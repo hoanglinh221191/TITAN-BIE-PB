@@ -1,0 +1,45 @@
+# Thu muc bien dich
+build/
+bin/
+cmake-build-*/
+.cache/
+
+# File nhi phan C++
+*.o
+*.d
+*.a
+*.so
+*.out
+*.exe
+
+# Du lieu MD va Quy dao (KHONG DUOC QUET)
+*.xtc
+*.trr
+*.pqr
+*.edr
+*.log
+*.xvg
+*.dat
+
+# Thu vien hoac file moi truong
+lib_ff/
+*.swp
+.DS_Store
+*.exe
+*.dat
+*.pdb
+*.log
+*.txt
+*.pdf
+*.png
+
+# Generated analysis outputs at repo root
+/network_edges.csv
+/network_nodes.csv
+/pca_fel.csv
+/tica_projections.csv
+/extract_basins.sh
+/tmp_test_dham*.in
+
+# Local smoke-test / scratch outputs
+/example/

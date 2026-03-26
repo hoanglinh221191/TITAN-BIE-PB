@@ -1,0 +1,37 @@
+# ============================================
+# TITAN arg.in — 10 Protein-RNA dimers (Martini CG)
+# DNA/RNA Profiler + LLPS Analysis
+# ============================================
+
+# ── Reference structure (topology) ──
+-s=md1_snap0.pdb
+
+# ── Force field ──
+-ff=martini
+-g=1-12
+
+# ── Common topology (shared for all copies) ──
+-common_topo=topol.top
+
+# ── Trajectory ──
+-traj=md1_1.xtc
+-dt=400
+#-pbcn
+-e=400000
+
+
+# ── Analyses ──
+-tda
+-llps
+
+# ── LLPS parameters (10 dimers = dimer-size 2, 20 chains total) ──
+-llps-dimer-size=2
+-llps-rcut=0.7
+-llps-perc=0.5
+-llps-contacts
+-llps-sticker=BB,SC1,SC2,SC3,SC4,BB1,BB2,BB3
+-mol-2-type=rna
+#-e=10000
+
+# ── Threads ──
+-nt=8

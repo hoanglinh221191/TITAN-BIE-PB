@@ -1,0 +1,14 @@
+#include "martini_v2.1-dna.itp"
+#include "Nucleic_A.itp"
+#include "molecule_0.itp"
+#include "martini_v2.0_ions.itp"
+
+[ system ]
+Title of the system in water
+
+[ molecules ]
+molecule_0    20
+Nucleic_A 1
+W           437680
+NA               5377
+CL               4878

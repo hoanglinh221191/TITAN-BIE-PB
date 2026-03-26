@@ -1,0 +1,519 @@
+#include<vector>
+#include<fstream>
+#include<iomanip>
+#include<cmath>
+#include<unordered_set>
+#include"miscellaneous.h"
+#include"folder.h"
+#include"distance_v2.h"
+#include"uti_func.h"
+#include"cache_sigma_epsilon.h"
+#include"info.h"
+#include"Multi_MOL.h"
+#include<thread>
+using namespace std;
+
+bool check_in_energy_list(vector<data_out>& lg_ener_inter, string chain, size_t resnr);
+void print_force_map(size_t nt, vector<vector<data_out> >& data, fstream& force_file, bool flag_all_mode, const arguments& Arguments,
+	vector<energy_res>& Energy_res, size_t num_snap, info& info_output);
+void print_energy_map(size_t nt, vector<vector<data_out> >& data, fstream& energy_file, bool flag_all_mode, arguments& Arguments,
+	vector<energy_res>& Energy_res, size_t num_snap, info& info_output);
+int wrapper_print_energy(size_t nt, vector<vector<data_out> > & data_lg, vector<vector<data_out> >& data_rec
+	, bool flag_all_mode, const arguments& Arguments, vector<energy_res>& Energy_res_mol1, vector<energy_res>& Energy_res_mol2,
+	size_t num_snap, info& info_output);
+
+int force_energy_add(const cache_sigma_epsilon & CachedData, size_t i
+	, double & electro_energy, double & van_der_waals_energy, force& force_elec, force& force_vdw, 
+	const vector<Multi_MOL_parameters>& rec_parameters, const vector<Multi_MOL_parameters>& lg_parameters,
+	const Multi_MOL& rec, const Multi_MOL& lg, size_t snap, const arguments& Arguments, size_t rec_pos=0, size_t lg_pos=0)
+{
+	if (i < CachedData.parameters.size())
+	{
+		electro_energy += CachedData.parameters[i].elec_ener;
+		van_der_waals_energy += CachedData.parameters[i].vdw_ener;
+
+		if (!CachedData.force_cache.empty())
+		{
+			force_elec += CachedData.force_cache[i].forces[0];
+			force_vdw += CachedData.force_cache[i].forces[1];
+		}
+	}
+	else
+	{
+		const double dx{ rec.m_mol[snap].Molecule[rec_pos].get_x() - lg.m_mol[snap].Molecule[lg_pos].get_x() },
+			dy{ rec.m_mol[snap].Molecule[rec_pos].get_y() - lg.m_mol[snap].Molecule[lg_pos].get_y() },
+			dz{ rec.m_mol[snap].Molecule[rec_pos].get_z() - lg.m_mol[snap].Molecule[lg_pos].get_z() },
+			charge{ 138.935457839 * rec_parameters[rec_pos].get_charge() * lg_parameters[lg_pos].get_charge() / Arguments.epsilon_in },
+			d{ 0.1 * sqrt(square(dx) + square(dy) + square(dz)) };
+
+		if (CachedData.cutoff_dis > 0. && d > CachedData.cutoff_dis) return 1;
+
+		electro_energy += charge / d;
+
+		if (CachedData.force_field_name.find("AMBER") != string::npos
+			|| CachedData.force_field_name.find("CHARMM")!=string::npos)
+		{
+			 double temp_vdw{ sqrt(rec_parameters[rec_pos].get_epsilon() * lg_parameters[lg_pos].get_epsilon()) },
+				c_6{ c6(0.5 * (lg_parameters[lg_pos].get_sigma() + rec_parameters[rec_pos].get_sigma()) / d) }, c_12{ square(c_6) };
+
+			if (lg_parameters[lg_pos].get_sigma() < 0. || rec_parameters[rec_pos].get_sigma() < 0.)
+				c_6 =  0.000;
+			
+
+			van_der_waals_energy += temp_vdw * (c_12 - c_6);
+
+			if (Arguments.self_int == true && (c_6 > 1. || (Arguments.flag_interchain_energy == true && lg.info[lg_pos].get_chain() == rec.info[i].get_chain())))
+				return 1;
+			if (Arguments.flag_cal_force == true)
+			{
+				double	sd{ square(1. / d) }, temp_par_vdw{ temp_vdw * (12. * c_12 * sd - 6. * c_6 * sd) },
+					temp_elec{ charge * sd };
+				force_elec.add(0.1 * temp_elec * dx, 0.1 * temp_elec * dy, 0.1 * temp_elec * dz);
+				force_vdw.add(0.1 * temp_par_vdw * dx, 0.1 * temp_par_vdw * dy, 0.1 * temp_par_vdw * dz);
+			}
+		}
+		else if (CachedData.force_field_name.find("OPLS") != string::npos)
+		{
+			double temp_vdw{ sqrt(rec_parameters[rec_pos].get_epsilon() * lg_parameters[lg_pos].get_epsilon()) },
+				c_6{ c6(sqrt(lg_parameters[lg_pos].get_sigma() * rec_parameters[rec_pos].get_sigma()) / d) }, c_12{ square(c_6) };
+			
+			if (lg_parameters[lg_pos].get_sigma() < 0. || rec_parameters[rec_pos].get_sigma() < 0.)
+				c_6 = 0.000;
+
+			if (Arguments.self_int == true && (c_6 > 1. || (Arguments.flag_interchain_energy == true && lg.info[lg_pos].get_chain() == rec.info[i].get_chain())))
+				return 1;
+
+			van_der_waals_energy += temp_vdw * (c_12 - c_6);
+
+			if (Arguments.flag_cal_force == true)
+			{
+				double	sd{ square(1. / d) }, temp_par_vdw{ temp_vdw * (12. * c_12 * sd - 6. * c_6 * sd) },
+					temp_elec{ charge * sd };
+				force_elec.add(0.1 * temp_elec * dx, 0.1 * temp_elec * dy, 0.1 * temp_elec * dz);
+				force_vdw.add(0.1 * temp_par_vdw * dx, 0.1 * temp_par_vdw * dy, 0.1 * temp_par_vdw * dz);
+			}
+		}
+		else
+		{
+			double sd{ 1. / square(d) }, temp_elec{ sd * charge }, c_6{ c6(d) }, c_12{ square(c_6) };
+			double epsilon{ sqrt(rec_parameters[rec_pos].get_epsilon()*lg_parameters[lg_pos].get_epsilon()) }, 
+				sigma{ sqrt(rec_parameters[rec_pos].get_sigma()*lg_parameters[lg_pos].get_sigma()) },
+				temp_vdw{ 12.* sd * epsilon / c_12 - 6.* sd *sigma / c_6 };
+
+			van_der_waals_energy += epsilon / c_12 - sigma / c_6;
+
+			if (Arguments.flag_cal_force == true)
+			{
+				force_elec.add(0.1 * temp_elec * dx, 0.1 * temp_elec * dy, 0.1 * temp_elec * dz);
+				force_vdw.add(0.1 * temp_vdw * dx, 0.1 * temp_vdw * dy, 0.1 * temp_vdw * dz);
+			}
+		}
+	}
+	return 0;
+}
+
+int helper_print_force(size_t nt, vector<vector<data_out> > & data_lg, vector<vector<data_out> >& data_rec, fstream& lg_ener_inter, fstream& rec_ener_inter
+,bool flag_all_mode, const arguments& Arguments, vector<energy_res>& Energy_res_mol1, vector<energy_res>& Energy_res_mol2,
+size_t num_snap, info& info_output)
+{
+	print_force_map(nt, data_lg, lg_ener_inter, flag_all_mode, Arguments, Energy_res_mol2, num_snap, info_output);
+	print_force_map(nt, data_rec, rec_ener_inter, flag_all_mode, Arguments, Energy_res_mol1, num_snap, info_output);
+	return 0;
+}
+
+int helper_print_energy(size_t nt, vector<vector<data_out> > & data_lg, vector<vector<data_out> >& data_rec, fstream& lg_ener_inter, fstream& rec_ener_inter
+	, bool flag_all_mode, arguments& Arguments, vector<energy_res>& Energy_res_mol1, vector<energy_res>& Energy_res_mol2, 
+	size_t num_snap, info& info_output);
+
+int wrapper_print_force(size_t nt, vector<vector<data_out> > & data_lg, vector<vector<data_out> >& data_rec
+	, bool flag_all_mode, const arguments& Arguments, vector<energy_res>& Energy_res_mol1, vector<energy_res>& Energy_res_mol2, 
+	size_t num_snap, info& info_output)
+{
+	fstream lg_force_inter("force_lg.txt", ios::out | ios::app);
+	//lg_ener_inter << "Atom" << setw(12) << "Electro." << setw(12) << "Van der W." << '\n';
+	fstream rec_force_inter("force_rec.txt", ios::out | ios::app);
+	//rec_ener_inter << "Res" << setw(12) << "Electro." << setw(12) << "Van der W." << '\n';
+	/**********************************************************************************/
+
+	if (nt >= 2)
+	{
+		thread print1(print_force_map, nt, ref(data_lg), ref(lg_force_inter), flag_all_mode, ref(Arguments), ref(Energy_res_mol2), num_snap, ref(info_output));
+		thread print2(print_force_map, nt, ref(data_rec), ref(rec_force_inter), flag_all_mode, ref(Arguments), ref(Energy_res_mol1), num_snap, ref(info_output));
+		print1.join();
+		print2.join();
+	}
+	else
+	{
+		helper_print_force(nt, data_lg, data_rec, lg_force_inter, rec_force_inter, flag_all_mode, Arguments, 
+			Energy_res_mol1, Energy_res_mol2, num_snap, info_output);
+	}
+
+	if (Arguments.flag_energy_same_force == true)
+	{
+		wrapper_print_energy(nt, data_lg, data_rec, flag_all_mode, Arguments, Energy_res_mol1, Energy_res_mol2, num_snap, info_output);
+	}
+	return 0;
+}
+
+void cal_energy_force_amber(const MOL &rec, const MOL &lg, const vector<mol_info>& info_rec, const vector<mol_info>& info_lg, cache_sigma_epsilon& CachedData,
+	size_t begin, size_t end, cache_energy& Energy, cache_force& Force, size_t num_snap, const arguments& Arguments
+	, const vector<Multi_MOL_parameters>& rec_parameters, const vector<Multi_MOL_parameters>& lg_parameters)
+{
+	Energy.set_energy(0., 0.);
+	Force.set_force(force(0., 0., 0.), force(0., 0., 0.));
+		
+	for (size_t j{ begin }; j < end; ++j)
+	{
+		double temp_epsilon_lg{ 16. *lg_parameters[j].get_epsilon() }, temp_charge{ 138.935457839* lg_parameters[j].get_charge() },
+			temp_sigma_lg{ lg_parameters[j].get_sigma() };
+		for (size_t i{}; i < rec.Molecule.size(); ++i)
+		{
+			double dx{  rec.Molecule[i].get_x() - lg.Molecule[j].get_x() },
+				dy{ rec.Molecule[i].get_y() - lg.Molecule[j].get_y() },
+				dz{ rec.Molecule[i].get_z() - lg.Molecule[j].get_z() };
+			double d{ 0.1 * sqrt(square(dx) + square(dy) + square(dz)) }, charge{ temp_charge * rec_parameters[i].get_charge() / d  };
+			double sd{ square(1. / d) }, temp_elec{ sd * charge },
+				temp_vdw{ sqrt(rec_parameters[i].get_epsilon() * temp_epsilon_lg) },
+				c_6{ c6(0.5 * (temp_sigma_lg + rec_parameters[i].get_sigma()) / d) }, c_12{ square(c_6) };
+			if (temp_sigma_lg < 0. || rec_parameters[i].get_sigma() < 0.)
+				c_6 = 0.000;
+			double temp_par_vdw{ temp_vdw*(12. * c_12 * sd - 6. * c_6 * sd) };
+
+			if (Arguments.distance_energy_cutoff > 0. && d > Arguments.distance_energy_cutoff)
+			{
+				size_t pos{ rec.Molecule.size() * j + i };
+				CachedData.parameters[pos].set_elec_vdw(0., 0.);
+				continue;
+			}
+
+			if (Arguments.self_int == true && (0.5 * (temp_sigma_lg + rec_parameters[i].get_sigma()) > d 
+				|| (Arguments.flag_interchain_energy == true && info_lg[j].get_chain() == info_rec[i].get_chain())))
+			{
+				continue;
+			}
+
+			if (CachedData.parameters.empty())
+			{
+				Energy += cache_energy(charge, temp_vdw * (c_12 - c_6));
+				Force += cache_force(0.1 * temp_elec * dx, 0.1 * temp_elec * dy, 0.1 * temp_elec * dz, 0.1 * temp_par_vdw * dx, 0.1 * temp_par_vdw * dy, 0.1 * temp_par_vdw * dz);
+			}
+			else
+			{
+				size_t pos{ rec.Molecule.size()*j + i };
+				CachedData.parameters[pos].set_energy(charge, temp_vdw * (c_12 - c_6));
+				CachedData.force_cache[pos].set_force(0.1 * temp_elec * dx, 0.1 * temp_elec * dy, 0.1 * temp_elec * dz, 0.1 * temp_par_vdw * dx, 0.1 * temp_par_vdw * dy, 0.1 * temp_par_vdw * dz);
+
+				Energy += CachedData.parameters[pos];
+				Force += CachedData.force_cache[pos];
+			}
+		}
+	}
+}
+
+void cal_energy_force_opls(const MOL &rec, const MOL &lg, const vector<mol_info>& info_rec, const vector<mol_info>& info_lg, cache_sigma_epsilon& CachedData,
+	size_t begin, size_t end, cache_energy& Energy, cache_force& Force, size_t num_snap, const arguments& Arguments
+	, const vector<Multi_MOL_parameters>& rec_parameters, const vector<Multi_MOL_parameters>& lg_parameters)
+{
+	Energy.set_energy(0., 0.);
+	Force.set_force(force(0., 0., 0.), force(0., 0., 0.));
+
+	for (size_t j{ begin }; j < end; ++j)
+	{
+		double temp_epsilon_lg{ 16. *lg_parameters[j].get_epsilon() }, temp_charge{ 138.935457839* lg_parameters[j].get_charge() },
+			temp_sigma_lg{ lg_parameters[j].get_sigma() };
+		for (size_t i{}; i < rec.Molecule.size(); ++i)
+		{
+			double dx{ rec.Molecule[i].get_x() - lg.Molecule[j].get_x() },
+				dy{ rec.Molecule[i].get_y() - lg.Molecule[j].get_y() },
+				dz{ rec.Molecule[i].get_z() - lg.Molecule[j].get_z() };
+			double d{ 0.1 * sqrt(square(dx) + square(dy) + square(dz)) }, charge{ temp_charge * rec_parameters[i].get_charge() / d };
+			double sd{ square(1. / d) }, temp_elec{ sd * charge },
+				temp_vdw{ sqrt(rec_parameters[i].get_epsilon()*temp_epsilon_lg) },
+				c_6{ c6(sqrt(temp_sigma_lg * rec_parameters[i].get_sigma()) / d) }, c_12{ square(c_6) }
+			, temp_par_vdw{ temp_vdw*(12. * c_12 * sd - 6. * c_6 * sd) };
+
+			if (Arguments.distance_energy_cutoff > 0. && d > Arguments.distance_energy_cutoff)
+			{
+				size_t pos{ rec.Molecule.size() * j + i };
+				CachedData.parameters[pos].set_elec_vdw(0., 0.);
+				continue;
+			}
+
+			if (Arguments.self_int == true && (sqrt(temp_sigma_lg * rec_parameters[i].get_sigma()) > d
+				|| (Arguments.flag_interchain_energy == true && info_lg[j].get_chain() == info_rec[i].get_chain())))
+			{
+				continue;
+			}
+
+
+			if (CachedData.parameters.empty())
+			{
+				Energy += cache_energy(charge, temp_vdw * (c_12 - c_6));
+				Force += cache_force(0.1 * temp_elec * dx, 0.1 * temp_elec * dy, 0.1 * temp_elec * dz, 0.1 * temp_par_vdw * dx, 0.1 * temp_par_vdw * dy, 0.1 * temp_par_vdw * dz);
+			}
+			else
+			{
+				size_t pos{ rec.Molecule.size()*j + i };
+				CachedData.parameters[pos].set_energy(charge, temp_vdw * (c_12 - c_6));
+				CachedData.force_cache[pos].set_force( 0.1 * temp_elec * dx, 0.1 * temp_elec * dy, 0.1 * temp_elec * dz, 0.1 * temp_par_vdw * dx, 0.1 * temp_par_vdw * dy, 0.1 * temp_par_vdw * dz);
+				Energy += CachedData.parameters[pos];
+				Force += CachedData.force_cache[pos];
+			}
+		}
+	}
+}
+
+void cal_energy_force_gromos(const MOL &rec, const MOL &lg, const vector<mol_info>& info_rec, const vector<mol_info>& info_lg, cache_sigma_epsilon& CachedData,
+	size_t begin, size_t end, cache_energy& Energy, cache_force& Force, size_t num_snap, const arguments& Arguments
+	, const vector<Multi_MOL_parameters>& rec_parameters, const vector<Multi_MOL_parameters>& lg_parameters)
+{
+	Energy.set_energy(0., 0.);
+	Force.set_force(force(0., 0., 0.), force(0., 0., 0.));
+
+	for (size_t j{ begin }; j < end; ++j)
+	{
+		double temp_charge{ 138.935457839* lg_parameters[j].get_charge() }, temp_epsilon_lg{ lg_parameters[j].get_epsilon() },
+		temp_sigma_lg{ lg_parameters[j].get_sigma() };
+		for (size_t i{}; i < rec.Molecule.size(); ++i)
+		{
+			if (Arguments.self_int == true && (i == j || (Arguments.flag_interchain_energy == true && info_lg[j].get_chain() == info_rec[i].get_chain())))
+			{
+				continue;
+			}
+
+			double dx{ rec.Molecule[i].get_x() - lg.Molecule[j].get_x() },
+				dy{ rec.Molecule[i].get_y() - lg.Molecule[j].get_y() },
+				dz{ rec.Molecule[i].get_z() - lg.Molecule[j].get_z() };
+
+			double d{ 0.1*sqrt(square(dx) + square(dy) + square(dz)) }, charge{ temp_charge * rec_parameters[i].get_charge() };
+			double sd{ 1./square(d) }, temp_elec{ sd * charge / d }, c_6{ c6(d) }, c_12{ square(c_6) };
+			double epsilon{ sqrt(rec_parameters[i].get_epsilon()*temp_epsilon_lg) }, sigma{ sqrt(rec_parameters[i].get_sigma()*temp_sigma_lg) };
+			double temp_vdw{ 12.* sd * epsilon / c_12 - 6.* sd *sigma / c_6 };
+
+			if (Arguments.distance_energy_cutoff > 0. && d > Arguments.distance_energy_cutoff)
+			{
+				size_t pos{ rec.Molecule.size() * j + i };
+				CachedData.parameters[pos].set_elec_vdw(0., 0.);
+				continue;
+			}
+
+			if (CachedData.parameters.empty())
+			{
+				Energy += cache_energy(charge / d, epsilon / c_12 - sigma / c_6);
+				Force += cache_force(0.1 * temp_elec * dx, 0.1 * temp_elec * dy, 0.1 * temp_elec * dz, 0.1 * temp_vdw * dx, 0.1 * temp_vdw * dy, 0.1 * temp_vdw * dz);
+			}
+			else
+			{
+				size_t pos{ rec.Molecule.size()*j + i };
+				CachedData.parameters[pos].set_energy(charge / d, epsilon / c_12 - sigma / c_6);
+				CachedData.force_cache[pos].set_force(0.1 * temp_elec * dx, 0.1 * temp_elec * dy, 0.1 * temp_elec * dz, 0.1 * temp_vdw * dx, 0.1 * temp_vdw * dy, 0.1 * temp_vdw * dz);
+				Energy += CachedData.parameters[pos];
+				Force += CachedData.force_cache[pos];
+			}
+		}
+	}
+}
+
+int imp_cal_force_lg_atom(vector<data_out>& lg_ener_inter, const Multi_MOL& rec, const Multi_MOL& lg, size_t num_snap, size_t begin, 
+	size_t end, const vector<d_min> & dmin, const cache_sigma_epsilon& CachedData,
+	const vector<Multi_MOL_parameters>& rec_parameters, const vector<Multi_MOL_parameters>& lg_parameters, const arguments& Arguments)
+{
+	for (size_t i = begin; i < end; ++i)
+	{
+		double E_E{}, E_V{};
+		force f_e_temp{}, f_v_temp{};
+		for (size_t j{}; j < rec.m_mol[num_snap].Molecule.size(); ++j)
+		{
+			force_energy_add(CachedData, rec.m_mol[0].Molecule.size()*i + j, E_E, E_V, f_e_temp, f_v_temp,
+				rec_parameters, lg_parameters, rec, lg, num_snap, Arguments, j, i);
+		}
+		lg_ener_inter.emplace_back(i + 1, " ", lg.info[i].get_original_res_name(), E_E, E_V, f_e_temp, f_v_temp);
+	}
+	return 0;
+}
+
+int imp_cal_force_lg(vector<data_out>& lg_ener_inter, const Multi_MOL& rec, const Multi_MOL& lg, size_t num_snap, size_t begin, size_t end, 
+	const vector<d_min> & dmin, const cache_sigma_epsilon& CachedData,
+	const vector<Multi_MOL_parameters>& rec_parameters, const vector<Multi_MOL_parameters>& lg_parameters, bool flag_all_mode, const arguments& Arguments)
+{
+	unordered_set<pair<string, size_t>, pair_hash> force_list;
+
+	for (size_t ii = begin; ii < end; ++ii)
+	{
+		for (size_t i = 0; i < dmin[ii].base.size(); ++i)
+		{
+			if (force_list.emplace(dmin[ii].base[i].chain_rec, dmin[ii].base[i].resnr_rec).second == false)
+				continue;
+			double E_E{}, E_V{};
+			force f_e_temp{}, f_v_temp{};
+			for (size_t j = dmin[ii].base[i].atom_num - 1; j < lg.m_mol[num_snap].Molecule.size(); ++j)
+			{
+				if (lg.info[j].get_resnr() == lg.info[dmin[ii].base[i].atom_num - 1].get_resnr()
+					&& lg.info[j].get_chain() == lg.info[dmin[ii].base[i].atom_num - 1].get_chain())
+				{
+					for (size_t k = 0; k < rec.m_mol[num_snap].Molecule.size(); ++k)
+					{
+						if (flag_all_mode == true)
+						{
+							force_energy_add(CachedData, rec.m_mol[0].Molecule.size()*j + k, E_E, E_V, f_e_temp, f_v_temp,
+								rec_parameters, lg_parameters, rec, lg, num_snap, Arguments, k, j);
+						}
+						else if (rec.info[k].get_resnr() == rec.info[dmin[ii].base[i].atom_num_rec - 1].get_resnr()
+							&& rec.info[k].get_chain() == rec.info[dmin[ii].base[i].atom_num_rec - 1].get_chain())
+						{
+							force_energy_add(CachedData, rec.m_mol[0].Molecule.size()*j + k, E_E, E_V, f_e_temp, f_v_temp,
+								rec_parameters, lg_parameters,rec, lg, num_snap, Arguments, k, j);
+						}
+						else {}
+					}
+				}
+				else break;
+			}
+			lg_ener_inter.emplace_back(dmin[ii].base[i].resnr_ab, dmin[ii].base[i].chain_ab, dmin[ii].base[i].res_name_ab, E_E, E_V, f_e_temp,f_v_temp);
+		}
+	}
+
+	return 0;
+}
+
+int imp_cal_force_rec(vector<data_out>& rec_ener_inter, const Multi_MOL& rec, const Multi_MOL& lg, size_t num_snap, size_t begin, size_t end,
+	const vector<d_min> & dmin, const cache_sigma_epsilon& CachedData, 
+	const vector<Multi_MOL_parameters>& rec_parameters, const vector<Multi_MOL_parameters>& lg_parameters, bool flag_all_mode, const arguments& Arguments)
+{
+	unordered_set<pair<string, size_t>, pair_hash> force_list;
+
+	for (size_t ii{ begin }; ii < end; ++ii)
+	{
+		for (size_t i{}; i < dmin[ii].base.size(); ++i)
+		{
+			if (force_list.emplace(dmin[ii].base[i].chain_rec, dmin[ii].base[i].resnr_rec).second == false)
+				continue;
+			double E_E{}, E_V{};
+			force f_e_temp{}, f_v_temp{};
+			size_t num = dmin[ii].base[i].atom_num_rec - 1 + 250 > rec.info.size() ? rec.info.size() : dmin[ii].base[i].atom_num_rec - 1 + 250;
+			for (size_t j = dmin[ii].base[i].atom_num_rec - 1; j < num; ++j)
+			{
+				if (rec.info[j].get_resnr() == rec.info[dmin[ii].base[i].atom_num_rec - 1].get_resnr()
+					&& rec.info[j].get_chain() == rec.info[dmin[ii].base[i].atom_num_rec - 1].get_chain())
+				{
+					for (size_t k{}; k < lg.m_mol[num_snap].Molecule.size(); ++k)
+					{
+						if (flag_all_mode == true)
+						{
+							force_energy_add(CachedData, rec.m_mol[0].Molecule.size()*k + j, E_E, E_V, f_e_temp, f_v_temp,
+								rec_parameters, lg_parameters, rec, lg, num_snap, Arguments, j, k);
+						}
+						else if (lg.info[k].get_resnr() == lg.info[dmin[ii].base[i].atom_num - 1].get_resnr()
+							&& lg.info[k].get_chain() == lg.info[dmin[ii].base[i].atom_num - 1].get_chain())
+						{
+							force_energy_add(CachedData, rec.m_mol[0].Molecule.size()*k + j, E_E, E_V, f_e_temp, f_v_temp,
+								rec_parameters, lg_parameters, rec, lg, num_snap,Arguments, j, k);
+						}
+						else {}
+					}
+				}
+				else break;
+			}
+			rec_ener_inter.emplace_back(dmin[ii].base[i].resnr_rec, dmin[ii].base[i].chain_rec, dmin[ii].base[i].res_name_rec, E_E, E_V, f_e_temp, f_v_temp);
+		}
+	}
+	return 0;
+}
+
+void forceMapOf2Pro(vector<thread>& threads, const Multi_MOL& rec, const Multi_MOL& lg, size_t num_snap, const vector<d_min> & dmin,
+	const cache_sigma_epsilon& CachedData, size_t nt, bool flag_all_mode, const arguments& Arguments, 
+	vector<energy_res>& Energy_res_mol1, vector<energy_res>& Energy_res_mol2, info& info_output,
+	const vector<Multi_MOL_parameters>& rec_parameters, const vector<Multi_MOL_parameters>& lg_parameters)
+{
+	vector<vector<data_out> > data_lg(nt), data_rec(nt);
+
+	for (size_t i{}; i < nt; ++i)
+		threads[i] = thread(imp_cal_force_lg, ref(data_lg[i]), ref(rec), ref(lg), num_snap, i*dmin.size() / nt, (i + 1)*dmin.size() / nt, ref(dmin), ref(CachedData), 
+			ref(rec_parameters), ref(lg_parameters), flag_all_mode, ref(Arguments));
+	for (auto& t : threads)
+		t.join();
+
+	for (size_t i{}; i < nt; ++i)
+		threads[i] = thread(imp_cal_force_rec, ref(data_rec[i]), ref(rec), ref(lg), num_snap, i*dmin.size() / nt, (i + 1)*dmin.size() / nt, ref(dmin), ref(CachedData),
+			ref(rec_parameters), ref(lg_parameters), flag_all_mode, ref(Arguments));
+	for (auto& t : threads)
+		t.join();
+
+	wrapper_print_force(nt, data_lg, data_rec, flag_all_mode, Arguments, Energy_res_mol1, Energy_res_mol2, num_snap, info_output);
+}
+
+void forceMapOfProLig(vector<thread>& threads, const Multi_MOL& rec, const Multi_MOL& lg, size_t num_snap, const vector<d_min> & dmin,
+	const cache_sigma_epsilon& CachedData, size_t nt, bool flag_all_mode, const arguments& Arguments,
+	vector<energy_res>& Energy_res_mol1, vector<energy_res>& Energy_res_mol2, info& info_output,
+	const vector<Multi_MOL_parameters>& rec_parameters, const vector<Multi_MOL_parameters>& lg_parameters)
+{
+	vector<vector<data_out> > data_lg(nt), data_rec(nt);
+
+	for (size_t i{}; i < nt; ++i)
+		threads[i] = thread(imp_cal_force_lg_atom, ref(data_lg[i]), ref(rec), ref(lg), num_snap, i*lg.m_mol[num_snap].Molecule.size() / nt, (i + 1)*lg.m_mol[num_snap].Molecule.size() / nt, 
+			ref(dmin), ref(CachedData), ref(rec_parameters), ref(lg_parameters), ref(Arguments));
+	for (auto& t : threads)
+		t.join();
+
+	for (size_t i{}; i < nt; ++i)
+		threads[i] = thread(imp_cal_force_rec, ref(data_rec[i]), ref(rec), ref(lg), num_snap, i*dmin.size() / nt, (i + 1)*dmin.size() / nt, ref(dmin), ref(CachedData), 
+			ref(rec_parameters), ref(lg_parameters), flag_all_mode, ref(Arguments));
+	for (auto& t : threads)
+		t.join();
+
+	wrapper_print_force(nt, data_lg, data_rec, flag_all_mode, Arguments, Energy_res_mol1, Energy_res_mol2, num_snap, info_output);
+}
+
+
+int forceMapOf2Ligs(const Multi_MOL& rec, const Multi_MOL& lg, size_t num_snap, const vector<d_min> & dmin, const cache_sigma_epsilon& CachedData, 
+	size_t nt, const arguments& Arguments, vector<energy_res>& Energy_res_mol1, vector<energy_res>& Energy_res_mol2, info& info_output,
+	const vector<Multi_MOL_parameters>& rec_parameters, const vector<Multi_MOL_parameters>& lg_parameters)
+{
+	vector<thread> ener(nt);
+	vector<vector<data_out> > data_lg(nt), data_rec(nt);
+
+
+	for (size_t i{}; i < nt; ++i)
+		ener[i] = thread(imp_cal_force_lg_atom, ref(data_lg[i]), ref(rec), ref(lg), num_snap, i*lg.m_mol[num_snap].Molecule.size() / nt, (i + 1)*lg.m_mol[num_snap].Molecule.size() / nt, ref(dmin), ref(CachedData),
+			ref(rec_parameters), ref(lg_parameters), ref(Arguments));
+	for (auto& t : ener)
+		t.join();
+
+	for (size_t i{}; i < nt; ++i)
+		ener[i] = thread(imp_cal_force_lg_atom, ref(data_rec[i]), ref(lg), ref(rec), num_snap, i*rec.m_mol[num_snap].Molecule.size() / nt, (i + 1)*rec.m_mol[num_snap].Molecule.size() / nt, ref(dmin), ref(CachedData),
+			ref(rec_parameters), ref(lg_parameters), ref(Arguments));
+	for (auto& t : ener)
+		t.join();
+
+	wrapper_print_force(1, data_lg, data_rec, true, Arguments, Energy_res_mol1, Energy_res_mol2, num_snap, info_output);
+	return 0;
+}
+
+int wrap_cal_force_map(vector<thread>& threads, Multi_MOL& mol1, Multi_MOL& mol2, const arguments& Arguments, size_t num_snap, const vector<d_min> & dmin, const cache_sigma_epsilon& CachedData,
+	vector<energy_res>& Energy_res_mol1, vector<energy_res>& Energy_res_mol2, info& info_output)
+{
+	if (Arguments.flag_topo_1 == true && Arguments.flag_topo_2 == true
+		|| (Arguments.force_map == 3 && Arguments.fmap_type == "atom-atom"))
+	{
+		forceMapOf2Ligs(mol1, mol2, num_snap, dmin, CachedData, Arguments.nt, Arguments, Energy_res_mol1, Energy_res_mol2, info_output
+		, mol1.parameters, mol2.parameters);
+	}
+	else if (Arguments.flag_topo_1 == true && Arguments.flag_topo_2 == false
+		|| (Arguments.force_map == 3 && Arguments.fmap_type == "residue-atom"))
+	{
+		forceMapOfProLig(threads, mol1, mol2, num_snap, dmin, CachedData, Arguments.nt, Arguments.fmap_level == "all", Arguments,
+			Energy_res_mol1, Energy_res_mol2, info_output, mol1.parameters, mol2.parameters);
+	}
+	else if (Arguments.flag_topo_1 == false && Arguments.flag_topo_2 == true
+		|| (Arguments.force_map == 3 && Arguments.fmap_type == "atom-residue"))
+	{
+		forceMapOfProLig(threads, mol2, mol1, num_snap, dmin, CachedData, Arguments.nt, Arguments.fmap_level == "all", Arguments, 
+			Energy_res_mol1, Energy_res_mol2, info_output, mol1.parameters, mol2.parameters);
+	}
+	else
+	{
+		forceMapOf2Pro(threads, mol1, mol2, num_snap, dmin, CachedData, Arguments.nt, Arguments.fmap_level == "all", Arguments, 
+			Energy_res_mol1, Energy_res_mol2, info_output, mol1.parameters, mol2.parameters);
+	}
+	return 0;
+}

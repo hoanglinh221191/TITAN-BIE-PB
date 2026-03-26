@@ -1,0 +1,31 @@
+#include "martini_v2.1-dna.itp"
+#include "Nucleic_A.itp"
+#include "molecule_0.itp"
+#include "martini_v2.0_ions.itp"
+[ moleculetype ]
+; molname       nrexcl
+  W             1
+
+[ atoms ]
+;id     type    resnr   residu  atom    cgnr    charge
+ 1      P4      1       W       W       1       0
+
+;;;;;; ANTIFREEZE (prevents freezing of water)
+
+[ moleculetype ]
+; molname        nrexcl
+  WF             1
+
+[ atoms ]
+;id     type    resnr   residu  atom    cgnr    charge
+ 1      BP4     1       WF      WF      1       0
+
+[ system ]
+Title of the system in water
+
+[ molecules ]
+molecule_0    20
+Nucleic_A        1
+W           437932
+NA               5217
+CL               4878

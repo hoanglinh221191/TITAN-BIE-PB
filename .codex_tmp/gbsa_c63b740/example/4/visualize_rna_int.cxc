@@ -1,0 +1,60 @@
+open C:/Users/ADMIN/OneDrive/Documents/antigravity/elec_vdw/example/4/total_energy_pdbtype.pdb
+
+coordset #1 1
+
+set bgColor white
+hide all
+show cartoon
+color all gray
+transparency 50 target c
+lighting soft
+
+# --- Cation-Pi: ARG89 - RADE118 ---
+show :89&:118@<15.0
+show :118
+style :89&:118@<15.0 stick
+style :118 stick
+color :89&:118@<15.0 cyan
+color :118 red
+distance :89@CA&:118@<15.0 :118@C4'
+
+# --- Cation-Pi: ARG93 - RADE118 ---
+show :93&:118@<15.0
+show :118
+style :93&:118@<15.0 stick
+style :118 stick
+color :93&:118@<15.0 cyan
+color :118 red
+distance :93@CA&:118@<15.0 :118@C4'
+
+# --- Cation-Pi: ARG93 - RURA93 ---
+show :93&:93@<15.0
+show :93
+style :93&:93@<15.0 stick
+style :93 stick
+color :93&:93@<15.0 cyan
+color :93 red
+distance :93@CA&:93@<15.0 :93@C4'
+
+# --- Cation-Pi: LYS61 - RURA95 ---
+show :61&:95@<15.0
+show :95
+style :61&:95@<15.0 stick
+style :95 stick
+color :61&:95@<15.0 cyan
+color :95 red
+distance :61@CA&:95@<15.0 :95@C4'
+
+# --- Salt-Bridge: LYS127 - RGUA88 ---
+show :127&:88@<15.0
+show :88
+style :127&:88@<15.0 stick
+style :88 stick
+color :127&:88@<15.0 pink
+color :88 blue
+distance :127@CA&:88@<15.0 :88@C4'
+
+color distances black
+size distances radius 0.08
+view @*&~cartoon
+hide labels

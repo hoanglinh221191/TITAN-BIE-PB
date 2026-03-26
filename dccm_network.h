@@ -1,0 +1,113 @@
+#ifndef DCCM_NETWORK_H
+#define DCCM_NETWORK_H
+
+#include "Multi_MOL.h"
+#include "aligned_allocator.h"
+#include "arguments.h"
+#include <Eigen/Dense>
+#include <array>
+#include <cstdint>
+#include <string>
+#include <tuple>
+#include <vector>
+
+class DCCMNetwork {
+public:
+  using TrajectoryRow = AlignedDoubleVector;
+  using TrajectoryRows = std::vector<TrajectoryRow>;
+
+  DCCMNetwork() = default;
+  ~DCCMNetwork() = default;
+
+  void init(const Multi_MOL &pro_in, const Multi_MOL &lig,
+            const arguments &args);
+
+  void process_frame(const Multi_MOL &pro_in, const Multi_MOL &lig,
+                     size_t chunk_snap_idx, size_t global_frame_idx,
+                     double time_ps = 0.0, int replica_id = 0);
+
+  void calculate_and_export(size_t num_threads);
+
+  void calculate_allostery_information(size_t num_threads, int tau_lag,
+                                       int num_bins);
+  void calculate_allostery_information_optimized(size_t num_threads,
+                                                 int tau_lag, int num_bins);
+
+  struct LSPMDConfig {
+    double cutoff_ang = 12.0;
+    bool use_avg_cutoff = true;
+  };
+
+  struct LSPMDResult {
+    std::vector<double> dc;
+    std::vector<double> bc;
+    std::vector<std::tuple<int, int, double>> edges;
+  };
+
+  void calculate_lspmd(size_t num_threads, const LSPMDConfig &cfg,
+                       LSPMDResult &result);
+  void export_lspmd(const LSPMDResult &result, double weight_threshold = 0.0);
+
+  const std::vector<std::string> &get_resnames() const { return ca_resname; }
+  const std::vector<int> &get_resnrs() const { return ca_resnrs; }
+  const std::vector<std::string> &get_chains() const { return ca_chain; }
+  const std::vector<int> &get_is_lig() const { return ca_is_lig; }
+  const std::vector<int> &get_ca_indices() const { return ca_indices; }
+  std::vector<std::vector<std::array<double, 3>>> get_ca_traj_aos() const;
+
+  size_t get_total_frames() const { return total_frames; }
+  const std::vector<int64_t> &get_global_frame_indices() const {
+    return frame_global_indices_;
+  }
+  const std::vector<double> &get_traj_times() const { return traj_times_; }
+  const std::vector<int> &get_traj_replicas() const { return traj_replicas_; }
+  const TrajectoryRows &get_traj_x() const { return traj_x; }
+  const TrajectoryRows &get_traj_y() const { return traj_y; }
+  const TrajectoryRows &get_traj_z() const { return traj_z; }
+  const TrajectoryRow &get_latest_traj_x() const {
+    return store_full_traj_ ? traj_x.back() : latest_traj_x_;
+  }
+  const TrajectoryRow &get_latest_traj_y() const {
+    return store_full_traj_ ? traj_y.back() : latest_traj_y_;
+  }
+  const TrajectoryRow &get_latest_traj_z() const {
+    return store_full_traj_ ? traj_z.back() : latest_traj_z_;
+  }
+  bool stores_full_trajectory() const { return store_full_traj_; }
+
+  const std::vector<int> &get_cb_indices() const { return cb_indices; }
+  const TrajectoryRows &get_traj_cbx() const { return traj_cbx; }
+  const TrajectoryRows &get_traj_cby() const { return traj_cby; }
+  const TrajectoryRows &get_traj_cbz() const { return traj_cbz; }
+
+private:
+  std::vector<int> ca_indices;
+  std::vector<int> ca_resnrs;
+  std::vector<int> ca_is_lig;
+  std::vector<std::string> ca_chain;
+  std::vector<std::string> ca_resname;
+  std::vector<int> cb_indices;
+  bool store_full_traj_ = true;
+  bool store_cb_traj_ = false;
+
+  TrajectoryRows traj_x;
+  TrajectoryRows traj_y;
+  TrajectoryRows traj_z;
+  TrajectoryRows traj_cbx;
+  TrajectoryRows traj_cby;
+  TrajectoryRows traj_cbz;
+
+  size_t total_frames = 0;
+  std::vector<int64_t> frame_global_indices_;
+  std::vector<double> traj_times_;
+  std::vector<int> traj_replicas_;
+  TrajectoryRow latest_traj_x_;
+  TrajectoryRow latest_traj_y_;
+  TrajectoryRow latest_traj_z_;
+  bool kabsch_aligned_ = false;
+
+  static int find_cb_for_residue(const Multi_MOL &mol, int resnr,
+                                 const std::string &chain, bool is_gly);
+};
+
+#endif // DCCM_NETWORK_H

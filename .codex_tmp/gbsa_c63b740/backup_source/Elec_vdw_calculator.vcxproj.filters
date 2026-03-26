@@ -1,0 +1,297 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;hm;inl;inc;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="pre_proc_pdb.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="solve_pbc.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="take_amino_acid.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="take_com.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="take_coordinates.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="take_min.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="take_para.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="groups.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="parse_arguments.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="h_bond.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="write_coor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="post_process_nucleotides.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="parse_coordinate_1_file.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="take_topo.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="impl_engine.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="misc.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="entropy-quasi_harmonic.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="matrix.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="eigen.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="non_gaussian_entropy.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="entropy-duan-zhang.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="solv_pbc_new_al.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="solv_pbc_int.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="cscd.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MOL.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="take_charge.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="initialization.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="energy.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="help.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="arguments.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="impl_cscd_class.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="folder.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="force.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="out_force.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="gen_inputlist.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="cache_sigma_epsilon.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="new_emap.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="out_energy.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dis_com_energy.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="post_proc_h_bonds.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="sup_funccpp.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="cal_sub_groups.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="solv_pbc_cluster.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="clust.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="impl_value_energy_force.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Multi_MOL.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="stat_energy_force_res.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="side_chain.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dipole.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Charged_atom_distance_distribution.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="impl_nocal.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="h_groups.h">
+      <Filter>Header Files</Filter>
+    </ClCompile>
+    <ClCompile Include="parse_pdb.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="sup_solv_pbc.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="out_misc.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="solv_pbc_reffile.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="parse_protein_topo.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="stat_ener_res_res.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="energy_intrin.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="force_intrin.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="find_pull_direction.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="matrix.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="amino_a.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="arguments.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="box_type.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="c6c12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="COM.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="distance_v2.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Forcefield.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="functions.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="groups.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="h_bond.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="index_v2.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="miscellaneous.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MOL.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="molecule.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="info.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="cscd.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="folder.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MOL_para.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MOL_info.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="uti_func.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="cache_sigma_epsilon.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="new_emap.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="clust.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="energy_force.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Multi_MOL.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="stat_hb_and_sc_contact.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="force.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="stat_ener_res_res.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="differential_evolution.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>

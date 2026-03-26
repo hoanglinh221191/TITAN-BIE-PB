@@ -1,0 +1,15 @@
+-ff=AMBER14SB
+-pbcn
+-g=1-20
+-nt=4
+-eu=kCal/mol
+-1pdb
+-dt=10000
+-b=100000
+-e=200000
+-n=../index.ndx
+-common_topo=../topol.top
+-f=../md1
+-gbsa
+-cas
+-mol-2-type=rna
