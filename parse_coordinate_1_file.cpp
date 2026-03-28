@@ -1,12 +1,71 @@
 #include "MOL.h"
 #include "functions.h"
 #include <algorithm>
+#include <charconv>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
 
 using namespace std;
+
+namespace {
+
+std::string_view trim_ascii_ws(std::string_view text) {
+  while (!text.empty() &&
+         (text.front() == ' ' || text.front() == '\t' || text.front() == '\r')) {
+    text.remove_prefix(1);
+  }
+  while (!text.empty() &&
+         (text.back() == ' ' || text.back() == '\t' || text.back() == '\r')) {
+    text.remove_suffix(1);
+  }
+  return text;
+}
+
+bool try_parse_title_time(std::string_view line, double &time_ps) {
+  if (!(line.rfind("TITLE", 0) == 0))
+    return false;
+
+  size_t value_pos = line.find("t=");
+  size_t value_offset = 2;
+  if (value_pos == std::string_view::npos) {
+    value_pos = line.find('=');
+    value_offset = 1;
+  }
+  if (value_pos == std::string_view::npos)
+    return false;
+
+  size_t value_begin = value_pos + value_offset;
+  size_t value_end = line.find("step", value_begin);
+  if (value_end == std::string_view::npos)
+    value_end = line.size();
+
+  std::string_view value_sv = trim_ascii_ws(line.substr(value_begin, value_end - value_begin));
+  if (value_sv.empty())
+    return false;
+
+  const char *begin = value_sv.data();
+  const char *end = begin + value_sv.size();
+  auto [ptr, ec] = std::from_chars(begin, end, time_ps);
+  if (ec == std::errc() && ptr != begin)
+    return true;
+
+  try {
+    time_ps = std::stod(std::string(value_sv));
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+template <typename MultiMolType>
+void discard_uncommitted_frame(MultiMolType &mol, size_t frame_index) {
+  if (frame_index < mol.m_mol.size())
+    mol.m_mol.resize(frame_index);
+}
+
+} // namespace
 
 int helper_parse_coor_not_copy(Multi_MOL &pro_in, Multi_MOL &lig,
                                Multi_MOL &water_traj, groups_cal &groups,
@@ -22,9 +81,7 @@ int helper_parse_coor_not_copy(Multi_MOL &pro_in, Multi_MOL &lig,
 
   if (flag_set_time == false) {
     time_of_snap_temp = static_cast<double>(I);
-    int check_time{
-        check_and_settime(time_of_snap_temp, protein_1, input_pdb, Arguments)};
-    if (check_time == 0)
+    if (try_parse_title_time(protein_1, time_of_snap_temp))
       flag_set_time = true;
   }
 
@@ -121,26 +178,40 @@ int helper_parse_coor_not_copy(Multi_MOL &pro_in, Multi_MOL &lig,
       (protein_1 == "ENDMDL" || protein_1 == "END" ||
        protein_1.rfind("ENDMDL", 0) == 0 || protein_1.rfind("END", 0) == 0);
   if (is_end_marker && check_in_time(Arguments, time_of_snap_temp) == true) {
-    if (pro_in.m_mol.empty() == true || lig.m_mol.empty() == true) {
-      cout << "Error occured in " << input_name
-           << " file. Cannot parse atom coordinates of MOL(s)\n";
-      cout << pro_in.m_mol.size() << " " << lig.m_mol.size();
-      EXIT_FAILURE;
+    const bool pro_has_current_frame =
+        I < pro_in.m_mol.size() && !pro_in.m_mol[I].pos.x.empty();
+    const bool lig_has_current_frame =
+        I < lig.m_mol.size() && !lig.m_mol[I].pos.x.empty();
+    const bool frame_complete =
+        pro_has_current_frame &&
+        (Arguments.flag_nocal || lig_has_current_frame);
+
+    if (!frame_complete) {
+      discard_uncommitted_frame(pro_in, I);
+      discard_uncommitted_frame(lig, I);
+      discard_uncommitted_frame(water_traj, I);
+      atom_num = 0;
+      flag_set_time = false;
+      flag_set_box = false;
+      return 0;
     }
 
     pro_in.check_and_pop_size_2last_snaps(I, " of molecule 1 ");
-    lig.check_and_pop_size_2last_snaps(I, " of molecule 2 ");
+    if (!Arguments.flag_nocal)
+      lig.check_and_pop_size_2last_snaps(I, " of molecule 2 ");
 
     if (flag_set_box == false && I != 0 && I < pro_in.m_mol.size() &&
         I < lig.m_mol.size()) {
       pro_in.m_mol[I].Box = pro_in.m_mol[I - 1].Box;
-      lig.m_mol[I].Box = lig.m_mol[I - 1].Box;
+      if (!Arguments.flag_nocal)
+        lig.m_mol[I].Box = lig.m_mol[I - 1].Box;
     } else
       flag_set_box = false;
 
     ++I;
     atom_num = 0;
     flag_set_time = false;
+    flag_set_box = false;
   }
 
   return 0;
@@ -162,6 +233,8 @@ void take_coordinate(Multi_MOL &pro_in, Multi_MOL &lig, Multi_MOL &water_traj,
 
   size_t I{}, atom_num{};
   bool flag_end{true};
+  const size_t flush_snap_count =
+      max_frames > 0 ? std::min<size_t>(10, max_frames) : 10;
   while (flag_end == true) {
     if (max_frames > 0 && pro_in.m_mol.size() >= max_frames) {
       flag_end = false;
@@ -181,7 +254,7 @@ void take_coordinate(Multi_MOL &pro_in, Multi_MOL &lig, Multi_MOL &water_traj,
       buffer_string.emplace_back(protein_1);
       if (protein_1 == "ENDMDL" || protein_1 == "END") {
         ++count_snap;
-        if (count_snap == 10) {
+        if (count_snap >= flush_snap_count) {
           for (size_t i{}; i < buffer_string.size(); ++i)
             if (1 == helper_parse_coor_not_copy(
                          pro_in, lig, water_traj, groups, Arguments, Box_temp,

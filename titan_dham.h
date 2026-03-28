@@ -12,7 +12,9 @@
 #include "parse_xvg.h"
 #include "titan_ui.h"
 #include <Eigen/Dense>
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <limits>
@@ -37,6 +39,26 @@ using MatrixXdRM = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
 // ============================================================================
 class TitanDHAM {
 public:
+    struct WindowMatchResult {
+        std::vector<std::size_t> kept_indices;
+        std::vector<double> kept_dtraj_times_ps;
+        std::vector<double> aligned_values;
+        double inferred_dt_energy_ps{0.0};
+        double match_tolerance_ps{0.0};
+        double traj_min_ps{0.0};
+        double traj_max_ps{0.0};
+        double energy_min_ps{0.0};
+        double energy_max_ps{0.0};
+        double overlap_start_ps{0.0};
+        double overlap_end_ps{0.0};
+        std::size_t original_frames{0};
+        std::size_t kept_frames{0};
+        std::size_t matched_frames{0};
+        std::size_t dropped_outside_overlap{0};
+        std::size_t unmatched_in_overlap{0};
+        bool overlap_found{false};
+    };
+
     // -------------------------------------------------------------------------
     // Constructor
     //   n_states:   number of microstates (K-means clusters)
@@ -109,6 +131,12 @@ public:
     // Uses high-perf TitanIO::parse_xvg_time_value under the hood
     static std::vector<std::pair<double,double>>
     parse_xvg(const std::string& path);
+
+    static WindowMatchResult
+    window_match_energy_to_dtraj(
+        const std::vector<double>& dtraj_times_ps,
+        const std::vector<std::pair<double,double>>& xvg_data,
+        double dt_energy_ps);
 
     // Map energy values to dtraj timestamps via nearest-neighbour matching.
     // Returns vector<double> of same length as dtraj_times_ps.
@@ -186,6 +214,103 @@ TitanDHAM::parse_xvg(const std::string& path) {
     return std::move(result.value());
 }
 
+inline TitanDHAM::WindowMatchResult
+TitanDHAM::window_match_energy_to_dtraj(
+    const std::vector<double>& dtraj_times_ps,
+    const std::vector<std::pair<double,double>>& xvg_data,
+    double dt_energy_ps)
+{
+    WindowMatchResult result;
+    result.original_frames = dtraj_times_ps.size();
+    if (dtraj_times_ps.empty() || xvg_data.empty())
+        return result;
+
+    auto infer_dt_ps = [&](double fallback) {
+        if (fallback > 0.0)
+            return fallback;
+
+        std::vector<double> positive_deltas;
+        positive_deltas.reserve(xvg_data.size() > 1 ? xvg_data.size() - 1 : 0);
+        for (std::size_t i = 1; i < xvg_data.size(); ++i) {
+            const double dt = xvg_data[i].first - xvg_data[i - 1].first;
+            if (std::isfinite(dt) && dt > 0.0)
+                positive_deltas.push_back(dt);
+        }
+
+        if (!positive_deltas.empty()) {
+            const std::size_t mid = positive_deltas.size() / 2;
+            std::nth_element(positive_deltas.begin(),
+                             positive_deltas.begin() +
+                                 static_cast<std::ptrdiff_t>(mid),
+                             positive_deltas.end());
+            return positive_deltas[mid];
+        }
+        return 2.0;
+    };
+
+    result.inferred_dt_energy_ps = infer_dt_ps(dt_energy_ps);
+    if (!std::isfinite(result.inferred_dt_energy_ps) ||
+        result.inferred_dt_energy_ps <= 0.0) {
+        result.inferred_dt_energy_ps = 2.0;
+    }
+    result.match_tolerance_ps =
+        0.5 * result.inferred_dt_energy_ps +
+        1e-9 * std::max(1.0, std::abs(result.inferred_dt_energy_ps));
+
+    const auto [traj_min_it, traj_max_it] =
+        std::minmax_element(dtraj_times_ps.begin(), dtraj_times_ps.end());
+    result.traj_min_ps = *traj_min_it;
+    result.traj_max_ps = *traj_max_it;
+    result.energy_min_ps = xvg_data.front().first;
+    result.energy_max_ps = xvg_data.back().first;
+    result.overlap_start_ps =
+        std::max(result.traj_min_ps,
+                 result.energy_min_ps - result.match_tolerance_ps);
+    result.overlap_end_ps =
+        std::min(result.traj_max_ps,
+                 result.energy_max_ps + result.match_tolerance_ps);
+
+    if (result.overlap_start_ps > result.overlap_end_ps)
+        return result;
+
+    result.overlap_found = true;
+    result.kept_indices.reserve(dtraj_times_ps.size());
+    result.kept_dtraj_times_ps.reserve(dtraj_times_ps.size());
+    result.aligned_values.reserve(dtraj_times_ps.size());
+
+    const double nan_val = std::numeric_limits<double>::quiet_NaN();
+    std::size_t j = 0;
+    for (std::size_t i = 0; i < dtraj_times_ps.size(); ++i) {
+        const double t_target = dtraj_times_ps[i];
+        if (t_target < result.overlap_start_ps ||
+            t_target > result.overlap_end_ps) {
+            ++result.dropped_outside_overlap;
+            continue;
+        }
+
+        if (j > 0 && xvg_data[j].first > t_target + result.match_tolerance_ps)
+            j = 0;
+        while (j + 1 < xvg_data.size() &&
+               std::abs(xvg_data[j + 1].first - t_target) <
+               std::abs(xvg_data[j].first - t_target)) {
+            ++j;
+        }
+
+        result.kept_indices.push_back(i);
+        result.kept_dtraj_times_ps.push_back(t_target);
+        if (std::abs(xvg_data[j].first - t_target) <= result.match_tolerance_ps) {
+            result.aligned_values.push_back(xvg_data[j].second);
+            ++result.matched_frames;
+        } else {
+            result.aligned_values.push_back(nan_val);
+            ++result.unmatched_in_overlap;
+        }
+    }
+
+    result.kept_frames = result.kept_indices.size();
+    return result;
+}
+
 inline std::vector<double>
 TitanDHAM::align_energy_to_dtraj(
     const std::vector<double>& dtraj_times_ps,
@@ -196,31 +321,36 @@ TitanDHAM::align_energy_to_dtraj(
     std::vector<double> aligned(dtraj_times_ps.size(), nan_val);
     if (xvg_data.empty()) return aligned;
 
-    // Compute actual dt_energy from data if not provided or zero
-    double dt_e = dt_energy_ps;
-    if (dt_e <= 0.0 && xvg_data.size() > 1)
-        dt_e = xvg_data[1].first - xvg_data[0].first;
-    if (dt_e <= 0.0) dt_e = 2.0; // fallback: 2 ps
-    const double match_tol =
-        0.5 * dt_e +
-        1e-9 * std::max(1.0, std::abs(dt_e));
-
-    size_t j = 0;
-    for (size_t i = 0; i < dtraj_times_ps.size(); ++i) {
-        double t_target = dtraj_times_ps[i];
-        // Fix B: Reset j if target time goes backwards (trajectory restart)
-        if (j > 0 && xvg_data[j].first > t_target + match_tol)
-            j = 0;
-        while (j + 1 < xvg_data.size() &&
-               std::abs(xvg_data[j+1].first - t_target) <
-               std::abs(xvg_data[j].first   - t_target))
-            ++j;
-        if (std::abs(xvg_data[j].first - t_target) <= match_tol)
-            aligned[i] = xvg_data[j].second;
+    const auto matched = window_match_energy_to_dtraj(
+        dtraj_times_ps, xvg_data, dt_energy_ps);
+    if (!matched.overlap_found) {
+        TitanUI::print_warning(
+            "DHAM: trajectory time range [" +
+            std::to_string(matched.traj_min_ps) + ", " +
+            std::to_string(matched.traj_max_ps) +
+            "] ps has no overlap with energy range [" +
+            std::to_string(matched.energy_min_ps) + ", " +
+            std::to_string(matched.energy_max_ps) + "] ps.");
+        return aligned;
     }
 
-    size_t nan_count = 0;
-    for (double v : aligned) if (std::isnan(v)) ++nan_count;
+    for (std::size_t i = 0; i < matched.kept_indices.size(); ++i)
+        aligned[matched.kept_indices[i]] = matched.aligned_values[i];
+
+    if (matched.dropped_outside_overlap > 0) {
+        TitanUI::print_warning(
+            "DHAM: trajectory time range [" +
+            std::to_string(matched.traj_min_ps) + ", " +
+            std::to_string(matched.traj_max_ps) +
+            "] ps extends outside energy range [" +
+            std::to_string(matched.energy_min_ps) + ", " +
+            std::to_string(matched.energy_max_ps) +
+            "] ps. Frames outside the common overlap remain unmatched unless "
+            "you enable DHAM window matching.");
+    }
+
+    std::size_t nan_count =
+        matched.dropped_outside_overlap + matched.unmatched_in_overlap;
     if (nan_count > aligned.size() / 10) {
         TitanUI::print_warning(
             "DHAM: " + std::to_string(nan_count) + "/" +

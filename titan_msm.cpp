@@ -155,7 +155,8 @@ TitanMSM::TitanMSM(int n_clusters, int n_tica_components, double dt_ns)
 // ============================================================================
 void TitanMSM::add_projected_frame(const Eigen::VectorXd &proj_x,
                                    int replica_id,
-                                   int64_t global_frame_index) {
+                                   int64_t global_frame_index,
+                                   double box_volume_nm3) {
   // Fix 3: grow proj_mat_ with doubling strategy (amortized O(1), contiguous)
   if (n_proj_frames_ >= proj_mat_.rows()) {
     int64_t new_rows = std::max(int64_t(1024), proj_mat_.rows() * 2);
@@ -163,18 +164,21 @@ void TitanMSM::add_projected_frame(const Eigen::VectorXd &proj_x,
     // Reserve replica tracking vectors to match
     frame_replica_ids_.reserve(static_cast<size_t>(new_rows));
     frame_timestamps_.reserve(static_cast<size_t>(new_rows));
+    frame_box_volumes_nm3_.reserve(static_cast<size_t>(new_rows));
     frame_global_indices_.reserve(static_cast<size_t>(new_rows));
   }
   proj_mat_.row(n_proj_frames_++) = proj_x.transpose();
   frame_replica_ids_.push_back(replica_id);
   frame_timestamps_.push_back(0.0);  // overwritten by record_frame_time
+  frame_box_volumes_nm3_.push_back(box_volume_nm3);
   frame_global_indices_.push_back(global_frame_index);
   last_added_was_raw_ = false;
 }
 
 void TitanMSM::add_feature_frame(const Eigen::VectorXd &feature_x,
                                  int replica_id,
-                                 int64_t global_frame_index) {
+                                 int64_t global_frame_index,
+                                 double box_volume_nm3) {
   if (feature_x.size() <= 0) {
     TitanUI::print_error(
         "TitanMSM::add_feature_frame: feature vector is empty.");
@@ -196,21 +200,25 @@ void TitanMSM::add_feature_frame(const Eigen::VectorXd &feature_x,
     raw_feat_mat_.conservativeResize(new_rows, feature_x.size());
     raw_frame_replica_ids_.reserve(static_cast<size_t>(new_rows));
     raw_frame_timestamps_.reserve(static_cast<size_t>(new_rows));
+    raw_frame_box_volumes_nm3_.reserve(static_cast<size_t>(new_rows));
     raw_frame_global_indices_.reserve(static_cast<size_t>(new_rows));
   }
 
   raw_feat_mat_.row(n_raw_frames_++) = feature_x.transpose();
   raw_frame_replica_ids_.push_back(replica_id);
   raw_frame_timestamps_.push_back(0.0); // overwritten by record_frame_time
+  raw_frame_box_volumes_nm3_.push_back(box_volume_nm3);
   raw_frame_global_indices_.push_back(global_frame_index);
   last_added_was_raw_ = true;
 }
 
 void TitanMSM::add_pending_frame_metadata(double time_ps, int replica_id,
-                                          int64_t global_frame_index) {
+                                          int64_t global_frame_index,
+                                          double box_volume_nm3) {
   ++n_raw_frames_;
   raw_frame_replica_ids_.push_back(replica_id);
   raw_frame_timestamps_.push_back(time_ps);
+  raw_frame_box_volumes_nm3_.push_back(box_volume_nm3);
   raw_frame_global_indices_.push_back(global_frame_index);
   last_added_was_raw_ = true;
 }
@@ -236,9 +244,11 @@ void TitanMSM::clear_projected() {
   last_added_was_raw_ = false;
   frame_replica_ids_.clear();
   frame_timestamps_.clear();
+  frame_box_volumes_nm3_.clear();
   frame_global_indices_.clear();
   raw_frame_replica_ids_.clear();
   raw_frame_timestamps_.clear();
+  raw_frame_box_volumes_nm3_.clear();
   raw_frame_global_indices_.clear();
 }
 
@@ -270,6 +280,7 @@ void TitanMSM::project_pending_features(const TitanKinetics &tica_analyzer) {
   eigen_solved_ = false;
   frame_replica_ids_.clear();
   frame_timestamps_.clear();
+  frame_box_volumes_nm3_.clear();
   frame_global_indices_.clear();
 
   if (raw_feat_mat_.cols() == 0) {
@@ -293,6 +304,7 @@ void TitanMSM::project_pending_features(const TitanKinetics &tica_analyzer) {
     n_proj_frames_ = n_raw_frames_;
     frame_replica_ids_ = raw_frame_replica_ids_;
     frame_timestamps_ = raw_frame_timestamps_;
+    frame_box_volumes_nm3_ = raw_frame_box_volumes_nm3_;
     frame_global_indices_ = raw_frame_global_indices_;
     traj_break_indices_ = raw_traj_break_indices_;
 
@@ -300,6 +312,7 @@ void TitanMSM::project_pending_features(const TitanKinetics &tica_analyzer) {
     raw_traj_break_indices_.clear();
     raw_frame_replica_ids_.clear();
     raw_frame_timestamps_.clear();
+    raw_frame_box_volumes_nm3_.clear();
     raw_frame_global_indices_.clear();
     last_added_was_raw_ = false;
     return;
@@ -316,6 +329,7 @@ void TitanMSM::project_pending_features(const TitanKinetics &tica_analyzer) {
   proj_mat_.resize(n_raw_frames_, n_comp_);
   frame_replica_ids_ = raw_frame_replica_ids_;
   frame_timestamps_ = raw_frame_timestamps_;
+  frame_box_volumes_nm3_ = raw_frame_box_volumes_nm3_;
   frame_global_indices_ = raw_frame_global_indices_;
   traj_break_indices_ = raw_traj_break_indices_;
 
@@ -330,6 +344,7 @@ void TitanMSM::project_pending_features(const TitanKinetics &tica_analyzer) {
   raw_traj_break_indices_.clear();
   raw_frame_replica_ids_.clear();
   raw_frame_timestamps_.clear();
+  raw_frame_box_volumes_nm3_.clear();
   raw_frame_global_indices_.clear();
   last_added_was_raw_ = false;
 }
@@ -371,6 +386,16 @@ TitanMSM::get_per_replica_timestamps() const {
     int rid = (i < frame_replica_ids_.size())
               ? frame_replica_ids_[i] : -1;
     result[rid].push_back(frame_timestamps_[i]);
+  }
+  return result;
+}
+
+std::unordered_map<int, std::vector<double>>
+TitanMSM::get_per_replica_box_volumes_nm3() const {
+  std::unordered_map<int, std::vector<double>> result;
+  for (size_t i = 0; i < frame_box_volumes_nm3_.size(); ++i) {
+    int rid = (i < frame_replica_ids_.size()) ? frame_replica_ids_[i] : -1;
+    result[rid].push_back(frame_box_volumes_nm3_[i]);
   }
   return result;
 }
@@ -1045,6 +1070,24 @@ std::vector<int> TitanMSM::run_pcca_crisp(int n_macro) const {
   }
 
   return macrostates;
+}
+
+int TitanMSM::effective_pcca_macrostates(int msm_macrostates) const {
+  if (msm_macrostates == -1) {
+    const int n_timescales = std::max(1, n_k_ - 1);
+    const auto ref_timescales = compute_implied_timescales(n_timescales);
+    return auto_detect_macrostates(ref_timescales);
+  }
+  return std::clamp(msm_macrostates, 2, n_k_);
+}
+
+std::vector<int> TitanMSM::compute_pcca_macrostates(int msm_macrostates) const {
+  if (!msm_built_) {
+    TitanUI::print_warning("PCCA: MSM is not built yet. Returning empty macrostate map.");
+    return {};
+  }
+  const int n_macro = effective_pcca_macrostates(msm_macrostates);
+  return run_pcca_crisp(n_macro);
 }
 
 // ============================================================================

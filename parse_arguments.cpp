@@ -65,6 +65,88 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (arg == "-cas") {
       flag_cas = true;
     }
+    if (arg == "-dssp") {
+      dssp.flag_dssp = true;
+    }
+    if (arg == "-no-dssp") {
+      dssp.flag_dssp = false;
+    }
+    if (arg == "-rms" || arg == "-rmsd" || arg == "-rmsf") {
+      rms.flag_rms = true;
+    }
+    if (arg == "-lj") {
+      lj.flag_lj = true;
+    }
+    if (arg.rfind("-lj-cut=", 0) == 0 ||
+        arg.rfind("--lj-cut=", 0) == 0) {
+      lj.lj_cluster_cutoff = stod(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-lj-cut" || arg == "--lj-cut") && i + 1 < argc) {
+      lj.lj_cluster_cutoff = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-lj-min-cluster=", 0) == 0 ||
+        arg.rfind("--lj-min-cluster=", 0) == 0) {
+      lj.lj_min_cluster_size = stoi(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-lj-min-cluster" || arg == "--lj-min-cluster") &&
+        i + 1 < argc) {
+      lj.lj_min_cluster_size = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-lj-rho-bin=", 0) == 0 ||
+        arg.rfind("--lj-rho-bin=", 0) == 0) {
+      lj.lj_rho_bin = stod(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-lj-rho-bin" || arg == "--lj-rho-bin") &&
+        i + 1 < argc) {
+      lj.lj_rho_bin = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-lj-rho-max=", 0) == 0 ||
+        arg.rfind("--lj-rho-max=", 0) == 0) {
+      lj.lj_rho_max = stod(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-lj-rho-max" || arg == "--lj-rho-max") &&
+        i + 1 < argc) {
+      lj.lj_rho_max = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-lj-solid-q6=", 0) == 0 ||
+        arg.rfind("--lj-solid-q6=", 0) == 0) {
+      lj.lj_solid_q6 = stod(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-lj-solid-q6" || arg == "--lj-solid-q6") && i + 1 < argc) {
+      lj.lj_solid_q6 = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-lj-solid-min-cn=", 0) == 0 ||
+        arg.rfind("--lj-solid-min-cn=", 0) == 0) {
+      lj.lj_solid_min_cn = stoi(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-lj-solid-min-cn" || arg == "--lj-solid-min-cn") &&
+        i + 1 < argc) {
+      lj.lj_solid_min_cn = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-lj-crystal-tol=", 0) == 0 ||
+        arg.rfind("--lj-crystal-tol=", 0) == 0) {
+      lj.lj_crystal_tol = stod(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-lj-crystal-tol" || arg == "--lj-crystal-tol") &&
+        i + 1 < argc) {
+      lj.lj_crystal_tol = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-dssp-hbond-cutoff=", 0) == 0 ||
+        arg.rfind("--dssp-hbond-cutoff=", 0) == 0) {
+      dssp.hbond_energy_cutoff = stod(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-dssp-hbond-cutoff" || arg == "--dssp-hbond-cutoff") &&
+        i + 1 < argc) {
+      dssp.hbond_energy_cutoff = stod(string(argv[i + 1]));
+      ++i;
+    }
     if (arg == "-network") {
       flag_network = true;
       flag_network_explicit = true;
@@ -1001,16 +1083,56 @@ int arguments::parse_arguments(int argc, char **argv) {
       msm.flag_tica = true;     // MSM depends on TICA projection
       flag_network = true;      // TICA depends on CA data from network module
     }
+    if (string(argv[i]).find("-dham-temps=") == 0 ||
+        string(argv[i]).find("--dham-temps=") == 0) {
+      dham.temps_file = string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
     if (string(argv[i]) == "-dham-temps" && i + 1 < argc) {
       dham.temps_file = string(argv[i + 1]);
       ++i;
+    }
+    if (string(argv[i]).find("-dham-ener=") == 0 ||
+        string(argv[i]).find("--dham-ener=") == 0) {
+      dham.ener_list_file =
+          string(argv[i]).substr(string(argv[i]).find('=') + 1);
     }
     if (string(argv[i]) == "-dham-ener" && i + 1 < argc) {
       dham.ener_list_file = string(argv[i + 1]);
       ++i;
     }
+    if (string(argv[i]).find("-dham-target-temp=") == 0 ||
+        string(argv[i]).find("--dham-target-temp=") == 0) {
+      dham.target_temp =
+          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
     if (string(argv[i]) == "-dham-target-temp" && i + 1 < argc) {
       dham.target_temp = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("-dham-ensemble=") == 0 ||
+        string(argv[i]).find("--dham-ensemble=") == 0) {
+      dham.ensemble = string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if (string(argv[i]) == "-dham-ensemble" && i + 1 < argc) {
+      dham.ensemble = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("-dham-window-match=") == 0 ||
+        string(argv[i]).find("--dham-window-match=") == 0) {
+      dham.window_match =
+          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if (string(argv[i]) == "-dham-window-match" && i + 1 < argc) {
+      dham.window_match = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("-dham-pressure-bar=") == 0 ||
+        string(argv[i]).find("--dham-pressure-bar=") == 0) {
+      dham.target_pressure_bar =
+          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if (string(argv[i]) == "-dham-pressure-bar" && i + 1 < argc) {
+      dham.target_pressure_bar = stod(string(argv[i + 1]));
       ++i;
     }
     if (string(argv[i]).find("--dham-max-iter=") == 0 ||
@@ -1028,8 +1150,128 @@ int arguments::parse_arguments(int argc, char **argv) {
       dham.n_replicas =
           stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
     }
+    if (string(argv[i]).find("-dham-dt-energy=") == 0 ||
+        string(argv[i]).find("--dham-dt-energy=") == 0) {
+      dham.dt_energy_ps =
+          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
     if (string(argv[i]) == "-dham-dt-energy" && i + 1 < argc) {
       dham.dt_energy_ps = stod(string(argv[i + 1]));
+      ++i;
+    }
+    // --- TPT (Transition Path Theory) flags ---
+    if (string(argv[i]) == "-tpt") {
+      tpt.flag_tpt = true;
+      msm.flag_msm = true;  // TPT depends on MSM microstates / TPM
+      msm.flag_tica = true; // MSM depends on TICA projection
+      flag_network = true;  // protein workflows still use network -> TICA -> MSM
+    }
+    if (string(argv[i]).find("--tpt-mode=") == 0 ||
+        string(argv[i]).find("-tpt-mode=") == 0) {
+      tpt.mode = string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if ((string(argv[i]) == "--tpt-mode" || string(argv[i]) == "-tpt-mode") &&
+        i + 1 < argc) {
+      tpt.mode = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("--tpt-source=") == 0 ||
+        string(argv[i]).find("-tpt-source=") == 0) {
+      tpt.source_spec = string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if ((string(argv[i]) == "--tpt-source" ||
+         string(argv[i]) == "-tpt-source") &&
+        i + 1 < argc) {
+      tpt.source_spec = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("--tpt-sink=") == 0 ||
+        string(argv[i]).find("-tpt-sink=") == 0) {
+      tpt.sink_spec = string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if ((string(argv[i]) == "--tpt-sink" || string(argv[i]) == "-tpt-sink") &&
+        i + 1 < argc) {
+      tpt.sink_spec = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("--tpt-top-paths=") == 0 ||
+        string(argv[i]).find("-tpt-top-paths=") == 0) {
+      tpt.top_paths =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--tpt-top-paths" ||
+         string(argv[i]) == "-tpt-top-paths") &&
+        i + 1 < argc) {
+      tpt.top_paths = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--tpt-flux-cut=") == 0 ||
+        string(argv[i]).find("-tpt-flux-cut=") == 0) {
+      tpt.flux_cut =
+          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--tpt-flux-cut" ||
+         string(argv[i]) == "-tpt-flux-cut") &&
+        i + 1 < argc) {
+      tpt.flux_cut = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--tpt-use-dham=") == 0 ||
+        string(argv[i]).find("-tpt-use-dham=") == 0) {
+      std::string value =
+          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+      std::transform(value.begin(), value.end(), value.begin(),
+                     [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                     });
+      tpt.use_dham =
+          !(value == "no" || value == "false" || value == "0" ||
+            value == "off");
+    }
+    if (string(argv[i]).find("--tpt-demux-map=") == 0 ||
+        string(argv[i]).find("-tpt-demux-map=") == 0) {
+      tpt.demux_map_file =
+          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if ((string(argv[i]) == "--tpt-demux-map" ||
+         string(argv[i]) == "-tpt-demux-map") &&
+        i + 1 < argc) {
+      tpt.demux_map_file = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("--tpt-bootstrap=") == 0 ||
+        string(argv[i]).find("-tpt-bootstrap=") == 0) {
+      tpt.bootstrap_samples =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--tpt-bootstrap" ||
+         string(argv[i]) == "-tpt-bootstrap") &&
+        i + 1 < argc) {
+      tpt.bootstrap_samples = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--tpt-bootstrap-seed=") == 0 ||
+        string(argv[i]).find("-tpt-bootstrap-seed=") == 0) {
+      tpt.bootstrap_seed = static_cast<unsigned int>(
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1)));
+    }
+    if ((string(argv[i]) == "--tpt-bootstrap-seed" ||
+         string(argv[i]) == "-tpt-bootstrap-seed") &&
+        i + 1 < argc) {
+      tpt.bootstrap_seed = static_cast<unsigned int>(stoi(string(argv[i + 1])));
+      ++i;
+    }
+    if ((string(argv[i]) == "--tpt-use-dham" ||
+         string(argv[i]) == "-tpt-use-dham") &&
+        i + 1 < argc) {
+      std::string value = string(argv[i + 1]);
+      std::transform(value.begin(), value.end(), value.begin(),
+                     [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                     });
+      tpt.use_dham =
+          !(value == "no" || value == "false" || value == "0" ||
+            value == "off");
       ++i;
     }
     if (string(argv[i]) == "-no-center") {

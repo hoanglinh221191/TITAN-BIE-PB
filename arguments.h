@@ -8,6 +8,7 @@ using namespace std;
 struct PbcArgs {
   int solv_pbc{0};
   bool solv_pbcn{false};
+  bool auto_enabled_pbcn{false};
   int solv_pbc_int{0}, solv_pbc_int2{0}, solv_pbc_int3{0};
   bool pbc_aggressive{false};
   bool pbc_mem{false};
@@ -104,11 +105,27 @@ struct DhamArgs {
   bool   flag_dham       {false};
   std::string temps_file {};       // file with replica temperatures (K)
   std::string ener_list_file {};   // file listing paths to .xvg energy files
+  std::string ensemble   {"nvt"};  // nvt | npt
+  std::string window_match {"auto"}; // auto | off | strict
   double target_temp     {300.0};  // target reweighting temperature (K)
+  double target_pressure_bar {1.0}; // target pressure for NPT reweighting (bar)
   int    max_iter        {5000};
   double tolerance       {1e-6};
   int    n_replicas      {0};      // explicit validation (0 = auto from temps)
   double dt_energy_ps    {0.0};    // energy .xvg output freq (ps); 0 = auto from file
+};
+
+struct TptArgs {
+  bool flag_tpt{false};
+  std::string mode{"ensemble"};   // ensemble | kinetic
+  std::string source_spec{};      // microstate list/range, e.g. micro:0,1-3
+  std::string sink_spec{};        // microstate list/range, e.g. 8-12
+  int top_paths{5};
+  double flux_cut{0.0};
+  bool use_dham{true};
+  std::string demux_map_file{};   // optional demux replica-map for kinetic mode
+  int bootstrap_samples{0};       // 0 = off
+  unsigned int bootstrap_seed{42};
 };
 
 struct UmapArgs {
@@ -122,6 +139,26 @@ struct UmapArgs {
   string umap_knn_mode{"exact"};
   bool umap_knn_benchmark{false};
   bool umap_verbose{false};
+};
+
+struct DsspArgs {
+  bool flag_dssp{false};
+  double hbond_energy_cutoff{-0.5};
+};
+
+struct RmsArgs {
+  bool flag_rms{false};
+};
+
+struct LjArgs {
+  bool flag_lj{false};
+  double lj_cluster_cutoff{5.0};
+  int lj_min_cluster_size{2};
+  double lj_rho_bin{1.0};
+  double lj_rho_max{0.0};
+  double lj_solid_q6{0.40};
+  int lj_solid_min_cn{6};
+  double lj_crystal_tol{0.08};
 };
 
 // ── Main arguments struct ───────────────────────────────────
@@ -141,7 +178,11 @@ public:
   LlpsArgs llps;
   IfpArgs ifp;
   DhamArgs dham;
+  TptArgs tpt;
   UmapArgs umap;
+  DsspArgs dssp;
+  RmsArgs rms;
+  LjArgs lj;
 
   // LSP-MD (Kornev, JCTC 2025) — Local Spatial Pattern network analysis
   struct LSPMDArgs {

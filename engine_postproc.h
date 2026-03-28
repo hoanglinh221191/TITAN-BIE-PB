@@ -15,10 +15,14 @@
 #include "titan_llps.h"
 #include "titan_msm.h"
 #include "titan_pca.h"
+#include "titan_rms.h"
+#include "titan_tpt.h"
+#include "titan_dssp.h"
 #include "titan_umap.h"
 #include "water_analysis.h"
 
 #include <chrono>
+#include <Eigen/Dense>
 #include <fstream>
 #include <memory>
 #include <vector>
@@ -31,6 +35,10 @@ void run_gbsa_postproc(const arguments &args, size_t tot_snap_allfiles,
                        GBSA_Aggregator &global_gbsa_agg,
                        CASAnalyzer &cas_analyzer, NucleicProfiler &na_profiler,
                        bool global_has_nucleic_acid, info &info_output,
+                       std::fstream &log);
+
+void run_dssp_postproc(const arguments &args, TitanDSSPAnalyzer &mol1_dssp,
+                       TitanDSSPAnalyzer &mol2_dssp, info &info_output,
                        std::fstream &log);
 
 // ---- 2. TICA + MSM post-processing ---------------------------------------
@@ -77,6 +85,20 @@ void run_dham_postproc(const arguments &args,
                        std::unique_ptr<TitanMSM> &msm_analyzer,
                        size_t num_threads, info &info_output,
                        std::fstream &log,
-                       std::vector<double> &out_frame_weights);
+                       std::vector<double> &out_frame_weights,
+                       Eigen::MatrixXd *out_reweighted_tpm = nullptr,
+                       Eigen::VectorXd *out_reweighted_pi = nullptr,
+                       bool *out_converged = nullptr);
+
+void run_tpt_postproc(const arguments &args,
+                      std::unique_ptr<TitanMSM> &msm_analyzer,
+                      size_t num_threads, info &info_output,
+                      std::fstream &log,
+                      const std::vector<std::string> &lj_feature_files = {},
+                      const TitanRMSAnalyzer *rms_analyzer = nullptr,
+                      const TitanDSSPAnalyzer *protein_dssp_analyzer = nullptr,
+                      const Eigen::MatrixXd *dham_tpm = nullptr,
+                      const Eigen::VectorXd *dham_pi = nullptr,
+                      bool dham_converged = false);
 
 #endif // ENGINE_POSTPROC_H

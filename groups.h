@@ -92,6 +92,14 @@ public:
     groups.emplace_back(group_name, begin, end);
     return 0;
   }
+  int add_empty_group(string group_name) {
+    if (groups.empty())
+      group_1 = 0;
+    else if (groups.size() == 1)
+      group_2 = 1;
+    groups.emplace_back(group_name);
+    return 0;
+  }
   int add_sub_group_1(arguments &Arguments);
   int add_sub_group_2(arguments &Arguments);
   int check_sub_group();

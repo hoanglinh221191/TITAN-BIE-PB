@@ -132,6 +132,7 @@ void DCCMNetwork::init(const Multi_MOL &pro_in, const Multi_MOL &lig,
   size_t skipped_rec_nodes = 0;
   size_t skipped_lig_nodes = 0;
   size_t cb_fallback_nodes = 0;
+  const bool include_lig_trace_nodes = !args.flag_nocal;
 
   bool is_lig_rec = (args.mol_1_type == "ligand" || args.mol_1_type == "lig");
   bool is_lig_lg = (args.mol_2_type == "ligand" || args.mol_2_type == "lig");
@@ -155,21 +156,23 @@ void DCCMNetwork::init(const Multi_MOL &pro_in, const Multi_MOL &lig,
     }
   }
   // Collect Ligand Nodes
-  for (size_t i = 0; i < lig.info.size(); ++i) {
-    if (i >= lig_coord_count) {
-      ++skipped_lig_nodes;
-      continue;
-    }
-    std::string atom_name = lig.info[i].get_atom();
-    if (is_lig_lg || atom_name == "CA" || atom_name == "CA " ||
-        atom_name == "BB" || atom_name == "BB2" || atom_name == "C4'" ||
-        atom_name == "C4*") {
-      ca_indices.emplace_back((int)i);
-      ca_resnrs.emplace_back(is_lig_lg ? (i + 1) : lig.info[i].get_resnr());
-      ca_is_lig.emplace_back(1); // 1 = Ligand
-      ca_chain.emplace_back(lig.info[i].get_chain());
-      ca_resname.emplace_back(is_lig_lg ? lig.info[i].get_atom()
-                                        : lig.info[i].get_res_name());
+  if (include_lig_trace_nodes) {
+    for (size_t i = 0; i < lig.info.size(); ++i) {
+      if (i >= lig_coord_count) {
+        ++skipped_lig_nodes;
+        continue;
+      }
+      std::string atom_name = lig.info[i].get_atom();
+      if (is_lig_lg || atom_name == "CA" || atom_name == "CA " ||
+          atom_name == "BB" || atom_name == "BB2" || atom_name == "C4'" ||
+          atom_name == "C4*") {
+        ca_indices.emplace_back((int)i);
+        ca_resnrs.emplace_back(is_lig_lg ? (i + 1) : lig.info[i].get_resnr());
+        ca_is_lig.emplace_back(1); // 1 = Ligand
+        ca_chain.emplace_back(lig.info[i].get_chain());
+        ca_resname.emplace_back(is_lig_lg ? lig.info[i].get_atom()
+                                          : lig.info[i].get_res_name());
+      }
     }
   }
 

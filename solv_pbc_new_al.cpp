@@ -1070,20 +1070,29 @@ int Multi_MOL::solv_pbc_pbcn(Multi_MOL &mol2, arguments &Arguments) {
 
     // Step 0: Allocate once per thread — N_rec/N_lig are constant across MD
     const size_t N_rec = m_mol[start_frame].pos.x.size();
-    const size_t N_lig = mol2.m_mol[start_frame].pos.x.size();
+    const bool has_ligand =
+        start_frame < static_cast<int>(mol2.m_mol.size()) &&
+        !mol2.m_mol[start_frame].pos.x.empty();
+    const size_t N_lig = has_ligand ? mol2.m_mol[start_frame].pos.x.size() : 0;
     std::vector<double> sx_rec(N_rec), sy_rec(N_rec), sz_rec(N_rec);
     std::vector<double> sx_lig(N_lig), sy_lig(N_lig), sz_lig(N_lig);
 
     for (int frame = start_frame; frame < end_frame; ++frame) {
-      if (frame >= static_cast<int>(mol2.m_mol.size()))
+      if (frame >= static_cast<int>(m_mol.size()))
         continue;
 
       MOL &rec = m_mol[frame];
-      MOL &lig = mol2.m_mol[frame];
+      MOL *lig_ptr =
+          frame < static_cast<int>(mol2.m_mol.size()) ? &mol2.m_mol[frame]
+                                                      : nullptr;
 
       // ISSUE 3: skip corrupt frames with mismatched atom count
-      if (rec.pos.x.size() != N_rec || lig.pos.x.size() != N_lig)
+      if (rec.pos.x.size() != N_rec)
         continue;
+      if (has_ligand) {
+        if (lig_ptr == nullptr || lig_ptr->pos.x.size() != N_lig)
+          continue;
+      }
 
       // ── Step 1: Build B⁻¹ and convert to scaled coordinates ──
       double v1[3], v2[3], v3[3];
@@ -1112,9 +1121,12 @@ int Multi_MOL::solv_pbc_pbcn(Multi_MOL &mol2, arguments &Arguments) {
       for (size_t i = 0; i < N_rec; ++i)
         cart_to_scaled(rec.pos.x[i], rec.pos.y[i], rec.pos.z[i], sx_rec[i],
                        sy_rec[i], sz_rec[i]);
-      for (size_t i = 0; i < N_lig; ++i)
-        cart_to_scaled(lig.pos.x[i], lig.pos.y[i], lig.pos.z[i], sx_lig[i],
-                       sy_lig[i], sz_lig[i]);
+      if (has_ligand) {
+        MOL &lig = *lig_ptr;
+        for (size_t i = 0; i < N_lig; ++i)
+          cart_to_scaled(lig.pos.x[i], lig.pos.y[i], lig.pos.z[i], sx_lig[i],
+                         sy_lig[i], sz_lig[i]);
+      }
 
       // ── Step 2: Unwrap molecules in scaled space (FixBox Eq. 13–17) ──
       // Accumulative unwrap: corrected atom i becomes reference for atom i+1.
@@ -1140,27 +1152,30 @@ int Multi_MOL::solv_pbc_pbcn(Multi_MOL &mol2, arguments &Arguments) {
       }
 
       // Pass B — Ligand chains
-      for (size_t k = 0; k + 1 < mol2.Index.size(); ++k) {
-        size_t a_start = mol2.Index[k].get_res_pos_e(0) - 1;
-        size_t a_end = mol2.Index[k + 1].get_res_pos_e(0) - 1;
-        if (a_start >= N_lig || a_end > N_lig)
-          continue;
+      if (has_ligand) {
+        for (size_t k = 0; k + 1 < mol2.Index.size(); ++k) {
+          size_t a_start = mol2.Index[k].get_res_pos_e(0) - 1;
+          size_t a_end = mol2.Index[k + 1].get_res_pos_e(0) - 1;
+          if (a_start >= N_lig || a_end > N_lig)
+            continue;
 
-        double sp_x = sx_lig[a_start];
-        double sp_y = sy_lig[a_start];
-        double sp_z = sz_lig[a_start];
-        for (size_t i = a_start + 1; i < a_end; ++i) {
-          sx_lig[i] -= std::round(sx_lig[i] - sp_x);
-          sy_lig[i] -= std::round(sy_lig[i] - sp_y);
-          sz_lig[i] -= std::round(sz_lig[i] - sp_z);
-          sp_x = sx_lig[i];
-          sp_y = sy_lig[i];
-          sp_z = sz_lig[i];
+          double sp_x = sx_lig[a_start];
+          double sp_y = sy_lig[a_start];
+          double sp_z = sz_lig[a_start];
+          for (size_t i = a_start + 1; i < a_end; ++i) {
+            sx_lig[i] -= std::round(sx_lig[i] - sp_x);
+            sy_lig[i] -= std::round(sy_lig[i] - sp_y);
+            sz_lig[i] -= std::round(sz_lig[i] - sp_z);
+            sp_x = sx_lig[i];
+            sp_y = sy_lig[i];
+            sp_z = sz_lig[i];
+          }
         }
       }
 
       // ── Step 3: Assemble Ligand onto Receptor (FixBox Eq. 12 + 17) ──
       // MI distance² in scaled space
+      if (has_ligand && N_lig > 0) {
       auto mic_dist_sq_scaled = [](double dsx, double dsy,
                                    double dsz) -> double {
         dsx -= std::round(dsx);
@@ -1222,6 +1237,7 @@ int Multi_MOL::solv_pbc_pbcn(Multi_MOL &mol2, arguments &Arguments) {
         sy_lig[i] -= Ky;
         sz_lig[i] -= Kz;
       }
+      }
 
       // ── Step 4: Center Receptor bounding box (FixBox Step 3) ──
       if (!Arguments.pbc.no_center) {
@@ -1242,10 +1258,12 @@ int Multi_MOL::solv_pbc_pbcn(Multi_MOL &mol2, arguments &Arguments) {
           sy_rec[i] += csy;
           sz_rec[i] += csz;
         }
-        for (size_t i = 0; i < N_lig; ++i) {
-          sx_lig[i] += csx;
-          sy_lig[i] += csy;
-          sz_lig[i] += csz;
+        if (has_ligand) {
+          for (size_t i = 0; i < N_lig; ++i) {
+            sx_lig[i] += csx;
+            sy_lig[i] += csy;
+            sz_lig[i] += csz;
+          }
         }
       }
 
@@ -1253,9 +1271,12 @@ int Multi_MOL::solv_pbc_pbcn(Multi_MOL &mol2, arguments &Arguments) {
       for (size_t i = 0; i < N_rec; ++i)
         scaled_to_cart(sx_rec[i], sy_rec[i], sz_rec[i], rec.pos.x[i],
                        rec.pos.y[i], rec.pos.z[i]);
-      for (size_t i = 0; i < N_lig; ++i)
-        scaled_to_cart(sx_lig[i], sy_lig[i], sz_lig[i], lig.pos.x[i],
-                       lig.pos.y[i], lig.pos.z[i]);
+      if (has_ligand) {
+        MOL &lig = *lig_ptr;
+        for (size_t i = 0; i < N_lig; ++i)
+          scaled_to_cart(sx_lig[i], sy_lig[i], sz_lig[i], lig.pos.x[i],
+                         lig.pos.y[i], lig.pos.z[i]);
+      }
     }
   };
 

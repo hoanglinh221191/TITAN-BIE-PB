@@ -19,7 +19,8 @@ DESCRIPTION
     Titan is a high-performance molecular analysis engine for computing
     electrostatic and van der Waals interactions, GBSA/ALPB solvation,
     hydrogen bonds, DCCM network analysis, PCA/FES, allostery, TICA, MSM,
-    DHAM reweighting, LLPS, GIST water thermodynamics, IFP occupancy, LSP-MD,
+    DHAM reweighting, TPT pathway analysis, LJ condensation, LLPS, GIST water thermodynamics,
+    IFP occupancy, LSP-MD,
     and related observables from PDB/XTC/TRR trajectories.
 
 ================================================================================
@@ -67,7 +68,10 @@ CORE DEPENDENCY CHAIN
   -tica       implies -network
   -umap       implies -tica and -network
   -msm        implies -tica and -network
-  -dham       implies -msm, -tica, and -network
+  -dham       implies -msm and -tica; for protein-like traces it also uses
+              -network, while LJ jobs switch to the LJ phase-2 feature backend
+  -tpt        implies -msm and -tica; phase 0 uses the built MSM TPM +
+              stationary distribution directly
   -lspmd      runs as its own network-style module and does not need -network
 
 GENERAL OUTPUT BEHAVIOR
@@ -154,6 +158,117 @@ IMPORTANT NOTES
     stat_hydrogenbonds.dat
     stat_average_HB.dat
     out_list_res_HB_<group>.dat
+
+2.3a DSSP Secondary Structure
+
+  Purpose:
+    Compute DSSP-like secondary-structure states per residue and aggregate
+    them across trajectories as mean +/- SEM, plus a consensus text string
+    suitable for martinize2-style workflows.
+
+  Main inputs:
+    -dssp                enable DSSP output
+    -no-dssp             disable DSSP output
+    -dssp-hbond-cutoff <val>
+    protein/protein-user molecule types
+
+  Typical outputs:
+    dssp_mol1.dat
+    dssp_mol1_content.dat
+    dssp_mol2.dat        only outside -nocal and only if molecule 2 is
+                         protein/protein-user
+    dssp_mol2_content.dat
+                         only outside -nocal and only if molecule 2 is
+                         protein/protein-user
+
+  Notes:
+    - In -nocal mode, DSSP is evaluated only for molecule 1.
+    - TITAN auto-skips DSSP if topology lacks a DSSP-compatible protein
+      backbone signature, which avoids meaningless output on LJ/monoatomic jobs.
+    - For each residue, Titan writes the dominant state, state fractions,
+      SEM across input trajectories, and one `martinize2_dssp` consensus
+      string built from the highest-population state per residue.
+    - The *_content.dat file reports, for each secondary-structure state,
+      1. protein-average content
+      2. per-residue occupancy +/- SEM
+    - Trajectory aggregation is two-stage:
+      1. frame fractions are averaged within each input trajectory
+      2. Titan reports mean +/- SEM across trajectories
+
+2.3b RMSD / RMSF
+
+  Purpose:
+    Compute a PBC-safe trace-atom RMSD time series and per-trace-atom RMSF
+    profile after Kabsch alignment.
+
+  Main inputs:
+    -rms                enable RMSD + RMSF
+    aliases: -rmsd, -rmsf
+
+  Trace atoms:
+    atomistic protein/protein-user: CA
+    atomistic RNA/DNA: C4' (fallback C4*)
+    MARTINI: BB (fallback BB2)
+
+  Typical outputs:
+    rmsd.dat            one file per trajectory; indexed if multiple inputs
+                        share one output folder
+    rmsf.dat            one file per trajectory; RMSD is combined over all
+                        active trace atoms, RMSF is split by molecule
+
+  Notes:
+    - In -nocal mode, only molecule 1 is analyzed.
+    - Outside -nocal, Titan builds one joint fit set from all supported
+      trace atoms in molecule 1 + molecule 2.
+    - RMSD is reported for the combined fit set.
+    - RMSF is reported separately for molecule 1 and molecule 2 in the same
+      RMSF file when both contribute trace atoms.
+    - If no explicit PBC mode is requested, Titan auto-enables -pbcn for
+      RMSD/RMSF and logs that decision.
+
+2.3c LJ Condensation / Cluster Density
+
+  Purpose:
+    Analyze monoatomic or generic Lennard-Jones-like systems through
+    cluster detection on molecule 1, then report condensation observables
+    such as largest-cluster Rg and radial density profile rho(r).
+
+  Main inputs:
+    -lj
+    -lj-cut <val>          cluster cutoff in Angstrom; default 5.0
+    -lj-min-cluster <N>    minimum size counted as a cluster; default 2
+    -lj-rho-bin <val>      rho(r) bin width in Angstrom; default 1.0
+    -lj-rho-max <val>      rho(r) max radius in Angstrom; default auto
+    -lj-solid-q6 <val>     q6 threshold for solid-like atoms; default 0.40
+    -lj-solid-min-cn <N>   minimum CN for dense/solid-like atoms; default 6
+    -lj-crystal-tol <val>  q4_bar/q6_bar crystal-class tolerance; default 0.08
+
+  Typical outputs:
+    lj_timeseries.dat      one file per trajectory; indexed if multiple inputs
+                           share one output folder
+    lj_cluster_rho_r.dat   trajectory-averaged radial density profile around
+                           the largest-cluster centroid
+    lj_features.dat        phase-2 feature matrix used by TICA/MSM for LJ jobs
+    lj_summary.dat         trajectory summary with mean +/- SEM observables
+
+  Notes:
+    - LJ analysis always reads molecule 1 only, both in -nocal and outside it.
+    - All atoms of molecule 1 are used; no protein/RNA trace-atom filter is
+      applied.
+    - TITAN auto-skips DSSP in LJ/monoatomic jobs when no protein backbone
+      signature is found in the topology.
+    - Timeseries columns include bulk density, number of clusters,
+      largest-cluster size/fraction, Rg, max cluster radius, dense-region
+      q4/q6, Lechner-Dellago q4_bar/q6_bar, solid-like fraction, largest
+      solid-cluster fraction, and FCC/HCP/BCC/ICO-like fractions.
+    - rho(r) is reported in atoms / nm^3 as a function of radius in Angstrom.
+    - If -lj is combined with -tica/-msm and no DCCM trace atoms exist, TITAN
+      automatically switches TICA input to LJ phase-2 features:
+      bulk density, largest-cluster fraction, normalized Rg/Rmax, CN
+      statistics, dense-region q4/q6 + q4_bar/q6_bar, solid-like fraction,
+      FCC/HCP fractions, and near-core shell enrichments.
+    - If no explicit PBC mode is requested, Titan auto-enables -pbcn for LJ
+      analysis and logs that decision.
 
 2.4 DCCM Network
 
@@ -295,24 +410,107 @@ IMPORTANT NOTES
     -dham-ener <energy_list.txt>
     optional:
       -dham-target-temp <K>
+      -dham-ensemble <nvt|npt>
+      -dham-pressure-bar <bar>
       -dham-max-iter=<N>
       -dham-tol=<val>
       -dham-n-replicas=<N>
       -dham-dt-energy <ps>
+      -dham-window-match <auto|off|strict>
 
   Required context:
-    DHAM depends on network -> TICA -> MSM and requires a valid MSM lag.
+    DHAM depends on TICA -> MSM and requires a valid MSM lag.
+    Protein-like jobs use network -> TICA -> MSM.
+    LJ jobs use the LJ phase-2 feature backend -> TICA -> MSM.
     Energy list files should point to GROMACS .xvg energy trajectories.
+    In NPT mode, TITAN combines the first numeric .xvg column with trajectory
+    box volumes using H = E_col1 + P*V.
+    The pressure term is the ensemble set-point, not instantaneous pressure(t).
+    By default, TITAN trims each replica to the common trajectory/energy
+    overlap before DHAM (`-dham-window-match auto`).
 
   Typical outputs:
     dham_stationary_distribution.dat
     dham_free_energy_profile.dat
     dham_unbiased_tpm.dat
+    dham_window_audit.dat
 
   Integration note:
     If DHAM converges, PCA/FES uses DHAM frame weights automatically.
     If DHAM does not converge, Titan prints a warning and PCA/FES falls back
     to uniform weights while other active modules continue normally.
+    NVT mode uses energy-based reweighting.
+    NPT mode uses an enthalpy-like observable assembled from the aligned .xvg
+    column plus trajectory volume metadata.
+
+2.10a TPT
+
+  Purpose:
+    Run Transition Path Theory on the built MSM to estimate committors,
+    reactive flux edges, and dominant pathways between user-defined source
+    and sink microstate basins.
+
+  Main inputs:
+    -tpt
+    -tpt-source <micro:list>
+    -tpt-sink <micro:list>
+    optional:
+      -tpt-mode <ensemble|kinetic>
+      -tpt-top-paths <N>
+      -tpt-flux-cut <val>
+
+  Required context:
+    TPT phase 0 depends on a completed TICA -> MSM workflow.
+    Source/sink basins currently support:
+      `micro:0,1-3`
+      `macro:0`
+      `tica_rect:x1,y1,x2,y2`
+      `lj:q6_bar>=0.172`
+      `ljpreset:gas`
+      `protein:major_macro`
+    `lj:` basin specs are only meaningful for LJ jobs. Protein jobs
+    normally use `micro:`, `macro:`, or `tica_rect:`.
+    Named LJ presets currently include `gas`, `dense`, `liquid`, and `solid`.
+    Protein presets currently include `major_macro`, `minor_macro`,
+    `low_pc1`, `high_pc1`, `low_pc2`, `high_pc2`,
+    `rmsd_low`, `rmsd_high`, `helical`, `strand`, `coil`, `turn`, and `bend`.
+    `protein:rmsd_*` presets require `-rms`; DSSP-informed presets require
+    `-dssp`.
+    Phase 0 uses the MSM TPM + stationary distribution directly.
+    In ensemble mode, TITAN can use the converged DHAM-reweighted TPM/pi
+    when `-tpt-use-dham yes` (default). If DHAM does not converge, TITAN
+    falls back to the built MSM model automatically.
+    In kinetic mode, TITAN always uses the built MSM model and writes
+    `tpt_kinetics.dat` diagnostics; it still does not certify kinetic
+    validity automatically. If `-tpt-demux-map <file>` is supplied, TITAN
+    rebuilds a kinetic MSM from the demuxed microstate segments before TPT.
+    Kinetic diagnostics now include a first-pass CK / Markov sanity check.
+    `-tpt-bootstrap <N>` enables segment bootstrap uncertainty for MSM-backed
+    TPT models. DHAM-reweighted bootstrap is not implemented yet.
+
+  Typical outputs:
+    tpt_summary.dat
+    tpt_committor.dat
+    tpt_flux_edges.dat
+    tpt_paths.dat
+    tpt_state_labels.dat
+    tpt_kinetics.dat
+    tpt_reactive_fes_2d.dat
+    tpt_flux_map_2d.dat
+    tpt_bootstrap_summary.dat
+    tpt_bootstrap_states.dat
+    tpt_all_pairs_kinetics.dat
+    tpt_path_clusters.dat
+    tpt_bottleneck_edges.dat
+    tpt_bottleneck_states.dat
+    `tpt_summary.dat` now appends a compact top-bottleneck table.
+    `tpt_state_labels.dat` always contains generic state columns.
+    For LJ jobs, TITAN appends LJ microstate-mean order parameters.
+    If TICA/MSM centroids are at least 2D, TITAN also exports a smoothed
+    reactive free-energy surface and a 2D centroid-to-centroid net-flux map.
+    Bottleneck tables rank reactive edges and microstates by flux throughput
+    near the transition region; dominant-path support is reported as an
+    auxiliary signal.
 
 2.11 LLPS
 
@@ -482,9 +680,41 @@ IMPORTANT NOTES
     rep2_energy.xvg
     rep3_energy.xvg
 
-  Result:
+ Result:
     if DHAM converges, PCA/FES is reweighted automatically to the requested
     target temperature. Basin extraction still works even if DHAM is off.
+
+3.8a Protein NPT DHAM workflow
+
+  titan.exe -s reference.pdb -i xtc_list.txt -network -tica -msm -dham \
+      -dham-temps temps.txt \
+      -dham-ener potential_xvg_list.txt \
+      -dham-target-temp 300 \
+      -dham-ensemble npt \
+      -dham-pressure-bar 1.0
+
+  Notes:
+    Use the ensemble set pressure with -dham-pressure-bar.
+    TITAN does not need instantaneous pressure(t) extracted from .edr.
+    In NPT mode, TITAN builds H = E_col1 + P*V from the .xvg column and
+    per-frame trajectory box volumes.
+
+3.8b LJ REMD / Argon DHAM workflow
+
+  titan.exe -s conf.pdb -i xtc_list.txt -nocal -lj -tica -msm -dham \
+      -common-topo topol.top \
+      -dham-temps temps.txt \
+      -dham-ener energy_xvg_list.txt \
+      -dham-target-temp 94 \
+      -dham-ensemble npt \
+      -dham-pressure-bar 1.0
+
+  Notes:
+    Each trajectory file is treated as one replica.
+    TITAN uses LJ phase-2 features instead of DCCM trace atoms.
+    `-dham-ensemble nvt` keeps the REMD-style energy workflow.
+    `-dham-ensemble npt` uses H = E_col1 + P*V with volume taken from the
+    trajectory box at each frame.
 
 3.9 PCA basin extraction after FES clustering
 
@@ -643,7 +873,7 @@ IMPORTANT NOTES
   -pbc-envi <chains...> Environment chains for PBC handling
   -no-center            Disable COM centering during PBC correction
 
-4.5 Network, PCA, TICA, MSM, DHAM, LLPS, GIST, IFP, LSP-MD
+4.5 LJ, RMS, Network, PCA, TICA, MSM, DHAM, LLPS, GIST, IFP, LSP-MD
 
   -network              DCCM network analysis
 
@@ -677,10 +907,34 @@ IMPORTANT NOTES
   -dham-temps <file>    Replica temperatures in K
   -dham-ener <file>     File containing list of GROMACS .xvg energy files
   -dham-target-temp <K> Target reweighting temperature. Default: 300
+  -dham-ensemble <mode> NVT or NPT DHAM observable. Default: nvt
+  -dham-pressure-bar <bar>
+                        Target pressure for NPT enthalpy term. Default: 1.0
   -dham-max-iter=<N>    Maximum DHAM iterations. Default: 5000
   -dham-tol=<val>       DHAM convergence tolerance. Default: 1e-6
   -dham-n-replicas=<N>  Explicit replica count validation
   -dham-dt-energy <ps>  Energy sampling interval in ps; 0 = auto
+  -dham-window-match <mode>
+                        auto | off | strict. Default: auto
+
+  -tpt                  Transition Path Theory on the built MSM
+  -tpt-mode <mode>      ensemble | kinetic. Default: ensemble
+  -tpt-source <list>    Basin spec, e.g. micro:0,1-3 | macro:0 |
+                        tica_rect:-1,-1,1,1 | lj:q6_bar>=0.172 |
+                        ljpreset:gas | protein:major_macro |
+                        protein:rmsd_low | protein:helical
+  -tpt-sink <list>      Basin spec, same syntax as -tpt-source
+  -tpt-top-paths <N>    Dominant pathways to export. Default: 5
+  -tpt-flux-cut <val>   Absolute flux cutoff. Default: 0.0
+  -tpt-use-dham <yes/no>
+                        Use converged DHAM TPM/pi when available.
+                        Default: yes
+  -tpt-demux-map <file>
+                        Optional demux replica-map for kinetic-TPT. Each row
+                        is one time step; each column is one demuxed segment.
+  -tpt-bootstrap <N>    Segment bootstrap replicates for uncertainty. Default: 0
+  -tpt-bootstrap-seed <N>
+                        RNG seed for TPT bootstrap. Default: 42
 
   -llps                 LLPS analysis
   -llps-rcut <val>      Contact cutoff (nm). Default: 0.7
@@ -716,6 +970,34 @@ IMPORTANT NOTES
   -ifp-hal <val>        Halogen cutoff. Default: 4.0
   -ifp-out <file>       Custom IFP output filename
 
+  -dssp                 DSSP-like secondary-structure analysis
+                        Default: ON
+                        Protein/protein-user only
+                        In -nocal mode, only molecule 1 is analyzed
+  -no-dssp              Disable DSSP analysis
+  -dssp-hbond-cutoff <val>
+                        DSSP H-bond energy threshold. Default: -0.5
+
+  -lj                   LJ condensation / cluster-density analysis
+                        Uses all atoms of molecule 1
+                        If no PBC mode is set, Titan auto-enables -pbcn
+  -lj-cut <val>         Cluster cutoff in Angstrom. Default: 5.0
+  -lj-min-cluster <N>   Minimum size counted as a cluster. Default: 2
+  -lj-rho-bin <val>     rho(r) bin width in Angstrom. Default: 1.0
+  -lj-rho-max <val>     rho(r) max radius in Angstrom. Default: auto
+  -lj-solid-q6 <val>    q6 threshold for solid-like atoms. Default: 0.40
+  -lj-solid-min-cn <N>  Minimum CN for dense/solid-like atoms. Default: 6
+  -lj-crystal-tol <val> Crystal classification tolerance. Default: 0.08
+
+  -rms                  RMSD + RMSF analysis
+                        Atomistic protein/protein-user uses CA
+                        Atomistic RNA/DNA uses C4' (fallback C4*)
+                        MARTINI uses BB (fallback BB2)
+                        In -nocal mode, only molecule 1 is analyzed
+                        If no PBC mode is set, Titan auto-enables -pbcn
+  -rmsd                 Alias for -rms
+  -rmsf                 Alias for -rms
+
   -lspmd                Local Spatial Pattern MD analysis
   -lspmd_cut=<val>      C-alpha cutoff in Angstrom. Default: 12.0
 
@@ -747,6 +1029,9 @@ IMPORTANT NOTES
 4.7 Miscellaneous
 
   -nocal                No-energy mode; useful for PBC/utility workflows
+                        DSSP in this mode analyzes molecule 1 only
+                        LJ in this mode analyzes molecule 1 only
+                        RMSD/RMSF in this mode analyzes molecule 1 only
   -cscd                 Side-chain contact distances
   -pqr                  Write PQR-style output
   -cal-force            Calculate atomic forces

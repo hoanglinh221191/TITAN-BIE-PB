@@ -111,6 +111,104 @@ public:
   string get_cas_hotspot_pdb_filename() const {
     return "cas_hotspots_b_factor.pdb";
   }
+  string get_dssp_mol1_filename() const { return "dssp_mol1.dat"; }
+  string get_dssp_mol2_filename() const { return "dssp_mol2.dat"; }
+  string get_dssp_mol1_content_filename() const {
+    return "dssp_mol1_content.dat";
+  }
+  string get_dssp_mol2_content_filename() const {
+    return "dssp_mol2_content.dat";
+  }
+  string get_rmsd_filename(const arguments &Arguments,
+                           const std::vector<string> &input_line,
+                           int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "rmsd.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "rmsd_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "rmsd.dat";
+  }
+  string get_rmsf_filename(const arguments &Arguments,
+                           const std::vector<string> &input_line,
+                           int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "rmsf.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "rmsf_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "rmsf.dat";
+  }
+  string get_lj_timeseries_filename(const arguments &Arguments,
+                                    const std::vector<string> &input_line,
+                                    int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "lj_timeseries.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "lj_timeseries_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "lj_timeseries.dat";
+  }
+  string get_lj_rho_r_filename(const arguments &Arguments,
+                               const std::vector<string> &input_line,
+                               int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "lj_cluster_rho_r.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "lj_cluster_rho_r_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "lj_cluster_rho_r.dat";
+  }
+  string get_lj_features_filename(const arguments &Arguments,
+                                  const std::vector<string> &input_line,
+                                  int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "lj_features.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "lj_features_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : input_name) +
+             ".dat";
+    return "lj_features.dat";
+  }
+  string get_lj_summary_filename(const arguments &Arguments,
+                                 const std::vector<string> &input_line,
+                                 int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "lj_summary.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "lj_summary_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "lj_summary.dat";
+  }
 
   string get_global_water_bridges_timeseries() const {
     return "global_water_bridges_timeseries.csv";
@@ -226,5 +324,21 @@ public:
   string get_dham_pi_filename() const { return "dham_stationary_distribution.dat"; }
   string get_dham_fes_filename() const { return "dham_free_energy_profile.dat"; }
   string get_dham_tpm_filename() const { return "dham_unbiased_tpm.dat"; }
+  string get_dham_window_audit_filename() const { return "dham_window_audit.dat"; }
+  // TPT output files
+  string get_tpt_summary_filename() const { return "tpt_summary.dat"; }
+  string get_tpt_committor_filename() const { return "tpt_committor.dat"; }
+  string get_tpt_flux_edges_filename() const { return "tpt_flux_edges.dat"; }
+  string get_tpt_paths_filename() const { return "tpt_paths.dat"; }
+  string get_tpt_state_labels_filename() const { return "tpt_state_labels.dat"; }
+  string get_tpt_kinetics_filename() const { return "tpt_kinetics.dat"; }
+  string get_tpt_reactive_fes_2d_filename() const { return "tpt_reactive_fes_2d.dat"; }
+  string get_tpt_flux_map_2d_filename() const { return "tpt_flux_map_2d.dat"; }
+  string get_tpt_bootstrap_summary_filename() const { return "tpt_bootstrap_summary.dat"; }
+  string get_tpt_bootstrap_states_filename() const { return "tpt_bootstrap_states.dat"; }
+  string get_tpt_all_pairs_kinetics_filename() const { return "tpt_all_pairs_kinetics.dat"; }
+  string get_tpt_path_clusters_filename() const { return "tpt_path_clusters.dat"; }
+  string get_tpt_bottleneck_edges_filename() const { return "tpt_bottleneck_edges.dat"; }
+  string get_tpt_bottleneck_states_filename() const { return "tpt_bottleneck_states.dat"; }
 };
 #endif

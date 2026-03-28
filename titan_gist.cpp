@@ -5,12 +5,14 @@
 #include "titan_ui.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <thread>
 
 #ifdef __AVX__
@@ -18,6 +20,61 @@
 #include "simd_compat.h"
 #include <immintrin.h>
 #endif
+
+namespace {
+
+struct LocalGistVoxelAccum {
+  uint32_t count{0};
+  double energy_sw{0.0};
+  double dipole_x{0.0};
+  double dipole_y{0.0};
+  double dipole_z{0.0};
+};
+
+struct LocalGistAccum {
+  std::unordered_map<size_t, size_t> voxel_to_slot;
+  std::vector<size_t> touched_voxels;
+  std::vector<LocalGistVoxelAccum> values;
+
+  void reserve(size_t expected) {
+    touched_voxels.reserve(expected);
+    values.reserve(expected);
+    voxel_to_slot.reserve(expected * 2 + 1);
+  }
+
+  void add(size_t voxel_idx, double dipole_x, double dipole_y,
+           double dipole_z, double energy_sw) {
+    auto [it, inserted] =
+        voxel_to_slot.try_emplace(voxel_idx, touched_voxels.size());
+    if (inserted) {
+      touched_voxels.push_back(voxel_idx);
+      values.emplace_back();
+    }
+
+    auto &slot = values[it->second];
+    ++slot.count;
+    slot.energy_sw += energy_sw;
+    slot.dipole_x += dipole_x;
+    slot.dipole_y += dipole_y;
+    slot.dipole_z += dipole_z;
+  }
+};
+
+void merge_local_gist_accum(std::vector<GistVoxel> &grid,
+                            const LocalGistAccum &accum) {
+  for (size_t i = 0; i < accum.touched_voxels.size(); ++i) {
+    const size_t voxel_idx = accum.touched_voxels[i];
+    const auto &slot = accum.values[i];
+    auto &dst = grid[voxel_idx];
+    dst.count += slot.count;
+    dst.energy_sw += slot.energy_sw;
+    dst.dipole_x += slot.dipole_x;
+    dst.dipole_y += slot.dipole_y;
+    dst.dipole_z += slot.dipole_z;
+  }
+}
+
+} // namespace
 
 // ============================================================================
 // Water model constants (TIP3P / SPC/E)
@@ -228,7 +285,6 @@ double TitanGIST::compute_esw(double ox, double oy, double oz, double h1x,
   const __m256d v_cut2 = _mm256_set1_pd(cut2_);
   const __m256d v_min_d2 = _mm256_set1_pd(MIN_D2);
   const __m256d v_four = _mm256_set1_pd(4.0);
-  const __m256d v_zero = _mm256_setzero_pd();
 
   __m256d v_e_acc = _mm256_setzero_pd();
 
@@ -535,20 +591,18 @@ void TitanGIST::process_frame(const MOL &pro, const MOL &lig, const MOL &water,
                                          H2[0], H2[1], H2[2]);
     }
   } else {
-    // Multi-threaded path: each thread accumulates into thread-local grid
-    const size_t grid_size = grid_.size();
+    // Multi-threaded path: each thread accumulates into a sparse local buffer.
     std::vector<std::jthread> threads;
     threads.reserve(nt_);
-    std::vector<std::vector<GistVoxel>> local_grids(nt_);
+    std::vector<LocalGistAccum> local_accums(nt_);
 
     auto worker = [&](size_t tid) {
-      // Thread-local grid accumulator
-      local_grids[tid].resize(grid_size);
-
       // Divide water molecules among threads
       size_t w_per_thread = n_water_mols / nt_;
       size_t w_start = tid * w_per_thread;
       size_t w_end = (tid == nt_ - 1) ? n_water_mols : (tid + 1) * w_per_thread;
+      auto &accum = local_accums[tid];
+      accum.reserve(std::max<size_t>(1, w_end - w_start));
 
       for (size_t wm = w_start; wm < w_end; ++wm) {
         size_t w = wm * 3;
@@ -562,8 +616,6 @@ void TitanGIST::process_frame(const MOL &pro, const MOL &lig, const MOL &water,
         if (vi < 0)
           continue;
 
-        local_grids[tid][vi].count++;
-
         double mx = 0.5 * (H1[0] + H2[0]) - O[0];
         double my = 0.5 * (H1[1] + H2[1]) - O[1];
         double mz = 0.5 * (H1[2] + H2[2]) - O[2];
@@ -573,12 +625,9 @@ void TitanGIST::process_frame(const MOL &pro, const MOL &lig, const MOL &water,
           my /= mlen;
           mz /= mlen;
         }
-        local_grids[tid][vi].dipole_x += mx;
-        local_grids[tid][vi].dipole_y += my;
-        local_grids[tid][vi].dipole_z += mz;
-
-        local_grids[tid][vi].energy_sw += compute_esw(
-            O[0], O[1], O[2], H1[0], H1[1], H1[2], H2[0], H2[1], H2[2]);
+        const double esw = compute_esw(O[0], O[1], O[2], H1[0], H1[1],
+                                       H1[2], H2[0], H2[1], H2[2]);
+        accum.add(static_cast<size_t>(vi), mx, my, mz, esw);
       }
     };
 
@@ -594,15 +643,9 @@ void TitanGIST::process_frame(const MOL &pro, const MOL &lig, const MOL &water,
       }
     }
 
-    // Serial reduce into main grid
-    for (size_t t = 0; t < nt_; ++t) {
-      for (size_t vi = 0; vi < grid_size; ++vi) {
-        grid_[vi].count += local_grids[t][vi].count;
-        grid_[vi].energy_sw += local_grids[t][vi].energy_sw;
-        grid_[vi].dipole_x += local_grids[t][vi].dipole_x;
-        grid_[vi].dipole_y += local_grids[t][vi].dipole_y;
-        grid_[vi].dipole_z += local_grids[t][vi].dipole_z;
-      }
+    // Serial reduce only the voxels that were actually touched.
+    for (const auto &accum : local_accums) {
+      merge_local_gist_accum(grid_, accum);
     }
   }
 }

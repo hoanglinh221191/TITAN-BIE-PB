@@ -21,6 +21,7 @@
 #include <Eigen/Dense>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -50,18 +51,24 @@ public:
   // Push one TICA-projected frame into RAM.
   void add_projected_frame(const Eigen::VectorXd &proj_x,
                            int replica_id = -1,
-                           int64_t global_frame_index = -1);
+                           int64_t global_frame_index = -1,
+                           double box_volume_nm3 =
+                               std::numeric_limits<double>::quiet_NaN());
 
   // Push one raw TICA feature vector into RAM. These frames are projected
   // after solve_tica() finishes.
   void add_feature_frame(const Eigen::VectorXd &feature_x,
                          int replica_id = -1,
-                         int64_t global_frame_index = -1);
+                         int64_t global_frame_index = -1,
+                         double box_volume_nm3 =
+                             std::numeric_limits<double>::quiet_NaN());
 
   // Low-memory path: record frame metadata only. Projections are later rebuilt
   // from TitanKinetics' own feature cache/spool after solve_tica().
   void add_pending_frame_metadata(double time_ps, int replica_id = -1,
-                                  int64_t global_frame_index = -1);
+                                  int64_t global_frame_index = -1,
+                                  double box_volume_nm3 =
+                                      std::numeric_limits<double>::quiet_NaN());
 
   // Record the simulation time (ps) of the most recently added frame.
   void record_frame_time(double time_ps, int replica_id = -1);
@@ -69,6 +76,9 @@ public:
   // Per-replica accessors (populated when replica_id != -1).
   const std::vector<int>&    get_frame_replica_ids() const { return frame_replica_ids_; }
   const std::vector<double>& get_frame_timestamps()  const { return frame_timestamps_; }
+  const std::vector<double>& get_frame_box_volumes_nm3() const {
+    return frame_box_volumes_nm3_;
+  }
   const std::vector<int64_t>& get_frame_global_indices() const {
     return frame_global_indices_;
   }
@@ -76,6 +86,8 @@ public:
   // Per-replica discrete trajectory extraction (call after train_kmeans).
   std::unordered_map<int, std::vector<int>>    get_per_replica_dtrajs() const;
   std::unordered_map<int, std::vector<double>> get_per_replica_timestamps() const;
+  std::unordered_map<int, std::vector<double>> get_per_replica_box_volumes_nm3()
+      const;
 
   // Mark a trajectory file boundary. The next add_projected_frame() call
   // starts a new segment. Must be called AFTER the last frame of each file.
@@ -134,6 +146,8 @@ public:
   int n_clusters() const { return n_k_; }
   int n_components() const { return n_comp_; }
   int msm_lag_time() const { return msm_lag_time_; }
+  double dt_ns() const { return dt_ns_; }
+  double lag_time_ns() const { return dt_ns_ * msm_lag_time_; }
   bool is_clustered() const { return clustered_; }
   bool is_built() const { return msm_built_; }
   // Fix 3: n_frames reads n_proj_frames_ (proj_mat_ actual row count)
@@ -148,6 +162,11 @@ public:
   const Eigen::MatrixXd &tpm() const { return tpm_; }
   const Eigen::VectorXd &stationary_dist() const { return stationary_dist_; }
   const std::vector<int> &discrete_traj() const { return discrete_traj_; }
+  const std::vector<int> &traj_break_indices() const {
+    return traj_break_indices_;
+  }
+  std::vector<int> compute_pcca_macrostates(int msm_macrostates = -1) const;
+  int effective_pcca_macrostates(int msm_macrostates = -1) const;
 
 private:
   // -----------------------------------------------------------------------
@@ -173,6 +192,7 @@ private:
   // DHAM replica tracking
   std::vector<int>    frame_replica_ids_;   // replica_id per proj_mat_ row
   std::vector<double> frame_timestamps_;    // time_ps per proj_mat_ row
+  std::vector<double> frame_box_volumes_nm3_; // volume_nm^3 per proj_mat_ row
   std::vector<int64_t> frame_global_indices_; // global frame index per proj_mat_ row
 
   // Pending raw TICA features collected before solve_tica() completes.
@@ -181,6 +201,7 @@ private:
   std::vector<int> raw_traj_break_indices_;
   std::vector<int> raw_frame_replica_ids_;
   std::vector<double> raw_frame_timestamps_;
+  std::vector<double> raw_frame_box_volumes_nm3_;
   std::vector<int64_t> raw_frame_global_indices_;
 
   // -----------------------------------------------------------------------

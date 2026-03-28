@@ -2,6 +2,7 @@
 #include "arguments.h"
 #include "functions.h"
 #include "groups.h"
+#include "lj_topology.h"
 #include "titan_ui.h"
 #include <expected>
 #include <filesystem>
@@ -55,7 +56,50 @@ std::expected<void, std::string> initialize_topology_streaming(
       Arguments.add_input_file_type();
     }
 
-    // 2. Build Topology using pre_proc_pdb (reads Frame 0 internally)
+    // 2. LJ single-molecule mode does not need the protein topology pipeline.
+    // Use the reference structure directly and only parse the common topology
+    // for lightweight atom-count validation.
+    if (Arguments.flag_nocal && Arguments.lj.flag_lj) {
+      const int r_value =
+          pre_proc_pdb(force_f, pro_in, lig, water_traj, Groups_from_index_file,
+                       0, Arguments, amine, output_info);
+      if (r_value != 0)
+        return std::unexpected("pre_proc_pdb failed.");
+
+      if (Arguments.topo_name != "no" && (!Arguments.file_par || topo_is_open)) {
+        auto lj_topology = parse_lj_topology_summary(Arguments.topo_name);
+        if (!lj_topology)
+          return std::unexpected(lj_topology.error());
+
+        TitanUI::log_kv(log, "LJ Topology", Arguments.topo_name);
+        TitanUI::log_kv(log, "LJ Molecule",
+                        lj_topology->primary_molecule.empty()
+                            ? std::string("unknown")
+                            : lj_topology->primary_molecule);
+        TitanUI::log_kv(log, "LJ Topology Atoms",
+                        std::to_string(lj_topology->total_atoms));
+
+        if (!pro_in.m_mol.empty()) {
+          const size_t reference_atoms = pro_in.m_mol[0].size();
+          if (lj_topology->total_atoms != reference_atoms) {
+            const std::string warning =
+                "LJ topology atom count (" +
+                std::to_string(lj_topology->total_atoms) +
+                ") differs from reference atoms (" +
+                std::to_string(reference_atoms) + ")";
+            TitanUI::print_warning(warning);
+            TitanUI::log_kv(log, "LJ Topology Warning", warning);
+          }
+        }
+      }
+
+      lig.m_mol.clear();
+      lig.info.clear();
+      lig.Index.clear();
+      return {};
+    }
+
+    // 3. Build Topology using pre_proc_pdb (reads Frame 0 internally)
     int flag_pre_proc = 1;
     if (topo_2_is_open)
       flag_pre_proc = 2;

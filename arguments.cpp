@@ -1,4 +1,5 @@
 #include "arguments.h"
+#include "titan_tpt.h"
 #include "titan_ui.h"
 #include <algorithm>
 #include <cctype>
@@ -100,6 +101,166 @@ int arguments::post_process() {
   if ((msm.flag_msm || dham.flag_dham) && msm.msm_lag <= 0) {
     TitanUI::print_error("MSM/DHAM: -msm-lag must be > 0.");
     exit(EXIT_FAILURE);
+  }
+  if (dham.flag_dham) {
+    std::transform(dham.ensemble.begin(), dham.ensemble.end(),
+                   dham.ensemble.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::transform(dham.window_match.begin(), dham.window_match.end(),
+                   dham.window_match.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (dham.ensemble != "nvt" && dham.ensemble != "npt") {
+      TitanUI::print_error("DHAM: -dham-ensemble must be either nvt or npt.");
+      exit(EXIT_FAILURE);
+    }
+    if (dham.window_match != "auto" && dham.window_match != "off" &&
+        dham.window_match != "strict") {
+      TitanUI::print_error(
+          "DHAM: -dham-window-match must be auto, off, or strict.");
+      exit(EXIT_FAILURE);
+    }
+    if (dham.target_temp <= 0.0) {
+      TitanUI::print_error("DHAM: -dham-target-temp must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (dham.target_pressure_bar < 0.0) {
+      TitanUI::print_error("DHAM: -dham-pressure-bar must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (dham.max_iter <= 0) {
+      TitanUI::print_error("DHAM: --dham-max-iter must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (dham.tolerance <= 0.0) {
+      TitanUI::print_error("DHAM: --dham-tol must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (dham.dt_energy_ps < 0.0) {
+      TitanUI::print_error("DHAM: -dham-dt-energy must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+  }
+  if (tpt.flag_tpt) {
+    std::transform(tpt.mode.begin(), tpt.mode.end(), tpt.mode.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (tpt.mode != "ensemble" && tpt.mode != "kinetic") {
+      TitanUI::print_error(
+          "TPT: -tpt-mode must be either ensemble or kinetic.");
+      exit(EXIT_FAILURE);
+    }
+    if (tpt.source_spec.empty()) {
+      TitanUI::print_error(
+          "TPT: -tpt-source is required when -tpt is enabled.");
+      exit(EXIT_FAILURE);
+    }
+    if (tpt.sink_spec.empty()) {
+      TitanUI::print_error(
+          "TPT: -tpt-sink is required when -tpt is enabled.");
+      exit(EXIT_FAILURE);
+    }
+    if (tpt.top_paths <= 0) {
+      TitanUI::print_error("TPT: -tpt-top-paths must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (tpt.flux_cut < 0.0) {
+      TitanUI::print_error("TPT: -tpt-flux-cut must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (tpt.bootstrap_samples < 0) {
+      TitanUI::print_error("TPT: -tpt-bootstrap must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (tpt.use_dham && !dham.flag_dham) {
+      TitanUI::print_info(
+          "TPT: -tpt-use-dham requested without -dham. TPT will fall back to MSM.");
+    }
+    if (!tpt.demux_map_file.empty() && tpt.mode != "kinetic") {
+      TitanUI::print_info(
+          "TPT: -tpt-demux-map is only used in kinetic mode. Ensemble TPT will ignore it.");
+    }
+
+    auto basin_prefix = [](const std::string &spec) {
+      const auto colon_pos = spec.find(':');
+      if (colon_pos == std::string::npos)
+        return std::string("micro");
+      std::string prefix = spec.substr(0, colon_pos);
+      std::transform(prefix.begin(), prefix.end(), prefix.begin(),
+                     [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                     });
+      return prefix;
+    };
+    const std::string source_prefix = basin_prefix(tpt.source_spec);
+    const std::string sink_prefix = basin_prefix(tpt.sink_spec);
+    const auto prefix_supported = [](const std::string &prefix) {
+      return prefix == "micro" || prefix == "state" || prefix == "states" ||
+             prefix == "macro" || prefix == "tica_rect" || prefix == "lj" ||
+             prefix == "ljpreset" || prefix == "lj_preset" ||
+             prefix == "protein" || prefix == "prot" ||
+             prefix == "protein_preset";
+    };
+    if (!prefix_supported(source_prefix)) {
+      TitanUI::print_error("TPT: unsupported -tpt-source prefix '" +
+                           source_prefix + "'.");
+      exit(EXIT_FAILURE);
+    }
+    if (!prefix_supported(sink_prefix)) {
+      TitanUI::print_error("TPT: unsupported -tpt-sink prefix '" +
+                           sink_prefix + "'.");
+      exit(EXIT_FAILURE);
+    }
+    if (source_prefix == "micro" || source_prefix == "state" ||
+        source_prefix == "states") {
+      std::vector<int> source_states;
+      std::string parse_error;
+      if (!TitanTPT::parse_state_spec(tpt.source_spec, -1, source_states,
+                                      &parse_error)) {
+        TitanUI::print_error("TPT: invalid -tpt-source: " + parse_error);
+        exit(EXIT_FAILURE);
+      }
+    }
+    if (sink_prefix == "micro" || sink_prefix == "state" ||
+        sink_prefix == "states") {
+      std::vector<int> sink_states;
+      std::string parse_error;
+      if (!TitanTPT::parse_state_spec(tpt.sink_spec, -1, sink_states,
+                                      &parse_error)) {
+        TitanUI::print_error("TPT: invalid -tpt-sink: " + parse_error);
+        exit(EXIT_FAILURE);
+      }
+    }
+    if ((source_prefix == "micro" || source_prefix == "state" ||
+         source_prefix == "states") &&
+        (sink_prefix == "micro" || sink_prefix == "state" ||
+         sink_prefix == "states")) {
+      std::vector<int> source_states;
+      std::vector<int> sink_states;
+      std::string parse_error;
+      TitanTPT::parse_state_spec(tpt.source_spec, -1, source_states,
+                                 &parse_error);
+      TitanTPT::parse_state_spec(tpt.sink_spec, -1, sink_states,
+                                 &parse_error);
+      std::vector<unsigned char> basin_mask;
+      int max_state = -1;
+      for (int state : source_states)
+        max_state = std::max(max_state, state);
+      for (int state : sink_states)
+        max_state = std::max(max_state, state);
+      basin_mask.assign(static_cast<size_t>(max_state + 1), 0);
+      for (int state : source_states)
+        basin_mask[static_cast<size_t>(state)] = 1;
+      for (int state : sink_states) {
+        if (basin_mask[static_cast<size_t>(state)] != 0) {
+          TitanUI::print_error(
+              "TPT: source and sink basins must be disjoint.");
+          exit(EXIT_FAILURE);
+        }
+      }
+    }
   }
   if (msm.flag_tica) {
     if (msm.tica_lag <= 0) {
@@ -247,6 +408,72 @@ int arguments::post_process() {
     emap_type = fmap_type;
     print_energy_res = print_force_res;
     cout << "Note: Options for energy and force are same!\n";
+  }
+
+  if (lj.flag_lj) {
+    if (lj.lj_cluster_cutoff <= 0.0) {
+      TitanUI::print_error("LJ: -lj-cut must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (lj.lj_min_cluster_size <= 0) {
+      TitanUI::print_error("LJ: -lj-min-cluster must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (lj.lj_rho_bin <= 0.0) {
+      TitanUI::print_error("LJ: -lj-rho-bin must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (lj.lj_rho_max < 0.0) {
+      TitanUI::print_error("LJ: -lj-rho-max must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (lj.lj_solid_q6 < 0.0 || lj.lj_solid_q6 > 1.0) {
+      TitanUI::print_error("LJ: -lj-solid-q6 must be in [0, 1].");
+      exit(EXIT_FAILURE);
+    }
+    if (lj.lj_solid_min_cn <= 0) {
+      TitanUI::print_error("LJ: -lj-solid-min-cn must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (lj.lj_crystal_tol <= 0.0) {
+      TitanUI::print_error("LJ: -lj-crystal-tol must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  const bool lj_trace_free_kinetics =
+      lj.flag_lj && (msm.flag_tica || msm.flag_msm || dham.flag_dham ||
+                     tpt.flag_tpt ||
+                     umap.flag_umap) &&
+      !flag_network_explicit && !flag_pca && !flag_allostery &&
+      !lspmd.flag_lspmd;
+  if (lj_trace_free_kinetics && flag_network) {
+    flag_network = false;
+    TitanUI::print_info(
+        "[LJ] Using permutation-invariant LJ phase-2 features for "
+        "TICA/MSM/UMAP/DHAM; skipping auto-enabled DCCM network setup.");
+  }
+
+  const bool has_explicit_pbc_mode =
+      pbc.solv_pbcn || pbc.solv_pbc == 1 || pbc.solv_pbc_int == 1 ||
+      pbc.solv_pbc_clust || pbc.flag_pbc_ref || pbc.pbc_mem ||
+      pbc.pbc_envi;
+  if ((rms.flag_rms || lj.flag_lj) && !has_explicit_pbc_mode) {
+    pbc.solv_pbcn = true;
+    pbc.auto_enabled_pbcn = true;
+    std::string reason;
+    if (rms.flag_rms && lj.flag_lj) {
+      reason = "RMSD/RMSF and LJ analysis requested without an explicit PBC "
+               "mode. Auto-enabling -pbcn (FixBox).";
+    } else if (lj.flag_lj) {
+      reason =
+          "LJ analysis requested without an explicit PBC mode. Auto-enabling "
+          "-pbcn (FixBox).";
+    } else {
+      reason = "RMSD/RMSF requested without an explicit PBC mode. "
+               "Auto-enabling -pbcn (FixBox).";
+    }
+    TitanUI::print_warning(reason);
   }
 
   if (pbc.solv_pbc_int == 1 && pbc.solv_pbc_clust == true) {

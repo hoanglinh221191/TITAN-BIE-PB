@@ -15,8 +15,9 @@ TITAN is a high-performance molecular trajectory analysis engine centered on:
 - interaction energy / force analysis
 - GBSA / ALPB
 - hydrogen bonds and geometry observables
+- RMSD / RMSF / DSSP / LJ order parameters
 - DCCM / network / PCA / allostery
-- TICA / MSM / DHAM / UMAP
+- TICA / MSM / DHAM / UMAP / TPT
 - LLPS / GIST / IFP / LSP-MD
 
 The project is performance-sensitive. Most heavy loops are expected to be
@@ -103,10 +104,14 @@ Post-processing:
 Analysis modules:
 - `energy.cpp`, `energy_intrin.cpp`, `force.cpp`, `force_intrin.cpp`
 - `dccm_network.cpp`
+- `titan_rms.cpp`
+- `titan_dssp.cpp`
+- `titan_lj.cpp`
 - `titan_pca.cpp`
 - `titan_kinetics.cpp` for TICA
 - `titan_msm.cpp` for MSM
 - `titan_dham.cpp` for DHAM
+- `titan_tpt.cpp` for TPT
 - `titan_umap.cpp`, `titan_umap_knn.cpp`
 - `titan_llps.cpp`, `titan_llps_cluster.cpp`
 - `titan_gist.cpp`
@@ -129,13 +134,25 @@ Important implied flags from parsing:
 - `-umap` implies `-tica` and `-network`
 - `-msm` implies `-tica` and `-network`
 - `-dham` implies `-msm`, `-tica`, and `-network`
+- `-tpt` implies `-msm`, `-tica`, and currently defaults to `-network`
+- `-dssp` enables a secondary-structure feature module; do not assume it is
+  only a side effect of protein workflows
 - `-lspmd` is standalone and does not need `-network`
+- `-rms` and `-lj` auto-enable `-pbcn` when the user did not choose an
+  explicit PBC mode
+- `-lj` used with `-tica` / `-msm` / `-dham` / `-umap` / `-tpt` may disable an
+  auto-enabled `-network` path and use permutation-invariant LJ phase-2
+  features instead
 
 Interpretation:
 - `network` owns the aligned Ca/backbone trajectory used downstream.
 - `tica` consumes aligned network-derived features.
+- `lj` can also act as a trace-free phase-2 feature source for kinetics-style
+  workflows.
+- `dssp` is its own feature pipeline and should be reviewed as such.
 - `msm` consumes TICA projections.
 - `dham` consumes MSM states plus temperature/energy metadata.
+- `tpt` consumes the built MSM TPM plus source/sink basin definitions.
 - `pca` can consume DHAM frame weights if DHAM converges.
 
 ================================================================================
@@ -226,6 +243,8 @@ Examples:
 - DCCM may store the trajectory required by downstream network/PCA/TICA work.
 - TICA uses either dense matrices, in-memory reduced caches, or on-disk spool
   files depending on backend.
+- Dense pair caches are guarded in `impl_engine.cpp`; do not assume O(NxM)
+  interaction caches are always safe or always enabled.
 
 If you add a new module:
 - Prefer streaming accumulation over full-frame storage.
@@ -244,6 +263,8 @@ Important practical rule:
 - Treat Linux support as "C++23 syntax with GCC 13-era reality".
 - Do not assume full latest-standard library coverage just because `-std=c++23`
   is enabled.
+- Current local build policy uses `-march=native` in `Makefile`.
+  This is good for workstation tuning, but it is not a portability contract.
 
 Allowed / encouraged:
 - `std::string::contains`
@@ -261,6 +282,8 @@ Build workflow:
 - If compilation behavior needs changing, edit `Makefile`, not ad-hoc compile
   commands.
 - `release` target adds LTO flags.
+- Keep AVX2/FMA assumptions paired with scalar fallback paths; do not assume
+  every supported build machine is identical to the local workstation.
 
 When changing headers or build rules:
 - Recheck `Makefile`.
@@ -268,7 +291,39 @@ When changing headers or build rules:
   dependency files enabled.
 
 ================================================================================
-9. HPC coding rules
+9. Known hotspots and current architectural debt
+================================================================================
+
+These are current-behavior notes, not blanket invitations to rewrite
+everything. Touch them carefully and profile before expanding scope.
+
+- `chunk_streamer.cpp`
+  Current behavior: the split-frame path copies `init_pro.m_mol[0]` and
+  `init_lig.m_mol[0]` into each frame, then overwrites coordinates.
+  Recommended direction: avoid additional deep copies on streaming paths unless
+  a topology-preservation fix truly requires them.
+- `impl_engine.cpp` + `cache_sigma_epsilon.cpp`
+  Current behavior: dense pair caches are O(NxM) in memory and only enabled
+  behind explicit guards.
+  Recommended direction: preserve the guard logic and prefer sparse or
+  streaming accumulation when adding new pairwise analyses.
+- `dccm_network.cpp`
+  Current behavior: several heavy paths still use `std::vector<std::vector<double>>`
+  and dense pair lists.
+  Recommended direction: flatten hot buffers before introducing even more pair-
+  dense work.
+- `titan_pca.cpp`
+  Current behavior: PCA still builds a dense `3N x 3N` covariance matrix.
+  Recommended direction: treat memory growth as a first-class constraint for
+  large proteins and weighted workflows.
+- `titan_tpt.cpp`
+  Current behavior: committor solves and flux matrices are dense O(K^2)/O(K^3)
+  in the number of MSM states.
+  Recommended direction: do not casually increase state counts or add extra
+  dense post-processing without checking solver cost and conditioning.
+
+================================================================================
+10. HPC coding rules
 ================================================================================
 
 This repo should be treated as HPC C++, not generic app C++.
@@ -307,7 +362,23 @@ Logging:
 - In engine code, prefer `TitanUI` and log files over ad-hoc console prints.
 
 ================================================================================
-10. Safe modification checklist
+11. HPC review checklist
+================================================================================
+
+When reviewing or extending a compute-heavy module, quickly verify:
+
+- SoA / flat row-major storage is preserved in hot loops.
+- 32-byte alignment assumptions still hold for AVX2 paths.
+- No avoidable `std::vector<std::vector<T>>` or deep topology/frame copies were
+  introduced into hot paths.
+- `std::jthread` usage is amortized over meaningful work; do not respawn tiny
+  worker batches inside already-small loops.
+- AVX2 kernels still have scalar remainder handling and a non-AVX fallback.
+- Numerical guards exist where needed for `NaN` / `Inf`, zero row sums, zero
+  distances, and ill-conditioned dense solves.
+
+================================================================================
+12. Safe modification checklist
 ================================================================================
 
 If you change CLI or defaults:
@@ -333,9 +404,18 @@ If you change trajectory streaming:
 - inspect `chunk_streamer.cpp`
 - inspect XDR and PDB path handling in `impl_engine.cpp`
 - verify replica boundaries still propagate correctly
+- recheck whether the change increases frame-copy pressure in the split path
+
+If you change RMS / DSSP / LJ / TPT behavior:
+- inspect `titan_rms.cpp`
+- inspect `titan_dssp.cpp`
+- inspect `titan_lj.cpp`
+- inspect `titan_tpt.cpp`
+- inspect `arguments.cpp` and `parse_arguments.cpp` for implied-module and PBC
+  semantics
 
 ================================================================================
-11. Common pitfalls
+13. Common pitfalls
 ================================================================================
 
 - Do not break module implication logic in `parse_arguments.cpp`.
@@ -345,14 +425,19 @@ If you change trajectory streaming:
 - Do not accidentally disable boundary-aware lag handling in TICA/MSM.
 - Do not add memory-hungry caches without considering XDR and multi-replica
   workflows.
+- Do not bypass dense pair-cache guards just because a workstation build has
+  enough RAM today.
 - Do not assume `exact_dense` TICA is safe for workflows that need projection
   replay.
+- Do not treat LJ phase-2 kinetics, DSSP features, RMS traces, and network-
+  derived TICA features as interchangeable; the runtime chooses among them
+  based on flags.
 - Do not replace jthread-based scoped parallelism with unmanaged threads.
 - Do not introduce shiny C++23 library features that GCC 13 likely does not
   support.
 
 ================================================================================
-12. Quick mental model
+14. Quick mental model
 ================================================================================
 
 If you need one sentence per layer:

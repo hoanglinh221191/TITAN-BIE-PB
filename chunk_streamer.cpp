@@ -79,6 +79,7 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
     const fs::path traj_path = fs::absolute(fs::path(args_ref.traj_file));
     const std::string tf = traj_path.string();
     std::error_code ec;
+    const bool use_lig_group = !args_ref.flag_nocal;
 
     if (!fs::exists(traj_path, ec) || ec) {
       return std::unexpected("XDR: trajectory file not found: " + tf);
@@ -107,8 +108,9 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
 
     // 2. Validate natoms: XDR must have >= atoms referenced by index groups
     size_t topology_natoms =
-        groups_ref.groups_atom_number(groups_ref.group_1_index()) +
-        groups_ref.groups_atom_number(groups_ref.group_2_index());
+        groups_ref.groups_atom_number(groups_ref.group_1_index());
+    if (use_lig_group)
+      topology_natoms += groups_ref.groups_atom_number(groups_ref.group_2_index());
     if (args_ref.n_wat >= 0)
       topology_natoms += groups_ref.groups_atom_number(args_ref.n_wat);
 
@@ -149,11 +151,16 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
     if (!pro_cache)
       return std::unexpected(pro_cache.error());
 
-    auto lig_cache =
-        cache_group_indices(groups_ref.group_2_index(), lig_atom_indices0_,
-                            lig_size_);
-    if (!lig_cache)
-      return std::unexpected(lig_cache.error());
+    if (use_lig_group) {
+      auto lig_cache =
+          cache_group_indices(groups_ref.group_2_index(), lig_atom_indices0_,
+                              lig_size_);
+      if (!lig_cache)
+        return std::unexpected(lig_cache.error());
+    } else {
+      lig_atom_indices0_.clear();
+      lig_size_ = 0;
+    }
 
     if (args_ref.n_wat >= 0) {
       auto wat_cache =
@@ -174,7 +181,8 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
       }
     };
     update_max_index(pro_atom_indices0_);
-    update_max_index(lig_atom_indices0_);
+    if (use_lig_group)
+      update_max_index(lig_atom_indices0_);
     update_max_index(wat_atom_indices0_);
     if (natoms_check <= static_cast<int>(max_selected_atom_index)) {
       return std::unexpected(
@@ -252,7 +260,9 @@ void ChunkStreamer::parallel_split_coordinates(
 
   // Pre-calculate target sizes to avoid redundant lookups
   size_t pro_size = groups_ref.groups_atom_number(groups_ref.group_1_index());
-  size_t lig_size = groups_ref.groups_atom_number(groups_ref.group_2_index());
+  size_t lig_size =
+      args_ref.flag_nocal ? 0
+                          : groups_ref.groups_atom_number(groups_ref.group_2_index());
   size_t wat_size =
       (args_ref.n_wat >= 0) ? groups_ref.groups_atom_number(args_ref.n_wat) : 0;
 

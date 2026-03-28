@@ -37,8 +37,11 @@ int parse_begin_end_atoms_2mols(groups_cal &groups, arguments &Arguments,
     } else if (Arguments.flag_nocal == true && Arguments.com_dis_2mol == 0) {
       end_mol_1 = PDB.m_mol[0].size();
       groups.add_group_from_range("molecule 1", 1ull, end_mol_1);
-      end_mol_2 = PDB.m_mol[0].size();
-      groups.add_group_from_range("molecule 2", 1ull, end_mol_2);
+      end_mol_2 = 0;
+      // -nocal analyzes a single molecule/reference only. Keep a placeholder
+      // second group so legacy callers can still address group_2 safely
+      // without duplicating the full system in XDR/PDB streaming paths.
+      groups.add_empty_group("molecule 2");
     } else if (Arguments.begin_mol_2 == 0) {
       cout << "Please type the first atom number of molecule 2:\n";
       cin >> begin_mol_2;
@@ -87,7 +90,7 @@ int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
   Multi_MOL PDB{};
   int flag_add_atom{0};
 
-  const size_t reference_max_frames = Arguments.flag_xdr ? 1 : 0;
+  const size_t reference_max_frames = 1;
   const bool can_subset_reference_directly =
       !Arguments.flag_xdr && !groups.empty() && Arguments.new_al_1pdb == false;
 
@@ -99,7 +102,7 @@ int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
 
     take_coordinate(protein_1, protein_2, water_traj, groups,
                     Arguments.pdb_name, force_field, Arguments, amine,
-                    output_info, 1, reference_max_frames > 0 ? 1 : 0);
+                    output_info, 1, reference_max_frames);
 
     Arguments.flag_begin_set = saved_begin_set;
     Arguments.flag_end_set = saved_end_set;
@@ -144,11 +147,11 @@ int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
     } else {
       if (groups.empty() && Arguments.begin_mol_2 == 0) {
         PDB.take_coordinate(Arguments.pdb_name, force_field, Arguments, amine,
-                            output_info, 1);
+                            output_info, 1, reference_max_frames);
       } else {
         take_coordinate(protein_1, protein_2, water_traj, groups,
                         Arguments.pdb_name, force_field, Arguments, amine,
-                        output_info, 1);
+                        output_info, 1, reference_max_frames);
         flag_add_atom = 1;
       }
     }
@@ -287,8 +290,7 @@ int trans_atom_to_MOL(Multi_MOL &MOL_source, Multi_MOL &protein_des,
                       const arguments &Arguments, const amino_acid &amine,
                       int flag = 0) {
   if (flag == 0) {
-
-    if (Arguments.flag_nocal == true) {
+    if (Arguments.flag_nocal == true && groups.empty()) {
       protein_des = MOL_source;
       protein_des.gen_vector_parameters();
       return 0;
@@ -331,6 +333,9 @@ int trans_atom_to_MOL(Multi_MOL &MOL_source, Multi_MOL &protein_des,
             }(),
             MOL_source.get_mol_type());
       }
+      if (Arguments.flag_nocal == true)
+        continue;
+
       for (size_t j{}; j < groups.groups_atom_number(group_index_2); ++j) {
         if (i == 0) {
           if (groups.atom_index(group_index_2, j) - 1 < 0 ||
