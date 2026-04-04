@@ -5,7 +5,6 @@
 #include "aligned_allocator.h"
 #include "arguments.h"
 #include <Eigen/Dense>
-#include <array>
 #include <cstdint>
 #include <string>
 #include <tuple>
@@ -28,10 +27,29 @@ public:
 
   void calculate_and_export(size_t num_threads);
 
+  struct AllosteryConfig {
+    int tau_lag = 5;
+    int num_bins = -1;
+    int knn = 0;
+    double cutoff_ang = 0.0;
+    bool use_avg_cutoff = true;
+    bool compute_te = true;
+  };
+
   void calculate_allostery_information(size_t num_threads, int tau_lag,
                                        int num_bins);
+  void calculate_allostery_information(size_t num_threads,
+                                       const AllosteryConfig &cfg);
   void calculate_allostery_information_optimized(size_t num_threads,
                                                  int tau_lag, int num_bins);
+  void calculate_allostery_information_optimized(size_t num_threads,
+                                                 const AllosteryConfig &cfg);
+  size_t get_last_allostery_candidate_pairs() const {
+    return last_allostery_candidate_pairs_;
+  }
+  size_t get_last_allostery_dense_pairs() const {
+    return last_allostery_dense_pairs_;
+  }
 
   struct LSPMDConfig {
     double cutoff_ang = 12.0;
@@ -53,7 +71,6 @@ public:
   const std::vector<std::string> &get_chains() const { return ca_chain; }
   const std::vector<int> &get_is_lig() const { return ca_is_lig; }
   const std::vector<int> &get_ca_indices() const { return ca_indices; }
-  std::vector<std::vector<std::array<double, 3>>> get_ca_traj_aos() const;
 
   size_t get_total_frames() const { return total_frames; }
   const std::vector<int64_t> &get_global_frame_indices() const {
@@ -105,6 +122,8 @@ private:
   TrajectoryRow latest_traj_y_;
   TrajectoryRow latest_traj_z_;
   bool kabsch_aligned_ = false;
+  size_t last_allostery_candidate_pairs_ = 0;
+  size_t last_allostery_dense_pairs_ = 0;
 
   static int find_cb_for_residue(const Multi_MOL &mol, int resnr,
                                  const std::string &chain, bool is_gly);

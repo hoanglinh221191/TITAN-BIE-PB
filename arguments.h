@@ -8,7 +8,9 @@ using namespace std;
 struct PbcArgs {
   int solv_pbc{0};
   bool solv_pbcn{false};
+  bool solv_pbctopo{false};
   bool auto_enabled_pbcn{false};
+  bool auto_enabled_pbci{false};
   int solv_pbc_int{0}, solv_pbc_int2{0}, solv_pbc_int3{0};
   bool pbc_aggressive{false};
   bool pbc_mem{false};
@@ -212,7 +214,7 @@ public:
       flag_angle_dipole_efield, flag_sep_opdb, heat_capacity_cp, flag_cal_vol,
       flag_elec_screening, flag_interchain_energy,
       flag_cal_mindis, mol_1_type_explicit, mol_2_type_explicit,
-      flag_cat_result_multi_infile;
+      flag_cat_result_multi_infile, opdb_name_explicit;
   int igb;
   int flag_pqr, flag_all_side_chain_ct, begin_mol_2,
       energy_map, force_map, argc, group_1, group_2,
@@ -223,6 +225,10 @@ public:
   int fes_grid;
   int allostery_tau;
   int allostery_bins;
+  int allostery_knn;
+  double allostery_cutoff;
+  bool allostery_use_avg_cutoff;
+  bool allostery_compute_te;
   // XDR trajectory (XTC/TRR)
   string traj_file;
   bool flag_xdr;
@@ -270,7 +276,7 @@ public:
         flag_elec_screening{false}, flag_interchain_energy{false},
         flag_cal_mindis{false}, mol_1_type_explicit{false},
         mol_2_type_explicit{false},
-        flag_cat_result_multi_infile{false},
+        flag_cat_result_multi_infile{false}, opdb_name_explicit{false},
         // Core ints
         igb{5},
         flag_pqr{2}, flag_all_side_chain_ct{1}, begin_mol_2{},
@@ -282,6 +288,9 @@ public:
         n_wat{-1},
         fes_grid{60},
         allostery_tau{5}, allostery_bins{-1},
+        allostery_knn{0},
+        allostery_cutoff{0.0}, allostery_use_avg_cutoff{true},
+        allostery_compute_te{true},
         // XDR
         traj_file{}, flag_xdr{false}, xdr_type{},
         // size_t

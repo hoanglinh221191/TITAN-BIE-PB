@@ -237,7 +237,11 @@ void TitanLLPS::build_contacts(
 
   // Use loose bounding box based on actual atom positions if box is non-PBC
   float Lx = bx, Ly = by, Lz = bz;
-  if (Lx <= 0 || Ly <= 0 || Lz <= 0) {
+  float shift_x = 0.0f;
+  float shift_y = 0.0f;
+  float shift_z = 0.0f;
+  const bool periodic = (Lx > 0 && Ly > 0 && Lz > 0);
+  if (!periodic) {
     // Compute bounding box from coords (non-PBC case)
     float xmin = 1e9, xmax = -1e9, ymin = 1e9, ymax = -1e9, zmin = 1e9,
           zmax = -1e9;
@@ -253,99 +257,84 @@ void TitanLLPS::build_contacts(
     Lx = xmax - xmin + 2 * r_cut_;
     Ly = ymax - ymin + 2 * r_cut_;
     Lz = zmax - zmin + 2 * r_cut_;
-    // Re-center (shift atoms temporarily — only for cell indexing via offset)
+    shift_x = -xmin + r_cut_;
+    shift_y = -ymin + r_cut_;
+    shift_z = -zmin + r_cut_;
   }
 
-  const int nx = std::max(1, static_cast<int>(Lx / r_cut_));
-  const int ny = std::max(1, static_cast<int>(Ly / r_cut_));
-  const int nz = std::max(1, static_cast<int>(Lz / r_cut_));
-  const float cx = Lx / nx, cy = Ly / ny, cz = Lz / nz;
+  titan_neighbor::OrthorhombicGridSpec spec;
+  spec.cutoff = r_cut_;
+  spec.len_x = Lx;
+  spec.len_y = Ly;
+  spec.len_z = Lz;
+  spec.shift_x = shift_x;
+  spec.shift_y = shift_y;
+  spec.shift_z = shift_z;
+  spec.periodic = periodic;
 
-  // B2: Reuse member buffers instead of per-frame heap alloc
-  cell_head_buf_.assign(nx * ny * nz, -1);
-  next_atom_buf_.assign(n_atoms, -1);
-  auto &cell_head = cell_head_buf_;
-  auto &next_atom = next_atom_buf_;
-
-  for (int a = 0; a < n_atoms; ++a) {
-    if (a >= static_cast<int>(atom_macro_.size()) || atom_macro_[a] < 0)
-      continue;
-    int ix = static_cast<int>(pos_nm[3 * a + 0] / cx);
-    ix = ((ix % nx) + nx) % nx;
-    int iy = static_cast<int>(pos_nm[3 * a + 1] / cy);
-    iy = ((iy % ny) + ny) % ny;
-    int iz = static_cast<int>(pos_nm[3 * a + 2] / cz);
-    iz = ((iz % nz) + nz) % nz;
-    int cell = ix * ny * nz + iy * nz + iz;
-    next_atom[a] = cell_head[cell];
-    cell_head[cell] = a;
-  }
+  const auto active_fn = [&](std::size_t a) noexcept {
+    return a < atom_macro_.size() && atom_macro_[a] >= 0;
+  };
+  const auto coord_fn = [&](std::size_t a, double &x, double &y,
+                            double &z) noexcept {
+    x = static_cast<double>(pos_nm[3 * a + 0]);
+    y = static_cast<double>(pos_nm[3 * a + 1]);
+    z = static_cast<double>(pos_nm[3 * a + 2]);
+  };
 
   // Fix #2: Use generation counter instead of alloc+zero
   ++cur_gen_;
   ++sticker_cur_gen_;
 
-  for (int a = 0; a < n_atoms; ++a) {
-    const int mi =
-        (a < static_cast<int>(atom_macro_.size())) ? atom_macro_[a] : -1;
-    if (mi < 0)
-      continue;
-    int ix = static_cast<int>(pos_nm[3 * a] / cx);
-    int iy = static_cast<int>(pos_nm[3 * a + 1] / cy);
-    int iz = static_cast<int>(pos_nm[3 * a + 2] / cz);
-    // Half-shell neighbor offsets: self (b > a only) + 13 forward neighbors
-    // This eliminates 50% redundant distance calculations (Newton's 3rd law)
-    static constexpr int HALF_SHELL[14][3] = {
-        {0, 0, 0},   {1, 0, 0},  {-1, 1, 0}, {0, 1, 0},  {1, 1, 0},
-        {-1, -1, 1}, {0, -1, 1}, {1, -1, 1}, {-1, 0, 1}, {0, 0, 1},
-        {1, 0, 1},   {-1, 1, 1}, {0, 1, 1},  {1, 1, 1}};
-    for (int nb = 0; nb < 14; ++nb) {
-      const int dx = HALF_SHELL[nb][0];
-      const int dy = HALF_SHELL[nb][1];
-      const int dz = HALF_SHELL[nb][2];
-      int nx2 = ((ix + dx) % nx + nx) % nx, ny2 = ((iy + dy) % ny + ny) % ny,
-          nz2 = ((iz + dz) % nz + nz) % nz;
-      int cell2 = nx2 * ny * nz + ny2 * nz + nz2;
-      for (int b = cell_head[cell2]; b != -1; b = next_atom[b]) {
-        // For self-cell (nb==0), only consider b > a to avoid double counting
-        if (nb == 0 && b <= a)
-          continue;
-        const int mj =
-            (b < static_cast<int>(atom_macro_.size())) ? atom_macro_[b] : -1;
+  contact_grid_.for_each_pair(
+      static_cast<std::size_t>(n_atoms), spec, coord_fn, active_fn,
+      [&](std::size_t lhs, std::size_t rhs) {
+        const int a = static_cast<int>(lhs);
+        const int b = static_cast<int>(rhs);
+        const int mi = atom_macro_[lhs];
+        const int mj = atom_macro_[rhs];
         if (mj < 0 || mj == mi)
-          continue;
-        float d2 = pbc_dist2(pos_nm[3 * a] - pos_nm[3 * b],
-                             pos_nm[3 * a + 1] - pos_nm[3 * b + 1],
-                             pos_nm[3 * a + 2] - pos_nm[3 * b + 2], Lx, Ly, Lz);
-        if (d2 < r_cut2_) {
-          int key = std::min(mi, mj) * n_macro_ + std::max(mi, mj);
-          if (seen_gen_[key] != cur_gen_) {
-            seen_gen_[key] = cur_gen_;
-            macro_contacts.emplace_back(std::min(mi, mj), std::max(mi, mj));
-          }
-          // B7: Accumulate sticker contacts in cell-list (O(N) instead of
-          // O(N²))
-          if (contacts_on_ && a < static_cast<int>(sticker_local_idx_.size()) &&
-              b < static_cast<int>(sticker_local_idx_.size())) {
-            int si = sticker_local_idx_[a];
-            int sj = sticker_local_idx_[b];
-            if (si >= 0 && sj >= 0 && si != sj) {
-              if (si > sj)
-                std::swap(si, sj);
-              const int sticker_key = si * n_stickers_ + sj;
-              if (sticker_key < static_cast<int>(sticker_seen_gen_.size()) &&
-                  sticker_seen_gen_[sticker_key] == sticker_cur_gen_)
-                continue;
-              if (sticker_key < static_cast<int>(sticker_seen_gen_.size()))
-                sticker_seen_gen_[sticker_key] = sticker_cur_gen_;
-              contact_accum_[si][sj] += 1.f;
-              contact_accum_[sj][si] += 1.f;
-            }
-          }
+          return;
+
+        const float d2 = pbc_dist2(pos_nm[3 * a] - pos_nm[3 * b],
+                                   pos_nm[3 * a + 1] - pos_nm[3 * b + 1],
+                                   pos_nm[3 * a + 2] - pos_nm[3 * b + 2],
+                                   periodic ? bx : 0.0f, periodic ? by : 0.0f,
+                                   periodic ? bz : 0.0f);
+        if (d2 >= r_cut2_)
+          return;
+
+        const int key = std::min(mi, mj) * n_macro_ + std::max(mi, mj);
+        if (seen_gen_[static_cast<std::size_t>(key)] != cur_gen_) {
+          seen_gen_[static_cast<std::size_t>(key)] = cur_gen_;
+          macro_contacts.emplace_back(std::min(mi, mj), std::max(mi, mj));
         }
-      }
-    }
-  }
+
+        if (!contacts_on_ || lhs >= sticker_local_idx_.size() ||
+            rhs >= sticker_local_idx_.size()) {
+          return;
+        }
+
+        int si = sticker_local_idx_[lhs];
+        int sj = sticker_local_idx_[rhs];
+        if (si < 0 || sj < 0 || si == sj)
+          return;
+        if (si > sj)
+          std::swap(si, sj);
+        const int sticker_key = si * n_stickers_ + sj;
+        if (sticker_key < static_cast<int>(sticker_seen_gen_.size()) &&
+            sticker_seen_gen_[static_cast<std::size_t>(sticker_key)] ==
+                sticker_cur_gen_) {
+          return;
+        }
+        if (sticker_key < static_cast<int>(sticker_seen_gen_.size()))
+          sticker_seen_gen_[static_cast<std::size_t>(sticker_key)] =
+              sticker_cur_gen_;
+        contact_accum_[static_cast<std::size_t>(si)]
+                     [static_cast<std::size_t>(sj)] += 1.f;
+        contact_accum_[static_cast<std::size_t>(sj)]
+                     [static_cast<std::size_t>(si)] += 1.f;
+      });
 }
 
 // ============================================================================

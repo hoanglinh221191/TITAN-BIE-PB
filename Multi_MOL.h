@@ -29,15 +29,17 @@ struct cache_sigma_epsilon;
 class Multi_MOL {
 private:
   int find_best_image(size_t ind, int chain_ref, arguments &Arguments);
+  int find_best_image_envelope(size_t ind, int chain_ref, arguments &Arguments);
   int find_best_image_new(size_t ind, size_t chain_ref, arguments &Arguments,
                           vector<vector<size_t>> &list_chain_combi);
   int impl_solv_pbc_new(Multi_MOL &mol2, size_t begin, size_t end,
                         arguments &Arguments, const amino_acid &amine);
   int impl_solve_pbc_chain(size_t ind, arguments &Arguments,
                            vector<size_t> &rejected_images);
-  int find_best_image_of_mol2(Multi_MOL &mol2, size_t i, arguments &Arguments);
+  int find_best_image_of_mol2(Multi_MOL &mol2, size_t i, int chain_ref,
+                              arguments &Arguments);
   int aggressive_find_best_image_of_mol2(Multi_MOL &mol2, size_t ind,
-                                         arguments &Arguments);
+                                         int chain_ref, arguments &Arguments);
   int solv_pbc_envi(size_t ind, arguments &Arguments,
                     vector<size_t> &rejected_images, size_t k,
                     Multi_MOL &pbc_images, std::span<double> com_ref_chain);
@@ -185,6 +187,7 @@ public:
   int solve_pbc_new(Multi_MOL &mol2, arguments &Arguments,
                     const amino_acid &amine);
   int solv_pbc_pbcn(Multi_MOL &mol2, arguments &Arguments);
+  int solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments);
 
   int emplace(size_t i, box &box_type, double time, std::string_view force_f,
               mol_info &&info_in, MOL &&mol_in);

@@ -42,6 +42,23 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     return true;
   };
+  auto parse_allostery_cut_mode = [&](std::string raw_mode) {
+    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (raw_mode == "avg" || raw_mode == "all" || raw_mode == "mean") {
+      allostery_use_avg_cutoff = true;
+      return;
+    }
+    if (raw_mode == "first" || raw_mode == "frame0" || raw_mode == "instant") {
+      allostery_use_avg_cutoff = false;
+      return;
+    }
+    TitanUI::print_error(
+        "Allostery: -allostery-cut-mode must be 'avg' or 'first'.");
+    exit(EXIT_FAILURE);
+  };
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = string(argv[i]);
@@ -183,6 +200,43 @@ int arguments::parse_arguments(int argc, char **argv) {
         string(argv[i]).find("-allostery-bins=") == 0) {
       allostery_bins =
           stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if (string(argv[i]).find("--allostery-knn=") == 0 ||
+        string(argv[i]).find("-allostery-knn=") == 0) {
+      allostery_knn =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--allostery-knn" ||
+         string(argv[i]) == "-allostery-knn") &&
+        i + 1 < argc) {
+      allostery_knn = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--allostery-cut=") == 0 ||
+        string(argv[i]).find("-allostery-cut=") == 0) {
+      allostery_cutoff =
+          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--allostery-cut" ||
+         string(argv[i]) == "-allostery-cut") &&
+        i + 1 < argc) {
+      allostery_cutoff = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--allostery-cut-mode=") == 0 ||
+        string(argv[i]).find("-allostery-cut-mode=") == 0) {
+      parse_allostery_cut_mode(
+          string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--allostery-cut-mode" ||
+         string(argv[i]) == "-allostery-cut-mode") &&
+        i + 1 < argc) {
+      parse_allostery_cut_mode(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]) == "--allostery-no-te" ||
+        string(argv[i]) == "-allostery-no-te") {
+      allostery_compute_te = false;
     }
     if (string(argv[i]) == "-tda") {
       flag_tda = true;
@@ -508,6 +562,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]) == "-saltcon" && i + 1 < argc) {
       saltcon = stod(argv[i + 1]);
+      salt_concentration = saltcon;
       ++i;
     }
     if (string(argv[i]) == "-n_wat" && i + 1 < argc) {
@@ -519,13 +574,25 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (string(argv[i]) == "-cscd") {
       cal_dis_sc_contact = true;
     }
-    if (string(argv[i]) == "-opdb" || string(argv[i]) == "-opdbsep") {
+    if (string(argv[i]) == "-opdb" || string(argv[i]) == "-opdbsep" ||
+        string(argv[i]).rfind("-opdb=", 0) == 0 ||
+        string(argv[i]).rfind("-opdbsep=", 0) == 0) {
       opdb = true;
-      if (string(argv[i]) == "-opdbsep")
+      const string arg(argv[i]);
+      if (arg == "-opdbsep" || arg.rfind("-opdbsep=", 0) == 0)
         flag_separation_results = true;
-      if (i + 1 < argc) {
-        if (string(argv[i + 1]).find(".pdb"))
+
+      if (arg.rfind("-opdb=", 0) == 0 || arg.rfind("-opdbsep=", 0) == 0) {
+        const size_t eq_pos = arg.find('=');
+        if (eq_pos != string::npos && eq_pos + 1 < arg.size()) {
+          out_pdb_name = arg.substr(eq_pos + 1);
+          opdb_name_explicit = true;
+        }
+      } else if (i + 1 < argc) {
+        if (string(argv[i + 1]).find(".pdb")) {
           out_pdb_name = string(argv[i + 1]);
+          opdb_name_explicit = true;
+        }
       }
     }
     if (string(argv[i]) == "-pqr") {
@@ -572,6 +639,9 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]) == "-pbcn") {
       pbc.solv_pbcn = true;
+    }
+    if (string(argv[i]) == "-pbctopo") {
+      pbc.solv_pbctopo = true;
     }
     if (string(argv[i]) == "-pbci2") {
       pbc.solv_pbc_int = 1;
@@ -783,7 +853,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]) == "-epsilon_in" && i + 1 < argc) {
       epsilon_in = atof(argv[i + 1]);
-      ++argc;
+      ++i;
     }
     if (string(argv[i]) == "-g" && i + 1 < argc) {
       auto found = string(argv[i + 1]).find("&");
@@ -1283,6 +1353,18 @@ int arguments::parse_arguments(int argc, char **argv) {
 
   if (flag_topo_1 && flag_topo_2 && topo_name == topo_name_2) {
     flag_use_common_topo = true;
+  }
+
+  if (pbc.solv_pbctopo) {
+    const bool conflict_with_reference =
+        pbc.solv_pbc == 1 || pbc.solv_pbc_int == 1 || pbc.solv_pbcn ||
+        pbc.pbc_aggressive || pbc.pbc_mem || pbc.flag_pbc_ref ||
+        pbc.pbc_envi || pbc.solv_pbc_clust;
+    if (conflict_with_reference) {
+      cout << "ERROR!! The option -pbctopo can not be combined with other "
+              "reference/legacy PBC modes.\n";
+      return 2;
+    }
   }
 
   return 0;

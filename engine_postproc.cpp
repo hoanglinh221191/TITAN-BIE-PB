@@ -3120,8 +3120,47 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
       if (args.flag_allostery) {
         auto start_allost = std::chrono::steady_clock::now();
         TitanUI::print_module_header("Allosteric Information Theory (GC + TE)");
-        dccm_analyzer.calculate_allostery_information_optimized(
-            num_threads, args.allostery_tau, args.allostery_bins);
+        DCCMNetwork::AllosteryConfig cfg;
+        cfg.tau_lag = args.allostery_tau;
+        cfg.num_bins = args.allostery_bins;
+        cfg.knn = args.allostery_knn;
+        cfg.cutoff_ang = args.allostery_cutoff;
+        cfg.use_avg_cutoff = args.allostery_use_avg_cutoff;
+        cfg.compute_te = args.allostery_compute_te;
+        dccm_analyzer.calculate_allostery_information_optimized(num_threads,
+                                                                cfg);
+        TitanUI::log_kv(log, "Allostery TE Stage",
+                        cfg.compute_te ? "enabled" : "disabled (GC only)");
+        if (cfg.cutoff_ang > 0.0 || cfg.knn > 0) {
+          std::ostringstream pair_filter;
+          bool has_filter = false;
+          if (cfg.cutoff_ang > 0.0) {
+            pair_filter << cfg.cutoff_ang << " A cutoff";
+            has_filter = true;
+          }
+          if (cfg.knn > 0) {
+            if (has_filter)
+              pair_filter << " + ";
+            pair_filter << "top-" << cfg.knn << " frame-voted kNN";
+          }
+          pair_filter << " ("
+                      << (cfg.use_avg_cutoff ? "union across frames"
+                                             : "frame-0 only")
+                      << ")";
+          TitanUI::log_kv(
+              log, "Allostery Pair Filter", pair_filter.str());
+          TitanUI::log_kv(
+              log, "Allostery Candidate Pairs",
+              std::to_string(dccm_analyzer.get_last_allostery_candidate_pairs()) +
+                  " / " +
+                  std::to_string(dccm_analyzer.get_last_allostery_dense_pairs()));
+          if (dccm_analyzer.get_last_allostery_candidate_pairs() == 0 &&
+              dccm_analyzer.get_last_allostery_dense_pairs() > 0) {
+            TitanUI::print_warning(
+                "Allostery pruning removed all candidate pairs; GC/TE outputs "
+                "contain headers only.");
+          }
+        }
         auto time_allost =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start_allost);
@@ -3130,18 +3169,21 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
       }
 
       if (args.flag_pca) {
-        auto ca_traj_aos = dccm_analyzer.get_ca_traj_aos();
+        const auto &pca_traj_x = dccm_analyzer.get_traj_x();
+        const auto &pca_traj_y = dccm_analyzer.get_traj_y();
+        const auto &pca_traj_z = dccm_analyzer.get_traj_z();
+        const size_t pca_frame_count = pca_traj_x.size();
         std::vector<double> pca_frame_weights;
         if (!frame_weights.empty()) {
           const auto &dccm_global_indices = dccm_analyzer.get_global_frame_indices();
-          if (dccm_global_indices.size() != ca_traj_aos.size()) {
+          if (dccm_global_indices.size() != pca_frame_count) {
             TitanUI::print_warning(
                 "PCA: DCCM global frame index count (" +
                 std::to_string(dccm_global_indices.size()) +
-                ") != PCA frame count (" + std::to_string(ca_traj_aos.size()) +
+                ") != PCA frame count (" + std::to_string(pca_frame_count) +
                 "). Falling back to uniform weights.");
           } else {
-            pca_frame_weights.assign(ca_traj_aos.size(), 0.0);
+            pca_frame_weights.assign(pca_frame_count, 0.0);
             size_t matched_frames = 0;
             size_t weighted_frames = 0;
             double mapped_weight_sum = 0.0;
@@ -3161,14 +3203,15 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
             TitanUI::print_info(
                 "PCA: Mapped DHAM weights onto " +
                 std::to_string(weighted_frames) + "/" +
-                std::to_string(ca_traj_aos.size()) +
+                std::to_string(pca_frame_count) +
                 " frames (matched indices: " + std::to_string(matched_frames) +
                 ", weight sum = " + std::to_string(mapped_weight_sum) + ").");
           }
         }
         TitanPCA::execute_pca_fes_analysis(
-            args, ca_traj_aos, dccm_analyzer.get_resnames(),
-            dccm_analyzer.get_resnrs(), dccm_analyzer.get_chains(),
+            args, pca_traj_x, pca_traj_y, pca_traj_z,
+            dccm_analyzer.get_resnames(), dccm_analyzer.get_resnrs(),
+            dccm_analyzer.get_chains(),
             dccm_analyzer.get_is_lig(), info_output, log, pca_frame_weights,
             dccm_analyzer.get_traj_times(), dccm_analyzer.get_traj_replicas(),
             replica_traj_files);

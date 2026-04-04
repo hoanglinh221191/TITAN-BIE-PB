@@ -1,6 +1,8 @@
 #include "dccm_network.h"
 #include "simd_compat.h"
 #include "titan_alignment.h"
+#include "titan_neighbor_grid.h"
+#include "titan_sparse_graph.h"
 #include "titan_ui.h"
 #include <algorithm>
 #include <cmath>
@@ -26,6 +28,601 @@ size_t coord_count(const MOL &mol) noexcept {
 
 inline bool is_aligned_32(const void *ptr) noexcept {
   return (reinterpret_cast<std::uintptr_t>(ptr) & 31u) == 0u;
+}
+
+template <typename T> struct FlatAlignedMatrixT {
+  static constexpr size_t kSimdLaneWidth =
+      std::max<size_t>(1, kTitanSimdAlignment / sizeof(T));
+
+  FlatAlignedMatrixT() = default;
+  FlatAlignedMatrixT(size_t rows, size_t cols, T value = T{})
+      : rows_(rows), cols_(cols),
+        stride_(cols == 0 ? 0
+                          : ((cols + kSimdLaneWidth - 1) / kSimdLaneWidth) *
+                                kSimdLaneWidth),
+        data_(rows * stride_, value) {}
+
+  void assign(size_t rows, size_t cols, T value = T{}) {
+    rows_ = rows;
+    cols_ = cols;
+    stride_ = cols == 0 ? 0
+                        : ((cols + kSimdLaneWidth - 1) / kSimdLaneWidth) *
+                              kSimdLaneWidth;
+    data_.assign(rows * stride_, value);
+  }
+
+  T &operator()(size_t row, size_t col) { return data_[row * stride_ + col]; }
+
+  const T &operator()(size_t row, size_t col) const {
+    return data_[row * stride_ + col];
+  }
+
+  T *row_data(size_t row) { return data_.data() + row * stride_; }
+  const T *row_data(size_t row) const { return data_.data() + row * stride_; }
+
+  size_t rows() const noexcept { return rows_; }
+  size_t cols() const noexcept { return cols_; }
+  size_t stride() const noexcept { return stride_; }
+
+  void fill(T value) { std::fill(data_.begin(), data_.end(), value); }
+
+private:
+  size_t rows_ = 0;
+  size_t cols_ = 0;
+  size_t stride_ = 0;
+  AlignedVector<T> data_;
+};
+
+using FlatAlignedMatrix = FlatAlignedMatrixT<double>;
+
+inline int resolve_allostery_bin_count(size_t total_frames, int num_bins) {
+  if (num_bins > 0)
+    return num_bins;
+  return std::max(8, static_cast<int>(std::cbrt(total_frames / 5.0)));
+}
+
+inline std::vector<std::string>
+build_allostery_node_labels(const std::vector<std::string> &ca_resname,
+                            const std::vector<int> &ca_resnrs,
+                            const std::vector<std::string> &ca_chain) {
+  const size_t num_ca = ca_resname.size();
+  std::vector<std::string> node_labels(num_ca);
+  for (size_t i = 0; i < num_ca; ++i)
+    node_labels[i] =
+        ca_resname[i] + std::to_string(ca_resnrs[i]) + "_" + ca_chain[i];
+  return node_labels;
+}
+
+inline size_t upper_triangle_pair_index(size_t i, size_t j,
+                                        size_t node_count) noexcept {
+  return i * (2 * node_count - i - 1) / 2 + (j - i - 1);
+}
+
+std::vector<std::pair<size_t, size_t>>
+build_dense_upper_triangle_pairs(size_t node_count) {
+  std::vector<std::pair<size_t, size_t>> pairs;
+  if (node_count < 2)
+    return pairs;
+
+  pairs.reserve(node_count * (node_count - 1) / 2);
+  for (size_t i = 0; i < node_count; ++i) {
+    for (size_t j = i + 1; j < node_count; ++j)
+      pairs.emplace_back(i, j);
+  }
+  return pairs;
+}
+
+std::vector<std::pair<size_t, size_t>> build_lspmd_candidate_pairs(
+    const DCCMNetwork::TrajectoryRows &traj_x,
+    const DCCMNetwork::TrajectoryRows &traj_y,
+    const DCCMNetwork::TrajectoryRows &traj_z, size_t num_ca,
+    size_t total_frames, double cutoff, bool use_avg_cutoff) {
+  std::vector<std::pair<size_t, size_t>> pairs;
+  if (num_ca < 2 || total_frames == 0 || cutoff <= 0.0)
+    return pairs;
+
+  const size_t dense_pair_count = num_ca * (num_ca - 1) / 2;
+  const size_t frame_limit = use_avg_cutoff ? total_frames : 1;
+  std::vector<unsigned char> seen(dense_pair_count, 0);
+  titan_neighbor::HalfShellGrid neighbor_grid;
+  pairs.reserve(std::min(dense_pair_count, num_ca * static_cast<size_t>(32)));
+
+  for (size_t f = 0; f < frame_limit; ++f) {
+    if (traj_x[f].size() < num_ca || traj_y[f].size() < num_ca ||
+        traj_z[f].size() < num_ca) {
+      return build_dense_upper_triangle_pairs(num_ca);
+    }
+
+    const auto &x_row = traj_x[f];
+    const auto &y_row = traj_y[f];
+    const auto &z_row = traj_z[f];
+    const auto [xmin, xmax] =
+        std::minmax_element(x_row.begin(), x_row.begin() + num_ca);
+    const auto [ymin, ymax] =
+        std::minmax_element(y_row.begin(), y_row.begin() + num_ca);
+    const auto [zmin, zmax] =
+        std::minmax_element(z_row.begin(), z_row.begin() + num_ca);
+
+    titan_neighbor::OrthorhombicGridSpec spec;
+    spec.cutoff = cutoff;
+    spec.shift_x = -(*xmin) + cutoff;
+    spec.shift_y = -(*ymin) + cutoff;
+    spec.shift_z = -(*zmin) + cutoff;
+    spec.len_x = (*xmax - *xmin) + 2.0 * cutoff;
+    spec.len_y = (*ymax - *ymin) + 2.0 * cutoff;
+    spec.len_z = (*zmax - *zmin) + 2.0 * cutoff;
+    spec.periodic = false;
+
+    neighbor_grid.for_each_pair(
+        num_ca, spec,
+        [&](std::size_t atom_index, double &x, double &y, double &z) {
+          x = x_row[atom_index];
+          y = y_row[atom_index];
+          z = z_row[atom_index];
+        },
+        [&](std::size_t atom_index) { return atom_index < num_ca; },
+        [&](std::size_t lhs, std::size_t rhs) {
+          const double dx = x_row[lhs] - x_row[rhs];
+          const double dy = y_row[lhs] - y_row[rhs];
+          const double dz = z_row[lhs] - z_row[rhs];
+          if (dx * dx + dy * dy + dz * dz > cutoff * cutoff)
+            return;
+
+          const size_t i = std::min(lhs, rhs);
+          const size_t j = std::max(lhs, rhs);
+          const size_t pair_index = upper_triangle_pair_index(i, j, num_ca);
+          if (seen[pair_index] != 0)
+            return;
+          seen[pair_index] = 1;
+          pairs.emplace_back(i, j);
+        });
+  }
+
+  return pairs;
+}
+
+std::vector<std::pair<size_t, size_t>> build_allostery_candidate_pairs(
+    const DCCMNetwork::TrajectoryRows &traj_x,
+    const DCCMNetwork::TrajectoryRows &traj_y,
+    const DCCMNetwork::TrajectoryRows &traj_z, size_t num_ca,
+    size_t total_frames, const DCCMNetwork::AllosteryConfig &cfg) {
+  const size_t dense_pair_count =
+      num_ca < 2 ? 0 : num_ca * (num_ca - 1) / 2;
+  if (cfg.cutoff_ang <= 0.0 && cfg.knn <= 0)
+    return build_dense_upper_triangle_pairs(num_ca);
+
+  std::vector<std::pair<size_t, size_t>> pairs;
+  std::vector<unsigned char> seen(dense_pair_count, 0);
+  auto mark_pair = [&](size_t i, size_t j) {
+    const size_t a = std::min(i, j);
+    const size_t b = std::max(i, j);
+    const size_t pair_index = upper_triangle_pair_index(a, b, num_ca);
+    if (seen[pair_index] != 0)
+      return false;
+    seen[pair_index] = 1;
+    pairs.emplace_back(a, b);
+    return true;
+  };
+
+  if (cfg.cutoff_ang > 0.0) {
+    auto cutoff_pairs = build_lspmd_candidate_pairs(
+        traj_x, traj_y, traj_z, num_ca, total_frames, cfg.cutoff_ang,
+        cfg.use_avg_cutoff);
+    for (const auto &[i, j] : cutoff_pairs)
+      mark_pair(i, j);
+  }
+
+  if (cfg.knn > 0 && num_ca > 1 && total_frames > 0) {
+    const size_t k = std::min<size_t>(static_cast<size_t>(cfg.knn), num_ca - 1);
+    const size_t frame_limit = cfg.use_avg_cutoff ? total_frames : 1;
+    bool can_rank = true;
+    for (size_t f = 0; f < frame_limit; ++f) {
+      if (traj_x[f].size() < num_ca || traj_y[f].size() < num_ca ||
+          traj_z[f].size() < num_ca) {
+        can_rank = false;
+        break;
+      }
+    }
+    if (!can_rank) {
+      if (pairs.empty())
+        return build_dense_upper_triangle_pairs(num_ca);
+      std::sort(pairs.begin(), pairs.end());
+      return pairs;
+    }
+
+    struct RankedNeighbor {
+      size_t partner = 0;
+      std::uint32_t votes = 0;
+      float min_dist2 = std::numeric_limits<float>::infinity();
+    };
+
+    std::vector<std::uint32_t> vote_counts(dense_pair_count, 0);
+    std::vector<float> min_dist2(dense_pair_count,
+                                 std::numeric_limits<float>::infinity());
+    for (size_t f = 0; f < frame_limit; ++f) {
+      const auto &x_row = traj_x[f];
+      const auto &y_row = traj_y[f];
+      const auto &z_row = traj_z[f];
+
+      std::vector<std::pair<float, size_t>> distances;
+      distances.reserve(num_ca - 1);
+      auto rank_cmp = [](const auto &lhs, const auto &rhs) {
+        if (lhs.first != rhs.first)
+          return lhs.first < rhs.first;
+        return lhs.second < rhs.second;
+      };
+
+      for (size_t i = 0; i < num_ca; ++i) {
+        distances.clear();
+        const double xi = x_row[i];
+        const double yi = y_row[i];
+        const double zi = z_row[i];
+        for (size_t j = 0; j < num_ca; ++j) {
+          if (i == j)
+            continue;
+          const double dx = xi - x_row[j];
+          const double dy = yi - y_row[j];
+          const double dz = zi - z_row[j];
+          distances.emplace_back(static_cast<float>(dx * dx + dy * dy + dz * dz),
+                                 j);
+        }
+
+        if (distances.size() > k) {
+          std::nth_element(distances.begin(),
+                           distances.begin() +
+                               static_cast<std::ptrdiff_t>(k),
+                           distances.end(), rank_cmp);
+          std::sort(distances.begin(),
+                    distances.begin() + static_cast<std::ptrdiff_t>(k),
+                    rank_cmp);
+        } else {
+          std::sort(distances.begin(), distances.end(), rank_cmp);
+        }
+
+        for (size_t n = 0; n < k; ++n) {
+          const size_t partner = distances[n].second;
+          const size_t a = std::min(i, partner);
+          const size_t b = std::max(i, partner);
+          const size_t pair_index = upper_triangle_pair_index(a, b, num_ca);
+          if (vote_counts[pair_index] !=
+              std::numeric_limits<std::uint32_t>::max()) {
+            ++vote_counts[pair_index];
+          }
+          min_dist2[pair_index] =
+              std::min(min_dist2[pair_index], distances[n].first);
+        }
+      }
+    }
+
+    std::vector<std::vector<RankedNeighbor>> ranked_neighbors(num_ca);
+    for (auto &neighbors : ranked_neighbors)
+      neighbors.reserve(k * 2);
+    for (size_t i = 0; i < num_ca; ++i) {
+      for (size_t j = i + 1; j < num_ca; ++j) {
+        const size_t pair_index = upper_triangle_pair_index(i, j, num_ca);
+        if (vote_counts[pair_index] == 0)
+          continue;
+        const RankedNeighbor ij{j, vote_counts[pair_index],
+                                min_dist2[pair_index]};
+        const RankedNeighbor ji{i, vote_counts[pair_index],
+                                min_dist2[pair_index]};
+        ranked_neighbors[i].push_back(ij);
+        ranked_neighbors[j].push_back(ji);
+      }
+    }
+
+    auto better_neighbor = [](const RankedNeighbor &lhs,
+                              const RankedNeighbor &rhs) {
+      if (lhs.votes != rhs.votes)
+        return lhs.votes > rhs.votes;
+      if (lhs.min_dist2 != rhs.min_dist2)
+        return lhs.min_dist2 < rhs.min_dist2;
+      return lhs.partner < rhs.partner;
+    };
+
+    for (size_t i = 0; i < num_ca; ++i) {
+      auto &neighbors = ranked_neighbors[i];
+      if (neighbors.empty())
+        continue;
+      if (neighbors.size() > k) {
+        std::nth_element(neighbors.begin(),
+                         neighbors.begin() + static_cast<std::ptrdiff_t>(k),
+                         neighbors.end(), better_neighbor);
+        std::sort(neighbors.begin(),
+                  neighbors.begin() + static_cast<std::ptrdiff_t>(k),
+                  better_neighbor);
+      } else {
+        std::sort(neighbors.begin(), neighbors.end(), better_neighbor);
+      }
+      const size_t keep = std::min(k, neighbors.size());
+      for (size_t n = 0; n < keep; ++n)
+        mark_pair(std::min(i, neighbors[n].partner),
+                  std::max(i, neighbors[n].partner));
+    }
+  }
+
+  std::sort(pairs.begin(), pairs.end());
+  return pairs;
+}
+
+template <typename BinType>
+size_t calculate_allostery_information_flat_impl(
+    const DCCMNetwork::TrajectoryRows &traj_x,
+    const DCCMNetwork::TrajectoryRows &traj_y,
+    const DCCMNetwork::TrajectoryRows &traj_z,
+    const std::vector<std::string> &node_labels, size_t total_frames,
+    size_t num_threads, const DCCMNetwork::AllosteryConfig &cfg, int B,
+    size_t *dense_pair_count_out = nullptr) {
+  if (total_frames == 0 || node_labels.empty())
+    return 0;
+  const size_t num_ca = node_labels.size();
+  const size_t tau = static_cast<size_t>(std::max(1, cfg.tau_lag));
+  if (tau >= total_frames) {
+    std::cerr << "[Allostery] tau_lag (" << tau << ") >= total_frames ("
+              << total_frames << "). Skipping.\n";
+    return 0;
+  }
+
+  const size_t B_sz = static_cast<size_t>(B);
+  if (B_sz > static_cast<size_t>(std::numeric_limits<BinType>::max())) {
+    TitanUI::print_warning(
+        "Allostery bin count exceeds selected bin storage. Skipping.");
+    return 0;
+  }
+
+  const size_t dense_pair_count = num_ca * (num_ca - 1) / 2;
+  if (dense_pair_count_out != nullptr)
+    *dense_pair_count_out = dense_pair_count;
+  const auto pairs = build_allostery_candidate_pairs(traj_x, traj_y, traj_z,
+                                                     num_ca, total_frames, cfg);
+  const size_t n_pairs = pairs.size();
+  std::ofstream gc_out("network_gc_edges.csv");
+  gc_out << "Source,Target,GC\n";
+  std::ofstream te_out("network_te_edges.csv");
+  te_out << "Source,Target,Net_TE\n";
+  if (n_pairs == 0)
+    return 0;
+
+  std::vector<double> mean_x(num_ca, 0.0), mean_y(num_ca, 0.0),
+      mean_z(num_ca, 0.0);
+  for (size_t f = 0; f < total_frames; ++f) {
+    const auto &x_row = traj_x[f];
+    const auto &y_row = traj_y[f];
+    const auto &z_row = traj_z[f];
+    for (size_t a = 0; a < num_ca; ++a) {
+      mean_x[a] += x_row[a];
+      mean_y[a] += y_row[a];
+      mean_z[a] += z_row[a];
+    }
+  }
+  const double inv_f = 1.0 / static_cast<double>(total_frames);
+  for (size_t a = 0; a < num_ca; ++a) {
+    mean_x[a] *= inv_f;
+    mean_y[a] *= inv_f;
+    mean_z[a] *= inv_f;
+  }
+
+  FlatAlignedMatrixT<BinType> proj_bins(num_ca, total_frames,
+                                        static_cast<BinType>(0));
+  std::vector<double> H1(num_ca, 0.0);
+  std::vector<double> H_past;
+  std::vector<double> H_auto;
+  if (cfg.compute_te) {
+    H_past.assign(num_ca, 0.0);
+    H_auto.assign(num_ca, 0.0);
+  }
+  const double norm1_full =
+      0.5 * static_cast<double>(B) + static_cast<double>(total_frames);
+  const double norm1_tau =
+      0.5 * static_cast<double>(B) +
+      static_cast<double>(total_frames - tau);
+  const double norm2_full =
+      0.5 * static_cast<double>(B_sz * B_sz) +
+      static_cast<double>(total_frames);
+  const double norm2_tau =
+      0.5 * static_cast<double>(B_sz * B_sz) +
+      static_cast<double>(total_frames - tau);
+  const double norm3_tau =
+      0.5 * static_cast<double>(B_sz * B_sz * B_sz) +
+      static_cast<double>(total_frames - tau);
+
+  auto entropy_from_hist = [](const std::vector<double> &hist,
+                              double norm) -> double {
+    double H = 0.0;
+    for (double count : hist) {
+      const double p = count / norm;
+      if (p > 0.0)
+        H -= p * std::log(p);
+    }
+    return H;
+  };
+
+  {
+    const size_t atom_worker_count = std::max<size_t>(1, num_threads);
+    std::vector<std::jthread> atom_workers;
+    atom_workers.reserve(atom_worker_count);
+    const size_t atoms_per_worker =
+        (num_ca + atom_worker_count - 1) / atom_worker_count;
+    for (size_t t = 0; t < atom_worker_count; ++t) {
+      const size_t a_begin = t * atoms_per_worker;
+      const size_t a_end = std::min(a_begin + atoms_per_worker, num_ca);
+      if (a_begin >= a_end)
+        continue;
+      atom_workers.emplace_back([&, a_begin, a_end]() {
+        AlignedDoubleVector atom_proj(total_frames, 0.0);
+        std::vector<double> hist1(B_sz, 0.0);
+        std::vector<double> hist2(cfg.compute_te ? B_sz * B_sz : 0, 0.0);
+        for (size_t a = a_begin; a < a_end; ++a) {
+          double c_xx = 0.0, c_xy = 0.0, c_xz = 0.0;
+          double c_yy = 0.0, c_yz = 0.0, c_zz = 0.0;
+          const double avg_x = mean_x[a];
+          const double avg_y = mean_y[a];
+          const double avg_z = mean_z[a];
+          for (size_t f = 0; f < total_frames; ++f) {
+            const double dx = traj_x[f][a] - avg_x;
+            const double dy = traj_y[f][a] - avg_y;
+            const double dz = traj_z[f][a] - avg_z;
+            c_xx += dx * dx;
+            c_xy += dx * dy;
+            c_xz += dx * dz;
+            c_yy += dy * dy;
+            c_yz += dy * dz;
+            c_zz += dz * dz;
+          }
+
+          Eigen::Matrix3d cov3;
+          cov3 << c_xx, c_xy, c_xz, c_xy, c_yy, c_yz, c_xz, c_yz, c_zz;
+          cov3 /= static_cast<double>(total_frames);
+
+          Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(cov3);
+          const Eigen::Vector3d e1 = es.eigenvectors().col(2);
+          const double ex = e1(0);
+          const double ey = e1(1);
+          const double ez = e1(2);
+
+          double p_min = std::numeric_limits<double>::max();
+          double p_max = std::numeric_limits<double>::lowest();
+          for (size_t f = 0; f < total_frames; ++f) {
+            const double proj_val = (traj_x[f][a] - avg_x) * ex +
+                                    (traj_y[f][a] - avg_y) * ey +
+                                    (traj_z[f][a] - avg_z) * ez;
+            atom_proj[f] = proj_val;
+            p_min = std::min(p_min, proj_val);
+            p_max = std::max(p_max, proj_val);
+          }
+
+          double p_range = p_max - p_min;
+          if (p_range < 1e-15)
+            p_range = 1e-15;
+
+          BinType *bins = proj_bins.row_data(a);
+          std::fill(hist1.begin(), hist1.end(), 0.5);
+          for (size_t f = 0; f < total_frames; ++f) {
+            const double scaled = (atom_proj[f] - p_min) / p_range;
+            int bin = static_cast<int>(scaled * static_cast<double>(B));
+            if (bin < 0)
+              bin = 0;
+            else if (bin >= B)
+              bin = B - 1;
+            bins[f] = static_cast<BinType>(bin);
+            hist1[static_cast<size_t>(bins[f])] += 1.0;
+          }
+          H1[a] = entropy_from_hist(hist1, norm1_full);
+
+          if (cfg.compute_te) {
+            std::fill(hist1.begin(), hist1.end(), 0.5);
+            for (size_t f = tau; f < total_frames; ++f)
+              hist1[static_cast<size_t>(bins[f - tau])] += 1.0;
+            H_past[a] = entropy_from_hist(hist1, norm1_tau);
+
+            std::fill(hist2.begin(), hist2.end(), 0.5);
+            for (size_t f = tau; f < total_frames; ++f) {
+              const size_t b_now = static_cast<size_t>(bins[f]);
+              const size_t b_past = static_cast<size_t>(bins[f - tau]);
+              hist2[b_now * B_sz + b_past] += 1.0;
+            }
+            H_auto[a] = entropy_from_hist(hist2, norm2_tau);
+          }
+        }
+      });
+    }
+  }
+
+  std::vector<double> gc_vals(n_pairs, 0.0);
+  std::vector<double> net_te_vals(cfg.compute_te ? n_pairs : 0, 0.0);
+
+  auto worker = [&](size_t p_start, size_t p_end) {
+    std::vector<double> hist2d(B_sz * B_sz, 0.0);
+    std::vector<double> hist2d_b(cfg.compute_te ? B_sz * B_sz : 0, 0.0);
+    std::vector<double> hist3d(cfg.compute_te ? B_sz * B_sz * B_sz : 0, 0.0);
+
+    for (size_t p = p_start; p < p_end; ++p) {
+      const size_t i = pairs[p].first;
+      const size_t j = pairs[p].second;
+      const BinType *bins_i = proj_bins.row_data(i);
+      const BinType *bins_j = proj_bins.row_data(j);
+
+      std::fill(hist2d.begin(), hist2d.end(), 0.5);
+      if (cfg.compute_te)
+        std::fill(hist2d_b.begin(), hist2d_b.end(), 0.5);
+      for (size_t f = 0; f < total_frames; ++f) {
+        const size_t bi = static_cast<size_t>(bins_i[f]);
+        const size_t bj = static_cast<size_t>(bins_j[f]);
+        hist2d[bi * B_sz + bj] += 1.0;
+        if (cfg.compute_te && f >= tau) {
+          const size_t bi_past = static_cast<size_t>(bins_i[f - tau]);
+          const size_t bj_past = static_cast<size_t>(bins_j[f - tau]);
+          hist2d_b[bi_past * B_sz + bj_past] += 1.0;
+        }
+      }
+
+      const double H_ij = entropy_from_hist(hist2d, norm2_full);
+      double MI = H1[i] + H1[j] - H_ij;
+      if (MI < 0.0)
+        MI = 0.0;
+      gc_vals[p] = std::sqrt(1.0 - std::exp(-2.0 * MI));
+
+      if (!cfg.compute_te)
+        continue;
+
+      const double H_past_ij = entropy_from_hist(hist2d_b, norm2_tau);
+      auto calc_h3 = [&](const BinType *src_bins,
+                         const BinType *dst_bins) -> double {
+        std::fill(hist3d.begin(), hist3d.end(), 0.5);
+        for (size_t f = tau; f < total_frames; ++f) {
+          const size_t b1 = static_cast<size_t>(dst_bins[f]);
+          const size_t b2 = static_cast<size_t>(dst_bins[f - tau]);
+          const size_t b3 = static_cast<size_t>(src_bins[f - tau]);
+          hist3d[(b1 * B_sz + b2) * B_sz + b3] += 1.0;
+        }
+        return entropy_from_hist(hist3d, norm3_tau);
+      };
+
+      const double H3_j_from_i = calc_h3(bins_i, bins_j);
+      const double H3_i_from_j = calc_h3(bins_j, bins_i);
+      const double te_ij = H_auto[j] + H_past_ij - H_past[j] - H3_j_from_i;
+      const double te_ji = H_auto[i] + H_past_ij - H_past[i] - H3_i_from_j;
+      net_te_vals[p] = te_ij - te_ji;
+    }
+  };
+
+  const size_t worker_count = std::max<size_t>(1, num_threads);
+  {
+    std::vector<std::jthread> workers;
+    workers.reserve(worker_count);
+    const size_t chunk = (n_pairs + worker_count - 1) / worker_count;
+    for (size_t t = 0; t < worker_count; ++t) {
+      const size_t start = t * chunk;
+      const size_t end = std::min(start + chunk, n_pairs);
+      if (start < end)
+        workers.emplace_back(worker, start, end);
+    }
+  }
+
+  for (size_t p = 0; p < n_pairs; ++p) {
+    if (gc_vals[p] > 0.35) {
+      const size_t i = pairs[p].first;
+      const size_t j = pairs[p].second;
+      gc_out << node_labels[i] << "," << node_labels[j] << "," << gc_vals[p]
+             << "\n";
+    }
+  }
+  gc_out.close();
+
+  if (cfg.compute_te) {
+    for (size_t p = 0; p < n_pairs; ++p) {
+      if (std::abs(net_te_vals[p]) > 0.05) {
+        size_t drv = pairs[p].first;
+        size_t tgt = pairs[p].second;
+        if (net_te_vals[p] <= 0.0)
+          std::swap(drv, tgt);
+        te_out << node_labels[drv] << "," << node_labels[tgt] << ","
+               << std::abs(net_te_vals[p]) << "\n";
+      }
+    }
+  }
+  te_out.close();
+  return n_pairs;
 }
 
 } // namespace
@@ -345,20 +942,6 @@ void DCCMNetwork::process_frame(const Multi_MOL &pro_in, const Multi_MOL &lig,
   total_frames++;
 }
 
-std::vector<std::vector<std::array<double, 3>>>
-DCCMNetwork::get_ca_traj_aos() const {
-  std::vector<std::vector<std::array<double, 3>>> aos(
-      total_frames, std::vector<std::array<double, 3>>(ca_indices.size()));
-  for (size_t f = 0; f < total_frames; ++f) {
-    for (size_t a = 0; a < ca_indices.size(); ++a) {
-      aos[f][a][0] = traj_x[f][a];
-      aos[f][a][1] = traj_y[f][a];
-      aos[f][a][2] = traj_z[f][a];
-    }
-  }
-  return aos;
-}
-
 void DCCMNetwork::calculate_and_export(size_t num_threads) {
   if (total_frames == 0 || ca_indices.empty())
     return;
@@ -421,12 +1004,9 @@ void DCCMNetwork::calculate_and_export(size_t num_threads) {
     mean_z[a] *= inv_total_frames;
   }
 
-  DCCMNetwork::TrajectoryRows dev_x(num_ca), dev_y(num_ca), dev_z(num_ca);
-  for (size_t a = 0; a < num_ca; ++a) {
-    dev_x[a].resize(total_frames);
-    dev_y[a].resize(total_frames);
-    dev_z[a].resize(total_frames);
-  }
+  FlatAlignedMatrix dev_x(num_ca, total_frames, 0.0);
+  FlatAlignedMatrix dev_y(num_ca, total_frames, 0.0);
+  FlatAlignedMatrix dev_z(num_ca, total_frames, 0.0);
 
   const size_t prep_worker_count = std::max<size_t>(1, num_threads);
   {
@@ -444,9 +1024,9 @@ void DCCMNetwork::calculate_and_export(size_t num_threads) {
           const double avg_x = mean_x[a];
           const double avg_y = mean_y[a];
           const double avg_z = mean_z[a];
-          auto &dx = dev_x[a];
-          auto &dy = dev_y[a];
-          auto &dz = dev_z[a];
+          double *dx = dev_x.row_data(a);
+          double *dy = dev_y.row_data(a);
+          double *dz = dev_z.row_data(a);
           for (size_t f = 0; f < total_frames; ++f) {
             dx[f] = traj_x[f][a] - avg_x;
             dy[f] = traj_y[f][a] - avg_y;
@@ -460,8 +1040,7 @@ void DCCMNetwork::calculate_and_export(size_t num_threads) {
   // 2. Tính Ma trận Hiệp phương sai (Multithreaded + AVX2)
   //    FIX: pair-based distribution for balanced workload,
   //         no mirror-write in workers to avoid data race.
-  std::vector<std::vector<double>> cov(num_ca,
-                                       std::vector<double>(num_ca, 0.0));
+  FlatAlignedMatrix cov(num_ca, num_ca, 0.0);
 
   // Build upper-triangle pair list (including diagonal)
   std::vector<std::pair<size_t, size_t>> pairs;
@@ -474,14 +1053,17 @@ void DCCMNetwork::calculate_and_export(size_t num_threads) {
   auto calc_cov_worker = [&](size_t p_start, size_t p_end) {
     for (size_t p = p_start; p < p_end; ++p) {
       auto [i, j] = pairs[p];
-      double dot_x = fast_dot_product_aligned(dev_x[i].data(), dev_x[j].data(),
-                                              total_frames);
-      double dot_y = fast_dot_product_aligned(dev_y[i].data(), dev_y[j].data(),
-                                              total_frames);
-      double dot_z = fast_dot_product_aligned(dev_z[i].data(), dev_z[j].data(),
-                                              total_frames);
+      const double *dx_i = dev_x.row_data(i);
+      const double *dx_j = dev_x.row_data(j);
+      const double *dy_i = dev_y.row_data(i);
+      const double *dy_j = dev_y.row_data(j);
+      const double *dz_i = dev_z.row_data(i);
+      const double *dz_j = dev_z.row_data(j);
+      double dot_x = fast_dot_product_aligned(dx_i, dx_j, total_frames);
+      double dot_y = fast_dot_product_aligned(dy_i, dy_j, total_frames);
+      double dot_z = fast_dot_product_aligned(dz_i, dz_j, total_frames);
 
-      cov[i][j] = (dot_x + dot_y + dot_z) / static_cast<double>(total_frames);
+      cov(i, j) = (dot_x + dot_y + dot_z) / static_cast<double>(total_frames);
     }
   };
 
@@ -504,16 +1086,16 @@ void DCCMNetwork::calculate_and_export(size_t num_threads) {
   // Single-threaded symmetry fill (safe, no race)
   for (size_t i = 0; i < num_ca; ++i)
     for (size_t j = i + 1; j < num_ca; ++j)
-      cov[j][i] = cov[i][j];
+      cov(j, i) = cov(i, j);
 
   // 3. Tính Correlation và Xuất File
   std::ofstream edges_out("network_edges.csv");
   edges_out << "Source,Target,Correlation\n";
   for (size_t i = 0; i < num_ca; ++i) {
     for (size_t j = i + 1; j < num_ca; ++j) {
-      double denom = std::sqrt(cov[i][i] * cov[j][j]);
+      double denom = std::sqrt(cov(i, i) * cov(j, j));
       if (denom > 1e-12) {
-        double corr = cov[i][j] / denom;
+        double corr = cov(i, j) / denom;
         if (std::abs(corr) > 0.4) {
           edges_out << ca_resname[i] << ca_resnrs[i] << "_" << ca_chain[i]
                     << "," << ca_resname[j] << ca_resnrs[j] << "_"
@@ -539,557 +1121,66 @@ void DCCMNetwork::calculate_and_export(size_t num_threads) {
 // =============================================================================
 void DCCMNetwork::calculate_allostery_information(size_t num_threads,
                                                   int tau_lag, int num_bins) {
-  if (total_frames == 0 || ca_indices.empty())
-    return;
-  size_t num_ca = ca_indices.size();
-  size_t tau = static_cast<size_t>(std::max(1, tau_lag));
-  if (tau >= total_frames) {
-    std::cerr << "[Allostery] tau_lag (" << tau << ") >= total_frames ("
-              << total_frames << "). Skipping.\n";
-    return;
-  }
+  AllosteryConfig cfg;
+  cfg.tau_lag = tau_lag;
+  cfg.num_bins = num_bins;
+  calculate_allostery_information(num_threads, cfg);
+}
 
-  // ── STEP 1: Signed Projection ──────────────────────────────────────────────
-  // For each atom, compute lightweight 3×3 covariance matrix from trajectory,
-  // extract dominant eigenvector, and project displacements onto it.
-  // This preserves sign (anti-correlation visible) and reduces to 1D.
-  std::vector<std::vector<double>> proj(num_ca,
-                                        std::vector<double>(total_frames));
-  {
-    // Compute per-atom mean (traj already Kabsch-aligned)
-    std::vector<double> mean_x(num_ca, 0.0), mean_y(num_ca, 0.0),
-        mean_z(num_ca, 0.0);
-    for (size_t f = 0; f < total_frames; ++f) {
-      for (size_t a = 0; a < num_ca; ++a) {
-        mean_x[a] += traj_x[f][a];
-        mean_y[a] += traj_y[f][a];
-        mean_z[a] += traj_z[f][a];
-      }
-    }
-    double inv_f = 1.0 / static_cast<double>(total_frames);
-    for (size_t a = 0; a < num_ca; ++a) {
-      mean_x[a] *= inv_f;
-      mean_y[a] *= inv_f;
-      mean_z[a] *= inv_f;
-    }
-
-    // Per-atom 3×3 covariance → dominant eigenvector → signed projection
-    for (size_t a = 0; a < num_ca; ++a) {
-      Eigen::Matrix3d cov3 = Eigen::Matrix3d::Zero();
-      for (size_t f = 0; f < total_frames; ++f) {
-        Eigen::Vector3d d(traj_x[f][a] - mean_x[a], traj_y[f][a] - mean_y[a],
-                          traj_z[f][a] - mean_z[a]);
-        cov3.noalias() += d * d.transpose();
-      }
-      cov3 /= static_cast<double>(total_frames);
-
-      Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(cov3);
-      // Largest eigenvalue is last (ascending order)
-      Eigen::Vector3d e1 = es.eigenvectors().col(2);
-
-      for (size_t f = 0; f < total_frames; ++f) {
-        Eigen::Vector3d d(traj_x[f][a] - mean_x[a], traj_y[f][a] - mean_y[a],
-                          traj_z[f][a] - mean_z[a]);
-        proj[a][f] = d.dot(e1); // signed 1D projection
-      }
-    }
-  }
-
-  // ── STEP 2: Min-Max Scaling to [0, 1] ─────────────────────────────────────
-  std::vector<double> p_min(num_ca), p_range(num_ca);
-  for (size_t a = 0; a < num_ca; ++a) {
-    auto [mn, mx] = std::minmax_element(proj[a].begin(), proj[a].end());
-    p_min[a] = *mn;
-    p_range[a] = (*mx - *mn);
-    if (p_range[a] < 1e-15)
-      p_range[a] = 1e-15; // avoid division by zero for frozen atoms
-    for (size_t f = 0; f < total_frames; ++f)
-      proj[a][f] = (proj[a][f] - p_min[a]) / p_range[a];
-  }
-
-  // ── STEP 3: Adaptive Binning ──────────────────────────────────────────────
-  int B = num_bins;
-  if (B <= 0)
-    B = std::max(8, static_cast<int>(std::cbrt(total_frames / 5.0)));
-
-  // ── STEP 4: Precompute per-atom 1D Entropy (shared, read-only) ────────────
-  // Each atom's entropy is needed by many pairs, compute once.
-  std::vector<double> H1(num_ca, 0.0); // H(X_i)
-  {
-    std::vector<double> hist(B, 0.0);
-    for (size_t a = 0; a < num_ca; ++a) {
-      std::fill(hist.begin(), hist.end(), 0.5); // Laplace pseudocount
-      for (size_t f = 0; f < total_frames; ++f) {
-        int bin = static_cast<int>(proj[a][f] * B);
-        if (bin >= B)
-          bin = B - 1;
-        hist[bin] += 1.0;
-      }
-      double norm = std::accumulate(hist.begin(), hist.end(), 0.0);
-      double H = 0.0;
-      for (int b = 0; b < B; ++b) {
-        double p = hist[b] / norm;
-        if (p > 0.0)
-          H -= p * std::log(p);
-      }
-      H1[a] = H;
-    }
-  }
-
-  // ── STEP 5: Pair-based multithreaded GC + TE ──────────────────────────────
-  // Build upper-triangle pair list (excluding diagonal — self-MI is trivial)
-  std::vector<std::pair<size_t, size_t>> pairs;
-  pairs.reserve(num_ca * (num_ca - 1) / 2);
-  for (size_t i = 0; i < num_ca; ++i)
-    for (size_t j = i + 1; j < num_ca; ++j)
-      pairs.emplace_back(i, j);
-
-  size_t n_pairs = pairs.size();
-  // Result arrays
-  std::vector<double> gc_vals(n_pairs, 0.0);
-  std::vector<double> net_te_vals(n_pairs, 0.0);
-
-  auto worker = [&](size_t p_start, size_t p_end) {
-    // Thread-local histogram buffers — allocated once, reused per pair
-    std::vector<double> hist2d(static_cast<size_t>(B) * B, 0.0);
-    std::vector<double> hist2d_b(static_cast<size_t>(B) * B, 0.0); // for TE
-    std::vector<double> hist3d(static_cast<size_t>(B) * B * B, 0.0);
-    std::vector<double> hist1d_te(B, 0.0);
-
-    for (size_t p = p_start; p < p_end; ++p) {
-      size_t i = pairs[p].first;
-      size_t j = pairs[p].second;
-
-      // ── GC: Mutual Information ────────────────────────────────────────
-      // Joint 2D histogram H(X_i, X_j)
-      std::fill(hist2d.begin(), hist2d.end(), 0.5); // Laplace
-      for (size_t f = 0; f < total_frames; ++f) {
-        int bi = static_cast<int>(proj[i][f] * B);
-        int bj = static_cast<int>(proj[j][f] * B);
-        if (bi >= B)
-          bi = B - 1;
-        if (bj >= B)
-          bj = B - 1;
-        hist2d[bi * B + bj] += 1.0;
-      }
-      double norm2 = std::accumulate(hist2d.begin(), hist2d.end(), 0.0);
-      double H_ij = 0.0;
-      for (auto c : hist2d) {
-        double p = c / norm2;
-        if (p > 0.0)
-          H_ij -= p * std::log(p);
-      }
-
-      double MI = H1[i] + H1[j] - H_ij;
-      if (MI < 0.0)
-        MI = 0.0; // numerical noise guard
-      double GC = std::sqrt(1.0 - std::exp(-2.0 * MI));
-      gc_vals[p] = GC;
-
-      // ── Transfer Entropy i→j and j→i ──────────────────────────────────
-      // TE(i→j) = H(Yₜ,Yₜ₋τ) + H(Yₜ₋τ,Xₜ₋τ) - H(Yₜ₋τ) - H(Yₜ,Yₜ₋τ,Xₜ₋τ)
-      auto calc_te = [&](size_t src, size_t dst) -> double {
-        // H(Yₜ₋τ) — 1D marginal
-        std::fill(hist1d_te.begin(), hist1d_te.end(), 0.5);
-        for (size_t f = tau; f < total_frames; ++f) {
-          int b = static_cast<int>(proj[dst][f - tau] * B);
-          if (b >= B)
-            b = B - 1;
-          hist1d_te[b] += 1.0;
-        }
-        double norm1 = std::accumulate(hist1d_te.begin(), hist1d_te.end(), 0.0);
-        double H_Yt_tau = 0.0;
-        for (int b = 0; b < B; ++b) {
-          double pp = hist1d_te[b] / norm1;
-          if (pp > 0.0)
-            H_Yt_tau -= pp * std::log(pp);
-        }
-
-        // H(Yₜ, Yₜ₋τ) — 2D
-        std::fill(hist2d.begin(), hist2d.end(), 0.5);
-        for (size_t f = tau; f < total_frames; ++f) {
-          int b1 = static_cast<int>(proj[dst][f] * B);
-          int b2 = static_cast<int>(proj[dst][f - tau] * B);
-          if (b1 >= B)
-            b1 = B - 1;
-          if (b2 >= B)
-            b2 = B - 1;
-          hist2d[b1 * B + b2] += 1.0;
-        }
-        double n2 = std::accumulate(hist2d.begin(), hist2d.end(), 0.0);
-        double H_Yt_Yt_tau = 0.0;
-        for (auto c : hist2d) {
-          double pp = c / n2;
-          if (pp > 0.0)
-            H_Yt_Yt_tau -= pp * std::log(pp);
-        }
-
-        // H(Yₜ₋τ, Xₜ₋τ) — 2D
-        std::fill(hist2d_b.begin(), hist2d_b.end(), 0.5);
-        for (size_t f = tau; f < total_frames; ++f) {
-          int b1 = static_cast<int>(proj[dst][f - tau] * B);
-          int b2 = static_cast<int>(proj[src][f - tau] * B);
-          if (b1 >= B)
-            b1 = B - 1;
-          if (b2 >= B)
-            b2 = B - 1;
-          hist2d_b[b1 * B + b2] += 1.0;
-        }
-        double n2b = std::accumulate(hist2d_b.begin(), hist2d_b.end(), 0.0);
-        double H_Yt_tau_Xt_tau = 0.0;
-        for (auto c : hist2d_b) {
-          double pp = c / n2b;
-          if (pp > 0.0)
-            H_Yt_tau_Xt_tau -= pp * std::log(pp);
-        }
-
-        // H(Yₜ, Yₜ₋τ, Xₜ₋τ) — 3D
-        std::fill(hist3d.begin(), hist3d.end(), 0.5);
-        for (size_t f = tau; f < total_frames; ++f) {
-          int b1 = static_cast<int>(proj[dst][f] * B);
-          int b2 = static_cast<int>(proj[dst][f - tau] * B);
-          int b3 = static_cast<int>(proj[src][f - tau] * B);
-          if (b1 >= B)
-            b1 = B - 1;
-          if (b2 >= B)
-            b2 = B - 1;
-          if (b3 >= B)
-            b3 = B - 1;
-          hist3d[(b1 * B + b2) * B + b3] += 1.0;
-        }
-        double n3 = std::accumulate(hist3d.begin(), hist3d.end(), 0.0);
-        double H_Yt_Yt_tau_Xt_tau = 0.0;
-        for (auto c : hist3d) {
-          double pp = c / n3;
-          if (pp > 0.0)
-            H_Yt_Yt_tau_Xt_tau -= pp * std::log(pp);
-        }
-
-        return H_Yt_Yt_tau + H_Yt_tau_Xt_tau - H_Yt_tau - H_Yt_Yt_tau_Xt_tau;
-      };
-
-      double te_ij = calc_te(i, j);
-      double te_ji = calc_te(j, i);
-      net_te_vals[p] = te_ij - te_ji;
-    }
-  };
-
-  // Launch threads with balanced pair distribution
-  std::vector<std::thread> workers;
-  size_t chunk = (n_pairs + num_threads - 1) / num_threads;
-  for (size_t t = 0; t < num_threads; ++t) {
-    size_t start = t * chunk;
-    size_t end = std::min(start + chunk, n_pairs);
-    if (start < end)
-      workers.emplace_back(worker, start, end);
-  }
-  for (auto &w : workers) {
-    if (w.joinable())
-      w.join();
-  }
-
-  // ── STEP 6: Export Results ─────────────────────────────────────────────────
-  // GC edges
-  std::ofstream gc_out("network_gc_edges.csv");
-  gc_out << "Source,Target,GC\n";
-  for (size_t p = 0; p < n_pairs; ++p) {
-    if (gc_vals[p] > 0.35) {
-      size_t i = pairs[p].first;
-      size_t j = pairs[p].second;
-      gc_out << ca_resname[i] << ca_resnrs[i] << "_" << ca_chain[i] << ","
-             << ca_resname[j] << ca_resnrs[j] << "_" << ca_chain[j] << ","
-             << gc_vals[p] << "\n";
-    }
-  }
-  gc_out.close();
-
-  // TE edges (directed — source is the driver)
-  std::ofstream te_out("network_te_edges.csv");
-  te_out << "Source,Target,Net_TE\n";
-  for (size_t p = 0; p < n_pairs; ++p) {
-    if (std::abs(net_te_vals[p]) > 0.05) {
-      size_t drv, tgt;
-      if (net_te_vals[p] > 0.0) {
-        drv = pairs[p].first;
-        tgt = pairs[p].second;
-      } else {
-        drv = pairs[p].second;
-        tgt = pairs[p].first;
-      }
-      te_out << ca_resname[drv] << ca_resnrs[drv] << "_" << ca_chain[drv] << ","
-             << ca_resname[tgt] << ca_resnrs[tgt] << "_" << ca_chain[tgt] << ","
-             << std::abs(net_te_vals[p]) << "\n";
-    }
-  }
-  te_out.close();
+void DCCMNetwork::calculate_allostery_information(
+    size_t num_threads, const AllosteryConfig &cfg) {
+  last_allostery_candidate_pairs_ = 0;
+  last_allostery_dense_pairs_ = 0;
+  const int resolved_bin_count =
+      resolve_allostery_bin_count(total_frames, cfg.num_bins);
+  const auto dispatch_node_labels =
+      build_allostery_node_labels(ca_resname, ca_resnrs, ca_chain);
+  last_allostery_candidate_pairs_ =
+      calculate_allostery_information_flat_impl<std::uint32_t>(
+          traj_x, traj_y, traj_z, dispatch_node_labels, total_frames,
+          num_threads, cfg, resolved_bin_count, &last_allostery_dense_pairs_);
 }
 
 void DCCMNetwork::calculate_allostery_information_optimized(
     size_t num_threads, int tau_lag, int num_bins) {
-  if (total_frames == 0 || ca_indices.empty())
-    return;
-  const size_t num_ca = ca_indices.size();
-  const size_t tau = static_cast<size_t>(std::max(1, tau_lag));
-  if (tau >= total_frames) {
-    std::cerr << "[Allostery] tau_lag (" << tau << ") >= total_frames ("
-              << total_frames << "). Skipping.\n";
-    return;
-  }
-
-  int B = num_bins;
-  if (B <= 0)
-    B = std::max(8, static_cast<int>(std::cbrt(total_frames / 5.0)));
-  const size_t B_sz = static_cast<size_t>(B);
-  using BinType = std::uint16_t;
-  if (B_sz > static_cast<size_t>(std::numeric_limits<BinType>::max())) {
-    TitanUI::print_warning(
-        "Allostery bin count exceeds uint16_t range. Falling back to legacy kernel.");
-    calculate_allostery_information(num_threads, tau_lag, num_bins);
-    return;
-  }
-
-  std::vector<double> mean_x(num_ca, 0.0), mean_y(num_ca, 0.0),
-      mean_z(num_ca, 0.0);
-  for (size_t f = 0; f < total_frames; ++f) {
-    for (size_t a = 0; a < num_ca; ++a) {
-      mean_x[a] += traj_x[f][a];
-      mean_y[a] += traj_y[f][a];
-      mean_z[a] += traj_z[f][a];
-    }
-  }
-  const double inv_f = 1.0 / static_cast<double>(total_frames);
-  for (size_t a = 0; a < num_ca; ++a) {
-    mean_x[a] *= inv_f;
-    mean_y[a] *= inv_f;
-    mean_z[a] *= inv_f;
-  }
-
-  std::vector<AlignedVector<BinType>> proj_bins(num_ca);
-  for (size_t a = 0; a < num_ca; ++a)
-    proj_bins[a].resize(total_frames);
-  std::vector<double> H1(num_ca, 0.0);
-  std::vector<double> H_past(num_ca, 0.0);
-  std::vector<double> H_auto(num_ca, 0.0);
-  const double norm1_full =
-      0.5 * static_cast<double>(B) + static_cast<double>(total_frames);
-  const double norm1_tau =
-      0.5 * static_cast<double>(B) +
-      static_cast<double>(total_frames - tau);
-  const double norm2_full =
-      0.5 * static_cast<double>(B_sz * B_sz) +
-      static_cast<double>(total_frames);
-  const double norm2_tau =
-      0.5 * static_cast<double>(B_sz * B_sz) +
-      static_cast<double>(total_frames - tau);
-  const double norm3_tau =
-      0.5 * static_cast<double>(B_sz * B_sz * B_sz) +
-      static_cast<double>(total_frames - tau);
-
-  auto entropy_from_hist = [](const std::vector<double> &hist,
-                              double norm) -> double {
-    double H = 0.0;
-    for (double count : hist) {
-      const double p = count / norm;
-      if (p > 0.0)
-        H -= p * std::log(p);
-    }
-    return H;
-  };
-
-  {
-    const size_t atom_worker_count = std::max<size_t>(1, num_threads);
-    std::vector<std::jthread> atom_workers;
-    atom_workers.reserve(atom_worker_count);
-    const size_t atoms_per_worker =
-        (num_ca + atom_worker_count - 1) / atom_worker_count;
-    for (size_t t = 0; t < atom_worker_count; ++t) {
-      const size_t a_begin = t * atoms_per_worker;
-      const size_t a_end = std::min(a_begin + atoms_per_worker, num_ca);
-      if (a_begin >= a_end)
-        continue;
-      atom_workers.emplace_back([&, a_begin, a_end]() {
-        AlignedDoubleVector atom_proj(total_frames, 0.0);
-        std::vector<double> hist1(B_sz, 0.0);
-        std::vector<double> hist2(B_sz * B_sz, 0.0);
-        for (size_t a = a_begin; a < a_end; ++a) {
-          double c_xx = 0.0, c_xy = 0.0, c_xz = 0.0;
-          double c_yy = 0.0, c_yz = 0.0, c_zz = 0.0;
-          const double avg_x = mean_x[a];
-          const double avg_y = mean_y[a];
-          const double avg_z = mean_z[a];
-          for (size_t f = 0; f < total_frames; ++f) {
-            const double dx = traj_x[f][a] - avg_x;
-            const double dy = traj_y[f][a] - avg_y;
-            const double dz = traj_z[f][a] - avg_z;
-            c_xx += dx * dx;
-            c_xy += dx * dy;
-            c_xz += dx * dz;
-            c_yy += dy * dy;
-            c_yz += dy * dz;
-            c_zz += dz * dz;
-          }
-
-          Eigen::Matrix3d cov3;
-          cov3 << c_xx, c_xy, c_xz, c_xy, c_yy, c_yz, c_xz, c_yz, c_zz;
-          cov3 /= static_cast<double>(total_frames);
-
-          Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(cov3);
-          const Eigen::Vector3d e1 = es.eigenvectors().col(2);
-          const double ex = e1(0);
-          const double ey = e1(1);
-          const double ez = e1(2);
-
-          double p_min = std::numeric_limits<double>::max();
-          double p_max = std::numeric_limits<double>::lowest();
-          for (size_t f = 0; f < total_frames; ++f) {
-            const double proj_val = (traj_x[f][a] - avg_x) * ex +
-                                    (traj_y[f][a] - avg_y) * ey +
-                                    (traj_z[f][a] - avg_z) * ez;
-            atom_proj[f] = proj_val;
-            p_min = std::min(p_min, proj_val);
-            p_max = std::max(p_max, proj_val);
-          }
-
-          double p_range = p_max - p_min;
-          if (p_range < 1e-15)
-            p_range = 1e-15;
-
-          auto &bins = proj_bins[a];
-          std::fill(hist1.begin(), hist1.end(), 0.5);
-          for (size_t f = 0; f < total_frames; ++f) {
-            const double scaled = (atom_proj[f] - p_min) / p_range;
-            int bin = static_cast<int>(scaled * static_cast<double>(B));
-            if (bin < 0)
-              bin = 0;
-            else if (bin >= B)
-              bin = B - 1;
-            bins[f] = static_cast<BinType>(bin);
-            hist1[static_cast<size_t>(bins[f])] += 1.0;
-          }
-          H1[a] = entropy_from_hist(hist1, norm1_full);
-
-          std::fill(hist1.begin(), hist1.end(), 0.5);
-          for (size_t f = tau; f < total_frames; ++f)
-            hist1[static_cast<size_t>(bins[f - tau])] += 1.0;
-          H_past[a] = entropy_from_hist(hist1, norm1_tau);
-
-          std::fill(hist2.begin(), hist2.end(), 0.5);
-          for (size_t f = tau; f < total_frames; ++f) {
-            const size_t b_now = static_cast<size_t>(bins[f]);
-            const size_t b_past = static_cast<size_t>(bins[f - tau]);
-            hist2[b_now * B_sz + b_past] += 1.0;
-          }
-          H_auto[a] = entropy_from_hist(hist2, norm2_tau);
-        }
-      });
-    }
-  }
-
-  std::vector<std::pair<size_t, size_t>> pairs;
-  pairs.reserve(num_ca * (num_ca - 1) / 2);
-  for (size_t i = 0; i < num_ca; ++i)
-    for (size_t j = i + 1; j < num_ca; ++j)
-      pairs.emplace_back(i, j);
-
-  const size_t n_pairs = pairs.size();
-  std::vector<double> gc_vals(n_pairs, 0.0);
-  std::vector<double> net_te_vals(n_pairs, 0.0);
-
-  auto worker = [&](size_t p_start, size_t p_end) {
-    std::vector<double> hist2d(B_sz * B_sz, 0.0);
-    std::vector<double> hist2d_b(B_sz * B_sz, 0.0);
-    std::vector<double> hist3d(B_sz * B_sz * B_sz, 0.0);
-
-    for (size_t p = p_start; p < p_end; ++p) {
-      const size_t i = pairs[p].first;
-      const size_t j = pairs[p].second;
-      const auto &bins_i = proj_bins[i];
-      const auto &bins_j = proj_bins[j];
-
-      std::fill(hist2d.begin(), hist2d.end(), 0.5);
-      std::fill(hist2d_b.begin(), hist2d_b.end(), 0.5);
-      for (size_t f = 0; f < total_frames; ++f) {
-        const size_t bi = static_cast<size_t>(bins_i[f]);
-        const size_t bj = static_cast<size_t>(bins_j[f]);
-        hist2d[bi * B_sz + bj] += 1.0;
-        if (f >= tau) {
-          const size_t bi_past = static_cast<size_t>(bins_i[f - tau]);
-          const size_t bj_past = static_cast<size_t>(bins_j[f - tau]);
-          hist2d_b[bi_past * B_sz + bj_past] += 1.0;
-        }
-      }
-
-      const double H_ij = entropy_from_hist(hist2d, norm2_full);
-      const double H_past_ij = entropy_from_hist(hist2d_b, norm2_tau);
-      double MI = H1[i] + H1[j] - H_ij;
-      if (MI < 0.0)
-        MI = 0.0;
-      gc_vals[p] = std::sqrt(1.0 - std::exp(-2.0 * MI));
-
-      auto calc_h3 = [&](const auto &src_bins, const auto &dst_bins) -> double {
-        std::fill(hist3d.begin(), hist3d.end(), 0.5);
-        for (size_t f = tau; f < total_frames; ++f) {
-          const size_t b1 = static_cast<size_t>(dst_bins[f]);
-          const size_t b2 = static_cast<size_t>(dst_bins[f - tau]);
-          const size_t b3 = static_cast<size_t>(src_bins[f - tau]);
-          hist3d[(b1 * B_sz + b2) * B_sz + b3] += 1.0;
-        }
-        return entropy_from_hist(hist3d, norm3_tau);
-      };
-
-      const double H3_j_from_i = calc_h3(bins_i, bins_j);
-      const double H3_i_from_j = calc_h3(bins_j, bins_i);
-      const double te_ij = H_auto[j] + H_past_ij - H_past[j] - H3_j_from_i;
-      const double te_ji = H_auto[i] + H_past_ij - H_past[i] - H3_i_from_j;
-      net_te_vals[p] = te_ij - te_ji;
-    }
-  };
-
-  const size_t worker_count = std::max<size_t>(1, num_threads);
-  {
-    std::vector<std::jthread> workers;
-    workers.reserve(worker_count);
-    const size_t chunk = (n_pairs + worker_count - 1) / worker_count;
-    for (size_t t = 0; t < worker_count; ++t) {
-      const size_t start = t * chunk;
-      const size_t end = std::min(start + chunk, n_pairs);
-      if (start < end)
-        workers.emplace_back(worker, start, end);
-    }
-  }
-
-  std::vector<std::string> node_labels(num_ca);
-  for (size_t i = 0; i < num_ca; ++i)
-    node_labels[i] =
-        ca_resname[i] + std::to_string(ca_resnrs[i]) + "_" + ca_chain[i];
-
-  std::ofstream gc_out("network_gc_edges.csv");
-  gc_out << "Source,Target,GC\n";
-  for (size_t p = 0; p < n_pairs; ++p) {
-    if (gc_vals[p] > 0.35) {
-      const size_t i = pairs[p].first;
-      const size_t j = pairs[p].second;
-      gc_out << node_labels[i] << "," << node_labels[j] << "," << gc_vals[p]
-             << "\n";
-    }
-  }
-  gc_out.close();
-
-  std::ofstream te_out("network_te_edges.csv");
-  te_out << "Source,Target,Net_TE\n";
-  for (size_t p = 0; p < n_pairs; ++p) {
-    if (std::abs(net_te_vals[p]) > 0.05) {
-      size_t drv = pairs[p].first;
-      size_t tgt = pairs[p].second;
-      if (net_te_vals[p] <= 0.0)
-        std::swap(drv, tgt);
-      te_out << node_labels[drv] << "," << node_labels[tgt] << ","
-             << std::abs(net_te_vals[p]) << "\n";
-    }
-  }
-  te_out.close();
+  AllosteryConfig cfg;
+  cfg.tau_lag = tau_lag;
+  cfg.num_bins = num_bins;
+  calculate_allostery_information_optimized(num_threads, cfg);
 }
 
+void DCCMNetwork::calculate_allostery_information_optimized(
+    size_t num_threads, const AllosteryConfig &cfg) {
+  last_allostery_candidate_pairs_ = 0;
+  last_allostery_dense_pairs_ = 0;
+  const int resolved_bin_count =
+      resolve_allostery_bin_count(total_frames, cfg.num_bins);
+  const auto dispatch_node_labels =
+      build_allostery_node_labels(ca_resname, ca_resnrs, ca_chain);
+  const size_t resolved_bin_count_sz =
+      static_cast<size_t>(resolved_bin_count);
+  if (resolved_bin_count_sz <=
+      static_cast<size_t>(std::numeric_limits<std::uint8_t>::max())) {
+    last_allostery_candidate_pairs_ =
+        calculate_allostery_information_flat_impl<std::uint8_t>(
+            traj_x, traj_y, traj_z, dispatch_node_labels, total_frames,
+            num_threads, cfg, resolved_bin_count,
+            &last_allostery_dense_pairs_);
+  } else if (resolved_bin_count_sz <=
+             static_cast<size_t>(std::numeric_limits<std::uint16_t>::max())) {
+    last_allostery_candidate_pairs_ =
+        calculate_allostery_information_flat_impl<std::uint16_t>(
+            traj_x, traj_y, traj_z, dispatch_node_labels, total_frames,
+            num_threads, cfg, resolved_bin_count,
+            &last_allostery_dense_pairs_);
+  } else {
+    last_allostery_candidate_pairs_ =
+        calculate_allostery_information_flat_impl<std::uint32_t>(
+            traj_x, traj_y, traj_z, dispatch_node_labels, total_frames,
+            num_threads, cfg, resolved_bin_count,
+            &last_allostery_dense_pairs_);
+  }
+}
 // =============================================================================
 // LSP-MD: Local Spatial Pattern (Kornev, JCTC 2025, 21, 8699)
 // =============================================================================
@@ -1097,21 +1188,24 @@ void DCCMNetwork::calculate_allostery_information_optimized(
 // ── Brandes weighted betweenness centrality (Dijkstra variant) ────────────────
 namespace {
 void brandes_weighted_bc(
-    size_t n,
-    const std::vector<std::vector<std::pair<size_t, double>>> &adj,
+    const titan_sparse::WeightedCSRGraph<double> &graph,
     std::vector<double> &bc_out,
     size_t num_threads = 1) {
+  const size_t n = static_cast<size_t>(graph.node_count());
+  const size_t worker_count = std::max<size_t>(1, num_threads);
   bc_out.assign(n, 0.0);
 
   // Per-thread partial sums (avoids false sharing / contention)
-  std::vector<std::vector<double>> partial(num_threads,
-                                           std::vector<double>(n, 0.0));
+  FlatAlignedMatrix partial(worker_count, n, 0.0);
 
   auto worker = [&](size_t t, size_t s_start, size_t s_end) {
-    auto &bc_local = partial[t];
+    double *bc_local = partial.row_data(t);
     // Allocate once per thread, reuse across source iterations
     std::vector<double> dist(n), sigma(n), delta(n);
     std::vector<std::vector<size_t>> pred(n);
+    for (size_t node = 0; node < n; ++node)
+      pred[node].reserve(
+          static_cast<size_t>(std::max(1, graph.degree(static_cast<int>(node)))));
     std::vector<size_t> order;
     order.reserve(n);
 
@@ -1136,7 +1230,11 @@ void brandes_weighted_bc(
         if (d_u > dist[u])
           continue;
         order.push_back(u);
-        for (auto &[v, w] : adj[u]) {
+        for (int edge_idx = graph.row_begin(static_cast<int>(u));
+             edge_idx < graph.row_end(static_cast<int>(u)); ++edge_idx) {
+          const size_t v =
+              static_cast<size_t>(graph.col_index(edge_idx));
+          const double w = graph.value(edge_idx);
           double alt = dist[u] + w;
           if (alt < dist[v] - 1e-12) {
             dist[v] = alt;
@@ -1166,22 +1264,23 @@ void brandes_weighted_bc(
   };
 
   // Distribute source nodes across threads
-  std::vector<std::thread> threads;
-  size_t chunk = (n + num_threads - 1) / num_threads;
-  for (size_t t = 0; t < num_threads; ++t) {
-    size_t s = t * chunk;
-    size_t e = std::min(s + chunk, n);
-    if (s < e)
-      threads.emplace_back(worker, t, s, e);
+  {
+    std::vector<std::jthread> threads;
+    size_t chunk = (n + worker_count - 1) / worker_count;
+    for (size_t t = 0; t < worker_count; ++t) {
+      size_t s = t * chunk;
+      size_t e = std::min(s + chunk, n);
+      if (s < e)
+        threads.emplace_back(worker, t, s, e);
+    }
   }
-  for (auto &th : threads)
-    if (th.joinable())
-      th.join();
 
   // Reduce partial sums
-  for (size_t t = 0; t < num_threads; ++t)
+  for (size_t t = 0; t < worker_count; ++t) {
+    const double *partial_row = partial.row_data(t);
     for (size_t i = 0; i < n; ++i)
-      bc_out[i] += partial[t][i];
+      bc_out[i] += partial_row[i];
+  }
 
   // Normalize for undirected graph
   if (n > 2) {
@@ -1218,7 +1317,7 @@ inline void compute_4dist_avx(
 }
 #endif
 
-inline void compute_4dist_scalar(
+[[maybe_unused]] inline void compute_4dist_scalar(
     double cax_i, double cay_i, double caz_i,
     double cbx_i, double cby_i, double cbz_i,
     double cax_j, double cay_j, double caz_j,
@@ -1311,53 +1410,64 @@ void DCCMNetwork::calculate_lspmd(size_t num_threads,
 
   // ── Pre-transpose to atom-major layout [atom][frame] for cache locality ────
   size_t F = total_frames;
-  std::vector<std::vector<double>> ax(num_ca, std::vector<double>(F));
-  std::vector<std::vector<double>> ay(num_ca, std::vector<double>(F));
-  std::vector<std::vector<double>> az(num_ca, std::vector<double>(F));
-  std::vector<std::vector<double>> bx(num_ca, std::vector<double>(F));
-  std::vector<std::vector<double>> by(num_ca, std::vector<double>(F));
-  std::vector<std::vector<double>> bz(num_ca, std::vector<double>(F));
+  FlatAlignedMatrix ax(num_ca, F, 0.0);
+  FlatAlignedMatrix ay(num_ca, F, 0.0);
+  FlatAlignedMatrix az(num_ca, F, 0.0);
+  FlatAlignedMatrix bx(num_ca, F, 0.0);
+  FlatAlignedMatrix by(num_ca, F, 0.0);
+  FlatAlignedMatrix bz(num_ca, F, 0.0);
 
   for (size_t f = 0; f < F; ++f)
     for (size_t a = 0; a < num_ca; ++a) {
-      ax[a][f] = traj_x[f][a];
-      ay[a][f] = traj_y[f][a];
-      az[a][f] = traj_z[f][a];
+      const double x = traj_x[f][a];
+      const double y = traj_y[f][a];
+      const double z = traj_z[f][a];
+      ax(a, f) = x;
+      ay(a, f) = y;
+      az(a, f) = z;
       if (use_cb_cache) {
-        bx[a][f] = traj_cbx[f][a];
-        by[a][f] = traj_cby[f][a];
-        bz[a][f] = traj_cbz[f][a];
+        bx(a, f) = traj_cbx[f][a];
+        by(a, f) = traj_cby[f][a];
+        bz(a, f) = traj_cbz[f][a];
       } else {
-        bx[a][f] = ax[a][f];
-        by[a][f] = ay[a][f];
-        bz[a][f] = az[a][f];
+        bx(a, f) = ax(a, f);
+        by(a, f) = ay(a, f);
+        bz(a, f) = az(a, f);
       }
     }
 
   // ── STEP 1: Build upper-triangle pair list and compute W_ij ────────────────
-  std::vector<std::pair<size_t, size_t>> pairs;
-  pairs.reserve(num_ca * (num_ca - 1) / 2);
-  for (size_t i = 0; i < num_ca; ++i)
-    for (size_t j = i + 1; j < num_ca; ++j)
-      pairs.emplace_back(i, j);
+  std::vector<std::pair<size_t, size_t>> pairs = build_lspmd_candidate_pairs(
+      traj_x, traj_y, traj_z, num_ca, total_frames, cutoff,
+      cfg.use_avg_cutoff);
+  if (pairs.empty()) {
+    result.edges.clear();
+    result.dc.assign(num_ca, 0.0);
+    result.bc.assign(num_ca, 0.0);
+    return;
+  }
 
-  size_t n_pairs = pairs.size();
+  const size_t n_pairs = pairs.size();
   std::vector<double> W_vals(n_pairs,
       std::numeric_limits<double>::quiet_NaN());
 
   auto worker = [&](size_t p_start, size_t p_end) {
+    AlignedDoubleVector d1v(F, 0.0), d2v(F, 0.0), d3v(F, 0.0), d4v(F, 0.0);
     for (size_t p = p_start; p < p_end; ++p) {
       size_t i = pairs[p].first;
       size_t j = pairs[p].second;
 
       // Pointers into transposed arrays — sequential access in inner loop
-      const double *axi = ax[i].data(), *ayi = ay[i].data(), *azi = az[i].data();
-      const double *bxi = bx[i].data(), *byi = by[i].data(), *bzi = bz[i].data();
-      const double *axj = ax[j].data(), *ayj = ay[j].data(), *azj = az[j].data();
-      const double *bxj = bx[j].data(), *byj = by[j].data(), *bzj = bz[j].data();
+      const double *axi = ax.row_data(i), *ayi = ay.row_data(i),
+                   *azi = az.row_data(i);
+      const double *bxi = bx.row_data(i), *byi = by.row_data(i),
+                   *bzi = bz.row_data(i);
+      const double *axj = ax.row_data(j), *ayj = ay.row_data(j),
+                   *azj = az.row_data(j);
+      const double *bxj = bx.row_data(j), *byj = by.row_data(j),
+                   *bzj = bz.row_data(j);
 
       // ── Single pass: compute distances + cache for deviation ──
-      std::vector<double> d1v(F), d2v(F), d3v(F), d4v(F);
       double sum_d1 = 0.0, sum_d2 = 0.0, sum_d3 = 0.0, sum_d4 = 0.0;
       for (size_t f = 0; f < F; ++f) {
 #ifdef __AVX__
@@ -1380,16 +1490,8 @@ void DCCMNetwork::calculate_lspmd(size_t num_threads,
       double avg_d4 = sum_d4 * inv_f;
 
       // ── Cutoff check ──
-      if (cfg.use_avg_cutoff) {
-        if (avg_d1 > cutoff)
-          continue;
-      } else {
-        double dx0 = ax[i][0] - ax[j][0];
-        double dy0 = ay[i][0] - ay[j][0];
-        double dz0 = az[i][0] - az[j][0];
-        if (std::sqrt(dx0 * dx0 + dy0 * dy0 + dz0 * dz0) > cutoff)
-          continue;
-      }
+      if (cfg.use_avg_cutoff && avg_d1 > cutoff)
+        continue;
 
       // ── Reuse cached distances for deviation ──
       double sum_Z2 = 0.0;
@@ -1407,8 +1509,9 @@ void DCCMNetwork::calculate_lspmd(size_t num_threads,
   // ── Launch multithreaded pair computation ──
   {
     std::vector<std::jthread> workers;
-    size_t chunk = (n_pairs + num_threads - 1) / num_threads;
-    for (size_t t = 0; t < num_threads; ++t) {
+    const size_t worker_count = std::max<size_t>(1, num_threads);
+    size_t chunk = (n_pairs + worker_count - 1) / worker_count;
+    for (size_t t = 0; t < worker_count; ++t) {
       size_t start = t * chunk;
       size_t end = std::min(start + chunk, n_pairs);
       if (start < end)
@@ -1427,6 +1530,15 @@ void DCCMNetwork::calculate_lspmd(size_t num_threads,
   }
 
   // ── STEP 2: Degree Centrality ──────────────────────────────────────────────
+  std::sort(result.edges.begin(), result.edges.end(),
+            [](const auto &lhs, const auto &rhs) {
+              if (std::get<0>(lhs) != std::get<0>(rhs))
+                return std::get<0>(lhs) < std::get<0>(rhs);
+              if (std::get<1>(lhs) != std::get<1>(rhs))
+                return std::get<1>(lhs) < std::get<1>(rhs);
+              return std::get<2>(lhs) > std::get<2>(rhs);
+            });
+
   result.dc.assign(num_ca, 0.0);
   for (auto &[i, j, w] : result.edges) {
     result.dc[i] += w;
@@ -1435,14 +1547,17 @@ void DCCMNetwork::calculate_lspmd(size_t num_threads,
 
   // ── STEP 3: Betweenness Centrality (Brandes + Dijkstra) ────────────────────
   // Build adjacency list with D_ij = -ln(W_ij) as distance
-  std::vector<std::vector<std::pair<size_t, double>>> adj(num_ca);
+  std::vector<std::tuple<int, int, double>> weighted_edges;
+  weighted_edges.reserve(result.edges.size());
   for (auto &[i, j, w] : result.edges) {
-    double d_weight = (w > 1e-15) ? -std::log(w) : 35.0;
-    adj[i].emplace_back(static_cast<size_t>(j), d_weight);
-    adj[j].emplace_back(static_cast<size_t>(i), d_weight);
+    const double d_weight = (w > 1e-15) ? -std::log(w) : 35.0;
+    weighted_edges.emplace_back(i, j, d_weight);
   }
+  const auto weighted_graph =
+      titan_sparse::WeightedCSRGraph<double>::from_undirected_edges(
+          static_cast<int>(num_ca), weighted_edges);
 
-  brandes_weighted_bc(num_ca, adj, result.bc, num_threads);
+  brandes_weighted_bc(weighted_graph, result.bc, num_threads);
 }
 
 void DCCMNetwork::export_lspmd(const LSPMDResult &result,

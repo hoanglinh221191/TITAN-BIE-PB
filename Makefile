@@ -4,6 +4,16 @@
 # Tích hợp Auto Dependency Tracking (.d)
 # ==========================================
 
+PROFILE ?= native
+
+ifeq ($(PROFILE),native)
+    ARCH_FLAGS = -march=native
+else ifeq ($(PROFILE),portable)
+    ARCH_FLAGS = -mavx2 -mfma -mtune=generic
+else
+    $(error Unsupported PROFILE '$(PROFILE)'. Use PROFILE=native or PROFILE=portable)
+endif
+
 ifeq ($(OS),Windows_NT)
     # ─── CẤU HÌNH CHO WINDOWS (CLANG) ───
     CXX  = clang++
@@ -14,8 +24,8 @@ ifeq ($(OS),Windows_NT)
     # Clang Flags: Thêm cờ chặn cảnh báo rác của Clang
     # Force Eigen to use its own aligned allocator on Windows.
     # This avoids AVX-aligned loads/stores from touching only 16-byte-aligned buffers.
-    CXXFLAGS = -I. -Igmxtraj/include -O3 -march=native -fopenmp -pipe -std=c++23 -Wall -Wno-unused-command-line-argument -MMD -MP
-    CFLAGS   = -Igmxtraj/include -O3 -march=native -ffast-math -pipe -w -Wno-incompatible-pointer-types -Wno-unused-command-line-argument -MMD -MP
+    CXXFLAGS = -I. -Igmxtraj/include -O3 $(ARCH_FLAGS) -fopenmp -pipe -std=c++23 -Wall -Wno-unused-command-line-argument -MMD -MP
+    CFLAGS   = -Igmxtraj/include -O3 $(ARCH_FLAGS) -ffast-math -pipe -w -Wno-incompatible-pointer-types -Wno-unused-command-line-argument -MMD -MP
     
     # Ép dùng LLD linker siêu tốc của LLVM
     LDFLAGS = -fuse-ld=lld -static -static-libgcc -static-libstdc++ -fopenmp
@@ -35,8 +45,8 @@ else
     
     # GCC Flags: Chuẩn C++23, loại bỏ các cờ đặc thù của Clang
     # Keep Eigen on its own aligned-allocation path across Linux builds too.
-    CXXFLAGS = -I. -Igmxtraj/include -O3 -march=native -fopenmp -pipe -std=c++23 -Wall -MMD -MP
-    CFLAGS   = -Igmxtraj/include -O3 -march=native -ffast-math -pipe -w -MMD -MP
+    CXXFLAGS = -I. -Igmxtraj/include -O3 $(ARCH_FLAGS) -fopenmp -pipe -std=c++23 -Wall -MMD -MP
+    CFLAGS   = -Igmxtraj/include -O3 $(ARCH_FLAGS) -ffast-math -pipe -w -MMD -MP
     
     # Linker mặc định của GCC (ld)
     LDFLAGS = -static-libgcc -static-libstdc++ -fopenmp
@@ -62,10 +72,12 @@ CDEPS = $(CSRCS:.c=.d)
 # BUILD RULES
 # ==========================================
 
+.PHONY: all clean clean-generated release native portable release-native release-portable print-config
+
 all: $(TARGET)
 
 $(TARGET): $(OBJS) $(COBJS)
-	@echo Linking $(TARGET)...
+	@echo Linking $(TARGET) [$(PROFILE)]...
 	@$(CXX) -o $@ $^ $(LDFLAGS)
 	@echo Build successful!
 
@@ -91,6 +103,27 @@ clean-generated:
 release: CXXFLAGS += $(LTO_FLAG)
 release: LDFLAGS += $(LTO_FLAG)
 release: clean all
+
+native: PROFILE := native
+native: clean all
+
+portable: PROFILE := portable
+portable: clean all
+
+release-native: PROFILE := native
+release-native: release
+
+release-portable: PROFILE := portable
+release-portable: release
+
+print-config:
+	@echo PROFILE=$(PROFILE)
+	@echo CXX=$(CXX)
+	@echo CC=$(CC)
+	@echo ARCH_FLAGS=$(ARCH_FLAGS)
+	@echo CXXFLAGS=$(CXXFLAGS)
+	@echo CFLAGS=$(CFLAGS)
+	@echo LDFLAGS=$(LDFLAGS)
 
 # Nạp cây phụ thuộc (Dependency Tracking)
 -include $(DEPS) $(CDEPS)

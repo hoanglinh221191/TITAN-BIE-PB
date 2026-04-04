@@ -1,5 +1,6 @@
 #pragma once
 
+#include "titan_sparse_graph.h"
 #include "titan_ui.h"
 
 #include <Eigen/Dense>
@@ -10,9 +11,6 @@
 
 class TitanTPT {
 public:
-  using MatrixRM = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
-                                 Eigen::RowMajor>;
-
   struct EdgeFlux {
     int from{-1};
     int to{-1};
@@ -58,8 +56,6 @@ public:
   const Eigen::VectorXd &gross_in_flux() const { return gross_in_flux_; }
   const Eigen::VectorXd &net_out_flux() const { return net_out_flux_; }
   const Eigen::VectorXd &net_in_flux() const { return net_in_flux_; }
-  const MatrixRM &gross_flux() const { return gross_flux_; }
-  const MatrixRM &net_flux() const { return net_flux_; }
   const std::vector<EdgeFlux> &edges() const { return edges_; }
   const std::vector<Pathway> &paths() const { return paths_; }
   const Summary &summary() const { return summary_; }
@@ -82,26 +78,26 @@ public:
   static std::string format_state_list(const std::vector<int> &states);
 
 private:
-  void sanitize_model();
+  void build_sparse_transition_backend(const Eigen::MatrixXd &transition_matrix);
   void validate_basins(const std::vector<int> &source_states,
                        const std::vector<int> &sink_states) const;
   void build_membership_masks();
-  void build_reverse_tpm();
-  void solve_committor_system(const MatrixRM &transition_matrix,
+  void solve_committor_system(const titan_sparse::WeightedCSRGraph<double> &graph,
                               const std::vector<unsigned char> &one_boundary,
                               const std::vector<unsigned char> &zero_boundary,
                               Eigen::VectorXd &out_committor) const;
   void compute_reactive_densities();
-  void compute_flux_matrices(int n_threads);
-  void compress_flux_edges(double noise_floor);
+  double find_transition_probability(int from, int to) const;
+  double compute_gross_flux_value(int from, int to) const;
+  void compute_flux_matrices(int n_threads, double flux_cut);
   void extract_dominant_paths(int top_paths, double flux_cut);
 
   static std::string trim_copy(const std::string &value);
 
   int n_states_{0};
-  MatrixRM tpm_;
-  MatrixRM reverse_tpm_;
   Eigen::VectorXd stationary_dist_;
+  titan_sparse::WeightedCSRGraph<double> tpm_graph_;
+  titan_sparse::WeightedCSRGraph<double> reverse_graph_;
 
   std::vector<int> source_states_;
   std::vector<int> sink_states_;
@@ -115,9 +111,6 @@ private:
   Eigen::VectorXd gross_in_flux_;
   Eigen::VectorXd net_out_flux_;
   Eigen::VectorXd net_in_flux_;
-
-  MatrixRM gross_flux_;
-  MatrixRM net_flux_;
 
   std::vector<EdgeFlux> edges_;
   std::vector<Pathway> paths_;

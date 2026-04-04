@@ -5,6 +5,7 @@
 #include "MOL.h"
 #include "MOL_info.h"
 #include "info.h"
+#include "titan_neighbor_grid.h"
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -102,6 +103,14 @@ public:
 
   // ---- Export --------------------------------------------------------------
   void export_results(const info &info_output, std::fstream &log) const;
+
+#ifdef TITAN_LLPS_TESTING
+  void debug_build_contacts(const std::vector<float> &pos_nm, float bx,
+                            float by, float bz,
+                            std::vector<std::pair<int, int>> &macro_contacts) {
+    build_contacts(pos_nm, bx, by, bz, macro_contacts);
+  }
+#endif
 
   // ---- Accessors -----------------------------------------------------------
   const LLPSResult &result() const { return result_; }
@@ -201,12 +210,11 @@ private:
   mutable std::vector<float> shifted_pos_buf_;
   mutable std::vector<float> rna_nm_buf_;
   mutable std::vector<float> pos_nm_buf_;                 // B1
-  mutable std::vector<int> cell_head_buf_;                // B2
-  mutable std::vector<int> next_atom_buf_;                // B2
   mutable std::vector<std::pair<int, int>> contacts_buf_; // B3
   mutable std::vector<int> degree_buf_;                   // B4
   mutable std::vector<int> gcc_macros_buf_;               // B5
   std::vector<int> sticker_local_idx_; // B7: atom → sticker residue index
+  titan_neighbor::HalfShellGrid contact_grid_;
 
   // ---- Atom-to-chain precomputed map ---------------------------------------
   std::vector<int> atom_chain_;

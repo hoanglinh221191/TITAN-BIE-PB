@@ -1,6 +1,7 @@
 #ifndef TITAN_PCA_H
 #define TITAN_PCA_H
 
+#include "aligned_allocator.h"
 #include "arguments.h"
 #include "info.h"
 #include "titan_kinetics.h"
@@ -11,6 +12,9 @@
 #include <vector>
 
 namespace TitanPCA {
+
+using CoordinateRow = AlignedDoubleVector;
+using CoordinateRows = std::vector<CoordinateRow>;
 
 // Structure representing a single grid bin on the 2D Free Energy Surface
 struct FES_Grid {
@@ -40,8 +44,8 @@ struct ClusterNode {
 // Main API isolated from impl_engine.cpp handling Covariance, FES Histograms &
 // Peak Clustering
 void execute_pca_fes_analysis(
-    const arguments &args,
-    const std::vector<std::vector<std::array<double, 3>>> &ca_traj,
+    const arguments &args, const CoordinateRows &traj_x,
+    const CoordinateRows &traj_y, const CoordinateRows &traj_z,
     const std::vector<std::string> &ca_resname,
     const std::vector<int> &ca_resnrs, const std::vector<std::string> &ca_chain,
     const std::vector<int> &ca_is_lig, info &info_out, std::fstream &log,

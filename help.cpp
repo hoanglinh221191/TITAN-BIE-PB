@@ -223,7 +223,7 @@ IMPORTANT NOTES
     - RMSD is reported for the combined fit set.
     - RMSF is reported separately for molecule 1 and molecule 2 in the same
       RMSF file when both contribute trace atoms.
-    - If no explicit PBC mode is requested, Titan auto-enables -pbcn for
+    - If no explicit PBC mode is requested, Titan auto-enables -pbci 0 for
       RMSD/RMSF and logs that decision.
 
 2.3c LJ Condensation / Cluster Density
@@ -267,7 +267,7 @@ IMPORTANT NOTES
       bulk density, largest-cluster fraction, normalized Rg/Rmax, CN
       statistics, dense-region q4/q6 + q4_bar/q6_bar, solid-like fraction,
       FCC/HCP fractions, and near-core shell enrichments.
-    - If no explicit PBC mode is requested, Titan auto-enables -pbcn for LJ
+    - If no explicit PBC mode is requested, Titan auto-enables -pbci 0 for LJ
       analysis and logs that decision.
 
 2.4 DCCM Network
@@ -318,6 +318,9 @@ IMPORTANT NOTES
   Main inputs:
     -allostery
     optional: -allostery-tau=<N>, -allostery-bins=<N>
+    optional: -allostery-knn=<N>
+    optional: -allostery-cut=<A>, -allostery-cut-mode=<avg|first>
+    optional: -allostery-no-te
 
   Typical outputs:
     network_gc_edges.csv
@@ -653,6 +656,12 @@ IMPORTANT NOTES
   titan.exe -s reference.pdb -traj md.xtc -allostery \
       -allostery-tau=10 -allostery-bins=48
 
+  titan.exe -s reference.pdb -traj md.xtc -allostery \
+      -allostery-cut=12 -allostery-cut-mode=avg -allostery-no-te
+
+  titan.exe -s reference.pdb -traj md.xtc -allostery \
+      -allostery-cut=12 -allostery-knn=4
+
 3.7 TICA + MSM workflow
 
   titan.exe -s reference.pdb -i input.txt -tica -tica-lag=10 \
@@ -788,8 +797,8 @@ IMPORTANT NOTES
 
   -a <file>             Read arguments from file. Default: arg.in
 
-  -opdb [name.pdb]      Write output PDB.
-  -opdbsep [name.pdb]   Write per-trajectory/separated output PDB.
+  -opdb=<name.pdb>      Write output PDB.
+  -opdbsep=<name.pdb>   Write per-trajectory/separated output PDB.
 
   -n <file>             Index file. Default: index.ndx
 
@@ -867,6 +876,7 @@ IMPORTANT NOTES
   -pbci3 <chain_ref>    Most aggressive internal-reference PBC
   -pbca <chain_ref>     Aggressive PBC mode
   -pbcn                 FixBox-style PBC mode
+  -pbctopo              pbctopo (VIBE): Virtual Intact Block Extraction PBC mode
   -pbcclust <axes>      Clustered PBC mode; axes like x, xy, xyz
   -pbcm [chain_ref]     Membrane-oriented PBC mode
   -refpbc <file>        Separate reference PDB for PBC correction
@@ -883,6 +893,11 @@ IMPORTANT NOTES
   -allostery            GC + Transfer Entropy analysis
   -allostery-tau=<N>    TE lag in frames. Default: 5
   -allostery-bins=<N>   Histogram bins. Default: auto (-1)
+  -allostery-knn=<N>    Keep top-N frame-voted nearest partners per residue. Default: 0
+  -allostery-cut=<A>    Distance-prune candidate residue pairs. Default: off
+  -allostery-cut-mode=<avg|first>
+                        avg scans all stored frames; first only frame 0 for pruning
+  -allostery-no-te      Skip Transfer Entropy stage and emit header-only TE CSV
 
   -tica                 TICA analysis
   -tica-lag=<N>         TICA lag. Default: 10
@@ -980,7 +995,7 @@ IMPORTANT NOTES
 
   -lj                   LJ condensation / cluster-density analysis
                         Uses all atoms of molecule 1
-                        If no PBC mode is set, Titan auto-enables -pbcn
+                        If no PBC mode is set, Titan auto-enables -pbci 0
   -lj-cut <val>         Cluster cutoff in Angstrom. Default: 5.0
   -lj-min-cluster <N>   Minimum size counted as a cluster. Default: 2
   -lj-rho-bin <val>     rho(r) bin width in Angstrom. Default: 1.0
@@ -994,7 +1009,7 @@ IMPORTANT NOTES
                         Atomistic RNA/DNA uses C4' (fallback C4*)
                         MARTINI uses BB (fallback BB2)
                         In -nocal mode, only molecule 1 is analyzed
-                        If no PBC mode is set, Titan auto-enables -pbcn
+                        If no PBC mode is set, Titan auto-enables -pbci 0
   -rmsd                 Alias for -rms
   -rmsf                 Alias for -rms
 

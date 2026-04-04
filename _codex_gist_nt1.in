@@ -1,2 +1,0 @@
--s=C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\example\6_xtc\md1_snap0.pdb -ff=charmm36 -g=2-21 -common_topo=C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\example\6_xtc\topol.top -traj=C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\example\6_xtc\md1_1_mini.xtc -dt=400 -e=1200 -n=C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\example\6_xtc\index1.ndx -n_wat=20 -pbcn -eu=kcal/mol -gbsa -gist --gist-resolution=0.5 --gist-padding=8.0 --gist-temperature=300 --gist-water-model=TIP3P --gist-min-count=1 --gist-cutoff=9.0
--nt=1

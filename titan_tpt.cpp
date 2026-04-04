@@ -1,12 +1,12 @@
 #include "titan_tpt.h"
 
 #include <algorithm>
+#include <Eigen/Sparse>
+#include <Eigen/SparseLU>
 #include <cmath>
-#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <iomanip>
-#include <immintrin.h>
 #include <limits>
 #include <numeric>
 #include <queue>
@@ -18,6 +18,8 @@ namespace {
 
 constexpr double kTptEps = 1e-14;
 constexpr double kNoiseGuardScale = 1e-12;
+
+using SparseMatrixCM = Eigen::SparseMatrix<double, Eigen::ColMajor, int>;
 
 template <typename T> T clamp01(T value) {
   return std::clamp(value, static_cast<T>(0), static_cast<T>(1));
@@ -33,30 +35,11 @@ std::string join_nodes(const std::vector<int> &nodes) {
   return oss.str();
 }
 
-#ifdef __AVX2__
-void gross_flux_row_avx2(const double *row_p, const double *q_forward,
-                         double prefactor, double *row_out, int n_states) {
-  const __m256d factor = _mm256_set1_pd(prefactor);
-  int j = 0;
-  for (; j + 4 <= n_states; j += 4) {
-    const __m256d p = _mm256_loadu_pd(row_p + j);
-    const __m256d q = _mm256_loadu_pd(q_forward + j);
-    const __m256d fq = _mm256_mul_pd(_mm256_mul_pd(p, q), factor);
-    _mm256_storeu_pd(row_out + j, fq);
-  }
-  for (; j < n_states; ++j) {
-    row_out[j] = prefactor * row_p[j] * q_forward[j];
-  }
-}
-#endif
-
 } // namespace
 
 TitanTPT::TitanTPT(const Eigen::MatrixXd &tpm,
                    const Eigen::VectorXd &stationary_dist)
     : n_states_(static_cast<int>(tpm.rows())),
-      tpm_(tpm.rows(), tpm.cols()),
-      reverse_tpm_(tpm.rows(), tpm.cols()),
       stationary_dist_(stationary_dist),
       q_forward_(Eigen::VectorXd::Zero(tpm.rows())),
       q_backward_(Eigen::VectorXd::Zero(tpm.rows())),
@@ -64,9 +47,7 @@ TitanTPT::TitanTPT(const Eigen::MatrixXd &tpm,
       gross_out_flux_(Eigen::VectorXd::Zero(tpm.rows())),
       gross_in_flux_(Eigen::VectorXd::Zero(tpm.rows())),
       net_out_flux_(Eigen::VectorXd::Zero(tpm.rows())),
-      net_in_flux_(Eigen::VectorXd::Zero(tpm.rows())),
-      gross_flux_(tpm.rows(), tpm.cols()),
-      net_flux_(tpm.rows(), tpm.cols()) {
+      net_in_flux_(Eigen::VectorXd::Zero(tpm.rows())) {
   if (tpm.rows() != tpm.cols()) {
     throw std::invalid_argument("TPT: transition matrix must be square");
   }
@@ -75,8 +56,7 @@ TitanTPT::TitanTPT(const Eigen::MatrixXd &tpm,
         "TPT: stationary distribution size does not match TPM");
   }
 
-  tpm_ = tpm;
-  sanitize_model();
+  build_sparse_transition_backend(tpm);
 }
 
 std::string TitanTPT::trim_copy(const std::string &value) {
@@ -202,24 +182,8 @@ std::string TitanTPT::format_state_list(const std::vector<int> &states) {
   return oss.str();
 }
 
-void TitanTPT::sanitize_model() {
-  for (int i = 0; i < n_states_; ++i) {
-    double row_sum = 0.0;
-    for (int j = 0; j < n_states_; ++j) {
-      double value = tpm_(i, j);
-      if (!std::isfinite(value) || value < 0.0)
-        value = 0.0;
-      tpm_(i, j) = value;
-      row_sum += value;
-    }
-    if (row_sum <= kTptEps) {
-      tpm_.row(i).setZero();
-      tpm_(i, i) = 1.0;
-      continue;
-    }
-    tpm_.row(i) /= row_sum;
-  }
-
+void TitanTPT::build_sparse_transition_backend(
+    const Eigen::MatrixXd &transition_matrix) {
   for (int i = 0; i < stationary_dist_.size(); ++i) {
     const double value = stationary_dist_[i];
     stationary_dist_[i] = (std::isfinite(value) && value > 0.0) ? value : 0.0;
@@ -230,6 +194,114 @@ void TitanTPT::sanitize_model() {
   } else {
     stationary_dist_ /= pi_sum;
   }
+
+  std::vector<int> tpm_row_offsets(static_cast<size_t>(n_states_) + 1, 0);
+  std::vector<int> tpm_col_indices;
+  std::vector<double> tpm_values;
+
+  for (int i = 0; i < n_states_; ++i) {
+    tpm_row_offsets[static_cast<size_t>(i)] =
+        static_cast<int>(tpm_col_indices.size());
+
+    double row_sum = 0.0;
+    std::vector<int> row_cols;
+    std::vector<double> row_values;
+    row_cols.reserve(static_cast<size_t>(n_states_));
+    row_values.reserve(static_cast<size_t>(n_states_));
+
+    for (int j = 0; j < n_states_; ++j) {
+      double value = transition_matrix(i, j);
+      if (!std::isfinite(value) || value < 0.0)
+        value = 0.0;
+      if (value <= 0.0)
+        continue;
+      row_cols.push_back(j);
+      row_values.push_back(value);
+      row_sum += value;
+    }
+
+    if (row_sum <= 0.0) {
+      tpm_col_indices.push_back(i);
+      tpm_values.push_back(1.0);
+      continue;
+    }
+
+    for (size_t idx = 0; idx < row_cols.size(); ++idx) {
+      tpm_col_indices.push_back(row_cols[idx]);
+      tpm_values.push_back(row_values[idx] / row_sum);
+    }
+  }
+  tpm_row_offsets[static_cast<size_t>(n_states_)] =
+      static_cast<int>(tpm_col_indices.size());
+  tpm_graph_.assign(n_states_, std::move(tpm_row_offsets),
+                    std::move(tpm_col_indices), std::move(tpm_values));
+
+  std::vector<int> reverse_counts(static_cast<size_t>(n_states_), 0);
+  std::vector<double> reverse_row_sums(static_cast<size_t>(n_states_), 0.0);
+  for (int from = 0; from < n_states_; ++from) {
+    for (int edge_idx = tpm_graph_.row_begin(from);
+         edge_idx < tpm_graph_.row_end(from);
+         ++edge_idx) {
+      const int to = tpm_graph_.col_index(edge_idx);
+      const double pi_to = stationary_dist_[to];
+      if (pi_to <= 0.0)
+        continue;
+      const double raw =
+          (stationary_dist_[from] * tpm_graph_.value(edge_idx)) / pi_to;
+      if (!std::isfinite(raw) || raw <= 0.0)
+        continue;
+      ++reverse_counts[static_cast<size_t>(to)];
+      reverse_row_sums[static_cast<size_t>(to)] += raw;
+    }
+  }
+
+  std::vector<int> reverse_row_offsets(static_cast<size_t>(n_states_) + 1, 0);
+  for (int i = 0; i < n_states_; ++i) {
+    const bool use_self_loop =
+        reverse_row_sums[static_cast<size_t>(i)] <= 0.0;
+    reverse_row_offsets[static_cast<size_t>(i + 1)] =
+        reverse_row_offsets[static_cast<size_t>(i)] +
+        (use_self_loop ? 1 : reverse_counts[static_cast<size_t>(i)]);
+  }
+
+  std::vector<int> reverse_col_indices(
+      static_cast<size_t>(reverse_row_offsets[static_cast<size_t>(n_states_)]),
+      0);
+  std::vector<double> reverse_values(reverse_col_indices.size(), 0.0);
+  std::vector<int> reverse_write = reverse_row_offsets;
+
+  for (int i = 0; i < n_states_; ++i) {
+    if (reverse_row_sums[static_cast<size_t>(i)] <= kTptEps) {
+      const int pos = reverse_write[static_cast<size_t>(i)]++;
+      reverse_col_indices[static_cast<size_t>(pos)] = i;
+      reverse_values[static_cast<size_t>(pos)] = 1.0;
+    }
+  }
+
+  for (int from = 0; from < n_states_; ++from) {
+    for (int edge_idx = tpm_graph_.row_begin(from);
+         edge_idx < tpm_graph_.row_end(from);
+         ++edge_idx) {
+      const int to = tpm_graph_.col_index(edge_idx);
+      const double row_sum = reverse_row_sums[static_cast<size_t>(to)];
+      if (row_sum <= 0.0)
+        continue;
+      const double pi_to = stationary_dist_[to];
+      if (pi_to <= 0.0)
+        continue;
+      const double raw =
+          (stationary_dist_[from] * tpm_graph_.value(edge_idx)) / pi_to;
+      if (!std::isfinite(raw) || raw <= 0.0)
+        continue;
+      const int pos = reverse_write[static_cast<size_t>(to)]++;
+      reverse_col_indices[static_cast<size_t>(pos)] = from;
+      reverse_values[static_cast<size_t>(pos)] = raw / row_sum;
+    }
+  }
+
+  reverse_graph_.assign(n_states_, std::move(reverse_row_offsets),
+                        std::move(reverse_col_indices),
+                        std::move(reverse_values));
 }
 
 void TitanTPT::validate_basins(const std::vector<int> &source_states,
@@ -268,39 +340,8 @@ void TitanTPT::build_membership_masks() {
   }
 }
 
-void TitanTPT::build_reverse_tpm() {
-  reverse_tpm_.setZero();
-  for (int i = 0; i < n_states_; ++i) {
-    const double pi_i = stationary_dist_[i];
-    if (pi_i <= kTptEps) {
-      reverse_tpm_(i, i) = 1.0;
-      continue;
-    }
-
-    double row_sum = 0.0;
-    for (int j = 0; j < n_states_; ++j) {
-      const double pi_j = stationary_dist_[j];
-      double value = 0.0;
-      if (pi_j > kTptEps) {
-        value = (pi_j * tpm_(j, i)) / pi_i;
-      }
-      if (!std::isfinite(value) || value < 0.0)
-        value = 0.0;
-      reverse_tpm_(i, j) = value;
-      row_sum += value;
-    }
-
-    if (row_sum <= kTptEps) {
-      reverse_tpm_.row(i).setZero();
-      reverse_tpm_(i, i) = 1.0;
-    } else {
-      reverse_tpm_.row(i) /= row_sum;
-    }
-  }
-}
-
 void TitanTPT::solve_committor_system(
-    const MatrixRM &transition_matrix,
+    const titan_sparse::WeightedCSRGraph<double> &graph,
     const std::vector<unsigned char> &one_boundary,
     const std::vector<unsigned char> &zero_boundary,
     Eigen::VectorXd &out_committor) const {
@@ -319,28 +360,96 @@ void TitanTPT::solve_committor_system(
     return;
 
   const int n_mid = static_cast<int>(intermediate_states.size());
-  Eigen::MatrixXd lhs = Eigen::MatrixXd::Zero(n_mid, n_mid);
   Eigen::VectorXd rhs = Eigen::VectorXd::Zero(n_mid);
+  std::vector<int> state_to_mid(static_cast<size_t>(n_states_), -1);
+  for (int row = 0; row < n_mid; ++row) {
+    state_to_mid[static_cast<size_t>(intermediate_states[static_cast<size_t>(row)])] =
+        row;
+  }
+
+  auto solve_dense_fallback = [&]() {
+    Eigen::MatrixXd lhs = Eigen::MatrixXd::Zero(n_mid, n_mid);
+    for (int row = 0; row < n_mid; ++row) {
+      const int i = intermediate_states[static_cast<size_t>(row)];
+      lhs(row, row) = 1.0;
+      double one_mass = 0.0;
+
+      for (int edge_idx = graph.row_begin(i); edge_idx < graph.row_end(i);
+           ++edge_idx) {
+        const int j = graph.col_index(edge_idx);
+        const double value = graph.value(edge_idx);
+        if (value <= 0.0)
+          continue;
+        if (one_boundary[static_cast<size_t>(j)] != 0) {
+          one_mass += value;
+          continue;
+        }
+        if (zero_boundary[static_cast<size_t>(j)] != 0)
+          continue;
+        const int col = state_to_mid[static_cast<size_t>(j)];
+        if (col < 0)
+          continue;
+        lhs(row, col) -= value;
+      }
+      rhs[row] = one_mass;
+    }
+    return lhs.colPivHouseholderQr().solve(rhs);
+  };
+
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<size_t>(n_mid) *
+                   static_cast<size_t>(std::min(n_states_, 16)) +
+                   static_cast<size_t>(n_mid));
 
   for (int row = 0; row < n_mid; ++row) {
     const int i = intermediate_states[static_cast<size_t>(row)];
-    lhs(row, row) = 1.0;
+    double diag = 1.0;
     double one_mass = 0.0;
 
-    for (int col = 0; col < n_mid; ++col) {
-      const int j = intermediate_states[static_cast<size_t>(col)];
-      lhs(row, col) -= transition_matrix(i, j);
-    }
+    for (int edge_idx = graph.row_begin(i); edge_idx < graph.row_end(i);
+         ++edge_idx) {
+      const int j = graph.col_index(edge_idx);
+      const double value = graph.value(edge_idx);
+      if (value <= 0.0)
+        continue;
 
-    for (int j = 0; j < n_states_; ++j) {
       if (one_boundary[static_cast<size_t>(j)] != 0) {
-        one_mass += transition_matrix(i, j);
+        one_mass += value;
+        continue;
+      }
+      if (zero_boundary[static_cast<size_t>(j)] != 0)
+        continue;
+
+      const int col = state_to_mid[static_cast<size_t>(j)];
+      if (col < 0)
+        continue;
+      if (col == row) {
+        diag -= value;
+      } else {
+        triplets.emplace_back(row, col, -value);
       }
     }
+
     rhs[row] = one_mass;
+    triplets.emplace_back(row, row, diag);
   }
 
-  Eigen::VectorXd solution = lhs.colPivHouseholderQr().solve(rhs);
+  SparseMatrixCM lhs(n_mid, n_mid);
+  lhs.setFromTriplets(triplets.begin(), triplets.end());
+  lhs.makeCompressed();
+
+  Eigen::SparseLU<SparseMatrixCM, Eigen::COLAMDOrdering<int>> solver;
+  Eigen::VectorXd solution;
+  solver.compute(lhs);
+  if (solver.info() != Eigen::Success) {
+    solution = solve_dense_fallback();
+  } else {
+    solution = solver.solve(rhs);
+    if (solver.info() != Eigen::Success || !solution.allFinite()) {
+      solution = solve_dense_fallback();
+    }
+  }
+
   for (int row = 0; row < n_mid; ++row) {
     const int i = intermediate_states[static_cast<size_t>(row)];
     out_committor[i] = clamp01(solution[row]);
@@ -354,44 +463,102 @@ void TitanTPT::compute_reactive_densities() {
   }
 }
 
-void TitanTPT::compute_flux_matrices(int n_threads) {
-  gross_flux_.setZero();
-  net_flux_.setZero();
+double TitanTPT::find_transition_probability(int from, int to) const {
+  return tpm_graph_.find_value(from, to, 0.0);
+}
+
+double TitanTPT::compute_gross_flux_value(int from, int to) const {
+  if (from < 0 || from >= n_states_ || to < 0 || to >= n_states_ || from == to)
+    return 0.0;
+  const double prefactor = stationary_dist_[from] * q_backward_[from];
+  if (prefactor <= 0.0)
+    return 0.0;
+  const double probability = find_transition_probability(from, to);
+  if (probability <= 0.0)
+    return 0.0;
+  return prefactor * probability * q_forward_[to];
+}
+
+void TitanTPT::compute_flux_matrices(int n_threads, double flux_cut) {
   gross_out_flux_.setZero();
   gross_in_flux_.setZero();
   net_out_flux_.setZero();
   net_in_flux_.setZero();
+  edges_.clear();
 
   const int threads =
       std::clamp(n_threads, 1, std::max(1, static_cast<int>(
                                          std::thread::hardware_concurrency())));
   const bool use_threads = (threads > 1 && n_states_ >= 64);
 
-  auto compute_rows = [&](int row_begin, int row_end) {
+  const int worker_count = use_threads ? threads : 1;
+  std::vector<Eigen::VectorXd> partial_gross_out(
+      static_cast<size_t>(worker_count), Eigen::VectorXd::Zero(n_states_));
+  std::vector<Eigen::VectorXd> partial_gross_in(
+      static_cast<size_t>(worker_count), Eigen::VectorXd::Zero(n_states_));
+  std::vector<Eigen::VectorXd> partial_net_out(
+      static_cast<size_t>(worker_count), Eigen::VectorXd::Zero(n_states_));
+  std::vector<Eigen::VectorXd> partial_net_in(
+      static_cast<size_t>(worker_count), Eigen::VectorXd::Zero(n_states_));
+  std::vector<std::vector<EdgeFlux>> partial_edges(
+      static_cast<size_t>(worker_count));
+
+  auto compute_rows = [&](int worker_idx, int row_begin, int row_end) {
+    auto &gross_out_local = partial_gross_out[static_cast<size_t>(worker_idx)];
+    auto &gross_in_local = partial_gross_in[static_cast<size_t>(worker_idx)];
+    auto &net_out_local = partial_net_out[static_cast<size_t>(worker_idx)];
+    auto &net_in_local = partial_net_in[static_cast<size_t>(worker_idx)];
+    auto &edge_local = partial_edges[static_cast<size_t>(worker_idx)];
+
     for (int i = row_begin; i < row_end; ++i) {
       const double prefactor = stationary_dist_[i] * q_backward_[i];
-      double *row_out = gross_flux_.data() +
-                        static_cast<std::ptrdiff_t>(i) * n_states_;
-      const double *row_p = tpm_.data() +
-                            static_cast<std::ptrdiff_t>(i) * n_states_;
-      if (prefactor <= kTptEps) {
-        std::fill(row_out, row_out + n_states_, 0.0);
-        continue;
+      for (int edge_idx = tpm_graph_.row_begin(i);
+           edge_idx < tpm_graph_.row_end(i); ++edge_idx) {
+        const int j = tpm_graph_.col_index(edge_idx);
+        if (i == j)
+          continue;
+
+        const double probability = tpm_graph_.value(edge_idx);
+        const double fij =
+            (prefactor <= 0.0) ? 0.0 : prefactor * probability * q_forward_[j];
+        if (fij > 0.0) {
+          gross_out_local[i] += fij;
+          gross_in_local[j] += fij;
+        }
+
+        const double reverse_probability = find_transition_probability(j, i);
+        const bool reverse_exists = reverse_probability > 0.0;
+        if (i > j && reverse_exists)
+          continue;
+
+        const double fji =
+            reverse_exists ? compute_gross_flux_value(j, i) : 0.0;
+
+        if (fij > fji) {
+          const double net = fij - fji;
+          if (net <= 0.0)
+            continue;
+          net_out_local[i] += net;
+          net_in_local[j] += net;
+          edge_local.push_back(EdgeFlux{i, j, fij, net});
+        } else if (fji > fij) {
+          const double net = fji - fij;
+          if (net <= 0.0)
+            continue;
+          net_out_local[j] += net;
+          net_in_local[i] += net;
+          edge_local.push_back(EdgeFlux{j, i, fji, net});
+        } else if (!reverse_exists && fij > 0.0) {
+          net_out_local[i] += fij;
+          net_in_local[j] += fij;
+          edge_local.push_back(EdgeFlux{i, j, fij, fij});
+        }
       }
-#ifdef __AVX2__
-      gross_flux_row_avx2(row_p, q_forward_.data(), prefactor, row_out,
-                          n_states_);
-#else
-      for (int j = 0; j < n_states_; ++j) {
-        row_out[j] = prefactor * row_p[j] * q_forward_[j];
-      }
-#endif
-      row_out[i] = 0.0;
     }
   };
 
   if (!use_threads) {
-    compute_rows(0, n_states_);
+    compute_rows(0, 0, n_states_);
   } else {
     std::vector<std::jthread> workers;
     workers.reserve(static_cast<size_t>(threads));
@@ -401,39 +568,17 @@ void TitanTPT::compute_flux_matrices(int n_threads) {
       const int row_end = std::min(row_begin + chunk, n_states_);
       if (row_begin >= row_end)
         continue;
-      workers.emplace_back([&, row_begin, row_end]() {
-        compute_rows(row_begin, row_end);
+      workers.emplace_back([&, tid, row_begin, row_end]() {
+        compute_rows(tid, row_begin, row_end);
       });
     }
   }
 
-  for (int i = 0; i < n_states_; ++i) {
-    for (int j = i + 1; j < n_states_; ++j) {
-      const double fij = gross_flux_(i, j);
-      const double fji = gross_flux_(j, i);
-      if (fij > fji) {
-        net_flux_(i, j) = fij - fji;
-      } else if (fji > fij) {
-        net_flux_(j, i) = fji - fij;
-      }
-    }
-  }
-
-  for (int i = 0; i < n_states_; ++i) {
-    double gross_out = 0.0;
-    double gross_in = 0.0;
-    double net_out = 0.0;
-    double net_in = 0.0;
-    for (int j = 0; j < n_states_; ++j) {
-      gross_out += gross_flux_(i, j);
-      gross_in += gross_flux_(j, i);
-      net_out += net_flux_(i, j);
-      net_in += net_flux_(j, i);
-    }
-    gross_out_flux_[i] = gross_out;
-    gross_in_flux_[i] = gross_in;
-    net_out_flux_[i] = net_out;
-    net_in_flux_[i] = net_in;
+  for (int tid = 0; tid < worker_count; ++tid) {
+    gross_out_flux_ += partial_gross_out[static_cast<size_t>(tid)];
+    gross_in_flux_ += partial_gross_in[static_cast<size_t>(tid)];
+    net_out_flux_ += partial_net_out[static_cast<size_t>(tid)];
+    net_in_flux_ += partial_net_in[static_cast<size_t>(tid)];
   }
 
   double total_flux = 0.0;
@@ -456,6 +601,8 @@ void TitanTPT::compute_flux_matrices(int n_threads) {
   summary_.intermediate_population =
       std::max(0.0, 1.0 - pi_source - pi_sink);
   summary_.total_reactive_flux = total_flux;
+  summary_.rate_source_to_sink_per_lag = 0.0;
+  summary_.mfpt_source_to_sink_lags = std::numeric_limits<double>::infinity();
   if (pi_source > kTptEps) {
     summary_.rate_source_to_sink_per_lag = total_flux / pi_source;
     if (summary_.rate_source_to_sink_per_lag > kTptEps) {
@@ -463,22 +610,21 @@ void TitanTPT::compute_flux_matrices(int n_threads) {
           1.0 / summary_.rate_source_to_sink_per_lag;
     }
   }
-}
 
-void TitanTPT::compress_flux_edges(double noise_floor) {
-  edges_.clear();
-  edges_.reserve(static_cast<size_t>(n_states_) * static_cast<size_t>(n_states_) /
-                 4);
+  const double noise_floor =
+      std::max(flux_cut, summary_.total_reactive_flux * kNoiseGuardScale);
+  size_t total_edge_candidates = 0;
+  for (const auto &worker_edges : partial_edges) {
+    total_edge_candidates += worker_edges.size();
+  }
+  edges_.reserve(total_edge_candidates);
   double max_flux = 0.0;
-  for (int i = 0; i < n_states_; ++i) {
-    for (int j = 0; j < n_states_; ++j) {
-      if (i == j)
+  for (const auto &worker_edges : partial_edges) {
+    for (const auto &edge : worker_edges) {
+      if (edge.net_flux <= noise_floor)
         continue;
-      const double net_value = net_flux_(i, j);
-      if (net_value <= noise_floor)
-        continue;
-      max_flux = std::max(max_flux, net_value);
-      edges_.push_back(EdgeFlux{i, j, gross_flux_(i, j), net_value});
+      max_flux = std::max(max_flux, edge.net_flux);
+      edges_.push_back(edge);
     }
   }
 
@@ -497,16 +643,23 @@ void TitanTPT::compress_flux_edges(double noise_floor) {
 
 void TitanTPT::extract_dominant_paths(int top_paths, double flux_cut) {
   paths_.clear();
-  if (top_paths <= 0 || summary_.total_reactive_flux <= flux_cut)
+  if (top_paths <= 0 || summary_.total_reactive_flux <= flux_cut ||
+      edges_.empty())
     return;
 
-  MatrixRM residual = net_flux_;
+  std::vector<EdgeFlux> residual = edges_;
+  std::vector<std::vector<int>> outgoing(static_cast<size_t>(n_states_));
+  for (int edge_idx = 0; edge_idx < static_cast<int>(residual.size()); ++edge_idx) {
+    outgoing[static_cast<size_t>(residual[static_cast<size_t>(edge_idx)].from)]
+        .push_back(edge_idx);
+  }
   const double effective_cut =
       std::max(flux_cut, summary_.total_reactive_flux * kNoiseGuardScale);
 
   for (int rank = 0; rank < top_paths; ++rank) {
     std::vector<double> best(static_cast<size_t>(n_states_), 0.0);
-    std::vector<int> predecessor(static_cast<size_t>(n_states_), -1);
+    std::vector<int> predecessor_state(static_cast<size_t>(n_states_), -1);
+    std::vector<int> predecessor_edge(static_cast<size_t>(n_states_), -1);
     using QueueItem = std::pair<double, int>;
     std::priority_queue<QueueItem> queue;
 
@@ -522,14 +675,17 @@ void TitanTPT::extract_dominant_paths(int top_paths, double flux_cut) {
       if (capacity + effective_cut < best[static_cast<size_t>(node)])
         continue;
 
-      for (int next = 0; next < n_states_; ++next) {
-        const double edge_flux = residual(node, next);
+      for (int edge_idx : outgoing[static_cast<size_t>(node)]) {
+        const auto &edge = residual[static_cast<size_t>(edge_idx)];
+        const double edge_flux = edge.net_flux;
         if (edge_flux <= effective_cut)
           continue;
+        const int next = edge.to;
         const double candidate = std::min(capacity, edge_flux);
         if (candidate > best[static_cast<size_t>(next)] + effective_cut) {
           best[static_cast<size_t>(next)] = candidate;
-          predecessor[static_cast<size_t>(next)] = node;
+          predecessor_state[static_cast<size_t>(next)] = node;
+          predecessor_edge[static_cast<size_t>(next)] = edge_idx;
           queue.emplace(candidate, next);
         }
       }
@@ -549,23 +705,27 @@ void TitanTPT::extract_dominant_paths(int top_paths, double flux_cut) {
       break;
 
     std::vector<int> nodes;
+    std::vector<int> path_edge_indices;
     for (int current = best_sink; current >= 0;
-         current = predecessor[static_cast<size_t>(current)]) {
+         current = predecessor_state[static_cast<size_t>(current)]) {
       nodes.push_back(current);
+      const int edge_idx = predecessor_edge[static_cast<size_t>(current)];
+      if (edge_idx >= 0)
+        path_edge_indices.push_back(edge_idx);
       if (is_source_[static_cast<size_t>(current)] != 0)
         break;
     }
     std::reverse(nodes.begin(), nodes.end());
+    std::reverse(path_edge_indices.begin(), path_edge_indices.end());
 
     if (nodes.size() < 2 || is_source_[static_cast<size_t>(nodes.front())] == 0 ||
         is_sink_[static_cast<size_t>(nodes.back())] == 0) {
       break;
     }
 
-    for (size_t idx = 0; idx + 1 < nodes.size(); ++idx) {
-      const int from = nodes[idx];
-      const int to = nodes[idx + 1];
-      residual(from, to) = std::max(0.0, residual(from, to) - bottleneck);
+    for (int edge_idx : path_edge_indices) {
+      auto &edge = residual[static_cast<size_t>(edge_idx)];
+      edge.net_flux = std::max(0.0, edge.net_flux - bottleneck);
     }
 
     Pathway path;
@@ -586,10 +746,9 @@ void TitanTPT::compute(const std::vector<int> &source_states,
   source_states_ = source_states;
   sink_states_ = sink_states;
   build_membership_masks();
-  build_reverse_tpm();
 
-  solve_committor_system(tpm_, is_sink_, is_source_, q_forward_);
-  solve_committor_system(reverse_tpm_, is_source_, is_sink_, q_backward_);
+  solve_committor_system(tpm_graph_, is_sink_, is_source_, q_forward_);
+  solve_committor_system(reverse_graph_, is_source_, is_sink_, q_backward_);
 
   for (int state : source_states_) {
     q_forward_[state] = 0.0;
@@ -606,10 +765,9 @@ void TitanTPT::compute(const std::vector<int> &source_states,
       [](double value) { return clamp01(value); });
 
   compute_reactive_densities();
-  compute_flux_matrices(n_threads);
+  compute_flux_matrices(n_threads, flux_cut);
   const double noise_floor =
       std::max(flux_cut, summary_.total_reactive_flux * kNoiseGuardScale);
-  compress_flux_edges(noise_floor);
   extract_dominant_paths(top_paths, noise_floor);
   computed_ = true;
 }

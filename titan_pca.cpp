@@ -50,6 +50,44 @@ struct FES2DResult {
   }
 };
 
+struct FlatCoordinateMatrix {
+  static constexpr size_t kSimdLaneWidth =
+      std::max<size_t>(1, kTitanSimdAlignment / sizeof(double));
+
+  FlatCoordinateMatrix() = default;
+  FlatCoordinateMatrix(size_t rows, size_t cols, double value = 0.0) {
+    assign(rows, cols, value);
+  }
+
+  void assign(size_t rows, size_t cols, double value = 0.0) {
+    rows_ = rows;
+    cols_ = cols;
+    stride_ = cols == 0 ? 0
+                        : ((cols + kSimdLaneWidth - 1) / kSimdLaneWidth) *
+                              kSimdLaneWidth;
+    data_.assign(rows * stride_, value);
+  }
+
+  double &operator()(size_t row, size_t col) {
+    return data_[row * stride_ + col];
+  }
+
+  const double &operator()(size_t row, size_t col) const {
+    return data_[row * stride_ + col];
+  }
+
+  double *row_data(size_t row) { return data_.data() + row * stride_; }
+  const double *row_data(size_t row) const {
+    return data_.data() + row * stride_;
+  }
+
+private:
+  size_t rows_{0};
+  size_t cols_{0};
+  size_t stride_{0};
+  AlignedDoubleVector data_{};
+};
+
 size_t choose_worker_count(size_t requested_threads, size_t work_items,
                            size_t min_items_per_worker) {
   if (work_items == 0)
@@ -310,8 +348,8 @@ bool write_2d_fes_grid(const std::string &label, const std::string &path,
 namespace TitanPCA {
 
 void execute_pca_fes_analysis(
-    const arguments &args,
-    const std::vector<std::vector<std::array<double, 3>>> &ca_traj,
+    const arguments &args, const CoordinateRows &traj_x,
+    const CoordinateRows &traj_y, const CoordinateRows &traj_z,
     const std::vector<std::string> &ca_resname,
     const std::vector<int> &ca_resnrs, const std::vector<std::string> &ca_chain,
     const std::vector<int> &ca_is_lig, info &info_out, std::fstream &log,
@@ -320,14 +358,27 @@ void execute_pca_fes_analysis(
     const std::vector<int> &traj_replicas,
     const std::vector<std::string> &replica_traj_files) {
 
-  if (ca_traj.empty() || ca_traj[0].empty()) {
+  if (traj_x.empty() || traj_x[0].empty()) {
     TitanUI::print_error("PCA ERROR: No valid trace coordinates found!");
     return;
   }
 
-  size_t num_frames = ca_traj.size();
-  size_t num_ca = ca_traj[0].size();
-  size_t dimensions = num_ca * 3;
+  const size_t num_frames = traj_x.size();
+  const size_t num_ca = traj_x[0].size();
+  const size_t dimensions = num_ca * 3;
+  if (traj_y.size() != num_frames || traj_z.size() != num_frames) {
+    TitanUI::print_error(
+        "PCA ERROR: DCCM trajectory component frame counts do not match.");
+    return;
+  }
+  for (size_t f = 0; f < num_frames; ++f) {
+    if (traj_x[f].size() != num_ca || traj_y[f].size() != num_ca ||
+        traj_z[f].size() != num_ca) {
+      TitanUI::print_error(
+          "PCA ERROR: DCCM trajectory component atom counts do not match.");
+      return;
+    }
+  }
   const bool have_frame_metadata =
       (traj_times.size() == num_frames && traj_replicas.size() == num_frames);
 
@@ -349,44 +400,60 @@ void execute_pca_fes_analysis(
   TitanUI::log_kv(log, "PCA Weight Mode",
                   use_weights ? "DHAM-weighted" : "uniform");
 
-  // Create mutable aligned trajectory copy
-  std::vector<std::vector<std::array<double, 3>>> aligned_traj = ca_traj;
+  FlatCoordinateMatrix aligned_traj(num_frames, dimensions, 0.0);
+  for (size_t f = 0; f < num_frames; ++f) {
+    const auto &x_row = traj_x[f];
+    const auto &y_row = traj_y[f];
+    const auto &z_row = traj_z[f];
+    double *aligned_row = aligned_traj.row_data(f);
+    for (size_t i = 0; i < num_ca; ++i) {
+      const size_t base = i * 3;
+      aligned_row[base + 0] = x_row[i];
+      aligned_row[base + 1] = y_row[i];
+      aligned_row[base + 2] = z_row[i];
+    }
+  }
 
   // 1. Setup Reference Frame (Frame 0)
   Eigen::MatrixXd ref_mat(num_ca, 3);
   Eigen::RowVector3d ref_centroid(0, 0, 0);
+  const double *ref_row = aligned_traj.row_data(0);
   for (size_t i = 0; i < num_ca; ++i) {
-    ref_centroid += Eigen::RowVector3d(
-        aligned_traj[0][i][0], aligned_traj[0][i][1], aligned_traj[0][i][2]);
+    const size_t base = i * 3;
+    ref_centroid +=
+        Eigen::RowVector3d(ref_row[base + 0], ref_row[base + 1], ref_row[base + 2]);
   }
   ref_centroid /= num_ca;
 
   for (size_t i = 0; i < num_ca; ++i) {
-    ref_mat(i, 0) = aligned_traj[0][i][0] - ref_centroid(0);
-    ref_mat(i, 1) = aligned_traj[0][i][1] - ref_centroid(1);
-    ref_mat(i, 2) = aligned_traj[0][i][2] - ref_centroid(2);
-    // Overwrite traj[0] with centered coords
-    aligned_traj[0][i][0] = ref_mat(i, 0);
-    aligned_traj[0][i][1] = ref_mat(i, 1);
-    aligned_traj[0][i][2] = ref_mat(i, 2);
+    const size_t base = i * 3;
+    ref_mat(i, 0) = ref_row[base + 0] - ref_centroid(0);
+    ref_mat(i, 1) = ref_row[base + 1] - ref_centroid(1);
+    ref_mat(i, 2) = ref_row[base + 2] - ref_centroid(2);
+    aligned_traj(0, base + 0) = ref_mat(i, 0);
+    aligned_traj(0, base + 1) = ref_mat(i, 1);
+    aligned_traj(0, base + 2) = ref_mat(i, 2);
   }
 
   // 2. Kabsch Alignment for all frames using shared TitanAlignment module
   //    align_frame() centers mobile and rotates in-place; ref_mat stays
   //    unchanged.
+  Eigen::MatrixXd frame_mat(num_ca, 3);
   for (size_t f = 1; f < num_frames; ++f) {
-    Eigen::MatrixXd frame_mat(num_ca, 3);
+    const double *frame_row = aligned_traj.row_data(f);
     for (size_t i = 0; i < num_ca; ++i) {
-      frame_mat(i, 0) = aligned_traj[f][i][0];
-      frame_mat(i, 1) = aligned_traj[f][i][1];
-      frame_mat(i, 2) = aligned_traj[f][i][2];
+      const size_t base = i * 3;
+      frame_mat(i, 0) = frame_row[base + 0];
+      frame_mat(i, 1) = frame_row[base + 1];
+      frame_mat(i, 2) = frame_row[base + 2];
     }
     TitanAlignment::align_frame(ref_mat,
                                 frame_mat); // centers + rotates in-place
     for (size_t i = 0; i < num_ca; ++i) {
-      aligned_traj[f][i][0] = frame_mat(i, 0);
-      aligned_traj[f][i][1] = frame_mat(i, 1);
-      aligned_traj[f][i][2] = frame_mat(i, 2);
+      const size_t base = i * 3;
+      aligned_traj(f, base + 0) = frame_mat(i, 0);
+      aligned_traj(f, base + 1) = frame_mat(i, 1);
+      aligned_traj(f, base + 2) = frame_mat(i, 2);
     }
   }
 
@@ -400,13 +467,10 @@ void execute_pca_fes_analysis(
   // 3. Compute Mean from aligned_traj
   std::vector<double> mean_coords(dimensions, 0.0);
   for (size_t f = 0; f < num_frames; ++f) {
-    const auto &coords = aligned_traj[f];
+    const double *coords = aligned_traj.row_data(f);
     const double w = analysis_weights[f];
-    for (size_t i = 0; i < num_ca; ++i) {
-      mean_coords[i * 3 + 0] += w * coords[i][0];
-      mean_coords[i * 3 + 1] += w * coords[i][1];
-      mean_coords[i * 3 + 2] += w * coords[i][2];
-    }
+    for (size_t dim = 0; dim < dimensions; ++dim)
+      mean_coords[dim] += w * coords[dim];
   }
   for (size_t i = 0; i < dimensions; ++i) {
     mean_coords[i] /= analysis_weight_sum;
@@ -420,16 +484,13 @@ void execute_pca_fes_analysis(
   const double cov_norm =
       use_weights ? analysis_weight_sum
                   : static_cast<double>(std::max<size_t>(num_frames - 1, 1));
+  std::vector<double> dev(dimensions);
 
   for (size_t f = 0; f < num_frames; ++f) {
-    const auto &coords = aligned_traj[f];
+    const double *coords = aligned_traj.row_data(f);
     const double w = analysis_weights[f];
-    std::vector<double> dev(dimensions);
-    for (size_t i = 0; i < num_ca; ++i) {
-      dev[i * 3 + 0] = coords[i][0] - mean_coords[i * 3 + 0];
-      dev[i * 3 + 1] = coords[i][1] - mean_coords[i * 3 + 1];
-      dev[i * 3 + 2] = coords[i][2] - mean_coords[i * 3 + 2];
-    }
+    for (size_t dim = 0; dim < dimensions; ++dim)
+      dev[dim] = coords[dim] - mean_coords[dim];
 
     for (size_t i = 0; i < dimensions; ++i) {
       for (size_t j = i; j < dimensions; ++j) {
@@ -483,13 +544,11 @@ void execute_pca_fes_analysis(
 
   for (size_t f = 0; f < num_frames; ++f) {
     double p1 = 0.0, p2 = 0.0;
-    for (size_t i = 0; i < num_ca; ++i) {
-      for (int j = 0; j < 3; ++j) {
-        int dim_idx = i * 3 + j;
-        double diff = aligned_traj[f][i][j] - mean_coords[dim_idx];
-        p1 += diff * pc1_vec(dim_idx);
-        p2 += diff * pc2_vec(dim_idx);
-      }
+    const double *coords = aligned_traj.row_data(f);
+    for (size_t dim = 0; dim < dimensions; ++dim) {
+      const double diff = coords[dim] - mean_coords[dim];
+      p1 += diff * pc1_vec(static_cast<Eigen::Index>(dim));
+      p2 += diff * pc2_vec(static_cast<Eigen::Index>(dim));
     }
     projections[f] = {p1, p2};
   }

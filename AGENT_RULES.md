@@ -48,6 +48,7 @@ Flatten Matrices: Never use nested std::vector<std::vector<T>>.
 3. **Build Architecture:** The project uses a custom `Makefile` via MSYS2 (`mingw32-make.exe -j`) for incremental builds to save RAM and compilation time. 
 4. **Modifying Build Steps:** If you need to add a new library, flag, or change compilation behavior, modify the `Makefile` directly. DO NOT modify `compile.bat` unless absolutely necessary.
 5. **Release Build:** If the user explicitly asks to build an optimized release version, instruct them to run `C:\msys64\ucrt64\bin\mingw32-make.exe release` in the terminal.
+6. **Test Output Discipline:** Run tests and regressions from dedicated subdirectories under `test/` and keep generated outputs there. Do not write test outputs into the source-tree root.
 ##5.examples:
 thư mục example/1 là ví dụ protein-ligand và example/3 là protein-ligand có nước
 example/2 là ví dụ protein-protein

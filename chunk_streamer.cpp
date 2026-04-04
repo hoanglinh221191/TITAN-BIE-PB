@@ -1,6 +1,7 @@
 #include "chunk_streamer.h"
 #include "titan_ui.h"
 #include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <immintrin.h> // AVX2 intrinsics
 #include <iostream>
@@ -38,6 +39,174 @@ void initialize_stream_water_frame(MOL &frame, std::string_view force_field,
   frame.flag_set_time = true;
   frame.compute_forces = false;
   frame.pos.resize(atom_count);
+}
+
+struct XdrFrameProbe {
+  int64_t frame_start = -1;
+  double time_ps = 0.0;
+  int step = 0;
+  int natoms = 0;
+  bool is_trr = false;
+  t_trnheader trr_header{};
+};
+
+constexpr double kXdrTimeTolerancePs = 1e-4;
+
+std::string xdr_status_message(int rc) {
+  if (rc >= 0 && rc < exdrNR && exdr_message[rc] != nullptr) {
+    return std::string(exdr_message[rc]);
+  }
+  return "unknown XDR status";
+}
+
+int64_t pad_xdr_opaque_bytes(int64_t byte_count) {
+  return (byte_count + 3LL) & ~3LL;
+}
+
+int probe_xdr_frame(XDRFILE *xdr_handle, const std::string &xdr_type,
+                    XdrFrameProbe &probe, std::string &error) {
+  probe = XdrFrameProbe{};
+  error.clear();
+
+  const int64_t frame_start = xdr_tell(xdr_handle);
+  if (frame_start < 0) {
+    error = "XDR: failed to query current frame offset.";
+    return exdrHEADER;
+  }
+  probe.frame_start = frame_start;
+
+  if (xdr_type == "xtc") {
+    int natoms = 0;
+    int step = 0;
+    float time_ps = 0.0f;
+    const int rc = xtc_header(xdr_handle, &natoms, &step, &time_ps, 1);
+    if (rc != exdrOK) {
+      error = "XDR: failed to read XTC frame header (rc=" + std::to_string(rc) +
+              ", " + xdr_status_message(rc) + ")";
+      return rc;
+    }
+    probe.time_ps = static_cast<double>(time_ps);
+    probe.step = step;
+    probe.natoms = natoms;
+    return exdrOK;
+  }
+
+  t_trnheader trr_header{};
+  const int rc = do_trnheader(xdr_handle, 1, &trr_header);
+  if (rc != exdrOK) {
+    error = "XDR: failed to read TRR frame header (rc=" + std::to_string(rc) +
+            ", " + xdr_status_message(rc) + ")";
+    return rc;
+  }
+  probe.time_ps = static_cast<double>(trr_header.td);
+  probe.step = trr_header.step;
+  probe.natoms = trr_header.natoms;
+  probe.is_trr = true;
+  probe.trr_header = trr_header;
+  return exdrOK;
+}
+
+int skip_xtc_frame_payload_after_header(XDRFILE *xdr_handle,
+                                        std::string &error) {
+  error.clear();
+
+  float dummy_box[DIM * DIM]{};
+  if (xdrfile_read_float(dummy_box, DIM * DIM, xdr_handle) != DIM * DIM) {
+    error = "XDR: failed to skip XTC box block.";
+    return exdrFLOAT;
+  }
+
+  int coord_count = 0;
+  if (xdrfile_read_int(&coord_count, 1, xdr_handle) != 1) {
+    error = "XDR: failed to read XTC coordinate count while skipping.";
+    return exdrINT;
+  }
+  if (coord_count < 0) {
+    error = "XDR: invalid negative XTC coordinate count while skipping.";
+    return exdrINT;
+  }
+
+  if (coord_count <= 9) {
+    const int64_t raw_coord_bytes =
+        static_cast<int64_t>(coord_count) * DIM * sizeof(float);
+    const int rc = xdr_seek(xdr_handle, raw_coord_bytes, SEEK_CUR);
+    if (rc != exdrOK) {
+      error = "XDR: failed to seek across uncompressed XTC coordinates (rc=" +
+              std::to_string(rc) + ", " + xdr_status_message(rc) + ")";
+    }
+    return rc;
+  }
+
+  float precision = 0.0f;
+  int minint[DIM]{};
+  int maxint[DIM]{};
+  int smallidx = 0;
+  int opaque_bytes = 0;
+
+  if (xdrfile_read_float(&precision, 1, xdr_handle) != 1) {
+    error = "XDR: failed to read XTC precision while skipping.";
+    return exdrFLOAT;
+  }
+  if (xdrfile_read_int(minint, DIM, xdr_handle) != DIM ||
+      xdrfile_read_int(maxint, DIM, xdr_handle) != DIM ||
+      xdrfile_read_int(&smallidx, 1, xdr_handle) != 1 ||
+      xdrfile_read_int(&opaque_bytes, 1, xdr_handle) != 1) {
+    error = "XDR: failed to read XTC compressed block header while skipping.";
+    return exdrINT;
+  }
+  if (opaque_bytes < 0) {
+    error = "XDR: invalid negative XTC opaque byte count while skipping.";
+    return exdrINT;
+  }
+
+  const int rc =
+      xdr_seek(xdr_handle, pad_xdr_opaque_bytes(opaque_bytes), SEEK_CUR);
+  if (rc != exdrOK) {
+    error = "XDR: failed to seek across compressed XTC payload (rc=" +
+            std::to_string(rc) + ", " + xdr_status_message(rc) + ")";
+  }
+  return rc;
+}
+
+int skip_trr_frame_payload_after_header(XDRFILE *xdr_handle,
+                                        const t_trnheader &trr_header,
+                                        std::string &error) {
+  error.clear();
+
+  const int64_t payload_bytes =
+      static_cast<int64_t>(trr_header.ir_size) +
+      static_cast<int64_t>(trr_header.e_size) +
+      static_cast<int64_t>(trr_header.box_size) +
+      static_cast<int64_t>(trr_header.vir_size) +
+      static_cast<int64_t>(trr_header.pres_size) +
+      static_cast<int64_t>(trr_header.top_size) +
+      static_cast<int64_t>(trr_header.sym_size) +
+      static_cast<int64_t>(trr_header.x_size) +
+      static_cast<int64_t>(trr_header.v_size) +
+      static_cast<int64_t>(trr_header.f_size);
+
+  if (payload_bytes < 0) {
+    error = "XDR: invalid negative TRR payload size while skipping.";
+    return exdrHEADER;
+  }
+
+  const int rc = xdr_seek(xdr_handle, payload_bytes, SEEK_CUR);
+  if (rc != exdrOK) {
+    error = "XDR: failed to seek across TRR payload (rc=" +
+            std::to_string(rc) + ", " + xdr_status_message(rc) + ")";
+  }
+  return rc;
+}
+
+int skip_xdr_frame_payload_after_probe(XDRFILE *xdr_handle,
+                                       const std::string &xdr_type,
+                                       const XdrFrameProbe &probe,
+                                       std::string &error) {
+  if (xdr_type == "xtc") {
+    return skip_xtc_frame_payload_after_header(xdr_handle, error);
+  }
+  return skip_trr_frame_payload_after_header(xdr_handle, probe.trr_header,
+                                             error);
 }
 
 } // namespace
@@ -269,16 +438,13 @@ void ChunkStreamer::parallel_split_coordinates(
   // Lambda to process a range of frames
   auto process_frames = [&](size_t start_f, size_t end_f) {
     for (size_t f = start_f; f < end_f; ++f) {
-      // ── FIX: Full structural copy from Frame 0 (topology: charge,
-      //    type_of_atom, res_name, atom_name, etc.) then overwrite coords.
-      pro_out.m_mol[f] = init_pro.m_mol[0];
-      lig_out.m_mol[f] = init_lig.m_mol[0];
-
-      // Overwrite box + time from this frame's data
-      pro_out.m_mol[f].Box = source_chunk.m_mol[f].Box;
-      pro_out.m_mol[f].time_of_snap = source_chunk.m_mol[f].time_of_snap;
-      lig_out.m_mol[f].Box = source_chunk.m_mol[f].Box;
-      lig_out.m_mol[f].time_of_snap = source_chunk.m_mol[f].time_of_snap;
+      // Lightweight frame init: keep stream metadata, avoid full MOL copies.
+      initialize_stream_frame(pro_out.m_mol[f], init_pro,
+                              source_chunk.m_mol[f].Box,
+                              source_chunk.m_mol[f].time_of_snap, pro_size);
+      initialize_stream_frame(lig_out.m_mol[f], init_lig,
+                              source_chunk.m_mol[f].Box,
+                              source_chunk.m_mol[f].time_of_snap, lig_size);
 
       // Overwrite ONLY coordinates from source_chunk
       pro_out.m_mol[f].pos.x.resize(pro_size);
@@ -369,8 +535,107 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
     size_t frames_read = 0;
     size_t skip_count = 0;
 
+    auto position_at_next_selected_frame =
+        [&]() -> std::expected<bool, std::string> {
+      while (true) {
+        XdrFrameProbe probe;
+        std::string probe_error;
+        const int probe_rc =
+            probe_xdr_frame(xdr_handle_, args_ref.xdr_type, probe, probe_error);
+
+        if (probe_rc == exdrENDOFFILE) {
+          xdr_eof_ = true;
+          return false;
+        }
+        if (probe_rc != exdrOK) {
+          xdr_eof_ = true;
+          return std::unexpected(probe_error);
+        }
+        if (probe.natoms != xdr_natoms_) {
+          xdr_eof_ = true;
+          return std::unexpected(
+              "XDR: frame atom count changed from " +
+              std::to_string(xdr_natoms_) + " to " +
+              std::to_string(probe.natoms) + " while streaming.");
+        }
+
+        const double time_val = probe.time_ps;
+        if (args_ref.flag_end_set && time_val > args_ref.end_time) {
+          xdr_eof_ = true;
+          return false;
+        }
+
+        const bool before_begin =
+            args_ref.flag_begin_set && time_val < args_ref.begin_time;
+
+        if (args_ref.dt > 0.0 && !before_begin &&
+            xdr_next_target_time_ < -1e17) {
+          xdr_next_target_time_ =
+              args_ref.flag_begin_set ? args_ref.begin_time : time_val;
+        }
+
+        const bool before_dt_target =
+            args_ref.dt > 0.0 &&
+            time_val < xdr_next_target_time_ - kXdrTimeTolerancePs;
+
+        if (before_begin || before_dt_target) {
+          std::string skip_error;
+          const int skip_rc = skip_xdr_frame_payload_after_probe(
+              xdr_handle_, args_ref.xdr_type, probe, skip_error);
+          if (skip_rc != exdrOK) {
+            xdr_eof_ = true;
+            return std::unexpected(skip_error);
+          }
+
+          if (before_begin) {
+            ++skip_count;
+            if (skip_count % 50 == 0) {
+              TitanUI::show_continuous_progress(
+                  "Skipping", skip_count,
+                  std::to_string(static_cast<int>(time_val)) +
+                      " ps (before -b=" +
+                      std::to_string(static_cast<int>(args_ref.begin_time)) +
+                      ")");
+            }
+          }
+          continue;
+        }
+
+        if (skip_count > 0) {
+          std::cout << "\n";
+          TitanUI::print_info("[TITAN] Skipped " + std::to_string(skip_count) +
+                              " frames. Starting analysis at t=" +
+                              std::to_string(static_cast<int>(time_val)) +
+                              " ps");
+          skip_count = 0;
+        }
+
+        if (args_ref.dt > 0.0) {
+          while (xdr_next_target_time_ <= time_val + kXdrTimeTolerancePs) {
+            xdr_next_target_time_ += args_ref.dt;
+          }
+        }
+
+        const int seek_rc = xdr_seek(xdr_handle_, probe.frame_start, SEEK_SET);
+        if (seek_rc != exdrOK) {
+          xdr_eof_ = true;
+          return std::unexpected(
+              "XDR: failed to rewind to selected frame (rc=" +
+              std::to_string(seek_rc) + ", " + xdr_status_message(seek_rc) +
+              ")");
+        }
+        return true;
+      }
+    };
+
     // Read frames until chunk is filled or EOF/end-time
     while (frames_read < chunk_size) {
+      auto positioned = position_at_next_selected_frame();
+      if (!positioned)
+        return std::unexpected(positioned.error());
+      if (!positioned.value())
+        break;
+
       int step;
       float time_ps, lambda = 0.0f;
       int rc;
@@ -390,6 +655,8 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
       }
 
       double time_val = static_cast<double>(time_ps);
+      goto xdr_selected_frame;
+#if 0
 
       // ── A. END FILTER — hard stop ──
       if (args_ref.flag_end_set && time_val > args_ref.end_time) {
@@ -434,6 +701,9 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
       // ── Frame passed all filters — store at frames_read index ──
 
       // ── Compute box from GROMACS matrix ──
+#endif
+    xdr_selected_frame:
+      // Only frames that pass begin/end/dt filters are fully decoded here.
       double v1x = static_cast<double>(xdr_box_[0][0]) * NM_TO_ANG;
       double v1y = static_cast<double>(xdr_box_[0][1]) * NM_TO_ANG;
       double v1z = static_cast<double>(xdr_box_[0][2]) * NM_TO_ANG;

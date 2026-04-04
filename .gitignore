@@ -43,5 +43,6 @@ lib_ff/
 
 # Local smoke-test / scratch outputs
 /example/
-/test*
+/test_*
+/test/
 /.codex*

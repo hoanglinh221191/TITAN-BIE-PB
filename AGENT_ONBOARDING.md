@@ -51,6 +51,10 @@ If you only have a few minutes, read these in order:
 7. `manual.txt` and `help.cpp`
    User-facing documentation. If behavior changes, these often need updates.
 
+8. `solv_pbc_pbctopo.cpp`
+   VIBE-pbctopo (`-pbctopo`) topology-aware PBC solver. Read this first before
+   touching pbctopo heuristics, warm-start behavior, or PBC-safe reconstruction.
+
 ================================================================================
 3. High-level runtime workflow
 ================================================================================
@@ -122,6 +126,12 @@ Analysis modules:
 Output and UI:
 - `info.h`: output filename getters
 - `titan_ui.h` and related implementation: user-facing logging/progress
+
+PBC and topology-aware reconstruction:
+- `solv_pbc_pbctopo.cpp`: VIBE-pbctopo (`-pbctopo`, Virtual Intact Block
+  Extraction), the topology-aware PBC path used for intact-block recovery on
+  difficult chain-aware systems. This module keeps its detailed timing/debug
+  output in `pbctopo_debug.log`, separate from the main `log.txt`.
 
 ================================================================================
 5. Module dependency graph
@@ -321,6 +331,14 @@ everything. Touch them carefully and profile before expanding scope.
   in the number of MSM states.
   Recommended direction: do not casually increase state counts or add extra
   dense post-processing without checking solver cost and conditioning.
+- `solv_pbc_pbctopo.cpp`
+  Current behavior: VIBE-pbctopo is a layered heuristic solver with projection
+  cuts, component-graph refinement, and anchor-based topology metrics. The
+  current hotspot is usually the coarse/exact anchor scoring path inside local
+  refine, not the CLI glue around `-pbctopo`.
+  Recommended direction: profile with `pbctopo_debug.log`, preserve output
+  equivalence, and treat anchor sampling / prune thresholds as benchmark-driven
+  changes rather than cosmetic rewrites.
 
 ================================================================================
 10. HPC coding rules
@@ -414,6 +432,15 @@ If you change RMS / DSSP / LJ / TPT behavior:
 - inspect `arguments.cpp` and `parse_arguments.cpp` for implied-module and PBC
   semantics
 
+If you change VIBE-pbctopo behavior:
+- inspect `solv_pbc_pbctopo.cpp`
+- inspect `parse_arguments.cpp`, `arguments.cpp`, `manual.txt`, and `help.cpp`
+  for `-pbctopo` semantics and user-facing wording
+- keep `pbctopo_debug.log` as the detailed debug/timing sink; do not spill hot
+  path diagnostics back into `log.txt`
+- benchmark on a representative trajectory chunk and compare both timing and
+  output hashes before keeping heuristic changes
+
 ================================================================================
 13. Common pitfalls
 ================================================================================
@@ -427,6 +454,8 @@ If you change RMS / DSSP / LJ / TPT behavior:
   workflows.
 - Do not bypass dense pair-cache guards just because a workstation build has
   enough RAM today.
+- Do not move detailed VIBE-pbctopo diagnostics back into `log.txt`; use
+  `pbctopo_debug.log` for that path.
 - Do not assume `exact_dense` TICA is safe for workflows that need projection
   replay.
 - Do not treat LJ phase-2 kinetics, DSSP features, RMS traces, and network-

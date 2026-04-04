@@ -1,6 +1,7 @@
 #include "titan_lj.h"
 
 #include "BoxMatrix.h"
+#include "titan_neighbor_grid.h"
 #include "titan_ui.h"
 
 #include <algorithm>
@@ -20,11 +21,6 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kFeatureEps = 1.0e-12;
-constexpr std::array<std::array<int, 3>, 14> kHalfShell{{
-    {{0, 0, 0}},   {{1, 0, 0}},  {{-1, 1, 0}}, {{0, 1, 0}},  {{1, 1, 0}},
-    {{-1, -1, 1}}, {{0, -1, 1}}, {{1, -1, 1}}, {{-1, 0, 1}}, {{0, 0, 1}},
-    {{1, 0, 1}},   {{-1, 1, 1}}, {{0, 1, 1}},  {{1, 1, 1}},
-}};
 constexpr std::array<const char *, TitanLJAnalyzer::kTicaFeatureDim>
     kLJFeatureLabels{{
         "rho_bulk_nm^-3",
@@ -239,7 +235,6 @@ void TitanLJAnalyzer::prepare_atom_buffers(std::size_t atom_count) {
   size_.resize(atom_count);
   atom_degree_.resize(atom_count);
   root_seen_.resize(atom_count);
-  next_.resize(atom_count);
   component_root_.resize(atom_count);
   atom_to_local_.resize(atom_count);
 }
@@ -249,9 +244,7 @@ void TitanLJAnalyzer::reset_trajectory_state() {
   feature_history_.clear();
   edges_.clear();
   cluster_members_.clear();
-  local_degree_.clear();
-  adjacency_offsets_.clear();
-  adjacency_indices_.clear();
+  cluster_graph_.clear();
   bfs_queue_.clear();
   visited_.clear();
   unwrap_x_.clear();
@@ -427,78 +420,46 @@ void TitanLJAnalyzer::build_contact_graph(const MOL &frame, std::size_t atom_cou
     lz = (*zmax - *zmin) + 2.0 * cutoff_a_;
   }
 
-  const int nx = std::max(1, static_cast<int>(lx / cutoff_a_));
-  const int ny = std::max(1, static_cast<int>(ly / cutoff_a_));
-  const int nz = std::max(1, static_cast<int>(lz / cutoff_a_));
-  const double cell_x = lx / static_cast<double>(nx);
-  const double cell_y = ly / static_cast<double>(ny);
-  const double cell_z = lz / static_cast<double>(nz);
-
-  head_.assign(static_cast<std::size_t>(nx * ny * nz), -1);
-  std::fill(next_.begin(), next_.begin() + atom_count, -1);
-
-  auto cell_of = [&](double x, double y, double z) {
-    int ix = static_cast<int>(std::floor((x + shift_x) / cell_x));
-    int iy = static_cast<int>(std::floor((y + shift_y) / cell_y));
-    int iz = static_cast<int>(std::floor((z + shift_z) / cell_z));
-    ix = ((ix % nx) + nx) % nx;
-    iy = ((iy % ny) + ny) % ny;
-    iz = ((iz % nz) + nz) % nz;
-    return ix * ny * nz + iy * nz + iz;
-  };
-
-  for (std::size_t i = 0; i < atom_count; ++i) {
-    const int cell = cell_of(xs[i], ys[i], zs[i]);
-    next_[i] = head_[static_cast<std::size_t>(cell)];
-    head_[static_cast<std::size_t>(cell)] = static_cast<int>(i);
-  }
+  titan_neighbor::OrthorhombicGridSpec spec;
+  spec.cutoff = cutoff_a_;
+  spec.len_x = lx;
+  spec.len_y = ly;
+  spec.len_z = lz;
+  spec.shift_x = shift_x;
+  spec.shift_y = shift_y;
+  spec.shift_z = shift_z;
+  spec.periodic = periodic;
 
   std::optional<BoxMatrix> box_matrix_storage;
   if (periodic)
     box_matrix_storage.emplace(frame.Box);
   const BoxMatrix *box_matrix =
       box_matrix_storage.has_value() ? &box_matrix_storage.value() : nullptr;
+  const double cutoff_sq = cutoff_a_ * cutoff_a_;
 
-  for (std::size_t i = 0; i < atom_count; ++i) {
-    int ix = static_cast<int>(std::floor((xs[i] + shift_x) / cell_x));
-    int iy = static_cast<int>(std::floor((ys[i] + shift_y) / cell_y));
-    int iz = static_cast<int>(std::floor((zs[i] + shift_z) / cell_z));
-    ix = ((ix % nx) + nx) % nx;
-    iy = ((iy % ny) + ny) % ny;
-    iz = ((iz % nz) + nz) % nz;
-
-    for (const auto &offset : kHalfShell) {
-      const int cell_ix = ((ix + offset[0]) % nx + nx) % nx;
-      const int cell_iy = ((iy + offset[1]) % ny + ny) % ny;
-      const int cell_iz = ((iz + offset[2]) % nz + nz) % nz;
-      const int cell = cell_ix * ny * nz + cell_iy * nz + cell_iz;
-
-      for (int j = head_[static_cast<std::size_t>(cell)]; j != -1;
-           j = next_[static_cast<std::size_t>(j)]) {
-        if (offset[0] == 0 && offset[1] == 0 && offset[2] == 0 &&
-            static_cast<std::size_t>(j) <= i) {
-          continue;
-        }
-
-        double dx = xs[i] - xs[static_cast<std::size_t>(j)];
-        double dy = ys[i] - ys[static_cast<std::size_t>(j)];
-        double dz = zs[i] - zs[static_cast<std::size_t>(j)];
+  neighbor_grid_.for_each_pair(
+      atom_count, spec,
+      [&](std::size_t idx, double &x, double &y, double &z) {
+        x = xs[idx];
+        y = ys[idx];
+        z = zs[idx];
+      },
+      [&](std::size_t idx) { return idx < atom_count; },
+      [&](std::size_t lhs, std::size_t rhs) {
+        double dx = xs[lhs] - xs[rhs];
+        double dy = ys[lhs] - ys[rhs];
+        double dz = zs[lhs] - zs[rhs];
         if (box_matrix != nullptr)
           box_matrix->apply_mic(dx, dy, dz);
-
-        const double d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 > cutoff_sq_a_)
-          continue;
-
-        const int lhs = static_cast<int>(i);
-        const int rhs = j;
-        unite_atoms(lhs, rhs);
-        ++atom_degree_[static_cast<std::size_t>(lhs)];
-        ++atom_degree_[static_cast<std::size_t>(rhs)];
-        edges_.emplace_back(lhs, rhs);
-      }
-    }
-  }
+        if (dx * dx + dy * dy + dz * dz > cutoff_sq)
+          return;
+        const int ilhs = static_cast<int>(lhs);
+        const int irhs = static_cast<int>(rhs);
+        unite_atoms(ilhs, irhs);
+        ++atom_degree_[lhs];
+        ++atom_degree_[rhs];
+        edges_.emplace_back(ilhs, irhs);
+      });
 }
 
 int TitanLJAnalyzer::find_largest_cluster_root(std::size_t atom_count,
@@ -548,7 +509,8 @@ void TitanLJAnalyzer::unwrap_largest_cluster(const MOL &frame, bool periodic) {
   if (cluster_size == 0)
     return;
 
-  local_degree_.assign(cluster_size, 0);
+  std::vector<std::pair<int, int>> local_edges;
+  local_edges.reserve(edges_.size());
   for (const auto &[lhs, rhs] : edges_) {
     if (lhs < 0 || rhs < 0)
       continue;
@@ -560,31 +522,10 @@ void TitanLJAnalyzer::unwrap_largest_cluster(const MOL &frame, bool periodic) {
     const int local_rhs = atom_to_local_[static_cast<std::size_t>(rhs)];
     if (local_lhs < 0 || local_rhs < 0)
       continue;
-    ++local_degree_[static_cast<std::size_t>(local_lhs)];
-    ++local_degree_[static_cast<std::size_t>(local_rhs)];
+    local_edges.emplace_back(local_lhs, local_rhs);
   }
-
-  adjacency_offsets_.assign(cluster_size + 1, 0);
-  for (std::size_t i = 0; i < cluster_size; ++i)
-    adjacency_offsets_[i + 1] = adjacency_offsets_[i] + local_degree_[i];
-  adjacency_indices_.assign(
-      static_cast<std::size_t>(adjacency_offsets_[cluster_size]), -1);
-  std::vector<int> cursor = adjacency_offsets_;
-
-  for (const auto &[lhs, rhs] : edges_) {
-    if (lhs < 0 || rhs < 0)
-      continue;
-    if (static_cast<std::size_t>(lhs) >= atom_to_local_.size() ||
-        static_cast<std::size_t>(rhs) >= atom_to_local_.size()) {
-      continue;
-    }
-    const int local_lhs = atom_to_local_[static_cast<std::size_t>(lhs)];
-    const int local_rhs = atom_to_local_[static_cast<std::size_t>(rhs)];
-    if (local_lhs < 0 || local_rhs < 0)
-      continue;
-    adjacency_indices_[static_cast<std::size_t>(cursor[local_lhs]++)] = local_rhs;
-    adjacency_indices_[static_cast<std::size_t>(cursor[local_rhs]++)] = local_lhs;
-  }
+  cluster_graph_ = titan_sparse::CSRTopology::from_undirected_edges(
+      static_cast<int>(cluster_size), local_edges);
 
   visited_.assign(cluster_size, 0);
   bfs_queue_.clear();
@@ -609,9 +550,9 @@ void TitanLJAnalyzer::unwrap_largest_cluster(const MOL &frame, bool periodic) {
   for (std::size_t head = 0; head < bfs_queue_.size(); ++head) {
     const int local_u = bfs_queue_[head];
     const int global_u = cluster_members_[static_cast<std::size_t>(local_u)];
-    for (int idx = adjacency_offsets_[static_cast<std::size_t>(local_u)];
-         idx < adjacency_offsets_[static_cast<std::size_t>(local_u + 1)]; ++idx) {
-      const int local_v = adjacency_indices_[static_cast<std::size_t>(idx)];
+    for (int idx = cluster_graph_.row_begin(local_u);
+         idx < cluster_graph_.row_end(local_u); ++idx) {
+      const int local_v = cluster_graph_.col_index(idx);
       if (local_v < 0 || visited_[static_cast<std::size_t>(local_v)] != 0)
         continue;
 
@@ -731,23 +672,9 @@ TitanLJAnalyzer::LocalOrderSummary TitanLJAnalyzer::compute_local_order_metrics(
   if (atom_count == 0)
     return summary;
 
-  std::vector<int> offsets(atom_count + 1, 0);
-  for (std::size_t i = 0; i < atom_count; ++i)
-    offsets[i + 1] = offsets[i] + atom_degree_[i];
-  std::vector<int> adjacency(static_cast<std::size_t>(offsets[atom_count]), -1);
-  std::vector<int> cursor = offsets;
-  for (const auto &[lhs, rhs] : edges_) {
-    if (lhs < 0 || rhs < 0)
-      continue;
-    if (static_cast<std::size_t>(lhs) >= atom_count ||
-        static_cast<std::size_t>(rhs) >= atom_count) {
-      continue;
-    }
-    adjacency[static_cast<std::size_t>(cursor[static_cast<std::size_t>(lhs)]++)] =
-        rhs;
-    adjacency[static_cast<std::size_t>(cursor[static_cast<std::size_t>(rhs)]++)] =
-        lhs;
-  }
+  const titan_sparse::CSRTopology graph =
+      titan_sparse::CSRTopology::from_undirected_edges(
+          static_cast<int>(atom_count), edges_);
 
   q4_values_.assign(atom_count, 0.0);
   q6_values_.assign(atom_count, 0.0);
@@ -779,14 +706,16 @@ TitanLJAnalyzer::LocalOrderSummary TitanLJAnalyzer::compute_local_order_metrics(
       break;
     workers.emplace_back([&, begin, end]() {
       for (std::size_t atom = begin; atom < end; ++atom) {
-        const int neighbor_count = offsets[atom + 1] - offsets[atom];
+        const int neighbor_count =
+            graph.degree(static_cast<int>(atom));
         if (neighbor_count <= 0)
           continue;
 
         std::array<std::complex<double>, 5> q4m{};
         std::array<std::complex<double>, 7> q6m{};
-        for (int idx = offsets[atom]; idx < offsets[atom + 1]; ++idx) {
-          const int nbr = adjacency[static_cast<std::size_t>(idx)];
+        for (int idx = graph.row_begin(static_cast<int>(atom));
+             idx < graph.row_end(static_cast<int>(atom)); ++idx) {
+          const int nbr = graph.col_index(idx);
           if (nbr < 0)
             continue;
           double dx = xs[static_cast<std::size_t>(nbr)] - xs[atom];
@@ -813,14 +742,16 @@ TitanLJAnalyzer::LocalOrderSummary TitanLJAnalyzer::compute_local_order_metrics(
       break;
     workers.emplace_back([&, begin, end]() {
       for (std::size_t atom = begin; atom < end; ++atom) {
-        const int neighbor_count = offsets[atom + 1] - offsets[atom];
+        const int neighbor_count =
+            graph.degree(static_cast<int>(atom));
         if (neighbor_count <= 0)
           continue;
 
         auto q4bar = q4m_local[atom];
         auto q6bar = q6m_local[atom];
-        for (int idx = offsets[atom]; idx < offsets[atom + 1]; ++idx) {
-          const int nbr = adjacency[static_cast<std::size_t>(idx)];
+        for (int idx = graph.row_begin(static_cast<int>(atom));
+             idx < graph.row_end(static_cast<int>(atom)); ++idx) {
+          const int nbr = graph.col_index(idx);
           if (nbr < 0)
             continue;
           for (std::size_t m = 0; m < q4bar.size(); ++m)
@@ -1028,52 +959,57 @@ void TitanLJAnalyzer::accumulate_radial_density(const MOL &frame, bool periodic,
   std::vector<std::vector<double>> local_all(
       worker_count, std::vector<double>(valid_bins, 0.0));
 
-  std::vector<std::jthread> workers;
-  workers.reserve(worker_count);
   const std::size_t all_chunk = (atom_count + worker_count - 1) / worker_count;
-  for (std::size_t worker = 0; worker < worker_count; ++worker) {
-    const std::size_t begin = worker * all_chunk;
-    const std::size_t end = std::min(begin + all_chunk, atom_count);
-    if (begin >= end)
-      break;
-    workers.emplace_back([&, worker, begin, end]() {
-      auto &all_bins = local_all[worker];
-      for (std::size_t atom = begin; atom < end; ++atom) {
-        double dx = xs[atom] - geometry.centroid_x;
-        double dy = ys[atom] - geometry.centroid_y;
-        double dz = zs[atom] - geometry.centroid_z;
-        if (box_matrix != nullptr)
-          box_matrix->apply_mic(dx, dy, dz);
-        const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
-        const std::size_t bin =
-            static_cast<std::size_t>(std::floor(r / rho_bin_a_));
-        if (bin < valid_bins)
-          all_bins[bin] += 1.0;
-      }
-    });
+  {
+    std::vector<std::jthread> workers;
+    workers.reserve(worker_count);
+    for (std::size_t worker = 0; worker < worker_count; ++worker) {
+      const std::size_t begin = worker * all_chunk;
+      const std::size_t end = std::min(begin + all_chunk, atom_count);
+      if (begin >= end)
+        break;
+      workers.emplace_back([&, worker, begin, end]() {
+        auto &all_bins = local_all[worker];
+        for (std::size_t atom = begin; atom < end; ++atom) {
+          double dx = xs[atom] - geometry.centroid_x;
+          double dy = ys[atom] - geometry.centroid_y;
+          double dz = zs[atom] - geometry.centroid_z;
+          if (box_matrix != nullptr)
+            box_matrix->apply_mic(dx, dy, dz);
+          const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+          const std::size_t bin =
+              static_cast<std::size_t>(std::floor(r / rho_bin_a_));
+          if (bin < valid_bins)
+            all_bins[bin] += 1.0;
+        }
+      });
+    }
   }
-  workers.clear();
 
   const std::size_t cluster_chunk =
       (cluster_size + worker_count - 1) / worker_count;
-  for (std::size_t worker = 0; worker < worker_count; ++worker) {
-    const std::size_t begin = worker * cluster_chunk;
-    const std::size_t end = std::min(begin + cluster_chunk, cluster_size);
-    if (begin >= end)
-      break;
-    workers.emplace_back([&, worker, begin, end]() {
-      auto &cluster_bins = local_cluster[worker];
-      for (std::size_t local_idx = begin; local_idx < end; ++local_idx) {
-        const double dx = unwrap_x_[local_idx] - geometry.centroid_x;
-        const double dy = unwrap_y_[local_idx] - geometry.centroid_y;
-        const double dz = unwrap_z_[local_idx] - geometry.centroid_z;
-        const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
-        const std::size_t bin =
-            static_cast<std::size_t>(std::floor(r / rho_bin_a_));
-        if (bin < valid_bins)
-          cluster_bins[bin] += 1.0;
-      }
-    });
+  {
+    std::vector<std::jthread> workers;
+    workers.reserve(worker_count);
+    for (std::size_t worker = 0; worker < worker_count; ++worker) {
+      const std::size_t begin = worker * cluster_chunk;
+      const std::size_t end = std::min(begin + cluster_chunk, cluster_size);
+      if (begin >= end)
+        break;
+      workers.emplace_back([&, worker, begin, end]() {
+        auto &cluster_bins = local_cluster[worker];
+        for (std::size_t local_idx = begin; local_idx < end; ++local_idx) {
+          const double dx = unwrap_x_[local_idx] - geometry.centroid_x;
+          const double dy = unwrap_y_[local_idx] - geometry.centroid_y;
+          const double dz = unwrap_z_[local_idx] - geometry.centroid_z;
+          const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+          const std::size_t bin =
+              static_cast<std::size_t>(std::floor(r / rho_bin_a_));
+          if (bin < valid_bins)
+            cluster_bins[bin] += 1.0;
+        }
+      });
+    }
   }
 
   std::vector<double> cluster_counts(valid_bins, 0.0);

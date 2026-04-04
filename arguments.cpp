@@ -53,10 +53,12 @@ int arguments::recheck_and_change_pdb_input() {
   return 0;
 }
 
-string arguments::set_Buildnumber() { return "20260319"; }
-string arguments::get_build_number() const { return "20260319"; }
+string arguments::set_Buildnumber() { return "20260104"; }
+string arguments::get_build_number() const { return "20260104"; }
 
 string arguments::get_pdbOutput() const {
+  if (opdb_name_explicit && !out_pdb_name.empty())
+    return out_pdb_name;
   fs::path p_temp = pdb_name;
   return "out_" + p_temp.stem().string() + ".pdb";
 }
@@ -89,6 +91,18 @@ int arguments::post_process() {
     TitanUI::print_info(
         "[MARTINI] Auto-set epsilon_in = 15.0 (Martini relative "
         "permittivity). Override with -epsilon_in if needed.");
+  }
+  if (flag_elec_screening) {
+    if (salt_concentration <= 0.0) {
+      TitanUI::print_error(
+          "Electrostatic screening: salt concentration must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (epsilon_in <= 0.0) {
+      TitanUI::print_error(
+          "Electrostatic screening: -epsilon_in must be > 0.");
+      exit(EXIT_FAILURE);
+    }
   }
   if (begin_time < 0. || end_time < 0.) {
     cout << "Your begin time and end time must not be negative!\n";
@@ -441,6 +455,31 @@ int arguments::post_process() {
     }
   }
 
+  if (flag_allostery) {
+    if (allostery_tau <= 0) {
+      TitanUI::print_error("Allostery: -allostery-tau must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (allostery_bins == 0) {
+      TitanUI::print_error(
+          "Allostery: -allostery-bins must be > 0 or -1 for auto.");
+      exit(EXIT_FAILURE);
+    }
+    if (allostery_bins < -1) {
+      TitanUI::print_error(
+          "Allostery: -allostery-bins must be >= 1 or -1 for auto.");
+      exit(EXIT_FAILURE);
+    }
+    if (allostery_cutoff < 0.0) {
+      TitanUI::print_error("Allostery: -allostery-cut must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (allostery_knn < 0) {
+      TitanUI::print_error("Allostery: -allostery-knn must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+  }
+
   const bool lj_trace_free_kinetics =
       lj.flag_lj && (msm.flag_tica || msm.flag_msm || dham.flag_dham ||
                      tpt.flag_tpt ||
@@ -455,23 +494,38 @@ int arguments::post_process() {
   }
 
   const bool has_explicit_pbc_mode =
-      pbc.solv_pbcn || pbc.solv_pbc == 1 || pbc.solv_pbc_int == 1 ||
+      pbc.solv_pbcn || pbc.solv_pbctopo || pbc.solv_pbc == 1 ||
+      pbc.solv_pbc_int == 1 ||
       pbc.solv_pbc_clust || pbc.flag_pbc_ref || pbc.pbc_mem ||
       pbc.pbc_envi;
-  if ((rms.flag_rms || lj.flag_lj) && !has_explicit_pbc_mode) {
-    pbc.solv_pbcn = true;
-    pbc.auto_enabled_pbcn = true;
+  if ((flag_nocal || rms.flag_rms || lj.flag_lj) && !has_explicit_pbc_mode) {
+    pbc.solv_pbc_int = 1;
+    pbc.solv_pbc = 0;
+    pbc.chain_ref = 0;
+    pbc.auto_enabled_pbci = true;
     std::string reason;
-    if (rms.flag_rms && lj.flag_lj) {
+    if (flag_nocal && rms.flag_rms && lj.flag_lj) {
+      reason = "Nocal, RMSD/RMSF, and LJ requested without an explicit PBC "
+               "mode. Auto-enabling -pbci 0.";
+    } else if (flag_nocal && rms.flag_rms) {
+      reason = "Nocal and RMSD/RMSF requested without an explicit PBC mode. "
+               "Auto-enabling -pbci 0.";
+    } else if (flag_nocal && lj.flag_lj) {
+      reason = "Nocal and LJ requested without an explicit PBC mode. "
+               "Auto-enabling -pbci 0.";
+    } else if (flag_nocal) {
+      reason = "Nocal requested without an explicit PBC mode. "
+               "Auto-enabling -pbci 0.";
+    } else if (rms.flag_rms && lj.flag_lj) {
       reason = "RMSD/RMSF and LJ analysis requested without an explicit PBC "
-               "mode. Auto-enabling -pbcn (FixBox).";
+               "mode. Auto-enabling -pbci 0.";
     } else if (lj.flag_lj) {
       reason =
           "LJ analysis requested without an explicit PBC mode. Auto-enabling "
-          "-pbcn (FixBox).";
+          "-pbci 0.";
     } else {
       reason = "RMSD/RMSF requested without an explicit PBC mode. "
-               "Auto-enabling -pbcn (FixBox).";
+               "Auto-enabling -pbci 0.";
     }
     TitanUI::print_warning(reason);
   }

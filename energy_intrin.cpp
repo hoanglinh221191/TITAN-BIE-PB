@@ -326,6 +326,7 @@ int cal_energy_amber_screening_intrin(
     const arguments &Arguments, const Multi_MOL_parameters &rec_parameters,
     const Multi_MOL_parameters &lg_parameters) {
   Energy.set_energy(0., 0.);
+  constexpr double kScreeningMinDistance = 1e-10;
   double epsilon_in{Arguments.epsilon_in},
       lambda_debye{3.07 / sqrt(Arguments.salt_concentration)};
 
@@ -333,6 +334,7 @@ int cal_energy_amber_screening_intrin(
   __m256d avx_neg_inv_lambda = _mm256_set1_pd(-1.0 / lambda_debye);
   __m256d avx_one = _mm256_set1_pd(1.0);
   __m256d avx_half = _mm256_set1_pd(0.5);
+  __m256d avx_min_distance = _mm256_set1_pd(kScreeningMinDistance);
 
   for (size_t j{begin}; j < end; ++j) {
     const double pos_x{lg.pos.x[j]}, pos_y{lg.pos.y[j]}, pos_z{lg.pos.z[j]};
@@ -365,11 +367,15 @@ int cal_energy_amber_screening_intrin(
 
       __m256d r2 = _mm256_add_pd(_mm256_add_pd(dx2, dy2), dz2);
       r2 = _mm256_mul_pd(r2, v_scale);
-      __m256d avx_array_d_rec = _mm256_sqrt_pd(r2);                // d
-      __m256d avx_inv_d = _mm256_div_pd(avx_one, avx_array_d_rec); // 1/d
+      __m256d avx_array_d_rec = _mm256_sqrt_pd(r2); // d
+      __m256d avx_valid_mask =
+          _mm256_cmp_pd(avx_array_d_rec, avx_min_distance, _CMP_GT_OQ);
+      __m256d avx_safe_d =
+          _mm256_blendv_pd(avx_min_distance, avx_array_d_rec, avx_valid_mask);
+      __m256d avx_inv_d = _mm256_div_pd(avx_one, avx_safe_d); // 1/d
 
       // Screening term: exp(-d / lambda)
-      __m256d avx_exp_arg = _mm256_mul_pd(avx_array_d_rec, avx_neg_inv_lambda);
+      __m256d avx_exp_arg = _mm256_mul_pd(avx_safe_d, avx_neg_inv_lambda);
       __m256d avx_exp_val = f_exp_avx(avx_exp_arg);
 
       // Elec = C * q1 * q2 * exp / d / eps_in
@@ -390,7 +396,7 @@ int cal_energy_amber_screening_intrin(
       vdw_temp2 = _mm256_add_pd(avx_temp_sigma, vdw_temp2);
       vdw_temp2 = _mm256_mul_pd(vdw_temp2, avx_half);
 
-      vdw_temp2 = _mm256_div_pd(vdw_temp2, avx_array_d_rec);
+      vdw_temp2 = _mm256_div_pd(vdw_temp2, avx_safe_d);
       vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
       __m256d vdw_temp3 = vdw_temp2;
       vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
@@ -399,6 +405,8 @@ int cal_energy_amber_screening_intrin(
       vdw_temp3 = _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2),
                                 vdw_temp2); // c12 - c6
       vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3);
+      avx_elec_result = _mm256_and_pd(avx_elec_result, avx_valid_mask);
+      vdw_temp3 = _mm256_and_pd(vdw_temp3, avx_valid_mask);
 
       if (CachedData.elec_ener.empty()) {
         Energy.elec_ener += hsum_double_avx(avx_elec_result);
@@ -415,6 +423,10 @@ int cal_energy_amber_screening_intrin(
           _mm256_storeu_pd(d, avx_array_d_rec);
           for (size_t k{}; k < 4; ++k) {
             size_t pos{rec.size() * j + i + k};
+            if (!std::isfinite(d[k]) || d[k] <= kScreeningMinDistance) {
+              CachedData.set_elec_vdw(pos, 0., 0.);
+              continue;
+            }
             if (d[k] > Arguments.distance_energy_cutoff) {
               CachedData.set_elec_vdw(pos, 0., 0.);
               continue;
@@ -432,6 +444,13 @@ int cal_energy_amber_screening_intrin(
         double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
                             square(rec.pos.y[i] - pos_y) +
                             square(rec.pos.z[i] - pos_z))};
+        if (!std::isfinite(d) || d <= kScreeningMinDistance) {
+          if (!CachedData.elec_ener.empty()) {
+            size_t pos{rec.size() * j + i};
+            CachedData.set_elec_vdw(pos, 0., 0.);
+          }
+          continue;
+        }
         double c_6{
             c6(0.5 *
                (lg_parameters[j].get_sigma() + rec_parameters[i].get_sigma()) /

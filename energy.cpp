@@ -283,6 +283,7 @@ int cal_energy_amber_screening(const MOL &rec, const MOL &lg,
                                size_t num_snap, const arguments &Arguments,
                                const Multi_MOL_parameters &rec_parameters,
                                const Multi_MOL_parameters &lg_parameters) {
+  constexpr double kScreeningMinDistance = 1e-10;
   const double epsilon_in{Arguments.epsilon_in};
   const double lambda_debye{3.07 / sqrt(Arguments.salt_concentration)};
   const bool is_charmm =
@@ -296,6 +297,14 @@ int cal_energy_amber_screening(const MOL &rec, const MOL &lg,
       const double d{0.1 * sqrt(square(rec.pos.x[i] - lg.pos.x[j]) +
                                 square(rec.pos.y[i] - lg.pos.y[j]) +
                                 square(rec.pos.z[i] - lg.pos.z[j]))};
+
+      if (!std::isfinite(d) || d <= kScreeningMinDistance) {
+        if (!CachedData.elec_ener.empty()) {
+          const size_t pos{rec.size() * j + i};
+          CachedData.set_elec_vdw(pos, 0., 0.);
+        }
+        continue;
+      }
 
       if (Arguments.distance_energy_cutoff > 0. &&
           d > Arguments.distance_energy_cutoff) [[unlikely]] {

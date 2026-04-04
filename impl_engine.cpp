@@ -509,29 +509,49 @@ int engine(arguments &Arguments) {
     TitanUI::log_section(log, "REQUESTED MODULES");
     TitanUI::log_kv(log, "Requested Features", active_modules);
     // PBC algorithm in use
-    if (Arguments.pbc.solv_pbcn)
+    if (Arguments.pbc.solv_pbctopo)
+      TitanUI::log_kv(log, "PBC Algorithm",
+                      "pbctopo (VIBE: Virtual Intact Block Extraction)");
+    else if (Arguments.pbc.solv_pbcn)
       TitanUI::log_kv(log, "PBC Algorithm",
                       Arguments.pbc.auto_enabled_pbcn
-                          ? "FixBox (Baptista et al. 2022, auto-enabled)"
-                          : "FixBox (Baptista et al. 2022)");
+                          ? "FixBox-style staged envelope (auto-enabled)"
+                          : "FixBox-style staged envelope");
     else if (Arguments.pbc.solv_pbc_int == 1)
       TitanUI::log_kv(log, "PBC Algorithm",
-                      "COM-heuristic (chain ref=" +
-                          std::to_string(Arguments.pbc.chain_ref) + ")");
+                      std::string("Internal-reference envelope (chain ref=") +
+                          std::to_string(Arguments.pbc.chain_ref) +
+                          (Arguments.pbc.auto_enabled_pbci ? ", auto-enabled)"
+                                                          : ")"));
     else if (Arguments.pbc.solv_pbc == 1)
       TitanUI::log_kv(log, "PBC Algorithm", "Prob (legacy)");
     else
       TitanUI::log_kv(log, "PBC Algorithm", "None");
-    if (Arguments.pbc.auto_enabled_pbcn) {
+    if (Arguments.pbc.auto_enabled_pbcn || Arguments.pbc.auto_enabled_pbci) {
       std::string auto_pbc_message =
-          "RMSD/RMSF requested without explicit PBC mode; enabled -pbcn";
-      if (Arguments.rms.flag_rms && Arguments.lj.flag_lj) {
+          "RMSD/RMSF requested without explicit PBC mode; enabled -pbci 0";
+      if (Arguments.flag_nocal && Arguments.rms.flag_rms &&
+          Arguments.lj.flag_lj) {
+        auto_pbc_message =
+            "Nocal, RMSD/RMSF, and LJ requested without explicit PBC mode; "
+            "enabled -pbci 0";
+      } else if (Arguments.flag_nocal && Arguments.rms.flag_rms) {
+        auto_pbc_message =
+            "Nocal and RMSD/RMSF requested without explicit PBC mode; "
+            "enabled -pbci 0";
+      } else if (Arguments.flag_nocal && Arguments.lj.flag_lj) {
+        auto_pbc_message =
+            "Nocal and LJ requested without explicit PBC mode; enabled -pbci 0";
+      } else if (Arguments.flag_nocal) {
+        auto_pbc_message =
+            "Nocal requested without explicit PBC mode; enabled -pbci 0";
+      } else if (Arguments.rms.flag_rms && Arguments.lj.flag_lj) {
         auto_pbc_message =
             "RMSD/RMSF and LJ requested without explicit PBC mode; "
-            "enabled -pbcn";
+            "enabled -pbci 0";
       } else if (Arguments.lj.flag_lj) {
         auto_pbc_message =
-            "LJ requested without explicit PBC mode; enabled -pbcn";
+            "LJ requested without explicit PBC mode; enabled -pbci 0";
       }
       TitanUI::log_kv(log, "PBC Auto-Enable", auto_pbc_message);
     }
@@ -602,7 +622,8 @@ int engine(arguments &Arguments) {
   std::chrono::milliseconds time_cal{}, time_emap{}, time_fmap{},
       time_subgroups_cal{}, time_solve_pbc{}, time_sc{}, time_hb{},
       time_other{}, time_print_ener_res{}, time_print_force{}, time_maxforce{},
-      time_new_emap_other{}, time_avg_emap{}, time_contact{}, time_pdb{},
+      time_new_emap_other{}, time_avg_emap{}, time_contact{},
+      time_input_init{}, time_input_stream{},
       time_cscd{0}, time_water{0}, time_na{0};
   vector<thread> threads(num_threads);
   std::vector<std::thread> threads_maxF(Arguments.nt);
@@ -647,7 +668,8 @@ int engine(arguments &Arguments) {
     const auto time_subgroups_cal_base = time_subgroups_cal;
     const auto time_na_base = time_na;
     const auto time_ifp_base = time_ifp;
-    const auto time_pdb_base = time_pdb;
+    const auto time_input_init_base = time_input_init;
+    const auto time_input_stream_base = time_input_stream;
     const auto time_solve_pbc_base = time_solve_pbc;
     const auto time_llps_base = time_llps;
 
@@ -709,7 +731,7 @@ int engine(arguments &Arguments) {
     multi_snap_emap rec_ener_inter;
     vector<vector<map_pos>> cont_matrix;
     vector<vector<int>> pos_lookup_1, pos_lookup_2;
-    auto start_pdb{std::chrono::steady_clock::now()};
+    auto start_input_init{std::chrono::steady_clock::now()};
 
     // --- Total File Size ---
     size_t total_traj_bytes = 1;
@@ -893,9 +915,6 @@ int engine(arguments &Arguments) {
         !detect_nucleic_polymer_type(pro_in.info).empty() ||
         !detect_nucleic_polymer_type(lig.info).empty();
 
-    time_pdb = std::chrono::duration_cast<milliseconds>(
-        std::chrono::steady_clock::now() - start_pdb);
-
     cache_sigma_epsilon CachedData{Arguments.distance_energy_cutoff};
     CachedData.force_field_name = force_f;
     // Martini CG systems are too large for O(N×M) pair cache (~GB).
@@ -1059,12 +1078,18 @@ int engine(arguments &Arguments) {
       current_input_file = "REC=" + name_pro + "; LIG=" + name_lig;
     }
     TitanUI::log_kv(log, "Current Input File", current_input_file);
+    const std::string receptor_group_label =
+        info_output.get_group_1_name() + " [" +
+        std::to_string(Arguments.group_1) + "] (" +
+        std::to_string(pro_in.info.size()) + " atoms)";
+    const std::string ligand_group_label =
+        info_output.get_group_2_name() + " [" +
+        std::to_string(Arguments.group_2) + "] (" +
+        std::to_string(lig.info.size()) + " atoms)";
     TitanUI::log_kv(log, "Receptor Group",
-                    "Group 1 [" + std::to_string(Arguments.group_1) + "] (" +
-                        std::to_string(pro_in.info.size()) + " atoms)");
+                    receptor_group_label);
     TitanUI::log_kv(log, "Ligand Group",
-                    "Group 2 [" + std::to_string(Arguments.group_2) + "] (" +
-                        std::to_string(lig.info.size()) + " atoms)");
+                    ligand_group_label);
 
     auto format_double = [](double v) {
       std::ostringstream oss;
@@ -1289,6 +1314,9 @@ int engine(arguments &Arguments) {
                           std::to_string(bytes_per_frame / 1024) +
                           " KB/frame)");
     }
+
+    time_input_init += std::chrono::duration_cast<milliseconds>(
+        std::chrono::steady_clock::now() - start_input_init);
 
     // --- TICA INITIALIZATION (after DCCM init, uses Cα count) ---
     if (Arguments.msm.flag_tica && !tica_analyzer) {
@@ -1686,8 +1714,11 @@ int engine(arguments &Arguments) {
     // MAIN STREAMING LOOP
     // ========================================================================
     while (is_streaming) {
+      const auto start_input_stream = std::chrono::steady_clock::now();
       auto expected_frames =
           streamer.read_next_chunk(CHUNK_SIZE, pro_in, lig, water_traj);
+      time_input_stream += std::chrono::duration_cast<milliseconds>(
+          std::chrono::steady_clock::now() - start_input_stream);
       if (!expected_frames) {
         TitanUI::print_error(expected_frames.error());
         break;
@@ -1725,7 +1756,9 @@ int engine(arguments &Arguments) {
       }
 
       auto start_pbc = std::chrono::steady_clock::now();
-      if (Arguments.pbc.solv_pbcn) {
+      if (Arguments.pbc.solv_pbctopo) {
+        pro_in.solve_pbc_pbctopo(lig, Arguments);
+      } else if (Arguments.pbc.solv_pbcn) {
         pro_in.solv_pbc_pbcn(lig, Arguments);
         align_complex(pro_in, lig, 0, 0);
       } else if (Arguments.pbc.solv_pbc_int == 1) {
@@ -1758,7 +1791,8 @@ int engine(arguments &Arguments) {
       if (Arguments.flag_nocal) {
         // Use align_to_box (position atoms within box) instead of
         // align_complex (which aligns two molecules for interaction calc)
-        if (Arguments.pbc.solv_pbcn || Arguments.pbc.solv_pbc_int)
+        if (Arguments.pbc.solv_pbcn || Arguments.pbc.solv_pbctopo ||
+            Arguments.pbc.solv_pbc_int)
           pro_in.align_to_box();
 
         // PBC clustering (non-int mode)
@@ -3241,9 +3275,17 @@ int engine(arguments &Arguments) {
                                  .count() /
                              1000.0;
     TitanUI::log_kv(log, "Timing Scope", "current trajectory/input");
-
-    TitanUI::log_time(log, "Parsing PDB",
-                      (time_pdb - time_pdb_base).count() / 1000.0);
+    const double input_init_time =
+        (time_input_init - time_input_init_base).count() / 1000.0;
+    const double input_stream_time =
+        (time_input_stream - time_input_stream_base).count() / 1000.0;
+    const std::string input_init_label =
+        Arguments.flag_xdr ? "Reference Parse + XDR Init" : "Input Init (PDB)";
+    const std::string input_stream_label =
+        Arguments.flag_xdr ? "Trajectory Streaming (XDR)"
+                           : "Trajectory Streaming (PDB)";
+    TitanUI::log_time(log, input_init_label, input_init_time);
+    TitanUI::log_time(log, input_stream_label, input_stream_time);
     TitanUI::log_time(log, "Solving PBC",
                       (time_solve_pbc - time_solve_pbc_base).count() / 1000.0);
     TitanUI::log_time(log, "GBSA Calculation",
@@ -3285,6 +3327,32 @@ int engine(arguments &Arguments) {
                       (time_tica - time_tica_base).count() / 1000.0);
     TitanUI::log_time(log, "IFP Analysis",
                       (time_ifp - time_ifp_base).count() / 1000.0);
+    const double accounted_traj_time =
+        input_init_time + input_stream_time +
+        (time_solve_pbc - time_solve_pbc_base).count() / 1000.0 +
+        (time_gbsa - time_gbsa_base).count() / 1000.0 +
+        (time_cas - time_cas_base).count() / 1000.0 +
+        (time_dssp - time_dssp_base).count() / 1000.0 +
+        (time_lj - time_lj_base).count() / 1000.0 +
+        (time_rms - time_rms_base).count() / 1000.0 +
+        (time_network - time_network_base).count() / 1000.0 +
+        (time_cal - time_cal_base).count() / 1000.0 +
+        (time_sc - time_sc_base).count() / 1000.0 +
+        (time_cscd - time_cscd_base).count() / 1000.0 +
+        (time_hb - time_hb_base).count() / 1000.0 +
+        (time_emap - time_emap_base).count() / 1000.0 +
+        (time_fmap - time_fmap_base).count() / 1000.0 +
+        (time_other - time_other_base).count() / 1000.0 +
+        (time_water - time_water_base).count() / 1000.0 +
+        (time_subgroups_cal - time_subgroups_cal_base).count() / 1000.0 +
+        (time_na - time_na_base).count() / 1000.0 +
+        (time_llps - time_llps_base).count() / 1000.0 +
+        (time_tica - time_tica_base).count() / 1000.0 +
+        (time_ifp - time_ifp_base).count() / 1000.0;
+    const double unaccounted_traj_time =
+        std::max(0.0, total_traj_time - accounted_traj_time);
+    TitanUI::log_time(log, "Unaccounted / Orchestration",
+                      unaccounted_traj_time);
 
     log << "-----------------------------------------------------------------"
            "--"

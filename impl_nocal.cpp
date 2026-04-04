@@ -28,7 +28,13 @@ int impl_nocal(Multi_MOL &pro_in, Multi_MOL &lig, fstream &log,
 
   log << "Charge: " << pro_in.total_charge() << "e\n";
 
-  if (Arguments.pbc.solv_pbcn) {
+  if (Arguments.pbc.solv_pbctopo) {
+    log << "Solving pbc...\n";
+    log << "Will use pbctopo (VIBE: Virtual Intact Block Extraction)!\n";
+    cout << "Will use pbctopo (VIBE: Virtual Intact Block Extraction)!\n";
+    pro_in.solve_pbc_pbctopo(lig, Arguments);
+    pro_in.align_to_box();
+  } else if (Arguments.pbc.solv_pbcn) {
     log << "Solving pbc...\n";
     log << "Will use the NEW strict branchless pbcn algorithm!\n";
     cout << "Will use the NEW strict branchless pbcn algorithm!\n";

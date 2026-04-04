@@ -3,6 +3,8 @@
 
 #include "Multi_MOL.h"
 #include "arguments.h"
+#include "titan_neighbor_grid.h"
+#include "titan_sparse_graph.h"
 
 #include <Eigen/Dense>
 #include <array>
@@ -151,17 +153,14 @@ private:
   std::vector<int> size_;
   std::vector<int> atom_degree_;
   std::vector<int> root_seen_;
-  std::vector<int> head_;
-  std::vector<int> next_;
   std::vector<int> component_root_;
   std::vector<int> cluster_members_;
   std::vector<int> atom_to_local_;
-  std::vector<int> local_degree_;
-  std::vector<int> adjacency_offsets_;
-  std::vector<int> adjacency_indices_;
   std::vector<int> bfs_queue_;
   std::vector<unsigned char> visited_;
   std::vector<std::pair<int, int>> edges_;
+  titan_sparse::CSRTopology cluster_graph_;
+  titan_neighbor::HalfShellGrid neighbor_grid_;
 
   std::vector<double> unwrap_x_;
   std::vector<double> unwrap_y_;
