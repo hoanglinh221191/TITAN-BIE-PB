@@ -498,6 +498,18 @@ int arguments::post_process() {
       pbc.solv_pbc_int == 1 ||
       pbc.solv_pbc_clust || pbc.flag_pbc_ref || pbc.pbc_mem ||
       pbc.pbc_envi;
+  std::transform(pbc.pbctopo_anchor_backend.begin(),
+                 pbc.pbctopo_anchor_backend.end(),
+                 pbc.pbctopo_anchor_backend.begin(), [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  if (pbc.pbctopo_anchor_backend != "auto" &&
+      pbc.pbctopo_anchor_backend != "prim" &&
+      pbc.pbctopo_anchor_backend != "spatial-all") {
+    TitanUI::print_error(
+        "PBCTOPO: -pbctopo-anchor-backend must be one of auto, prim, spatial-all.");
+    exit(EXIT_FAILURE);
+  }
   if ((flag_nocal || rms.flag_rms || lj.flag_lj) && !has_explicit_pbc_mode) {
     pbc.solv_pbc_int = 1;
     pbc.solv_pbc = 0;

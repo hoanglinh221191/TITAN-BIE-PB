@@ -877,6 +877,8 @@ IMPORTANT NOTES
   -pbca <chain_ref>     Aggressive PBC mode
   -pbcn                 FixBox-style PBC mode
   -pbctopo              pbctopo (VIBE): Virtual Intact Block Extraction PBC mode
+  -pbctopo-anchor-backend=<name>
+                        auto | prim | spatial-all. Default: auto
   -pbcclust <axes>      Clustered PBC mode; axes like x, xy, xyz
   -pbcm [chain_ref]     Membrane-oriented PBC mode
   -refpbc <file>        Separate reference PDB for PBC correction

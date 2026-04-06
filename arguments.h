@@ -23,6 +23,7 @@ struct PbcArgs {
   int pbc_mol2_aggressive{0};
   bool flag_pbc_ref{false};
   string ref_pdb_name{};
+  string pbctopo_anchor_backend{"auto"};
 };
 
 struct MsmArgs {

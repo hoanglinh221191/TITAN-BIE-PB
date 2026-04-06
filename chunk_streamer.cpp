@@ -51,6 +51,7 @@ struct XdrFrameProbe {
 };
 
 constexpr double kXdrTimeTolerancePs = 1e-4;
+constexpr double kOrthorhombicBoxToleranceNm = 1e-7;
 
 std::string xdr_status_message(int rc) {
   if (rc >= 0 && rc < exdrNR && exdr_message[rc] != nullptr) {
@@ -61,6 +62,181 @@ std::string xdr_status_message(int rc) {
 
 int64_t pad_xdr_opaque_bytes(int64_t byte_count) {
   return (byte_count + 3LL) & ~3LL;
+}
+
+template <typename T>
+box build_frame_box_from_xdr_matrix(const T (&box_nm)[DIM][DIM]) {
+  constexpr double kNmToAng = 10.0;
+  constexpr double kRadToDeg = 180.0 / 3.14159265358979;
+
+  const bool orthorhombic =
+      std::fabs(static_cast<double>(box_nm[0][1])) <=
+          kOrthorhombicBoxToleranceNm &&
+      std::fabs(static_cast<double>(box_nm[0][2])) <=
+          kOrthorhombicBoxToleranceNm &&
+      std::fabs(static_cast<double>(box_nm[1][0])) <=
+          kOrthorhombicBoxToleranceNm &&
+      std::fabs(static_cast<double>(box_nm[1][2])) <=
+          kOrthorhombicBoxToleranceNm &&
+      std::fabs(static_cast<double>(box_nm[2][0])) <=
+          kOrthorhombicBoxToleranceNm &&
+      std::fabs(static_cast<double>(box_nm[2][1])) <=
+          kOrthorhombicBoxToleranceNm;
+
+  if (orthorhombic) {
+    return box(std::abs(static_cast<double>(box_nm[0][0])) * kNmToAng,
+               std::abs(static_cast<double>(box_nm[1][1])) * kNmToAng,
+               std::abs(static_cast<double>(box_nm[2][2])) * kNmToAng, 90.0,
+               90.0, 90.0);
+  }
+
+  const double v1x = static_cast<double>(box_nm[0][0]) * kNmToAng;
+  const double v1y = static_cast<double>(box_nm[0][1]) * kNmToAng;
+  const double v1z = static_cast<double>(box_nm[0][2]) * kNmToAng;
+  const double v2x = static_cast<double>(box_nm[1][0]) * kNmToAng;
+  const double v2y = static_cast<double>(box_nm[1][1]) * kNmToAng;
+  const double v2z = static_cast<double>(box_nm[1][2]) * kNmToAng;
+  const double v3x = static_cast<double>(box_nm[2][0]) * kNmToAng;
+  const double v3y = static_cast<double>(box_nm[2][1]) * kNmToAng;
+  const double v3z = static_cast<double>(box_nm[2][2]) * kNmToAng;
+
+  const double la = std::sqrt(v1x * v1x + v1y * v1y + v1z * v1z);
+  const double lb = std::sqrt(v2x * v2x + v2y * v2y + v2z * v2z);
+  const double lc = std::sqrt(v3x * v3x + v3y * v3y + v3z * v3z);
+
+  double cos_alpha = (lb > 0.0 && lc > 0.0)
+                         ? (v2x * v3x + v2y * v3y + v2z * v3z) / (lb * lc)
+                         : 0.0;
+  double cos_beta = (la > 0.0 && lc > 0.0)
+                        ? (v1x * v3x + v1y * v3y + v1z * v3z) / (la * lc)
+                        : 0.0;
+  double cos_gamma = (la > 0.0 && lb > 0.0)
+                         ? (v1x * v2x + v1y * v2y + v1z * v2z) / (la * lb)
+                         : 0.0;
+
+  cos_alpha = std::clamp(cos_alpha, -1.0, 1.0);
+  cos_beta = std::clamp(cos_beta, -1.0, 1.0);
+  cos_gamma = std::clamp(cos_gamma, -1.0, 1.0);
+
+  box frame_box;
+  frame_box.set_a(la);
+  frame_box.set_b(lb);
+  frame_box.set_c(lc);
+  frame_box.set_alpha(std::acos(cos_alpha) * kRadToDeg);
+  frame_box.set_beta(std::acos(cos_beta) * kRadToDeg);
+  frame_box.set_gamma(std::acos(cos_gamma) * kRadToDeg);
+  return frame_box;
+}
+
+int read_xtc_frame_payload_after_header(XDRFILE *xdr_handle, int natoms,
+                                        float (&box_out)[DIM][DIM],
+                                        rvec *pos_out, float *precision,
+                                        std::string &error) {
+  error.clear();
+
+  if (xdrfile_read_float(box_out[0], DIM * DIM, xdr_handle) != DIM * DIM) {
+    error = "XDR: failed to read XTC box block.";
+    return exdrFLOAT;
+  }
+
+  int coord_count = natoms;
+  const int rc = xdrfile_decompress_coord_float(
+      reinterpret_cast<float *>(pos_out), &coord_count, precision, xdr_handle);
+  if (rc != natoms || coord_count != natoms) {
+    error = "XDR: failed to decode XTC coordinates after header.";
+    return exdr3DX;
+  }
+
+  return exdrOK;
+}
+
+bool trr_selective_fast_path_supported(const t_trnheader &header,
+                                       std::string &reason) {
+  reason.clear();
+
+  const int coord_elem_bytes = header.bDouble ? sizeof(double) : sizeof(float);
+  const int expected_coord_bytes = header.natoms * DIM * coord_elem_bytes;
+  const int expected_box_bytes = DIM * DIM * coord_elem_bytes;
+
+  if (header.ir_size != 0 || header.e_size != 0 || header.top_size != 0 ||
+      header.sym_size != 0) {
+    reason = "TRR header carries unsupported legacy/topology payload blocks.";
+    return false;
+  }
+  if (header.x_size == 0) {
+    reason = "TRR frame does not contain coordinates.";
+    return false;
+  }
+  if (header.x_size != expected_coord_bytes) {
+    reason = "TRR coordinate block size does not match natoms.";
+    return false;
+  }
+  if (header.box_size != 0 && header.box_size != expected_box_bytes) {
+    reason = "TRR box block size is not a standard 3x3 matrix.";
+    return false;
+  }
+  if (header.vir_size != 0 && header.vir_size != expected_box_bytes) {
+    reason = "TRR virial block has unexpected size.";
+    return false;
+  }
+  if (header.pres_size != 0 && header.pres_size != expected_box_bytes) {
+    reason = "TRR pressure block has unexpected size.";
+    return false;
+  }
+
+  return true;
+}
+
+int read_trr_box_and_skip_prefix_after_header(XDRFILE *xdr_handle,
+                                              const t_trnheader &header,
+                                              float (&box_out)[DIM][DIM],
+                                              std::string &error) {
+  error.clear();
+
+  for (int i = 0; i < DIM; ++i) {
+    for (int j = 0; j < DIM; ++j) {
+      box_out[i][j] = 0.0f;
+    }
+  }
+
+  if (header.box_size != 0) {
+    if (header.bDouble) {
+      double box_tmp[DIM * DIM]{};
+      if (xdrfile_read_double(box_tmp, DIM * DIM, xdr_handle) != DIM * DIM) {
+        error = "XDR: failed to read TRR box block.";
+        return exdrDOUBLE;
+      }
+      for (int i = 0; i < DIM; ++i) {
+        for (int j = 0; j < DIM; ++j) {
+          box_out[i][j] = static_cast<float>(box_tmp[i * DIM + j]);
+        }
+      }
+    } else if (xdrfile_read_float(box_out[0], DIM * DIM, xdr_handle) !=
+               DIM * DIM) {
+      error = "XDR: failed to read TRR box block.";
+      return exdrFLOAT;
+    }
+  }
+
+  if (header.vir_size != 0) {
+    const int rc = xdr_seek(xdr_handle, header.vir_size, SEEK_CUR);
+    if (rc != exdrOK) {
+      error = "XDR: failed to skip TRR virial block (rc=" +
+              std::to_string(rc) + ", " + xdr_status_message(rc) + ")";
+      return rc;
+    }
+  }
+
+  if (header.pres_size != 0) {
+    const int rc = xdr_seek(xdr_handle, header.pres_size, SEEK_CUR);
+    if (rc != exdrOK) {
+      error = "XDR: failed to skip TRR pressure block (rc=" +
+              std::to_string(rc) + ", " + xdr_status_message(rc) + ")";
+      return rc;
+    }
+  }
+
+  return exdrOK;
 }
 
 int probe_xdr_frame(XDRFILE *xdr_handle, const std::string &xdr_type,
@@ -341,6 +517,68 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
       wat_size_ = 0;
     }
 
+    xdr_extract_runs_.clear();
+    xdr_max_run_length_ = 0;
+    xdr_has_overlapping_runs_ = false;
+    xdr_warned_xtc_fallback_ = false;
+    xdr_warned_trr_fallback_ = false;
+
+    auto append_runs = [&](const std::vector<size_t> &indices,
+                           ChunkStreamer::XdrRunTarget target) {
+      if (indices.empty()) {
+        return;
+      }
+
+      size_t run_source_begin = indices.front();
+      size_t run_output_begin = 0;
+      size_t run_length = 1;
+
+      auto flush_run = [&]() {
+        xdr_extract_runs_.push_back(
+            {run_source_begin, run_output_begin, run_length, target});
+        xdr_max_run_length_ = std::max(xdr_max_run_length_, run_length);
+      };
+
+      for (size_t out_idx = 1; out_idx < indices.size(); ++out_idx) {
+        if (indices[out_idx] == indices[out_idx - 1] + 1) {
+          ++run_length;
+          continue;
+        }
+        flush_run();
+        run_source_begin = indices[out_idx];
+        run_output_begin = out_idx;
+        run_length = 1;
+      }
+
+      flush_run();
+    };
+
+    append_runs(pro_atom_indices0_, ChunkStreamer::XdrRunTarget::Pro);
+    append_runs(lig_atom_indices0_, ChunkStreamer::XdrRunTarget::Lig);
+    append_runs(wat_atom_indices0_, ChunkStreamer::XdrRunTarget::Wat);
+
+    std::stable_sort(xdr_extract_runs_.begin(), xdr_extract_runs_.end(),
+                     [](const auto &lhs, const auto &rhs) {
+                       return lhs.source_begin < rhs.source_begin;
+                     });
+
+    for (size_t run_idx = 1; run_idx < xdr_extract_runs_.size(); ++run_idx) {
+      const auto &prev_run = xdr_extract_runs_[run_idx - 1];
+      const auto &curr_run = xdr_extract_runs_[run_idx];
+      if (curr_run.source_begin < prev_run.source_begin + prev_run.length) {
+        xdr_has_overlapping_runs_ = true;
+        break;
+      }
+    }
+
+    if (xdr_max_run_length_ > 0) {
+      xdr_trr_float_scratch_.resize(xdr_max_run_length_ * DIM);
+      xdr_trr_double_scratch_.resize(xdr_max_run_length_ * DIM);
+    } else {
+      xdr_trr_float_scratch_.clear();
+      xdr_trr_double_scratch_.clear();
+    }
+
     size_t max_selected_atom_index = 0;
     auto update_max_index = [&](const std::vector<size_t> &indices) {
       if (!indices.empty()) {
@@ -536,7 +774,7 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
     size_t skip_count = 0;
 
     auto position_at_next_selected_frame =
-        [&]() -> std::expected<bool, std::string> {
+        [&](XdrFrameProbe &selected_probe) -> std::expected<bool, std::string> {
       while (true) {
         XdrFrameProbe probe;
         std::string probe_error;
@@ -616,25 +854,373 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
           }
         }
 
-        const int seek_rc = xdr_seek(xdr_handle_, probe.frame_start, SEEK_SET);
-        if (seek_rc != exdrOK) {
-          xdr_eof_ = true;
-          return std::unexpected(
-              "XDR: failed to rewind to selected frame (rc=" +
-              std::to_string(seek_rc) + ", " + xdr_status_message(seek_rc) +
-              ")");
-        }
+        selected_probe = probe;
         return true;
+      }
+    };
+
+    auto select_target_positions =
+        [&](XdrRunTarget target, MOL &pro_frame, MOL &lig_frame,
+            MOL *water_frame) -> AlignedVector3D * {
+      switch (target) {
+      case XdrRunTarget::Pro:
+        return &pro_frame.pos;
+      case XdrRunTarget::Lig:
+        return &lig_frame.pos;
+      case XdrRunTarget::Wat:
+        return water_frame ? &water_frame->pos : nullptr;
+      }
+      return nullptr;
+    };
+
+    auto materialize_run_from_float =
+        [&](const XdrAtomRun &run, const float *src_xyz, MOL &pro_frame,
+            MOL &lig_frame, MOL *water_frame)
+        -> std::expected<void, std::string> {
+      auto *target_pos =
+          select_target_positions(run.target, pro_frame, lig_frame, water_frame);
+      if (!target_pos) {
+        return std::unexpected(
+            "XDR: water atom run requested without an initialized water frame.");
+      }
+
+      for (size_t atom_offset = 0; atom_offset < run.length; ++atom_offset) {
+        const size_t source_offset = atom_offset * DIM;
+        const size_t output_index = run.output_begin + atom_offset;
+        target_pos->x[output_index] =
+            static_cast<double>(src_xyz[source_offset]) * NM_TO_ANG;
+        target_pos->y[output_index] =
+            static_cast<double>(src_xyz[source_offset + 1]) * NM_TO_ANG;
+        target_pos->z[output_index] =
+            static_cast<double>(src_xyz[source_offset + 2]) * NM_TO_ANG;
+      }
+
+      return {};
+    };
+
+    auto materialize_run_from_double =
+        [&](const XdrAtomRun &run, const double *src_xyz, MOL &pro_frame,
+            MOL &lig_frame, MOL *water_frame)
+        -> std::expected<void, std::string> {
+      auto *target_pos =
+          select_target_positions(run.target, pro_frame, lig_frame, water_frame);
+      if (!target_pos) {
+        return std::unexpected(
+            "XDR: water atom run requested without an initialized water frame.");
+      }
+
+      for (size_t atom_offset = 0; atom_offset < run.length; ++atom_offset) {
+        const size_t source_offset = atom_offset * DIM;
+        const size_t output_index = run.output_begin + atom_offset;
+        target_pos->x[output_index] = src_xyz[source_offset] * NM_TO_ANG;
+        target_pos->y[output_index] = src_xyz[source_offset + 1] * NM_TO_ANG;
+        target_pos->z[output_index] = src_xyz[source_offset + 2] * NM_TO_ANG;
+      }
+
+      return {};
+    };
+
+    auto warn_xtc_fallback_once = [&](const std::string &reason) {
+      if (!xdr_warned_xtc_fallback_) {
+        TitanUI::print_warning(
+            "XDR: streaming XTC fast payload path fell back to read_xtc(). " +
+            reason);
+        xdr_warned_xtc_fallback_ = true;
+      }
+    };
+
+    auto warn_trr_fallback_once = [&](const std::string &reason) {
+      if (!xdr_warned_trr_fallback_) {
+        TitanUI::print_warning(
+            "XDR: streaming TRR selective read fell back to read_trr(). " +
+            reason);
+        xdr_warned_trr_fallback_ = true;
       }
     };
 
     // Read frames until chunk is filled or EOF/end-time
     while (frames_read < chunk_size) {
-      auto positioned = position_at_next_selected_frame();
+      XdrFrameProbe selected_probe;
+      auto positioned = position_at_next_selected_frame(selected_probe);
       if (!positioned)
         return std::unexpected(positioned.error());
       if (!positioned.value())
         break;
+
+      {
+        MOL pro_frame;
+        MOL lig_frame;
+        MOL water_frame;
+        MOL *water_frame_ptr = nullptr;
+
+        auto initialize_output_frames = [&](const box &frame_box,
+                                            double time_val) {
+          pro_frame = MOL{};
+          lig_frame = MOL{};
+          water_frame = MOL{};
+          initialize_stream_frame(pro_frame, *init_pro_, frame_box, time_val,
+                                  pro_size);
+          initialize_stream_frame(lig_frame, *init_lig_, frame_box, time_val,
+                                  lig_size);
+          if (wat_size > 0) {
+            initialize_stream_water_frame(water_frame, force_f, frame_box,
+                                          time_val, wat_size);
+            water_frame_ptr = &water_frame;
+          } else {
+            water_frame_ptr = nullptr;
+          }
+        };
+
+        if (args_ref.xdr_type == "xtc") {
+          float time_ps = static_cast<float>(selected_probe.time_ps);
+          std::string xtc_error;
+          int rc = read_xtc_frame_payload_after_header(
+              xdr_handle_, xdr_natoms_, xdr_box_, xdr_pos_buf_, &xdr_prec_,
+              xtc_error);
+
+          if (rc != exdrOK) {
+            warn_xtc_fallback_once(xtc_error);
+            const int seek_rc =
+                xdr_seek(xdr_handle_, selected_probe.frame_start, SEEK_SET);
+            if (seek_rc != exdrOK) {
+              xdr_eof_ = true;
+              return std::unexpected(
+                  "XDR: failed to rewind to selected XTC frame (rc=" +
+                  std::to_string(seek_rc) + ", " +
+                  xdr_status_message(seek_rc) + ")");
+            }
+
+            int step = 0;
+            rc = read_xtc(xdr_handle_, xdr_natoms_, &step, &time_ps, xdr_box_,
+                          xdr_pos_buf_, &xdr_prec_);
+            if (rc == exdrENDOFFILE) {
+              xdr_eof_ = true;
+              break;
+            }
+            if (rc != exdrOK) {
+              xdr_eof_ = true;
+              return std::unexpected(
+                  "XDR: failed to read selected XTC frame (rc=" +
+                  std::to_string(rc) + ", " + xdr_status_message(rc) + ")");
+            }
+          }
+
+          initialize_output_frames(build_frame_box_from_xdr_matrix(xdr_box_),
+                                   static_cast<double>(time_ps));
+
+          for (const auto &run : xdr_extract_runs_) {
+            auto materialized = materialize_run_from_float(
+                run, &xdr_pos_buf_[run.source_begin][0], pro_frame, lig_frame,
+                water_frame_ptr);
+            if (!materialized) {
+              return std::unexpected(materialized.error());
+            }
+          }
+        } else {
+          float time_ps = static_cast<float>(selected_probe.time_ps);
+          bool use_full_trr_fallback = false;
+          std::string trr_reason;
+
+          if (xdr_has_overlapping_runs_) {
+            trr_reason =
+                "Overlapping receptor/ligand/water atom selections require the "
+                "full TRR reader for safety.";
+            use_full_trr_fallback = true;
+          } else if (!trr_selective_fast_path_supported(
+                         selected_probe.trr_header, trr_reason)) {
+            use_full_trr_fallback = true;
+          }
+
+          if (!use_full_trr_fallback) {
+            std::string trr_error;
+            int rc = read_trr_box_and_skip_prefix_after_header(
+                xdr_handle_, selected_probe.trr_header, xdr_box_, trr_error);
+
+            if (rc == exdrOK) {
+              initialize_output_frames(build_frame_box_from_xdr_matrix(xdr_box_),
+                                       static_cast<double>(time_ps));
+
+              size_t cursor_atom = 0;
+              const auto coord_elem_bytes =
+                  static_cast<int64_t>(selected_probe.trr_header.bDouble
+                                           ? sizeof(double)
+                                           : sizeof(float));
+
+              auto seek_trr_bytes =
+                  [&](int64_t byte_count, const std::string &context)
+                  -> std::expected<void, std::string> {
+                if (byte_count == 0) {
+                  return {};
+                }
+
+                const int seek_rc = xdr_seek(xdr_handle_, byte_count, SEEK_CUR);
+                if (seek_rc != exdrOK) {
+                  return std::unexpected("XDR: failed to skip " + context +
+                                         " in TRR frame (rc=" +
+                                         std::to_string(seek_rc) + ", " +
+                                         xdr_status_message(seek_rc) + ")");
+                }
+                return {};
+              };
+
+              for (const auto &run : xdr_extract_runs_) {
+                if (run.source_begin < cursor_atom) {
+                  rc = exdrHEADER;
+                  trr_error =
+                      "XDR: overlapping atom runs reached TRR selective path.";
+                  break;
+                }
+
+                const size_t gap_atoms = run.source_begin - cursor_atom;
+                auto skipped_gap = seek_trr_bytes(
+                    static_cast<int64_t>(gap_atoms) * DIM * coord_elem_bytes,
+                    "a coordinate gap");
+                if (!skipped_gap) {
+                  rc = exdrHEADER;
+                  trr_error = skipped_gap.error();
+                  break;
+                }
+
+                const int value_count = static_cast<int>(run.length * DIM);
+                if (selected_probe.trr_header.bDouble) {
+                  if (xdrfile_read_double(xdr_trr_double_scratch_.data(),
+                                          value_count, xdr_handle_) !=
+                      value_count) {
+                    rc = exdrDOUBLE;
+                    trr_error =
+                        "XDR: failed to read a selected TRR coordinate span.";
+                    break;
+                  }
+
+                  auto materialized = materialize_run_from_double(
+                      run, xdr_trr_double_scratch_.data(), pro_frame, lig_frame,
+                      water_frame_ptr);
+                  if (!materialized) {
+                    rc = exdrHEADER;
+                    trr_error = materialized.error();
+                    break;
+                  }
+                } else {
+                  if (xdrfile_read_float(xdr_trr_float_scratch_.data(),
+                                         value_count, xdr_handle_) !=
+                      value_count) {
+                    rc = exdrFLOAT;
+                    trr_error =
+                        "XDR: failed to read a selected TRR coordinate span.";
+                    break;
+                  }
+
+                  auto materialized = materialize_run_from_float(
+                      run, xdr_trr_float_scratch_.data(), pro_frame, lig_frame,
+                      water_frame_ptr);
+                  if (!materialized) {
+                    rc = exdrHEADER;
+                    trr_error = materialized.error();
+                    break;
+                  }
+                }
+
+                cursor_atom = run.source_begin + run.length;
+              }
+
+              if (rc == exdrOK) {
+                const size_t tail_atoms =
+                    static_cast<size_t>(selected_probe.trr_header.natoms) -
+                    cursor_atom;
+                auto skipped_tail = seek_trr_bytes(
+                    static_cast<int64_t>(tail_atoms) * DIM * coord_elem_bytes,
+                    "the trailing coordinate block");
+                if (!skipped_tail) {
+                  rc = exdrHEADER;
+                  trr_error = skipped_tail.error();
+                }
+              }
+
+              if (rc == exdrOK) {
+                auto skipped_velocity = seek_trr_bytes(
+                    selected_probe.trr_header.v_size, "the velocity block");
+                if (!skipped_velocity) {
+                  rc = exdrHEADER;
+                  trr_error = skipped_velocity.error();
+                }
+              }
+
+              if (rc == exdrOK) {
+                auto skipped_force =
+                    seek_trr_bytes(selected_probe.trr_header.f_size,
+                                   "the force block");
+                if (!skipped_force) {
+                  rc = exdrHEADER;
+                  trr_error = skipped_force.error();
+                }
+              }
+            }
+
+            if (rc != exdrOK) {
+              trr_reason = trr_error;
+              use_full_trr_fallback = true;
+            }
+          }
+
+          if (use_full_trr_fallback) {
+            warn_trr_fallback_once(trr_reason);
+            const int seek_rc =
+                xdr_seek(xdr_handle_, selected_probe.frame_start, SEEK_SET);
+            if (seek_rc != exdrOK) {
+              xdr_eof_ = true;
+              return std::unexpected(
+                  "XDR: failed to rewind to selected TRR frame (rc=" +
+                  std::to_string(seek_rc) + ", " +
+                  xdr_status_message(seek_rc) + ")");
+            }
+
+            int has_prop = 0;
+            int step = 0;
+            float time_ps_fallback = time_ps;
+            float lambda = 0.0f;
+            const int rc = read_trr(xdr_handle_, xdr_natoms_, &step,
+                                    &time_ps_fallback, &lambda, xdr_box_,
+                                    xdr_pos_buf_, nullptr, nullptr, &has_prop);
+            if (rc == exdrENDOFFILE) {
+              xdr_eof_ = true;
+              break;
+            }
+            if (rc != exdrOK) {
+              xdr_eof_ = true;
+              return std::unexpected(
+                  "XDR: failed to read selected TRR frame (rc=" +
+                  std::to_string(rc) + ", " + xdr_status_message(rc) + ")");
+            }
+            if ((has_prop & HASX) == 0) {
+              xdr_eof_ = true;
+              return std::unexpected(
+                  "XDR: selected TRR frame does not contain coordinates.");
+            }
+
+            time_ps = time_ps_fallback;
+            initialize_output_frames(build_frame_box_from_xdr_matrix(xdr_box_),
+                                     static_cast<double>(time_ps));
+
+            for (const auto &run : xdr_extract_runs_) {
+              auto materialized = materialize_run_from_float(
+                  run, &xdr_pos_buf_[run.source_begin][0], pro_frame, lig_frame,
+                  water_frame_ptr);
+              if (!materialized) {
+                return std::unexpected(materialized.error());
+              }
+            }
+          }
+        }
+
+        pro_in.m_mol.push_back(std::move(pro_frame));
+        lig.m_mol.push_back(std::move(lig_frame));
+        if (water_frame_ptr) {
+          water_traj.m_mol.push_back(std::move(water_frame));
+        }
+
+        ++frames_read;
+        continue;
+      }
 
       int step;
       float time_ps, lambda = 0.0f;

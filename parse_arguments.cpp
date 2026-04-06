@@ -643,6 +643,10 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (string(argv[i]) == "-pbctopo") {
       pbc.solv_pbctopo = true;
     }
+    if (string(argv[i]).find("-pbctopo-anchor-backend=") == 0) {
+      pbc.pbctopo_anchor_backend =
+          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
     if (string(argv[i]) == "-pbci2") {
       pbc.solv_pbc_int = 1;
       pbc.solv_pbc_int2 = 1;
@@ -1409,13 +1413,17 @@ arguments::tokenize_arg_file(const std::string &filename) {
       if (ve != std::string::npos)
         value = value.substr(0, ve + 1);
 
-      // Split flag and value into separate tokens (single-dash only in arg.in)
-      tokens.push_back(flag);
-      if (!value.empty()) {
-        std::istringstream iss(value);
-        std::string word;
-        while (iss >> word)
-          tokens.push_back(word);
+      if (flag == "-pbctopo-anchor-backend") {
+        tokens.push_back(flag + "=" + value);
+      } else {
+        // Split flag and value into separate tokens (single-dash only in arg.in)
+        tokens.push_back(flag);
+        if (!value.empty()) {
+          std::istringstream iss(value);
+          std::string word;
+          while (iss >> word)
+            tokens.push_back(word);
+        }
       }
     } else {
       // No '=', push as-is (boolean flags like -gbsa, -entropy)

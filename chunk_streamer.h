@@ -6,6 +6,7 @@
 #include "groups.h"
 #include "info.h"
 #include <cmath> // acos, sqrt for triclinic box conversion
+#include <cstdint>
 #include <expected>
 #include <fstream>
 #include <string>
@@ -38,6 +39,15 @@ public:
                                                      Multi_MOL &water_traj);
 
 private:
+  enum class XdrRunTarget : std::uint8_t { Pro = 0, Lig = 1, Wat = 2 };
+
+  struct XdrAtomRun {
+    size_t source_begin = 0;
+    size_t output_begin = 0;
+    size_t length = 0;
+    XdrRunTarget target = XdrRunTarget::Pro;
+  };
+
   arguments &args_ref;
   info &info_ref;
   groups_cal &groups_ref;
@@ -74,6 +84,13 @@ private:
   std::vector<size_t> pro_atom_indices0_;
   std::vector<size_t> lig_atom_indices0_;
   std::vector<size_t> wat_atom_indices0_;
+  std::vector<XdrAtomRun> xdr_extract_runs_;
+  size_t xdr_max_run_length_ = 0;
+  bool xdr_has_overlapping_runs_ = false;
+  std::vector<float> xdr_trr_float_scratch_;
+  std::vector<double> xdr_trr_double_scratch_;
+  bool xdr_warned_xtc_fallback_ = false;
+  bool xdr_warned_trr_fallback_ = false;
 
   const Multi_MOL *init_pro_ = nullptr;
   const Multi_MOL *init_lig_ = nullptr;
