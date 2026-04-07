@@ -617,7 +617,7 @@ int engine(arguments &Arguments) {
 
   double time_new_emap{};
   std::chrono::milliseconds time_cal{}, time_emap{}, time_fmap{},
-      time_subgroups_cal{}, time_solve_pbc{}, time_sc{}, time_hb{},
+      time_subgroups_cal{}, time_solve_pbc{}, time_sc{}, time_hb{}, time_pdb{},
       time_other{}, time_print_ener_res{}, time_print_force{}, time_maxforce{},
       time_new_emap_other{}, time_avg_emap{}, time_contact{},
       time_input_init{}, time_input_stream{},
@@ -655,6 +655,7 @@ int engine(arguments &Arguments) {
     const auto time_sc_base = time_sc;
     const auto time_cscd_base = time_cscd;
     const auto time_hb_base = time_hb;
+    const auto time_pdb_base = time_pdb;
     const auto time_emap_base = time_emap;
     const auto time_fmap_base = time_fmap;
     const auto time_other_base = time_other;
@@ -1753,7 +1754,7 @@ int engine(arguments &Arguments) {
 
       auto start_pbc = std::chrono::steady_clock::now();
       if (Arguments.pbc.solv_pbctopo) {
-        pro_in.solve_pbc_pbctopo(lig, Arguments);
+        pro_in.solve_pbc_pbctopo(lig, Arguments, &executor);
       } else if (Arguments.pbc.solv_pbcn) {
         pro_in.solv_pbc_pbcn(lig, Arguments);
         align_complex(pro_in, lig, 0, 0);
@@ -1992,8 +1993,11 @@ int engine(arguments &Arguments) {
                       Arguments, paths);
 
           // PDB output (critical for nocal)
+          auto start_pdb = std::chrono::steady_clock::now();
           write_pdb(pro_in, lig, Arguments, chunk_snap_idx, paths, input_line,
                     input_name);
+          time_pdb += std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - start_pdb);
         }
 
         tot_snap_allfiles += chunk_num_snaps;
@@ -2287,6 +2291,9 @@ int engine(arguments &Arguments) {
               worker_fn(worker_id);
             });
           };
+          const bool use_unfiltered_energy_intrin =
+              Arguments.self_int == false &&
+              Arguments.distance_energy_cutoff < 0.;
 
           if (Arguments.force_f.find("CHARMM") != string::npos) {
             dispatch_energy_workers([&](size_t i) {
@@ -2334,13 +2341,23 @@ int engine(arguments &Arguments) {
               if (Arguments.flag_elec_screening == false) {
                 if (Arguments.flag_cal_force == false) {
 #ifdef __AVX__
-                  cal_energy_amber_intrin(
-                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
-                      pro_in.info, lig.info, CachedData,
-                      ligand_atom_count * i / num_threads,
-                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
-                      chunk_snap_idx, Arguments, pro_in.parameters,
-                      lig.parameters);
+                  if (use_unfiltered_energy_intrin) {
+                    cal_energy_amber_intrin_nofilter(
+                        pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                        pro_in.info, lig.info, CachedData,
+                        ligand_atom_count * i / num_threads,
+                        ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                        chunk_snap_idx, Arguments, pro_in.parameters,
+                        lig.parameters);
+                  } else {
+                    cal_energy_amber_intrin(
+                        pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                        pro_in.info, lig.info, CachedData,
+                        ligand_atom_count * i / num_threads,
+                        ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                        chunk_snap_idx, Arguments, pro_in.parameters,
+                        lig.parameters);
+                  }
 #else
                   cal_energy_amber(
                       pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
@@ -2362,13 +2379,23 @@ int engine(arguments &Arguments) {
                 if (Arguments.flag_cal_force == false)
 
 #ifdef __AVX__
-                  cal_energy_amber_screening_intrin(
-                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
-                      pro_in.info, lig.info, CachedData,
-                      ligand_atom_count * i / num_threads,
-                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
-                      chunk_snap_idx, Arguments, pro_in.parameters,
-                      lig.parameters);
+                  if (use_unfiltered_energy_intrin) {
+                    cal_energy_amber_screening_intrin_nofilter(
+                        pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                        pro_in.info, lig.info, CachedData,
+                        ligand_atom_count * i / num_threads,
+                        ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                        chunk_snap_idx, Arguments, pro_in.parameters,
+                        lig.parameters);
+                  } else {
+                    cal_energy_amber_screening_intrin(
+                        pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                        pro_in.info, lig.info, CachedData,
+                        ligand_atom_count * i / num_threads,
+                        ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                        chunk_snap_idx, Arguments, pro_in.parameters,
+                        lig.parameters);
+                  }
 #else
                   cal_energy_amber_screening(
                       pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
@@ -2393,13 +2420,23 @@ int engine(arguments &Arguments) {
             dispatch_energy_workers([&](size_t i) {
               if (Arguments.flag_cal_force == false)
 #ifdef __AVX__
-                cal_energy_opls_intrin(
-                    pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
-                    pro_in.info, lig.info, CachedData,
-                    ligand_atom_count * i / num_threads,
-                    ligand_atom_count * (i + 1) / num_threads, Energy[i],
-                    chunk_snap_idx, Arguments, pro_in.parameters,
-                    lig.parameters);
+                if (use_unfiltered_energy_intrin) {
+                  cal_energy_opls_intrin_nofilter(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
+                } else {
+                  cal_energy_opls_intrin(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
+                }
 #else
                 cal_energy_opls(
                     pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
@@ -2451,13 +2488,23 @@ int engine(arguments &Arguments) {
             dispatch_energy_workers([&](size_t i) {
               if (Arguments.flag_cal_force == false)
 #ifdef __AVX__
-                cal_energy_gromos_intrin(
-                    pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
-                    pro_in.info, lig.info, CachedData,
-                    ligand_atom_count * i / num_threads,
-                    ligand_atom_count * (i + 1) / num_threads, Energy[i],
-                    chunk_snap_idx, Arguments, pro_in.parameters,
-                    lig.parameters);
+                if (use_unfiltered_energy_intrin) {
+                  cal_energy_gromos_intrin_nofilter(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
+                } else {
+                  cal_energy_gromos_intrin(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
+                }
 #else
                 cal_energy_gromos(
                     pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
@@ -2636,8 +2683,11 @@ int engine(arguments &Arguments) {
           write_pqr(pro_in, lig, input_line, input_name, chunk_snap_idx,
                     Arguments, paths);
         }
+        auto start_pdb = std::chrono::steady_clock::now();
         write_pdb(pro_in, lig, Arguments, chunk_snap_idx, paths, input_line,
                   input_name);
+        time_pdb += std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_pdb);
 
         if (Arguments.flag_cas) {
           auto start_cas = std::chrono::steady_clock::now();
@@ -3145,6 +3195,20 @@ int engine(arguments &Arguments) {
       res_hb_rec.emplace_back(hb_rec_1traj);
     }
 
+    if (Arguments.flag_h_bond == 1) {
+      auto start_hb_flush = std::chrono::steady_clock::now();
+      finalize_hbond_output_files();
+      time_hb += std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start_hb_flush);
+    }
+
+    if (Arguments.opdb) {
+      auto start_pdb_flush = std::chrono::steady_clock::now();
+      finalize_pdb_output_stream();
+      time_pdb += std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start_pdb_flush);
+    }
+
     auto start_contact = std::chrono::steady_clock::now();
     if (Arguments.flag_cal_contact == true) {
       sc_lg_1traj.snap_num = global_frame_counter;
@@ -3206,6 +3270,8 @@ int engine(arguments &Arguments) {
                       (time_cscd - time_cscd_base).count() / 1000.0);
     TitanUI::log_time(log, "Hydrogen Bonds",
                       (time_hb - time_hb_base).count() / 1000.0);
+    TitanUI::log_time(log, "PDB Output",
+                      (time_pdb - time_pdb_base).count() / 1000.0);
     TitanUI::log_time(log, "Energy Map (EMAP)",
                       (time_emap - time_emap_base).count() / 1000.0);
     TitanUI::log_time(log, "Force Map (FMAP)",
@@ -3238,6 +3304,7 @@ int engine(arguments &Arguments) {
         (time_sc - time_sc_base).count() / 1000.0 +
         (time_cscd - time_cscd_base).count() / 1000.0 +
         (time_hb - time_hb_base).count() / 1000.0 +
+        (time_pdb - time_pdb_base).count() / 1000.0 +
         (time_emap - time_emap_base).count() / 1000.0 +
         (time_fmap - time_fmap_base).count() / 1000.0 +
         (time_other - time_other_base).count() / 1000.0 +

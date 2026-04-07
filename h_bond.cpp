@@ -29,6 +29,7 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kMinDistanceSq = 1.0e-4;
+constexpr std::size_t kHBondOutputBufferSize = 1U << 20;
 constexpr std::string_view kHBondAllFile = "out_hydrogen_bonds.dat";
 constexpr std::string_view kHBondReceptorFile =
     "out_hydrogen_bonds_receptor.dat";
@@ -195,6 +196,101 @@ void write_hbond_header(std::ostream &out, std::string_view description,
        << "Time_" << time_unit << '\n';
 }
 
+struct hbond_output_manager {
+  std::ofstream all_stream;
+  std::ofstream rec_stream;
+  std::ofstream lig_stream;
+  std::array<char, kHBondOutputBufferSize> all_buffer{};
+  std::array<char, kHBondOutputBufferSize> rec_buffer{};
+  std::array<char, kHBondOutputBufferSize> lig_buffer{};
+
+  static void prepare_stream(std::ofstream &stream,
+                             std::array<char, kHBondOutputBufferSize> &buffer) {
+    stream.close();
+    stream.clear();
+    stream.rdbuf()->pubsetbuf(buffer.data(),
+                              static_cast<std::streamsize>(buffer.size()));
+  }
+
+  static void close_stream(std::ofstream &stream) {
+    if (stream.is_open()) {
+      stream.flush();
+      stream.close();
+    }
+    stream.clear();
+  }
+
+  void close() {
+    close_stream(all_stream);
+    close_stream(rec_stream);
+    close_stream(lig_stream);
+  }
+
+  int init(const arguments &Arguments) {
+    close();
+
+    prepare_stream(all_stream, all_buffer);
+    all_stream.open(std::string(kHBondAllFile), std::ios::out | std::ios::trunc);
+    write_hbond_header(all_stream, "All intermolecular hydrogen bonds",
+                       Arguments.tu);
+
+    prepare_stream(rec_stream, rec_buffer);
+    rec_stream.open(std::string(kHBondReceptorFile),
+                    std::ios::out | std::ios::trunc);
+    write_hbond_header(rec_stream,
+                       "Rows where the receptor-side atom is the acceptor",
+                       Arguments.tu);
+
+    prepare_stream(lig_stream, lig_buffer);
+    lig_stream.open(std::string(kHBondLigandFile),
+                    std::ios::out | std::ios::trunc);
+    write_hbond_header(lig_stream,
+                       "Rows where the ligand-side atom is the acceptor",
+                       Arguments.tu);
+    return 0;
+  }
+
+  void ensure_open_for_append() {
+    if (!all_stream.is_open()) {
+      prepare_stream(all_stream, all_buffer);
+      all_stream.open(std::string(kHBondAllFile), std::ios::out | std::ios::app);
+    }
+    if (!rec_stream.is_open()) {
+      prepare_stream(rec_stream, rec_buffer);
+      rec_stream.open(std::string(kHBondReceptorFile),
+                      std::ios::out | std::ios::app);
+    }
+    if (!lig_stream.is_open()) {
+      prepare_stream(lig_stream, lig_buffer);
+      lig_stream.open(std::string(kHBondLigandFile),
+                      std::ios::out | std::ios::app);
+    }
+  }
+
+  void append(const std::string &all_rows, const std::string &rec_rows,
+              const std::string &lig_rows) {
+    if (all_rows.empty() && rec_rows.empty() && lig_rows.empty()) {
+      return;
+    }
+
+    ensure_open_for_append();
+    if (!all_rows.empty() && all_stream.is_open()) {
+      all_stream << all_rows;
+    }
+    if (!rec_rows.empty() && rec_stream.is_open()) {
+      rec_stream << rec_rows;
+    }
+    if (!lig_rows.empty() && lig_stream.is_open()) {
+      lig_stream << lig_rows;
+    }
+  }
+};
+
+hbond_output_manager &get_hbond_output_manager() {
+  static hbond_output_manager manager;
+  return manager;
+}
+
 struct hbond_cell_key {
   int x{};
   int y{};
@@ -279,22 +375,12 @@ inline bool check_sidechain_hbond(const arguments &Arguments,
 }
 
 int init_hbond_output_files(const arguments &Arguments) {
-  std::ofstream out_h_bonds(std::string(kHBondAllFile), std::ios::out);
-  write_hbond_header(out_h_bonds, "All intermolecular hydrogen bonds",
-                     Arguments.tu);
-  out_h_bonds.close();
+  get_hbond_output_manager().init(Arguments);
+  return 0;
+}
 
-  std::ofstream out_h_bonds_rec(std::string(kHBondReceptorFile), std::ios::out);
-  write_hbond_header(out_h_bonds_rec,
-                     "Rows where the receptor-side atom is the acceptor",
-                     Arguments.tu);
-  out_h_bonds_rec.close();
-
-  std::ofstream out_h_bonds_lig(std::string(kHBondLigandFile), std::ios::out);
-  write_hbond_header(out_h_bonds_lig,
-                     "Rows where the ligand-side atom is the acceptor",
-                     Arguments.tu);
-  out_h_bonds_lig.close();
+int finalize_hbond_output_files() {
+  get_hbond_output_manager().close();
   return 0;
 }
 
@@ -428,6 +514,51 @@ void cal_h_bonds(MOL &pro_in, MOL &lig, std::size_t begin, std::size_t end,
   }
 }
 
+struct bounded_hbond_selection {
+  std::array<std::size_t, 3> indices{};
+  std::size_t size{0};
+};
+
+inline bool hbond_distance_precedes(const std::vector<h_bonds> &records,
+                                    std::size_t lhs,
+                                    std::size_t rhs) noexcept {
+  const double lhs_distance = records[lhs].get_dis();
+  const double rhs_distance = records[rhs].get_dis();
+  return lhs_distance < rhs_distance ||
+         (lhs_distance == rhs_distance && lhs < rhs);
+}
+
+inline void insert_hbond_candidate(bounded_hbond_selection &selection,
+                                   std::size_t candidate,
+                                   std::size_t limit,
+                                   const std::vector<h_bonds> &records) {
+  std::size_t insert_pos = selection.size;
+  for (std::size_t i = 0; i < selection.size; ++i) {
+    if (hbond_distance_precedes(records, candidate, selection.indices[i])) {
+      insert_pos = i;
+      break;
+    }
+  }
+
+  if (selection.size < limit) {
+    for (std::size_t i = selection.size; i > insert_pos; --i) {
+      selection.indices[i] = selection.indices[i - 1];
+    }
+    selection.indices[insert_pos] = candidate;
+    ++selection.size;
+    return;
+  }
+
+  if (insert_pos >= limit) {
+    return;
+  }
+
+  for (std::size_t i = limit - 1; i > insert_pos; --i) {
+    selection.indices[i] = selection.indices[i - 1];
+  }
+  selection.indices[insert_pos] = candidate;
+}
+
 int find_h_bonds(MOL &pro_in, MOL &pro_in_ref, MOL &lig, MOL &lig_ref,
                  h_groups &groups_1, h_groups &groups_2,
                  const arguments &Arguments, std::size_t num_snap,
@@ -544,8 +675,9 @@ int MOL::imp_post_proc(const std::pair<char, std::size_t> &atom_dat,
     return 0;
   }
 
-  std::unordered_map<std::size_t, std::vector<std::size_t>> grouped_records;
+  std::unordered_map<std::size_t, bounded_hbond_selection> grouped_records;
   grouped_records.reserve(list_h_bonds.dat.size());
+  std::vector<unsigned char> matched_record(list_h_bonds.dat.size(), 0U);
 
   for (std::size_t record_idx = 0; record_idx < list_h_bonds.dat.size();
        ++record_idx) {
@@ -568,29 +700,33 @@ int MOL::imp_post_proc(const std::pair<char, std::size_t> &atom_dat,
 
     if (atom_name != nullptr &&
         atom_name->find(atom_dat.first) != std::string::npos) {
-      grouped_records[tracked_index].emplace_back(record_idx);
+      matched_record[record_idx] = 1U;
+      auto &selection = grouped_records[tracked_index];
+      insert_hbond_candidate(selection, record_idx, atom_dat.second,
+                             list_h_bonds.dat);
     }
   }
 
-  std::vector<bool> keep_record(list_h_bonds.dat.size(), true);
-  for (auto &[tracked_index, record_indices] : grouped_records) {
+  if (std::find(matched_record.begin(), matched_record.end(), 1U) ==
+      matched_record.end()) {
+    return 0;
+  }
+
+  std::vector<unsigned char> keep_record(list_h_bonds.dat.size(), 1U);
+  for (std::size_t i = 0; i < matched_record.size(); ++i) {
+    if (matched_record[i] != 0U) {
+      keep_record[i] = 0U;
+    }
+  }
+
+  for (auto &[tracked_index, selection] : grouped_records) {
     (void)tracked_index;
-    if (record_indices.size() <= atom_dat.second) {
-      continue;
-    }
-
-    std::stable_sort(record_indices.begin(), record_indices.end(),
-                     [this](std::size_t lhs, std::size_t rhs) {
-                       return list_h_bonds.dat[lhs].get_dis() <
-                              list_h_bonds.dat[rhs].get_dis();
-                     });
-
-    for (std::size_t i = atom_dat.second; i < record_indices.size(); ++i) {
-      keep_record[record_indices[i]] = false;
+    for (std::size_t i = 0; i < selection.size; ++i) {
+      keep_record[selection.indices[i]] = 1U;
     }
   }
 
-  if (std::find(keep_record.begin(), keep_record.end(), false) ==
+  if (std::find(keep_record.begin(), keep_record.end(), 0U) ==
       keep_record.end()) {
     return 0;
   }
@@ -598,7 +734,7 @@ int MOL::imp_post_proc(const std::pair<char, std::size_t> &atom_dat,
   std::vector<h_bonds> filtered_records;
   filtered_records.reserve(list_h_bonds.dat.size());
   for (std::size_t i = 0; i < list_h_bonds.dat.size(); ++i) {
-    if (keep_record[i]) {
+    if (keep_record[i] != 0U) {
       filtered_records.emplace_back(std::move(list_h_bonds.dat[i]));
     }
   }
@@ -786,21 +922,7 @@ int print_hbond_per_snap(const MOL &pro_in, const MOL &lig,
   const std::string all_rows = out_all.str();
   const std::string rec_rows = out_rec.str();
   const std::string lig_rows = out_lig.str();
-
-  if (!all_rows.empty()) {
-    std::ofstream out_h_bonds(std::string(kHBondAllFile), std::ios::app);
-    out_h_bonds << all_rows;
-  }
-  if (!rec_rows.empty()) {
-    std::ofstream out_h_bonds_rec(std::string(kHBondReceptorFile),
-                                  std::ios::app);
-    out_h_bonds_rec << rec_rows;
-  }
-  if (!lig_rows.empty()) {
-    std::ofstream out_h_bonds_lig(std::string(kHBondLigandFile),
-                                  std::ios::app);
-    out_h_bonds_lig << lig_rows;
-  }
+  get_hbond_output_manager().append(all_rows, rec_rows, lig_rows);
 
   (void)Arguments;
   return 0;

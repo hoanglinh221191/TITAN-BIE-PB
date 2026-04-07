@@ -33,7 +33,7 @@ int impl_nocal(Multi_MOL &pro_in, Multi_MOL &lig, fstream &log,
     log << "Solving pbc...\n";
     log << "Will use pbctopo (VIBE: Virtual Intact Block Extraction)!\n";
     cout << "Will use pbctopo (VIBE: Virtual Intact Block Extraction)!\n";
-    pro_in.solve_pbc_pbctopo(lig, Arguments);
+    pro_in.solve_pbc_pbctopo(lig, Arguments, nullptr);
     pro_in.align_to_box();
   } else if (Arguments.pbc.solv_pbcn) {
     log << "Solving pbc...\n";
@@ -114,6 +114,13 @@ int impl_nocal(Multi_MOL &pro_in, Multi_MOL &lig, fstream &log,
                 paths);
     }
     write_pdb(pro_in, lig, Arguments, num_snap, paths, input_line, input_name);
+  }
+
+  if (Arguments.flag_h_bond == 1) {
+    finalize_hbond_output_files();
+  }
+  if (Arguments.opdb) {
+    finalize_pdb_output_stream();
   }
 
   return 0;

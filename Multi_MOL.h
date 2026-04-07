@@ -25,6 +25,7 @@ using std::vector;
 
 struct topo_info_temp;
 struct cache_sigma_epsilon;
+class TitanExecutor;
 
 class Multi_MOL {
 private:
@@ -187,7 +188,8 @@ public:
   int solve_pbc_new(Multi_MOL &mol2, arguments &Arguments,
                     const amino_acid &amine);
   int solv_pbc_pbcn(Multi_MOL &mol2, arguments &Arguments);
-  int solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments);
+  int solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
+                        TitanExecutor *executor = nullptr);
 
   int emplace(size_t i, box &box_type, double time, std::string_view force_f,
               mol_info &&info_in, MOL &&mol_in);

@@ -46,3 +46,4 @@ lib_ff/
 /test_*
 /test/
 /.codex*
+/smoke*

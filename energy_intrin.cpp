@@ -22,6 +22,18 @@
 #include "avx_math.h"
 #include <immintrin.h>
 
+namespace {
+inline __m256d load_lane_mask_pd(const double *lane_mask) {
+  return _mm256_loadu_pd(lane_mask);
+}
+
+inline void zero_cached_pair_if_present(cache_sigma_epsilon &CachedData,
+                                        size_t pos) {
+  if (!CachedData.elec_ener.empty())
+    CachedData.set_elec_vdw(pos, 0., 0.);
+}
+} // namespace
+
 int cal_one_ele(const MOL &rec, const MOL &lg, cache_sigma_epsilon &CachedData,
                 const arguments &Arguments, double pos_x, double pos_y,
                 double pos_z, double temp_sigma, double temp_charge,
@@ -41,220 +53,143 @@ int cal_energy_amber_intrin(const MOL &rec, const MOL &lg,
                             const Multi_MOL_parameters &rec_parameters,
                             const Multi_MOL_parameters &lg_parameters) {
   Energy.set_energy(0., 0.);
-  __m256d avx_half = _mm256_set1_pd(0.5);
-  __m256d v_scale = _mm256_set1_pd(0.01);
+  const __m256d avx_half = _mm256_set1_pd(0.5);
+  const __m256d v_scale = _mm256_set1_pd(0.01);
   const size_t rec_size{rec.size()};
   const size_t size_vector_rec{rec.size() / 4};
-  double epsilon_in = Arguments.epsilon_in;
+  const double epsilon_in = Arguments.epsilon_in;
+  const bool write_cache = !CachedData.elec_ener.empty();
+  const bool has_cutoff = Arguments.distance_energy_cutoff > 0.;
+  const bool check_self = Arguments.self_int;
+  const bool check_interchain = Arguments.flag_interchain_energy;
 
-  if (CachedData.elec_ener.empty()) {
-    for (size_t j{begin}; j < end; ++j) {
-      const double pos_x{lg.pos.x[j]}, pos_y{lg.pos.y[j]}, pos_z{lg.pos.z[j]};
+  for (size_t j{begin}; j < end; ++j) {
+    const double pos_x{lg.pos.x[j]}, pos_y{lg.pos.y[j]}, pos_z{lg.pos.z[j]};
+    alignas(32) double elec_temp[4]{}, vdw_temp_d[4]{}, d_arr[4]{},
+        sigma_self_arr[4]{}, lane_mask_vals[4]{};
 
-      __m256d avx_temp_epsilon_lg =
-          _mm256_set1_pd(16. * lg_parameters.epsilon[j]);
-      __m256d avx_temp_charge_lg =
-          _mm256_set1_pd(138.935457839 * lg_parameters.charge[j] / epsilon_in);
-      __m256d avx_temp_sigma = _mm256_set1_pd(lg_parameters.sigma[j]);
+    const __m256d avx_temp_epsilon_lg =
+        _mm256_set1_pd(16. * lg_parameters.epsilon[j]);
+    const __m256d avx_temp_charge_lg =
+        _mm256_set1_pd(138.935457839 * lg_parameters.charge[j] / epsilon_in);
+    const __m256d avx_temp_sigma = _mm256_set1_pd(lg_parameters.sigma[j]);
 
-      __m256d v_pos_x = _mm256_set1_pd(pos_x);
-      __m256d v_pos_y = _mm256_set1_pd(pos_y);
-      __m256d v_pos_z = _mm256_set1_pd(pos_z);
+    const __m256d v_pos_x = _mm256_set1_pd(pos_x);
+    const __m256d v_pos_y = _mm256_set1_pd(pos_y);
+    const __m256d v_pos_z = _mm256_set1_pd(pos_z);
 
-      for (size_t i = 0; i < size_vector_rec * 4; i += 4) {
-        __m256d v_x = _mm256_loadu_pd(&rec.pos.x[i]);
-        __m256d v_y = _mm256_loadu_pd(&rec.pos.y[i]);
-        __m256d v_z = _mm256_loadu_pd(&rec.pos.z[i]);
+    for (size_t i = 0; i < size_vector_rec * 4; i += 4) {
+      const __m256d v_x = _mm256_loadu_pd(&rec.pos.x[i]);
+      const __m256d v_y = _mm256_loadu_pd(&rec.pos.y[i]);
+      const __m256d v_z = _mm256_loadu_pd(&rec.pos.z[i]);
 
-        __m256d dx = _mm256_sub_pd(v_x, v_pos_x);
-        __m256d dy = _mm256_sub_pd(v_y, v_pos_y);
-        __m256d dz = _mm256_sub_pd(v_z, v_pos_z);
+      const __m256d dx = _mm256_sub_pd(v_x, v_pos_x);
+      const __m256d dy = _mm256_sub_pd(v_y, v_pos_y);
+      const __m256d dz = _mm256_sub_pd(v_z, v_pos_z);
 
-        __m256d dx2 = _mm256_mul_pd(dx, dx);
-        __m256d dy2 = _mm256_mul_pd(dy, dy);
-        __m256d dz2 = _mm256_mul_pd(dz, dz);
+      const __m256d dx2 = _mm256_mul_pd(dx, dx);
+      const __m256d dy2 = _mm256_mul_pd(dy, dy);
+      const __m256d dz2 = _mm256_mul_pd(dz, dz);
 
-        __m256d r2 = _mm256_add_pd(_mm256_add_pd(dx2, dy2), dz2);
-        r2 = _mm256_mul_pd(r2, v_scale);
-        __m256d avx_array_d_rec = _mm256_sqrt_pd(r2);
+      __m256d r2 = _mm256_add_pd(_mm256_add_pd(dx2, dy2), dz2);
+      r2 = _mm256_mul_pd(r2, v_scale);
+      const __m256d avx_array_d_rec = _mm256_sqrt_pd(r2);
 
-        __m256d avx_array_charge_rec =
-            _mm256_loadu_pd(&rec_parameters.charge[i]);
-        __m256d avx_elec_result =
-            _mm256_mul_pd(avx_temp_charge_lg, avx_array_charge_rec);
-        avx_elec_result = _mm256_div_pd(avx_elec_result, avx_array_d_rec);
+      const __m256d avx_array_charge_rec =
+          _mm256_loadu_pd(&rec_parameters.charge[i]);
+      __m256d avx_elec_result =
+          _mm256_mul_pd(avx_temp_charge_lg, avx_array_charge_rec);
+      avx_elec_result = _mm256_div_pd(avx_elec_result, avx_array_d_rec);
 
-        __m256d vdw_temp = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
-        vdw_temp = _mm256_mul_pd(avx_temp_epsilon_lg, vdw_temp);
-        vdw_temp = _mm256_sqrt_pd(vdw_temp);
+      __m256d vdw_temp = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
+      vdw_temp = _mm256_mul_pd(avx_temp_epsilon_lg, vdw_temp);
+      vdw_temp = _mm256_sqrt_pd(vdw_temp);
 
-        __m256d vdw_temp2 = _mm256_loadu_pd(&rec_parameters.sigma[i]);
-        vdw_temp2 = _mm256_add_pd(avx_temp_sigma, vdw_temp2);
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, avx_half);
+      __m256d sigma_self_vec = _mm256_loadu_pd(&rec_parameters.sigma[i]);
+      sigma_self_vec = _mm256_add_pd(avx_temp_sigma, sigma_self_vec);
+      sigma_self_vec = _mm256_mul_pd(sigma_self_vec, avx_half);
 
-        vdw_temp2 = _mm256_div_pd(vdw_temp2, avx_array_d_rec);
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-        __m256d vdw_temp3 = vdw_temp2;
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp3);
-        vdw_temp3 =
-            _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2), vdw_temp2);
-        vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3);
+      __m256d vdw_temp2 = _mm256_div_pd(sigma_self_vec, avx_array_d_rec);
+      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
+      __m256d vdw_temp3 = vdw_temp2;
+      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
+      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp3);
+      vdw_temp3 =
+          _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2), vdw_temp2);
+      vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3);
 
-        Energy.elec_ener += hsum_double_avx(avx_elec_result);
-        Energy.vdw_ener += hsum_double_avx(vdw_temp3);
-      }
-
-      if (size_vector_rec * 4 < rec_size) {
-        for (size_t i{size_vector_rec * 4}; i < rec_size; ++i) {
-          double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
-                              square(rec.pos.y[i] - pos_y) +
-                              square(rec.pos.z[i] - pos_z))},
-              c_6{c6(0.5 * (lg_parameters.sigma[j] + rec_parameters.sigma[i]) /
-                     d)};
-          if (Arguments.distance_energy_cutoff > 0. &&
-              d > Arguments.distance_energy_cutoff) {
-            continue;
+      _mm256_storeu_pd(d_arr, avx_array_d_rec);
+      _mm256_storeu_pd(sigma_self_arr, sigma_self_vec);
+      for (int k = 0; k < 4; ++k) {
+        bool keep = true;
+        if (has_cutoff && d_arr[k] > Arguments.distance_energy_cutoff)
+          keep = false;
+        if (keep && check_self) {
+          if (d_arr[k] < sigma_self_arr[k]) {
+            keep = false;
+          } else if (check_interchain) {
+            keep = info_lg[j].get_chain() != info_rec[i + k].get_chain();
           }
-          if (Arguments.self_int == true &&
-              (d < 0.5 * (lg_parameters.sigma[j] + rec_parameters.sigma[i]) ||
-               (Arguments.flag_interchain_energy == true &&
-                info_lg[j].get_chain() == info_rec[i].get_chain()))) {
-            continue;
-          }
-          Energy.elec_ener +=
-              (138.935457839 * lg_parameters.charge[j] / epsilon_in) *
-              rec_parameters.charge[i] / d;
-          if (lg_parameters.sigma[j] < 0. || rec_parameters.sigma[i] < 0.)
-            Energy.vdw_ener += sqrt(16. * lg_parameters.epsilon[j] *
-                                    rec_parameters.epsilon[i]) *
-                               (square(c_6) - 0.000);
-          else
-            Energy.vdw_ener += sqrt(16. * lg_parameters.epsilon[j] *
-                                    rec_parameters.epsilon[i]) *
-                               (square(c_6) - c_6);
         }
+        lane_mask_vals[k] = keep ? -1.0 : 0.0;
       }
-    }
-  } else {
-    for (size_t j{begin}; j < end; ++j) {
-      const double pos_x{lg.pos.x[j]}, pos_y{lg.pos.y[j]}, pos_z{lg.pos.z[j]};
-      double elec_temp[4]{}, vdw_temp_d[4]{};
 
-      __m256d avx_temp_epsilon_lg =
-          _mm256_set1_pd(16. * lg_parameters.epsilon[j]);
-      __m256d avx_temp_charge_lg =
-          _mm256_set1_pd(138.935457839 * lg_parameters.charge[j] / epsilon_in);
-      __m256d avx_temp_sigma = _mm256_set1_pd(lg_parameters.sigma[j]);
+      const __m256d final_mask = load_lane_mask_pd(lane_mask_vals);
+      avx_elec_result = _mm256_and_pd(avx_elec_result, final_mask);
+      vdw_temp3 = _mm256_and_pd(vdw_temp3, final_mask);
 
-      __m256d v_pos_x = _mm256_set1_pd(pos_x);
-      __m256d v_pos_y = _mm256_set1_pd(pos_y);
-      __m256d v_pos_z = _mm256_set1_pd(pos_z);
+      Energy.elec_ener += hsum_double_avx(avx_elec_result);
+      Energy.vdw_ener += hsum_double_avx(vdw_temp3);
 
-      for (size_t i = 0; i < size_vector_rec * 4; i += 4) {
-        __m256d v_x = _mm256_loadu_pd(&rec.pos.x[i]);
-        __m256d v_y = _mm256_loadu_pd(&rec.pos.y[i]);
-        __m256d v_z = _mm256_loadu_pd(&rec.pos.z[i]);
-
-        __m256d dx = _mm256_sub_pd(v_x, v_pos_x);
-        __m256d dy = _mm256_sub_pd(v_y, v_pos_y);
-        __m256d dz = _mm256_sub_pd(v_z, v_pos_z);
-
-        __m256d dx2 = _mm256_mul_pd(dx, dx);
-        __m256d dy2 = _mm256_mul_pd(dy, dy);
-        __m256d dz2 = _mm256_mul_pd(dz, dz);
-
-        __m256d r2 = _mm256_add_pd(_mm256_add_pd(dx2, dy2), dz2);
-        r2 = _mm256_mul_pd(r2, v_scale);
-        __m256d avx_array_d_rec = _mm256_sqrt_pd(r2);
-
-        __m256d avx_array_charge_rec =
-            _mm256_loadu_pd(&rec_parameters.charge[i]);
-        __m256d avx_elec_result =
-            _mm256_mul_pd(avx_temp_charge_lg, avx_array_charge_rec);
-        avx_elec_result = _mm256_div_pd(avx_elec_result, avx_array_d_rec);
-
-        __m256d vdw_temp = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
-        vdw_temp = _mm256_mul_pd(avx_temp_epsilon_lg, vdw_temp);
-        vdw_temp = _mm256_sqrt_pd(vdw_temp);
-
-        __m256d vdw_temp2 = _mm256_loadu_pd(&rec_parameters.sigma[i]);
-        vdw_temp2 = _mm256_add_pd(avx_temp_sigma, vdw_temp2);
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, avx_half);
-
-        vdw_temp2 = _mm256_div_pd(vdw_temp2, avx_array_d_rec);
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-        __m256d vdw_temp3 = vdw_temp2;
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp3);
-        vdw_temp3 =
-            _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2), vdw_temp2);
-        vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3);
-
+      if (write_cache) {
         _mm256_storeu_pd(elec_temp, avx_elec_result);
         _mm256_storeu_pd(vdw_temp_d, vdw_temp3);
-
-        if (Arguments.distance_energy_cutoff < 0.) {
-          Energy.elec_ener += hsum_double_avx(avx_elec_result);
-          Energy.vdw_ener += hsum_double_avx(vdw_temp3);
-          size_t pos_base = rec_size * j + i;
-          for (int k = 0; k < 4; ++k) {
-            CachedData.set_elec_vdw(pos_base + k, elec_temp[k], vdw_temp_d[k]);
-          }
-        } else {
-          double d_arr[4];
-          _mm256_storeu_pd(d_arr, avx_array_d_rec);
-          size_t pos_base = rec_size * j + i;
-          for (int k = 0; k < 4; ++k) {
-            size_t pos = pos_base + k;
-            if (d_arr[k] > Arguments.distance_energy_cutoff) {
-              CachedData.set_elec_vdw(pos, 0., 0.);
-              continue;
-            }
-            CachedData.set_elec_vdw(pos, elec_temp[k], vdw_temp_d[k]);
-            Energy.elec_ener += elec_temp[k];
-            Energy.vdw_ener += vdw_temp_d[k];
-          }
-        }
+        CachedData.set_elec_vdw(rec_size * j + i, elec_temp, vdw_temp_d, 4);
       }
+    }
 
-      if (size_vector_rec * 4 < rec_size) {
-        for (size_t i{size_vector_rec * 4}; i < rec_size; ++i) {
-          double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
-                              square(rec.pos.y[i] - pos_y) +
-                              square(rec.pos.z[i] - pos_z))},
-              c_6{c6(0.5 * (lg_parameters.sigma[j] + rec_parameters.sigma[i]) /
-                     d)};
-          size_t pos{rec_size * j + i};
+    if (size_vector_rec * 4 < rec_size) {
+      for (size_t i{size_vector_rec * 4}; i < rec_size; ++i) {
+        const double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
+                                  square(rec.pos.y[i] - pos_y) +
+                                  square(rec.pos.z[i] - pos_z))};
+        const size_t pos{rec_size * j + i};
 
-          if (Arguments.distance_energy_cutoff > 0. &&
-              d > Arguments.distance_energy_cutoff) {
-            CachedData.set_elec_vdw(pos, 0., 0.);
-            continue;
-          }
-          if (Arguments.self_int == true &&
-              (d < 0.5 * (lg_parameters.sigma[j] + rec_parameters.sigma[i]) ||
-               (Arguments.flag_interchain_energy == true &&
-                info_lg[j].get_chain() == info_rec[i].get_chain()))) {
-            CachedData.set_elec_vdw(pos, 0., 0.);
-            continue;
-          }
+        if (has_cutoff && d > Arguments.distance_energy_cutoff) {
+          zero_cached_pair_if_present(CachedData, pos);
+          continue;
+        }
+        if (check_self &&
+            (d < 0.5 * (lg_parameters.sigma[j] + rec_parameters.sigma[i]) ||
+             (check_interchain &&
+              info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+          zero_cached_pair_if_present(CachedData, pos);
+          continue;
+        }
 
-          double elec_val =
-              (138.935457839 * lg_parameters.charge[j] / epsilon_in) *
-              rec_parameters.charge[i] / d;
-          double vdw_val = 0.0;
-          if (lg_parameters.sigma[j] < 0. || rec_parameters.sigma[i] < 0.)
-            vdw_val = sqrt(16. * lg_parameters.epsilon[j] *
-                           rec_parameters.epsilon[i]) *
-                      (square(c_6) - 0.000);
-          else
-            vdw_val = sqrt(16. * lg_parameters.epsilon[j] *
-                           rec_parameters.epsilon[i]) *
-                      (square(c_6) - c_6);
+        const double c_6{
+            c6(0.5 * (lg_parameters.sigma[j] + rec_parameters.sigma[i]) / d)};
+        const double elec_val =
+            (138.935457839 * lg_parameters.charge[j] / epsilon_in) *
+            rec_parameters.charge[i] / d;
 
+        double vdw_val = 0.0;
+        if (lg_parameters.sigma[j] < 0. || rec_parameters.sigma[i] < 0.) {
+          vdw_val = sqrt(16. * lg_parameters.epsilon[j] *
+                         rec_parameters.epsilon[i]) *
+                    (square(c_6) - 0.000);
+        } else {
+          vdw_val = sqrt(16. * lg_parameters.epsilon[j] *
+                         rec_parameters.epsilon[i]) *
+                    (square(c_6) - c_6);
+        }
+
+        if (write_cache) {
           CachedData.set_elec_vdw(pos, elec_val, vdw_val);
           Energy += CachedData.get_energy(pos);
+        } else {
+          Energy.elec_ener += elec_val;
+          Energy.vdw_ener += vdw_val;
         }
       }
     }
@@ -281,14 +216,15 @@ int cal_one_ele(const MOL &rec, const MOL &lg, cache_sigma_epsilon &CachedData,
   if (Arguments.distance_energy_cutoff > 0. &&
       d > Arguments.distance_energy_cutoff) {
     size_t pos{rec.size() * j + i};
-    CachedData.set_elec_vdw(pos, 0., 0.);
+    zero_cached_pair_if_present(CachedData, pos);
     return 0;
   }
 
   if (Arguments.self_int == true &&
       (d < 0.5 * (temp_sigma + rec_parameters[i].get_sigma()) ||
        (Arguments.flag_interchain_energy == true &&
-        info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+         info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+    zero_cached_pair_if_present(CachedData, rec.size() * j + i);
     return 0;
   }
 
@@ -327,59 +263,63 @@ int cal_energy_amber_screening_intrin(
     const Multi_MOL_parameters &lg_parameters) {
   Energy.set_energy(0., 0.);
   constexpr double kScreeningMinDistance = 1e-10;
-  double epsilon_in{Arguments.epsilon_in},
-      lambda_debye{3.07 / sqrt(Arguments.salt_concentration)};
+  const double epsilon_in{Arguments.epsilon_in};
+  const double lambda_debye{3.07 / sqrt(Arguments.salt_concentration)};
+  const bool write_cache = !CachedData.elec_ener.empty();
+  const bool has_cutoff = Arguments.distance_energy_cutoff > 0.;
+  const bool check_self = Arguments.self_int;
+  const bool check_interchain = Arguments.flag_interchain_energy;
 
-  __m256d avx_epsilon_in = _mm256_set1_pd(epsilon_in);
-  __m256d avx_neg_inv_lambda = _mm256_set1_pd(-1.0 / lambda_debye);
-  __m256d avx_one = _mm256_set1_pd(1.0);
-  __m256d avx_half = _mm256_set1_pd(0.5);
-  __m256d avx_min_distance = _mm256_set1_pd(kScreeningMinDistance);
+  const __m256d avx_epsilon_in = _mm256_set1_pd(epsilon_in);
+  const __m256d avx_neg_inv_lambda = _mm256_set1_pd(-1.0 / lambda_debye);
+  const __m256d avx_one = _mm256_set1_pd(1.0);
+  const __m256d avx_half = _mm256_set1_pd(0.5);
+  const __m256d avx_min_distance = _mm256_set1_pd(kScreeningMinDistance);
 
   for (size_t j{begin}; j < end; ++j) {
     const double pos_x{lg.pos.x[j]}, pos_y{lg.pos.y[j]}, pos_z{lg.pos.z[j]};
     const size_t rec_size{rec.size()}, size_vector_rec{rec.size() / 4};
-    double elec_temp[4]{}, vdw_temp_d[4]{}, d[4]{};
+    alignas(32) double elec_temp[4]{}, vdw_temp_d[4]{}, d[4]{},
+        sigma_self_arr[4]{}, lane_mask_vals[4]{};
 
-    __m256d avx_temp_epsilon_lg =
+    const __m256d avx_temp_epsilon_lg =
         _mm256_set1_pd(16. * lg_parameters[j].get_epsilon());
-    __m256d avx_temp_charge_lg =
+    const __m256d avx_temp_charge_lg =
         _mm256_set1_pd(138.935457839 * lg_parameters[j].get_charge());
-    __m256d avx_temp_sigma = _mm256_set1_pd(lg_parameters[j].get_sigma());
+    const __m256d avx_temp_sigma = _mm256_set1_pd(lg_parameters[j].get_sigma());
 
-    __m256d v_pos_x = _mm256_set1_pd(pos_x);
-    __m256d v_pos_y = _mm256_set1_pd(pos_y);
-    __m256d v_pos_z = _mm256_set1_pd(pos_z);
-    __m256d v_scale = _mm256_set1_pd(0.01);
+    const __m256d v_pos_x = _mm256_set1_pd(pos_x);
+    const __m256d v_pos_y = _mm256_set1_pd(pos_y);
+    const __m256d v_pos_z = _mm256_set1_pd(pos_z);
+    const __m256d v_scale = _mm256_set1_pd(0.01);
 
     for (size_t i = 0; i < size_vector_rec * 4; i += 4) {
-      __m256d v_x = _mm256_loadu_pd(&rec.pos.x[i]);
-      __m256d v_y = _mm256_loadu_pd(&rec.pos.y[i]);
-      __m256d v_z = _mm256_loadu_pd(&rec.pos.z[i]);
+      const __m256d v_x = _mm256_loadu_pd(&rec.pos.x[i]);
+      const __m256d v_y = _mm256_loadu_pd(&rec.pos.y[i]);
+      const __m256d v_z = _mm256_loadu_pd(&rec.pos.z[i]);
 
-      __m256d dx = _mm256_sub_pd(v_x, v_pos_x);
-      __m256d dy = _mm256_sub_pd(v_y, v_pos_y);
-      __m256d dz = _mm256_sub_pd(v_z, v_pos_z);
+      const __m256d dx = _mm256_sub_pd(v_x, v_pos_x);
+      const __m256d dy = _mm256_sub_pd(v_y, v_pos_y);
+      const __m256d dz = _mm256_sub_pd(v_z, v_pos_z);
 
-      __m256d dx2 = _mm256_mul_pd(dx, dx);
-      __m256d dy2 = _mm256_mul_pd(dy, dy);
-      __m256d dz2 = _mm256_mul_pd(dz, dz);
+      const __m256d dx2 = _mm256_mul_pd(dx, dx);
+      const __m256d dy2 = _mm256_mul_pd(dy, dy);
+      const __m256d dz2 = _mm256_mul_pd(dz, dz);
 
       __m256d r2 = _mm256_add_pd(_mm256_add_pd(dx2, dy2), dz2);
       r2 = _mm256_mul_pd(r2, v_scale);
-      __m256d avx_array_d_rec = _mm256_sqrt_pd(r2); // d
-      __m256d avx_valid_mask =
+      const __m256d avx_array_d_rec = _mm256_sqrt_pd(r2);
+      const __m256d avx_valid_mask =
           _mm256_cmp_pd(avx_array_d_rec, avx_min_distance, _CMP_GT_OQ);
-      __m256d avx_safe_d =
+      const __m256d avx_safe_d =
           _mm256_blendv_pd(avx_min_distance, avx_array_d_rec, avx_valid_mask);
-      __m256d avx_inv_d = _mm256_div_pd(avx_one, avx_safe_d); // 1/d
+      const __m256d avx_inv_d = _mm256_div_pd(avx_one, avx_safe_d);
 
-      // Screening term: exp(-d / lambda)
-      __m256d avx_exp_arg = _mm256_mul_pd(avx_safe_d, avx_neg_inv_lambda);
-      __m256d avx_exp_val = f_exp_avx(avx_exp_arg);
+      const __m256d avx_exp_arg = _mm256_mul_pd(avx_safe_d, avx_neg_inv_lambda);
+      const __m256d avx_exp_val = f_exp_avx(avx_exp_arg);
 
-      // Elec = C * q1 * q2 * exp / d / eps_in
-      __m256d avx_array_charge_rec = _mm256_loadu_pd(&rec_parameters.charge[i]);
+      const __m256d avx_array_charge_rec =
+          _mm256_loadu_pd(&rec_parameters.charge[i]);
 
       __m256d avx_elec_result =
           _mm256_mul_pd(avx_temp_charge_lg, avx_array_charge_rec);
@@ -387,55 +327,51 @@ int cal_energy_amber_screening_intrin(
       avx_elec_result = _mm256_mul_pd(avx_elec_result, avx_inv_d);
       avx_elec_result = _mm256_div_pd(avx_elec_result, avx_epsilon_in);
 
-      // VdW Calculation
       __m256d vdw_temp = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
       vdw_temp = _mm256_mul_pd(avx_temp_epsilon_lg, vdw_temp);
       vdw_temp = _mm256_sqrt_pd(vdw_temp);
 
-      __m256d vdw_temp2 = _mm256_loadu_pd(&rec_parameters.sigma[i]);
-      vdw_temp2 = _mm256_add_pd(avx_temp_sigma, vdw_temp2);
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, avx_half);
+      __m256d sigma_self_vec = _mm256_loadu_pd(&rec_parameters.sigma[i]);
+      sigma_self_vec = _mm256_add_pd(avx_temp_sigma, sigma_self_vec);
+      sigma_self_vec = _mm256_mul_pd(sigma_self_vec, avx_half);
 
-      vdw_temp2 = _mm256_div_pd(vdw_temp2, avx_safe_d);
+      __m256d vdw_temp2 = _mm256_div_pd(sigma_self_vec, avx_safe_d);
       vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
       __m256d vdw_temp3 = vdw_temp2;
       vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp3); // c6
-
+      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp3);
       vdw_temp3 = _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2),
-                                vdw_temp2); // c12 - c6
+                                vdw_temp2);
       vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3);
-      avx_elec_result = _mm256_and_pd(avx_elec_result, avx_valid_mask);
-      vdw_temp3 = _mm256_and_pd(vdw_temp3, avx_valid_mask);
 
-      if (CachedData.elec_ener.empty()) {
-        Energy.elec_ener += hsum_double_avx(avx_elec_result);
-        Energy.vdw_ener += hsum_double_avx(vdw_temp3);
-      } else {
-        _mm256_storeu_pd(elec_temp, avx_elec_result);
-        _mm256_storeu_pd(vdw_temp_d, vdw_temp3);
-
-        if (Arguments.distance_energy_cutoff < 0.) {
-          Energy.elec_ener += hsum_double_avx(avx_elec_result);
-          Energy.vdw_ener += hsum_double_avx(vdw_temp3);
-          CachedData.set_elec_vdw(rec.size() * j + i, elec_temp, vdw_temp_d, 4);
-        } else {
-          _mm256_storeu_pd(d, avx_array_d_rec);
-          for (size_t k{}; k < 4; ++k) {
-            size_t pos{rec.size() * j + i + k};
-            if (!std::isfinite(d[k]) || d[k] <= kScreeningMinDistance) {
-              CachedData.set_elec_vdw(pos, 0., 0.);
-              continue;
-            }
-            if (d[k] > Arguments.distance_energy_cutoff) {
-              CachedData.set_elec_vdw(pos, 0., 0.);
-              continue;
-            }
-            CachedData.set_elec_vdw(pos, elec_temp[k], vdw_temp_d[k]);
-            Energy.elec_ener += elec_temp[k];
-            Energy.vdw_ener += vdw_temp_d[k];
+      _mm256_storeu_pd(d, avx_array_d_rec);
+      _mm256_storeu_pd(sigma_self_arr, sigma_self_vec);
+      for (int k = 0; k < 4; ++k) {
+        bool keep = std::isfinite(d[k]) && d[k] > kScreeningMinDistance;
+        if (keep && has_cutoff && d[k] > Arguments.distance_energy_cutoff)
+          keep = false;
+        if (keep && check_self) {
+          if ((sigma_self_arr[k] > 0.0 && d[k] < sigma_self_arr[k])) {
+            keep = false;
+          } else if (check_interchain) {
+            keep = info_lg[j].get_chain() != info_rec[i + k].get_chain();
           }
         }
+        lane_mask_vals[k] = keep ? -1.0 : 0.0;
+      }
+
+      const __m256d final_mask =
+          _mm256_and_pd(avx_valid_mask, load_lane_mask_pd(lane_mask_vals));
+      avx_elec_result = _mm256_and_pd(avx_elec_result, final_mask);
+      vdw_temp3 = _mm256_and_pd(vdw_temp3, final_mask);
+
+      Energy.elec_ener += hsum_double_avx(avx_elec_result);
+      Energy.vdw_ener += hsum_double_avx(vdw_temp3);
+
+      if (write_cache) {
+        _mm256_storeu_pd(elec_temp, avx_elec_result);
+        _mm256_storeu_pd(vdw_temp_d, vdw_temp3);
+        CachedData.set_elec_vdw(rec_size * j + i, elec_temp, vdw_temp_d, 4);
       }
     }
 
@@ -444,25 +380,28 @@ int cal_energy_amber_screening_intrin(
         double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
                             square(rec.pos.y[i] - pos_y) +
                             square(rec.pos.z[i] - pos_z))};
+        const size_t pos{rec_size * j + i};
         if (!std::isfinite(d) || d <= kScreeningMinDistance) {
-          if (!CachedData.elec_ener.empty()) {
-            size_t pos{rec.size() * j + i};
-            CachedData.set_elec_vdw(pos, 0., 0.);
-          }
-          continue;
-        }
-        double c_6{
-            c6(0.5 *
-               (lg_parameters[j].get_sigma() + rec_parameters[i].get_sigma()) /
-               d)};
-
-        if (Arguments.distance_energy_cutoff > 0. &&
-            d > Arguments.distance_energy_cutoff) {
-          size_t pos{rec.size() * j + i};
-          CachedData.set_elec_vdw(pos, 0., 0.);
+          zero_cached_pair_if_present(CachedData, pos);
           continue;
         }
 
+        if (has_cutoff && d > Arguments.distance_energy_cutoff) {
+          zero_cached_pair_if_present(CachedData, pos);
+          continue;
+        }
+
+        const double sigma_self =
+            0.5 * (lg_parameters[j].get_sigma() + rec_parameters[i].get_sigma());
+        if (check_self &&
+            ((sigma_self > 0.0 && d < sigma_self) ||
+             (check_interchain &&
+              info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+          zero_cached_pair_if_present(CachedData, pos);
+          continue;
+        }
+
+        const double c_6{c6(sigma_self / d)};
         double term_exp = exp(-d / lambda_debye);
         double e_val = (138.935457839 * lg_parameters[j].get_charge() *
                         rec_parameters[i].get_charge() * term_exp) /
@@ -471,13 +410,12 @@ int cal_energy_amber_screening_intrin(
                             rec_parameters[i].get_epsilon()) *
                        (square(c_6) - c_6);
 
-        if (CachedData.elec_ener.empty()) {
-          Energy.elec_ener += e_val;
-          Energy.vdw_ener += v_val;
-        } else {
-          size_t pos{rec.size() * j + i};
+        if (write_cache) {
           CachedData.set_elec_vdw(pos, e_val, v_val);
           Energy += CachedData.get_energy(pos);
+        } else {
+          Energy.elec_ener += e_val;
+          Energy.vdw_ener += v_val;
         }
       }
     }
@@ -494,105 +432,119 @@ int cal_energy_gromos_intrin(const MOL &rec, const MOL &lg,
                              const Multi_MOL_parameters &rec_parameters,
                              const Multi_MOL_parameters &lg_parameters) {
   Energy.set_energy(0., 0.);
-  __m256d avx_epsilon_in = _mm256_set1_pd(Arguments.epsilon_in);
-  __m256d avx_one = _mm256_set1_pd(1.0);
+  const __m256d avx_epsilon_in = _mm256_set1_pd(Arguments.epsilon_in);
+  const __m256d avx_one = _mm256_set1_pd(1.0);
+  const bool write_cache = !CachedData.elec_ener.empty();
+  const bool has_cutoff = Arguments.distance_energy_cutoff > 0.;
+  const bool check_self = Arguments.self_int;
+  const bool check_interchain = Arguments.flag_interchain_energy;
 
   for (size_t j{begin}; j < end; ++j) {
     const double pos_x{lg.pos.x[j]}, pos_y{lg.pos.y[j]}, pos_z{lg.pos.z[j]};
     const size_t rec_size{rec.size()}, size_vector_rec{rec.size() / 4};
-    double elec_temp[4]{}, vdw_temp_d[4]{}, d[4]{};
+    alignas(32) double elec_temp[4]{}, vdw_temp_d[4]{}, d[4]{},
+        lane_mask_vals[4]{};
 
-    __m256d avx_temp_charge_lg =
+    const __m256d avx_temp_charge_lg =
         _mm256_set1_pd(138.935457839 * lg_parameters[j].get_charge());
-    __m256d avx_temp_epsilon_lg =
+    const __m256d avx_temp_epsilon_lg =
         _mm256_set1_pd(lg_parameters[j].get_epsilon());
-    __m256d avx_temp_sigma_lg = _mm256_set1_pd(lg_parameters[j].get_sigma());
+    const __m256d avx_temp_sigma_lg =
+        _mm256_set1_pd(lg_parameters[j].get_sigma());
 
-    __m256d v_pos_x = _mm256_set1_pd(pos_x);
-    __m256d v_pos_y = _mm256_set1_pd(pos_y);
-    __m256d v_pos_z = _mm256_set1_pd(pos_z);
-    __m256d v_scale = _mm256_set1_pd(0.01);
+    const __m256d v_pos_x = _mm256_set1_pd(pos_x);
+    const __m256d v_pos_y = _mm256_set1_pd(pos_y);
+    const __m256d v_pos_z = _mm256_set1_pd(pos_z);
+    const __m256d v_scale = _mm256_set1_pd(0.01);
 
     for (size_t i = 0; i < size_vector_rec * 4; i += 4) {
-      __m256d v_x = _mm256_loadu_pd(&rec.pos.x[i]);
-      __m256d v_y = _mm256_loadu_pd(&rec.pos.y[i]);
-      __m256d v_z = _mm256_loadu_pd(&rec.pos.z[i]);
+      const __m256d v_x = _mm256_loadu_pd(&rec.pos.x[i]);
+      const __m256d v_y = _mm256_loadu_pd(&rec.pos.y[i]);
+      const __m256d v_z = _mm256_loadu_pd(&rec.pos.z[i]);
 
-      __m256d dx = _mm256_sub_pd(v_x, v_pos_x);
-      __m256d dy = _mm256_sub_pd(v_y, v_pos_y);
-      __m256d dz = _mm256_sub_pd(v_z, v_pos_z);
+      const __m256d dx = _mm256_sub_pd(v_x, v_pos_x);
+      const __m256d dy = _mm256_sub_pd(v_y, v_pos_y);
+      const __m256d dz = _mm256_sub_pd(v_z, v_pos_z);
 
-      __m256d dx2 = _mm256_mul_pd(dx, dx);
-      __m256d dy2 = _mm256_mul_pd(dy, dy);
-      __m256d dz2 = _mm256_mul_pd(dz, dz);
+      const __m256d dx2 = _mm256_mul_pd(dx, dx);
+      const __m256d dy2 = _mm256_mul_pd(dy, dy);
+      const __m256d dz2 = _mm256_mul_pd(dz, dz);
 
       __m256d r2 = _mm256_add_pd(_mm256_add_pd(dx2, dy2), dz2);
       r2 = _mm256_mul_pd(r2, v_scale);
-      __m256d avx_array_d_rec = _mm256_sqrt_pd(r2);                // d
-      __m256d avx_inv_d = _mm256_div_pd(avx_one, avx_array_d_rec); // 1/d
+      const __m256d avx_array_d_rec = _mm256_sqrt_pd(r2);
+      const __m256d avx_inv_d = _mm256_div_pd(avx_one, avx_array_d_rec);
 
-      // Elec = C * q1 * q2 / d / eps_in
-      __m256d avx_array_charge_rec = _mm256_loadu_pd(&rec_parameters.charge[i]);
+      const __m256d avx_array_charge_rec =
+          _mm256_loadu_pd(&rec_parameters.charge[i]);
       __m256d avx_elec_result =
           _mm256_mul_pd(avx_temp_charge_lg, avx_array_charge_rec);
       avx_elec_result = _mm256_mul_pd(avx_elec_result, avx_inv_d);
       avx_elec_result = _mm256_div_pd(avx_elec_result, avx_epsilon_in);
 
-      // Gromos VdW: sqrt(eps1*eps2)/r^12 - sqrt(sig1*sig2)/r^6
-      __m256d avx_rec_epsilon = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
-      __m256d avx_rec_sigma = _mm256_loadu_pd(&rec_parameters.sigma[i]);
+      const __m256d avx_rec_epsilon =
+          _mm256_loadu_pd(&rec_parameters.epsilon[i]);
+      const __m256d avx_rec_sigma = _mm256_loadu_pd(&rec_parameters.sigma[i]);
 
-      __m256d term_eps =
+      const __m256d term_eps =
           _mm256_sqrt_pd(_mm256_mul_pd(avx_temp_epsilon_lg, avx_rec_epsilon));
-      __m256d term_sig =
+      const __m256d term_sig =
           _mm256_sqrt_pd(_mm256_mul_pd(avx_temp_sigma_lg, avx_rec_sigma));
 
       __m256d r2_vdw = _mm256_mul_pd(avx_array_d_rec, avx_array_d_rec);
-      __m256d r6 = _mm256_mul_pd(r2_vdw, r2_vdw); // r^4
-      r6 = _mm256_mul_pd(r6, r2_vdw);             // r^6
+      __m256d r6 = _mm256_mul_pd(r2_vdw, r2_vdw);
+      r6 = _mm256_mul_pd(r6, r2_vdw);
 
-      __m256d inv_r6 = _mm256_div_pd(avx_one, r6);
-      __m256d inv_r12 = _mm256_mul_pd(inv_r6, inv_r6);
+      const __m256d inv_r6 = _mm256_div_pd(avx_one, r6);
+      const __m256d inv_r12 = _mm256_mul_pd(inv_r6, inv_r6);
 
       __m256d vdw_res = _mm256_sub_pd(_mm256_mul_pd(term_eps, inv_r12),
                                       _mm256_mul_pd(term_sig, inv_r6));
 
-      if (CachedData.elec_ener.empty()) {
-        Energy.elec_ener += hsum_double_avx(avx_elec_result);
-        Energy.vdw_ener += hsum_double_avx(vdw_res);
-      } else {
-        _mm256_storeu_pd(elec_temp, avx_elec_result);
-        _mm256_storeu_pd(vdw_temp_d, vdw_res);
-        if (Arguments.distance_energy_cutoff < 0.) {
-          Energy.elec_ener += hsum_double_avx(avx_elec_result);
-          Energy.vdw_ener += hsum_double_avx(vdw_res);
-          CachedData.set_elec_vdw(rec.size() * j + i, elec_temp, vdw_temp_d, 4);
-        } else {
-          _mm256_storeu_pd(d, avx_array_d_rec);
-          for (size_t k{}; k < 4; ++k) {
-            size_t pos{rec.size() * j + i + k};
-            if (d[k] > Arguments.distance_energy_cutoff) {
-              CachedData.set_elec_vdw(pos, 0., 0.);
-              continue;
-            }
-            CachedData.set_elec_vdw(pos, elec_temp[k], vdw_temp_d[k]);
-            Energy.elec_ener += elec_temp[k];
-            Energy.vdw_ener += vdw_temp_d[k];
+      _mm256_storeu_pd(d, avx_array_d_rec);
+      for (int k = 0; k < 4; ++k) {
+        bool keep = true;
+        if (has_cutoff && d[k] > Arguments.distance_energy_cutoff)
+          keep = false;
+        if (keep && check_self) {
+          if (i + static_cast<size_t>(k) == j) {
+            keep = false;
+          } else if (check_interchain) {
+            keep = info_lg[j].get_chain() != info_rec[i + k].get_chain();
           }
         }
+        lane_mask_vals[k] = keep ? -1.0 : 0.0;
+      }
+
+      const __m256d final_mask = load_lane_mask_pd(lane_mask_vals);
+      avx_elec_result = _mm256_and_pd(avx_elec_result, final_mask);
+      vdw_res = _mm256_and_pd(vdw_res, final_mask);
+
+      Energy.elec_ener += hsum_double_avx(avx_elec_result);
+      Energy.vdw_ener += hsum_double_avx(vdw_res);
+
+      if (write_cache) {
+        _mm256_storeu_pd(elec_temp, avx_elec_result);
+        _mm256_storeu_pd(vdw_temp_d, vdw_res);
+        CachedData.set_elec_vdw(rec_size * j + i, elec_temp, vdw_temp_d, 4);
       }
     }
 
-    // Remainder
     if (size_vector_rec * 4 < rec_size) {
       for (size_t i{size_vector_rec * 4}; i < rec_size; ++i) {
         double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
                             square(rec.pos.y[i] - pos_y) +
                             square(rec.pos.z[i] - pos_z))};
-        if (Arguments.distance_energy_cutoff > 0. &&
-            d > Arguments.distance_energy_cutoff) {
-          size_t pos{rec.size() * j + i};
-          CachedData.set_elec_vdw(pos, 0., 0.);
+        const size_t pos{rec_size * j + i};
+        if (has_cutoff && d > Arguments.distance_energy_cutoff) {
+          zero_cached_pair_if_present(CachedData, pos);
+          continue;
+        }
+
+        if (check_self &&
+            (i == j || (check_interchain &&
+                        info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+          zero_cached_pair_if_present(CachedData, pos);
           continue;
         }
 
@@ -606,13 +558,12 @@ int cal_energy_gromos_intrin(const MOL &rec, const MOL &lg,
             sqrt(lg_parameters[j].get_sigma() * rec_parameters[i].get_sigma());
         double vdw_val = eps_term / square(c_6) - sig_term / c_6;
 
-        if (CachedData.elec_ener.empty()) {
-          Energy.elec_ener += temp_ch;
-          Energy.vdw_ener += vdw_val;
-        } else {
-          size_t pos{rec.size() * j + i};
+        if (write_cache) {
           CachedData.set_elec_vdw(pos, temp_ch, vdw_val);
           Energy += CachedData.get_energy(pos);
+        } else {
+          Energy.elec_ener += temp_ch;
+          Energy.vdw_ener += vdw_val;
         }
       }
     }
@@ -629,44 +580,50 @@ void cal_energy_opls_intrin(const MOL &rec, const MOL &lg,
                             const Multi_MOL_parameters &rec_parameters,
                             const Multi_MOL_parameters &lg_parameters) {
   Energy.set_energy(0., 0.);
-  __m256d avx_one = _mm256_set1_pd(1.0);
+  const __m256d avx_one = _mm256_set1_pd(1.0);
+  const bool write_cache = !CachedData.elec_ener.empty();
+  const bool has_cutoff = Arguments.distance_energy_cutoff > 0.;
+  const bool check_self = Arguments.self_int;
+  const bool check_interchain = Arguments.flag_interchain_energy;
 
   for (size_t j{begin}; j < end; ++j) {
     const double pos_x{lg.pos.x[j]}, pos_y{lg.pos.y[j]}, pos_z{lg.pos.z[j]};
     const size_t rec_size{rec.size()}, size_vector_rec{rec.size() / 4};
-    double elec_temp[4]{}, vdw_temp_d[4]{}, d[4]{};
+    alignas(32) double elec_temp[4]{}, vdw_temp_d[4]{}, d[4]{}, c6_arr[4]{},
+        lane_mask_vals[4]{};
 
-    __m256d avx_temp_epsilon_lg =
+    const __m256d avx_temp_epsilon_lg =
         _mm256_set1_pd(16. * lg_parameters[j].get_epsilon());
-    __m256d avx_temp_charge_lg = _mm256_set1_pd(
+    const __m256d avx_temp_charge_lg = _mm256_set1_pd(
         138.935457839 * lg_parameters[j].get_charge() / Arguments.epsilon_in);
-    __m256d avx_temp_sigma = _mm256_set1_pd(lg_parameters[j].get_sigma());
+    const __m256d avx_temp_sigma = _mm256_set1_pd(lg_parameters[j].get_sigma());
 
-    __m256d v_pos_x = _mm256_set1_pd(pos_x);
-    __m256d v_pos_y = _mm256_set1_pd(pos_y);
-    __m256d v_pos_z = _mm256_set1_pd(pos_z);
-    __m256d v_scale = _mm256_set1_pd(0.01);
+    const __m256d v_pos_x = _mm256_set1_pd(pos_x);
+    const __m256d v_pos_y = _mm256_set1_pd(pos_y);
+    const __m256d v_pos_z = _mm256_set1_pd(pos_z);
+    const __m256d v_scale = _mm256_set1_pd(0.01);
 
     for (size_t i = 0; i < size_vector_rec * 4; i += 4) {
-      __m256d v_x = _mm256_loadu_pd(&rec.pos.x[i]);
-      __m256d v_y = _mm256_loadu_pd(&rec.pos.y[i]);
-      __m256d v_z = _mm256_loadu_pd(&rec.pos.z[i]);
+      const __m256d v_x = _mm256_loadu_pd(&rec.pos.x[i]);
+      const __m256d v_y = _mm256_loadu_pd(&rec.pos.y[i]);
+      const __m256d v_z = _mm256_loadu_pd(&rec.pos.z[i]);
 
-      __m256d dx = _mm256_sub_pd(v_x, v_pos_x);
-      __m256d dy = _mm256_sub_pd(v_y, v_pos_y);
-      __m256d dz = _mm256_sub_pd(v_z, v_pos_z);
+      const __m256d dx = _mm256_sub_pd(v_x, v_pos_x);
+      const __m256d dy = _mm256_sub_pd(v_y, v_pos_y);
+      const __m256d dz = _mm256_sub_pd(v_z, v_pos_z);
 
-      __m256d dx2 = _mm256_mul_pd(dx, dx);
-      __m256d dy2 = _mm256_mul_pd(dy, dy);
-      __m256d dz2 = _mm256_mul_pd(dz, dz);
+      const __m256d dx2 = _mm256_mul_pd(dx, dx);
+      const __m256d dy2 = _mm256_mul_pd(dy, dy);
+      const __m256d dz2 = _mm256_mul_pd(dz, dz);
 
       __m256d r2 = _mm256_add_pd(_mm256_add_pd(dx2, dy2), dz2);
       r2 = _mm256_mul_pd(r2, v_scale);
-      __m256d avx_array_d_rec = _mm256_sqrt_pd(r2);
-      __m256d avx_inv_d = _mm256_div_pd(avx_one, avx_array_d_rec);
-      __m256d avx_inv_d2 = _mm256_mul_pd(avx_inv_d, avx_inv_d);
+      const __m256d avx_array_d_rec = _mm256_sqrt_pd(r2);
+      const __m256d avx_inv_d = _mm256_div_pd(avx_one, avx_array_d_rec);
+      const __m256d avx_inv_d2 = _mm256_mul_pd(avx_inv_d, avx_inv_d);
 
-      __m256d avx_array_charge_rec = _mm256_loadu_pd(&rec_parameters.charge[i]);
+      const __m256d avx_array_charge_rec =
+          _mm256_loadu_pd(&rec_parameters.charge[i]);
       __m256d avx_elec_result =
           _mm256_mul_pd(avx_temp_charge_lg, avx_array_charge_rec);
       avx_elec_result = _mm256_mul_pd(avx_elec_result, avx_inv_d);
@@ -689,40 +646,32 @@ void cal_energy_opls_intrin(const MOL &rec, const MOL &lg,
       vdw_temp3 = _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2), vdw_temp2);
       vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3); // eps * (c12 - c6)
 
-      if (CachedData.elec_ener.empty()) {
-        Energy.elec_ener += hsum_double_avx(avx_elec_result);
-        Energy.vdw_ener += hsum_double_avx(vdw_temp3);
-      } else {
+      _mm256_storeu_pd(d, avx_array_d_rec);
+      _mm256_storeu_pd(c6_arr, vdw_temp2);
+      for (int k = 0; k < 4; ++k) {
+        bool keep = true;
+        if (check_self &&
+            (c6_arr[k] > 1.0 || (check_interchain &&
+                                 info_lg[j].get_chain() ==
+                                     info_rec[i + k].get_chain()))) {
+          keep = false;
+        }
+        if (keep && has_cutoff && d[k] > Arguments.distance_energy_cutoff)
+          keep = false;
+        lane_mask_vals[k] = keep ? -1.0 : 0.0;
+      }
+
+      const __m256d final_mask = load_lane_mask_pd(lane_mask_vals);
+      avx_elec_result = _mm256_and_pd(avx_elec_result, final_mask);
+      vdw_temp3 = _mm256_and_pd(vdw_temp3, final_mask);
+
+      Energy.elec_ener += hsum_double_avx(avx_elec_result);
+      Energy.vdw_ener += hsum_double_avx(vdw_temp3);
+
+      if (write_cache) {
         _mm256_storeu_pd(elec_temp, avx_elec_result);
         _mm256_storeu_pd(vdw_temp_d, vdw_temp3);
-        if (Arguments.distance_energy_cutoff < 0.) {
-          Energy.elec_ener += hsum_double_avx(avx_elec_result);
-          Energy.vdw_ener += hsum_double_avx(vdw_temp3);
-          CachedData.set_elec_vdw(rec.size() * j + i, elec_temp, vdw_temp_d, 4);
-        } else {
-          _mm256_storeu_pd(d, avx_array_d_rec);
-          for (size_t k{}; k < 4; ++k) {
-            size_t pos{rec.size() * j + i + k};
-            if (d[k] > Arguments.distance_energy_cutoff) {
-              CachedData.set_elec_vdw(pos, 0., 0.);
-              continue;
-            }
-            const double temp_sigma{lg_parameters[j].get_sigma()};
-            if (Arguments.self_int == true &&
-                (c6(sqrt(temp_sigma * rec_parameters[i + k].get_sigma()) /
-                    d[k]) > 1. ||
-                 (Arguments.flag_interchain_energy == true &&
-                  info_lg[j].get_chain() == info_rec[i + k].get_chain()))) {
-              CachedData.set_elec_vdw(pos, 0., 0.);
-              continue;
-            }
-
-            CachedData.set_elec_vdw(pos, elec_temp[k], vdw_temp_d[k]);
-
-            Energy.elec_ener += elec_temp[k];
-            Energy.vdw_ener += vdw_temp_d[k];
-          }
-        }
+        CachedData.set_elec_vdw(rec_size * j + i, elec_temp, vdw_temp_d, 4);
       }
     }
 
@@ -735,16 +684,16 @@ void cal_energy_opls_intrin(const MOL &rec, const MOL &lg,
                         rec_parameters[i].get_sigma()) /
                    d)};
 
-        if (Arguments.self_int == true &&
-            (c_6 > 1. || (Arguments.flag_interchain_energy == true &&
+        const size_t pos{rec_size * j + i};
+        if (check_self &&
+            (c_6 > 1. || (check_interchain &&
                           info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+          zero_cached_pair_if_present(CachedData, pos);
           continue;
         }
 
-        if (Arguments.distance_energy_cutoff > 0. &&
-            d > Arguments.distance_energy_cutoff) {
-          size_t pos{rec.size() * j + i};
-          CachedData.set_elec_vdw(pos, 0., 0.);
+        if (has_cutoff && d > Arguments.distance_energy_cutoff) {
+          zero_cached_pair_if_present(CachedData, pos);
           continue;
         }
 
@@ -755,13 +704,12 @@ void cal_energy_opls_intrin(const MOL &rec, const MOL &lg,
                             rec_parameters[i].get_epsilon()) *
                        (square(c_6) - c_6);
 
-        if (CachedData.elec_ener.empty()) {
-          Energy.elec_ener += e_val;
-          Energy.vdw_ener += v_val;
-        } else {
-          size_t pos{rec.size() * j + i};
+        if (write_cache) {
           CachedData.set_elec_vdw(pos, e_val, v_val);
           Energy += CachedData.get_energy(pos);
+        } else {
+          Energy.elec_ener += e_val;
+          Energy.vdw_ener += v_val;
         }
       }
   }

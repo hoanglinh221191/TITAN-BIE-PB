@@ -35,6 +35,15 @@ using std::string_view;
 // AVX is not available.
 
 using namespace std;
+
+namespace {
+inline void zero_cached_pair_if_present(cache_sigma_epsilon &CachedData,
+                                        size_t pos) {
+  if (!CachedData.elec_ener.empty())
+    CachedData.set_elec_vdw(pos, 0., 0.);
+}
+} // namespace
+
 int imp_cal_energy_lg(vector<data_out> &lg_ener_inter, const Multi_MOL &rec,
                       const Multi_MOL &lg, size_t num_snap, size_t begin,
                       size_t end, const vector<d_min> &dmin,
@@ -300,17 +309,13 @@ int cal_energy_amber_screening(const MOL &rec, const MOL &lg,
                                 square(rec.pos.z[i] - lg.pos.z[j]))};
 
       if (!std::isfinite(d) || d <= kScreeningMinDistance) {
-        if (!CachedData.elec_ener.empty()) {
-          const size_t pos{rec.size() * j + i};
-          CachedData.set_elec_vdw(pos, 0., 0.);
-        }
+        zero_cached_pair_if_present(CachedData, rec.size() * j + i);
         continue;
       }
 
       if (Arguments.distance_energy_cutoff > 0. &&
           d > Arguments.distance_energy_cutoff) [[unlikely]] {
-        size_t pos{rec.size() * j + i};
-        CachedData.set_elec_vdw(pos, 0., 0.);
+        zero_cached_pair_if_present(CachedData, rec.size() * j + i);
         continue;
       }
 
@@ -341,6 +346,7 @@ int cal_energy_amber_screening(const MOL &rec, const MOL &lg,
           ((sigma_self > 0.0 && d < sigma_self) ||
            (Arguments.flag_interchain_energy == true &&
             info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+        zero_cached_pair_if_present(CachedData, rec.size() * j + i);
         continue;
       }
 
@@ -380,8 +386,7 @@ void cal_energy_amber(const MOL &rec, const MOL &lg,
 
       if (Arguments.distance_energy_cutoff > 0. &&
           d > Arguments.distance_energy_cutoff) [[unlikely]] {
-        size_t pos{rec.size() * j + i};
-        CachedData.set_elec_vdw(pos, 0., 0.);
+        zero_cached_pair_if_present(CachedData, rec.size() * j + i);
         continue;
       }
 
@@ -414,6 +419,7 @@ void cal_energy_amber(const MOL &rec, const MOL &lg,
           ((sigma_self > 0.0 && d < sigma_self) ||
            (Arguments.flag_interchain_energy == true &&
             info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+        zero_cached_pair_if_present(CachedData, rec.size() * j + i);
         continue;
       }
 
@@ -458,13 +464,13 @@ void cal_energy_opls(const MOL &rec, const MOL &lg,
       if (Arguments.self_int == true &&
           (c_6 > 1. || (Arguments.flag_interchain_energy == true &&
                         info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+        zero_cached_pair_if_present(CachedData, rec.size() * j + i);
         continue;
       }
 
       if (Arguments.distance_energy_cutoff > 0. &&
           d > Arguments.distance_energy_cutoff) [[unlikely]] {
-        size_t pos{rec.size() * j + i};
-        CachedData.set_elec_vdw(pos, 0., 0.);
+        zero_cached_pair_if_present(CachedData, rec.size() * j + i);
         continue;
       }
 
@@ -522,14 +528,14 @@ void cal_energy_gromos(const MOL &rec, const MOL &lg,
 
       if (Arguments.distance_energy_cutoff > 0. &&
           d > Arguments.distance_energy_cutoff) [[unlikely]] {
-        size_t pos{rec.size() * j + i};
-        CachedData.set_elec_vdw(pos, 0., 0.);
+        zero_cached_pair_if_present(CachedData, rec.size() * j + i);
         continue;
       }
 
       if (Arguments.self_int == true &&
           (i == j || (Arguments.flag_interchain_energy == true &&
                       info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+        zero_cached_pair_if_present(CachedData, rec.size() * j + i);
         continue;
       }
 

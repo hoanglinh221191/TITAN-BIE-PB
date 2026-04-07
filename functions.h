@@ -187,6 +187,13 @@ int cal_energy_amber_screening_intrin(
     const arguments &Arguments, const Multi_MOL_parameters &rec_parameters,
     const Multi_MOL_parameters &lg_parameters);
 
+int cal_energy_amber_screening_intrin_nofilter(
+    const MOL &rec, const MOL &lg, const vector<mol_info> &info_rec,
+    const vector<mol_info> &info_lg, cache_sigma_epsilon &CachedData,
+    size_t begin, size_t end, cache_energy &Energy, size_t num_snap,
+    const arguments &Arguments, const Multi_MOL_parameters &rec_parameters,
+    const Multi_MOL_parameters &lg_parameters);
+
 int cal_energy_gromos_intrin(const MOL &rec, const MOL &lg,
                              const vector<mol_info> &info_rec,
                              const vector<mol_info> &info_lg,
@@ -196,6 +203,13 @@ int cal_energy_gromos_intrin(const MOL &rec, const MOL &lg,
                              const Multi_MOL_parameters &rec_parameters,
                              const Multi_MOL_parameters &lg_parameters);
 
+int cal_energy_gromos_intrin_nofilter(
+    const MOL &rec, const MOL &lg, const vector<mol_info> &info_rec,
+    const vector<mol_info> &info_lg, cache_sigma_epsilon &CachedData,
+    size_t begin, size_t end, cache_energy &Energy, size_t num_snap,
+    const arguments &Arguments, const Multi_MOL_parameters &rec_parameters,
+    const Multi_MOL_parameters &lg_parameters);
+
 void cal_energy_opls_intrin(const MOL &rec, const MOL &lg,
                             const vector<mol_info> &info_rec,
                             const vector<mol_info> &info_lg,
@@ -204,6 +218,13 @@ void cal_energy_opls_intrin(const MOL &rec, const MOL &lg,
                             const arguments &Arguments,
                             const Multi_MOL_parameters &rec_parameters,
                             const Multi_MOL_parameters &lg_parameters);
+
+void cal_energy_opls_intrin_nofilter(
+    const MOL &rec, const MOL &lg, const vector<mol_info> &info_rec,
+    const vector<mol_info> &info_lg, cache_sigma_epsilon &CachedData,
+    size_t begin, size_t end, cache_energy &Energy, size_t num_snap,
+    const arguments &Arguments, const Multi_MOL_parameters &rec_parameters,
+    const Multi_MOL_parameters &lg_parameters);
 
 int out(vector<double> &E_e, vector<double> &E_v, vector<double> &time_of_snap,
         fstream &cal_out, arguments &Arguments, int input_name,
@@ -233,6 +254,7 @@ int find_h_bonds(MOL &pro_in, MOL &pro_in_ref, MOL &lig, MOL &lig_ref,
                  vector<mol_info> &info_rec, vector<mol_info> &info_lg,
                  vector<vector<size_t>> &Hbonds_vector);
 int init_hbond_output_files(const arguments &Arguments);
+int finalize_hbond_output_files();
 int add_atom_to_MOL(Multi_MOL &MOL_source, Multi_MOL &protein_des,
                     groups_cal &groups, int group_index,
                     const arguments &Arguments, string type,
@@ -245,6 +267,7 @@ int trans_atom_to_MOL(Multi_MOL &MOL_source, Multi_MOL &protein_des,
 int write_pdb(const Multi_MOL &pro_in, const Multi_MOL &lig,
               const arguments &Arguments, size_t num_snap, folders &paths,
               vector<string> &input_line, int input_name);
+int finalize_pdb_output_stream();
 size_t check_res_H(vector<mol_info> &protein_in, string_view res_name,
                    string_view atom_name, size_t i);
 int check_and_settime(double &time_of_snap, string protein_1,
@@ -392,6 +415,13 @@ int cal_energy_amber_intrin(const MOL &rec, const MOL &lg,
                             const arguments &Arguments,
                             const Multi_MOL_parameters &rec_parameters,
                             const Multi_MOL_parameters &lg_parameters);
+
+int cal_energy_amber_intrin_nofilter(
+    const MOL &rec, const MOL &lg, const vector<mol_info> &info_rec,
+    const vector<mol_info> &info_lg, cache_sigma_epsilon &CachedData,
+    size_t begin, size_t end, cache_energy &Energy, size_t num_snap,
+    const arguments &Arguments, const Multi_MOL_parameters &rec_parameters,
+    const Multi_MOL_parameters &lg_parameters);
 
 int cal_energy_martini_intrin(const MOL &rec, const MOL &lg,
                               const vector<mol_info> &info_rec,

@@ -2,6 +2,7 @@
 #define STAT_HB_SC_H
 #include "MOL.h"
 #include <map>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -145,26 +146,34 @@ struct res_hb {
 
 struct traj_hb {
   vector<res_hb> residues_hb;
+  unordered_map<unsigned long long, size_t> residue_index;
   size_t snap_num{};
   traj_hb() = default;
   traj_hb(string _resname, string _chain, size_t _resnum, size_t _hb_num,
           size_t _chainid) {
     residues_hb.emplace_back(_resname, _chain, _resnum, _hb_num, _hb_num, 0,
                              _chainid);
+    residue_index.emplace((static_cast<unsigned long long>(_chainid) << 32) |
+                              static_cast<unsigned long long>(_resnum),
+                          0);
   }
   traj_hb(const traj_hb &rhs) : snap_num{rhs.snap_num} {
     residues_hb = rhs.residues_hb;
+    residue_index = rhs.residue_index;
   }
   traj_hb(traj_hb &&rhs) : snap_num{rhs.snap_num} {
     residues_hb = std::move(rhs.residues_hb);
+    residue_index = std::move(rhs.residue_index);
   }
   traj_hb &operator=(const traj_hb &rhs) {
     residues_hb = rhs.residues_hb;
+    residue_index = rhs.residue_index;
     snap_num = rhs.snap_num;
     return *this;
   }
   traj_hb &operator=(traj_hb &&rhs) {
     residues_hb = std::move(rhs.residues_hb);
+    residue_index = std::move(rhs.residue_index);
     snap_num = rhs.snap_num;
     return *this;
   }
@@ -174,6 +183,7 @@ struct traj_hb {
   bool check_in(const res_hb &res_hbond, size_t &pos);
   void clear_frame() {
     residues_hb.clear();
+    residue_index.clear();
     snap_num = 0;
   }
 };
