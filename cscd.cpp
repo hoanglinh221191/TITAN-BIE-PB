@@ -4,6 +4,7 @@
 #include<iomanip>
 #include<thread>
 #include"functions.h"
+#include "titan_executor.h"
 using namespace std;
 int gen_files_for_cscd(Multi_MOL& pro_in, Multi_MOL& lig, const arguments& Arguments, fstream& log, size_t num_snap, int sc_flag, 
 	int input_name, vector<string>& list_output_name, all_cscd& out_dis, const folders& paths, vector<fstream>& out_files)
@@ -56,25 +57,28 @@ int gen_files_for_cscd(Multi_MOL& pro_in, Multi_MOL& lig, const arguments& Argum
 	return 0;
 }
 
-int impl_cscd(Multi_MOL& pro_in, Multi_MOL& lig, const arguments& Arguments, fstream& log, vector<thread>& threads, size_t num_snap, 
+int impl_cscd(Multi_MOL& pro_in, Multi_MOL& lig, const arguments& Arguments, fstream& log, TitanExecutor &executor, size_t num_snap, 
 	int sc_flag, int input_name, vector<string>& list_output_name, all_cscd& out_dis, const folders& paths, vector<fstream>& out_files)
 {
 	vector<d_min> dis_sc(Arguments.nt);
 	if (Arguments.flag_topo_1 == false)
 	{
-		for (size_t i{}; i < Arguments.nt; ++i)
-		{
-			threads[i] = thread(take_min, ref(pro_in.m_mol[num_snap].Com), ref(lig.m_mol[num_snap].Com), ref(dis_sc[i]), i *pro_in.m_mol[num_snap].Com.size() / Arguments.nt, (i + 1ull) *pro_in.m_mol[num_snap].Com.size() / Arguments.nt, 0ull, lig.m_mol[num_snap].Com.size(), ref(Arguments), sc_flag, Arguments.limit_dis);
-		}
-		for (auto& t : threads)t.join();
+		executor.parallel_do(Arguments.nt, [&](size_t i) {
+			take_min(ref(pro_in.m_mol[num_snap].Com), ref(lig.m_mol[num_snap].Com), ref(dis_sc[i]),
+			         i * pro_in.m_mol[num_snap].Com.size() / Arguments.nt,
+			         (i + 1ull) * pro_in.m_mol[num_snap].Com.size() / Arguments.nt,
+			         0ull, lig.m_mol[num_snap].Com.size(), ref(Arguments), sc_flag, Arguments.limit_dis);
+		});
 	}
 	else
 	{
-		for (size_t i{}; i < Arguments.nt; ++i)
-		{
-			threads[i] = thread(find_d_rescom_com, ref(pro_in.m_mol[num_snap].Com), ref(lig), ref(dis_sc[i]), i *pro_in.m_mol[num_snap].Com.size() / Arguments.nt, (i + 1ull) *pro_in.m_mol[num_snap].Com.size() / Arguments.nt, num_snap, lig.m_mol[num_snap].Com.size(), Arguments.force_f, sc_flag, Arguments.limit_dis);
-		}
-		for (auto& t : threads)t.join();
+		executor.parallel_do(Arguments.nt, [&](size_t i) {
+			find_d_rescom_com(ref(pro_in.m_mol[num_snap].Com), ref(lig), ref(dis_sc[i]),
+			                  i * pro_in.m_mol[num_snap].Com.size() / Arguments.nt,
+			                  (i + 1ull) * pro_in.m_mol[num_snap].Com.size() / Arguments.nt,
+			                  num_snap, lig.m_mol[num_snap].Com.size(), Arguments.force_f,
+			                  sc_flag, Arguments.limit_dis);
+		});
 	}
 
 	if (gen_files_for_cscd(pro_in, lig, Arguments, log, num_snap, sc_flag, input_name, list_output_name, out_dis, paths, out_files) == 1) return 1;

@@ -6,6 +6,7 @@
 #include "info.h"
 #include "martini_nonbonded.h"
 #include "miscellaneous.h"
+#include "titan_executor.h"
 #include "uti_func.h"
 #include <cmath>
 #include <fstream>
@@ -668,7 +669,7 @@ int imp_cal_force_rec(vector<data_out> &rec_ener_inter, const Multi_MOL &rec,
   return 0;
 }
 
-void forceMapOf2Pro(vector<thread> &threads, const Multi_MOL &rec,
+void forceMapOf2Pro(TitanExecutor &executor, const Multi_MOL &rec,
                     const Multi_MOL &lg, size_t num_snap,
                     const vector<d_min> &dmin,
                     const cache_sigma_epsilon &CachedData, size_t nt,
@@ -679,29 +680,23 @@ void forceMapOf2Pro(vector<thread> &threads, const Multi_MOL &rec,
                     const Multi_MOL_parameters & lg_parameters) {
   vector<vector<data_out>> data_lg(nt), data_rec(nt);
 
-  for (size_t i{}; i < nt; ++i)
-    threads[i] =
-        thread(imp_cal_force_lg, ref(data_lg[i]), ref(rec), ref(lg), num_snap,
-               i * dmin.size() / nt, (i + 1) * dmin.size() / nt, ref(dmin),
-               ref(CachedData), ref(rec_parameters), ref(lg_parameters),
-               flag_all_mode, ref(Arguments));
-  for (auto &t : threads)
-    t.join();
+  executor.parallel_do(nt, [&](size_t i) {
+    imp_cal_force_lg(data_lg[i], rec, lg, num_snap, i * dmin.size() / nt,
+                     (i + 1) * dmin.size() / nt, dmin, CachedData,
+                     rec_parameters, lg_parameters, flag_all_mode, Arguments);
+  });
 
-  for (size_t i{}; i < nt; ++i)
-    threads[i] =
-        thread(imp_cal_force_rec, ref(data_rec[i]), ref(rec), ref(lg), num_snap,
-               i * dmin.size() / nt, (i + 1) * dmin.size() / nt, ref(dmin),
-               ref(CachedData), ref(rec_parameters), ref(lg_parameters),
-               flag_all_mode, ref(Arguments));
-  for (auto &t : threads)
-    t.join();
+  executor.parallel_do(nt, [&](size_t i) {
+    imp_cal_force_rec(data_rec[i], rec, lg, num_snap, i * dmin.size() / nt,
+                      (i + 1) * dmin.size() / nt, dmin, CachedData,
+                      rec_parameters, lg_parameters, flag_all_mode, Arguments);
+  });
 
   wrapper_print_force(nt, data_lg, data_rec, flag_all_mode, Arguments,
                       Energy_res_mol1, Energy_res_mol2, num_snap, info_output);
 }
 
-void forceMapOfProLig(vector<thread> &threads, const Multi_MOL &rec,
+void forceMapOfProLig(TitanExecutor &executor, const Multi_MOL &rec,
                       const Multi_MOL &lg, size_t num_snap,
                       const vector<d_min> &dmin,
                       const cache_sigma_epsilon &CachedData, size_t nt,
@@ -712,30 +707,25 @@ void forceMapOfProLig(vector<thread> &threads, const Multi_MOL &rec,
                       const Multi_MOL_parameters & lg_parameters) {
   vector<vector<data_out>> data_lg(nt), data_rec(nt);
 
-  for (size_t i{}; i < nt; ++i)
-    threads[i] =
-        thread(imp_cal_force_lg_atom, ref(data_lg[i]), ref(rec), ref(lg),
-               num_snap, i * lg.m_mol[num_snap].size() / nt,
-               (i + 1) * lg.m_mol[num_snap].size() / nt, ref(dmin),
-               ref(CachedData), ref(rec_parameters), ref(lg_parameters),
-               ref(Arguments));
-  for (auto &t : threads)
-    t.join();
+  executor.parallel_do(nt, [&](size_t i) {
+    imp_cal_force_lg_atom(
+        data_lg[i], rec, lg, num_snap, i * lg.m_mol[num_snap].size() / nt,
+        (i + 1) * lg.m_mol[num_snap].size() / nt, dmin, CachedData,
+        rec_parameters, lg_parameters, Arguments);
+  });
 
-  for (size_t i{}; i < nt; ++i)
-    threads[i] =
-        thread(imp_cal_force_rec, ref(data_rec[i]), ref(rec), ref(lg), num_snap,
-               i * dmin.size() / nt, (i + 1) * dmin.size() / nt, ref(dmin),
-               ref(CachedData), ref(rec_parameters), ref(lg_parameters),
-               flag_all_mode, ref(Arguments));
-  for (auto &t : threads)
-    t.join();
+  executor.parallel_do(nt, [&](size_t i) {
+    imp_cal_force_rec(data_rec[i], rec, lg, num_snap, i * dmin.size() / nt,
+                      (i + 1) * dmin.size() / nt, dmin, CachedData,
+                      rec_parameters, lg_parameters, flag_all_mode, Arguments);
+  });
 
   wrapper_print_force(nt, data_lg, data_rec, flag_all_mode, Arguments,
                       Energy_res_mol1, Energy_res_mol2, num_snap, info_output);
 }
 
-int forceMapOf2Ligs(const Multi_MOL &rec, const Multi_MOL &lg, size_t num_snap,
+int forceMapOf2Ligs(TitanExecutor &executor, const Multi_MOL &rec,
+                    const Multi_MOL &lg, size_t num_snap,
                     const vector<d_min> &dmin,
                     const cache_sigma_epsilon &CachedData, size_t nt,
                     const arguments &Arguments,
@@ -743,33 +733,28 @@ int forceMapOf2Ligs(const Multi_MOL &rec, const Multi_MOL &lg, size_t num_snap,
                     vector<energy_res> &Energy_res_mol2, info &info_output,
                     const Multi_MOL_parameters & rec_parameters,
                     const Multi_MOL_parameters & lg_parameters) {
-  vector<thread> ener(nt);
   vector<vector<data_out>> data_lg(nt), data_rec(nt);
 
-  for (size_t i{}; i < nt; ++i)
-    ener[i] = thread(imp_cal_force_lg_atom, ref(data_lg[i]), ref(rec), ref(lg),
-                     num_snap, i * lg.m_mol[num_snap].size() / nt,
-                     (i + 1) * lg.m_mol[num_snap].size() / nt,
-                     ref(dmin), ref(CachedData), ref(rec_parameters),
-                     ref(lg_parameters), ref(Arguments));
-  for (auto &t : ener)
-    t.join();
+  executor.parallel_do(nt, [&](size_t i) {
+    imp_cal_force_lg_atom(data_lg[i], rec, lg, num_snap,
+                          i * lg.m_mol[num_snap].size() / nt,
+                          (i + 1) * lg.m_mol[num_snap].size() / nt, dmin,
+                          CachedData, rec_parameters, lg_parameters, Arguments);
+  });
 
-  for (size_t i{}; i < nt; ++i)
-    ener[i] = thread(imp_cal_force_lg_atom, ref(data_rec[i]), ref(lg), ref(rec),
-                     num_snap, i * rec.m_mol[num_snap].size() / nt,
-                     (i + 1) * rec.m_mol[num_snap].size() / nt,
-                     ref(dmin), ref(CachedData), ref(rec_parameters),
-                     ref(lg_parameters), ref(Arguments));
-  for (auto &t : ener)
-    t.join();
+  executor.parallel_do(nt, [&](size_t i) {
+    imp_cal_force_lg_atom(data_rec[i], lg, rec, num_snap,
+                          i * rec.m_mol[num_snap].size() / nt,
+                          (i + 1) * rec.m_mol[num_snap].size() / nt, dmin,
+                          CachedData, rec_parameters, lg_parameters, Arguments);
+  });
 
   wrapper_print_force(1, data_lg, data_rec, true, Arguments, Energy_res_mol1,
                       Energy_res_mol2, num_snap, info_output);
   return 0;
 }
 
-int wrap_cal_force_map(vector<thread> &threads, Multi_MOL &mol1,
+int wrap_cal_force_map(TitanExecutor &executor, Multi_MOL &mol1,
                        Multi_MOL &mol2, const arguments &Arguments,
                        size_t num_snap, const vector<d_min> &dmin,
                        const cache_sigma_epsilon &CachedData,
@@ -777,25 +762,25 @@ int wrap_cal_force_map(vector<thread> &threads, Multi_MOL &mol1,
                        vector<energy_res> &Energy_res_mol2, info &info_output) {
   if (Arguments.flag_topo_1 == true && Arguments.flag_topo_2 == true ||
       (Arguments.force_map == 3 && Arguments.fmap_type == "atom-atom")) {
-    forceMapOf2Ligs(mol1, mol2, num_snap, dmin, CachedData, Arguments.nt,
+    forceMapOf2Ligs(executor, mol1, mol2, num_snap, dmin, CachedData, Arguments.nt,
                     Arguments, Energy_res_mol1, Energy_res_mol2, info_output,
                     mol1.parameters, mol2.parameters);
   } else if (Arguments.flag_topo_1 == true && Arguments.flag_topo_2 == false ||
              (Arguments.force_map == 3 &&
               Arguments.fmap_type == "residue-atom")) {
-    forceMapOfProLig(threads, mol1, mol2, num_snap, dmin, CachedData,
+    forceMapOfProLig(executor, mol1, mol2, num_snap, dmin, CachedData,
                      Arguments.nt, Arguments.fmap_level == "all", Arguments,
                      Energy_res_mol1, Energy_res_mol2, info_output,
                      mol1.parameters, mol2.parameters);
   } else if (Arguments.flag_topo_1 == false && Arguments.flag_topo_2 == true ||
              (Arguments.force_map == 3 &&
               Arguments.fmap_type == "atom-residue")) {
-    forceMapOfProLig(threads, mol2, mol1, num_snap, dmin, CachedData,
+    forceMapOfProLig(executor, mol2, mol1, num_snap, dmin, CachedData,
                      Arguments.nt, Arguments.fmap_level == "all", Arguments,
                      Energy_res_mol1, Energy_res_mol2, info_output,
                      mol1.parameters, mol2.parameters);
   } else {
-    forceMapOf2Pro(threads, mol1, mol2, num_snap, dmin, CachedData,
+    forceMapOf2Pro(executor, mol1, mol2, num_snap, dmin, CachedData,
                    Arguments.nt, Arguments.fmap_level == "all", Arguments,
                    Energy_res_mol1, Energy_res_mol2, info_output,
                    mol1.parameters, mol2.parameters);

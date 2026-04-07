@@ -53,8 +53,8 @@ int arguments::recheck_and_change_pdb_input() {
   return 0;
 }
 
-string arguments::set_Buildnumber() { return "20260104"; }
-string arguments::get_build_number() const { return "20260104"; }
+string arguments::set_Buildnumber() { return "20260406"; }
+string arguments::get_build_number() const { return "20260406"; }
 
 string arguments::get_pdbOutput() const {
   if (opdb_name_explicit && !out_pdb_name.empty())
@@ -276,6 +276,18 @@ int arguments::post_process() {
       }
     }
   }
+  if (community.flag_community) {
+    std::transform(community.method.begin(), community.method.end(),
+                   community.method.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (community.method != "louvain") {
+      TitanUI::print_error("Community: unsupported method '" +
+                           community.method +
+                           "'. V1 supports only -community=louvain.");
+      exit(EXIT_FAILURE);
+    }
+  }
   if (msm.flag_tica) {
     if (msm.tica_lag <= 0) {
       TitanUI::print_error("TICA: -tica-lag must be > 0.");
@@ -485,7 +497,7 @@ int arguments::post_process() {
                      tpt.flag_tpt ||
                      umap.flag_umap) &&
       !flag_network_explicit && !flag_pca && !flag_allostery &&
-      !lspmd.flag_lspmd;
+      !community.flag_community && !lspmd.flag_lspmd;
   if (lj_trace_free_kinetics && flag_network) {
     flag_network = false;
     TitanUI::print_info(

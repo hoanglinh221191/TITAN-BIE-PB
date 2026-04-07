@@ -1,6 +1,7 @@
 #include "titan_rms.h"
 
 #include "titan_alignment.h"
+#include "titan_executor.h"
 #include "titan_ui.h"
 
 #include <algorithm>
@@ -285,7 +286,7 @@ void TitanRMSAnalyzer::init(const Multi_MOL &mol1, const Multi_MOL &mol2,
 void TitanRMSAnalyzer::gather_trace_coordinates(const Multi_MOL &mol1,
                                                 const Multi_MOL &mol2,
                                                 std::size_t snap_idx,
-                                                std::size_t num_threads) {
+                                                TitanExecutor &executor) {
   const std::size_t mol1_count = mol1_trace_.size();
   const std::size_t total_count = total_trace_count_;
   if (total_count == 0)
@@ -332,25 +333,20 @@ void TitanRMSAnalyzer::gather_trace_coordinates(const Multi_MOL &mol1,
     }
   };
 
-  const std::size_t worker_count = effective_worker_count(num_threads, total_count);
+  const std::size_t worker_count =
+      effective_worker_count(executor.capacity(), total_count);
   if (worker_count <= 1) {
     gather_range(0, total_count);
     return;
   }
 
-  const std::size_t chunk = (total_count + worker_count - 1) / worker_count;
-  std::vector<std::jthread> workers;
-  workers.reserve(worker_count);
-  for (std::size_t t = 0; t < worker_count; ++t) {
-    const std::size_t begin = t * chunk;
-    const std::size_t end = std::min(begin + chunk, total_count);
-    if (begin >= end)
-      break;
-    workers.emplace_back([&, begin, end]() { gather_range(begin, end); });
-  }
+  executor.parallel_for(total_count, worker_count, 1,
+                        [&](std::size_t, std::size_t begin, std::size_t end) {
+                          gather_range(begin, end);
+                        });
 }
 
-void TitanRMSAnalyzer::update_welford(std::size_t num_threads) {
+void TitanRMSAnalyzer::update_welford(TitanExecutor &executor) {
   const std::size_t total_count = total_trace_count_;
   if (total_count == 0 || current_traj_frames_ == 0)
     return;
@@ -379,33 +375,28 @@ void TitanRMSAnalyzer::update_welford(std::size_t num_threads) {
     }
   };
 
-  const std::size_t worker_count = effective_worker_count(num_threads, total_count);
+  const std::size_t worker_count =
+      effective_worker_count(executor.capacity(), total_count);
   if (worker_count <= 1) {
     update_range(0, total_count);
     return;
   }
 
-  const std::size_t chunk = (total_count + worker_count - 1) / worker_count;
-  std::vector<std::jthread> workers;
-  workers.reserve(worker_count);
-  for (std::size_t t = 0; t < worker_count; ++t) {
-    const std::size_t begin = t * chunk;
-    const std::size_t end = std::min(begin + chunk, total_count);
-    if (begin >= end)
-      break;
-    workers.emplace_back([&, begin, end]() { update_range(begin, end); });
-  }
+  executor.parallel_for(total_count, worker_count, 1,
+                        [&](std::size_t, std::size_t begin, std::size_t end) {
+                          update_range(begin, end);
+                        });
 }
 
 void TitanRMSAnalyzer::process_frame(const Multi_MOL &mol1, const Multi_MOL &mol2,
                                      std::size_t snap_idx,
-                                     std::size_t num_threads) {
+                                     TitanExecutor &executor) {
   if (!enabled_ || total_trace_count_ == 0)
     return;
   if (snap_idx >= mol1.m_mol.size())
     return;
 
-  gather_trace_coordinates(mol1, mol2, snap_idx, num_threads);
+  gather_trace_coordinates(mol1, mol2, snap_idx, executor);
 
   const double inv_count = 1.0 / static_cast<double>(total_trace_count_);
   const double centroid_x = sum_avx2(raw_x_.data(), total_trace_count_) * inv_count;
@@ -421,22 +412,15 @@ void TitanRMSAnalyzer::process_frame(const Multi_MOL &mol1, const Multi_MOL &mol
   };
 
   const std::size_t worker_count =
-      effective_worker_count(num_threads, total_trace_count_);
+      effective_worker_count(executor.capacity(), total_trace_count_);
   if (worker_count <= 1) {
     fill_mobile_range(0, total_trace_count_);
   } else {
-    const std::size_t chunk =
-        (total_trace_count_ + worker_count - 1) / worker_count;
-    std::vector<std::jthread> workers;
-    workers.reserve(worker_count);
-    for (std::size_t t = 0; t < worker_count; ++t) {
-      const std::size_t begin = t * chunk;
-      const std::size_t end = std::min(begin + chunk, total_trace_count_);
-      if (begin >= end)
-        break;
-      workers.emplace_back(
-          [&, begin, end]() { fill_mobile_range(begin, end); });
-    }
+    executor.parallel_for(
+        total_trace_count_, worker_count, 1,
+        [&](std::size_t, std::size_t begin, std::size_t end) {
+          fill_mobile_range(begin, end);
+        });
   }
 
   double rmsd = 0.0;
@@ -452,7 +436,7 @@ void TitanRMSAnalyzer::process_frame(const Multi_MOL &mol1, const Multi_MOL &mol
   }
 
   ++current_traj_frames_;
-  update_welford(num_threads);
+  update_welford(executor);
   rmsd_series_.push_back(rmsd);
   time_series_ps_.push_back(mol1.m_mol[snap_idx].time_of_snap);
 }

@@ -22,6 +22,7 @@
 #include "titan_llps.h"
 #include "titan_llps_cluster.h"
 #include "titan_msm.h"
+#include "titan_executor.h"
 #include "titan_ifp.h"
 #include "titan_pca.h" // Ensured inclusion as per instruction
 #include "titan_dssp.h"
@@ -325,6 +326,7 @@ int engine(arguments &Arguments) {
   double d_standard{Arguments.d_standard};
   int num_amine{};
   size_t num_threads{Arguments.nt}, tot_snap_allfiles{};
+  TitanExecutor executor(std::max<size_t>(1, num_threads));
   string name_pro{}, name_lig{};
   para parameter;
 
@@ -385,14 +387,7 @@ int engine(arguments &Arguments) {
   }
 
   if (Arguments.flag_h_bond == 1) {
-    fstream out_h_bonds("out_hydrogen_bonds.dat", ios::out);
-    out_h_bonds.close();
-    fstream out_h_bonds_rec("out_hydrogen_bonds_receptor.dat", ios::out);
-    out_h_bonds_rec << "# atom of receptor | atom of ligand\n";
-    out_h_bonds_rec.close();
-    fstream out_h_bonds_lig("out_hydrogen_bonds_ligand.dat", ios::out);
-    out_h_bonds_lig << "# atom of ligand | atom of receptor\n";
-    out_h_bonds_lig.close();
+    init_hbond_output_files(Arguments);
   }
 
   TitanUI::log_section(log, "TITAN ENGINE INITIALIZATION");
@@ -475,8 +470,10 @@ int engine(arguments &Arguments) {
     append_module_label(active_modules, "LJ");
   if (Arguments.rms.flag_rms)
     append_module_label(active_modules, "RMSD/RMSF");
-  if (Arguments.flag_network_explicit)
+  if (Arguments.flag_network || Arguments.community.flag_community)
     append_module_label(active_modules, "DCCM/Network");
+  if (Arguments.community.flag_community)
+    append_module_label(active_modules, "Community");
   if (Arguments.flag_pca)
     append_module_label(active_modules, "PCA_FEL");
   if (Arguments.flag_tda)
@@ -625,9 +622,6 @@ int engine(arguments &Arguments) {
       time_new_emap_other{}, time_avg_emap{}, time_contact{},
       time_input_init{}, time_input_stream{},
       time_cscd{0}, time_water{0}, time_na{0};
-  vector<thread> threads(num_threads);
-  std::vector<std::thread> threads_maxF(Arguments.nt);
-
   Multi_MOL pro_in(force_f), lig(force_f), water_traj(force_f);
   bool topo_initialized = false;
   bool charge_initialized = false;
@@ -1203,7 +1197,7 @@ int engine(arguments &Arguments) {
 
     // --- STREAMING ARCHITECTURE INITIALIZATION ---
     ChunkStreamer streamer(Arguments, info_output, Groups_from_index_file,
-                           force_f, num_threads);
+                           force_f, executor, num_threads);
     // Save file positions after Frame 0 was consumed by init
     std::streampos pos_pro = -1, pos_lig = -1;
     {
@@ -1599,20 +1593,22 @@ int engine(arguments &Arguments) {
       append_module_label(resolved_modules, "CAS");
     const bool dssp_runtime_enabled =
         dssp_mol1_analyzer.enabled() || dssp_mol2_analyzer.enabled();
-    if (dssp_runtime_enabled) {
-      append_module_label(resolved_modules, "DSSP");
-    } else if (dssp_mol1_requested || dssp_mol2_requested) {
-      append_module_label(skipped_modules,
-                          "DSSP(auto-skipped: no compatible protein backbone)");
-    }
-    if (lj_analyzer.enabled())
-      append_module_label(resolved_modules, "LJ");
-    if (rms_analyzer.enabled())
-      append_module_label(resolved_modules, "RMSD/RMSF");
-    if (Arguments.flag_network_explicit)
-      append_module_label(resolved_modules, "DCCM/Network");
-    if (Arguments.flag_pca)
-      append_module_label(resolved_modules, "PCA_FEL");
+  if (dssp_runtime_enabled) {
+    append_module_label(resolved_modules, "DSSP");
+  } else if (dssp_mol1_requested || dssp_mol2_requested) {
+    append_module_label(skipped_modules,
+                        "DSSP(auto-skipped: no compatible protein backbone)");
+  }
+  if (lj_analyzer.enabled())
+    append_module_label(resolved_modules, "LJ");
+  if (rms_analyzer.enabled())
+    append_module_label(resolved_modules, "RMSD/RMSF");
+  if (Arguments.flag_network || Arguments.community.flag_community)
+    append_module_label(resolved_modules, "DCCM/Network");
+  if (Arguments.community.flag_community)
+    append_module_label(resolved_modules, "Community");
+  if (Arguments.flag_pca)
+    append_module_label(resolved_modules, "PCA_FEL");
     if (Arguments.flag_tda)
       append_module_label(resolved_modules, "TDA");
     if (Arguments.msm.flag_tica && tica_analyzer)
@@ -1657,8 +1653,8 @@ int engine(arguments &Arguments) {
       append_module_label(streaming_modules, "LJ");
     if (rms_analyzer.enabled())
       append_module_label(streaming_modules, "RMSD/RMSF");
-    if (Arguments.flag_network || Arguments.flag_pca ||
-        Arguments.lspmd.flag_lspmd) {
+    if (Arguments.flag_network || Arguments.community.flag_community ||
+        Arguments.flag_pca || Arguments.lspmd.flag_lspmd) {
       append_module_label(streaming_modules, "DCCM/PCA");
     }
     if (Arguments.msm.flag_tica && tica_analyzer)
@@ -1763,12 +1759,9 @@ int engine(arguments &Arguments) {
         align_complex(pro_in, lig, 0, 0);
       } else if (Arguments.pbc.solv_pbc_int == 1) {
         if (Arguments.pbc.chain_ref == -2) {
-          for (size_t i{}; i < num_threads; ++i)
-            threads[i] =
-                thread(&Multi_MOL::solve_pbc_int, &pro_in, i, num_threads);
-          for (auto &t : threads)
-            if (t.joinable())
-              t.join();
+          executor.parallel_do(num_threads, [&](size_t worker_id) {
+            pro_in.solve_pbc_int(worker_id, num_threads);
+          });
         }
         if (Arguments.pbc.chain_ref > -2) {
           pro_in.solve_pbc_new(lig, Arguments, amine);
@@ -1776,12 +1769,9 @@ int engine(arguments &Arguments) {
         }
       }
       if (Arguments.pbc.solv_pbc == 1) {
-        for (size_t i{}; i < num_threads; ++i)
-          threads[i] =
-              thread(&Multi_MOL::pbc_prob, &pro_in, ref(lig), i, num_threads);
-        for (auto &t : threads)
-          if (t.joinable())
-            t.join();
+        executor.parallel_do(num_threads, [&](size_t worker_id) {
+          pro_in.pbc_prob(lig, worker_id, num_threads);
+        });
         align_complex(pro_in, lig, 0, 0);
       }
       time_solve_pbc += std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1839,17 +1829,16 @@ int engine(arguments &Arguments) {
               (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled())) {
             auto start_dssp = std::chrono::steady_clock::now();
             if (dssp_mol1_analyzer.enabled())
-              dssp_mol1_analyzer.process_frame(pro_in, chunk_snap_idx,
-                                              num_threads);
+              dssp_mol1_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
             if (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled())
-              dssp_mol2_analyzer.process_frame(lig, chunk_snap_idx, num_threads);
+              dssp_mol2_analyzer.process_frame(lig, chunk_snap_idx, executor);
             time_dssp += std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start_dssp);
           }
 
           if (lj_analyzer.enabled()) {
             auto start_lj = std::chrono::steady_clock::now();
-            lj_analyzer.process_frame(pro_in, chunk_snap_idx, num_threads);
+            lj_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
             time_lj += std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start_lj);
           }
@@ -1890,7 +1879,7 @@ int engine(arguments &Arguments) {
 
           if (rms_analyzer.enabled()) {
             auto start_rms = std::chrono::steady_clock::now();
-            rms_analyzer.process_frame(pro_in, lig, chunk_snap_idx, num_threads);
+            rms_analyzer.process_frame(pro_in, lig, chunk_snap_idx, executor);
             time_rms += std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start_rms);
           }
@@ -1990,10 +1979,11 @@ int engine(arguments &Arguments) {
           if (Arguments.flag_h_bond == 1) {
             h_groups groups_1_nc, groups_2_nc;
             MOL temp_mol(pro_in.m_mol[chunk_snap_idx]);
+            const size_t hbond_snap_idx = global_frame_counter + chunk_snap_idx;
             find_h_bonds(pro_in.m_mol[chunk_snap_idx], pro_in.m_mol[0],
                          temp_mol, temp_mol, groups_1_nc, groups_2_nc,
-                         Arguments, chunk_snap_idx, pro_in.info, pro_in.info,
-                         Hbonds_vector);
+                         Arguments, hbond_snap_idx, pro_in.info,
+                         pro_in.info, Hbonds_vector);
           }
 
           // PQR output
@@ -2166,6 +2156,7 @@ int engine(arguments &Arguments) {
         size_t lg_snap = (lig.m_mol.size() > 1) ? chunk_snap_idx : 0;
         const MOL &active_lg_mol = lig.m_mol[lg_snap];
         const vector<mol_info> &active_lg_info = lig.info;
+        const size_t ligand_atom_count = lig.m_mol[0].size();
 
         auto start_energy_eval = std::chrono::steady_clock::now();
         GBSA_energy_snap frame_gbsa_total;
@@ -2177,38 +2168,35 @@ int engine(arguments &Arguments) {
           rec_complex_radii.resize(pro_in.m_mol[chunk_snap_idx].size());
           lg_complex_radii.resize(active_lg_mol.size());
 
-          std::vector<std::jthread> born_workers;
-          born_workers.reserve(4);
-          born_workers.emplace_back(
-              cal_effective_born_radii_avx2,
-              std::cref(pro_in.m_mol[chunk_snap_idx]), std::cref(rec_vdw_radii),
-              std::ref(rec_free_radii), Arguments.igb, 0,
-              pro_in.m_mol[chunk_snap_idx].size(), nullptr, nullptr);
-
-          if (active_lg_mol.size() > 0) {
-            born_workers.emplace_back(cal_effective_born_radii_avx2,
-                                      std::cref(active_lg_mol),
-                                      std::cref(lg_vdw_radii),
-                                      std::ref(lg_free_radii), Arguments.igb,
-                                      0, active_lg_mol.size(), nullptr,
-                                      nullptr);
-            born_workers.emplace_back(
-                cal_effective_born_radii_avx2,
-                std::cref(pro_in.m_mol[chunk_snap_idx]),
-                std::cref(rec_vdw_radii), std::ref(rec_complex_radii),
-                Arguments.igb, 0, pro_in.m_mol[chunk_snap_idx].size(),
-                &active_lg_mol, &lg_vdw_radii);
-            born_workers.emplace_back(
-                cal_effective_born_radii_avx2, std::cref(active_lg_mol),
-                std::cref(lg_vdw_radii), std::ref(lg_complex_radii),
-                Arguments.igb, 0, active_lg_mol.size(),
-                &pro_in.m_mol[chunk_snap_idx], &rec_vdw_radii);
-          }
-
-          for (auto &worker : born_workers) {
-            if (worker.joinable())
-              worker.join();
-          }
+          const size_t born_task_count = active_lg_mol.size() > 0 ? 4ull : 1ull;
+          executor.parallel_for(
+              born_task_count, born_task_count, 1,
+              [&](size_t /*worker_id*/, size_t begin, size_t end) {
+                for (size_t task_id = begin; task_id < end; ++task_id) {
+                  if (task_id == 0) {
+                    cal_effective_born_radii_avx2(
+                        pro_in.m_mol[chunk_snap_idx], rec_vdw_radii,
+                        rec_free_radii, Arguments.igb, 0,
+                        pro_in.m_mol[chunk_snap_idx].size(), nullptr, nullptr);
+                  } else if (task_id == 1) {
+                    cal_effective_born_radii_avx2(
+                        active_lg_mol, lg_vdw_radii, lg_free_radii,
+                        Arguments.igb, 0, active_lg_mol.size(), nullptr,
+                        nullptr);
+                  } else if (task_id == 2) {
+                    cal_effective_born_radii_avx2(
+                        pro_in.m_mol[chunk_snap_idx], rec_vdw_radii,
+                        rec_complex_radii, Arguments.igb, 0,
+                        pro_in.m_mol[chunk_snap_idx].size(), &active_lg_mol,
+                        &lg_vdw_radii);
+                  } else {
+                    cal_effective_born_radii_avx2(
+                        active_lg_mol, lg_vdw_radii, lg_complex_radii,
+                        Arguments.igb, 0, active_lg_mol.size(),
+                        &pro_in.m_mol[chunk_snap_idx], &rec_vdw_radii);
+                  }
+                }
+              });
 
           build_gbsa_sasa_cache(pro_in.m_mol[chunk_snap_idx], active_lg_mol,
                                 pro_in.parameters, lig.parameters,
@@ -2222,33 +2210,25 @@ int engine(arguments &Arguments) {
               num_threads, GBSA_Aggregator(Arguments, info_output));
           std::vector<GBSA_energy_snap> gbsa_energies(num_threads);
           std::vector<info_ener_res> infoener_res_v(num_threads);
-          std::vector<std::jthread> gbsa_workers;
-          gbsa_workers.reserve(num_threads);
 
           size_t active_lg_size = active_lg_mol.size();
           size_t rec_size = pro_in.m_mol[chunk_snap_idx].size();
-          for (size_t i{}; i < num_threads; ++i) {
+          executor.parallel_do(num_threads, [&](size_t i) {
 #ifdef __AVX__
-            gbsa_workers.emplace_back(
-                cal_energy_gbsa_avx2, std::ref(pro_in.m_mol[chunk_snap_idx]),
-                std::ref(active_lg_mol), std::ref(pro_in.info),
-                std::ref(active_lg_info), std::ref(CachedData),
+            cal_energy_gbsa_avx2(
+                pro_in.m_mol[chunk_snap_idx], active_lg_mol, pro_in.info,
+                active_lg_info, CachedData,
                 rec_size * i / num_threads, rec_size * (i + 1) / num_threads,
                 active_lg_size * i / num_threads,
                 active_lg_size * (i + 1) / num_threads,
-                std::ref(gbsa_energies[i]), chunk_snap_idx, std::ref(Arguments),
-                std::ref(pro_in.parameters), std::ref(lig.parameters),
-                std::ref(pro_in.lcpo_p1), std::ref(pro_in.lcpo_p2),
-                std::ref(lig.lcpo_p1), std::ref(lig.lcpo_p2),
-                std::ref(rec_free_radii), std::ref(lg_free_radii),
-                std::ref(rec_complex_radii), std::ref(lg_complex_radii),
+                gbsa_energies[i], chunk_snap_idx, Arguments,
+                pro_in.parameters, lig.parameters, pro_in.lcpo_p1,
+                pro_in.lcpo_p2, lig.lcpo_p1, lig.lcpo_p2, rec_free_radii,
+                lg_free_radii, rec_complex_radii, lg_complex_radii,
                 &local_aggs[i], &infoener_res_v[i], &frame_sasa_cache,
                 true);
 #endif
-          }
-          for (auto &worker : gbsa_workers)
-            if (worker.joinable())
-              worker.join();
+          });
 
           for (auto &ii : infoener_res_v) {
             for (auto &ele : ii.position_map) {
@@ -2302,241 +2282,200 @@ int engine(arguments &Arguments) {
           time_gbsa += std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - start_energy_eval);
         } else {
+          auto dispatch_energy_workers = [&](auto &&worker_fn) {
+            executor.parallel_do(num_threads, [&](size_t worker_id) {
+              worker_fn(worker_id);
+            });
+          };
 
           if (Arguments.force_f.find("CHARMM") != string::npos) {
-            for (size_t i{}; i < num_threads; ++i) {
+            dispatch_energy_workers([&](size_t i) {
               if (Arguments.flag_elec_screening == false) {
                 if (Arguments.flag_cal_force == false) {
-                  threads[i] = thread(
-                      cal_energy_amber, ref(pro_in.m_mol[chunk_snap_idx]),
-                      ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                      ref(lig.info), ref(CachedData),
-                      lig.m_mol[0].size() * i / num_threads,
-                      lig.m_mol[0].size() * (i + 1) / num_threads,
-                      ref(Energy[i]), chunk_snap_idx, ref(Arguments),
-                      ref(pro_in.parameters), ref(lig.parameters));
+                  cal_energy_amber(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
                 } else {
-                  threads[i] = thread(
-                      cal_energy_force_amber, ref(pro_in.m_mol[chunk_snap_idx]),
-                      ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                      ref(lig.info), ref(CachedData),
-                      lig.m_mol[0].size() * i / num_threads,
-                      lig.m_mol[0].size() * (i + 1) / num_threads,
-                      ref(Energy[i]), ref(Force[i]), chunk_snap_idx,
-                      ref(Arguments), ref(pro_in.parameters),
-                      ref(lig.parameters));
+                  cal_energy_force_amber(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      Force[i], chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
                 }
               } else {
                 if (Arguments.flag_cal_force == false) {
-                  threads[i] = thread(
-                      cal_energy_amber_screening,
-                      ref(pro_in.m_mol[chunk_snap_idx]),
-                      ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                      ref(lig.info), ref(CachedData),
-                      lig.m_mol[0].size() * i / num_threads,
-                      lig.m_mol[0].size() * (i + 1) / num_threads,
-                      ref(Energy[i]), chunk_snap_idx, ref(Arguments),
-                      ref(pro_in.parameters), ref(lig.parameters));
+                  cal_energy_amber_screening(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
                 } else {
-                  threads[i] = thread(
-                      cal_energy_force_amber, ref(pro_in.m_mol[chunk_snap_idx]),
-                      ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                      ref(lig.info), ref(CachedData),
-                      lig.m_mol[0].size() * i / num_threads,
-                      lig.m_mol[0].size() * (i + 1) / num_threads,
-                      ref(Energy[i]), ref(Force[i]), chunk_snap_idx,
-                      ref(Arguments), ref(pro_in.parameters),
-                      ref(lig.parameters));
+                  cal_energy_force_amber(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      Force[i], chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
                 }
               }
-            }
-            for (auto &t : threads)
-              if (t.joinable())
-                t.join();
+            });
 
           } else if (Arguments.force_f.find("AMBER") != string::npos) {
-            for (size_t i{}; i < num_threads; ++i) {
+            dispatch_energy_workers([&](size_t i) {
               if (Arguments.flag_elec_screening == false) {
                 if (Arguments.flag_cal_force == false) {
 #ifdef __AVX__
-                  threads[i] =
-                      thread(cal_energy_amber_intrin,
-                             ref(pro_in.m_mol[chunk_snap_idx]),
-                             ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                             ref(lig.info), ref(CachedData),
-                             lig.m_mol[0].size() * i / num_threads,
-                             lig.m_mol[0].size() * (i + 1) / num_threads,
-                             ref(Energy[i]), chunk_snap_idx, ref(Arguments),
-                             ref(pro_in.parameters), ref(lig.parameters));
+                  cal_energy_amber_intrin(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
 #else
-                  threads[i] = thread(
-                      cal_energy_amber, ref(pro_in.m_mol[chunk_snap_idx]),
-                      ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                      ref(lig.info), ref(CachedData),
-                      lig.m_mol[0].size() * i / num_threads,
-                      lig.m_mol[0].size() * (i + 1) / num_threads,
-                      ref(Energy[i]), chunk_snap_idx, ref(Arguments),
-                      ref(pro_in.parameters), ref(lig.parameters));
+                  cal_energy_amber(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
 #endif
                 } else
-                  threads[i] = thread(
-                      cal_energy_force_amber, ref(pro_in.m_mol[chunk_snap_idx]),
-                      ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                      ref(lig.info), ref(CachedData),
-                      lig.m_mol[0].size() * i / num_threads,
-                      lig.m_mol[0].size() * (i + 1) / num_threads,
-                      ref(Energy[i]), ref(Force[i]), chunk_snap_idx,
-                      ref(Arguments), ref(pro_in.parameters),
-                      ref(lig.parameters));
+                  cal_energy_force_amber(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      Force[i], chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
               } else {
                 if (Arguments.flag_cal_force == false)
 
 #ifdef __AVX__
-                  threads[i] =
-                      thread(cal_energy_amber_screening_intrin,
-                             ref(pro_in.m_mol[chunk_snap_idx]),
-                             ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                             ref(lig.info), ref(CachedData),
-                             lig.m_mol[0].size() * i / num_threads,
-                             lig.m_mol[0].size() * (i + 1) / num_threads,
-                             ref(Energy[i]), chunk_snap_idx, ref(Arguments),
-                             ref(pro_in.parameters), ref(lig.parameters));
+                  cal_energy_amber_screening_intrin(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
 #else
-                  threads[i] =
-                      thread(cal_energy_amber_screening,
-                             ref(pro_in.m_mol[chunk_snap_idx]),
-                             ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                             ref(lig.info), ref(CachedData),
-                             lig.m_mol[0].size() * i / num_threads,
-                             lig.m_mol[0].size() * (i + 1) / num_threads,
-                             ref(Energy[i]), chunk_snap_idx, ref(Arguments),
-                             ref(pro_in.parameters), ref(lig.parameters));
+                  cal_energy_amber_screening(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
 #endif
                 else
-                  threads[i] = thread(
-                      cal_energy_force_amber, ref(pro_in.m_mol[chunk_snap_idx]),
-                      ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                      ref(lig.info), ref(CachedData),
-                      lig.m_mol[0].size() * i / num_threads,
-                      lig.m_mol[0].size() * (i + 1) / num_threads,
-                      ref(Energy[i]), ref(Force[i]), chunk_snap_idx,
-                      ref(Arguments), ref(pro_in.parameters),
-                      ref(lig.parameters));
+                  cal_energy_force_amber(
+                      pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                      pro_in.info, lig.info, CachedData,
+                      ligand_atom_count * i / num_threads,
+                      ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                      Force[i], chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters);
               }
-            }
-            for (auto &t : threads)
-              if (t.joinable())
-                t.join();
+            });
 
           } else if (Arguments.force_f.find("OPLSAA") != string::npos) {
-            for (size_t i{}; i < num_threads; ++i) {
+            dispatch_energy_workers([&](size_t i) {
               if (Arguments.flag_cal_force == false)
 #ifdef __AVX__
-                threads[i] = thread(
-                    cal_energy_opls_intrin, ref(pro_in.m_mol[chunk_snap_idx]),
-                    ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                    ref(lig.info), ref(CachedData),
-                    lig.m_mol[0].size() * i / num_threads,
-                    lig.m_mol[0].size() * (i + 1) / num_threads, ref(Energy[i]),
-                    chunk_snap_idx, ref(Arguments), ref(pro_in.parameters),
-                    ref(lig.parameters));
+                cal_energy_opls_intrin(
+                    pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                    pro_in.info, lig.info, CachedData,
+                    ligand_atom_count * i / num_threads,
+                    ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                    chunk_snap_idx, Arguments, pro_in.parameters,
+                    lig.parameters);
 #else
-                threads[i] =
-                    thread(cal_energy_opls, ref(pro_in.m_mol[chunk_snap_idx]),
-                           ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                           ref(lig.info), ref(CachedData),
-                           lig.m_mol[0].size() * i / num_threads,
-                           lig.m_mol[0].size() * (i + 1) / num_threads,
-                           ref(Energy[i]), chunk_snap_idx, ref(Arguments),
-                           ref(pro_in.parameters), ref(lig.parameters));
+                cal_energy_opls(
+                    pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                    pro_in.info, lig.info, CachedData,
+                    ligand_atom_count * i / num_threads,
+                    ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                    chunk_snap_idx, Arguments, pro_in.parameters,
+                    lig.parameters);
 #endif
               else
-                threads[i] = thread(
-                    cal_energy_force_opls, ref(pro_in.m_mol[chunk_snap_idx]),
-                    ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                    ref(lig.info), ref(CachedData),
-                    lig.m_mol[0].size() * i / num_threads,
-                    lig.m_mol[0].size() * (i + 1) / num_threads, ref(Energy[i]),
-                    ref(Force[i]), chunk_snap_idx, ref(Arguments),
-                    ref(pro_in.parameters), ref(lig.parameters));
-            }
-            for (auto &t : threads)
-              if (t.joinable())
-                if (t.joinable())
-                  t.join();
+                cal_energy_force_opls(
+                    pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                    pro_in.info, lig.info, CachedData,
+                    ligand_atom_count * i / num_threads,
+                    ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                    Force[i], chunk_snap_idx, Arguments, pro_in.parameters,
+                    lig.parameters);
+            });
           } else if (Arguments.force_f.find("MARTINI") != string::npos) {
-            for (size_t i{}; i < num_threads; ++i) {
+            dispatch_energy_workers([&](size_t i) {
               if (Arguments.flag_cal_force == false)
 #ifdef __AVX__
-                threads[i] =
-                    thread(cal_energy_martini_intrin,
-                           ref(pro_in.m_mol[chunk_snap_idx]),
-                           ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                           ref(lig.info), ref(CachedData),
-                           lig.m_mol[0].size() * i / num_threads,
-                           lig.m_mol[0].size() * (i + 1) / num_threads,
-                           ref(Energy[i]), chunk_snap_idx, ref(Arguments),
-                           ref(pro_in.parameters), ref(lig.parameters));
+                cal_energy_martini_intrin(
+                    pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                    pro_in.info, lig.info, CachedData,
+                    ligand_atom_count * i / num_threads,
+                    ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                    chunk_snap_idx, Arguments, pro_in.parameters,
+                    lig.parameters);
 #else
-                threads[i] = thread(
-                    cal_energy_martini, ref(pro_in.m_mol[chunk_snap_idx]),
-                    ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                    ref(lig.info), ref(CachedData),
-                    lig.m_mol[0].size() * i / num_threads,
-                    lig.m_mol[0].size() * (i + 1) / num_threads, ref(Energy[i]),
-                    chunk_snap_idx, ref(Arguments), ref(pro_in.parameters),
-                    ref(lig.parameters));
+                cal_energy_martini(
+                    pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                    pro_in.info, lig.info, CachedData,
+                    ligand_atom_count * i / num_threads,
+                    ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                    chunk_snap_idx, Arguments, pro_in.parameters,
+                    lig.parameters);
 #endif
               else
-                threads[i] = thread(
-                    cal_energy_force_martini,
-                    ref(pro_in.m_mol[chunk_snap_idx]),
-                    ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                    ref(lig.info), ref(CachedData),
-                    lig.m_mol[0].size() * i / num_threads,
-                    lig.m_mol[0].size() * (i + 1) / num_threads, ref(Energy[i]),
-                    ref(Force[i]), chunk_snap_idx, ref(Arguments),
-                    ref(pro_in.parameters), ref(lig.parameters));
-            }
-            for (auto &t : threads)
-              if (t.joinable())
-                t.join();
+                cal_energy_force_martini(
+                    pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                    pro_in.info, lig.info, CachedData,
+                    ligand_atom_count * i / num_threads,
+                    ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                    Force[i], chunk_snap_idx, Arguments, pro_in.parameters,
+                    lig.parameters);
+            });
           } else {
-            for (size_t i{}; i < num_threads; ++i) {
+            dispatch_energy_workers([&](size_t i) {
               if (Arguments.flag_cal_force == false)
 #ifdef __AVX__
-                threads[i] = thread(
-                    cal_energy_gromos_intrin, ref(pro_in.m_mol[chunk_snap_idx]),
-                    ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                    ref(lig.info), ref(CachedData),
-                    lig.m_mol[0].size() * i / num_threads,
-                    lig.m_mol[0].size() * (i + 1) / num_threads, ref(Energy[i]),
-                    chunk_snap_idx, ref(Arguments), ref(pro_in.parameters),
-                    ref(lig.parameters));
+                cal_energy_gromos_intrin(
+                    pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                    pro_in.info, lig.info, CachedData,
+                    ligand_atom_count * i / num_threads,
+                    ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                    chunk_snap_idx, Arguments, pro_in.parameters,
+                    lig.parameters);
 #else
-                threads[i] =
-                    thread(cal_energy_gromos, ref(pro_in.m_mol[chunk_snap_idx]),
-                           ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                           ref(lig.info), ref(CachedData),
-                           lig.m_mol[0].size() * i / num_threads,
-                           lig.m_mol[0].size() * (i + 1) / num_threads,
-                           ref(Energy[i]), chunk_snap_idx, ref(Arguments),
-                           ref(pro_in.parameters), ref(lig.parameters));
+                cal_energy_gromos(
+                    pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                    pro_in.info, lig.info, CachedData,
+                    ligand_atom_count * i / num_threads,
+                    ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                    chunk_snap_idx, Arguments, pro_in.parameters,
+                    lig.parameters);
 #endif
               else
-                threads[i] = thread(
-                    cal_energy_force_gromos, ref(pro_in.m_mol[chunk_snap_idx]),
-                    ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                    ref(lig.info), ref(CachedData),
-                    lig.m_mol[0].size() * i / num_threads,
-                    lig.m_mol[0].size() * (i + 1) / num_threads, ref(Energy[i]),
-                    ref(Force[i]), chunk_snap_idx, ref(Arguments),
-                    ref(pro_in.parameters), ref(lig.parameters));
-            }
-            for (auto &t : threads)
-              if (t.joinable())
-                if (t.joinable())
-                  t.join();
+                cal_energy_force_gromos(
+                    pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
+                    pro_in.info, lig.info, CachedData,
+                    ligand_atom_count * i / num_threads,
+                    ligand_atom_count * (i + 1) / num_threads, Energy[i],
+                    Force[i], chunk_snap_idx, Arguments, pro_in.parameters,
+                    lig.parameters);
+            });
           }
           time_cal += std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - start_energy_eval);
@@ -2572,86 +2511,46 @@ int engine(arguments &Arguments) {
         if (need_distance_scan) {
           auto start_sc{chrono::steady_clock::now()};
 
-          size_t num_threads_rest(
-              pro_in.Index.size() - 1 > 0 ? pro_in.Index.size() - 1 : 1);
-          size_t ite_thread{};
-          while (num_threads_rest > 0) {
-            if (num_threads_rest <= num_threads) {
-              for (size_t i{}; i < num_threads_rest; ++i) {
-                threads[i] =
-                    thread(&MOL::take_com, &pro_in.m_mol[chunk_snap_idx],
-                           ref(pro_in.parameters), i + ite_thread,
-                           pro_in.Index[i + ite_thread + 1].get_res_pos_e(0),
-                           ref(pro_in.Index), ref(pro_in.info));
-              }
-              for_each(threads.begin(), threads.begin() + num_threads_rest,
-                       mem_fn(&thread::join));
-              num_threads_rest = 0ull;
-            } else {
-              for (size_t i{}; i < num_threads; ++i) {
-                threads[i] =
-                    thread(&MOL::take_com, &pro_in.m_mol[chunk_snap_idx],
-                           ref(pro_in.parameters), i + ite_thread,
-                           pro_in.Index[i + ite_thread + 1].get_res_pos_e(0),
-                           ref(pro_in.Index), ref(pro_in.info));
-              }
-              for (auto &t : threads)
-                if (t.joinable())
-                  if (t.joinable())
-                    t.join();
-              num_threads_rest -= num_threads;
-              ite_thread += num_threads;
-            }
+          if (pro_in.Index.size() > 1) {
+            executor.parallel_for(
+                pro_in.Index.size() - 1, num_threads, 1,
+                [&](size_t /*worker_id*/, size_t begin, size_t end) {
+                  for (size_t residue_idx = begin; residue_idx < end;
+                       ++residue_idx) {
+                    pro_in.m_mol[chunk_snap_idx].take_com(
+                        pro_in.parameters, residue_idx,
+                        pro_in.Index[residue_idx + 1].get_res_pos_e(0),
+                        pro_in.Index, pro_in.info);
+                  }
+                });
           }
 
-          num_threads_rest =
-              lig.Index.size() - 1 > 0 ? lig.Index.size() - 1 : 1;
-          ite_thread = 0;
-          while (num_threads_rest > 0) {
-            if (num_threads_rest <= num_threads) {
-              for (size_t i{}; i < num_threads_rest; ++i) {
-                threads[i] =
-                    thread(&MOL::take_com, &lig.m_mol[chunk_snap_idx],
-                           ref(lig.parameters), i + ite_thread,
-                           lig.Index[i + ite_thread + 1].get_res_pos_e(0),
-                           ref(lig.Index), ref(lig.info));
-              }
-              for_each(threads.begin(), threads.begin() + num_threads_rest,
-                       mem_fn(&thread::join));
-              num_threads_rest = 0ull;
-            } else {
-              for (size_t i{}; i < num_threads; ++i) {
-                threads[i] =
-                    thread(&MOL::take_com, &lig.m_mol[chunk_snap_idx],
-                           ref(lig.parameters), i + ite_thread,
-                           lig.Index[i + ite_thread + 1].get_res_pos_e(0),
-                           ref(lig.Index), ref(lig.info));
-              }
-              for (auto &t : threads)
-                if (t.joinable())
-                  if (t.joinable())
-                    t.join();
-              num_threads_rest -= num_threads;
-              ite_thread += num_threads;
-            }
+          if (lig.Index.size() > 1) {
+            executor.parallel_for(
+                lig.Index.size() - 1, num_threads, 1,
+                [&](size_t /*worker_id*/, size_t begin, size_t end) {
+                  for (size_t residue_idx = begin; residue_idx < end;
+                       ++residue_idx) {
+                    lig.m_mol[chunk_snap_idx].take_com(
+                        lig.parameters, residue_idx,
+                        lig.Index[residue_idx + 1].get_res_pos_e(0), lig.Index,
+                        lig.info);
+                  }
+                });
           }
 
           impl_add_coms_2_mols(lig, pro_in, Arguments, chunk_snap_idx);
           /***************************************************************************************************************/
 
-          for (size_t i{}; i < num_threads; ++i) {
-            threads[i] = thread(
-                take_min, ref(pro_in.m_mol[chunk_snap_idx].Com),
-                ref(lig.m_mol[chunk_snap_idx].Com), ref(dis_min[i]),
-                i * pro_in.m_mol[chunk_snap_idx].Com.size() / num_threads,
-                (i + 1) * pro_in.m_mol[chunk_snap_idx].Com.size() / num_threads,
-                0, lig.m_mol[chunk_snap_idx].Com.size(), ref(Arguments), 0,
-                d_standard);
-          }
-          for (auto &t : threads)
-            if (t.joinable())
-              if (t.joinable())
-                t.join();
+          executor.parallel_do(num_threads, [&](size_t i) {
+            take_min(pro_in.m_mol[chunk_snap_idx].Com,
+                     lig.m_mol[chunk_snap_idx].Com, dis_min[i],
+                     i * pro_in.m_mol[chunk_snap_idx].Com.size() / num_threads,
+                     (i + 1) * pro_in.m_mol[chunk_snap_idx].Com.size() /
+                         num_threads,
+                     0, lig.m_mol[chunk_snap_idx].Com.size(), Arguments, 0,
+                     d_standard);
+          });
 
           time_sc += chrono::duration_cast<chrono::milliseconds>(
               chrono::steady_clock::now() - start_sc);
@@ -2691,7 +2590,7 @@ int engine(arguments &Arguments) {
 
         if (Arguments.cal_dis_sc_contact == true) {
           auto start_cscd = std::chrono::steady_clock::now();
-          impl_cscd(pro_in, lig, Arguments, log, threads, chunk_snap_idx,
+          impl_cscd(pro_in, lig, Arguments, log, executor, chunk_snap_idx,
                     sc_flag, input_name, cscd_out_name, cscd_out_dis, paths,
                     out_cal_dis_files);
           time_cscd += std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2711,25 +2610,24 @@ int engine(arguments &Arguments) {
         if (dssp_mol1_analyzer.enabled() ||
             (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled())) {
           auto start_dssp = std::chrono::steady_clock::now();
-          if (dssp_mol1_analyzer.enabled())
-            dssp_mol1_analyzer.process_frame(pro_in, chunk_snap_idx,
-                                            num_threads);
-          if (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled())
-            dssp_mol2_analyzer.process_frame(lig, chunk_snap_idx, num_threads);
+            if (dssp_mol1_analyzer.enabled())
+              dssp_mol1_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
+            if (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled())
+              dssp_mol2_analyzer.process_frame(lig, chunk_snap_idx, executor);
           time_dssp += std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - start_dssp);
         }
 
         if (lj_analyzer.enabled()) {
           auto start_lj = std::chrono::steady_clock::now();
-          lj_analyzer.process_frame(pro_in, chunk_snap_idx, num_threads);
+            lj_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
           time_lj += std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - start_lj);
         }
 
         if (rms_analyzer.enabled()) {
           auto start_rms = std::chrono::steady_clock::now();
-          rms_analyzer.process_frame(pro_in, lig, chunk_snap_idx, num_threads);
+            rms_analyzer.process_frame(pro_in, lig, chunk_snap_idx, executor);
           time_rms += std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - start_rms);
         }
@@ -2907,7 +2805,7 @@ int engine(arguments &Arguments) {
             (Arguments.energy_map == 1 || Arguments.energy_map == 3 ||
              Arguments.energy_map == 4) &&
             !CachedData.elec_ener.empty()) {
-          wrap_cal_energy_map(threads, pro_in, lig, Arguments, chunk_snap_idx,
+          wrap_cal_energy_map(executor, pro_in, lig, Arguments, chunk_snap_idx,
                               dis_min, CachedData, Energy_res_mol1,
                               Energy_res_mol2, info_output, infoener_res);
         }
@@ -2922,7 +2820,7 @@ int engine(arguments &Arguments) {
         if (Arguments.flag_cal_force == true &&
             (Arguments.force_map == 1 || Arguments.force_map == 3) &&
             !CachedData.elec_ener.empty()) {
-          wrap_cal_force_map(threads, pro_in, lig, Arguments, chunk_snap_idx,
+          wrap_cal_force_map(executor, pro_in, lig, Arguments, chunk_snap_idx,
                              dis_min, CachedData, Force_res_mol1,
                              Force_res_mol2, info_output);
         }
@@ -2934,22 +2832,21 @@ int engine(arguments &Arguments) {
         if (Arguments.flag_h_bond == 1) {
           find_h_bonds(pro_in.m_mol[chunk_snap_idx], pro_in.m_mol[0],
                        lig.m_mol[chunk_snap_idx], lig.m_mol[0], groups_1,
-                       groups_2, Arguments, chunk_snap_idx, pro_in.info,
+                       groups_2, Arguments, global_snap_idx, pro_in.info,
                        lig.info, Hbonds_vector);
 
           if (Arguments.nt >= 2) {
-            thread t_hb_1(add_hb_res, ref(pro_in.m_mol[chunk_snap_idx]),
-                          ref(lig.m_mol[chunk_snap_idx]), ref(pro_in.info),
-                          ref(lig.info), Arguments, ref(hb_rec_1traj));
-            thread t_hb_2(add_hb_res, ref(lig.m_mol[chunk_snap_idx]),
-                          ref(pro_in.m_mol[chunk_snap_idx]), ref(lig.info),
-                          ref(pro_in.info), Arguments, ref(hb_lg_1traj));
-            if (t_hb_1.joinable())
-              if (t_hb_1.joinable())
-                t_hb_1.join();
-            if (t_hb_2.joinable())
-              if (t_hb_2.joinable())
-                t_hb_2.join();
+            executor.parallel_do(2, [&](size_t worker_id) {
+              if (worker_id == 0) {
+                add_hb_res(pro_in.m_mol[chunk_snap_idx],
+                           lig.m_mol[chunk_snap_idx], pro_in.info, lig.info,
+                           Arguments, hb_rec_1traj);
+              } else {
+                add_hb_res(lig.m_mol[chunk_snap_idx],
+                           pro_in.m_mol[chunk_snap_idx], lig.info, pro_in.info,
+                           Arguments, hb_lg_1traj);
+              }
+            });
           } else {
             add_hb_res(pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
                        pro_in.info, lig.info, Arguments, hb_rec_1traj);
@@ -3046,10 +2943,11 @@ int engine(arguments &Arguments) {
             !CachedData.elec_ener.empty()) {
           Energy_force_subgroups(Groups_from_index_file, pro_in, lig,
                                  CachedData, EF_subgroups, Energy_groups_out,
-                                 chunk_snap_idx, NUM, Arguments, threads);
+                                 chunk_snap_idx, NUM, Arguments, executor);
           if (Arguments.flag_cal_mindis == true)
             mindis_subgroups(Groups_from_index_file, pro_in, lig,
-                             chunk_snap_idx, NUM, Arguments, threads, MIN_DIS);
+                             chunk_snap_idx, NUM, Arguments, executor,
+                             MIN_DIS);
         }
         time_subgroups_cal +=
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3556,16 +3454,13 @@ int engine(arguments &Arguments) {
 
   if (Arguments.flag_h_bond == 1) {
     if (num_threads > 1) {
-      thread s_hbres_1(stat_hb_res, ref(res_hb_rec),
-                       info_output.get_res_list_hb_rec_filename());
-      thread s_hbres_2(stat_hb_res, ref(res_hb_lg),
-                       info_output.get_res_list_hb_lg_filename());
-      if (s_hbres_1.joinable())
-        if (s_hbres_1.joinable())
-          s_hbres_1.join();
-      if (s_hbres_2.joinable())
-        if (s_hbres_2.joinable())
-          s_hbres_2.join();
+      executor.parallel_do(2, [&](size_t worker_id) {
+        if (worker_id == 0) {
+          stat_hb_res(res_hb_rec, info_output.get_res_list_hb_rec_filename());
+        } else {
+          stat_hb_res(res_hb_lg, info_output.get_res_list_hb_lg_filename());
+        }
+      });
     } else {
       try {
         stat_hb_res(res_hb_rec, info_output.get_res_list_hb_rec_filename());
@@ -3684,7 +3579,7 @@ int engine(arguments &Arguments) {
 
   auto start_pp_tica = std::chrono::steady_clock::now();
   run_tica_msm_postproc(Arguments, dccm_analyzer, tica_analyzer, msm_analyzer,
-                        num_threads, info_output, log);
+                        executor, info_output, log);
   auto time_pp_tica = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_tica);
 
@@ -3693,14 +3588,14 @@ int engine(arguments &Arguments) {
   Eigen::VectorXd dham_tpt_pi;
   bool dham_tpt_converged = false;
   auto start_pp_dham = std::chrono::steady_clock::now();
-  run_dham_postproc(Arguments, msm_analyzer, num_threads, info_output, log,
+  run_dham_postproc(Arguments, msm_analyzer, executor, info_output, log,
                     dham_frame_weights, &dham_tpt_tpm, &dham_tpt_pi,
                     &dham_tpt_converged);
   auto time_pp_dham = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_dham);
 
   auto start_pp_tpt = std::chrono::steady_clock::now();
-  run_tpt_postproc(Arguments, msm_analyzer, num_threads, info_output, log,
+  run_tpt_postproc(Arguments, msm_analyzer, executor, info_output, log,
                    lj_feature_files, &rms_analyzer, &dssp_mol1_analyzer,
                    &dham_tpt_tpm, &dham_tpt_pi,
                    dham_tpt_converged);
@@ -3708,19 +3603,19 @@ int engine(arguments &Arguments) {
       std::chrono::steady_clock::now() - start_pp_tpt);
 
   auto start_pp_tica_fes = std::chrono::steady_clock::now();
-  run_tica_fes_postproc(Arguments, msm_analyzer, info_output, log,
+  run_tica_fes_postproc(Arguments, msm_analyzer, executor, info_output, log,
                         dham_frame_weights);
   auto time_pp_tica_fes = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_tica_fes);
 
-  run_umap_postproc(Arguments, msm_analyzer, umap_analyzer, num_threads,
+  run_umap_postproc(Arguments, msm_analyzer, umap_analyzer, executor,
                     info_output, log);
 
   // Drain LLPS worker queue before finalize
   auto start_pp_llps = std::chrono::steady_clock::now();
   if (Arguments.llps.flag_llps && llps_analyzer)
     llps_analyzer->flush_async();
-  run_llps_postproc(Arguments, llps_analyzer, num_threads, info_output, log);
+  run_llps_postproc(Arguments, llps_analyzer, executor, info_output, log);
   auto time_pp_llps = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_llps);
 
@@ -3737,7 +3632,7 @@ int engine(arguments &Arguments) {
 
   auto start_pp_dccm = std::chrono::steady_clock::now();
   run_dccm_pca_postproc(Arguments, tot_snap_allfiles, dccm_analyzer,
-                        num_threads, time_network, info_output, log,
+                        executor, time_network, info_output, log,
                         dham_frame_weights, replica_traj_files);
   auto time_pp_dccm = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_dccm);
@@ -3760,7 +3655,7 @@ int engine(arguments &Arguments) {
   }
 
   auto start_pp_lspmd = std::chrono::steady_clock::now();
-  run_lspmd_postproc(Arguments, dccm_analyzer, num_threads, info_output, log);
+  run_lspmd_postproc(Arguments, dccm_analyzer, executor, info_output, log);
   auto time_pp_lspmd = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_lspmd);
 

@@ -105,15 +105,21 @@ struct res_hb {
   vector<atom_hb> atoms;
   string resname;
   string chain;
-  size_t resnum, h_bond_num, chainid;
-  res_hb() : resname{}, chain{}, resnum{}, h_bond_num{}, chainid{} {}
+  size_t resnum, h_bond_num, acceptor_hbond_num, donor_hbond_num, chainid;
+  res_hb()
+      : resname{}, chain{}, resnum{}, h_bond_num{}, acceptor_hbond_num{},
+        donor_hbond_num{}, chainid{} {}
   res_hb(string _resname, string _chain, size_t _resnum, size_t _hb_num,
+         size_t _acc_hb_num, size_t _donor_hb_num,
          size_t _chainid)
       : resname{_resname}, chain{_chain}, resnum{_resnum}, h_bond_num{_hb_num},
+        acceptor_hbond_num{_acc_hb_num}, donor_hbond_num{_donor_hb_num},
         chainid{_chainid} {}
   res_hb(string _resname, string _chain, size_t _resnum, size_t _hb_num,
-         size_t _chainid, vector<atom_hb> &_atoms)
+         size_t _acc_hb_num, size_t _donor_hb_num, size_t _chainid,
+         vector<atom_hb> &_atoms)
       : resname{_resname}, chain{_chain}, resnum{_resnum}, h_bond_num{_hb_num},
+        acceptor_hbond_num{_acc_hb_num}, donor_hbond_num{_donor_hb_num},
         chainid{_chainid} {
     atoms = _atoms;
   }
@@ -143,7 +149,8 @@ struct traj_hb {
   traj_hb() = default;
   traj_hb(string _resname, string _chain, size_t _resnum, size_t _hb_num,
           size_t _chainid) {
-    residues_hb.emplace_back(_resname, _chain, _resnum, _hb_num, _chainid);
+    residues_hb.emplace_back(_resname, _chain, _resnum, _hb_num, _hb_num, 0,
+                             _chainid);
   }
   traj_hb(const traj_hb &rhs) : snap_num{rhs.snap_num} {
     residues_hb = rhs.residues_hb;

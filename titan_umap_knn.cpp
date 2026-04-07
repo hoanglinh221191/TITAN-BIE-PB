@@ -1,4 +1,5 @@
 #include "titan_umap_knn.h"
+#include "titan_executor.h"
 
 #include <array>
 #include <algorithm>
@@ -230,7 +231,8 @@ Mode select_mode(Mode requested_mode, int n_samples, int auto_exact_threshold) {
 }
 
 InternalBuildResult build_exact_knn_graph(const MatrixRMConstRef &input,
-                                          int neighbor_count, int n_threads) {
+                                          int neighbor_count,
+                                          const BuildConfig &cfg) {
   const auto start = std::chrono::steady_clock::now();
   const int n_samples = static_cast<int>(input.rows());
   const int dim = static_cast<int>(input.cols());
@@ -240,7 +242,7 @@ InternalBuildResult build_exact_knn_graph(const MatrixRMConstRef &input,
       static_cast<size_t>(n_samples),
       std::vector<NeighborCandidate>(static_cast<size_t>(max_neighbors)));
 
-  const size_t hw_threads = static_cast<size_t>(std::max(1, n_threads));
+  const size_t hw_threads = static_cast<size_t>(std::max(1, cfg.n_threads));
   const size_t n_workers =
       std::min<size_t>(hw_threads, static_cast<size_t>(n_samples));
   const int block_size =
@@ -248,7 +250,68 @@ InternalBuildResult build_exact_knn_graph(const MatrixRMConstRef &input,
                       static_cast<int>(n_workers));
 
   std::vector<std::uint64_t> worker_counts(n_workers, 0);
-  {
+  const auto run_worker = [&](size_t worker_id) {
+    const int begin = static_cast<int>(worker_id) * block_size;
+    const int end = std::min(n_samples, begin + block_size);
+    std::vector<NeighborRow> batch_best(
+        static_cast<size_t>(kExactQueryBatch),
+        NeighborRow(static_cast<size_t>(max_neighbors)));
+    std::array<const double *, kExactQueryBatch> lhs_ptrs{};
+    std::array<int, kExactQueryBatch> row_ids{};
+    std::uint64_t local_count = 0;
+
+    for (int batch_begin = begin; batch_begin < end;
+         batch_begin += kExactQueryBatch) {
+      const int batch_size = std::min(kExactQueryBatch, end - batch_begin);
+      for (int b = 0; b < batch_size; ++b) {
+        const int row = batch_begin + b;
+        row_ids[b] = row;
+        lhs_ptrs[b] = input.data() + static_cast<ptrdiff_t>(row) * dim;
+        std::fill(batch_best[static_cast<size_t>(b)].begin(),
+                  batch_best[static_cast<size_t>(b)].end(), NeighborCandidate{});
+      }
+
+      for (int candidate_block = 0; candidate_block < n_samples;
+           candidate_block += kCandidateBlock) {
+        const int candidate_end =
+            std::min(n_samples, candidate_block + kCandidateBlock);
+        if (candidate_end < n_samples) {
+          prefetch_row_read(input.data() +
+                            static_cast<ptrdiff_t>(candidate_end) * dim);
+        }
+        for (int j = candidate_block; j < candidate_end; ++j) {
+          const double *rhs = input.data() + static_cast<ptrdiff_t>(j) * dim;
+          if (j + 1 < candidate_end) {
+            prefetch_row_read(input.data() +
+                              static_cast<ptrdiff_t>(j + 1) * dim);
+          }
+          for (int b = 0; b < batch_size; ++b) {
+            if (row_ids[b] == j)
+              continue;
+            const double dist_sq = squared_distance_avx2(lhs_ptrs[b], rhs, dim);
+            ++local_count;
+            try_insert_neighbor(batch_best[static_cast<size_t>(b)], nullptr, j,
+                                dist_sq);
+          }
+        }
+      }
+
+      for (int b = 0; b < batch_size; ++b) {
+        knn[static_cast<size_t>(row_ids[b])] =
+            batch_best[static_cast<size_t>(b)];
+      }
+    }
+
+    worker_counts[worker_id] = local_count;
+  };
+
+  if (cfg.executor != nullptr) {
+    if (n_workers > 1) {
+      cfg.executor->parallel_do(n_workers, run_worker);
+    } else {
+      run_worker(0);
+    }
+  } else {
     std::vector<std::jthread> workers;
     workers.reserve(n_workers);
     for (size_t worker_id = 0; worker_id < n_workers; ++worker_id) {
@@ -256,62 +319,7 @@ InternalBuildResult build_exact_knn_graph(const MatrixRMConstRef &input,
       const int end = std::min(n_samples, begin + block_size);
       if (begin >= end)
         break;
-
-      workers.emplace_back([&, worker_id, begin, end]() {
-        std::vector<NeighborRow> batch_best(
-            static_cast<size_t>(kExactQueryBatch),
-            NeighborRow(static_cast<size_t>(max_neighbors)));
-        std::array<const double *, kExactQueryBatch> lhs_ptrs{};
-        std::array<int, kExactQueryBatch> row_ids{};
-        std::uint64_t local_count = 0;
-
-        for (int batch_begin = begin; batch_begin < end;
-             batch_begin += kExactQueryBatch) {
-          const int batch_size =
-              std::min(kExactQueryBatch, end - batch_begin);
-          for (int b = 0; b < batch_size; ++b) {
-            const int row = batch_begin + b;
-            row_ids[b] = row;
-            lhs_ptrs[b] = input.data() + static_cast<ptrdiff_t>(row) * dim;
-            std::fill(batch_best[static_cast<size_t>(b)].begin(),
-                      batch_best[static_cast<size_t>(b)].end(),
-                      NeighborCandidate{});
-          }
-
-          for (int candidate_block = 0; candidate_block < n_samples;
-               candidate_block += kCandidateBlock) {
-            const int candidate_end =
-                std::min(n_samples, candidate_block + kCandidateBlock);
-            if (candidate_end < n_samples) {
-              prefetch_row_read(input.data() +
-                                static_cast<ptrdiff_t>(candidate_end) * dim);
-            }
-            for (int j = candidate_block; j < candidate_end; ++j) {
-              const double *rhs =
-                  input.data() + static_cast<ptrdiff_t>(j) * dim;
-              if (j + 1 < candidate_end) {
-                prefetch_row_read(input.data() +
-                                  static_cast<ptrdiff_t>(j + 1) * dim);
-              }
-              for (int b = 0; b < batch_size; ++b) {
-                if (row_ids[b] == j)
-                  continue;
-                const double dist_sq = squared_distance_avx2(lhs_ptrs[b], rhs, dim);
-                ++local_count;
-                try_insert_neighbor(batch_best[static_cast<size_t>(b)], nullptr,
-                                    j, dist_sq);
-              }
-            }
-          }
-
-          for (int b = 0; b < batch_size; ++b) {
-            knn[static_cast<size_t>(row_ids[b])] =
-                batch_best[static_cast<size_t>(b)];
-          }
-        }
-
-        worker_counts[worker_id] = local_count;
-      });
+      workers.emplace_back([&, worker_id]() { run_worker(worker_id); });
     }
   }
 
@@ -387,7 +395,29 @@ InternalBuildResult build_approx_knn_graph(const MatrixRMConstRef &input,
                       static_cast<int>(n_workers));
 
   std::vector<std::uint64_t> worker_seed_counts(n_workers, 0);
-  {
+  const auto seed_worker = [&](size_t worker_id) {
+    const int begin = static_cast<int>(worker_id) * block_size;
+    const int end = std::min(n_samples, begin + block_size);
+    std::uint64_t local_count = 0;
+    for (int i = begin; i < end; ++i) {
+      NeighborRow seeded =
+          random_seed_neighbors(input, i, max_neighbors, cfg.seed,
+                                cfg.approx_seed_neighbors, local_count);
+      current[static_cast<size_t>(i)] = seeded;
+      FlagRow &flags = current_is_new[static_cast<size_t>(i)];
+      for (size_t pos = 0; pos < seeded.size() && pos < flags.size(); ++pos) {
+        flags[pos] = (seeded[pos].index >= 0) ? 1u : 0u;
+      }
+    }
+    worker_seed_counts[worker_id] = local_count;
+  };
+  if (cfg.executor != nullptr) {
+    if (n_workers > 1) {
+      cfg.executor->parallel_do(n_workers, seed_worker);
+    } else {
+      seed_worker(0);
+    }
+  } else {
     std::vector<std::jthread> workers;
     workers.reserve(n_workers);
     for (size_t worker_id = 0; worker_id < n_workers; ++worker_id) {
@@ -395,21 +425,7 @@ InternalBuildResult build_approx_knn_graph(const MatrixRMConstRef &input,
       const int end = std::min(n_samples, begin + block_size);
       if (begin >= end)
         break;
-
-      workers.emplace_back([&, worker_id, begin, end]() {
-        std::uint64_t local_count = 0;
-        for (int i = begin; i < end; ++i) {
-          NeighborRow seeded = random_seed_neighbors(
-              input, i, max_neighbors, cfg.seed, cfg.approx_seed_neighbors,
-              local_count);
-          current[static_cast<size_t>(i)] = seeded;
-          FlagRow &flags = current_is_new[static_cast<size_t>(i)];
-          for (size_t pos = 0; pos < seeded.size() && pos < flags.size(); ++pos) {
-            flags[pos] = (seeded[pos].index >= 0) ? 1u : 0u;
-          }
-        }
-        worker_seed_counts[worker_id] = local_count;
-      });
+      workers.emplace_back([&, worker_id]() { seed_worker(worker_id); });
     }
   }
 
@@ -429,36 +445,26 @@ InternalBuildResult build_approx_knn_graph(const MatrixRMConstRef &input,
     std::vector<std::uint8_t> row_changed(static_cast<size_t>(n_samples), 0u);
     std::vector<std::uint64_t> worker_counts(n_workers, 0);
     std::vector<size_t> worker_updates(n_workers, 0);
-    {
-      std::vector<std::jthread> workers;
-      workers.reserve(n_workers);
+    const auto refine_worker = [&](size_t worker_id) {
+      const int begin = static_cast<int>(worker_id) * block_size;
+      const int end = std::min(n_samples, begin + block_size);
+      std::uint64_t local_count = 0;
+      size_t local_updates = 0;
+      std::vector<int> candidates;
+      std::vector<int> new_sources;
+      std::vector<std::uint32_t> visited_epoch(static_cast<size_t>(n_samples), 0u);
+      std::vector<std::uint32_t> source_epoch(static_cast<size_t>(n_samples), 0u);
+      std::uint32_t visit_token = 0u;
+      const int reserve_guess = 4 * max_neighbors +
+                                cfg.approx_extra_random_candidates;
+      candidates.reserve(static_cast<size_t>(std::max(reserve_guess, 1)));
+      new_sources.reserve(static_cast<size_t>(std::max(2 * max_neighbors, 1)));
+      std::mt19937 rng(cfg.seed ^ (0x85EBCA6Bu *
+                                  static_cast<unsigned int>(worker_id + 1)) ^
+                       static_cast<unsigned int>(iter + 1));
+      std::uniform_int_distribution<int> node_dist(0, n_samples - 1);
 
-      for (size_t worker_id = 0; worker_id < n_workers; ++worker_id) {
-        const int begin = static_cast<int>(worker_id) * block_size;
-        const int end = std::min(n_samples, begin + block_size);
-        if (begin >= end)
-          break;
-
-        workers.emplace_back([&, worker_id, begin, end, iter]() {
-          std::uint64_t local_count = 0;
-          size_t local_updates = 0;
-          std::vector<int> candidates;
-          std::vector<int> new_sources;
-          std::vector<std::uint32_t> visited_epoch(static_cast<size_t>(n_samples),
-                                                   0u);
-          std::vector<std::uint32_t> source_epoch(static_cast<size_t>(n_samples),
-                                                  0u);
-          std::uint32_t visit_token = 0u;
-          const int reserve_guess = 4 * max_neighbors +
-                                    cfg.approx_extra_random_candidates;
-          candidates.reserve(static_cast<size_t>(std::max(reserve_guess, 1)));
-          new_sources.reserve(static_cast<size_t>(std::max(2 * max_neighbors, 1)));
-          std::mt19937 rng(cfg.seed ^ (0x85EBCA6Bu *
-                                      static_cast<unsigned int>(worker_id + 1)) ^
-                           static_cast<unsigned int>(iter + 1));
-          std::uniform_int_distribution<int> node_dist(0, n_samples - 1);
-
-          for (int i = begin; i < end; ++i) {
+      for (int i = begin; i < end; ++i) {
             ++visit_token;
             if (visit_token == 0u) {
               std::fill(visited_epoch.begin(), visited_epoch.end(), 0u);
@@ -543,11 +549,26 @@ InternalBuildResult build_approx_knn_graph(const MatrixRMConstRef &input,
               row_changed[static_cast<size_t>(i)] = 1u;
               ++local_updates;
             }
-          }
+      }
 
-          worker_counts[worker_id] = local_count;
-          worker_updates[worker_id] = local_updates;
-        });
+      worker_counts[worker_id] = local_count;
+      worker_updates[worker_id] = local_updates;
+    };
+    if (cfg.executor != nullptr) {
+      if (n_workers > 1) {
+        cfg.executor->parallel_do(n_workers, refine_worker);
+      } else {
+        refine_worker(0);
+      }
+    } else {
+      std::vector<std::jthread> workers;
+      workers.reserve(n_workers);
+      for (size_t worker_id = 0; worker_id < n_workers; ++worker_id) {
+        const int begin = static_cast<int>(worker_id) * block_size;
+        const int end = std::min(n_samples, begin + block_size);
+        if (begin >= end)
+          break;
+        workers.emplace_back([&, worker_id]() { refine_worker(worker_id); });
       }
     }
 
@@ -633,8 +654,9 @@ BuildResult build_knn_graph(const MatrixRMConstRef &input, int neighbor_count,
 
   if (cfg.benchmark) {
     const InternalBuildResult exact =
-        build_exact_knn_graph(input, neighbor_count, cfg.n_threads);
-    const InternalBuildResult approx = build_approx_knn_graph(input, neighbor_count, cfg);
+        build_exact_knn_graph(input, neighbor_count, cfg);
+    const InternalBuildResult approx =
+        build_approx_knn_graph(input, neighbor_count, cfg);
 
     result.stats.exact_elapsed_ms = exact.elapsed_ms;
     result.stats.approx_elapsed_ms = approx.elapsed_ms;
@@ -668,7 +690,7 @@ BuildResult build_knn_graph(const MatrixRMConstRef &input, int neighbor_count,
   }
 
   const InternalBuildResult exact =
-      build_exact_knn_graph(input, neighbor_count, cfg.n_threads);
+      build_exact_knn_graph(input, neighbor_count, cfg);
   result.knn = exact.knn;
   result.stats.selected_elapsed_ms = exact.elapsed_ms;
   result.stats.selected_distance_evals = exact.distance_evals;

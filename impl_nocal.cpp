@@ -3,13 +3,14 @@
 #include "functions.h"
 #include "groups.h"
 #include "h_groups.h"
+#include "titan_executor.h"
 #include <fstream>
 #include <iostream>
 #include <thread>
 
 
 int impl_nocal(Multi_MOL &pro_in, Multi_MOL &lig, fstream &log,
-               arguments &Arguments, info &info_output, vector<thread> &threads,
+               arguments &Arguments, info &info_output, TitanExecutor &executor,
                amino_acid &amine, para &parameter, folders &paths,
                vector<string> &input_line, h_groups &groups_1,
                h_groups &groups_2, vector<vector<size_t>> &Hbonds_vector,
@@ -18,13 +19,13 @@ int impl_nocal(Multi_MOL &pro_in, Multi_MOL &lig, fstream &log,
   cout << "Nocal mode is turned on!\n";
   log << "Box type: " << pro_in.m_mol[0].Box.get_box_type() << '\n';
 
-  for (size_t i{}; i < Arguments.nt; ++i)
-    threads[i] =
-        thread(&Multi_MOL::take_charge, &pro_in, ref(amine), ref(parameter),
-               (i + 1) * pro_in.m_mol[0].size() / Arguments.nt,
-               i * pro_in.m_mol[0].size() / Arguments.nt, Arguments.force_f, 0);
-  for (auto &t : threads)
-    t.join();
+  const size_t worker_count = std::max<size_t>(1, Arguments.nt);
+  executor.parallel_do(worker_count, [&](size_t i) {
+    pro_in.take_charge(amine, parameter,
+                       (i + 1) * pro_in.m_mol[0].size() / worker_count,
+                       i * pro_in.m_mol[0].size() / worker_count,
+                       Arguments.force_f, 0);
+  });
 
   log << "Charge: " << pro_in.total_charge() << "e\n";
 

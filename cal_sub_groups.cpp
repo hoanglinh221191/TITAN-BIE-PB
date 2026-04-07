@@ -3,6 +3,7 @@
 #include "folder.h"
 #include "groups.h"
 #include "miscellaneous.h"
+#include "titan_executor.h"
 #include <cmath>
 #include <fstream>
 #include <immintrin.h>
@@ -231,21 +232,17 @@ int cal_one_sub_group_multi_threads(
     int group_lg_index, size_t sub2_pos, const Multi_MOL &rec,
     const Multi_MOL &lg, const cache_sigma_epsilon &CachedData,
     energy_res_base &energy_force_out, const arguments &Arguments,
-    vector<thread> &calthreads, size_t num_snap, size_t num_thread) {
+    TitanExecutor &executor, size_t num_snap, size_t num_thread) {
   vector<energy_res_base> energy_force_out_mthreads(num_thread);
   energy_force_out.time = rec.m_mol[num_snap].time_of_snap;
 
-  for (size_t i{}; i < num_thread; ++i) {
-    calthreads[i] = thread(
-        sup_cal_one_subgroup_optimized, ref(groups), group_rec_index, sub1_pos,
-        group_lg_index, sub2_pos, ref(rec), ref(lg), ref(CachedData),
-        ref(energy_force_out_mthreads[i]), ref(Arguments), num_snap,
+  executor.parallel_do(num_thread, [&](size_t i) {
+    sup_cal_one_subgroup_optimized(
+        groups, group_rec_index, sub1_pos, group_lg_index, sub2_pos, rec, lg,
+        CachedData, energy_force_out_mthreads[i], Arguments, num_snap,
         i * groups.groups_atom_number(group_rec_index) / num_thread,
         (i + 1) * groups.groups_atom_number(group_rec_index) / num_thread);
-  }
-  for (auto &calt : calthreads)
-    if (calt.joinable())
-      calt.join();
+  });
 
   for (auto &ef_out : energy_force_out_mthreads) {
     energy_force_out += ef_out;
@@ -276,7 +273,7 @@ int cal_sub_groups_1_file(groups_cal &groups, const Multi_MOL &rec,
                           const cache_sigma_epsilon &CachedData,
                           vector<energy_groups> &Energy_groups_out,
                           size_t num_snap, arguments &Arguments,
-                          vector<thread> &calthreads) {
+                          TitanExecutor &executor) {
   for (size_t i{}; i < groups.subgroup1_size(); ++i)
     for (size_t j{}; j < groups.subgroup2_size(); ++j) {
       energy_res_base Egroup_temp;
@@ -290,7 +287,7 @@ int cal_sub_groups_1_file(groups_cal &groups, const Multi_MOL &rec,
         cal_one_sub_group_multi_threads(groups, groups.subgroup_1_index(i), i,
                                         groups.subgroup_2_index(j), j, rec, lg,
                                         CachedData, Egroup_temp, Arguments,
-                                        calthreads, num_snap, Arguments.nt);
+                                        executor, num_snap, Arguments.nt);
 
       bool check_in{false};
       for (size_t k{}; k < Energy_groups_out.size(); ++k)
@@ -318,9 +315,9 @@ int Energy_force_subgroups(groups_cal &groups, const Multi_MOL &rec,
                            vector<vector<energy_groups>> &EF_subgroups,
                            vector<energy_groups> &Energy_groups_out,
                            size_t num_snap, size_t MAX_NUM,
-                           arguments &Arguments, vector<thread> &calthreads) {
+                           arguments &Arguments, TitanExecutor &executor) {
   cal_sub_groups_1_file(groups, rec, lg, CachedData, Energy_groups_out,
-                        num_snap, Arguments, calthreads);
+                        num_snap, Arguments, executor);
 
   if (num_snap == MAX_NUM - 1)
     EF_subgroups.emplace_back(Energy_groups_out);
@@ -646,21 +643,18 @@ int dis_sub_group_multi_threads(groups_cal &groups, int group_rec_index,
                                 size_t sub1_pos, int group_lg_index,
                                 size_t sub2_pos, const Multi_MOL &rec,
                                 const Multi_MOL &lg, const arguments &Arguments,
-                                vector<thread> &calthreads, size_t num_snap,
+                                TitanExecutor &executor, size_t num_snap,
                                 size_t num_thread,
                                 vector<pair<double, double>> &mindis_vec) {
   vector<double> mdis_v(num_thread);
-  for (size_t i{}; i < num_thread; ++i) {
-    calthreads[i] = thread(
-        sup_distance_one_subgroup, ref(groups), group_rec_index, sub1_pos,
-        group_lg_index, sub2_pos, ref(rec), ref(lg), ref(Arguments), num_snap,
+  executor.parallel_do(num_thread, [&](size_t i) {
+    sup_distance_one_subgroup(
+        groups, group_rec_index, sub1_pos, group_lg_index, sub2_pos, rec, lg,
+        Arguments, num_snap,
         i * groups.groups_atom_number(group_rec_index) / num_thread,
         (i + 1) * groups.groups_atom_number(group_rec_index) / num_thread,
-        ref(mdis_v[i]));
-  }
-  for (auto &calt : calthreads)
-    if (calt.joinable())
-      calt.join();
+        mdis_v[i]);
+  });
 
   double min{mdis_v[0]};
   for (size_t i{}; i < num_thread; ++i)
@@ -674,13 +668,13 @@ int cal_mindis_sub_groups_1_file(groups_cal &groups, const Multi_MOL &rec,
                                  const Multi_MOL &lg,
                                  vector<mindistance_group> &MIN_DIS,
                                  size_t num_snap, arguments &Arguments,
-                                 vector<thread> &calthreads) {
+                                 TitanExecutor &executor) {
   for (size_t i{}; i < groups.subgroup1_size(); ++i)
     for (size_t j{}; j < groups.subgroup2_size(); ++j) {
       vector<pair<double, double>> mindis_vec;
       dis_sub_group_multi_threads(groups, groups.subgroup_1_index(i), i,
                                   groups.subgroup_2_index(j), j, rec, lg,
-                                  Arguments, ref(calthreads), num_snap,
+                                  Arguments, executor, num_snap,
                                   Arguments.nt, mindis_vec);
       string group1name = groups.group_name(groups.subgroup_1_index(i));
       string group2name = groups.group_name(groups.subgroup_2_index(j));
@@ -701,10 +695,10 @@ int cal_mindis_sub_groups_1_file(groups_cal &groups, const Multi_MOL &rec,
 
 int mindis_subgroups(groups_cal &groups, const Multi_MOL &rec,
                      const Multi_MOL &lg, size_t num_snap, size_t MAX_NUM,
-                     arguments &Arguments, vector<thread> &calthreads,
+                     arguments &Arguments, TitanExecutor &executor,
                      vector<mindistance_group> &MIN_DIS) {
   cal_mindis_sub_groups_1_file(groups, rec, lg, MIN_DIS, num_snap, Arguments,
-                               calthreads);
+                               executor);
   return 0;
 }
 

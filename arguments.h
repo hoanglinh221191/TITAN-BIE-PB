@@ -131,6 +131,11 @@ struct TptArgs {
   unsigned int bootstrap_seed{42};
 };
 
+struct CommunityArgs {
+  bool flag_community{false};
+  std::string method{};
+};
+
 struct UmapArgs {
   bool flag_umap{false};
   int umap_neighbors{15};
@@ -182,6 +187,7 @@ public:
   IfpArgs ifp;
   DhamArgs dham;
   TptArgs tpt;
+  CommunityArgs community;
   UmapArgs umap;
   DsspArgs dssp;
   RmsArgs rms;

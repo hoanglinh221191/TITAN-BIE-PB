@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+class TitanExecutor;
+
 class TitanLJAnalyzer {
 public:
   static constexpr std::size_t kFeatureShellCount = 3;
@@ -51,7 +53,7 @@ public:
   void configure(const LjArgs &args);
   void init(const Multi_MOL &mol1, const arguments &args, std::fstream &log);
   void process_frame(const Multi_MOL &mol1, std::size_t snap_idx,
-                     std::size_t num_threads);
+                     TitanExecutor &executor);
   void finalize_trajectory(const std::string &timeseries_filename,
                            const std::string &rho_filename,
                            const std::string &feature_filename,
@@ -114,16 +116,16 @@ private:
                                 int &n_clusters_out);
   void build_largest_cluster_members(std::size_t atom_count, int largest_root);
   void unwrap_largest_cluster(const MOL &frame, bool periodic);
-  ClusterGeometry compute_cluster_geometry(std::size_t num_threads) const;
+  ClusterGeometry compute_cluster_geometry(TitanExecutor &executor) const;
   LocalOrderSummary compute_local_order_metrics(const MOL &frame,
                                                 std::size_t atom_count,
                                                 bool periodic,
-                                                std::size_t num_threads);
+                                                TitanExecutor &executor);
   void accumulate_radial_density(const MOL &frame, bool periodic,
                                  const ClusterGeometry &geometry,
                                  std::array<double, kFeatureShellCount>
                                      &shell_all_nm3,
-                                 std::size_t num_threads);
+                                 TitanExecutor &executor);
   void export_timeseries(const std::string &filename, std::fstream &log) const;
   void export_rho_profile(const std::string &filename, std::fstream &log) const;
   void export_feature_timeseries(const std::string &filename,

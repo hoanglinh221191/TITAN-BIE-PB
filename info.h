@@ -119,6 +119,21 @@ public:
   string get_dssp_mol2_content_filename() const {
     return "dssp_mol2_content.dat";
   }
+  string get_network_communities_filename() const {
+    return "network_communities.csv";
+  }
+  string get_network_community_summary_filename() const {
+    return "network_community_summary.csv";
+  }
+  string get_network_supergraph_filename() const {
+    return "network_supergraph.csv";
+  }
+  string get_network_community_id_pdb_filename() const {
+    return "network_community_id_bfactor.pdb";
+  }
+  string get_network_participation_pdb_filename() const {
+    return "network_participation_coeff_bfactor.pdb";
+  }
   string get_rmsd_filename(const arguments &Arguments,
                            const std::vector<string> &input_line,
                            int input_name) const {

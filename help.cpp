@@ -72,6 +72,7 @@ CORE DEPENDENCY CHAIN
               -network, while LJ jobs switch to the LJ phase-2 feature backend
   -tpt        implies -msm and -tica; phase 0 uses the built MSM TPM +
               stationary distribution directly
+  -community=louvain implies -network
   -lspmd      runs as its own network-style module and does not need -network
 
 GENERAL OUTPUT BEHAVIOR
@@ -158,6 +159,9 @@ IMPORTANT NOTES
     stat_hydrogenbonds.dat
     stat_average_HB.dat
     out_list_res_HB_<group>.dat
+    out_hydrogen_bonds.dat
+    out_hydrogen_bonds_receptor.dat
+    out_hydrogen_bonds_ligand.dat
 
 2.3a DSSP Secondary Structure
 
@@ -283,6 +287,23 @@ IMPORTANT NOTES
   Typical outputs:
     network_edges.csv
     network_nodes.csv
+
+2.4a Community Detection
+
+  Purpose:
+    Partition the DCCM graph into residue communities using Louvain modularity
+    optimization.
+
+  Main inputs:
+    -community=louvain
+    implies -network
+
+  Typical outputs:
+    network_communities.csv
+    network_community_summary.csv
+    network_supergraph.csv
+    network_community_id_bfactor.pdb
+    network_participation_coeff_bfactor.pdb
 
 2.5 PCA / FES / Basin Extraction
 
@@ -649,7 +670,8 @@ IMPORTANT NOTES
 
 3.5 DCCM network + PCA/FES
 
-  titan.exe -s reference.pdb -traj md.xtc -network -pca -fes-grid=80
+  titan.exe -s reference.pdb -traj md.xtc -network -community=louvain \
+      -pca -fes-grid=80
 
 3.6 Allostery analysis
 
@@ -888,6 +910,7 @@ IMPORTANT NOTES
 4.5 LJ, RMS, Network, PCA, TICA, MSM, DHAM, LLPS, GIST, IFP, LSP-MD
 
   -network              DCCM network analysis
+  -community=louvain    Louvain community detection on the DCCM graph
 
   -pca                  PCA and FES analysis
   -fes-grid=<N>         FES grid size. Default: 60

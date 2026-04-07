@@ -10,6 +10,8 @@
 #include <tuple>
 #include <vector>
 
+class TitanExecutor;
+
 class DCCMNetwork {
 public:
   using TrajectoryRow = AlignedDoubleVector;
@@ -25,7 +27,19 @@ public:
                      size_t chunk_snap_idx, size_t global_frame_idx,
                      double time_ps = 0.0, int replica_id = 0);
 
-  void calculate_and_export(size_t num_threads);
+  void calculate_and_export(TitanExecutor &executor, const info &info_output);
+
+  struct CommunityConfig {
+    bool enabled{false};
+    std::string method{};
+  };
+
+  struct CommunityResult {
+    std::vector<int> membership;
+    std::vector<int> community_sizes;
+    double modularity{0.0};
+    bool has_result{false};
+  };
 
   struct AllosteryConfig {
     int tau_lag = 5;
@@ -36,14 +50,14 @@ public:
     bool compute_te = true;
   };
 
-  void calculate_allostery_information(size_t num_threads, int tau_lag,
+  void calculate_allostery_information(TitanExecutor &executor, int tau_lag,
                                        int num_bins);
-  void calculate_allostery_information(size_t num_threads,
+  void calculate_allostery_information(TitanExecutor &executor,
                                        const AllosteryConfig &cfg);
-  void calculate_allostery_information_optimized(size_t num_threads,
-                                                 int tau_lag, int num_bins);
-  void calculate_allostery_information_optimized(size_t num_threads,
-                                                 const AllosteryConfig &cfg);
+  void calculate_allostery_information_optimized(TitanExecutor &executor,
+                                                  int tau_lag, int num_bins);
+  void calculate_allostery_information_optimized(TitanExecutor &executor,
+                                                  const AllosteryConfig &cfg);
   size_t get_last_allostery_candidate_pairs() const {
     return last_allostery_candidate_pairs_;
   }
@@ -62,7 +76,7 @@ public:
     std::vector<std::tuple<int, int, double>> edges;
   };
 
-  void calculate_lspmd(size_t num_threads, const LSPMDConfig &cfg,
+  void calculate_lspmd(TitanExecutor &executor, const LSPMDConfig &cfg,
                        LSPMDResult &result);
   void export_lspmd(const LSPMDResult &result, double weight_threshold = 0.0);
 
@@ -96,6 +110,9 @@ public:
   const TrajectoryRows &get_traj_cbx() const { return traj_cbx; }
   const TrajectoryRows &get_traj_cby() const { return traj_cby; }
   const TrajectoryRows &get_traj_cbz() const { return traj_cbz; }
+  const CommunityResult &get_last_community_result() const {
+    return last_community_result_;
+  }
 
 private:
   std::vector<int> ca_indices;
@@ -106,6 +123,7 @@ private:
   std::vector<int> cb_indices;
   bool store_full_traj_ = true;
   bool store_cb_traj_ = false;
+  bool has_first_snapshot_frame_ = false;
 
   TrajectoryRows traj_x;
   TrajectoryRows traj_y;
@@ -124,6 +142,12 @@ private:
   bool kabsch_aligned_ = false;
   size_t last_allostery_candidate_pairs_ = 0;
   size_t last_allostery_dense_pairs_ = 0;
+  CommunityConfig community_cfg_;
+  CommunityResult last_community_result_;
+  MOL first_pro_frame_;
+  MOL first_lig_frame_;
+  std::vector<mol_info> first_pro_info_;
+  std::vector<mol_info> first_lig_info_;
 
   static int find_cb_for_residue(const Multi_MOL &mol, int resnr,
                                  const std::string &chain, bool is_gly);

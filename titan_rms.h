@@ -14,6 +14,8 @@
 #include <thread>
 #include <vector>
 
+class TitanExecutor;
+
 class TitanRMSAnalyzer {
 public:
   struct TrajectorySeries {
@@ -44,7 +46,7 @@ public:
   void init(const Multi_MOL &mol1, const Multi_MOL &mol2, const arguments &args,
             std::fstream &log);
   void process_frame(const Multi_MOL &mol1, const Multi_MOL &mol2,
-                     std::size_t snap_idx, std::size_t num_threads);
+                     std::size_t snap_idx, TitanExecutor &executor);
   void finalize_trajectory(const std::string &rmsd_filename,
                            const std::string &rmsf_filename,
                            std::fstream &log);
@@ -89,9 +91,8 @@ private:
   void reset_runtime_buffers();
   void reset_trajectory_state();
   void gather_trace_coordinates(const Multi_MOL &mol1, const Multi_MOL &mol2,
-                                std::size_t snap_idx,
-                                std::size_t num_threads);
-  void update_welford(std::size_t num_threads);
+                                std::size_t snap_idx, TitanExecutor &executor);
+  void update_welford(TitanExecutor &executor);
   [[nodiscard]] OutputSummary compute_summary(
       std::vector<double> &rmsf_mol1,
       std::vector<double> &rmsf_mol2) const;

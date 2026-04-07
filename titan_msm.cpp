@@ -2,6 +2,7 @@
 // TitanMSM — Markov State Model (Phase 2) Implementation
 // ============================================================================
 #include "titan_msm.h"
+#include "titan_executor.h"
 
 #include "titan_kinetics.h"
 #include <Eigen/Dense>
@@ -404,8 +405,9 @@ TitanMSM::get_per_replica_box_volumes_nm3() const {
 // train_kmeans — K-Means++ init + Lloyd iteration  (Fix 3: RowMajor proj_mat_)
 // n_threads: number of std::threads for the assignment step
 // ============================================================================
-void TitanMSM::train_kmeans(int max_iter, unsigned int seed, int n_threads) {
-  n_threads_ = std::max(1, n_threads);
+void TitanMSM::train_kmeans(TitanExecutor &executor, int max_iter,
+                            unsigned int seed) {
+  n_threads_ = std::max(1, static_cast<int>(executor.capacity()));
   // --- Preconditions -------------------------------------------------------
   if (n_proj_frames_ == 0) {
     TitanUI::print_error(
@@ -441,24 +443,18 @@ void TitanMSM::train_kmeans(int max_iter, unsigned int seed, int n_threads) {
 
   auto compute_weights_parallel = [&](int up_to_c) {
     const int64_t chunk = (N + n_threads_ - 1) / n_threads_;
-    std::vector<std::jthread> wk;
-    wk.reserve(n_threads_);
-
-    for (int t = 0; t < n_threads_; ++t) {
-      int64_t start = t * chunk;
-      int64_t end = std::min(start + chunk, N);
+    executor.parallel_do(static_cast<size_t>(n_threads_), [&](size_t t_sz) {
+      const int t = static_cast<int>(t_sz);
+      const int64_t start = t * chunk;
+      const int64_t end = std::min(start + chunk, N);
       if (start >= end)
-        continue;
-
-      wk.emplace_back([&, start, end, up_to_c]() {
-        scan_best_centroids_blocked(
-            proj_mat_, start, end, centroids_, up_to_c, n_comp_,
-            [&](int64_t i, int /*best_c*/, double min_d2) {
-              weights[static_cast<size_t>(i)] = min_d2;
-            });
-      });
-    }
-    // jthread RAII join
+        return;
+      scan_best_centroids_blocked(
+          proj_mat_, start, end, centroids_, up_to_c, n_comp_,
+          [&](int64_t i, int /*best_c*/, double min_d2) {
+            weights[static_cast<size_t>(i)] = min_d2;
+          });
+    });
   };
 
   for (int c = 1; c < n_k_; ++c) {
@@ -472,7 +468,7 @@ void TitanMSM::train_kmeans(int max_iter, unsigned int seed, int n_threads) {
                       std::to_string(n_k_) + " centroids).");
 
   // -------------------------------------------------------------------------
-  // K-Means Lloyd Iteration  (multi-threaded assignment via std::jthread)
+  // K-Means Lloyd Iteration  (multi-threaded assignment via shared executor)
   // -------------------------------------------------------------------------
   discrete_traj_.assign(static_cast<size_t>(N), 0);
   DenseMatrixRM new_centroids(n_k_, n_comp_);
@@ -499,15 +495,13 @@ void TitanMSM::train_kmeans(int max_iter, unsigned int seed, int n_threads) {
     };
 
     {
-      std::vector<std::jthread> workers;
-      workers.reserve(n_threads_);
-      int64_t chunk = (N + n_threads_ - 1) / n_threads_;
-      for (int t = 0; t < n_threads_; ++t) {
-        int64_t start = t * chunk;
-        int64_t end = std::min(start + chunk, N);
+      const int64_t chunk = (N + n_threads_ - 1) / n_threads_;
+      executor.parallel_do(static_cast<size_t>(n_threads_), [&](size_t t_sz) {
+        const int64_t start = static_cast<int64_t>(t_sz) * chunk;
+        const int64_t end = std::min(start + chunk, N);
         if (start < end)
-          workers.emplace_back(assign_worker, start, end);
-      }
+          assign_worker(start, end);
+      });
     }
 
     // ----- Update step (parallel partial sums, serial merge) --------------
@@ -528,15 +522,14 @@ void TitanMSM::train_kmeans(int max_iter, unsigned int seed, int n_threads) {
       }
     };
     {
-      std::vector<std::jthread> workers;
-      workers.reserve(n_threads_);
-      int64_t chunk = (N + n_threads_ - 1) / n_threads_;
-      for (int t = 0; t < n_threads_; ++t) {
-        int64_t start = t * chunk;
-        int64_t end = std::min(start + chunk, N);
+      const int64_t chunk = (N + n_threads_ - 1) / n_threads_;
+      executor.parallel_do(static_cast<size_t>(n_threads_), [&](size_t t_sz) {
+        const int t = static_cast<int>(t_sz);
+        const int64_t start = static_cast<int64_t>(t) * chunk;
+        const int64_t end = std::min(start + chunk, N);
         if (start < end)
-          workers.emplace_back(update_worker, t, start, end);
-      }
+          update_worker(t, start, end);
+      });
     }
 
     // Merge partial sums
@@ -559,16 +552,13 @@ void TitanMSM::train_kmeans(int max_iter, unsigned int seed, int n_threads) {
         std::vector<double> local_max_d2(static_cast<size_t>(n_threads_), -1.0);
         std::vector<int64_t> local_far_idx(static_cast<size_t>(n_threads_), 0);
         {
-          std::vector<std::jthread> workers;
-          workers.reserve(n_threads_);
           const int64_t chunk = (N + n_threads_ - 1) / n_threads_;
-          for (int t = 0; t < n_threads_; ++t) {
-            const int64_t start = t * chunk;
+          executor.parallel_do(static_cast<size_t>(n_threads_), [&](size_t t_sz) {
+            const int t = static_cast<int>(t_sz);
+            const int64_t start = static_cast<int64_t>(t) * chunk;
             const int64_t end = std::min(start + chunk, N);
-            if (start >= end) {
-              continue;
-            }
-            workers.emplace_back([&, t, start, end]() {
+            if (start >= end)
+              return;
               double best_d2 = -1.0;
               int64_t best_idx = start;
               for (int64_t i = start; i < end; ++i) {
@@ -586,8 +576,7 @@ void TitanMSM::train_kmeans(int max_iter, unsigned int seed, int n_threads) {
               }
               local_max_d2[static_cast<size_t>(t)] = best_d2;
               local_far_idx[static_cast<size_t>(t)] = best_idx;
-            });
-          }
+          });
         }
 
         double max_d2 = -1.0;
@@ -624,30 +613,26 @@ void TitanMSM::train_kmeans(int max_iter, unsigned int seed, int n_threads) {
             discrete_traj_[static_cast<size_t>(i)] = best_c;
           });
     };
-    std::vector<std::jthread> workers;
-    int64_t chunk = (N + n_threads_ - 1) / n_threads_;
-    for (int t = 0; t < n_threads_; ++t) {
-      int64_t start = t * chunk;
-      int64_t end = std::min(start + chunk, N);
+    const int64_t chunk = (N + n_threads_ - 1) / n_threads_;
+    executor.parallel_do(static_cast<size_t>(n_threads_), [&](size_t t_sz) {
+      const int64_t start = static_cast<int64_t>(t_sz) * chunk;
+      const int64_t end = std::min(start + chunk, N);
       if (start < end)
-        workers.emplace_back(assign_worker, start, end);
-    }
+        assign_worker(start, end);
+    });
   }
 
   // Inertia
   double inertia = 0.0;
   std::vector<double> local_inertia(static_cast<size_t>(n_threads_), 0.0);
   {
-    std::vector<std::jthread> workers;
-    workers.reserve(n_threads_);
     const int64_t chunk = (N + n_threads_ - 1) / n_threads_;
-    for (int t = 0; t < n_threads_; ++t) {
-      const int64_t start = t * chunk;
+    executor.parallel_do(static_cast<size_t>(n_threads_), [&](size_t t_sz) {
+      const int t = static_cast<int>(t_sz);
+      const int64_t start = static_cast<int64_t>(t) * chunk;
       const int64_t end = std::min(start + chunk, N);
-      if (start >= end) {
-        continue;
-      }
-      workers.emplace_back([&, t, start, end]() {
+      if (start >= end)
+        return;
         double partial = 0.0;
         for (int64_t i = start; i < end; ++i) {
           const double *frame =
@@ -658,8 +643,7 @@ void TitanMSM::train_kmeans(int max_iter, unsigned int seed, int n_threads) {
           partial += squared_distance_rowmajor_avx2(frame, centroid, n_comp_);
         }
         local_inertia[static_cast<size_t>(t)] = partial;
-      });
-    }
+    });
   }
   for (double partial : local_inertia) {
     inertia += partial;
@@ -1111,8 +1095,8 @@ int TitanMSM::auto_detect_macrostates(
 // ============================================================================
 // export_results — write all output files + run ITS scan + PCCA
 // ============================================================================
-void TitanMSM::export_results(const info &info_output, std::fstream &log,
-                              int n_timescales, bool msm_run_its,
+void TitanMSM::export_results(TitanExecutor &executor, const info &info_output,
+                              std::fstream &log, int n_timescales, bool msm_run_its,
                               bool msm_run_pcca, int msm_macrostates,
                               const std::vector<int> &its_lags) const {
   if (!msm_built_) {
@@ -1319,16 +1303,12 @@ void TitanMSM::export_results(const info &info_output, std::fstream &log,
 
         // Launch jthread workers — each processes a shard of lags
         {
-          std::vector<std::jthread> workers;
-          workers.reserve(n_workers);
-
-          for (int w = 0; w < n_workers; ++w) {
-            int shard_begin = n_lags * w / n_workers;
-            int shard_end = n_lags * (w + 1) / n_workers;
+          executor.parallel_do(static_cast<size_t>(n_workers), [&](size_t w_sz) {
+            const int w = static_cast<int>(w_sz);
+            const int shard_begin = n_lags * w / n_workers;
+            const int shard_end = n_lags * (w + 1) / n_workers;
             if (shard_begin >= shard_end)
-              continue;
-
-            workers.emplace_back([&, shard_begin, shard_end]() {
+              return;
               Eigen::MatrixXd C_tmp(n_k_, n_k_);
               Eigen::MatrixXd T_tmp_local(n_k_, n_k_);
 
@@ -1400,9 +1380,7 @@ void TitanMSM::export_results(const info &info_output, std::fstream &log,
                 res.T_tmp = T_tmp_local;
                 res.ok = true;
               }
-            }); // end jthread lambda
-          }
-          // jthread RAII: all join here
+          });
         }
 
         // Write results IN ORDER (single-threaded, after all workers joined)

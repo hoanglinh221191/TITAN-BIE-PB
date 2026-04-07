@@ -29,6 +29,8 @@
 
 #include "gbsa_intrin.h" // GBSA_Aggregator complete type
 
+class TitanExecutor;
+
 // ---- 1. GBSA + ML + CAS + Nucleic Acid post-processing -------------------
 void run_gbsa_postproc(const arguments &args, size_t tot_snap_allfiles,
                        MLFeatureExtractor &ml_extractor,
@@ -46,29 +48,30 @@ void run_tica_msm_postproc(const arguments &args,
                            DCCMNetwork &dccm_analyzer,
                            std::unique_ptr<TitanKinetics> &tica_analyzer,
                            std::unique_ptr<TitanMSM> &msm_analyzer,
-                           size_t num_threads, info &info_output,
+                           TitanExecutor &executor, info &info_output,
                            std::fstream &log);
 
 void run_tica_fes_postproc(const arguments &args,
                            std::unique_ptr<TitanMSM> &msm_analyzer,
-                           info &info_output, std::fstream &log,
+                           TitanExecutor &executor, info &info_output,
+                           std::fstream &log,
                            const std::vector<double> &frame_weights = {});
 
 void run_umap_postproc(const arguments &args,
                        std::unique_ptr<TitanMSM> &msm_analyzer,
                        std::unique_ptr<TitanUMAP> &umap_analyzer,
-                       size_t num_threads,
+                       TitanExecutor &executor,
                        const info &info_output, std::fstream &log);
 
 // ---- 3. LLPS post-processing ----------------------------------------------
 void run_llps_postproc(const arguments &args,
                        std::unique_ptr<TitanLLPS> &llps_analyzer,
-                       size_t num_threads, info &info_output,
+                       TitanExecutor &executor, info &info_output,
                        std::fstream &log);
 
 // ---- 4. DCCM + PCA post-processing ----------------------------------------
 void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
-                           DCCMNetwork &dccm_analyzer, size_t num_threads,
+                           DCCMNetwork &dccm_analyzer, TitanExecutor &executor,
                            std::chrono::milliseconds &time_network,
                            info &info_output, std::fstream &log,
                            const std::vector<double> &frame_weights = {},
@@ -76,14 +79,14 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
 
 // ---- 5. LSP-MD post-processing ---------------------------------------------
 void run_lspmd_postproc(const arguments &args, DCCMNetwork &dccm_analyzer,
-                        size_t num_threads, info &info_output,
+                        TitanExecutor &executor, info &info_output,
                         std::fstream &log);
 
 // ---- 6. DHAM post-processing -----------------------------------------------
 #include "titan_dham.h"
 void run_dham_postproc(const arguments &args,
                        std::unique_ptr<TitanMSM> &msm_analyzer,
-                       size_t num_threads, info &info_output,
+                       TitanExecutor &executor, info &info_output,
                        std::fstream &log,
                        std::vector<double> &out_frame_weights,
                        Eigen::MatrixXd *out_reweighted_tpm = nullptr,
@@ -92,7 +95,7 @@ void run_dham_postproc(const arguments &args,
 
 void run_tpt_postproc(const arguments &args,
                       std::unique_ptr<TitanMSM> &msm_analyzer,
-                      size_t num_threads, info &info_output,
+                      TitanExecutor &executor, info &info_output,
                       std::fstream &log,
                       const std::vector<std::string> &lj_feature_files = {},
                       const TitanRMSAnalyzer *rms_analyzer = nullptr,

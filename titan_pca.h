@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+class TitanExecutor;
+
 namespace TitanPCA {
 
 using CoordinateRow = AlignedDoubleVector;
@@ -48,7 +50,8 @@ void execute_pca_fes_analysis(
     const CoordinateRows &traj_y, const CoordinateRows &traj_z,
     const std::vector<std::string> &ca_resname,
     const std::vector<int> &ca_resnrs, const std::vector<std::string> &ca_chain,
-    const std::vector<int> &ca_is_lig, info &info_out, std::fstream &log,
+    const std::vector<int> &ca_is_lig, TitanExecutor &executor, info &info_out,
+    std::fstream &log,
     const std::vector<double> &frame_weights = {},
     const std::vector<double> &traj_times = {},
     const std::vector<int> &traj_replicas = {},
@@ -57,7 +60,7 @@ void execute_pca_fes_analysis(
 void execute_tica_fes_analysis(
     const arguments &args, const MatrixXdAnyConstRef &tica_proj_mat,
     int64_t n_actual_frames, const std::vector<int64_t> &frame_global_indices,
-    info &info_out, std::fstream &log,
+    TitanExecutor &executor, info &info_out, std::fstream &log,
     const std::vector<double> &frame_weights = {});
 
 } // namespace TitanPCA

@@ -2,6 +2,7 @@
 
 #include "BoxMatrix.h"
 #include "titan_neighbor_grid.h"
+#include "titan_executor.h"
 #include "titan_ui.h"
 
 #include <algorithm>
@@ -598,7 +599,7 @@ void TitanLJAnalyzer::unwrap_largest_cluster(const MOL &frame, bool periodic) {
 }
 
 TitanLJAnalyzer::ClusterGeometry
-TitanLJAnalyzer::compute_cluster_geometry(std::size_t num_threads) const {
+TitanLJAnalyzer::compute_cluster_geometry(TitanExecutor &executor) const {
   ClusterGeometry geometry;
   const std::size_t cluster_size = cluster_members_.size();
   if (cluster_size == 0)
@@ -612,7 +613,7 @@ TitanLJAnalyzer::compute_cluster_geometry(std::size_t num_threads) const {
                         static_cast<double>(cluster_size);
 
   const std::size_t worker_count =
-      effective_worker_count(num_threads, cluster_size);
+      effective_worker_count(executor.capacity(), cluster_size);
   if (worker_count <= 1) {
     const double rg_sq = centered_sq_sum_avx2(
         unwrap_x_.data(), unwrap_y_.data(), unwrap_z_.data(), cluster_size,
@@ -629,33 +630,25 @@ TitanLJAnalyzer::compute_cluster_geometry(std::size_t num_threads) const {
     return geometry;
   }
 
-  const std::size_t chunk = (cluster_size + worker_count - 1) / worker_count;
   std::vector<double> partial_rg_sq(worker_count, 0.0);
   std::vector<double> partial_rmax_sq(worker_count, 0.0);
-  std::vector<std::jthread> workers;
-  workers.reserve(worker_count);
-  for (std::size_t worker = 0; worker < worker_count; ++worker) {
-    const std::size_t begin = worker * chunk;
-    const std::size_t end = std::min(begin + chunk, cluster_size);
-    if (begin >= end)
-      break;
-    workers.emplace_back([&, worker, begin, end]() {
-      double rg_sq = centered_sq_sum_avx2(
-          unwrap_x_.data() + begin, unwrap_y_.data() + begin,
-          unwrap_z_.data() + begin, end - begin, geometry.centroid_x,
-          geometry.centroid_y, geometry.centroid_z);
-      double max_r2 = 0.0;
-      for (std::size_t i = begin; i < end; ++i) {
-        const double dx = unwrap_x_[i] - geometry.centroid_x;
-        const double dy = unwrap_y_[i] - geometry.centroid_y;
-        const double dz = unwrap_z_[i] - geometry.centroid_z;
-        max_r2 = std::max(max_r2, dx * dx + dy * dy + dz * dz);
-      }
-      partial_rg_sq[worker] = rg_sq;
-      partial_rmax_sq[worker] = max_r2;
-    });
-  }
-  workers.clear();
+  executor.parallel_for(
+      cluster_size, worker_count, 1,
+      [&](std::size_t worker, std::size_t begin, std::size_t end) {
+        double rg_sq = centered_sq_sum_avx2(
+            unwrap_x_.data() + begin, unwrap_y_.data() + begin,
+            unwrap_z_.data() + begin, end - begin, geometry.centroid_x,
+            geometry.centroid_y, geometry.centroid_z);
+        double max_r2 = 0.0;
+        for (std::size_t i = begin; i < end; ++i) {
+          const double dx = unwrap_x_[i] - geometry.centroid_x;
+          const double dy = unwrap_y_[i] - geometry.centroid_y;
+          const double dz = unwrap_z_[i] - geometry.centroid_z;
+          max_r2 = std::max(max_r2, dx * dx + dy * dy + dz * dz);
+        }
+        partial_rg_sq[worker] = rg_sq;
+        partial_rmax_sq[worker] = max_r2;
+      });
 
   const double total_rg_sq =
       std::accumulate(partial_rg_sq.begin(), partial_rg_sq.end(), 0.0);
@@ -667,7 +660,7 @@ TitanLJAnalyzer::compute_cluster_geometry(std::size_t num_threads) const {
 
 TitanLJAnalyzer::LocalOrderSummary TitanLJAnalyzer::compute_local_order_metrics(
     const MOL &frame, std::size_t atom_count, bool periodic,
-    std::size_t num_threads) {
+    TitanExecutor &executor) {
   LocalOrderSummary summary;
   if (atom_count == 0)
     return summary;
@@ -695,53 +688,41 @@ TitanLJAnalyzer::LocalOrderSummary TitanLJAnalyzer::compute_local_order_metrics(
       box_matrix_storage.has_value() ? &box_matrix_storage.value() : nullptr;
 
   const std::size_t worker_count =
-      effective_worker_count(num_threads, atom_count);
-  const std::size_t chunk = (atom_count + worker_count - 1) / worker_count;
-  std::vector<std::jthread> workers;
-  workers.reserve(worker_count);
-  for (std::size_t worker = 0; worker < worker_count; ++worker) {
-    const std::size_t begin = worker * chunk;
-    const std::size_t end = std::min(begin + chunk, atom_count);
-    if (begin >= end)
-      break;
-    workers.emplace_back([&, begin, end]() {
-      for (std::size_t atom = begin; atom < end; ++atom) {
-        const int neighbor_count =
-            graph.degree(static_cast<int>(atom));
-        if (neighbor_count <= 0)
-          continue;
-
-        std::array<std::complex<double>, 5> q4m{};
-        std::array<std::complex<double>, 7> q6m{};
-        for (int idx = graph.row_begin(static_cast<int>(atom));
-             idx < graph.row_end(static_cast<int>(atom)); ++idx) {
-          const int nbr = graph.col_index(idx);
-          if (nbr < 0)
+      effective_worker_count(executor.capacity(), atom_count);
+  executor.parallel_for(
+      atom_count, worker_count, 1,
+      [&](std::size_t /*worker*/, std::size_t begin, std::size_t end) {
+        for (std::size_t atom = begin; atom < end; ++atom) {
+          const int neighbor_count = graph.degree(static_cast<int>(atom));
+          if (neighbor_count <= 0)
             continue;
-          double dx = xs[static_cast<std::size_t>(nbr)] - xs[atom];
-          double dy = ys[static_cast<std::size_t>(nbr)] - ys[atom];
-          double dz = zs[static_cast<std::size_t>(nbr)] - zs[atom];
-          if (box_matrix != nullptr)
-            box_matrix->apply_mic(dx, dy, dz);
-          accumulate_qlm<4>(dx, dy, dz, q4m);
-          accumulate_qlm<6>(dx, dy, dz, q6m);
-        }
-        q4_values_[atom] = finalize_ql<4>(q4m, neighbor_count);
-        q6_values_[atom] = finalize_ql<6>(q6m, neighbor_count);
-        q4m_local[atom] = q4m;
-        q6m_local[atom] = q6m;
-      }
-    });
-  }
 
-  workers.clear();
-  for (std::size_t worker = 0; worker < worker_count; ++worker) {
-    const std::size_t begin = worker * chunk;
-    const std::size_t end = std::min(begin + chunk, atom_count);
-    if (begin >= end)
-      break;
-    workers.emplace_back([&, begin, end]() {
-      for (std::size_t atom = begin; atom < end; ++atom) {
+          std::array<std::complex<double>, 5> q4m{};
+          std::array<std::complex<double>, 7> q6m{};
+          for (int idx = graph.row_begin(static_cast<int>(atom));
+               idx < graph.row_end(static_cast<int>(atom)); ++idx) {
+            const int nbr = graph.col_index(idx);
+            if (nbr < 0)
+              continue;
+            double dx = xs[static_cast<std::size_t>(nbr)] - xs[atom];
+            double dy = ys[static_cast<std::size_t>(nbr)] - ys[atom];
+            double dz = zs[static_cast<std::size_t>(nbr)] - zs[atom];
+            if (box_matrix != nullptr)
+              box_matrix->apply_mic(dx, dy, dz);
+            accumulate_qlm<4>(dx, dy, dz, q4m);
+            accumulate_qlm<6>(dx, dy, dz, q6m);
+          }
+          q4_values_[atom] = finalize_ql<4>(q4m, neighbor_count);
+          q6_values_[atom] = finalize_ql<6>(q6m, neighbor_count);
+          q4m_local[atom] = q4m;
+          q6m_local[atom] = q6m;
+        }
+      });
+
+  executor.parallel_for(
+      atom_count, worker_count, 1,
+      [&](std::size_t /*worker*/, std::size_t begin, std::size_t end) {
+        for (std::size_t atom = begin; atom < end; ++atom) {
         const int neighbor_count =
             graph.degree(static_cast<int>(atom));
         if (neighbor_count <= 0)
@@ -768,9 +749,7 @@ TitanLJAnalyzer::LocalOrderSummary TitanLJAnalyzer::compute_local_order_metrics(
         q4_bar_values[atom] = ql_from_normalized<4>(q4bar);
         q6_bar_values[atom] = ql_from_normalized<6>(q6bar);
       }
-    });
-  }
-  workers.clear();
+      });
 
   double dense_q4_sum = 0.0;
   double dense_q6_sum = 0.0;
@@ -920,7 +899,7 @@ void TitanLJAnalyzer::accumulate_radial_density(const MOL &frame, bool periodic,
                                                 const ClusterGeometry &geometry,
                                                 std::array<double, kFeatureShellCount>
                                                     &shell_all_nm3,
-                                                std::size_t num_threads) {
+                                                TitanExecutor &executor) {
   if (!profile_layout_ready_ || radial_bin_count_ == 0)
     return;
 
@@ -952,23 +931,16 @@ void TitanLJAnalyzer::accumulate_radial_density(const MOL &frame, bool periodic,
   const BoxMatrix *box_matrix =
       box_matrix_storage.has_value() ? &box_matrix_storage.value() : nullptr;
 
-  const std::size_t worker_count =
-      effective_worker_count(num_threads, std::max(atom_count, cluster_size));
+  const std::size_t worker_count = effective_worker_count(
+      executor.capacity(), std::max(atom_count, cluster_size));
   std::vector<std::vector<double>> local_cluster(
       worker_count, std::vector<double>(valid_bins, 0.0));
   std::vector<std::vector<double>> local_all(
       worker_count, std::vector<double>(valid_bins, 0.0));
 
-  const std::size_t all_chunk = (atom_count + worker_count - 1) / worker_count;
-  {
-    std::vector<std::jthread> workers;
-    workers.reserve(worker_count);
-    for (std::size_t worker = 0; worker < worker_count; ++worker) {
-      const std::size_t begin = worker * all_chunk;
-      const std::size_t end = std::min(begin + all_chunk, atom_count);
-      if (begin >= end)
-        break;
-      workers.emplace_back([&, worker, begin, end]() {
+  executor.parallel_for(
+      atom_count, worker_count, 1,
+      [&](std::size_t worker, std::size_t begin, std::size_t end) {
         auto &all_bins = local_all[worker];
         for (std::size_t atom = begin; atom < end; ++atom) {
           double dx = xs[atom] - geometry.centroid_x;
@@ -983,20 +955,10 @@ void TitanLJAnalyzer::accumulate_radial_density(const MOL &frame, bool periodic,
             all_bins[bin] += 1.0;
         }
       });
-    }
-  }
 
-  const std::size_t cluster_chunk =
-      (cluster_size + worker_count - 1) / worker_count;
-  {
-    std::vector<std::jthread> workers;
-    workers.reserve(worker_count);
-    for (std::size_t worker = 0; worker < worker_count; ++worker) {
-      const std::size_t begin = worker * cluster_chunk;
-      const std::size_t end = std::min(begin + cluster_chunk, cluster_size);
-      if (begin >= end)
-        break;
-      workers.emplace_back([&, worker, begin, end]() {
+  executor.parallel_for(
+      cluster_size, worker_count, 1,
+      [&](std::size_t worker, std::size_t begin, std::size_t end) {
         auto &cluster_bins = local_cluster[worker];
         for (std::size_t local_idx = begin; local_idx < end; ++local_idx) {
           const double dx = unwrap_x_[local_idx] - geometry.centroid_x;
@@ -1009,8 +971,6 @@ void TitanLJAnalyzer::accumulate_radial_density(const MOL &frame, bool periodic,
             cluster_bins[bin] += 1.0;
         }
       });
-    }
-  }
 
   std::vector<double> cluster_counts(valid_bins, 0.0);
   std::vector<double> all_counts(valid_bins, 0.0);
@@ -1048,7 +1008,7 @@ void TitanLJAnalyzer::accumulate_radial_density(const MOL &frame, bool periodic,
 }
 
 void TitanLJAnalyzer::process_frame(const Multi_MOL &mol1, std::size_t snap_idx,
-                                    std::size_t num_threads) {
+                                    TitanExecutor &executor) {
   if (!enabled_ || snap_idx >= mol1.m_mol.size())
     return;
 
@@ -1075,12 +1035,12 @@ void TitanLJAnalyzer::process_frame(const Multi_MOL &mol1, std::size_t snap_idx,
 
   build_largest_cluster_members(atom_count, largest_root);
   unwrap_largest_cluster(frame, periodic);
-  const ClusterGeometry geometry = compute_cluster_geometry(num_threads);
+  const ClusterGeometry geometry = compute_cluster_geometry(executor);
   const LocalOrderSummary local_order =
-      compute_local_order_metrics(frame, atom_count, periodic, num_threads);
+      compute_local_order_metrics(frame, atom_count, periodic, executor);
   std::array<double, kFeatureShellCount> shell_all_nm3{};
   accumulate_radial_density(frame, periodic, geometry, shell_all_nm3,
-                            num_threads);
+                            executor);
 
   double volume_a3 = 0.0;
   if (periodic) {

@@ -1,5 +1,6 @@
 #include "titan_pca.h"
 #include "titan_alignment.h"
+#include "titan_executor.h"
 #include "titan_ui.h"
 #include <algorithm>
 #include <chrono>
@@ -198,7 +199,7 @@ double resolve_target_temperature(const arguments &args, bool use_weights) {
 FES2DResult compute_2d_fes_grid(
     const std::vector<std::pair<double, double>> &projections,
     const std::vector<double> &analysis_weights, int requested_grid_size,
-    double target_temp, double scale_factor, size_t requested_threads) {
+    double target_temp, double scale_factor, TitanExecutor &executor) {
   FES2DResult result;
   if (projections.empty())
     return result;
@@ -238,7 +239,7 @@ FES2DResult compute_2d_fes_grid(
   }
 
   const size_t worker_count =
-      choose_worker_count(requested_threads, projections.size(), 2048);
+      choose_worker_count(executor.capacity(), projections.size(), 2048);
   std::vector<std::vector<int>> local_counts(
       worker_count, std::vector<int>(grid_cells, 0));
   std::vector<std::vector<double>> local_weights(
@@ -246,32 +247,24 @@ FES2DResult compute_2d_fes_grid(
   const double inv_step_x = 1.0 / result.step_x;
   const double inv_step_y = 1.0 / result.step_y;
 
-  {
-    std::vector<std::jthread> workers;
-    workers.reserve(worker_count);
-    for (size_t worker = 0; worker < worker_count; ++worker) {
-      const size_t begin = projections.size() * worker / worker_count;
-      const size_t end = projections.size() * (worker + 1) / worker_count;
-      if (begin >= end)
-        continue;
-      workers.emplace_back([&, worker, begin, end]() {
-        auto &counts = local_counts[worker];
-        auto &weights = local_weights[worker];
-        for (size_t frame = begin; frame < end; ++frame) {
-          const auto &[x, y] = projections[frame];
-          int ix = static_cast<int>(std::floor((x - result.min_x) * inv_step_x));
-          int iy = static_cast<int>(std::floor((y - result.min_y) * inv_step_y));
-          ix = std::clamp(ix, 0, result.grid_size - 1);
-          iy = std::clamp(iy, 0, result.grid_size - 1);
-          const size_t bin_index =
-              static_cast<size_t>(ix) * static_cast<size_t>(result.grid_size) +
-              static_cast<size_t>(iy);
-          ++counts[bin_index];
-          weights[bin_index] += analysis_weights[frame];
-        }
-      });
+  executor.parallel_do(worker_count, [&](size_t worker) {
+    const size_t begin = projections.size() * worker / worker_count;
+    const size_t end = projections.size() * (worker + 1) / worker_count;
+    auto &counts = local_counts[worker];
+    auto &weights = local_weights[worker];
+    for (size_t frame = begin; frame < end; ++frame) {
+      const auto &[x, y] = projections[frame];
+      int ix = static_cast<int>(std::floor((x - result.min_x) * inv_step_x));
+      int iy = static_cast<int>(std::floor((y - result.min_y) * inv_step_y));
+      ix = std::clamp(ix, 0, result.grid_size - 1);
+      iy = std::clamp(iy, 0, result.grid_size - 1);
+      const size_t bin_index =
+          static_cast<size_t>(ix) * static_cast<size_t>(result.grid_size) +
+          static_cast<size_t>(iy);
+      ++counts[bin_index];
+      weights[bin_index] += analysis_weights[frame];
     }
-  }
+  });
 
   for (size_t cell = 0; cell < grid_cells; ++cell) {
     int count = 0;
@@ -289,26 +282,19 @@ FES2DResult compute_2d_fes_grid(
     return result;
 
   const double kbT = kBoltzmannKjPerMolK * target_temp;
-  const size_t fe_workers = choose_worker_count(requested_threads, grid_cells, 1024);
-  {
-    std::vector<std::jthread> workers;
-    workers.reserve(fe_workers);
-    for (size_t worker = 0; worker < fe_workers; ++worker) {
-      const size_t begin = grid_cells * worker / fe_workers;
-      const size_t end = grid_cells * (worker + 1) / fe_workers;
-      if (begin >= end)
-        continue;
-      workers.emplace_back([&, begin, end]() {
-        for (size_t cell = begin; cell < end; ++cell) {
-          auto &bin = result.bins[cell];
-          if (bin.count_w > 0.0) {
-            const double prob = bin.count_w / result.max_bin_weight;
-            bin.free_energy = -kbT * scale_factor * std::log(prob);
-          }
-        }
-      });
+  const size_t fe_workers =
+      choose_worker_count(executor.capacity(), grid_cells, 1024);
+  executor.parallel_do(fe_workers, [&](size_t worker) {
+    const size_t begin = grid_cells * worker / fe_workers;
+    const size_t end = grid_cells * (worker + 1) / fe_workers;
+    for (size_t cell = begin; cell < end; ++cell) {
+      auto &bin = result.bins[cell];
+      if (bin.count_w > 0.0) {
+        const double prob = bin.count_w / result.max_bin_weight;
+        bin.free_energy = -kbT * scale_factor * std::log(prob);
+      }
     }
-  }
+  });
 
   return result;
 }
@@ -352,7 +338,8 @@ void execute_pca_fes_analysis(
     const CoordinateRows &traj_y, const CoordinateRows &traj_z,
     const std::vector<std::string> &ca_resname,
     const std::vector<int> &ca_resnrs, const std::vector<std::string> &ca_chain,
-    const std::vector<int> &ca_is_lig, info &info_out, std::fstream &log,
+    const std::vector<int> &ca_is_lig, TitanExecutor &executor, info &info_out,
+    std::fstream &log,
     const std::vector<double> &frame_weights,
     const std::vector<double> &traj_times,
     const std::vector<int> &traj_replicas,
@@ -566,7 +553,7 @@ void execute_pca_fes_analysis(
   const double target_temp = resolve_target_temperature(args, use_weights);
   auto fes_result = compute_2d_fes_grid(
       projections, analysis_weights, args.fes_grid, target_temp,
-      1.0 / args.eu_par, std::max<size_t>(1, args.nt));
+      1.0 / args.eu_par, executor);
   if (!write_2d_fes_grid("PCA", info_out.get_pca_fes_2d_filename(), fes_result,
                          log)) {
     return;
@@ -813,7 +800,7 @@ void execute_pca_fes_analysis(
 void execute_tica_fes_analysis(
     const arguments &args, const MatrixXdAnyConstRef &tica_proj_mat,
     int64_t n_actual_frames, const std::vector<int64_t> &frame_global_indices,
-    info &info_out, std::fstream &log,
+    TitanExecutor &executor, info &info_out, std::fstream &log,
     const std::vector<double> &frame_weights) {
   if (n_actual_frames <= 0) {
     TitanUI::print_warning("TICA: no projected frames available for 2D FES.");
@@ -853,7 +840,7 @@ void execute_tica_fes_analysis(
   const double target_temp = resolve_target_temperature(args, use_weights);
   const auto fes_result = compute_2d_fes_grid(
       projections, weight_state.analysis_weights, args.fes_grid, target_temp,
-      1.0 / args.eu_par, std::max<size_t>(1, args.nt));
+      1.0 / args.eu_par, executor);
   write_2d_fes_grid("TICA", info_out.get_tica_fes_2d_filename(), fes_result,
                     log);
 }

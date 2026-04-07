@@ -35,7 +35,7 @@ ifeq ($(OS),Windows_NT)
     
     # Lệnh dọn dẹp trên Windows CMD/MSYS2
     CLEAN_CMD = $(RM) *.o *.d gmxtraj\*.o gmxtraj\*.d $(TARGET) 2>nul || exit 0
-    CLEAN_GENERATED_CMD = $(RM) network_edges.csv network_nodes.csv pca_fel.csv tica_projections.csv extract_basins.sh tmp_test_dham*.in 2>nul || exit 0
+    CLEAN_GENERATED_CMD = $(RM) network_edges.csv network_nodes.csv network_communities.csv network_community_summary.csv network_supergraph.csv pca_fel.csv tica_projections.csv extract_basins.sh tmp_test_dham*.in 2>nul || exit 0
 else
     # ─── CẤU HÌNH CHO LINUX (GCC 13) ───
     CXX  = g++
@@ -56,7 +56,7 @@ else
     
     # Lệnh dọn dẹp trên Linux bash
     CLEAN_CMD = $(RM) *.o *.d gmxtraj/*.o gmxtraj/*.d $(TARGET) 2>/dev/null || true
-    CLEAN_GENERATED_CMD = $(RM) network_edges.csv network_nodes.csv pca_fel.csv tica_projections.csv extract_basins.sh tmp_test_dham*.in 2>/dev/null || true
+    CLEAN_GENERATED_CMD = $(RM) network_edges.csv network_nodes.csv network_communities.csv network_community_summary.csv network_supergraph.csv pca_fel.csv tica_projections.csv extract_basins.sh tmp_test_dham*.in 2>/dev/null || true
 endif
 
 # ─── Tệp nguồn (Sources) ───

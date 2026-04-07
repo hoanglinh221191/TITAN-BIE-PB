@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <vector>
 
+class TitanExecutor;
+
 namespace TitanUMAPKNN {
 
 using MatrixRM =
@@ -32,6 +34,7 @@ struct BuildConfig {
   int approx_seed_neighbors = 24;
   int approx_extra_random_candidates = 8;
   int n_threads = 1;
+  TitanExecutor *executor = nullptr;
 };
 
 struct BuildStats {

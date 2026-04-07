@@ -1,4 +1,5 @@
 #include "titan_tpt.h"
+#include "titan_executor.h"
 
 #include <algorithm>
 #include <Eigen/Sparse>
@@ -479,16 +480,19 @@ double TitanTPT::compute_gross_flux_value(int from, int to) const {
   return prefactor * probability * q_forward_[to];
 }
 
-void TitanTPT::compute_flux_matrices(int n_threads, double flux_cut) {
+void TitanTPT::compute_flux_matrices(TitanExecutor *executor, int n_threads,
+                                     double flux_cut) {
   gross_out_flux_.setZero();
   gross_in_flux_.setZero();
   net_out_flux_.setZero();
   net_in_flux_.setZero();
   edges_.clear();
 
-  const int threads =
-      std::clamp(n_threads, 1, std::max(1, static_cast<int>(
-                                         std::thread::hardware_concurrency())));
+  const int max_threads = (executor != nullptr)
+                              ? std::max(1, static_cast<int>(executor->capacity()))
+                              : std::max(1, static_cast<int>(
+                                               std::thread::hardware_concurrency()));
+  const int threads = std::clamp(n_threads, 1, max_threads);
   const bool use_threads = (threads > 1 && n_states_ >= 64);
 
   const int worker_count = use_threads ? threads : 1;
@@ -559,6 +563,18 @@ void TitanTPT::compute_flux_matrices(int n_threads, double flux_cut) {
 
   if (!use_threads) {
     compute_rows(0, 0, n_states_);
+  } else if (executor != nullptr) {
+    const int chunk = (n_states_ + threads - 1) / threads;
+    if (threads > 1) {
+      executor->parallel_do(static_cast<size_t>(threads), [&](size_t tid_sz) {
+        const int tid = static_cast<int>(tid_sz);
+        const int row_begin = tid * chunk;
+        const int row_end = std::min(row_begin + chunk, n_states_);
+        compute_rows(tid, row_begin, row_end);
+      });
+    } else {
+      compute_rows(0, 0, n_states_);
+    }
   } else {
     std::vector<std::jthread> workers;
     workers.reserve(static_cast<size_t>(threads));
@@ -568,9 +584,8 @@ void TitanTPT::compute_flux_matrices(int n_threads, double flux_cut) {
       const int row_end = std::min(row_begin + chunk, n_states_);
       if (row_begin >= row_end)
         continue;
-      workers.emplace_back([&, tid, row_begin, row_end]() {
-        compute_rows(tid, row_begin, row_end);
-      });
+      workers.emplace_back(
+          [&, tid, row_begin, row_end]() { compute_rows(tid, row_begin, row_end); });
     }
   }
 
@@ -741,7 +756,7 @@ void TitanTPT::extract_dominant_paths(int top_paths, double flux_cut) {
 
 void TitanTPT::compute(const std::vector<int> &source_states,
                        const std::vector<int> &sink_states, int top_paths,
-                       double flux_cut, int n_threads) {
+                       double flux_cut, TitanExecutor *executor, int n_threads) {
   validate_basins(source_states, sink_states);
   source_states_ = source_states;
   sink_states_ = sink_states;
@@ -765,7 +780,7 @@ void TitanTPT::compute(const std::vector<int> &source_states,
       [](double value) { return clamp01(value); });
 
   compute_reactive_densities();
-  compute_flux_matrices(n_threads, flux_cut);
+  compute_flux_matrices(executor, n_threads, flux_cut);
   const double noise_floor =
       std::max(flux_cut, summary_.total_reactive_flux * kNoiseGuardScale);
   extract_dominant_paths(top_paths, noise_floor);

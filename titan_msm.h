@@ -30,6 +30,7 @@
 #include <vector>
 
 class TitanKinetics;
+class TitanExecutor;
 
 class TitanMSM {
 public:
@@ -111,8 +112,8 @@ public:
   // max_iter : maximum EM iterations
   // seed     : RNG seed for K-Means++ initialisation
   // -----------------------------------------------------------------------
-  void train_kmeans(int max_iter = 300, unsigned int seed = 42,
-                    int n_threads = 1);
+  void train_kmeans(TitanExecutor &executor, int max_iter = 300,
+                    unsigned int seed = 42);
 
   // -----------------------------------------------------------------------
   // Phase 2B — Build Markov State Model
@@ -135,7 +136,8 @@ public:
   // msm_macrostates   : -1 = auto-detect from timescales
   // its_lags          : lag list for ITS scan (empty = auto-generate)
   // -----------------------------------------------------------------------
-  void export_results(const info &info_output, std::fstream &log,
+  void export_results(TitanExecutor &executor, const info &info_output,
+                      std::fstream &log,
                       int n_timescales = 3, bool msm_run_its = true,
                       bool msm_run_pcca = true, int msm_macrostates = -1,
                       const std::vector<int> &its_lags = {}) const;

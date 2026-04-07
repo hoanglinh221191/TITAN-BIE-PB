@@ -30,6 +30,8 @@ using std::string_view;
 
 using namespace std;
 
+class TitanExecutor;
+
 #ifdef __AVX__
 inline double hsum_double_avx(__m256d v) {
   __m128d vlow = _mm256_castpd256_pd128(v);
@@ -230,6 +232,7 @@ int find_h_bonds(MOL &pro_in, MOL &pro_in_ref, MOL &lig, MOL &lig_ref,
                  const arguments &Arguments, size_t num_snap,
                  vector<mol_info> &info_rec, vector<mol_info> &info_lg,
                  vector<vector<size_t>> &Hbonds_vector);
+int init_hbond_output_files(const arguments &Arguments);
 int add_atom_to_MOL(Multi_MOL &MOL_source, Multi_MOL &protein_des,
                     groups_cal &groups, int group_index,
                     const arguments &Arguments, string type,
@@ -267,20 +270,20 @@ int find_d_rescom_com(vector<com> &cen_cas, Multi_MOL &lig, d_min &dmin,
                       size_t begin, size_t end, size_t begin2, size_t end2,
                       string force_f, int flag, double d_standard);
 int impl_cscd(Multi_MOL &pro_in, Multi_MOL &lig, const arguments &Arguments,
-              fstream &log, vector<thread> &threads, size_t num_snap,
+              fstream &log, TitanExecutor &executor, size_t num_snap,
               int sc_flag, int input_name, vector<string> &list_output_name,
               all_cscd &out_dis, const folders &paths,
               vector<fstream> &out_files);
 int impl_add_coms_2_mols(Multi_MOL &mol1, Multi_MOL &mol2, arguments &Arguments,
                          size_t snap_index);
-int wrap_cal_energy_map(vector<thread> &threads, Multi_MOL &mol1,
+int wrap_cal_energy_map(TitanExecutor &executor, Multi_MOL &mol1,
                         Multi_MOL &mol2, arguments &Arguments, size_t num_snap,
                         const vector<d_min> &dmin,
                         const cache_sigma_epsilon &CachedData,
                         vector<energy_res> &Energy_res_mol1,
                         vector<energy_res> &Energy_res_mol2, info &info_output,
                         info_ener_res &infoener_res);
-int wrap_cal_force_map(vector<thread> &threads, Multi_MOL &mol1,
+int wrap_cal_force_map(TitanExecutor &executor, Multi_MOL &mol1,
                        Multi_MOL &mol2, const arguments &Arguments,
                        size_t num_snap, const vector<d_min> &dmin,
                        const cache_sigma_epsilon &CachedData,
@@ -360,11 +363,11 @@ int Energy_force_subgroups(groups_cal &groups, const Multi_MOL &rec,
                            vector<vector<energy_groups>> &EF_subgroups,
                            vector<energy_groups> &Energy_groups_out,
                            size_t num_snap, size_t MAX_NUM,
-                           arguments &Arguments, vector<thread> &calthreads);
+                           arguments &Arguments, TitanExecutor &executor);
 int stat_energy_res(vector<vector<energy_res>> &Energy_stat_res, int file_num,
                     const arguments &Arguments, info &info_output, string name);
 int impl_nocal(Multi_MOL &pro_in, Multi_MOL &lig, fstream &log,
-               arguments &Arguments, info &info_output, vector<thread> &threads,
+               arguments &Arguments, info &info_output, TitanExecutor &executor,
                amino_acid &amine, para &parameter, folders &paths,
                vector<string> &input_line, h_groups &groups_1,
                h_groups &groups_2, vector<vector<size_t>> &Hbonds_vector,
@@ -413,7 +416,7 @@ int find_pull_direct(Multi_MOL &rec, Multi_MOL &lg,
                      groups_cal &Groups_from_index_file);
 int mindis_subgroups(groups_cal &groups, const Multi_MOL &rec,
                      const Multi_MOL &lg, size_t num_snap, size_t MAX_NUM,
-                     arguments &Arguments, vector<thread> &calthreads,
+                     arguments &Arguments, TitanExecutor &executor,
                      vector<mindistance_group> &MIN_DIS);
 int post_proc_mindis(groups_cal &groups, arguments &Arguments,
                      info &info_output, vector<mindistance_group> &MIN_DIS);

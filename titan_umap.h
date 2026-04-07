@@ -13,6 +13,8 @@
 #include <thread>
 #include <vector>
 
+class TitanExecutor;
+
 class TitanUMAP {
 public:
   using InputMatrixRM = TitanUMAPKNN::MatrixRM;
@@ -33,6 +35,7 @@ public:
     int knn_approx_seed_neighbors = 24;
     int knn_approx_extra_random_candidates = 8;
     int n_threads = 1;
+    TitanExecutor *executor = nullptr;
     bool verbose = false;
   };
 

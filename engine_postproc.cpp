@@ -3,6 +3,7 @@
 // Each function manages its own timing via std::chrono and logs via fstream.
 #include "engine_postproc.h"
 #include "titan_alignment.h"
+#include "titan_executor.h"
 #include "titan_ui.h"
 #include <Eigen/Dense>
 #include <mutex>
@@ -1771,7 +1772,7 @@ bool run_tpt_bootstrap(
     int lag_frames, double lag_time_ns, bool symmetrize_counts,
     const std::vector<int> &source_states, const std::vector<int> &sink_states,
     int top_paths, double flux_cut, int n_threads, int n_samples,
-    unsigned int seed, TptBootstrapAggregate &out_bootstrap,
+    unsigned int seed, TitanExecutor &executor, TptBootstrapAggregate &out_bootstrap,
     std::string &error_message) {
   out_bootstrap = {};
   out_bootstrap.requested_samples = n_samples;
@@ -1814,15 +1815,12 @@ bool run_tpt_bootstrap(
   std::mutex merge_mutex;
   const int worker_count = std::max(1, std::min(n_threads, n_samples));
   const int chunk = (n_samples + worker_count - 1) / worker_count;
-  std::vector<std::jthread> workers;
-  workers.reserve(static_cast<std::size_t>(worker_count));
-
-  for (int worker = 0; worker < worker_count; ++worker) {
+  executor.parallel_do(static_cast<size_t>(worker_count), [&](size_t worker_sz) {
+    const int worker = static_cast<int>(worker_sz);
     const int begin = worker * chunk;
     const int end = std::min(n_samples, begin + chunk);
     if (begin >= end)
-      continue;
-    workers.emplace_back([&, begin, end, worker]() {
+      return;
       LocalAccum local(n_states);
       std::mt19937 rng(seed + static_cast<unsigned int>(worker * 7919 + 17));
       std::uniform_int_distribution<int> seg_pick(
@@ -1849,7 +1847,8 @@ bool run_tpt_bootstrap(
 
         try {
           TitanTPT sample_tpt(sample_tpm, sample_pi);
-          sample_tpt.compute(source_states, sink_states, top_paths, flux_cut, 1);
+          sample_tpt.compute(source_states, sink_states, top_paths, flux_cut,
+                             nullptr, 1);
           const auto &summary = sample_tpt.summary();
           append_if_finite(local.total_reactive_flux,
                            summary.total_reactive_flux);
@@ -1895,12 +1894,7 @@ bool run_tpt_bootstrap(
       out_bootstrap.q_forward_sq_sum += local.q_forward_sq_sum;
       out_bootstrap.reactive_density_sum += local.reactive_density_sum;
       out_bootstrap.reactive_density_sq_sum += local.reactive_density_sq_sum;
-    });
-  }
-
-  // std::jthread joins on destruction; make that happen before checking the
-  // aggregate so we don't falsely report zero successful bootstrap samples.
-  workers.clear();
+  });
 
   if (out_bootstrap.successful_samples <= 0) {
     error_message = "all bootstrap replicates failed";
@@ -2125,7 +2119,7 @@ std::size_t write_tpt_path_clusters_file(const std::string &filename,
 }
 
 TptPathSupport accumulate_tpt_path_support(const TitanTPT &tpt_analyzer,
-                                           std::size_t num_threads) {
+                                           TitanExecutor &executor) {
   const auto &paths = tpt_analyzer.paths();
   const auto &edges = tpt_analyzer.edges();
   const std::size_t n_edges = edges.size();
@@ -2148,8 +2142,8 @@ TptPathSupport accumulate_tpt_path_support(const TitanTPT &tpt_analyzer,
   }
 
   const std::size_t worker_count =
-      (num_threads > 1 && paths.size() >= 8 && total_work >= 256)
-          ? std::min<std::size_t>(num_threads, paths.size())
+      (executor.capacity() > 1 && paths.size() >= 8 && total_work >= 256)
+          ? std::min<std::size_t>(executor.capacity(), paths.size())
           : 1;
 
   auto accumulate_range = [&](std::size_t begin, std::size_t end,
@@ -2191,19 +2185,14 @@ TptPathSupport accumulate_tpt_path_support(const TitanTPT &tpt_analyzer,
   for (std::size_t i = 0; i < worker_count; ++i)
     locals.emplace_back(n_edges, n_states);
 
-  std::vector<std::jthread> workers;
-  workers.reserve(worker_count);
   const std::size_t chunk = (paths.size() + worker_count - 1) / worker_count;
-  for (std::size_t worker = 0; worker < worker_count; ++worker) {
+  executor.parallel_do(worker_count, [&](size_t worker) {
     const std::size_t begin = worker * chunk;
     const std::size_t end = std::min(paths.size(), begin + chunk);
     if (begin >= end)
-      break;
-    workers.emplace_back([&, begin, end, worker]() {
-      accumulate_range(begin, end, locals[worker]);
-    });
-  }
-  workers.clear();
+      return;
+    accumulate_range(begin, end, locals[worker]);
+  });
 
   for (const auto &local : locals) {
     for (std::size_t i = 0; i < n_edges; ++i) {
@@ -2528,7 +2517,7 @@ std::size_t write_tpt_all_pairs_kinetics_file(const std::string &filename,
       if (source == sink)
         continue;
       TitanTPT macro_tpt(macro_tpm, macro_pi);
-      macro_tpt.compute({source}, {sink}, 3, 0.0, 1);
+      macro_tpt.compute({source}, {sink}, 3, 0.0, nullptr, 1);
       const auto &summary = macro_tpt.summary();
       const double rate_ns =
           (lag_time_ns > 0.0) ? summary.rate_source_to_sink_per_lag / lag_time_ns
@@ -2859,7 +2848,7 @@ void run_tica_msm_postproc(const arguments &args,
                            DCCMNetwork &dccm_analyzer,
                            std::unique_ptr<TitanKinetics> &tica_analyzer,
                            std::unique_ptr<TitanMSM> &msm_analyzer,
-                           size_t num_threads, info &info_output,
+                           TitanExecutor &executor, info &info_output,
                            std::fstream &log) {
   if (!(args.msm.flag_tica && tica_analyzer))
     return;
@@ -2942,16 +2931,15 @@ void run_tica_msm_postproc(const arguments &args,
       }
 
       if (msm_analyzer->n_frames() > 0) {
-        msm_analyzer->train_kmeans(args.msm.msm_kmeans_iter,
-                                   static_cast<unsigned>(args.msm.msm_seed),
-                                   static_cast<int>(num_threads));
+        msm_analyzer->train_kmeans(executor, args.msm.msm_kmeans_iter,
+                                   static_cast<unsigned>(args.msm.msm_seed));
 
         if (msm_analyzer->is_clustered())
           msm_analyzer->build_markov_model(args.msm.msm_lag);
 
         if (msm_analyzer->is_built()) {
           msm_analyzer->export_results(
-              info_output, log, args.msm.msm_nts, args.msm.msm_run_its,
+              executor, info_output, log, args.msm.msm_nts, args.msm.msm_run_its,
               args.msm.msm_run_pcca, args.msm.msm_macrostates,
               args.msm.msm_its_lags);
         }
@@ -2980,7 +2968,8 @@ void run_tica_msm_postproc(const arguments &args,
 // ============================================================================
 void run_tica_fes_postproc(const arguments &args,
                            std::unique_ptr<TitanMSM> &msm_analyzer,
-                           info &info_output, std::fstream &log,
+                           TitanExecutor &executor, info &info_output,
+                           std::fstream &log,
                            const std::vector<double> &frame_weights) {
   if (!(args.msm.flag_tica && args.msm.flag_msm && msm_analyzer))
     return;
@@ -2992,7 +2981,7 @@ void run_tica_fes_postproc(const arguments &args,
     TitanUI::print_module_header("TICA 2D Free Energy Surface");
     TitanPCA::execute_tica_fes_analysis(
         args, msm_analyzer->proj_mat_ref(), msm_analyzer->n_frames(),
-        msm_analyzer->get_frame_global_indices(), info_output, log,
+        msm_analyzer->get_frame_global_indices(), executor, info_output, log,
         frame_weights);
     auto time_tica_fes = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start_tica_fes);
@@ -3007,7 +2996,7 @@ void run_tica_fes_postproc(const arguments &args,
 void run_umap_postproc(const arguments &args,
                        std::unique_ptr<TitanMSM> &msm_analyzer,
                        std::unique_ptr<TitanUMAP> &umap_analyzer,
-                       size_t num_threads,
+                       TitanExecutor &executor,
                        const info &info_output, std::fstream &log) {
   if (!(args.umap.flag_umap && msm_analyzer && msm_analyzer->n_frames() > 0))
     return;
@@ -3023,7 +3012,8 @@ void run_umap_postproc(const arguments &args,
     cfg.min_dist = args.umap.umap_min_dist;
     cfg.spread = args.umap.umap_spread;
     cfg.seed = args.umap.umap_seed;
-    cfg.n_threads = static_cast<int>(std::max<size_t>(1, num_threads));
+    cfg.n_threads = static_cast<int>(std::max<size_t>(1, executor.capacity()));
+    cfg.executor = &executor;
     if (args.umap.umap_knn_mode == "approx") {
       cfg.knn_mode = TitanUMAP::KnnMode::Approx;
     } else if (args.umap.umap_knn_mode == "auto") {
@@ -3074,7 +3064,7 @@ void run_umap_postproc(const arguments &args,
 // ============================================================================
 void run_llps_postproc(const arguments &args,
                        std::unique_ptr<TitanLLPS> &llps_analyzer,
-                       size_t num_threads, info &info_output,
+                       TitanExecutor &executor, info &info_output,
                        std::fstream &log) {
   if (!(args.llps.flag_llps && llps_analyzer &&
         llps_analyzer->n_frames_processed() > 0))
@@ -3083,7 +3073,8 @@ void run_llps_postproc(const arguments &args,
   try {
     auto start_llps = std::chrono::steady_clock::now();
     TitanUI::print_module_header("LLPS Analysis");
-    llps_analyzer->finalize(static_cast<int>(num_threads), args.llps.llps_maxlag);
+    llps_analyzer->finalize(static_cast<int>(executor.capacity()),
+                            args.llps.llps_maxlag);
     llps_analyzer->export_results(info_output, log);
     auto time_llps = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start_llps);
@@ -3097,12 +3088,13 @@ void run_llps_postproc(const arguments &args,
 // 5. DCCM + PCA post-processing
 // ============================================================================
 void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
-                           DCCMNetwork &dccm_analyzer, size_t num_threads,
+                           DCCMNetwork &dccm_analyzer, TitanExecutor &executor,
                            std::chrono::milliseconds &time_network,
                            info &info_output, std::fstream &log,
                            const std::vector<double> &frame_weights,
                            const std::vector<std::string> &replica_traj_files) {
-  if (!(args.flag_network_explicit || args.flag_pca || args.flag_allostery))
+  if (!(args.flag_network_explicit || args.flag_pca || args.flag_allostery ||
+        args.community.flag_community))
     return;
 
   try {
@@ -3110,7 +3102,7 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
       auto start_dccm = std::chrono::steady_clock::now();
       TitanUI::print_module_header("DCCM Network Analysis");
 
-      dccm_analyzer.calculate_and_export(num_threads);
+      dccm_analyzer.calculate_and_export(executor, info_output);
 
       time_network += std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now() - start_dccm);
@@ -3127,8 +3119,7 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
         cfg.cutoff_ang = args.allostery_cutoff;
         cfg.use_avg_cutoff = args.allostery_use_avg_cutoff;
         cfg.compute_te = args.allostery_compute_te;
-        dccm_analyzer.calculate_allostery_information_optimized(num_threads,
-                                                                cfg);
+        dccm_analyzer.calculate_allostery_information_optimized(executor, cfg);
         TitanUI::log_kv(log, "Allostery TE Stage",
                         cfg.compute_te ? "enabled" : "disabled (GC only)");
         if (cfg.cutoff_ang > 0.0 || cfg.knn > 0) {
@@ -3211,8 +3202,8 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
         TitanPCA::execute_pca_fes_analysis(
             args, pca_traj_x, pca_traj_y, pca_traj_z,
             dccm_analyzer.get_resnames(), dccm_analyzer.get_resnrs(),
-            dccm_analyzer.get_chains(),
-            dccm_analyzer.get_is_lig(), info_output, log, pca_frame_weights,
+            dccm_analyzer.get_chains(), dccm_analyzer.get_is_lig(), executor,
+            info_output, log, pca_frame_weights,
             dccm_analyzer.get_traj_times(), dccm_analyzer.get_traj_replicas(),
             replica_traj_files);
       }
@@ -3226,7 +3217,7 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
 // 5. LSP-MD post-processing (Kornev, JCTC 2025)
 // ============================================================================
 void run_lspmd_postproc(const arguments &args, DCCMNetwork &dccm_analyzer,
-                        size_t num_threads, info &info_output,
+                        TitanExecutor &executor, info &info_output,
                         std::fstream &log) {
   if (!args.lspmd.flag_lspmd)
     return;
@@ -3250,7 +3241,7 @@ void run_lspmd_postproc(const arguments &args, DCCMNetwork &dccm_analyzer,
     cfg.use_avg_cutoff = args.lspmd.lspmd_use_avg;
 
     DCCMNetwork::LSPMDResult result;
-    dccm_analyzer.calculate_lspmd(num_threads, cfg, result);
+    dccm_analyzer.calculate_lspmd(executor, cfg, result);
     dccm_analyzer.export_lspmd(result);
 
     TitanUI::log_kv(log, "LSP-MD Edges",
@@ -3268,7 +3259,7 @@ void run_lspmd_postproc(const arguments &args, DCCMNetwork &dccm_analyzer,
 // ============================================================================
 void run_dham_postproc(const arguments &args,
                        std::unique_ptr<TitanMSM> &msm_analyzer,
-                       size_t num_threads, info &info_output,
+                       TitanExecutor &executor, info &info_output,
                        std::fstream &log,
                        std::vector<double> &out_frame_weights,
                        Eigen::MatrixXd *out_reweighted_tpm,
@@ -3393,26 +3384,23 @@ void run_dham_postproc(const arguments &args,
   std::unordered_map<int, std::vector<double>> per_replica_energies;
   std::unordered_map<int, std::vector<std::pair<double, double>>> parsed_xvg;
   std::mutex parsed_xvg_mutex;
-  int n_io_threads = std::min(static_cast<int>(num_threads), n_replicas);
-  {
-    std::vector<std::jthread> workers;
-    workers.reserve(static_cast<size_t>(n_io_threads));
-    int chunk = (n_replicas + n_io_threads - 1) / n_io_threads;
-    for (int t = 0; t < n_io_threads; ++t) {
-      int ks = t * chunk;
-      int ke = std::min(ks + chunk, n_replicas);
-      if (ks >= ke) continue;
-      workers.emplace_back([&, ks, ke]() {
-        for (int k = ks; k < ke; ++k) {
-          auto xvg_data = TitanDHAM::parse_xvg(
-              ener_paths[static_cast<size_t>(k)]);
-          if (xvg_data.empty()) continue;
-          std::lock_guard<std::mutex> lock(parsed_xvg_mutex);
-          parsed_xvg[k] = std::move(xvg_data);
-        }
-      });
+  const int n_io_threads =
+      std::min(static_cast<int>(executor.capacity()), n_replicas);
+  const int chunk = (n_replicas + n_io_threads - 1) / n_io_threads;
+  executor.parallel_do(static_cast<size_t>(n_io_threads), [&](size_t t_sz) {
+    const int t = static_cast<int>(t_sz);
+    const int ks = t * chunk;
+    const int ke = std::min(ks + chunk, n_replicas);
+    if (ks >= ke)
+      return;
+    for (int k = ks; k < ke; ++k) {
+      auto xvg_data = TitanDHAM::parse_xvg(ener_paths[static_cast<size_t>(k)]);
+      if (xvg_data.empty())
+        continue;
+      std::lock_guard<std::mutex> lock(parsed_xvg_mutex);
+      parsed_xvg[k] = std::move(xvg_data);
     }
-  }
+  });
   TitanUI::log_kv(log, "DHAM Window Matching", args.dham.window_match);
   if (args.dham.dt_energy_ps > 0.0) {
     TitanUI::print_info("DHAM: Using user-specified dt_energy = " +
@@ -3801,7 +3789,7 @@ void run_dham_postproc(const arguments &args,
   // 6. Compute per-state mean thermodynamic observables (Opt 4: multi-threaded)
   auto state_energies = TitanDHAM::compute_state_energies(
       per_replica_dtrajs, per_replica_observables, n_states, n_replicas,
-      static_cast<int>(num_threads));
+      static_cast<int>(executor.capacity()));
 
   // 7. Create TitanDHAM and load data
   TitanDHAM dham(n_states, n_replicas, temps, args.dham.target_temp);
@@ -4007,7 +3995,7 @@ void run_dham_postproc(const arguments &args,
 
 void run_tpt_postproc(const arguments &args,
                       std::unique_ptr<TitanMSM> &msm_analyzer,
-                      size_t num_threads, info &info_output,
+                      TitanExecutor &executor, info &info_output,
                       std::fstream &log,
                       const std::vector<std::string> &lj_feature_files,
                       const TitanRMSAnalyzer *rms_analyzer,
@@ -4153,7 +4141,8 @@ void run_tpt_postproc(const arguments &args,
 
     TitanTPT analyzer(*model_tpm_ptr, *model_pi_ptr);
     analyzer.compute(source_states, sink_states, args.tpt.top_paths,
-                     args.tpt.flux_cut, static_cast<int>(num_threads));
+                     args.tpt.flux_cut, &executor,
+                     static_cast<int>(executor.capacity()));
     analyzer.write_results(info_output.get_tpt_summary_filename(),
                            info_output.get_tpt_committor_filename(),
                            info_output.get_tpt_flux_edges_filename(),
@@ -4173,7 +4162,7 @@ void run_tpt_postproc(const arguments &args,
     const std::size_t n_path_clusters = write_tpt_path_clusters_file(
         info_output.get_tpt_path_clusters_filename(), analyzer);
     const TptPathSupport bottleneck_support =
-        accumulate_tpt_path_support(analyzer, num_threads);
+        accumulate_tpt_path_support(analyzer, executor);
     const auto bottleneck_edge_rows =
         compute_tpt_bottleneck_edges(analyzer, macro_assignments,
                                      bottleneck_support);
@@ -4274,8 +4263,9 @@ void run_tpt_postproc(const arguments &args,
                 msm_analyzer->msm_lag_time(), msm_analyzer->lag_time_ns(),
                 symmetrize_bootstrap, source_states, sink_states,
                 args.tpt.top_paths, args.tpt.flux_cut,
-                static_cast<int>(num_threads), args.tpt.bootstrap_samples,
-                args.tpt.bootstrap_seed, bootstrap, bootstrap_error)) {
+                static_cast<int>(executor.capacity()),
+                args.tpt.bootstrap_samples, args.tpt.bootstrap_seed, executor,
+                bootstrap, bootstrap_error)) {
           write_tpt_bootstrap_files(
               info_output.get_tpt_bootstrap_summary_filename(),
               info_output.get_tpt_bootstrap_states_filename(), bootstrap,

@@ -1,4 +1,5 @@
 #include "titan_dssp.h"
+#include "titan_executor.h"
 
 #include "titan_ui.h"
 
@@ -453,7 +454,7 @@ void TitanDSSPAnalyzer::update_best_bond(std::array<BondRecord, 2> &best,
   }
 }
 
-void TitanDSSPAnalyzer::compute_hbond_topology(std::size_t num_threads) {
+void TitanDSSPAnalyzer::compute_hbond_topology(TitanExecutor &executor) {
   const std::size_t n_res = residues_.size();
   if (n_res == 0)
     return;
@@ -468,8 +469,8 @@ void TitanDSSPAnalyzer::compute_hbond_topology(std::size_t num_threads) {
     flags[2] = HelixFlag::None;
   }
 
-  const std::size_t worker_count = std::max<std::size_t>(
-      1, std::min<std::size_t>(num_threads == 0 ? 1 : num_threads, n_res));
+  const std::size_t worker_count =
+      std::max<std::size_t>(1, std::min<std::size_t>(executor.capacity(), n_res));
 
   auto worker = [this, n_res](std::size_t begin, std::size_t end) {
     alignas(32) double ca_d2_buf[4];
@@ -526,15 +527,11 @@ void TitanDSSPAnalyzer::compute_hbond_topology(std::size_t num_threads) {
     }
   };
 
-  std::vector<std::jthread> workers;
-  workers.reserve(worker_count);
-  for (std::size_t worker_idx = 0; worker_idx < worker_count; ++worker_idx) {
-    const std::size_t begin = n_res * worker_idx / worker_count;
-    const std::size_t end = n_res * (worker_idx + 1) / worker_count;
-    if (begin >= end)
-      continue;
-    workers.emplace_back(worker, begin, end);
-  }
+  executor.parallel_for(
+      n_res, worker_count, 1,
+      [&](std::size_t /*worker_id*/, std::size_t begin, std::size_t end) {
+        worker(begin, end);
+      });
 }
 
 bool TitanDSSPAnalyzer::test_bond(std::size_t donor,
@@ -784,12 +781,12 @@ void TitanDSSPAnalyzer::classify_current_frame() {
 }
 
 void TitanDSSPAnalyzer::process_frame(const Multi_MOL &mol, std::size_t snap_idx,
-                                      std::size_t num_threads) {
+                                      TitanExecutor &executor) {
   if (!enabled_ || !initialized_ || snap_idx >= mol.m_mol.size())
     return;
 
   prepare_backbone_coordinates(mol.m_mol[snap_idx]);
-  compute_hbond_topology(num_threads);
+  compute_hbond_topology(executor);
   classify_current_frame();
 
   FrameProfile frame_profile{};

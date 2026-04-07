@@ -11,13 +11,16 @@ struct h_group
 	h_group() :name{ '-' }, index{} {
 		h_index.reserve(100);
 	}
-	int add_groups(const MOL& mol_in, const MOL& ref, size_t i, const size_t remain, char _name, double bond_length, vector<mol_info>& info);
+	[[nodiscard]] bool has_hydrogen() const noexcept { return !h_index.empty(); }
+	int add_groups(const MOL& mol_in, size_t i, char _name, double bond_length,
+	               const vector<mol_info>& info);
 };
 
 struct h_groups
 {
 	std::vector<h_group> groups;
-	int find_groups(const MOL& mol_in, const MOL& ref, vector<mol_info>& info, const arguments& Arguments);
+	int find_groups(const MOL& mol_in, const vector<mol_info>& info,
+	                const arguments& Arguments);
 	void print_group(int m);
 };
 

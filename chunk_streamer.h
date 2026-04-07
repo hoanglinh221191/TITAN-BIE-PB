@@ -13,6 +13,8 @@
 #include <string_view>
 #include <vector>
 
+class TitanExecutor;
+
 // Forward-declare XDR types to avoid including xdrfile.h
 // (which defines `typedef float matrix[3][3]` conflicting with Eigen)
 struct XDRFILE;
@@ -20,7 +22,8 @@ struct XDRFILE;
 class ChunkStreamer {
 public:
   ChunkStreamer(arguments &args, info &output_info, groups_cal &groups,
-                std::string_view force_f, size_t num_threads);
+                std::string_view force_f, TitanExecutor &executor,
+                size_t num_threads);
   ~ChunkStreamer();
 
   void set_frame0_positions(std::streampos pos_pro, std::streampos pos_lig) {
@@ -52,6 +55,7 @@ private:
   info &info_ref;
   groups_cal &groups_ref;
   std::string force_f;
+  TitanExecutor *executor_;
   size_t nt;
 
   std::ifstream stream_pro;

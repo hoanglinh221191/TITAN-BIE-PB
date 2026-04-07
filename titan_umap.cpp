@@ -350,6 +350,7 @@ void TitanUMAP::fit_transform(const MatrixXdAnyConstRef &proj_mat,
     knn_cfg.approx_seed_neighbors = cfg_.knn_approx_seed_neighbors;
     knn_cfg.approx_extra_random_candidates = cfg_.knn_approx_extra_random_candidates;
     knn_cfg.n_threads = std::max(1, cfg_.n_threads);
+    knn_cfg.executor = cfg_.executor;
 
     auto knn_result =
         TitanUMAPKNN::build_knn_graph(input, effective_neighbors, knn_cfg);

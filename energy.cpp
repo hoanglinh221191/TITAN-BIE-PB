@@ -6,6 +6,7 @@
 #include "miscellaneous.h"
 #include "new_emap.h"
 #include "stat_ener_res_res.h"
+#include "titan_executor.h"
 #include "uti_func.h"
 #include <algorithm>
 #include <chrono>
@@ -1307,7 +1308,7 @@ int imp_cal_energy_rec_res(multi_snap_emap &rec_ener_inter,
   return 0;
 }
 
-void energyMapOf2Pro(vector<thread> &threads, info_ener_res &infoener_res,
+void energyMapOf2Pro(TitanExecutor &executor, info_ener_res &infoener_res,
                      const Multi_MOL &rec, const Multi_MOL &lg, size_t num_snap,
                      const vector<d_min> &dmin,
                      const cache_sigma_epsilon &CachedData, size_t nt,
@@ -1350,16 +1351,14 @@ void energyMapOf2Pro(vector<thread> &threads, info_ener_res &infoener_res,
   // << '\n'; cout << "size of map mol1: " <<
   // list_res_mol1.size() << '\n';
 
-  for (size_t i{}; i < nt; ++i)
-    threads[i] =
-        thread(imp_cal_energy_lg, ref(data_lg[i]), ref(rec), ref(lg), num_snap,
-               static_cast<size_t>(i * list_res_mol2.size() / nt),
-               static_cast<size_t>((i + 1) * list_res_mol2.size() / nt),
-               ref(dmin), ref(CachedData), flag_all_mode, ref(rec_parameters),
-               ref(lg_parameters), ref(map_list_res), ref(list_res_mol2),
-               ref(infoener_res_v[i]), ref(Arguments));
-  for (auto &t : threads)
-    t.join();
+  executor.parallel_do(nt, [&](size_t i) {
+    imp_cal_energy_lg(data_lg[i], rec, lg, num_snap,
+                      static_cast<size_t>(i * list_res_mol2.size() / nt),
+                      static_cast<size_t>((i + 1) * list_res_mol2.size() / nt),
+                      dmin, CachedData, flag_all_mode, rec_parameters,
+                      lg_parameters, map_list_res, list_res_mol2,
+                      infoener_res_v[i], Arguments);
+  });
 
   vector<bool> is_lg_dmin_res;
   if (flag_all_mode) {
@@ -1380,16 +1379,14 @@ void energyMapOf2Pro(vector<thread> &threads, info_ener_res &infoener_res,
   }
 
   cache_sigma_epsilon empty_cache;
-  for (size_t i{}; i < nt; ++i)
-    threads[i] = thread(
-        imp_cal_energy_rec, ref(data_rec[i]), ref(infoener_res_v[i]), ref(rec),
-        ref(lg), num_snap, static_cast<size_t>(i * list_res_mol1.size() / nt),
-        static_cast<size_t>((i + 1) * list_res_mol1.size() / nt), ref(dmin),
-        ref(CachedData), flag_all_mode, ref(rec_parameters), ref(lg_parameters),
-        ref(map_list_res_mol1), ref(list_res_mol1), ref(Arguments),
-        std::cref(is_lg_dmin_res));
-  for (auto &t : threads)
-    t.join();
+  executor.parallel_do(nt, [&](size_t i) {
+    imp_cal_energy_rec(data_rec[i], infoener_res_v[i], rec, lg, num_snap,
+                       static_cast<size_t>(i * list_res_mol1.size() / nt),
+                       static_cast<size_t>((i + 1) * list_res_mol1.size() / nt),
+                       dmin, CachedData, flag_all_mode, rec_parameters,
+                       lg_parameters, map_list_res_mol1, list_res_mol1,
+                       Arguments, is_lg_dmin_res);
+  });
   // cout << "time of cal map snap " << num_snap << " (ms):
   // "
   //	<<
@@ -1408,7 +1405,7 @@ void energyMapOf2Pro(vector<thread> &threads, info_ener_res &infoener_res,
                        Energy_res_mol1, Energy_res_mol2, num_snap, info_output);
 }
 
-void energyMapOfProLig(vector<thread> &threads, info_ener_res &infoener_res,
+void energyMapOfProLig(TitanExecutor &executor, info_ener_res &infoener_res,
                        const Multi_MOL &rec, const Multi_MOL &lg,
                        size_t num_snap, const vector<d_min> &dmin,
                        const cache_sigma_epsilon &CachedData, size_t nt,
@@ -1444,27 +1441,25 @@ void energyMapOfProLig(vector<thread> &threads, info_ener_res &infoener_res,
     }
   }
 
-  for (size_t i{}; i < nt; ++i)
-    threads[i] = thread(
-        imp_cal_energy_lg_atom, ref(data_lg[i]), ref(rec), ref(lg), num_snap,
+  executor.parallel_do(nt, [&](size_t i) {
+    imp_cal_energy_lg_atom(
+        data_lg[i], rec, lg, num_snap,
         static_cast<size_t>(i * lg.m_mol[num_snap].size() / nt),
         std::min(static_cast<size_t>((i + 1) * lg.m_mol[num_snap].size() / nt),
                  lg.info.size()),
-        ref(dmin), ref(CachedData), ref(rec_parameters), ref(lg_parameters),
-        ref(Arguments), false, &infoener_res_v[i]);
-  for (auto &t : threads)
-    t.join();
+        dmin, CachedData, rec_parameters, lg_parameters, Arguments, false,
+        &infoener_res_v[i]);
+  });
 
-  for (size_t i{}; i < nt; ++i)
-    threads[i] = thread(
-        imp_cal_energy_lg_atom, ref(data_rec[i]), ref(lg), ref(rec), num_snap,
+  executor.parallel_do(nt, [&](size_t i) {
+    imp_cal_energy_lg_atom(
+        data_rec[i], lg, rec, num_snap,
         static_cast<size_t>(i * rec.m_mol[num_snap].size() / nt),
         std::min(static_cast<size_t>((i + 1) * rec.m_mol[num_snap].size() / nt),
                  rec.info.size()),
-        ref(dmin), ref(CachedData), ref(lg_parameters), ref(rec_parameters),
-        ref(Arguments), true, &infoener_res_v[i]);
-  for (auto &t : threads)
-    t.join();
+        dmin, CachedData, lg_parameters, rec_parameters, Arguments, true,
+        &infoener_res_v[i]);
+  });
 
   for (auto &ii : infoener_res_v) {
     for (auto &ele : ii.position_map) {
@@ -1478,7 +1473,8 @@ void energyMapOfProLig(vector<thread> &threads, info_ener_res &infoener_res,
                        Energy_res_mol1, Energy_res_mol2, num_snap, info_output);
 }
 
-int energyMapOf2Ligs(const Multi_MOL &rec, const Multi_MOL &lg, size_t num_snap,
+int energyMapOf2Ligs(TitanExecutor &executor, const Multi_MOL &rec,
+                     const Multi_MOL &lg, size_t num_snap,
                      const vector<d_min> &dmin,
                      const cache_sigma_epsilon &CachedData, size_t nt,
                      const arguments &Arguments,
@@ -1487,31 +1483,28 @@ int energyMapOf2Ligs(const Multi_MOL &rec, const Multi_MOL &lg, size_t num_snap,
                      const Multi_MOL_parameters &rec_parameters,
                      const Multi_MOL_parameters &lg_parameters,
                      info_ener_res &infoener_res) {
-  vector<thread> ener(nt);
   vector<vector<data_out>> data_lg(nt), data_rec(nt);
   vector<info_ener_res> infoener_res_v(nt);
 
-  for (size_t i{}; i < nt; ++i)
-    ener[i] = thread(
-        imp_cal_energy_lg_atom, ref(data_lg[i]), ref(rec), ref(lg), num_snap,
+  executor.parallel_do(nt, [&](size_t i) {
+    imp_cal_energy_lg_atom(
+        data_lg[i], rec, lg, num_snap,
         static_cast<size_t>(i * lg.m_mol[num_snap].size() / nt),
         std::min(static_cast<size_t>((i + 1) * lg.m_mol[num_snap].size() / nt),
                  lg.info.size()),
-        ref(dmin), ref(CachedData), ref(rec_parameters), ref(lg_parameters),
-        ref(Arguments), false, &infoener_res_v[i]);
-  for (auto &t : ener)
-    t.join();
+        dmin, CachedData, rec_parameters, lg_parameters, Arguments, false,
+        &infoener_res_v[i]);
+  });
 
-  for (size_t i{}; i < nt; ++i)
-    ener[i] = thread(
-        imp_cal_energy_lg_atom, ref(data_rec[i]), ref(lg), ref(rec), num_snap,
+  executor.parallel_do(nt, [&](size_t i) {
+    imp_cal_energy_lg_atom(
+        data_rec[i], lg, rec, num_snap,
         static_cast<size_t>(i * rec.m_mol[num_snap].size() / nt),
         std::min(static_cast<size_t>((i + 1) * rec.m_mol[num_snap].size() / nt),
                  rec.info.size()),
-        ref(dmin), ref(CachedData), ref(lg_parameters), ref(rec_parameters),
-        ref(Arguments), true, &infoener_res_v[i]);
-  for (auto &t : ener)
-    t.join();
+        dmin, CachedData, lg_parameters, rec_parameters, Arguments, true,
+        &infoener_res_v[i]);
+  });
 
   for (auto &ii : infoener_res_v) {
     for (auto &ele : ii.position_map) {
@@ -1527,7 +1520,7 @@ int energyMapOf2Ligs(const Multi_MOL &rec, const Multi_MOL &lg, size_t num_snap,
   return 0;
 }
 
-int wrap_cal_energy_map(vector<thread> &threads, Multi_MOL &mol1,
+int wrap_cal_energy_map(TitanExecutor &executor, Multi_MOL &mol1,
                         Multi_MOL &mol2, arguments &Arguments, size_t num_snap,
                         const vector<d_min> &dmin,
                         const cache_sigma_epsilon &CachedData,
@@ -1543,25 +1536,25 @@ int wrap_cal_energy_map(vector<thread> &threads, Multi_MOL &mol1,
 
   if ((is_lig1 && is_lig2) ||
       (Arguments.energy_map == 3 && Arguments.emap_type == "atom-atom")) {
-    energyMapOf2Ligs(mol1, mol2, num_snap, dmin, CachedData, Arguments.nt,
+    energyMapOf2Ligs(executor, mol1, mol2, num_snap, dmin, CachedData, Arguments.nt,
                      Arguments, Energy_res_mol1, Energy_res_mol2, info_output,
                      mol1.parameters, mol2.parameters, infoener_res);
   } else if ((!is_lig1 && is_lig2) ||
              (Arguments.energy_map == 3 &&
               Arguments.emap_type == "residue-atom")) {
-    energyMapOfProLig(threads, infoener_res, mol1, mol2, num_snap, dmin,
+    energyMapOfProLig(executor, infoener_res, mol1, mol2, num_snap, dmin,
                       CachedData, Arguments.nt, Arguments.emap_level == "all",
                       Arguments, Energy_res_mol1, Energy_res_mol2, info_output,
                       mol1.parameters, mol2.parameters);
   } else if ((is_lig1 && !is_lig2) ||
              (Arguments.energy_map == 3 &&
               Arguments.emap_type == "atom-residue")) {
-    energyMapOfProLig(threads, infoener_res, mol2, mol1, num_snap, dmin,
+    energyMapOfProLig(executor, infoener_res, mol2, mol1, num_snap, dmin,
                       CachedData, Arguments.nt, Arguments.emap_level == "all",
                       Arguments, Energy_res_mol1, Energy_res_mol2, info_output,
                       mol2.parameters, mol1.parameters);
   } else {
-    energyMapOf2Pro(threads, infoener_res, mol1, mol2, num_snap, dmin,
+    energyMapOf2Pro(executor, infoener_res, mol1, mol2, num_snap, dmin,
                     CachedData, Arguments.nt, true, Arguments, Energy_res_mol1,
                     Energy_res_mol2, info_output, mol1.parameters,
                     mol2.parameters);

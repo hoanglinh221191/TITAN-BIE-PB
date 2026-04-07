@@ -72,6 +72,23 @@ int arguments::parse_arguments(int argc, char **argv) {
       continue;
     }
 
+    if (arg.rfind("-community=", 0) == 0) {
+      community.flag_community = true;
+      community.method = arg.substr(11);
+      flag_network = true;
+      continue;
+    }
+    if (arg == "-community") {
+      TitanUI::print_error(
+          "Community: use -community=louvain (single token, no spaces).");
+      exit(EXIT_FAILURE);
+    }
+    if (arg.rfind("--community", 0) == 0) {
+      TitanUI::print_error(
+          "Community: use -community=louvain (single dash, no spaces).");
+      exit(EXIT_FAILURE);
+    }
+
     if (arg == "-gbsa") {
       flag_gbsa = true;
     }
@@ -1413,7 +1430,7 @@ arguments::tokenize_arg_file(const std::string &filename) {
       if (ve != std::string::npos)
         value = value.substr(0, ve + 1);
 
-      if (flag == "-pbctopo-anchor-backend") {
+      if (flag == "-pbctopo-anchor-backend" || flag == "-community") {
         tokens.push_back(flag + "=" + value);
       } else {
         // Split flag and value into separate tokens (single-dash only in arg.in)

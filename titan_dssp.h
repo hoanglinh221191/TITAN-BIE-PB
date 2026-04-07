@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+class TitanExecutor;
+
 class TitanDSSPAnalyzer {
 public:
   static constexpr std::size_t kStateCount = 8;
@@ -39,7 +41,7 @@ public:
   void configure(const DsspArgs &args);
   void init(const Multi_MOL &mol, const std::string &label);
   void process_frame(const Multi_MOL &mol, std::size_t snap_idx,
-                     std::size_t num_threads);
+                     TitanExecutor &executor);
   void finalize_trajectory();
   void export_results(const std::string &filename, std::fstream &log) const;
   void export_content_profile(const std::string &filename,
@@ -91,7 +93,7 @@ private:
 
   void build_residue_map(const std::vector<mol_info> &info);
   void prepare_backbone_coordinates(const MOL &frame);
-  void compute_hbond_topology(std::size_t num_threads);
+  void compute_hbond_topology(TitanExecutor &executor);
   void classify_current_frame();
   void compute_mean_sem(std::vector<double> &mean,
                         std::vector<double> &sem) const;

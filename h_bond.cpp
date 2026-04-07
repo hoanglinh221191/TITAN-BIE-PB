@@ -1,444 +1,807 @@
 #include "h_bond.h"
+
+#include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
-#include <thread>
-// #include<mutex>
-#include "MOL.h"
-#include "functions.h"
-#include "miscellaneous.h"
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <ostream>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
-using namespace std;
-double PI = 3.1415926535897;
-// std::mutex emplace_mutex_1;
-// std::mutex emplace_mutex_2;
-double cal_angle_3_atoms(double x1, double y1, double z1, double x2, double y2,
-                         double z2, double x3, double y3, double z3);
-inline double cal_cos_angle_3_atoms(double x1, double y1, double z1, double x2,
-                                    double y2, double z2, double x3, double y3,
-                                    double z3) {
-  double vector_1[3]{x1 - x2, y1 - y2, z1 - z2};
-  double vector_2[3]{x3 - x2, y3 - y2, z3 - z2};
-  double d1 = std::sqrt(vector_1[0] * vector_1[0] + vector_1[1] * vector_1[1] +
-                        vector_1[2] * vector_1[2]);
-  double d2 = std::sqrt(vector_2[0] * vector_2[0] + vector_2[1] * vector_2[1] +
-                        vector_2[2] * vector_2[2]);
-  return (vector_1[0] * vector_2[0] + vector_1[1] * vector_2[1] +
-          vector_1[2] * vector_2[2]) /
-         (d1 * d2);
-} // Returns cos(angle)
-int print_hbond_per_snap(MOL &pro_in, MOL &lig, vector<mol_info> &info_rec,
-                         vector<mol_info> &info_lg, const arguments &Arguments);
-inline bool check_sidechain_hbond(const arguments &Arguments, string atom) {
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
+
+#include "MOL.h"
+#include "functions.h"
+#include "miscellaneous.h"
+
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kMinDistanceSq = 1.0e-4;
+constexpr std::string_view kHBondAllFile = "out_hydrogen_bonds.dat";
+constexpr std::string_view kHBondReceptorFile =
+    "out_hydrogen_bonds_receptor.dat";
+constexpr std::string_view kHBondLigandFile = "out_hydrogen_bonds_ligand.dat";
+
+inline bool is_hydrogen_atom(const mol_info &info) {
+  const auto &atom_type = info.get_atom_type();
+  const std::string atom_name = info.get_atom();
+  return (!atom_type.empty() && atom_type[0] == 'H') ||
+         (!atom_name.empty() && atom_name[0] == 'H') ||
+         (atom_name.size() >= 2 && atom_name[1] == 'H');
+}
+
+inline bool same_residue(const std::vector<mol_info> &info, std::size_t lhs,
+                         std::size_t rhs) {
+  return info[lhs].get_chainnum() == info[rhs].get_chainnum() &&
+         info[lhs].get_resnr() == info[rhs].get_resnr();
+}
+
+inline double squared_distance(const MOL &lhs, std::size_t lhs_idx,
+                               const MOL &rhs, std::size_t rhs_idx) noexcept {
+  const double dx = lhs.pos.x[lhs_idx] - rhs.pos.x[rhs_idx];
+  const double dy = lhs.pos.y[lhs_idx] - rhs.pos.y[rhs_idx];
+  const double dz = lhs.pos.z[lhs_idx] - rhs.pos.z[rhs_idx];
+  return dx * dx + dy * dy + dz * dz;
+}
+
+inline double clamp_cosine(double value) noexcept {
+  return std::clamp(value, -1.0, 1.0);
+}
+
+bool try_calculate_angle_deg(const MOL &donor_mol, std::size_t donor_idx,
+                             std::size_t hydrogen_idx, const MOL &acceptor_mol,
+                             std::size_t acceptor_idx, double cos_cutoff,
+                             double &angle_deg) noexcept {
+  const double dh_x = donor_mol.pos.x[donor_idx] - donor_mol.pos.x[hydrogen_idx];
+  const double dh_y = donor_mol.pos.y[donor_idx] - donor_mol.pos.y[hydrogen_idx];
+  const double dh_z = donor_mol.pos.z[donor_idx] - donor_mol.pos.z[hydrogen_idx];
+
+  const double ah_x =
+      acceptor_mol.pos.x[acceptor_idx] - donor_mol.pos.x[hydrogen_idx];
+  const double ah_y =
+      acceptor_mol.pos.y[acceptor_idx] - donor_mol.pos.y[hydrogen_idx];
+  const double ah_z =
+      acceptor_mol.pos.z[acceptor_idx] - donor_mol.pos.z[hydrogen_idx];
+
+  const double dh_norm_sq = dh_x * dh_x + dh_y * dh_y + dh_z * dh_z;
+  const double ah_norm_sq = ah_x * ah_x + ah_y * ah_y + ah_z * ah_z;
+  if (dh_norm_sq <= std::numeric_limits<double>::epsilon() ||
+      ah_norm_sq <= std::numeric_limits<double>::epsilon()) {
+    return false;
+  }
+
+  const double dot = dh_x * ah_x + dh_y * ah_y + dh_z * ah_z;
+  const double cosine =
+      clamp_cosine(dot / std::sqrt(dh_norm_sq * ah_norm_sq));
+  if (cosine > cos_cutoff) {
+    return false;
+  }
+
+  angle_deg = std::acos(cosine) * 180.0 / kPi;
+  return true;
+}
+
+void process_group_pair(const MOL &pro_in, const MOL &lig, const h_group &group_1,
+                        const h_group &group_2, double pair_dis_sq,
+                        double cos_cutoff, h_bonds_wrapper &dat_pro_in,
+                        h_bonds_wrapper &dat_lig) {
+  const bool group_1_has_h = group_1.has_hydrogen();
+  const bool group_2_has_h = group_2.has_hydrogen();
+  if ((!group_1_has_h && !group_2_has_h) || pair_dis_sq <= kMinDistanceSq) {
+    return;
+  }
+
+  const double pair_dis = std::sqrt(pair_dis_sq);
+
+  if (group_1_has_h) {
+    for (const std::size_t hydrogen_idx : group_1.h_index) {
+      double angle_deg = 0.0;
+      if (try_calculate_angle_deg(pro_in, group_1.index, hydrogen_idx, lig,
+                                  group_2.index, cos_cutoff, angle_deg)) {
+        dat_lig.dat.emplace_back(group_1.index, group_2.index, hydrogen_idx,
+                                 angle_deg, pair_dis);
+      }
+    }
+  }
+
+  if (group_2_has_h) {
+    for (const std::size_t hydrogen_idx : group_2.h_index) {
+      double angle_deg = 0.0;
+      if (try_calculate_angle_deg(lig, group_2.index, hydrogen_idx, pro_in,
+                                  group_1.index, cos_cutoff, angle_deg)) {
+        dat_pro_in.dat.emplace_back(group_2.index, group_1.index, hydrogen_idx,
+                                    angle_deg, pair_dis);
+      }
+    }
+  }
+}
+
+#ifdef __AVX2__
+unsigned distance_mask_avx2(const MOL &lhs, std::size_t lhs_idx,
+                            const h_groups &rhs_groups, std::size_t rhs_begin,
+                            const MOL &rhs, double cutoff_sq) noexcept {
+  alignas(32) long long gather_idx[4] = {
+      static_cast<long long>(rhs_groups.groups[rhs_begin].index),
+      static_cast<long long>(rhs_groups.groups[rhs_begin + 1].index),
+      static_cast<long long>(rhs_groups.groups[rhs_begin + 2].index),
+      static_cast<long long>(rhs_groups.groups[rhs_begin + 3].index)};
+
+  const __m256i indices =
+      _mm256_load_si256(reinterpret_cast<const __m256i *>(gather_idx));
+  const __m256d x1 = _mm256_set1_pd(lhs.pos.x[lhs_idx]);
+  const __m256d y1 = _mm256_set1_pd(lhs.pos.y[lhs_idx]);
+  const __m256d z1 = _mm256_set1_pd(lhs.pos.z[lhs_idx]);
+  const __m256d x2 = _mm256_i64gather_pd(rhs.pos.x.data(), indices, 8);
+  const __m256d y2 = _mm256_i64gather_pd(rhs.pos.y.data(), indices, 8);
+  const __m256d z2 = _mm256_i64gather_pd(rhs.pos.z.data(), indices, 8);
+
+  const __m256d dx = _mm256_sub_pd(x1, x2);
+  const __m256d dy = _mm256_sub_pd(y1, y2);
+  const __m256d dz = _mm256_sub_pd(z1, z2);
+  const __m256d dx_sq = _mm256_mul_pd(dx, dx);
+  const __m256d dy_sq = _mm256_mul_pd(dy, dy);
+  const __m256d dz_sq = _mm256_mul_pd(dz, dz);
+  const __m256d dist_sq = _mm256_add_pd(_mm256_add_pd(dx_sq, dy_sq), dz_sq);
+
+  const __m256d cutoff_vec = _mm256_set1_pd(cutoff_sq);
+  const __m256d min_vec = _mm256_set1_pd(kMinDistanceSq);
+  const __m256d le_cutoff = _mm256_cmp_pd(dist_sq, cutoff_vec, _CMP_LE_OQ);
+  const __m256d gt_min = _mm256_cmp_pd(dist_sq, min_vec, _CMP_GT_OQ);
+  const __m256d mask = _mm256_and_pd(le_cutoff, gt_min);
+  return static_cast<unsigned>(_mm256_movemask_pd(mask));
+}
+#endif
+
+bool valid_hbond_record(const h_bonds &bond,
+                        const std::vector<mol_info> &acceptor_info,
+                        const std::vector<mol_info> &donor_info) {
+  return bond.get_index_acceptor() < acceptor_info.size() &&
+         bond.get_index_h() < donor_info.size() &&
+         bond.get_index_donor() < donor_info.size();
+}
+
+void append_hbond_row(std::ostringstream &out, const mol_info &acceptor,
+                      const mol_info &hydrogen, const mol_info &donor,
+                      const h_bonds &bond, std::size_t frame_index,
+                      double time_value) {
+  out << acceptor.get_atom() << '\t' << acceptor.get_chain() << '\t'
+      << acceptor.get_resnr() << '\t' << hydrogen.get_atom() << '\t'
+      << hydrogen.get_resnr() << '\t' << donor.get_atom() << '\t'
+      << donor.get_chain() << '\t' << donor.get_resnr() << '\t'
+      << acceptor.get_original_res_name() << '\t'
+      << donor.get_original_res_name() << '\t' << std::fixed
+      << std::setprecision(3) << bond.get_dis() << '\t' << bond.get_angle()
+      << '\t' << frame_index << '\t' << time_value << '\n';
+}
+
+void write_hbond_header(std::ostream &out, std::string_view description,
+                        std::string_view time_unit) {
+  out << "# " << description << '\n';
+  out << "#AcceptorAtom\tAcceptorChain\tAcceptorResNum\tHydrogenAtom\t"
+         "HydrogenResNum\tDonorAtom\tDonorChain\tDonorResNum\t"
+         "AcceptorResName\tDonorResName\tDistance_A\tAngle_DHA_deg\tFrame\t"
+       << "Time_" << time_unit << '\n';
+}
+
+struct hbond_cell_key {
+  int x{};
+  int y{};
+  int z{};
+
+  bool operator==(const hbond_cell_key &rhs) const noexcept = default;
+};
+
+struct hbond_cell_key_hash {
+  std::size_t operator()(const hbond_cell_key &key) const noexcept {
+    const std::size_t h1 = std::hash<int>()(key.x);
+    const std::size_t h2 = std::hash<int>()(key.y);
+    const std::size_t h3 = std::hash<int>()(key.z);
+    return h1 ^ (h2 << 1U) ^ (h3 << 2U);
+  }
+};
+
+struct hbond_spatial_index {
+  double cell_size{};
+  std::unordered_map<hbond_cell_key, std::vector<std::size_t>,
+                     hbond_cell_key_hash>
+      buckets;
+};
+
+inline hbond_cell_key make_hbond_cell_key(double x, double y, double z,
+                                          double cell_size) noexcept {
+  const double inv_cell_size = 1.0 / cell_size;
+  return {static_cast<int>(std::floor(x * inv_cell_size)),
+          static_cast<int>(std::floor(y * inv_cell_size)),
+          static_cast<int>(std::floor(z * inv_cell_size))};
+}
+
+hbond_spatial_index build_hbond_spatial_index(const MOL &mol,
+                                              const h_groups &groups,
+                                              double cell_size) {
+  hbond_spatial_index spatial_index;
+  spatial_index.cell_size = cell_size;
+  spatial_index.buckets.reserve(groups.groups.size());
+
+  for (std::size_t group_idx = 0; group_idx < groups.groups.size(); ++group_idx) {
+    const std::size_t atom_idx = groups.groups[group_idx].index;
+    const hbond_cell_key key = make_hbond_cell_key(
+        mol.pos.x[atom_idx], mol.pos.y[atom_idx], mol.pos.z[atom_idx],
+        cell_size);
+    spatial_index.buckets[key].emplace_back(group_idx);
+  }
+
+  return spatial_index;
+}
+
+inline void evaluate_group_pair(const MOL &pro_in, const MOL &lig,
+                                const h_group &group_1, const h_group &group_2,
+                                bool group_1_has_h, double dis_h_sq,
+                                double cos_cutoff,
+                                h_bonds_wrapper &dat_pro_in,
+                                h_bonds_wrapper &dat_lig) {
+  if (!group_1_has_h && !group_2.has_hydrogen()) {
+    return;
+  }
+
+  const double pair_dis_sq =
+      squared_distance(pro_in, group_1.index, lig, group_2.index);
+  if (pair_dis_sq > dis_h_sq || pair_dis_sq <= kMinDistanceSq) {
+    return;
+  }
+
+  process_group_pair(pro_in, lig, group_1, group_2, pair_dis_sq, cos_cutoff,
+                     dat_pro_in, dat_lig);
+}
+
+} // namespace
+
+int print_hbond_per_snap(const MOL &pro_in, const MOL &lig,
+                         const std::vector<mol_info> &info_rec,
+                         const std::vector<mol_info> &info_lg,
+                         const arguments &Arguments, std::size_t frame_index);
+
+inline bool check_sidechain_hbond(const arguments &Arguments,
+                                  std::string_view atom) {
   return (!Arguments.flag_sidechain_hbond ||
           (Arguments.flag_sidechain_hbond && atom != "N" && atom != "O"));
 }
-int h_group::add_groups(const MOL &mol_in, const MOL &ref, size_t i,
-                        const size_t remain, char _name, double bond_length,
-                        vector<mol_info> &info) {
+
+int init_hbond_output_files(const arguments &Arguments) {
+  std::ofstream out_h_bonds(std::string(kHBondAllFile), std::ios::out);
+  write_hbond_header(out_h_bonds, "All intermolecular hydrogen bonds",
+                     Arguments.tu);
+  out_h_bonds.close();
+
+  std::ofstream out_h_bonds_rec(std::string(kHBondReceptorFile), std::ios::out);
+  write_hbond_header(out_h_bonds_rec,
+                     "Rows where the receptor-side atom is the acceptor",
+                     Arguments.tu);
+  out_h_bonds_rec.close();
+
+  std::ofstream out_h_bonds_lig(std::string(kHBondLigandFile), std::ios::out);
+  write_hbond_header(out_h_bonds_lig,
+                     "Rows where the ligand-side atom is the acceptor",
+                     Arguments.tu);
+  out_h_bonds_lig.close();
+  return 0;
+}
+
+int h_group::add_groups(const MOL &mol_in, std::size_t i, char _name,
+                        double bond_length, const std::vector<mol_info> &info) {
   name = _name;
   index = i;
-  size_t next{i + remain > mol_in.size() ? mol_in.size() : i + remain};
-  for (size_t j{i}; j < next; ++j) {
-    if (info[j].get_resnr() == info[i].get_resnr()) {
-      if ((info[j].get_atom_type()[0] == 'H' ||
-           (info[j].get_atom().length() >= 4 && info[j].get_atom()[1] == 'H') ||
-           info[j].get_atom()[0] == 'H') &&
-          std::sqrt(std::pow(mol_in.pos.x[i] - mol_in.pos.x[j], 2) +
-                    std::pow(mol_in.pos.y[i] - mol_in.pos.y[j], 2) +
-                    std::pow(mol_in.pos.z[i] - mol_in.pos.z[j], 2)) < bond_length)
-        h_index.emplace_back(j);
-    } else
-      break;
+  h_index.clear();
+
+  if (i >= mol_in.size() || i >= info.size()) {
+    return 1;
   }
-  return 0;
-}
-int h_groups::find_groups(const MOL &mol_in, const MOL &ref,
-                          vector<mol_info> &info, const arguments &Arguments) {
-  size_t remain{120};
-  for (size_t i{}; i < mol_in.size(); ++i) {
-    h_group group_temp;
-    if ((info[i].get_atom_type()[0] == 'O' || info[i].get_atom()[0] == 'O') &&
-        check_sidechain_hbond(Arguments, info[i].get_atom())) {
-      group_temp.add_groups(mol_in, ref, i, remain, 'O', 1.1, info);
-      groups.emplace_back(group_temp);
-    } else if ((info[i].get_atom_type()[0] == 'N' ||
-                info[i].get_atom()[0] == 'N') &&
-               check_sidechain_hbond(Arguments, info[i].get_atom())) {
-      group_temp.add_groups(mol_in, ref, i, remain, 'N', 1.5, info);
-      groups.emplace_back(group_temp);
-    } else if (info[i].get_atom_type()[0] == 'F' ||
-               info[i].get_atom()[0] == 'F') {
-      group_temp.add_groups(mol_in, ref, i, remain, 'F', 1.1, info);
-      groups.emplace_back(group_temp);
-    } else
+
+  const double bond_length_sq = bond_length * bond_length;
+  std::size_t begin = i;
+  while (begin > 0 && same_residue(info, begin - 1, i)) {
+    --begin;
+  }
+
+  std::size_t end = i + 1;
+  while (end < mol_in.size() && end < info.size() && same_residue(info, end, i)) {
+    ++end;
+  }
+
+  for (std::size_t j = begin; j < end; ++j) {
+    if (j == i || !is_hydrogen_atom(info[j])) {
       continue;
+    }
+    if (squared_distance(mol_in, i, mol_in, j) <= bond_length_sq) {
+      h_index.emplace_back(j);
+    }
   }
+
   return 0;
 }
-void cal_h_bonds(MOL &pro_in, MOL &lig, size_t begin, size_t end,
+
+int h_groups::find_groups(const MOL &mol_in, const std::vector<mol_info> &info,
+                          const arguments &Arguments) {
+  groups.clear();
+  groups.reserve(mol_in.size() / 3 + 1);
+
+  for (std::size_t i = 0; i < mol_in.size() && i < info.size(); ++i) {
+    h_group group_temp;
+    const auto &atom_type = info[i].get_atom_type();
+    const std::string atom_name = info[i].get_atom();
+
+    if ((!atom_type.empty() && atom_type[0] == 'O') ||
+        (!atom_name.empty() && atom_name[0] == 'O')) {
+      if (!check_sidechain_hbond(Arguments, atom_name)) {
+        continue;
+      }
+      group_temp.add_groups(mol_in, i, 'O', 1.1, info);
+      groups.emplace_back(std::move(group_temp));
+    } else if ((!atom_type.empty() && atom_type[0] == 'N') ||
+               (!atom_name.empty() && atom_name[0] == 'N')) {
+      if (!check_sidechain_hbond(Arguments, atom_name)) {
+        continue;
+      }
+      group_temp.add_groups(mol_in, i, 'N', 1.5, info);
+      groups.emplace_back(std::move(group_temp));
+    } else if ((!atom_type.empty() && atom_type[0] == 'F') ||
+               (!atom_name.empty() && atom_name[0] == 'F')) {
+      group_temp.add_groups(mol_in, i, 'F', 1.1, info);
+      groups.emplace_back(std::move(group_temp));
+    }
+  }
+
+  return 0;
+}
+
+void cal_h_bonds(MOL &pro_in, MOL &lig, std::size_t begin, std::size_t end,
                  const arguments &Arguments, h_groups &groups_1,
-                 h_groups &groups_2, h_bonds_wrapper &dat_pro_in,
-                 h_bonds_wrapper &dat_lig) {
-  for (size_t i{begin}; i < end; ++i) {
-    for (size_t j{}; j < groups_2.groups.size(); ++j) {
-      double d{std::sqrt(std::pow(pro_in.pos.x[groups_1.groups[i].index] -
-                                      lig.pos.x[groups_2.groups[j].index],
-                                  2) +
-                         std::pow(pro_in.pos.y[groups_1.groups[i].index] -
-                                      lig.pos.y[groups_2.groups[j].index],
-                                  2) +
-                         std::pow(pro_in.pos.z[groups_1.groups[i].index] -
-                                      lig.pos.z[groups_2.groups[j].index],
-                                  2))};
+                 h_groups &groups_2,
+                 const hbond_spatial_index *groups_2_spatial,
+                 h_bonds_wrapper &dat_pro_in, h_bonds_wrapper &dat_lig) {
+  const double dis_h_sq = Arguments.dis_h * Arguments.dis_h;
+  const double cos_cutoff = std::cos(Arguments.angle_h * kPi / 180.0);
+  const std::size_t groups_2_size = groups_2.groups.size();
 
-      if ((!groups_1.groups[i].h_index.empty() ||
-           !groups_2.groups[j].h_index.empty()) &&
-          d <= Arguments.dis_h && d > 0.01) {
-        const double cos_cutoff = cos(Arguments.angle_h * PI / 180.0);
-        for (size_t k{}; k < groups_1.groups[i].h_index.size(); ++k) {
-          // Optimized angle check: cos(angle) <= cos(cutoff)  (since angle >=
-          // cutoff and cos is decreasing in 0-180) angle = acos(dot / (d1*d2))
-          // dot / (d1*d2) <= cos_cutoff
-          // Note: cal_angle_3_atoms returned fabs(acos(...)), implying inputs
-          // in range [-1,1] -> [0, PI]. Angle is always positive 0..180.
+  for (std::size_t i = begin; i < end; ++i) {
+    const h_group &group_1 = groups_1.groups[i];
+    const bool group_1_has_h = group_1.has_hydrogen();
 
-          // Recalculate dot product and dists inline or call helper
-          // Helper:
-          // double vector_1[3]{ mol1.x - mol2.x, ... }
-          // double vector_2[3]{ mol3.x - mol2.x, ... }
-          // dot = v1.v2
-          // d1 = mol1.dis(mol2) (already computed? no d is pro[i] to lig[j].
-          // Wait. Angle is D-H...A.
-          // groups_1[i].index is Donor? h_index[k] is H?
-          // pro_in.Molecule[groups_1.groups[i].index] is the heavy atom (D).
-          // pro_in.Molecule[groups_1.groups[i].h_index[k]] is the H atom.
-          // lig.Molecule[groups_2.groups[j].index] is the Acceptor (A).
-          // The angle is usually D-H...A or N-H...O.
-          // Angle at H? Or angle at D?
-          // cal_angle_3_atoms(D, H, A) -> angle at H (arg2 is center).
-          // Standard H-bond definition is usually angle(D-H-A) > 120.
+    if (groups_2_spatial != nullptr) {
+      const hbond_cell_key center = make_hbond_cell_key(
+          pro_in.pos.x[group_1.index], pro_in.pos.y[group_1.index],
+          pro_in.pos.z[group_1.index], groups_2_spatial->cell_size);
 
-          // Calling original function signature: cal_angle_3_atoms(mol1, mol2,
-          // mol3) Inside: center is mol2. Call 1: (D, H, A). Center is H.
+      for (int dx = -1; dx <= 1; ++dx) {
+        for (int dy = -1; dy <= 1; ++dy) {
+          for (int dz = -1; dz <= 1; ++dz) {
+            const hbond_cell_key neighbor{center.x + dx, center.y + dy,
+                                          center.z + dz};
+            const auto bucket_it = groups_2_spatial->buckets.find(neighbor);
+            if (bucket_it == groups_2_spatial->buckets.end()) {
+              continue;
+            }
 
-          double angle_cos_val = cal_cos_angle_3_atoms(
-              pro_in.pos.x[groups_1.groups[i].index],
-              pro_in.pos.y[groups_1.groups[i].index],
-              pro_in.pos.z[groups_1.groups[i].index],
-              pro_in.pos.x[groups_1.groups[i].h_index[k]],
-              pro_in.pos.y[groups_1.groups[i].h_index[k]],
-              pro_in.pos.z[groups_1.groups[i].h_index[k]],
-              lig.pos.x[groups_2.groups[j].index], lig.pos.y[groups_2.groups[j].index],
-              lig.pos.z[groups_2.groups[j].index]);
-          if (angle_cos_val <= cos_cutoff) {
-            // std::lock_guard<std::mutex> lock(emplace_mutex_1);
-            //  We need angle in degrees for output? Yes, emplace_back takes
-            //  angle. So we must compute acos ONLY if it passes the check.
-            double angle_deg = acos(angle_cos_val) * 180.0 / PI;
-            dat_lig.dat.emplace_back(
-                groups_1.groups[i].index, groups_2.groups[j].index,
-                groups_1.groups[i].h_index[k], angle_deg, d);
-          }
-        }
-        for (size_t k{}; k < groups_2.groups[j].h_index.size(); ++k) {
-          double angle_cos_val = cal_cos_angle_3_atoms(
-              lig.pos.x[groups_2.groups[j].index], lig.pos.y[groups_2.groups[j].index],
-              lig.pos.z[groups_2.groups[j].index],
-              lig.pos.x[groups_2.groups[j].h_index[k]],
-              lig.pos.y[groups_2.groups[j].h_index[k]],
-              lig.pos.z[groups_2.groups[j].h_index[k]],
-              pro_in.pos.x[groups_1.groups[i].index],
-              pro_in.pos.y[groups_1.groups[i].index],
-              pro_in.pos.z[groups_1.groups[i].index]);
-          if (angle_cos_val <= cos_cutoff) {
-            double angle_deg = acos(angle_cos_val) * 180.0 / PI;
-            // std::lock_guard<std::mutex> lock(emplace_mutex_2);
-            dat_pro_in.dat.emplace_back(
-                groups_2.groups[j].index, groups_1.groups[i].index,
-                groups_2.groups[j].h_index[k], angle_deg, d);
+            for (const std::size_t group_2_idx : bucket_it->second) {
+              evaluate_group_pair(pro_in, lig, group_1,
+                                  groups_2.groups[group_2_idx], group_1_has_h,
+                                  dis_h_sq, cos_cutoff, dat_pro_in, dat_lig);
+            }
           }
         }
       }
+      continue;
+    }
+
+    std::size_t j = 0;
+
+#ifdef __AVX2__
+    for (; j + 3 < groups_2_size; j += 4) {
+      unsigned mask = distance_mask_avx2(pro_in, group_1.index, groups_2, j, lig,
+                                         dis_h_sq);
+      while (mask != 0U) {
+        const unsigned lane = static_cast<unsigned>(std::countr_zero(mask));
+        const h_group &group_2 = groups_2.groups[j + lane];
+        evaluate_group_pair(pro_in, lig, group_1, group_2, group_1_has_h,
+                            dis_h_sq, cos_cutoff, dat_pro_in, dat_lig);
+        mask &= (mask - 1U);
+      }
+    }
+#endif
+
+    for (; j < groups_2_size; ++j) {
+      evaluate_group_pair(pro_in, lig, group_1, groups_2.groups[j],
+                          group_1_has_h, dis_h_sq, cos_cutoff, dat_pro_in,
+                          dat_lig);
     }
   }
 }
+
 int find_h_bonds(MOL &pro_in, MOL &pro_in_ref, MOL &lig, MOL &lig_ref,
                  h_groups &groups_1, h_groups &groups_2,
-                 const arguments &Arguments, size_t num_snap,
-                 vector<mol_info> &info_rec, vector<mol_info> &info_lg,
-                 vector<vector<size_t>> &Hbonds_vector) {
+                 const arguments &Arguments, std::size_t num_snap,
+                 std::vector<mol_info> &info_rec,
+                 std::vector<mol_info> &info_lg,
+                 std::vector<std::vector<std::size_t>> &Hbonds_vector) {
+  (void)pro_in_ref;
+  (void)lig_ref;
+
   if (num_snap == 0) {
     if (Arguments.nt >= 2) {
-      thread t1(&h_groups::find_groups, &groups_1, ref(pro_in), ref(pro_in_ref),
-                ref(info_rec), ref(Arguments));
-      thread t2(&h_groups::find_groups, &groups_2, ref(lig), ref(lig_ref),
-                ref(info_lg), ref(Arguments));
-      t1.join();
-      t2.join();
+      std::jthread t1(&h_groups::find_groups, &groups_1, std::cref(pro_in),
+                      std::cref(info_rec), std::cref(Arguments));
+      std::jthread t2(&h_groups::find_groups, &groups_2, std::cref(lig),
+                      std::cref(info_lg), std::cref(Arguments));
     } else {
-      groups_1.find_groups(pro_in, pro_in_ref, info_rec, Arguments);
-      groups_2.find_groups(lig, lig_ref, info_lg, Arguments);
+      groups_1.find_groups(pro_in, info_rec, Arguments);
+      groups_2.find_groups(lig, info_lg, Arguments);
     }
   }
 
-  vector<h_bonds_wrapper> h_bonds_pro{Arguments.nt}, h_bonds_lig{Arguments.nt};
+  pro_in.list_h_bonds.dat.clear();
+  lig.list_h_bonds.dat.clear();
 
-  vector<thread> threads_h(Arguments.nt);
-  for (size_t i{}; i < Arguments.nt; ++i) {
-    threads_h[i] = thread(cal_h_bonds, ref(pro_in), ref(lig),
-                          i * groups_1.groups.size() / Arguments.nt,
-                          (i + 1) * groups_1.groups.size() / Arguments.nt,
-                          ref(Arguments), ref(groups_1), ref(groups_2),
-                          ref(h_bonds_pro[i]), ref(h_bonds_lig[i]));
-  }
-  for (auto &t : threads_h) {
-    t.join();
+  if (groups_1.groups.empty() || groups_2.groups.empty()) {
+    if (num_snap >= Hbonds_vector.size()) {
+      Hbonds_vector.resize(num_snap + 1);
+    }
+    Hbonds_vector[num_snap].emplace_back(0);
+    return 0;
   }
 
-  for (size_t i{}; i < Arguments.nt; ++i) {
-    for (size_t j{}; j < h_bonds_pro[i].dat.size(); ++j)
-      pro_in.list_h_bonds.dat.emplace_back(h_bonds_pro[i].dat[j]);
-    for (size_t j{}; j < h_bonds_lig[i].dat.size(); ++j)
-      lig.list_h_bonds.dat.emplace_back(h_bonds_lig[i].dat[j]);
-  }
+  const std::size_t worker_count =
+      std::min<std::size_t>(std::max<std::size_t>(1, Arguments.nt),
+                            groups_1.groups.size());
+  std::vector<h_bonds_wrapper> h_bonds_pro(worker_count);
+  std::vector<h_bonds_wrapper> h_bonds_lig(worker_count);
+  const std::size_t pair_count = groups_1.groups.size() * groups_2.groups.size();
+  const bool use_spatial_index = pair_count >= 8192;
+  const hbond_spatial_index groups_2_spatial =
+      use_spatial_index
+          ? build_hbond_spatial_index(
+                lig, groups_2, std::max(Arguments.dis_h, 1.0))
+          : hbond_spatial_index{};
+  const hbond_spatial_index *groups_2_spatial_ptr =
+      use_spatial_index ? &groups_2_spatial : nullptr;
 
-  // cout << "pos proc..";
-  lig.post_proc_hbonds(lig, info_lg, info_rec);
-  // cout << " lig done ";
-  pro_in.post_proc_hbonds(pro_in, info_rec, info_lg);
-  // cout << "beg.. "<<num_snap;
-  print_hbond_per_snap(pro_in, lig, info_rec, info_lg, Arguments);
-  // cout << " printed  ";
-  if (num_snap >= Hbonds_vector.size()) {
-    Hbonds_vector.emplace_back(vector<size_t>(
-        1, pro_in.list_h_bonds.dat.size() + lig.list_h_bonds.dat.size()));
+  if (worker_count == 1) {
+    cal_h_bonds(pro_in, lig, 0, groups_1.groups.size(), Arguments, groups_1,
+                groups_2, groups_2_spatial_ptr, h_bonds_pro[0], h_bonds_lig[0]);
   } else {
-    Hbonds_vector[num_snap].emplace_back(pro_in.list_h_bonds.dat.size() +
-                                         lig.list_h_bonds.dat.size());
-  }
-  // cout << "exported!\n";
-  return 0;
-}
-inline double cal_angle_3_atoms(double x1, double y1, double z1, double x2,
-                                double y2, double z2, double x3, double y3,
-                                double z3) {
-  double vector_1[3]{x1 - x2, y1 - y2, z1 - z2};
-  double vector_2[3]{x3 - x2, y3 - y2, z3 - z2};
-  double d1 = std::sqrt(vector_1[0] * vector_1[0] + vector_1[1] * vector_1[1] +
-                        vector_1[2] * vector_1[2]);
-  double d2 = std::sqrt(vector_2[0] * vector_2[0] + vector_2[1] * vector_2[1] +
-                        vector_2[2] * vector_2[2]);
-  return fabs(acos((vector_1[0] * vector_2[0] + vector_1[1] * vector_2[1] +
-                    vector_1[2] * vector_2[2]) /
-                   (d1 * d2)) *
-              180. / PI);
-}
-int MOL::post_proc_hbonds(const MOL &mol, vector<mol_info> &info,
-                          vector<mol_info> &counter_info) {
-  vector<pair<char, int>> max_hbonds;
-  max_hbonds.emplace_back('O', 2);
-  max_hbonds.emplace_back('N', 3);
-  max_hbonds.emplace_back('H', 1);
-  max_hbonds.emplace_back('F', 1);
-  for (size_t i{}; i < max_hbonds.size(); ++i)
-    imp_post_proc(max_hbonds[i], mol, info, counter_info);
-  return 0;
-}
-int MOL::imp_post_proc(const pair<char, size_t> &atom_dat, const MOL &mol,
-                       vector<mol_info> &info, vector<mol_info> &counter_info) {
-  vector<hbonds_pos> pos_summary;
-  for (size_t i{}; i < list_h_bonds.dat.size(); ++i) {
-    // if (info.size() <= list_h_bonds.dat[i].get_index_acceptor()) { cout <<
-    // info.size() << " smaller than acceptor index " <<
-    // list_h_bonds.dat[i].get_index_acceptor() << '\n'; continue; }
-    string name{info[list_h_bonds.dat[i].get_index_acceptor()].get_atom_type()};
-    int count_appear{};
-    size_t index{list_h_bonds.dat[i].get_index_acceptor()};
-    if (atom_dat.first == 'H') {
-      // if (counter_info.size() <= list_h_bonds.dat[i].get_index_h()) { cout <<
-      // counter_info.size() << " smaller than h index " <<
-      // list_h_bonds.dat[i].get_index_h() << '\n'; continue; }
-      name = counter_info[list_h_bonds.dat[i].get_index_h()].get_atom_type();
-      index = list_h_bonds.dat[i].get_index_h();
-    }
-    if (name.find(atom_dat.first) != string::npos) {
-      for (size_t j{}; j < pos_summary.size(); ++j) {
-        if (index == pos_summary[j].index_mol) {
-          pos_summary[j].index_rep.emplace_back(i);
-          ++count_appear;
-        } else
-          continue;
-      }
-      if (count_appear > 0)
-        count_appear = 0;
-      else
-        pos_summary.emplace_back(index, i);
+    std::vector<std::jthread> workers;
+    workers.reserve(worker_count);
+    for (std::size_t i = 0; i < worker_count; ++i) {
+      const std::size_t begin = i * groups_1.groups.size() / worker_count;
+      const std::size_t end = (i + 1) * groups_1.groups.size() / worker_count;
+      workers.emplace_back(cal_h_bonds, std::ref(pro_in), std::ref(lig), begin,
+                           end, std::cref(Arguments), std::ref(groups_1),
+                           std::ref(groups_2), groups_2_spatial_ptr,
+                           std::ref(h_bonds_pro[i]), std::ref(h_bonds_lig[i]));
     }
   }
-  for (size_t i{}; i < pos_summary.size(); ++i) {
-    if (pos_summary[i].index_rep.size() > atom_dat.second) {
-      while (pos_summary[i].index_rep.size() != atom_dat.second) {
-        double max_dis{0.};
-        size_t pos_max_dis{}, pos_summary_del{};
-        for (size_t j{}; j < pos_summary[i].index_rep.size(); ++j) {
-          if (max_dis <
-              list_h_bonds.dat[pos_summary[i].index_rep[j]].get_dis()) {
-            max_dis = list_h_bonds.dat[pos_summary[i].index_rep[j]].get_dis();
-            pos_max_dis = pos_summary[i].index_rep[j];
-            pos_summary_del = j;
-          }
-        }
-        // if (pos_summary_del >= pos_summary[i].index_rep.size())cout << "
-        // !!!pos_summary ";
-        pos_summary[i].index_rep.erase(pos_summary[i].index_rep.begin() +
-                                       pos_summary_del);
-        // if (pos_max_dis >= list_h_bonds.dat.size())cout << " !!!list h
-        // bond.dat ";
-        list_h_bonds.dat.erase(list_h_bonds.dat.begin() + pos_max_dis);
 
-        for (size_t k{}; k < pos_summary.size(); ++k)
-          for (size_t l{}; l < pos_summary[k].index_rep.size(); ++l)
-            if (pos_summary[k].index_rep[l] > pos_max_dis)
-              --pos_summary[k].index_rep[l];
-      }
-    }
+  std::size_t total_pro = 0;
+  std::size_t total_lig = 0;
+  for (std::size_t i = 0; i < worker_count; ++i) {
+    total_pro += h_bonds_pro[i].dat.size();
+    total_lig += h_bonds_lig[i].dat.size();
+  }
+  pro_in.list_h_bonds.dat.reserve(total_pro);
+  lig.list_h_bonds.dat.reserve(total_lig);
+
+  for (std::size_t i = 0; i < worker_count; ++i) {
+    pro_in.list_h_bonds.dat.insert(pro_in.list_h_bonds.dat.end(),
+                                   h_bonds_pro[i].dat.begin(),
+                                   h_bonds_pro[i].dat.end());
+    lig.list_h_bonds.dat.insert(lig.list_h_bonds.dat.end(),
+                                h_bonds_lig[i].dat.begin(),
+                                h_bonds_lig[i].dat.end());
+  }
+
+  lig.post_proc_hbonds(lig, info_lg, info_rec);
+  pro_in.post_proc_hbonds(pro_in, info_rec, info_lg);
+  print_hbond_per_snap(pro_in, lig, info_rec, info_lg, Arguments, num_snap);
+
+  if (num_snap >= Hbonds_vector.size()) {
+    Hbonds_vector.resize(num_snap + 1);
+  }
+  Hbonds_vector[num_snap].emplace_back(pro_in.list_h_bonds.dat.size() +
+                                       lig.list_h_bonds.dat.size());
+  return 0;
+}
+
+int MOL::post_proc_hbonds(const MOL &mol, std::vector<mol_info> &info,
+                          std::vector<mol_info> &counter_info) {
+  (void)mol;
+  const std::array<std::pair<char, std::size_t>, 4> max_hbonds = {
+      std::pair<char, std::size_t>{'O', 2},
+      std::pair<char, std::size_t>{'N', 3},
+      std::pair<char, std::size_t>{'H', 1},
+      std::pair<char, std::size_t>{'F', 1}};
+
+  for (const auto &atom_dat : max_hbonds) {
+    imp_post_proc(atom_dat, mol, info, counter_info);
   }
   return 0;
 }
+
+int MOL::imp_post_proc(const std::pair<char, std::size_t> &atom_dat,
+                       const MOL &mol, std::vector<mol_info> &info,
+                       std::vector<mol_info> &counter_info) {
+  (void)mol;
+  if (list_h_bonds.dat.empty()) {
+    return 0;
+  }
+
+  std::unordered_map<std::size_t, std::vector<std::size_t>> grouped_records;
+  grouped_records.reserve(list_h_bonds.dat.size());
+
+  for (std::size_t record_idx = 0; record_idx < list_h_bonds.dat.size();
+       ++record_idx) {
+    std::size_t tracked_index = 0;
+    const std::string *atom_name = nullptr;
+
+    if (atom_dat.first == 'H') {
+      tracked_index = list_h_bonds.dat[record_idx].get_index_h();
+      if (tracked_index >= counter_info.size()) {
+        continue;
+      }
+      atom_name = &counter_info[tracked_index].get_atom_type();
+    } else {
+      tracked_index = list_h_bonds.dat[record_idx].get_index_acceptor();
+      if (tracked_index >= info.size()) {
+        continue;
+      }
+      atom_name = &info[tracked_index].get_atom_type();
+    }
+
+    if (atom_name != nullptr &&
+        atom_name->find(atom_dat.first) != std::string::npos) {
+      grouped_records[tracked_index].emplace_back(record_idx);
+    }
+  }
+
+  std::vector<bool> keep_record(list_h_bonds.dat.size(), true);
+  for (auto &[tracked_index, record_indices] : grouped_records) {
+    (void)tracked_index;
+    if (record_indices.size() <= atom_dat.second) {
+      continue;
+    }
+
+    std::stable_sort(record_indices.begin(), record_indices.end(),
+                     [this](std::size_t lhs, std::size_t rhs) {
+                       return list_h_bonds.dat[lhs].get_dis() <
+                              list_h_bonds.dat[rhs].get_dis();
+                     });
+
+    for (std::size_t i = atom_dat.second; i < record_indices.size(); ++i) {
+      keep_record[record_indices[i]] = false;
+    }
+  }
+
+  if (std::find(keep_record.begin(), keep_record.end(), false) ==
+      keep_record.end()) {
+    return 0;
+  }
+
+  std::vector<h_bonds> filtered_records;
+  filtered_records.reserve(list_h_bonds.dat.size());
+  for (std::size_t i = 0; i < list_h_bonds.dat.size(); ++i) {
+    if (keep_record[i]) {
+      filtered_records.emplace_back(std::move(list_h_bonds.dat[i]));
+    }
+  }
+  list_h_bonds.dat.swap(filtered_records);
+  return 0;
+}
+
 void h_groups::print_group(int m) {
-  fstream groups_out("out_hbonds_groups_" + to_string(m) + ".dat", ios::out);
-  for (size_t i{}; i < groups.size(); ++i) {
+  std::fstream groups_out("out_hbonds_groups_" + std::to_string(m) + ".dat",
+                          std::ios::out);
+  for (std::size_t i = 0; i < groups.size(); ++i) {
     groups_out << groups[i].name << " " << groups[i].index << '\n';
-    for (size_t j{}; j < groups[i].h_index.size(); ++j)
+    for (std::size_t j = 0; j < groups[i].h_index.size(); ++j) {
       groups_out << groups[i].h_index[j] << "   ";
+    }
     groups_out << '\n';
   }
 }
 
-int stat_hbonds(vector<vector<size_t>> &Hbonds_vector, const info &infos,
-                arguments &Arguments, vector<double> &time_of_snaps,
-                vector<string> &list_name) {
-  if (Arguments.flag_h_bond == 0)
+int stat_hbonds(std::vector<std::vector<std::size_t>> &Hbonds_vector,
+                const info &infos, arguments &Arguments,
+                std::vector<double> &time_of_snaps,
+                std::vector<std::string> &list_name) {
+  if (Arguments.flag_h_bond == 0) {
     return 1;
-  fstream statHB(infos.get_stathb_name(), ios::out);
-  statHB << "#Time (" << Arguments.tu << ")   Number of H-bonds   SD\n";
-  for (size_t i{}; i < Hbonds_vector.size(); ++i) {
-    double mean{}, sd{};
-    for (size_t j{}; j < Hbonds_vector[i].size(); ++j) {
-      mean += Hbonds_vector[i][j];
-    }
-    mean /= Hbonds_vector[i].size();
-    for (size_t j{}; j < Hbonds_vector[i].size(); ++j)
-      sd += square(Hbonds_vector[i][j] - mean);
-    sd = sqrt(sd / Hbonds_vector[i].size());
-    statHB << setw(8) << time_of_snaps[i] << setw(12) << mean << setw(12) << sd
-           << '\n';
   }
-  statHB.close();
-  fstream stat_aveHB(infos.get_stat_ave_hb_name(), ios::out);
-  if (!Hbonds_vector.empty()) {
-    size_t num_traj = 0;
-    for (size_t k = 0; k < Hbonds_vector.size(); ++k) {
-      if (Hbonds_vector[k].size() > num_traj) {
-        num_traj = Hbonds_vector[k].size();
-      }
+
+  std::ofstream stat_hb(infos.get_stathb_name(), std::ios::out);
+  stat_hb << "#Time (" << Arguments.tu
+          << ")\tMean_HB\tSD_HB\tMin_HB\tMax_HB\tSampleCount\n";
+
+  for (std::size_t i = 0; i < Hbonds_vector.size(); ++i) {
+    if (Hbonds_vector[i].empty()) {
+      continue;
     }
-    for (size_t i{}; i < num_traj; ++i) {
-      double mean{}, sd{};
-      size_t Size{}; // Count valid trajectories that have this column `i`
 
-      for (size_t j{}; j < Hbonds_vector.size(); ++j) {
-        if (i < Hbonds_vector[j].size()) {
-          mean += Hbonds_vector[j][i];
-          Size++;
+    double mean = 0.0;
+    double sd = 0.0;
+    std::size_t min_hb = Hbonds_vector[i].front();
+    std::size_t max_hb = Hbonds_vector[i].front();
+
+    for (const std::size_t value : Hbonds_vector[i]) {
+      mean += static_cast<double>(value);
+      min_hb = std::min(min_hb, value);
+      max_hb = std::max(max_hb, value);
+    }
+    mean /= static_cast<double>(Hbonds_vector[i].size());
+
+    for (const std::size_t value : Hbonds_vector[i]) {
+      sd += square(static_cast<double>(value) - mean);
+    }
+    sd = std::sqrt(sd / static_cast<double>(Hbonds_vector[i].size()));
+
+    stat_hb << std::fixed << std::setprecision(3) << time_of_snaps[i] << '\t'
+            << mean << '\t' << sd << '\t' << min_hb << '\t' << max_hb << '\t'
+            << Hbonds_vector[i].size() << '\n';
+  }
+  stat_hb.close();
+
+  std::ofstream stat_ave_hb(infos.get_stat_ave_hb_name(), std::ios::out);
+  stat_ave_hb << "#Trajectory\tMean_HB\tSD_HB\tFrameCount\n";
+
+  const auto write_summary_line =
+      [&stat_ave_hb](const std::string &traj_name,
+                     const std::vector<std::size_t> &samples) {
+        if (samples.empty()) {
+          return;
         }
+
+        double mean = 0.0;
+        double variance_sum = 0.0;
+        for (const std::size_t sample : samples) {
+          mean += static_cast<double>(sample);
+        }
+        mean /= static_cast<double>(samples.size());
+
+        for (const std::size_t sample : samples) {
+          variance_sum += square(static_cast<double>(sample) - mean);
+        }
+
+        stat_ave_hb << traj_name << '\t' << std::fixed << std::setprecision(3)
+                    << mean << '\t'
+                    << std::sqrt(variance_sum /
+                                 static_cast<double>(samples.size()))
+                    << '\t' << samples.size() << '\n';
+      };
+
+  const bool is_multi_trajectory_average_mode =
+      (Arguments.flag_pattern_input || Arguments.flag_listfile ||
+       Arguments.flag_all_folders) &&
+      !Arguments.flag_cat_result_multi_infile;
+
+  if (!Hbonds_vector.empty()) {
+    if (!is_multi_trajectory_average_mode) {
+      std::vector<std::size_t> all_samples;
+      for (const auto &frame_values : Hbonds_vector) {
+        all_samples.insert(all_samples.end(), frame_values.begin(),
+                           frame_values.end());
       }
 
-      if (Size > 0) {
-        mean /= Size;
-        double variance_sum = 0.0;
-        for (size_t j{}; j < Hbonds_vector.size(); ++j) {
-          if (i < Hbonds_vector[j].size()) {
-            variance_sum += square(Hbonds_vector[j][i] - mean);
+      const std::string traj_name =
+          !list_name.empty() ? list_name.front() : "Traj_1";
+      write_summary_line(traj_name, all_samples);
+    } else {
+      std::size_t trajectory_count = 0;
+      for (const auto &frame_values : Hbonds_vector) {
+        trajectory_count = std::max(trajectory_count, frame_values.size());
+      }
+
+      if (!list_name.empty()) {
+        trajectory_count = std::min(trajectory_count, list_name.size());
+      }
+
+      for (std::size_t trajectory_idx = 0; trajectory_idx < trajectory_count;
+           ++trajectory_idx) {
+        std::vector<std::size_t> trajectory_samples;
+        trajectory_samples.reserve(Hbonds_vector.size());
+
+        for (const auto &frame_values : Hbonds_vector) {
+          if (trajectory_idx < frame_values.size()) {
+            trajectory_samples.emplace_back(frame_values[trajectory_idx]);
           }
         }
-        string traj_name = (list_name.size() > i)
-                               ? list_name[i]
-                               : ("Traj_" + to_string(i + 1));
-        stat_aveHB << setw(15) << traj_name << setw(12) << mean << setw(12)
-                   << sqrt(variance_sum / Size) << '\n';
+
+        const std::string traj_name =
+            (list_name.size() > trajectory_idx)
+                ? list_name[trajectory_idx]
+                : ("Traj_" + std::to_string(trajectory_idx + 1));
+        write_summary_line(traj_name, trajectory_samples);
       }
     }
   }
-  stat_aveHB.close();
+
+  stat_ave_hb.close();
   return 0;
 }
 
-int print_hbond_per_snap(MOL &pro_in, MOL &lig, vector<mol_info> &info_rec,
-                         vector<mol_info> &info_lg,
-                         const arguments &Arguments) {
-  fstream out_h_bonds("out_hydrogen_bonds.dat", ios::app);
-  for (size_t i{}; i < pro_in.list_h_bonds.dat.size(); ++i) {
-    out_h_bonds
-        << setw(4) << left
-        << info_rec[pro_in.list_h_bonds.dat[i].get_index_acceptor()].get_atom()
-        << setw(3) << right
-        << info_rec[pro_in.list_h_bonds.dat[i].get_index_acceptor()].get_chain()
-        << setw(5) << right
-        << info_rec[pro_in.list_h_bonds.dat[i].get_index_acceptor()].get_resnr()
-        << setw(6) << right
-        << info_lg[pro_in.list_h_bonds.dat[i].get_index_h()].get_atom()
-        << setw(5) << right
-        << info_lg[pro_in.list_h_bonds.dat[i].get_index_h()].get_resnr()
-        << '\n';
-  }
-  for (size_t i{}; i < lig.list_h_bonds.dat.size(); ++i) {
-    if (lig.list_h_bonds.dat[i].get_index_h() >= info_rec.size())
-      cout << "info_rec.size smaller than index h\n";
-    if (lig.list_h_bonds.dat[i].get_index_acceptor() > info_lg.size())
-      cout << "info_lg size smaller than index acc\n";
+int print_hbond_per_snap(const MOL &pro_in, const MOL &lig,
+                         const std::vector<mol_info> &info_rec,
+                         const std::vector<mol_info> &info_lg,
+                         const arguments &Arguments, std::size_t frame_index) {
+  const double time_value = pro_in.get_time();
+  std::ostringstream out_all;
+  std::ostringstream out_rec;
+  std::ostringstream out_lig;
 
-    out_h_bonds
-        << setw(4) << left
-        << info_lg[lig.list_h_bonds.dat[i].get_index_acceptor()].get_atom()
-        << setw(3) << right
-        << info_lg[lig.list_h_bonds.dat[i].get_index_acceptor()].get_chain()
-        << setw(5) << right
-        << info_lg[lig.list_h_bonds.dat[i].get_index_acceptor()].get_resnr()
-        << setw(6) << right
-        << info_rec[lig.list_h_bonds.dat[i].get_index_h()].get_atom() << setw(5)
-        << right << info_rec[lig.list_h_bonds.dat[i].get_index_h()].get_resnr()
-        << '\n';
+  std::size_t skipped_rec = 0;
+  std::size_t skipped_lig = 0;
+
+  for (const h_bonds &bond : pro_in.list_h_bonds.dat) {
+    if (!valid_hbond_record(bond, info_rec, info_lg)) {
+      ++skipped_rec;
+      continue;
+    }
+
+    const mol_info &acceptor = info_rec[bond.get_index_acceptor()];
+    const mol_info &hydrogen = info_lg[bond.get_index_h()];
+    const mol_info &donor = info_lg[bond.get_index_donor()];
+    append_hbond_row(out_all, acceptor, hydrogen, donor, bond, frame_index,
+                     time_value);
+    append_hbond_row(out_rec, acceptor, hydrogen, donor, bond, frame_index,
+                     time_value);
   }
-  out_h_bonds.close();
-  fstream out_h_bonds_rec("out_hydrogen_bonds_receptor.dat", ios::app);
-  for (size_t i{}; i < pro_in.list_h_bonds.dat.size(); ++i) {
-    out_h_bonds_rec
-        << setw(4) << left
-        << info_rec[pro_in.list_h_bonds.dat[i].get_index_acceptor()].get_atom()
-        << setw(5) << right
-        << info_rec[pro_in.list_h_bonds.dat[i].get_index_acceptor()].get_resnr()
-        << setw(6) << right
-        << info_lg[pro_in.list_h_bonds.dat[i].get_index_h()].get_atom()
-        << setw(5) << right
-        << info_lg[pro_in.list_h_bonds.dat[i].get_index_h()].get_resnr()
-        << '\n';
+
+  for (const h_bonds &bond : lig.list_h_bonds.dat) {
+    if (!valid_hbond_record(bond, info_lg, info_rec)) {
+      ++skipped_lig;
+      continue;
+    }
+
+    const mol_info &acceptor = info_lg[bond.get_index_acceptor()];
+    const mol_info &hydrogen = info_rec[bond.get_index_h()];
+    const mol_info &donor = info_rec[bond.get_index_donor()];
+    append_hbond_row(out_all, acceptor, hydrogen, donor, bond, frame_index,
+                     time_value);
+    append_hbond_row(out_lig, acceptor, hydrogen, donor, bond, frame_index,
+                     time_value);
   }
-  out_h_bonds_rec.close();
-  fstream out_h_bonds_lig("out_hydrogen_bonds_ligand.dat", ios::app);
-  for (size_t i{}; i < lig.list_h_bonds.dat.size(); ++i) {
-    out_h_bonds_lig
-        << setw(4) << left
-        << info_lg[lig.list_h_bonds.dat[i].get_index_acceptor()].get_atom()
-        << setw(5) << right
-        << info_lg[lig.list_h_bonds.dat[i].get_index_acceptor()].get_resnr()
-        << setw(6) << right
-        << info_rec[lig.list_h_bonds.dat[i].get_index_h()].get_atom() << setw(5)
-        << right << info_rec[lig.list_h_bonds.dat[i].get_index_h()].get_resnr()
-        << '\n';
+
+  if (skipped_rec + skipped_lig > 0) {
+    std::cerr << "[WARNING] Skipped " << (skipped_rec + skipped_lig)
+              << " malformed H-bond records at frame " << frame_index << ".\n";
   }
-  out_h_bonds_lig.close();
+
+  const std::string all_rows = out_all.str();
+  const std::string rec_rows = out_rec.str();
+  const std::string lig_rows = out_lig.str();
+
+  if (!all_rows.empty()) {
+    std::ofstream out_h_bonds(std::string(kHBondAllFile), std::ios::app);
+    out_h_bonds << all_rows;
+  }
+  if (!rec_rows.empty()) {
+    std::ofstream out_h_bonds_rec(std::string(kHBondReceptorFile),
+                                  std::ios::app);
+    out_h_bonds_rec << rec_rows;
+  }
+  if (!lig_rows.empty()) {
+    std::ofstream out_h_bonds_lig(std::string(kHBondLigandFile),
+                                  std::ios::app);
+    out_h_bonds_lig << lig_rows;
+  }
+
+  (void)Arguments;
   return 0;
 }

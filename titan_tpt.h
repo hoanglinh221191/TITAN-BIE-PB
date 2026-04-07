@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+class TitanExecutor;
+
 class TitanTPT {
 public:
   struct EdgeFlux {
@@ -43,7 +45,8 @@ public:
 
   void compute(const std::vector<int> &source_states,
                const std::vector<int> &sink_states, int top_paths = 5,
-               double flux_cut = 0.0, int n_threads = 1);
+               double flux_cut = 0.0, TitanExecutor *executor = nullptr,
+               int n_threads = 1);
 
   bool computed() const { return computed_; }
   int n_states() const { return n_states_; }
@@ -89,7 +92,8 @@ private:
   void compute_reactive_densities();
   double find_transition_probability(int from, int to) const;
   double compute_gross_flux_value(int from, int to) const;
-  void compute_flux_matrices(int n_threads, double flux_cut);
+  void compute_flux_matrices(TitanExecutor *executor, int n_threads,
+                             double flux_cut);
   void extract_dominant_paths(int top_paths, double flux_cut);
 
   static std::string trim_copy(const std::string &value);

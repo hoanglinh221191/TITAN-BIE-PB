@@ -1,4 +1,5 @@
 #include "chunk_streamer.h"
+#include "titan_executor.h"
 #include "titan_ui.h"
 #include <algorithm>
 #include <cstdio>
@@ -389,9 +390,9 @@ int skip_xdr_frame_payload_after_probe(XDRFILE *xdr_handle,
 
 ChunkStreamer::ChunkStreamer(arguments &args, info &output_info,
                              groups_cal &groups, std::string_view force_field,
-                             size_t num_threads)
+                             TitanExecutor &executor, size_t num_threads)
     : args_ref(args), info_ref(output_info), groups_ref(groups),
-      force_f(force_field), nt(num_threads) {}
+      force_f(force_field), executor_(&executor), nt(num_threads) {}
 
 ChunkStreamer::~ChunkStreamer() {
   // XDR cleanup
@@ -734,15 +735,11 @@ void ChunkStreamer::parallel_split_coordinates(
     }
   };
 
-  // Spin up threads
-  std::vector<std::jthread> workers;
-  size_t chunk_per_thread = (num_frames + nt - 1) / nt;
-  for (size_t t = 0; t < nt; ++t) {
-    size_t start = t * chunk_per_thread;
-    size_t end = std::min(start + chunk_per_thread, num_frames);
-    if (start < end)
-      workers.emplace_back(process_frames, start, end);
-  }
+  executor_->parallel_for(
+      num_frames, nt, 1,
+      [&](size_t /*worker_id*/, size_t start, size_t end) {
+        process_frames(start, end);
+      });
 }
 
 std::expected<size_t, std::string>
