@@ -1,0 +1,57 @@
+# ============================================
+# TITAN arg.in - protein-protein AWH multiwalker
+# 4 walkers listed in awh_walkers.txt
+# ============================================
+
+# Input files
+-s=md1_snap0.pdb
+-i=awh_walkers.txt
+-n=index.ndx
+-common_topo=topol.top
+
+# System definition
+# Change -ff only if your topol.top is not AMBER14SB-based
+-ff=AMBER14SB
+-g=3-4
+-mol-1-type=protein
+-mol-2-type=protein
+
+# Optional trimming / stride
+#-b=...
+#-e=...
+#-dt=...
+
+# PBC handling
+-pbcn
+# If the chains are badly fragmented across the box, try this instead:
+#-pbctopo
+
+# Interface / structural analysis
+-rms
+-dssp
+-hb
+-ifp
+
+# Collective motion / network analysis
+-network
+-community=louvain
+-pca
+--fes-grid=80
+
+# Slow modes / state decomposition
+-tica
+--tica-lag=10
+--tica-components=5
+-umap
+-msm
+-msm-clusters=50
+-msm-lag=10
+-msm-macrostates=4
+
+# Enable TPT only after inspecting MSM macrostates or TICA regions
+#-tpt
+#-tpt-source=macro:0
+#-tpt-sink=macro:1
+
+# Threads
+#-nt=8

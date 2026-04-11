@@ -1,27 +1,28 @@
-﻿#include "Multi_MOL.h"
+#include "Multi_MOL.h"
 #include "functions.h"
 #include "titan_ui.h"
 #include <algorithm>
 #include <charconv>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <string_view>
-using std::string_view;
-#include <expected>
-#include <system_error>
 
-// -----------------------------------------------------------------------------
-// 1. HIGH-PERFORMANCE HELPER FUNCTIONS
-// -----------------------------------------------------------------------------
+using std::string_view;
+
+namespace {
+
+constexpr size_t kPdbBufferSize = 1024 * 1024;
+constexpr double kPdbTimeTolerancePs = 1e-4;
 
 double fast_parse_double(std::string_view data) {
   const char *begin = data.data();
   const char *end = begin + data.size();
-  while (begin < end && *begin == ' ') {
+  while (begin < end && *begin == ' ')
     ++begin;
-  }
-  double value;
+
+  double value = 0.0;
   auto [ptr, ec] = std::from_chars(begin, end, value);
   if (ec == std::errc())
     return value;
@@ -31,19 +32,16 @@ double fast_parse_double(std::string_view data) {
 size_t fast_parse_u64(std::string_view data) {
   const char *begin = data.data();
   const char *end = begin + data.size();
-  while (begin < end && *begin == ' ') {
+  while (begin < end && *begin == ' ')
     ++begin;
-  }
-  size_t value;
+
+  size_t value = 0;
   auto [ptr, ec] = std::from_chars(begin, end, value);
   if (ec == std::errc())
     return value;
   return 0;
 }
 
-// HÃ m trim khoáº£ng tráº¯ng siÃªu tá»‘c Ä‘á»™ tráº£
-// vá» string_view, KHÃ”NG cáº¥p phÃ¡t bá»™ nhá»›
-// Ä‘á»™ng
 constexpr std::string_view trim_spaces(std::string_view sv) {
   sv.remove_prefix(std::min(sv.find_first_not_of(" \t\r\n"), sv.size()));
   sv.remove_suffix(sv.empty() ? 0
@@ -51,243 +49,241 @@ constexpr std::string_view trim_spaces(std::string_view sv) {
   return sv;
 }
 
-// -----------------------------------------------------------------------------
-// 2. CORE PARSING LOGIC
-// -----------------------------------------------------------------------------
-
-int check_and_settime_new(double &time_of_snap, std::string_view protein_1,
-                          std::string_view protein_2, arguments &Arguments) {
-  if (protein_1.length() >= 5 &&
-      protein_1.find("TITLE") != std::string_view::npos) {
-    size_t found = protein_1.find('=');
-    size_t found_2 = protein_1.find("step");
-    size_t time_length = std::min(protein_1.length(), found_2);
-
-    if (found != std::string_view::npos && protein_1.length() > found + 2) {
-      time_of_snap = fast_parse_double(
-          protein_1.substr(found + 1, time_length - found - 1));
-      return 0;
-    } else {
-      found = protein_2.find("t=");
-      found_2 = protein_2.find("step");
-      time_length = std::min(protein_2.length(), found_2);
-      if (found != std::string_view::npos) {
-        time_of_snap = fast_parse_double(
-            protein_2.substr(found + 2, time_length - found - 2));
-      }
-      return 0;
-    }
+bool try_parse_title_time(double &time_of_snap, std::string_view protein_1,
+                          std::string_view protein_2) {
+  if (protein_1.length() < 5 ||
+      protein_1.find("TITLE") == std::string_view::npos) {
+    return false;
   }
-  return 1;
+
+  size_t found = protein_1.find('=');
+  size_t found_2 = protein_1.find("step");
+  size_t time_length = std::min(protein_1.length(), found_2);
+
+  if (found != std::string_view::npos && protein_1.length() > found + 2) {
+    time_of_snap =
+        fast_parse_double(protein_1.substr(found + 1, time_length - found - 1));
+    return true;
+  }
+
+  found = protein_2.find("t=");
+  found_2 = protein_2.find("step");
+  time_length = std::min(protein_2.length(), found_2);
+  if (found != std::string_view::npos) {
+    time_of_snap =
+        fast_parse_double(protein_2.substr(found + 2, time_length - found - 2));
+    return true;
+  }
+
+  return false;
 }
 
-// FIX: ÄÃ£ bá»• sung tham sá»‘ 'force_f' bá»‹ thiáº¿u
-// Ä‘á»ƒ hÃ m emplace() cÃ³ thá»ƒ gá»i Ä‘Æ°á»£c
-int Multi_MOL::helper_parse_pdb(arguments &Arguments, box &Box_temp,
-                                bool &flag_set_time, double &time_of_snap_temp,
-                                std::string_view protein_1, size_t &I,
-                                bool &flag_set_box, ::info &output_info,
-                                std::string_view protein_2,
-                                std::string_view input_name,
-                                std::string_view force_f) {
+bool is_atom_record(std::string_view line) {
+  return line.length() >= 54 &&
+         (line.starts_with("ATOM") || line.starts_with("HETATM"));
+}
 
-  if (!flag_set_time) {
-    time_of_snap_temp = static_cast<double>(I);
-    if (check_and_settime_new(time_of_snap_temp, protein_1, protein_2,
-                              Arguments) == 0) {
-      flag_set_time = true;
+bool is_end_record(std::string_view line) {
+  return line.starts_with("ENDMDL") || line.starts_with("END");
+}
+
+void parse_cryst1_box(box &box_temp, std::string_view line) {
+  box_temp = box(fast_parse_double(line.substr(6, 9)),
+                 fast_parse_double(line.substr(15, 9)),
+                 fast_parse_double(line.substr(24, 9)),
+                 fast_parse_double(line.substr(33, 7)),
+                 fast_parse_double(line.substr(40, 7)),
+                 fast_parse_double(line.substr(47, 7)));
+}
+
+mol_info make_atom_info(std::string_view line,
+                        size_t original_atom_id = std::numeric_limits<size_t>::max()) {
+  std::string_view atom = trim_spaces(line.substr(12, 4));
+  std::string_view resname = trim_spaces(
+      line.length() >= 21 ? line.substr(16, 5) : std::string_view{});
+  if (resname.empty() && line.length() >= 21) {
+    resname = trim_spaces(line.substr(17, 4));
+  }
+
+  mol_info atom_info(fast_parse_u64(line.substr(22, 4)), "NULL",
+                     std::string(atom), std::string(line.substr(21, 1)),
+                     std::string(resname));
+  if (original_atom_id != std::numeric_limits<size_t>::max())
+    atom_info.set_original_atom_id(original_atom_id);
+  return atom_info;
+}
+
+double parse_atom_coord(std::string_view line, size_t offset) {
+  return fast_parse_double(line.substr(offset, 8));
+}
+
+size_t expected_frame_atoms(const Multi_MOL &mol, size_t frame_index,
+                            size_t hinted_count) {
+  if (!mol.info.empty())
+    return mol.info.size();
+  if (frame_index > 0 && frame_index - 1 < mol.m_mol.size())
+    return mol.m_mol[frame_index - 1].size();
+  if (hinted_count > 0)
+    return hinted_count;
+  if (frame_index < mol.m_mol.size())
+    return mol.m_mol[frame_index].size();
+  return 0;
+}
+
+template <typename Sink>
+std::expected<size_t, std::string> parse_pdb_stream_impl(
+    std::istream &input_pdb, std::string_view input_name, size_t max_frames,
+    std::string_view force_f, arguments &Arguments, ::info &output_info,
+    double &next_target_time_state, Sink &sink) {
+  if (!input_pdb.good() && !input_pdb.eof())
+    return std::unexpected("Input PDB stream is not readable.");
+
+  double time_of_snap_temp = 0.0;
+  box box_temp;
+  bool flag_set_time = false;
+  bool flag_set_box = false;
+  size_t committed_frames = 0;
+  size_t source_atom_index = 0;
+
+  std::vector<char> buffer(kPdbBufferSize);
+  std::string remainder;
+  remainder.reserve(512);
+
+  bool stop_due_to_end = false;
+
+  auto process_line = [&](std::string_view line,
+                          std::string &error_message) -> bool {
+    if (line.empty())
+      return true;
+
+    if (!flag_set_time) {
+      time_of_snap_temp = static_cast<double>(committed_frames);
+      if (try_parse_title_time(time_of_snap_temp, line, line))
+        flag_set_time = true;
     }
-  }
 
-  // Tá»‘i Æ°u C++20: DÃ¹ng starts_with thay vÃ¬ substr() == "..."
-  if (!flag_set_box && protein_1.length() >= 54 &&
-      protein_1.starts_with("CRYST1")) {
-    Box_temp = box(fast_parse_double(protein_1.substr(6, 9)),
-                   fast_parse_double(protein_1.substr(15, 9)),
-                   fast_parse_double(protein_1.substr(24, 9)),
-                   fast_parse_double(protein_1.substr(33, 7)),
-                   fast_parse_double(protein_1.substr(40, 7)),
-                   fast_parse_double(protein_1.substr(47, 7)));
-    flag_set_box = true;
-  }
-
-  if (protein_1.length() >= 54 && protein_1.starts_with("ATOM")) {
-    // FAST EXIT: If we passed the end time, signal EOF to stop reading the file
-    // entirely
-    if (Arguments.flag_end_set && time_of_snap_temp > Arguments.end_time)
-      return 1;
-
-    if (!Arguments.flag_begin_set && I == 0)
-      output_info.set_current_begin_time(time_of_snap_temp);
-
-    if (check_in_time(Arguments, time_of_snap_temp)) {
-
-      // STRICT -dt LOGIC
-      bool accept_dt = true;
-      if (Arguments.dt > 0) {
-        if (this->next_target_time == -1e9) {
-          this->next_target_time = Arguments.flag_begin_set
-                                       ? Arguments.begin_time
-                                       : time_of_snap_temp;
-        }
-        if (time_of_snap_temp < this->next_target_time - 1e-4)
-          accept_dt = false;
-      }
-
-      if (accept_dt) {
-        std::string_view atom = trim_spaces(protein_1.substr(12, 4));
-        std::string_view resname = trim_spaces(protein_1.substr(16, 5));
-        try {
-          this->emplace(I, Box_temp, time_of_snap_temp, force_f,
-                        mol_info(fast_parse_u64(protein_1.substr(22, 4)),
-                                 "NULL", std::string(atom),
-                                 std::string(protein_1.substr(21, 1)),
-                                 std::string(resname)),
-                        [&] {
-                          MOL m;
-                          m.pos.x.emplace_back(
-                              fast_parse_double(protein_1.substr(30, 8)));
-                          m.pos.y.emplace_back(
-                              fast_parse_double(protein_1.substr(38, 8)));
-                          m.pos.z.emplace_back(
-                              fast_parse_double(protein_1.substr(46, 8)));
-                          return m;
-                        }());
-        } catch (...) {
-          return 1;
-        }
-      } else {
-        if (I < this->m_mol.size()) {
-          this->m_mol[I].pos.x.clear();
-          this->m_mol[I].pos.y.clear();
-          this->m_mol[I].pos.z.clear();
-        }
-        flag_set_box = false;
-      }
-    } else {
-      flag_set_box = false;
+    if (!flag_set_box && line.length() >= 54 && line.starts_with("CRYST1")) {
+      parse_cryst1_box(box_temp, line);
+      flag_set_box = true;
     }
-  }
 
-  if (protein_1.starts_with("ENDMDL") || protein_1.starts_with("END")) {
-    // ONLY finalize frame if atoms were actually pushed
-    if (I < this->m_mol.size() && !this->m_mol[I].pos.x.empty()) {
-      // Missing atoms check
-      size_t current_atoms = this->m_mol[I].pos.x.size();
-      size_t expected_atoms = current_atoms;
-      if (I > 0 && (I - 1) < this->m_mol.size()) {
-        expected_atoms = this->m_mol[I - 1].pos.x.size();
+    if (is_atom_record(line)) {
+      ++source_atom_index;
+
+      if (Arguments.flag_end_set && time_of_snap_temp > Arguments.end_time) {
+        stop_due_to_end = true;
+        return false;
       }
 
-      if (current_atoms != expected_atoms) {
-        TitanUI::print_warning("Incomplete frame detected at " +
-                               std::to_string(time_of_snap_temp) +
-                               " ps. Skipping...");
-        this->m_mol[I].pos.x.clear();
-        this->m_mol[I].pos.y.clear();
-        this->m_mol[I].pos.z.clear();
-      } else {
-        check_and_pop_size_2last_snaps(I);
-        if (!flag_set_box && I != 0 && this->m_mol.size() > I)
-          this->m_mol[I].Box = this->m_mol[I - 1].Box;
-        else
-          flag_set_box = false;
+      if (!Arguments.flag_begin_set && committed_frames == 0)
+        output_info.set_current_begin_time(time_of_snap_temp);
 
-        ++I; // Successfully committed frame
+      if (check_in_time(Arguments, time_of_snap_temp)) {
+        bool accept_dt = true;
+        if (Arguments.dt > 0.0) {
+          if (next_target_time_state < -1e17) {
+            next_target_time_state = Arguments.flag_begin_set
+                                         ? Arguments.begin_time
+                                         : time_of_snap_temp;
+          }
+          if (time_of_snap_temp < next_target_time_state - kPdbTimeTolerancePs)
+            accept_dt = false;
+        }
 
-        // Advance Target Time for next accepted frame
-        if (Arguments.dt > 0) {
-          while (this->next_target_time <= time_of_snap_temp + 1e-4) {
-            this->next_target_time += Arguments.dt;
+        if (accept_dt) {
+          if (!sink.append_atom(committed_frames, source_atom_index, line,
+                                box_temp, time_of_snap_temp, force_f,
+                                error_message)) {
+            return false;
           }
         }
       }
     }
-    if (I < this->m_mol.size()) {
-      this->m_mol[I].pos.x.clear();
-      this->m_mol[I].pos.y.clear();
-      this->m_mol[I].pos.z.clear();
+
+    if (is_end_record(line)) {
+      std::string warning_message;
+      const bool committed =
+          sink.finalize_frame(committed_frames, flag_set_box, time_of_snap_temp,
+                              warning_message);
+      if (!warning_message.empty())
+        TitanUI::print_warning(warning_message);
+
+      if (committed) {
+        ++committed_frames;
+        if (Arguments.dt > 0.0) {
+          while (next_target_time_state <=
+                 time_of_snap_temp + kPdbTimeTolerancePs) {
+            next_target_time_state += Arguments.dt;
+          }
+        }
+      }
+
+      flag_set_time = false;
+      flag_set_box = false;
+      source_atom_index = 0;
     }
-    flag_set_time = false;
-  }
-  return 0;
-}
 
-// -----------------------------------------------------------------------------
-// 3. FILE PARSING LOOP
-// -----------------------------------------------------------------------------
-
-int Multi_MOL::parse_pdb(std::string_view input_name, std::string_view force_f,
-                         arguments &Arguments, ::info &output_info,
-                         size_t max_frames) {
-  // KhÃ´ng cáº§n sync_with_stdio(false) vÃ¬ Ä‘ang dÃ¹ng ifstream, khÃ´ng dÃ¹ng
-  // std::cin
-  std::ifstream input_pdb(std::string(input_name), std::ios::binary);
-  if (!input_pdb.is_open()) {
-    std::cerr << "Can not open " << input_name << " file!\n";
-    return 1;
-  }
-
-  double time_of_snap_temp{};
-  box Box_temp;
-  bool flag_set_time{false}, flag_set_box{false};
-  size_t I{}, limit_snap{10};
-
-  const size_t BUFFER_SIZE = 1024 * 1024; // 1 MB buffer
-  std::vector<char> buffer(BUFFER_SIZE);
-  std::string remainder;
-  remainder.reserve(256);
+    return true;
+  };
 
   while (input_pdb) {
-    input_pdb.read(buffer.data(), BUFFER_SIZE);
-    std::streamsize bytes_read = input_pdb.gcount();
+    input_pdb.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const std::streamsize bytes_read = input_pdb.gcount();
     if (bytes_read <= 0)
       break;
 
     std::string_view chunk(buffer.data(), static_cast<size_t>(bytes_read));
     size_t start = 0;
     size_t end = chunk.find('\n');
-
-    if (max_frames > 0 && I >= max_frames) {
-      break;
-    }
+    bool hit_limit = false;
 
     while (end != std::string_view::npos) {
-      if (max_frames > 0 && I >= max_frames) {
-        break;
-      }
-
       std::string_view line_view = chunk.substr(start, end - start);
-
-      if (!line_view.empty() && line_view.back() == '\r') {
+      if (!line_view.empty() && line_view.back() == '\r')
         line_view.remove_suffix(1);
-      }
 
+      std::string materialized_line;
       if (!remainder.empty()) {
         remainder.append(line_view);
-        if (!remainder.empty()) {
-          if (1 == helper_parse_pdb(Arguments, Box_temp, flag_set_time,
-                                    time_of_snap_temp, remainder, I,
-                                    flag_set_box, output_info, remainder,
-                                    input_name, force_f)) {
-            return 0;
-          }
-        }
+        materialized_line = remainder;
         remainder.clear();
-      } else {
-        if (!line_view.empty()) {
-          // FIX: XÃ³a chuá»—i rÃ¡c "line)\n"; vÃ  truyá»n thÃªm
-          // force_f
-          if (1 == helper_parse_pdb(Arguments, Box_temp, flag_set_time,
-                                    time_of_snap_temp, line_view, I,
-                                    flag_set_box, output_info, line_view,
-                                    input_name, force_f)) {
-            return 0;
+      }
+
+      std::string_view effective_line =
+          materialized_line.empty() ? line_view : std::string_view(materialized_line);
+
+      if (!effective_line.empty()) {
+        std::string error_message;
+        if (!process_line(effective_line, error_message)) {
+          if (!error_message.empty())
+            return std::unexpected(error_message);
+
+          if (stop_due_to_end) {
+            input_pdb.clear();
+            input_pdb.seekg(0, std::ios_base::end);
+            input_pdb.setstate(std::ios::eofbit);
+            sink.discard_frame(committed_frames);
+            return committed_frames;
           }
         }
       }
+
       start = end + 1;
+      if (max_frames > 0 && committed_frames >= max_frames) {
+        hit_limit = true;
+        break;
+      }
       end = chunk.find('\n', start);
+    }
+
+    if (hit_limit) {
+      const std::streamoff rewind_bytes =
+          static_cast<std::streamoff>(bytes_read) -
+          static_cast<std::streamoff>(start);
+      if (rewind_bytes > 0)
+        input_pdb.seekg(-rewind_bytes, std::ios_base::cur);
+      remainder.clear();
+      break;
     }
 
     if (start < static_cast<size_t>(bytes_read)) {
@@ -297,11 +293,328 @@ int Multi_MOL::parse_pdb(std::string_view input_name, std::string_view force_f,
     }
   }
 
-  if (!remainder.empty() && !(max_frames > 0 && I >= max_frames)) {
-    helper_parse_pdb(Arguments, Box_temp, flag_set_time, time_of_snap_temp,
-                     remainder, I, flag_set_box, output_info, remainder,
-                     input_name, force_f);
+  if (!remainder.empty() && !(max_frames > 0 && committed_frames >= max_frames)) {
+    std::string error_message;
+    if (!process_line(remainder, error_message) && !error_message.empty())
+      return std::unexpected(error_message);
   }
+
+  if (sink.has_pending_frame(committed_frames) &&
+      !(max_frames > 0 && committed_frames >= max_frames)) {
+    std::string warning_message;
+    const bool committed = sink.finalize_frame(committed_frames, flag_set_box,
+                                               time_of_snap_temp, warning_message);
+    if (!warning_message.empty())
+      TitanUI::print_warning(warning_message);
+    if (committed) {
+      ++committed_frames;
+      if (Arguments.dt > 0.0) {
+        while (next_target_time_state <= time_of_snap_temp + kPdbTimeTolerancePs)
+          next_target_time_state += Arguments.dt;
+      }
+    }
+  }
+
+  return committed_frames;
+}
+
+struct SinglePdbSink {
+  Multi_MOL &out;
+
+  bool append_atom(size_t frame_index, size_t source_atom_index,
+                   std::string_view line, const box &box_type, double time_ps,
+                   std::string_view force_f, std::string &error_message) {
+    const size_t reserve_hint =
+        expected_frame_atoms(out, frame_index, frame_index == 0 ? out.info.size() : 0);
+    if (frame_index >= out.m_mol.size())
+      out.begin_frame(frame_index, box_type, time_ps, force_f, reserve_hint);
+
+    if (frame_index == 0 && out.info.size() < out.m_mol[0].pos.x.size() + 1) {
+      out.append_topology_if_frame0(make_atom_info(line, source_atom_index - 1));
+    }
+
+    out.append_xyz(frame_index, parse_atom_coord(line, 30),
+                   parse_atom_coord(line, 38), parse_atom_coord(line, 46));
+    (void)error_message;
+    return true;
+  }
+
+  bool finalize_frame(size_t frame_index, bool had_box, double time_ps,
+                      std::string &warning_message) {
+    if (!has_pending_frame(frame_index))
+      return false;
+
+    const size_t current_atoms = out.m_mol[frame_index].size();
+    const size_t expected_atoms = expected_frame_atoms(out, frame_index, 0);
+    if (expected_atoms > 0 && current_atoms != expected_atoms) {
+      warning_message = "Incomplete frame detected at " +
+                        std::to_string(time_ps) + " ps. Skipping...";
+      out.discard_pending_frame(frame_index);
+      return false;
+    }
+
+    if (!had_box && frame_index != 0 && frame_index < out.m_mol.size()) {
+      out.m_mol[frame_index].Box = out.m_mol[frame_index - 1].Box;
+    }
+
+    return true;
+  }
+
+  void discard_frame(size_t frame_index) { out.discard_pending_frame(frame_index); }
+
+  bool has_pending_frame(size_t frame_index) const {
+    return frame_index < out.m_mol.size() && !out.m_mol[frame_index].pos.x.empty();
+  }
+};
+
+struct RoutedPdbSink {
+  Multi_MOL &pro;
+  Multi_MOL &lig;
+  Multi_MOL &water;
+  const PdbRoutePlan &route_plan;
+  const bool require_lig;
+  const bool require_water;
+  const bool capture_topology;
+
+  bool append_atom(size_t frame_index, size_t source_atom_index,
+                   std::string_view line, const box &box_type, double time_ps,
+                   std::string_view force_f, std::string &error_message) {
+    const PdbRouteEntry route = route_plan.route_for(source_atom_index);
+    if (route.target == PdbRouteTarget::None)
+      return true;
+
+    Multi_MOL *target_mol = nullptr;
+    size_t reserve_hint = 0;
+    std::string_view target_type = "protein";
+    switch (route.target) {
+    case PdbRouteTarget::Pro:
+      target_mol = &pro;
+      reserve_hint = std::max(route_plan.pro_atom_count, pro.info.size());
+      target_type = pro.get_mol_type();
+      break;
+    case PdbRouteTarget::Lig:
+      target_mol = &lig;
+      reserve_hint = std::max(route_plan.lig_atom_count, lig.info.size());
+      target_type = lig.get_mol_type();
+      break;
+    case PdbRouteTarget::Wat:
+      target_mol = &water;
+      reserve_hint = std::max(route_plan.wat_atom_count, water.info.size());
+      target_type = "water";
+      break;
+    case PdbRouteTarget::None:
+      break;
+    }
+
+    if (target_mol == nullptr) {
+      error_message = "Invalid routed PDB target.";
+      return false;
+    }
+
+    if (frame_index >= target_mol->m_mol.size()) {
+      target_mol->begin_frame(frame_index, box_type, time_ps, force_f,
+                              expected_frame_atoms(*target_mol, frame_index,
+                                                   reserve_hint),
+                              target_type);
+    }
+
+    if (capture_topology &&
+        (target_mol->info.empty() ||
+         target_mol->info.size() < target_mol->m_mol[0].pos.x.size() + 1)) {
+      target_mol->append_topology_if_frame0(
+          make_atom_info(line, source_atom_index - 1));
+    }
+
+    target_mol->append_xyz(frame_index, parse_atom_coord(line, 30),
+                           parse_atom_coord(line, 38),
+                           parse_atom_coord(line, 46));
+    return true;
+  }
+
+  bool finalize_target(Multi_MOL &target_mol, size_t frame_index, bool had_box,
+                       size_t hinted_count, bool required,
+                       std::string_view label,
+                       std::string &warning_message) const {
+    if (frame_index >= target_mol.m_mol.size() ||
+        target_mol.m_mol[frame_index].pos.x.empty()) {
+      if (!required)
+        return true;
+      warning_message = std::string(label) + " frame is empty. Skipping...";
+      return false;
+    }
+
+    const size_t current_atoms = target_mol.m_mol[frame_index].size();
+    const size_t expected_atoms =
+        expected_frame_atoms(target_mol, frame_index, hinted_count);
+    if (expected_atoms > 0 && current_atoms != expected_atoms) {
+      warning_message = std::string(label) + " frame has " +
+                        std::to_string(current_atoms) + " atoms, expected " +
+                        std::to_string(expected_atoms) + ". Skipping...";
+      return false;
+    }
+
+    if (!had_box && frame_index != 0) {
+      target_mol.m_mol[frame_index].Box = target_mol.m_mol[frame_index - 1].Box;
+    }
+
+    return true;
+  }
+
+  bool finalize_frame(size_t frame_index, bool had_box, double time_ps,
+                      std::string &warning_message) {
+    if (!has_pending_frame(frame_index))
+      return false;
+
+    std::string local_warning;
+    if (!finalize_target(pro, frame_index, had_box, route_plan.pro_atom_count, true,
+                         "Receptor", local_warning) ||
+        !finalize_target(lig, frame_index, had_box, route_plan.lig_atom_count,
+                         require_lig, "Ligand", local_warning) ||
+        !finalize_target(water, frame_index, had_box, route_plan.wat_atom_count,
+                         require_water, "Water", local_warning)) {
+      if (!local_warning.empty()) {
+        warning_message = local_warning + " Time " + std::to_string(time_ps) +
+                          " ps.";
+      }
+      discard_frame(frame_index);
+      return false;
+    }
+
+    return true;
+  }
+
+  void discard_frame(size_t frame_index) {
+    pro.discard_pending_frame(frame_index);
+    lig.discard_pending_frame(frame_index);
+    water.discard_pending_frame(frame_index);
+  }
+
+  bool has_pending_frame(size_t frame_index) const {
+    const bool pro_pending =
+        frame_index < pro.m_mol.size() && !pro.m_mol[frame_index].pos.x.empty();
+    const bool lig_pending =
+        frame_index < lig.m_mol.size() && !lig.m_mol[frame_index].pos.x.empty();
+    const bool water_pending = frame_index < water.m_mol.size() &&
+                               !water.m_mol[frame_index].pos.x.empty();
+    return pro_pending || lig_pending || water_pending;
+  }
+};
+
+} // namespace
+
+std::expected<PdbRoutePlan, std::string>
+build_pdb_route_plan(groups_cal &groups, const arguments &Arguments) {
+  PdbRoutePlan plan;
+
+  if (groups.empty()) {
+    if (Arguments.begin_mol_2 > 0) {
+      plan.split_begin_mol_2 = Arguments.begin_mol_2;
+      return plan;
+    }
+    return std::unexpected("No PDB routing groups available.");
+  }
+
+  size_t max_source_atom_index = 0;
+  auto update_max_index = [&](size_t group_index) {
+    for (size_t i = 0; i < groups.groups_atom_number(group_index); ++i) {
+      max_source_atom_index =
+          std::max(max_source_atom_index, groups.atom_index(group_index, i));
+    }
+  };
+
+  update_max_index(groups.group_1_index());
+  if (!Arguments.flag_nocal)
+    update_max_index(groups.group_2_index());
+  if (Arguments.n_wat >= 0 && Arguments.n_wat < static_cast<int>(groups.group_num()))
+    update_max_index(static_cast<size_t>(Arguments.n_wat));
+
+  plan.atom_routes.resize(max_source_atom_index + 1);
+
+  auto assign_group = [&](size_t group_index, PdbRouteTarget target,
+                          size_t &count_ref) -> std::expected<void, std::string> {
+    for (size_t i = 0; i < groups.groups_atom_number(group_index); ++i) {
+      const size_t source_atom_index = groups.atom_index(group_index, i);
+      if (source_atom_index >= plan.atom_routes.size())
+        plan.atom_routes.resize(source_atom_index + 1);
+
+      if (plan.atom_routes[source_atom_index].target != PdbRouteTarget::None) {
+        return std::unexpected("Overlapping PDB routing groups are not supported.");
+      }
+
+      plan.atom_routes[source_atom_index] = {target, count_ref++};
+    }
+    return {};
+  };
+
+  plan.pro_atom_count = 0;
+  plan.lig_atom_count = 0;
+  plan.wat_atom_count = 0;
+
+  if (auto assigned =
+          assign_group(groups.group_1_index(), PdbRouteTarget::Pro,
+                       plan.pro_atom_count);
+      !assigned) {
+    return std::unexpected(assigned.error());
+  }
+
+  if (!Arguments.flag_nocal) {
+    if (auto assigned =
+            assign_group(groups.group_2_index(), PdbRouteTarget::Lig,
+                         plan.lig_atom_count);
+        !assigned) {
+      return std::unexpected(assigned.error());
+    }
+  }
+
+  if (Arguments.n_wat >= 0 && Arguments.n_wat < static_cast<int>(groups.group_num())) {
+    if (auto assigned =
+            assign_group(static_cast<size_t>(Arguments.n_wat),
+                         PdbRouteTarget::Wat, plan.wat_atom_count);
+        !assigned) {
+      return std::unexpected(assigned.error());
+    }
+  }
+
+  return plan;
+}
+
+std::expected<size_t, std::string>
+read_routed_pdb_chunk(std::istream &input_pdb, std::string_view input_name,
+                      size_t chunk_size, std::string_view force_f,
+                      arguments &Arguments, ::info &output_info,
+                      Multi_MOL &pro_out, Multi_MOL &lig_out,
+                      Multi_MOL &water_out, const PdbRoutePlan &route_plan,
+                      double &next_target_time_state, bool capture_topology) {
+  RoutedPdbSink sink{pro_out,
+                     lig_out,
+                     water_out,
+                     route_plan,
+                     !Arguments.flag_nocal,
+                     Arguments.n_wat >= 0,
+                     capture_topology};
+  return parse_pdb_stream_impl(
+      input_pdb, input_name,
+      chunk_size == std::numeric_limits<size_t>::max() ? 0 : chunk_size, force_f,
+      Arguments, output_info, next_target_time_state, sink);
+}
+
+int Multi_MOL::parse_pdb(std::string_view input_name, std::string_view force_f,
+                         arguments &Arguments, ::info &output_info,
+                         size_t max_frames) {
+  std::ifstream input_pdb(std::string(input_name), std::ios::binary);
+  if (!input_pdb.is_open()) {
+    std::cerr << "Can not open " << input_name << " file!\n";
+    return 1;
+  }
+
+  reset_parser_state();
+  SinglePdbSink sink{*this};
+  auto parsed = parse_pdb_stream_impl(
+      input_pdb, input_name,
+      max_frames == std::numeric_limits<size_t>::max() ? 0 : max_frames, force_f,
+      Arguments, output_info, next_target_time, sink);
+  if (!parsed)
+    return 1;
 
   if (this->m_mol.size() >= 2) {
     output_info.set_current_dt(
@@ -315,10 +628,11 @@ int Multi_MOL::parse_pdb(std::string_view input_name, std::string_view force_f,
   }
 
   if (Arguments.flag_begin_set && this->m_mol.empty() &&
-      time_of_snap_temp < Arguments.begin_time) {
+      !input_pdb.fail() && !input_pdb.bad()) {
     std::cout << "WARNING!!! Your begin time is " << Arguments.begin_time
               << " ps while time of the last snapshot is smaller than that!\n";
   }
+
   return 0;
 }
 
@@ -329,174 +643,18 @@ Multi_MOL::read_pdb_chunk(std::ifstream &input_pdb, size_t chunk_size,
   if (!input_pdb.is_open())
     return std::unexpected("Input PDB stream is closed.");
   if (input_pdb.eof())
-    return 0; // Normal EOF
+    return 0;
 
-  size_t frames_read = 0;
-  double time_of_snap_temp = 0.0;
-  box Box_temp;
-  bool flag_set_time = false, flag_set_box = false;
-  size_t I = 0;
+  SinglePdbSink sink{*this};
+  auto parsed = parse_pdb_stream_impl(
+      input_pdb, "stream",
+      chunk_size == std::numeric_limits<size_t>::max() ? 0 : chunk_size, force_f,
+      Arguments, output_info, next_target_time, sink);
+  if (!parsed)
+    return parsed;
 
-  const size_t BUFFER_SIZE = 1024 * 1024;
-  std::vector<char> buf(BUFFER_SIZE);
-  std::string remainder;
-  remainder.reserve(512);
-
-  while (frames_read < chunk_size && input_pdb) {
-    input_pdb.read(buf.data(), BUFFER_SIZE);
-    std::streamsize bytes_read = input_pdb.gcount();
-    if (bytes_read <= 0)
-      break;
-
-    std::string_view chunk_view(buf.data(), bytes_read);
-    size_t start = 0;
-    size_t end = chunk_view.find('\n');
-
-    while (end != std::string_view::npos) {
-      if (frames_read >= chunk_size) {
-        break;
-      }
-
-      std::string_view line_view = chunk_view.substr(start, end - start);
-      if (!line_view.empty() && line_view.back() == '\r') {
-        line_view.remove_suffix(1);
-      }
-
-      size_t old_I = I;
-
-      if (!remainder.empty()) {
-        remainder.append(line_view);
-        if (!remainder.empty()) {
-          if (1 == helper_parse_pdb(Arguments, Box_temp, flag_set_time,
-                                    time_of_snap_temp, remainder, I,
-                                    flag_set_box, output_info, remainder,
-                                    "stream", force_f)) {
-            if (Arguments.flag_end_set &&
-                time_of_snap_temp > Arguments.end_time) {
-              this->m_mol.resize(I);
-              input_pdb.seekg(0, std::ios_base::end);
-              input_pdb.setstate(std::ios::eofbit);
-              return frames_read;
-            }
-            this->m_mol.resize(I);
-            return std::unexpected("Format error at line: " + remainder);
-          }
-        }
-        remainder.clear();
-      } else {
-        if (!line_view.empty()) {
-          if (1 == helper_parse_pdb(Arguments, Box_temp, flag_set_time,
-                                    time_of_snap_temp, line_view, I,
-                                    flag_set_box, output_info, line_view,
-                                    "stream", force_f)) {
-            if (Arguments.flag_end_set &&
-                time_of_snap_temp > Arguments.end_time) {
-              this->m_mol.resize(I);
-              input_pdb.seekg(0, std::ios_base::end);
-              input_pdb.setstate(std::ios::eofbit);
-              return frames_read;
-            }
-            this->m_mol.resize(I);
-            return std::unexpected("Format error at line: " +
-                                   std::string(line_view));
-          }
-        }
-      }
-
-      if (I > old_I) {
-        // ── A. END FILTER — hard stop (same as XDR path) ──
-        if (Arguments.flag_end_set && time_of_snap_temp > Arguments.end_time) {
-          // Exclude this over-limit frame
-          --I;
-          this->m_mol.resize(I);
-          remainder.clear();
-          // Signal EOF so streaming loop stops entirely
-          input_pdb.seekg(0, std::ios_base::end);
-          input_pdb.setstate(std::ios::eofbit);
-          return frames_read;
-        }
-
-        // ── B. BEGIN FILTER — skip frames before -b ──
-        if (Arguments.flag_begin_set &&
-            time_of_snap_temp < Arguments.begin_time) {
-          // Discard this frame: roll back I, don't increment frames_read
-          --I;
-          this->m_mol.resize(I);
-          goto next_line; // skip to next line without counting this frame
-        }
-
-        // ── C. DT FILTER — stride (skip frames between dt intervals) ──
-        if (Arguments.dt > 0.0) {
-          static thread_local double pdb_next_target_time = -1e30;
-          if (pdb_next_target_time < -1e17) {
-            // Initialize on first accepted-by-begin frame
-            pdb_next_target_time = Arguments.flag_begin_set
-                                       ? Arguments.begin_time
-                                       : time_of_snap_temp;
-          }
-          if (time_of_snap_temp < pdb_next_target_time - 1e-4) {
-            // Frame doesn't hit target time — discard it
-            --I;
-            this->m_mol.resize(I);
-            goto next_line;
-          }
-          // Advance target: keep stepping until strictly past time
-          while (pdb_next_target_time <= time_of_snap_temp + 1e-4)
-            pdb_next_target_time += Arguments.dt;
-        }
-
-        frames_read++;
-      }
-
-    next_line:
-      start = end + 1;
-      end = chunk_view.find('\n', start);
-    }
-
-    if (frames_read >= chunk_size) {
-      std::streamoff rewind_bytes = static_cast<std::streamoff>(bytes_read) -
-                                    static_cast<std::streamoff>(start);
-      input_pdb.seekg(-rewind_bytes, std::ios_base::cur);
-      remainder.clear();
-      break;
-    }
-
-    if (start < static_cast<size_t>(bytes_read)) {
-      remainder.assign(chunk_view.substr(start));
-    } else {
-      remainder.clear();
-    }
-  }
-
-  if (!remainder.empty() && frames_read < chunk_size) {
-    size_t old_I = I;
-    if (1 == helper_parse_pdb(Arguments, Box_temp, flag_set_time,
-                              time_of_snap_temp, remainder, I, flag_set_box,
-                              output_info, remainder, "stream", force_f)) {
-    }
-    if (I > old_I) {
-      // Apply same time filters as main loop
-      bool accept = true;
-      if (Arguments.flag_end_set && time_of_snap_temp > Arguments.end_time) {
-        --I;
-        accept = false;
-      }
-      if (accept && Arguments.flag_begin_set &&
-          time_of_snap_temp < Arguments.begin_time) {
-        --I;
-        accept = false;
-      }
-      if (accept)
-        frames_read++;
-    }
-  }
-
-  // Erase any allocated ghost frames that were skipped by time filters
-  this->m_mol.resize(I); // Always resize to exactly I, even if I == 0
-
-  if (this->parameters.charge.empty() && !this->info.empty()) {
+  if (this->parameters.charge.empty() && !this->info.empty())
     this->gen_vector_parameters();
-  }
 
-  return frames_read;
+  return parsed.value();
 }

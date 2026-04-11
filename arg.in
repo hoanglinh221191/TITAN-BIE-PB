@@ -1,34 +1,57 @@
 # ============================================
-# TITAN arg.in — Dimer AB42 + NSP11
-# GBSA  |  PCA  |  Allostery
+# TITAN arg.in - protein-protein AWH trajectory
+# Structural + state-space analysis starter
 # ============================================
 
-# ── Reference structure / topology ──
--s=complex.pdb
--common_topo=topol.top
+# Input files
+-s=md1_snap0.pdb
+-traj=awh1.xtc
 -n=index.ndx
+-common_topo=topol.top
 
-# ── Force field ──
+# System definition
+# Change -ff only if your topol.top is not AMBER14SB-based
 -ff=AMBER14SB
--g=4-3
+-g=3-4
+-mol-1-type=protein
+-mol-2-type=protein
 
-# ── Trajectory ──
--traj=md1.xtc
--dt=10000
--b=100000
+# Optional trimming / stride
+#-b=...
+#-e=...
+#-dt=...
 
-# ── Energy settings ──
--eu=kCal/mol
--entropy
-
-# ── PBC ──
+# PBC handling
 -pbcn
+# If the chains are badly fragmented across the box, try this instead:
+#-pbctopo
 
-# ── Analyses ──
--gbsa
--pca
+# Interface / structural analysis
+-rms
+-dssp
+-hb
+-ifp
+
+# Collective motion / network analysis
 -network
--allostery
+-community=louvain
+-pca
+--fes-grid=80
 
-# ── Threads ──
--nt=8
+# Slow modes / state decomposition
+-tica
+--tica-lag=10
+--tica-components=5
+-umap
+-msm
+-msm-clusters=50
+-msm-lag=10
+-msm-macrostates=4
+
+# Enable TPT only after inspecting MSM macrostates or TICA regions
+#-tpt
+#-tpt-source=macro:0
+#-tpt-sink=macro:1
+
+# Threads
+#-nt=8

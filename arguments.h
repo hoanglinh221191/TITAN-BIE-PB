@@ -60,18 +60,34 @@ struct GistArgs {
 
 struct DeArgs {
   bool flag_find_pulling_direct{false};
+  std::string pull_opt{"de"};
+  size_t pull_max_evals{0};
+  unsigned int pull_seed{42};
   double de_diff_weight{0.9};
   double de_cross_prob{0.9};
   double de_F{0.5};
   double de_scan_radius{2.};
   double de_min_scan_radius{0.5};
-  double de_restrain_angle{65.};
+  double de_restrain_angle{90.};
   int de_flag_score_function{1};
   size_t de_pop_num{6480};
   size_t de_algorithm{};
   size_t de_ite{100};
   bool de_adaptive_F{true};
   int de_stagnation_limit{20};
+  size_t de_memory_size{10};
+  double de_p_best_rate{0.2};
+  double de_archive_scale{1.0};
+  size_t de_min_pop_num{4};
+  bool user_set_de_diff_weight{false};
+  bool user_set_de_cross_prob{false};
+  bool user_set_de_F{false};
+  bool user_set_de_algorithm{false};
+  bool user_set_de_adaptive_F{false};
+  bool user_set_de_memory_size{false};
+  bool user_set_de_p_best_rate{false};
+  bool user_set_de_archive_scale{false};
+  bool user_set_de_min_pop_num{false};
   bool flag_de_auto_term{false};
   double dis_along_path{4.};
   bool flag_pathway{false};
@@ -169,6 +185,21 @@ struct LjArgs {
   double lj_crystal_tol{0.08};
 };
 
+struct ZtsArgs {
+  bool flag_zts{false};
+  int zts_images{50};
+  int zts_max_iter{2000};
+  double zts_step{0.01};
+  double zts_tol{1e-5};
+  int zts_source{-1};
+  int zts_sink{-1};
+  double zts_fes_sigma{1.0};
+  bool zts_smooth_fes{true};
+  std::string zts_init_mode{"linear"};
+  std::string zts_domain{"pca"};
+  bool zts_domain_explicit{false};
+};
+
 // ── Main arguments struct ───────────────────────────────────
 struct arguments {
 private:
@@ -192,6 +223,7 @@ public:
   DsspArgs dssp;
   RmsArgs rms;
   LjArgs lj;
+  ZtsArgs zts;
 
   // LSP-MD (Kornev, JCTC 2025) — Local Spatial Pattern network analysis
   struct LSPMDArgs {
@@ -234,7 +266,9 @@ public:
   int allostery_bins;
   int allostery_knn;
   double allostery_cutoff;
+  double allostery_knn_contact_cutoff;
   bool allostery_use_avg_cutoff;
+  bool allostery_knn_use_contact_prior;
   bool allostery_compute_te;
   // XDR trajectory (XTC/TRR)
   string traj_file;
@@ -296,7 +330,9 @@ public:
         fes_grid{60},
         allostery_tau{5}, allostery_bins{-1},
         allostery_knn{0},
-        allostery_cutoff{0.0}, allostery_use_avg_cutoff{true},
+        allostery_cutoff{0.0}, allostery_knn_contact_cutoff{8.0},
+        allostery_use_avg_cutoff{true},
+        allostery_knn_use_contact_prior{false},
         allostery_compute_te{true},
         // XDR
         traj_file{}, flag_xdr{false}, xdr_type{},

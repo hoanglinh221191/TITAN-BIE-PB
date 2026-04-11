@@ -418,6 +418,26 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
   // Store topology references for later use in parallel_split_coordinates
   init_pro_ = &init_pro;
   init_lig_ = &init_lig;
+  pdb_route_plan_ready_ = false;
+  pdb_warned_direct_route_fallback_ = false;
+  pdb_next_target_time_ = -1e18;
+  pro_total_bytes_ = 0;
+  lig_total_bytes_ = 0;
+  pro_data_offset_bytes_ = 0;
+  lig_data_offset_bytes_ = 0;
+
+  auto file_size_bytes = [](const std::string &path) -> size_t {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    return ec ? 0 : static_cast<size_t>(size);
+  };
+  auto stream_offset = [](std::ifstream &stream, size_t fallback_total) -> size_t {
+    const std::streampos pos = stream.tellg();
+    if (pos == std::streampos(-1))
+      return fallback_total;
+    const auto as_off = static_cast<std::streamoff>(pos);
+    return as_off < 0 ? 0 : static_cast<size_t>(as_off);
+  };
 
   // ── XDR PATH (XTC/TRR) ──────────────────────────────────────────────
   if (args_ref.flag_xdr) {
@@ -614,6 +634,12 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
 
   // ── PDB PATH (unchanged) ────────────────────────────────────────────
   if (args_ref.flag_1_pdb) {
+    pro_total_bytes_ = file_size_bytes(args_ref.pdb_name);
+    if (auto route_plan = build_pdb_route_plan(groups_ref, args_ref); route_plan) {
+      pdb_route_plan_ = std::move(route_plan.value());
+      pdb_route_plan_ready_ = true;
+    }
+
     stream_pro.open(args_ref.pdb_name, std::ios::in);
     if (!stream_pro.is_open())
       return std::unexpected("Failed to open stream: " + args_ref.pdb_name);
@@ -628,7 +654,19 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
       if (!sk)
         return std::unexpected("Failed to skip Frame 0 in stream");
     }
+    pro_data_offset_bytes_ = stream_offset(stream_pro, pro_total_bytes_);
+    if (args_ref.dt > 0.0 && !init_pro.m_mol.empty()) {
+      pdb_next_target_time_ =
+          args_ref.flag_begin_set ? args_ref.begin_time
+                                  : init_pro.m_mol[0].time_of_snap;
+      while (pdb_next_target_time_ <=
+             init_pro.m_mol[0].time_of_snap + kXdrTimeTolerancePs) {
+        pdb_next_target_time_ += args_ref.dt;
+      }
+    }
   } else {
+    pro_total_bytes_ = file_size_bytes(name_pro);
+    lig_total_bytes_ = file_size_bytes(name_lig);
     stream_pro.open(name_pro, std::ios::in);
     stream_lig.open(name_lig, std::ios::in);
 
@@ -651,6 +689,8 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
       Multi_MOL dummy_mol;
       dummy_mol.read_pdb_chunk(stream_lig, 1, args_ref, info_ref, force_f);
     }
+    pro_data_offset_bytes_ = stream_offset(stream_pro, pro_total_bytes_);
+    lig_data_offset_bytes_ = stream_offset(stream_lig, lig_total_bytes_);
   }
   return {};
 }
@@ -749,6 +789,26 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
   lig.m_mol.clear();
   if (args_ref.n_wat >= 0)
     water_traj.m_mol.clear();
+
+  auto current_stream_offset = [](std::ifstream &stream, size_t fallback_total) {
+    const std::streampos pos = stream.tellg();
+    if (pos == std::streampos(-1))
+      return fallback_total;
+    const auto as_off = static_cast<std::streamoff>(pos);
+    return as_off < 0 ? size_t(0) : static_cast<size_t>(as_off);
+  };
+  auto progress_bytes = [](size_t current, size_t begin_offset, size_t total) {
+    if (current <= begin_offset)
+      return size_t(0);
+    return std::min(current - begin_offset, total > begin_offset ? total - begin_offset
+                                                                 : size_t(0));
+  };
+  auto show_pdb_loading_progress = [&](const std::string &label, size_t current,
+                                       size_t total) {
+    if (total == 0)
+      return;
+    TitanUI::show_progress_exact(label, current, total, "Loading PDB");
+  };
 
   // ── XDR PATH (XTC/TRR) ──────────────────────────────────────────────
   if (args_ref.flag_xdr) {
@@ -1376,6 +1436,21 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
 
   // ── PDB PATH (unchanged) ────────────────────────────────────────────
   if (args_ref.flag_1_pdb == false) {
+    const std::string load_label = "rec+lig";
+    const size_t total_load_bytes =
+        (pro_total_bytes_ > pro_data_offset_bytes_
+             ? pro_total_bytes_ - pro_data_offset_bytes_
+             : 0) +
+        (lig_total_bytes_ > lig_data_offset_bytes_
+             ? lig_total_bytes_ - lig_data_offset_bytes_
+             : 0);
+    const size_t load_before =
+        progress_bytes(current_stream_offset(stream_pro, pro_total_bytes_),
+                       pro_data_offset_bytes_, pro_total_bytes_) +
+        progress_bytes(current_stream_offset(stream_lig, lig_total_bytes_),
+                       lig_data_offset_bytes_, lig_total_bytes_);
+    show_pdb_loading_progress(load_label, load_before, total_load_bytes);
+
     size_t pro_frames = 0;
     size_t lig_frames = 0;
 
@@ -1400,6 +1475,13 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
         last_lig_frame = lig.m_mol.back(); // Track last known frame
     }
 
+    const size_t load_after =
+        progress_bytes(current_stream_offset(stream_pro, pro_total_bytes_),
+                       pro_data_offset_bytes_, pro_total_bytes_) +
+        progress_bytes(current_stream_offset(stream_lig, lig_total_bytes_),
+                       lig_data_offset_bytes_, lig_total_bytes_);
+    show_pdb_loading_progress(load_label, load_after, total_load_bytes);
+
     size_t actual_frames = std::max(pro_frames, lig_frames);
 
     // Stop if BOTH trajectories are entirely exhausted
@@ -1422,20 +1504,67 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
 
     return actual_frames;
   } else {
-    Multi_MOL chunk_pdb;
-    auto expected_pro = chunk_pdb.read_pdb_chunk(stream_pro, chunk_size,
-                                                 args_ref, info_ref, force_f);
+    const std::string load_label =
+        std::filesystem::path(args_ref.pdb_name).filename().string();
+    const size_t total_load_bytes =
+        pro_total_bytes_ > pro_data_offset_bytes_
+            ? pro_total_bytes_ - pro_data_offset_bytes_
+            : 0;
+    const size_t load_before =
+        progress_bytes(current_stream_offset(stream_pro, pro_total_bytes_),
+                       pro_data_offset_bytes_, pro_total_bytes_);
+    show_pdb_loading_progress(load_label, load_before, total_load_bytes);
 
-    if (!expected_pro)
-      return std::unexpected("Chunk read failed: " + expected_pro.error());
-    if (expected_pro.value() == 0)
-      return 0; // EOF
+    std::expected<size_t, std::string> expected_frames =
+        std::unexpected("Chunk read failed.");
+    const std::streampos chunk_start_pos = stream_pro.tellg();
 
-    size_t frames = expected_pro.value();
-    // PDB chunks already contain topology data, pass stored init references
-    parallel_split_coordinates(chunk_pdb, *init_pro_, *init_lig_, pro_in, lig,
-                               water_traj, frames);
+    if (pdb_route_plan_ready_) {
+      expected_frames = read_routed_pdb_chunk(
+          stream_pro, args_ref.pdb_name, chunk_size, force_f, args_ref, info_ref,
+          pro_in, lig, water_traj, pdb_route_plan_, pdb_next_target_time_, false);
+    }
 
-    return frames;
+    if (!pdb_route_plan_ready_ || !expected_frames) {
+      if (pdb_route_plan_ready_ && !pdb_warned_direct_route_fallback_) {
+        TitanUI::print_warning(
+            "PDB direct routed streaming fell back to chunk split path: " +
+            expected_frames.error());
+        pdb_warned_direct_route_fallback_ = true;
+      }
+      if (chunk_start_pos != std::streampos(-1)) {
+        stream_pro.clear();
+        stream_pro.seekg(chunk_start_pos);
+      }
+
+      pro_in.m_mol.clear();
+      lig.m_mol.clear();
+      water_traj.m_mol.clear();
+
+      Multi_MOL chunk_pdb;
+      expected_frames = chunk_pdb.read_pdb_chunk(stream_pro, chunk_size, args_ref,
+                                                 info_ref, force_f);
+      if (!expected_frames)
+        return std::unexpected("Chunk read failed: " + expected_frames.error());
+      if (expected_frames.value() == 0) {
+        const size_t load_after =
+            progress_bytes(current_stream_offset(stream_pro, pro_total_bytes_),
+                           pro_data_offset_bytes_, pro_total_bytes_);
+        show_pdb_loading_progress(load_label, load_after, total_load_bytes);
+        return 0;
+      }
+
+      parallel_split_coordinates(chunk_pdb, *init_pro_, *init_lig_, pro_in, lig,
+                                 water_traj, expected_frames.value());
+    }
+
+    const size_t load_after =
+        progress_bytes(current_stream_offset(stream_pro, pro_total_bytes_),
+                       pro_data_offset_bytes_, pro_total_bytes_);
+    show_pdb_loading_progress(load_label, load_after, total_load_bytes);
+
+    if (expected_frames.value() == 0)
+      return 0;
+    return expected_frames.value();
   }
 }

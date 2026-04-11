@@ -2967,11 +2967,14 @@ void run_tica_msm_postproc(const arguments &args,
 // 3. TICA 2D FES post-processing
 // ============================================================================
 void run_tica_fes_postproc(const arguments &args,
+                           std::unique_ptr<TitanKinetics> &tica_analyzer,
                            std::unique_ptr<TitanMSM> &msm_analyzer,
                            TitanExecutor &executor, info &info_output,
                            std::fstream &log,
-                           const std::vector<double> &frame_weights) {
-  if (!(args.msm.flag_tica && args.msm.flag_msm && msm_analyzer))
+                           const std::vector<double> &frame_weights,
+                           TitanPCA::FesPostprocMetrics *metrics) {
+  (void)tica_analyzer;
+  if (!(args.msm.flag_tica && msm_analyzer))
     return;
   if (msm_analyzer->n_frames() <= 0)
     return;
@@ -2982,7 +2985,7 @@ void run_tica_fes_postproc(const arguments &args,
     TitanPCA::execute_tica_fes_analysis(
         args, msm_analyzer->proj_mat_ref(), msm_analyzer->n_frames(),
         msm_analyzer->get_frame_global_indices(), executor, info_output, log,
-        frame_weights);
+        frame_weights, metrics);
     auto time_tica_fes = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start_tica_fes);
     TitanUI::log_time(log, "TICA 2D FES", time_tica_fes.count() / 1000.0);
@@ -3092,7 +3095,8 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
                            std::chrono::milliseconds &time_network,
                            info &info_output, std::fstream &log,
                            const std::vector<double> &frame_weights,
-                           const std::vector<std::string> &replica_traj_files) {
+                           const std::vector<std::string> &replica_traj_files,
+                           TitanPCA::FesPostprocMetrics *metrics) {
   if (!(args.flag_network_explicit || args.flag_pca || args.flag_allostery ||
         args.community.flag_community))
     return;
@@ -3108,20 +3112,45 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
           std::chrono::steady_clock::now() - start_dccm);
       TitanUI::log_time(log, "Network Output", time_network.count() / 1000.0);
 
-      // Allosteric Information Theory (GC + Transfer Entropy)
+      // Allosteric Information Theory (MI -> GC + Transfer Entropy)
       if (args.flag_allostery) {
         auto start_allost = std::chrono::steady_clock::now();
-        TitanUI::print_module_header("Allosteric Information Theory (GC + TE)");
+        TitanUI::print_module_header(
+            "Allosteric Information Theory (MI, GC + TE)");
         DCCMNetwork::AllosteryConfig cfg;
         cfg.tau_lag = args.allostery_tau;
         cfg.num_bins = args.allostery_bins;
         cfg.knn = args.allostery_knn;
         cfg.cutoff_ang = args.allostery_cutoff;
         cfg.use_avg_cutoff = args.allostery_use_avg_cutoff;
+        cfg.knn_use_contact_prior = args.allostery_knn_use_contact_prior;
+        cfg.knn_contact_cutoff = args.allostery_knn_contact_cutoff;
         cfg.compute_te = args.allostery_compute_te;
-        dccm_analyzer.calculate_allostery_information_optimized(executor, cfg);
+        dccm_analyzer.calculate_allostery_information_optimized(
+            executor, cfg, info_output.get_network_gc_edges_filename(),
+            info_output.get_network_mi_edges_filename(),
+            info_output.get_network_te_edges_filename());
+        TitanUI::log_kv(log, "Allostery MI File",
+                        info_output.get_network_mi_edges_filename());
+        TitanUI::log_kv(log, "Allostery GC File",
+                        info_output.get_network_gc_edges_filename());
+        TitanUI::log_kv(log, "Allostery TE File",
+                        info_output.get_network_te_edges_filename());
         TitanUI::log_kv(log, "Allostery TE Stage",
                         cfg.compute_te ? "enabled" : "disabled (GC only)");
+        TitanUI::log_kv(log, "Allostery Prune Window",
+                        cfg.use_avg_cutoff ? "union across frames"
+                                           : "frame-0 only");
+        if (cfg.knn > 0) {
+          std::ostringstream knn_prior;
+          if (cfg.knn_use_contact_prior) {
+            knn_prior << "contact-frequency (Cbeta/N anchors, "
+                      << cfg.knn_contact_cutoff << " A)";
+          } else {
+            knn_prior << "frame-voted nearest";
+          }
+          TitanUI::log_kv(log, "Allostery kNN Prior", knn_prior.str());
+        }
         if (cfg.cutoff_ang > 0.0 || cfg.knn > 0) {
           std::ostringstream pair_filter;
           bool has_filter = false;
@@ -3132,7 +3161,12 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
           if (cfg.knn > 0) {
             if (has_filter)
               pair_filter << " + ";
-            pair_filter << "top-" << cfg.knn << " frame-voted kNN";
+            pair_filter << "top-" << cfg.knn << " "
+                        << (cfg.knn_use_contact_prior
+                                ? "contact-frequency kNN @ "
+                                : "frame-voted kNN");
+            if (cfg.knn_use_contact_prior)
+              pair_filter << cfg.knn_contact_cutoff << " A";
           }
           pair_filter << " ("
                       << (cfg.use_avg_cutoff ? "union across frames"
@@ -3155,7 +3189,7 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
         auto time_allost =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start_allost);
-        TitanUI::log_time(log, "Allostery GC+TE",
+        TitanUI::log_time(log, "Allostery MI+GC+TE",
                           time_allost.count() / 1000.0);
       }
 
@@ -3205,7 +3239,7 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
             dccm_analyzer.get_chains(), dccm_analyzer.get_is_lig(), executor,
             info_output, log, pca_frame_weights,
             dccm_analyzer.get_traj_times(), dccm_analyzer.get_traj_replicas(),
-            replica_traj_files);
+            replica_traj_files, metrics);
       }
     }
   } catch (const std::exception &e) {

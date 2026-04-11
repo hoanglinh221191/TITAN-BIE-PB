@@ -66,6 +66,14 @@ private:
 
   MOL last_pro_frame;
   MOL last_lig_frame;
+  PdbRoutePlan pdb_route_plan_;
+  bool pdb_route_plan_ready_ = false;
+  bool pdb_warned_direct_route_fallback_ = false;
+  size_t pro_total_bytes_ = 0;
+  size_t lig_total_bytes_ = 0;
+  size_t pro_data_offset_bytes_ = 0;
+  size_t lig_data_offset_bytes_ = 0;
+  double pdb_next_target_time_ = -1e18;
 
   void parallel_split_coordinates(const Multi_MOL &source_chunk,
                                   const Multi_MOL &init_pro,

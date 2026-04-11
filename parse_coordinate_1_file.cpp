@@ -1,9 +1,11 @@
 #include "MOL.h"
 #include "functions.h"
+#include "titan_ui.h"
 #include <algorithm>
 #include <charconv>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 
@@ -221,6 +223,62 @@ void take_coordinate(Multi_MOL &pro_in, Multi_MOL &lig, Multi_MOL &water_traj,
                      groups_cal &groups, string input_name, string force_f,
                      arguments &Arguments, const amino_acid &amine,
                      ::info &output_info, int flag_raw, size_t max_frames) {
+  auto try_direct_routed_parse = [&]() -> bool {
+    auto route_plan = build_pdb_route_plan(groups, Arguments);
+    if (!route_plan)
+      return false;
+
+    std::ifstream routed_input(input_name, std::ios::binary);
+    if (!routed_input.is_open())
+      return false;
+
+    pro_in.m_mol.clear();
+    lig.m_mol.clear();
+    water_traj.m_mol.clear();
+
+    double next_target_time_state = -1e18;
+    const bool capture_topology =
+        pro_in.info.empty() ||
+        (!Arguments.flag_nocal && lig.info.empty()) ||
+        (Arguments.n_wat >= 0 && water_traj.info.empty());
+    const size_t frame_limit =
+        max_frames > 0 ? max_frames : std::numeric_limits<size_t>::max();
+
+    auto parsed = read_routed_pdb_chunk(
+        routed_input, input_name, frame_limit, force_f, Arguments, output_info,
+        pro_in, lig, water_traj, route_plan.value(), next_target_time_state,
+        capture_topology);
+    if (!parsed) {
+      TitanUI::print_warning("Falling back to legacy 1-PDB parser: " +
+                             parsed.error());
+      pro_in.m_mol.clear();
+      lig.m_mol.clear();
+      water_traj.m_mol.clear();
+      return false;
+    }
+
+    if (pro_in.m_mol.size() >= 2) {
+      output_info.set_current_dt(
+          pro_in.m_mol[pro_in.m_mol.size() - 1].time_of_snap -
+          pro_in.m_mol[pro_in.m_mol.size() - 2].time_of_snap);
+    }
+
+    if (Arguments.flag_end_set == false && !pro_in.m_mol.empty()) {
+      output_info.set_current_end_time(
+          pro_in.m_mol[pro_in.m_mol.size() - 1].time_of_snap);
+    }
+
+    pro_in.gen_vector_parameters();
+    lig.gen_vector_parameters();
+    if (Arguments.n_wat >= 0)
+      water_traj.gen_vector_parameters();
+
+    return true;
+  };
+
+  if (try_direct_routed_parse())
+    return;
+
   box Box_temp;
   double time_of_snap_temp{};
   bool flag_set_time{false}, flag_set_box{false};

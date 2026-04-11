@@ -45,9 +45,14 @@ public:
   string get_pca_fel_filename() const { return "pca_fel.csv"; }
   string get_pca_fes_2d_filename() const { return "pca_fes_2d.dat"; }
   string get_tica_fes_2d_filename() const { return "tica_fes_2d.dat"; }
+  string get_pca_zts_path_filename() const { return "pca_zts_path.csv"; }
+  string get_tica_zts_path_filename() const { return "tica_zts_path.csv"; }
   string get_fes_2d_filename() const { return get_pca_fes_2d_filename(); }
   string get_cluster_representatives_filename() const {
     return "cluster_representatives.dat";
+  }
+  string get_tica_cluster_representatives_filename() const {
+    return "tica_cluster_representatives.dat";
   }
 
   void setPdbName(const arguments &Arguments) {
@@ -105,6 +110,15 @@ public:
   string get_DE_output_filename() { return "DE_out_vector.dat"; }
   string get_DE_log_filename() { return "DE_log.dat"; }
   string get_DE_pdb_vector_filename() { return "DE_vector.pdb"; }
+  string get_pull_direction_aligned_pdb_filename() const {
+    return "pull_direction_aligned_snapshot.pdb";
+  }
+  string get_pull_direction_system_info_filename() const {
+    return "pull_direction_system_info.txt";
+  }
+  string get_pull_direction_status_filename() const {
+    return "pull_direction_status.txt";
+  }
 
   string get_cas_receptor_filename() const { return "cas_receptor.dat"; }
   string get_cas_ligand_filename() const { return "cas_ligand.dat"; }
@@ -121,6 +135,15 @@ public:
   }
   string get_network_communities_filename() const {
     return "network_communities.csv";
+  }
+  string get_network_gc_edges_filename() const {
+    return "network_gc_edges.csv";
+  }
+  string get_network_mi_edges_filename() const {
+    return "raw_mi_edges.csv";
+  }
+  string get_network_te_edges_filename() const {
+    return "network_te_edges.csv";
   }
   string get_network_community_summary_filename() const {
     return "network_community_summary.csv";

@@ -97,6 +97,70 @@ int Multi_MOL::emplace(size_t i, box &box_type, double time,
   return 0;
 }
 
+void Multi_MOL::begin_frame(size_t frame_index, const box &box_type, double time,
+                            string_view force_field, size_t reserve_atoms,
+                            string_view frame_mol_type) {
+  this->force_f = force_field;
+  if (frame_index >= m_mol.size())
+    m_mol.resize(frame_index + 1);
+
+  MOL &frame = m_mol[frame_index];
+  frame.pos.clear();
+  if (frame.force_vec.has_value())
+    frame.force_vec.reset();
+  frame.thread_local_forces.clear();
+  frame.Com.clear();
+  frame.list_h_bonds.dat.clear();
+  frame.Box = box_type;
+  frame.set_time(time);
+  frame.force_f = std::string(force_field);
+  frame.flag_set_time = true;
+  frame.compute_forces = false;
+  if (!frame_mol_type.empty())
+    frame.mol_type = std::string(frame_mol_type);
+  else if (!this->mol_type.empty())
+    frame.mol_type = this->mol_type;
+
+  this->reserve_atoms(frame_index, reserve_atoms);
+}
+
+void Multi_MOL::reserve_atoms(size_t frame_index, size_t atom_count) {
+  if (frame_index >= m_mol.size())
+    m_mol.resize(frame_index + 1);
+
+  if (atom_count == 0)
+    return;
+
+  MOL &frame = m_mol[frame_index];
+  frame.pos.x.reserve(atom_count);
+  frame.pos.y.reserve(atom_count);
+  frame.pos.z.reserve(atom_count);
+}
+
+void Multi_MOL::append_xyz(size_t frame_index, double x, double y, double z) {
+  if (frame_index >= m_mol.size())
+    m_mol.resize(frame_index + 1);
+
+  MOL &frame = m_mol[frame_index];
+  frame.pos.x.emplace_back(x);
+  frame.pos.y.emplace_back(y);
+  frame.pos.z.emplace_back(z);
+}
+
+void Multi_MOL::append_topology_if_frame0(const mol_info &info_in) {
+  if (m_mol.empty())
+    return;
+
+  const size_t next_atom_index = m_mol[0].pos.x.size() + 1;
+  if (info.size() < next_atom_index)
+    info.emplace_back(info_in);
+}
+
+void Multi_MOL::discard_pending_frame(size_t frame_index) {
+  if (frame_index < m_mol.size())
+    m_mol.resize(frame_index);
+}
+
 int Multi_MOL::emplace(size_t i, box &box_type, double time,
                        string_view force_f, const mol_info &info_in,
                        const MOL &mol_in, string_view _mol_type) {

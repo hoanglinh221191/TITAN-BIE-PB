@@ -443,6 +443,7 @@ int cal_one_ele(const MOL &rec, const MOL &lg, cache_sigma_epsilon &CachedData,
 int find_pull_direct(Multi_MOL &rec, Multi_MOL &lg,
                      cache_sigma_epsilon &CachedData, de_arg &DE_arguments,
                      arguments &Arguments, info &output_info,
+                     TitanExecutor &executor,
                      groups_cal &Groups_from_index_file);
 int mindis_subgroups(groups_cal &groups, const Multi_MOL &rec,
                      const Multi_MOL &lg, size_t num_snap, size_t MAX_NUM,

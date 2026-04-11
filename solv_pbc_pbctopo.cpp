@@ -4,6 +4,7 @@
 #include "titan_ui.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cctype>
 #include <chrono>
@@ -2338,8 +2339,6 @@ bool anchor_graph_metrics_ok(const vector<Vec3> &placed_points,
   const bool has_incumbent =
       (incumbent != nullptr && incumbent->valid &&
        isfinite(incumbent->anchor_mst2) && isfinite(incumbent->anchor_max_d2));
-  const double incumbent_anchor_mst2 =
-      has_incumbent ? incumbent->anchor_mst2 : inf;
   const double incumbent_anchor_max_d2 =
       has_incumbent ? incumbent->anchor_max_d2 : inf;
 
@@ -2359,8 +2358,7 @@ bool anchor_graph_metrics_ok(const vector<Vec3> &placed_points,
     used[next] = 1;
     mst2 += next_cost;
     max_d2 = max(max_d2, next_cost);
-    if (has_incumbent && max_d2 > incumbent_anchor_max_d2 + 1.0e-6 &&
-        mst2 > incumbent_anchor_mst2 + 1.0e-6) {
+    if (has_incumbent && max_d2 > incumbent_anchor_max_d2 + 1.0e-6) {
       return false;
     }
     const double sx = px[next];
@@ -4357,7 +4355,7 @@ bool component_candidate_cannot_beat_incumbent_prefix(
 }
 
 PbctopoComponentCandidate score_component_assignment(
-    const vector<PbctopoAtom> &atoms, box Box, const vector<Vec3> &placed_points,
+    const vector<PbctopoAtom> &atoms, const vector<Vec3> &placed_points,
     const vector<vector<size_t>> &components, double min_pair_d2,
     size_t clash_atom_a, size_t clash_atom_b,
     const vector<PbctopoContinuityPair> &continuity_pairs,
@@ -4711,7 +4709,6 @@ vector<PbctopoComponentSearchShiftOption> build_component_search_shift_order(
 PbctopoComponentCandidate search_component_shift_candidate(
     const vector<PbctopoAtom> &atoms, box Box,
     const vector<vector<size_t>> &components, const vector<PbctopoShift> &shifts,
-    const unordered_set<uint64_t> &edge_set,
     const vector<PbctopoContinuityPair> &continuity_pairs,
     const vector<size_t> &anchor_indices,
     const PbctopoRuntimeCutoffs &cutoffs, vector<Vec3> &best_points_out,
@@ -4722,7 +4719,6 @@ PbctopoComponentCandidate search_component_shift_candidate(
   PbctopoComponentCandidate best;
   if (components.empty())
     return best;
-  (void)edge_set;
 
   vector<Vec3> placed_points(atoms.size());
   best_points_out.clear();
@@ -4800,7 +4796,7 @@ PbctopoComponentCandidate search_component_shift_candidate(
         }
         if (depth >= search_order.size()) {
           PbctopoComponentCandidate candidate = score_component_assignment(
-              atoms, Box, placed_points, components, min_pair_d2, clash_atom_a,
+              atoms, placed_points, components, min_pair_d2, clash_atom_a,
               clash_atom_b, continuity_pairs, anchor_indices,
               cutoffs.continuity_cutoff, shift_norm2,
               best.valid ? &best : nullptr, timing);
@@ -7566,6 +7562,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
         (executor != nullptr) ? max<size_t>(1, executor->capacity()) : requested_threads;
     const size_t coarse_threads =
         min(executor_capacity, coarse_seed_options.size());
+    atomic<size_t> coarse_projection_skip_evals{0};
     coarse_results.assign(coarse_seed_options.size(), PbctopoCutCandidate{});
     if (executor != nullptr && coarse_threads > 1 && coarse_seed_options.size() >= 4 &&
         projection_atoms.size() >= 2000) {
@@ -7584,7 +7581,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                   runtime_cutoffs.continuity_cutoff, nullptr,
                   skip_projection_candidate_clash);
               if (skip_projection_candidate_clash)
-                ++timing.projection_clash_skip_evals;
+                coarse_projection_skip_evals.fetch_add(
+                    1, memory_order_relaxed);
             }
           });
     } else if (coarse_threads > 1 && coarse_seed_options.size() >= 4 &&
@@ -7611,7 +7609,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                 runtime_cutoffs.continuity_cutoff, nullptr,
                 skip_projection_candidate_clash);
             if (skip_projection_candidate_clash)
-              ++timing.projection_clash_skip_evals;
+              coarse_projection_skip_evals.fetch_add(
+                  1, memory_order_relaxed);
           }
         });
       }
@@ -7627,9 +7626,11 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             runtime_cutoffs.continuity_cutoff, nullptr,
             skip_projection_candidate_clash);
         if (skip_projection_candidate_clash)
-          ++timing.projection_clash_skip_evals;
+          coarse_projection_skip_evals.fetch_add(1, memory_order_relaxed);
       }
     }
+    timing.projection_clash_skip_evals +=
+        coarse_projection_skip_evals.load(memory_order_relaxed);
     for (const auto &candidate : coarse_results) {
       push_top_virtual_box_candidate(coarse_candidates, candidate,
                                      kProjectionKeepCandidates);
@@ -7895,7 +7896,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
         PbctopoComponentCandidate component_candidate =
             search_component_shift_candidate(component_atoms,
                                              this->m_mol[frame_idx].Box,
-                                             components, shifts, local_edge_set,
+                                             components, shifts,
                                              trajectory_context.continuity_pairs,
                                              trajectory_context.continuity_anchor_indices,
                                              runtime_cutoffs, component_points,

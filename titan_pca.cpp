@@ -2,6 +2,7 @@
 #include "titan_alignment.h"
 #include "titan_executor.h"
 #include "titan_ui.h"
+#include "titan_zts.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -10,6 +11,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <span>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -23,32 +25,12 @@ namespace {
 constexpr double kBoltzmannKjPerMolK = 0.008314463;
 constexpr double kMinimumAxisRange = 1e-6;
 constexpr double kDefaultFreeEnergy = 20.0;
+using TitanPCA::FES2DResult;
 
 struct FrameWeightResolution {
   bool use_weights{false};
-  std::vector<double> analysis_weights{};
+  AlignedDoubleVector analysis_weights{};
   double analysis_weight_sum{0.0};
-};
-
-struct FES2DResult {
-  int grid_size{0};
-  double min_x{0.0};
-  double min_y{0.0};
-  double step_x{1.0};
-  double step_y{1.0};
-  double total_weight{0.0};
-  double max_bin_weight{0.0};
-  std::vector<TitanPCA::FES_Grid> bins{};
-
-  TitanPCA::FES_Grid &bin(int ix, int iy) {
-    return bins[static_cast<size_t>(ix) * static_cast<size_t>(grid_size) +
-                static_cast<size_t>(iy)];
-  }
-
-  const TitanPCA::FES_Grid &bin(int ix, int iy) const {
-    return bins[static_cast<size_t>(ix) * static_cast<size_t>(grid_size) +
-                static_cast<size_t>(iy)];
-  }
 };
 
 struct FlatCoordinateMatrix {
@@ -101,7 +83,7 @@ size_t choose_worker_count(size_t requested_threads, size_t work_items,
 
 FrameWeightResolution resolve_frame_weights(const std::string &label,
                                             size_t num_frames,
-                                            const std::vector<double> &weights) {
+                                            std::span<const double> weights) {
   FrameWeightResolution resolved;
   resolved.analysis_weights.assign(num_frames, 1.0);
   resolved.analysis_weight_sum = static_cast<double>(num_frames);
@@ -118,7 +100,7 @@ FrameWeightResolution resolve_frame_weights(const std::string &label,
     return resolved;
   }
 
-  resolved.analysis_weights = weights;
+  resolved.analysis_weights.assign(weights.begin(), weights.end());
   resolved.analysis_weight_sum =
       std::accumulate(resolved.analysis_weights.begin(),
                       resolved.analysis_weights.end(), 0.0);
@@ -135,7 +117,7 @@ FrameWeightResolution resolve_frame_weights(const std::string &label,
   return resolved;
 }
 
-std::vector<double> map_global_weights_to_local_frames(
+AlignedDoubleVector map_global_weights_to_local_frames(
     const std::string &label, int64_t n_frames,
     const std::vector<int64_t> &frame_global_indices,
     const std::vector<double> &global_frame_weights) {
@@ -154,7 +136,7 @@ std::vector<double> map_global_weights_to_local_frames(
     return {};
   }
 
-  std::vector<double> mapped(local_frames, 0.0);
+  AlignedDoubleVector mapped(local_frames, 0.0);
   size_t matched_frames = 0;
   size_t weighted_frames = 0;
   size_t invalid_indices = 0;
@@ -198,7 +180,7 @@ double resolve_target_temperature(const arguments &args, bool use_weights) {
 
 FES2DResult compute_2d_fes_grid(
     const std::vector<std::pair<double, double>> &projections,
-    const std::vector<double> &analysis_weights, int requested_grid_size,
+    const AlignedDoubleVector &analysis_weights, int requested_grid_size,
     double target_temp, double scale_factor, TitanExecutor &executor) {
   FES2DResult result;
   if (projections.empty())
@@ -240,10 +222,10 @@ FES2DResult compute_2d_fes_grid(
 
   const size_t worker_count =
       choose_worker_count(executor.capacity(), projections.size(), 2048);
-  std::vector<std::vector<int>> local_counts(
-      worker_count, std::vector<int>(grid_cells, 0));
-  std::vector<std::vector<double>> local_weights(
-      worker_count, std::vector<double>(grid_cells, 0.0));
+  std::vector<AlignedIntVector> local_counts(worker_count,
+                                             AlignedIntVector(grid_cells, 0));
+  std::vector<AlignedDoubleVector> local_weights(
+      worker_count, AlignedDoubleVector(grid_cells, 0.0));
   const double inv_step_x = 1.0 / result.step_x;
   const double inv_step_y = 1.0 / result.step_y;
 
@@ -329,6 +311,289 @@ bool write_2d_fes_grid(const std::string &label, const std::string &path,
   return true;
 }
 
+std::vector<TitanPCA::ClusterNode> detect_fes_clusters(
+    FES2DResult &fes_result,
+    const std::vector<std::pair<double, double>> &projections,
+    const AlignedDoubleVector &analysis_weights, bool use_weights,
+    TitanExecutor &executor) {
+  if (fes_result.grid_size <= 2 || projections.empty())
+    return {};
+
+  const size_t grid_cells = static_cast<size_t>(fes_result.grid_size) *
+                            static_cast<size_t>(fes_result.grid_size);
+  AlignedIntVector minima_flags(grid_cells, 0);
+  const size_t worker_count =
+      choose_worker_count(executor.capacity(), grid_cells, 256);
+  executor.parallel_do(worker_count, [&](size_t worker) {
+    const size_t begin = grid_cells * worker / worker_count;
+    const size_t end = grid_cells * (worker + 1) / worker_count;
+    for (size_t linear = begin; linear < end; ++linear) {
+      const int ix = static_cast<int>(linear /
+                                      static_cast<size_t>(fes_result.grid_size));
+      const int iy = static_cast<int>(linear %
+                                      static_cast<size_t>(fes_result.grid_size));
+      if (ix <= 0 || iy <= 0 || ix >= fes_result.grid_size - 1 ||
+          iy >= fes_result.grid_size - 1) {
+        continue;
+      }
+      if (fes_result.bin(ix, iy).count_w <= 0.0)
+        continue;
+
+      const double e = fes_result.bin(ix, iy).free_energy;
+      bool is_minimum = true;
+      for (int dx = -1; dx <= 1 && is_minimum; ++dx) {
+        for (int dy = -1; dy <= 1 && is_minimum; ++dy) {
+          if (dx == 0 && dy == 0)
+            continue;
+          if (fes_result.bin(ix + dx, iy + dy).free_energy < e)
+            is_minimum = false;
+        }
+      }
+      minima_flags[linear] = is_minimum ? 1 : 0;
+    }
+  });
+
+  std::vector<TitanPCA::ClusterNode> clusters;
+  int current_cluster_id = 0;
+  for (size_t linear = 0; linear < grid_cells; ++linear) {
+    if (minima_flags[linear] == 0)
+      continue;
+    const int ix = static_cast<int>(linear /
+                                    static_cast<size_t>(fes_result.grid_size));
+    const int iy = static_cast<int>(linear %
+                                    static_cast<size_t>(fes_result.grid_size));
+    auto &bin = fes_result.bin(ix, iy);
+    bin.sink_id = current_cluster_id++;
+    TitanPCA::ClusterNode cluster{};
+    cluster.id = bin.sink_id;
+    cluster.min_pc1 = bin.pc1;
+    cluster.min_pc2 = bin.pc2;
+    cluster.min_energy = bin.free_energy;
+    cluster.representative_frame_idx = -1;
+    cluster.min_euclidean_distance = 1e9;
+    cluster.population = 0;
+    cluster.population_w = 0.0;
+    cluster.percentage = 0.0;
+    cluster.percentage_w = 0.0;
+    clusters.emplace_back(cluster);
+  }
+
+  for (size_t frame = 0; frame < projections.size(); ++frame) {
+    const double p1 = projections[frame].first;
+    const double p2 = projections[frame].second;
+    int best_cluster = -1;
+    double min_dist = 1e9;
+    for (size_t c = 0; c < clusters.size(); ++c) {
+      const double dx = p1 - clusters[c].min_pc1;
+      const double dy = p2 - clusters[c].min_pc2;
+      const double dist = std::sqrt(dx * dx + dy * dy);
+      if (dist < min_dist) {
+        min_dist = dist;
+        best_cluster = static_cast<int>(c);
+      }
+    }
+    if (best_cluster < 0)
+      continue;
+    auto &cluster = clusters[static_cast<size_t>(best_cluster)];
+    cluster.population++;
+    cluster.population_w += analysis_weights[frame];
+    if (min_dist < cluster.min_euclidean_distance) {
+      cluster.min_euclidean_distance = min_dist;
+      cluster.representative_frame_idx = static_cast<int>(frame);
+    }
+  }
+
+  const double threshold =
+      0.02 * (use_weights ? fes_result.total_weight
+                          : static_cast<double>(projections.size()));
+  std::vector<TitanPCA::ClusterNode> valid_clusters;
+  for (auto &cluster : clusters) {
+    cluster.percentage =
+        100.0 * static_cast<double>(cluster.population) / projections.size();
+    cluster.percentage_w =
+        (fes_result.total_weight > 0.0)
+            ? (100.0 * cluster.population_w / fes_result.total_weight)
+            : 0.0;
+    if ((use_weights && cluster.population_w >= threshold) ||
+        (!use_weights &&
+         static_cast<double>(cluster.population) >= threshold)) {
+      valid_clusters.emplace_back(cluster);
+    }
+  }
+  return valid_clusters;
+}
+
+std::string bash_quote(const std::string &value) {
+  std::string quoted = "'";
+  for (char ch : value) {
+    if (ch == '\'')
+      quoted += "'\"'\"'";
+    else
+      quoted.push_back(ch);
+  }
+  quoted.push_back('\'');
+  return quoted;
+}
+
+std::string format_time_ps(double time_ps, int precision) {
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(precision) << time_ps;
+  return oss.str();
+}
+
+std::string make_time_label(double time_ps) {
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(1) << time_ps;
+  std::string label = oss.str();
+  std::replace(label.begin(), label.end(), '.', 'p');
+  std::replace(label.begin(), label.end(), '-', 'm');
+  return label;
+}
+
+bool write_cluster_representatives_file(
+    const std::string &label, const std::string &space_name,
+    const std::string &filename,
+    const std::vector<TitanPCA::ClusterNode> &clusters, bool use_weights,
+    const std::vector<double> &traj_times, const std::vector<int> &traj_replicas,
+    std::fstream &log) {
+  std::ofstream rep_out(filename);
+  if (!rep_out.is_open()) {
+    TitanUI::print_error(label + ": cannot open " + filename +
+                         " for writing basin metadata.");
+    return false;
+  }
+
+  rep_out << "# Representative frame = closest frame to basin minimum in "
+          << space_name << " space\n";
+  rep_out << "# Not necessarily the lowest-energy frame in this basin\n";
+  rep_out << "ClusterID,Population%,FrameCount,WeightSum,DeltaG_Sink,"
+             "Representative_Frame,ReplicaID,Time_ps,PC1,PC2\n";
+  for (const auto &cluster : clusters) {
+    const double reported_percentage =
+        use_weights ? cluster.percentage_w : cluster.percentage;
+    int replica_id = -1;
+    double time_ps = 0.0;
+    const int rep_idx = cluster.representative_frame_idx;
+    if (rep_idx >= 0 &&
+        static_cast<size_t>(rep_idx) < traj_replicas.size()) {
+      replica_id = traj_replicas[static_cast<size_t>(rep_idx)];
+    }
+    if (rep_idx >= 0 && static_cast<size_t>(rep_idx) < traj_times.size()) {
+      time_ps = traj_times[static_cast<size_t>(rep_idx)];
+    }
+
+    rep_out << cluster.id << "," << std::fixed << std::setprecision(2)
+            << reported_percentage << "%," << cluster.population << ","
+            << std::setprecision(6) << cluster.population_w << ","
+            << std::setprecision(4) << cluster.min_energy << ","
+            << cluster.representative_frame_idx << "," << replica_id << ","
+            << std::setprecision(1) << time_ps << "," << cluster.min_pc1 << ","
+            << cluster.min_pc2 << "\n";
+  }
+  TitanUI::log_kv(log, label + " Basin File", filename);
+  return true;
+}
+
+void write_pca_extraction_script(const arguments &args,
+                                 const std::vector<TitanPCA::ClusterNode> &clusters,
+                                 const std::vector<double> &traj_times,
+                                 const std::vector<int> &traj_replicas,
+                                 const std::vector<std::string> &replica_traj_files) {
+  std::ofstream bash_out("extract_basins.sh");
+  if (!bash_out.is_open()) {
+    TitanUI::print_warning("PCA: failed to open extract_basins.sh for writing.");
+    return;
+  }
+
+  bash_out << "#!/bin/bash\n";
+  bash_out << "# Titan Engine: Auto-generated FES Basin Extraction Script\n";
+  bash_out << "# Representative frame = closest frame to basin minimum in PCA "
+              "space\n";
+  bash_out << "# Not necessarily the lowest-energy frame in this basin\n";
+  bash_out << "# Review TOPOLOGY, trajectory paths, and trjconv group selection "
+              "before running.\n";
+  bash_out << "# Default group selection below uses index group 0; edit the "
+              "heredoc if needed.\n\n";
+
+  const std::string topology_hint =
+      !args.pbc.ref_pdb_name.empty()
+          ? args.pbc.ref_pdb_name
+          : (!args.pdb_name.empty() ? args.pdb_name : "UPDATE_ME_STRUCTURE.pdb");
+  bash_out << "TOPOLOGY=" << bash_quote(topology_hint) << "\n";
+
+  std::set<int> used_replicas;
+  for (const auto &cluster : clusters) {
+    const int rep_idx = cluster.representative_frame_idx;
+    if (rep_idx >= 0 && static_cast<size_t>(rep_idx) < traj_replicas.size()) {
+      used_replicas.insert(traj_replicas[static_cast<size_t>(rep_idx)]);
+    }
+  }
+
+  if (!used_replicas.empty()) {
+    bash_out << "# Trajectory files inferred from Titan input:\n";
+    for (int replica_id : used_replicas) {
+      std::string traj_value = "replica_" + std::to_string(replica_id) + ".xtc";
+      if (replica_id >= 0 &&
+          static_cast<size_t>(replica_id) < replica_traj_files.size() &&
+          !replica_traj_files[static_cast<size_t>(replica_id)].empty()) {
+        traj_value = replica_traj_files[static_cast<size_t>(replica_id)];
+      }
+      bash_out << "TRAJ_REP_" << replica_id << "=" << bash_quote(traj_value)
+               << "\n";
+    }
+  } else {
+    bash_out << "# No replica metadata was available; update trajectory paths "
+                "manually if you add extraction commands below.\n";
+  }
+  bash_out << "\n";
+
+  for (const auto &cluster : clusters) {
+    const int rep_idx = cluster.representative_frame_idx;
+    int replica_id = -1;
+    double time_ps = 0.0;
+    if (rep_idx >= 0 && static_cast<size_t>(rep_idx) < traj_replicas.size()) {
+      replica_id = traj_replicas[static_cast<size_t>(rep_idx)];
+    }
+    if (rep_idx >= 0 && static_cast<size_t>(rep_idx) < traj_times.size()) {
+      time_ps = traj_times[static_cast<size_t>(rep_idx)];
+    }
+    if (replica_id < 0) {
+      bash_out << "# Basin " << cluster.id
+               << ": skipped automatic extraction because frame metadata is "
+                  "unavailable.\n\n";
+      continue;
+    }
+
+    const double tol_ps = 1.0;
+    const std::string time_begin_str = format_time_ps(time_ps - tol_ps, 3);
+    const std::string time_end_str = format_time_ps(time_ps + tol_ps, 3);
+    const std::string out_name = "FES_Basin_" + std::to_string(cluster.id) +
+                                 "_Rep" + std::to_string(replica_id) + "_" +
+                                 make_time_label(time_ps) + "ps.pdb";
+    bash_out << "echo \"-> Extracting Basin " << cluster.id << " (Replica "
+             << replica_id << " at " << format_time_ps(time_ps, 1)
+             << " ps)...\"\n";
+    bash_out << "gmx trjconv -f $TRAJ_REP_" << replica_id
+             << " -s $TOPOLOGY -b " << time_begin_str << " -e "
+             << time_end_str << " -o " << bash_quote(out_name)
+             << " <<< \"0\" > /dev/null 2>&1\n\n";
+  }
+  bash_out.close();
+
+#ifndef _WIN32
+  chmod("extract_basins.sh",
+        S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
+#endif
+
+  TitanUI::print_info("PCA: Generated 'extract_basins.sh'.");
+  TitanUI::print_info(
+      "PCA: Review TOPOLOGY, trajectory paths, and trjconv group selection "
+      "before running the script.");
+  TitanUI::print_info(
+      "PCA: Run the script in an environment where GROMACS 'gmx' is already "
+      "available in PATH.");
+}
+
 } // namespace
 
 namespace TitanPCA {
@@ -343,7 +608,15 @@ void execute_pca_fes_analysis(
     const std::vector<double> &frame_weights,
     const std::vector<double> &traj_times,
     const std::vector<int> &traj_replicas,
-    const std::vector<std::string> &replica_traj_files) {
+    const std::vector<std::string> &replica_traj_files,
+    FesPostprocMetrics *metrics) {
+
+  (void)ca_resname;
+  (void)ca_resnrs;
+  (void)ca_chain;
+  (void)ca_is_lig;
+  if (metrics)
+    *metrics = {};
 
   if (traj_x.empty() || traj_x[0].empty()) {
     TitanUI::print_error("PCA ERROR: No valid trace coordinates found!");
@@ -559,249 +832,60 @@ void execute_pca_fes_analysis(
     return;
   }
 
-  // 6. Density-Aware Basin Clustering
-  std::vector<ClusterNode> clusters;
-  int current_cluster_id = 0;
-
-  // Find Sinks (local minima) explicitly searching neighbors cleanly
-  for (int i = 1; i < fes_result.grid_size - 1; ++i) {
-    for (int j = 1; j < fes_result.grid_size - 1; ++j) {
-      if (fes_result.bin(i, j).count_w <= 0.0)
-        continue;
-
-      double e = fes_result.bin(i, j).free_energy;
-      bool is_minimum = true;
-
-      for (int di = -1; di <= 1 && is_minimum; ++di) {
-        for (int dj = -1; dj <= 1 && is_minimum; ++dj) {
-          if (di == 0 && dj == 0)
-            continue;
-          if (fes_result.bin(i + di, j + dj).free_energy < e) {
-            is_minimum = false;
-          }
-        }
-      }
-
-      if (is_minimum) {
-        fes_result.bin(i, j).sink_id = current_cluster_id++;
-        ClusterNode c;
-        c.id = fes_result.bin(i, j).sink_id;
-        c.min_pc1 = fes_result.bin(i, j).pc1;
-        c.min_pc2 = fes_result.bin(i, j).pc2;
-        c.min_energy = e;
-        c.representative_frame_idx = -1;
-        c.min_euclidean_distance = 1e9;
-        c.population = 0;
-        c.population_w = 0.0;
-        c.percentage = 0.0;
-        c.percentage_w = 0.0;
-        clusters.emplace_back(c);
-      }
-    }
-  }
-
-  // Assign frames to nearest sink strictly matching nearest nodes linearly
-  // isolating noisy bins
-  for (size_t f = 0; f < num_frames; ++f) {
-    double p1 = projections[f].first;
-    double p2 = projections[f].second;
-
-    int best_cluster = -1;
-    double min_dist = 1e9;
-
-    for (size_t c = 0; c < clusters.size(); ++c) {
-      double dist = std::sqrt(std::pow(p1 - clusters[c].min_pc1, 2) +
-                              std::pow(p2 - clusters[c].min_pc2, 2));
-      if (dist < min_dist) {
-        min_dist = dist;
-        best_cluster = c;
-      }
-    }
-
-    if (best_cluster != -1) {
-      clusters[best_cluster].population++;
-      clusters[best_cluster].population_w += analysis_weights[f];
-
-      // Track representative tracking shortest bounds solving extraction goals
-      if (min_dist < clusters[best_cluster].min_euclidean_distance) {
-        clusters[best_cluster].min_euclidean_distance = min_dist;
-        clusters[best_cluster].representative_frame_idx = f;
-      }
-    }
-  }
-
-  // Reject noise clusters (< 2.0% frames) explicitly enforcing physics bounds
-  // resolving anomalies
-  const double threshold =
-      0.02 * (use_weights ? fes_result.total_weight
-                          : static_cast<double>(num_frames));
-  std::vector<ClusterNode> valid_clusters;
-
-  for (auto &c : clusters) {
-    c.percentage = 100.0 * static_cast<double>(c.population) / num_frames;
-    c.percentage_w = (fes_result.total_weight > 0.0)
-                         ? (100.0 * c.population_w / fes_result.total_weight)
-                         : 0.0;
-    if ((use_weights && c.population_w >= threshold) ||
-        (!use_weights && static_cast<double>(c.population) >= threshold)) {
-      valid_clusters.emplace_back(c);
-    }
-  }
-
-  auto bash_quote = [](const std::string &value) {
-    std::string quoted = "'";
-    for (char ch : value) {
-      if (ch == '\'')
-        quoted += "'\"'\"'";
-      else
-        quoted.push_back(ch);
-    }
-    quoted.push_back('\'');
-    return quoted;
-  };
-  auto format_time_ps = [](double time_ps, int precision) {
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(precision) << time_ps;
-    return oss.str();
-  };
-  auto make_time_label = [](double time_ps) {
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(1) << time_ps;
-    std::string label = oss.str();
-    std::replace(label.begin(), label.end(), '.', 'p');
-    std::replace(label.begin(), label.end(), '-', 'm');
-    return label;
-  };
-
-  // Export Cluster Representatives and generate a helper extraction script.
-  std::ofstream rep_out(info_out.get_cluster_representatives_filename());
-  rep_out << "# Representative frame = closest frame to basin minimum in PCA "
-             "space\n";
-  rep_out << "# Not necessarily the lowest-energy frame in this basin\n";
-  rep_out << "ClusterID,Population%,FrameCount,WeightSum,DeltaG_Sink,"
-             "Representative_Frame,ReplicaID,Time_ps,PC1,PC2\n";
-
-  std::ofstream bash_out("extract_basins.sh");
-  bash_out << "#!/bin/bash\n";
-  bash_out << "# Titan Engine: Auto-generated FES Basin Extraction Script\n";
-  bash_out << "# Representative frame = closest frame to basin minimum in PCA "
-              "space\n";
-  bash_out << "# Not necessarily the lowest-energy frame in this basin\n";
-  bash_out << "# Review TOPOLOGY, trajectory paths, and trjconv group selection "
-              "before running.\n";
-  bash_out << "# Default group selection below uses index group 0; edit the "
-              "heredoc if needed.\n\n";
-
-  const std::string topology_hint =
-      !args.pbc.ref_pdb_name.empty()
-          ? args.pbc.ref_pdb_name
-          : (!args.pdb_name.empty() ? args.pdb_name : "UPDATE_ME_STRUCTURE.pdb");
-  bash_out << "TOPOLOGY=" << bash_quote(topology_hint) << "\n";
-
-  std::set<int> used_replicas;
-  if (have_frame_metadata) {
-    for (const auto &c : valid_clusters) {
-      const int rep_idx = c.representative_frame_idx;
-      if (rep_idx >= 0 &&
-          static_cast<size_t>(rep_idx) < traj_replicas.size()) {
-        used_replicas.insert(traj_replicas[static_cast<size_t>(rep_idx)]);
-      }
-    }
-  }
-
-  if (!used_replicas.empty()) {
-    bash_out << "# Trajectory files inferred from Titan input:\n";
-    for (int replica_id : used_replicas) {
-      std::string traj_value = "replica_" + std::to_string(replica_id) + ".xtc";
-      if (replica_id >= 0 &&
-          static_cast<size_t>(replica_id) < replica_traj_files.size() &&
-          !replica_traj_files[static_cast<size_t>(replica_id)].empty()) {
-        traj_value = replica_traj_files[static_cast<size_t>(replica_id)];
-      }
-      bash_out << "TRAJ_REP_" << replica_id << "=" << bash_quote(traj_value)
-               << "\n";
-    }
-  } else {
-    bash_out << "# No replica metadata was available; update trajectory paths "
-                "manually if you add extraction commands below.\n";
-  }
-  bash_out << "\n";
-
-  for (const auto &c : valid_clusters) {
-    const double reported_percentage = use_weights ? c.percentage_w : c.percentage;
-    const int rep_idx = c.representative_frame_idx;
-    int replica_id = -1;
-    double time_ps = 0.0;
-    if (have_frame_metadata && rep_idx >= 0 &&
-        static_cast<size_t>(rep_idx) < traj_replicas.size()) {
-      replica_id = traj_replicas[static_cast<size_t>(rep_idx)];
-    }
-    if (have_frame_metadata && rep_idx >= 0 &&
-        static_cast<size_t>(rep_idx) < traj_times.size()) {
-      time_ps = traj_times[static_cast<size_t>(rep_idx)];
-    }
-
-    rep_out << c.id << "," << std::fixed << std::setprecision(2)
-            << reported_percentage << "%," << c.population << ","
-            << std::setprecision(6) << c.population_w << ","
-            << std::setprecision(4) << c.min_energy << ","
-            << c.representative_frame_idx << "," << replica_id << ","
-            << std::setprecision(1) << time_ps << "," << c.min_pc1 << ","
-            << c.min_pc2 << "\n";
-
-    if (replica_id < 0) {
-      bash_out << "# Basin " << c.id
-               << ": skipped automatic extraction because frame metadata is "
-                  "unavailable.\n\n";
-      continue;
-    }
-
-    const double tol_ps = 1.0;
-    const std::string time_begin_str = format_time_ps(time_ps - tol_ps, 3);
-    const std::string time_end_str = format_time_ps(time_ps + tol_ps, 3);
-    const std::string out_name = "FES_Basin_" + std::to_string(c.id) + "_Rep" +
-                                 std::to_string(replica_id) + "_" +
-                                 make_time_label(time_ps) + "ps.pdb";
-    bash_out << "echo \"-> Extracting Basin " << c.id << " (Replica "
-             << replica_id << " at " << format_time_ps(time_ps, 1)
-             << " ps)...\"\n";
-    bash_out << "gmx trjconv -f $TRAJ_REP_" << replica_id
-             << " -s $TOPOLOGY -b " << time_begin_str << " -e "
-             << time_end_str
-             << " -o " << bash_quote(out_name)
-             << " <<< \"0\" > /dev/null 2>&1\n\n";
-  }
-  rep_out.close();
-  bash_out.close();
-
-#ifndef _WIN32
-  chmod("extract_basins.sh",
-        S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
-#endif
-
-  TitanUI::print_info("PCA: Generated 'extract_basins.sh'.");
-  TitanUI::print_info(
-      "PCA: Review TOPOLOGY, trajectory paths, and trjconv group selection "
-      "before running the script.");
-  TitanUI::print_info(
-      "PCA: Run the script in an environment where GROMACS 'gmx' is already "
-      "available in PATH.");
-
+  const auto valid_clusters =
+      detect_fes_clusters(fes_result, projections, analysis_weights, use_weights,
+                          executor);
+  const std::vector<double> empty_times;
+  const std::vector<int> empty_replicas;
+  write_cluster_representatives_file(
+      "PCA", "PCA", info_out.get_cluster_representatives_filename(),
+      valid_clusters, use_weights, have_frame_metadata ? traj_times : empty_times,
+      have_frame_metadata ? traj_replicas : empty_replicas, log);
+  write_pca_extraction_script(args, valid_clusters, traj_times, traj_replicas,
+                              replica_traj_files);
   TitanUI::log_kv(log, "Macrostate Clusters Extracted",
                   std::to_string(valid_clusters.size()));
+
+  if (args.zts.flag_zts && args.zts.zts_domain == "pca") {
+    auto start_zts = std::chrono::steady_clock::now();
+    TitanUI::print_module_header("Zero-Temperature String Method (PCA)");
+    const auto zts_result =
+        TitanZTS::run_zts(args.zts, fes_result, valid_clusters, executor, log);
+    const auto zts_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_zts);
+    if (!zts_result.path.empty()) {
+      TitanZTS::write_zts_path(info_out.get_pca_zts_path_filename(), zts_result);
+      TitanUI::log_kv(log, "PCA ZTS Path File",
+                      info_out.get_pca_zts_path_filename());
+      TitanUI::log_kv(log, "PCA ZTS Barrier Fwd",
+                      std::to_string(zts_result.barrier_fwd) + " " + args.eu);
+      TitanUI::log_kv(log, "PCA ZTS Barrier Rev",
+                      std::to_string(zts_result.barrier_rev) + " " + args.eu);
+      TitanUI::log_kv(log, "PCA ZTS Converged",
+                      zts_result.converged ? "yes" : "no (max iter reached)");
+      if (metrics) {
+        metrics->zts_ran = true;
+        metrics->zts_time = zts_time;
+      }
+    }
+    TitanUI::log_time(log, "PCA ZTS", zts_time.count() / 1000.0);
+  }
 
   auto t_end = std::chrono::steady_clock::now();
   TitanUI::log_time(
       log, "PCA + FES Clustering",
       std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_eigen)
-          .count());
+              .count() /
+          1000.0);
 }
 
 void execute_tica_fes_analysis(
     const arguments &args, const MatrixXdAnyConstRef &tica_proj_mat,
     int64_t n_actual_frames, const std::vector<int64_t> &frame_global_indices,
     TitanExecutor &executor, info &info_out, std::fstream &log,
-    const std::vector<double> &frame_weights) {
+    const std::vector<double> &frame_weights, FesPostprocMetrics *metrics) {
+  if (metrics)
+    *metrics = {};
   if (n_actual_frames <= 0) {
     TitanUI::print_warning("TICA: no projected frames available for 2D FES.");
     return;
@@ -838,11 +922,49 @@ void execute_tica_fes_analysis(
                   use_weights ? "DHAM-weighted" : "uniform");
 
   const double target_temp = resolve_target_temperature(args, use_weights);
-  const auto fes_result = compute_2d_fes_grid(
+  auto fes_result = compute_2d_fes_grid(
       projections, weight_state.analysis_weights, args.fes_grid, target_temp,
       1.0 / args.eu_par, executor);
-  write_2d_fes_grid("TICA", info_out.get_tica_fes_2d_filename(), fes_result,
-                    log);
+  if (!write_2d_fes_grid("TICA", info_out.get_tica_fes_2d_filename(), fes_result,
+                         log)) {
+    return;
+  }
+
+  const auto valid_clusters =
+      detect_fes_clusters(fes_result, projections, weight_state.analysis_weights,
+                          use_weights, executor);
+  const std::vector<double> empty_times;
+  const std::vector<int> empty_replicas;
+  write_cluster_representatives_file(
+      "TICA", "TICA", info_out.get_tica_cluster_representatives_filename(),
+      valid_clusters, use_weights, empty_times, empty_replicas, log);
+  TitanUI::log_kv(log, "TICA Macrostate Clusters",
+                  std::to_string(valid_clusters.size()));
+
+  if (args.zts.flag_zts && args.zts.zts_domain == "tica") {
+    auto start_zts = std::chrono::steady_clock::now();
+    TitanUI::print_module_header("Zero-Temperature String Method (TICA)");
+    const auto zts_result =
+        TitanZTS::run_zts(args.zts, fes_result, valid_clusters, executor, log);
+    const auto zts_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_zts);
+    if (!zts_result.path.empty()) {
+      TitanZTS::write_zts_path(info_out.get_tica_zts_path_filename(), zts_result);
+      TitanUI::log_kv(log, "TICA ZTS Path File",
+                      info_out.get_tica_zts_path_filename());
+      TitanUI::log_kv(log, "TICA ZTS Barrier Fwd",
+                      std::to_string(zts_result.barrier_fwd) + " " + args.eu);
+      TitanUI::log_kv(log, "TICA ZTS Barrier Rev",
+                      std::to_string(zts_result.barrier_rev) + " " + args.eu);
+      TitanUI::log_kv(log, "TICA ZTS Converged",
+                      zts_result.converged ? "yes" : "no (max iter reached)");
+      if (metrics) {
+        metrics->zts_ran = true;
+        metrics->zts_time = zts_time;
+      }
+    }
+    TitanUI::log_time(log, "TICA ZTS", zts_time.count() / 1000.0);
+  }
 }
 
 } // namespace TitanPCA

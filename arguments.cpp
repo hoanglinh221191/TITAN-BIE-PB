@@ -325,14 +325,79 @@ int arguments::post_process() {
       backend = "randomized";
     }
     const bool need_tica_projection_cache =
-        msm.flag_msm || dham.flag_dham || umap.flag_umap;
+        msm.flag_msm || dham.flag_dham || umap.flag_umap ||
+        (zts.flag_zts && zts.zts_domain == "tica");
     if (need_tica_projection_cache && backend == "exact_dense") {
       TitanUI::print_warning(
           "TICA: exact_dense does not retain per-frame projection history "
-          "needed by MSM/DHAM/UMAP. Switching backend to exact_dual.");
+          "needed by MSM/DHAM/UMAP/ZTS. Switching backend to exact_dual.");
       backend = "exact_dual";
     }
     msm.tica_backend = backend;
+  }
+  if (zts.flag_zts) {
+    std::transform(zts.zts_domain.begin(), zts.zts_domain.end(),
+                   zts.zts_domain.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::transform(zts.zts_init_mode.begin(), zts.zts_init_mode.end(),
+                   zts.zts_init_mode.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (flag_pca && msm.flag_tica && !zts.zts_domain_explicit) {
+      TitanUI::print_error(
+          "ZTS: when both -pca and -tica are enabled, -zts-domain is required.");
+      exit(EXIT_FAILURE);
+    }
+    if (zts.zts_domain != "pca" && zts.zts_domain != "tica") {
+      TitanUI::print_error("ZTS: -zts-domain must be either pca or tica.");
+      exit(EXIT_FAILURE);
+    }
+    if (zts.zts_domain == "pca" && !flag_pca) {
+      TitanUI::print_error("ZTS: -zts-domain pca requires -pca.");
+      exit(EXIT_FAILURE);
+    }
+    if (zts.zts_domain == "tica" && !msm.flag_tica) {
+      TitanUI::print_error("ZTS: -zts-domain tica requires -tica.");
+      exit(EXIT_FAILURE);
+    }
+    if (zts.zts_images < 3) {
+      TitanUI::print_error("ZTS: -zts-images must be >= 3.");
+      exit(EXIT_FAILURE);
+    }
+    if (zts.zts_step <= 0.0) {
+      TitanUI::print_error("ZTS: -zts-step must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (zts.zts_tol <= 0.0) {
+      TitanUI::print_error("ZTS: -zts-tol must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (zts.zts_max_iter <= 0) {
+      TitanUI::print_error("ZTS: -zts-iter must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (zts.zts_fes_sigma <= 0.0) {
+      TitanUI::print_error("ZTS: -zts-sigma must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    const bool source_explicit = zts.zts_source >= 0;
+    const bool sink_explicit = zts.zts_sink >= 0;
+    if (source_explicit != sink_explicit) {
+      TitanUI::print_error(
+          "ZTS: -zts-source and -zts-sink must be set together, or both left at auto.");
+      exit(EXIT_FAILURE);
+    }
+    if (source_explicit && zts.zts_source == zts.zts_sink) {
+      TitanUI::print_error(
+          "ZTS: -zts-source and -zts-sink must refer to different basins.");
+      exit(EXIT_FAILURE);
+    }
+    if (zts.zts_init_mode != "linear") {
+      TitanUI::print_error(
+          "ZTS: -zts-init currently supports only 'linear' in this build.");
+      exit(EXIT_FAILURE);
+    }
   }
   if (umap.flag_umap) {
     std::transform(umap.umap_knn_mode.begin(), umap.umap_knn_mode.end(),
@@ -370,6 +435,141 @@ int arguments::post_process() {
     cout << "Groups for calculating energy are invalid! ";
     cout << "Your index group(s) must not be negative!\n";
     exit(EXIT_FAILURE);
+  }
+  if (de.flag_find_pulling_direct) {
+    std::transform(de.pull_opt.begin(), de.pull_opt.end(), de.pull_opt.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (de.pull_opt.empty())
+      de.pull_opt = "de";
+    if (de.pull_opt == "de-pattern" || de.pull_opt == "de_pattern")
+      de.pull_opt = "de+pattern";
+    if (de.pull_opt == "de-jso-pattern" || de.pull_opt == "de_jso_pattern")
+      de.pull_opt = "de-jso+pattern";
+    if (de.pull_opt == "de-nl-shade-lbc-pattern" ||
+        de.pull_opt == "de_nl_shade_lbc_pattern")
+      de.pull_opt = "de-nl-shade-lbc+pattern";
+    if (de.pull_opt == "direct-pattern" || de.pull_opt == "direct_pattern")
+      de.pull_opt = "direct+pattern";
+    if (de.pull_opt != "de" && de.pull_opt != "de+pattern" &&
+        de.pull_opt != "de-shade" && de.pull_opt != "de-l-shade" &&
+        de.pull_opt != "de-jso" && de.pull_opt != "de-jso+pattern" &&
+        de.pull_opt != "de-nl-shade-lbc" &&
+        de.pull_opt != "de-nl-shade-lbc+pattern" && de.pull_opt != "direct" &&
+        de.pull_opt != "direct+pattern") {
+      TitanUI::print_error(
+          "Pull-direction optimizer: supported values are de, de+pattern, de-shade, de-l-shade, de-jso, de-jso+pattern, de-nl-shade-lbc, de-nl-shade-lbc+pattern, direct, and direct+pattern.");
+      exit(EXIT_FAILURE);
+    }
+    const bool use_legacy_de =
+        (de.pull_opt == "de" || de.pull_opt == "de+pattern");
+    const bool use_shade_family =
+        (de.pull_opt == "de-shade" || de.pull_opt == "de-l-shade" ||
+         de.pull_opt == "de-jso" || de.pull_opt == "de-jso+pattern" ||
+         de.pull_opt == "de-nl-shade-lbc" ||
+         de.pull_opt == "de-nl-shade-lbc+pattern");
+    const bool use_de_family = use_legacy_de || use_shade_family;
+    const bool use_direct =
+        (de.pull_opt == "direct" || de.pull_opt == "direct+pattern");
+    if ((de.pull_opt == "de-jso" || de.pull_opt == "de-jso+pattern") &&
+        !de.user_set_de_p_best_rate)
+      de.de_p_best_rate = 0.11;
+    if (use_de_family && de.de_pop_num < 4) {
+      TitanUI::print_error(
+          "Pull-direction DE: -de-pop-num must be >= 4.");
+      exit(EXIT_FAILURE);
+    }
+    if (use_de_family && de.de_ite == 0) {
+      TitanUI::print_error(
+          "Pull-direction DE: -de-ite-num must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (de.de_cross_prob < 0.0 || de.de_cross_prob > 1.0) {
+      TitanUI::print_error(
+          "Pull-direction DE: -de-cross-prob must be in [0, 1].");
+      exit(EXIT_FAILURE);
+    }
+    if (de.de_scan_radius <= 0.0 || de.de_min_scan_radius <= 0.0) {
+      TitanUI::print_error(
+          "Pull-direction DE: scan radii must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (de.de_scan_radius < de.de_min_scan_radius) {
+      TitanUI::print_error(
+          "Pull-direction DE: -de-scan-radius must be >= -de-min-scan-radius.");
+      exit(EXIT_FAILURE);
+    }
+    if (use_de_family && de.de_stagnation_limit < 1) {
+      TitanUI::print_error(
+          "Pull-direction DE: -de-stagnation-limit must be >= 1.");
+      exit(EXIT_FAILURE);
+    }
+    if (use_shade_family && de.de_memory_size == 0) {
+      TitanUI::print_error(
+          "Pull-direction SHADE-family: -de-memory-size must be >= 1.");
+      exit(EXIT_FAILURE);
+    }
+    if (use_shade_family &&
+        (de.de_p_best_rate <= 0.0 || de.de_p_best_rate > 1.0)) {
+      TitanUI::print_error(
+          "Pull-direction SHADE-family: -de-p-best-rate must be in (0, 1].");
+      exit(EXIT_FAILURE);
+    }
+    if (use_shade_family && de.de_archive_scale < 0.0) {
+      TitanUI::print_error(
+          "Pull-direction SHADE-family: -de-archive-scale must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if ((de.pull_opt == "de-l-shade" || de.pull_opt == "de-jso" ||
+         de.pull_opt == "de-jso+pattern" ||
+         de.pull_opt == "de-nl-shade-lbc" ||
+         de.pull_opt == "de-nl-shade-lbc+pattern") &&
+        de.de_min_pop_num < 4) {
+      TitanUI::print_error(
+          "Pull-direction SHADE-family: -de-min-pop-num must be >= 4.");
+      exit(EXIT_FAILURE);
+    }
+    if ((de.pull_opt == "de-l-shade" || de.pull_opt == "de-jso" ||
+         de.pull_opt == "de-jso+pattern" ||
+         de.pull_opt == "de-nl-shade-lbc" ||
+         de.pull_opt == "de-nl-shade-lbc+pattern") &&
+        de.de_min_pop_num > de.de_pop_num) {
+      TitanUI::print_error(
+          "Pull-direction SHADE-family: -de-min-pop-num must be <= -de-pop-num.");
+      exit(EXIT_FAILURE);
+    }
+    if (use_de_family && de.pull_max_evals != 0 &&
+        de.pull_max_evals < de.de_pop_num) {
+      TitanUI::print_error(
+          "Pull-direction DE: -pull-max-evals must be 0 or >= -de-pop-num.");
+      exit(EXIT_FAILURE);
+    }
+    if (use_direct && de.pull_max_evals == 0 && de.de_ite == 0) {
+      TitanUI::print_error(
+          "Pull-direction DIRECT: provide -pull-max-evals or keep -de-ite-num > 0 for fallback budget.");
+      exit(EXIT_FAILURE);
+    }
+    if (de.flag_pathway && de.dis_along_path <= 0.0) {
+      TitanUI::print_error(
+          "Pull-direction DE pathway: -de-pathway-radius must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (use_shade_family &&
+        (de.user_set_de_diff_weight || de.user_set_de_cross_prob ||
+         de.user_set_de_F || de.user_set_de_algorithm ||
+         de.user_set_de_adaptive_F)) {
+      TitanUI::print_error(
+          "Pull-direction SHADE-family: legacy flags -de-diff-weight, -de-cross-prob, -de-F, -de-algorithm, and -de-adaptive-F are not supported.");
+      exit(EXIT_FAILURE);
+    }
+    if ((use_legacy_de || use_direct) &&
+        (de.user_set_de_memory_size || de.user_set_de_p_best_rate ||
+         de.user_set_de_archive_scale || de.user_set_de_min_pop_num)) {
+      TitanUI::print_error(
+          "Pull-direction optimizer: SHADE-family flags -de-memory-size, -de-p-best-rate, -de-archive-scale, and -de-min-pop-num are only valid with de-shade, de-l-shade, de-jso, de-jso+pattern, de-nl-shade-lbc, or de-nl-shade-lbc+pattern.");
+      exit(EXIT_FAILURE);
+    }
   }
   if (entropy_quasi == true &&
       (group_entropy_com < 0 || group_entropy_rec < 0 ||
@@ -488,6 +688,11 @@ int arguments::post_process() {
     }
     if (allostery_knn < 0) {
       TitanUI::print_error("Allostery: -allostery-knn must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (allostery_knn_use_contact_prior && allostery_knn_contact_cutoff <= 0.0) {
+      TitanUI::print_error(
+          "Allostery: -allostery-knn-contact-cut must be > 0.");
       exit(EXIT_FAILURE);
     }
   }

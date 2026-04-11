@@ -26,6 +26,16 @@ std::expected<void, std::string> initialize_topology_streaming(
     Multi_MOL &water_traj, groups_cal &Groups_from_index_file, para &parameter,
     amino_acid &amine, info &output_info) {
 
+  auto show_init_pdb_progress = [](const std::string &label, bool completed) {
+    TitanUI::show_progress_exact(label, completed ? 1U : 0U, 1U, "Loading PDB");
+  };
+
+  auto file_label = [](const std::string &path_text) {
+    const fs::path path(path_text);
+    const std::string filename = path.filename().string();
+    return filename.empty() ? path_text : filename;
+  };
+
   int flag_groups{helper_parse_groups(
       Groups_from_index_file,
       Arguments)}; // ---------------------------------------------------------------------------
@@ -60,9 +70,11 @@ std::expected<void, std::string> initialize_topology_streaming(
     // Use the reference structure directly and only parse the common topology
     // for lightweight atom-count validation.
     if (Arguments.flag_nocal && Arguments.lj.flag_lj) {
+      show_init_pdb_progress(file_label(Arguments.pdb_name), false);
       const int r_value =
           pre_proc_pdb(force_f, pro_in, lig, water_traj, Groups_from_index_file,
                        0, Arguments, amine, output_info);
+      show_init_pdb_progress(file_label(Arguments.pdb_name), true);
       if (r_value != 0)
         return std::unexpected("pre_proc_pdb failed.");
 
@@ -107,9 +119,11 @@ std::expected<void, std::string> initialize_topology_streaming(
       flag_pre_proc = 3;
 
     if (Arguments.topo_name != "no" && (!Arguments.file_par || topo_is_open)) {
+      show_init_pdb_progress(file_label(Arguments.pdb_name), false);
       const int r_value =
           pre_proc_pdb(force_f, pro_in, lig, water_traj, Groups_from_index_file,
                        flag_pre_proc, Arguments, amine, output_info);
+      show_init_pdb_progress(file_label(Arguments.pdb_name), true);
       if (r_value != 0)
         return std::unexpected("pre_proc_pdb failed.");
 
@@ -127,9 +141,11 @@ std::expected<void, std::string> initialize_topology_streaming(
         }
       }
     } else {
+      show_init_pdb_progress(file_label(Arguments.pdb_name), false);
       const int r_value =
           pre_proc_pdb(force_f, pro_in, lig, water_traj, Groups_from_index_file,
                        0, Arguments, amine, output_info);
+      show_init_pdb_progress(file_label(Arguments.pdb_name), true);
       if (r_value != 0)
         return std::unexpected("pre_proc_pdb failed.");
     }
@@ -140,6 +156,7 @@ std::expected<void, std::string> initialize_topology_streaming(
   // SCENARIO 2: TWO SEPARATE PDB FILES (Receptor and Ligand)
   // ---------------------------------------------------------------------------
   else {
+    show_init_pdb_progress("rec+lig", false);
     // 1. Build Topology using legacy take_coordinate (reads Frame 0)
     if (topo_is_open && !topo_2_is_open) {
       pro_in.take_coordinate(name_pro, force_f, Arguments, amine, output_info,
@@ -162,6 +179,7 @@ std::expected<void, std::string> initialize_topology_streaming(
       lig.take_coordinate(name_lig, force_f, Arguments, amine, output_info, 0,
                           1);
     }
+    show_init_pdb_progress("rec+lig", true);
 
     if (pro_in.m_mol.empty() && lig.m_mol.empty())
       return std::unexpected(

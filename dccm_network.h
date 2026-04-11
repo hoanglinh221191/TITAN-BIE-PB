@@ -47,17 +47,43 @@ public:
     int knn = 0;
     double cutoff_ang = 0.0;
     bool use_avg_cutoff = true;
+    bool knn_use_contact_prior = false;
+    double knn_contact_cutoff = 8.0;
     bool compute_te = true;
   };
 
   void calculate_allostery_information(TitanExecutor &executor, int tau_lag,
-                                       int num_bins);
+                                       int num_bins,
+                                       const std::string &gc_filename =
+                                           "network_gc_edges.csv",
+                                       const std::string &mi_filename =
+                                           "raw_mi_edges.csv",
+                                       const std::string &te_filename =
+                                           "network_te_edges.csv");
   void calculate_allostery_information(TitanExecutor &executor,
-                                       const AllosteryConfig &cfg);
+                                       const AllosteryConfig &cfg,
+                                       const std::string &gc_filename =
+                                           "network_gc_edges.csv",
+                                       const std::string &mi_filename =
+                                           "raw_mi_edges.csv",
+                                       const std::string &te_filename =
+                                           "network_te_edges.csv");
   void calculate_allostery_information_optimized(TitanExecutor &executor,
-                                                  int tau_lag, int num_bins);
+                                                  int tau_lag, int num_bins,
+                                                  const std::string &gc_filename =
+                                                      "network_gc_edges.csv",
+                                                  const std::string &mi_filename =
+                                                      "raw_mi_edges.csv",
+                                                  const std::string &te_filename =
+                                                      "network_te_edges.csv");
   void calculate_allostery_information_optimized(TitanExecutor &executor,
-                                                  const AllosteryConfig &cfg);
+                                                  const AllosteryConfig &cfg,
+                                                  const std::string &gc_filename =
+                                                      "network_gc_edges.csv",
+                                                  const std::string &mi_filename =
+                                                      "raw_mi_edges.csv",
+                                                  const std::string &te_filename =
+                                                      "network_te_edges.csv");
   size_t get_last_allostery_candidate_pairs() const {
     return last_allostery_candidate_pairs_;
   }

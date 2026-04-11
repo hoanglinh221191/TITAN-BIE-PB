@@ -42,7 +42,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     return true;
   };
-  auto parse_allostery_cut_mode = [&](std::string raw_mode) {
+  auto parse_allostery_prune_window = [&](std::string raw_mode) {
     std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
                    [](unsigned char c) {
                      return static_cast<char>(std::tolower(c));
@@ -56,7 +56,25 @@ int arguments::parse_arguments(int argc, char **argv) {
       return;
     }
     TitanUI::print_error(
-        "Allostery: -allostery-cut-mode must be 'avg' or 'first'.");
+        "Allostery: prune window must be 'avg' or 'first'.");
+    exit(EXIT_FAILURE);
+  };
+  auto parse_allostery_knn_prior = [&](std::string raw_mode) {
+    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (raw_mode == "frame" || raw_mode == "nearest" || raw_mode == "vote") {
+      allostery_knn_use_contact_prior = false;
+      return;
+    }
+    if (raw_mode == "contact" || raw_mode == "contacts" ||
+        raw_mode == "contact-frequency") {
+      allostery_knn_use_contact_prior = true;
+      return;
+    }
+    TitanUI::print_error(
+        "Allostery: -allostery-knn-prior must be 'frame' or 'contact'.");
     exit(EXIT_FAILURE);
   };
 
@@ -242,13 +260,46 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]).find("--allostery-cut-mode=") == 0 ||
         string(argv[i]).find("-allostery-cut-mode=") == 0) {
-      parse_allostery_cut_mode(
+      parse_allostery_prune_window(
           string(argv[i]).substr(string(argv[i]).find('=') + 1));
     }
     if ((string(argv[i]) == "--allostery-cut-mode" ||
          string(argv[i]) == "-allostery-cut-mode") &&
         i + 1 < argc) {
-      parse_allostery_cut_mode(string(argv[i + 1]));
+      parse_allostery_prune_window(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--allostery-prune-window=") == 0 ||
+        string(argv[i]).find("-allostery-prune-window=") == 0) {
+      parse_allostery_prune_window(
+          string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--allostery-prune-window" ||
+         string(argv[i]) == "-allostery-prune-window") &&
+        i + 1 < argc) {
+      parse_allostery_prune_window(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--allostery-knn-prior=") == 0 ||
+        string(argv[i]).find("-allostery-knn-prior=") == 0) {
+      parse_allostery_knn_prior(
+          string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--allostery-knn-prior" ||
+         string(argv[i]) == "-allostery-knn-prior") &&
+        i + 1 < argc) {
+      parse_allostery_knn_prior(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--allostery-knn-contact-cut=") == 0 ||
+        string(argv[i]).find("-allostery-knn-contact-cut=") == 0) {
+      allostery_knn_contact_cutoff =
+          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--allostery-knn-contact-cut" ||
+         string(argv[i]) == "-allostery-knn-contact-cut") &&
+        i + 1 < argc) {
+      allostery_knn_contact_cutoff = stod(string(argv[i + 1]));
       ++i;
     }
     if (string(argv[i]) == "--allostery-no-te" ||
@@ -261,6 +312,105 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (string(argv[i]) == "-tica") {
       msm.flag_tica = true;
       flag_network = true; // TICA depends on CA data from network module
+    }
+    if (string(argv[i]) == "-zts" || string(argv[i]) == "--zts") {
+      zts.flag_zts = true;
+    }
+    if (string(argv[i]).find("--zts-images=") == 0 ||
+        string(argv[i]).find("-zts-images=") == 0) {
+      zts.zts_images =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--zts-images" || string(argv[i]) == "-zts-images") &&
+        i + 1 < argc) {
+      zts.zts_images = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--zts-iter=") == 0 ||
+        string(argv[i]).find("-zts-iter=") == 0) {
+      zts.zts_max_iter =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--zts-iter" || string(argv[i]) == "-zts-iter") &&
+        i + 1 < argc) {
+      zts.zts_max_iter = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--zts-step=") == 0 ||
+        string(argv[i]).find("-zts-step=") == 0) {
+      zts.zts_step =
+          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--zts-step" || string(argv[i]) == "-zts-step") &&
+        i + 1 < argc) {
+      zts.zts_step = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--zts-tol=") == 0 ||
+        string(argv[i]).find("-zts-tol=") == 0) {
+      zts.zts_tol =
+          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--zts-tol" || string(argv[i]) == "-zts-tol") &&
+        i + 1 < argc) {
+      zts.zts_tol = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--zts-source=") == 0 ||
+        string(argv[i]).find("-zts-source=") == 0) {
+      zts.zts_source =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--zts-source" || string(argv[i]) == "-zts-source") &&
+        i + 1 < argc) {
+      zts.zts_source = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--zts-sink=") == 0 ||
+        string(argv[i]).find("-zts-sink=") == 0) {
+      zts.zts_sink =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--zts-sink" || string(argv[i]) == "-zts-sink") &&
+        i + 1 < argc) {
+      zts.zts_sink = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--zts-sigma=") == 0 ||
+        string(argv[i]).find("-zts-sigma=") == 0) {
+      zts.zts_fes_sigma =
+          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--zts-sigma" || string(argv[i]) == "-zts-sigma") &&
+        i + 1 < argc) {
+      zts.zts_fes_sigma = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]) == "--zts-no-smooth" ||
+        string(argv[i]) == "-zts-no-smooth") {
+      zts.zts_smooth_fes = false;
+    }
+    if (string(argv[i]).find("--zts-init=") == 0 ||
+        string(argv[i]).find("-zts-init=") == 0) {
+      zts.zts_init_mode =
+          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if ((string(argv[i]) == "--zts-init" || string(argv[i]) == "-zts-init") &&
+        i + 1 < argc) {
+      zts.zts_init_mode = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("--zts-domain=") == 0 ||
+        string(argv[i]).find("-zts-domain=") == 0) {
+      zts.zts_domain =
+          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+      zts.zts_domain_explicit = true;
+    }
+    if ((string(argv[i]) == "--zts-domain" || string(argv[i]) == "-zts-domain") &&
+        i + 1 < argc) {
+      zts.zts_domain = string(argv[i + 1]);
+      zts.zts_domain_explicit = true;
+      ++i;
     }
     if (string(argv[i]).find("--tica-lag=") == 0 ||
         string(argv[i]).find("-tica-lag=") == 0) {
@@ -1048,14 +1198,50 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (string(argv[i]) == "-pull-direct") {
       de.flag_find_pulling_direct = true;
     }
+    if (arg.rfind("-pull-opt=", 0) == 0) {
+      de.pull_opt = arg.substr(10);
+    }
+    if (string(argv[i]) == "-pull-opt" && i + 1 < argc) {
+      de.pull_opt = string(argv[i + 1]);
+      ++i;
+    }
+    if (arg.rfind("-pull-max-evals=", 0) == 0) {
+      de.pull_max_evals = static_cast<size_t>(stoull(arg.substr(16)));
+    }
+    if (string(argv[i]) == "-pull-max-evals" && i + 1 < argc) {
+      de.pull_max_evals = static_cast<size_t>(stoull(string(argv[i + 1])));
+      ++i;
+    }
+    if (arg.rfind("-pull-seed=", 0) == 0) {
+      de.pull_seed = static_cast<unsigned int>(stoul(arg.substr(11)));
+    }
+    if (string(argv[i]) == "-pull-seed" && i + 1 < argc) {
+      de.pull_seed = static_cast<unsigned int>(stoul(string(argv[i + 1])));
+      ++i;
+    }
+    if (arg.rfind("-de-diff-weight=", 0) == 0) {
+      de.de_diff_weight = atof(arg.substr(16).c_str());
+      de.user_set_de_diff_weight = true;
+    }
     if (string(argv[i]) == "-de-diff-weight" && i + 1 < argc) {
       de.de_diff_weight = atof(argv[i + 1]);
+      de.user_set_de_diff_weight = true;
+    }
+    if (arg.rfind("-de-cross-prob=", 0) == 0) {
+      de.de_cross_prob = atof(arg.substr(15).c_str());
+      de.user_set_de_cross_prob = true;
     }
     if (string(argv[i]) == "-de-cross-prob" && i + 1 < argc) {
       de.de_cross_prob = atof(argv[i + 1]);
+      de.user_set_de_cross_prob = true;
+    }
+    if (arg.rfind("-de-F=", 0) == 0) {
+      de.de_F = atof(arg.substr(6).c_str());
+      de.user_set_de_F = true;
     }
     if (string(argv[i]) == "-de-F" && i + 1 < argc) {
       de.de_F = atof(argv[i + 1]);
+      de.user_set_de_F = true;
     }
     if (string(argv[i]) == "-de-scan-radius" && i + 1 < argc) {
       de.de_scan_radius = atof(argv[i + 1]);
@@ -1072,8 +1258,13 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (string(argv[i]) == "-de-ite-num" && i + 1 < argc) {
       de.de_ite = stoi(string(argv[i + 1]));
     }
+    if (arg.rfind("-de-algorithm=", 0) == 0) {
+      de.de_algorithm = stoi(arg.substr(14));
+      de.user_set_de_algorithm = true;
+    }
     if (string(argv[i]) == "-de-algorithm" && i + 1 < argc) {
       de.de_algorithm = stoi(string(argv[i + 1]));
+      de.user_set_de_algorithm = true;
     }
     if (string(argv[i]) == "-de-angle" && i + 1 < argc) {
       de.de_restrain_angle = atof(argv[i + 1]);
@@ -1083,9 +1274,49 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]) == "-de-adaptive-F") {
       de.de_adaptive_F = true;
+      de.user_set_de_adaptive_F = true;
     }
     if (string(argv[i]) == "-de-stagnation-limit" && i + 1 < argc) {
       de.de_stagnation_limit = stoi(string(argv[i + 1]));
+    }
+    if (arg.rfind("-de-memory-size=", 0) == 0) {
+      de.de_memory_size = static_cast<size_t>(stoull(arg.substr(16)));
+      de.user_set_de_memory_size = true;
+    }
+    if (string(argv[i]) == "-de-memory-size" && i + 1 < argc) {
+      de.de_memory_size = static_cast<size_t>(stoull(string(argv[i + 1])));
+      de.user_set_de_memory_size = true;
+    }
+    if (arg.rfind("-de-p-best-rate=", 0) == 0) {
+      de.de_p_best_rate = atof(arg.substr(16).c_str());
+      de.user_set_de_p_best_rate = true;
+    }
+    if (string(argv[i]) == "-de-p-best-rate" && i + 1 < argc) {
+      de.de_p_best_rate = atof(argv[i + 1]);
+      de.user_set_de_p_best_rate = true;
+    }
+    if (arg.rfind("-de-archive-scale=", 0) == 0) {
+      de.de_archive_scale = atof(arg.substr(18).c_str());
+      de.user_set_de_archive_scale = true;
+    }
+    if (string(argv[i]) == "-de-archive-scale" && i + 1 < argc) {
+      de.de_archive_scale = atof(argv[i + 1]);
+      de.user_set_de_archive_scale = true;
+    }
+    if (arg.rfind("-de-min-pop-num=", 0) == 0) {
+      de.de_min_pop_num = static_cast<size_t>(stoull(arg.substr(16)));
+      de.user_set_de_min_pop_num = true;
+    }
+    if (string(argv[i]) == "-de-min-pop-num" && i + 1 < argc) {
+      de.de_min_pop_num = static_cast<size_t>(stoull(string(argv[i + 1])));
+      de.user_set_de_min_pop_num = true;
+    }
+    if (string(argv[i]) == "-de-pathway-group" && i + 1 < argc) {
+      de.group_pathway = static_cast<size_t>(stoull(string(argv[i + 1])));
+      de.flag_pathway = true;
+    }
+    if (string(argv[i]) == "-de-pathway-radius" && i + 1 < argc) {
+      de.dis_along_path = atof(argv[i + 1]);
     }
     // --- Flags previously only in arg-file parser, now unified ---
     if (string(argv[i]) == "-new_al" || string(argv[i]) == "-new-al") {

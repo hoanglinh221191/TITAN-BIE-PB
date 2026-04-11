@@ -214,7 +214,7 @@ Da hoan thanh:
 Con lam duoc ngay:
 
 - [done] Phase 3 / 5.3 `DCCM / allostery pruning` slice 1
-  - allostery da co residue-distance / contact-prior pruning opt-in qua
+  - allostery da co residue-distance pruning opt-in qua
     `-allostery-cut` + `-allostery-cut-mode`
   - transfer entropy da co the tat qua `-allostery-no-te`, giu file
     `network_te_edges.csv` o dang header-only de khong vo workflow cu
@@ -225,9 +225,26 @@ Con lam duoc ngay:
     `lspmd_*.csv`
   - invalid input `test/allostery_pruning_invalid_cut` da fail-fast dung thong
     diep `Allostery: -allostery-cut must be >= 0.`
-- [next] Phase 3 / 5.3 `DCCM / allostery pruning` slice 2
-  - them kNN pruning / contact-prior ranking de tranh cat het long-range pair
-    co tin hieu, thay vi chi dung cutoff hinh hoc thuan tuy
+- [done] Phase 3 / 5.3 `DCCM / allostery pruning` slice 2
+  - da them ranking-aware `frame-voted kNN` pruning va union an toan voi
+    cutoff-pruning trong `dccm_network.cpp`
+  - `test/allostery_pruning_knn_only_post1..post3` cho thay pruning
+    deterministic (`913 / 81810` candidate pairs, `network_*.csv`
+    hash-identical qua rerun)
+  - `test/allostery_pruning_cut_knn_union_post1` giu
+    `9342 / 81810` candidate pairs, khong nho hon cutoff-only baseline
+  - `test/allostery_pruning_invalid_knn` va
+    `test/allostery_pruning_invalid_cut_mode` deu fail-fast dung thong diep
+- [done] Phase 3 / 5.3 `DCCM / allostery pruning` slice 3
+  - da them `-allostery-knn-prior=<frame|contact>` va
+    `-allostery-knn-contact-cut=<A>` de ho tro true contact-frequency prior
+    tren anchor `Cbeta/N`
+  - da them `-allostery-prune-window=<avg|first>`; `-allostery-cut-mode`
+    duoc giu lam alias tuong thich nguoc
+  - `test/allostery_knn_contact_slice3_post1..post2` cho thay
+    `999 / 81810` candidate pairs va output allostery deterministic qua rerun
+  - `test/allostery_invalid_knn_prior_slice3` va
+    `test/allostery_invalid_contact_cut_slice3` deu fail-fast dung thong diep
 - [done] Phase 2 / 4.2 `Shared sparse graph backend` slice 3
 - da quyet toan hash gate cho `lj_cluster_rho_r_0.dat`
   - da ra not Brandes scratch trong `dccm_network.cpp`; phan con lai neu lam
@@ -518,8 +535,8 @@ Target:
 - [done] tranh recompute gross flux / rescan dense pair trong flux compression
 - [done] bo persistent dense `tpm_`; transition graph da duoc normalize sang CSR
   forward / reverse va flux worker da duyet adjacency sparse
-- [next] toi uu reverse-edge lookup / chia se sparse graph backend thay vi moi
-  module tu quan ly CSR rieng
+- [next] toi uu reverse-edge lookup / adjacency queries trong TPT residual path,
+  tan dung backend CSR chung da co thay vi mo rong them dense helper rieng
 
 Target:
 
@@ -570,11 +587,30 @@ Status:
     `test/allostery_pruning_lspmd_guard_post3` khop hash voi
     `test/shared_sparse_graph_dccm_lspmd_post1`
 
-- [next] Slice 3: estimator / prior refinement
-  - can nhac true contact-frequency prior hoac estimator kNN/KDE cho mot so
-    metric de giam bias cua histogram theo tung cap residue
-  - tach ro `pruning window` khoi ten `cut-mode` neu CLI bat dau mo rong them
-    nhieu prior khac nhau
+- [done] Slice 3: estimator / prior refinement
+  - da them `-allostery-knn-prior=<frame|contact>` de tach `frame-voted`
+    nearest-neighbor heuristic khoi true contact-frequency prior
+  - da them `-allostery-knn-contact-cut=<A>`; contact prior hien xep hang theo
+    tan suat contact tren anchor `Cbeta/N`, tie-break bang `min_dist2`, va
+    fallback ve `Calpha` neu cache anchor chua san sang
+  - da them `-allostery-prune-window=<avg|first>`; `-allostery-cut-mode`
+    duoc giu lam alias tuong thich nguoc de tach ro y nghia `pruning window`
+    khoi distance cutoff
+  - regression `test/allostery_default_slice3_post1..post2`,
+    `test/allostery_knn_frame_slice3_post1..post2`, va
+    `test/allostery_knn_contact_slice3_post1..post2` deu deterministic;
+    `frame-voted` giu `913 / 81810` candidate pairs, con `contact-frequency`
+    cho `999 / 81810`
+  - `test/allostery_pruning_lspmd_guard_post4` van khop hash voi
+    `example/2/lspmd_*.csv`
+  - validation input `test/allostery_invalid_knn_prior_slice3` va
+    `test/allostery_invalid_contact_cut_slice3` deu fail-fast dung thong diep
+
+- [next] Slice 4: estimator upgrades
+  - neu can, thu nghiem estimator kNN / KDE cho GC/TE tren tap pair da duoc
+    pruning de giam bias cua histogram moi cap residue
+  - can nhac contact-frequency prior co them normalized occupancy / dwell-time
+    weighting neu muon uu tien interface on dinh hon nua
 
 Target:
 

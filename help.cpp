@@ -15,12 +15,12 @@ SYNOPSIS
     titan.exe [OPTIONS]
     titan.exe -a arg.in
 
-DESCRIPTION
+  DESCRIPTION
     Titan is a high-performance molecular analysis engine for computing
     electrostatic and van der Waals interactions, GBSA/ALPB solvation,
     hydrogen bonds, DCCM network analysis, PCA/FES, allostery, TICA, MSM,
-    DHAM reweighting, TPT pathway analysis, LJ condensation, LLPS, GIST water thermodynamics,
-    IFP occupancy, LSP-MD,
+    ZTS minimum-energy paths, DHAM reweighting, TPT pathway analysis, LJ
+    condensation, LLPS, GIST water thermodynamics, IFP occupancy, LSP-MD,
     and related observables from PDB/XTC/TRR trajectories.
 
 ================================================================================
@@ -66,6 +66,7 @@ CORE DEPENDENCY CHAIN
   -pca        implies -network
   -allostery  implies -network
   -tica       implies -network
+  -zts        requires -pca or -tica; if both are active, set -zts-domain
   -umap       implies -tica and -network
   -msm        implies -tica and -network
   -dham       implies -msm and -tica; for protein-like traces it also uses
@@ -319,9 +320,10 @@ IMPORTANT NOTES
 
   Typical outputs:
     pca_fel.csv
-    fes_2d.dat
+    pca_fes_2d.dat
     cluster_representatives.dat
     extract_basins.sh
+    pca_zts_path.csv        (when -zts -zts-domain pca is enabled)
 
   Notes:
     - Without DHAM, FES is built from uniform frame counts.
@@ -329,28 +331,52 @@ IMPORTANT NOTES
       -dham-target-temp automatically.
     - `extract_basins.sh` uses stored trajectory metadata
       (replica id + time in ps) to help recover full-atom basin structures.
+    - `-zts` on PCA exports a minimum-energy path between two FES basins.
 
 2.6 Allostery
 
   Purpose:
     Estimate nonlinear coupling and directed information flow between residues
-    using Generalized Correlation (GC) and Transfer Entropy (TE).
+    using mutual-information-derived Generalized Correlation (GC) and
+    Transfer Entropy (TE).
 
   Main inputs:
     -allostery
     optional: -allostery-tau=<N>, -allostery-bins=<N>
-    optional: -allostery-knn=<N>
-    optional: -allostery-cut=<A>, -allostery-cut-mode=<avg|first>
+    optional: -allostery-knn=<N>, -allostery-knn-prior=<frame|contact>
+    optional: -allostery-knn-contact-cut=<A>
+    optional: -allostery-cut=<A>, -allostery-prune-window=<avg|first>
     optional: -allostery-no-te
 
   Typical outputs:
+    raw_mi_edges.csv
     network_gc_edges.csv
     network_te_edges.csv
+
+  Notes:
+    - TITAN computes pairwise mutual information (MI) internally and exports it
+      to `raw_mi_edges.csv` for every candidate pair that survives the pair
+      filter.
+    - GC is derived from MI using:
+        GC = sqrt(1 - exp(-2 * MI))
+    - `network_gc_edges.csv` remains a thresholded coupling graph, while
+      `raw_mi_edges.csv` stores the unthresholded MI values for the same
+      candidate-pair set.
+
+2.6a Mutual Information / Generalized Correlation
+
+  Interpretation:
+    - `raw_mi_edges.csv` reports the raw pairwise MI estimated from the
+      discretized allostery projections.
+    - `network_gc_edges.csv` reports the MI-derived GC transform, which maps
+      nonlinear dependence onto the bounded interval [0, 1).
+    - `network_te_edges.csv` remains the directed lagged-information export.
 
 2.7 TICA
 
   Purpose:
-    Extract slow collective coordinates from time-lagged covariance.
+    Extract slow collective coordinates from time-lagged covariance and
+    optionally build TICA-space FES / ZTS pathways.
 
   Main inputs:
     -tica
@@ -362,6 +388,14 @@ IMPORTANT NOTES
     tica_eigenvalues.dat
     tica_eigenvectors.dat
     tica_projections.csv
+    tica_fes_2d.dat         (when TICA FES postproc runs)
+    tica_cluster_representatives.dat
+    tica_zts_path.csv       (when -zts -zts-domain tica is enabled)
+
+  Notes:
+    - TICA-space ZTS uses the projection-cache capable backend path.
+    - TITAN auto-promotes `-tica-backend exact_dense` when projection caching
+      is required by MSM, DHAM, UMAP, or ZTS.
 
 2.8 MSM
 
@@ -679,10 +713,19 @@ IMPORTANT NOTES
       -allostery-tau=10 -allostery-bins=48
 
   titan.exe -s reference.pdb -traj md.xtc -allostery \
-      -allostery-cut=12 -allostery-cut-mode=avg -allostery-no-te
+      -allostery-cut=12 -allostery-prune-window=avg -allostery-no-te
 
   titan.exe -s reference.pdb -traj md.xtc -allostery \
       -allostery-cut=12 -allostery-knn=4
+
+  titan.exe -s reference.pdb -traj md.xtc -allostery \
+      -allostery-knn=4 -allostery-knn-prior=contact \
+      -allostery-knn-contact-cut=8 -allostery-no-te
+
+  Inspect:
+    raw_mi_edges.csv for unthresholded mutual information
+    network_gc_edges.csv for the derived GC network
+    network_te_edges.csv for directed transfer entropy
 
 3.7 TICA + MSM workflow
 
@@ -756,6 +799,14 @@ IMPORTANT NOTES
     2. make sure GROMACS `gmx` is available in your shell
     3. run:
          bash extract_basins.sh
+
+  PCA ZTS example:
+    titan.exe -s reference.pdb -traj md.xtc -pca -zts -zts-domain pca \
+        -zts-images 64 -zts-source 0 -zts-sink 1
+
+  TICA ZTS example:
+    titan.exe -s reference.pdb -traj md.xtc -tica -zts -zts-domain tica \
+        -zts-images 64 -zts-source 0 -zts-sink 1
 
 3.10 LLPS analysis (Martini)
 
@@ -915,13 +966,19 @@ IMPORTANT NOTES
   -pca                  PCA and FES analysis
   -fes-grid=<N>         FES grid size. Default: 60
 
-  -allostery            GC + Transfer Entropy analysis
+  -allostery            MI-derived GC + Transfer Entropy analysis
   -allostery-tau=<N>    TE lag in frames. Default: 5
   -allostery-bins=<N>   Histogram bins. Default: auto (-1)
-  -allostery-knn=<N>    Keep top-N frame-voted nearest partners per residue. Default: 0
+  -allostery-knn=<N>    Keep top-N ranked partners per residue. Default: 0
+  -allostery-knn-prior=<frame|contact>
+                        frame = nearest-neighbor votes; contact = Cbeta/N contact frequency
+  -allostery-knn-contact-cut=<A>
+                        Anchor-contact cutoff for contact prior. Default: 8 A
   -allostery-cut=<A>    Distance-prune candidate residue pairs. Default: off
-  -allostery-cut-mode=<avg|first>
+  -allostery-prune-window=<avg|first>
                         avg scans all stored frames; first only frame 0 for pruning
+  -allostery-cut-mode=<avg|first>
+                        Deprecated alias for -allostery-prune-window
   -allostery-no-te      Skip Transfer Entropy stage and emit header-only TE CSV
 
   -tica                 TICA analysis
@@ -929,6 +986,18 @@ IMPORTANT NOTES
   -tica-components=<N>  Components kept. Default: 5
   -tica-backend=<name>  auto | exact_dense | exact_dual | randomized
   -tica-rank=<N>        Reduced-rank target for large-system TICA. Default: 64
+
+  -zts                  Zero-Temperature String minimum-energy path on PCA/TICA FES
+  -zts-domain=<mode>    pca | tica. Default: pca unless both domains are active
+  -zts-images=<N>       Number of string images. Default: 50
+  -zts-iter=<N>         Maximum ZTS iterations. Default: 2000
+  -zts-step=<val>       Gradient-descent step size. Default: 0.01
+  -zts-tol=<val>        Convergence tolerance. Default: 1e-5
+  -zts-source=<id>      Source basin sink_id. Default: auto lowest basin
+  -zts-sink=<id>        Sink basin sink_id. Default: auto second-lowest basin
+  -zts-sigma=<val>      Gaussian smoothing radius in grid units. Default: 1.0
+  -zts-no-smooth        Disable pre-smoothing of the FES grid
+  -zts-init=<mode>      Initialization mode. V1 supports: linear
 
   -msm                  MSM analysis
   -msm-clusters <N>     K-means cluster count. Default: 25
@@ -1095,12 +1164,22 @@ IMPORTANT NOTES
   -noprint-side_chain_contact
                         Suppress side-chain contact printing
 
-4.8 Differential Evolution Optimizer
+4.8 Pull Direction Optimizers
 
-  -pull-direct          Differential-evolution pulling-direction search
-  -de-diff-weight <val> Differential weight. Default: 0.9
-  -de-cross-prob <val>  Crossover probability. Default: 0.9
-  -de-F <val>           Scaling factor. Default: 0.5
+  -pull-direct          Pulling-direction search on the first input only.
+                        Uses the last snapshot of the first pdb/xtc/trr input.
+                        If -e is set, uses the last snapshot with time <= -e.
+                        TITAN exits after this module finishes and ignores
+                        remaining inputs for pull-direct.
+  -pull-opt <mode>      Optimizer mode. Current build supports: de, de+pattern,
+                        de-shade, de-l-shade, de-jso, de-jso+pattern,
+                        de-nl-shade-lbc, de-nl-shade-lbc+pattern, direct,
+                        direct+pattern
+  -pull-max-evals <N>   Global evaluation budget. Default: 0 (unlimited)
+  -pull-seed <N>        Deterministic seed for pull-direction search. Default: 42
+  -de-diff-weight <val> Differential weight for legacy de only. Default: 0.9
+  -de-cross-prob <val>  Crossover probability for legacy de only. Default: 0.9
+  -de-F <val>           Scaling factor for legacy de only. Default: 0.5
   -de-scan-radius <val> Scan radius. Default: 2.0
   -de-min-scan-radius <val>
                         Minimum scan radius. Default: 0.5
@@ -1108,12 +1187,45 @@ IMPORTANT NOTES
                         Score function index
   -de-pop-num <N>       Population size. Default: 6480
   -de-ite-num <N>       Maximum iterations. Default: 100
-  -de-algorithm <N>     DE algorithm variant
-  -de-angle <val>       Restrain angle. Default: 65.0
+  -de-algorithm <N>     Legacy de mutation variant
+  -de-angle <val>       Restrain angle. Default: 90.0
   -de-auto-term         Auto-termination
-  -de-adaptive-F        Adaptive F scaling
+  -de-adaptive-F        Adaptive F scaling for legacy de only
   -de-stagnation-limit <N>
                         Stagnation limit. Default: 20
+  -de-memory-size <N>   SHADE-family memory size. Default: 10
+  -de-p-best-rate <val> SHADE-family p-best rate. Defaults: 0.2 (de-shade,
+                        de-l-shade, de-nl-shade-lbc), 0.11 (de-jso,
+                        de-jso+pattern)
+  -de-archive-scale <v> SHADE-family archive size scale. Default: 1.0
+  -de-min-pop-num <N>   Minimum population for de-l-shade / de-jso /
+                        de-jso+pattern / de-nl-shade-lbc /
+                        de-nl-shade-lbc+pattern. Default: 4
+  -de-pathway-group <N> Pathway group on reference side (subset of g1)
+  -de-pathway-radius <A>
+                        Geometric rescue radius for auto-ordering pathway nodes. Default: 4.0
+                        In pathway mode, TITAN reuses DE_out_vector.dat as the
+                        previous pull direction, enforces angle(new, old) <=
+                        -de-angle, and writes pull_direction_status.txt with
+                        STOP/CONTINUE for Titan+Gromacs chaining.
+                        Pathway mode supports DE-family plus direct and
+                        direct+pattern in the current build.
+                        Recovery mode prioritizes reattaching mol2 to the
+                        nearest reachable forward point on the pathway before
+                        energy. Advance mode prioritizes energy first and then
+                        forward progress.
+                        Legacy outputs DE_out_vector.dat / DE_log.dat /
+                        DE_report.dat / DE_vector.pdb / best_conf.pdb stay in
+                        the original input frame. Only
+                        pull_direction_aligned_snapshot.pdb and
+                        pull_direction_system_info.txt are rotated so that the
+                        best pull vector points to +Z.
+                        de-nl-shade-lbc is the recommended DE-family branch in
+                        the current build. direct+pattern remains the strongest
+                        score-focused competitor on the benchmark case.
+                        direct can be faster than de on small/medium cases
+                        because it often reaches a good answer with far fewer
+                        energy evaluations.
 
 4.9 Help / Version
 

@@ -6,6 +6,7 @@
 #include "info.h"
 #include "titan_kinetics.h"
 #include "titan_ui.h"
+#include <chrono>
 #include <Eigen/Dense>
 #include <fstream>
 #include <string>
@@ -28,6 +29,27 @@ struct FES_Grid {
   int sink_id{-1}; // -1 means unassigned, else indexes a local minimum
 };
 
+struct FES2DResult {
+  int grid_size{0};
+  double min_x{0.0};
+  double min_y{0.0};
+  double step_x{1.0};
+  double step_y{1.0};
+  double total_weight{0.0};
+  double max_bin_weight{0.0};
+  AlignedVector<FES_Grid> bins{};
+
+  FES_Grid &bin(int ix, int iy) {
+    return bins[static_cast<size_t>(ix) * static_cast<size_t>(grid_size) +
+                static_cast<size_t>(iy)];
+  }
+
+  const FES_Grid &bin(int ix, int iy) const {
+    return bins[static_cast<size_t>(ix) * static_cast<size_t>(grid_size) +
+                static_cast<size_t>(iy)];
+  }
+};
+
 // Structure representing a macrostate cluster defined by a prominent density
 // sink
 struct ClusterNode {
@@ -43,6 +65,11 @@ struct ClusterNode {
   double percentage_w;
 };
 
+struct FesPostprocMetrics {
+  bool zts_ran{false};
+  std::chrono::milliseconds zts_time{0};
+};
+
 // Main API isolated from impl_engine.cpp handling Covariance, FES Histograms &
 // Peak Clustering
 void execute_pca_fes_analysis(
@@ -55,13 +82,15 @@ void execute_pca_fes_analysis(
     const std::vector<double> &frame_weights = {},
     const std::vector<double> &traj_times = {},
     const std::vector<int> &traj_replicas = {},
-    const std::vector<std::string> &replica_traj_files = {});
+    const std::vector<std::string> &replica_traj_files = {},
+    FesPostprocMetrics *metrics = nullptr);
 
 void execute_tica_fes_analysis(
     const arguments &args, const MatrixXdAnyConstRef &tica_proj_mat,
     int64_t n_actual_frames, const std::vector<int64_t> &frame_global_indices,
     TitanExecutor &executor, info &info_out, std::fstream &log,
-    const std::vector<double> &frame_weights = {});
+    const std::vector<double> &frame_weights = {},
+    FesPostprocMetrics *metrics = nullptr);
 
 } // namespace TitanPCA
 

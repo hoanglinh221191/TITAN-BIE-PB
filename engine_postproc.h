@@ -52,10 +52,12 @@ void run_tica_msm_postproc(const arguments &args,
                            std::fstream &log);
 
 void run_tica_fes_postproc(const arguments &args,
+                           std::unique_ptr<TitanKinetics> &tica_analyzer,
                            std::unique_ptr<TitanMSM> &msm_analyzer,
                            TitanExecutor &executor, info &info_output,
                            std::fstream &log,
-                           const std::vector<double> &frame_weights = {});
+                           const std::vector<double> &frame_weights = {},
+                           TitanPCA::FesPostprocMetrics *metrics = nullptr);
 
 void run_umap_postproc(const arguments &args,
                        std::unique_ptr<TitanMSM> &msm_analyzer,
@@ -75,7 +77,8 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
                            std::chrono::milliseconds &time_network,
                            info &info_output, std::fstream &log,
                            const std::vector<double> &frame_weights = {},
-                           const std::vector<std::string> &replica_traj_files = {});
+                           const std::vector<std::string> &replica_traj_files = {},
+                           TitanPCA::FesPostprocMetrics *metrics = nullptr);
 
 // ---- 5. LSP-MD post-processing ---------------------------------------------
 void run_lspmd_postproc(const arguments &args, DCCMNetwork &dccm_analyzer,

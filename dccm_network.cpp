@@ -520,8 +520,17 @@ std::vector<std::pair<size_t, size_t>> build_lspmd_candidate_pairs(
 std::vector<std::pair<size_t, size_t>> build_allostery_candidate_pairs(
     const DCCMNetwork::TrajectoryRows &traj_x,
     const DCCMNetwork::TrajectoryRows &traj_y,
-    const DCCMNetwork::TrajectoryRows &traj_z, size_t num_ca,
+    const DCCMNetwork::TrajectoryRows &traj_z,
+    const DCCMNetwork::TrajectoryRows &anchor_x,
+    const DCCMNetwork::TrajectoryRows &anchor_y,
+    const DCCMNetwork::TrajectoryRows &anchor_z, size_t num_ca,
     size_t total_frames, const DCCMNetwork::AllosteryConfig &cfg) {
+  struct RankedNeighbor {
+    size_t partner = 0;
+    std::uint32_t score = 0;
+    float min_dist2 = std::numeric_limits<float>::infinity();
+  };
+
   const size_t dense_pair_count =
       num_ca < 2 ? 0 : num_ca * (num_ca - 1) / 2;
   if (cfg.cutoff_ang <= 0.0 && cfg.knn <= 0)
@@ -539,54 +548,93 @@ std::vector<std::pair<size_t, size_t>> build_allostery_candidate_pairs(
     pairs.emplace_back(a, b);
     return true;
   };
-
-  if (cfg.cutoff_ang > 0.0) {
-    auto cutoff_pairs = build_lspmd_candidate_pairs(
-        traj_x, traj_y, traj_z, num_ca, total_frames, cfg.cutoff_ang,
-        cfg.use_avg_cutoff);
-    for (const auto &[i, j] : cutoff_pairs)
-      mark_pair(i, j);
-  }
-
-  if (cfg.knn > 0 && num_ca > 1 && total_frames > 0) {
-    const size_t k = std::min<size_t>(static_cast<size_t>(cfg.knn), num_ca - 1);
-    const size_t frame_limit = cfg.use_avg_cutoff ? total_frames : 1;
-    bool can_rank = true;
+  auto has_complete_rows = [&](const DCCMNetwork::TrajectoryRows &x_rows,
+                               const DCCMNetwork::TrajectoryRows &y_rows,
+                               const DCCMNetwork::TrajectoryRows &z_rows,
+                               size_t frame_limit) {
+    if (x_rows.size() < frame_limit || y_rows.size() < frame_limit ||
+        z_rows.size() < frame_limit) {
+      return false;
+    }
     for (size_t f = 0; f < frame_limit; ++f) {
-      if (traj_x[f].size() < num_ca || traj_y[f].size() < num_ca ||
-          traj_z[f].size() < num_ca) {
-        can_rank = false;
-        break;
+      if (x_rows[f].size() < num_ca || y_rows[f].size() < num_ca ||
+          z_rows[f].size() < num_ca) {
+        return false;
       }
     }
-    if (!can_rank) {
-      if (pairs.empty())
-        return build_dense_upper_triangle_pairs(num_ca);
-      std::sort(pairs.begin(), pairs.end());
-      return pairs;
-    }
+    return true;
+  };
+  auto append_top_ranked_pairs =
+      [&](const std::vector<std::uint32_t> &scores,
+          const std::vector<float> &min_dist2, size_t k) {
+        std::vector<std::vector<RankedNeighbor>> ranked_neighbors(num_ca);
+        for (auto &neighbors : ranked_neighbors)
+          neighbors.reserve(k * 2);
+        for (size_t i = 0; i < num_ca; ++i) {
+          for (size_t j = i + 1; j < num_ca; ++j) {
+            const size_t pair_index = upper_triangle_pair_index(i, j, num_ca);
+            if (scores[pair_index] == 0)
+              continue;
+            ranked_neighbors[i].push_back(
+                RankedNeighbor{j, scores[pair_index], min_dist2[pair_index]});
+            ranked_neighbors[j].push_back(
+                RankedNeighbor{i, scores[pair_index], min_dist2[pair_index]});
+          }
+        }
 
-    struct RankedNeighbor {
-      size_t partner = 0;
-      std::uint32_t votes = 0;
-      float min_dist2 = std::numeric_limits<float>::infinity();
-    };
+        auto better_neighbor = [](const RankedNeighbor &lhs,
+                                  const RankedNeighbor &rhs) {
+          if (lhs.score != rhs.score)
+            return lhs.score > rhs.score;
+          if (lhs.min_dist2 != rhs.min_dist2)
+            return lhs.min_dist2 < rhs.min_dist2;
+          return lhs.partner < rhs.partner;
+        };
+
+        bool added_any = false;
+        for (size_t i = 0; i < num_ca; ++i) {
+          auto &neighbors = ranked_neighbors[i];
+          if (neighbors.empty())
+            continue;
+          if (neighbors.size() > k) {
+            std::nth_element(
+                neighbors.begin(),
+                neighbors.begin() + static_cast<std::ptrdiff_t>(k),
+                neighbors.end(), better_neighbor);
+            std::sort(neighbors.begin(),
+                      neighbors.begin() + static_cast<std::ptrdiff_t>(k),
+                      better_neighbor);
+          } else {
+            std::sort(neighbors.begin(), neighbors.end(), better_neighbor);
+          }
+          const size_t keep = std::min(k, neighbors.size());
+          for (size_t n = 0; n < keep; ++n) {
+            added_any |=
+                mark_pair(std::min(i, neighbors[n].partner),
+                          std::max(i, neighbors[n].partner));
+          }
+        }
+        return added_any;
+      };
+  auto append_frame_voted_knn = [&](size_t k, size_t frame_limit) {
+    if (!has_complete_rows(traj_x, traj_y, traj_z, frame_limit))
+      return false;
 
     std::vector<std::uint32_t> vote_counts(dense_pair_count, 0);
     std::vector<float> min_dist2(dense_pair_count,
                                  std::numeric_limits<float>::infinity());
+    std::vector<std::pair<float, size_t>> distances;
+    distances.reserve(num_ca > 0 ? num_ca - 1 : 0);
+    auto rank_cmp = [](const auto &lhs, const auto &rhs) {
+      if (lhs.first != rhs.first)
+        return lhs.first < rhs.first;
+      return lhs.second < rhs.second;
+    };
+
     for (size_t f = 0; f < frame_limit; ++f) {
       const auto &x_row = traj_x[f];
       const auto &y_row = traj_y[f];
       const auto &z_row = traj_z[f];
-
-      std::vector<std::pair<float, size_t>> distances;
-      distances.reserve(num_ca - 1);
-      auto rank_cmp = [](const auto &lhs, const auto &rhs) {
-        if (lhs.first != rhs.first)
-          return lhs.first < rhs.first;
-        return lhs.second < rhs.second;
-      };
 
       for (size_t i = 0; i < num_ca; ++i) {
         distances.clear();
@@ -630,55 +678,123 @@ std::vector<std::pair<size_t, size_t>> build_allostery_candidate_pairs(
       }
     }
 
-    std::vector<std::vector<RankedNeighbor>> ranked_neighbors(num_ca);
-    for (auto &neighbors : ranked_neighbors)
-      neighbors.reserve(k * 2);
-    for (size_t i = 0; i < num_ca; ++i) {
-      for (size_t j = i + 1; j < num_ca; ++j) {
-        const size_t pair_index = upper_triangle_pair_index(i, j, num_ca);
-        if (vote_counts[pair_index] == 0)
-          continue;
-        const RankedNeighbor ij{j, vote_counts[pair_index],
-                                min_dist2[pair_index]};
-        const RankedNeighbor ji{i, vote_counts[pair_index],
-                                min_dist2[pair_index]};
-        ranked_neighbors[i].push_back(ij);
-        ranked_neighbors[j].push_back(ji);
-      }
+    return append_top_ranked_pairs(vote_counts, min_dist2, k);
+  };
+  auto append_contact_frequency_knn = [&](size_t k, size_t frame_limit) {
+    if (!has_complete_rows(anchor_x, anchor_y, anchor_z, frame_limit))
+      return false;
+
+    const double cutoff = cfg.knn_contact_cutoff;
+    const double cutoff2 = cutoff * cutoff;
+    titan_neighbor::HalfShellGrid neighbor_grid;
+    std::vector<std::uint32_t> contact_counts(dense_pair_count, 0);
+    std::vector<float> min_dist2(dense_pair_count,
+                                 std::numeric_limits<float>::infinity());
+    bool saw_contact = false;
+
+    for (size_t f = 0; f < frame_limit; ++f) {
+      const auto &x_row = anchor_x[f];
+      const auto &y_row = anchor_y[f];
+      const auto &z_row = anchor_z[f];
+      const auto [xmin, xmax] =
+          std::minmax_element(x_row.begin(), x_row.begin() + num_ca);
+      const auto [ymin, ymax] =
+          std::minmax_element(y_row.begin(), y_row.begin() + num_ca);
+      const auto [zmin, zmax] =
+          std::minmax_element(z_row.begin(), z_row.begin() + num_ca);
+
+      titan_neighbor::OrthorhombicGridSpec spec;
+      spec.cutoff = cutoff;
+      spec.shift_x = -(*xmin) + cutoff;
+      spec.shift_y = -(*ymin) + cutoff;
+      spec.shift_z = -(*zmin) + cutoff;
+      spec.len_x = (*xmax - *xmin) + 2.0 * cutoff;
+      spec.len_y = (*ymax - *ymin) + 2.0 * cutoff;
+      spec.len_z = (*zmax - *zmin) + 2.0 * cutoff;
+      spec.periodic = false;
+
+      neighbor_grid.for_each_pair(
+          num_ca, spec,
+          [&](std::size_t atom_index, double &x, double &y, double &z) {
+            x = x_row[atom_index];
+            y = y_row[atom_index];
+            z = z_row[atom_index];
+          },
+          [&](std::size_t atom_index) { return atom_index < num_ca; },
+          [&](std::size_t lhs, std::size_t rhs) {
+            const double dx = x_row[lhs] - x_row[rhs];
+            const double dy = y_row[lhs] - y_row[rhs];
+            const double dz = z_row[lhs] - z_row[rhs];
+            const float dist2 =
+                static_cast<float>(dx * dx + dy * dy + dz * dz);
+            if (dist2 > cutoff2)
+              return;
+
+            saw_contact = true;
+            const size_t i = std::min(lhs, rhs);
+            const size_t j = std::max(lhs, rhs);
+            const size_t pair_index = upper_triangle_pair_index(i, j, num_ca);
+            if (contact_counts[pair_index] !=
+                std::numeric_limits<std::uint32_t>::max()) {
+              ++contact_counts[pair_index];
+            }
+            min_dist2[pair_index] = std::min(min_dist2[pair_index], dist2);
+          });
     }
 
-    auto better_neighbor = [](const RankedNeighbor &lhs,
-                              const RankedNeighbor &rhs) {
-      if (lhs.votes != rhs.votes)
-        return lhs.votes > rhs.votes;
-      if (lhs.min_dist2 != rhs.min_dist2)
-        return lhs.min_dist2 < rhs.min_dist2;
-      return lhs.partner < rhs.partner;
-    };
+    if (!saw_contact)
+      return false;
+    return append_top_ranked_pairs(contact_counts, min_dist2, k);
+  };
 
-    for (size_t i = 0; i < num_ca; ++i) {
-      auto &neighbors = ranked_neighbors[i];
-      if (neighbors.empty())
-        continue;
-      if (neighbors.size() > k) {
-        std::nth_element(neighbors.begin(),
-                         neighbors.begin() + static_cast<std::ptrdiff_t>(k),
-                         neighbors.end(), better_neighbor);
-        std::sort(neighbors.begin(),
-                  neighbors.begin() + static_cast<std::ptrdiff_t>(k),
-                  better_neighbor);
-      } else {
-        std::sort(neighbors.begin(), neighbors.end(), better_neighbor);
-      }
-      const size_t keep = std::min(k, neighbors.size());
-      for (size_t n = 0; n < keep; ++n)
-        mark_pair(std::min(i, neighbors[n].partner),
-                  std::max(i, neighbors[n].partner));
+  if (cfg.cutoff_ang > 0.0) {
+    auto cutoff_pairs = build_lspmd_candidate_pairs(
+        traj_x, traj_y, traj_z, num_ca, total_frames, cfg.cutoff_ang,
+        cfg.use_avg_cutoff);
+    for (const auto &[i, j] : cutoff_pairs)
+      mark_pair(i, j);
+  }
+
+  if (cfg.knn > 0 && num_ca > 1 && total_frames > 0) {
+    const size_t k = std::min<size_t>(static_cast<size_t>(cfg.knn), num_ca - 1);
+    const size_t frame_limit = cfg.use_avg_cutoff ? total_frames : 1;
+    const bool can_rank = has_complete_rows(traj_x, traj_y, traj_z, frame_limit);
+    if (!can_rank) {
+      if (pairs.empty())
+        return build_dense_upper_triangle_pairs(num_ca);
+      std::sort(pairs.begin(), pairs.end());
+      return pairs;
     }
+    bool added_knn_pairs = false;
+    if (cfg.knn_use_contact_prior) {
+      added_knn_pairs = append_contact_frequency_knn(k, frame_limit);
+    }
+    if (!added_knn_pairs) {
+      added_knn_pairs = append_frame_voted_knn(k, frame_limit);
+    }
+    if (!added_knn_pairs && pairs.empty())
+      return build_dense_upper_triangle_pairs(num_ca);
   }
 
   std::sort(pairs.begin(), pairs.end());
   return pairs;
+}
+
+bool has_complete_anchor_rows(const DCCMNetwork::TrajectoryRows &x_rows,
+                              const DCCMNetwork::TrajectoryRows &y_rows,
+                              const DCCMNetwork::TrajectoryRows &z_rows,
+                              size_t num_ca, size_t total_frames) {
+  if (x_rows.size() != total_frames || y_rows.size() != total_frames ||
+      z_rows.size() != total_frames) {
+    return false;
+  }
+  for (size_t f = 0; f < total_frames; ++f) {
+    if (x_rows[f].size() < num_ca || y_rows[f].size() < num_ca ||
+        z_rows[f].size() < num_ca) {
+      return false;
+    }
+  }
+  return true;
 }
 
 template <typename BinType>
@@ -686,8 +802,13 @@ size_t calculate_allostery_information_flat_impl(
     const DCCMNetwork::TrajectoryRows &traj_x,
     const DCCMNetwork::TrajectoryRows &traj_y,
     const DCCMNetwork::TrajectoryRows &traj_z,
+    const DCCMNetwork::TrajectoryRows &anchor_x,
+    const DCCMNetwork::TrajectoryRows &anchor_y,
+    const DCCMNetwork::TrajectoryRows &anchor_z,
     const std::vector<std::string> &node_labels, size_t total_frames,
     TitanExecutor &executor, const DCCMNetwork::AllosteryConfig &cfg, int B,
+    const std::string &gc_filename, const std::string &mi_filename,
+    const std::string &te_filename,
     size_t *dense_pair_count_out = nullptr) {
   if (total_frames == 0 || node_labels.empty())
     return 0;
@@ -709,12 +830,15 @@ size_t calculate_allostery_information_flat_impl(
   const size_t dense_pair_count = num_ca * (num_ca - 1) / 2;
   if (dense_pair_count_out != nullptr)
     *dense_pair_count_out = dense_pair_count;
-  const auto pairs = build_allostery_candidate_pairs(traj_x, traj_y, traj_z,
-                                                     num_ca, total_frames, cfg);
+  const auto pairs =
+      build_allostery_candidate_pairs(traj_x, traj_y, traj_z, anchor_x, anchor_y,
+                                      anchor_z, num_ca, total_frames, cfg);
   const size_t n_pairs = pairs.size();
-  std::ofstream gc_out("network_gc_edges.csv");
+  std::ofstream gc_out(gc_filename);
   gc_out << "Source,Target,GC\n";
-  std::ofstream te_out("network_te_edges.csv");
+  std::ofstream mi_out(mi_filename);
+  mi_out << "Source,Target,MI\n";
+  std::ofstream te_out(te_filename);
   te_out << "Source,Target,Net_TE\n";
   if (n_pairs == 0)
     return 0;
@@ -861,6 +985,7 @@ size_t calculate_allostery_information_flat_impl(
   }
 
   std::vector<double> gc_vals(n_pairs, 0.0);
+  std::vector<double> mi_vals(n_pairs, 0.0);
   std::vector<double> net_te_vals(cfg.compute_te ? n_pairs : 0, 0.0);
 
   auto worker = [&](size_t p_start, size_t p_end) {
@@ -892,6 +1017,7 @@ size_t calculate_allostery_information_flat_impl(
       double MI = H1[i] + H1[j] - H_ij;
       if (MI < 0.0)
         MI = 0.0;
+      mi_vals[p] = MI;
       gc_vals[p] = std::sqrt(1.0 - std::exp(-2.0 * MI));
 
       if (!cfg.compute_te)
@@ -926,6 +1052,14 @@ size_t calculate_allostery_information_flat_impl(
     if (start < end)
       worker(start, end);
   });
+
+  for (size_t p = 0; p < n_pairs; ++p) {
+    const size_t i = pairs[p].first;
+    const size_t j = pairs[p].second;
+    mi_out << node_labels[i] << "," << node_labels[j] << "," << mi_vals[p]
+           << "\n";
+  }
+  mi_out.close();
 
   for (size_t p = 0; p < n_pairs; ++p) {
     if (gc_vals[p] > 0.35) {
@@ -1522,64 +1656,113 @@ void DCCMNetwork::calculate_and_export(TitanExecutor &executor,
 // Information-Theory Allosteric Analysis: GC + Transfer Entropy
 // =============================================================================
 void DCCMNetwork::calculate_allostery_information(TitanExecutor &executor,
-                                                  int tau_lag, int num_bins) {
+                                                  int tau_lag, int num_bins,
+                                                  const std::string &gc_filename,
+                                                  const std::string &mi_filename,
+                                                  const std::string &te_filename) {
   AllosteryConfig cfg;
   cfg.tau_lag = tau_lag;
   cfg.num_bins = num_bins;
-  calculate_allostery_information(executor, cfg);
+  calculate_allostery_information(executor, cfg, gc_filename, mi_filename,
+                                  te_filename);
 }
 
 void DCCMNetwork::calculate_allostery_information(
-    TitanExecutor &executor, const AllosteryConfig &cfg) {
+    TitanExecutor &executor, const AllosteryConfig &cfg,
+    const std::string &gc_filename, const std::string &mi_filename,
+    const std::string &te_filename) {
   last_allostery_candidate_pairs_ = 0;
   last_allostery_dense_pairs_ = 0;
   const int resolved_bin_count =
       resolve_allostery_bin_count(total_frames, cfg.num_bins);
   const auto dispatch_node_labels =
       build_allostery_node_labels(ca_resname, ca_resnrs, ca_chain);
+  const bool use_contact_anchor_cache =
+      cfg.knn_use_contact_prior &&
+      has_complete_anchor_rows(traj_cbx, traj_cby, traj_cbz, ca_indices.size(),
+                               total_frames);
+  const auto &anchor_x =
+      use_contact_anchor_cache ? traj_cbx : traj_x;
+  const auto &anchor_y =
+      use_contact_anchor_cache ? traj_cby : traj_y;
+  const auto &anchor_z =
+      use_contact_anchor_cache ? traj_cbz : traj_z;
+  if (cfg.knn > 0 && cfg.knn_use_contact_prior && !use_contact_anchor_cache) {
+    TitanUI::print_warning(
+        "Allostery: contact-frequency kNN prior is falling back to Calpha "
+        "anchors because Cbeta/N trajectory cache is unavailable.");
+  }
   last_allostery_candidate_pairs_ =
       calculate_allostery_information_flat_impl<std::uint32_t>(
-          traj_x, traj_y, traj_z, dispatch_node_labels, total_frames, executor,
-          cfg, resolved_bin_count, &last_allostery_dense_pairs_);
+          traj_x, traj_y, traj_z, anchor_x, anchor_y, anchor_z,
+          dispatch_node_labels, total_frames, executor, cfg, resolved_bin_count,
+          gc_filename, mi_filename, te_filename,
+          &last_allostery_dense_pairs_);
 }
 
 void DCCMNetwork::calculate_allostery_information_optimized(
-    TitanExecutor &executor, int tau_lag, int num_bins) {
+    TitanExecutor &executor, int tau_lag, int num_bins,
+    const std::string &gc_filename, const std::string &mi_filename,
+    const std::string &te_filename) {
   AllosteryConfig cfg;
   cfg.tau_lag = tau_lag;
   cfg.num_bins = num_bins;
-  calculate_allostery_information_optimized(executor, cfg);
+  calculate_allostery_information_optimized(executor, cfg, gc_filename,
+                                            mi_filename, te_filename);
 }
 
 void DCCMNetwork::calculate_allostery_information_optimized(
-    TitanExecutor &executor, const AllosteryConfig &cfg) {
+    TitanExecutor &executor, const AllosteryConfig &cfg,
+    const std::string &gc_filename, const std::string &mi_filename,
+    const std::string &te_filename) {
   last_allostery_candidate_pairs_ = 0;
   last_allostery_dense_pairs_ = 0;
   const int resolved_bin_count =
       resolve_allostery_bin_count(total_frames, cfg.num_bins);
   const auto dispatch_node_labels =
       build_allostery_node_labels(ca_resname, ca_resnrs, ca_chain);
+  const bool use_contact_anchor_cache =
+      cfg.knn_use_contact_prior &&
+      has_complete_anchor_rows(traj_cbx, traj_cby, traj_cbz, ca_indices.size(),
+                               total_frames);
+  const auto &anchor_x =
+      use_contact_anchor_cache ? traj_cbx : traj_x;
+  const auto &anchor_y =
+      use_contact_anchor_cache ? traj_cby : traj_y;
+  const auto &anchor_z =
+      use_contact_anchor_cache ? traj_cbz : traj_z;
+  if (cfg.knn > 0 && cfg.knn_use_contact_prior && !use_contact_anchor_cache) {
+    TitanUI::print_warning(
+        "Allostery: contact-frequency kNN prior is falling back to Calpha "
+        "anchors because Cbeta/N trajectory cache is unavailable.");
+  }
   const size_t resolved_bin_count_sz =
       static_cast<size_t>(resolved_bin_count);
   if (resolved_bin_count_sz <=
       static_cast<size_t>(std::numeric_limits<std::uint8_t>::max())) {
     last_allostery_candidate_pairs_ =
         calculate_allostery_information_flat_impl<std::uint8_t>(
-            traj_x, traj_y, traj_z, dispatch_node_labels, total_frames,
-            executor, cfg, resolved_bin_count,
+            traj_x, traj_y, traj_z, anchor_x, anchor_y, anchor_z,
+            dispatch_node_labels, total_frames, executor, cfg,
+            resolved_bin_count, gc_filename, mi_filename,
+            te_filename,
             &last_allostery_dense_pairs_);
   } else if (resolved_bin_count_sz <=
              static_cast<size_t>(std::numeric_limits<std::uint16_t>::max())) {
     last_allostery_candidate_pairs_ =
         calculate_allostery_information_flat_impl<std::uint16_t>(
-            traj_x, traj_y, traj_z, dispatch_node_labels, total_frames,
-            executor, cfg, resolved_bin_count,
+            traj_x, traj_y, traj_z, anchor_x, anchor_y, anchor_z,
+            dispatch_node_labels, total_frames, executor, cfg,
+            resolved_bin_count, gc_filename, mi_filename,
+            te_filename,
             &last_allostery_dense_pairs_);
   } else {
     last_allostery_candidate_pairs_ =
         calculate_allostery_information_flat_impl<std::uint32_t>(
-            traj_x, traj_y, traj_z, dispatch_node_labels, total_frames,
-            executor, cfg, resolved_bin_count,
+            traj_x, traj_y, traj_z, anchor_x, anchor_y, anchor_z,
+            dispatch_node_labels, total_frames, executor, cfg,
+            resolved_bin_count, gc_filename, mi_filename,
+            te_filename,
             &last_allostery_dense_pairs_);
   }
 }

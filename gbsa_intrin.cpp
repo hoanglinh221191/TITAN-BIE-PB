@@ -22,6 +22,25 @@ static inline double hsum_avx(__m256d v) {
   return _mm_cvtsd_f64(vlow);
 }
 
+static inline __m256d charmm_lj_energy_gbsa_avx(__m256d sigma_vec,
+                                                __m256d epsilon_vec,
+                                                __m256d distance_vec) {
+  const __m256d avx_zero = _mm256_setzero_pd();
+  const __m256d avx_four = _mm256_set1_pd(4.0);
+  const __m256d sigma_valid = _mm256_cmp_pd(sigma_vec, avx_zero, _CMP_GT_OQ);
+  const __m256d epsilon_valid =
+      _mm256_cmp_pd(epsilon_vec, avx_zero, _CMP_NEQ_OQ);
+  const __m256d valid_mask = _mm256_and_pd(sigma_valid, epsilon_valid);
+
+  const __m256d sr = _mm256_div_pd(sigma_vec, distance_vec);
+  const __m256d sr2 = _mm256_mul_pd(sr, sr);
+  const __m256d sr6 = _mm256_mul_pd(_mm256_mul_pd(sr2, sr2), sr2);
+  const __m256d sr12 = _mm256_mul_pd(sr6, sr6);
+  __m256d energy = _mm256_mul_pd(
+      _mm256_mul_pd(avx_four, epsilon_vec), _mm256_sub_pd(sr12, sr6));
+  return _mm256_and_pd(energy, valid_mask);
+}
+
 void cal_effective_born_radii_avx2(const MOL &mol,
                                    const AlignedDoubleVector &vdw_radii,
                                    AlignedDoubleVector &radii, int igb,
@@ -457,9 +476,8 @@ int cal_energy_gbsa_avx2(
 
   double self_gpol_sum = 0.0;
   double kappa_val = 0.73 * std::sqrt(Arguments.saltcon);
-  const bool use_charmm_scalar_pairs =
-      Arguments.force_f.find("CHARMM") != std::string::npos &&
-      CachedData.has_charmm_pair_overrides();
+  const bool is_charmm =
+      Arguments.force_f.find("CHARMM") != std::string::npos;
   const bool can_write_pair_cache =
       write_pair_cache && !CachedData.elec_ener.empty();
 
@@ -761,8 +779,7 @@ int cal_energy_gbsa_avx2(
     __m256d v_q_j = _mm256_set1_pd(lg_parameters.charge[j]);
 
     size_t size_vector_rec = rec.size() / 4;
-    if (!use_charmm_scalar_pairs) {
-      for (size_t i = 0; i < size_vector_rec * 4; i += 4) {
+    for (size_t i = 0; i < size_vector_rec * 4; i += 4) {
       __m256d v_x = _mm256_load_pd(&rec.pos.x[i]);
       __m256d v_y = _mm256_load_pd(&rec.pos.y[i]);
       __m256d v_z = _mm256_load_pd(&rec.pos.z[i]);
@@ -796,7 +813,15 @@ int cal_energy_gbsa_avx2(
           _mm256_cmp_pd(r_nm, _mm256_set1_pd(0.05), _CMP_GE_OQ);
 
       __m256d vdw_res;
-      if (is_oplsaa) {
+      if (is_charmm) {
+        alignas(32) double sigma_lane[4]{};
+        alignas(32) double epsilon_lane[4]{};
+        charmm::pair_params_block(CachedData, rec_parameters, lg_parameters, i,
+                                  4, j, sigma_lane, epsilon_lane);
+        const __m256d sigma_vec = _mm256_loadu_pd(sigma_lane);
+        const __m256d epsilon_vec = _mm256_loadu_pd(epsilon_lane);
+        vdw_res = charmm_lj_energy_gbsa_avx(sigma_vec, epsilon_vec, r_nm);
+      } else if (is_oplsaa) {
         __m256d four_eps = _mm256_mul_pd(_mm256_set1_pd(4.0), eps_ij);
         __m256d sig_ij =
             _mm256_sqrt_pd(_mm256_mul_pd(avx_temp_sigma_lg, avx_rec_sigma));
@@ -860,6 +885,8 @@ int cal_energy_gbsa_avx2(
       __m256d E_vdw_scaled = vdw_res;
       __m256d E_elec_scaled = elec_res;
       __m256d G_polar_scaled = gpol_res;
+      E_elec_scaled = _mm256_and_pd(E_elec_scaled, r_min_mask);
+      G_polar_scaled = _mm256_and_pd(G_polar_scaled, r_min_mask);
 
       double vdw_a[4], elec_a[4], gpol_a[4];
       _mm256_storeu_pd(vdw_a, E_vdw_scaled);
@@ -893,11 +920,9 @@ int cal_energy_gbsa_avx2(
         add_pair_map(i + k, j, elec_a[k] + gpol_a[k], vdw_a[k]);
       }
     }
-    }
 
     // Scalar Remainder Loop
-    for (size_t i = use_charmm_scalar_pairs ? 0 : size_vector_rec * 4;
-         i < rec.size(); ++i) {
+    for (size_t i = size_vector_rec * 4; i < rec.size(); ++i) {
       double dx = rec.pos.x[i] - pos_x;
       double dy = rec.pos.y[i] - pos_y;
       double dz = rec.pos.z[i] - pos_z;

@@ -1,4 +1,5 @@
 #include "cache_sigma_epsilon.h"
+#include "charmm_nonbonded.h"
 #include "force.h"
 #include "functions.h"
 #include "martini_nonbonded.h"
@@ -24,13 +25,35 @@
 
 namespace {
 inline __m256d load_lane_mask_pd(const double *lane_mask) {
-  return _mm256_loadu_pd(lane_mask);
+  // _mm256_and_pd expects a bitmask (all-ones/zero), not the IEEE bits of -1.0.
+  const __m256d lane_values = _mm256_loadu_pd(lane_mask);
+  const __m256d zero = _mm256_setzero_pd();
+  return _mm256_cmp_pd(lane_values, zero, _CMP_NEQ_OQ);
 }
 
 inline void zero_cached_pair_if_present(cache_sigma_epsilon &CachedData,
                                         size_t pos) {
   if (!CachedData.elec_ener.empty())
     CachedData.set_elec_vdw(pos, 0., 0.);
+}
+
+inline __m256d charmm_lj_energy_avx(__m256d sigma_vec, __m256d epsilon_vec,
+                                    __m256d distance_vec) {
+  const __m256d avx_zero = _mm256_setzero_pd();
+  const __m256d avx_four = _mm256_set1_pd(4.0);
+  const __m256d sigma_valid = _mm256_cmp_pd(sigma_vec, avx_zero, _CMP_GT_OQ);
+  const __m256d epsilon_valid =
+      _mm256_cmp_pd(epsilon_vec, avx_zero, _CMP_NEQ_OQ);
+  const __m256d valid_mask = _mm256_and_pd(sigma_valid, epsilon_valid);
+
+  const __m256d sr = _mm256_div_pd(sigma_vec, distance_vec);
+  const __m256d sr2 = _mm256_mul_pd(sr, sr);
+  const __m256d sr6 = _mm256_mul_pd(_mm256_mul_pd(sr2, sr2), sr2);
+  const __m256d sr12 = _mm256_mul_pd(sr6, sr6);
+  __m256d energy = _mm256_mul_pd(
+      _mm256_mul_pd(avx_four, epsilon_vec), _mm256_sub_pd(sr12, sr6));
+  energy = _mm256_and_pd(energy, valid_mask);
+  return energy;
 }
 } // namespace
 
@@ -53,6 +76,8 @@ int cal_energy_amber_intrin(const MOL &rec, const MOL &lg,
                             const Multi_MOL_parameters &rec_parameters,
                             const Multi_MOL_parameters &lg_parameters) {
   Energy.set_energy(0., 0.);
+  const bool is_charmm =
+      Arguments.force_f.find("CHARMM") != std::string::npos;
   const __m256d avx_half = _mm256_set1_pd(0.5);
   const __m256d v_scale = _mm256_set1_pd(0.01);
   const size_t rec_size{rec.size()};
@@ -101,22 +126,35 @@ int cal_energy_amber_intrin(const MOL &rec, const MOL &lg,
           _mm256_mul_pd(avx_temp_charge_lg, avx_array_charge_rec);
       avx_elec_result = _mm256_div_pd(avx_elec_result, avx_array_d_rec);
 
-      __m256d vdw_temp = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
-      vdw_temp = _mm256_mul_pd(avx_temp_epsilon_lg, vdw_temp);
-      vdw_temp = _mm256_sqrt_pd(vdw_temp);
+      __m256d sigma_self_vec{};
+      __m256d vdw_temp3{};
+      if (is_charmm) {
+        alignas(32) double sigma_lane[4]{};
+        alignas(32) double epsilon_lane[4]{};
+        charmm::pair_params_block(CachedData, rec_parameters, lg_parameters, i,
+                                  4, j, sigma_lane, epsilon_lane);
+        sigma_self_vec = _mm256_loadu_pd(sigma_lane);
+        const __m256d epsilon_vec = _mm256_loadu_pd(epsilon_lane);
+        vdw_temp3 =
+            charmm_lj_energy_avx(sigma_self_vec, epsilon_vec, avx_array_d_rec);
+      } else {
+        __m256d vdw_temp = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
+        vdw_temp = _mm256_mul_pd(avx_temp_epsilon_lg, vdw_temp);
+        vdw_temp = _mm256_sqrt_pd(vdw_temp);
 
-      __m256d sigma_self_vec = _mm256_loadu_pd(&rec_parameters.sigma[i]);
-      sigma_self_vec = _mm256_add_pd(avx_temp_sigma, sigma_self_vec);
-      sigma_self_vec = _mm256_mul_pd(sigma_self_vec, avx_half);
+        sigma_self_vec = _mm256_loadu_pd(&rec_parameters.sigma[i]);
+        sigma_self_vec = _mm256_add_pd(avx_temp_sigma, sigma_self_vec);
+        sigma_self_vec = _mm256_mul_pd(sigma_self_vec, avx_half);
 
-      __m256d vdw_temp2 = _mm256_div_pd(sigma_self_vec, avx_array_d_rec);
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-      __m256d vdw_temp3 = vdw_temp2;
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp3);
-      vdw_temp3 =
-          _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2), vdw_temp2);
-      vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3);
+        __m256d vdw_temp2 = _mm256_div_pd(sigma_self_vec, avx_array_d_rec);
+        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
+        vdw_temp3 = vdw_temp2;
+        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
+        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp3);
+        vdw_temp3 =
+            _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2), vdw_temp2);
+        vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3);
+      }
 
       _mm256_storeu_pd(d_arr, avx_array_d_rec);
       _mm256_storeu_pd(sigma_self_arr, sigma_self_vec);
@@ -159,30 +197,39 @@ int cal_energy_amber_intrin(const MOL &rec, const MOL &lg,
           zero_cached_pair_if_present(CachedData, pos);
           continue;
         }
+        double sigma_self =
+            0.5 * (lg_parameters.sigma[j] + rec_parameters.sigma[i]);
+        double vdw_val = 0.0;
+        if (is_charmm) {
+          double epsilon_ij{};
+          charmm::pair_params(CachedData, rec_parameters, lg_parameters, i, j,
+                              sigma_self, epsilon_ij);
+          vdw_val = charmm::lj_energy(sigma_self, epsilon_ij, d);
+        } else if (lg_parameters.sigma[j] < 0. ||
+                   rec_parameters.sigma[i] < 0.) {
+          const double c_6{
+              c6(0.5 * (lg_parameters.sigma[j] + rec_parameters.sigma[i]) / d)};
+          vdw_val = sqrt(16. * lg_parameters.epsilon[j] *
+                         rec_parameters.epsilon[i]) *
+                    (square(c_6) - 0.000);
+        } else {
+          const double c_6{
+              c6(0.5 * (lg_parameters.sigma[j] + rec_parameters.sigma[i]) / d)};
+          vdw_val = sqrt(16. * lg_parameters.epsilon[j] *
+                         rec_parameters.epsilon[i]) *
+                    (square(c_6) - c_6);
+        }
+
         if (check_self &&
-            (d < 0.5 * (lg_parameters.sigma[j] + rec_parameters.sigma[i]) ||
+            ((sigma_self > 0.0 && d < sigma_self) ||
              (check_interchain &&
               info_lg[j].get_chain() == info_rec[i].get_chain()))) {
           zero_cached_pair_if_present(CachedData, pos);
           continue;
         }
-
-        const double c_6{
-            c6(0.5 * (lg_parameters.sigma[j] + rec_parameters.sigma[i]) / d)};
         const double elec_val =
             (138.935457839 * lg_parameters.charge[j] / epsilon_in) *
             rec_parameters.charge[i] / d;
-
-        double vdw_val = 0.0;
-        if (lg_parameters.sigma[j] < 0. || rec_parameters.sigma[i] < 0.) {
-          vdw_val = sqrt(16. * lg_parameters.epsilon[j] *
-                         rec_parameters.epsilon[i]) *
-                    (square(c_6) - 0.000);
-        } else {
-          vdw_val = sqrt(16. * lg_parameters.epsilon[j] *
-                         rec_parameters.epsilon[i]) *
-                    (square(c_6) - c_6);
-        }
 
         if (write_cache) {
           CachedData.set_elec_vdw(pos, elec_val, vdw_val);
@@ -265,6 +312,8 @@ int cal_energy_amber_screening_intrin(
   constexpr double kScreeningMinDistance = 1e-10;
   const double epsilon_in{Arguments.epsilon_in};
   const double lambda_debye{3.07 / sqrt(Arguments.salt_concentration)};
+  const bool is_charmm =
+      Arguments.force_f.find("CHARMM") != std::string::npos;
   const bool write_cache = !CachedData.elec_ener.empty();
   const bool has_cutoff = Arguments.distance_energy_cutoff > 0.;
   const bool check_self = Arguments.self_int;
@@ -327,22 +376,34 @@ int cal_energy_amber_screening_intrin(
       avx_elec_result = _mm256_mul_pd(avx_elec_result, avx_inv_d);
       avx_elec_result = _mm256_div_pd(avx_elec_result, avx_epsilon_in);
 
-      __m256d vdw_temp = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
-      vdw_temp = _mm256_mul_pd(avx_temp_epsilon_lg, vdw_temp);
-      vdw_temp = _mm256_sqrt_pd(vdw_temp);
+      __m256d sigma_self_vec{};
+      __m256d vdw_temp3{};
+      if (is_charmm) {
+        alignas(32) double sigma_lane[4]{};
+        alignas(32) double epsilon_lane[4]{};
+        charmm::pair_params_block(CachedData, rec_parameters, lg_parameters, i,
+                                  4, j, sigma_lane, epsilon_lane);
+        sigma_self_vec = _mm256_loadu_pd(sigma_lane);
+        const __m256d epsilon_vec = _mm256_loadu_pd(epsilon_lane);
+        vdw_temp3 = charmm_lj_energy_avx(sigma_self_vec, epsilon_vec, avx_safe_d);
+      } else {
+        __m256d vdw_temp = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
+        vdw_temp = _mm256_mul_pd(avx_temp_epsilon_lg, vdw_temp);
+        vdw_temp = _mm256_sqrt_pd(vdw_temp);
 
-      __m256d sigma_self_vec = _mm256_loadu_pd(&rec_parameters.sigma[i]);
-      sigma_self_vec = _mm256_add_pd(avx_temp_sigma, sigma_self_vec);
-      sigma_self_vec = _mm256_mul_pd(sigma_self_vec, avx_half);
+        sigma_self_vec = _mm256_loadu_pd(&rec_parameters.sigma[i]);
+        sigma_self_vec = _mm256_add_pd(avx_temp_sigma, sigma_self_vec);
+        sigma_self_vec = _mm256_mul_pd(sigma_self_vec, avx_half);
 
-      __m256d vdw_temp2 = _mm256_div_pd(sigma_self_vec, avx_safe_d);
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-      __m256d vdw_temp3 = vdw_temp2;
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp3);
-      vdw_temp3 = _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2),
-                                vdw_temp2);
-      vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3);
+        __m256d vdw_temp2 = _mm256_div_pd(sigma_self_vec, avx_safe_d);
+        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
+        vdw_temp3 = vdw_temp2;
+        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
+        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp3);
+        vdw_temp3 = _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2),
+                                  vdw_temp2);
+        vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3);
+      }
 
       _mm256_storeu_pd(d, avx_array_d_rec);
       _mm256_storeu_pd(sigma_self_arr, sigma_self_vec);
@@ -391,8 +452,20 @@ int cal_energy_amber_screening_intrin(
           continue;
         }
 
-        const double sigma_self =
+        double sigma_self =
             0.5 * (lg_parameters[j].get_sigma() + rec_parameters[i].get_sigma());
+        double v_val = 0.0;
+        if (is_charmm) {
+          double epsilon_ij{};
+          charmm::pair_params(CachedData, rec_parameters, lg_parameters, i, j,
+                              sigma_self, epsilon_ij);
+          v_val = charmm::lj_energy(sigma_self, epsilon_ij, d);
+        } else {
+          const double c_6{c6(sigma_self / d)};
+          v_val = sqrt(lg_parameters[j].get_epsilon() * 16. *
+                       rec_parameters[i].get_epsilon()) *
+                  (square(c_6) - c_6);
+        }
         if (check_self &&
             ((sigma_self > 0.0 && d < sigma_self) ||
              (check_interchain &&
@@ -401,14 +474,10 @@ int cal_energy_amber_screening_intrin(
           continue;
         }
 
-        const double c_6{c6(sigma_self / d)};
         double term_exp = exp(-d / lambda_debye);
         double e_val = (138.935457839 * lg_parameters[j].get_charge() *
                         rec_parameters[i].get_charge() * term_exp) /
                        (d * epsilon_in);
-        double v_val = sqrt(lg_parameters[j].get_epsilon() * 16. *
-                            rec_parameters[i].get_epsilon()) *
-                       (square(c_6) - c_6);
 
         if (write_cache) {
           CachedData.set_elec_vdw(pos, e_val, v_val);
@@ -767,9 +836,9 @@ int cal_energy_martini_intrin(const MOL &rec, const MOL &lg,
     const int lg_row_offset = lg_type >= 0 ? lg_type * martini_types : 0;
 
     for (size_t i = 0; i < size_vector_rec * 4; i += 4) {
-      const __m256d v_x = _mm256_load_pd(&rec_x[i]);
-      const __m256d v_y = _mm256_load_pd(&rec_y[i]);
-      const __m256d v_z = _mm256_load_pd(&rec_z[i]);
+      const __m256d v_x = _mm256_loadu_pd(&rec_x[i]);
+      const __m256d v_y = _mm256_loadu_pd(&rec_y[i]);
+      const __m256d v_z = _mm256_loadu_pd(&rec_z[i]);
 
       const __m256d dx = _mm256_sub_pd(v_x, v_pos_x);
       const __m256d dy = _mm256_sub_pd(v_y, v_pos_y);
@@ -821,10 +890,10 @@ int cal_energy_martini_intrin(const MOL &rec, const MOL &lg,
       }
 
       __m256d fallback_sigma =
-          _mm256_mul_pd(_mm256_add_pd(avx_lg_sigma, _mm256_load_pd(&rec_sigma[i])),
+          _mm256_mul_pd(_mm256_add_pd(avx_lg_sigma, _mm256_loadu_pd(&rec_sigma[i])),
                         avx_half);
       __m256d fallback_epsilon = _mm256_sqrt_pd(
-          _mm256_mul_pd(avx_lg_eps, _mm256_load_pd(&rec_epsilon[i])));
+          _mm256_mul_pd(avx_lg_eps, _mm256_loadu_pd(&rec_epsilon[i])));
       __m256d sigma_missing =
           _mm256_cmp_pd(sigma_vec, avx_zero, _CMP_LT_OQ);
       __m256d epsilon_missing =
@@ -835,7 +904,7 @@ int cal_energy_martini_intrin(const MOL &rec, const MOL &lg,
 
       __m256d inv_d = _mm256_div_pd(avx_one, avx_d_safe);
       __m256d avx_elec_result =
-          _mm256_mul_pd(avx_temp_charge_lg, _mm256_load_pd(&rec_charge[i]));
+          _mm256_mul_pd(avx_temp_charge_lg, _mm256_loadu_pd(&rec_charge[i]));
       __m256d rf_term = _mm256_sub_pd(
           _mm256_add_pd(inv_d, _mm256_mul_pd(avx_k_rf, r2)), avx_c_rf);
       avx_elec_result = _mm256_mul_pd(avx_elec_result, rf_term);
@@ -865,7 +934,7 @@ int cal_energy_martini_intrin(const MOL &rec, const MOL &lg,
         lane_mask_vals[k] = keep ? -1.0 : 0.0;
       }
 
-      const __m256d final_mask = _mm256_loadu_pd(lane_mask_vals);
+      const __m256d final_mask = load_lane_mask_pd(lane_mask_vals);
       avx_elec_result = _mm256_and_pd(avx_elec_result, final_mask);
       vdw_result = _mm256_and_pd(vdw_result, final_mask);
 

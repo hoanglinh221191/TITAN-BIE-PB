@@ -76,6 +76,8 @@ int groups_cal::index(arguments &Arguments) {
 
   this->groups[group_1].gen_setgroup();
   this->groups[group_2].gen_setgroup();
+  if (add_group_pathway(Arguments) != 0)
+    return 1;
 
   return 0;
 }
@@ -488,9 +490,31 @@ int groups_cal::parse_subgroups() {
 }
 
 size_t groups_cal::add_group_pathway(arguments &Arguments) {
-  if (Arguments.de.flag_pathway == true) {
-    group_pathway = Arguments.de.group_pathway;
+  if (Arguments.de.flag_pathway == false)
     return 0;
-  } else
-    return 0;
+
+  group_pathway = Arguments.de.group_pathway;
+  if (group_pathway >= groups.size()) {
+    cerr << "Pathway group " << group_pathway
+         << " is not present in the index file.\n";
+    return 1;
+  }
+
+  groups[group_pathway].gen_setgroup();
+  if (groups[group_pathway].atom_index.empty()) {
+    cerr << "Pathway group " << group_pathway << " is empty.\n";
+    return 1;
+  }
+
+  for (size_t atom_index : groups[group_pathway].atom_index) {
+    if (!groups[group_1].check_in(atom_index)) {
+      cerr << "Pathway group must be a subset of reference group g1.\n";
+      return 1;
+    }
+    if (groups[group_2].check_in(atom_index)) {
+      cerr << "Pathway group must not overlap the pulled group g2.\n";
+      return 1;
+    }
+  }
+  return 0;
 }

@@ -96,6 +96,45 @@ inline void show_progress(const std::string &module_name, size_t current,
   }
 }
 
+inline void show_progress_exact(const std::string &module_name, size_t completed,
+                                size_t total,
+                                const std::string &status_text = "",
+                                const std::string &module_text = "") {
+  if (total == 0)
+    return;
+
+  const float progress =
+      static_cast<float>(std::min(completed, total)) / static_cast<float>(total);
+  const int barWidth = 28;
+  const std::string display_name = clamp_display_text(module_name, 18);
+  const std::string display_status = clamp_display_text(status_text, 36);
+  const std::string display_modules = clamp_display_text(module_text, 42);
+
+  std::cout << "\r\033[1;36m[TITAN]\033[0m \033[1;33m" << std::setw(18)
+            << std::left << display_name << "\033[0m [";
+
+  const int pos = static_cast<int>(barWidth * progress);
+  for (int i = 0; i < barWidth; ++i) {
+    if (i < pos)
+      std::cout << "\033[1;32m=\033[0m";
+    else if (i == pos && completed < total)
+      std::cout << "\033[1;32m>\033[0m";
+    else
+      std::cout << " ";
+  }
+
+  std::cout << "] " << std::setw(3) << std::right
+            << static_cast<int>(progress * 100.0f) << "%";
+  if (!display_status.empty())
+    std::cout << " | " << display_status;
+  if (!display_modules.empty())
+    std::cout << " | Active: " << display_modules;
+  std::cout << "\033[K" << std::flush;
+
+  if (completed >= total)
+    std::cout << std::endl;
+}
+
 inline void show_continuous_progress(const std::string &module_name,
                                      size_t current_frame,
                                      const std::string &status_text = "",

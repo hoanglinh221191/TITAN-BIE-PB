@@ -9,8 +9,10 @@
 #include "c6c12.h"
 #include "index_v2.h"
 #include "info.h"
+#include <cstdint>
 #include <expected>
 #include <fstream>
+#include <istream>
 #include <map>
 #include <span>
 #include <string>
@@ -26,6 +28,7 @@ using std::vector;
 struct topo_info_temp;
 struct cache_sigma_epsilon;
 class TitanExecutor;
+class groups_cal;
 
 class Multi_MOL {
 private:
@@ -162,6 +165,15 @@ public:
 
   double next_target_time{-1e9}; // Added for -dt parsing logic
 
+  void reset_parser_state() noexcept { next_target_time = -1e9; }
+  void begin_frame(size_t frame_index, const box &box_type, double time,
+                   std::string_view force_field, size_t reserve_atoms,
+                   std::string_view frame_mol_type = {});
+  void reserve_atoms(size_t frame_index, size_t atom_count);
+  void append_xyz(size_t frame_index, double x, double y, double z);
+  void append_topology_if_frame0(const mol_info &info_in);
+  void discard_pending_frame(size_t frame_index);
+
   int take_coordinate(std::string_view input_name, std::string_view _force_f,
                       arguments &Arguments, const amino_acid &amine,
                       ::info &output_info, int flag_raw, size_t max_frames = 0);
@@ -249,5 +261,50 @@ public:
   int gen_pop(MOL &mol_seed, de_arg &DE_arguments, const vector<mol_info> &info,
               string_view mol_type, vector<force> &tran_data);
 };
+
+enum class PdbRouteTarget : std::uint8_t { None = 0, Pro = 1, Lig = 2, Wat = 3 };
+
+struct PdbRouteEntry {
+  PdbRouteTarget target{PdbRouteTarget::None};
+  size_t output_index{0};
+};
+
+struct PdbRoutePlan {
+  std::vector<PdbRouteEntry> atom_routes;
+  size_t split_begin_mol_2{0};
+  size_t pro_atom_count{0};
+  size_t lig_atom_count{0};
+  size_t wat_atom_count{0};
+
+  [[nodiscard]] bool uses_explicit_routes() const noexcept {
+    return !atom_routes.empty();
+  }
+
+  [[nodiscard]] PdbRouteEntry route_for(size_t source_atom_1based) const noexcept {
+    if (uses_explicit_routes()) {
+      if (source_atom_1based < atom_routes.size())
+        return atom_routes[source_atom_1based];
+      return {};
+    }
+
+    if (split_begin_mol_2 == 0)
+      return {};
+
+    if (source_atom_1based < split_begin_mol_2)
+      return {PdbRouteTarget::Pro, source_atom_1based - 1};
+    return {PdbRouteTarget::Lig, source_atom_1based - split_begin_mol_2};
+  }
+};
+
+std::expected<PdbRoutePlan, std::string>
+build_pdb_route_plan(groups_cal &groups, const arguments &Arguments);
+
+std::expected<size_t, std::string>
+read_routed_pdb_chunk(std::istream &input_pdb, std::string_view input_name,
+                      size_t chunk_size, std::string_view force_f,
+                      arguments &Arguments, ::info &output_info,
+                      Multi_MOL &pro_out, Multi_MOL &lig_out,
+                      Multi_MOL &water_out, const PdbRoutePlan &route_plan,
+                      double &next_target_time_state, bool capture_topology);
 
 #endif // MULTI_MOL_H

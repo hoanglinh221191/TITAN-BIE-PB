@@ -85,6 +85,18 @@ inline void pair_params(const cache_sigma_epsilon &cache,
                       lg_parameters[lg_pos].get_epsilon());
 }
 
+inline void pair_params_block(const cache_sigma_epsilon &cache,
+                              const Multi_MOL_parameters &rec_parameters,
+                              const Multi_MOL_parameters &lg_parameters,
+                              size_t rec_pos_begin, size_t lane_count,
+                              size_t lg_pos, double *sigma,
+                              double *epsilon) {
+  for (size_t lane = 0; lane < lane_count; ++lane) {
+    pair_params(cache, rec_parameters, lg_parameters, rec_pos_begin + lane,
+                lg_pos, sigma[lane], epsilon[lane]);
+  }
+}
+
 inline double lj_energy(double sigma, double epsilon, double distance_nm) {
   if (distance_nm <= 0.0 || sigma <= 0.0 || epsilon == 0.0)
     return 0.0;
