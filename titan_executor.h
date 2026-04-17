@@ -7,7 +7,7 @@
 #include <functional>
 #include <mutex>
 #include <stdexcept>
-#include <thread>
+#include "titan_thread_compat.h"
 #include <vector>
 
 class TitanExecutor {
@@ -31,7 +31,7 @@ public:
 private:
   enum class BatchMode : unsigned char { None, ParallelFor, ParallelDo };
 
-  void worker_loop(std::stop_token stop_token, std::size_t worker_id);
+  void worker_loop(titan::stop_token stop_token, std::size_t worker_id);
   void shutdown();
 
   std::size_t compute_parallel_for_workers(std::size_t total_items,
@@ -40,7 +40,7 @@ private:
   std::size_t compute_parallel_do_workers(std::size_t requested_workers) const;
 
   std::size_t capacity_{1};
-  std::vector<std::jthread> workers_;
+  std::vector<titan::jthread> workers_;
 
   mutable std::mutex mutex_;
   std::condition_variable batch_cv_;

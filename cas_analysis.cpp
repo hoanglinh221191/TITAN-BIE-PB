@@ -1,5 +1,6 @@
 #include "cas_analysis.h"
 #include "gbsa_intrin.h"
+#include "titan_thread_compat.h"
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
@@ -174,11 +175,13 @@ void CASAnalyzer::process_frame(Multi_MOL &pro_in, Multi_MOL &lig,
       result.res_name = cas_data[result.res_id].res_name;
     }
 
-    std::vector<std::jthread> workers;
+    std::vector<titan::jthread> workers;
     workers.reserve(n_workers);
 
     for (size_t worker_idx = 0; worker_idx < n_workers; ++worker_idx) {
-      auto [shard_begin, shard_end] = get_shard(worker_idx);
+      const auto shard = get_shard(worker_idx);
+      const size_t shard_begin = shard.first;
+      const size_t shard_end = shard.second;
       if (shard_begin >= shard_end) {
         continue;
       }

@@ -45,6 +45,8 @@ public:
   string get_pca_fel_filename() const { return "pca_fel.csv"; }
   string get_pca_fes_2d_filename() const { return "pca_fes_2d.dat"; }
   string get_tica_fes_2d_filename() const { return "tica_fes_2d.dat"; }
+  string get_mbar_tica_fes_2d_filename() const { return "mbar_tica_fes_2d.dat"; }
+  string get_mbar_pca_fes_2d_filename() const { return "mbar_pca_fes_2d.dat"; }
   string get_pca_zts_path_filename() const { return "pca_zts_path.csv"; }
   string get_tica_zts_path_filename() const { return "tica_zts_path.csv"; }
   string get_fes_2d_filename() const { return get_pca_fes_2d_filename(); }
@@ -53,6 +55,12 @@ public:
   }
   string get_tica_cluster_representatives_filename() const {
     return "tica_cluster_representatives.dat";
+  }
+  string get_mbar_tica_cluster_representatives_filename() const {
+    return "mbar_tica_cluster_representatives.csv";
+  }
+  string get_mbar_pca_cluster_representatives_filename() const {
+    return "mbar_pca_cluster_representatives.csv";
   }
 
   void setPdbName(const arguments &Arguments) {
@@ -187,6 +195,54 @@ public:
              ".dat";
     return "rmsf.dat";
   }
+  string get_rg2_filename(const arguments &Arguments,
+                          const std::vector<string> &input_line,
+                          int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "rg2.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "rg2_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "rg2.dat";
+  }
+  string get_rg2_summary_filename(const arguments &Arguments,
+                                  const std::vector<string> &input_line,
+                                  int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "rg2_summary.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "rg2_summary_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "rg2_summary.dat";
+  }
+  string get_rg2_hist_filename(const arguments &Arguments,
+                               const std::vector<string> &input_line,
+                               int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "rg2_hist.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "rg2_hist_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "rg2_hist.dat";
+  }
+  string get_rg2_all_filename() const { return "rg2_all.dat"; }
+  string get_rg2_summary_all_filename() const { return "rg2_summary_all.dat"; }
+  string get_rg2_hist_all_filename() const { return "rg2_hist_all.dat"; }
   string get_lj_timeseries_filename(const arguments &Arguments,
                                     const std::vector<string> &input_line,
                                     int input_name) const {
@@ -358,11 +414,60 @@ public:
   string get_llps_dbscan_timeseries_filename() const { return "llps_dbscan_timeseries.csv"; }
   // IFP output file
   string get_ifp_filename() const { return "ifp_occupancy.csv"; }
+  string get_ifp_rna_annotations_filename() const {
+    return "ifp_rna_annotations.csv";
+  }
+  string get_nucleic_acid_interactions_filename() const {
+    return "nucleic_acid_interactions.csv";
+  }
+  string get_awh_rc_summary_filename() const {
+    return "awh_rc_bin_summary.dat";
+  }
+  string get_awh_ifp_by_bin_filename() const {
+    return "awh_ifp_by_bin.csv";
+  }
+  string get_awh_ifp_heatmap_filename() const {
+    return "awh_ifp_heatmap.dat";
+  }
+  string get_awh_bin_structural_summary_filename() const {
+    return "awh_bin_structural_summary.dat";
+  }
+  string get_awh_bin_top_contacts_filename() const {
+    return "awh_bin_top_contacts.csv";
+  }
+  string get_awh_walker_stability_by_bin_filename() const {
+    return "awh_walker_stability_by_bin.dat";
+  }
+  string get_awh_walker_pair_overlap_filename() const {
+    return "awh_walker_pair_overlap.dat";
+  }
+  string get_awh_rc_frame_map_filename() const {
+    return "awh_rc_frame_map.dat";
+  }
+  string get_awh_frame_assignments_filename() const {
+    return "awh_frame_assignments.dat";
+  }
+  string get_awh_walker_diagnostics_filename() const {
+    return "awh_walker_diagnostics.dat";
+  }
+  string get_awh_rc_overlap_filename() const {
+    return "awh_rc_overlap_diagnostics.dat";
+  }
+  string get_awh_exploratory_context_filename() const {
+    return "awh_exploratory_context.dat";
+  }
+  string get_awh_rep_pdb_prefix() const {
+    return "awh_rep_bin";
+  }
   // DHAM output files
   string get_dham_pi_filename() const { return "dham_stationary_distribution.dat"; }
   string get_dham_fes_filename() const { return "dham_free_energy_profile.dat"; }
   string get_dham_tpm_filename() const { return "dham_unbiased_tpm.dat"; }
   string get_dham_window_audit_filename() const { return "dham_window_audit.dat"; }
+  string get_mbar_frame_weights_filename() const { return "mbar_frame_weights.dat"; }
+  string get_mbar_summary_filename() const { return "mbar_summary.dat"; }
+  string get_mbar_window_audit_filename() const { return "mbar_window_audit.dat"; }
+  string get_mbar_cv_filename() const { return "mbar_cv.dat"; }
   // TPT output files
   string get_tpt_summary_filename() const { return "tpt_summary.dat"; }
   string get_tpt_committor_filename() const { return "tpt_committor.dat"; }

@@ -4,6 +4,7 @@
 #include "titan_ui.h"
 #include "titan_zts.h"
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <iomanip>
@@ -15,6 +16,7 @@
 #include <set>
 #include <sstream>
 #include <thread>
+#include <Eigen/Eigenvalues>
 
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -176,6 +178,439 @@ double resolve_target_temperature(const arguments &args, bool use_weights) {
   if (use_weights && args.dham.flag_dham && args.dham.target_temp > 0.0)
     return args.dham.target_temp;
   return 300.0;
+}
+
+struct PcaSymmetryBlock {
+  size_t begin{0};
+  size_t end{0};
+  int is_lig{0};
+  std::string chain{};
+  std::string label{};
+  std::string signature{};
+  Eigen::MatrixXd ref_centered{};
+};
+
+struct PcaSymmetryClass {
+  std::vector<size_t> block_indices{};
+  std::string signature{};
+};
+
+struct PcaSymmetrySetup {
+  bool active{false};
+  std::vector<PcaSymmetryBlock> blocks{};
+  std::vector<PcaSymmetryClass> classes{};
+  size_t permutation_cap_exceeded{0};
+};
+
+struct PcaAssignmentResult {
+  bool valid{false};
+  double cost{std::numeric_limits<double>::infinity()};
+  std::vector<size_t> assigned_current{};
+};
+
+std::string trim_copy(const std::string &value) {
+  const auto first =
+      std::find_if_not(value.begin(), value.end(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+      });
+  if (first == value.end())
+    return {};
+  const auto last =
+      std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+      }).base();
+  return std::string(first, last);
+}
+
+std::string canonical_chain_label(const std::string &chain) {
+  const std::string trimmed = trim_copy(chain);
+  return trimmed.empty() ? "_" : trimmed;
+}
+
+std::string build_pca_block_signature(const std::vector<std::string> &ca_resname,
+                                      const std::vector<int> &ca_resnrs,
+                                      size_t begin, size_t end) {
+  std::ostringstream sig;
+  sig << (end - begin) << "|";
+  for (size_t idx = begin; idx < end; ++idx) {
+    sig << trim_copy(ca_resname[idx]);
+    if (idx > begin)
+      sig << ":" << (ca_resnrs[idx] - ca_resnrs[idx - 1]);
+    sig << ";";
+  }
+  return sig.str();
+}
+
+double compute_alignment_rmsd(const Eigen::MatrixXd &ref_centered,
+                              const Eigen::MatrixXd &mobile_aligned) {
+  if (ref_centered.rows() == 0 || ref_centered.rows() != mobile_aligned.rows())
+    return std::numeric_limits<double>::infinity();
+  const double squared_error =
+      (ref_centered - mobile_aligned).rowwise().squaredNorm().sum();
+  const double mean_squared_error =
+      squared_error / static_cast<double>(ref_centered.rows());
+  return std::sqrt(std::max(0.0, mean_squared_error));
+}
+
+PcaAssignmentResult solve_min_cost_assignment(
+    const std::vector<std::vector<double>> &cost_matrix) {
+  PcaAssignmentResult result;
+  const size_t n = cost_matrix.size();
+  if (n == 0) {
+    result.valid = true;
+    return result;
+  }
+  for (const auto &row : cost_matrix) {
+    if (row.size() != n)
+      return result;
+  }
+  if (n >= static_cast<size_t>(sizeof(size_t) * 8))
+    return result;
+
+  const size_t state_count = static_cast<size_t>(1) << n;
+  std::vector<double> dp(state_count, std::numeric_limits<double>::infinity());
+  std::vector<size_t> parent_mask(state_count, state_count);
+  std::vector<size_t> parent_choice(state_count, n);
+  dp[0] = 0.0;
+
+  for (size_t mask = 0; mask < state_count; ++mask) {
+    if (!std::isfinite(dp[mask]))
+      continue;
+    const size_t ref_idx = static_cast<size_t>(std::popcount(mask));
+    if (ref_idx >= n)
+      continue;
+    for (size_t current_idx = 0; current_idx < n; ++current_idx) {
+      if ((mask & (static_cast<size_t>(1) << current_idx)) != 0)
+        continue;
+      const size_t next_mask = mask | (static_cast<size_t>(1) << current_idx);
+      const double new_cost = dp[mask] + cost_matrix[ref_idx][current_idx];
+      if (new_cost + 1.0e-12 < dp[next_mask]) {
+        dp[next_mask] = new_cost;
+        parent_mask[next_mask] = mask;
+        parent_choice[next_mask] = current_idx;
+      }
+    }
+  }
+
+  const size_t final_mask = state_count - 1;
+  if (!std::isfinite(dp[final_mask]))
+    return result;
+
+  result.valid = true;
+  result.cost = dp[final_mask];
+  result.assigned_current.assign(n, 0);
+  size_t mask = final_mask;
+  for (size_t ref_idx = n; ref_idx-- > 0;) {
+    const size_t choice = parent_choice[mask];
+    if (choice >= n)
+      return PcaAssignmentResult{};
+    result.assigned_current[ref_idx] = choice;
+    mask = parent_mask[mask];
+    if (mask >= state_count && ref_idx > 0)
+      return PcaAssignmentResult{};
+  }
+  return result;
+}
+
+PcaSymmetrySetup build_pca_symmetry_setup(
+    const arguments &args, const std::vector<std::string> &ca_resname,
+    const std::vector<int> &ca_resnrs, const std::vector<std::string> &ca_chain,
+    const std::vector<int> &ca_is_lig, const TitanPCA::CoordinateRows &traj_x,
+    const TitanPCA::CoordinateRows &traj_y, const TitanPCA::CoordinateRows &traj_z,
+    std::fstream &log) {
+  PcaSymmetrySetup setup;
+  if (!args.msm.pca_symmetry_aware)
+    return setup;
+  if (traj_x.empty() || traj_y.empty() || traj_z.empty() || ca_resname.empty())
+    return setup;
+
+  constexpr size_t kMaxPermutationClassSize = 12;
+  const size_t num_ca = ca_resname.size();
+  if (ca_resnrs.size() != num_ca || ca_chain.size() != num_ca ||
+      ca_is_lig.size() != num_ca || traj_x.front().size() != num_ca ||
+      traj_y.front().size() != num_ca || traj_z.front().size() != num_ca) {
+    TitanUI::print_warning(
+        "PCA symmetry-aware canonicalization disabled: inconsistent trace "
+        "metadata sizes.");
+    return setup;
+  }
+
+  size_t begin = 0;
+  auto is_block_boundary = [&](size_t idx) {
+    if (idx == 0 || idx >= num_ca)
+      return false;
+    if (ca_is_lig[idx] != ca_is_lig[idx - 1])
+      return true;
+    if (canonical_chain_label(ca_chain[idx]) !=
+        canonical_chain_label(ca_chain[idx - 1])) {
+      return true;
+    }
+    return ca_resnrs[idx] <= ca_resnrs[idx - 1];
+  };
+
+  for (size_t idx = 1; idx <= num_ca; ++idx) {
+    if (idx != num_ca && !is_block_boundary(idx))
+      continue;
+    if (begin >= idx) {
+      begin = idx;
+      continue;
+    }
+    PcaSymmetryBlock block;
+    block.begin = begin;
+    block.end = idx;
+    block.is_lig = ca_is_lig[begin];
+    block.chain = canonical_chain_label(ca_chain[begin]);
+    block.label = (block.is_lig != 0 ? "L:" : "R:") + block.chain + "#" +
+                  std::to_string(setup.blocks.size() + 1);
+    block.signature = build_pca_block_signature(ca_resname, ca_resnrs, begin, idx);
+    const size_t block_size = idx - begin;
+    block.ref_centered.resize(static_cast<Eigen::Index>(block_size), 3);
+    Eigen::RowVector3d centroid(0.0, 0.0, 0.0);
+    for (size_t offset = 0; offset < block_size; ++offset) {
+      const size_t atom_idx = begin + offset;
+      centroid += Eigen::RowVector3d(traj_x[0][atom_idx], traj_y[0][atom_idx],
+                                     traj_z[0][atom_idx]);
+    }
+    centroid /= static_cast<double>(block_size);
+    for (size_t offset = 0; offset < block_size; ++offset) {
+      const size_t atom_idx = begin + offset;
+      block.ref_centered(static_cast<Eigen::Index>(offset), 0) =
+          traj_x[0][atom_idx] - centroid(0);
+      block.ref_centered(static_cast<Eigen::Index>(offset), 1) =
+          traj_y[0][atom_idx] - centroid(1);
+      block.ref_centered(static_cast<Eigen::Index>(offset), 2) =
+          traj_z[0][atom_idx] - centroid(2);
+    }
+    setup.blocks.push_back(std::move(block));
+    begin = idx;
+  }
+
+  if (setup.blocks.size() < 2) {
+    TitanUI::print_warning(
+        "PCA symmetry-aware canonicalization requested, but fewer than 2 "
+        "trace-chain blocks were detected.");
+    setup.blocks.clear();
+    return setup;
+  }
+
+  std::map<std::string, std::vector<size_t>> classes_by_signature;
+  for (size_t block_idx = 0; block_idx < setup.blocks.size(); ++block_idx)
+    classes_by_signature[setup.blocks[block_idx].signature].push_back(block_idx);
+
+  size_t active_classes = 0;
+  for (const auto &[signature, block_indices] : classes_by_signature) {
+    if (block_indices.size() <= 1)
+      continue;
+    if (block_indices.size() > kMaxPermutationClassSize) {
+      ++setup.permutation_cap_exceeded;
+      continue;
+    }
+    setup.classes.push_back({block_indices, signature});
+    ++active_classes;
+  }
+
+  if (active_classes == 0) {
+    TitanUI::print_warning(
+        "PCA symmetry-aware canonicalization requested, but no equivalent "
+        "multimer block class was eligible for permutation.");
+    setup.blocks.clear();
+    return setup;
+  }
+
+  setup.active = true;
+  TitanUI::log_kv(log, "PCA Symmetry Canonicalization", "enabled");
+  TitanUI::log_kv(log, "PCA Symmetry Blocks",
+                  std::to_string(setup.blocks.size()));
+  TitanUI::log_kv(log, "PCA Symmetry Classes",
+                  std::to_string(setup.classes.size()));
+  if (setup.permutation_cap_exceeded > 0) {
+    TitanUI::print_warning(
+        "PCA symmetry-aware canonicalization skipped " +
+        std::to_string(setup.permutation_cap_exceeded) +
+        " multimer equivalence class(es) because they exceed the permutation "
+        "solver cap.");
+  }
+  return setup;
+}
+
+bool canonicalize_multimer_frame_to_reference(
+    const PcaSymmetrySetup &setup, const Eigen::MatrixXd &raw_frame,
+    Eigen::MatrixXd &canonical_frame, bool &frame_permuted) {
+  frame_permuted = false;
+  if (!setup.active || setup.blocks.empty())
+    return false;
+
+  std::vector<Eigen::MatrixXd> current_blocks;
+  current_blocks.reserve(setup.blocks.size());
+  for (const auto &block : setup.blocks) {
+    current_blocks.emplace_back(
+        raw_frame.middleRows(static_cast<Eigen::Index>(block.begin),
+                             static_cast<Eigen::Index>(block.end - block.begin)));
+  }
+
+  canonical_frame = raw_frame;
+  for (const auto &symmetry_class : setup.classes) {
+    const size_t class_size = symmetry_class.block_indices.size();
+    if (class_size <= 1)
+      continue;
+
+    std::vector<std::vector<double>> cost_matrix(
+        class_size, std::vector<double>(class_size, 0.0));
+    for (size_t ref_slot = 0; ref_slot < class_size; ++ref_slot) {
+      const size_t ref_block_idx = symmetry_class.block_indices[ref_slot];
+      const auto &ref_block = setup.blocks[ref_block_idx];
+      for (size_t current_slot = 0; current_slot < class_size; ++current_slot) {
+        const size_t current_block_idx = symmetry_class.block_indices[current_slot];
+        Eigen::MatrixXd mobile = current_blocks[current_block_idx];
+        TitanAlignment::align_frame(ref_block.ref_centered, mobile);
+        cost_matrix[ref_slot][current_slot] =
+            compute_alignment_rmsd(ref_block.ref_centered, mobile);
+      }
+    }
+
+    const auto assignment = solve_min_cost_assignment(cost_matrix);
+    if (!assignment.valid || assignment.assigned_current.size() != class_size)
+      continue;
+
+    for (size_t ref_slot = 0; ref_slot < class_size; ++ref_slot) {
+      const size_t ref_block_idx = symmetry_class.block_indices[ref_slot];
+      const size_t current_slot = assignment.assigned_current[ref_slot];
+      const size_t current_block_idx = symmetry_class.block_indices[current_slot];
+      const auto &ref_block = setup.blocks[ref_block_idx];
+      canonical_frame.middleRows(static_cast<Eigen::Index>(ref_block.begin),
+                                 static_cast<Eigen::Index>(ref_block.end -
+                                                           ref_block.begin)) =
+          current_blocks[current_block_idx];
+      if (ref_block_idx != current_block_idx)
+        frame_permuted = true;
+    }
+  }
+
+  return true;
+}
+
+
+bool solve_pca_eigenvalues(const Eigen::MatrixXd &cov_matrix,
+                           MsmArgs::PcaSolverMode mode, int pca_topk,
+                           int pca_max_k_full,
+                           Eigen::VectorXd &out_eigenvalues_desc,
+                           Eigen::MatrixXd &out_eigenvectors_desc,
+                           std::string &effective_solver_mode) {
+  const int n_dim = static_cast<int>(cov_matrix.rows());
+  if (n_dim <= 0)
+    return false;
+
+  MsmArgs::PcaSolverMode chosen_mode = mode;
+  if (chosen_mode == MsmArgs::PcaSolverMode::Full && n_dim > pca_max_k_full) {
+    chosen_mode = MsmArgs::PcaSolverMode::Partial;
+  }
+
+  auto fill_desc_sorted = [&](const Eigen::VectorXd &evals_asc,
+                              const Eigen::MatrixXd &evecs_asc) {
+    out_eigenvalues_desc.resize(n_dim);
+    out_eigenvectors_desc.resize(n_dim, n_dim);
+    for (int src = 0; src < n_dim; ++src) {
+      const int dst = n_dim - 1 - src;
+      out_eigenvalues_desc[dst] = evals_asc[src];
+      out_eigenvectors_desc.col(dst) = evecs_asc.col(src);
+    }
+  };
+
+  auto try_full = [&]() -> bool {
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(cov_matrix);
+    if (es.info() != Eigen::Success)
+      return false;
+    fill_desc_sorted(es.eigenvalues(), es.eigenvectors());
+    effective_solver_mode = "full";
+    return true;
+  };
+
+  auto try_partial = [&]() -> bool {
+    int topk = pca_topk;
+    if (topk <= 0)
+      topk = std::max(8, std::min(n_dim, 64));
+    topk = std::min(topk, n_dim);
+    if (topk < 2) {
+      return try_full();
+    }
+
+    constexpr int max_subspace_iter = 96;
+    constexpr double subspace_tol = 1e-8;
+
+    Eigen::MatrixXd Q = Eigen::MatrixXd::Random(n_dim, topk);
+
+    auto orthonormalize = [&](Eigen::MatrixXd &M) {
+      Eigen::HouseholderQR<Eigen::MatrixXd> qr(M);
+      M = qr.householderQ() * Eigen::MatrixXd::Identity(M.rows(), M.cols());
+    };
+
+    orthonormalize(Q);
+
+    Eigen::MatrixXd Z(n_dim, topk);
+    Eigen::MatrixXd B(topk, topk);
+    Eigen::MatrixXd B_prev = Eigen::MatrixXd::Zero(topk, topk);
+
+    for (int it = 0; it < max_subspace_iter; ++it) {
+      Z.noalias() = cov_matrix * Q;
+      orthonormalize(Z);
+      Q.swap(Z);
+      B.noalias() = Q.transpose() * cov_matrix * Q;
+
+      if (it > 0) {
+        const double diff = (B - B_prev).norm();
+        const double scale = std::max(1.0, B.norm());
+        if (diff <= subspace_tol * scale)
+          break;
+      }
+      B_prev = B;
+    }
+
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_small(B);
+    if (es_small.info() != Eigen::Success)
+      return false;
+
+    const Eigen::VectorXd evals_small = es_small.eigenvalues();
+    const Eigen::MatrixXd evecs_small = es_small.eigenvectors();
+    Eigen::MatrixXd ritz_vecs = Q * evecs_small;
+
+    std::vector<int> idx_desc(static_cast<size_t>(topk));
+    std::iota(idx_desc.begin(), idx_desc.end(), 0);
+    std::sort(idx_desc.begin(), idx_desc.end(),
+              [&](int lhs, int rhs) {
+                return evals_small[lhs] > evals_small[rhs];
+              });
+
+    out_eigenvalues_desc = Eigen::VectorXd::Zero(n_dim);
+    out_eigenvectors_desc = Eigen::MatrixXd::Zero(n_dim, n_dim);
+
+    for (int rank = 0; rank < topk; ++rank) {
+      const int src = idx_desc[static_cast<size_t>(rank)];
+      out_eigenvalues_desc[rank] = evals_small[src];
+      out_eigenvectors_desc.col(rank) = ritz_vecs.col(src);
+    }
+
+    for (int col = topk; col < n_dim; ++col) {
+      out_eigenvectors_desc(col, col) = 1.0;
+    }
+
+    effective_solver_mode = "partial(subspace)";
+    return true;
+  };
+
+  bool ok = false;
+  if (chosen_mode == MsmArgs::PcaSolverMode::Partial) {
+    ok = try_partial();
+  } else {
+    ok = try_full();
+  }
+
+  if (!ok && chosen_mode != MsmArgs::PcaSolverMode::Full) {
+    ok = try_full();
+    if (ok) {
+      effective_solver_mode = "full(fallback)";
+    }
+  }
+  return ok;
 }
 
 FES2DResult compute_2d_fes_grid(
@@ -598,6 +1033,53 @@ void write_pca_extraction_script(const arguments &args,
 
 namespace TitanPCA {
 
+bool export_projection_fes_analysis(
+    const std::string &label, const std::string &space_name,
+    const arguments &args,
+    const std::vector<std::pair<double, double>> &projections,
+    const AlignedDoubleVector &analysis_weights, bool use_weights,
+    double target_temp, const std::string &weighted_mode_label,
+    TitanExecutor &executor, std::fstream &log, const std::string &fes_filename,
+    const std::string &cluster_filename,
+    const std::vector<double> &traj_times,
+    const std::vector<int> &traj_replicas, FES2DResult *out_fes,
+    std::vector<ClusterNode> *out_clusters) {
+  if (projections.empty()) {
+    TitanUI::print_warning(label + ": no projected frames available for 2D FES.");
+    return false;
+  }
+  if (analysis_weights.size() != projections.size()) {
+    TitanUI::print_warning(label + ": projection/weight size mismatch. Skipping "
+                                   "2D FES export.");
+    return false;
+  }
+
+  TitanUI::log_kv(log, label + " FES Frames", std::to_string(projections.size()));
+  TitanUI::log_kv(log, label + " Weight Mode",
+                  use_weights ? weighted_mode_label : "uniform");
+
+  auto fes_result = compute_2d_fes_grid(projections, analysis_weights,
+                                        args.fes_grid, target_temp,
+                                        1.0 / args.eu_par, executor);
+  if (!write_2d_fes_grid(label, fes_filename, fes_result, log))
+    return false;
+
+  const auto valid_clusters =
+      detect_fes_clusters(fes_result, projections, analysis_weights, use_weights,
+                          executor);
+  write_cluster_representatives_file(
+      label, space_name, cluster_filename, valid_clusters, use_weights,
+      traj_times, traj_replicas, log);
+  TitanUI::log_kv(log, label + " Macrostate Clusters",
+                  std::to_string(valid_clusters.size()));
+
+  if (out_fes)
+    *out_fes = fes_result;
+  if (out_clusters)
+    *out_clusters = valid_clusters;
+  return true;
+}
+
 void execute_pca_fes_analysis(
     const arguments &args, const CoordinateRows &traj_x,
     const CoordinateRows &traj_y, const CoordinateRows &traj_z,
@@ -611,10 +1093,6 @@ void execute_pca_fes_analysis(
     const std::vector<std::string> &replica_traj_files,
     FesPostprocMetrics *metrics) {
 
-  (void)ca_resname;
-  (void)ca_resnrs;
-  (void)ca_chain;
-  (void)ca_is_lig;
   if (metrics)
     *metrics = {};
 
@@ -674,6 +1152,11 @@ void execute_pca_fes_analysis(
     }
   }
 
+  const auto symmetry_setup =
+      build_pca_symmetry_setup(args, ca_resname, ca_resnrs, ca_chain, ca_is_lig,
+                               traj_x, traj_y, traj_z, log);
+  size_t symmetry_permuted_frames = 0;
+
   // 1. Setup Reference Frame (Frame 0)
   Eigen::MatrixXd ref_mat(num_ca, 3);
   Eigen::RowVector3d ref_centroid(0, 0, 0);
@@ -699,6 +1182,7 @@ void execute_pca_fes_analysis(
   //    align_frame() centers mobile and rotates in-place; ref_mat stays
   //    unchanged.
   Eigen::MatrixXd frame_mat(num_ca, 3);
+  Eigen::MatrixXd canonical_frame_mat(num_ca, 3);
   for (size_t f = 1; f < num_frames; ++f) {
     const double *frame_row = aligned_traj.row_data(f);
     for (size_t i = 0; i < num_ca; ++i) {
@@ -707,14 +1191,28 @@ void execute_pca_fes_analysis(
       frame_mat(i, 1) = frame_row[base + 1];
       frame_mat(i, 2) = frame_row[base + 2];
     }
-    TitanAlignment::align_frame(ref_mat,
-                                frame_mat); // centers + rotates in-place
+    bool frame_permuted = false;
+    if (symmetry_setup.active &&
+        canonicalize_multimer_frame_to_reference(symmetry_setup, frame_mat,
+                                                 canonical_frame_mat,
+                                                 frame_permuted)) {
+      if (frame_permuted)
+        ++symmetry_permuted_frames;
+      TitanAlignment::align_frame(ref_mat, canonical_frame_mat);
+    } else {
+      canonical_frame_mat = frame_mat;
+      TitanAlignment::align_frame(ref_mat, canonical_frame_mat);
+    }
     for (size_t i = 0; i < num_ca; ++i) {
       const size_t base = i * 3;
-      aligned_traj(f, base + 0) = frame_mat(i, 0);
-      aligned_traj(f, base + 1) = frame_mat(i, 1);
-      aligned_traj(f, base + 2) = frame_mat(i, 2);
+      aligned_traj(f, base + 0) = canonical_frame_mat(i, 0);
+      aligned_traj(f, base + 1) = canonical_frame_mat(i, 1);
+      aligned_traj(f, base + 2) = canonical_frame_mat(i, 2);
     }
+  }
+  if (symmetry_setup.active) {
+    TitanUI::log_kv(log, "PCA Symmetry Permuted Frames",
+                    std::to_string(symmetry_permuted_frames));
   }
 
   auto t_rmsd = std::chrono::steady_clock::now();
@@ -771,25 +1269,16 @@ void execute_pca_fes_analysis(
           1000.0);
 
   // 5. Diagonalization natively executing
-  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(cov_matrix);
-  if (es.info() != Eigen::Success) {
+  Eigen::VectorXd eigenvalues_desc;
+  Eigen::MatrixXd eigenvectors_desc;
+  std::string pca_solver_mode;
+  if (!solve_pca_eigenvalues(cov_matrix, args.msm.pca_solver, args.msm.pca_topk,
+                             args.msm.pca_max_k_full, eigenvalues_desc,
+                             eigenvectors_desc, pca_solver_mode)) {
     TitanUI::print_error("PCA ERROR: Eigenvalue Decomposition failed!");
     return;
   }
-
-  Eigen::VectorXd eigenvalues = es.eigenvalues();
-  Eigen::MatrixXd eigenvectors = es.eigenvectors();
-
-  // Eigen solver returns them in ascending order, we need descending (largest
-  // variance first)
-  std::vector<double> ev_sorted;
-  std::vector<Eigen::VectorXd> evec_sorted;
-
-  for (int i = dimensions - 1; i >= 0; --i) {
-    ev_sorted.emplace_back(eigenvalues(i));
-    evec_sorted.emplace_back(eigenvectors.col(i));
-  }
-
+  TitanUI::log_kv(log, "PCA Solver", pca_solver_mode);
   auto t_eigen = std::chrono::steady_clock::now();
   TitanUI::log_time(
       log, "Eigendecomposition",
@@ -799,8 +1288,10 @@ void execute_pca_fes_analysis(
 
   // 6. Project Trajectory onto PC1 and PC2
   std::vector<std::pair<double, double>> projections(num_frames);
-  const Eigen::VectorXd &pc1_vec = evec_sorted[0];
-  const Eigen::VectorXd &pc2_vec = evec_sorted[1];
+  const Eigen::VectorXd pc1_vec =
+      eigenvectors_desc.col(0).head(static_cast<Eigen::Index>(dimensions));
+  const Eigen::VectorXd pc2_vec =
+      eigenvectors_desc.col(1).head(static_cast<Eigen::Index>(dimensions));
 
   for (size_t f = 0; f < num_frames; ++f) {
     double p1 = 0.0, p2 = 0.0;
@@ -824,23 +1315,18 @@ void execute_pca_fes_analysis(
   pca_out.close();
 
   const double target_temp = resolve_target_temperature(args, use_weights);
-  auto fes_result = compute_2d_fes_grid(
-      projections, analysis_weights, args.fes_grid, target_temp,
-      1.0 / args.eu_par, executor);
-  if (!write_2d_fes_grid("PCA", info_out.get_pca_fes_2d_filename(), fes_result,
-                         log)) {
+  FES2DResult fes_result;
+  std::vector<ClusterNode> valid_clusters;
+  if (!export_projection_fes_analysis(
+          "PCA", "PCA", args, projections, analysis_weights, use_weights,
+          target_temp, "DHAM-weighted", executor, log,
+          info_out.get_pca_fes_2d_filename(),
+          info_out.get_cluster_representatives_filename(),
+          have_frame_metadata ? traj_times : std::vector<double>{},
+          have_frame_metadata ? traj_replicas : std::vector<int>{}, &fes_result,
+          &valid_clusters)) {
     return;
   }
-
-  const auto valid_clusters =
-      detect_fes_clusters(fes_result, projections, analysis_weights, use_weights,
-                          executor);
-  const std::vector<double> empty_times;
-  const std::vector<int> empty_replicas;
-  write_cluster_representatives_file(
-      "PCA", "PCA", info_out.get_cluster_representatives_filename(),
-      valid_clusters, use_weights, have_frame_metadata ? traj_times : empty_times,
-      have_frame_metadata ? traj_replicas : empty_replicas, log);
   write_pca_extraction_script(args, valid_clusters, traj_times, traj_replicas,
                               replica_traj_files);
   TitanUI::log_kv(log, "Macrostate Clusters Extracted",
@@ -922,24 +1408,16 @@ void execute_tica_fes_analysis(
                   use_weights ? "DHAM-weighted" : "uniform");
 
   const double target_temp = resolve_target_temperature(args, use_weights);
-  auto fes_result = compute_2d_fes_grid(
-      projections, weight_state.analysis_weights, args.fes_grid, target_temp,
-      1.0 / args.eu_par, executor);
-  if (!write_2d_fes_grid("TICA", info_out.get_tica_fes_2d_filename(), fes_result,
-                         log)) {
+  FES2DResult fes_result;
+  std::vector<ClusterNode> valid_clusters;
+  if (!export_projection_fes_analysis(
+          "TICA", "TICA", args, projections, weight_state.analysis_weights,
+          use_weights, target_temp, "DHAM-weighted", executor, log,
+          info_out.get_tica_fes_2d_filename(),
+          info_out.get_tica_cluster_representatives_filename(), {}, {},
+          &fes_result, &valid_clusters)) {
     return;
   }
-
-  const auto valid_clusters =
-      detect_fes_clusters(fes_result, projections, weight_state.analysis_weights,
-                          use_weights, executor);
-  const std::vector<double> empty_times;
-  const std::vector<int> empty_replicas;
-  write_cluster_representatives_file(
-      "TICA", "TICA", info_out.get_tica_cluster_representatives_filename(),
-      valid_clusters, use_weights, empty_times, empty_replicas, log);
-  TitanUI::log_kv(log, "TICA Macrostate Clusters",
-                  std::to_string(valid_clusters.size()));
 
   if (args.zts.flag_zts && args.zts.zts_domain == "tica") {
     auto start_zts = std::chrono::steady_clock::now();

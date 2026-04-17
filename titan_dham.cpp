@@ -2,6 +2,7 @@
 // TitanDHAM — Dynamic Histogram Analysis Method (Implementation)
 // ============================================================================
 #include "titan_dham.h"
+#include "titan_thread_compat.h"
 #include <algorithm>
 #include <iomanip>
 #include <numeric>
@@ -527,7 +528,7 @@ Eigen::MatrixXd TitanDHAM::compute_state_energies(
     if (n_use <= 1) {
         worker(0, n_replicas);
     } else {
-        std::vector<std::jthread> threads;
+    std::vector<titan::jthread> threads;
         threads.reserve(static_cast<size_t>(n_use));
         int chunk = (n_replicas + n_use - 1) / n_use;
         for (int t = 0; t < n_use; ++t) {

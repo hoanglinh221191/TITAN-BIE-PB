@@ -51,7 +51,14 @@ If you only have a few minutes, read these in order:
 7. `manual.txt` and `help.cpp`
    User-facing documentation. If behavior changes, these often need updates.
 
-8. `solv_pbc_pbctopo.cpp`
+8. `titan_gyration.h` and `titan_gyration.cpp`
+   Shared gyration / shape-metric math used by `-rg2`, LLPS, and VIBE-pbctopo.
+   This is also where the reusable AVX2 SoA point-stat accumulation lives.
+
+9. `titan_rg.h` and `titan_rg.cpp`
+   `-rg2` analyzer, per-trajectory export, and multi-input aggregate export.
+
+10. `solv_pbc_pbctopo.cpp`
    VIBE-pbctopo (`-pbctopo`) topology-aware PBC solver. Read this first before
    touching pbctopo heuristics, warm-start behavior, or PBC-safe reconstruction.
 
@@ -109,6 +116,7 @@ Analysis modules:
 - `energy.cpp`, `energy_intrin.cpp`, `force.cpp`, `force_intrin.cpp`
 - `dccm_network.cpp`
 - `titan_rms.cpp`
+- `titan_rg.cpp`
 - `titan_dssp.cpp`
 - `titan_lj.cpp`
 - `titan_pca.cpp`
@@ -122,6 +130,12 @@ Analysis modules:
 - `titan_ifp.cpp`
 - `cas_analysis.cpp`
 - `water_analysis.cpp`
+
+Shared math / reusable numerics:
+- `titan_gyration.cpp`: reusable `Rg`, `Rg^2`, principal gyration axes, shape
+  descriptors, and AVX2 SoA point-stat accumulation
+- `pbctopo_hull.cpp`: reusable convex-hull volume and hull-rescue support for
+  pbctopo-style reconstruction paths
 
 Output and UI:
 - `info.h`: output filename getters
@@ -148,8 +162,8 @@ Important implied flags from parsing:
 - `-dssp` enables a secondary-structure feature module; do not assume it is
   only a side effect of protein workflows
 - `-lspmd` is standalone and does not need `-network`
-- `-rms` and `-lj` auto-enable `-pbcn` when the user did not choose an
-  explicit PBC mode
+- `-rms`, `-lj`, and `-rg2` auto-enable a safe PBC path when the user did not
+  choose an explicit PBC mode
 - `-lj` used with `-tica` / `-msm` / `-dham` / `-umap` / `-tpt` may disable an
   auto-enabled `-network` path and use permutation-invariant LJ phase-2
   features instead
@@ -266,8 +280,9 @@ If you add a new module:
 ================================================================================
 
 Current build intent:
-- Windows: `clang++` via `compile.bat` and `mingw32-make.exe`
-- Linux: `g++` with `-std=c++23`
+- Windows: MSYS2 UCRT64 `clang++` via `compile.bat` and `mingw32-make.exe`
+- Linux: either `g++` (GCC 13-era target) or `TOOLCHAIN=clang` with LLVM 22 +
+  libc++ as configured in `Makefile`
 
 Important practical rule:
 - Treat Linux support as "C++23 syntax with GCC 13-era reality".
@@ -294,6 +309,14 @@ Build workflow:
 - `release` target adds LTO flags.
 - Keep AVX2/FMA assumptions paired with scalar fallback paths; do not assume
   every supported build machine is identical to the local workstation.
+- For Linux `TOOLCHAIN=clang`, prefer the `Makefile`-managed LLVM 22/libc++
+  path rather than hand-written compiler/linker commands.
+- The codebase now carries small compatibility shims because libc++ / GCC 13
+  feature coverage still differs in practice (`titan_thread_compat.h`,
+  `titan_charconv_compat.h`, etc.).
+- On Windows, `titan.exe` may occasionally be file-locked by an active run.
+  In that case, linking an alternate target name is acceptable for validation,
+  but keep `Makefile` as the source of truth.
 
 When changing headers or build rules:
 - Recheck `Makefile`.
@@ -335,7 +358,11 @@ everything. Touch them carefully and profile before expanding scope.
   Current behavior: VIBE-pbctopo is a layered heuristic solver with projection
   cuts, component-graph refinement, and anchor-based topology metrics. The
   current hotspot is usually the coarse/exact anchor scoring path inside local
-  refine, not the CLI glue around `-pbctopo`.
+  refine, not the CLI glue around `-pbctopo`. Recent AVX2 work already covers
+  the gyration accumulation path, the cut-candidate edge scan, continuity
+  checks, and the anchor MST relax/select loops; remaining wins are now more
+  likely in component-search state management than in the already-vectorized
+  geometry kernels.
   Recommended direction: profile with `pbctopo_debug.log`, preserve output
   equivalence, and treat anchor sampling / prune thresholds as benchmark-driven
   changes rather than cosmetic rewrites.
@@ -426,11 +453,20 @@ If you change trajectory streaming:
 
 If you change RMS / DSSP / LJ / TPT behavior:
 - inspect `titan_rms.cpp`
+- inspect `titan_rg.cpp` if the change affects trace-atom geometry observables
 - inspect `titan_dssp.cpp`
 - inspect `titan_lj.cpp`
 - inspect `titan_tpt.cpp`
 - inspect `arguments.cpp` and `parse_arguments.cpp` for implied-module and PBC
   semantics
+
+If you change gyration / shape-metric behavior:
+- inspect `titan_gyration.cpp`
+- inspect `titan_rg.cpp`
+- inspect `titan_llps.cpp` for GCC/Rg reuse
+- inspect `solv_pbc_pbctopo.cpp` because pbctopo scoring also consumes these
+  metrics
+- inspect `info.h`, `help.cpp`, and `manual.txt` if output names or units move
 
 If you change VIBE-pbctopo behavior:
 - inspect `solv_pbc_pbctopo.cpp`
@@ -466,7 +502,66 @@ If you change VIBE-pbctopo behavior:
   support.
 
 ================================================================================
-14. Quick mental model
+14. Current 2026-04 Status
+================================================================================
+
+This section is intentionally current-state and should be kept in sync with
+recent engine work.
+
+Reusable gyration / `-rg2`:
+- `titan_gyration.*` is now the shared source of truth for:
+  - `Rg^2`
+  - `Rg`
+  - principal gyration-axis eigenvalues
+  - `kappa2`, asphericity, and acylindricity
+- `titan_rg.*` is a standalone analyzer, not folded into RMS code.
+- `-rg2` exports:
+  - `rg2*.dat`
+  - `rg2_summary*.dat`
+  - `rg2_hist*.dat`
+- For multi-input runs it also exports aggregate files:
+  - `rg2_all.dat`
+  - `rg2_summary_all.dat`
+  - `rg2_hist_all.dat`
+- Aggregate timeseries columns are:
+  - `traj_index frame time_ps rg2_A2 rg_A`
+- Aggregate summary contains one row per trajectory plus an `ALL` row.
+
+Current AVX2 coverage:
+- `titan_gyration.cpp`
+  - AVX2 SoA accumulation is implemented for hot `PointStats` reduction.
+  - The 3x3 eigensolve and shape-descriptor formulas remain scalar by design.
+- `titan_llps.cpp`
+  - GCC `Rg` now reuses the same SoA gyration path instead of scalar
+    point-by-point accumulation.
+- `solv_pbc_pbctopo.cpp`
+  - AVX2 currently covers:
+    - cut-candidate edge scan
+    - continuity metric scan
+    - anchor MST relax step
+    - anchor MST next-node selection
+  - Component-search hot loops were also tightened with cheaper sorting and
+    less state copying, but they are not "fully SIMD-ized".
+
+Current pbctopo behavior:
+- VIBE-pbctopo now relies on shared gyration metrics from `titan_gyration.*`.
+- Split-contacting-owner rejection and rescue hierarchy are already in place.
+- QuickHull was moved into reusable `pbctopo_hull.*`.
+- Current regression expectation on the recent local validation windows:
+  - dimer window: no final split, no rescue, no pbci fallback
+  - tetramer window: one split candidate may be rejected internally, but final
+    output still has no split and no pbci fallback
+
+Representative local-only validation fixtures:
+- Difficult dimer case:
+  - `D:\Data_MD\Npro\dimerunphos`
+- Extended tetramer case:
+  - `D:\Data_MD\Npro\tetramer_conf0_unphos`
+- These are workstation-local paths, not portable repo fixtures. Treat them as
+  regression references when they exist, not as guaranteed CI assets.
+
+================================================================================
+15. Quick mental model
 ================================================================================
 
 If you need one sentence per layer:

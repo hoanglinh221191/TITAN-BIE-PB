@@ -38,6 +38,8 @@ private:
 
   inline bool is_backbone(const std::string &atom_name) const {
     return (atom_name == "P" || atom_name == "OP1" || atom_name == "OP2" ||
+            atom_name == "OP3" || atom_name == "O1P" || atom_name == "O2P" ||
+            atom_name == "O3P" ||
             atom_name == "O5'" || atom_name == "C5'" || atom_name == "C4'" ||
             atom_name == "O4'" || atom_name == "C3'" || atom_name == "O3'" ||
             atom_name == "C2'" || atom_name == "C1'" || atom_name == "O2'");
@@ -47,7 +49,7 @@ private:
     if (atom_name.empty())
       return false;
     char first = atom_name[0];
-    if (first != 'N' && first != 'C')
+    if (first != 'N' && first != 'C' && first != 'O')
       return false;
     if (is_backbone(atom_name))
       return false;

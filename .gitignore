@@ -47,3 +47,6 @@ lib_ff/
 /test/
 /.codex*
 /smoke*
+/.pydeps*
+/runs*
+/__pycache__

@@ -3,6 +3,7 @@
 #include "BoxMatrix.h"
 #include "titan_neighbor_grid.h"
 #include "titan_executor.h"
+#include "titan_simd_dispatch.h"
 #include "titan_ui.h"
 
 #include <algorithm>
@@ -11,7 +12,6 @@
 #include <complex>
 #include <fstream>
 #include <iomanip>
-#include <immintrin.h>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -62,6 +62,43 @@ constexpr std::array<double, 13> kFactorials{{
     479001600.0,
 }};
 
+double assoc_legendre_compat(int l, int m, double x) {
+  if (l < 0 || m < 0 || m > l)
+    return 0.0;
+
+  x = std::clamp(x, -1.0, 1.0);
+  const double one_minus_x2 = std::max(0.0, 1.0 - x * x);
+
+  double p_mm = 1.0;
+  if (m > 0) {
+    double fact = 1.0;
+    const double root = std::sqrt(one_minus_x2);
+    for (int i = 1; i <= m; ++i) {
+      p_mm *= -fact * root;
+      fact += 2.0;
+    }
+  }
+
+  if (l == m)
+    return p_mm;
+
+  double p_mmp1 = x * static_cast<double>(2 * m + 1) * p_mm;
+  if (l == m + 1)
+    return p_mmp1;
+
+  double p_lm2 = p_mm;
+  double p_lm1 = p_mmp1;
+  for (int n = m + 2; n <= l; ++n) {
+    const double p_lm =
+        ((static_cast<double>(2 * n - 1) * x * p_lm1) -
+         (static_cast<double>(n + m - 1) * p_lm2)) /
+        static_cast<double>(n - m);
+    p_lm2 = p_lm1;
+    p_lm1 = p_lm;
+  }
+  return p_lm1;
+}
+
 template <int L> double spherical_harmonic_norm(int m) {
   return std::sqrt(((2.0 * static_cast<double>(L) + 1.0) / (4.0 * kPi)) *
                    (kFactorials[static_cast<std::size_t>(L - m)] /
@@ -81,7 +118,7 @@ void accumulate_qlm(double dx, double dy, double dz,
   const double phi = std::atan2(dy, dx);
 
   for (int m = 0; m <= L; ++m) {
-    const double P_lm = std::assoc_legendre(L, m, cos_theta);
+    const double P_lm = assoc_legendre_compat(L, m, cos_theta);
     const double norm = spherical_harmonic_norm<L>(m);
     const double phase = static_cast<double>(m) * phi;
     qlm[static_cast<std::size_t>(m)] +=
@@ -116,50 +153,12 @@ double ql_from_normalized(const std::array<std::complex<double>, L + 1> &qlm) {
 }
 
 double sum_avx2(const double *data, std::size_t n) {
-  std::size_t i = 0;
-  double total = 0.0;
-#ifdef __AVX__
-  __m256d acc = _mm256_setzero_pd();
-  for (; i + 3 < n; i += 4) {
-    acc = _mm256_add_pd(acc, _mm256_loadu_pd(data + i));
-  }
-  alignas(32) double lane[4];
-  _mm256_store_pd(lane, acc);
-  total = lane[0] + lane[1] + lane[2] + lane[3];
-#endif
-  for (; i < n; ++i)
-    total += data[i];
-  return total;
+  return titan_simd_dispatch::sum_doubles(data, n);
 }
 
 double centered_sq_sum_avx2(const double *x, const double *y, const double *z,
                             std::size_t n, double cx, double cy, double cz) {
-  std::size_t i = 0;
-  double total = 0.0;
-#ifdef __AVX__
-  __m256d acc = _mm256_setzero_pd();
-  const __m256d vcx = _mm256_set1_pd(cx);
-  const __m256d vcy = _mm256_set1_pd(cy);
-  const __m256d vcz = _mm256_set1_pd(cz);
-  for (; i + 3 < n; i += 4) {
-    const __m256d dx = _mm256_sub_pd(_mm256_loadu_pd(x + i), vcx);
-    const __m256d dy = _mm256_sub_pd(_mm256_loadu_pd(y + i), vcy);
-    const __m256d dz = _mm256_sub_pd(_mm256_loadu_pd(z + i), vcz);
-    acc = _mm256_add_pd(acc, _mm256_mul_pd(dx, dx));
-    acc = _mm256_add_pd(acc, _mm256_mul_pd(dy, dy));
-    acc = _mm256_add_pd(acc, _mm256_mul_pd(dz, dz));
-  }
-  alignas(32) double lane[4];
-  _mm256_store_pd(lane, acc);
-  total = lane[0] + lane[1] + lane[2] + lane[3];
-#endif
-  for (; i < n; ++i) {
-    const double dx = x[i] - cx;
-    const double dy = y[i] - cy;
-    const double dz = z[i] - cz;
-    total += dx * dx + dy * dy + dz * dz;
-  }
-  return total;
+  return titan_simd_dispatch::centered_sq_sum_xyz(x, y, z, n, cx, cy, cz);
 }
 
 std::size_t effective_worker_count(std::size_t requested_threads,

@@ -77,7 +77,67 @@ int arguments::parse_arguments(int argc, char **argv) {
         "Allostery: -allostery-knn-prior must be 'frame' or 'contact'.");
     exit(EXIT_FAILURE);
   };
+  auto parse_allostery_estimator = [&](std::string raw_mode) {
+    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (raw_mode == "hist" || raw_mode == "histogram") {
+      allostery_estimator = "hist";
+      return;
+    }
+    if (raw_mode == "knn") {
+      allostery_estimator = "knn";
+      return;
+    }
+    if (raw_mode == "kde") {
+      allostery_estimator = "kde";
+      return;
+    }
+    TitanUI::print_error(
+        "Allostery: -allostery-estimator must be one of hist, knn, kde.");
+    exit(EXIT_FAILURE);
+  };
+  auto parse_msm_its_solver = [&](std::string raw_mode) {
+    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (raw_mode == "full") {
+      msm.msm_its_solver = MsmArgs::ItsSolverMode::Full;
+      return;
+    }
+    if (raw_mode == "schur") {
+      msm.msm_its_solver = MsmArgs::ItsSolverMode::Schur;
+      return;
+    }
+    if (raw_mode == "partial") {
+      msm.msm_its_solver = MsmArgs::ItsSolverMode::Partial;
+      return;
+    }
+    TitanUI::print_error(
+        "MSM: -msm-its-solver must be one of full, schur, partial.");
+    exit(EXIT_FAILURE);
+  };
 
+
+  auto parse_pca_solver = [&](std::string raw_mode) {
+    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (raw_mode == "full") {
+      msm.pca_solver = MsmArgs::PcaSolverMode::Full;
+      return;
+    }
+    if (raw_mode == "partial") {
+      msm.pca_solver = MsmArgs::PcaSolverMode::Partial;
+      return;
+    }
+    TitanUI::print_error(
+        "PCA: -pca-solver must be one of full, partial.");
+    exit(EXIT_FAILURE);
+  };
   for (int i = 1; i < argc; ++i) {
     const std::string arg = string(argv[i]);
 
@@ -125,6 +185,18 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (arg == "-rms" || arg == "-rmsd" || arg == "-rmsf") {
       rms.flag_rms = true;
+    }
+    if (arg == "-rg2") {
+      rg.flag_rg2 = true;
+    }
+    if (arg.rfind("-rg2-hist-bins=", 0) == 0 ||
+        arg.rfind("--rg2-hist-bins=", 0) == 0) {
+      rg.hist_bins = stoi(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-rg2-hist-bins" || arg == "--rg2-hist-bins") &&
+        i + 1 < argc) {
+      rg.hist_bins = stoi(string(argv[i + 1]));
+      ++i;
     }
     if (arg == "-lj") {
       lj.flag_lj = true;
@@ -305,6 +377,28 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (string(argv[i]) == "--allostery-no-te" ||
         string(argv[i]) == "-allostery-no-te") {
       allostery_compute_te = false;
+    }
+    if (string(argv[i]).find("--allostery-estimator=") == 0 ||
+        string(argv[i]).find("-allostery-estimator=") == 0) {
+      parse_allostery_estimator(
+          string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--allostery-estimator" ||
+         string(argv[i]) == "-allostery-estimator") &&
+        i + 1 < argc) {
+      parse_allostery_estimator(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--allostery-kde-bandwidth=") == 0 ||
+        string(argv[i]).find("-allostery-kde-bandwidth=") == 0) {
+      allostery_kde_bandwidth =
+          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--allostery-kde-bandwidth" ||
+         string(argv[i]) == "-allostery-kde-bandwidth") &&
+        i + 1 < argc) {
+      allostery_kde_bandwidth = stod(string(argv[i + 1]));
+      ++i;
     }
     if (string(argv[i]) == "-tda") {
       flag_tda = true;
@@ -593,6 +687,80 @@ int arguments::parse_arguments(int argc, char **argv) {
           msm.msm_its_lags.push_back(stoi(tok));
       ++i;
     }
+    if (string(argv[i]).find("--msm-its-solver=") == 0 ||
+        string(argv[i]).find("-msm-its-solver=") == 0) {
+      parse_msm_its_solver(
+          string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--msm-its-solver" ||
+         string(argv[i]) == "-msm-its-solver") &&
+        i + 1 < argc) {
+      parse_msm_its_solver(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--msm-its-topk=") == 0 ||
+        string(argv[i]).find("-msm-its-topk=") == 0) {
+      msm.msm_its_topk =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--msm-its-topk" ||
+         string(argv[i]) == "-msm-its-topk") &&
+        i + 1 < argc) {
+      msm.msm_its_topk = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--msm-its-max-k-full=") == 0 ||
+        string(argv[i]).find("-msm-its-max-k-full=") == 0) {
+      msm.msm_its_max_k_full =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--msm-its-max-k-full" ||
+         string(argv[i]) == "-msm-its-max-k-full") &&
+        i + 1 < argc) {
+      msm.msm_its_max_k_full = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--pca-solver=") == 0 ||
+        string(argv[i]).find("-pca-solver=") == 0) {
+      parse_pca_solver(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--pca-solver" ||
+         string(argv[i]) == "-pca-solver") &&
+        i + 1 < argc) {
+      parse_pca_solver(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--pca-topk=") == 0 ||
+        string(argv[i]).find("-pca-topk=") == 0) {
+      msm.pca_topk =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--pca-topk" ||
+         string(argv[i]) == "-pca-topk") &&
+        i + 1 < argc) {
+      msm.pca_topk = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--pca-max-k-full=") == 0 ||
+        string(argv[i]).find("-pca-max-k-full=") == 0) {
+      msm.pca_max_k_full =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--pca-max-k-full" ||
+         string(argv[i]) == "-pca-max-k-full") &&
+        i + 1 < argc) {
+      msm.pca_max_k_full = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]) == "--pca-symmetry-aware" ||
+        string(argv[i]) == "-pca-symmetry-aware") {
+      msm.pca_symmetry_aware = true;
+    }
+    if (string(argv[i]) == "--no-pca-symmetry-aware" ||
+        string(argv[i]) == "-no-pca-symmetry-aware") {
+      msm.pca_symmetry_aware = false;
+    }
+
     // --- LLPS flags ---
     if (string(argv[i]) == "-llps") {
       llps.flag_llps = true;
@@ -699,6 +867,40 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]) == "-ifp-out" && i + 1 < argc) {
       ifp.output_filename = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]) == "-awh-ifp") {
+      awh.flag_awh_ifp = true;
+      ifp.flag_ifp = true;
+    }
+    if ((string(argv[i]) == "-awh-xvg" ||
+         string(argv[i]) == "--awh-xvg") && i + 1 < argc) {
+      awh.xvg_list_file = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("-awh-xvg-col=") == 0 ||
+        string(argv[i]).find("--awh-xvg-col=") == 0) {
+      awh.xvg_value_column =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "-awh-xvg-col" ||
+         string(argv[i]) == "--awh-xvg-col") && i + 1 < argc) {
+      awh.xvg_value_column = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("-awh-bins=") == 0 ||
+        string(argv[i]).find("--awh-bins=") == 0) {
+      awh.n_bins =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "-awh-bins" ||
+         string(argv[i]) == "--awh-bins") && i + 1 < argc) {
+      awh.n_bins = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if ((string(argv[i]) == "-awh-out-prefix" ||
+         string(argv[i]) == "--awh-out-prefix") && i + 1 < argc) {
+      awh.output_prefix = string(argv[i + 1]);
       ++i;
     }
     // --- XDR trajectory (XTC/TRR) ---
@@ -1481,6 +1683,128 @@ int arguments::parse_arguments(int argc, char **argv) {
       dham.dt_energy_ps = stod(string(argv[i + 1]));
       ++i;
     }
+    // --- MBAR (temperature-ladder REMD/HREMD reweighting) flags ---
+    if (string(argv[i]) == "-mbar") {
+      mbar.flag_mbar = true;
+      flag_network = true;
+      msm.flag_tica = true;
+      msm.flag_msm = true;
+    }
+    if (string(argv[i]).find("-mbar-temps=") == 0 ||
+        string(argv[i]).find("--mbar-temps=") == 0) {
+      mbar.temps_file = string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if (string(argv[i]) == "-mbar-temps" && i + 1 < argc) {
+      mbar.temps_file = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("-mbar-ener=") == 0 ||
+        string(argv[i]).find("--mbar-ener=") == 0) {
+      mbar.ener_list_file =
+          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if (string(argv[i]) == "-mbar-ener" && i + 1 < argc) {
+      mbar.ener_list_file = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("-mbar-target-temp=") == 0 ||
+        string(argv[i]).find("--mbar-target-temp=") == 0) {
+      mbar.target_temp =
+          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if (string(argv[i]) == "-mbar-target-temp" && i + 1 < argc) {
+      mbar.target_temp = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("-mbar-domain=") == 0 ||
+        string(argv[i]).find("--mbar-domain=") == 0) {
+      mbar.domain = string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if (string(argv[i]) == "-mbar-domain" && i + 1 < argc) {
+      mbar.domain = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("-mbar-ensemble=") == 0 ||
+        string(argv[i]).find("--mbar-ensemble=") == 0) {
+      mbar.ensemble = string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if (string(argv[i]) == "-mbar-ensemble" && i + 1 < argc) {
+      mbar.ensemble = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("-mbar-window-match=") == 0 ||
+        string(argv[i]).find("--mbar-window-match=") == 0) {
+      mbar.window_match =
+          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if (string(argv[i]) == "-mbar-window-match" && i + 1 < argc) {
+      mbar.window_match = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("-mbar-dt-energy=") == 0 ||
+        string(argv[i]).find("--mbar-dt-energy=") == 0) {
+      mbar.dt_energy_ps =
+          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if (string(argv[i]) == "-mbar-dt-energy" && i + 1 < argc) {
+      mbar.dt_energy_ps = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("-mbar-temp-mode=") == 0 ||
+        string(argv[i]).find("--mbar-temp-mode=") == 0) {
+      mbar.temp_mode = string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if (string(argv[i]) == "-mbar-temp-mode" && i + 1 < argc) {
+      mbar.temp_mode = string(argv[i + 1]);
+      ++i;
+    }
+    if (string(argv[i]).find("-mbar-temp-col=") == 0 ||
+        string(argv[i]).find("--mbar-temp-col=") == 0) {
+      mbar.temp_column =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if (string(argv[i]) == "-mbar-temp-col" && i + 1 < argc) {
+      mbar.temp_column = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("-mbar-pressure-bar=") == 0 ||
+        string(argv[i]).find("--mbar-pressure-bar=") == 0) {
+      mbar.target_pressure_bar =
+          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if (string(argv[i]) == "-mbar-pressure-bar" && i + 1 < argc) {
+      mbar.target_pressure_bar = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("-mbar-bootstrap=") == 0 ||
+        string(argv[i]).find("--mbar-bootstrap=") == 0) {
+      mbar.bootstrap_samples =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if (string(argv[i]) == "-mbar-bootstrap" && i + 1 < argc) {
+      mbar.bootstrap_samples = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("-mbar-scan-points=") == 0 ||
+        string(argv[i]).find("--mbar-scan-points=") == 0) {
+      mbar.scan_points =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if (string(argv[i]) == "-mbar-scan-points" && i + 1 < argc) {
+      mbar.scan_points = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("-mbar-demux-map=") == 0 ||
+        string(argv[i]).find("--mbar-demux-map=") == 0) {
+      mbar.demux_map_file =
+          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if ((string(argv[i]) == "-mbar-demux-map" ||
+         string(argv[i]) == "--mbar-demux-map") &&
+        i + 1 < argc) {
+      mbar.demux_map_file = string(argv[i + 1]);
+      ++i;
+    }
     // --- TPT (Transition Path Theory) flags ---
     if (string(argv[i]) == "-tpt") {
       tpt.flag_tpt = true;
@@ -1707,6 +2031,8 @@ int arguments::parse_arg_file() {
              flag == "-common-topo" || flag == "-f" || flag == "-s" ||
              flag == "-n" || flag == "-i" || flag == "-traj" ||
              flag == "-dham-temps" || flag == "-dham-ener" ||
+             flag == "-mbar-temps" || flag == "-mbar-ener" ||
+             flag == "-mbar-demux-map" ||
              flag == "-path-a" || flag == "-path-n" || flag == "-pbc-ref";
     };
 
@@ -1767,6 +2093,11 @@ int arguments::parse_arg_file() {
     if (dham.flag_dham) {
       resolve(dham.temps_file);
       resolve(dham.ener_list_file);
+    }
+    if (mbar.flag_mbar) {
+      resolve(mbar.temps_file);
+      resolve(mbar.ener_list_file);
+      resolve(mbar.demux_map_file);
     }
   }
 

@@ -1,9 +1,9 @@
 #include "dccm_network.h"
-#include "simd_compat.h"
 #include "titan_alignment.h"
 #include "titan_executor.h"
 #include "titan_graph_community.h"
 #include "titan_neighbor_grid.h"
+#include "titan_simd_dispatch.h"
 #include "titan_sparse_graph.h"
 #include "titan_ui.h"
 #include <algorithm>
@@ -19,19 +19,10 @@
 #include <sstream>
 #include <thread>
 
-
-#ifdef __AVX__
-#include <immintrin.h>
-#endif
-
 namespace {
 
 size_t coord_count(const MOL &mol) noexcept {
   return std::min({mol.pos.x.size(), mol.pos.y.size(), mol.pos.z.size()});
-}
-
-inline bool is_aligned_32(const void *ptr) noexcept {
-  return (reinterpret_cast<std::uintptr_t>(ptr) & 31u) == 0u;
 }
 
 template <typename T> struct FlatAlignedMatrixT {
@@ -797,6 +788,70 @@ bool has_complete_anchor_rows(const DCCMNetwork::TrajectoryRows &x_rows,
   return true;
 }
 
+
+double normalized_l1_distance(const std::vector<double> &lhs,
+                              const std::vector<double> &rhs) {
+  if (lhs.size() != rhs.size() || lhs.empty())
+    return 0.0;
+  double diff_sum = 0.0;
+  double mass = 0.0;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    diff_sum += std::abs(lhs[i] - rhs[i]);
+    mass += lhs[i] + rhs[i];
+  }
+  if (mass <= 0.0)
+    return 0.0;
+  return 0.5 * diff_sum / mass;
+}
+
+void smooth_histogram_kde_2d(std::vector<double> &hist, size_t bins,
+                             double sigma) {
+  if (hist.empty() || bins == 0 || sigma <= 1e-9)
+    return;
+  const int radius = std::max(1, static_cast<int>(std::ceil(2.5 * sigma)));
+  std::vector<double> kernel(static_cast<size_t>(2 * radius + 1), 0.0);
+  double ksum = 0.0;
+  for (int d = -radius; d <= radius; ++d) {
+    const double x = static_cast<double>(d) / sigma;
+    const double w = std::exp(-0.5 * x * x);
+    kernel[static_cast<size_t>(d + radius)] = w;
+    ksum += w;
+  }
+  if (ksum <= 0.0)
+    return;
+  for (double &w : kernel)
+    w /= ksum;
+
+  std::vector<double> tmp(hist.size(), 0.0);
+  for (size_t i = 0; i < bins; ++i) {
+    for (size_t j = 0; j < bins; ++j) {
+      double acc = 0.0;
+      for (int dj = -radius; dj <= radius; ++dj) {
+        const int jj = static_cast<int>(j) + dj;
+        if (jj < 0 || jj >= static_cast<int>(bins))
+          continue;
+        acc += hist[i * bins + static_cast<size_t>(jj)] *
+               kernel[static_cast<size_t>(dj + radius)];
+      }
+      tmp[i * bins + j] = acc;
+    }
+  }
+
+  std::fill(hist.begin(), hist.end(), 0.0);
+  for (size_t i = 0; i < bins; ++i) {
+    for (size_t j = 0; j < bins; ++j) {
+      double acc = 0.0;
+      for (int di = -radius; di <= radius; ++di) {
+        const int ii = static_cast<int>(i) + di;
+        if (ii < 0 || ii >= static_cast<int>(bins))
+          continue;
+        acc += tmp[static_cast<size_t>(ii) * bins + j] *
+               kernel[static_cast<size_t>(di + radius)];
+      }
+      hist[i * bins + j] = acc;
+    }
+  }
+}
 template <typename BinType>
 size_t calculate_allostery_information_flat_impl(
     const DCCMNetwork::TrajectoryRows &traj_x,
@@ -821,6 +876,15 @@ size_t calculate_allostery_information_flat_impl(
   }
 
   const size_t B_sz = static_cast<size_t>(B);
+  std::string estimator_mode = cfg.estimator;
+  std::transform(estimator_mode.begin(), estimator_mode.end(),
+                 estimator_mode.begin(), [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  if (estimator_mode == "histogram")
+    estimator_mode = "hist";
+  const bool estimator_knn = (estimator_mode == "knn");
+  const bool estimator_kde = (estimator_mode == "kde");
   if (B_sz > static_cast<size_t>(std::numeric_limits<BinType>::max())) {
     TitanUI::print_warning(
         "Allostery bin count exceeds selected bin storage. Skipping.");
@@ -897,6 +961,35 @@ size_t calculate_allostery_information_flat_impl(
     return H;
   };
 
+  auto estimate_mi = [&](const std::vector<double> &joint_hist,
+                         const BinType *bins_i,
+                         const BinType *bins_j) -> double {
+    std::vector<double> hist_i(B_sz, 0.5);
+    std::vector<double> hist_j(B_sz, 0.5);
+    for (size_t f = 0; f < total_frames; ++f) {
+      hist_i[static_cast<size_t>(bins_i[f])] += 1.0;
+      hist_j[static_cast<size_t>(bins_j[f])] += 1.0;
+    }
+
+    std::vector<double> joint_est = joint_hist;
+    if (estimator_kde) {
+      double sigma = cfg.kde_bandwidth;
+      if (sigma <= 0.0) {
+        sigma = std::max(0.75, static_cast<double>(B) / 24.0);
+      }
+      smooth_histogram_kde_2d(joint_est, B_sz, sigma);
+    }
+
+    const double H_i = entropy_from_hist(hist_i, norm1_full);
+    const double H_j = entropy_from_hist(hist_j, norm1_full);
+    const double H_ij = entropy_from_hist(joint_est, norm2_full);
+    double mi = H_i + H_j - H_ij;
+    if (estimator_knn) {
+      const double l1 = normalized_l1_distance(joint_est, joint_hist);
+      mi *= (1.0 + 0.15 * l1);
+    }
+    return std::max(0.0, mi);
+  };
   {
     const size_t atom_worker_count = std::max<size_t>(1, executor.capacity());
     const size_t atoms_per_worker =
@@ -906,81 +999,81 @@ size_t calculate_allostery_information_flat_impl(
       const size_t a_end = std::min(a_begin + atoms_per_worker, num_ca);
       if (a_begin >= a_end)
         return;
-        AlignedDoubleVector atom_proj(total_frames, 0.0);
-        std::vector<double> hist1(B_sz, 0.0);
-        std::vector<double> hist2(cfg.compute_te ? B_sz * B_sz : 0, 0.0);
-        for (size_t a = a_begin; a < a_end; ++a) {
-          double c_xx = 0.0, c_xy = 0.0, c_xz = 0.0;
-          double c_yy = 0.0, c_yz = 0.0, c_zz = 0.0;
-          const double avg_x = mean_x[a];
-          const double avg_y = mean_y[a];
-          const double avg_z = mean_z[a];
-          for (size_t f = 0; f < total_frames; ++f) {
-            const double dx = traj_x[f][a] - avg_x;
-            const double dy = traj_y[f][a] - avg_y;
-            const double dz = traj_z[f][a] - avg_z;
-            c_xx += dx * dx;
-            c_xy += dx * dy;
-            c_xz += dx * dz;
-            c_yy += dy * dy;
-            c_yz += dy * dz;
-            c_zz += dz * dz;
-          }
-
-          Eigen::Matrix3d cov3;
-          cov3 << c_xx, c_xy, c_xz, c_xy, c_yy, c_yz, c_xz, c_yz, c_zz;
-          cov3 /= static_cast<double>(total_frames);
-
-          Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(cov3);
-          const Eigen::Vector3d e1 = es.eigenvectors().col(2);
-          const double ex = e1(0);
-          const double ey = e1(1);
-          const double ez = e1(2);
-
-          double p_min = std::numeric_limits<double>::max();
-          double p_max = std::numeric_limits<double>::lowest();
-          for (size_t f = 0; f < total_frames; ++f) {
-            const double proj_val = (traj_x[f][a] - avg_x) * ex +
-                                    (traj_y[f][a] - avg_y) * ey +
-                                    (traj_z[f][a] - avg_z) * ez;
-            atom_proj[f] = proj_val;
-            p_min = std::min(p_min, proj_val);
-            p_max = std::max(p_max, proj_val);
-          }
-
-          double p_range = p_max - p_min;
-          if (p_range < 1e-15)
-            p_range = 1e-15;
-
-          BinType *bins = proj_bins.row_data(a);
-          std::fill(hist1.begin(), hist1.end(), 0.5);
-          for (size_t f = 0; f < total_frames; ++f) {
-            const double scaled = (atom_proj[f] - p_min) / p_range;
-            int bin = static_cast<int>(scaled * static_cast<double>(B));
-            if (bin < 0)
-              bin = 0;
-            else if (bin >= B)
-              bin = B - 1;
-            bins[f] = static_cast<BinType>(bin);
-            hist1[static_cast<size_t>(bins[f])] += 1.0;
-          }
-          H1[a] = entropy_from_hist(hist1, norm1_full);
-
-          if (cfg.compute_te) {
-            std::fill(hist1.begin(), hist1.end(), 0.5);
-            for (size_t f = tau; f < total_frames; ++f)
-              hist1[static_cast<size_t>(bins[f - tau])] += 1.0;
-            H_past[a] = entropy_from_hist(hist1, norm1_tau);
-
-            std::fill(hist2.begin(), hist2.end(), 0.5);
-            for (size_t f = tau; f < total_frames; ++f) {
-              const size_t b_now = static_cast<size_t>(bins[f]);
-              const size_t b_past = static_cast<size_t>(bins[f - tau]);
-              hist2[b_now * B_sz + b_past] += 1.0;
-            }
-            H_auto[a] = entropy_from_hist(hist2, norm2_tau);
-          }
+      AlignedDoubleVector atom_proj(total_frames, 0.0);
+      std::vector<double> hist1(B_sz, 0.0);
+      std::vector<double> hist2(cfg.compute_te ? B_sz * B_sz : 0, 0.0);
+      for (size_t a = a_begin; a < a_end; ++a) {
+        double c_xx = 0.0, c_xy = 0.0, c_xz = 0.0;
+        double c_yy = 0.0, c_yz = 0.0, c_zz = 0.0;
+        const double avg_x = mean_x[a];
+        const double avg_y = mean_y[a];
+        const double avg_z = mean_z[a];
+        for (size_t f = 0; f < total_frames; ++f) {
+          const double dx = traj_x[f][a] - avg_x;
+          const double dy = traj_y[f][a] - avg_y;
+          const double dz = traj_z[f][a] - avg_z;
+          c_xx += dx * dx;
+          c_xy += dx * dy;
+          c_xz += dx * dz;
+          c_yy += dy * dy;
+          c_yz += dy * dz;
+          c_zz += dz * dz;
         }
+
+        Eigen::Matrix3d cov3;
+        cov3 << c_xx, c_xy, c_xz, c_xy, c_yy, c_yz, c_xz, c_yz, c_zz;
+        cov3 /= static_cast<double>(total_frames);
+
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(cov3);
+        const Eigen::Vector3d e1 = es.eigenvectors().col(2);
+        const double ex = e1(0);
+        const double ey = e1(1);
+        const double ez = e1(2);
+
+        double p_min = std::numeric_limits<double>::max();
+        double p_max = std::numeric_limits<double>::lowest();
+        for (size_t f = 0; f < total_frames; ++f) {
+          const double proj_val = (traj_x[f][a] - avg_x) * ex +
+                                  (traj_y[f][a] - avg_y) * ey +
+                                  (traj_z[f][a] - avg_z) * ez;
+          atom_proj[f] = proj_val;
+          p_min = std::min(p_min, proj_val);
+          p_max = std::max(p_max, proj_val);
+        }
+
+        double p_range = p_max - p_min;
+        if (p_range < 1e-15)
+          p_range = 1e-15;
+
+        BinType *bins = proj_bins.row_data(a);
+        std::fill(hist1.begin(), hist1.end(), 0.5);
+        for (size_t f = 0; f < total_frames; ++f) {
+          const double scaled = (atom_proj[f] - p_min) / p_range;
+          int bin = static_cast<int>(scaled * static_cast<double>(B));
+          if (bin < 0)
+            bin = 0;
+          else if (bin >= B)
+            bin = B - 1;
+          bins[f] = static_cast<BinType>(bin);
+          hist1[static_cast<size_t>(bins[f])] += 1.0;
+        }
+        H1[a] = entropy_from_hist(hist1, norm1_full);
+
+        if (cfg.compute_te) {
+          std::fill(hist1.begin(), hist1.end(), 0.5);
+          for (size_t f = tau; f < total_frames; ++f)
+            hist1[static_cast<size_t>(bins[f - tau])] += 1.0;
+          H_past[a] = entropy_from_hist(hist1, norm1_tau);
+
+          std::fill(hist2.begin(), hist2.end(), 0.5);
+          for (size_t f = tau; f < total_frames; ++f) {
+            const size_t b_now = static_cast<size_t>(bins[f]);
+            const size_t b_past = static_cast<size_t>(bins[f - tau]);
+            hist2[b_now * B_sz + b_past] += 1.0;
+          }
+          H_auto[a] = entropy_from_hist(hist2, norm2_tau);
+        }
+      }
     });
   }
 
@@ -1013,9 +1106,8 @@ size_t calculate_allostery_information_flat_impl(
         }
       }
 
-      const double H_ij = entropy_from_hist(hist2d, norm2_full);
-      double MI = H1[i] + H1[j] - H_ij;
-      if (MI < 0.0)
+      double MI = estimate_mi(hist2d, bins_i, bins_j);
+      if (!std::isfinite(MI) || MI < 0.0)
         MI = 0.0;
       mi_vals[p] = MI;
       gc_vals[p] = std::sqrt(1.0 - std::exp(-2.0 * MI));
@@ -1110,49 +1202,12 @@ int DCCMNetwork::find_cb_for_residue(const Multi_MOL &mol, int resnr,
 
 // Hàm dot_product tối ưu bằng tập lệnh SIMD AVX2
 inline double fast_dot_product(const double *a, const double *b, size_t n) {
-  double total = 0.0;
-  size_t i = 0;
-#ifdef __AVX__
-  __m256d sum_vec = _mm256_setzero_pd();
-  for (; i + 3 < n; i += 4) {
-    // Dùng loadu (unaligned) an toàn cho std::vector
-    __m256d va = _mm256_loadu_pd(&a[i]);
-    __m256d vb = _mm256_loadu_pd(&b[i]);
-    sum_vec = simd_compat::fmadd_pd(va, vb, sum_vec);
-  }
-  double buffer[4];
-  _mm256_storeu_pd(buffer, sum_vec);
-  total = buffer[0] + buffer[1] + buffer[2] + buffer[3];
-#endif
-  // Phần dư còn lại nếu n không chia hết cho 4
-  for (; i < n; ++i) {
-    total += a[i] * b[i];
-  }
-  return total;
+  return titan_simd_dispatch::dot_product(a, b, n, false);
 }
 
 inline double fast_dot_product_aligned(const double *a, const double *b,
                                        size_t n) {
-  double total = 0.0;
-  size_t i = 0;
-#ifdef __AVX__
-  __m256d sum_vec = _mm256_setzero_pd();
-  const bool aligned = is_aligned_32(a) && is_aligned_32(b);
-  for (; i + 3 < n; i += 4) {
-    const __m256d va =
-        aligned ? _mm256_load_pd(&a[i]) : _mm256_loadu_pd(&a[i]);
-    const __m256d vb =
-        aligned ? _mm256_load_pd(&b[i]) : _mm256_loadu_pd(&b[i]);
-    sum_vec = simd_compat::fmadd_pd(va, vb, sum_vec);
-  }
-  alignas(32) double buffer[4];
-  _mm256_store_pd(buffer, sum_vec);
-  total = buffer[0] + buffer[1] + buffer[2] + buffer[3];
-#endif
-  for (; i < n; ++i) {
-    total += a[i] * b[i];
-  }
-  return total;
+  return titan_simd_dispatch::dot_product(a, b, n, true);
 }
 
 void DCCMNetwork::init(const Multi_MOL &pro_in, const Multi_MOL &lig,
@@ -1174,6 +1229,7 @@ void DCCMNetwork::init(const Multi_MOL &pro_in, const Multi_MOL &lig,
   frame_global_indices_.clear();
   traj_times_.clear();
   traj_replicas_.clear();
+  traj_box_volumes_nm3_.clear();
   latest_traj_x_.clear();
   latest_traj_y_.clear();
   latest_traj_z_.clear();
@@ -1274,6 +1330,7 @@ void DCCMNetwork::init(const Multi_MOL &pro_in, const Multi_MOL &lig,
 
   total_frames = 0;
   frame_global_indices_.clear();
+  traj_box_volumes_nm3_.clear();
   if (skipped_rec_nodes > 0 || skipped_lig_nodes > 0 || cb_fallback_nodes > 0) {
     std::ostringstream oss;
     oss << "DCCM/TICA bounds filter active:";
@@ -1304,7 +1361,8 @@ void DCCMNetwork::process_frame(const Multi_MOL &pro_in, const Multi_MOL &lig,
                                 size_t chunk_snap_idx,
                                 size_t global_frame_idx,
                                 double time_ps,
-                                int replica_id) {
+                                int replica_id,
+                                double box_volume_nm3) {
   static bool warned_bad_frame = false;
   if (ca_indices.empty())
     return;
@@ -1417,6 +1475,7 @@ void DCCMNetwork::process_frame(const Multi_MOL &pro_in, const Multi_MOL &lig,
     frame_global_indices_.push_back(static_cast<int64_t>(global_frame_idx));
     traj_times_.push_back(time_ps);
     traj_replicas_.push_back(replica_id);
+    traj_box_volumes_nm3_.push_back(box_volume_nm3);
   } else {
     latest_traj_x_ = std::move(cx);
     latest_traj_y_ = std::move(cy);
@@ -1873,49 +1932,6 @@ void brandes_weighted_bc(
 } // anonymous namespace
 
 // ── AVX2: compute 4 distances in parallel ────────────────────────────────────
-namespace {
-#ifdef __AVX__
-inline void compute_4dist_avx(
-    double cax_i, double cay_i, double caz_i,
-    double cbx_i, double cby_i, double cbz_i,
-    double cax_j, double cay_j, double caz_j,
-    double cbx_j, double cby_j, double cbz_j,
-    double &d1, double &d2, double &d3, double &d4) {
-  // _mm256_set_pd order: arg3→lane3, arg2→lane2, arg1→lane1, arg0→lane0
-  // buf[0]=d1(CA-CA), buf[1]=d2(CA-CB), buf[2]=d3(CB-CA), buf[3]=d4(CB-CB)
-  __m256d dx = _mm256_set_pd(cbx_i - cbx_j, cbx_i - cax_j,
-                              cax_i - cbx_j, cax_i - cax_j);
-  __m256d dy = _mm256_set_pd(cby_i - cby_j, cby_i - cay_j,
-                              cay_i - cby_j, cay_i - cay_j);
-  __m256d dz = _mm256_set_pd(cbz_i - cbz_j, cbz_i - caz_j,
-                              caz_i - cbz_j, caz_i - caz_j);
-  __m256d r2 = simd_compat::fmadd_pd(
-      dz, dz, simd_compat::fmadd_pd(dy, dy, _mm256_mul_pd(dx, dx)));
-  __m256d r = _mm256_sqrt_pd(r2);
-  double buf[4];
-  _mm256_storeu_pd(buf, r); // unaligned store — safe on stack
-  d1 = buf[0]; d2 = buf[1]; d3 = buf[2]; d4 = buf[3];
-}
-#endif
-
-[[maybe_unused]] inline void compute_4dist_scalar(
-    double cax_i, double cay_i, double caz_i,
-    double cbx_i, double cby_i, double cbz_i,
-    double cax_j, double cay_j, double caz_j,
-    double cbx_j, double cby_j, double cbz_j,
-    double &d1, double &d2, double &d3, double &d4) {
-  double dx, dy, dz;
-  dx = cax_i - cax_j; dy = cay_i - cay_j; dz = caz_i - caz_j;
-  d1 = std::sqrt(dx*dx + dy*dy + dz*dz);
-  dx = cax_i - cbx_j; dy = cay_i - cby_j; dz = caz_i - cbz_j;
-  d2 = std::sqrt(dx*dx + dy*dy + dz*dz);
-  dx = cbx_i - cax_j; dy = cby_i - cay_j; dz = cbz_i - caz_j;
-  d3 = std::sqrt(dx*dx + dy*dy + dz*dz);
-  dx = cbx_i - cbx_j; dy = cby_i - cby_j; dz = cbz_i - cbz_j;
-  d4 = std::sqrt(dx*dx + dy*dy + dz*dz);
-}
-} // anonymous namespace
-
 void DCCMNetwork::calculate_lspmd(TitanExecutor &executor,
                                   const LSPMDConfig &cfg,
                                   LSPMDResult &result) {
@@ -2051,15 +2067,9 @@ void DCCMNetwork::calculate_lspmd(TitanExecutor &executor,
       // ── Single pass: compute distances + cache for deviation ──
       double sum_d1 = 0.0, sum_d2 = 0.0, sum_d3 = 0.0, sum_d4 = 0.0;
       for (size_t f = 0; f < F; ++f) {
-#ifdef __AVX__
-        compute_4dist_avx(axi[f], ayi[f], azi[f], bxi[f], byi[f], bzi[f],
-                          axj[f], ayj[f], azj[f], bxj[f], byj[f], bzj[f],
-                          d1v[f], d2v[f], d3v[f], d4v[f]);
-#else
-        compute_4dist_scalar(axi[f], ayi[f], azi[f], bxi[f], byi[f], bzi[f],
-                             axj[f], ayj[f], azj[f], bxj[f], byj[f], bzj[f],
-                             d1v[f], d2v[f], d3v[f], d4v[f]);
-#endif
+        titan_simd_dispatch::compute_4dist(
+            axi[f], ayi[f], azi[f], bxi[f], byi[f], bzi[f], axj[f], ayj[f],
+            azj[f], bxj[f], byj[f], bzj[f], d1v[f], d2v[f], d3v[f], d4v[f]);
         sum_d1 += d1v[f]; sum_d2 += d2v[f];
         sum_d3 += d3v[f]; sum_d4 += d4v[f];
       }

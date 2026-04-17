@@ -6,8 +6,9 @@
 // Zero heap allocation per data line (no istringstream, no stod).
 // ============================================================================
 #include "parse_xvg.h"
+#include "titan_charconv_compat.h"
 
-#include <charconv>
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <utility>
@@ -33,7 +34,7 @@ inline const char* skip_token(const char* p, const char* end) {
 inline bool parse_double_advance(const char*& p, const char* end, double& out) {
     p = skip_ws(p, end);
     if (p >= end) return false;
-    auto [ptr, ec] = std::from_chars(p, end, out);
+    auto [ptr, ec] = titan::from_chars_compat(p, end, out);
     if (ec != std::errc()) return false;
     p = ptr;
     return true;
@@ -64,7 +65,6 @@ parse_xvg_column(const std::string& filename, size_t target_column) {
         if (bytes_read <= 0) break;
 
         const char* chunk = buffer.data();
-        const char* chunk_end = chunk + bytes_read;
         size_t start = 0;
 
         // Find newlines and process lines
@@ -249,6 +249,103 @@ parse_xvg_time_value(const std::string& filename,
             if (ok && max_col < 16)
                 result.emplace_back(cols[time_column], cols[value_column]);
         }
+    }
+
+    return result;
+}
+
+std::expected<std::vector<XvgTimeTwoValues>, std::string>
+parse_xvg_time_two_values(const std::string& filename,
+                          size_t time_column,
+                          size_t value1_column,
+                          size_t value2_column) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file.is_open())
+        return std::unexpected("Cannot open .xvg file: " + filename);
+
+    const size_t max_col =
+        std::max(time_column, std::max(value1_column, value2_column));
+    if (max_col > 15) {
+        return std::unexpected(
+            "parse_xvg_time_two_values: column index > 15 not supported.");
+    }
+
+    std::vector<XvgTimeTwoValues> result;
+    result.reserve(100000);
+
+    constexpr size_t BUF_SIZE = 1024 * 1024;
+    std::vector<char> buffer(BUF_SIZE);
+    std::string remainder;
+    remainder.reserve(512);
+
+    auto parse_line = [&](std::string_view line_sv) {
+        if (!line_sv.empty() && line_sv.back() == '\r')
+            line_sv.remove_suffix(1);
+        if (line_sv.empty())
+            return;
+        const char first = line_sv.front();
+        if (first == '#' || first == '@')
+            return;
+
+        const char* p = line_sv.data();
+        const char* end = p + line_sv.size();
+        double cols[16] = {};
+        bool ok = true;
+        for (size_t col = 0; col <= max_col; ++col) {
+            if (!parse_double_advance(p, end, cols[col])) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok)
+            return;
+
+        XvgTimeTwoValues row;
+        row.time_ps = cols[time_column];
+        row.value1 = cols[value1_column];
+        row.value2 = cols[value2_column];
+        result.push_back(row);
+    };
+
+    while (file) {
+        file.read(buffer.data(), static_cast<std::streamsize>(BUF_SIZE));
+        std::streamsize bytes_read = file.gcount();
+        if (bytes_read <= 0)
+            break;
+
+        const char* chunk = buffer.data();
+        size_t start = 0;
+        for (size_t pos = 0; pos < static_cast<size_t>(bytes_read); ++pos) {
+            if (chunk[pos] != '\n')
+                continue;
+
+            std::string_view line_sv;
+            std::string merged_line;
+            if (!remainder.empty()) {
+                merged_line = remainder;
+                merged_line.append(chunk + start, pos - start);
+                remainder.clear();
+                line_sv = merged_line;
+            } else {
+                line_sv = std::string_view(chunk + start, pos - start);
+            }
+            start = pos + 1;
+            parse_line(line_sv);
+        }
+
+        if (start < static_cast<size_t>(bytes_read)) {
+            remainder.assign(chunk + start,
+                             static_cast<size_t>(bytes_read) - start);
+        }
+    }
+
+    if (!remainder.empty()) {
+        while (!remainder.empty() &&
+               (remainder.back() == '\r' || remainder.back() == '\n')) {
+            remainder.pop_back();
+        }
+        if (!remainder.empty())
+            parse_line(remainder);
     }
 
     return result;

@@ -1,4 +1,6 @@
 #include "h_bond.h"
+#include "titan_simd_dispatch.h"
+#include "titan_thread_compat.h"
 
 #include <algorithm>
 #include <array>
@@ -16,10 +18,6 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-
-#ifdef __AVX2__
-#include <immintrin.h>
-#endif
 
 #include "MOL.h"
 #include "functions.h"
@@ -129,41 +127,20 @@ void process_group_pair(const MOL &pro_in, const MOL &lig, const h_group &group_
   }
 }
 
-#ifdef __AVX2__
-unsigned distance_mask_avx2(const MOL &lhs, std::size_t lhs_idx,
-                            const h_groups &rhs_groups, std::size_t rhs_begin,
-                            const MOL &rhs, double cutoff_sq) noexcept {
-  alignas(32) long long gather_idx[4] = {
-      static_cast<long long>(rhs_groups.groups[rhs_begin].index),
-      static_cast<long long>(rhs_groups.groups[rhs_begin + 1].index),
-      static_cast<long long>(rhs_groups.groups[rhs_begin + 2].index),
-      static_cast<long long>(rhs_groups.groups[rhs_begin + 3].index)};
-
-  const __m256i indices =
-      _mm256_load_si256(reinterpret_cast<const __m256i *>(gather_idx));
-  const __m256d x1 = _mm256_set1_pd(lhs.pos.x[lhs_idx]);
-  const __m256d y1 = _mm256_set1_pd(lhs.pos.y[lhs_idx]);
-  const __m256d z1 = _mm256_set1_pd(lhs.pos.z[lhs_idx]);
-  const __m256d x2 = _mm256_i64gather_pd(rhs.pos.x.data(), indices, 8);
-  const __m256d y2 = _mm256_i64gather_pd(rhs.pos.y.data(), indices, 8);
-  const __m256d z2 = _mm256_i64gather_pd(rhs.pos.z.data(), indices, 8);
-
-  const __m256d dx = _mm256_sub_pd(x1, x2);
-  const __m256d dy = _mm256_sub_pd(y1, y2);
-  const __m256d dz = _mm256_sub_pd(z1, z2);
-  const __m256d dx_sq = _mm256_mul_pd(dx, dx);
-  const __m256d dy_sq = _mm256_mul_pd(dy, dy);
-  const __m256d dz_sq = _mm256_mul_pd(dz, dz);
-  const __m256d dist_sq = _mm256_add_pd(_mm256_add_pd(dx_sq, dy_sq), dz_sq);
-
-  const __m256d cutoff_vec = _mm256_set1_pd(cutoff_sq);
-  const __m256d min_vec = _mm256_set1_pd(kMinDistanceSq);
-  const __m256d le_cutoff = _mm256_cmp_pd(dist_sq, cutoff_vec, _CMP_LE_OQ);
-  const __m256d gt_min = _mm256_cmp_pd(dist_sq, min_vec, _CMP_GT_OQ);
-  const __m256d mask = _mm256_and_pd(le_cutoff, gt_min);
-  return static_cast<unsigned>(_mm256_movemask_pd(mask));
+unsigned distance_mask_dispatch(const MOL &lhs, std::size_t lhs_idx,
+                                const h_groups &rhs_groups,
+                                std::size_t rhs_begin, const MOL &rhs,
+                                double cutoff_sq) noexcept {
+  const std::int64_t gather_idx[4] = {
+      static_cast<std::int64_t>(rhs_groups.groups[rhs_begin].index),
+      static_cast<std::int64_t>(rhs_groups.groups[rhs_begin + 1].index),
+      static_cast<std::int64_t>(rhs_groups.groups[rhs_begin + 2].index),
+      static_cast<std::int64_t>(rhs_groups.groups[rhs_begin + 3].index)};
+  return titan_simd_dispatch::point_vs_gathered4_cutoff_mask(
+      lhs.pos.x[lhs_idx], lhs.pos.y[lhs_idx], lhs.pos.z[lhs_idx],
+      rhs.pos.x.data(), rhs.pos.y.data(), rhs.pos.z.data(), gather_idx,
+      cutoff_sq, kMinDistanceSq, true);
 }
-#endif
 
 bool valid_hbond_record(const h_bonds &bond,
                         const std::vector<mol_info> &acceptor_info,
@@ -492,10 +469,9 @@ void cal_h_bonds(MOL &pro_in, MOL &lig, std::size_t begin, std::size_t end,
 
     std::size_t j = 0;
 
-#ifdef __AVX2__
     for (; j + 3 < groups_2_size; j += 4) {
-      unsigned mask = distance_mask_avx2(pro_in, group_1.index, groups_2, j, lig,
-                                         dis_h_sq);
+      unsigned mask = distance_mask_dispatch(pro_in, group_1.index, groups_2, j,
+                                             lig, dis_h_sq);
       while (mask != 0U) {
         const unsigned lane = static_cast<unsigned>(std::countr_zero(mask));
         const h_group &group_2 = groups_2.groups[j + lane];
@@ -504,7 +480,6 @@ void cal_h_bonds(MOL &pro_in, MOL &lig, std::size_t begin, std::size_t end,
         mask &= (mask - 1U);
       }
     }
-#endif
 
     for (; j < groups_2_size; ++j) {
       evaluate_group_pair(pro_in, lig, group_1, groups_2.groups[j],
@@ -570,9 +545,9 @@ int find_h_bonds(MOL &pro_in, MOL &pro_in_ref, MOL &lig, MOL &lig_ref,
 
   if (num_snap == 0) {
     if (Arguments.nt >= 2) {
-      std::jthread t1(&h_groups::find_groups, &groups_1, std::cref(pro_in),
+      titan::jthread t1(&h_groups::find_groups, &groups_1, std::cref(pro_in),
                       std::cref(info_rec), std::cref(Arguments));
-      std::jthread t2(&h_groups::find_groups, &groups_2, std::cref(lig),
+      titan::jthread t2(&h_groups::find_groups, &groups_2, std::cref(lig),
                       std::cref(info_lg), std::cref(Arguments));
     } else {
       groups_1.find_groups(pro_in, info_rec, Arguments);
@@ -610,7 +585,7 @@ int find_h_bonds(MOL &pro_in, MOL &pro_in_ref, MOL &lig, MOL &lig_ref,
     cal_h_bonds(pro_in, lig, 0, groups_1.groups.size(), Arguments, groups_1,
                 groups_2, groups_2_spatial_ptr, h_bonds_pro[0], h_bonds_lig[0]);
   } else {
-    std::vector<std::jthread> workers;
+    std::vector<titan::jthread> workers;
     workers.reserve(worker_count);
     for (std::size_t i = 0; i < worker_count; ++i) {
       const std::size_t begin = i * groups_1.groups.size() / worker_count;

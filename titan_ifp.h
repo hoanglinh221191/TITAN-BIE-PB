@@ -76,6 +76,16 @@ get_atom_range(const std::vector<class index> &Index, size_t chainid,
 // ─── Main TitanIFP class ───────────────────────────────────
 class TitanIFP {
 public:
+  IFP_Frame collect_frame_contacts(const MOL &rec_mol, const MOL &lig_mol,
+                                   const std::vector<mol_info> &rec_info,
+                                   const std::vector<mol_info> &lig_info,
+                                   const std::vector<class index> &rec_index,
+                                   const std::vector<class index> &lig_index,
+                                   size_t rec_total_atoms,
+                                   size_t lig_total_atoms,
+                                   const std::vector<d_min> &dis_min,
+                                   const IfpArgs &args) const;
+
   void process_frame(const MOL &rec_mol, const MOL &lig_mol,
                      const std::vector<mol_info> &rec_info,
                      const std::vector<mol_info> &lig_info,
@@ -84,8 +94,10 @@ public:
                      size_t rec_total_atoms, size_t lig_total_atoms,
                      const std::vector<d_min> &dis_min, const IfpArgs &args);
 
-  void aggregate_occupancy();  // converts counts → percentage
+  void aggregate_occupancy();  // converts counts -> percentage
   void export_csv(const std::string &filename) const;
+  void export_rna_annotations_csv(const std::string &filename) const;
+  bool has_rna_annotations() const { return !rna_region_map_.empty(); }
 
 private:
   size_t total_frames_{0};  // online frame counter
@@ -99,6 +111,39 @@ private:
     std::array<double, 6> occupancy{}; // filled by aggregate_occupancy()
   };
   std::map<ResKey, OccupancyRecord> occupancy_map_;
+
+  struct RnaRegionRecord {
+    size_t resnr_rec{}, resnr_lig{};
+    size_t chainid_rec{}, chainid_lig{};
+    std::string res_name_rec, res_name_lig;
+    std::array<size_t, 3> counts{};
+    std::array<double, 3> occupancy{};
+  };
+  std::map<ResKey, RnaRegionRecord> rna_region_map_;
+
+  struct FrameRnaRegionContact {
+    size_t resnr_rec{}, resnr_lig{};
+    size_t chainid_rec{}, chainid_lig{};
+    std::string res_name_rec, res_name_lig;
+    std::array<bool, 3> flags{};
+  };
+
+  struct FrameAnalysisResult {
+    IFP_Frame contacts;
+    std::vector<FrameRnaRegionContact> rna_regions;
+  };
+
+  FrameAnalysisResult analyze_frame(const MOL &rec_mol, const MOL &lig_mol,
+                                   const std::vector<mol_info> &rec_info,
+                                   const std::vector<mol_info> &lig_info,
+                                   const std::vector<class index> &rec_index,
+                                   const std::vector<class index> &lig_index,
+                                   size_t rec_total_atoms,
+                                   size_t lig_total_atoms,
+                                   const std::vector<d_min> &dis_min,
+                                   const IfpArgs &args) const;
+
+  void accumulate_frame(const FrameAnalysisResult &frame);
 
   // ── Perf cache: (chainid, resnr) → respos ──
 

@@ -1,5 +1,6 @@
 #include<iostream>
 #include<thread>
+#include<functional>
 #include"matrix.h"
 #include<cmath>
 #include<vector>
@@ -78,7 +79,7 @@ matrix matrix::operator*(matrix& rhs)
 	{
 		vector<thread> mul_mat(num_of_thread);
 		for (size_t i{};i < num_of_thread;++i)
-			mul_mat[i] = thread(&matrix::impl_mul, &(*this), ref(rhs), ref(result), static_cast<int>(i*row / num_of_thread), static_cast<int>((i + 1)*row / num_of_thread));
+			mul_mat[i] = thread(&matrix::impl_mul, &(*this), std::ref(rhs), std::ref(result), static_cast<int>(i*row / num_of_thread), static_cast<int>((i + 1)*row / num_of_thread));
 		for (auto& t : mul_mat)t.join();
 	}
 	else
@@ -97,7 +98,7 @@ matrix matrix::operator*(matrix&& rhs)
 	{
 		vector<thread> mul_mat(num_of_thread);
 		for (size_t i{};i < num_of_thread;++i)
-			mul_mat[i] = thread(&matrix::impl_mul, &(*this), ref(rhs), ref(result), static_cast<int>(i*row / num_of_thread), static_cast<int>((i + 1)*row / num_of_thread));
+			mul_mat[i] = thread(&matrix::impl_mul, &(*this), std::ref(rhs), std::ref(result), static_cast<int>(i*row / num_of_thread), static_cast<int>((i + 1)*row / num_of_thread));
 		for (auto& t : mul_mat)t.join();
 	}
 	else

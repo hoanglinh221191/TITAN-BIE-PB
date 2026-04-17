@@ -6,6 +6,7 @@
 #include "miscellaneous.h"
 #include "new_emap.h"
 #include "stat_ener_res_res.h"
+#include "titan_simd_dispatch.h"
 #include "uti_func.h"
 #include <algorithm>
 #include <cmath>
@@ -138,22 +139,19 @@ int cal_energy_amber_intrin(const MOL &rec, const MOL &lg,
         vdw_temp3 =
             charmm_lj_energy_avx(sigma_self_vec, epsilon_vec, avx_array_d_rec);
       } else {
-        __m256d vdw_temp = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
-        vdw_temp = _mm256_mul_pd(avx_temp_epsilon_lg, vdw_temp);
-        vdw_temp = _mm256_sqrt_pd(vdw_temp);
-
+        alignas(32) double mixed_epsilon_arr[4]{};
         sigma_self_vec = _mm256_loadu_pd(&rec_parameters.sigma[i]);
         sigma_self_vec = _mm256_add_pd(avx_temp_sigma, sigma_self_vec);
         sigma_self_vec = _mm256_mul_pd(sigma_self_vec, avx_half);
-
-        __m256d vdw_temp2 = _mm256_div_pd(sigma_self_vec, avx_array_d_rec);
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-        vdw_temp3 = vdw_temp2;
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp3);
-        vdw_temp3 =
-            _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2), vdw_temp2);
-        vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3);
+        __m256d mixed_epsilon_vec = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
+        mixed_epsilon_vec = _mm256_mul_pd(avx_temp_epsilon_lg, mixed_epsilon_vec);
+        mixed_epsilon_vec = _mm256_sqrt_pd(mixed_epsilon_vec);
+        _mm256_storeu_pd(d_arr, avx_array_d_rec);
+        _mm256_storeu_pd(sigma_self_arr, sigma_self_vec);
+        _mm256_storeu_pd(mixed_epsilon_arr, mixed_epsilon_vec);
+        titan_simd_dispatch::lj_mixed_sigma_epsilon_distance_fourlanes(
+            sigma_self_arr, mixed_epsilon_arr, d_arr, vdw_temp_d);
+        vdw_temp3 = _mm256_loadu_pd(vdw_temp_d);
       }
 
       _mm256_storeu_pd(d_arr, avx_array_d_rec);
@@ -387,22 +385,19 @@ int cal_energy_amber_screening_intrin(
         const __m256d epsilon_vec = _mm256_loadu_pd(epsilon_lane);
         vdw_temp3 = charmm_lj_energy_avx(sigma_self_vec, epsilon_vec, avx_safe_d);
       } else {
-        __m256d vdw_temp = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
-        vdw_temp = _mm256_mul_pd(avx_temp_epsilon_lg, vdw_temp);
-        vdw_temp = _mm256_sqrt_pd(vdw_temp);
-
+        alignas(32) double mixed_epsilon_arr[4]{}, safe_d_arr[4]{};
         sigma_self_vec = _mm256_loadu_pd(&rec_parameters.sigma[i]);
         sigma_self_vec = _mm256_add_pd(avx_temp_sigma, sigma_self_vec);
         sigma_self_vec = _mm256_mul_pd(sigma_self_vec, avx_half);
-
-        __m256d vdw_temp2 = _mm256_div_pd(sigma_self_vec, avx_safe_d);
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-        vdw_temp3 = vdw_temp2;
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-        vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp3);
-        vdw_temp3 = _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2),
-                                  vdw_temp2);
-        vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3);
+        __m256d mixed_epsilon_vec = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
+        mixed_epsilon_vec = _mm256_mul_pd(avx_temp_epsilon_lg, mixed_epsilon_vec);
+        mixed_epsilon_vec = _mm256_sqrt_pd(mixed_epsilon_vec);
+        _mm256_storeu_pd(safe_d_arr, avx_safe_d);
+        _mm256_storeu_pd(sigma_self_arr, sigma_self_vec);
+        _mm256_storeu_pd(mixed_epsilon_arr, mixed_epsilon_vec);
+        titan_simd_dispatch::lj_mixed_sigma_epsilon_distance_fourlanes(
+            sigma_self_arr, mixed_epsilon_arr, safe_d_arr, vdw_temp_d);
+        vdw_temp3 = _mm256_loadu_pd(vdw_temp_d);
       }
 
       _mm256_storeu_pd(d, avx_array_d_rec);

@@ -1,143 +1,259 @@
 #include "titan_ifp.h"
+#include "polymer_classification.h"
+#include "titan_simd_dispatch.h"
 #include "titan_ui.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
-#include <immintrin.h>
+namespace PC = PolymerClassification;
 
-// ═══════════════════════════════════════════════════════════════
-// Classification helpers (static)
-// ═══════════════════════════════════════════════════════════════
+namespace {
 
-// Helper: check all HIS protonation variants across force fields
-static bool is_his_variant(const std::string &r) {
-  return r == "HIS"  || r == "HSD"  || r == "HSE"  || r == "HSP"  || // CHARMM
-         r == "HID"  || r == "HIE"  || r == "HIP"  ||                // AMBER
-         r == "HISD" || r == "HISE" || r == "HISH" ||                // OPLS
-         r == "HISA" || r == "HISB";                                 // GROMOS
+constexpr size_t kBaseRegion = 0;
+constexpr size_t kSugarRegion = 1;
+constexpr size_t kPhosphateRegion = 2;
+
+bool is_his_variant(const std::string &res_name_upper) {
+  return res_name_upper == "HIS" || res_name_upper == "HSD" ||
+         res_name_upper == "HSE" || res_name_upper == "HSP" ||
+         res_name_upper == "HID" || res_name_upper == "HIE" ||
+         res_name_upper == "HIP" || res_name_upper == "HISD" ||
+         res_name_upper == "HISE" || res_name_upper == "HISH" ||
+         res_name_upper == "HISA" || res_name_upper == "HISB";
 }
 
+bool is_protein_aromatic_residue(const std::string &res_name_upper) {
+  return res_name_upper == "PHE" || res_name_upper == "TYR" ||
+         res_name_upper == "TRP" || is_his_variant(res_name_upper);
+}
+
+bool is_nucleic_base_donor(const std::string &atom_name,
+                           const std::string &res_name_upper) {
+  const std::string atom = PC::normalize_nucleic_atom_name(atom_name);
+  if (PC::is_purine_residue_name(res_name_upper)) {
+    if (res_name_upper == "A" || res_name_upper == "RA" ||
+        res_name_upper == "ADE" || res_name_upper == "RIA" ||
+        res_name_upper == "DA") {
+      return atom == "N6";
+    }
+    return atom == "N1" || atom == "N2";
+  }
+  if (res_name_upper == "C" || res_name_upper == "RC" ||
+      res_name_upper == "CYT" || res_name_upper == "RCY" ||
+      res_name_upper == "DC") {
+    return atom == "N4";
+  }
+  if (res_name_upper == "U" || res_name_upper == "RU" ||
+      res_name_upper == "URA" || res_name_upper == "RUR" ||
+      res_name_upper == "DT" || res_name_upper == "THY") {
+    return atom == "N3";
+  }
+  return atom == "O2'";
+}
+
+bool is_nucleic_base_acceptor(const std::string &atom_name,
+                              const std::string &res_name_upper) {
+  const std::string atom = PC::normalize_nucleic_atom_name(atom_name);
+  if (res_name_upper == "A" || res_name_upper == "RA" ||
+      res_name_upper == "ADE" || res_name_upper == "RIA" ||
+      res_name_upper == "DA") {
+    return atom == "N1" || atom == "N3" || atom == "N7";
+  }
+  if (res_name_upper == "G" || res_name_upper == "RG" ||
+      res_name_upper == "GUA" || res_name_upper == "RGU" ||
+      res_name_upper == "DG") {
+    return atom == "O6" || atom == "N3" || atom == "N7";
+  }
+  if (res_name_upper == "C" || res_name_upper == "RC" ||
+      res_name_upper == "CYT" || res_name_upper == "RCY" ||
+      res_name_upper == "DC") {
+    return atom == "O2" || atom == "N3";
+  }
+  if (res_name_upper == "U" || res_name_upper == "RU" ||
+      res_name_upper == "URA" || res_name_upper == "RUR" ||
+      res_name_upper == "DT" || res_name_upper == "THY") {
+    return atom == "O2" || atom == "O4";
+  }
+  return false;
+}
+
+bool is_nucleic_sugar_acceptor(const std::string &atom_name) {
+  const std::string atom = PC::normalize_nucleic_atom_name(atom_name);
+  return atom == "O2'" || atom == "O3'" || atom == "O4'" || atom == "O5'";
+}
+
+bool is_protein_hydrophobic_atom(const std::string &atom_name,
+                                 const std::string &res_name_upper) {
+  if (res_name_upper == "ASP" || res_name_upper == "ASH" ||
+      res_name_upper == "GLU" || res_name_upper == "GLH" ||
+      res_name_upper == "ARG" || res_name_upper == "LYS" ||
+      res_name_upper == "ASN" || res_name_upper == "GLN" ||
+      is_his_variant(res_name_upper)) {
+    return false;
+  }
+
+  if (atom_name.empty())
+    return false;
+  if (atom_name[0] == 'C' && atom_name != "C")
+    return true;
+  return atom_name == "SD" && res_name_upper == "MET";
+}
+
+size_t region_index(PC::NucleicAtomRegion region) {
+  switch (region) {
+  case PC::NucleicAtomRegion::Base:
+    return kBaseRegion;
+  case PC::NucleicAtomRegion::Sugar:
+    return kSugarRegion;
+  case PC::NucleicAtomRegion::Phosphate:
+    return kPhosphateRegion;
+  default:
+    return static_cast<size_t>(-1);
+  }
+}
+
+void mark_nucleic_region(std::array<bool, 3> &flags, const mol_info &info) {
+  if (!PC::is_nucleic_residue_name(PC::uppercase_copy(info.get_res_name())))
+    return;
+  const size_t idx =
+      region_index(PC::classify_nucleic_atom_region(info.get_atom()));
+  if (idx < flags.size())
+    flags[idx] = true;
+}
+
+std::pair<size_t, size_t>
+find_residue_full_range(const std::vector<class index> &Index, size_t chainid,
+                        size_t target_resnr, size_t mol_total_atoms) {
+  if (chainid >= Index.size())
+    return {SIZE_MAX, 0};
+  const auto &idx = Index[chainid];
+  size_t first_pos = SIZE_MAX;
+  size_t last_pos = SIZE_MAX;
+  for (size_t i = 0; i < idx.get_size_v(); ++i) {
+    if (idx.get_res_num_e(i) == target_resnr) {
+      if (first_pos == SIZE_MAX)
+        first_pos = i;
+      last_pos = i;
+    }
+  }
+  if (first_pos == SIZE_MAX)
+    return {SIZE_MAX, 0};
+  const size_t start = idx.get_res_pos_e(first_pos) - 1;
+  size_t end = mol_total_atoms;
+  if (last_pos + 1 < idx.get_size_v()) {
+    end = idx.get_res_pos_e(last_pos + 1) - 1;
+  } else if (chainid + 1 < Index.size()) {
+    end = Index[chainid + 1].get_res_pos_e(0) - 1;
+  }
+  return {start, end};
+}
+
+} // namespace
+
 bool TitanIFP::is_aromatic_residue(const std::string &res_name) {
-  return res_name == "PHE" || res_name == "TYR" || res_name == "TRP" ||
-         is_his_variant(res_name);
+  const std::string upper = PC::uppercase_copy(res_name);
+  return is_protein_aromatic_residue(upper) ||
+         PC::is_nucleic_residue_name(upper);
 }
 
 bool TitanIFP::is_hydrophobic_atom(const std::string &atom_name,
                                    const std::string &res_name) {
-  // Exclude polar residues entirely
-  if (res_name == "ASP" || res_name == "GLU" || res_name == "ARG" ||
-      res_name == "LYS" || res_name == "HIS" || res_name == "HISE" ||
-      res_name == "ASN" || res_name == "GLN")
-    return false;
-
-  if (atom_name.empty())
-    return false;
-  // Carbon atoms (CB, CG, CD, CE, CZ, etc.)
-  if (atom_name[0] == 'C' && atom_name != "C")
-    return true;
-  // Sulfur in methionine
-  if (atom_name == "SD" && res_name == "MET")
-    return true;
-
-  return false;
+  const std::string upper = PC::uppercase_copy(res_name);
+  if (PC::is_nucleic_residue_name(upper))
+    return PC::is_nucleobase_carbon(atom_name);
+  return is_protein_hydrophobic_atom(atom_name, upper);
 }
 
 bool TitanIFP::is_hbond_donor(const std::string &atom,
                               const std::string &res_name) {
-  // Backbone NH
+  const std::string upper = PC::uppercase_copy(res_name);
+  if (PC::is_nucleic_residue_name(upper))
+    return is_nucleic_base_donor(atom, upper);
+
   if (atom == "N")
     return true;
-  // Ser/Thr OH
-  if ((res_name == "SER" || res_name == "THR") && atom == "OG")
+  if ((upper == "SER" || upper == "THR") && atom == "OG")
     return true;
-  if (res_name == "THR" && atom == "OG1")
+  if (upper == "THR" && atom == "OG1")
     return true;
-  // Tyr OH
-  if (res_name == "TYR" && atom == "OH")
+  if (upper == "TYR" && atom == "OH")
     return true;
-  // Arg NH
-  if (res_name == "ARG" &&
-      (atom == "NH1" || atom == "NH2" || atom == "NE"))
+  if (upper == "ARG" && (atom == "NH1" || atom == "NH2" || atom == "NE"))
     return true;
-  // Lys NH3+
-  if (res_name == "LYS" && atom == "NZ")
+  if (upper == "LYS" && atom == "NZ")
     return true;
-  // His NH (all variants)
-  if (is_his_variant(res_name) && (atom == "ND1" || atom == "NE2"))
+  if (is_his_variant(upper) && (atom == "ND1" || atom == "NE2"))
     return true;
-  // Asn/Gln NH2
-  if (res_name == "ASN" && atom == "ND2")
+  if (upper == "ASN" && atom == "ND2")
     return true;
-  if (res_name == "GLN" && atom == "NE2")
+  if (upper == "GLN" && atom == "NE2")
     return true;
-  // Trp NH
-  if (res_name == "TRP" && atom == "NE1")
+  if (upper == "TRP" && atom == "NE1")
     return true;
-  // Cys SH
-  if (res_name == "CYS" && atom == "SG")
+  if (upper == "CYS" && atom == "SG")
     return true;
   return false;
 }
 
 bool TitanIFP::is_hbond_acceptor(const std::string &atom,
                                  const std::string &res_name) {
-  // Backbone C=O
+  const std::string upper = PC::uppercase_copy(res_name);
+  if (PC::is_nucleic_residue_name(upper)) {
+    return is_nucleic_base_acceptor(atom, upper) ||
+           is_nucleic_sugar_acceptor(atom) ||
+           PC::is_phosphate_oxygen(atom);
+  }
+
   if (atom == "O")
     return true;
-  // Asp/Glu COO-
-  if ((res_name == "ASP" || res_name == "ASH") &&
+  if ((upper == "ASP" || upper == "ASH") &&
       (atom == "OD1" || atom == "OD2"))
     return true;
-  if ((res_name == "GLU" || res_name == "GLH") &&
+  if ((upper == "GLU" || upper == "GLH") &&
       (atom == "OE1" || atom == "OE2"))
     return true;
-  // Ser/Thr OH (also acceptor)
-  if ((res_name == "SER" || res_name == "THR") && atom == "OG")
+  if ((upper == "SER" || upper == "THR") && atom == "OG")
     return true;
-  if (res_name == "THR" && atom == "OG1")
+  if (upper == "THR" && atom == "OG1")
     return true;
-  // Tyr OH
-  if (res_name == "TYR" && atom == "OH")
+  if (upper == "TYR" && atom == "OH")
     return true;
-  // Asn/Gln C=O
-  if (res_name == "ASN" && atom == "OD1")
+  if (upper == "ASN" && atom == "OD1")
     return true;
-  if (res_name == "GLN" && atom == "OE1")
+  if (upper == "GLN" && atom == "OE1")
     return true;
-  // His N (all variants)
-  if (is_his_variant(res_name) && (atom == "ND1" || atom == "NE2"))
+  if (is_his_variant(upper) && (atom == "ND1" || atom == "NE2"))
     return true;
-  // Backbone N (weak acceptor, but commonly counted)
-  // Met S
-  if (res_name == "MET" && atom == "SD")
+  if (upper == "MET" && atom == "SD")
     return true;
   return false;
 }
 
 bool TitanIFP::is_acidic(const std::string &atom, const std::string &res_name) {
-  if (res_name == "ASP" && (atom == "OD1" || atom == "OD2"))
+  const std::string upper = PC::uppercase_copy(res_name);
+  if (upper == "ASP" && (atom == "OD1" || atom == "OD2"))
     return true;
-  if (res_name == "GLU" && (atom == "OE1" || atom == "OE2"))
+  if (upper == "GLU" && (atom == "OE1" || atom == "OE2"))
     return true;
   return false;
 }
 
 bool TitanIFP::is_basic(const std::string &atom, const std::string &res_name) {
-  if (res_name == "ARG" &&
-      (atom == "NH1" || atom == "NH2" || atom == "NE"))
+  const std::string upper = PC::uppercase_copy(res_name);
+  if (upper == "ARG" && (atom == "NH1" || atom == "NH2" || atom == "NE"))
     return true;
-  if (res_name == "LYS" && atom == "NZ")
+  if (upper == "LYS" && atom == "NZ")
     return true;
-  if (is_his_variant(res_name) && (atom == "ND1" || atom == "NE2"))
+  if (is_his_variant(upper) && (atom == "ND1" || atom == "NE2"))
     return true;
   return false;
 }
 
 bool TitanIFP::is_halogen(const std::string &atom) {
-  // F excluded: sigma hole too weak for halogen bonding
-  return atom == "CL" || atom == "BR" || atom == "I" || atom == "Cl" ||
-         atom == "Br";
+  return atom == "CL" || atom == "BR" || atom == "I" ||
+         atom == "Cl" || atom == "Br";
 }
 
 bool TitanIFP::is_halogen_acceptor(const std::string &atom) {
@@ -148,55 +264,59 @@ bool TitanIFP::is_halogen_acceptor(const std::string &atom) {
 
 bool TitanIFP::is_cation_atom(const std::string &atom,
                               const std::string &res_name) {
-  if (res_name == "ARG" &&
-      (atom == "NH1" || atom == "NH2" || atom == "NE"))
+  const std::string upper = PC::uppercase_copy(res_name);
+  if (upper == "ARG" && (atom == "NH1" || atom == "NH2" || atom == "NE"))
     return true;
-  if (res_name == "LYS" && atom == "NZ")
+  if (upper == "LYS" && atom == "NZ")
     return true;
-  // HSP/HIP/HISH are doubly protonated → cation character
-  if ((res_name == "HSP" || res_name == "HIP" || res_name == "HISH") &&
+  if ((upper == "HSP" || upper == "HIP" || upper == "HISH") &&
       (atom == "ND1" || atom == "NE2"))
     return true;
   return false;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Aromatic ring atom tables
-// ═══════════════════════════════════════════════════════════════
-
 TitanIFP::RingAtoms
 TitanIFP::get_ring_atoms(const std::string &res_name,
                          const std::vector<mol_info> &info, size_t start,
                          size_t end) {
-  // Define which atom names form the aromatic ring
-  static const std::vector<std::string> phe_ring = {"CG",  "CD1", "CD2",
-                                                    "CE1", "CE2", "CZ"};
-  static const std::vector<std::string> tyr_ring = {"CG",  "CD1", "CD2",
-                                                    "CE1", "CE2", "CZ"};
-  static const std::vector<std::string> trp_ring = {"CG",  "CD1", "CD2",
-                                                    "NE1", "CE2", "CE3",
-                                                    "CZ2", "CZ3", "CH2"};
-  static const std::vector<std::string> his_ring = {"CG", "ND1", "CD2",
-                                                    "CE1", "NE2"};
+  const std::string upper = PC::uppercase_copy(res_name);
+
+  static const std::vector<std::string> phe_ring = {
+      "CG", "CD1", "CD2", "CE1", "CE2", "CZ"};
+  static const std::vector<std::string> tyr_ring = {
+      "CG", "CD1", "CD2", "CE1", "CE2", "CZ"};
+  static const std::vector<std::string> trp_ring = {
+      "CG", "CD1", "CD2", "NE1", "CE2", "CE3", "CZ2", "CZ3", "CH2"};
+  static const std::vector<std::string> his_ring = {
+      "CG", "ND1", "CD2", "CE1", "NE2"};
+  static const std::vector<std::string> purine_ring = {
+      "N9", "C8", "N7", "C5", "C4", "N3", "C2", "N1", "C6"};
+  static const std::vector<std::string> pyrimidine_ring = {
+      "N1", "C2", "N3", "C4", "C5", "C6"};
 
   const std::vector<std::string> *ring_names = nullptr;
-  if (res_name == "PHE")
+  if (upper == "PHE")
     ring_names = &phe_ring;
-  else if (res_name == "TYR")
+  else if (upper == "TYR")
     ring_names = &tyr_ring;
-  else if (res_name == "TRP")
+  else if (upper == "TRP")
     ring_names = &trp_ring;
-  else if (is_his_variant(res_name))
+  else if (is_his_variant(upper))
     ring_names = &his_ring;
+  else if (PC::is_purine_residue_name(upper))
+    ring_names = &purine_ring;
+  else if (PC::is_pyrimidine_residue_name(upper))
+    ring_names = &pyrimidine_ring;
 
   RingAtoms indices;
-  if (!ring_names)
+  if (ring_names == nullptr)
     return indices;
 
   for (size_t i = start; i < end; ++i) {
-    const auto &aname = info[i].get_atom();
-    for (const auto &rn : *ring_names) {
-      if (aname == rn) {
+    const std::string atom_name =
+        PC::normalize_nucleic_atom_name(info[i].get_atom());
+    for (const auto &expected : *ring_names) {
+      if (atom_name == expected) {
         indices.push_back(i);
         break;
       }
@@ -205,10 +325,6 @@ TitanIFP::get_ring_atoms(const std::string &res_name,
   return indices;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Ring geometry (Eigen)
-// ═══════════════════════════════════════════════════════════════
-
 bool TitanIFP::compute_ring_geometry(const MOL &mol,
                                      const RingAtoms &ring_indices,
                                      Eigen::Vector3d &com,
@@ -216,56 +332,47 @@ bool TitanIFP::compute_ring_geometry(const MOL &mol,
   if (ring_indices.size() < 3)
     return false;
 
-  // Ring COM
   com = Eigen::Vector3d::Zero();
   for (auto idx : ring_indices) {
     com += Eigen::Vector3d(mol.pos.x[idx], mol.pos.y[idx], mol.pos.z[idx]);
   }
   com /= static_cast<double>(ring_indices.size());
 
-  // Ring normal: cross product of (atom[1]-atom[0]) × (atom[2]-atom[0])
-  Eigen::Vector3d p0(mol.pos.x[ring_indices.idx[0]], mol.pos.y[ring_indices.idx[0]],
-                     mol.pos.z[ring_indices.idx[0]]);
-  Eigen::Vector3d p1(mol.pos.x[ring_indices.idx[1]], mol.pos.y[ring_indices.idx[1]],
-                     mol.pos.z[ring_indices.idx[1]]);
-  Eigen::Vector3d p2(mol.pos.x[ring_indices.idx[2]], mol.pos.y[ring_indices.idx[2]],
-                     mol.pos.z[ring_indices.idx[2]]);
-
-  Eigen::Vector3d v1 = p1 - p0;
-  Eigen::Vector3d v2 = p2 - p0;
-  Eigen::Vector3d n = v1.cross(v2);
-  double n_norm = n.norm();
+  const Eigen::Vector3d p0(mol.pos.x[ring_indices.idx[0]],
+                           mol.pos.y[ring_indices.idx[0]],
+                           mol.pos.z[ring_indices.idx[0]]);
+  const Eigen::Vector3d p1(mol.pos.x[ring_indices.idx[1]],
+                           mol.pos.y[ring_indices.idx[1]],
+                           mol.pos.z[ring_indices.idx[1]]);
+  const Eigen::Vector3d p2(mol.pos.x[ring_indices.idx[2]],
+                           mol.pos.y[ring_indices.idx[2]],
+                           mol.pos.z[ring_indices.idx[2]]);
+  const Eigen::Vector3d v1 = p1 - p0;
+  const Eigen::Vector3d v2 = p2 - p0;
+  const Eigen::Vector3d n = v1.cross(v2);
+  const double n_norm = n.norm();
   if (n_norm < 1e-10)
     return false;
   normal = n / n_norm;
   return true;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Find bonded hydrogen
-// ═══════════════════════════════════════════════════════════════
-
 size_t TitanIFP::find_bonded_hydrogen(const MOL &mol,
                                       const std::vector<mol_info> &info,
                                       size_t donor_idx, size_t res_start,
                                       size_t res_end) const {
   for (size_t h = res_start; h < res_end; ++h) {
-    const auto &aname = info[h].get_atom();
-    if (aname.empty() || aname[0] != 'H')
+    const auto &atom_name = info[h].get_atom();
+    if (atom_name.empty() || atom_name[0] != 'H')
       continue;
-    double dx = mol.pos.x[h] - mol.pos.x[donor_idx];
-    double dy = mol.pos.y[h] - mol.pos.y[donor_idx];
-    double dz = mol.pos.z[h] - mol.pos.z[donor_idx];
-    double d2 = dx * dx + dy * dy + dz * dz;
-    if (d2 < 1.44) // 1.2² Å
+    const double dx = mol.pos.x[h] - mol.pos.x[donor_idx];
+    const double dy = mol.pos.y[h] - mol.pos.y[donor_idx];
+    const double dz = mol.pos.z[h] - mol.pos.z[donor_idx];
+    if ((dx * dx + dy * dy + dz * dz) < 1.44)
       return h;
   }
   return SIZE_MAX;
 }
-
-// ═══════════════════════════════════════════════════════════════
-// Geometric checkers
-// ═══════════════════════════════════════════════════════════════
 
 bool TitanIFP::check_hbond(const MOL &rec_mol, const MOL &lig_mol,
                            const std::vector<mol_info> &rec_info,
@@ -280,56 +387,49 @@ bool TitanIFP::check_hbond(const MOL &rec_mol, const MOL &lig_mol,
   const auto &atom_l = lig_info[al].get_atom();
   const auto &res_l = lig_info[al].get_res_name();
 
-  // Case 1: rec=donor, lig=acceptor
   if (is_hbond_donor(atom_r, res_r) && is_hbond_acceptor(atom_l, res_l)) {
-    size_t h_idx = find_bonded_hydrogen(rec_mol, rec_info, ar, rs, re);
+    const size_t h_idx = find_bonded_hydrogen(rec_mol, rec_info, ar, rs, re);
     if (h_idx != SIZE_MAX) {
-      // D-H···A angle at H: vectors H→D and H→A
-      double hx = rec_mol.pos.x[h_idx], hy = rec_mol.pos.y[h_idx],
-             hz = rec_mol.pos.z[h_idx];
-      double v_hd_x = hx - rec_mol.pos.x[ar];  // H→D
-      double v_hd_y = hy - rec_mol.pos.y[ar];
-      double v_hd_z = hz - rec_mol.pos.z[ar];
-      double v_ha_x = lig_mol.pos.x[al] - hx;  // H→A
-      double v_ha_y = lig_mol.pos.y[al] - hy;
-      double v_ha_z = lig_mol.pos.z[al] - hz;
-
-      double dot = v_hd_x * v_ha_x + v_hd_y * v_ha_y + v_hd_z * v_ha_z;
-      double mag_hd = std::sqrt(v_hd_x * v_hd_x + v_hd_y * v_hd_y +
-                                v_hd_z * v_hd_z);
-      double mag_ha = std::sqrt(v_ha_x * v_ha_x + v_ha_y * v_ha_y +
-                                v_ha_z * v_ha_z);
+      const double hx = rec_mol.pos.x[h_idx];
+      const double hy = rec_mol.pos.y[h_idx];
+      const double hz = rec_mol.pos.z[h_idx];
+      const double v_hd_x = hx - rec_mol.pos.x[ar];
+      const double v_hd_y = hy - rec_mol.pos.y[ar];
+      const double v_hd_z = hz - rec_mol.pos.z[ar];
+      const double v_ha_x = lig_mol.pos.x[al] - hx;
+      const double v_ha_y = lig_mol.pos.y[al] - hy;
+      const double v_ha_z = lig_mol.pos.z[al] - hz;
+      const double dot = v_hd_x * v_ha_x + v_hd_y * v_ha_y + v_hd_z * v_ha_z;
+      const double mag_hd =
+          std::sqrt(v_hd_x * v_hd_x + v_hd_y * v_hd_y + v_hd_z * v_hd_z);
+      const double mag_ha =
+          std::sqrt(v_ha_x * v_ha_x + v_ha_y * v_ha_y + v_ha_z * v_ha_z);
       if (mag_hd > 1e-10 && mag_ha > 1e-10) {
-        double cos_angle = dot / (mag_hd * mag_ha);
-        // D-H···A angle ≥ 135° → cos(DHA) ≤ cos(135°) ≈ -0.7071
-        if (cos_angle <= -0.7071)
+        if ((dot / (mag_hd * mag_ha)) <= -0.7071)
           return true;
       }
     }
   }
 
-  // Case 2: lig=donor, rec=acceptor
   if (is_hbond_donor(atom_l, res_l) && is_hbond_acceptor(atom_r, res_r)) {
-    size_t h_idx = find_bonded_hydrogen(lig_mol, lig_info, al, ls, le);
+    const size_t h_idx = find_bonded_hydrogen(lig_mol, lig_info, al, ls, le);
     if (h_idx != SIZE_MAX) {
-      double hx = lig_mol.pos.x[h_idx], hy = lig_mol.pos.y[h_idx],
-             hz = lig_mol.pos.z[h_idx];
-      double v_hd_x = hx - lig_mol.pos.x[al];  // H→D
-      double v_hd_y = hy - lig_mol.pos.y[al];
-      double v_hd_z = hz - lig_mol.pos.z[al];
-      double v_ha_x = rec_mol.pos.x[ar] - hx;   // H→A
-      double v_ha_y = rec_mol.pos.y[ar] - hy;
-      double v_ha_z = rec_mol.pos.z[ar] - hz;
-
-      double dot = v_hd_x * v_ha_x + v_hd_y * v_ha_y + v_hd_z * v_ha_z;
-      double mag_hd = std::sqrt(v_hd_x * v_hd_x + v_hd_y * v_hd_y +
-                                v_hd_z * v_hd_z);
-      double mag_ha = std::sqrt(v_ha_x * v_ha_x + v_ha_y * v_ha_y +
-                                v_ha_z * v_ha_z);
+      const double hx = lig_mol.pos.x[h_idx];
+      const double hy = lig_mol.pos.y[h_idx];
+      const double hz = lig_mol.pos.z[h_idx];
+      const double v_hd_x = hx - lig_mol.pos.x[al];
+      const double v_hd_y = hy - lig_mol.pos.y[al];
+      const double v_hd_z = hz - lig_mol.pos.z[al];
+      const double v_ha_x = rec_mol.pos.x[ar] - hx;
+      const double v_ha_y = rec_mol.pos.y[ar] - hy;
+      const double v_ha_z = rec_mol.pos.z[ar] - hz;
+      const double dot = v_hd_x * v_ha_x + v_hd_y * v_ha_y + v_hd_z * v_ha_z;
+      const double mag_hd =
+          std::sqrt(v_hd_x * v_hd_x + v_hd_y * v_hd_y + v_hd_z * v_hd_z);
+      const double mag_ha =
+          std::sqrt(v_ha_x * v_ha_x + v_ha_y * v_ha_y + v_ha_z * v_ha_z);
       if (mag_hd > 1e-10 && mag_ha > 1e-10) {
-        double cos_angle = dot / (mag_hd * mag_ha);
-        // D-H···A angle ≥ 135° → cos(DHA) ≤ cos(135°) ≈ -0.7071
-        if (cos_angle <= -0.7071)
+        if ((dot / (mag_hd * mag_ha)) <= -0.7071)
           return true;
       }
     }
@@ -345,8 +445,20 @@ bool TitanIFP::check_salt_bridge(const mol_info &info_a,
   const auto &atom_b = info_b.get_atom();
   const auto &res_b = info_b.get_res_name();
 
-  return (is_acidic(atom_a, res_a) && is_basic(atom_b, res_b)) ||
-         (is_basic(atom_a, res_a) && is_acidic(atom_b, res_b));
+  const bool protein_ionic =
+      (is_acidic(atom_a, res_a) && is_basic(atom_b, res_b)) ||
+      (is_basic(atom_a, res_a) && is_acidic(atom_b, res_b));
+  if (protein_ionic)
+    return true;
+
+  const std::string upper_a = PC::uppercase_copy(res_a);
+  const std::string upper_b = PC::uppercase_copy(res_b);
+  const bool a_is_phosphate =
+      PC::is_nucleic_residue_name(upper_a) && PC::is_phosphate_oxygen(atom_a);
+  const bool b_is_phosphate =
+      PC::is_nucleic_residue_name(upper_b) && PC::is_phosphate_oxygen(atom_b);
+  return (a_is_phosphate && is_basic(atom_b, res_b)) ||
+         (b_is_phosphate && is_basic(atom_a, res_a));
 }
 
 bool TitanIFP::check_hydrophobic(const mol_info &info_a,
@@ -366,46 +478,33 @@ bool TitanIFP::check_pi_pi(const MOL &rec_mol, const MOL &lig_mol,
                            bool &is_cation_pi) const {
   is_cation_pi = false;
 
-  // Compute ring atoms once for each side (Stability 2: use verified res names)
-  auto rec_ring = get_ring_atoms(rec_res_name, rec_info, rec_start, rec_end);
-  auto lig_ring = get_ring_atoms(lig_res_name, lig_info, lig_start, lig_end);
+  const auto rec_ring = get_ring_atoms(rec_res_name, rec_info, rec_start, rec_end);
+  const auto lig_ring = get_ring_atoms(lig_res_name, lig_info, lig_start, lig_end);
+  const bool rec_aromatic = !rec_ring.empty();
+  const bool lig_aromatic = !lig_ring.empty();
 
-  bool rec_aromatic = !rec_ring.empty();
-  bool lig_aromatic = !lig_ring.empty();
-
-  // Bug 3 fix: compute ring geometry once, reuse for Pi-Pi and Cation-Pi
   Eigen::Vector3d rec_com, rec_normal, lig_com, lig_normal;
-  bool rec_geom_ok = rec_aromatic &&
-      compute_ring_geometry(rec_mol, rec_ring, rec_com, rec_normal);
-  bool lig_geom_ok = lig_aromatic &&
-      compute_ring_geometry(lig_mol, lig_ring, lig_com, lig_normal);
+  const bool rec_geom_ok =
+      rec_aromatic && compute_ring_geometry(rec_mol, rec_ring, rec_com, rec_normal);
+  const bool lig_geom_ok =
+      lig_aromatic && compute_ring_geometry(lig_mol, lig_ring, lig_com, lig_normal);
 
-  // Pi-Pi: both must be aromatic with valid geometry
   bool pi_pi_detected = false;
   if (rec_geom_ok && lig_geom_ok) {
-    double com_dist = (rec_com - lig_com).norm();
+    const double com_dist = (rec_com - lig_com).norm();
     if (com_dist < cutoff) {
-      double cos_angle =
-          std::abs(rec_normal.dot(lig_normal)); // abs → both faces
-
-      // Face-to-face: angle between normals < 30° → cos > 0.866
-      // Edge-to-face: angle between normals 50°–90° → 0 ≤ cos < 0.643
-      // Bug 4 fix: exclude anti-parallel (cos near 0 but angle > 90°)
-      if (cos_angle > 0.866 || (cos_angle >= 0.0 && cos_angle < 0.643)) {
+      const double cos_angle = std::abs(rec_normal.dot(lig_normal));
+      if (cos_angle > 0.866 || (cos_angle >= 0.0 && cos_angle < 0.643))
         pi_pi_detected = true;
-      }
     }
   }
 
-  // Cation-Pi: rec aromatic ring vs ligand cation
   if (rec_geom_ok) {
     for (size_t al = lig_start; al < lig_end; ++al) {
-      if (is_cation_atom(lig_info[al].get_atom(),
-                         lig_info[al].get_res_name())) {
-        Eigen::Vector3d cat_pos(lig_mol.pos.x[al], lig_mol.pos.y[al],
-                               lig_mol.pos.z[al]);
-        double cat_dist = (rec_com - cat_pos).norm();
-        if (cat_dist < cutoff_cation_pi) {
+      if (is_cation_atom(lig_info[al].get_atom(), lig_info[al].get_res_name())) {
+        const Eigen::Vector3d cat_pos(
+            lig_mol.pos.x[al], lig_mol.pos.y[al], lig_mol.pos.z[al]);
+        if ((rec_com - cat_pos).norm() < cutoff_cation_pi) {
           is_cation_pi = true;
           break;
         }
@@ -413,15 +512,12 @@ bool TitanIFP::check_pi_pi(const MOL &rec_mol, const MOL &lig_mol,
     }
   }
 
-  // Cation-Pi: lig aromatic ring vs receptor cation
   if (lig_geom_ok && !is_cation_pi) {
     for (size_t ar = rec_start; ar < rec_end; ++ar) {
-      if (is_cation_atom(rec_info[ar].get_atom(),
-                         rec_info[ar].get_res_name())) {
-        Eigen::Vector3d cat_pos(rec_mol.pos.x[ar], rec_mol.pos.y[ar],
-                               rec_mol.pos.z[ar]);
-        double cat_dist = (lig_com - cat_pos).norm();
-        if (cat_dist < cutoff_cation_pi) {
+      if (is_cation_atom(rec_info[ar].get_atom(), rec_info[ar].get_res_name())) {
+        const Eigen::Vector3d cat_pos(
+            rec_mol.pos.x[ar], rec_mol.pos.y[ar], rec_mol.pos.z[ar]);
+        if ((lig_com - cat_pos).norm() < cutoff_cation_pi) {
           is_cation_pi = true;
           break;
         }
@@ -437,70 +533,58 @@ bool TitanIFP::check_halogen(const MOL &rec_mol, const MOL &lig_mol,
                              const std::vector<mol_info> &lig_info, size_t ar,
                              size_t al, size_t rs, size_t re, size_t ls,
                              size_t le, double d) const {
+  (void)d;
   const auto &atom_r = rec_info[ar].get_atom();
   const auto &atom_l = lig_info[al].get_atom();
 
-  // Case 1: lig has halogen, rec has acceptor
   if (is_halogen(atom_l) && is_halogen_acceptor(atom_r)) {
-    // Find carbon bonded to halogen in ligand residue (ls..le range)
     for (size_t c = ls; c < le; ++c) {
       if (lig_info[c].get_atom().empty() || lig_info[c].get_atom()[0] != 'C')
         continue;
-      double cx_dx = lig_mol.pos.x[c] - lig_mol.pos.x[al];
-      double cx_dy = lig_mol.pos.y[c] - lig_mol.pos.y[al];
-      double cx_dz = lig_mol.pos.z[c] - lig_mol.pos.z[al];
-      double cx_d = std::sqrt(cx_dx * cx_dx + cx_dy * cx_dy + cx_dz * cx_dz);
+      const double cx_dx = lig_mol.pos.x[c] - lig_mol.pos.x[al];
+      const double cx_dy = lig_mol.pos.y[c] - lig_mol.pos.y[al];
+      const double cx_dz = lig_mol.pos.z[c] - lig_mol.pos.z[al];
+      const double cx_d = std::sqrt(cx_dx * cx_dx + cx_dy * cx_dy + cx_dz * cx_dz);
       if (cx_d < 2.1 && cx_d > 0.1) {
-        // Angle C-X···Acceptor at X
-        double v_cx_x = lig_mol.pos.x[c] - lig_mol.pos.x[al];
-        double v_cx_y = lig_mol.pos.y[c] - lig_mol.pos.y[al];
-        double v_cx_z = lig_mol.pos.z[c] - lig_mol.pos.z[al];
-        double v_xa_x = rec_mol.pos.x[ar] - lig_mol.pos.x[al];
-        double v_xa_y = rec_mol.pos.y[ar] - lig_mol.pos.y[al];
-        double v_xa_z = rec_mol.pos.z[ar] - lig_mol.pos.z[al];
-
-        double dot = v_cx_x * v_xa_x + v_cx_y * v_xa_y + v_cx_z * v_xa_z;
-        double m1 =
-            std::sqrt(v_cx_x * v_cx_x + v_cx_y * v_cx_y + v_cx_z * v_cx_z);
-        double m2 =
-            std::sqrt(v_xa_x * v_xa_x + v_xa_y * v_xa_y + v_xa_z * v_xa_z);
-        if (m1 > 1e-10 && m2 > 1e-10) {
-          double cos_angle = dot / (m1 * m2);
-          // C-X···A angle > 160° → cos < cos(160°) ≈ -0.9397
-          if (cos_angle < -0.9397)
-            return true;
-        }
+        const double v_cx_x = lig_mol.pos.x[c] - lig_mol.pos.x[al];
+        const double v_cx_y = lig_mol.pos.y[c] - lig_mol.pos.y[al];
+        const double v_cx_z = lig_mol.pos.z[c] - lig_mol.pos.z[al];
+        const double v_xa_x = rec_mol.pos.x[ar] - lig_mol.pos.x[al];
+        const double v_xa_y = rec_mol.pos.y[ar] - lig_mol.pos.y[al];
+        const double v_xa_z = rec_mol.pos.z[ar] - lig_mol.pos.z[al];
+        const double dot = v_cx_x * v_xa_x + v_cx_y * v_xa_y + v_cx_z * v_xa_z;
+        const double m1 = std::sqrt(v_cx_x * v_cx_x + v_cx_y * v_cx_y +
+                                    v_cx_z * v_cx_z);
+        const double m2 = std::sqrt(v_xa_x * v_xa_x + v_xa_y * v_xa_y +
+                                    v_xa_z * v_xa_z);
+        if (m1 > 1e-10 && m2 > 1e-10 && (dot / (m1 * m2)) < -0.9397)
+          return true;
       }
     }
   }
 
-  // Case 2: rec has halogen, lig has acceptor (less common, but symmetric)
   if (is_halogen(atom_r) && is_halogen_acceptor(atom_l)) {
     for (size_t c = rs; c < re; ++c) {
       if (rec_info[c].get_atom().empty() || rec_info[c].get_atom()[0] != 'C')
         continue;
-      double cx_dx = rec_mol.pos.x[c] - rec_mol.pos.x[ar];
-      double cx_dy = rec_mol.pos.y[c] - rec_mol.pos.y[ar];
-      double cx_dz = rec_mol.pos.z[c] - rec_mol.pos.z[ar];
-      double cx_d = std::sqrt(cx_dx * cx_dx + cx_dy * cx_dy + cx_dz * cx_dz);
+      const double cx_dx = rec_mol.pos.x[c] - rec_mol.pos.x[ar];
+      const double cx_dy = rec_mol.pos.y[c] - rec_mol.pos.y[ar];
+      const double cx_dz = rec_mol.pos.z[c] - rec_mol.pos.z[ar];
+      const double cx_d = std::sqrt(cx_dx * cx_dx + cx_dy * cx_dy + cx_dz * cx_dz);
       if (cx_d < 2.1 && cx_d > 0.1) {
-        double v_cx_x = rec_mol.pos.x[c] - rec_mol.pos.x[ar];
-        double v_cx_y = rec_mol.pos.y[c] - rec_mol.pos.y[ar];
-        double v_cx_z = rec_mol.pos.z[c] - rec_mol.pos.z[ar];
-        double v_xa_x = lig_mol.pos.x[al] - rec_mol.pos.x[ar];
-        double v_xa_y = lig_mol.pos.y[al] - rec_mol.pos.y[ar];
-        double v_xa_z = lig_mol.pos.z[al] - rec_mol.pos.z[ar];
-
-        double dot = v_cx_x * v_xa_x + v_cx_y * v_xa_y + v_cx_z * v_xa_z;
-        double m1 =
-            std::sqrt(v_cx_x * v_cx_x + v_cx_y * v_cx_y + v_cx_z * v_cx_z);
-        double m2 =
-            std::sqrt(v_xa_x * v_xa_x + v_xa_y * v_xa_y + v_xa_z * v_xa_z);
-        if (m1 > 1e-10 && m2 > 1e-10) {
-          double cos_angle = dot / (m1 * m2);
-          if (cos_angle < -0.9397)
-            return true;
-        }
+        const double v_cx_x = rec_mol.pos.x[c] - rec_mol.pos.x[ar];
+        const double v_cx_y = rec_mol.pos.y[c] - rec_mol.pos.y[ar];
+        const double v_cx_z = rec_mol.pos.z[c] - rec_mol.pos.z[ar];
+        const double v_xa_x = lig_mol.pos.x[al] - rec_mol.pos.x[ar];
+        const double v_xa_y = lig_mol.pos.y[al] - rec_mol.pos.y[ar];
+        const double v_xa_z = lig_mol.pos.z[al] - rec_mol.pos.z[ar];
+        const double dot = v_cx_x * v_xa_x + v_cx_y * v_xa_y + v_cx_z * v_xa_z;
+        const double m1 = std::sqrt(v_cx_x * v_cx_x + v_cx_y * v_cx_y +
+                                    v_cx_z * v_cx_z);
+        const double m2 = std::sqrt(v_xa_x * v_xa_x + v_xa_y * v_xa_y +
+                                    v_xa_z * v_xa_z);
+        if (m1 > 1e-10 && m2 > 1e-10 && (dot / (m1 * m2)) < -0.9397)
+          return true;
       }
     }
   }
@@ -508,54 +592,16 @@ bool TitanIFP::check_halogen(const MOL &rec_mol, const MOL &lig_mol,
   return false;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// File-local helper: find full [start, end) atom range for ligand
-// (handles per-atom Index entries sharing the same resnr)
-// ═══════════════════════════════════════════════════════════════
-
-static std::pair<size_t, size_t>
-find_residue_full_range(const std::vector<class index> &Index, size_t chainid,
-                        size_t target_resnr, size_t mol_total_atoms) {
-  if (chainid >= Index.size())
-    return {SIZE_MAX, 0};
-  const auto &idx = Index[chainid];
-  size_t first_pos = SIZE_MAX, last_pos = SIZE_MAX;
-  for (size_t i = 0; i < idx.get_size_v(); ++i) {
-    if (idx.get_res_num_e(i) == target_resnr) {
-      if (first_pos == SIZE_MAX)
-        first_pos = i;
-      last_pos = i;
-    }
-  }
-  if (first_pos == SIZE_MAX)
-    return {SIZE_MAX, 0};
-  size_t start = idx.get_res_pos_e(first_pos) - 1; // 1-based → 0-based
-  size_t end;
-  if (last_pos + 1 < idx.get_size_v())
-    end = idx.get_res_pos_e(last_pos + 1) - 1;
-  else if (chainid + 1 < Index.size())
-    end = Index[chainid + 1].get_res_pos_e(0) - 1;
-  else
-    end = mol_total_atoms;
-  return {start, end};
-}
-
-// ═══════════════════════════════════════════════════════════════
-// process_frame — Two-tier IFP detection
-// ═══════════════════════════════════════════════════════════════
-
-void TitanIFP::process_frame(
+TitanIFP::FrameAnalysisResult TitanIFP::analyze_frame(
     const MOL &rec_mol, const MOL &lig_mol,
     const std::vector<mol_info> &rec_info,
     const std::vector<mol_info> &lig_info,
     const std::vector<class index> &rec_index,
     const std::vector<class index> &lig_index, size_t rec_total_atoms,
     size_t lig_total_atoms, const std::vector<d_min> &dis_min,
-    const IfpArgs &args) {
+    const IfpArgs &args) const {
+  FrameAnalysisResult analysis;
 
-  ++total_frames_;
-
-  // ── Step 1: DEDUP — Cache-friendly O(N log N) ──
   size_t total_contacts = 0;
   for (const auto &dm : dis_min)
     total_contacts += dm.base.size();
@@ -565,53 +611,45 @@ void TitanIFP::process_frame(
   for (const auto &dm : dis_min)
     unique_pairs.insert(unique_pairs.end(), dm.base.begin(), dm.base.end());
 
-  // Sort by (chainid_rec, resnr_rec, chainid_ab, resnr_ab)
   std::sort(unique_pairs.begin(), unique_pairs.end(),
-            [](const dmin_base &a, const dmin_base &b) {
-              if (a.chainid_rec != b.chainid_rec)
-                return a.chainid_rec < b.chainid_rec;
-              if (a.resnr_rec != b.resnr_rec)
-                return a.resnr_rec < b.resnr_rec;
-              if (a.chainid_ab != b.chainid_ab)
-                return a.chainid_ab < b.chainid_ab;
-              return a.resnr_ab < b.resnr_ab;
+            [](const dmin_base &lhs, const dmin_base &rhs) {
+              if (lhs.chainid_rec != rhs.chainid_rec)
+                return lhs.chainid_rec < rhs.chainid_rec;
+              if (lhs.resnr_rec != rhs.resnr_rec)
+                return lhs.resnr_rec < rhs.resnr_rec;
+              if (lhs.chainid_ab != rhs.chainid_ab)
+                return lhs.chainid_ab < rhs.chainid_ab;
+              return lhs.resnr_ab < rhs.resnr_ab;
             });
+  unique_pairs.erase(
+      std::unique(unique_pairs.begin(), unique_pairs.end(),
+                  [](const dmin_base &lhs, const dmin_base &rhs) {
+                    return lhs.chainid_rec == rhs.chainid_rec &&
+                           lhs.resnr_rec == rhs.resnr_rec &&
+                           lhs.chainid_ab == rhs.chainid_ab &&
+                           lhs.resnr_ab == rhs.resnr_ab;
+                  }),
+      unique_pairs.end());
 
-  auto last = std::unique(unique_pairs.begin(), unique_pairs.end(),
-                          [](const dmin_base &a, const dmin_base &b) {
-                            return a.chainid_rec == b.chainid_rec &&
-                                   a.resnr_rec == b.resnr_rec &&
-                                   a.chainid_ab == b.chainid_ab &&
-                                   a.resnr_ab == b.resnr_ab;
-                          });
-  unique_pairs.erase(last, unique_pairs.end());
-
-  // Maximum cutoff for AVX2 screening
-  double max_cutoff = std::max({args.cutoff_hbond, args.cutoff_salt_bridge,
-                                args.cutoff_hydrophobic, args.cutoff_halogen});
-  double max_cutoff_sq = max_cutoff * max_cutoff;
-
-  // ── Step 2: For each unique pair, run Tier 2 checks ──
+  const double max_cutoff = std::max(
+      {args.cutoff_hbond, args.cutoff_salt_bridge, args.cutoff_hydrophobic,
+       args.cutoff_halogen, args.cutoff_pi_pi, args.cutoff_cation_pi});
+  const double max_cutoff_sq = max_cutoff * max_cutoff;
 
   for (const auto &contact : unique_pairs) {
-    // Get receptor atom range — O(1) via respos_rec already in dmin_base
-    auto [rs, re] =
-        get_atom_range(rec_index, contact.chainid_rec,
-                       contact.respos_rec, rec_total_atoms);
-    if (rs >= re) continue;
-
-    // Get ligand atom range — full-range scan by resnr (ligand may have
-    // per-atom Index entries sharing the same resnr)
-    auto [ls, le] =
-        find_residue_full_range(lig_index, contact.chainid_ab,
-                                contact.resnr_ab, lig_total_atoms);
-    if (ls == SIZE_MAX) continue;
-
-    // Bounds safety
-    if (rs >= rec_mol.size() || re > rec_mol.size()) continue;
-    if (ls >= lig_mol.size() || le > lig_mol.size())
+    const auto [rs, re] = get_atom_range(
+        rec_index, contact.chainid_rec, contact.respos_rec, rec_total_atoms);
+    if (rs >= re)
       continue;
 
+    const auto [ls, le] = find_residue_full_range(
+        lig_index, contact.chainid_ab, contact.resnr_ab, lig_total_atoms);
+    if (ls == SIZE_MAX || ls >= le)
+      continue;
+    if (rs >= rec_mol.size() || re > rec_mol.size() || ls >= lig_mol.size() ||
+        le > lig_mol.size()) {
+      continue;
+    }
 
     IFP_Contact result;
     result.resnr_rec = contact.resnr_rec;
@@ -621,123 +659,109 @@ void TitanIFP::process_frame(
     result.res_name_rec = contact.res_name_rec;
     result.res_name_lig = contact.res_name_ab;
 
-    // ── Step 3: Atom-pair loops (Tier 2 with AVX2 distance screening) ──
-    for (size_t ar = rs; ar < re; ++ar) {
-      double rx = rec_mol.pos.x[ar];
-      double ry = rec_mol.pos.y[ar];
-      double rz = rec_mol.pos.z[ar];
+    const bool pair_has_nucleic =
+        PC::is_nucleic_residue_name(PC::uppercase_copy(contact.res_name_rec)) ||
+        PC::is_nucleic_residue_name(PC::uppercase_copy(contact.res_name_ab));
+    std::array<bool, 3> region_flags{};
 
-      // Check if all pairwise bits are already set (early exit)
+    for (size_t ar = rs; ar < re; ++ar) {
+      const double rx = rec_mol.pos.x[ar];
+      const double ry = rec_mol.pos.y[ar];
+      const double rz = rec_mol.pos.z[ar];
+
       constexpr uint8_t pairwise_mask =
           (1u << BIT_HBOND) | (1u << BIT_SALT) | (1u << BIT_HYDROPHOBIC) |
           (1u << BIT_HALOGEN);
-      if ((result.interactions.to_ulong() & pairwise_mask) == pairwise_mask)
-        break; // all pairwise bits saturated
-
-#ifdef __AVX__
-      // ── AVX2 distance screening: batch 4 ligand atoms at a time ──
-      __m256d vrx = _mm256_set1_pd(rx);
-      __m256d vry = _mm256_set1_pd(ry);
-      __m256d vrz = _mm256_set1_pd(rz);
-      __m256d vcutoff_sq = _mm256_set1_pd(max_cutoff_sq);
+      const bool all_pairwise_detected =
+          (result.interactions.to_ulong() & pairwise_mask) == pairwise_mask;
+      if (!pair_has_nucleic && all_pairwise_detected)
+        break;
+      if (pair_has_nucleic && all_pairwise_detected &&
+          region_flags[kBaseRegion] && region_flags[kSugarRegion] &&
+          region_flags[kPhosphateRegion]) {
+        break;
+      }
 
       size_t al = ls;
-      size_t vec_end = ls + ((le - ls) / 4) * 4;
+      const size_t vec_end = ls + ((le - ls) / 4) * 4;
       for (; al < vec_end; al += 4) {
-        __m256d lx = _mm256_loadu_pd(&lig_mol.pos.x[al]);
-        __m256d ly = _mm256_loadu_pd(&lig_mol.pos.y[al]);
-        __m256d lz = _mm256_loadu_pd(&lig_mol.pos.z[al]);
-
-        __m256d dx = _mm256_sub_pd(vrx, lx);
-        __m256d dy = _mm256_sub_pd(vry, ly);
-        __m256d dz = _mm256_sub_pd(vrz, lz);
-
-        __m256d d2 = _mm256_add_pd(
-            _mm256_mul_pd(dx, dx),
-            _mm256_add_pd(_mm256_mul_pd(dy, dy), _mm256_mul_pd(dz, dz)));
-
-        __m256d mask = _mm256_cmp_pd(d2, vcutoff_sq, _CMP_LT_OQ);
-        int bitmask = _mm256_movemask_pd(mask);
-
+        const unsigned bitmask = titan_simd_dispatch::point_vs_four_cutoff_mask(
+            rx, ry, rz, &lig_mol.pos.x[al], &lig_mol.pos.y[al],
+            &lig_mol.pos.z[al], max_cutoff_sq, 0.0, false);
         if (bitmask == 0)
-          continue; // all 4 atoms beyond cutoff
+          continue;
 
-        // Process each passing atom
         for (int bit = 0; bit < 4; ++bit) {
           if (!(bitmask & (1 << bit)))
             continue;
-          size_t al_idx = al + static_cast<size_t>(bit);
+          const size_t al_idx = al + static_cast<size_t>(bit);
+          const double ddx = rx - lig_mol.pos.x[al_idx];
+          const double ddy = ry - lig_mol.pos.y[al_idx];
+          const double ddz = rz - lig_mol.pos.z[al_idx];
+          const double d = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
 
-          double ddx = rx - lig_mol.pos.x[al_idx];
-          double ddy = ry - lig_mol.pos.y[al_idx];
-          double ddz = rz - lig_mol.pos.z[al_idx];
-          double d = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+          if (pair_has_nucleic) {
+            mark_nucleic_region(region_flags, rec_info[ar]);
+            mark_nucleic_region(region_flags, lig_info[al_idx]);
+          }
 
-          // H-Bond
-          if (!result.interactions[BIT_HBOND])
-            if (check_hbond(rec_mol, lig_mol, rec_info, lig_info, ar, al_idx,
-                            rs, re, ls, le, d, args))
-              result.interactions.set(BIT_HBOND);
-
-          // Salt Bridge
-          if (!result.interactions[BIT_SALT])
-            if (d < args.cutoff_salt_bridge)
-              if (check_salt_bridge(rec_info[ar], lig_info[al_idx]))
-                result.interactions.set(BIT_SALT);
-
-          // Hydrophobic
-          if (!result.interactions[BIT_HYDROPHOBIC])
-            if (d < args.cutoff_hydrophobic)
-              if (check_hydrophobic(rec_info[ar], lig_info[al_idx]))
-                result.interactions.set(BIT_HYDROPHOBIC);
-
-          // Halogen Bond
-          if (!result.interactions[BIT_HALOGEN])
-            if (d < args.cutoff_halogen)
-              if (check_halogen(rec_mol, lig_mol, rec_info, lig_info, ar,
-                                al_idx, rs, re, ls, le, d))
-                result.interactions.set(BIT_HALOGEN);
+          if (!result.interactions[BIT_HBOND] &&
+              check_hbond(rec_mol, lig_mol, rec_info, lig_info, ar, al_idx,
+                          rs, re, ls, le, d, args)) {
+            result.interactions.set(BIT_HBOND);
+          }
+          if (!result.interactions[BIT_SALT] && d < args.cutoff_salt_bridge &&
+              check_salt_bridge(rec_info[ar], lig_info[al_idx])) {
+            result.interactions.set(BIT_SALT);
+          }
+          if (!result.interactions[BIT_HYDROPHOBIC] &&
+              d < args.cutoff_hydrophobic &&
+              check_hydrophobic(rec_info[ar], lig_info[al_idx])) {
+            result.interactions.set(BIT_HYDROPHOBIC);
+          }
+          if (!result.interactions[BIT_HALOGEN] && d < args.cutoff_halogen &&
+              check_halogen(rec_mol, lig_mol, rec_info, lig_info, ar, al_idx,
+                            rs, re, ls, le, d)) {
+            result.interactions.set(BIT_HALOGEN);
+          }
         }
       }
 
-      // ── Scalar fallback for tail ──
       for (; al < le; ++al) {
-#else
-      for (size_t al = ls; al < le; ++al) {
-#endif
-        double ddx = rx - lig_mol.pos.x[al];
-        double ddy = ry - lig_mol.pos.y[al];
-        double ddz = rz - lig_mol.pos.z[al];
-        double d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+        const double ddx = rx - lig_mol.pos.x[al];
+        const double ddy = ry - lig_mol.pos.y[al];
+        const double ddz = rz - lig_mol.pos.z[al];
+        const double d2 = ddx * ddx + ddy * ddy + ddz * ddz;
         if (d2 >= max_cutoff_sq)
           continue;
+        const double d = std::sqrt(d2);
 
-        double d = std::sqrt(d2);
-
-        if (!result.interactions[BIT_HBOND])
-          if (check_hbond(rec_mol, lig_mol, rec_info, lig_info, ar, al, rs, re,
-                          ls, le, d, args))
-            result.interactions.set(BIT_HBOND);
-
-        if (!result.interactions[BIT_SALT])
-          if (d < args.cutoff_salt_bridge)
-            if (check_salt_bridge(rec_info[ar], lig_info[al]))
-              result.interactions.set(BIT_SALT);
-
-        if (!result.interactions[BIT_HYDROPHOBIC])
-          if (d < args.cutoff_hydrophobic)
-            if (check_hydrophobic(rec_info[ar], lig_info[al]))
-              result.interactions.set(BIT_HYDROPHOBIC);
-
-        if (!result.interactions[BIT_HALOGEN])
-          if (d < args.cutoff_halogen)
-            if (check_halogen(rec_mol, lig_mol, rec_info, lig_info, ar, al,
-                             rs, re, ls, le, d))
-              result.interactions.set(BIT_HALOGEN);
+        if (pair_has_nucleic) {
+          mark_nucleic_region(region_flags, rec_info[ar]);
+          mark_nucleic_region(region_flags, lig_info[al]);
+        }
+        if (!result.interactions[BIT_HBOND] &&
+            check_hbond(rec_mol, lig_mol, rec_info, lig_info, ar, al, rs, re,
+                        ls, le, d, args)) {
+          result.interactions.set(BIT_HBOND);
+        }
+        if (!result.interactions[BIT_SALT] && d < args.cutoff_salt_bridge &&
+            check_salt_bridge(rec_info[ar], lig_info[al])) {
+          result.interactions.set(BIT_SALT);
+        }
+        if (!result.interactions[BIT_HYDROPHOBIC] &&
+            d < args.cutoff_hydrophobic &&
+            check_hydrophobic(rec_info[ar], lig_info[al])) {
+          result.interactions.set(BIT_HYDROPHOBIC);
+        }
+        if (!result.interactions[BIT_HALOGEN] && d < args.cutoff_halogen &&
+            check_halogen(rec_mol, lig_mol, rec_info, lig_info, ar, al, rs, re,
+                          ls, le, d)) {
+          result.interactions.set(BIT_HALOGEN);
+        }
       }
-    } // end receptor atom loop
+    }
 
-    // ── Step 4: Ring-based interactions (Pi-Pi, Cation-Pi) ──
     if (is_aromatic_residue(contact.res_name_rec) ||
         is_aromatic_residue(contact.res_name_ab)) {
       bool is_cat_pi = false;
@@ -750,50 +774,109 @@ void TitanIFP::process_frame(
         result.interactions.set(BIT_CATION_PI);
     }
 
-    // ── Online accumulation: directly into occupancy_map_ ──
     if (result.interactions.any()) {
-      ResKey key{result.chainid_rec, result.resnr_rec,
-                 result.chainid_lig, result.resnr_lig};
-      auto &rec = occupancy_map_[key];
-
-      // Initialize metadata on first encounter
-      if (rec.res_name_rec.empty()) {
-        rec.resnr_rec = result.resnr_rec;
-        rec.resnr_lig = result.resnr_lig;
-        rec.chainid_rec = result.chainid_rec;
-        rec.chainid_lig = result.chainid_lig;
-        rec.res_name_rec = result.res_name_rec;
-        rec.res_name_lig = result.res_name_lig;
-      }
-
-      for (int b = 0; b < 6; ++b) {
-        if (result.interactions[b])
-          rec.counts[static_cast<size_t>(b)]++;
-      }
+      analysis.contacts.push_back(result);
     }
-  } // end unique_pairs loop
+
+    if (pair_has_nucleic &&
+        (region_flags[kBaseRegion] || region_flags[kSugarRegion] ||
+         region_flags[kPhosphateRegion])) {
+      FrameRnaRegionContact region_contact;
+      region_contact.resnr_rec = result.resnr_rec;
+      region_contact.resnr_lig = result.resnr_lig;
+      region_contact.chainid_rec = result.chainid_rec;
+      region_contact.chainid_lig = result.chainid_lig;
+      region_contact.res_name_rec = result.res_name_rec;
+      region_contact.res_name_lig = result.res_name_lig;
+      region_contact.flags = region_flags;
+      analysis.rna_regions.push_back(std::move(region_contact));
+    }
+  }
+
+  return analysis;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Occupancy aggregation — converts counts → percentages
-// ═══════════════════════════════════════════════════════════════
+IFP_Frame TitanIFP::collect_frame_contacts(
+    const MOL &rec_mol, const MOL &lig_mol,
+    const std::vector<mol_info> &rec_info,
+    const std::vector<mol_info> &lig_info,
+    const std::vector<class index> &rec_index,
+    const std::vector<class index> &lig_index, size_t rec_total_atoms,
+    size_t lig_total_atoms, const std::vector<d_min> &dis_min,
+    const IfpArgs &args) const {
+  return analyze_frame(rec_mol, lig_mol, rec_info, lig_info, rec_index,
+                       lig_index, rec_total_atoms, lig_total_atoms, dis_min,
+                       args)
+      .contacts;
+}
 
-void TitanIFP::aggregate_occupancy() {
-  if (total_frames_ == 0)
-    return;
+void TitanIFP::accumulate_frame(const FrameAnalysisResult &frame) {
+  for (const auto &result : frame.contacts) {
+    const ResKey key{result.chainid_rec, result.resnr_rec, result.chainid_lig,
+                     result.resnr_lig};
+    auto &record = occupancy_map_[key];
+    if (record.res_name_rec.empty()) {
+      record.resnr_rec = result.resnr_rec;
+      record.resnr_lig = result.resnr_lig;
+      record.chainid_rec = result.chainid_rec;
+      record.chainid_lig = result.chainid_lig;
+      record.res_name_rec = result.res_name_rec;
+      record.res_name_lig = result.res_name_lig;
+    }
+    for (int bit = 0; bit < 6; ++bit) {
+      if (result.interactions[bit])
+        record.counts[static_cast<size_t>(bit)]++;
+    }
+  }
 
-  double inv_frames = 100.0 / static_cast<double>(total_frames_);
-  for (auto &[key, rec] : occupancy_map_) {
-    for (int b = 0; b < 6; ++b) {
-      rec.occupancy[static_cast<size_t>(b)] =
-          static_cast<double>(rec.counts[static_cast<size_t>(b)]) * inv_frames;
+  for (const auto &region : frame.rna_regions) {
+    const ResKey key{region.chainid_rec, region.resnr_rec, region.chainid_lig,
+                     region.resnr_lig};
+    auto &record = rna_region_map_[key];
+    if (record.res_name_rec.empty()) {
+      record.resnr_rec = region.resnr_rec;
+      record.resnr_lig = region.resnr_lig;
+      record.chainid_rec = region.chainid_rec;
+      record.chainid_lig = region.chainid_lig;
+      record.res_name_rec = region.res_name_rec;
+      record.res_name_lig = region.res_name_lig;
+    }
+    for (size_t idx = 0; idx < region.flags.size(); ++idx) {
+      if (region.flags[idx])
+        record.counts[idx]++;
     }
   }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// CSV export
-// ═══════════════════════════════════════════════════════════════
+void TitanIFP::process_frame(
+    const MOL &rec_mol, const MOL &lig_mol,
+    const std::vector<mol_info> &rec_info,
+    const std::vector<mol_info> &lig_info,
+    const std::vector<class index> &rec_index,
+    const std::vector<class index> &lig_index, size_t rec_total_atoms,
+    size_t lig_total_atoms, const std::vector<d_min> &dis_min,
+    const IfpArgs &args) {
+  ++total_frames_;
+  accumulate_frame(analyze_frame(rec_mol, lig_mol, rec_info, lig_info,
+                                 rec_index, lig_index, rec_total_atoms,
+                                 lig_total_atoms, dis_min, args));
+}
+void TitanIFP::aggregate_occupancy() {
+  if (total_frames_ == 0)
+    return;
+
+  const double inv_frames = 100.0 / static_cast<double>(total_frames_);
+  for (auto &[key, record] : occupancy_map_) {
+    (void)key;
+    for (size_t idx = 0; idx < record.occupancy.size(); ++idx)
+      record.occupancy[idx] = static_cast<double>(record.counts[idx]) * inv_frames;
+  }
+  for (auto &[key, record] : rna_region_map_) {
+    (void)key;
+    for (size_t idx = 0; idx < record.occupancy.size(); ++idx)
+      record.occupancy[idx] = static_cast<double>(record.counts[idx]) * inv_frames;
+  }
+}
 
 void TitanIFP::export_csv(const std::string &filename) const {
   std::ofstream out(filename);
@@ -805,25 +888,60 @@ void TitanIFP::export_csv(const std::string &filename) const {
   out << "ChainID_Rec,ResID_Rec,ResName_Rec,ChainID_Lig,ResID_Lig,ResName_Lig,"
          "HBond(%),SaltBridge(%),PiPi(%),CationPi(%),Hydrophobic(%),Halogen(%)"
       << '\n';
-
   out << std::fixed << std::setprecision(1);
-
-  // occupancy_map_ is std::map<ResKey> where ResKey =
-  // (chainid_rec, resnr_rec, chainid_lig, resnr_lig)
-  // std::map is already sorted by key → sorted by chainid_rec ASC →
-  // resnr_rec ASC → chainid_lig ASC → resnr_lig ASC
-  for (const auto &[key, rec] : occupancy_map_) {
-    out << rec.chainid_rec << ',' << rec.resnr_rec << ',' << rec.res_name_rec
-        << ',' << rec.chainid_lig << ',' << rec.resnr_lig << ','
-        << rec.res_name_lig << ',' << rec.occupancy[BIT_HBOND] << ','
-        << rec.occupancy[BIT_SALT] << ',' << rec.occupancy[BIT_PI_PI] << ','
-        << rec.occupancy[BIT_CATION_PI] << ','
-        << rec.occupancy[BIT_HYDROPHOBIC] << ',' << rec.occupancy[BIT_HALOGEN]
-        << '\n';
+  for (const auto &[key, record] : occupancy_map_) {
+    (void)key;
+    out << record.chainid_rec << ',' << record.resnr_rec << ','
+        << record.res_name_rec << ',' << record.chainid_lig << ','
+        << record.resnr_lig << ',' << record.res_name_lig << ','
+        << record.occupancy[BIT_HBOND] << ','
+        << record.occupancy[BIT_SALT] << ','
+        << record.occupancy[BIT_PI_PI] << ','
+        << record.occupancy[BIT_CATION_PI] << ','
+        << record.occupancy[BIT_HYDROPHOBIC] << ','
+        << record.occupancy[BIT_HALOGEN] << '\n';
   }
-
-  out.close();
   TitanUI::print_info("[IFP] Results written to " + filename + " (" +
                       std::to_string(occupancy_map_.size()) +
+                      " residue pairs)");
+}
+
+void TitanIFP::export_rna_annotations_csv(const std::string &filename) const {
+  std::ofstream out(filename);
+  if (!out.is_open()) {
+    TitanUI::print_error("[IFP] Cannot open RNA annotation file: " + filename);
+    return;
+  }
+
+  out << "ChainID_Rec,ResID_Rec,ResName_Rec,ChainID_Lig,ResID_Lig,ResName_Lig,"
+         "BaseContact(%),SugarContact(%),PhosphateContact(%),DominantRNARegion\n";
+  out << std::fixed << std::setprecision(1);
+  const auto dominant_region_label = [](const auto &record) {
+    std::array<std::pair<double, const char *>, 3> ranked{{
+        {record.occupancy[kBaseRegion], "base"},
+        {record.occupancy[kSugarRegion], "sugar"},
+        {record.occupancy[kPhosphateRegion], "phosphate"},
+    }};
+    std::sort(ranked.begin(), ranked.end(), [](const auto &lhs, const auto &rhs) {
+      return lhs.first > rhs.first;
+    });
+    if (ranked[0].first <= 0.0)
+      return std::string("mixed");
+    if (ranked[1].first > 0.0 && ranked[0].first < ranked[1].first * 1.5)
+      return std::string("mixed");
+    return std::string(ranked[0].second);
+  };
+  for (const auto &[key, record] : rna_region_map_) {
+    (void)key;
+    out << record.chainid_rec << ',' << record.resnr_rec << ','
+        << record.res_name_rec << ',' << record.chainid_lig << ','
+        << record.resnr_lig << ',' << record.res_name_lig << ','
+        << record.occupancy[kBaseRegion] << ','
+        << record.occupancy[kSugarRegion] << ','
+        << record.occupancy[kPhosphateRegion] << ','
+        << dominant_region_label(record) << '\n';
+  }
+  TitanUI::print_info("[IFP] RNA annotations written to " + filename + " (" +
+                      std::to_string(rna_region_map_.size()) +
                       " residue pairs)");
 }

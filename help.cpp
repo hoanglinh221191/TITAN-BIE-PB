@@ -19,9 +19,9 @@ SYNOPSIS
     Titan is a high-performance molecular analysis engine for computing
     electrostatic and van der Waals interactions, GBSA/ALPB solvation,
     hydrogen bonds, DCCM network analysis, PCA/FES, allostery, TICA, MSM,
-    ZTS minimum-energy paths, DHAM reweighting, TPT pathway analysis, LJ
-    condensation, LLPS, GIST water thermodynamics, IFP occupancy, LSP-MD,
-    and related observables from PDB/XTC/TRR trajectories.
+    ZTS minimum-energy paths, DHAM/MBAR reweighting, TPT pathway analysis,
+    LJ condensation, LLPS, GIST water thermodynamics, IFP occupancy,
+    LSP-MD, and related observables from PDB/XTC/TRR trajectories.
 
 ================================================================================
 1. CORE INPUT / OUTPUT
@@ -71,6 +71,9 @@ CORE DEPENDENCY CHAIN
   -msm        implies -tica and -network
   -dham       implies -msm and -tica; for protein-like traces it also uses
               -network, while LJ jobs switch to the LJ phase-2 feature backend
+  -mbar       standalone REMD/HREMD temperature-ladder reweighting;
+              domain=tica implies -msm/-tica/-network, domain=pca implies
+              -pca/-network, domain=both enables both paths
   -tpt        implies -msm and -tica; phase 0 uses the built MSM TPM +
               stationary distribution directly
   -community=louvain implies -network
@@ -95,6 +98,10 @@ IMPORTANT NOTES
   - If DHAM converges, PCA/FES automatically uses DHAM frame weights at the
     requested target temperature. This enables weighted FES without changing
     the rest of the PCA workflow.
+
+  - MBAR v1 is standalone-only. It writes `mbar_*` outputs, reweights to a
+    target temperature from REMD/HREMD energy ladders, and does not overwrite
+    the standard PCA/TICA/DHAM outputs.
 
   - PCA basin extraction writes an auto-generated shell script:
       extract_basins.sh
@@ -231,7 +238,36 @@ IMPORTANT NOTES
     - If no explicit PBC mode is requested, Titan auto-enables -pbci 0 for
       RMSD/RMSF and logs that decision.
 
-2.3c LJ Condensation / Cluster Density
+2.3c Rg2
+
+  Purpose:
+    Compute a PBC-safe trace-atom radius of gyration time series for the same
+    trace atom set used by RMSD/RMSF.
+
+  Main inputs:
+    -rg2                enable Rg2 analysis
+    -rg2-hist-bins <N>  histogram bin count for rg2_hist.dat. Default: 100
+
+  Outputs:
+    rg2.dat             per-frame frame/time_ps/Rg^2/Rg time series
+    rg2_summary.dat     mean/std/min/max for Rg^2 and Rg
+    rg2_hist.dat        histogram over Rg^2
+    rg2_all.dat         aggregated per-frame time series across multi-input runs
+    rg2_summary_all.dat per-trajectory summaries plus a global ALL row
+    rg2_hist_all.dat    histogram over Rg^2 using all frames from all inputs
+
+  Units:
+    - Rg^2 is reported in A^2.
+    - Rg is reported in A.
+
+  Notes:
+    - In -nocal mode, only molecule 1 is analyzed.
+    - Outside -nocal, Titan builds one joint trace set from molecule 1 +
+      molecule 2, matching RMSD/RMSF trace selection.
+    - If no explicit PBC mode is requested, Titan auto-enables -pbci 0 for
+      Rg2 and logs that decision.
+
+2.3d LJ Condensation / Cluster Density
 
   Purpose:
     Analyze monoatomic or generic Lennard-Jones-like systems through
@@ -316,6 +352,8 @@ IMPORTANT NOTES
   Main inputs:
     -pca
     optional: -fes-grid=<N>
+    optional: -pca-solver=<full|partial>, -pca-topk=<N>, -pca-max-k-full=<N>
+    optional: -pca-symmetry-aware
     optional DHAM weights if -dham converges
 
   Typical outputs:
@@ -329,6 +367,9 @@ IMPORTANT NOTES
     - Without DHAM, FES is built from uniform frame counts.
     - With converged DHAM, FES and basin populations are reweighted to
       -dham-target-temp automatically.
+    - `-pca-symmetry-aware` canonicalizes equivalent chain blocks before
+      global PCA alignment. This helps symmetric dimers/multimers whose
+      subunits exchange roles across the trajectory.
     - `extract_basins.sh` uses stored trajectory metadata
       (replica id + time in ps) to help recover full-atom basin structures.
     - `-zts` on PCA exports a minimum-energy path between two FES basins.
@@ -416,6 +457,9 @@ IMPORTANT NOTES
       -msm-no-pcca
       -msm-no-its
       -msm-its-lags
+      -msm-its-solver
+      -msm-its-topk
+      -msm-its-max-k-full
 
   Typical outputs:
     msm_tpm.dat
@@ -501,7 +545,69 @@ IMPORTANT NOTES
     NPT mode uses an enthalpy-like observable assembled from the aligned .xvg
     column plus trajectory volume metadata.
 
-2.10a TPT
+2.10a MBAR Reweighting
+
+  Purpose:
+    Solve temperature-ladder MBAR for REMD/HREMD-like energy series, export
+    per-frame weights, and generate standalone weighted FES outputs in TICA
+    and/or PCA space at a chosen target temperature.
+
+  Main inputs:
+    -mbar
+    -mbar-temps <temps.txt>
+    -mbar-ener <energy_list.txt>
+    optional:
+      -mbar-target-temp <K>
+      -mbar-domain <tica|pca|both>
+      -mbar-ensemble <nvt|npt>
+      -mbar-window-match <auto|off|strict>
+      -mbar-temp-mode <fixed|per_frame>
+      -mbar-temp-col <col>
+      -mbar-demux-map <file>
+      -mbar-pressure-bar <bar>
+      -mbar-dt-energy <ps>
+      -mbar-bootstrap <N>
+      -mbar-scan-points <N>
+
+  Required context:
+    MBAR v1 is temperature-ladder only and expects one GROMACS .xvg
+    observable trajectory per replica/window.
+    `-mbar-temp-mode fixed` keeps the original ladder-per-file workflow and
+    expects `-mbar-temps`.
+    `-mbar-temp-mode per_frame` supports raw GROMACS T-REMD-style XVG files
+    where temperature changes with time inside each series.
+    In `per_frame` mode, `-mbar-temps` is optional: TITAN can infer the
+    ladder from replica temperatures directly, or from `-mbar-demux-map`
+    plus the XVG temperature column.
+    `-mbar-demux-map` is the authoritative state-assignment route for raw
+    replica outputs; if it is omitted, TITAN maps each frame to the nearest
+    inferred ladder temperature using the XVG temperature column.
+    `-mbar-ensemble nvt` treats the XVG observable as energy.
+    `-mbar-ensemble npt` treats the XVG observable as enthalpy-like.
+    `-mbar-domain tica` reuses the TICA/MSM frame metadata path.
+    `-mbar-domain pca` reuses PCA trajectory metadata and the standard
+    `pca_fel.csv` projection export.
+    `-mbar-domain both` runs both standalone weighted exports.
+    MBAR uses DHAM-style window alignment controls, but does not replace DHAM
+    and does not feed weights back into MSM/TPT/PCA/TICA defaults automatically.
+    If a requested projection domain is unavailable, TITAN warns and skips it.
+
+  Typical outputs:
+    mbar_frame_weights.dat
+    mbar_summary.dat
+    mbar_window_audit.dat
+    mbar_cv.dat                       (when -mbar-scan-points > 1)
+    mbar_tica_fes_2d.dat              (when domain includes tica)
+    mbar_tica_cluster_representatives.csv
+    mbar_pca_fes_2d.dat               (when domain includes pca)
+    mbar_pca_cluster_representatives.csv
+
+  Integration note:
+    MBAR outputs are intentionally standalone in v1.
+    Standard `tica_fes_2d.dat`, `pca_fes_2d.dat`, and DHAM/TPT outputs keep
+    their original behavior.
+
+2.10b TPT
 
   Purpose:
     Run Transition Path Theory on the built MSM to estimate committors,
@@ -627,6 +733,8 @@ IMPORTANT NOTES
   Purpose:
     Compute per-contact occupancy fingerprints for H-bond, salt bridge,
     hydrophobic, pi-pi, cation-pi, and halogen contacts.
+    Supports protein-protein and protein-RNA/DNA systems while keeping
+    ifp_occupancy.csv backward compatible.
 
   Main inputs:
     -ifp
@@ -641,6 +749,41 @@ IMPORTANT NOTES
 
   Typical outputs:
     ifp_occupancy.csv
+    ifp_rna_annotations.csv   (only when nucleic-acid contacts are detected)
+    nucleic_acid_interactions.csv
+      coarse RNA/DNA recognition summary, separate from residue-pair IFP
+
+2.12a AWH RC-Binned IFP
+
+  Purpose:
+    For GROMACS AWH trajectories, read walker-aligned RC time series from
+    .xvg, bin snapshots along the biased reaction coordinate, then report
+    IFP patterns and representative structures along that coordinate.
+    This workflow is intended for structural mechanism mapping on a biased
+    ensemble, not for absolute kinetics or equilibrium populations.
+
+  Main inputs:
+    -awh-ifp
+    -awh-xvg <filelist>
+    optional:
+      -awh-xvg-col <N>
+      -awh-bins <N>
+      -awh-out-prefix <prefix>
+
+  Typical outputs:
+    awh_rc_bin_summary.dat
+    awh_walker_diagnostics.dat
+    awh_rc_overlap_diagnostics.dat
+    awh_walker_stability_by_bin.dat
+    awh_walker_pair_overlap.dat
+    awh_ifp_by_bin.csv
+    awh_ifp_heatmap.dat
+    awh_bin_structural_summary.dat
+    awh_bin_top_contacts.csv
+    awh_rc_frame_map.dat
+    awh_frame_assignments.dat
+    awh_exploratory_context.dat
+    awh_rep_bin_*.pdb
 
 2.13 LSP-MD
 
@@ -790,6 +933,30 @@ IMPORTANT NOTES
     `-dham-ensemble npt` uses H = E_col1 + P*V with volume taken from the
     trajectory box at each frame.
 
+3.9 MBAR standalone weighted TICA/PCA FES from REMD/HREMD data
+
+  titan.exe -s reference.pdb -i xtc_list.txt -network -tica -msm -pca -mbar \
+      -mbar-temps temps.txt \
+      -mbar-ener energy_xvg_list.txt \
+      -mbar-target-temp 300 \
+      -mbar-domain both \
+      -mbar-temp-mode per_frame \
+      -mbar-window-match auto \
+      -mbar-scan-points 24
+
+  Notes:
+    MBAR writes separate `mbar_*` outputs and keeps the default TICA/PCA FES
+    files untouched.
+    Raw GROMACS T-REMD NVT/NPT energy files with a fluctuating temperature
+    column can be handled via `-mbar-temp-mode per_frame`.
+    If you have a demux/state-assignment map, prefer `-mbar-demux-map`;
+    otherwise TITAN falls back to nearest-ladder assignment from the XVG
+    temperature column.
+    `-mbar-domain tica` is the lightest-weight integration path.
+    `-mbar-domain pca` reuses PCA projection exports and is useful when you
+    want a target-temperature PCA free-energy map without changing the default
+    PCA analysis.
+
 3.9 PCA basin extraction after FES clustering
 
   titan.exe -s reference.pdb -traj md.xtc -pca
@@ -827,6 +994,9 @@ IMPORTANT NOTES
 
   titan.exe -s complex.pdb -traj md.xtc -ifp \
       -ifp-hbond 3.5 -ifp-salt 4.0 -ifp-hphob 4.0
+
+  Protein-RNA/DNA runs keep ifp_occupancy.csv unchanged and may also
+  write ifp_rna_annotations.csv with base/sugar/phosphate contact bias.
 
 3.13 LSP-MD network analysis
 
@@ -965,6 +1135,10 @@ IMPORTANT NOTES
 
   -pca                  PCA and FES analysis
   -fes-grid=<N>         FES grid size. Default: 60
+  -pca-solver=<mode>    PCA spectral solver: full | partial (default: full)
+  -pca-topk=<N>         Top spectrum size for partial solver; 0 = auto from FES needs
+  -pca-max-k-full=<N>   Full solver cutoff K; if K > cutoff, auto-switch full -> partial
+  -pca-symmetry-aware   Canonicalize equivalent chain blocks before PCA alignment
 
   -allostery            MI-derived GC + Transfer Entropy analysis
   -allostery-tau=<N>    TE lag in frames. Default: 5
@@ -980,6 +1154,10 @@ IMPORTANT NOTES
   -allostery-cut-mode=<avg|first>
                         Deprecated alias for -allostery-prune-window
   -allostery-no-te      Skip Transfer Entropy stage and emit header-only TE CSV
+  -allostery-estimator=<mode>
+                        hist | knn | kde. Default: hist
+  -allostery-kde-bandwidth=<val>
+                        KDE bandwidth override for estimator=kde. Default: 0 (auto)
 
   -tica                 TICA analysis
   -tica-lag=<N>         TICA lag. Default: 10
@@ -1011,6 +1189,10 @@ IMPORTANT NOTES
   -msm-no-pcca          Disable PCCA
   -msm-no-its           Disable implied-timescale scan
   -msm-its-lags <list>  Comma-separated lag list
+  -msm-its-solver <m>   ITS spectral solver: full | schur | partial (default: full)
+  -msm-its-topk <N>     Top spectrum size for partial solver; 0 = auto from -msm-nts
+  -msm-its-max-k-full <N>
+                        Full solver cutoff K; if K > cutoff, auto-switch full -> schur
 
   -dham                 DHAM reweighting
   -dham-temps <file>    Replica temperatures in K
@@ -1025,6 +1207,28 @@ IMPORTANT NOTES
   -dham-dt-energy <ps>  Energy sampling interval in ps; 0 = auto
   -dham-window-match <mode>
                         auto | off | strict. Default: auto
+
+  -mbar                 MBAR reweighting for REMD/HREMD temperature ladders
+-mbar-temps <file>    Optional ladder temperatures in K; required for fixed mode,
+                      optional override for per-frame mode
+  -mbar-ener <file>     File containing list of GROMACS .xvg energy files
+  -mbar-target-temp <K> Target reweighting temperature. Default: 300
+  -mbar-domain <mode>   tica | pca | both. Default: tica
+  -mbar-ensemble <mode> nvt | npt. Default: nvt
+  -mbar-window-match <mode>
+                         auto | off | strict. Default: auto
+  -mbar-temp-mode <mode>
+                        fixed | per_frame. Default: fixed
+  -mbar-temp-col <col>  XVG temperature-column index for raw per-frame mode.
+                        Default: 2
+  -mbar-demux-map <file>
+                        Optional per-frame state-assignment map for raw
+                        replica outputs
+  -mbar-pressure-bar <bar>
+                        Target/reporting pressure for NPT MBAR. Default: 1.0
+  -mbar-dt-energy <ps>  Energy sampling interval in ps; 0 = auto
+  -mbar-bootstrap <N>   Bootstrap replicates for Cv/<E> uncertainty. Default: 0
+  -mbar-scan-points <N> Number of temperature scan points; >1 writes mbar_cv.dat
 
   -tpt                  Transition Path Theory on the built MSM
   -tpt-mode <mode>      ensemble | kinetic. Default: ensemble
@@ -1070,7 +1274,8 @@ IMPORTANT NOTES
   -gist-min-count=<N>   Min voxel count. Default: 10
   -gist-cutoff=<val>    Interaction cutoff in Angstrom. Default: 9.0
 
-  -ifp                  Interaction fingerprint analysis
+  -ifp                  Interaction fingerprint analysis for protein-protein
+                        and protein-RNA/DNA systems
   -ifp-hbond <val>      H-bond cutoff. Default: 3.5
   -ifp-salt <val>       Salt-bridge cutoff. Default: 4.0
   -ifp-hphob <val>      Hydrophobic cutoff. Default: 4.0
@@ -1078,6 +1283,17 @@ IMPORTANT NOTES
   -ifp-cpi <val>        Cation-pi cutoff. Default: 6.0
   -ifp-hal <val>        Halogen cutoff. Default: 4.0
   -ifp-out <file>       Custom IFP output filename
+                        Extra RNA/DNA annotations still go to
+                        ifp_rna_annotations.csv when applicable
+  -awh-ifp              RC-binned IFP analysis for GROMACS AWH trajectories
+                        Auto-enables -ifp and keeps classic IFP output intact
+                        Writes awh_frame_assignments.dat and
+                        awh_exploratory_context.dat for exploratory-only
+                        biased-ensemble overlays when downstream context exists
+  -awh-xvg <file>       Text file listing one walker RC .xvg path per line
+  -awh-xvg-col <N>      RC value column index in the .xvg file. Default: 1
+  -awh-bins <N>         Number of equal-width RC bins. Default: 20
+  -awh-out-prefix <p>   Prefix for AWH representative PDB filenames
 
   -dssp                 DSSP-like secondary-structure analysis
                         Default: ON
@@ -1106,6 +1322,11 @@ IMPORTANT NOTES
                         If no PBC mode is set, Titan auto-enables -pbci 0
   -rmsd                 Alias for -rms
   -rmsf                 Alias for -rms
+  -rg2                  Radius-of-gyration analysis on the RMS trace set
+                        Outputs Rg^2 in A^2 and Rg in A
+                        In -nocal mode, only molecule 1 is analyzed
+                        If no PBC mode is set, Titan auto-enables -pbci 0
+  -rg2-hist-bins <N>    Histogram bin count for rg2_hist.dat. Default: 100
 
   -lspmd                Local Spatial Pattern MD analysis
   -lspmd_cut=<val>      C-alpha cutoff in Angstrom. Default: 12.0

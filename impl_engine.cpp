@@ -12,21 +12,25 @@
 #include "miscellaneous.h" // Added as per instruction's Code Edit
 #include "ml_extractor.h"
 #include "nucleic_profiler.h"
+#include "polymer_classification.h"
 #include "tda.h"
 #include "titan_ui.h"
 
 #include "engine_postproc.h"
 #include "titan_alignment.h"
+#include "titan_build_info.h"
 #include "titan_gist.h"
 #include "titan_kinetics.h"
 #include "titan_llps.h"
 #include "titan_llps_cluster.h"
 #include "titan_msm.h"
 #include "titan_executor.h"
+#include "titan_awh_ifp.h"
 #include "titan_ifp.h"
 #include "titan_pca.h" // Ensured inclusion as per instruction
 #include "titan_dssp.h"
 #include "titan_lj.h"
+#include "titan_rg.h"
 #include "titan_rms.h"
 #include "titan_umap.h"
 #include "water_analysis.h"
@@ -268,21 +272,6 @@ prepare_pull_direct_snapshot(arguments &Arguments, de_arg &DE_arguments,
   return selection;
 }
 
-std::string uppercase_copy(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(),
-                 [](unsigned char c) {
-                   return static_cast<char>(std::toupper(c));
-                 });
-  return value;
-}
-
-bool is_rna_residue_name(const std::string &res_name_upper) {
-  static const std::unordered_set<std::string> kRnaNames{
-      "A",   "U",   "C",   "G",   "RA",  "RU",  "RC",  "RG",
-      "ADE", "URA", "CYT", "GUA", "RIA", "RCY", "RUR", "RGU"};
-  return kRnaNames.contains(res_name_upper);
-}
-
 double determinant3x3(const BoxMatrix &box_matrix) {
   return box_matrix.m[0][0] *
              (box_matrix.m[1][1] * box_matrix.m[2][2] -
@@ -306,42 +295,6 @@ double frame_box_volume_nm3(const box &frame_box) {
     return std::numeric_limits<double>::quiet_NaN();
   }
   return volume_a3 / 1000.0;
-}
-
-bool is_dna_residue_name(const std::string &res_name_upper) {
-  static const std::unordered_set<std::string> kDnaNames{
-      "DA", "DT", "DC", "DG", "THY"};
-  return kDnaNames.contains(res_name_upper);
-}
-
-std::string detect_nucleic_polymer_type(const std::vector<mol_info> &info) {
-  std::unordered_set<unsigned long long> seen_residues;
-  size_t rna_hits = 0;
-  size_t dna_hits = 0;
-
-  for (const auto &atom : info) {
-    const unsigned long long residue_key =
-        (static_cast<unsigned long long>(atom.get_chainnum()) << 32) |
-        static_cast<unsigned long long>(atom.get_resnr());
-    if (!seen_residues.insert(residue_key).second)
-      continue;
-
-    const std::string res_name = uppercase_copy(atom.get_res_name());
-    if (is_rna_residue_name(res_name)) {
-      ++rna_hits;
-    } else if (is_dna_residue_name(res_name)) {
-      ++dna_hits;
-    }
-  }
-
-  if (rna_hits == 0 && dna_hits == 0)
-    return {};
-  return (rna_hits >= dna_hits) ? "rna" : "dna";
-}
-
-bool is_nucleic_type(const std::string &mol_type) {
-  return mol_type.find("rna") != std::string::npos ||
-         mol_type.find("dna") != std::string::npos;
 }
 
 bool is_generic_autotype_candidate(const std::string &mol_type) {
@@ -427,7 +380,8 @@ bool should_enable_dense_pair_cache(const arguments &Arguments,
 
 void auto_adjust_polymer_type(arguments &Arguments, Multi_MOL &mol,
                               std::fstream &log, bool is_mol1) {
-  const std::string detected_type = detect_nucleic_polymer_type(mol.info);
+  const std::string detected_type =
+      PolymerClassification::detect_nucleic_polymer_type(mol.info);
   if (detected_type.empty())
     return;
 
@@ -453,10 +407,18 @@ void auto_adjust_polymer_type(arguments &Arguments, Multi_MOL &mol,
     return;
   }
 
-  if (Arguments.flag_gbsa && !is_nucleic_type(mol_type)) {
+  const std::string resolved_upper =
+      PolymerClassification::uppercase_copy(mol_type);
+  const std::string detected_upper =
+      PolymerClassification::uppercase_copy(detected_type);
+  const bool resolved_matches_detected =
+      resolved_upper.find(detected_upper) != std::string::npos;
+  if (!resolved_matches_detected) {
     const std::string message =
-        uppercase_copy(molecule_name) + " topology looks like " + detected_type +
-        " but resolved type is " + mol_type + ".";
+        PolymerClassification::uppercase_copy(molecule_name) +
+        " topology looks like " + detected_type +
+        " but resolved type is " + mol_type +
+        ". RNA/DNA-aware modules will fall back to residue/atom detection.";
     TitanUI::print_warning(message);
     TitanUI::log_message(log, "[Auto-Type] " + message);
   }
@@ -593,6 +555,21 @@ int engine(arguments &Arguments) {
 
   TitanUI::log_section(log, "TITAN ENGINE INITIALIZATION");
   TitanUI::log_kv(log, "Software Build", info_output.getBuild());
+  TitanUI::log_kv(log, "Build Profile", titan_build::build_profile_name());
+  TitanUI::log_kv(log, "C++23 Floor", titan_build::cxx23_floor_name());
+  TitanUI::log_kv(log, "Compiled SIMD",
+                  titan_build::simd_level_name(
+                      titan_build::compiled_simd_level()));
+  TitanUI::log_kv(log, "Runtime SIMD",
+                  titan_build::simd_level_name(
+                      titan_build::runtime_simd_level()));
+  TitanUI::log_kv(log, "Runtime Supports Build SIMD",
+                  titan_build::runtime_supports_compiled_simd() ? "yes"
+                                                                 : "no");
+  TitanUI::log_kv(log, "Runtime Dispatch",
+                  titan_build::runtime_dispatch_mode_name());
+  TitanUI::log_kv(log, "std::jthread",
+                  TITAN_HAS_STD_JTHREAD ? "available" : "missing");
 
   time_t timeRun{time(nullptr)};
   char time_str[100];
@@ -670,6 +647,8 @@ int engine(arguments &Arguments) {
   }
   if (Arguments.lj.flag_lj)
     append_module_label(active_modules, "LJ");
+  if (Arguments.rg.flag_rg2)
+    append_module_label(active_modules, "Rg2");
   if (Arguments.rms.flag_rms)
     append_module_label(active_modules, "RMSD/RMSF");
   if (Arguments.flag_network || Arguments.community.flag_community)
@@ -729,31 +708,26 @@ int engine(arguments &Arguments) {
     else
       TitanUI::log_kv(log, "PBC Algorithm", "None");
     if (Arguments.pbc.auto_enabled_pbcn || Arguments.pbc.auto_enabled_pbci) {
-      std::string auto_pbc_message =
-          "RMSD/RMSF requested without explicit PBC mode; enabled -pbci 0";
-      if (Arguments.flag_nocal && Arguments.rms.flag_rms &&
-          Arguments.lj.flag_lj) {
-        auto_pbc_message =
-            "Nocal, RMSD/RMSF, and LJ requested without explicit PBC mode; "
-            "enabled -pbci 0";
-      } else if (Arguments.flag_nocal && Arguments.rms.flag_rms) {
-        auto_pbc_message =
-            "Nocal and RMSD/RMSF requested without explicit PBC mode; "
-            "enabled -pbci 0";
-      } else if (Arguments.flag_nocal && Arguments.lj.flag_lj) {
-        auto_pbc_message =
-            "Nocal and LJ requested without explicit PBC mode; enabled -pbci 0";
-      } else if (Arguments.flag_nocal) {
-        auto_pbc_message =
-            "Nocal requested without explicit PBC mode; enabled -pbci 0";
-      } else if (Arguments.rms.flag_rms && Arguments.lj.flag_lj) {
-        auto_pbc_message =
-            "RMSD/RMSF and LJ requested without explicit PBC mode; "
-            "enabled -pbci 0";
-      } else if (Arguments.lj.flag_lj) {
-        auto_pbc_message =
-            "LJ requested without explicit PBC mode; enabled -pbci 0";
+      std::vector<std::string> auto_pbc_modules;
+      if (Arguments.flag_nocal)
+        auto_pbc_modules.push_back("Nocal");
+      if (Arguments.rms.flag_rms)
+        auto_pbc_modules.push_back("RMSD/RMSF");
+      if (Arguments.rg.flag_rg2)
+        auto_pbc_modules.push_back("Rg2");
+      if (Arguments.lj.flag_lj)
+        auto_pbc_modules.push_back("LJ");
+      std::string auto_pbc_message;
+      for (std::size_t i = 0; i < auto_pbc_modules.size(); ++i) {
+        if (i > 0)
+          auto_pbc_message +=
+              (i + 1 == auto_pbc_modules.size()) ? " and " : ", ";
+        auto_pbc_message += auto_pbc_modules[i];
       }
+      if (auto_pbc_modules.size() == 1 && auto_pbc_modules.front() == "LJ")
+        auto_pbc_message += " analysis";
+      auto_pbc_message +=
+          " requested without explicit PBC mode; enabled -pbci 0";
       TitanUI::log_kv(log, "PBC Auto-Enable", auto_pbc_message);
     }
   }
@@ -792,6 +766,7 @@ int engine(arguments &Arguments) {
   TitanDSSPAnalyzer dssp_mol1_analyzer;
   TitanDSSPAnalyzer dssp_mol2_analyzer;
   TitanLJAnalyzer lj_analyzer;
+  TitanRgAnalyzer rg_analyzer;
   TitanRMSAnalyzer rms_analyzer;
   std::vector<std::string> lj_feature_files;
   NucleicProfiler na_profiler;
@@ -801,7 +776,7 @@ int engine(arguments &Arguments) {
   // Network Analysis (DCCM) Variables
   DCCMNetwork dccm_analyzer;
   std::chrono::milliseconds time_gbsa{0}, time_cas{0}, time_dssp{0},
-      time_lj{0}, time_rms{0},
+      time_lj{0}, time_rg{0}, time_rms{0},
       time_network{0}, time_tda{0}, time_llps{0}, time_tica{0};
   std::unique_ptr<TitanLLPSCluster> dbscan_llps;
   std::chrono::milliseconds time_llps_dbscan{0};
@@ -817,6 +792,7 @@ int engine(arguments &Arguments) {
   dssp_mol1_analyzer.configure(Arguments.dssp);
   dssp_mol2_analyzer.configure(Arguments.dssp);
   lj_analyzer.configure(Arguments.lj);
+  rg_analyzer.configure(Arguments.rg);
   rms_analyzer.configure(Arguments.rms);
 
   double time_new_emap{};
@@ -832,9 +808,22 @@ int engine(arguments &Arguments) {
 
   // --- IFP (Interaction Fingerprint) Initialization ---
   std::unique_ptr<TitanIFP> ifp_analyzer;
+  std::unique_ptr<TitanAwhIfp> awh_ifp_analyzer;
   if (Arguments.ifp.flag_ifp) {
     ifp_analyzer = std::make_unique<TitanIFP>();
     TitanUI::print_info("[IFP] Interaction Fingerprint module enabled.");
+  }
+  if (Arguments.awh.flag_awh_ifp) {
+    awh_ifp_analyzer = std::make_unique<TitanAwhIfp>();
+    const size_t expected_awh_walkers = input_line.empty() ? 1u : input_line.size();
+    if (!awh_ifp_analyzer->initialize(Arguments, info_output,
+                                      expected_awh_walkers)) {
+      TitanUI::print_error(
+          "AWH: failed to initialize RC-binned IFP workflow.");
+      return 1;
+    }
+    TitanUI::print_info(
+        "[AWH] RC-binned IFP workflow enabled for biased AWH analysis.");
   }
   std::chrono::milliseconds time_ifp{0};
 
@@ -852,6 +841,7 @@ int engine(arguments &Arguments) {
     const auto time_cas_base = time_cas;
     const auto time_dssp_base = time_dssp;
     const auto time_lj_base = time_lj;
+    const auto time_rg_base = time_rg;
     const auto time_rms_base = time_rms;
     const auto time_network_base = time_network;
     const auto time_tica_base = time_tica;
@@ -1109,10 +1099,10 @@ int engine(arguments &Arguments) {
     TitanUI::log_kv(log, "Resolved Molecule 1 Type", resolved_mol1_type);
     TitanUI::log_kv(log, "Resolved Molecule 2 Type", resolved_mol2_type);
     global_has_nucleic_acid =
-        is_nucleic_type(Arguments.mol_1_type) ||
-        is_nucleic_type(Arguments.mol_2_type) ||
-        !detect_nucleic_polymer_type(pro_in.info).empty() ||
-        !detect_nucleic_polymer_type(lig.info).empty();
+        PolymerClassification::is_nucleic_type(Arguments.mol_1_type) ||
+        PolymerClassification::is_nucleic_type(Arguments.mol_2_type) ||
+        !PolymerClassification::detect_nucleic_polymer_type(pro_in.info).empty() ||
+        !PolymerClassification::detect_nucleic_polymer_type(lig.info).empty();
 
     cache_sigma_epsilon CachedData{Arguments.distance_energy_cutoff};
     CachedData.force_field_name = force_f;
@@ -1368,6 +1358,9 @@ int engine(arguments &Arguments) {
     }
     if (Arguments.lj.flag_lj) {
       lj_analyzer.init(pro_in, Arguments, log);
+    }
+    if (Arguments.rg.flag_rg2) {
+      rg_analyzer.init(pro_in, lig, Arguments, log);
     }
     if (Arguments.rms.flag_rms) {
       rms_analyzer.init(pro_in, lig, Arguments, log);
@@ -1814,6 +1807,8 @@ int engine(arguments &Arguments) {
   }
   if (lj_analyzer.enabled())
     append_module_label(resolved_modules, "LJ");
+  if (rg_analyzer.enabled())
+    append_module_label(resolved_modules, "Rg2");
   if (rms_analyzer.enabled())
     append_module_label(resolved_modules, "RMSD/RMSF");
   if (Arguments.flag_network || Arguments.community.flag_community)
@@ -1864,6 +1859,8 @@ int engine(arguments &Arguments) {
       append_module_label(streaming_modules, "DSSP");
     if (lj_analyzer.enabled())
       append_module_label(streaming_modules, "LJ");
+    if (rg_analyzer.enabled())
+      append_module_label(streaming_modules, "Rg2");
     if (rms_analyzer.enabled())
       append_module_label(streaming_modules, "RMSD/RMSF");
     if (Arguments.flag_network || Arguments.community.flag_community ||
@@ -1874,6 +1871,8 @@ int engine(arguments &Arguments) {
       append_module_label(streaming_modules, "TICA");
     if (Arguments.ifp.flag_ifp && ifp_analyzer)
       append_module_label(streaming_modules, "IFP");
+    if (Arguments.awh.flag_awh_ifp && awh_ifp_analyzer)
+      append_module_label(streaming_modules, "AWH-IFP");
     if (Arguments.llps.flag_llps)
       append_module_label(streaming_modules, "LLPS");
     if (streaming_modules.empty())
@@ -2078,6 +2077,13 @@ int engine(arguments &Arguments) {
                 std::chrono::steady_clock::now() - start_lj);
           }
 
+          if (rg_analyzer.enabled()) {
+            auto start_rg = std::chrono::steady_clock::now();
+            rg_analyzer.process_frame(pro_in, lig, chunk_snap_idx, executor);
+            time_rg += std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_rg);
+          }
+
           if (Arguments.flag_nocal && use_lj_tica_features &&
               Arguments.msm.flag_tica && tica_analyzer &&
               lj_analyzer.has_feature_vector()) {
@@ -2122,6 +2128,8 @@ int engine(arguments &Arguments) {
           const int current_replica = input_name - Arguments.b_input;
           const size_t absolute_global_snap_idx =
               tot_snap_allfiles + global_frame_counter + chunk_snap_idx;
+          const double current_box_volume_nm3 =
+              frame_box_volume_nm3(pro_in.m_mol[chunk_snap_idx].Box);
 
           auto start_network = std::chrono::steady_clock::now();
           if (Arguments.flag_network || Arguments.flag_pca ||
@@ -2129,7 +2137,8 @@ int engine(arguments &Arguments) {
               (Arguments.msm.flag_tica && !use_lj_tica_features)) {
             dccm_analyzer.process_frame(
                 pro_in, lig, chunk_snap_idx, absolute_global_snap_idx,
-                pro_in.m_mol[chunk_snap_idx].time_of_snap, current_replica);
+                pro_in.m_mol[chunk_snap_idx].time_of_snap, current_replica,
+                current_box_volume_nm3);
           }
           time_network += std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - start_network);
@@ -2864,6 +2873,17 @@ int engine(arguments &Arguments) {
         if (Arguments.ifp.flag_ifp && ifp_analyzer) {
           auto start_ifp = std::chrono::steady_clock::now();
           size_t lg_snap_ifp = (lig.m_mol.size() > 1) ? chunk_snap_idx : 0;
+          if (Arguments.awh.flag_awh_ifp && awh_ifp_analyzer) {
+            const int current_replica = input_name - Arguments.b_input;
+            const auto awh_contacts = ifp_analyzer->collect_frame_contacts(
+                pro_in.m_mol[chunk_snap_idx], lig.m_mol[lg_snap_ifp], pro_in.info,
+                lig.info, pro_in.Index, lig.Index, pro_in.info.size(),
+                lig.info.size(), dis_min, Arguments.ifp);
+            awh_ifp_analyzer->consume_frame(
+                current_replica, pro_in.m_mol[chunk_snap_idx].time_of_snap, static_cast<int64_t>(tot_snap_allfiles + global_snap_idx),
+                awh_contacts, pro_in.m_mol[chunk_snap_idx],
+                lig.m_mol[lg_snap_ifp]);
+          }
           ifp_analyzer->process_frame(
               pro_in.m_mol[chunk_snap_idx],
               lig.m_mol[lg_snap_ifp],
@@ -2915,6 +2935,13 @@ int engine(arguments &Arguments) {
               std::chrono::steady_clock::now() - start_lj);
         }
 
+        if (rg_analyzer.enabled()) {
+          auto start_rg = std::chrono::steady_clock::now();
+          rg_analyzer.process_frame(pro_in, lig, chunk_snap_idx, executor);
+          time_rg += std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - start_rg);
+        }
+
         if (rms_analyzer.enabled()) {
           auto start_rms = std::chrono::steady_clock::now();
             rms_analyzer.process_frame(pro_in, lig, chunk_snap_idx, executor);
@@ -2947,6 +2974,8 @@ int engine(arguments &Arguments) {
         const int current_replica = input_name - Arguments.b_input;
         const size_t absolute_global_snap_idx =
             tot_snap_allfiles + global_snap_idx;
+        const double current_box_volume_nm3 =
+            frame_box_volume_nm3(pro_in.m_mol[chunk_snap_idx].Box);
 
         // Network Analysis (DCCM) Data Collection
         auto start_network = std::chrono::steady_clock::now();
@@ -2954,7 +2983,8 @@ int engine(arguments &Arguments) {
             Arguments.lspmd.flag_lspmd) {
           dccm_analyzer.process_frame(
               pro_in, lig, chunk_snap_idx, absolute_global_snap_idx,
-              pro_in.m_mol[chunk_snap_idx].time_of_snap, current_replica);
+              pro_in.m_mol[chunk_snap_idx].time_of_snap, current_replica,
+              current_box_volume_nm3);
         }
         time_network += std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start_network);
@@ -3348,6 +3378,31 @@ int engine(arguments &Arguments) {
                                       lj_summary_out, log);
       lj_feature_files.push_back(lj_feature_out);
     }
+    if (rg_analyzer.enabled()) {
+      const std::size_t traj_index =
+          input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
+      const std::size_t path_index =
+          (Arguments.flag_separation_results && traj_index < paths.get_size())
+              ? traj_index
+              : 0;
+      const std::string base_dir = paths.get_path(path_index);
+      const std::string rg2_out =
+          base_dir + "/" +
+          info_output.get_rg2_filename(Arguments, input_line, input_name);
+      const std::string rg2_summary_out =
+          base_dir + "/" +
+          info_output.get_rg2_summary_filename(Arguments, input_line, input_name);
+      const std::string rg2_hist_out =
+          base_dir + "/" +
+          info_output.get_rg2_hist_filename(Arguments, input_line, input_name);
+      const std::string traj_label =
+          (!input_line.empty() && traj_index < input_line.size())
+              ? input_line[traj_index]
+              : ("traj_" + std::to_string(traj_index));
+      rg_analyzer.finalize_trajectory(rg2_out, rg2_summary_out, rg2_hist_out,
+                                      traj_index, traj_label, log);
+    }
+
     if (rms_analyzer.enabled()) {
       const std::size_t traj_index =
           input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
@@ -3501,6 +3556,8 @@ int engine(arguments &Arguments) {
                       (time_dssp - time_dssp_base).count() / 1000.0);
     TitanUI::log_time(log, "LJ Analysis",
                       (time_lj - time_lj_base).count() / 1000.0);
+    TitanUI::log_time(log, "RG2 Analysis",
+                      (time_rg - time_rg_base).count() / 1000.0);
     TitanUI::log_time(log, "RMSD/RMSF Analysis",
                       (time_rms - time_rms_base).count() / 1000.0);
     TitanUI::log_time(log, "Network Data Collection",
@@ -3541,6 +3598,7 @@ int engine(arguments &Arguments) {
         (time_cas - time_cas_base).count() / 1000.0 +
         (time_dssp - time_dssp_base).count() / 1000.0 +
         (time_lj - time_lj_base).count() / 1000.0 +
+        (time_rg - time_rg_base).count() / 1000.0 +
         (time_rms - time_rms_base).count() / 1000.0 +
         (time_network - time_network_base).count() / 1000.0 +
         (time_cal - time_cal_base).count() / 1000.0 +
@@ -3624,6 +3682,19 @@ int engine(arguments &Arguments) {
                                   ? info_output.get_ifp_filename()
                                   : Arguments.ifp.output_filename;
     ifp_analyzer->export_csv(ifp_outfile);
+    if (ifp_analyzer->has_rna_annotations()) {
+      ifp_analyzer->export_rna_annotations_csv(
+          info_output.get_ifp_rna_annotations_filename());
+    }
+  }
+  if (Arguments.awh.flag_awh_ifp && awh_ifp_analyzer) {
+    awh_ifp_analyzer->export_results(Arguments, info_output, pro_in.info,
+                                     lig.info);
+  }
+  if (rg_analyzer.enabled() && rg_analyzer.has_multiple_trajectories()) {
+    rg_analyzer.finalize_all(info_output.get_rg2_all_filename(),
+                             info_output.get_rg2_summary_all_filename(),
+                             info_output.get_rg2_hist_all_filename(), log);
   }
 
   out_sc.close();
@@ -3951,6 +4022,14 @@ int engine(arguments &Arguments) {
   auto time_pp_dccm = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_dccm);
 
+  std::vector<double> mbar_frame_weights;
+  auto start_pp_mbar = std::chrono::steady_clock::now();
+  run_mbar_postproc(Arguments, msm_analyzer, &dccm_analyzer, executor,
+                    info_output, log, &mbar_frame_weights);
+  run_awh_exploratory_postproc(Arguments, msm_analyzer, umap_analyzer,
+                               &dccm_analyzer, info_output, log);
+  auto time_pp_mbar = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start_pp_mbar);
   {
     std::vector<std::string> fes_outputs;
     if (Arguments.msm.flag_tica && msm_analyzer && msm_analyzer->n_frames() > 0 &&
@@ -4027,6 +4106,7 @@ int engine(arguments &Arguments) {
   }
   TitanUI::log_time(log, "LLPS Flush+Postproc", time_pp_llps.count() / 1000.0);
   TitanUI::log_time(log, "DCCM/PCA Postproc", time_pp_dccm.count() / 1000.0);
+  TitanUI::log_time(log, "MBAR Postproc", time_pp_mbar.count() / 1000.0);
   TitanUI::log_time(log, "LSP-MD Postproc", time_pp_lspmd.count() / 1000.0);
   TitanUI::log_time(log, "Water Bridges Export",
                     time_pp_water.count() / 1000.0);

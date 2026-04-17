@@ -2,6 +2,7 @@
 
 #include "titan_alignment.h"
 #include "titan_executor.h"
+#include "titan_simd_dispatch.h"
 #include "titan_ui.h"
 
 #include <algorithm>
@@ -9,7 +10,6 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
-#include <immintrin.h>
 #include <limits>
 #include <numeric>
 #include <sstream>
@@ -17,43 +17,12 @@
 namespace {
 
 double sum_avx2(const double *data, std::size_t n) {
-  std::size_t i = 0;
-  double total = 0.0;
-#ifdef __AVX__
-  __m256d acc = _mm256_setzero_pd();
-  for (; i + 3 < n; i += 4) {
-    acc = _mm256_add_pd(acc, _mm256_loadu_pd(data + i));
-  }
-  alignas(32) double lane[4];
-  _mm256_store_pd(lane, acc);
-  total = lane[0] + lane[1] + lane[2] + lane[3];
-#endif
-  for (; i < n; ++i)
-    total += data[i];
-  return total;
+  return titan_simd_dispatch::sum_doubles(data, n);
 }
 
 double squared_diff_sum_avx2(const double *lhs, const double *rhs,
                              std::size_t n) {
-  std::size_t i = 0;
-  double total = 0.0;
-#ifdef __AVX__
-  __m256d acc = _mm256_setzero_pd();
-  for (; i + 3 < n; i += 4) {
-    const __m256d a = _mm256_loadu_pd(lhs + i);
-    const __m256d b = _mm256_loadu_pd(rhs + i);
-    const __m256d d = _mm256_sub_pd(a, b);
-    acc = _mm256_add_pd(acc, _mm256_mul_pd(d, d));
-  }
-  alignas(32) double lane[4];
-  _mm256_store_pd(lane, acc);
-  total = lane[0] + lane[1] + lane[2] + lane[3];
-#endif
-  for (; i < n; ++i) {
-    const double d = lhs[i] - rhs[i];
-    total += d * d;
-  }
-  return total;
+  return titan_simd_dispatch::squared_diff_sum(lhs, rhs, n);
 }
 
 const char *trace_kind_name(TitanRMSAnalyzer::TraceKind kind) noexcept {

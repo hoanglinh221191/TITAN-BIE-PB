@@ -1,4 +1,3 @@
-#pragma GCC optimize ("O0")
 #include "titan_rf_model.h"
 
 double predict_rf_pKD(double* input) {

@@ -4,8 +4,10 @@
 
 #include "MOL.h"
 #include "MOL_info.h"
+#include "aligned_allocator.h"
 #include "info.h"
 #include "titan_neighbor_grid.h"
+#include "titan_thread_compat.h"
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -134,12 +136,12 @@ private:
   std::mutex queue_mtx_;
   std::condition_variable queue_cv_;
   bool worker_stop_ = false;
-  std::jthread worker_thread_;
+  titan::jthread worker_thread_;
   bool async_mode_ = false;
   static constexpr int MAX_QUEUE_SIZE_ = 4;
   std::condition_variable queue_full_cv_; // backpressure
 
-  void worker_loop(std::stop_token stoken);
+  void worker_loop(titan::stop_token stoken);
 
   // Internal implementation accepting pre-converted nm coordinates.
   void process_frame_impl(const std::vector<float> &pos_nm,
@@ -210,6 +212,9 @@ private:
   mutable std::vector<float> shifted_pos_buf_;
   mutable std::vector<float> rna_nm_buf_;
   mutable std::vector<float> pos_nm_buf_;                 // B1
+  mutable AlignedDoubleVector gcc_rg_x_buf_;
+  mutable AlignedDoubleVector gcc_rg_y_buf_;
+  mutable AlignedDoubleVector gcc_rg_z_buf_;
   mutable std::vector<std::pair<int, int>> contacts_buf_; // B3
   mutable std::vector<int> degree_buf_;                   // B4
   mutable std::vector<int> gcc_macros_buf_;               // B5

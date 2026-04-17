@@ -19,6 +19,7 @@
 #include "info.h"
 #include "titan_ui.h"
 #include <Eigen/Dense>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -31,6 +32,11 @@
 
 class TitanKinetics;
 class TitanExecutor;
+enum class TitanMSMItsSolverMode {
+  Full,
+  Schur,
+  Partial,
+};
 
 class TitanMSM {
 public:
@@ -136,11 +142,13 @@ public:
   // msm_macrostates   : -1 = auto-detect from timescales
   // its_lags          : lag list for ITS scan (empty = auto-generate)
   // -----------------------------------------------------------------------
-  void export_results(TitanExecutor &executor, const info &info_output,
-                      std::fstream &log,
-                      int n_timescales = 3, bool msm_run_its = true,
-                      bool msm_run_pcca = true, int msm_macrostates = -1,
-                      const std::vector<int> &its_lags = {}) const;
+  void export_results(
+      TitanExecutor &executor, const info &info_output, std::fstream &log,
+      int n_timescales = 3, bool msm_run_its = true,
+      bool msm_run_pcca = true, int msm_macrostates = -1,
+      const std::vector<int> &its_lags = {},
+      TitanMSMItsSolverMode its_solver_mode = TitanMSMItsSolverMode::Full,
+      int its_topk = 0, int its_max_k_full = 256) const;
 
   // -----------------------------------------------------------------------
   // Accessors

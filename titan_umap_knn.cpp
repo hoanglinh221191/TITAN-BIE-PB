@@ -1,5 +1,7 @@
 #include "titan_umap_knn.h"
 #include "titan_executor.h"
+#include "titan_simd_dispatch.h"
+#include "titan_thread_compat.h"
 
 #include <array>
 #include <algorithm>
@@ -44,32 +46,7 @@ bool try_insert_neighbor(NeighborRow &best, FlagRow *is_new, int index,
                          double dist_sq);
 
 double squared_distance_avx2(const double *lhs, const double *rhs, int dim) {
-#if defined(__AVX2__)
-  __m256d acc = _mm256_setzero_pd();
-  int c = 0;
-  for (; c + 4 <= dim; c += 4) {
-    const __m256d x = _mm256_loadu_pd(lhs + c);
-    const __m256d y = _mm256_loadu_pd(rhs + c);
-    const __m256d diff = _mm256_sub_pd(x, y);
-    acc = _mm256_add_pd(acc, _mm256_mul_pd(diff, diff));
-  }
-
-  alignas(32) double lane_sum[4];
-  _mm256_store_pd(lane_sum, acc);
-  double total = lane_sum[0] + lane_sum[1] + lane_sum[2] + lane_sum[3];
-  for (; c < dim; ++c) {
-    const double diff = lhs[c] - rhs[c];
-    total += diff * diff;
-  }
-  return total;
-#else
-  double total = 0.0;
-  for (int c = 0; c < dim; ++c) {
-    const double diff = lhs[c] - rhs[c];
-    total += diff * diff;
-  }
-  return total;
-#endif
+  return titan_simd_dispatch::squared_distance_rowmajor(lhs, rhs, dim);
 }
 
 inline void prefetch_row_read(const double *ptr) noexcept {
@@ -312,7 +289,7 @@ InternalBuildResult build_exact_knn_graph(const MatrixRMConstRef &input,
       run_worker(0);
     }
   } else {
-    std::vector<std::jthread> workers;
+    std::vector<titan::jthread> workers;
     workers.reserve(n_workers);
     for (size_t worker_id = 0; worker_id < n_workers; ++worker_id) {
       const int begin = static_cast<int>(worker_id) * block_size;
@@ -418,7 +395,7 @@ InternalBuildResult build_approx_knn_graph(const MatrixRMConstRef &input,
       seed_worker(0);
     }
   } else {
-    std::vector<std::jthread> workers;
+    std::vector<titan::jthread> workers;
     workers.reserve(n_workers);
     for (size_t worker_id = 0; worker_id < n_workers; ++worker_id) {
       const int begin = static_cast<int>(worker_id) * block_size;
@@ -561,7 +538,7 @@ InternalBuildResult build_approx_knn_graph(const MatrixRMConstRef &input,
         refine_worker(0);
       }
     } else {
-      std::vector<std::jthread> workers;
+    std::vector<titan::jthread> workers;
       workers.reserve(n_workers);
       for (size_t worker_id = 0; worker_id < n_workers; ++worker_id) {
         const int begin = static_cast<int>(worker_id) * block_size;

@@ -348,7 +348,7 @@ int groups_cal::create_group_entropy(const Multi_MOL &mol1,
   return 0;
 }
 
-groups_cal::groups_cal(const vector<::index> &Index)
+groups_cal::groups_cal(const vector<class index> &Index)
     : entropy{false}, group_1{}, group_2{}, group_entropy_com{},
       group_entropy_rec{}, group_entropy_lg{} {}
 

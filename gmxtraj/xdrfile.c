@@ -2519,6 +2519,8 @@ static int xdrstdio_getlong (XDR *, int32_t *);
 static int xdrstdio_putlong (XDR *, int32_t *);
 static int xdrstdio_getbytes (XDR *, char *, unsigned int);
 static int xdrstdio_putbytes (XDR *, char *, unsigned int);
+static unsigned int xdrstdio_getpostn_compat (XDR *);
+static int xdrstdio_setpostn_compat (XDR *, unsigned int);
 static int64_t xdrstdio_getpos (XDR *);
 static int xdrstdio_setpos (XDR *, int64_t, int);
 static void xdrstdio_destroy (XDR *);
@@ -2532,8 +2534,8 @@ static const struct xdr_ops xdrstdio_ops =
 		xdrstdio_putlong,		/* serialize a long int */
 		xdrstdio_getbytes,       	/* deserialize counted bytes */
 		xdrstdio_putbytes,     	/* serialize counted bytes */
-		xdrstdio_getpos,		/* get offset in the stream */
-		xdrstdio_setpos,		/* set offset in the stream */
+		xdrstdio_getpostn_compat,	/* get offset in the stream */
+		xdrstdio_setpostn_compat,	/* set offset in the stream */
 		xdrstdio_destroy,		/* destroy stream */
 	};
 
@@ -2612,6 +2614,17 @@ xdrstdio_getpos (XDR *xdrs)
     #endif
 }
 
+static unsigned int
+xdrstdio_getpostn_compat (XDR *xdrs)
+{
+	int64_t pos = xdrstdio_getpos(xdrs);
+	if (pos < 0)
+		return 0U;
+	if ((uint64_t) pos > (uint64_t) UINT_MAX)
+		return UINT_MAX;
+	return (unsigned int) pos;
+}
+
 static int
 xdrstdio_setpos (XDR *xdrs, int64_t pos, int whence)
 {
@@ -2628,6 +2641,12 @@ xdrstdio_setpos (XDR *xdrs, int64_t pos, int whence)
     #endif
 
 
+}
+
+static int
+xdrstdio_setpostn_compat (XDR *xdrs, unsigned int pos)
+{
+	return xdrstdio_setpos(xdrs, (int64_t) pos, SEEK_SET);
 }
 
 

@@ -2,6 +2,7 @@
 #include <map>
 #include <set>
 using namespace std;
+using index_type = class index;
 
 bool find_lipid(string res_name) {
   set<string> list_lipid{"DOPA", "DOPC", "DOPE", "DOPG", "DOPS", "DMPA", "DMPC",
@@ -15,7 +16,7 @@ int Multi_MOL::generate_index() {
   if (m_mol.empty())
     return 1;
 
-  index index_temp{};
+  index_type index_temp{};
   size_t index_i{}, index_e{};
   index_temp.set_chain(info[0].get_chain());
   Index.emplace_back(index_temp);
@@ -42,7 +43,7 @@ int Multi_MOL::generate_index() {
                               info[i].get_res_name());
       index_e = 0u;
     }
-  Index.emplace_back(index(std::string("NULL_S"), info.size() + 1));
+  Index.emplace_back(index_type(std::string("NULL_S"), info.size() + 1));
   return 0;
 }
 int Multi_MOL::check_dna_or_rna(const amino_acid &amine) {
@@ -171,7 +172,7 @@ int Multi_MOL::post_process_protein() {
   }
   return 0;
 }
-int Multi_MOL::post_process_type_res(index &in, size_t pos_res) {
+int Multi_MOL::post_process_type_res(class index &in, size_t pos_res) {
   string type_of_res{this->check_head_tail_res(in, pos_res)};
   if (this->force_f.find("AMBER") != string::npos &&
       in.get_type_base(pos_res) == "protein") {

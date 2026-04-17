@@ -2582,6 +2582,80 @@ void write_dham_window_audit_file(const std::string &filename,
   }
 }
 
+AlignedDoubleVector map_global_weights_to_local_indices(
+    const std::string &label, const std::vector<int64_t> &local_global_indices,
+    const std::vector<double> &global_frame_weights, bool &use_weights) {
+  AlignedDoubleVector mapped(local_global_indices.size(), 0.0);
+  use_weights = false;
+  if (local_global_indices.empty() || global_frame_weights.empty())
+    return mapped;
+
+  std::size_t matched_frames = 0;
+  std::size_t weighted_frames = 0;
+  double weight_sum = 0.0;
+  for (std::size_t idx = 0; idx < local_global_indices.size(); ++idx) {
+    const int64_t global_idx = local_global_indices[idx];
+    if (global_idx < 0 ||
+        static_cast<std::size_t>(global_idx) >= global_frame_weights.size()) {
+      continue;
+    }
+    const double weight = global_frame_weights[static_cast<std::size_t>(global_idx)];
+    mapped[idx] = weight;
+    ++matched_frames;
+    if (weight > 0.0)
+      ++weighted_frames;
+    weight_sum += weight;
+  }
+
+  if (weight_sum <= 0.0) {
+    TitanUI::print_warning(label + ": mapped MBAR weights sum to zero. Skipping "
+                                   "weighted FES export.");
+    return mapped;
+  }
+
+  use_weights = true;
+  TitanUI::print_info(label + ": Mapped MBAR weights onto " +
+                      std::to_string(weighted_frames) + "/" +
+                      std::to_string(local_global_indices.size()) +
+                      " frames (matched indices: " +
+                      std::to_string(matched_frames) + ", weight sum = " +
+                      std::to_string(weight_sum) + ").");
+  return mapped;
+}
+
+std::vector<std::pair<double, double>>
+read_projection_csv_pairs(const std::string &path) {
+  std::ifstream in(path);
+  if (!in.is_open())
+    return {};
+
+  std::vector<std::pair<double, double>> projections;
+  std::string line;
+  bool first_line = true;
+  while (std::getline(in, line)) {
+    if (line.empty())
+      continue;
+    if (first_line) {
+      first_line = false;
+      if (line.find("Frame") != std::string::npos)
+        continue;
+    }
+    std::stringstream ss(line);
+    std::string token;
+    std::vector<std::string> cols;
+    while (std::getline(ss, token, ','))
+      cols.push_back(token);
+    if (cols.size() < 3)
+      continue;
+    try {
+      projections.emplace_back(std::stod(cols[1]), std::stod(cols[2]));
+    } catch (...) {
+      continue;
+    }
+  }
+  return projections;
+}
+
 int select_effective_msm_clusters(const arguments &args,
                                   const TitanKinetics &tica_analyzer) {
   const int requested_k = std::max(2, args.msm.msm_clusters);
@@ -2797,7 +2871,8 @@ void run_gbsa_postproc(const arguments &args, size_t tot_snap_allfiles,
   if (global_has_nucleic_acid) {
     try {
       if (tot_snap_allfiles > 0) {
-        na_profiler.export_results("nucleic_acid_interactions.csv");
+        na_profiler.export_results(
+            info_output.get_nucleic_acid_interactions_filename());
       }
     } catch (const std::exception &e) {
       std::cerr << "[ERROR] Exception in NA Profiler: " << e.what() << "\n";
@@ -2938,10 +3013,24 @@ void run_tica_msm_postproc(const arguments &args,
           msm_analyzer->build_markov_model(args.msm.msm_lag);
 
         if (msm_analyzer->is_built()) {
+          TitanMSMItsSolverMode its_solver_mode = TitanMSMItsSolverMode::Full;
+          switch (args.msm.msm_its_solver) {
+          case MsmArgs::ItsSolverMode::Schur:
+            its_solver_mode = TitanMSMItsSolverMode::Schur;
+            break;
+          case MsmArgs::ItsSolverMode::Partial:
+            its_solver_mode = TitanMSMItsSolverMode::Partial;
+            break;
+          case MsmArgs::ItsSolverMode::Full:
+          default:
+            its_solver_mode = TitanMSMItsSolverMode::Full;
+            break;
+          }
           msm_analyzer->export_results(
               executor, info_output, log, args.msm.msm_nts, args.msm.msm_run_its,
               args.msm.msm_run_pcca, args.msm.msm_macrostates,
-              args.msm.msm_its_lags);
+              args.msm.msm_its_lags, its_solver_mode, args.msm.msm_its_topk,
+              args.msm.msm_its_max_k_full);
         }
       } else {
         TitanUI::log_kv(log, "TICA Projections",
@@ -3125,6 +3214,8 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
         cfg.use_avg_cutoff = args.allostery_use_avg_cutoff;
         cfg.knn_use_contact_prior = args.allostery_knn_use_contact_prior;
         cfg.knn_contact_cutoff = args.allostery_knn_contact_cutoff;
+        cfg.estimator = args.allostery_estimator;
+        cfg.kde_bandwidth = args.allostery_kde_bandwidth;
         cfg.compute_te = args.allostery_compute_te;
         dccm_analyzer.calculate_allostery_information_optimized(
             executor, cfg, info_output.get_network_gc_edges_filename(),
@@ -3138,6 +3229,11 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
                         info_output.get_network_te_edges_filename());
         TitanUI::log_kv(log, "Allostery TE Stage",
                         cfg.compute_te ? "enabled" : "disabled (GC only)");
+        TitanUI::log_kv(log, "Allostery Estimator",
+                        cfg.estimator == "kde"
+                            ? (std::string("kde (bandwidth=") +
+                               std::to_string(cfg.kde_bandwidth) + ")")
+                            : cfg.estimator);
         TitanUI::log_kv(log, "Allostery Prune Window",
                         cfg.use_avg_cutoff ? "union across frames"
                                            : "frame-0 only");
@@ -4027,6 +4123,142 @@ void run_dham_postproc(const arguments &args,
   TitanUI::log_time(log, "DHAM Analysis", time_dham.count() / 1000.0);
 }
 
+void run_mbar_postproc(const arguments &args,
+                       std::unique_ptr<TitanMSM> &msm_analyzer,
+                       DCCMNetwork *dccm_analyzer, TitanExecutor &executor,
+                       info &info_output, std::fstream &log,
+                       std::vector<double> *out_frame_weights) {
+  if (out_frame_weights)
+    out_frame_weights->clear();
+  if (!args.mbar.flag_mbar)
+    return;
+
+  auto start_mbar = std::chrono::steady_clock::now();
+  TitanUI::print_module_header("MBAR Post-Processing");
+
+  const bool want_tica =
+      (args.mbar.domain == "tica" || args.mbar.domain == "both");
+  const bool want_pca =
+      (args.mbar.domain == "pca" || args.mbar.domain == "both");
+
+  TitanMBAR::FrameMetadata metadata;
+  if (dccm_analyzer && dccm_analyzer->get_total_frames() > 0 &&
+      (want_pca || !want_tica)) {
+    metadata.replica_ids = dccm_analyzer->get_traj_replicas();
+    metadata.timestamps_ps = dccm_analyzer->get_traj_times();
+    metadata.global_indices = dccm_analyzer->get_global_frame_indices();
+    metadata.box_volumes_nm3 = dccm_analyzer->get_traj_box_volumes_nm3();
+  } else if (msm_analyzer && msm_analyzer->n_frames() > 0) {
+    metadata.replica_ids = msm_analyzer->get_frame_replica_ids();
+    metadata.timestamps_ps = msm_analyzer->get_frame_timestamps();
+    metadata.global_indices = msm_analyzer->get_frame_global_indices();
+    metadata.box_volumes_nm3 = msm_analyzer->get_frame_box_volumes_nm3();
+  }
+
+  auto mbar_result = TitanMBAR::run_temperature_ladder_reweighting(
+      args, metadata, executor, log);
+  TitanMBAR::write_window_audit_file(info_output.get_mbar_window_audit_filename(),
+                                     mbar_result.window_audit);
+  TitanMBAR::write_frame_weights_file(
+      info_output.get_mbar_frame_weights_filename(), mbar_result.frame_weights);
+  TitanMBAR::write_summary_file(info_output.get_mbar_summary_filename(),
+                                mbar_result, args, log);
+  if (args.mbar.scan_points > 1 && !mbar_result.cv_scan.empty()) {
+    TitanMBAR::write_cv_file(info_output.get_mbar_cv_filename(),
+                             mbar_result.cv_scan);
+    TitanUI::log_kv(log, "MBAR Cv File", info_output.get_mbar_cv_filename());
+  }
+  TitanUI::log_kv(log, "MBAR Weight File",
+                  info_output.get_mbar_frame_weights_filename());
+  TitanUI::log_kv(log, "MBAR Window Audit File",
+                  info_output.get_mbar_window_audit_filename());
+
+  if (out_frame_weights)
+    *out_frame_weights = mbar_result.global_frame_weights;
+  if (!mbar_result.solved) {
+    auto time_mbar = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_mbar);
+    TitanUI::log_time(log, "MBAR Analysis", time_mbar.count() / 1000.0);
+    return;
+  }
+
+  if (want_tica) {
+    if (!(msm_analyzer && msm_analyzer->n_frames() > 0 &&
+          msm_analyzer->proj_mat_ref().cols() >= 2)) {
+      TitanUI::print_warning(
+          "MBAR/TICA: no valid TICA projection metadata available. "
+          "Skipping weighted TICA FES.");
+    } else if (mbar_result.global_frame_weights.empty()) {
+      TitanUI::print_warning(
+          "MBAR/TICA: no mapped global frame weights available. "
+          "Skipping weighted TICA FES.");
+    } else {
+      bool use_weights = false;
+      const auto local_weights = map_global_weights_to_local_indices(
+          "MBAR/TICA", msm_analyzer->get_frame_global_indices(),
+          mbar_result.global_frame_weights, use_weights);
+      if (use_weights) {
+        std::vector<std::pair<double, double>> projections(
+            static_cast<std::size_t>(msm_analyzer->n_frames()));
+        for (std::size_t frame = 0; frame < projections.size(); ++frame) {
+          projections[frame] = {
+              msm_analyzer->proj_mat_ref()(static_cast<Eigen::Index>(frame), 0),
+              msm_analyzer->proj_mat_ref()(static_cast<Eigen::Index>(frame), 1)};
+        }
+        TitanPCA::export_projection_fes_analysis(
+            "MBAR TICA", "TICA", args, projections, local_weights, true,
+            args.mbar.target_temp, "MBAR-weighted", executor, log,
+            info_output.get_mbar_tica_fes_2d_filename(),
+            info_output.get_mbar_tica_cluster_representatives_filename(),
+            msm_analyzer->get_frame_timestamps(),
+            msm_analyzer->get_frame_replica_ids());
+      }
+    }
+  }
+
+  if (want_pca) {
+    if (!(dccm_analyzer && dccm_analyzer->get_total_frames() > 0)) {
+      TitanUI::print_warning(
+          "MBAR/PCA: no PCA trajectory metadata available. "
+          "Skipping weighted PCA FES.");
+    } else if (mbar_result.global_frame_weights.empty()) {
+      TitanUI::print_warning(
+          "MBAR/PCA: no mapped global frame weights available. "
+          "Skipping weighted PCA FES.");
+    } else {
+      const auto projections =
+          read_projection_csv_pairs(info_output.get_pca_fel_filename());
+      if (projections.size() != dccm_analyzer->get_total_frames()) {
+        TitanUI::print_warning(
+            "MBAR/PCA: projection count in " +
+            info_output.get_pca_fel_filename() + " (" +
+            std::to_string(projections.size()) +
+            ") does not match PCA frame count (" +
+            std::to_string(dccm_analyzer->get_total_frames()) +
+            "). Skipping weighted PCA FES.");
+      } else {
+        bool use_weights = false;
+        const auto local_weights = map_global_weights_to_local_indices(
+            "MBAR/PCA", dccm_analyzer->get_global_frame_indices(),
+            mbar_result.global_frame_weights, use_weights);
+        if (use_weights) {
+          TitanPCA::export_projection_fes_analysis(
+              "MBAR PCA", "PCA", args, projections, local_weights, true,
+              args.mbar.target_temp, "MBAR-weighted", executor, log,
+              info_output.get_mbar_pca_fes_2d_filename(),
+              info_output.get_mbar_pca_cluster_representatives_filename(),
+              dccm_analyzer->get_traj_times(),
+              dccm_analyzer->get_traj_replicas());
+        }
+      }
+    }
+  }
+
+  auto time_mbar = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start_mbar);
+  TitanUI::log_time(log, "MBAR Analysis", time_mbar.count() / 1000.0);
+}
+
 void run_tpt_postproc(const arguments &args,
                       std::unique_ptr<TitanMSM> &msm_analyzer,
                       TitanExecutor &executor, info &info_output,
@@ -4348,3 +4580,247 @@ void run_tpt_postproc(const arguments &args,
       std::chrono::steady_clock::now() - start_tpt);
   TitanUI::log_time(log, "TPT Analysis", time_tpt.count() / 1000.0);
 }
+
+namespace {
+
+struct AwhFrameAssignmentRow {
+  std::size_t bin_id{0};
+  std::int64_t global_frame_index{-1};
+  double rc_left{0.0};
+  double rc_center{0.0};
+  double rc_right{0.0};
+  std::string overlap_status;
+  std::string stability_status;
+};
+
+struct TptCommittorRow {
+  int state{-1};
+  char label{'I'};
+  double q_plus{std::numeric_limits<double>::quiet_NaN()};
+  double q_minus{std::numeric_limits<double>::quiet_NaN()};
+  double reactive_density{std::numeric_limits<double>::quiet_NaN()};
+  double net_out{std::numeric_limits<double>::quiet_NaN()};
+};
+
+std::vector<AwhFrameAssignmentRow>
+read_awh_frame_assignments(const std::string &path) {
+  std::ifstream in(path);
+  if (!in.is_open())
+    return {};
+
+  std::vector<AwhFrameAssignmentRow> rows;
+  std::string line;
+  bool first_line = true;
+  while (std::getline(in, line)) {
+    if (line.empty())
+      continue;
+    if (first_line) {
+      first_line = false;
+      if (line.find("bin_id") != std::string::npos)
+        continue;
+    }
+    std::stringstream ss(line);
+    AwhFrameAssignmentRow row;
+    int replica_id = -1;
+    if (!(ss >> row.bin_id >> replica_id >> row.global_frame_index))
+      continue;
+    double time_ps = 0.0;
+    double rc_value = 0.0;
+    if (!(ss >> time_ps >> rc_value >> row.rc_left >> row.rc_center >> row.rc_right >> row.overlap_status >> row.stability_status))
+      continue;
+    rows.push_back(row);
+  }
+  return rows;
+}
+
+std::unordered_map<int, TptCommittorRow>
+read_tpt_committor_rows(const std::string &path) {
+  std::ifstream in(path);
+  if (!in.is_open())
+    return {};
+
+  std::unordered_map<int, TptCommittorRow> rows;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#')
+      continue;
+    std::stringstream ss(line);
+    TptCommittorRow row;
+    if (!(ss >> row.state >> row.label))
+      continue;
+    double pi = 0.0;
+    double gross_out = 0.0;
+    double gross_in = 0.0;
+    double net_in = 0.0;
+    if (!(ss >> pi >> row.q_plus >> row.q_minus >> row.reactive_density >> gross_out >> gross_in >> row.net_out >> net_in))
+      continue;
+    rows[row.state] = row;
+  }
+  return rows;
+}
+
+} // namespace
+
+void run_awh_exploratory_postproc(const arguments &args,
+                                  std::unique_ptr<TitanMSM> &msm_analyzer,
+                                  std::unique_ptr<TitanUMAP> &umap_analyzer,
+                                  DCCMNetwork *dccm_analyzer,
+                                  info &info_output, std::fstream &log) {
+  if (!args.awh.flag_awh_ifp)
+    return;
+
+  const auto awh_rows =
+      read_awh_frame_assignments(info_output.get_awh_frame_assignments_filename());
+  if (awh_rows.empty()) {
+    TitanUI::print_warning(
+        "AWH exploratory context: no frame assignments found. Skipping overlay export.");
+    return;
+  }
+
+  std::unordered_map<std::size_t, std::vector<std::int64_t>> bin_to_globals;
+  std::unordered_map<std::size_t, AwhFrameAssignmentRow> bin_meta;
+  for (const auto &row : awh_rows) {
+    if (row.global_frame_index < 0)
+      continue;
+    bin_to_globals[row.bin_id].push_back(row.global_frame_index);
+    bin_meta[row.bin_id] = row;
+  }
+
+  const auto pca_pairs = read_projection_csv_pairs(info_output.get_pca_fel_filename());
+  const auto tpt_rows = read_tpt_committor_rows(info_output.get_tpt_committor_filename());
+  const auto &umap_matrix = (umap_analyzer && umap_analyzer->is_fitted())
+                                ? umap_analyzer->embedding()
+                                : TitanUMAP::EmbeddingMatrixRM{};
+
+  std::ofstream out(info_output.get_awh_exploratory_context_filename());
+  if (!out.is_open()) {
+    TitanUI::print_warning(
+        "AWH exploratory context: cannot open output file for writing.");
+    return;
+  }
+
+  out << "# exploratory_only biased_ensemble_context\n";
+  out << "# Do not interpret these overlays as unbiased kinetics or equilibrium populations.\n";
+  out << "bin_id\trc_left\trc_center\trc_right\tmatched_frames\tpca_frames\t"
+         "pca_pc1_mean\tpca_pc2_mean\tumap_frames\tumap1_mean\tumap2_mean\t"
+         "microstate_frames\tdominant_microstate\tdominant_microstate_fraction\t"
+         "macrostate_frames\tdominant_macrostate\tdominant_macrostate_fraction\t"
+         "tpt_frames\tmean_q_plus\tmean_q_minus\tmean_reactive_density\t"
+         "mean_net_out\thas_source_like\thas_sink_like\thas_intermediate_like\t"
+         "overlap_status\tstability_status\tnote\n";
+  out << std::fixed << std::setprecision(6);
+
+  std::vector<int> macro_assignments;
+  if (msm_analyzer && msm_analyzer->is_built()) {
+    macro_assignments =
+        msm_analyzer->compute_pcca_macrostates(args.msm.msm_macrostates);
+  }
+
+  for (const auto &[bin_id, globals] : bin_to_globals) {
+    const auto meta_it = bin_meta.find(bin_id);
+    if (meta_it == bin_meta.end())
+      continue;
+    const auto &meta = meta_it->second;
+
+    double pca_pc1_sum = 0.0, pca_pc2_sum = 0.0;
+    std::size_t pca_count = 0;
+    double umap1_sum = 0.0, umap2_sum = 0.0;
+    std::size_t umap_count = 0;
+    std::unordered_map<int, std::size_t> micro_counts;
+    std::unordered_map<int, std::size_t> macro_counts;
+    double q_plus_sum = 0.0, q_minus_sum = 0.0, reactive_sum = 0.0, net_out_sum = 0.0;
+    std::size_t tpt_count = 0;
+    bool has_source = false, has_sink = false, has_intermediate = false;
+
+    for (std::int64_t global_idx : globals) {
+      if (global_idx >= 0 && static_cast<std::size_t>(global_idx) < pca_pairs.size()) {
+        pca_pc1_sum += pca_pairs[static_cast<std::size_t>(global_idx)].first;
+        pca_pc2_sum += pca_pairs[static_cast<std::size_t>(global_idx)].second;
+        ++pca_count;
+      }
+      if (msm_analyzer && msm_analyzer->n_frames() > 0) {
+        const auto &frame_globals = msm_analyzer->get_frame_global_indices();
+        auto found = std::find(frame_globals.begin(), frame_globals.end(), global_idx);
+        if (found != frame_globals.end()) {
+          const auto local_idx = static_cast<std::size_t>(std::distance(frame_globals.begin(), found));
+          if (umap_analyzer && umap_analyzer->is_fitted() && local_idx < static_cast<std::size_t>(umap_matrix.rows()) && umap_matrix.cols() >= 2) {
+            umap1_sum += umap_matrix(static_cast<Eigen::Index>(local_idx), 0);
+            umap2_sum += umap_matrix(static_cast<Eigen::Index>(local_idx), 1);
+            ++umap_count;
+          }
+          if (local_idx < msm_analyzer->discrete_traj().size()) {
+            const int micro = msm_analyzer->discrete_traj()[local_idx];
+            ++micro_counts[micro];
+            if (!macro_assignments.empty() && micro >= 0 && micro < static_cast<int>(macro_assignments.size())) {
+              ++macro_counts[macro_assignments[static_cast<std::size_t>(micro)]];
+            }
+            auto tpt_it = tpt_rows.find(micro);
+            if (tpt_it != tpt_rows.end()) {
+              q_plus_sum += tpt_it->second.q_plus;
+              q_minus_sum += tpt_it->second.q_minus;
+              reactive_sum += tpt_it->second.reactive_density;
+              net_out_sum += tpt_it->second.net_out;
+              ++tpt_count;
+              has_source = has_source || tpt_it->second.label == 'A';
+              has_sink = has_sink || tpt_it->second.label == 'B';
+              has_intermediate = has_intermediate || tpt_it->second.label == 'I';
+            }
+          }
+        }
+      }
+    }
+
+    auto dominant_state = [](const auto &counts) {
+      int state = -1;
+      std::size_t n = 0;
+      for (const auto &[key, value] : counts) {
+        if (value > n) {
+          state = key;
+          n = value;
+        }
+      }
+      return std::pair<int, std::size_t>{state, n};
+    };
+
+    const auto [dominant_micro, dominant_micro_n] = dominant_state(micro_counts);
+    const auto [dominant_macro, dominant_macro_n] = dominant_state(macro_counts);
+
+    out << bin_id << '\t' << meta.rc_left << '\t' << meta.rc_center << '\t'
+        << meta.rc_right << '\t' << globals.size() << '\t' << pca_count << '\t'
+        << (pca_count > 0 ? pca_pc1_sum / static_cast<double>(pca_count) : 0.0) << '\t'
+        << (pca_count > 0 ? pca_pc2_sum / static_cast<double>(pca_count) : 0.0) << '\t'
+        << umap_count << '\t'
+        << (umap_count > 0 ? umap1_sum / static_cast<double>(umap_count) : 0.0) << '\t'
+        << (umap_count > 0 ? umap2_sum / static_cast<double>(umap_count) : 0.0) << '\t'
+        << micro_counts.size() << '\t' << dominant_micro << '\t'
+        << (globals.empty() ? 0.0 : static_cast<double>(dominant_micro_n) /
+                                   static_cast<double>(globals.size()))
+        << '\t' << macro_counts.size() << '\t' << dominant_macro << '\t'
+        << (globals.empty() ? 0.0 : static_cast<double>(dominant_macro_n) /
+                                   static_cast<double>(globals.size()))
+        << '\t' << tpt_count << '\t'
+        << (tpt_count > 0 ? q_plus_sum / static_cast<double>(tpt_count) : 0.0)
+        << '\t'
+        << (tpt_count > 0 ? q_minus_sum / static_cast<double>(tpt_count) : 0.0)
+        << '\t'
+        << (tpt_count > 0 ? reactive_sum / static_cast<double>(tpt_count) : 0.0)
+        << '\t'
+        << (tpt_count > 0 ? net_out_sum / static_cast<double>(tpt_count) : 0.0)
+        << '\t' << (has_source ? 1 : 0) << '\t' << (has_sink ? 1 : 0) << '\t'
+        << (has_intermediate ? 1 : 0) << '\t' << meta.overlap_status << '\t'
+        << meta.stability_status << '\t'
+        << "exploratory_context_only"
+        << '\n';
+  }
+
+  TitanUI::log_kv(log, "AWH Exploratory Bins",
+                  std::to_string(bin_to_globals.size()));
+  TitanUI::log_kv(log, "AWH Exploratory Output",
+                  info_output.get_awh_exploratory_context_filename());
+  TitanUI::print_info(
+      "AWH exploratory context: exported biased-ensemble overlay to " +
+      info_output.get_awh_exploratory_context_filename());
+  TitanUI::print_warning(
+      "AWH exploratory context remains exploratory only; do not interpret it as unbiased kinetics or equilibrium populations.");
+}
+

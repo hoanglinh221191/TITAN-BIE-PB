@@ -9,7 +9,7 @@ TitanExecutor::TitanExecutor(std::size_t nt) : capacity_(std::max<std::size_t>(1
   workers_.reserve(capacity_);
   for (std::size_t worker_id = 0; worker_id < capacity_; ++worker_id) {
     workers_.emplace_back(
-        [this, worker_id](std::stop_token stop_token) {
+        [this, worker_id](titan::stop_token stop_token) {
           worker_loop(stop_token, worker_id);
         });
   }
@@ -103,7 +103,7 @@ void TitanExecutor::parallel_do(
   }
 }
 
-void TitanExecutor::worker_loop(std::stop_token stop_token,
+void TitanExecutor::worker_loop(titan::stop_token stop_token,
                                 std::size_t worker_id) {
   std::size_t local_generation = 0;
 

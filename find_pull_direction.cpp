@@ -3,6 +3,7 @@
 #include "functions.h"
 #include "pull_de_variants.h"
 #include "pull_direction_pathway.h"
+#include "titan_simd_dispatch.h"
 #include "titan_ui.h"
 #include <algorithm>
 #include <array>
@@ -606,34 +607,10 @@ cache_energy pull_reference_energy(const Multi_MOL &rec, const Multi_MOL &lg,
 
 void translate_seed_to_scratch(const MOL &seed, MOL &scratch, double dX,
                                double dY, double dZ) {
-  const std::size_t n_atoms = seed.size();
-  const double *seed_x = seed.pos.x.data();
-  const double *seed_y = seed.pos.y.data();
-  const double *seed_z = seed.pos.z.data();
-  double *scratch_x = scratch.pos.x.data();
-  double *scratch_y = scratch.pos.y.data();
-  double *scratch_z = scratch.pos.z.data();
-
-  std::size_t i = 0;
-#if defined(__AVX2__)
-  const std::size_t simd_end = (n_atoms / 4) * 4;
-  const __m256d shift_x = _mm256_set1_pd(dX);
-  const __m256d shift_y = _mm256_set1_pd(dY);
-  const __m256d shift_z = _mm256_set1_pd(dZ);
-  for (; i < simd_end; i += 4) {
-    _mm256_storeu_pd(scratch_x + i,
-                     _mm256_add_pd(_mm256_loadu_pd(seed_x + i), shift_x));
-    _mm256_storeu_pd(scratch_y + i,
-                     _mm256_add_pd(_mm256_loadu_pd(seed_y + i), shift_y));
-    _mm256_storeu_pd(scratch_z + i,
-                     _mm256_add_pd(_mm256_loadu_pd(seed_z + i), shift_z));
-  }
-#endif
-  for (; i < n_atoms; ++i) {
-    scratch_x[i] = seed_x[i] + dX;
-    scratch_y[i] = seed_y[i] + dY;
-    scratch_z[i] = seed_z[i] + dZ;
-  }
+  titan_simd_dispatch::translate_xyz(
+      scratch.pos.x.data(), scratch.pos.y.data(), scratch.pos.z.data(),
+      seed.pos.x.data(), seed.pos.y.data(), seed.pos.z.data(), seed.size(), dX,
+      dY, dZ);
 }
 
 force sanitize_spherical_candidate(force spherical) {

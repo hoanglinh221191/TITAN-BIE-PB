@@ -1,4 +1,5 @@
 #include "functions.h"
+#include "titan_simd_dispatch.h"
 
 #ifdef __AVX__
 #include "avx_math.h"
@@ -81,6 +82,8 @@ int cal_energy_amber_intrin_nofilter(
         _mm256_set1_pd(16. * lg_parameters.epsilon[j]);
 
     for (size_t i = 0; i < vector_limit; i += 4) {
+      alignas(32) double sigma_arr[4]{}, epsilon_arr[4]{}, d_arr[4]{},
+          vdw_arr[4]{};
       const __m256d dx = _mm256_sub_pd(_mm256_loadu_pd(rec_x + i), v_pos_x);
       const __m256d dy = _mm256_sub_pd(_mm256_loadu_pd(rec_y + i), v_pos_y);
       const __m256d dz = _mm256_sub_pd(_mm256_loadu_pd(rec_z + i), v_pos_z);
@@ -91,14 +94,17 @@ int cal_energy_amber_intrin_nofilter(
       __m256d elec = _mm256_mul_pd(avx_temp_charge_lg, _mm256_loadu_pd(rec_charge + i));
       elec = _mm256_mul_pd(elec, inv_d);
 
-      __m256d epsilon = _mm256_sqrt_pd(
+      const __m256d epsilon = _mm256_sqrt_pd(
           _mm256_mul_pd(avx_temp_epsilon_lg, _mm256_loadu_pd(rec_epsilon + i)));
-      __m256d sigma =
+      const __m256d sigma =
           _mm256_mul_pd(_mm256_add_pd(avx_temp_sigma, _mm256_loadu_pd(rec_sigma + i)),
                         avx_half);
-      const __m256d c6 = pow6_ratio(_mm256_mul_pd(sigma, inv_d));
-      const __m256d vdw =
-          _mm256_mul_pd(epsilon, _mm256_sub_pd(_mm256_mul_pd(c6, c6), c6));
+      _mm256_storeu_pd(sigma_arr, sigma);
+      _mm256_storeu_pd(epsilon_arr, epsilon);
+      _mm256_storeu_pd(d_arr, d);
+      titan_simd_dispatch::lj_mixed_sigma_epsilon_distance_fourlanes(
+          sigma_arr, epsilon_arr, d_arr, vdw_arr);
+      const __m256d vdw = _mm256_loadu_pd(vdw_arr);
 
       avx_sum_elec = _mm256_add_pd(avx_sum_elec, elec);
       avx_sum_vdw = _mm256_add_pd(avx_sum_vdw, vdw);
@@ -183,6 +189,8 @@ int cal_energy_amber_screening_intrin_nofilter(
         _mm256_set1_pd(16. * lg_parameters.epsilon[j]);
 
     for (size_t i = 0; i < vector_limit; i += 4) {
+      alignas(32) double sigma_arr[4]{}, epsilon_arr[4]{}, safe_d_arr[4]{},
+          vdw_arr[4]{};
       const __m256d dx = _mm256_sub_pd(_mm256_loadu_pd(rec_x + i), v_pos_x);
       const __m256d dy = _mm256_sub_pd(_mm256_loadu_pd(rec_y + i), v_pos_y);
       const __m256d dz = _mm256_sub_pd(_mm256_loadu_pd(rec_z + i), v_pos_z);
@@ -198,14 +206,17 @@ int cal_energy_amber_screening_intrin_nofilter(
       elec = _mm256_mul_pd(elec, inv_d);
       elec = _mm256_div_pd(elec, avx_epsilon_in);
 
-      __m256d epsilon = _mm256_sqrt_pd(
+      const __m256d epsilon = _mm256_sqrt_pd(
           _mm256_mul_pd(avx_temp_epsilon_lg, _mm256_loadu_pd(rec_epsilon + i)));
-      __m256d sigma =
+      const __m256d sigma =
           _mm256_mul_pd(_mm256_add_pd(avx_temp_sigma, _mm256_loadu_pd(rec_sigma + i)),
                         avx_half);
-      const __m256d c6 = pow6_ratio(_mm256_mul_pd(sigma, inv_d));
-      __m256d vdw =
-          _mm256_mul_pd(epsilon, _mm256_sub_pd(_mm256_mul_pd(c6, c6), c6));
+      _mm256_storeu_pd(sigma_arr, sigma);
+      _mm256_storeu_pd(epsilon_arr, epsilon);
+      _mm256_storeu_pd(safe_d_arr, safe_d);
+      titan_simd_dispatch::lj_mixed_sigma_epsilon_distance_fourlanes(
+          sigma_arr, epsilon_arr, safe_d_arr, vdw_arr);
+      __m256d vdw = _mm256_loadu_pd(vdw_arr);
 
       elec = _mm256_and_pd(elec, valid_mask);
       vdw = _mm256_and_pd(vdw, valid_mask);

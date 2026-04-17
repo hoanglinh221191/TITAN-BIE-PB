@@ -1,6 +1,6 @@
 # ============================================
-# TITAN arg.in - protein-protein AWH multiwalker
-# 4 walkers listed in awh_walkers.txt
+# TITAN arg_multiwalker.in - AWH multiwalker starter
+# RC-binned IFP across walkers
 # ============================================
 
 # Input files
@@ -16,8 +16,8 @@
 -mol-1-type=protein
 -mol-2-type=protein
 
-# Optional trimming / stride
-#-b=...
+# Recommended trimming / stride for long AWH trajectories
+#-b=400000
 #-e=...
 #-dt=...
 
@@ -26,32 +26,27 @@
 # If the chains are badly fragmented across the box, try this instead:
 #-pbctopo
 
-# Interface / structural analysis
+# Structural readouts that remain useful on the biased ensemble
 -rms
 -dssp
 -hb
--ifp
 
-# Collective motion / network analysis
--network
--community=louvain
--pca
---fes-grid=80
+# Primary AWH workflow:
+# one RC .xvg per walker, aligned by time to the streamed trajectory frames.
+-awh-ifp
+-awh-xvg=awh_xvg_walkers.txt
+-awh-bins=24
+-awh-out-prefix=awh_rep_bin
 
-# Slow modes / state decomposition
--tica
---tica-lag=10
---tica-components=5
--umap
--msm
--msm-clusters=50
--msm-lag=10
--msm-macrostates=4
+# Optional secondary context only
+#-network
+#-community=louvain
+#-pca
 
-# Enable TPT only after inspecting MSM macrostates or TICA regions
-#-tpt
-#-tpt-source=macro:0
-#-tpt-sink=macro:1
+# Exploratory only on biased AWH data; not the default analysis axis
+#-tica
+#-umap
+#-msm
 
 # Threads
 #-nt=8

@@ -106,7 +106,7 @@ int wrapper_cal_dis_clust(Multi_MOL& pbc_images, multi_cluster& CLUST, vector<si
 	return 0;
 }
 
-int MOL::impl_solv_pbc_clust(arguments& Arguments, vector<index>& Index)
+int MOL::impl_solv_pbc_clust(arguments& Arguments, vector<class index>& Index)
 {
 	Multi_MOL pbc_images;
 	pbc_images.m_mol.reserve(27);

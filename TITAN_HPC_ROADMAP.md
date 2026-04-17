@@ -43,7 +43,7 @@ Da hoan thanh:
 - [done] Phase 0 `Portable build profile + local stress suites`
   - `Makefile` va `compile.bat` da co `native` / `portable` profile ro rang
   - `portable` hien tai bo `-march=native` nhung giu explicit
-    `AVX2 + FMA + generic tuning`; full runtime dispatch van la phase sau
+    `AVX2 + FMA + generic tuning`; runtime dispatch da duoc chot o Phase 4
   - `test/benchmark_harness.ps1` da co suite `small` / `medium` / `large`,
     ghi build profile vao summary, va uu tien binary snapshot trong `test/bin`
   - da verify `small portable`, `medium native`, va `large native` bang repo-
@@ -520,6 +520,17 @@ Muc tieu:
 - bo sung mode truncated eigen / randomized SVD khi chi can top components
 - can nhac block covariance accumulation hoac direct low-rank solver
 
+Status:
+
+- [done] Slice 1: truncated spectral solver cho PCA K lon
+  - them `-pca-solver=<full|partial>`, `-pca-topk=<N>`, va
+    `-pca-max-k-full=<N>` trong `arguments.h`, `parse_arguments.cpp`,
+    `arguments.cpp`, va `help.cpp`
+  - `titan_pca.cpp` da them duong `partial(subspace)` theo huong subspace-iteration
+    + Ritz spectrum, co fallback ve `full` neu khong hoi tu
+  - runtime log da co `PCA Solver`; output `pca_fel.csv` / `pca_fes_2d.dat`
+    van giu format cu
+
 Target:
 
 - `titan_pca.cpp`
@@ -535,8 +546,11 @@ Target:
 - [done] tranh recompute gross flux / rescan dense pair trong flux compression
 - [done] bo persistent dense `tpm_`; transition graph da duoc normalize sang CSR
   forward / reverse va flux worker da duyet adjacency sparse
-- [next] toi uu reverse-edge lookup / adjacency queries trong TPT residual path,
+- [done] toi uu reverse-edge lookup / adjacency queries trong TPT residual path,
   tan dung backend CSR chung da co thay vi mo rong them dense helper rieng
+  - `titan_tpt.cpp` da them `reverse_edge_lookup_` de tra cuu canh nguoc O(1)
+    theo edge-index, bo scan adjacency lap lai
+  - duong flux worker giu TitanExecutor parallel path, khong doi output file TPT
 
 Target:
 
@@ -606,11 +620,13 @@ Status:
   - validation input `test/allostery_invalid_knn_prior_slice3` va
     `test/allostery_invalid_contact_cut_slice3` deu fail-fast dung thong diep
 
-- [next] Slice 4: estimator upgrades
-  - neu can, thu nghiem estimator kNN / KDE cho GC/TE tren tap pair da duoc
-    pruning de giam bias cua histogram moi cap residue
-  - can nhac contact-frequency prior co them normalized occupancy / dwell-time
-    weighting neu muon uu tien interface on dinh hon nua
+- [done] Slice 4: estimator upgrades
+  - da them `-allostery-estimator=<hist|knn|kde>` va
+    `-allostery-kde-bandwidth=<val>` trong parser/validation/help
+  - allostery kernel trong `dccm_network.cpp` da co estimator hook cho MI/GC:
+    `hist` (legacy), `kde` (smooth histogram), va `knn` (distance-weighted adjustment)
+  - `engine_postproc.cpp` da log `Allostery Estimator` de theo doi mode runtime,
+    giu output `raw_mi_edges.csv`, `network_gc_edges.csv`, `network_te_edges.csv`
 
 Target:
 
@@ -618,9 +634,29 @@ Target:
 
 5.4 MSM spectral cost
 
-- ra soat ITS scan va eigensolve per lag
-- neu K lon, can nhac partial spectrum / Schur / reuse intermediate structures
 
+Status:
+
+- [done] ra soat ITS scan va eigensolve per lag trong `titan_msm.cpp`
+  - tach helper dung chung de build TPM theo lag (`count -> symmetrize -> normalize`)
+  - ITS worker chay song song qua `TitanExecutor`, precompute boundary mot lan,
+    va giam luong state tam giu theo lag
+  - them log profiler `ITS Matrix+Spectral`, `ITS Total`, va `ITS Solver Usage`
+
+- [done] bo sung che do spectral cho K lon (giu tuong thich nguoc)
+  - them `-msm-its-solver=<full|schur|partial>`
+  - them `-msm-its-topk=<N>` va `-msm-its-max-k-full=<N>`
+  - co fallback ve full solver neu solver duoc chon khong hoi tu
+  - `help.cpp`, `parse_arguments.cpp`, `arguments.cpp` da cap nhat validation
+
+- [done] giu nguyen output ITS hien tai
+  - van ghi `msm_its_scan.dat` va `msm_its_tpm/tpm_lag*.dat`
+  - khong doi ten file/format cot de tranh vo workflow post-process cu
+
+- [done] toi uu cho truong hop K rat lon
+  - che do `partial` da doi sang subspace-iteration + Ritz spectrum (khong goi
+    full eigensolver tren ma tran `K x K`), giam them chi phi spectral khi
+    `K` lon trong ITS scan
 Target:
 
 - `titan_msm.cpp`
@@ -648,6 +684,179 @@ Cong viec:
 - gioi han code moi trong subset C++23 ma `g++13/libstdc++13` ho tro on dinh
 - khong xem `g++13` la target toolchain bat buoc cho local benchmark; no la moc
   tuong thich de tranh dung nham tinh nang thu vien / ngon ngu qua moi
+- [done] Slice 1: harden build/profile plumbing ma khong doi logic tinh toan
+  - `Makefile` dung object/dependency tach theo `build/native/` va
+    `build/portable/` de tranh stale object contamination
+  - `titan_build_info.h` + startup log in ro `Build Profile`, `C++23 Floor`,
+    `Compiled SIMD`, `Runtime SIMD`, `Runtime Supports Build SIMD`,
+    va `std::jthread`
+  - native/portable regression trong `test/phase4_*` hash-identical cho
+    allostery (`raw_mi_edges.csv`, `network_gc_edges.csv`, `network_te_edges.csv`)
+    va LSP-MD (`lspmd_edges.csv`, `lspmd_degree_centrality.csv`,
+    `lspmd_betweenness_centrality.csv`)
+- [done] Slice 2: centralize runtime dispatch cho cac kernel nong nhat,
+  giu scalar fallback khong doi logic va so sanh `native` vs `portable`
+  - them `titan_simd_dispatch.h` de gom shared helper cho reduction,
+    dot-product, squared-distance, add-row, va 4-distance hotspots
+  - wire runtime dispatch/log metadata qua `titan_build_info.h` va startup log
+  - native/portable regression duoi `test/phase4_*` duoc dung de xac nhan
+    output khoa hoc khong doi
+  - portable profile van la `AVX2 + FMA + generic tuning`; true scalar-baseline
+    portability can cleanup AVX assumption rong hon va la follow-up rieng
+- [done] Slice 3: migrate classic IFP / H-bond AVX screening sang shared
+  runtime-dispatch helper
+  - them shared `point-vs-4` cutoff helpers trong `titan_simd_dispatch.h`
+    cho contiguous va gathered coordinate paths
+  - `titan_ifp.cpp` bo AVX block rieng va dung helper shared cho ligand atom
+    screening
+  - `h_bond.cpp` bo AVX2 prefilter rieng va dung helper gathered shared cho
+    hydrogen-bond group pruning
+  - regression duoi `test/phase4_slice3_ifp_*` hash-identical cho
+    `ifp_occupancy.csv`, `out_hydrogen_bonds*.dat`,
+    `out_list_res_HB_*.dat`, `stat_average_HB.dat`, va
+    `stat_hydrogenbonds.dat`
+  - ket qua khop ca theo truc `baseline native truoc-sua -> native sau-sua`
+    va `native -> portable`
+- [done] Slice 4: migrate LLPS autocorrelation popcount sang shared
+  runtime-dispatch helper
+  - `titan_llps.cpp` bo local AVX2 popcount block trong `finalize()` va goi
+    helper XOR-overlap popcount chung tu `titan_simd_dispatch.h`
+  - regression trong `test/phase4_slice4_llps_baseline_native`,
+    `test/phase4_slice4_llps_native`, va
+    `test/phase4_slice4_llps_portable` hash-identical cho
+    `llps_summary.dat`, `llps_timeseries.dat`, `llps_degree_dist.dat`,
+    `llps_dbscan_timeseries.csv`, `llps_dbscan_droplets.pdb`,
+    `llps_contact_map.dat`, `llps_density_protein.dx`,
+    `llps_density_rna.dx`, va `polymer_scaling.dat`
+  - `llps_autocorr.dat` tiep tuc vang mat o ca 3 run vi fixture chua co du
+    post-percolation frames cho `C(t)`, nen absence nay duoc xem la gate on
+    dinh cua slice
+- [done] Slice 5: migrate DSSP CA-distance prefilter sang shared
+  runtime-dispatch helper
+  - `titan_dssp.cpp` bo local AVX distance-register block trong
+    `compute_hbond_topology()` va dung
+    `titan_simd_dispatch::point_vs_four_cutoff_mask(...)`
+  - logic hbond energy `hbond_energy_scalar()` va residue exclusion
+    (`donor_acceptor_excluded`) giu nguyen; chi doi lop prefilter 4-lane
+  - regression trong `test/phase4_slice5_dssp_baseline_native`,
+    `test/phase4_slice5_dssp_native`, va
+    `test/phase4_slice5_dssp_portable` hash-identical cho
+    `dssp_mol1.dat` va `dssp_mol1_content.dat`
+- [done] Slice 6: migrate GBSA Shrake-Rupley SASA burial filter sang shared
+  runtime-dispatch helper
+  - `gbsa_intrin.cpp` bo local AVX2 burial-mask block trong
+    `compute_sasa_shrake_rupley()` va dung
+    `titan_simd_dispatch::point_vs_four_cutoff_mask(...)`
+  - logic khoa hoc giu nguyen: burial test van la strict `< Rj^2`, SASA
+    accumulation va downstream GBSA math khong doi
+  - regression trong `test/phase4_slice6_gbsa_baseline_native`,
+    `test/phase4_slice6_gbsa_native`, va
+    `test/phase4_slice6_gbsa_portable` hash-identical cho
+    `gbsa_summary.dat`, `gbsa_timeseries_avg.dat`,
+    `traj_0_gbsa_snapshots.dat`, `gbsa_decomposition_ligand.dat`, va
+    `gbsa_decomposition_receptor.dat`
+- [done] Slice 7: migrate GBSA effective Born-radii helper sang shared
+  runtime-dispatch helper
+  - `gbsa_intrin.cpp` bo local AVX horizontal-sum + register loop trong
+    `cal_effective_born_radii_avx2()` va dung
+    `titan_simd_dispatch::gbsa_inverse_r4_volume_sum(...)`
+  - `titan_simd_dispatch.h` da them helper Born-radii dung chung voi 3 mode:
+    scalar, AVX2, va AVX2+FMA; AVX2/FMA chi thay doi cach thuc thi, khong doi
+    cong thuc `rho^3 / 3 / r^4`, gate `r2 > 1e-6`, hay downstream Born-radius
+    formulas
+  - regression trong `test/phase4_slice7_gbsa_baseline_native`,
+    `test/phase4_slice7_gbsa_native`, va
+    `test/phase4_slice7_gbsa_portable` hash-identical cho
+    `gbsa_summary.dat`, `gbsa_timeseries_avg.dat`,
+    `traj_0_gbsa_snapshots.dat`, `gbsa_decomposition_ligand.dat`, va
+    `gbsa_decomposition_receptor.dat`
+- [done] Slice 8: migrate GBSA LJ energy helper sang shared
+  runtime-dispatch helper
+  - `gbsa_intrin.cpp` bo local AVX register math lap lai trong
+    `cal_energy_gbsa_avx2()` cho duong OPLS/AMBER-style LJ mixing va dung
+    `titan_simd_dispatch::gbsa_lj_mixed_sigma_epsilon_r6_fourlanes(...)`
+  - `titan_simd_dispatch.h` da them helper LJ dung chung voi 2 mode:
+    scalar va AVX2; AVX2 chi thay doi cach thuc thi, khong doi cong thuc
+    `4 * epsilon * (sr12 - sr6)`, sigma mixing, epsilon mixing, hay
+    `r6` floor `1e-12`
+  - regression trong `test/phase4_slice8_gbsa_baseline_native`,
+    `test/phase4_slice8_gbsa_native`, va
+    `test/phase4_slice8_gbsa_portable` hash-identical cho
+    `gbsa_summary.dat`, `gbsa_timeseries_avg.dat`,
+    `traj_0_gbsa_snapshots.dat`, `gbsa_decomposition_ligand.dat`, va
+    `gbsa_decomposition_receptor.dat`
+- [done] Slice 9: migrate AMBER energy helper path sang shared
+  runtime-dispatch helper
+  - `energy_intrin.cpp` va `energy_intrin_nofilter.cpp` bo local AVX register
+    math lap lai trong filtered + no-filter AMBER LJ helper paths va dung
+    `titan_simd_dispatch::lj_mixed_sigma_epsilon_distance_fourlanes(...)`
+  - `titan_simd_dispatch.h` da them helper LJ dung chung voi 2 mode:
+    scalar va AVX2; AVX2 chi thay doi cach thuc thi, khong doi sigma mixing
+    arithmetic, epsilon mixing `sqrt(16 * eps_i * eps_j)`, hay screening
+    semantics voi `safe_d`
+  - regression trong `test/phase4_slice9_energy_baseline_native`,
+    `test/phase4_slice9_energy_native`,
+    `test/phase4_slice9_energy_portable`,
+    `test/phase4_slice9_energy_screening_baseline_native`,
+    `test/phase4_slice9_energy_screening_native`, va
+    `test/phase4_slice9_energy_screening_portable` deu hash-identical cho
+    toan bo output files tru `arg.in` va `log.txt`
+- [done] Slice 10: migrate AMBER/CHARMM force helper path sang shared
+  runtime-dispatch helper
+  - `force_intrin.cpp` bo local AVX register math lap lai trong
+    `force_energy_add_intrin(...)` cho nhanh AMBER/CHARMM LJ force helper va
+    dung `titan_simd_dispatch::lj_mixed_sigma_epsilon_distance_c6_fourlanes(...)`
+  - `titan_simd_dispatch.h` da them helper LJ dung chung tra ve ca `c6` va
+    energy voi 2 mode: scalar va AVX2; AVX2 chi thay doi cach thuc thi,
+    khong doi sigma mixing arithmetic, epsilon mixing `sqrt(eps_i * eps_j)`,
+    hay `c6`-based self-interaction guard
+  - regression trong `test/phase4_slice10_force_baseline_native`,
+    `test/phase4_slice10_force_native`, va
+    `test/phase4_slice10_force_portable` deu hash-identical cho toan bo
+    output files tru `arg.in`, `log.txt`, va `run_stdout.txt`
+  - `titan_rf_model.cpp` cung da duoc khoa compile `-O0` bang `Makefile`
+    cho moi profile thay vi dua vao source pragma
+- [done] Slice 11: migrate legacy OPLS force helper path sang shared
+  runtime-dispatch helper
+  - `force_intrin.cpp` bo local AVX register math lap lai trong nhanh OPLS
+    cua `force_energy_add_intrin(...)` va dung
+    `titan_simd_dispatch::lj_sigma_product_distance_c6_fourlanes(...)`
+  - `titan_simd_dispatch.h` da them helper LJ dung chung tra ve ca `c6` va
+    energy voi 2 mode: scalar va AVX2; helper nay giu nguyen legacy OPLS AVX
+    lane math order dua tren sigma-product lanes, khong doi `c6`-based
+    self-interaction guard
+  - regression trong `test/phase4_slice11_force_opls_baseline_native`,
+    `test/phase4_slice11_force_opls_native`, va
+    `test/phase4_slice11_force_opls_portable` deu hash-identical cho toan bo
+    output files tru `arg.in`, `log.txt`, va `run_stdout.txt`
+- [done] Slice 12: dong audit AVX local con sot va chot Phase 4
+  - `dccm_network.cpp` bo helper `compute_4dist_avx` local va dead SIMD
+    fallback code; `calculate_lspmd()` dung truc tiep
+    `titan_simd_dispatch::compute_4dist(...)` va shared dot-product helper
+  - `MOL.h` bo local `_mm256` loop trong `reduce_forces()` va dung
+    `titan_simd_dispatch::add_row_inplace(...)` cho phan prefix vectorizable
+  - `find_pull_direction.cpp` bo local AVX translate loop va dung
+    `titan_simd_dispatch::translate_xyz(...)`
+  - regression trong `test/phase4_slice12_native_lspmd_example2`,
+    `test/phase4_slice12_portable_lspmd_example2`,
+    `test/phase4_slice12_force_opls_native`,
+    `test/phase4_slice12_force_opls_portable`,
+    `test/phase4_slice12_pull_native`,
+    `test/phase4_slice12_pull_native_rerun`, va
+    `test/phase4_slice12_pull_portable`
+  - hash gates:
+    `lspmd_edges.csv`, `lspmd_degree_centrality.csv`,
+    `lspmd_betweenness_centrality.csv`; OPLS `cal_force.txt`,
+    `cal_force.xvg`, `total_force.dat`, `total_energy.dat`,
+    `electrostatic_force.dat`, `vanderwaals_force.dat`; pull-direction
+    `DE_out_vector.dat`, `DE_vector.pdb`, `best_conf.pdb`, va aligned snapshot
+  - ket qua sau audit:
+    AVX local con lai trong `energy_intrin*.cpp`, `force_intrin.cpp`,
+    `gbsa_intrin.cpp`, `titan_gist.cpp`, va `cal_sub_groups.cpp` duoc giu lai
+    co chu dich vi do la full kernels hoac microkernels dac thu; `avx_math.h`,
+    `BoxMatrix.h`, `functions.h`, va `simd_compat.h` la support headers
+  - `DE_log.dat` / `DE_report.dat` cua pull-direction khong duoc dung lam hash
+    gate khoa hoc vi co chen thong tin report/runtime theo profile
 
 Target:
 
@@ -666,10 +875,63 @@ Exit criteria:
 Cac module duoi day kha thi va co gia tri cao, nhung nen lam sau khi Phase 2-3
 da tao duoc nen tang sparse / flat-buffer tot.
 
-7.1 `titan_mbar` hoac `titan_wham`
+7.1 `titan_mbar`
 
-- mo rong tu `titan_dham`
-- phu hop cho free-energy / reweighting workflow nghiem tuc hon
+Status:
+
+- `5.1a core + frame weights + thermo scan`: done
+- `5.1b weighted TICA FES`: done
+- `5.1c weighted PCA FES`: done
+- `5.1d NPT enthalpy extension`: done
+- `5.1e per-frame temperature / demux-aware MBAR`: done
+
+Pham vi v1 da chot:
+
+- MBAR cho `temperature ladder` REMD/HREMD
+- standalone only, khong overwrite hay thay the DHAM
+- xuat `mbar_frame_weights.dat`, `mbar_summary.dat`,
+  `mbar_window_audit.dat`
+- neu `-mbar-scan-points > 1` thi xuat `mbar_cv.dat`
+- reweight FES doc lap sang `target temperature`:
+  `mbar_tica_fes_2d.dat`, `mbar_tica_cluster_representatives.csv`,
+  `mbar_pca_fes_2d.dat`, `mbar_pca_cluster_representatives.csv`
+- co ca hai mode thermodynamic-state assignment:
+  `fixed` theo ladder-per-file va `per_frame` theo demux hoac nearest-ladder
+  mapping tu XVG temperature column
+- `nvt` dung observable energy; `npt` dung observable enthalpy-like tu XVG
+
+Ung dung trong Titan:
+
+- dien giai ensemble muc tieu cho REMD/HREMD o nhiet do dich
+- weighted basin ranking va representative-frame selection tren TICA/PCA
+- heat-capacity / melting / phase-transition diagnostics cho protein va LJ
+- xu ly nhanh workflow reweighting nghiem tuc hon so voi histogram FES thuan
+
+Tich hop vao Titan:
+
+- tai su dung shape input cua DHAM:
+  `energy_list.txt`, va `temps.txt` chi con la optional ladder override
+- `-mbar-domain=tica` di qua metadata cua TICA/MSM
+- `-mbar-domain=pca` di qua metadata PCA va `pca_fel.csv`
+- `-mbar-domain=both` xuat ca hai khong doi logic output cu
+- `window-match` va `dt-energy` dung cung semantics voi DHAM
+
+Luu y thiet ke:
+
+- v1 chi ho tro temp-ladder, chua lam generic `u_kn`
+- raw GROMACS T-REMD replica outputs voi `T(t)` thay doi theo frame da duoc ho
+  tro qua `-mbar-temp-mode per_frame`
+- trong `per_frame`, TITAN co the tu infer ladder nhiet do tu replica input;
+  neu co `-mbar-demux-map` thi demux la route authoritative de dung state
+  assignment va suy ra ladder trung binh theo state
+- `-mbar-demux-map` la duong authoritative cho state assignment; neu khong co,
+  TITAN fallback sang nearest-ladder mapping tu XVG temperature column
+- v1 chua feed weights vao TPT/MSM/DHAM/PCA/TICA defaults
+- `WHAM` khong con la deliverable chinh o Phase 5; neu can thi de lai
+  nhu note compatibility ve sau
+- NPT pressure-shift MBAR tong quat tu `E + P*V` van la mot extension sau;
+  `5.1d` hien tai tap trung vao enthalpy-like observable path on dinh cho
+  workflow GROMACS NPT
 
 7.2 `titan_hbond_kinetics`
 
@@ -702,6 +964,83 @@ da tao duoc nen tang sparse / flat-buffer tot.
 - community detection
 - edge filtering
 - bottleneck ranking
+
+7.7 `titan_awh_analysis`
+
+Status:
+
+- [done] Nen tang AWH RC-binned IFP da co san
+  - `titan_awh_ifp.cpp` da doc explicit RC `.xvg` per walker, canh hang theo
+    thoi gian frame, chia RC thanh cac bin deu nhau, va xuat:
+    `awh_rc_bin_summary.dat`, `awh_ifp_by_bin.csv`,
+    `awh_ifp_heatmap.dat`, `awh_rc_frame_map.dat`, va
+    `awh_rep_bin_*.pdb`
+  - workflow nay uu tien `structural/state mapping` tren biased ensemble, khong
+    lay TICA/MSM lam truc chinh
+
+- [done] AWH-1 provenance + overlap diagnostics
+  - them `awh_walker_diagnostics.dat` va `awh_rc_overlap_diagnostics.dat`
+    de report `matched/unmatched frames`, RC/time range, occupied bins theo
+    walker, dominant walker theo bin, va tinh trang `single_walker` /
+    `multiwalker` overlap
+  - `awh_rc_bin_summary.dat` da bo sung header diagnostics:
+    `occupied_bins`, `empty_bins`, `single_walker_bins`,
+    `multiwalker_overlap_bins`
+  - runtime warning da ro rang hon khi co qua nhieu frame khong match,
+    bin trong, hoac overlap multiwalker kem
+  - da verify bang smoke local duoi `test/awh_inputs_local`,
+    `test/awh_ifp_only_local_native`, `test/awh_ifp_local_native`, va
+    `test/awh_ifp_local_portable`; classic `ifp_occupancy.csv` giu hash-identical
+    khi bat them `-awh-ifp`, va cac output AWH moi giu hash-identical giua
+    native / portable
+
+- [done] AWH-2 richer RC-binned structural mapping
+  - them `awh_bin_structural_summary.dat` de tong hop structural load theo
+    RC bin: `active_walkers`, `dominant_walker`, representative frame, tong
+    residue-pair count, tong contact-event load, va breakdown theo 6 loai
+    IFP (`HBond`, `SaltBridge`, `PiPi`, `CationPi`, `Hydrophobic`, `Halogen`)
+  - them `awh_bin_top_contacts.csv` de rut gon top contact theo moi loai
+    interaction trong tung RC bin, uu tien cach doc co che nhanh hon so voi
+    quet toan bo `awh_ifp_by_bin.csv`
+  - `awh_rc_frame_map.dat` da duoc enrich them cot `rc_left/center/right`,
+    `bin_frames`, `active_walkers`, `dominant_walker`, `dominant_fraction`,
+    va `overlap_status`; cac cot cu duoc giu nguyen o dau file
+  - da verify bang smoke local:
+    `ifp_occupancy.csv` van hash-identical giua baseline IFP va AWH path;
+    cac file AWH cu giu nguyen hash ngoai `awh_rc_frame_map.dat` doi co chu
+    dich, va toan bo file AWH moi + file enrich deu hash-identical giua
+    native / portable
+
+- [done] AWH-3 walker-consistency / stability
+  - them `awh_walker_stability_by_bin.dat` de classify moi RC bin thanh:
+    `empty`, `single_walker`, `multiwalker_balanced`,
+    `multiwalker_imbalanced`; dong thoi report `effective_walkers`,
+    `dominant_fraction`, va fractional support cua tung walker
+  - them `awh_walker_pair_overlap.dat` de tong hop overlap theo cap walker:
+    `shared_bins`, `bin_jaccard`, `shared_frames`, `frame_overlap_fraction`,
+    va so bin `balanced_shared` / `imbalanced_shared`
+  - `awh_rc_bin_summary.dat` da bo sung them header diagnostics:
+    `multiwalker_balanced_bins` va `multiwalker_imbalanced_bins`
+  - da verify bang 2 smoke local:
+    fixture cu cho case `no overlap`, va fixture consistency moi
+    `test/awh_ifp_consistency_native_post1`,
+    `test/awh_ifp_consistency_portable_post1` cho thay ro ca
+    `multiwalker_imbalanced`, `multiwalker_balanced`, va `single_walker`
+  - `ifp_occupancy.csv` van hash-identical giua baseline IFP va AWH path; cac
+    output AWH giu hash-identical giua native / portable
+
+- [done] AWH-4 optional exploratory context
+  - da them provenance `global_frame_index -> RC bin` qua
+    `awh_frame_assignments.dat`
+  - da them `awh_exploratory_context.dat` de overlay PCA/UMAP/MSM/TPT nhu lop
+    context phu tren biased ensemble
+  - giu wording `exploratory only`; khong dien giai unbiased kinetics hay
+    equilibrium populations tu overlay nay
+
+- workflow phan tich cho GROMACS AWH biased ensemble dua tren explicit RC `.xvg` ingest, RC binning, va snapshot selection theo reaction coordinate
+- uu tien structural/state mapping va IFP dọc theo reaction coordinate de mo ta co che unbinding, thay vi xem TICA/MSM la truc chinh
+- PCA/TICA/UMAP/MSM/TPT neu co dung thi chi la lop context phu; MSM/TPT tren AWH van chi nen dung o muc exploratory cho state/pathway mapping tuong doi, khong dien giai equilibrium populations hay absolute kinetics neu chua co reweighting/validation rieng
+- xem tai lieu chi tiet trong `TITAN_AWH_ANALYSIS_PLAN.md`
 
 Luu y:
 

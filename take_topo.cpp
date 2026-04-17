@@ -15,6 +15,7 @@ using std::string_view;
 #include <vector>
 
 using namespace std;
+using index_type = class index;
 
 namespace {
 
@@ -48,7 +49,7 @@ void Multi_MOL::take_topo_lg(std::string &input_name, std::string &input_topo,
 
 void Multi_MOL::post_process_coordinates_lig() {
   mol_type = "ligand";
-  index index_temp;
+  index_type index_temp;
   size_t index_i{};
   index_temp.set_chain(info[0].get_chain());
   Index.emplace_back(index_temp);
@@ -58,7 +59,7 @@ void Multi_MOL::post_process_coordinates_lig() {
                             info[i].get_res_name());
   }
 
-  Index.emplace_back(index(std::string("NULL_S"), m_mol[0].size() + 1));
+  Index.emplace_back(index_type(std::string("NULL_S"), m_mol[0].size() + 1));
 }
 
 void Multi_MOL::topo_lg(std::string_view input_topo, std::string_view force_f,

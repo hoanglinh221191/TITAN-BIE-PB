@@ -1,5 +1,6 @@
 #include "titan_dssp.h"
 #include "titan_executor.h"
+#include "titan_simd_dispatch.h"
 
 #include "titan_ui.h"
 
@@ -9,7 +10,6 @@
 #include <cctype>
 #include <deque>
 #include <iomanip>
-#include <immintrin.h>
 #include <limits>
 #include <ostream>
 #include <sstream>
@@ -473,37 +473,29 @@ void TitanDSSPAnalyzer::compute_hbond_topology(TitanExecutor &executor) {
       std::max<std::size_t>(1, std::min<std::size_t>(executor.capacity(), n_res));
 
   auto worker = [this, n_res](std::size_t begin, std::size_t end) {
-    alignas(32) double ca_d2_buf[4];
-
     for (std::size_t donor = begin; donor < end; ++donor) {
       if (!donor_valid_[donor] || !has_ca_[donor])
         continue;
 
       std::array<BondRecord, 2> local_best{};
-      const __m256d cax = _mm256_set1_pd(ca_x_[donor]);
-      const __m256d cay = _mm256_set1_pd(ca_y_[donor]);
-      const __m256d caz = _mm256_set1_pd(ca_z_[donor]);
+      const double donor_ca_x = ca_x_[donor];
+      const double donor_ca_y = ca_y_[donor];
+      const double donor_ca_z = ca_z_[donor];
 
       std::size_t acceptor = 0;
       for (; acceptor + 4 <= n_res; acceptor += 4) {
-        const __m256d ox = _mm256_load_pd(ca_x_.data() + acceptor);
-        const __m256d oy = _mm256_load_pd(ca_y_.data() + acceptor);
-        const __m256d oz = _mm256_load_pd(ca_z_.data() + acceptor);
-
-        const __m256d dx = _mm256_sub_pd(cax, ox);
-        const __m256d dy = _mm256_sub_pd(cay, oy);
-        const __m256d dz = _mm256_sub_pd(caz, oz);
-        const __m256d ca_d2 = _mm256_add_pd(
-            _mm256_add_pd(_mm256_mul_pd(dx, dx), _mm256_mul_pd(dy, dy)),
-            _mm256_mul_pd(dz, dz));
-        _mm256_store_pd(ca_d2_buf, ca_d2);
+        const unsigned within_cutoff =
+            titan_simd_dispatch::point_vs_four_cutoff_mask(
+                donor_ca_x, donor_ca_y, donor_ca_z, ca_x_.data() + acceptor,
+                ca_y_.data() + acceptor, ca_z_.data() + acceptor,
+                kMinimalCADistance2, -1.0, true);
 
         for (std::size_t lane = 0; lane < 4; ++lane) {
           const std::size_t idx = acceptor + lane;
           if (!has_ca_[idx] || !acceptor_valid_[idx] ||
               donor_acceptor_excluded(donor, idx))
             continue;
-          if (ca_d2_buf[lane] > kMinimalCADistance2)
+          if ((within_cutoff & (1u << lane)) == 0u)
             continue;
 
           update_best_bond(local_best, idx, hbond_energy_scalar(donor, idx));
@@ -514,9 +506,9 @@ void TitanDSSPAnalyzer::compute_hbond_topology(TitanExecutor &executor) {
         if (!has_ca_[acceptor] || !acceptor_valid_[acceptor] ||
             donor_acceptor_excluded(donor, acceptor))
           continue;
-        const double dx = ca_x_[donor] - ca_x_[acceptor];
-        const double dy = ca_y_[donor] - ca_y_[acceptor];
-        const double dz = ca_z_[donor] - ca_z_[acceptor];
+        const double dx = donor_ca_x - ca_x_[acceptor];
+        const double dy = donor_ca_y - ca_y_[acceptor];
+        const double dz = donor_ca_z - ca_z_[acceptor];
         if (dx * dx + dy * dy + dz * dz > kMinimalCADistance2)
           continue;
 

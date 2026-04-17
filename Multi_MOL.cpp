@@ -20,7 +20,7 @@ void Multi_MOL::post_process_coordinates_user_define(string_view type) {
   generate_index();
 }
 
-string Multi_MOL::check_head_tail_res(index &in, size_t pos_res) {
+string Multi_MOL::check_head_tail_res(class index &in, size_t pos_res) {
   if (in.get_type_base(pos_res) == "protein") {
     if (info[in.get_res_pos_e(pos_res) - 1].get_atom().find("N") !=
             string::npos &&

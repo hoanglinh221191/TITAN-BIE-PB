@@ -1,8 +1,8 @@
 #include "Multi_MOL.h"
 #include "functions.h"
+#include "titan_charconv_compat.h"
 #include "titan_ui.h"
 #include <algorithm>
-#include <charconv>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -23,7 +23,7 @@ double fast_parse_double(std::string_view data) {
     ++begin;
 
   double value = 0.0;
-  auto [ptr, ec] = std::from_chars(begin, end, value);
+  auto [ptr, ec] = titan::from_chars_compat(begin, end, value);
   if (ec == std::errc())
     return value;
   return 0.0;

@@ -1,0 +1,9 @@
+label,mode,global_frame,walker,local_frame,time_ps,x,y,note
+TICA_M0,macrostate_centroid,59641,3,13939,1793900.0,1.894271,-0.405708,Nearest frame to TICA centroid of macrostate M0
+TICA_M1,macrostate_centroid,29611,1,14377,1837700.0,-0.417285,0.163214,Nearest frame to TICA centroid of macrostate M1
+TICA_M2,macrostate_centroid,31372,2,904,490400.0,-0.775982,-0.743538,Nearest frame to TICA centroid of macrostate M2
+TICA_M3,macrostate_centroid,48587,3,2885,688500.0,0.243179,1.231975,Nearest frame to TICA centroid of macrostate M3
+PCA_PC1_min,pca_extreme,12282,0,12282,1628200.0,-60.6914,22.3112,Minimum along PC1
+PCA_PC1_max,pca_extreme,15099,0,15099,1909900.0,87.5515,77.0242,Maximum along PC1
+PCA_PC2_min,pca_extreme,3849,0,3849,784900.0,7.6939,-54.4161,Minimum along PC2
+PCA_PC2_max,pca_extreme,15017,0,15017,1901700.0,62.1543,100.9653,Maximum along PC2

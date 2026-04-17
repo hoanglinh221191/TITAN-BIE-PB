@@ -90,8 +90,6 @@ private:
                               const std::vector<unsigned char> &zero_boundary,
                               Eigen::VectorXd &out_committor) const;
   void compute_reactive_densities();
-  double find_transition_probability(int from, int to) const;
-  double compute_gross_flux_value(int from, int to) const;
   void compute_flux_matrices(TitanExecutor *executor, int n_threads,
                              double flux_cut);
   void extract_dominant_paths(int top_paths, double flux_cut);
@@ -102,6 +100,7 @@ private:
   Eigen::VectorXd stationary_dist_;
   titan_sparse::WeightedCSRGraph<double> tpm_graph_;
   titan_sparse::WeightedCSRGraph<double> reverse_graph_;
+  std::vector<int> reverse_edge_lookup_;
 
   std::vector<int> source_states_;
   std::vector<int> sink_states_;

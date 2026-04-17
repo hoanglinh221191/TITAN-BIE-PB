@@ -7,10 +7,10 @@ const double par = 0.14;
 const double par_2 = 0.7;
 void pbc_multi_snap(Multi_MOL &multi_mol, size_t begin, size_t end);
 void pbc_multi_chain(MOL &mol, vector<pair<size_t, size_t>> &neighbors,
-                     vector<index> &Index);
-void pbc_chain(MOL &mol, size_t ind, vector<index> &Index);
+                     vector<class index> &Index);
+void pbc_chain(MOL &mol, size_t ind, vector<class index> &Index);
 int multi_chain(MOL &mol, size_t ind, vector<pair<size_t, size_t>> &neighbors,
-                vector<index> &Index);
+                vector<class index> &Index);
 void fix_pair_z(MOL &mol, size_t atom1, size_t atom2);
 void fix_pair_y(MOL &mol, size_t atom1, size_t atom2);
 void fix_pair_x(MOL &mol, size_t atom1, size_t atom2);
@@ -31,20 +31,20 @@ void pbc_multi_snap(Multi_MOL &multi_mol, size_t begin, size_t end) {
     pbc_multi_chain(multi_mol.m_mol[i], neighbors, multi_mol.Index);
 }
 void pbc_multi_chain(MOL &mol, vector<pair<size_t, size_t>> &neighbors,
-                     vector<index> &Index) {
+                     vector<class index> &Index) {
   for (size_t i{}; i < Index.size() - 1; ++i) {
     pbc_chain(mol, i, Index);
     multi_chain(mol, i, neighbors, Index);
   }
 }
-void pbc_chain(MOL &mol, size_t ind, vector<index> &Index) {
+void pbc_chain(MOL &mol, size_t ind, vector<class index> &Index) {
   for (size_t j{Index[ind].get_res_pos_e(0)};
        j < Index[ind + 1].get_res_pos_e(0); ++j) {
     fix_pair_coor(mol, j, j + 1);
   }
 }
 int multi_chain(MOL &mol, size_t ind, vector<pair<size_t, size_t>> &neighbors,
-                vector<index> &Index) {
+                vector<class index> &Index) {
   if (ind == Index.size() - 2)
     return 0;
   double v1[3]{}, v2[3]{}, v3[3]{};

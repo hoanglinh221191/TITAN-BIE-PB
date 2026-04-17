@@ -1,8 +1,8 @@
 #include "MOL.h"
 #include "functions.h"
+#include "titan_charconv_compat.h"
 #include "titan_ui.h"
 #include <algorithm>
-#include <charconv>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -49,7 +49,7 @@ bool try_parse_title_time(std::string_view line, double &time_ps) {
 
   const char *begin = value_sv.data();
   const char *end = begin + value_sv.size();
-  auto [ptr, ec] = std::from_chars(begin, end, time_ps);
+  auto [ptr, ec] = titan::from_chars_compat(begin, end, time_ps);
   if (ec == std::errc() && ptr != begin)
     return true;
 

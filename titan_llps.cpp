@@ -2,13 +2,14 @@
 // Corrected: MOL coordinate API, dimer macro-nodes, PBC-post-solve hook
 #include "titan_llps.h"
 #include "memory_utils.h"
+#include "titan_gyration.h"
+#include "titan_simd_dispatch.h"
 #include "titan_ui.h"
 
 #include <algorithm>
 #include <bit> // std::popcount (C++20)
 #include <cmath>
 #include <fstream>
-#include <immintrin.h> // AVX2 intrinsics for vectorized popcount
 #include <iomanip>
 #include <numeric>
 #include <sstream>
@@ -351,12 +352,11 @@ float TitanLLPS::compute_gcc_rg(const std::vector<float> &pos_nm, float bx,
   const float rx = pos_nm[3 * ref], ry = pos_nm[3 * ref + 1],
               rz = pos_nm[3 * ref + 2];
 
-  std::vector<float> px, py, pz;
-  px.reserve(gcc_macros.size());
-  py.reserve(gcc_macros.size());
-  pz.reserve(gcc_macros.size());
-  double sx = 0, sy = 0, sz = 0;
+  gcc_rg_x_buf_.resize(gcc_macros.size());
+  gcc_rg_y_buf_.resize(gcc_macros.size());
+  gcc_rg_z_buf_.resize(gcc_macros.size());
 
+  std::size_t cnt = 0;
   for (int m : gcc_macros) {
     int b = bb_atom_[m];
     if (b < 0)
@@ -369,25 +369,16 @@ float TitanLLPS::compute_gcc_rg(const std::vector<float> &pos_nm, float bx,
       dy -= by * std::round(dy / by);
     if (bz > 0)
       dz -= bz * std::round(dz / bz);
-    float ux = rx + dx, uy = ry + dy, uz = rz + dz;
-    px.push_back(ux);
-    py.push_back(uy);
-    pz.push_back(uz);
-    sx += ux;
-    sy += uy;
-    sz += uz;
+    gcc_rg_x_buf_[cnt] = static_cast<double>(rx + dx);
+    gcc_rg_y_buf_[cnt] = static_cast<double>(ry + dy);
+    gcc_rg_z_buf_[cnt] = static_cast<double>(rz + dz);
+    ++cnt;
   }
-  const int cnt = static_cast<int>(px.size());
   if (cnt == 0)
     return 0.f;
-  const float cx = float(sx / cnt), cy_c = float(sy / cnt),
-              cz_c = float(sz / cnt);
-  double rg2 = 0;
-  for (int i = 0; i < cnt; ++i) {
-    float ddx = px[i] - cx, ddy = py[i] - cy_c, ddz = pz[i] - cz_c;
-    rg2 += ddx * ddx + ddy * ddy + ddz * ddz;
-  }
-  return static_cast<float>(std::sqrt(rg2 / cnt));
+  const titan_gyration::PointStats stats = titan_gyration::build_point_stats_soa(
+      gcc_rg_x_buf_.data(), gcc_rg_y_buf_.data(), gcc_rg_z_buf_.data(), cnt);
+  return static_cast<float>(titan_gyration::compute_rg_from_stats(stats));
 }
 
 // ============================================================================
@@ -824,55 +815,11 @@ void TitanLLPS::finalize(int n_threads, int max_lag_frames) {
             const int slotL = (gi + lag) % ring_cap;
             const auto &A0 = adj_ring_[slot0];
             const auto &AL = adj_ring_[slotL];
-#ifdef __AVX2__
-            const __m256i lookup = _mm256_setr_epi8(
-                0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 0, 1, 1, 2, 1,
-                2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
-            const __m256i low_mask = _mm256_set1_epi8(0x0f);
-            __m256i acc_num = _mm256_setzero_si256();
-            __m256i acc_den = _mm256_setzero_si256();
-            const int n4 = n_words_ & ~3;
-            for (int w = 0; w < n4; w += 4) {
-              __m256i va0 =
-                  _mm256_loadu_si256(reinterpret_cast<const __m256i *>(&A0[w]));
-              __m256i val =
-                  _mm256_loadu_si256(reinterpret_cast<const __m256i *>(&AL[w]));
-              __m256i vm = _mm256_loadu_si256(
-                  reinterpret_cast<const __m256i *>(&mean_adj[w]));
-              __m256i d0 = _mm256_xor_si256(va0, vm);
-              __m256i dl = _mm256_xor_si256(val, vm);
-              __m256i and_nl = _mm256_and_si256(d0, dl);
-              __m256i lo = _mm256_and_si256(and_nl, low_mask);
-              __m256i hi =
-                  _mm256_and_si256(_mm256_srli_epi16(and_nl, 4), low_mask);
-              __m256i cnt = _mm256_add_epi8(_mm256_shuffle_epi8(lookup, lo),
-                                            _mm256_shuffle_epi8(lookup, hi));
-              acc_num = _mm256_add_epi64(
-                  acc_num, _mm256_sad_epu8(cnt, _mm256_setzero_si256()));
-              lo = _mm256_and_si256(d0, low_mask);
-              hi = _mm256_and_si256(_mm256_srli_epi16(d0, 4), low_mask);
-              cnt = _mm256_add_epi8(_mm256_shuffle_epi8(lookup, lo),
-                                    _mm256_shuffle_epi8(lookup, hi));
-              acc_den = _mm256_add_epi64(
-                  acc_den, _mm256_sad_epu8(cnt, _mm256_setzero_si256()));
-            }
-            alignas(32) uint64_t buf_n[4], buf_d[4];
-            _mm256_store_si256(reinterpret_cast<__m256i *>(buf_n), acc_num);
-            _mm256_store_si256(reinterpret_cast<__m256i *>(buf_d), acc_den);
-            num += buf_n[0] + buf_n[1] + buf_n[2] + buf_n[3];
-            denom += buf_d[0] + buf_d[1] + buf_d[2] + buf_d[3];
-            for (int w = n4; w < n_words_; ++w) {
-              uint64_t d0s = A0[w] ^ mean_adj[w], dls = AL[w] ^ mean_adj[w];
-              num += std::popcount(d0s & dls);
-              denom += std::popcount(d0s);
-            }
-#else
-            for (int w = 0; w < n_words_; ++w) {
-              uint64_t d0 = A0[w] ^ mean_adj[w], dl = AL[w] ^ mean_adj[w];
-              num += std::popcount(d0 & dl);
-              denom += std::popcount(d0);
-            }
-#endif
+            const auto counts = titan_simd_dispatch::xor_overlap_popcount(
+                A0.data(), AL.data(), mean_adj.data(),
+                static_cast<std::size_t>(n_words_));
+            num += static_cast<double>(counts.overlap);
+            denom += static_cast<double>(counts.reference);
           }
           result_.ct_values[lag] = (denom > 0) ? num / denom : 0.0;
         }
@@ -927,7 +874,7 @@ double TitanLLPS::fit_tau(const std::vector<double> &ct,
 // Async pipeline — worker_loop, start_async, process_frame_async, flush_async
 // ============================================================================
 
-void TitanLLPS::worker_loop(std::stop_token stoken) {
+void TitanLLPS::worker_loop(titan::stop_token stoken) {
   while (true) {
     FrameWorkItem item;
     {
@@ -957,7 +904,7 @@ void TitanLLPS::start_async() {
   async_mode_ = true;
   worker_stop_ = false;
   worker_thread_ =
-      std::jthread([this](std::stop_token st) { worker_loop(st); });
+      titan::jthread([this](titan::stop_token st) { worker_loop(st); });
 }
 
 void TitanLLPS::process_frame_async(

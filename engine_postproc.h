@@ -13,6 +13,7 @@
 #include "nucleic_profiler.h"
 #include "titan_kinetics.h"
 #include "titan_llps.h"
+#include "titan_mbar.h"
 #include "titan_msm.h"
 #include "titan_pca.h"
 #include "titan_rms.h"
@@ -96,6 +97,12 @@ void run_dham_postproc(const arguments &args,
                        Eigen::VectorXd *out_reweighted_pi = nullptr,
                        bool *out_converged = nullptr);
 
+void run_mbar_postproc(const arguments &args,
+                       std::unique_ptr<TitanMSM> &msm_analyzer,
+                       DCCMNetwork *dccm_analyzer, TitanExecutor &executor,
+                       info &info_output, std::fstream &log,
+                       std::vector<double> *out_frame_weights = nullptr);
+
 void run_tpt_postproc(const arguments &args,
                       std::unique_ptr<TitanMSM> &msm_analyzer,
                       TitanExecutor &executor, info &info_output,
@@ -107,4 +114,9 @@ void run_tpt_postproc(const arguments &args,
                       const Eigen::VectorXd *dham_pi = nullptr,
                       bool dham_converged = false);
 
+void run_awh_exploratory_postproc(const arguments &args,
+                                  std::unique_ptr<TitanMSM> &msm_analyzer,
+                                  std::unique_ptr<TitanUMAP> &umap_analyzer,
+                                  DCCMNetwork *dccm_analyzer, info &info_output,
+                                  std::fstream &log);
 #endif // ENGINE_POSTPROC_H

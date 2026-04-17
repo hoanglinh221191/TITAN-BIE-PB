@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <title>Discussion for TITAN AWH Multiwalker Run 2336</title>
+  <style>
+    body {
+      font-family: "Times New Roman", serif;
+      line-height: 1.45;
+      margin: 36px auto;
+      max-width: 980px;
+      color: #222;
+    }
+    h1, h2, h3 {
+      color: #12324a;
+      margin-bottom: 0.35em;
+    }
+    p {
+      margin: 0.45em 0;
+      text-align: justify;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 1em 0 1.2em 0;
+      font-size: 0.96rem;
+    }
+    th, td {
+      border: 1px solid #999;
+      padding: 8px 10px;
+      vertical-align: top;
+    }
+    th {
+      background: #eef4f8;
+    }
+    .note {
+      background: #f7fafc;
+      border-left: 4px solid #3b6c8e;
+      padding: 10px 12px;
+      margin: 1em 0;
+    }
+    .warn {
+      background: #fff7eb;
+      border-left: 4px solid #c97a00;
+      padding: 10px 12px;
+      margin: 1em 0;
+    }
+    .mono {
+      font-family: Consolas, monospace;
+    }
+  </style>
+</head>
+<body>
+  <h1>Discussion for TITAN AWH Multiwalker Run 2336</h1>
+  <p><b>System:</b> protein-protein AWH, 4 walkers</p>
+  <p><b>Output folder:</b> <span class="mono">D:\Data_MD\cpps\2336</span></p>
+  <p><b>Analysis window:</b> started from <span class="mono">-b=400 ns</span></p>
+  <p><b>Total analyzed frames:</b> 60936 frames, with 15234 frames per walker</p>
+
+  <h2>1. Kết luận nhanh về mốc -b=400 ns</h2>
+  <p>Mốc <span class="mono">-b=400 ns</span> là <b>hợp lý cho phân tích thăm dò cơ chế</b>, vì nó loại được phần đầu trajectory và giữ lại đủ dữ liệu để nhận diện landscape trạng thái, interface heterogeneity và các basin chính. Tuy nhiên, bộ hình hiện tại cho thấy <b>4 walker chưa trộn lẫn hoàn toàn</b>, nên mốc này <b>chưa đủ mạnh để khẳng định ensemble đã hội tụ hoàn toàn</b>.</p>
+  <p>Nói ngắn gọn, với cutoff hiện tại, kết quả phù hợp để bàn về <b>state decomposition, pathway dị thể, thay đổi contact/H-bond và đặc điểm cấu trúc</b>. Ngược lại, cần thận trọng nếu muốn diễn giải <b>population cân bằng tuyệt đối, kinetics tuyệt đối hoặc MSM timescale định lượng</b>.</p>
+
+  <div class="note">
+    <b>Khuyến nghị sử dụng kết quả:</b> dùng bộ hình hiện tại cho phần mechanism và structural interpretation; tránh viết quá mạnh theo hướng fully converged equilibrium sampling.
+  </div>
+
+  <h2>2. Các số chính nên nêu trong bài</h2>
+  <table>
+    <tr>
+      <th>Đại lượng</th>
+      <th>Giá trị chính</th>
+      <th>Ý nghĩa</th>
+    </tr>
+    <tr>
+      <td>Macrostate populations</td>
+      <td>M0 = 0.185, M1 = 0.626, M2 = 0.133, M3 = 0.057</td>
+      <td>M1 là basin chiếm ưu thế, nhưng hệ vẫn phân bố trên nhiều trạng thái.</td>
+    </tr>
+    <tr>
+      <td>Per-walker macrostate occupancy</td>
+      <td>walker0: gần như toàn M1; walker1: gần như toàn M1; walker2: chia giữa M1/M2; walker3: chủ yếu M0/M3</td>
+      <td>Walker overlap chưa hoàn toàn, còn heterogeneity giữa các trajectory.</td>
+    </tr>
+    <tr>
+      <td>MSM timescales tại lag được chọn</td>
+      <td>t1 = 3.77 ns; t2 = 1.03 ns; t3 = 0.76 ns</td>
+      <td>Dùng được để mô tả chậm-nhanh tương đối, nhưng chưa đủ để khẳng định kinetics hội tụ.</td>
+    </tr>
+    <tr>
+      <td>Implied timescale scan</td>
+      <td>Timescale tăng dần theo lag và chưa tạo plateau rõ</td>
+      <td>MSM phù hợp hơn cho phân state hơn là kinetics định lượng trong run hiện tại.</td>
+    </tr>
+    <tr>
+      <td>Interface H-bond mean theo walker</td>
+      <td>w0 = 1.407; w1 = 1.063; w2 = 4.111; w3 = 9.829</td>
+      <td>Interface stability khác nhau rõ giữa các walker, gợi ý nhiều mode tương tác.</td>
+    </tr>
+    <tr>
+      <td>DSSP content của mol1</td>
+      <td>coil = 0.7628; bend = 0.1730; turn = 0.0438; helix/strand rất thấp</td>
+      <td>Chuỗi phân tích có tính linh động cao, thiên về disordered/flexible ensemble.</td>
+    </tr>
+  </table>
+
+  <h2>3. Đánh giá từng hình</h2>
+  <table>
+    <tr>
+      <th>Hình</th>
+      <th>Quan sát chính</th>
+      <th>Đánh giá</th>
+    </tr>
+    <tr>
+      <td class="mono">01_tica_fes_macro.png</td>
+      <td>Landscape TICA tách được 4 basin lớn. M1 là basin ưu thế, trong khi M0, M2 và M3 là các basin phụ nhưng vẫn có độ tách biệt rõ.</td>
+      <td>Đây là hình mạnh nhất để trình bày rằng hệ không đơn giản chỉ có một trạng thái bound duy nhất, mà tồn tại nhiều substate/intermediate. Rất nên giữ làm hình chính.</td>
+    </tr>
+    <tr>
+      <td class="mono">02_tica_scatter.png</td>
+      <td>Walker0 và walker1 gần như chỉ nằm ở M1; walker2 trải giữa M1 và M2; walker3 chủ yếu ở M0 và M3.</td>
+      <td>Hình này cho thấy rõ vấn đề overlap chưa hoàn toàn giữa 4 walker. Vì vậy, -b=400 ns là đủ cho nhận diện state-space, nhưng chưa chứng minh được hội tụ chặt về ensemble.</td>
+    </tr>
+    <tr>
+      <td class="mono">03_umap_scatter.png</td>
+      <td>UMAP tách các cụm còn rõ hơn TICA; walker3 nằm ở vùng khá riêng biệt, walker2 chiếm vùng khác với walker0/1.</td>
+      <td>UMAP củng cố nhận định rằng landscape là dị thể và có nhiều vùng trạng thái khác nhau. Đây là hình rất tốt cho phần supplement hoặc bổ sung cho TICA.</td>
+    </tr>
+    <tr>
+      <td class="mono">04_msm_macro_network.png</td>
+      <td>M1 có population lớn nhất, các trạng thái còn lại nhỏ hơn nhưng không bỏ qua được.</td>
+      <td>Dùng tốt để minh họa phân bố state. Tuy nhiên, do walker mixing chưa hoàn toàn và kinetics chưa plateau, nên network này nên được hiểu theo nghĩa qualitative state connectivity hơn là kinetic network định lượng.</td>
+    </tr>
+    <tr>
+      <td class="mono">05_msm_its.png</td>
+      <td>ITS tăng dần khi tăng lag và chưa hình thành plateau rõ trong vùng lag đã quét. Lag chọn hiện tại là 0.01 ns.</td>
+      <td>Đây là bằng chứng quan trọng cho thấy MSM hiện phù hợp để chia state và gợi ý pathway, nhưng chưa đủ mạnh để báo cáo timescale tuyệt đối hoặc rate constant như kết quả hội tụ hoàn chỉnh.</td>
+    </tr>
+    <tr>
+      <td class="mono">06_interface_metrics.png</td>
+      <td>Số H-bond và sidechain contact biến thiên mạnh giữa các walker. Walker3 có trung bình H-bond cao hơn hẳn, còn walker0/1 thấp hơn rõ.</td>
+      <td>Hình này rất hữu ích để nói rằng các basin khác nhau tương ứng với các mức độ ổn định interface khác nhau. Lưu ý: trong bản vẽ cũ có artifact nối từ 0 đến 400 ns vì file thống kê có dòng đầu ở 0 ps; script đã được vá để ngắt đoạn này.</td>
+    </tr>
+    <tr>
+      <td class="mono">07_rmsd_rmsf.png</td>
+      <td>RMSD vẫn rộng và dao động mạnh sau 400 ns; RMSF cao ở đầu-cuối chuỗi và đáng kể cả vùng giữa.</td>
+      <td>Kết quả phù hợp với một ensemble linh động hơn là một trạng thái cấu trúc đơn nhất. Hình này hỗ trợ tốt cho nhận định rằng interface sampling sau cutoff vẫn đa dạng.</td>
+    </tr>
+    <tr>
+      <td class="mono">08_average_contact_map.png</td>
+      <td>Contact map khá thưa, với một số hotspot nổi bật thay vì contact lan tỏa toàn bề mặt.</td>
+      <td>Đây là hình đẹp cho phần structural interpretation: interface có vẻ được giữ bởi một số patch contact chọn lọc, không phải tiếp xúc đồng đều trên toàn bề mặt.</td>
+    </tr>
+    <tr>
+      <td class="mono">09_network_communities.png</td>
+      <td>Residue được chia thành vài community tương đối liên tục dọc chuỗi, cho thấy tổ chức modular của network tương quan.</td>
+      <td>Hữu ích nếu bạn muốn bàn đến communication hoặc collective motion. Tuy vậy, nên diễn giải thận trọng vì network này được xây trên ensemble chưa trộn hoàn toàn.</td>
+    </tr>
+    <tr>
+      <td class="mono">10_dssp_mol1.png</td>
+      <td>Coil chiếm ưu thế mạnh, bend đứng thứ hai, còn helix và strand rất thấp.</td>
+      <td>Hình này củng cố rất tốt ý tưởng rằng chuỗi được phân tích có tính mềm dẻo cao và không neo vào một secondary structure bền trong phần lớn trajectory.</td>
+    </tr>
+    <tr>
+      <td class="mono">11_pca_fes_scatter.png</td>
+      <td>PCA vẫn cho landscape rộng, nhưng mức tách basin kém thuyết phục hơn TICA.</td>
+      <td>Nên để PCA ở supplementary, còn TICA giữ vai trò chính cho state decomposition.</td>
+    </tr>
+    <tr>
+      <td class="mono">12_ifp_occupancy.png</td>
+      <td>Không được tạo trong run này vì file IFP gần như chỉ có header và không có occupancy đáng kể sau lọc.</td>
+      <td>Không phải vấn đề lớn. Với dataset hiện tại, contact map và H-bond đang cho thông tin interface rõ hơn IFP.</td>
+    </tr>
+  </table>
+
+  <h2>4. Cách viết kết luận về -b=400 ns</h2>
+  <p><b>Cách viết an toàn:</b> “The first 400 ns were excluded from analysis to minimize early transient effects. The resulting ensemble revealed multiple metastable regions in TICA space and heterogeneous interface stabilization patterns across the four walkers. While this cutoff is sufficient for qualitative mapping of conformational states and interface descriptors, the incomplete overlap between walkers and the absence of a clear ITS plateau indicate that full equilibrium convergence has not yet been established.”</p>
+  <p><b>Ý tiếng Việt tương đương:</b> “Việc loại bỏ 400 ns đầu giúp giảm ảnh hưởng của giai đoạn đầu lấy mẫu và cho phép nhận diện rõ nhiều vùng trạng thái metastable cùng các mô thức ổn định interface khác nhau giữa bốn walker. Tuy nhiên, do các walker vẫn chưa chồng lấp hoàn toàn và implied timescales chưa tạo plateau rõ, tập hợp dữ liệu sau cutoff này phù hợp hơn cho phân tích định tính về landscape và cơ chế hơn là cho mô tả cân bằng hoặc động học tuyệt đối.”</p>
+
+  <h2>5. Đoạn discussion có thể dùng trực tiếp</h2>
+  <p>The multiwalker AWH ensemble analyzed from 400 ns onward reveals a heterogeneous binding landscape rather than a single dominant bound configuration. TICA and UMAP both resolve several metastable regions, with one major basin accompanied by at least three less populated substates. Importantly, the four walkers do not fully overlap in this reduced space: two walkers remain almost entirely within the dominant basin, one walker mainly samples an adjacent substate, and another preferentially visits two alternative regions. This behavior indicates that the 400 ns cutoff is sufficient to capture meaningful post-transient structural heterogeneity, but not yet sufficient to claim complete ensemble convergence.</p>
+  <p>Interface descriptors support this interpretation. The mean number of intermolecular hydrogen bonds differs strongly among walkers, consistent with distinct interface stabilization modes rather than a unique interaction pattern. In parallel, the average contact map shows only a limited set of contact hotspots, suggesting that complex formation is maintained by selective residue patches rather than by a uniformly packed interface. RMSD and RMSF profiles further indicate a structurally flexible ensemble, while DSSP analysis shows a strong predominance of coil and bend states and only minimal persistent helix or strand content. Together, these results support a model in which binding and partial unbinding proceed through multiple flexible interface arrangements. Therefore, the present dataset is well suited for mechanistic discussion of state heterogeneity and pathway diversity, whereas quantitative equilibrium populations and MSM-derived kinetics should be interpreted with caution.</p>
+
+  <h2>6. Gợi ý nếu muốn làm phần kết quả mạnh hơn</h2>
+  <p>1. So sánh thêm các cutoff như 600 ns và 800 ns để xem walker overlap có cải thiện hay không.</p>
+  <p>2. Chạy lại network/community chỉ trên tập con bound hoặc intermediate để bàn sâu hơn về communication nội tại.</p>
+  <p>3. Nếu muốn nhấn mạnh kinetics, nên bổ sung thêm dữ liệu unbiased hoặc ít nhất kiểm tra lại MSM ở lag lớn hơn với overlap tốt hơn giữa các walker.</p>
+  <p>4. Nếu viết bài theo hướng structural mechanism, bộ hình mạnh nhất hiện tại là TICA FES, TICA scatter theo walker, interface metrics, average contact map và DSSP.</p>
+
+  <div class="warn">
+    <b>Lưu ý quan trọng:</b> vì đây là AWH biased sampling, các kết quả từ TICA, UMAP, MSM và TPT nên được ưu tiên diễn giải như bản đồ trạng thái và pathway tương đối. Không nên mô tả population hay timescale như kinetics tuyệt đối nếu chưa có bước kiểm tra hội tụ mạnh hơn hoặc reweighting phù hợp.
+  </div>
+</body>
+</html>

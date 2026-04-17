@@ -1,6 +1,8 @@
 #include "gbsa_intrin.h"
 #include "charmm_nonbonded.h"
+#include "titan_simd_dispatch.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -11,16 +13,6 @@
 #ifdef __AVX__
 #include "avx_math.h"
 #include <immintrin.h>
-
-// Helper to horizontal sum AVX register
-static inline double hsum_avx(__m256d v) {
-  __m128d vlow = _mm256_castpd256_pd128(v);
-  __m128d vhigh = _mm256_extractf128_pd(v, 1);
-  vlow = _mm_add_pd(vlow, vhigh);
-  __m128d shuf = _mm_shuffle_pd(vlow, vlow, _MM_SHUFFLE2(0, 1));
-  vlow = _mm_add_pd(vlow, shuf);
-  return _mm_cvtsd_f64(vlow);
-}
 
 static inline __m256d charmm_lj_energy_gbsa_avx(__m256d sigma_vec,
                                                 __m256d epsilon_vec,
@@ -60,99 +52,20 @@ void cal_effective_born_radii_avx2(const MOL &mol,
     gamma = 4.85;
   }
 
-  __m256d avx_one = _mm256_set1_pd(1.0);
-
   for (size_t i = begin; i < end; ++i) {
     double pos_x = mol.pos.x[i], pos_y = mol.pos.y[i], pos_z = mol.pos.z[i];
     double rho_i = vdw_radii[i]; // In Angstroms!
     if (rho_i < 1.0)
       rho_i = 1.5; // fallback
-    __m256d v_pos_x = _mm256_set1_pd(pos_x);
-    __m256d v_pos_y = _mm256_set1_pd(pos_y);
-    __m256d v_pos_z = _mm256_set1_pd(pos_z);
-
-    __m256d psi_sum = _mm256_setzero_pd();
-    size_t size_vec = size / 4;
-    for (size_t j = 0; j < size_vec * 4; j += 4) {
-      __m256d v_x = _mm256_load_pd(&mol.pos.x[j]);
-      __m256d v_y = _mm256_load_pd(&mol.pos.y[j]);
-      __m256d v_z = _mm256_load_pd(&mol.pos.z[j]);
-      __m256d v_rho_j = _mm256_load_pd(&vdw_radii[j]);
-
-      __m256d dx = _mm256_sub_pd(v_x, v_pos_x);
-      __m256d dy = _mm256_sub_pd(v_y, v_pos_y);
-      __m256d dz = _mm256_sub_pd(v_z, v_pos_z);
-
-      __m256d dx2 = _mm256_mul_pd(dx, dx);
-      __m256d dy2 = _mm256_mul_pd(dy, dy);
-      __m256d dz2 = _mm256_mul_pd(dz, dz);
-
-      __m256d r2 = _mm256_add_pd(_mm256_add_pd(dx2, dy2), dz2);
-      __m256d mask = _mm256_cmp_pd(r2, _mm256_set1_pd(1e-6), _CMP_GT_OQ);
-
-      // Psi integral: (rho_j^3 / 3.0) / r^4
-      __m256d rho_j_3 = _mm256_mul_pd(v_rho_j, _mm256_mul_pd(v_rho_j, v_rho_j));
-      __m256d vol_j = _mm256_div_pd(rho_j_3, _mm256_set1_pd(3.0));
-      __m256d inv_r2 = _mm256_div_pd(avx_one, r2);
-      __m256d term = _mm256_mul_pd(vol_j, _mm256_mul_pd(inv_r2, inv_r2));
-      term = _mm256_and_pd(term, mask); // zero out self-interaction
-      psi_sum = _mm256_add_pd(psi_sum, term);
-    }
-
-    double psi = hsum_avx(psi_sum);
-    // Scalar remainder
-    for (size_t j = size_vec * 4; j < size; ++j) {
-      if (i == j)
-        continue;
-      double dx = mol.pos.x[j] - pos_x;
-      double dy = mol.pos.y[j] - pos_y;
-      double dz = mol.pos.z[j] - pos_z;
-      double r2 = dx * dx + dy * dy + dz * dz;
-      if (r2 > 1e-6) {
-        double vol_j = vdw_radii[j] * vdw_radii[j] * vdw_radii[j] / 3.0;
-        psi += vol_j / (r2 * r2);
-      }
-    }
+    double psi = titan_simd_dispatch::gbsa_inverse_r4_volume_sum(
+        mol.pos.x.data(), mol.pos.y.data(), mol.pos.z.data(), vdw_radii.data(),
+        size, pos_x, pos_y, pos_z, 1e-6, true);
 
     if (env_mol != nullptr && env_vdw_radii != nullptr) {
-      size_t env_size = env_mol->size();
-      size_t env_size_vec = env_size / 4;
-      __m256d env_psi_sum = _mm256_setzero_pd();
-      for (size_t j = 0; j < env_size_vec * 4; j += 4) {
-        __m256d v_x = _mm256_load_pd(&env_mol->pos.x[j]);
-        __m256d v_y = _mm256_load_pd(&env_mol->pos.y[j]);
-        __m256d v_z = _mm256_load_pd(&env_mol->pos.z[j]);
-        __m256d v_rho_j = _mm256_load_pd(&(*env_vdw_radii)[j]);
-
-        __m256d dx = _mm256_sub_pd(v_x, v_pos_x);
-        __m256d dy = _mm256_sub_pd(v_y, v_pos_y);
-        __m256d dz = _mm256_sub_pd(v_z, v_pos_z);
-        __m256d dx2 = _mm256_mul_pd(dx, dx);
-        __m256d dy2 = _mm256_mul_pd(dy, dy);
-        __m256d dz2 = _mm256_mul_pd(dz, dz);
-        __m256d r2 = _mm256_add_pd(_mm256_add_pd(dx2, dy2), dz2);
-        __m256d mask = _mm256_cmp_pd(r2, _mm256_set1_pd(1e-6), _CMP_GT_OQ);
-
-        __m256d rho_j_3 =
-            _mm256_mul_pd(v_rho_j, _mm256_mul_pd(v_rho_j, v_rho_j));
-        __m256d vol_j = _mm256_div_pd(rho_j_3, _mm256_set1_pd(3.0));
-        __m256d inv_r2 = _mm256_div_pd(avx_one, r2);
-        __m256d term = _mm256_mul_pd(vol_j, _mm256_mul_pd(inv_r2, inv_r2));
-        term = _mm256_and_pd(term, mask);
-        env_psi_sum = _mm256_add_pd(env_psi_sum, term);
-      }
-      psi += hsum_avx(env_psi_sum);
-      for (size_t j = env_size_vec * 4; j < env_size; ++j) {
-        double dx = env_mol->pos.x[j] - pos_x;
-        double dy = env_mol->pos.y[j] - pos_y;
-        double dz = env_mol->pos.z[j] - pos_z;
-        double r2 = dx * dx + dy * dy + dz * dz;
-        if (r2 > 1e-6) {
-          double vol_j = (*env_vdw_radii)[j] * (*env_vdw_radii)[j] *
-                         (*env_vdw_radii)[j] / 3.0;
-          psi += vol_j / (r2 * r2);
-        }
-      }
+      psi += titan_simd_dispatch::gbsa_inverse_r4_volume_sum(
+          env_mol->pos.x.data(), env_mol->pos.y.data(), env_mol->pos.z.data(),
+          env_vdw_radii->data(), env_mol->size(), pos_x, pos_y, pos_z, 1e-6,
+          true);
     }
 
     psi *= 0.1; // Convert integral from Angstrom^-4 to nm^-4
@@ -281,79 +194,44 @@ compute_sasa_shrake_rupley(const MOL &mol, std::span<const double> radii,
       }
     }
 
-#ifdef __AVX__
-    // AVX2 96-Point Intersection Check (24 loops of 4 points)
-    __m256d px[24], py[24], pz[24];
-    __m256d buried_mask[24];
+    // Use the shared runtime-dispatch helper so native/portable builds keep
+    // the same AVX2/scalar selection policy while preserving the original
+    // strict '< Rj^2' burial test.
+    std::array<std::array<double, 4>, 24> px{};
+    std::array<std::array<double, 4>, 24> py{};
+    std::array<std::array<double, 4>, 24> pz{};
+    std::array<unsigned, 24> buried_mask{};
     for (int k = 0; k < 24; ++k) {
-      buried_mask[k] = _mm256_setzero_pd();
-      px[k] = _mm256_set_pd(x_i + SASA_SPHERE_POINTS[k * 4 + 3].x * R_i,
-                            x_i + SASA_SPHERE_POINTS[k * 4 + 2].x * R_i,
-                            x_i + SASA_SPHERE_POINTS[k * 4 + 1].x * R_i,
-                            x_i + SASA_SPHERE_POINTS[k * 4 + 0].x * R_i);
-      py[k] = _mm256_set_pd(y_i + SASA_SPHERE_POINTS[k * 4 + 3].y * R_i,
-                            y_i + SASA_SPHERE_POINTS[k * 4 + 2].y * R_i,
-                            y_i + SASA_SPHERE_POINTS[k * 4 + 1].y * R_i,
-                            y_i + SASA_SPHERE_POINTS[k * 4 + 0].y * R_i);
-      pz[k] = _mm256_set_pd(z_i + SASA_SPHERE_POINTS[k * 4 + 3].z * R_i,
-                            z_i + SASA_SPHERE_POINTS[k * 4 + 2].z * R_i,
-                            z_i + SASA_SPHERE_POINTS[k * 4 + 1].z * R_i,
-                            z_i + SASA_SPHERE_POINTS[k * 4 + 0].z * R_i);
+      for (int lane = 0; lane < 4; ++lane) {
+        const auto &pt = SASA_SPHERE_POINTS[k * 4 + lane];
+        px[k][lane] = x_i + pt.x * R_i;
+        py[k][lane] = y_i + pt.y * R_i;
+        pz[k][lane] = z_i + pt.z * R_i;
+      }
     }
 
     for (size_t j : neighbors) {
-      __m256d jx = _mm256_set1_pd(mol.pos.x[j]);
-      __m256d jy = _mm256_set1_pd(mol.pos.y[j]);
-      __m256d jz = _mm256_set1_pd(mol.pos.z[j]);
-      __m256d Rj2 =
-          _mm256_set1_pd((radii[j] + probe_radius) * (radii[j] + probe_radius));
-
+      const double cutoff_sq =
+          (radii[j] + probe_radius) * (radii[j] + probe_radius);
       for (int k = 0; k < 24; ++k) {
-        __m256d dx = _mm256_sub_pd(px[k], jx);
-        __m256d dy = _mm256_sub_pd(py[k], jy);
-        __m256d dz = _mm256_sub_pd(pz[k], jz);
-        __m256d dist_sq = _mm256_add_pd(
-            _mm256_add_pd(_mm256_mul_pd(dx, dx), _mm256_mul_pd(dy, dy)),
-            _mm256_mul_pd(dz, dz));
-        __m256d mask = _mm256_cmp_pd(dist_sq, Rj2, _CMP_LT_OQ);
-        buried_mask[k] = _mm256_or_pd(buried_mask[k], mask);
+        buried_mask[k] |= titan_simd_dispatch::point_vs_four_cutoff_mask(
+            mol.pos.x[j], mol.pos.y[j], mol.pos.z[j], px[k].data(), py[k].data(),
+            pz[k].data(), cutoff_sq, -1.0, false);
       }
     }
 
     int exposed_points = 0;
     for (int k = 0; k < 24; ++k) {
-      int mask_int = _mm256_movemask_pd(buried_mask[k]);
-      if ((mask_int & 1) == 0)
+      const unsigned mask_int = buried_mask[k];
+      if ((mask_int & 1u) == 0u)
         exposed_points++;
-      if ((mask_int & 2) == 0)
+      if ((mask_int & 2u) == 0u)
         exposed_points++;
-      if ((mask_int & 4) == 0)
+      if ((mask_int & 4u) == 0u)
         exposed_points++;
-      if ((mask_int & 8) == 0)
-        exposed_points++;
-    }
-#else
-    // Scalar fallback if targeted atoms > 0 but not vectorizable fully
-    // Count how many points are accessible
-    int exposed_points = 0;
-    for (const auto &pt : SASA_SPHERE_POINTS) {
-      double px_val = x_i + pt.x * R_i, py_val = y_i + pt.y * R_i,
-             pz_val = z_i + pt.z * R_i;
-      bool buried = false;
-      for (size_t j : neighbors) {
-        double R_j = radii[j] + probe_radius;
-        double dist_sq = (px_val - mol.pos.x[j]) * (px_val - mol.pos.x[j]) +
-                         (py_val - mol.pos.y[j]) * (py_val - mol.pos.y[j]) +
-                         (pz_val - mol.pos.z[j]) * (pz_val - mol.pos.z[j]);
-        if (dist_sq < R_j * R_j) {
-          buried = true;
-          break;
-        }
-      }
-      if (!buried)
+      if ((mask_int & 8u) == 0u)
         exposed_points++;
     }
-#endif
     sasa[i] = exposed_points * area_per_point * R_i_sq;
   }
   return sasa;
@@ -768,7 +646,6 @@ int cal_energy_gbsa_avx2(
 
   __m256d v_scale = _mm256_set1_pd(0.01);
 
-
   for (size_t j = lg_begin; j < lg_end; ++j) {
     double pos_x = lg.pos.x[j], pos_y = lg.pos.y[j], pos_z = lg.pos.z[j];
     double R_j = lg_complex_radii[j];
@@ -821,24 +698,24 @@ int cal_energy_gbsa_avx2(
         const __m256d sigma_vec = _mm256_loadu_pd(sigma_lane);
         const __m256d epsilon_vec = _mm256_loadu_pd(epsilon_lane);
         vdw_res = charmm_lj_energy_gbsa_avx(sigma_vec, epsilon_vec, r_nm);
-      } else if (is_oplsaa) {
-        __m256d four_eps = _mm256_mul_pd(_mm256_set1_pd(4.0), eps_ij);
-        __m256d sig_ij =
-            _mm256_sqrt_pd(_mm256_mul_pd(avx_temp_sigma_lg, avx_rec_sigma));
-        __m256d sig2 = _mm256_mul_pd(sig_ij, sig_ij);
-        __m256d sig6 = _mm256_mul_pd(_mm256_mul_pd(sig2, sig2), sig2);
-        __m256d sr6 = _mm256_mul_pd(sig6, _mm256_div_pd(avx_one, r6_nm));
-        __m256d sr12 = _mm256_mul_pd(sr6, sr6);
-        vdw_res = _mm256_mul_pd(four_eps, _mm256_sub_pd(sr12, sr6));
       } else {
-        __m256d four_eps = _mm256_mul_pd(_mm256_set1_pd(4.0), eps_ij);
-        __m256d sig_ij = _mm256_mul_pd(
-            _mm256_add_pd(avx_temp_sigma_lg, avx_rec_sigma), avx_half);
-        __m256d sig2 = _mm256_mul_pd(sig_ij, sig_ij);
-        __m256d sig6 = _mm256_mul_pd(_mm256_mul_pd(sig2, sig2), sig2);
-        __m256d sr6 = _mm256_mul_pd(sig6, _mm256_div_pd(avx_one, r6_nm));
-        __m256d sr12 = _mm256_mul_pd(sr6, sr6);
-        vdw_res = _mm256_mul_pd(four_eps, _mm256_sub_pd(sr12, sr6));
+        alignas(32) double sigma_lane[4]{};
+        alignas(32) double epsilon_lane[4]{};
+        alignas(32) double r6_lane[4]{};
+        alignas(32) double vdw_lane[4]{};
+        const __m256d sig_ij = is_oplsaa
+                                   ? _mm256_sqrt_pd(_mm256_mul_pd(
+                                         avx_temp_sigma_lg, avx_rec_sigma))
+                                   : _mm256_mul_pd(
+                                         _mm256_add_pd(avx_temp_sigma_lg,
+                                                       avx_rec_sigma),
+                                         avx_half);
+        _mm256_storeu_pd(sigma_lane, sig_ij);
+        _mm256_storeu_pd(epsilon_lane, eps_ij);
+        _mm256_storeu_pd(r6_lane, r6_nm);
+        titan_simd_dispatch::gbsa_lj_mixed_sigma_epsilon_r6_fourlanes(
+            sigma_lane, epsilon_lane, r6_lane, vdw_lane);
+        vdw_res = _mm256_loadu_pd(vdw_lane);
       }
       // Apply distance mask: zero out VdW for too-close pairs
       vdw_res = _mm256_and_pd(vdw_res, r_min_mask);

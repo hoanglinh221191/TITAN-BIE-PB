@@ -25,7 +25,9 @@ public:
 
   void process_frame(const Multi_MOL &pro_in, const Multi_MOL &lig,
                      size_t chunk_snap_idx, size_t global_frame_idx,
-                     double time_ps = 0.0, int replica_id = 0);
+                     double time_ps = 0.0, int replica_id = 0,
+                     double box_volume_nm3 =
+                         std::numeric_limits<double>::quiet_NaN());
 
   void calculate_and_export(TitanExecutor &executor, const info &info_output);
 
@@ -50,6 +52,8 @@ public:
     bool knn_use_contact_prior = false;
     double knn_contact_cutoff = 8.0;
     bool compute_te = true;
+    std::string estimator{"hist"};
+    double kde_bandwidth = 0.0;
   };
 
   void calculate_allostery_information(TitanExecutor &executor, int tau_lag,
@@ -118,6 +122,9 @@ public:
   }
   const std::vector<double> &get_traj_times() const { return traj_times_; }
   const std::vector<int> &get_traj_replicas() const { return traj_replicas_; }
+  const std::vector<double> &get_traj_box_volumes_nm3() const {
+    return traj_box_volumes_nm3_;
+  }
   const TrajectoryRows &get_traj_x() const { return traj_x; }
   const TrajectoryRows &get_traj_y() const { return traj_y; }
   const TrajectoryRows &get_traj_z() const { return traj_z; }
@@ -162,6 +169,7 @@ private:
   std::vector<int64_t> frame_global_indices_;
   std::vector<double> traj_times_;
   std::vector<int> traj_replicas_;
+  std::vector<double> traj_box_volumes_nm3_;
   TrajectoryRow latest_traj_x_;
   TrajectoryRow latest_traj_y_;
   TrajectoryRow latest_traj_z_;

@@ -3,6 +3,7 @@
 #include "functions.h"
 #include "miscellaneous.h"
 #include "new_emap.h"
+#include "titan_simd_dispatch.h"
 #include "stat_ener_res_res.h"
 #include "uti_func.h"
 #include <algorithm>
@@ -101,32 +102,19 @@ int force_energy_add_intrin(const cache_sigma_epsilon &CachedData, size_t *i,
                             lg_parameters[lg_pos + 3].get_epsilon());
       vdw_temp = _mm256_sqrt_pd(vdw_temp);
 
-      __m256d vdw_temp2 =
-          _mm256_set_pd(0.5 * (lg_parameters[lg_pos].get_sigma() +
-                               rec_parameters[rec_pos].get_sigma()),
-                        0.5 * (lg_parameters[lg_pos + 1].get_sigma() +
-                               rec_parameters[rec_pos].get_sigma()),
-                        0.5 * (lg_parameters[lg_pos + 2].get_sigma() +
-                               rec_parameters[rec_pos].get_sigma()),
-                        0.5 * (lg_parameters[lg_pos + 3].get_sigma() +
-                               rec_parameters[rec_pos].get_sigma()));
-      vdw_temp2 = _mm256_div_pd(vdw_temp2, avx_d);
-
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-      __m256d vdw_temp3 = vdw_temp2;
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp3);
-      // vdw_temp3 = _mm256_fmsub_pd(vdw_temp2, vdw_temp2, vdw_temp2);
-      vdw_temp3 = _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2), vdw_temp2);
-      // vdw_temp3 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-      // vdw_temp3 = _mm256_sub_pd(vdw_temp3, vdw_temp2);
-      vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3);
-
+      const double rec_sigma = rec_parameters[rec_pos].get_sigma();
+      double sigma_lanes[4] = {
+          0.5 * (lg_parameters[lg_pos + 3].get_sigma() + rec_sigma),
+          0.5 * (lg_parameters[lg_pos + 2].get_sigma() + rec_sigma),
+          0.5 * (lg_parameters[lg_pos + 1].get_sigma() + rec_sigma),
+          0.5 * (lg_parameters[lg_pos].get_sigma() + rec_sigma)};
+      double epsilon_lanes[4], distance_lanes[4];
       double elec_temp[4], vdw_temp_d[4], vdw_temp_d2[4];
+      _mm256_storeu_pd(epsilon_lanes, vdw_temp);
+      _mm256_storeu_pd(distance_lanes, avx_d);
       _mm256_storeu_pd(elec_temp, avx_electro_energy);
-      //_mm256_storeu_pd(d, avx_d);
-      _mm256_storeu_pd(vdw_temp_d, vdw_temp3);
-      _mm256_storeu_pd(vdw_temp_d2, vdw_temp2);
+      titan_simd_dispatch::lj_mixed_sigma_epsilon_distance_c6_fourlanes(
+          sigma_lanes, epsilon_lanes, distance_lanes, vdw_temp_d2, vdw_temp_d);
 
       for (size_t k{}; k < 4; ++k) {
         electro_energy += elec_temp[k];
@@ -220,28 +208,17 @@ int force_energy_add_intrin(const cache_sigma_epsilon &CachedData, size_t *i,
                          ? lg_parameters[lg_pos + 3].get_sigma()
                          : 0.};
 
-      __m256d vdw_temp2 =
-          _mm256_set_pd((lg_1_sigma * rec_sigma), (lg_2_sigma * rec_sigma),
-                        (lg_3_sigma * rec_sigma), (lg_4_sigma * rec_sigma));
-
-      vdw_temp2 = _mm256_div_pd(vdw_temp2, avx_d);
-      vdw_temp2 = _mm256_sqrt_pd(vdw_temp2);
-
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-      __m256d vdw_temp3 = vdw_temp2;
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-      vdw_temp2 = _mm256_mul_pd(vdw_temp2, vdw_temp3); // c_6
-      // vdw_temp3 = _mm256_fmsub_pd(vdw_temp2, vdw_temp2, vdw_temp2);
-      vdw_temp3 = _mm256_sub_pd(_mm256_mul_pd(vdw_temp2, vdw_temp2), vdw_temp2);
-      // vdw_temp3 = _mm256_mul_pd(vdw_temp2, vdw_temp2);
-      // vdw_temp3 = _mm256_sub_pd(vdw_temp3, vdw_temp2);
-      vdw_temp3 = _mm256_mul_pd(vdw_temp, vdw_temp3);
-
+      double sigma_product_lanes[4] = {
+          lg_4_sigma * rec_sigma, lg_3_sigma * rec_sigma,
+          lg_2_sigma * rec_sigma, lg_1_sigma * rec_sigma};
+      double epsilon_lanes[4], distance_lanes[4];
       double elec_temp[4], vdw_temp_d[4], vdw_temp_d2[4];
+      _mm256_storeu_pd(epsilon_lanes, vdw_temp);
+      _mm256_storeu_pd(distance_lanes, avx_d);
       _mm256_storeu_pd(elec_temp, avx_electro_energy);
-      //_mm256_storeu_pd(d, avx_d);
-      _mm256_storeu_pd(vdw_temp_d, vdw_temp3);
-      _mm256_storeu_pd(vdw_temp_d2, vdw_temp2);
+      titan_simd_dispatch::lj_sigma_product_distance_c6_fourlanes(
+          sigma_product_lanes, epsilon_lanes, distance_lanes, vdw_temp_d2,
+          vdw_temp_d);
 
       for (size_t k{}; k < 4; ++k) {
         electro_energy += elec_temp[k];

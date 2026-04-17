@@ -70,6 +70,18 @@ struct FesPostprocMetrics {
   std::chrono::milliseconds zts_time{0};
 };
 
+bool export_projection_fes_analysis(
+    const std::string &label, const std::string &space_name,
+    const arguments &args,
+    const std::vector<std::pair<double, double>> &projections,
+    const AlignedDoubleVector &analysis_weights, bool use_weights,
+    double target_temp, const std::string &weighted_mode_label,
+    TitanExecutor &executor, std::fstream &log, const std::string &fes_filename,
+    const std::string &cluster_filename,
+    const std::vector<double> &traj_times = {},
+    const std::vector<int> &traj_replicas = {}, FES2DResult *out_fes = nullptr,
+    std::vector<ClusterNode> *out_clusters = nullptr);
+
 // Main API isolated from impl_engine.cpp handling Covariance, FES Histograms &
 // Peak Clustering
 void execute_pca_fes_analysis(

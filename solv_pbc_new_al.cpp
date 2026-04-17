@@ -1,5 +1,6 @@
 #include "BoxMatrix.h"
 #include "functions.h"
+#include "pbctopo_hull.h"
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -81,6 +82,31 @@ struct EnvelopeScene {
   double center_sum_y = 0.0;
   double center_sum_z = 0.0;
   size_t atom_total = 0;
+};
+
+using pbctopo_hull::PbctopoHullScratch;
+using pbctopo_hull::Vec3;
+
+struct HullChainGeom {
+  size_t atom_count = 0;
+  vector<Vec3> atom_points;
+};
+
+struct HullAssemblyScene {
+  unordered_map<uint64_t, vector<Vec3>> clash_atoms;
+  vector<Vec3> points;
+};
+
+struct HullPlacementScore {
+  size_t moving = static_cast<size_t>(-1);
+  size_t image_index = 26;
+  double tx = 0.0;
+  double ty = 0.0;
+  double tz = 0.0;
+  double hull_volume = std::numeric_limits<double>::infinity();
+  double min_d2 = std::numeric_limits<double>::infinity();
+  bool min_d2_ready = false;
+  bool valid = false;
 };
 
 struct LegacyImageShift {
@@ -230,11 +256,23 @@ EnvelopeChainGeom build_envelope_chain_geom(
   return geom;
 }
 
+HullChainGeom build_hull_chain_geom(vector<Vec3> atom_points) {
+  HullChainGeom geom;
+  geom.atom_count = atom_points.size();
+  geom.atom_points = std::move(atom_points);
+  return geom;
+}
+
 void reserve_envelope_scene(EnvelopeScene &scene, size_t atom_hint,
                             size_t surface_hint) {
   scene.core_cells.reserve(std::max<size_t>(1, atom_hint * 2));
   scene.clash_atoms.reserve(std::max<size_t>(1, atom_hint * 2));
   scene.surface_points.reserve(std::max<size_t>(1, surface_hint * 2));
+}
+
+void reserve_hull_scene(HullAssemblyScene &scene, size_t atom_hint) {
+  scene.clash_atoms.reserve(std::max<size_t>(1, atom_hint * 2));
+  scene.points.reserve(atom_hint);
 }
 
 void add_chain_to_envelope_scene(EnvelopeScene &scene,
@@ -278,6 +316,167 @@ void add_chain_to_envelope_scene(EnvelopeScene &scene,
         envelope_grid_index(pz, kContactCutoff))]
         .push_back({px, py, pz});
   }
+}
+
+void add_chain_to_hull_scene(HullAssemblyScene &scene, const HullChainGeom &geom,
+                             double tx, double ty, double tz) {
+  if (geom.atom_count == 0)
+    return;
+  for (const Vec3 &atom : geom.atom_points) {
+    const Vec3 shifted{atom.x + tx, atom.y + ty, atom.z + tz};
+    scene.points.push_back(shifted);
+    scene.clash_atoms[pack_envelope_cell(
+        envelope_grid_index(shifted.x, kClashGrid),
+        envelope_grid_index(shifted.y, kClashGrid),
+        envelope_grid_index(shifted.z, kClashGrid))]
+        .push_back(shifted);
+  }
+}
+
+bool shifted_chain_has_exact_hard_clash(const HullChainGeom &geom,
+                                        const HullAssemblyScene &scene,
+                                        double tx, double ty, double tz) {
+  if (geom.atom_points.empty() || scene.points.empty())
+    return false;
+
+  for (const Vec3 &atom : geom.atom_points) {
+    const double rx = atom.x + tx;
+    const double ry = atom.y + ty;
+    const double rz = atom.z + tz;
+    const int hx = envelope_grid_index(rx, kClashGrid);
+    const int hy = envelope_grid_index(ry, kClashGrid);
+    const int hz = envelope_grid_index(rz, kClashGrid);
+    for (int ox = -1; ox <= 1; ++ox) {
+      for (int oy = -1; oy <= 1; ++oy) {
+        for (int oz = -1; oz <= 1; ++oz) {
+          const auto it = scene.clash_atoms.find(
+              pack_envelope_cell(hx + ox, hy + oy, hz + oz));
+          if (it == scene.clash_atoms.end())
+            continue;
+          for (const Vec3 &other : it->second) {
+            const double dx = rx - other.x;
+            const double dy = ry - other.y;
+            const double dz = rz - other.z;
+            const double d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < kHardClashCutoff2)
+              return true;
+          }
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+double compute_shifted_chain_min_d2(const HullChainGeom &geom,
+                                    const HullAssemblyScene &scene, double tx,
+                                    double ty, double tz) {
+  double min_d2 = std::numeric_limits<double>::infinity();
+  if (geom.atom_points.empty() || scene.points.empty())
+    return min_d2;
+
+  for (const Vec3 &atom : geom.atom_points) {
+    const double rx = atom.x + tx;
+    const double ry = atom.y + ty;
+    const double rz = atom.z + tz;
+    for (const Vec3 &other : scene.points) {
+      const double dx = rx - other.x;
+      const double dy = ry - other.y;
+      const double dz = rz - other.z;
+      const double d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < min_d2)
+        min_d2 = d2;
+    }
+  }
+
+  return min_d2;
+}
+
+void build_shifted_hull_candidate_points(const HullAssemblyScene &scene,
+                                         const HullChainGeom &geom, double tx,
+                                         double ty, double tz,
+                                         vector<Vec3> &candidate_points) {
+  candidate_points.clear();
+  candidate_points.reserve(scene.points.size() + geom.atom_points.size());
+  candidate_points.insert(candidate_points.end(), scene.points.begin(),
+                          scene.points.end());
+  for (const Vec3 &atom : geom.atom_points) {
+    candidate_points.push_back({atom.x + tx, atom.y + ty, atom.z + tz});
+  }
+}
+
+double compute_convex_hull_volume_or_zero(const vector<Vec3> &points,
+                                          PbctopoHullScratch &scratch) {
+  if (points.size() < 4)
+    return 0.0;
+
+  double hull_volume = 0.0;
+  if (pbctopo_hull::quickhull_volume(points, hull_volume, &scratch))
+    return hull_volume;
+  return 0.0;
+}
+
+void ensure_hull_candidate_min_d2(HullPlacementScore &candidate,
+                                  const HullChainGeom &geom,
+                                  const HullAssemblyScene &scene) {
+  if (candidate.min_d2_ready)
+    return;
+  candidate.min_d2 =
+      compute_shifted_chain_min_d2(geom, scene, candidate.tx, candidate.ty,
+                                   candidate.tz);
+  candidate.min_d2_ready = true;
+}
+
+bool better_hull_placement(HullPlacementScore &lhs, HullPlacementScore &rhs,
+                           const vector<HullChainGeom> &geom,
+                           const HullAssemblyScene &scene) {
+  constexpr double kHullVolumeTol = 1.0e-9;
+  constexpr double kMinD2Tol = 1.0e-12;
+  if (!lhs.valid)
+    return false;
+  if (!rhs.valid)
+    return true;
+  if (lhs.hull_volume + kHullVolumeTol < rhs.hull_volume)
+    return true;
+  if (rhs.hull_volume + kHullVolumeTol < lhs.hull_volume)
+    return false;
+
+  if (lhs.moving < geom.size())
+    ensure_hull_candidate_min_d2(lhs, geom[lhs.moving], scene);
+  if (rhs.moving < geom.size())
+    ensure_hull_candidate_min_d2(rhs, geom[rhs.moving], scene);
+
+  if (lhs.min_d2 > rhs.min_d2 + kMinD2Tol)
+    return true;
+  if (rhs.min_d2 > lhs.min_d2 + kMinD2Tol)
+    return false;
+  if (lhs.image_index != rhs.image_index)
+    return lhs.image_index < rhs.image_index;
+  return lhs.moving < rhs.moving;
+}
+
+HullPlacementScore evaluate_hull_placement_candidate(
+    const HullChainGeom &geom, const HullAssemblyScene &scene, double tx,
+    double ty, double tz, size_t moving, size_t image_index,
+    vector<Vec3> &candidate_points, PbctopoHullScratch &hull_scratch) {
+  HullPlacementScore candidate;
+  candidate.moving = moving;
+  candidate.image_index = image_index;
+  candidate.tx = tx;
+  candidate.ty = ty;
+  candidate.tz = tz;
+
+  if (geom.atom_points.empty())
+    return candidate;
+  if (shifted_chain_has_exact_hard_clash(geom, scene, tx, ty, tz))
+    return candidate;
+
+  build_shifted_hull_candidate_points(scene, geom, tx, ty, tz, candidate_points);
+  candidate.hull_volume =
+      compute_convex_hull_volume_or_zero(candidate_points, hull_scratch);
+  candidate.valid = true;
+  return candidate;
 }
 
 EnvelopePlacementScore score_chain_envelope_placement(
@@ -638,7 +837,7 @@ struct CartesianChainRange {
 };
 
 vector<CartesianChainRange>
-build_cartesian_chain_ranges(const vector<index> &Index, size_t atom_count) {
+build_cartesian_chain_ranges(const vector<class index> &Index, size_t atom_count) {
   vector<CartesianChainRange> ranges;
   ranges.reserve(Index.size());
   for (size_t k = 0; k + 1 < Index.size(); ++k) {
@@ -666,6 +865,148 @@ build_envelope_chain_geometries(const MOL &mol,
     geom.push_back(build_envelope_chain_geom(std::move(atom_cart)));
   }
   return geom;
+}
+
+void apply_range_shift(MOL &mol, const CartesianChainRange &range, double tx,
+                       double ty, double tz);
+
+array<unsigned char, 27>
+build_rejected_image_mask(const vector<size_t> &rejected_images);
+
+vector<HullChainGeom>
+build_hull_chain_geometries(const MOL &mol,
+                            const vector<CartesianChainRange> &ranges) {
+  vector<HullChainGeom> geom;
+  geom.reserve(ranges.size());
+  for (const auto &range : ranges) {
+    vector<Vec3> atom_points;
+    atom_points.reserve(range.end - range.begin);
+    for (size_t i = range.begin; i < range.end; ++i) {
+      atom_points.push_back({mol.pos.x[i], mol.pos.y[i], mol.pos.z[i]});
+    }
+    geom.push_back(build_hull_chain_geom(std::move(atom_points)));
+  }
+  return geom;
+}
+
+int assemble_chains_with_hull(MOL &mol, const vector<class index> &Index,
+                              int seed_chain,
+                              const vector<size_t> &rejected_images,
+                              const vector<char> *skip_mask_ptr = nullptr) {
+  const auto ranges = build_cartesian_chain_ranges(Index, mol.pos.x.size());
+  if (ranges.empty())
+    return 0;
+
+  vector<char> skip_mask(ranges.size(), 0);
+  if (skip_mask_ptr != nullptr) {
+    const size_t limit = std::min(skip_mask.size(), skip_mask_ptr->size());
+    for (size_t i = 0; i < limit; ++i)
+      skip_mask[i] = (*skip_mask_ptr)[i];
+  }
+
+  size_t active_chain_count = 0;
+  size_t active_atom_hint = 0;
+  const auto geom = build_hull_chain_geometries(mol, ranges);
+  for (size_t i = 0; i < geom.size(); ++i) {
+    if (skip_mask[i])
+      continue;
+    ++active_chain_count;
+    active_atom_hint += geom[i].atom_count;
+  }
+  if (active_chain_count == 0)
+    return 0;
+
+  if (seed_chain < 0 || seed_chain >= static_cast<int>(ranges.size()) ||
+      skip_mask[static_cast<size_t>(seed_chain)] != 0) {
+    seed_chain = 0;
+    while (static_cast<size_t>(seed_chain) < skip_mask.size() &&
+           skip_mask[static_cast<size_t>(seed_chain)] != 0) {
+      ++seed_chain;
+    }
+    if (static_cast<size_t>(seed_chain) >= skip_mask.size())
+      return 0;
+  }
+
+  const auto candidate_shifts = build_legacy_image_shifts(mol.Box);
+  const auto rejected_mask = build_rejected_image_mask(rejected_images);
+
+  vector<char> assembled(ranges.size(), 0);
+  vector<array<double, 3>> chosen_shift(ranges.size(), {0.0, 0.0, 0.0});
+  HullAssemblyScene scene;
+  reserve_hull_scene(scene, active_atom_hint);
+  assembled[static_cast<size_t>(seed_chain)] = 1;
+  add_chain_to_hull_scene(scene, geom[static_cast<size_t>(seed_chain)], 0.0, 0.0,
+                          0.0);
+
+  size_t remaining = active_chain_count - 1;
+  vector<Vec3> candidate_points;
+  candidate_points.reserve(active_atom_hint);
+  PbctopoHullScratch hull_scratch;
+  hull_scratch.reserve(active_atom_hint);
+
+  while (remaining > 0) {
+    HullPlacementScore best_score;
+    for (size_t moving = 0; moving < ranges.size(); ++moving) {
+      if (skip_mask[moving] || assembled[moving])
+        continue;
+
+      for (const auto &shift : candidate_shifts) {
+        if (shift.image_index < rejected_mask.size() &&
+            rejected_mask[shift.image_index] != 0) {
+          continue;
+        }
+
+        HullPlacementScore candidate = evaluate_hull_placement_candidate(
+            geom[moving], scene, shift.tx, shift.ty, shift.tz, moving,
+            shift.image_index, candidate_points, hull_scratch);
+        if (!candidate.valid)
+          continue;
+        if (better_hull_placement(candidate, best_score, geom, scene))
+          best_score = candidate;
+      }
+    }
+
+    if (!best_score.valid) {
+      for (size_t moving = 0; moving < ranges.size(); ++moving) {
+        if (skip_mask[moving] || assembled[moving])
+          continue;
+        HullPlacementScore candidate = evaluate_hull_placement_candidate(
+            geom[moving], scene, 0.0, 0.0, 0.0, moving, 26, candidate_points,
+            hull_scratch);
+        if (!candidate.valid)
+          continue;
+        if (better_hull_placement(candidate, best_score, geom, scene))
+          best_score = candidate;
+      }
+    }
+
+    if (!best_score.valid) {
+      for (size_t moving = 0; moving < ranges.size(); ++moving) {
+        if (skip_mask[moving] || assembled[moving])
+          continue;
+        assembled[moving] = 1;
+        --remaining;
+        break;
+      }
+      continue;
+    }
+
+    chosen_shift[best_score.moving] = {best_score.tx, best_score.ty,
+                                       best_score.tz};
+    assembled[best_score.moving] = 1;
+    add_chain_to_hull_scene(scene, geom[best_score.moving], best_score.tx,
+                            best_score.ty, best_score.tz);
+    --remaining;
+  }
+
+  for (size_t chain = 0; chain < ranges.size(); ++chain) {
+    if (skip_mask[chain])
+      continue;
+    apply_range_shift(mol, ranges[chain], chosen_shift[chain][0],
+                      chosen_shift[chain][1], chosen_shift[chain][2]);
+  }
+
+  return 0;
 }
 
 array<unsigned char, 27>
@@ -724,7 +1065,7 @@ void fixbox_scaled_to_cartesian(const double v1[3], const double v2[3],
 }
 
 void unwrap_scaled_chain_ranges(vector<double> &sx, vector<double> &sy,
-                                vector<double> &sz, const vector<index> &Index,
+                                vector<double> &sz, const vector<class index> &Index,
                                 size_t atom_count) {
   for (size_t k = 0; k + 1 < Index.size(); ++k) {
     const size_t begin = Index[k].get_res_pos_e(0) - 1;
@@ -746,7 +1087,7 @@ void unwrap_scaled_chain_ranges(vector<double> &sx, vector<double> &sy,
   }
 }
 
-void unwrap_mol_chains_in_scaled_space(MOL &mol, const vector<index> &Index,
+void unwrap_mol_chains_in_scaled_space(MOL &mol, const vector<class index> &Index,
                                        size_t atom_count) {
   if (atom_count == 0 || atom_count > mol.pos.x.size())
     atom_count = mol.pos.x.size();
@@ -783,7 +1124,7 @@ struct FixBoxChainRange {
 };
 
 vector<FixBoxChainRange>
-build_fixbox_chain_ranges(const vector<index> &Index, size_t atom_count,
+build_fixbox_chain_ranges(const vector<class index> &Index, size_t atom_count,
                           bool ligand_flag) {
   vector<FixBoxChainRange> ranges;
   ranges.reserve(Index.size());
@@ -813,8 +1154,8 @@ double fixbox_cart_dist_sq(const double v1[3], const double v2[3],
 void apply_fixbox_pbcn_frame(vector<double> &sx_rec, vector<double> &sy_rec,
                              vector<double> &sz_rec, vector<double> &sx_lig,
                              vector<double> &sy_lig, vector<double> &sz_lig,
-                             bool has_ligand, const vector<index> &rec_index,
-                             const vector<index> &lig_index, int chain_ref,
+                             bool has_ligand, const vector<class index> &rec_index,
+                             const vector<class index> &lig_index, int chain_ref,
                              const arguments &Arguments, const double v1[3],
                              const double v2[3], const double v3[3]) {
   (void)chain_ref;
@@ -1085,103 +1426,16 @@ void apply_range_shift(MOL &mol, const CartesianChainRange &range, double tx,
   }
 }
 
-int assemble_chains_with_envelope(MOL &mol, const vector<index> &Index,
+int assemble_chains_with_envelope(MOL &mol, const vector<class index> &Index,
                                   int seed_chain,
                                   const vector<size_t> &rejected_images) {
-  constexpr size_t kCoarseShortlist = 8;
-  constexpr size_t kExactRefineTopK = 4;
-  const auto ranges = build_cartesian_chain_ranges(Index, mol.pos.x.size());
-  if (ranges.empty())
-    return 0;
-
-  if (seed_chain < 0 || seed_chain >= static_cast<int>(ranges.size()))
-    seed_chain = 0;
-
-  const auto geom = build_envelope_chain_geometries(mol, ranges);
-  const auto candidate_shifts = build_legacy_image_shifts(mol.Box);
-  const auto rejected_mask = build_rejected_image_mask(rejected_images);
-
-  vector<char> assembled(ranges.size(), 0);
-  vector<array<double, 3>> chosen_shift(ranges.size(), {0.0, 0.0, 0.0});
-  size_t total_atoms = 0;
-  size_t total_surface_cells = 0;
-  for (const auto &chain_geom : geom) {
-    total_atoms += chain_geom.atom_count;
-    total_surface_cells += chain_geom.surface_centers.size();
-  }
-
-  EnvelopeScene scene;
-  reserve_envelope_scene(scene, total_atoms, total_surface_cells);
-  assembled[static_cast<size_t>(seed_chain)] = 1;
-  add_chain_to_envelope_scene(scene, geom[static_cast<size_t>(seed_chain)], 0.0,
-                              0.0, 0.0);
-
-  size_t remaining = ranges.size() - 1;
-  while (remaining > 0) {
-    EnvelopePlacementScore best_score;
-    for (size_t moving = 0; moving < ranges.size(); ++moving) {
-      if (assembled[moving])
-        continue;
-
-      vector<EnvelopePlacementScore> moving_coarse_top_scores;
-      for (const auto &shift : candidate_shifts) {
-        if (shift.image_index < rejected_mask.size() &&
-            rejected_mask[shift.image_index] != 0)
-          continue;
-
-        const EnvelopePlacementScore coarse_candidate =
-            score_chain_envelope_placement_coarse(
-                geom[moving], scene, shift.tx, shift.ty, shift.tz, moving,
-                static_cast<size_t>(seed_chain), shift.image_index);
-        insert_top_coarse_envelope_candidate(moving_coarse_top_scores,
-                                             coarse_candidate,
-                                             kCoarseShortlist);
-      }
-
-      const vector<EnvelopePlacementScore> moving_top_scores =
-          refine_envelope_candidate_shortlist(
-              geom[moving], scene, moving_coarse_top_scores, kExactRefineTopK);
-      const EnvelopePlacementScore moving_best =
-          finalize_envelope_candidate_selection(geom[moving], scene,
-                                                moving_top_scores);
-      if (better_envelope_placement(moving_best, best_score))
-        best_score = moving_best;
-    }
-
-    if (!best_score.valid || best_score.moving >= ranges.size()) {
-      for (size_t moving = 0; moving < ranges.size(); ++moving) {
-        if (!assembled[moving]) {
-          best_score = score_chain_envelope_placement(
-              geom[moving], scene, 0.0, 0.0, 0.0, moving,
-              static_cast<size_t>(seed_chain), 26, nullptr);
-          break;
-        }
-      }
-    }
-    if (!best_score.valid || best_score.moving >= ranges.size())
-      break;
-
-    chosen_shift[best_score.moving] = {best_score.tx, best_score.ty,
-                                       best_score.tz};
-    assembled[best_score.moving] = 1;
-    add_chain_to_envelope_scene(scene, geom[best_score.moving], best_score.tx,
-                                best_score.ty, best_score.tz);
-    --remaining;
-  }
-
-  for (size_t chain = 0; chain < ranges.size(); ++chain) {
-    apply_range_shift(mol, ranges[chain], chosen_shift[chain][0],
-                      chosen_shift[chain][1], chosen_shift[chain][2]);
-  }
-
-  return 0;
+  return assemble_chains_with_hull(mol, Index, seed_chain, rejected_images,
+                                   nullptr);
 }
 
-int place_molecule_with_envelope(const MOL &anchor, const vector<index> &Index,
+int place_molecule_with_envelope(const MOL &anchor, const vector<class index> &Index,
                                  MOL &moving,
                                  const vector<size_t> &rejected_images) {
-  constexpr size_t kCoarseShortlist = 8;
-  constexpr size_t kExactRefineTopK = 4;
   if (anchor.pos.x.empty() || moving.pos.x.empty())
     return 0;
 
@@ -1190,42 +1444,49 @@ int place_molecule_with_envelope(const MOL &anchor, const vector<index> &Index,
   if (anchor_ranges.empty())
     return 0;
 
-  const auto anchor_geom = build_envelope_chain_geometries(anchor, anchor_ranges);
+  const auto anchor_geom = build_hull_chain_geometries(anchor, anchor_ranges);
   const auto image_shifts = build_legacy_image_shifts(moving.Box);
   const auto rejected_mask = build_rejected_image_mask(rejected_images);
 
   vector<CartesianChainRange> moving_ranges{{0, moving.pos.x.size()}};
-  const auto moving_geom = build_envelope_chain_geometries(moving, moving_ranges);
+  const auto moving_geom = build_hull_chain_geometries(moving, moving_ranges);
   size_t anchor_atom_hint = 0;
-  size_t anchor_surface_hint = 0;
   for (const auto &chain_geom : anchor_geom) {
     anchor_atom_hint += chain_geom.atom_count;
-    anchor_surface_hint += chain_geom.surface_centers.size();
   }
 
-  EnvelopeScene scene;
-  reserve_envelope_scene(scene, anchor_atom_hint, anchor_surface_hint);
+  HullAssemblyScene scene;
+  reserve_hull_scene(scene, anchor_atom_hint);
   for (const auto &chain_geom : anchor_geom)
-    add_chain_to_envelope_scene(scene, chain_geom, 0.0, 0.0, 0.0);
+    add_chain_to_hull_scene(scene, chain_geom, 0.0, 0.0, 0.0);
 
-  vector<EnvelopePlacementScore> coarse_top_scores;
+  vector<Vec3> candidate_points;
+  candidate_points.reserve(anchor_atom_hint + moving_geom[0].atom_count);
+  PbctopoHullScratch hull_scratch;
+  hull_scratch.reserve(anchor_atom_hint + moving_geom[0].atom_count);
+
+  HullPlacementScore best_score;
   for (const auto &shift : image_shifts) {
     if (shift.image_index < rejected_mask.size() &&
         rejected_mask[shift.image_index] != 0)
       continue;
-    const EnvelopePlacementScore coarse_candidate =
-        score_chain_envelope_placement_coarse(
-            moving_geom[0], scene, shift.tx, shift.ty, shift.tz, 0, 0,
-            shift.image_index);
-    insert_top_coarse_envelope_candidate(coarse_top_scores, coarse_candidate,
-                                         kCoarseShortlist);
+    HullPlacementScore candidate = evaluate_hull_placement_candidate(
+        moving_geom[0], scene, shift.tx, shift.ty, shift.tz, 0,
+        shift.image_index, candidate_points, hull_scratch);
+    if (!candidate.valid)
+      continue;
+    if (better_hull_placement(candidate, best_score, moving_geom, scene))
+      best_score = candidate;
   }
 
-  const vector<EnvelopePlacementScore> top_scores =
-      refine_envelope_candidate_shortlist(moving_geom[0], scene,
-                                          coarse_top_scores, kExactRefineTopK);
-  const EnvelopePlacementScore best_score =
-      finalize_envelope_candidate_selection(moving_geom[0], scene, top_scores);
+  if (!best_score.valid) {
+    HullPlacementScore identity_candidate = evaluate_hull_placement_candidate(
+        moving_geom[0], scene, 0.0, 0.0, 0.0, 0, 26, candidate_points,
+        hull_scratch);
+    if (identity_candidate.valid)
+      best_score = identity_candidate;
+  }
+
   if (!best_score.valid)
     return 0;
 
@@ -1272,7 +1533,7 @@ size_t MOL::find_chain_ref_pbc(arguments &Arguments,
 }
 
 int MOL::find_images_suitable(size_t chain, size_t res,
-                              std::vector<::index> &Index,
+                              std::vector<class index> &Index,
                               std::vector<size_t> &list_image) const {
   double com[3]{};
   size_t atom_count{};
@@ -1365,7 +1626,7 @@ int MOL::find_images_suitable(size_t chain, size_t res,
 
 double MOL::find_min_dis_2res(size_t chain, size_t chain2, size_t res1,
                               size_t res2, Multi_MOL &images,
-                              std::vector<::index> &Index,
+                              std::vector<class index> &Index,
                               size_t pos_image) const {
   double com[3]{}, com2[3]{};
   size_t atom_count{};
@@ -1400,7 +1661,7 @@ double MOL::find_min_dis_2res(size_t chain, size_t chain2, size_t res1,
 }
 
 double MOL::find_dis_res_point(size_t chain, size_t res, Multi_MOL &images,
-                               std::vector<::index> &Index, size_t pos_image,
+                               std::vector<class index> &Index, size_t pos_image,
                                std::span<const double> point) const {
   double com[3]{};
   size_t atom_count{};
@@ -1454,7 +1715,7 @@ int Multi_MOL::solv_pbc_envi(size_t ind, arguments &Arguments,
   return 0;
 }
 
-int MOL::find_cog_chain(size_t k, arguments &Arguments, vector<index> &Index,
+int MOL::find_cog_chain(size_t k, arguments &Arguments, vector<class index> &Index,
                         std::span<double> center_of_geometry) {
   // Zero-init before accumulating so double-call is safe
   center_of_geometry[0] = center_of_geometry[1] = center_of_geometry[2] = 0.0;
@@ -1526,7 +1787,7 @@ double Multi_MOL::find_min_dis(size_t ind, size_t ind2, size_t chain,
 }
 
 int MOL::create_pbc_images(arguments &Arguments, Multi_MOL &out_mol,
-                           const vector<index> &Index) {
+                           const vector<class index> &Index) {
 
   for (int i{}; i < 27; ++i) {
     double tran_vec[3]{}, tran_vec_2[3]{}, tran_vec_3[3]{};
@@ -1705,7 +1966,7 @@ int MOL::create_pbc_images(arguments &Arguments, Multi_MOL &out_mol,
   return 0;
 }
 int MOL::find_best_image_of_residues(Multi_MOL &pbc_images, size_t chain,
-                                     vector<index> &Index,
+                                     vector<class index> &Index,
                                      vector<size_t> &rejected_images) {
   for (size_t j{}; j < Index[chain].get_size_v(); ++j) {
     size_t limit = (j == Index[chain].get_size_v() - 1
@@ -1845,13 +2106,10 @@ int Multi_MOL::find_best_image(size_t ind, int chain_ref,
 
 int Multi_MOL::find_best_image_envelope(size_t ind, int chain_ref,
                                         arguments &Arguments) {
-  constexpr size_t kCoarseShortlist = 8;
-  constexpr size_t kExactRefineTopK = 4;
   vector<size_t> rejected_images;
 
   if (Arguments.pbc.solv_pbc_clust == true)
     init_rejected_images(rejected_images, Arguments);
-  const auto rejected_mask = build_rejected_image_mask(rejected_images);
 
   this->impl_solve_pbc_chain(ind, Arguments, rejected_images);
 
@@ -1861,19 +2119,8 @@ int Multi_MOL::find_best_image_envelope(size_t ind, int chain_ref,
   if (chain_ref < 0 || static_cast<size_t>(chain_ref) >= chain_count)
     chain_ref = 0;
 
-  vector<EnvelopeChainGeom> chain_geom(chain_count);
   vector<char> envi_chain(chain_count, 0);
   for (size_t k = 0; k < chain_count; ++k) {
-    const size_t begin_atom = Index[k].get_res_pos_e(0) - 1;
-    const size_t end_atom = Index[k + 1].get_res_pos_e(0) - 1;
-    vector<array<double, 3>> atom_cart;
-    atom_cart.reserve(end_atom - begin_atom);
-    for (size_t i = begin_atom; i < end_atom; ++i) {
-      atom_cart.push_back(
-          {m_mol[ind].pos.x[i], m_mol[ind].pos.y[i], m_mol[ind].pos.z[i]});
-    }
-    chain_geom[k] = build_envelope_chain_geom(std::move(atom_cart));
-
     if (Arguments.pbc.pbc_envi == true) {
       for (size_t c{}; c < Arguments.pbc.pbc_envi_chain.size(); ++c) {
         if (Index[k].get_chain() == Arguments.pbc.pbc_envi_chain[c]) {
@@ -1884,84 +2131,8 @@ int Multi_MOL::find_best_image_envelope(size_t ind, int chain_ref,
     }
   }
 
-  const vector<LegacyImageShift> candidate_shifts =
-      build_legacy_image_shifts(m_mol[ind].Box);
-  vector<char> assembled(chain_count, 0);
-  vector<array<double, 3>> chosen_shift(chain_count, {0.0, 0.0, 0.0});
-  EnvelopeScene scene;
-
-  assembled[chain_ref] = 1;
-  add_chain_to_envelope_scene(scene, chain_geom[chain_ref], 0.0, 0.0, 0.0);
-
-  size_t remaining = 0;
-  for (size_t k = 0; k < chain_count; ++k)
-    remaining += (!assembled[k] && !envi_chain[k]) ? 1u : 0u;
-
-  while (remaining > 0) {
-    EnvelopePlacementScore best_score;
-    for (size_t k = 0; k < chain_count; ++k) {
-      if (assembled[k] || envi_chain[k])
-        continue;
-
-      vector<EnvelopePlacementScore> coarse_top_scores;
-      for (const auto &shift : candidate_shifts) {
-        if (shift.image_index < rejected_mask.size() &&
-            rejected_mask[shift.image_index] != 0)
-          continue;
-
-        const EnvelopePlacementScore coarse_candidate =
-            score_chain_envelope_placement_coarse(
-                chain_geom[k], scene, shift.tx, shift.ty, shift.tz, k,
-                static_cast<size_t>(chain_ref), shift.image_index);
-        insert_top_coarse_envelope_candidate(coarse_top_scores, coarse_candidate,
-                                             kCoarseShortlist);
-      }
-
-      const vector<EnvelopePlacementScore> refined_top_scores =
-          refine_envelope_candidate_shortlist(
-              chain_geom[k], scene, coarse_top_scores, kExactRefineTopK);
-      const EnvelopePlacementScore candidate =
-          finalize_envelope_candidate_selection(chain_geom[k], scene,
-                                                refined_top_scores);
-      if (better_envelope_placement(candidate, best_score))
-        best_score = candidate;
-    }
-
-    if (!best_score.valid) {
-      for (size_t k = 0; k < chain_count; ++k) {
-        if (assembled[k] || envi_chain[k])
-          continue;
-        best_score = score_chain_envelope_placement(
-            chain_geom[k], scene, 0.0, 0.0, 0.0, k,
-            static_cast<size_t>(chain_ref), 26, nullptr);
-        break;
-      }
-    }
-    if (!best_score.valid)
-      break;
-
-    chosen_shift[best_score.moving] = {best_score.tx, best_score.ty,
-                                       best_score.tz};
-    assembled[best_score.moving] = 1;
-    add_chain_to_envelope_scene(scene, chain_geom[best_score.moving],
-                                best_score.tx, best_score.ty, best_score.tz);
-    --remaining;
-  }
-
-  for (size_t k = 0; k < chain_count; ++k) {
-    if (k == static_cast<size_t>(chain_ref) || envi_chain[k])
-      continue;
-    const size_t begin_atom = Index[k].get_res_pos_e(0) - 1;
-    const size_t end_atom = Index[k + 1].get_res_pos_e(0) - 1;
-    const double tx = chosen_shift[k][0];
-    const double ty = chosen_shift[k][1];
-    const double tz = chosen_shift[k][2];
-    for (size_t i = begin_atom; i < end_atom; ++i) {
-      m_mol[ind].pos.x[i] += tx;
-      m_mol[ind].pos.y[i] += ty;
-      m_mol[ind].pos.z[i] += tz;
-    }
-  }
+  assemble_chains_with_hull(this->m_mol[ind], Index, chain_ref, rejected_images,
+                            &envi_chain);
 
   if (Arguments.pbc.pbc_envi == true) {
     Multi_MOL pbc_images;
@@ -1997,95 +2168,8 @@ int Multi_MOL::find_best_image_new(size_t ind, size_t chain_ref,
                                    arguments &Arguments,
                                    vector<vector<size_t>> &list_chain_combi) {
   (void)list_chain_combi;
-  vector<size_t> rejected_images;
-
-  if (Arguments.pbc.solv_pbc_clust == true)
-    init_rejected_images(rejected_images, Arguments);
-
-  this->impl_solve_pbc_chain(ind, Arguments, rejected_images);
-
-  if (Arguments.pbc.pbc_envi == false) {
-    return assemble_chains_with_envelope(
-        this->m_mol[ind], Index, static_cast<int>(chain_ref), rejected_images);
-  }
-
-  Multi_MOL pbc_images;
-  pbc_images.m_mol.reserve(27);
-  this->m_mol[ind].create_pbc_images(Arguments, pbc_images, Index);
-
-  if (chain_ref >= Index.size() - 1)
-    return 0;
-
-  double centerofrefchain[3]{};
-  if (Arguments.pbc.pbc_envi == true)
-    this->m_mol[ind].find_cog_chain(chain_ref, Arguments, this->Index,
-                                    centerofrefchain);
-
-  vector<vector<force>> center_of_geo;
-
-  for (size_t k{}; k < Index.size() - 1; ++k) {
-    vector<force> center_of_geo_temp;
-    if (Arguments.pbc.pbc_envi == true) {
-      bool in_evi{false};
-      for (size_t c{}; c < Arguments.pbc.pbc_envi_chain.size(); ++c)
-        if (Index[k].get_chain() == Arguments.pbc.pbc_envi_chain[c]) {
-          in_evi = true;
-          break;
-        }
-      if (in_evi == true) {
-        this->solv_pbc_envi(ind, Arguments, rejected_images, k, pbc_images,
-                            centerofrefchain);
-        continue;
-      }
-    }
-
-    for (size_t j{}; j < pbc_images.m_mol.size(); ++j) {
-      double cog[3]{};
-      pbc_images.m_mol[j].find_cog_chain(k, Arguments, this->Index, cog);
-
-      force cog_temp;
-      cog_temp.set(cog, 3);
-      center_of_geo_temp.emplace_back(cog_temp);
-    }
-    center_of_geo.emplace_back(center_of_geo_temp);
-  }
-
-  double min_dis{10e10};
-  size_t pos{};
-  for (size_t i{}; i < list_chain_combi.size(); ++i) {
-    double distance{};
-    for (size_t j{}; j < center_of_geo.size(); ++j) {
-      if (chain_ref == j)
-        continue;
-
-      distance += sqrt(
-          square(center_of_geo[j][list_chain_combi[i][j]].Fx -
-                 center_of_geo[chain_ref][list_chain_combi[i][chain_ref]].Fx) +
-          square(center_of_geo[j][list_chain_combi[i][j]].Fy -
-                 center_of_geo[chain_ref][list_chain_combi[i][chain_ref]].Fy) +
-          square(center_of_geo[j][list_chain_combi[i][j]].Fz -
-                 center_of_geo[chain_ref][list_chain_combi[i][chain_ref]].Fz));
-    }
-    if (distance < min_dis) {
-      min_dis = distance;
-      pos = i;
-    }
-  }
-
-  vector<size_t> chain_image;
-  for (size_t i{}; i < list_chain_combi[pos].size(); ++i) {
-    chain_image.emplace_back(list_chain_combi[pos][i]);
-  }
-
-  for (size_t k{}; k < Index.size() - 1; ++k)
-    for (size_t i{Index[k].get_res_pos_e(0) - 1};
-         i < Index[k + 1].get_res_pos_e(0) - 1; ++i) {
-      m_mol[ind].pos.x[i] = pbc_images.m_mol[chain_image[k]].pos.x[i];
-      m_mol[ind].pos.y[i] = pbc_images.m_mol[chain_image[k]].pos.y[i];
-      m_mol[ind].pos.z[i] = pbc_images.m_mol[chain_image[k]].pos.z[i];
-    }
-
-  return 0;
+  return this->find_best_image_envelope(ind, static_cast<int>(chain_ref),
+                                        Arguments);
 }
 
 int Multi_MOL::find_best_image_of_mol2(Multi_MOL &mol2, size_t ind,

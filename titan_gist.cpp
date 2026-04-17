@@ -2,6 +2,7 @@
 // Grid Inhomogeneous Solvation Theory — density, enthalpy, entropy maps
 // Overhaul: merged solute arrays, AVX2 E_sw kernel, jthread parallelism
 #include "titan_gist.h"
+#include "titan_thread_compat.h"
 #include "titan_ui.h"
 
 #include <algorithm>
@@ -592,7 +593,7 @@ void TitanGIST::process_frame(const MOL &pro, const MOL &lig, const MOL &water,
     }
   } else {
     // Multi-threaded path: each thread accumulates into a sparse local buffer.
-    std::vector<std::jthread> threads;
+    std::vector<titan::jthread> threads;
     threads.reserve(nt_);
     std::vector<LocalGistAccum> local_accums(nt_);
 

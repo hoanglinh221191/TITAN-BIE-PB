@@ -2,7 +2,7 @@
 // take center of mass of side chain of residues
 
 void MOL::take_com(Multi_MOL_parameters & parameters, size_t I,
-                   size_t end, vector<index> &Index, vector<mol_info> &info) {
+                   size_t end, vector<class index> &Index, vector<mol_info> &info) {
   for (size_t i{}; i < Index[I].get_size_v() - 1; ++i) {
     double X{}, Y{}, Z{}, M{};
     for (size_t j = Index[I].get_res_pos_e(i) - 1;
@@ -49,7 +49,7 @@ void MOL::take_com(Multi_MOL_parameters & parameters, size_t I,
 
 // take center of geometry of residues
 void MOL::take_com_all_atoms(Multi_MOL_parameters & parameters, size_t I,
-                             size_t end, vector<index> &Index,
+                             size_t end, vector<class index> &Index,
                              vector<mol_info> &info, multi_points &com_res) {
   for (size_t i{}; i < Index[I].get_size_v() - 1; ++i) {
     double X{}, Y{}, Z{}, M{};

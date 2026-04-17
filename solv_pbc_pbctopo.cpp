@@ -1,5 +1,9 @@
 #include "Multi_MOL.h"
 #include "BoxMatrix.h"
+#include "aligned_allocator.h"
+#include "pbctopo_hull.h"
+#include "titan_gyration.h"
+#include "titan_simd_dispatch.h"
 #include "titan_executor.h"
 #include "titan_ui.h"
 #include <algorithm>
@@ -27,6 +31,21 @@ using namespace std;
 
 namespace {
 
+using pbctopo_hull::cross;
+using pbctopo_hull::dot;
+using pbctopo_hull::norm2;
+using pbctopo_hull::PbctopoHullScratch;
+using pbctopo_hull::PbctopoHullSpan;
+using pbctopo_hull::Vec3;
+using titan_gyration::build_point_stats;
+using titan_gyration::compute_bbox_volume;
+using titan_gyration::compute_gyration_shape_metrics;
+using titan_gyration::compute_principal_rg2;
+using titan_gyration::compute_rg2;
+using titan_gyration::compute_rg2_from_stats;
+using titan_gyration::GyrationShapeMetrics;
+using titan_gyration::PointStats;
+
 constexpr int kTopoImageCoeff[27][3] = {
     {1, 0, 0},   {-1, 0, 0},  {0, 1, 0},   {0, -1, 0},  {0, 0, 1},
     {0, 0, -1},  {1, 1, 0},   {1, -1, 0},  {-1, 1, 0},  {-1, -1, 0},
@@ -35,7 +54,6 @@ constexpr int kTopoImageCoeff[27][3] = {
     {1, -1, 1},  {1, 1, -1},  {-1, -1, 1}, {-1, 1, -1}, {1, -1, -1},
     {-1, -1, -1}, {0, 0, 0}};
 
-constexpr double kHullEps = 1.0e-9;
 constexpr double kDistanceEps = 1.0e-12;
 constexpr const char *kPbctopoDebugLogPath = "pbctopo_debug.log";
 constexpr int kPackedCellBias = 1 << 20;
@@ -43,10 +61,21 @@ constexpr uint64_t kPackedCellMask = (1ull << 21) - 1ull;
 constexpr size_t kPbctopoSpatialAnchorThreshold = 512;
 constexpr size_t kPbctopoSpatialAnchorK = 12;
 constexpr size_t kPbctopoDenseClashGridMaxCells = 1u << 24;
+constexpr size_t kPbctopoExactComponentLimit = 6;
+constexpr size_t kPbctopoMergeModeMaxRawComponents = 16;
+constexpr size_t kPbctopoMergedNodeMaxAtoms = 4096;
+constexpr size_t kPbctopoMergedNodeMaxRawComponents = 4;
+constexpr size_t kPbctopoBeamWidth = 12;
+constexpr size_t kPbctopoBeamFinalRescore = 4;
 
 mutex &pbctopo_log_mutex() {
   static mutex log_mutex;
   return log_mutex;
+}
+
+ofstream &pbctopo_log_stream() {
+  static ofstream log_stream;
+  return log_stream;
 }
 
 void reset_pbctopo_log_file() {
@@ -54,13 +83,18 @@ void reset_pbctopo_log_file() {
   static bool initialized = false;
   if (initialized)
     return;
-  ofstream log_file(kPbctopoDebugLogPath, ios::out | ios::trunc);
+  auto &log_file = pbctopo_log_stream();
+  if (log_file.is_open())
+    log_file.close();
+  log_file.open(kPbctopoDebugLogPath, ios::out | ios::trunc);
   initialized = true;
 }
 
 void append_pbctopo_log_line(const string &message) {
   lock_guard<mutex> lock(pbctopo_log_mutex());
-  ofstream log_file(kPbctopoDebugLogPath, ios::out | ios::app);
+  auto &log_file = pbctopo_log_stream();
+  if (!log_file.is_open())
+    log_file.open(kPbctopoDebugLogPath, ios::out | ios::app);
   if (!log_file)
     return;
   log_file << message << '\n';
@@ -151,22 +185,18 @@ struct PbctopoFragmentCopyNode {
   double max_z = 0.0;
 };
 
-struct Vec3 {
-  double x = 0.0;
-  double y = 0.0;
-  double z = 0.0;
+struct PbctopoOwnerPairSplitDetail {
+  int owner_a = -1;
+  int owner_b = -1;
+  Vec3 raw_delta_scaled{};
+  Vec3 minimg_delta_scaled{};
+  double raw_norm = 0.0;
+  double minimg_norm = 0.0;
+  bool valid = false;
 };
 
 struct PbctopoTranslationCache {
   Vec3 by_shift[5][5][5]{};
-};
-
-struct HullFace {
-  int a = -1;
-  int b = -1;
-  int c = -1;
-  Vec3 normal{};
-  bool valid = false;
 };
 
 struct PbctopoCandidate {
@@ -174,8 +204,14 @@ struct PbctopoCandidate {
   double hull_volume = numeric_limits<double>::infinity();
   double bbox_volume = numeric_limits<double>::infinity();
   double rg2 = numeric_limits<double>::infinity();
+  double shape_kappa2 = numeric_limits<double>::infinity();
+  double shape_asphericity = numeric_limits<double>::infinity();
+  double shape_acylindricity = numeric_limits<double>::infinity();
   double fragment_mst2 = numeric_limits<double>::infinity();
   double fragment_rg2 = numeric_limits<double>::infinity();
+  double fragment_kappa2 = numeric_limits<double>::infinity();
+  double fragment_asphericity = numeric_limits<double>::infinity();
+  double fragment_acylindricity = numeric_limits<double>::infinity();
   double shift_norm2 = numeric_limits<double>::infinity();
   double min_interfragment_d2 = numeric_limits<double>::infinity();
   size_t connectivity_edges = 0;
@@ -193,6 +229,8 @@ struct PbctopoSeed2D {
   double cx = 1.5;
   double cy = 1.5;
   double score = -numeric_limits<double>::infinity();
+  size_t ix = 0;
+  size_t iy = 0;
 };
 
 struct PbctopoSeed3D {
@@ -200,7 +238,12 @@ struct PbctopoSeed3D {
   double cy = 1.5;
   double cz = 1.5;
   double score = -numeric_limits<double>::infinity();
+  size_t ix = 0;
+  size_t iy = 0;
+  size_t iz = 0;
 };
+
+using PbctopoGyrationShapeMetrics = GyrationShapeMetrics;
 
 struct PbctopoCutCandidate {
   double cut_x = 0.0;
@@ -209,6 +252,9 @@ struct PbctopoCutCandidate {
   double gap_score = 0.0;
   double bbox_volume = numeric_limits<double>::infinity();
   double rg2 = numeric_limits<double>::infinity();
+  double shape_kappa2 = numeric_limits<double>::infinity();
+  double shape_asphericity = numeric_limits<double>::infinity();
+  double shape_acylindricity = numeric_limits<double>::infinity();
   double shift_norm2 = numeric_limits<double>::infinity();
   double min_pair_d2 = numeric_limits<double>::infinity();
   double continuity_path = numeric_limits<double>::infinity();
@@ -219,7 +265,9 @@ struct PbctopoCutCandidate {
   double principal_rg2_mid = numeric_limits<double>::infinity();
   double principal_rg2_min = numeric_limits<double>::infinity();
   double edge_stretch = numeric_limits<double>::infinity();
+  double max_owner_raw_minus_minimg_delta = 0.0;
   size_t broken_edges = numeric_limits<size_t>::max();
+  size_t split_owner_pairs = 0;
   size_t clash_atom_a = numeric_limits<size_t>::max();
   size_t clash_atom_b = numeric_limits<size_t>::max();
   bool ultra_clash = false;
@@ -247,8 +295,14 @@ struct PbctopoComponentCandidate {
   double principal_rg2_max = numeric_limits<double>::infinity();
   double principal_rg2_mid = numeric_limits<double>::infinity();
   double principal_rg2_min = numeric_limits<double>::infinity();
+  double shape_kappa2 = numeric_limits<double>::infinity();
+  double shape_asphericity = numeric_limits<double>::infinity();
+  double shape_acylindricity = numeric_limits<double>::infinity();
   double component_mst2 = numeric_limits<double>::infinity();
   double component_rg2 = numeric_limits<double>::infinity();
+  double component_kappa2 = numeric_limits<double>::infinity();
+  double component_asphericity = numeric_limits<double>::infinity();
+  double component_acylindricity = numeric_limits<double>::infinity();
   double bbox_volume = numeric_limits<double>::infinity();
   double rg2 = numeric_limits<double>::infinity();
   double shift_norm2 = numeric_limits<double>::infinity();
@@ -300,6 +354,11 @@ struct PbctopoGraphEdge {
 };
 
 string format_int3(const Int3 &value) {
+  return "(" + to_string(value.x) + "," + to_string(value.y) + "," +
+         to_string(value.z) + ")";
+}
+
+string format_vec3(const Vec3 &value) {
   return "(" + to_string(value.x) + "," + to_string(value.y) + "," +
          to_string(value.z) + ")";
 }
@@ -357,6 +416,18 @@ struct PbctopoTimingStats {
   size_t component_search_seed_warm = 0;
   size_t component_search_seed_graph = 0;
   size_t component_search_seed_none = 0;
+  size_t component_large_mode_merge_frames = 0;
+  size_t component_large_mode_pair_only_frames = 0;
+  size_t component_large_mode_beam_frames = 0;
+  size_t component_large_mode_merge_count = 0;
+  size_t component_large_mode_graph_seed_count = 0;
+  size_t component_large_mode_graph_seed_refined = 0;
+  size_t component_large_mode_graph_seed_nonbaseline_win = 0;
+  size_t component_large_mode_beam_expanded = 0;
+  size_t component_large_mode_beam_kept = 0;
+  size_t component_large_mode_beam_complete_assignments = 0;
+  size_t component_large_mode_beam_final_rescored = 0;
+  size_t component_large_mode_fallback_frames = 0;
   size_t component_graph_outlier_rejects = 0;
   size_t component_search_outlier_rejects = 0;
   size_t component_score_continuity_rejects = 0;
@@ -380,6 +451,11 @@ struct PbctopoTimingStats {
   size_t component_refine_shortlist_hint_hits = 0;
   size_t component_pair_warm_shift_hits = 0;
   size_t component_refine_fanout_reduced = 0;
+  size_t hull_rescue_attempts = 0;
+  size_t hull_rescue_successes = 0;
+  size_t distance_rescue_attempts = 0;
+  size_t distance_rescue_successes = 0;
+  size_t pbci_fallback_frames = 0;
   size_t component_graph_refine_score_calls = 0;
   size_t component_graph_refine_preclash_prunes = 0;
   size_t component_graph_refine_anchor_spatial_calls = 0;
@@ -454,6 +530,13 @@ enum class PbctopoAnchorBackend {
   Auto,
   Prim,
   SpatialAll,
+};
+
+enum class PbctopoComponentMode {
+  Disabled,
+  Exact,
+  MergeThenGraph,
+  Beam,
 };
 
 struct PbctopoCutScoreBreakdown {
@@ -535,6 +618,24 @@ struct PbctopoComponentPairShiftTable {
   }
 };
 
+struct PbctopoMergedComponentPlan {
+  vector<vector<size_t>> merged_components;
+  vector<vector<size_t>> merged_to_raw;
+  vector<size_t> raw_to_merged;
+};
+
+struct PbctopoGraphSeedQuickScore {
+  bool valid = false;
+  double continuity_max_d2 = numeric_limits<double>::infinity();
+  double continuity_path = numeric_limits<double>::infinity();
+  double anchor_max_d2 = numeric_limits<double>::infinity();
+  double anchor_mst2 = numeric_limits<double>::infinity();
+  double principal_rg2_max = numeric_limits<double>::infinity();
+  double principal_rg2_mid = numeric_limits<double>::infinity();
+  double principal_rg2_min = numeric_limits<double>::infinity();
+  double shift_norm2 = numeric_limits<double>::infinity();
+};
+
 enum class PbctopoComponentCandidatePrefixStage {
   Continuity,
   Anchor,
@@ -597,6 +698,56 @@ struct PbctopoTrajectoryContext {
   vector<PbctopoContinuityPair> continuity_pairs;
   vector<size_t> continuity_anchor_indices;
 };
+
+struct PbctopoResidueChainKey {
+  int owner = 0;
+  uint64_t chain_key = 0;
+
+  bool operator==(const PbctopoResidueChainKey &other) const {
+    return owner == other.owner && chain_key == other.chain_key;
+  }
+};
+
+struct PbctopoResidueChainKeyHash {
+  size_t operator()(const PbctopoResidueChainKey &key) const {
+    const uint64_t owner_bits =
+        static_cast<uint64_t>(static_cast<uint32_t>(key.owner));
+    const uint64_t mixed = key.chain_key ^ (owner_bits * 0x9e3779b97f4a7c15ull);
+    return static_cast<size_t>(mixed ^ (mixed >> 32));
+  }
+};
+
+vector<int> build_topology_residue_sequence_indices(
+    const vector<PbctopoAtom> &atoms) {
+  vector<int> residue_sequence_indices(atoms.size(), numeric_limits<int>::min());
+  struct ChainState {
+    int last_residue_id = numeric_limits<int>::min();
+    int current_rank = -1;
+    bool initialized = false;
+  };
+  unordered_map<PbctopoResidueChainKey, ChainState, PbctopoResidueChainKeyHash>
+      chain_states;
+  chain_states.reserve(max<size_t>(8, atoms.size() / 64));
+
+  for (size_t atom_idx = 0; atom_idx < atoms.size(); ++atom_idx) {
+    const auto &atom = atoms[atom_idx];
+    if (!atom.has_topology_key)
+      continue;
+    const PbctopoResidueChainKey key{atom.owner, atom.chain_key};
+    auto &state = chain_states[key];
+    if (!state.initialized) {
+      state.initialized = true;
+      state.last_residue_id = atom.residue_id;
+      state.current_rank = 0;
+    } else if (atom.residue_id != state.last_residue_id) {
+      state.last_residue_id = atom.residue_id;
+      ++state.current_rank;
+    }
+    residue_sequence_indices[atom_idx] = state.current_rank;
+  }
+
+  return residue_sequence_indices;
+}
 
 struct PbctopoFrameScratch {
   vector<PbctopoAtom> base_atoms;
@@ -785,46 +936,6 @@ struct NodeVectorHash {
   }
 };
 
-struct PointStats {
-  size_t count = 0;
-  double sum_x = 0.0;
-  double sum_y = 0.0;
-  double sum_z = 0.0;
-  double sum_sq = 0.0;
-  double sum_x2 = 0.0;
-  double sum_y2 = 0.0;
-  double sum_z2 = 0.0;
-  double sum_xy = 0.0;
-  double sum_xz = 0.0;
-  double sum_yz = 0.0;
-  double min_x = numeric_limits<double>::infinity();
-  double min_y = numeric_limits<double>::infinity();
-  double min_z = numeric_limits<double>::infinity();
-  double max_x = -numeric_limits<double>::infinity();
-  double max_y = -numeric_limits<double>::infinity();
-  double max_z = -numeric_limits<double>::infinity();
-
-  void add(double x, double y, double z) {
-    ++count;
-    sum_x += x;
-    sum_y += y;
-    sum_z += z;
-    sum_sq += x * x + y * y + z * z;
-    sum_x2 += x * x;
-    sum_y2 += y * y;
-    sum_z2 += z * z;
-    sum_xy += x * y;
-    sum_xz += x * z;
-    sum_yz += y * z;
-    min_x = min(min_x, x);
-    min_y = min(min_y, y);
-    min_z = min(min_z, z);
-    max_x = max(max_x, x);
-    max_y = max(max_y, y);
-    max_z = max(max_z, z);
-  }
-};
-
 Int3 operator+(const Int3 &lhs, const Int3 &rhs) {
   return {lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z};
 }
@@ -960,9 +1071,7 @@ vector<size_t> build_pair_shift_order(const vector<PbctopoShift> &shifts,
   return ordered_indices;
 }
 
-double compute_rg2(const vector<Vec3> &points);
 double compute_mst2(const vector<Vec3> &points);
-array<double, 3> compute_principal_rg2(const PointStats &stats);
 vector<size_t> collect_fragment_options(
     size_t fragment_id, const vector<size_t> &selected_nodes,
     const vector<PbctopoFragmentCopyNode> &nodes,
@@ -971,6 +1080,30 @@ bool better_cut_candidate(const PbctopoCutCandidate &lhs,
                           const PbctopoCutCandidate &rhs);
 bool better_preclash_cut_candidate(const PbctopoCutCandidate &lhs,
                                    const PbctopoCutCandidate &rhs);
+vector<pair<int, int>>
+build_contacting_owner_pairs(const vector<PbctopoLocalEdge> &local_edges,
+                             const vector<PbctopoAtom> &atoms, box Box,
+                             double contact_cutoff);
+unordered_map<int, Vec3>
+compute_owner_com_cartesian(const vector<Vec3> &placed_points,
+                            const vector<PbctopoAtom> &atoms);
+unordered_map<int, Vec3>
+compute_owner_com_scaled(box Box,
+                         const unordered_map<int, Vec3> &owner_com_cartesian);
+bool candidate_has_split_contacting_owners(
+    const vector<Vec3> &placed_points, const vector<PbctopoAtom> &atoms, box Box,
+    const vector<pair<int, int>> &contacting_owner_pairs, size_t &split_owner_pairs,
+    double &max_owner_raw_minus_minimg_delta,
+    PbctopoOwnerPairSplitDetail *detail = nullptr);
+bool reimage_contacting_owner_points_minimum_image(
+    vector<Vec3> &placed_points, const vector<PbctopoAtom> &atoms, box Box,
+    const vector<pair<int, int>> &contacting_owner_pairs);
+bool rescue_split_contacting_owner_candidate(
+    const vector<Vec3> &seed_points, const vector<PbctopoAtom> &atoms, box Box,
+    const vector<pair<int, int>> &contacting_owner_pairs,
+    const vector<PbctopoShift> &shifts,
+    const PbctopoOwnerPairSplitDetail &split_detail, vector<Vec3> &rescued_points,
+    Int3 &applied_shift, double &best_raw_delta_norm);
 bool preclash_cut_candidate_cannot_beat_incumbent(
     const PbctopoCutCandidate &candidate,
     const PbctopoCutCandidate *incumbent);
@@ -1029,6 +1162,9 @@ PbctopoCutCandidate score_cut_candidate_principal_only(
     const PbctopoCutCandidate *pre_edge_seed = nullptr);
 bool better_stage1_cut_candidate(const PbctopoCutCandidate &lhs,
                                  const PbctopoCutCandidate &rhs);
+bool edge_scan_cannot_beat_threshold(const PbctopoCutCandidate &partial,
+                                     const PbctopoCutCandidate *threshold,
+                                     PbctopoRefineScorePhase phase);
 bool scaled_span_fits_unit_box(box Box, const vector<Vec3> &placed_points,
                                double tolerance = 1.0e-5);
 bool continuity_metrics_ok(
@@ -1061,14 +1197,17 @@ const char *pbctopo_anchor_backend_name(PbctopoAnchorBackend backend);
 PbctopoCutCandidate evaluate_virtual_box_candidate(
     const vector<PbctopoAtom> &atoms, const vector<PbctopoLocalEdge> &local_edges,
     const unordered_set<uint64_t> &edge_set,
-    const PbctopoTranslationCache &translation_cache, double cut_x, double cut_y,
-    double cut_z, double gap_score, vector<Vec3> &placed_points,
+    const PbctopoTranslationCache &translation_cache, box Box, double cut_x,
+    double cut_y, double cut_z, double gap_score, vector<Vec3> &placed_points,
     double clash_cutoff,
     const vector<PbctopoContinuityPair> *continuity_pairs = nullptr,
     const vector<size_t> *anchor_indices = nullptr,
+    const vector<pair<int, int>> *contacting_owner_pairs = nullptr,
     double continuity_cutoff = 20.0,
     const PbctopoCutCandidate *incumbent = nullptr,
-    bool skip_clash = false);
+    bool skip_clash = false,
+    double frame_time_ps = numeric_limits<double>::quiet_NaN(),
+    const char *reject_context = nullptr);
 vector<size_t> build_atom_component_index(
     size_t atom_count, const vector<vector<size_t>> &components);
 void append_interface_anchor_edges(
@@ -1079,29 +1218,6 @@ void append_interface_anchor_edges(
 PbctopoCutCandidate rescore_cut_candidate(
     const vector<PbctopoLocalEdge> &scoring_edges,
     const vector<Vec3> &placed_points, const PbctopoCutCandidate &source);
-
-Vec3 operator+(const Vec3 &lhs, const Vec3 &rhs) {
-  return {lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z};
-}
-
-Vec3 operator-(const Vec3 &lhs, const Vec3 &rhs) {
-  return {lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z};
-}
-
-Vec3 operator*(const Vec3 &lhs, double rhs) {
-  return {lhs.x * rhs, lhs.y * rhs, lhs.z * rhs};
-}
-
-double dot(const Vec3 &lhs, const Vec3 &rhs) {
-  return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z;
-}
-
-Vec3 cross(const Vec3 &lhs, const Vec3 &rhs) {
-  return {lhs.y * rhs.z - lhs.z * rhs.y, lhs.z * rhs.x - lhs.x * rhs.z,
-          lhs.x * rhs.y - lhs.y * rhs.x};
-}
-
-double norm2(const Vec3 &value) { return dot(value, value); }
 
 [[maybe_unused]] Vec3 point_from_atom_copy(const PbctopoAtomCopy &atom) {
   return {atom.x, atom.y, atom.z};
@@ -1202,7 +1318,7 @@ uint64_t oriented_edge_key(int u, int v) {
          static_cast<uint32_t>(v);
 }
 
-vector<PbctopoRange> build_ranges_from_index(const vector<index> &Index,
+vector<PbctopoRange> build_ranges_from_index(const vector<class index> &Index,
                                              size_t atom_count) {
   vector<PbctopoRange> ranges;
   ranges.reserve(Index.size());
@@ -1735,6 +1851,8 @@ void build_local_neighborhood_graph(
   edge_set.clear();
   if (atoms.size() < 2)
     return;
+  const vector<int> residue_sequence_indices =
+      build_topology_residue_sequence_indices(atoms);
 
   const double kBondCutoff = bond_cutoff;
   const double kBondCutoff2 = bond_cutoff * bond_cutoff;
@@ -1788,8 +1906,15 @@ void build_local_neighborhood_graph(
             if (ai.has_topology_key && aj.has_topology_key) {
               if (ai.chain_key != aj.chain_key)
                 continue;
-              if (abs(ai.residue_id - aj.residue_id) > 1)
+              const int ai_residue_rank = residue_sequence_indices[i];
+              const int aj_residue_rank = residue_sequence_indices[j];
+              if (ai_residue_rank != numeric_limits<int>::min() &&
+                  aj_residue_rank != numeric_limits<int>::min()) {
+                if (abs(ai_residue_rank - aj_residue_rank) > 1)
+                  continue;
+              } else if (abs(ai.residue_id - aj.residue_id) > 1) {
                 continue;
+              }
             }
             double dsx = aj.sx - ai.sx;
             double dsy = aj.sy - ai.sy;
@@ -2262,6 +2387,413 @@ bool scaled_span_fits_unit_box(box Box, const vector<Vec3> &placed_points,
          (max_sz - min_sz) <= (1.0 + tolerance);
 }
 
+vector<pair<int, int>>
+build_contacting_owner_pairs(const vector<PbctopoLocalEdge> &local_edges,
+                             const vector<PbctopoAtom> &atoms, box Box,
+                             double contact_cutoff) {
+  vector<pair<int, int>> owner_pairs;
+  unordered_set<uint64_t> seen;
+  seen.reserve(local_edges.size());
+  auto register_owner_pair = [&](int owner_a, int owner_b) {
+    if (owner_a == owner_b)
+      return false;
+    const int lo = min(owner_a, owner_b);
+    const int hi = max(owner_a, owner_b);
+    const uint64_t key =
+        (static_cast<uint64_t>(static_cast<uint32_t>(lo)) << 32) |
+        static_cast<uint32_t>(hi);
+    if (!seen.insert(key).second)
+      return false;
+    owner_pairs.emplace_back(lo, hi);
+    return true;
+  };
+  for (const auto &edge : local_edges) {
+    if (edge.a >= atoms.size() || edge.b >= atoms.size())
+      continue;
+    register_owner_pair(atoms[edge.a].owner, atoms[edge.b].owner);
+  }
+
+  if (atoms.size() < 2 || contact_cutoff <= kDistanceEps)
+    return owner_pairs;
+
+  const BoxMatrix box_matrix(Box);
+  const double cutoff2 = contact_cutoff * contact_cutoff;
+  const double sx_bound =
+      min(0.5, contact_cutoff * sqrt(box_matrix.inv[0][0] * box_matrix.inv[0][0] +
+                                     box_matrix.inv[0][1] * box_matrix.inv[0][1] +
+                                     box_matrix.inv[0][2] * box_matrix.inv[0][2]) +
+                    1.0e-9);
+  const double sy_bound =
+      min(0.5, contact_cutoff * sqrt(box_matrix.inv[1][0] * box_matrix.inv[1][0] +
+                                     box_matrix.inv[1][1] * box_matrix.inv[1][1] +
+                                     box_matrix.inv[1][2] * box_matrix.inv[1][2]) +
+                    1.0e-9);
+  const double sz_bound =
+      min(0.5, contact_cutoff * sqrt(box_matrix.inv[2][0] * box_matrix.inv[2][0] +
+                                     box_matrix.inv[2][1] * box_matrix.inv[2][1] +
+                                     box_matrix.inv[2][2] * box_matrix.inv[2][2]) +
+                    1.0e-9);
+  const int nx = max(1, static_cast<int>(floor(1.0 / max(sx_bound, 1.0e-6))));
+  const int ny = max(1, static_cast<int>(floor(1.0 / max(sy_bound, 1.0e-6))));
+  const int nz = max(1, static_cast<int>(floor(1.0 / max(sz_bound, 1.0e-6))));
+  const double cell_sx = 1.0 / static_cast<double>(nx);
+  const double cell_sy = 1.0 / static_cast<double>(ny);
+  const double cell_sz = 1.0 / static_cast<double>(nz);
+  auto wrap_index = [](int value, int mod) {
+    int wrapped = value % mod;
+    if (wrapped < 0)
+      wrapped += mod;
+    return wrapped;
+  };
+
+  unordered_map<ClashCellKey, vector<size_t>, ClashCellKeyHash> contact_grid;
+  contact_grid.reserve(max<size_t>(64, atoms.size() / 2));
+  for (size_t atom_idx = 0; atom_idx < atoms.size(); ++atom_idx) {
+    const auto &atom = atoms[atom_idx];
+    if (!atom.is_heavy)
+      continue;
+    const int cx = min(nx - 1, static_cast<int>(floor(atom.sx / cell_sx)));
+    const int cy = min(ny - 1, static_cast<int>(floor(atom.sy / cell_sy)));
+    const int cz = min(nz - 1, static_cast<int>(floor(atom.sz / cell_sz)));
+    for (int dx = -1; dx <= 1; ++dx) {
+      for (int dy = -1; dy <= 1; ++dy) {
+        for (int dz = -1; dz <= 1; ++dz) {
+          const ClashCellKey key{wrap_index(cx + dx, nx), wrap_index(cy + dy, ny),
+                                 wrap_index(cz + dz, nz)};
+          const auto it = contact_grid.find(key);
+          if (it == contact_grid.end())
+            continue;
+          for (size_t other_idx : it->second) {
+            const auto &other = atoms[other_idx];
+            if (atom.owner == other.owner)
+              continue;
+            double dx_cart = other.x - atom.x;
+            double dy_cart = other.y - atom.y;
+            double dz_cart = other.z - atom.z;
+            box_matrix.apply_mic(dx_cart, dy_cart, dz_cart);
+            const double d2 = dx_cart * dx_cart + dy_cart * dy_cart +
+                              dz_cart * dz_cart;
+            if (d2 > cutoff2)
+              continue;
+            register_owner_pair(atom.owner, other.owner);
+          }
+        }
+      }
+    }
+    contact_grid[{cx, cy, cz}].push_back(atom_idx);
+  }
+  return owner_pairs;
+}
+
+unordered_map<int, Vec3>
+compute_owner_com_cartesian(const vector<Vec3> &placed_points,
+                            const vector<PbctopoAtom> &atoms) {
+  unordered_map<int, Vec3> owner_sums;
+  unordered_map<int, size_t> owner_counts;
+  owner_sums.reserve(8);
+  owner_counts.reserve(8);
+  const size_t atom_count = min(placed_points.size(), atoms.size());
+  for (size_t atom_idx = 0; atom_idx < atom_count; ++atom_idx) {
+    const int owner = atoms[atom_idx].owner;
+    Vec3 &sum = owner_sums[owner];
+    sum.x += placed_points[atom_idx].x;
+    sum.y += placed_points[atom_idx].y;
+    sum.z += placed_points[atom_idx].z;
+    ++owner_counts[owner];
+  }
+  for (auto &[owner, sum] : owner_sums) {
+    const size_t count = owner_counts[owner];
+    if (count == 0)
+      continue;
+    const double inv_count = 1.0 / static_cast<double>(count);
+    sum.x *= inv_count;
+    sum.y *= inv_count;
+    sum.z *= inv_count;
+  }
+  return owner_sums;
+}
+
+unordered_map<int, Vec3>
+compute_owner_com_scaled(box Box,
+                         const unordered_map<int, Vec3> &owner_com_cartesian) {
+  unordered_map<int, Vec3> owner_com_scaled;
+  owner_com_scaled.reserve(owner_com_cartesian.size());
+  const BoxMatrix box_matrix(Box);
+  for (const auto &[owner, point] : owner_com_cartesian) {
+    owner_com_scaled[owner] = {
+        box_matrix.inv[0][0] * point.x + box_matrix.inv[0][1] * point.y +
+            box_matrix.inv[0][2] * point.z,
+        box_matrix.inv[1][0] * point.x + box_matrix.inv[1][1] * point.y +
+            box_matrix.inv[1][2] * point.z,
+        box_matrix.inv[2][0] * point.x + box_matrix.inv[2][1] * point.y +
+            box_matrix.inv[2][2] * point.z};
+  }
+  return owner_com_scaled;
+}
+
+bool candidate_has_split_contacting_owners(
+    const vector<Vec3> &placed_points, const vector<PbctopoAtom> &atoms, box Box,
+    const vector<pair<int, int>> &contacting_owner_pairs, size_t &split_owner_pairs,
+    double &max_owner_raw_minus_minimg_delta,
+    PbctopoOwnerPairSplitDetail *detail) {
+  split_owner_pairs = 0;
+  max_owner_raw_minus_minimg_delta = 0.0;
+  if (detail != nullptr)
+    *detail = {};
+  if (contacting_owner_pairs.empty() || placed_points.empty() || atoms.empty())
+    return false;
+
+  const auto owner_com_cartesian = compute_owner_com_cartesian(placed_points, atoms);
+  const auto owner_com_scaled = compute_owner_com_scaled(Box, owner_com_cartesian);
+
+  for (const auto &[owner_a, owner_b] : contacting_owner_pairs) {
+    const auto it_a = owner_com_scaled.find(owner_a);
+    const auto it_b = owner_com_scaled.find(owner_b);
+    if (it_a == owner_com_scaled.end() || it_b == owner_com_scaled.end())
+      continue;
+
+    const Vec3 raw_delta_scaled{it_b->second.x - it_a->second.x,
+                                it_b->second.y - it_a->second.y,
+                                it_b->second.z - it_a->second.z};
+    const Vec3 minimg_delta_scaled{
+        raw_delta_scaled.x - round(raw_delta_scaled.x),
+        raw_delta_scaled.y - round(raw_delta_scaled.y),
+        raw_delta_scaled.z - round(raw_delta_scaled.z)};
+    const Vec3 split_delta{raw_delta_scaled.x - minimg_delta_scaled.x,
+                           raw_delta_scaled.y - minimg_delta_scaled.y,
+                           raw_delta_scaled.z - minimg_delta_scaled.z};
+    const double axis_shift_max =
+        max({fabs(split_delta.x), fabs(split_delta.y), fabs(split_delta.z)});
+    const double raw_norm = sqrt(raw_delta_scaled.x * raw_delta_scaled.x +
+                                 raw_delta_scaled.y * raw_delta_scaled.y +
+                                 raw_delta_scaled.z * raw_delta_scaled.z);
+    const double minimg_norm =
+        sqrt(minimg_delta_scaled.x * minimg_delta_scaled.x +
+             minimg_delta_scaled.y * minimg_delta_scaled.y +
+             minimg_delta_scaled.z * minimg_delta_scaled.z);
+    const double norm_gap = raw_norm - minimg_norm;
+    if (axis_shift_max <= 0.5 || norm_gap <= 0.20)
+      continue;
+
+    ++split_owner_pairs;
+    if (norm_gap > max_owner_raw_minus_minimg_delta) {
+      max_owner_raw_minus_minimg_delta = norm_gap;
+      if (detail != nullptr) {
+        detail->owner_a = owner_a;
+        detail->owner_b = owner_b;
+        detail->raw_delta_scaled = raw_delta_scaled;
+        detail->minimg_delta_scaled = minimg_delta_scaled;
+        detail->raw_norm = raw_norm;
+        detail->minimg_norm = minimg_norm;
+        detail->valid = true;
+      }
+    }
+  }
+
+  return split_owner_pairs > 0;
+}
+
+bool reimage_contacting_owner_points_minimum_image(
+    vector<Vec3> &placed_points, const vector<PbctopoAtom> &atoms, box Box,
+    const vector<pair<int, int>> &contacting_owner_pairs) {
+  if (contacting_owner_pairs.empty() || placed_points.size() != atoms.size())
+    return false;
+
+  const auto owner_com_cartesian = compute_owner_com_cartesian(placed_points, atoms);
+  const auto owner_com_scaled = compute_owner_com_scaled(Box, owner_com_cartesian);
+  if (owner_com_scaled.size() < 2)
+    return false;
+
+  unordered_map<int, vector<int>> adjacency;
+  adjacency.reserve(owner_com_scaled.size());
+  for (const auto &[owner_a, owner_b] : contacting_owner_pairs) {
+    if (owner_com_scaled.find(owner_a) == owner_com_scaled.end() ||
+        owner_com_scaled.find(owner_b) == owner_com_scaled.end()) {
+      continue;
+    }
+    adjacency[owner_a].push_back(owner_b);
+    adjacency[owner_b].push_back(owner_a);
+  }
+  if (adjacency.empty())
+    return false;
+
+  vector<int> owners;
+  owners.reserve(owner_com_scaled.size());
+  for (const auto &[owner, _] : owner_com_scaled)
+    owners.push_back(owner);
+  sort(owners.begin(), owners.end());
+
+  unordered_map<int, Int3> owner_shifts;
+  owner_shifts.reserve(owner_com_scaled.size());
+  queue<int> pending;
+  for (int root_owner : owners) {
+    if (owner_shifts.find(root_owner) != owner_shifts.end())
+      continue;
+    owner_shifts[root_owner] = {0, 0, 0};
+    pending.push(root_owner);
+    while (!pending.empty()) {
+      const int owner_u = pending.front();
+      pending.pop();
+      const auto adj_it = adjacency.find(owner_u);
+      if (adj_it == adjacency.end())
+        continue;
+      const Vec3 &com_u = owner_com_scaled.at(owner_u);
+      const Int3 shift_u = owner_shifts.at(owner_u);
+      for (int owner_v : adj_it->second) {
+        const Vec3 &com_v = owner_com_scaled.at(owner_v);
+        const Int3 proposed_shift{
+            shift_u.x - static_cast<int>(llround(round(com_v.x - com_u.x))),
+            shift_u.y - static_cast<int>(llround(round(com_v.y - com_u.y))),
+            shift_u.z - static_cast<int>(llround(round(com_v.z - com_u.z)))};        
+        const auto [shift_it, inserted] =
+            owner_shifts.emplace(owner_v, proposed_shift);
+        if (inserted)
+          pending.push(owner_v);
+      }
+    }
+  }
+
+  double v1[3]{}, v2[3]{}, v3[3]{};
+  Box.get_v1(v1);
+  Box.get_v2(v2);
+  Box.get_v3(v3);
+  bool changed = false;
+  for (size_t atom_idx = 0; atom_idx < atoms.size(); ++atom_idx) {
+    const auto shift_it = owner_shifts.find(atoms[atom_idx].owner);
+    if (shift_it == owner_shifts.end())
+      continue;
+    const Int3 &shift = shift_it->second;
+    if (shift.x == 0 && shift.y == 0 && shift.z == 0)
+      continue;
+    placed_points[atom_idx].x += shift.x * v1[0] + shift.y * v2[0] + shift.z * v3[0];
+    placed_points[atom_idx].y += shift.x * v1[1] + shift.y * v2[1] + shift.z * v3[1];
+    placed_points[atom_idx].z += shift.x * v1[2] + shift.y * v2[2] + shift.z * v3[2];
+    changed = true;
+  }
+  return changed;
+}
+
+void build_owner_spans(const vector<PbctopoAtom> &atoms, int owner,
+                       vector<PbctopoHullSpan> &spans) {
+  spans.clear();
+  size_t span_begin = numeric_limits<size_t>::max();
+  for (size_t atom_idx = 0; atom_idx < atoms.size(); ++atom_idx) {
+    if (atoms[atom_idx].owner == owner) {
+      if (span_begin == numeric_limits<size_t>::max())
+        span_begin = atom_idx;
+      continue;
+    }
+    if (span_begin != numeric_limits<size_t>::max()) {
+      spans.push_back({span_begin, atom_idx});
+      span_begin = numeric_limits<size_t>::max();
+    }
+  }
+  if (span_begin != numeric_limits<size_t>::max())
+    spans.push_back({span_begin, atoms.size()});
+}
+
+bool rescue_split_contacting_owner_candidate(
+    const vector<Vec3> &seed_points, const vector<PbctopoAtom> &atoms, box Box,
+    const vector<pair<int, int>> &contacting_owner_pairs,
+    const vector<PbctopoShift> &shifts,
+    const PbctopoOwnerPairSplitDetail &split_detail, vector<Vec3> &rescued_points,
+    Int3 &applied_shift, double &best_raw_delta_norm) {
+  rescued_points.clear();
+  applied_shift = {};
+  best_raw_delta_norm = numeric_limits<double>::infinity();
+  if (!split_detail.valid || seed_points.size() != atoms.size() ||
+      contacting_owner_pairs.empty() || shifts.empty()) {
+    return false;
+  }
+
+  const auto owner_com_cartesian = compute_owner_com_cartesian(seed_points, atoms);
+  const auto owner_com_scaled = compute_owner_com_scaled(Box, owner_com_cartesian);
+  size_t best_shift_idx = numeric_limits<size_t>::max();
+  double best_score = numeric_limits<double>::infinity();
+  int owner_to_move = -1;
+  vector<int> move_candidates;
+  move_candidates.reserve(2);
+  move_candidates.push_back(split_detail.owner_b);
+  if (split_detail.owner_a != split_detail.owner_b)
+    move_candidates.push_back(split_detail.owner_a);
+
+  for (int move_owner : move_candidates) {
+    const int ref_owner =
+        move_owner == split_detail.owner_b ? split_detail.owner_a
+                                           : split_detail.owner_b;
+    const auto ref_it = owner_com_scaled.find(ref_owner);
+    const auto move_it = owner_com_scaled.find(move_owner);
+    if (ref_it == owner_com_scaled.end() || move_it == owner_com_scaled.end())
+      continue;
+
+    const Vec3 &ref_com = ref_it->second;
+    const Vec3 &move_com = move_it->second;
+    for (size_t shift_idx = 0; shift_idx < shifts.size(); ++shift_idx) {
+      const auto &shift = shifts[shift_idx];
+      const Vec3 shifted_move_scaled{move_com.x + static_cast<double>(shift.ix),
+                                     move_com.y + static_cast<double>(shift.iy),
+                                     move_com.z + static_cast<double>(shift.iz)};
+      const Vec3 raw_delta_scaled{shifted_move_scaled.x - ref_com.x,
+                                  shifted_move_scaled.y - ref_com.y,
+                                  shifted_move_scaled.z - ref_com.z};
+      const double raw_norm = sqrt(norm2(raw_delta_scaled));
+      double score = raw_norm;
+      for (const auto &[owner_a, owner_b] : contacting_owner_pairs) {
+        if (owner_a != move_owner && owner_b != move_owner)
+          continue;
+        const int other_owner = (owner_a == move_owner) ? owner_b : owner_a;
+        const auto other_it = owner_com_scaled.find(other_owner);
+        if (other_it == owner_com_scaled.end())
+          continue;
+        Vec3 pair_raw_delta_scaled{};
+        if (owner_a == move_owner) {
+          pair_raw_delta_scaled = {
+              other_it->second.x - shifted_move_scaled.x,
+              other_it->second.y - shifted_move_scaled.y,
+              other_it->second.z - shifted_move_scaled.z};
+        } else {
+          pair_raw_delta_scaled = {
+              shifted_move_scaled.x - other_it->second.x,
+              shifted_move_scaled.y - other_it->second.y,
+              shifted_move_scaled.z - other_it->second.z};
+        }
+        score += 0.25 * sqrt(norm2(pair_raw_delta_scaled));
+      }
+      if (score + 1.0e-9 < best_score) {
+        best_score = score;
+        best_raw_delta_norm = raw_norm;
+        best_shift_idx = shift_idx;
+        applied_shift = {shift.ix, shift.iy, shift.iz};
+        owner_to_move = move_owner;
+      }
+    }
+  }
+
+  if (best_shift_idx == numeric_limits<size_t>::max() || owner_to_move < 0)
+    return false;
+  if (applied_shift.x == 0 && applied_shift.y == 0 && applied_shift.z == 0)
+    return false;
+
+  double v1[3]{}, v2[3]{}, v3[3]{};
+  Box.get_v1(v1);
+  Box.get_v2(v2);
+  Box.get_v3(v3);
+  const Vec3 translation{
+      applied_shift.x * v1[0] + applied_shift.y * v2[0] + applied_shift.z * v3[0],
+      applied_shift.x * v1[1] + applied_shift.y * v2[1] + applied_shift.z * v3[1],
+      applied_shift.x * v1[2] + applied_shift.y * v2[2] + applied_shift.z * v3[2]};
+
+  rescued_points = seed_points;
+  for (size_t atom_idx = 0; atom_idx < atoms.size(); ++atom_idx) {
+    if (atoms[atom_idx].owner != owner_to_move)
+      continue;
+    rescued_points[atom_idx].x += translation.x;
+    rescued_points[atom_idx].y += translation.y;
+    rescued_points[atom_idx].z += translation.z;
+  }
+  return true;
+}
+
 bool continuity_metrics_ok(
     const vector<Vec3> &placed_points,
     const vector<PbctopoContinuityPair> &continuity_pairs, double hard_cutoff,
@@ -2277,20 +2809,234 @@ bool continuity_metrics_ok(
        isfinite(incumbent->continuity_path) &&
        isfinite(incumbent->continuity_max_d2));
 
-  for (const auto &pair : continuity_pairs) {
-    const Vec3 delta = placed_points[pair.a] - placed_points[pair.b];
-    const double d2 = norm2(delta);
+  auto consume_pair_metric = [&](double d2, double distance) -> bool {
     if (d2 > max_d2)
       max_d2 = d2;
     if (d2 > hard_cutoff2)
       return false;
-    path_sum += sqrt(max(d2, 0.0));
+    path_sum += distance;
     if (has_incumbent && max_d2 > incumbent->continuity_max_d2 + 1.0e-6 &&
         path_sum > incumbent->continuity_path + 1.0e-6) {
       return false;
     }
+    return true;
+  };
+
+#if TITAN_SIMD_X86 && TITAN_RUNTIME_TARGET_ATTRS
+  if (titan_simd_dispatch::runtime_has_avx2() &&
+      continuity_pairs.size() >= 8) {
+    alignas(32) double ax[4];
+    alignas(32) double ay[4];
+    alignas(32) double az[4];
+    alignas(32) double bx[4];
+    alignas(32) double by[4];
+    alignas(32) double bz[4];
+    alignas(32) double d2_lane[4];
+    alignas(32) double dist_lane[4];
+    const __m256d zero = _mm256_setzero_pd();
+    size_t pair_idx = 0;
+    for (; pair_idx + 4 <= continuity_pairs.size(); pair_idx += 4) {
+      for (size_t lane = 0; lane < 4; ++lane) {
+        const auto &pair = continuity_pairs[pair_idx + lane];
+        const Vec3 &point_a = placed_points[pair.a];
+        const Vec3 &point_b = placed_points[pair.b];
+        ax[lane] = point_a.x;
+        ay[lane] = point_a.y;
+        az[lane] = point_a.z;
+        bx[lane] = point_b.x;
+        by[lane] = point_b.y;
+        bz[lane] = point_b.z;
+      }
+
+      const __m256d dx =
+          _mm256_sub_pd(_mm256_load_pd(ax), _mm256_load_pd(bx));
+      const __m256d dy =
+          _mm256_sub_pd(_mm256_load_pd(ay), _mm256_load_pd(by));
+      const __m256d dz =
+          _mm256_sub_pd(_mm256_load_pd(az), _mm256_load_pd(bz));
+      const __m256d d2 = _mm256_add_pd(
+          _mm256_add_pd(_mm256_mul_pd(dx, dx), _mm256_mul_pd(dy, dy)),
+          _mm256_mul_pd(dz, dz));
+      const __m256d dist = _mm256_sqrt_pd(_mm256_max_pd(d2, zero));
+      _mm256_store_pd(d2_lane, d2);
+      _mm256_store_pd(dist_lane, dist);
+
+      for (size_t lane = 0; lane < 4; ++lane) {
+        if (!consume_pair_metric(d2_lane[lane], dist_lane[lane]))
+          return false;
+      }
+    }
+    for (; pair_idx < continuity_pairs.size(); ++pair_idx) {
+      const auto &pair = continuity_pairs[pair_idx];
+      const Vec3 delta = placed_points[pair.a] - placed_points[pair.b];
+      const double d2 = norm2(delta);
+      if (!consume_pair_metric(d2, sqrt(max(d2, 0.0))))
+        return false;
+    }
+    return true;
+  }
+#endif
+
+  for (const auto &pair : continuity_pairs) {
+    const Vec3 delta = placed_points[pair.a] - placed_points[pair.b];
+    const double d2 = norm2(delta);
+    if (!consume_pair_metric(d2, sqrt(max(d2, 0.0))))
+      return false;
   }
   return true;
+}
+
+inline void relax_anchor_best_scalar(double *best, const double *px,
+                                     const double *py, const double *pz,
+                                     size_t n, double sx, double sy,
+                                     double sz) noexcept {
+  for (size_t i = 0; i < n; ++i) {
+    const double dx = sx - px[i];
+    const double dy = sy - py[i];
+    const double dz = sz - pz[i];
+    const double d2 = dx * dx + dy * dy + dz * dz;
+    best[i] = min(best[i], d2);
+  }
+}
+
+#if TITAN_SIMD_X86
+TITAN_TARGET_AVX2
+inline void relax_anchor_best_avx2(double *best, const double *px,
+                                   const double *py, const double *pz,
+                                   size_t n, double sx, double sy,
+                                   double sz) noexcept {
+  const __m256d vsx = _mm256_set1_pd(sx);
+  const __m256d vsy = _mm256_set1_pd(sy);
+  const __m256d vsz = _mm256_set1_pd(sz);
+  size_t i = 0;
+  for (; i + 4 <= n; i += 4) {
+    const __m256d dx = _mm256_sub_pd(vsx, _mm256_loadu_pd(px + i));
+    const __m256d dy = _mm256_sub_pd(vsy, _mm256_loadu_pd(py + i));
+    const __m256d dz = _mm256_sub_pd(vsz, _mm256_loadu_pd(pz + i));
+    const __m256d d2 = _mm256_add_pd(
+        _mm256_add_pd(_mm256_mul_pd(dx, dx), _mm256_mul_pd(dy, dy)),
+        _mm256_mul_pd(dz, dz));
+    const __m256d best_vec = _mm256_loadu_pd(best + i);
+    _mm256_storeu_pd(best + i, _mm256_min_pd(best_vec, d2));
+  }
+  for (; i < n; ++i) {
+    const double dx = sx - px[i];
+    const double dy = sy - py[i];
+    const double dz = sz - pz[i];
+    const double d2 = dx * dx + dy * dy + dz * dz;
+    best[i] = min(best[i], d2);
+  }
+}
+
+TITAN_TARGET_AVX2_FMA
+inline void relax_anchor_best_avx2_fma(double *best, const double *px,
+                                       const double *py, const double *pz,
+                                       size_t n, double sx, double sy,
+                                       double sz) noexcept {
+  const __m256d vsx = _mm256_set1_pd(sx);
+  const __m256d vsy = _mm256_set1_pd(sy);
+  const __m256d vsz = _mm256_set1_pd(sz);
+  size_t i = 0;
+  for (; i + 4 <= n; i += 4) {
+    const __m256d dx = _mm256_sub_pd(vsx, _mm256_loadu_pd(px + i));
+    const __m256d dy = _mm256_sub_pd(vsy, _mm256_loadu_pd(py + i));
+    const __m256d dz = _mm256_sub_pd(vsz, _mm256_loadu_pd(pz + i));
+    const __m256d d2 =
+        _mm256_fmadd_pd(dz, dz,
+                        _mm256_fmadd_pd(dy, dy, _mm256_mul_pd(dx, dx)));
+    const __m256d best_vec = _mm256_loadu_pd(best + i);
+    _mm256_storeu_pd(best + i, _mm256_min_pd(best_vec, d2));
+  }
+  for (; i < n; ++i) {
+    const double dx = sx - px[i];
+    const double dy = sy - py[i];
+    const double dz = sz - pz[i];
+    const double d2 = dx * dx + dy * dy + dz * dz;
+    best[i] = min(best[i], d2);
+  }
+}
+#endif
+
+inline void relax_anchor_best(double *best, const double *px, const double *py,
+                              const double *pz, size_t n, double sx,
+                              double sy, double sz) noexcept {
+  using Kernel = void (*)(double *, const double *, const double *,
+                          const double *, size_t, double, double,
+                          double) noexcept;
+  static const Kernel kernel = []() noexcept -> Kernel {
+#if TITAN_SIMD_X86 && TITAN_RUNTIME_TARGET_ATTRS
+    if (titan_simd_dispatch::runtime_has_avx2_fma())
+      return &relax_anchor_best_avx2_fma;
+    if (titan_simd_dispatch::runtime_has_avx2())
+      return &relax_anchor_best_avx2;
+#endif
+    return &relax_anchor_best_scalar;
+  }();
+  kernel(best, px, py, pz, n, sx, sy, sz);
+}
+
+inline size_t select_anchor_next_scalar(const double *best,
+                                        const unsigned char *used, size_t n,
+                                        double &next_cost) noexcept {
+  size_t next = numeric_limits<size_t>::max();
+  next_cost = numeric_limits<double>::infinity();
+  for (size_t i = 0; i < n; ++i) {
+    if (used[i] != 0)
+      continue;
+    if (best[i] < next_cost) {
+      next = i;
+      next_cost = best[i];
+    }
+  }
+  return next;
+}
+
+#if TITAN_SIMD_X86
+TITAN_TARGET_AVX2
+inline size_t select_anchor_next_avx2(const double *best,
+                                      const unsigned char *used, size_t n,
+                                      double &next_cost) noexcept {
+  const double inf = numeric_limits<double>::infinity();
+  size_t next = numeric_limits<size_t>::max();
+  next_cost = inf;
+  alignas(32) double lane_best[4];
+  size_t i = 0;
+  for (; i + 4 <= n; i += 4) {
+    const __m256d best_vec = _mm256_loadu_pd(best + i);
+    _mm256_store_pd(lane_best, best_vec);
+    for (size_t lane = 0; lane < 4; ++lane) {
+      if (used[i + lane] != 0)
+        continue;
+      if (lane_best[lane] < next_cost) {
+        next = i + lane;
+        next_cost = lane_best[lane];
+      }
+    }
+  }
+  for (; i < n; ++i) {
+    if (used[i] != 0)
+      continue;
+    if (best[i] < next_cost) {
+      next = i;
+      next_cost = best[i];
+    }
+  }
+  return next;
+}
+#endif
+
+inline size_t select_anchor_next(const double *best, const unsigned char *used,
+                                 size_t n, double &next_cost) noexcept {
+  using Kernel =
+      size_t (*)(const double *, const unsigned char *, size_t, double &) noexcept;
+  static const Kernel kernel = []() noexcept -> Kernel {
+#if TITAN_SIMD_X86 && TITAN_RUNTIME_TARGET_ATTRS
+    if (titan_simd_dispatch::runtime_has_avx2())
+      return &select_anchor_next_avx2;
+#endif
+    return &select_anchor_next_scalar;
+  }();
+  return kernel(best, used, n, next_cost);
 }
 
 bool anchor_graph_metrics_ok(const vector<Vec3> &placed_points,
@@ -2343,16 +3089,8 @@ bool anchor_graph_metrics_ok(const vector<Vec3> &placed_points,
       has_incumbent ? incumbent->anchor_max_d2 : inf;
 
   for (size_t step = 0; step < n; ++step) {
-    size_t next = numeric_limits<size_t>::max();
     double next_cost = inf;
-    for (size_t i = 0; i < n; ++i) {
-      if (used[i] != 0)
-        continue;
-      if (best[i] < next_cost) {
-        next = i;
-        next_cost = best[i];
-      }
-    }
+    const size_t next = select_anchor_next(best, used, n, next_cost);
     if (next == numeric_limits<size_t>::max())
       return false;
     used[next] = 1;
@@ -2364,13 +3102,7 @@ bool anchor_graph_metrics_ok(const vector<Vec3> &placed_points,
     const double sx = px[next];
     const double sy = py[next];
     const double sz = pz[next];
-    for (size_t i = 0; i < n; ++i) {
-      const double dx = sx - px[i];
-      const double dy = sy - py[i];
-      const double dz = sz - pz[i];
-      const double d2 = dx * dx + dy * dy + dz * dz;
-      best[i] = min(best[i], d2);
-    }
+    relax_anchor_best(best, px, py, pz, n, sx, sy, sz);
   }
   return true;
 }
@@ -2801,9 +3533,7 @@ PbctopoCutCandidate score_component_placed_points_solution(
             .count());
     stage_started = chrono::steady_clock::now();
   }
-  PointStats stats;
-  for (const auto &point : placed_points)
-    stats.add(point.x, point.y, point.z);
+  const PointStats stats = build_point_stats(placed_points);
   PbctopoCutCandidate candidate;
   PbctopoCutScoreBreakdown cut_breakdown;
   PbctopoCutCandidate pre_edge_seed;
@@ -3336,8 +4066,259 @@ vector<Int3> extract_component_offsets_from_points(
   return offsets;
 }
 
+const char *pbctopo_component_mode_name(PbctopoComponentMode mode) {
+  switch (mode) {
+  case PbctopoComponentMode::Disabled:
+    return "disabled";
+  case PbctopoComponentMode::Exact:
+    return "exact";
+  case PbctopoComponentMode::MergeThenGraph:
+    return "merge_then_graph";
+  case PbctopoComponentMode::Beam:
+    return "beam";
+  }
+  return "unknown";
+}
+
+PbctopoComponentMode select_pbctopo_component_mode(size_t raw_component_count) {
+  if (raw_component_count == 0)
+    return PbctopoComponentMode::Disabled;
+  if (raw_component_count <= kPbctopoExactComponentLimit)
+    return PbctopoComponentMode::Exact;
+  if (raw_component_count <= kPbctopoMergeModeMaxRawComponents)
+    return PbctopoComponentMode::MergeThenGraph;
+  return PbctopoComponentMode::Beam;
+}
+
+struct PbctopoRawComponentMetadata {
+  size_t raw_index = 0;
+  int owner = 0;
+  uint64_t chain_key = 0;
+  size_t atom_count = 0;
+  size_t min_local_atom_index = numeric_limits<size_t>::max();
+  size_t max_local_atom_index = 0;
+  size_t min_atom_index = numeric_limits<size_t>::max();
+};
+
+PbctopoMergedComponentPlan build_chain_merged_component_plan(
+    const vector<PbctopoAtom> &atoms,
+    const vector<vector<size_t>> &raw_components) {
+  PbctopoMergedComponentPlan plan;
+  plan.raw_to_merged.assign(raw_components.size(), numeric_limits<size_t>::max());
+  if (raw_components.empty())
+    return plan;
+
+  vector<PbctopoRawComponentMetadata> metadata;
+  metadata.reserve(raw_components.size());
+  for (size_t raw_idx = 0; raw_idx < raw_components.size(); ++raw_idx) {
+    const auto &component = raw_components[raw_idx];
+    if (component.empty())
+      continue;
+    PbctopoRawComponentMetadata meta;
+    meta.raw_index = raw_idx;
+    meta.atom_count = component.size();
+    const auto &first_atom = atoms[component.front()];
+    meta.owner = first_atom.owner;
+    meta.chain_key = first_atom.chain_key;
+    for (size_t atom_idx : component) {
+      if (atom_idx >= atoms.size())
+        continue;
+      meta.min_local_atom_index =
+          min(meta.min_local_atom_index, atoms[atom_idx].local_atom_index);
+      meta.max_local_atom_index =
+          max(meta.max_local_atom_index, atoms[atom_idx].local_atom_index);
+      meta.min_atom_index = min(meta.min_atom_index, atom_idx);
+    }
+    metadata.push_back(meta);
+  }
+
+  stable_sort(metadata.begin(), metadata.end(),
+              [](const PbctopoRawComponentMetadata &lhs,
+                 const PbctopoRawComponentMetadata &rhs) {
+                if (lhs.owner != rhs.owner)
+                  return lhs.owner < rhs.owner;
+                if (lhs.chain_key != rhs.chain_key)
+                  return lhs.chain_key < rhs.chain_key;
+                if (lhs.min_local_atom_index != rhs.min_local_atom_index)
+                  return lhs.min_local_atom_index < rhs.min_local_atom_index;
+                return lhs.raw_index < rhs.raw_index;
+              });
+
+  vector<size_t> current_raw_group;
+  vector<size_t> current_atoms;
+  current_raw_group.reserve(kPbctopoMergedNodeMaxRawComponents);
+  current_atoms.reserve(kPbctopoMergedNodeMaxAtoms);
+  int current_owner = 0;
+  uint64_t current_chain_key = 0;
+  size_t current_last_local_atom = 0;
+  bool has_current_group = false;
+
+  auto flush_group = [&]() {
+    if (current_raw_group.empty())
+      return;
+    const size_t merged_idx = plan.merged_components.size();
+    sort(current_atoms.begin(), current_atoms.end());
+    plan.merged_components.push_back(current_atoms);
+    plan.merged_to_raw.push_back(current_raw_group);
+    for (size_t raw_idx : current_raw_group) {
+      if (raw_idx < plan.raw_to_merged.size())
+        plan.raw_to_merged[raw_idx] = merged_idx;
+    }
+    current_raw_group.clear();
+    current_atoms.clear();
+    has_current_group = false;
+  };
+
+  for (const auto &meta : metadata) {
+    const bool contiguous_with_current =
+        has_current_group && meta.owner == current_owner &&
+        meta.chain_key == current_chain_key &&
+        meta.min_local_atom_index == current_last_local_atom + 1;
+    const bool fits_current =
+        contiguous_with_current &&
+        current_raw_group.size() < kPbctopoMergedNodeMaxRawComponents &&
+        current_atoms.size() + meta.atom_count <= kPbctopoMergedNodeMaxAtoms;
+    if (!fits_current)
+      flush_group();
+    if (!has_current_group) {
+      current_owner = meta.owner;
+      current_chain_key = meta.chain_key;
+      current_last_local_atom = meta.max_local_atom_index;
+      has_current_group = true;
+    } else {
+      current_last_local_atom = meta.max_local_atom_index;
+    }
+    current_raw_group.push_back(meta.raw_index);
+    current_atoms.insert(current_atoms.end(), raw_components[meta.raw_index].begin(),
+                         raw_components[meta.raw_index].end());
+  }
+  flush_group();
+
+  return plan;
+}
+
+vector<Int3> expand_merged_offsets_to_raw_components(
+    const vector<Int3> &merged_offsets, const vector<vector<size_t>> &raw_components,
+    const PbctopoMergedComponentPlan &plan) {
+  vector<Int3> raw_offsets(raw_components.size(), {0, 0, 0});
+  for (size_t merged_idx = 0; merged_idx < plan.merged_to_raw.size(); ++merged_idx) {
+    const Int3 merged_offset =
+        merged_idx < merged_offsets.size() ? merged_offsets[merged_idx] : Int3{};
+    for (size_t raw_idx : plan.merged_to_raw[merged_idx]) {
+      if (raw_idx < raw_offsets.size())
+        raw_offsets[raw_idx] = merged_offset;
+    }
+  }
+  rebase_component_offsets(raw_offsets, raw_components);
+  return raw_offsets;
+}
+
+bool derive_merged_warm_offsets(const vector<Int3> &raw_offsets,
+                                const PbctopoMergedComponentPlan &plan,
+                                vector<Int3> &merged_offsets) {
+  if (raw_offsets.empty() || plan.merged_to_raw.empty())
+    return false;
+  merged_offsets.clear();
+  merged_offsets.reserve(plan.merged_to_raw.size());
+  for (const auto &group : plan.merged_to_raw) {
+    if (group.empty())
+      return false;
+    const size_t first_raw_idx = group.front();
+    if (first_raw_idx >= raw_offsets.size())
+      return false;
+    const Int3 &candidate = raw_offsets[first_raw_idx];
+    for (size_t raw_idx : group) {
+      if (raw_idx >= raw_offsets.size())
+        return false;
+      const auto &raw_offset = raw_offsets[raw_idx];
+      if (raw_offset.x != candidate.x || raw_offset.y != candidate.y ||
+          raw_offset.z != candidate.z) {
+        return false;
+      }
+    }
+    merged_offsets.push_back(candidate);
+  }
+  return true;
+}
+
+int compare_principal_rg2(double lhs, double rhs);
+
+bool graph_seed_quick_score_better(const PbctopoGraphSeedQuickScore &lhs,
+                                   const PbctopoGraphSeedQuickScore &rhs) {
+  if (!lhs.valid)
+    return false;
+  if (!rhs.valid)
+    return true;
+  if (fabs(lhs.continuity_max_d2 - rhs.continuity_max_d2) > 1.0e-6)
+    return lhs.continuity_max_d2 < rhs.continuity_max_d2;
+  if (fabs(lhs.continuity_path - rhs.continuity_path) > 1.0e-6)
+    return lhs.continuity_path < rhs.continuity_path;
+  if (fabs(lhs.anchor_max_d2 - rhs.anchor_max_d2) > 1.0e-6)
+    return lhs.anchor_max_d2 < rhs.anchor_max_d2;
+  if (fabs(lhs.anchor_mst2 - rhs.anchor_mst2) > 1.0e-6)
+    return lhs.anchor_mst2 < rhs.anchor_mst2;
+  const int principal_max_cmp =
+      compare_principal_rg2(lhs.principal_rg2_max, rhs.principal_rg2_max);
+  if (principal_max_cmp != 0)
+    return principal_max_cmp < 0;
+  const int principal_mid_cmp =
+      compare_principal_rg2(lhs.principal_rg2_mid, rhs.principal_rg2_mid);
+  if (principal_mid_cmp != 0)
+    return principal_mid_cmp < 0;
+  const int principal_min_cmp =
+      compare_principal_rg2(lhs.principal_rg2_min, rhs.principal_rg2_min);
+  if (principal_min_cmp != 0)
+    return principal_min_cmp < 0;
+  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-6)
+    return lhs.shift_norm2 < rhs.shift_norm2;
+  return false;
+}
+
+PbctopoGraphSeedQuickScore score_component_graph_seed_quick(
+    const vector<PbctopoAtom> &atoms, const vector<vector<size_t>> &components,
+    const vector<Vec3> &placed_points, const vector<PbctopoContinuityPair> &continuity_pairs,
+    const vector<size_t> &anchor_indices, double continuity_cutoff,
+    double shift_norm2) {
+  PbctopoGraphSeedQuickScore score;
+  if (placed_points.size() != atoms.size())
+    return score;
+  if (!continuity_metrics_ok(placed_points, continuity_pairs, continuity_cutoff,
+                             score.continuity_path, score.continuity_max_d2,
+                             nullptr)) {
+    return score;
+  }
+  const vector<size_t> half_anchor_indices =
+      build_coarse_anchor_subset(atoms, anchor_indices);
+  const vector<size_t> third_anchor_indices =
+      build_third_anchor_subset(atoms, anchor_indices);
+  const vector<size_t> *quick_anchor_indices = &anchor_indices;
+  if (anchor_indices.size() > 256 && third_anchor_indices.size() >= 2) {
+    quick_anchor_indices = &third_anchor_indices;
+  } else if (half_anchor_indices.size() >= 2) {
+    quick_anchor_indices = &half_anchor_indices;
+  }
+  if (!anchor_graph_metrics_ok(placed_points, *quick_anchor_indices, score.anchor_mst2,
+                               score.anchor_max_d2, nullptr)) {
+    return score;
+  }
+  const PointStats stats = build_point_stats(placed_points);
+  if (stats.count == 0)
+    return score;
+  const array<double, 3> principal_rg2 = compute_principal_rg2(stats);
+  score.principal_rg2_max = principal_rg2[0];
+  score.principal_rg2_mid = principal_rg2[1];
+  score.principal_rg2_min = principal_rg2[2];
+  score.shift_norm2 = shift_norm2;
+  score.valid = true;
+  return score;
+}
+
 constexpr double kPrincipalRgRelTol = 0.08;
 constexpr double kPrincipalRgAbsTol = 5.0;
+constexpr double kShapeKappaRelTol = 0.10;
+constexpr double kShapeKappaAbsTol = 0.02;
+constexpr double kShapeMomentRelTol = 0.08;
+constexpr double kShapeMomentAbsTol = 5.0;
 
 double principal_rg2_tolerance(double reference) {
   return max(kPrincipalRgAbsTol, max(0.0, reference) * kPrincipalRgRelTol);
@@ -3363,18 +4344,66 @@ int compare_principal_rg2(double lhs, double rhs) {
   return 0;
 }
 
+double shape_kappa_tolerance(double reference) {
+  return max(kShapeKappaAbsTol, max(0.0, reference) * kShapeKappaRelTol);
+}
+
+bool shape_kappa_significantly_worse(double value, double reference) {
+  if (!isfinite(value) || !isfinite(reference))
+    return false;
+  return value > reference + shape_kappa_tolerance(reference);
+}
+
+bool shape_kappa_significantly_better(double value, double reference) {
+  if (!isfinite(value) || !isfinite(reference))
+    return false;
+  return value + shape_kappa_tolerance(reference) < reference;
+}
+
+int compare_shape_kappa(double lhs, double rhs) {
+  if (shape_kappa_significantly_better(lhs, rhs))
+    return -1;
+  if (shape_kappa_significantly_better(rhs, lhs))
+    return 1;
+  return 0;
+}
+
+double shape_moment_tolerance(double reference) {
+  return max(kShapeMomentAbsTol, max(0.0, reference) * kShapeMomentRelTol);
+}
+
+bool shape_moment_significantly_worse(double value, double reference) {
+  if (!isfinite(value) || !isfinite(reference))
+    return false;
+  return value > reference + shape_moment_tolerance(reference);
+}
+
+bool shape_moment_significantly_better(double value, double reference) {
+  if (!isfinite(value) || !isfinite(reference))
+    return false;
+  return value + shape_moment_tolerance(reference) < reference;
+}
+
+int compare_shape_moment(double lhs, double rhs) {
+  if (shape_moment_significantly_better(lhs, rhs))
+    return -1;
+  if (shape_moment_significantly_better(rhs, lhs))
+    return 1;
+  return 0;
+}
+
 bool component_candidate_is_outlier(const PbctopoCutCandidate &candidate,
                                     const PbctopoCutCandidate *reference) {
   if (!candidate.valid || candidate.ultra_clash || reference == nullptr ||
       !reference->valid || reference->ultra_clash) {
     return false;
   }
-  const bool rg2_outlier =
-      candidate.rg2 > max(reference->rg2 * 1.60, reference->rg2 + 500.0);
-  const bool bbox_outlier = candidate.bbox_volume >
-                            max(reference->bbox_volume * 1.35,
-                                reference->bbox_volume + 250000.0);
-  return rg2_outlier || bbox_outlier;
+  return principal_rg2_significantly_worse(candidate.principal_rg2_max,
+                                           reference->principal_rg2_max) &&
+         (shape_moment_significantly_worse(candidate.shape_asphericity,
+                                           reference->shape_asphericity) ||
+          shape_kappa_significantly_worse(candidate.shape_kappa2,
+                                          reference->shape_kappa2));
 }
 
 const char *candidate_skip_search_reject_reason(
@@ -3418,14 +4447,25 @@ const char *candidate_skip_search_reject_reason(
                                         reference.principal_rg2_mid)) {
     return "principal_rg2_mid";
   }
+  if (principal_rg2_significantly_worse(candidate.principal_rg2_min,
+                                        reference.principal_rg2_min)) {
+    return "principal_rg2_min";
+  }
+  if (shape_kappa_significantly_worse(candidate.shape_kappa2,
+                                      reference.shape_kappa2)) {
+    return "shape_kappa2";
+  }
+  if (shape_moment_significantly_worse(candidate.shape_asphericity,
+                                       reference.shape_asphericity)) {
+    return "shape_asphericity";
+  }
+  if (shape_moment_significantly_worse(candidate.shape_acylindricity,
+                                       reference.shape_acylindricity)) {
+    return "shape_acylindricity";
+  }
   if (candidate.edge_stretch >
       max(reference.edge_stretch * 1.10, reference.edge_stretch + 0.05))
     return "edge_stretch";
-  if (candidate.rg2 > max(reference.rg2 * 1.03, reference.rg2 + 5.0))
-    return "rg2";
-  if (candidate.bbox_volume >
-      max(reference.bbox_volume * 1.03, reference.bbox_volume + 1000.0))
-    return "bbox_volume";
   if (isfinite(reference.min_pair_d2) &&
       candidate.min_pair_d2 + 1.0e-6 <
           min(reference.min_pair_d2 * 0.90, reference.min_pair_d2 - 0.05))
@@ -3533,44 +4573,39 @@ bool solve_component_offsets_from_tree(
   return find(seen.begin(), seen.end(), 0) == seen.end();
 }
 
-bool solve_component_offsets_via_pair_graph(
-    const vector<PbctopoAtom> &atoms, box Box,
-    const vector<vector<size_t>> &components, const vector<PbctopoShift> &shifts,
-    const vector<PbctopoLocalEdge> &local_edges,
-    const unordered_set<uint64_t> &edge_set, vector<Vec3> &placed_points,
-    const vector<PbctopoContinuityPair> &continuity_pairs,
-    const vector<size_t> &anchor_indices,
-    const PbctopoRuntimeCutoffs &cutoffs, PbctopoCutCandidate &best_cut,
-    double &shift_norm2, PbctopoTimingStats *timing,
-    PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
-    const vector<Int3> *warm_component_offsets = nullptr,
-    PbctopoWarmState *warm_state = nullptr,
-    const PbctopoCutCandidate *warm_reference_candidate = nullptr,
-    vector<Int3> *tree_offsets_out = nullptr,
-    vector<Int3> *refined_offsets_out = nullptr,
-    vector<PbctopoGraphEdge> *tree_edges_out = nullptr) {
-  if (components.empty())
-    return false;
+bool graph_edge_has_zero_shift(const PbctopoGraphEdge &edge) {
+  return edge.dx == 0 && edge.dy == 0 && edge.dz == 0;
+}
 
-  size_t identity_shift_pos = 0;
+bool graph_edge_matches_delta(const PbctopoGraphEdge &edge, const Int3 &delta) {
+  return edge.dx == delta.x && edge.dy == delta.y && edge.dz == delta.z;
+}
+
+vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
+    const vector<PbctopoAtom> &atoms,
+    const vector<vector<size_t>> &components, const vector<PbctopoShift> &shifts,
+    const PbctopoRuntimeCutoffs &cutoffs, PbctopoTimingStats *timing,
+    const vector<Int3> *warm_component_offsets,
+    vector<vector<PbctopoShiftedComponent>> &shifted_components_out,
+    size_t &identity_shift_pos_out) {
+  identity_shift_pos_out = 0;
   for (size_t shift_idx = 0; shift_idx < shifts.size(); ++shift_idx) {
     if (shifts[shift_idx].ix == 0 && shifts[shift_idx].iy == 0 &&
         shifts[shift_idx].iz == 0) {
-      identity_shift_pos = shift_idx;
+      identity_shift_pos_out = shift_idx;
       break;
     }
   }
 
   const auto precompute_started = chrono::steady_clock::now();
-  const auto shifted_components =
-      precompute_shifted_components(atoms, components, shifts,
-                                    cutoffs.clash_cutoff,
-                                    cutoffs.pair_contact_cutoff);
+  shifted_components_out = precompute_shifted_components(
+      atoms, components, shifts, cutoffs.clash_cutoff, cutoffs.pair_contact_cutoff);
   if (timing != nullptr) {
     timing->component_graph_precompute_s +=
         chrono::duration<double>(chrono::steady_clock::now() - precompute_started)
             .count();
   }
+
   vector<PbctopoGraphEdge> ranked_edges;
   ranked_edges.reserve((components.size() * (components.size() - 1)) / 2);
   const auto pair_score_started = chrono::steady_clock::now();
@@ -3591,12 +4626,9 @@ bool solve_component_offsets_via_pair_graph(
         const auto &shift = shifts[shift_idx];
         const PbctopoPairShiftScore *incumbent =
             (best_score.valid && !best_score.ultra_clash) ? &best_score : nullptr;
-        // The stored edge delta is the relative lattice offset of rhs with lhs
-        // treated as the local origin for this pair. Tree propagation later
-        // converts these pairwise deltas into global component offsets.
         const auto score = score_component_pair_shift(
-            shifted_components[lhs][identity_shift_pos],
-            shifted_components[rhs][shift_idx], shift, cutoffs.clash_cutoff,
+            shifted_components_out[lhs][identity_shift_pos_out],
+            shifted_components_out[rhs][shift_idx], shift, cutoffs.clash_cutoff,
             cutoffs.pair_contact_cutoff, incumbent);
         if (better_pair_shift_score(score, best_score)) {
           second_score = best_score;
@@ -3628,11 +4660,37 @@ bool solve_component_offsets_via_pair_graph(
     timing->component_graph_pair_score_s +=
         chrono::duration<double>(chrono::steady_clock::now() - pair_score_started)
             .count();
+    timing->component_graph_edges += ranked_edges.size();
   }
+  return ranked_edges;
+}
+
+bool solve_component_offsets_via_pair_graph(
+    const vector<PbctopoAtom> &atoms, box Box,
+    const vector<vector<size_t>> &components, const vector<PbctopoShift> &shifts,
+    const vector<PbctopoLocalEdge> &local_edges,
+    const unordered_set<uint64_t> &edge_set, vector<Vec3> &placed_points,
+    const vector<PbctopoContinuityPair> &continuity_pairs,
+    const vector<size_t> &anchor_indices,
+    const PbctopoRuntimeCutoffs &cutoffs, PbctopoCutCandidate &best_cut,
+    double &shift_norm2, PbctopoTimingStats *timing,
+    PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
+    const vector<Int3> *warm_component_offsets = nullptr,
+    PbctopoWarmState *warm_state = nullptr,
+    const PbctopoCutCandidate *warm_reference_candidate = nullptr,
+    vector<Int3> *tree_offsets_out = nullptr,
+    vector<Int3> *refined_offsets_out = nullptr,
+    vector<PbctopoGraphEdge> *tree_edges_out = nullptr) {
+  if (components.empty())
+    return false;
+
+  size_t identity_shift_pos = 0;
+  vector<vector<PbctopoShiftedComponent>> shifted_components;
+  vector<PbctopoGraphEdge> ranked_edges = build_component_graph_edge_candidates(
+      atoms, components, shifts, cutoffs, timing, warm_component_offsets,
+      shifted_components, identity_shift_pos);
   const auto tree_started = chrono::steady_clock::now();
   sort(ranked_edges.begin(), ranked_edges.end(), better_component_graph_edge);
-  if (timing != nullptr)
-    timing->component_graph_edges += ranked_edges.size();
   vector<PbctopoGraphEdge> tree_edges;
   if (!build_component_tree_from_ranked_edges(components.size(), ranked_edges, {},
                                               tree_edges))
@@ -3670,6 +4728,162 @@ bool solve_component_offsets_via_pair_graph(
     *refined_offsets_out = offsets;
   shift_norm2 = best_cut.shift_norm2;
   return best_cut.valid && placed_points.size() == atoms.size();
+}
+
+struct PbctopoGraphSeedSolveResult {
+  const char *seed_name = "baseline";
+  vector<Int3> offsets;
+  PbctopoGraphSeedQuickScore quick_score;
+  bool valid = false;
+};
+
+bool solve_component_offsets_from_ranked_edges(
+    size_t component_count, const vector<vector<size_t>> &components,
+    const vector<PbctopoGraphEdge> &ranked_edges, vector<Int3> &offsets) {
+  vector<PbctopoGraphEdge> tree_edges;
+  if (!build_component_tree_from_ranked_edges(component_count, ranked_edges, {},
+                                              tree_edges))
+    return false;
+  if (!solve_component_offsets_from_tree(component_count, tree_edges, offsets))
+    return false;
+  rebase_component_offsets(offsets, components);
+  return true;
+}
+
+vector<PbctopoGraphSeedSolveResult> build_large_component_graph_seed_candidates(
+    const vector<PbctopoAtom> &atoms, box Box,
+    const vector<vector<size_t>> &components, const vector<PbctopoShift> &shifts,
+    const vector<PbctopoContinuityPair> &continuity_pairs,
+    const vector<size_t> &anchor_indices, const PbctopoRuntimeCutoffs &cutoffs,
+    const vector<Int3> *warm_component_offsets, PbctopoTimingStats *timing) {
+  size_t identity_shift_pos = 0;
+  vector<vector<PbctopoShiftedComponent>> shifted_components;
+  const vector<PbctopoGraphEdge> base_edges = build_component_graph_edge_candidates(
+      atoms, components, shifts, cutoffs, timing, warm_component_offsets,
+      shifted_components, identity_shift_pos);
+  vector<PbctopoGraphSeedSolveResult> results;
+  results.reserve(3);
+  unordered_set<string> seen_offset_signatures;
+
+  auto try_seed = [&](const char *seed_name,
+                      const function<void(vector<PbctopoGraphEdge> &)> &sort_fn) {
+    vector<PbctopoGraphEdge> ranked_edges = base_edges;
+    sort_fn(ranked_edges);
+    vector<Int3> offsets;
+    if (!solve_component_offsets_from_ranked_edges(components.size(), components,
+                                                   ranked_edges, offsets)) {
+      return;
+    }
+    const string signature = format_component_offsets(offsets);
+    if (!seen_offset_signatures.insert(signature).second)
+      return;
+    vector<Vec3> seed_points;
+    double seed_shift_norm2 = 0.0;
+    build_component_points_from_offsets(atoms, components, Box, offsets, seed_points,
+                                        seed_shift_norm2);
+    PbctopoGraphSeedSolveResult result;
+    result.seed_name = seed_name;
+    result.offsets = offsets;
+    result.quick_score = score_component_graph_seed_quick(
+        atoms, components, seed_points, continuity_pairs, anchor_indices,
+        cutoffs.continuity_cutoff, seed_shift_norm2);
+    result.valid = result.quick_score.valid;
+    results.push_back(std::move(result));
+  };
+
+  try_seed("baseline", [&](vector<PbctopoGraphEdge> &ranked_edges) {
+    sort(ranked_edges.begin(), ranked_edges.end(), better_component_graph_edge);
+  });
+
+  try_seed("nonzero", [&](vector<PbctopoGraphEdge> &ranked_edges) {
+    stable_sort(ranked_edges.begin(), ranked_edges.end(),
+                [](const PbctopoGraphEdge &lhs, const PbctopoGraphEdge &rhs) {
+                  if (!lhs.valid)
+                    return false;
+                  if (!rhs.valid)
+                    return true;
+                  if (lhs.ultra_clash != rhs.ultra_clash)
+                    return rhs.ultra_clash;
+                  const bool lhs_zero = graph_edge_has_zero_shift(lhs);
+                  const bool rhs_zero = graph_edge_has_zero_shift(rhs);
+                  if (lhs_zero != rhs_zero)
+                    return !lhs_zero;
+                  if (lhs.contact_atoms != rhs.contact_atoms)
+                    return lhs.contact_atoms > rhs.contact_atoms;
+                  if (fabs(lhs.confidence - rhs.confidence) > 1.0e-9)
+                    return lhs.confidence > rhs.confidence;
+                  if (fabs(lhs.soft_penalty - rhs.soft_penalty) > 1.0e-9)
+                    return lhs.soft_penalty < rhs.soft_penalty;
+                  if (fabs(lhs.min_pair_d2 - rhs.min_pair_d2) > 1.0e-9)
+                    return lhs.min_pair_d2 > rhs.min_pair_d2;
+                  if (fabs(lhs.bbox_d2 - rhs.bbox_d2) > 1.0e-9)
+                    return lhs.bbox_d2 < rhs.bbox_d2;
+                  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-9)
+                    return lhs.shift_norm2 < rhs.shift_norm2;
+                  if (lhs.a != rhs.a)
+                    return lhs.a < rhs.a;
+                  return lhs.b < rhs.b;
+                });
+  });
+
+  try_seed("warm", [&](vector<PbctopoGraphEdge> &ranked_edges) {
+    if (warm_component_offsets == nullptr ||
+        warm_component_offsets->size() != components.size()) {
+      stable_sort(ranked_edges.begin(), ranked_edges.end(),
+                  [](const PbctopoGraphEdge &lhs, const PbctopoGraphEdge &rhs) {
+                    if (!lhs.valid)
+                      return false;
+                    if (!rhs.valid)
+                      return true;
+                    if (lhs.ultra_clash != rhs.ultra_clash)
+                      return rhs.ultra_clash;
+                    const bool lhs_zero = graph_edge_has_zero_shift(lhs);
+                    const bool rhs_zero = graph_edge_has_zero_shift(rhs);
+                    if (lhs_zero != rhs_zero)
+                      return !lhs_zero;
+                    return better_component_graph_edge(lhs, rhs);
+                  });
+      return;
+    }
+    stable_sort(ranked_edges.begin(), ranked_edges.end(),
+                [&](const PbctopoGraphEdge &lhs, const PbctopoGraphEdge &rhs) {
+                  if (!lhs.valid)
+                    return false;
+                  if (!rhs.valid)
+                    return true;
+                  if (lhs.ultra_clash != rhs.ultra_clash)
+                    return rhs.ultra_clash;
+                  const Int3 lhs_expected =
+                      (*warm_component_offsets)[lhs.b] - (*warm_component_offsets)[lhs.a];
+                  const Int3 rhs_expected =
+                      (*warm_component_offsets)[rhs.b] - (*warm_component_offsets)[rhs.a];
+                  const bool lhs_warm = graph_edge_matches_delta(lhs, lhs_expected);
+                  const bool rhs_warm = graph_edge_matches_delta(rhs, rhs_expected);
+                  if (lhs_warm != rhs_warm)
+                    return lhs_warm;
+                  const bool lhs_zero = graph_edge_has_zero_shift(lhs);
+                  const bool rhs_zero = graph_edge_has_zero_shift(rhs);
+                  if (lhs_zero != rhs_zero)
+                    return !lhs_zero;
+                  if (lhs.contact_atoms != rhs.contact_atoms)
+                    return lhs.contact_atoms > rhs.contact_atoms;
+                  if (fabs(lhs.confidence - rhs.confidence) > 1.0e-9)
+                    return lhs.confidence > rhs.confidence;
+                  if (fabs(lhs.soft_penalty - rhs.soft_penalty) > 1.0e-9)
+                    return lhs.soft_penalty < rhs.soft_penalty;
+                  if (fabs(lhs.min_pair_d2 - rhs.min_pair_d2) > 1.0e-9)
+                    return lhs.min_pair_d2 > rhs.min_pair_d2;
+                  if (fabs(lhs.bbox_d2 - rhs.bbox_d2) > 1.0e-9)
+                    return lhs.bbox_d2 < rhs.bbox_d2;
+                  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-9)
+                    return lhs.shift_norm2 < rhs.shift_norm2;
+                  if (lhs.a != rhs.a)
+                    return lhs.a < rhs.a;
+                  return lhs.b < rhs.b;
+                });
+  });
+
+  return results;
 }
 
 void remove_component_from_clash_grid(const vector<size_t> &component,
@@ -3799,6 +5013,223 @@ build_edge_scan_soa(const vector<PbctopoLocalEdge> &local_edges) {
     soa.break_cutoff_d2.push_back(edge.break_cutoff_d2);
   }
   return soa;
+}
+
+struct PbctopoEdgeScanScratch {
+  AlignedDoubleVector xs;
+  AlignedDoubleVector ys;
+  AlignedDoubleVector zs;
+
+  void resize(size_t point_count) {
+    xs.resize(point_count);
+    ys.resize(point_count);
+    zs.resize(point_count);
+  }
+};
+
+PbctopoEdgeScanScratch &pbctopo_edge_scan_scratch() {
+  thread_local PbctopoEdgeScanScratch scratch;
+  return scratch;
+}
+
+void sync_edge_scan_coords_soa(const vector<Vec3> &placed_points,
+                               PbctopoEdgeScanScratch &scratch) {
+  scratch.resize(placed_points.size());
+  for (size_t i = 0; i < placed_points.size(); ++i) {
+    scratch.xs[i] = placed_points[i].x;
+    scratch.ys[i] = placed_points[i].y;
+    scratch.zs[i] = placed_points[i].z;
+  }
+}
+
+bool update_cut_candidate_with_edge_distance(
+    PbctopoCutCandidate &candidate, double d2, double ref_d2, double inv_ref_d2,
+    double break_cutoff_d2, const PbctopoCutCandidate *edge_prune_threshold,
+    PbctopoRefineScorePhase phase) {
+  if (d2 > break_cutoff_d2)
+    ++candidate.broken_edges;
+  if (d2 > ref_d2)
+    candidate.edge_stretch += (d2 - ref_d2) * inv_ref_d2;
+  return edge_prune_threshold == nullptr ||
+         !edge_scan_cannot_beat_threshold(candidate, edge_prune_threshold,
+                                          phase);
+}
+
+#if TITAN_SIMD_X86 && TITAN_RUNTIME_TARGET_ATTRS
+TITAN_TARGET_AVX2
+bool accumulate_edge_scan_avx2(
+    PbctopoCutCandidate &candidate, const PbctopoEdgeScanSoA &edge_scan_soa,
+    const vector<Vec3> &placed_points,
+    const PbctopoStage1EdgeContext *edge_context,
+    const PbctopoCutCandidate *edge_prune_threshold,
+    PbctopoRefineScorePhase phase) {
+  if (placed_points.empty())
+    return true;
+
+  auto &scratch = pbctopo_edge_scan_scratch();
+  sync_edge_scan_coords_soa(placed_points, scratch);
+  const double *xs = scratch.xs.data();
+  const double *ys = scratch.ys.data();
+  const double *zs = scratch.zs.data();
+
+  const auto process_block = [&](const size_t *edge_indices,
+                                 size_t block_count) -> bool {
+    alignas(32) long long atom_a_lane[4]{};
+    alignas(32) long long atom_b_lane[4]{};
+    alignas(32) double ref_lane[4]{};
+    alignas(32) double inv_ref_lane[4]{};
+    alignas(32) double cutoff_lane[4]{};
+    for (size_t lane = 0; lane < block_count; ++lane) {
+      const size_t edge_idx = edge_indices[lane];
+      atom_a_lane[lane] = static_cast<long long>(edge_scan_soa.a[edge_idx]);
+      atom_b_lane[lane] = static_cast<long long>(edge_scan_soa.b[edge_idx]);
+      ref_lane[lane] = edge_scan_soa.ref_d2[edge_idx];
+      inv_ref_lane[lane] = edge_scan_soa.inv_ref_d2[edge_idx];
+      cutoff_lane[lane] = edge_scan_soa.break_cutoff_d2[edge_idx];
+    }
+
+    const __m256i gather_a = _mm256_set_epi64x(
+        atom_a_lane[3], atom_a_lane[2], atom_a_lane[1], atom_a_lane[0]);
+    const __m256i gather_b = _mm256_set_epi64x(
+        atom_b_lane[3], atom_b_lane[2], atom_b_lane[1], atom_b_lane[0]);
+    const __m256d ax = _mm256_i64gather_pd(xs, gather_a, 8);
+    const __m256d ay = _mm256_i64gather_pd(ys, gather_a, 8);
+    const __m256d az = _mm256_i64gather_pd(zs, gather_a, 8);
+    const __m256d bx = _mm256_i64gather_pd(xs, gather_b, 8);
+    const __m256d by = _mm256_i64gather_pd(ys, gather_b, 8);
+    const __m256d bz = _mm256_i64gather_pd(zs, gather_b, 8);
+    const __m256d dx = _mm256_sub_pd(ax, bx);
+    const __m256d dy = _mm256_sub_pd(ay, by);
+    const __m256d dz = _mm256_sub_pd(az, bz);
+    const __m256d d2 = _mm256_add_pd(
+        _mm256_add_pd(_mm256_mul_pd(dx, dx), _mm256_mul_pd(dy, dy)),
+        _mm256_mul_pd(dz, dz));
+    alignas(32) double d2_lane[4];
+    _mm256_store_pd(d2_lane, d2);
+
+    for (size_t lane = 0; lane < block_count; ++lane) {
+      if (!update_cut_candidate_with_edge_distance(
+              candidate, d2_lane[lane], ref_lane[lane], inv_ref_lane[lane],
+              cutoff_lane[lane], edge_prune_threshold, phase)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  if (edge_context != nullptr) {
+    size_t block[4]{};
+    size_t block_count = 0;
+    for (size_t edge_idx : edge_context->variable_edge_indices) {
+      if (edge_idx >= edge_scan_soa.a.size())
+        continue;
+      block[block_count++] = edge_idx;
+      if (block_count == 4) {
+        if (!process_block(block, block_count))
+          return false;
+        block_count = 0;
+      }
+    }
+    if (block_count != 0 && !process_block(block, block_count))
+      return false;
+    return true;
+  }
+
+  size_t edge_idx = 0;
+  size_t block[4]{};
+  while (edge_idx + 4 <= edge_scan_soa.a.size()) {
+    block[0] = edge_idx + 0;
+    block[1] = edge_idx + 1;
+    block[2] = edge_idx + 2;
+    block[3] = edge_idx + 3;
+    if (!process_block(block, 4))
+      return false;
+    edge_idx += 4;
+  }
+  for (; edge_idx < edge_scan_soa.a.size(); ++edge_idx) {
+    const size_t atom_a = edge_scan_soa.a[edge_idx];
+    const size_t atom_b = edge_scan_soa.b[edge_idx];
+    const Vec3 delta = placed_points[atom_a] - placed_points[atom_b];
+    const double d2 = norm2(delta);
+    if (!update_cut_candidate_with_edge_distance(
+            candidate, d2, edge_scan_soa.ref_d2[edge_idx],
+            edge_scan_soa.inv_ref_d2[edge_idx],
+            edge_scan_soa.break_cutoff_d2[edge_idx], edge_prune_threshold,
+            phase)) {
+      return false;
+    }
+  }
+  return true;
+}
+#endif
+
+bool accumulate_edge_scan(
+    PbctopoCutCandidate &candidate, const vector<PbctopoLocalEdge> &local_edges,
+    const vector<Vec3> &placed_points,
+    const PbctopoStage1EdgeContext *edge_context,
+    const PbctopoEdgeScanSoA *edge_scan_soa,
+    const PbctopoCutCandidate *edge_prune_threshold,
+    PbctopoRefineScorePhase phase) {
+  const bool use_soa =
+      edge_scan_soa != nullptr && edge_scan_soa->a.size() == local_edges.size() &&
+      edge_scan_soa->b.size() == local_edges.size() &&
+      edge_scan_soa->ref_d2.size() == local_edges.size() &&
+      edge_scan_soa->inv_ref_d2.size() == local_edges.size() &&
+      edge_scan_soa->break_cutoff_d2.size() == local_edges.size();
+
+#if TITAN_SIMD_X86 && TITAN_RUNTIME_TARGET_ATTRS
+  const bool simd_enabled = use_soa &&
+                            titan_simd_dispatch::runtime_has_avx2() &&
+                            local_edges.size() >= 8;
+  if (simd_enabled) {
+    return accumulate_edge_scan_avx2(candidate, *edge_scan_soa, placed_points,
+                                     edge_context, edge_prune_threshold,
+                                     phase);
+  }
+#endif
+
+  const auto accumulate_edge = [&](size_t edge_idx) {
+    size_t atom_a = 0;
+    size_t atom_b = 0;
+    double ref_d2 = 0.0;
+    double inv_ref_d2 = 0.0;
+    double break_cutoff_d2 = 0.0;
+    if (use_soa) {
+      atom_a = edge_scan_soa->a[edge_idx];
+      atom_b = edge_scan_soa->b[edge_idx];
+      ref_d2 = edge_scan_soa->ref_d2[edge_idx];
+      inv_ref_d2 = edge_scan_soa->inv_ref_d2[edge_idx];
+      break_cutoff_d2 = edge_scan_soa->break_cutoff_d2[edge_idx];
+    } else {
+      const auto &edge = local_edges[edge_idx];
+      atom_a = edge.a;
+      atom_b = edge.b;
+      ref_d2 = edge.ref_d2;
+      inv_ref_d2 = edge.inv_ref_d2;
+      break_cutoff_d2 = edge.break_cutoff_d2;
+    }
+    const Vec3 delta = placed_points[atom_a] - placed_points[atom_b];
+    const double d2 = norm2(delta);
+    return update_cut_candidate_with_edge_distance(
+        candidate, d2, ref_d2, inv_ref_d2, break_cutoff_d2,
+        edge_prune_threshold, phase);
+  };
+
+  if (edge_context != nullptr) {
+    for (size_t edge_idx : edge_context->variable_edge_indices) {
+      if (edge_idx >= local_edges.size())
+        continue;
+      if (!accumulate_edge(edge_idx))
+        return false;
+    }
+    return true;
+  }
+
+  for (size_t edge_idx = 0; edge_idx < local_edges.size(); ++edge_idx) {
+    if (!accumulate_edge(edge_idx))
+      return false;
+  }
+  return true;
 }
 
 int compare_candidate_prefix_before_edge_stretch(
@@ -3965,9 +5396,7 @@ PbctopoCutCandidate rescore_cut_candidate(
     const vector<Vec3> &placed_points, const PbctopoCutCandidate &source) {
   if (!source.valid)
     return source;
-  PointStats stats;
-  for (const auto &point : placed_points)
-    stats.add(point.x, point.y, point.z);
+  const PointStats stats = build_point_stats(placed_points);
   PbctopoCutCandidate rescored = score_cut_candidate(
       scoring_edges, placed_points, source.cut_x, source.cut_y, source.cut_z,
       source.gap_score, stats, source.shift_norm2);
@@ -4044,6 +5473,9 @@ component_candidate_to_cut_candidate(const PbctopoComponentCandidate &candidate)
   cut.principal_rg2_min = candidate.principal_rg2_min;
   cut.bbox_volume = candidate.bbox_volume;
   cut.rg2 = candidate.rg2;
+  cut.shape_kappa2 = candidate.shape_kappa2;
+  cut.shape_asphericity = candidate.shape_asphericity;
+  cut.shape_acylindricity = candidate.shape_acylindricity;
   cut.shift_norm2 = candidate.shift_norm2;
   cut.min_pair_d2 = candidate.min_pair_d2;
   cut.clash_atom_a = candidate.clash_atom_a;
@@ -4068,6 +5500,9 @@ PbctopoComponentCandidate build_component_candidate_seed(
   seed.principal_rg2_min = source.principal_rg2_min;
   seed.bbox_volume = source.bbox_volume;
   seed.rg2 = source.rg2;
+  seed.shape_kappa2 = source.shape_kappa2;
+  seed.shape_asphericity = source.shape_asphericity;
+  seed.shape_acylindricity = source.shape_acylindricity;
   seed.shift_norm2 = source.shift_norm2;
   seed.min_pair_d2 = source.min_pair_d2;
   seed.clash_atom_a = source.clash_atom_a;
@@ -4085,6 +5520,13 @@ PbctopoComponentCandidate build_component_candidate_seed(
         center * (1.0 / static_cast<double>(component.size())));
   }
   seed.component_rg2 = compute_rg2(component_centers);
+  const PointStats component_stats = build_point_stats(component_centers);
+  const auto component_principal_rg2 = compute_principal_rg2(component_stats);
+  const auto component_shape_metrics =
+      compute_gyration_shape_metrics(component_principal_rg2);
+  seed.component_kappa2 = component_shape_metrics.kappa2;
+  seed.component_asphericity = component_shape_metrics.asphericity;
+  seed.component_acylindricity = component_shape_metrics.acylindricity;
   seed.component_mst2 = compute_mst2(component_centers);
   seed.valid = true;
   return seed;
@@ -4323,6 +5765,12 @@ bool component_candidate_cannot_beat_incumbent_prefix(
     return true;
   if (principal_mid_cmp < 0)
     return false;
+  const int principal_min_cmp =
+      compare_principal_rg2(candidate.principal_rg2_min, incumbent->principal_rg2_min);
+  if (principal_min_cmp > 0)
+    return true;
+  if (principal_min_cmp < 0)
+    return false;
   if (stage == PbctopoComponentCandidatePrefixStage::Principal)
     return false;
 
@@ -4330,20 +5778,49 @@ bool component_candidate_cannot_beat_incumbent_prefix(
     return true;
   if (candidate.component_mst2 + 1.0e-6 < incumbent->component_mst2)
     return false;
-  if (candidate.component_rg2 > incumbent->component_rg2 + 1.0e-6)
+  const int component_kappa_cmp =
+      compare_shape_kappa(candidate.component_kappa2,
+                          incumbent->component_kappa2);
+  if (component_kappa_cmp > 0)
     return true;
-  if (candidate.component_rg2 + 1.0e-6 < incumbent->component_rg2)
+  if (component_kappa_cmp < 0)
+    return false;
+  const int component_asph_cmp =
+      compare_shape_moment(candidate.component_asphericity,
+                           incumbent->component_asphericity);
+  if (component_asph_cmp > 0)
+    return true;
+  if (component_asph_cmp < 0)
+    return false;
+  const int component_acyl_cmp =
+      compare_shape_moment(candidate.component_acylindricity,
+                           incumbent->component_acylindricity);
+  if (component_acyl_cmp > 0)
+    return true;
+  if (component_acyl_cmp < 0)
     return false;
   if (stage == PbctopoComponentCandidatePrefixStage::ComponentMetrics)
     return false;
 
-  if (candidate.rg2 > incumbent->rg2 + 1.0e-6)
+  const int shape_kappa_cmp =
+      compare_shape_kappa(candidate.shape_kappa2, incumbent->shape_kappa2);
+  if (shape_kappa_cmp > 0)
     return true;
-  if (candidate.rg2 + 1.0e-6 < incumbent->rg2)
+  if (shape_kappa_cmp < 0)
     return false;
-  if (candidate.bbox_volume > incumbent->bbox_volume + 1.0e-6)
+  const int shape_asph_cmp =
+      compare_shape_moment(candidate.shape_asphericity,
+                           incumbent->shape_asphericity);
+  if (shape_asph_cmp > 0)
     return true;
-  if (candidate.bbox_volume + 1.0e-6 < incumbent->bbox_volume)
+  if (shape_asph_cmp < 0)
+    return false;
+  const int shape_acyl_cmp =
+      compare_shape_moment(candidate.shape_acylindricity,
+                           incumbent->shape_acylindricity);
+  if (shape_acyl_cmp > 0)
+    return true;
+  if (shape_acyl_cmp < 0)
     return false;
   if (candidate.shift_norm2 > incumbent->shift_norm2 + 1.0e-6)
     return true;
@@ -4444,25 +5921,19 @@ PbctopoComponentCandidate score_component_assignment(
   }
 
   stage_started = clock::now();
-  PointStats stats;
-  for (const auto &point : placed_points)
-    stats.add(point.x, point.y, point.z);
+  const PointStats stats = build_point_stats(placed_points);
   if (stats.count == 0)
     return finish(candidate);
   const array<double, 3> principal_rg2 = compute_principal_rg2(stats);
   candidate.principal_rg2_max = principal_rg2[0];
   candidate.principal_rg2_mid = principal_rg2[1];
   candidate.principal_rg2_min = principal_rg2[2];
-  const double inv_count = 1.0 / static_cast<double>(stats.count);
-  const double mean_x = stats.sum_x * inv_count;
-  const double mean_y = stats.sum_y * inv_count;
-  const double mean_z = stats.sum_z * inv_count;
-  candidate.rg2 = max(
-      0.0, stats.sum_sq * inv_count -
-               (mean_x * mean_x + mean_y * mean_y + mean_z * mean_z));
-  candidate.bbox_volume =
-      max(0.0, stats.max_x - stats.min_x) * max(0.0, stats.max_y - stats.min_y) *
-      max(0.0, stats.max_z - stats.min_z);
+  const auto shape_metrics = compute_gyration_shape_metrics(principal_rg2);
+  candidate.shape_kappa2 = shape_metrics.kappa2;
+  candidate.shape_asphericity = shape_metrics.asphericity;
+  candidate.shape_acylindricity = shape_metrics.acylindricity;
+  candidate.rg2 = compute_rg2_from_stats(stats);
+  candidate.bbox_volume = compute_bbox_volume(stats);
   if (timing != nullptr) {
     timing->component_score_stats_principal_s +=
         chrono::duration<double>(clock::now() - stage_started).count();
@@ -4487,6 +5958,13 @@ PbctopoComponentCandidate score_component_assignment(
         center * (1.0 / static_cast<double>(component.size())));
   }
   candidate.component_rg2 = compute_rg2(component_centers);
+  const PointStats component_stats = build_point_stats(component_centers);
+  const auto component_principal_rg2 = compute_principal_rg2(component_stats);
+  const auto component_shape_metrics =
+      compute_gyration_shape_metrics(component_principal_rg2);
+  candidate.component_kappa2 = component_shape_metrics.kappa2;
+  candidate.component_asphericity = component_shape_metrics.asphericity;
+  candidate.component_acylindricity = component_shape_metrics.acylindricity;
   candidate.component_mst2 = compute_mst2(component_centers);
   if (timing != nullptr) {
     timing->component_score_component_metrics_s +=
@@ -4515,7 +5993,8 @@ PbctopoComponentCandidate score_component_assignment(
         ", anchor_mst2=" + to_string(candidate.anchor_mst2) +
         ", princ_max=" + to_string(candidate.principal_rg2_max) +
         ", comp_mst2=" + to_string(candidate.component_mst2) +
-        ", rg2=" + to_string(candidate.rg2));
+        ", kappa2=" + to_string(candidate.shape_kappa2) +
+        ", asph=" + to_string(candidate.shape_asphericity));
   }
   return finish(candidate);
 }
@@ -4558,14 +6037,36 @@ bool better_component_candidate(const PbctopoComponentCandidate &lhs,
       compare_principal_rg2(lhs.principal_rg2_mid, rhs.principal_rg2_mid);
   if (principal_mid_cmp != 0)
     return principal_mid_cmp < 0;
+  const int principal_min_cmp =
+      compare_principal_rg2(lhs.principal_rg2_min, rhs.principal_rg2_min);
+  if (principal_min_cmp != 0)
+    return principal_min_cmp < 0;
   if (fabs(lhs.component_mst2 - rhs.component_mst2) > 1.0e-6)
     return lhs.component_mst2 < rhs.component_mst2;
-  if (fabs(lhs.component_rg2 - rhs.component_rg2) > 1.0e-6)
-    return lhs.component_rg2 < rhs.component_rg2;
-  if (fabs(lhs.rg2 - rhs.rg2) > 1.0e-6)
-    return lhs.rg2 < rhs.rg2;
-  if (fabs(lhs.bbox_volume - rhs.bbox_volume) > 1.0e-6)
-    return lhs.bbox_volume < rhs.bbox_volume;
+  const int component_kappa_cmp =
+      compare_shape_kappa(lhs.component_kappa2, rhs.component_kappa2);
+  if (component_kappa_cmp != 0)
+    return component_kappa_cmp < 0;
+  const int component_asph_cmp =
+      compare_shape_moment(lhs.component_asphericity, rhs.component_asphericity);
+  if (component_asph_cmp != 0)
+    return component_asph_cmp < 0;
+  const int component_acyl_cmp = compare_shape_moment(
+      lhs.component_acylindricity, rhs.component_acylindricity);
+  if (component_acyl_cmp != 0)
+    return component_acyl_cmp < 0;
+  const int shape_kappa_cmp =
+      compare_shape_kappa(lhs.shape_kappa2, rhs.shape_kappa2);
+  if (shape_kappa_cmp != 0)
+    return shape_kappa_cmp < 0;
+  const int shape_asph_cmp =
+      compare_shape_moment(lhs.shape_asphericity, rhs.shape_asphericity);
+  if (shape_asph_cmp != 0)
+    return shape_asph_cmp < 0;
+  const int shape_acyl_cmp =
+      compare_shape_moment(lhs.shape_acylindricity, rhs.shape_acylindricity);
+  if (shape_acyl_cmp != 0)
+    return shape_acyl_cmp < 0;
   if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-6)
     return lhs.shift_norm2 < rhs.shift_norm2;
   if (fabs(lhs.min_pair_d2 - rhs.min_pair_d2) > 1.0e-9)
@@ -4582,6 +6083,17 @@ struct PbctopoComponentSearchShiftOption {
   size_t clash_atom_a = numeric_limits<size_t>::max();
   size_t clash_atom_b = numeric_limits<size_t>::max();
   bool warm_priority = false;
+};
+
+struct PbctopoBeamState {
+  vector<size_t> selected_shift;
+  vector<uint32_t> allowed_masks;
+  double shift_norm2 = 0.0;
+  double min_pair_d2 = numeric_limits<double>::infinity();
+  size_t clash_atom_a = numeric_limits<size_t>::max();
+  size_t clash_atom_b = numeric_limits<size_t>::max();
+  size_t future_remaining_shifts = numeric_limits<size_t>::max();
+  size_t warm_hits = 0;
 };
 
 vector<Int3> normalize_search_warm_offsets(
@@ -4688,22 +6200,238 @@ vector<PbctopoComponentSearchShiftOption> build_component_search_shift_order(
     ordered.push_back(option);
   }
 
-  stable_sort(ordered.begin(), ordered.end(),
-              [](const PbctopoComponentSearchShiftOption &lhs,
-                 const PbctopoComponentSearchShiftOption &rhs) {
-                if (lhs.warm_priority != rhs.warm_priority)
-                  return lhs.warm_priority;
-                if (lhs.future_remaining_shifts != rhs.future_remaining_shifts)
-                  return lhs.future_remaining_shifts < rhs.future_remaining_shifts;
-                if (fabs(lhs.ordering_min_pair_d2 - rhs.ordering_min_pair_d2) > 1.0e-9)
-                  return lhs.ordering_min_pair_d2 > rhs.ordering_min_pair_d2;
-                if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-9)
-                  return lhs.shift_norm2 < rhs.shift_norm2;
-                return lhs.shift_idx < rhs.shift_idx;
-              });
+  sort(ordered.begin(), ordered.end(),
+       [](const PbctopoComponentSearchShiftOption &lhs,
+          const PbctopoComponentSearchShiftOption &rhs) {
+         if (lhs.warm_priority != rhs.warm_priority)
+           return lhs.warm_priority;
+         if (lhs.future_remaining_shifts != rhs.future_remaining_shifts)
+           return lhs.future_remaining_shifts < rhs.future_remaining_shifts;
+         if (fabs(lhs.ordering_min_pair_d2 - rhs.ordering_min_pair_d2) > 1.0e-9)
+           return lhs.ordering_min_pair_d2 > rhs.ordering_min_pair_d2;
+         if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-9)
+           return lhs.shift_norm2 < rhs.shift_norm2;
+         return lhs.shift_idx < rhs.shift_idx;
+       });
   if (!ordered.empty() && ordered.front().warm_priority && timing != nullptr)
     ++timing->component_search_shift_warm_hits;
   return ordered;
+}
+
+bool better_component_beam_state(const PbctopoBeamState &lhs,
+                                 const PbctopoBeamState &rhs) {
+  const bool lhs_has_pair = isfinite(lhs.min_pair_d2);
+  const bool rhs_has_pair = isfinite(rhs.min_pair_d2);
+  if (lhs_has_pair != rhs_has_pair)
+    return lhs_has_pair;
+  if (lhs_has_pair && fabs(lhs.min_pair_d2 - rhs.min_pair_d2) > 1.0e-9)
+    return lhs.min_pair_d2 > rhs.min_pair_d2;
+  if (lhs.warm_hits != rhs.warm_hits)
+    return lhs.warm_hits > rhs.warm_hits;
+  if (lhs.future_remaining_shifts != rhs.future_remaining_shifts)
+    return lhs.future_remaining_shifts < rhs.future_remaining_shifts;
+  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-9)
+    return lhs.shift_norm2 < rhs.shift_norm2;
+  return lhs.selected_shift < rhs.selected_shift;
+}
+
+bool build_component_points_from_selected_shifts(
+    const vector<PbctopoAtom> &atoms, const vector<vector<size_t>> &components,
+    const vector<vector<PbctopoShiftedComponent>> &shifted_components,
+    const vector<size_t> &selected_shift, vector<Vec3> &placed_points,
+    double &shift_norm2) {
+  if (components.size() != selected_shift.size())
+    return false;
+  placed_points.resize(atoms.size());
+  shift_norm2 = 0.0;
+  for (size_t comp_idx = 0; comp_idx < components.size(); ++comp_idx) {
+    const size_t shift_idx = selected_shift[comp_idx];
+    if (shift_idx >= shifted_components[comp_idx].size())
+      return false;
+    const auto &component = components[comp_idx];
+    const auto &shifted = shifted_components[comp_idx][shift_idx];
+    if (shifted.points.size() != component.size())
+      return false;
+    shift_norm2 += shifted.weighted_shift_norm2;
+    for (size_t local_idx = 0; local_idx < component.size(); ++local_idx)
+      placed_points[component[local_idx]] = shifted.points[local_idx];
+  }
+  return true;
+}
+
+PbctopoComponentCandidate search_component_shift_candidate_beam(
+    const vector<PbctopoAtom> &atoms, box Box,
+    const vector<vector<size_t>> &components, const vector<PbctopoShift> &shifts,
+    const vector<PbctopoContinuityPair> &continuity_pairs,
+    const vector<size_t> &anchor_indices,
+    const PbctopoRuntimeCutoffs &cutoffs, vector<Vec3> &best_points_out,
+    const vector<Int3> *warm_component_offsets = nullptr,
+    const PbctopoCutCandidate *incumbent_cut = nullptr,
+    const vector<Vec3> *incumbent_points = nullptr,
+    PbctopoTimingStats *timing = nullptr) {
+  (void)Box;
+  PbctopoComponentCandidate best;
+  if (components.empty())
+    return best;
+
+  vector<Vec3> placed_points(atoms.size());
+  best_points_out.clear();
+  best_points_out.reserve(atoms.size());
+
+  const auto shifted_components =
+      precompute_shifted_components(atoms, components, shifts,
+                                    cutoffs.clash_cutoff,
+                                    cutoffs.pair_contact_cutoff);
+
+  size_t identity_shift_pos = 0;
+  for (size_t shift_idx = 0; shift_idx < shifts.size(); ++shift_idx) {
+    if (shifts[shift_idx].ix == 0 && shifts[shift_idx].iy == 0 &&
+        shifts[shift_idx].iz == 0) {
+      identity_shift_pos = shift_idx;
+      break;
+    }
+  }
+
+  if (incumbent_cut != nullptr && incumbent_cut->valid &&
+      !incumbent_cut->ultra_clash && incumbent_points != nullptr &&
+      incumbent_points->size() == atoms.size()) {
+    best = build_component_candidate_seed(*incumbent_cut, components, *incumbent_points);
+    if (timing != nullptr)
+      ++timing->component_search_seed_graph;
+  } else if (timing != nullptr) {
+    ++timing->component_search_seed_none;
+  }
+
+  const PbctopoComponentPairShiftTable pair_table =
+      build_component_pair_shift_table(components, shifted_components,
+                                       cutoffs.clash_cutoff, timing);
+  const vector<size_t> atom_component_index =
+      build_atom_component_index(atoms.size(), components);
+  const vector<size_t> search_order = build_component_search_order(
+      components, anchor_indices, atom_component_index, pair_table, identity_shift_pos);
+  const vector<Int3> normalized_warm_offsets =
+      (warm_component_offsets != nullptr &&
+       warm_component_offsets->size() == components.size())
+          ? normalize_search_warm_offsets(*warm_component_offsets, components)
+          : vector<Int3>{};
+  const vector<Int3> *normalized_warm_offsets_ptr =
+      normalized_warm_offsets.empty() ? nullptr : &normalized_warm_offsets;
+
+  const uint32_t full_shift_mask = component_search_full_shift_mask(shifts.size());
+  vector<uint32_t> initial_allowed_masks(components.size(), full_shift_mask);
+  vector<size_t> initial_selected_shift(components.size(), shifts.size());
+  if (!search_order.empty() && identity_shift_pos < 32) {
+    const size_t root_comp_idx = search_order.front();
+    initial_allowed_masks[root_comp_idx] = (1u << identity_shift_pos);
+    initial_selected_shift[root_comp_idx] = identity_shift_pos;
+    for (size_t depth = 1; depth < search_order.size(); ++depth) {
+      const size_t future_comp_idx = search_order[depth];
+      initial_allowed_masks[future_comp_idx] &=
+          pair_table.compat_mask(root_comp_idx, identity_shift_pos, future_comp_idx);
+      if (initial_allowed_masks[future_comp_idx] == 0u && timing != nullptr) {
+        ++timing->component_pair_table_prunes;
+        ++timing->component_search_zero_future_mask_prunes;
+      }
+    }
+  }
+
+  vector<PbctopoBeamState> beam_states;
+  PbctopoBeamState root_state;
+  root_state.selected_shift = initial_selected_shift;
+  root_state.allowed_masks = initial_allowed_masks;
+  root_state.future_remaining_shifts = 0;
+  beam_states.push_back(std::move(root_state));
+  if (timing != nullptr)
+    ++timing->component_search_depth_visits[0];
+
+  for (size_t depth = search_order.empty() ? 0 : 1; depth < search_order.size();
+       ++depth) {
+    vector<PbctopoBeamState> next_states;
+    next_states.reserve(beam_states.size() * min<size_t>(kPbctopoBeamWidth,
+                                                         shifts.size()));
+    const size_t actual_comp_idx = search_order[depth];
+    for (const auto &state : beam_states) {
+      if (timing != nullptr &&
+          depth < timing->component_search_depth_visits.size()) {
+        ++timing->component_search_depth_visits[depth];
+      }
+      const vector<PbctopoComponentSearchShiftOption> ordered_shifts =
+          build_component_search_shift_order(
+              shifts, actual_comp_idx, depth, search_order, state.selected_shift,
+              state.allowed_masks, pair_table, state.min_pair_d2, state.clash_atom_a,
+              state.clash_atom_b, normalized_warm_offsets_ptr, timing);
+      for (const auto &option : ordered_shifts) {
+        if (timing != nullptr) {
+          ++timing->component_shift_trials;
+          ++timing->component_large_mode_beam_expanded;
+        }
+        PbctopoBeamState next_state = state;
+        next_state.selected_shift[actual_comp_idx] = option.shift_idx;
+        if (actual_comp_idx < next_state.allowed_masks.size() && option.shift_idx < 32)
+          next_state.allowed_masks[actual_comp_idx] = (1u << option.shift_idx);
+        for (size_t future_depth = depth + 1; future_depth < search_order.size();
+             ++future_depth) {
+          const size_t future_comp_idx = search_order[future_depth];
+          next_state.allowed_masks[future_comp_idx] &=
+              pair_table.compat_mask(actual_comp_idx, option.shift_idx, future_comp_idx);
+        }
+        next_state.shift_norm2 +=
+            shifted_components[actual_comp_idx][option.shift_idx].weighted_shift_norm2;
+        next_state.min_pair_d2 = option.next_min_pair_d2;
+        next_state.clash_atom_a = option.clash_atom_a;
+        next_state.clash_atom_b = option.clash_atom_b;
+        next_state.future_remaining_shifts = option.future_remaining_shifts;
+        next_state.warm_hits += option.warm_priority ? 1u : 0u;
+        next_states.push_back(std::move(next_state));
+      }
+    }
+    if (next_states.empty())
+      return best;
+    if (next_states.size() > kPbctopoBeamWidth) {
+      partial_sort(next_states.begin(),
+                   next_states.begin() + static_cast<ptrdiff_t>(kPbctopoBeamWidth),
+                   next_states.end(), better_component_beam_state);
+      next_states.resize(kPbctopoBeamWidth);
+    } else {
+      sort(next_states.begin(), next_states.end(), better_component_beam_state);
+    }
+    if (timing != nullptr)
+      timing->component_large_mode_beam_kept += next_states.size();
+    beam_states = std::move(next_states);
+  }
+
+  if (timing != nullptr)
+    timing->component_large_mode_beam_complete_assignments += beam_states.size();
+  const size_t exact_rescore_count =
+      min(kPbctopoBeamFinalRescore, beam_states.size());
+  if (beam_states.size() > exact_rescore_count) {
+    partial_sort(beam_states.begin(),
+                 beam_states.begin() + static_cast<ptrdiff_t>(exact_rescore_count),
+                 beam_states.end(), better_component_beam_state);
+  } else {
+    sort(beam_states.begin(), beam_states.end(), better_component_beam_state);
+  }
+  if (timing != nullptr)
+    timing->component_large_mode_beam_final_rescored += exact_rescore_count;
+  for (size_t state_idx = 0; state_idx < exact_rescore_count; ++state_idx) {
+    double candidate_shift_norm2 = 0.0;
+    if (!build_component_points_from_selected_shifts(
+            atoms, components, shifted_components, beam_states[state_idx].selected_shift,
+            placed_points, candidate_shift_norm2)) {
+      continue;
+    }
+    PbctopoComponentCandidate candidate = score_component_assignment(
+        atoms, placed_points, components, beam_states[state_idx].min_pair_d2,
+        beam_states[state_idx].clash_atom_a, beam_states[state_idx].clash_atom_b,
+        continuity_pairs, anchor_indices, cutoffs.continuity_cutoff,
+        candidate_shift_norm2, best.valid ? &best : nullptr, timing);
+    if (better_component_candidate(candidate, best)) {
+      best = candidate;
+      best_points_out = placed_points;
+    }
+  }
+
+  return best;
 }
 
 PbctopoComponentCandidate search_component_shift_candidate(
@@ -4716,6 +6444,7 @@ PbctopoComponentCandidate search_component_shift_candidate(
     const PbctopoCutCandidate *incumbent_cut = nullptr,
     const vector<Vec3> *incumbent_points = nullptr,
     PbctopoTimingStats *timing = nullptr) {
+  (void)Box;
   PbctopoComponentCandidate best;
   if (components.empty())
     return best;
@@ -4786,10 +6515,10 @@ PbctopoComponentCandidate search_component_shift_candidate(
     }
   }
 
-  function<void(size_t, double, double, size_t, size_t, const vector<uint32_t> &)> dfs =
+  function<void(size_t, double, double, size_t, size_t, vector<uint32_t> &)> dfs =
       [&](size_t depth, double shift_norm2, double min_pair_d2,
           size_t clash_atom_a, size_t clash_atom_b,
-          const vector<uint32_t> &allowed_masks) {
+          vector<uint32_t> &allowed_masks) {
         if (timing != nullptr &&
             depth < timing->component_search_depth_visits.size()) {
           ++timing->component_search_depth_visits[depth];
@@ -4823,18 +6552,32 @@ PbctopoComponentCandidate search_component_shift_candidate(
             placed_points[component[local_idx]] = shifted.points[local_idx];
           }
           selected_shift[actual_comp_idx] = shift_idx;
-          vector<uint32_t> next_allowed_masks = allowed_masks;
-          if (actual_comp_idx < next_allowed_masks.size() && shift_idx < 32)
-            next_allowed_masks[actual_comp_idx] = (1u << shift_idx);
+          vector<pair<size_t, uint32_t>> allowed_mask_restore;
+          allowed_mask_restore.reserve(search_order.size() - depth);
+          if (actual_comp_idx < allowed_masks.size() && shift_idx < 32) {
+            allowed_mask_restore.push_back(
+                {actual_comp_idx, allowed_masks[actual_comp_idx]});
+            allowed_masks[actual_comp_idx] = (1u << shift_idx);
+          }
           for (size_t future_depth = depth + 1; future_depth < search_order.size();
                ++future_depth) {
             const size_t future_comp_idx = search_order[future_depth];
-            next_allowed_masks[future_comp_idx] &=
+            const uint32_t previous_mask = allowed_masks[future_comp_idx];
+            const uint32_t updated_mask =
+                previous_mask &
                 pair_table.compat_mask(actual_comp_idx, shift_idx, future_comp_idx);
+            if (updated_mask != previous_mask) {
+              allowed_mask_restore.push_back({future_comp_idx, previous_mask});
+              allowed_masks[future_comp_idx] = updated_mask;
+            }
           }
           dfs(depth + 1, shift_norm2 + shifted.weighted_shift_norm2,
               option.next_min_pair_d2, option.clash_atom_a,
-              option.clash_atom_b, next_allowed_masks);
+              option.clash_atom_b, allowed_masks);
+          for (auto restore_it = allowed_mask_restore.rbegin();
+               restore_it != allowed_mask_restore.rend(); ++restore_it) {
+            allowed_masks[restore_it->first] = restore_it->second;
+          }
           selected_shift[actual_comp_idx] = shifts.size();
         }
       };
@@ -4843,6 +6586,122 @@ PbctopoComponentCandidate search_component_shift_candidate(
       numeric_limits<size_t>::max(), numeric_limits<size_t>::max(),
       initial_allowed_masks);
   return best;
+}
+
+bool solve_large_component_merge_mode(
+    const vector<PbctopoAtom> &atoms, box Box,
+    const vector<vector<size_t>> &raw_components,
+    const PbctopoMergedComponentPlan &merge_plan,
+    const vector<PbctopoShift> &shifts,
+    const vector<PbctopoLocalEdge> &local_edges,
+    const unordered_set<uint64_t> &edge_set, vector<Vec3> &placed_points,
+    const vector<PbctopoContinuityPair> &continuity_pairs,
+    const vector<size_t> &anchor_indices,
+    const PbctopoRuntimeCutoffs &cutoffs, PbctopoCutCandidate &best_cut,
+    double &shift_norm2, PbctopoTimingStats *timing,
+    PbctopoAnchorBackend anchor_backend,
+    const vector<Int3> *warm_component_offsets,
+    PbctopoWarmState *warm_state,
+    const PbctopoCutCandidate *warm_reference_candidate,
+    bool allow_exact_search_on_merged,
+    vector<Int3> *best_raw_offsets_out = nullptr) {
+  best_cut = {};
+  shift_norm2 = 0.0;
+  placed_points.clear();
+  if (merge_plan.merged_components.empty())
+    return false;
+
+  vector<Int3> merged_warm_offsets;
+  const vector<Int3> *merged_warm_offsets_ptr =
+      (warm_component_offsets != nullptr &&
+       derive_merged_warm_offsets(*warm_component_offsets, merge_plan,
+                                  merged_warm_offsets))
+          ? &merged_warm_offsets
+          : nullptr;
+
+  vector<Vec3> best_points_local;
+  vector<Int3> best_raw_offsets;
+  auto consider_raw_offsets = [&](const vector<Int3> &raw_offsets) {
+    vector<Int3> refine_offsets = raw_offsets;
+    vector<Vec3> refine_points;
+    PbctopoCutCandidate candidate = improve_component_offsets_locally(
+        atoms, raw_components, Box, shifts, local_edges, edge_set,
+        continuity_pairs, anchor_indices, refine_offsets, cutoffs.clash_cutoff,
+        cutoffs.continuity_cutoff, refine_points, anchor_backend, timing,
+        warm_state, warm_reference_candidate);
+    if (candidate.valid && !candidate.ultra_clash &&
+        refine_points.size() == atoms.size() &&
+        (!best_cut.valid || better_cut_candidate(candidate, best_cut))) {
+      best_cut = candidate;
+      best_points_local = refine_points;
+      best_raw_offsets = refine_offsets;
+    }
+  };
+
+  const vector<PbctopoGraphSeedSolveResult> graph_seed_results =
+      build_large_component_graph_seed_candidates(
+          atoms, Box, merge_plan.merged_components, shifts, continuity_pairs,
+          anchor_indices, cutoffs, merged_warm_offsets_ptr, timing);
+  if (timing != nullptr)
+    timing->component_large_mode_graph_seed_count += graph_seed_results.size();
+
+  const PbctopoGraphSeedSolveResult *selected_seed = nullptr;
+  for (const auto &seed_result : graph_seed_results) {
+    if (!seed_result.valid)
+      continue;
+    if (selected_seed == nullptr ||
+        graph_seed_quick_score_better(seed_result.quick_score,
+                                      selected_seed->quick_score)) {
+      selected_seed = &seed_result;
+    }
+  }
+  if (selected_seed == nullptr && !graph_seed_results.empty())
+    selected_seed = &graph_seed_results.front();
+
+  if (selected_seed != nullptr &&
+      selected_seed->offsets.size() == merge_plan.merged_components.size()) {
+    if (timing != nullptr) {
+      ++timing->component_large_mode_graph_seed_refined;
+      if (string(selected_seed->seed_name) != "baseline")
+        ++timing->component_large_mode_graph_seed_nonbaseline_win;
+    }
+    consider_raw_offsets(expand_merged_offsets_to_raw_components(
+        selected_seed->offsets, raw_components, merge_plan));
+  }
+
+  if (allow_exact_search_on_merged) {
+    vector<Vec3> merged_search_points;
+    const PbctopoCutCandidate *search_incumbent =
+        (best_cut.valid && !best_cut.ultra_clash) ? &best_cut : warm_reference_candidate;
+    const vector<Vec3> *search_incumbent_points =
+        (best_cut.valid && !best_cut.ultra_clash &&
+         best_points_local.size() == atoms.size())
+            ? &best_points_local
+            : nullptr;
+    if (timing != nullptr)
+      ++timing->component_search_frames;
+    PbctopoComponentCandidate merged_candidate = search_component_shift_candidate(
+        atoms, Box, merge_plan.merged_components, shifts, continuity_pairs,
+        anchor_indices, cutoffs, merged_search_points, merged_warm_offsets_ptr,
+        search_incumbent, search_incumbent_points, timing);
+    if (merged_candidate.valid && !merged_candidate.ultra_clash &&
+        merged_search_points.size() == atoms.size()) {
+      const vector<Int3> merged_search_offsets = extract_component_offsets_from_points(
+          atoms, merge_plan.merged_components, Box, merged_search_points);
+      if (merged_search_offsets.size() == merge_plan.merged_components.size()) {
+        consider_raw_offsets(expand_merged_offsets_to_raw_components(
+            merged_search_offsets, raw_components, merge_plan));
+      }
+    }
+  }
+
+  if (!best_cut.valid || best_points_local.size() != atoms.size())
+    return false;
+  placed_points = best_points_local;
+  shift_norm2 = best_cut.shift_norm2;
+  if (best_raw_offsets_out != nullptr)
+    *best_raw_offsets_out = best_raw_offsets;
+  return true;
 }
 
 double clamp_virtual_box_center(double center) {
@@ -5076,6 +6935,143 @@ vector<double> build_projection_density_grid(const vector<PbctopoAtom> &atoms,
   return scores;
 }
 
+double projection_grid_center(size_t mesh_bins, size_t idx) {
+  if (mesh_bins <= 1)
+    return 1.5;
+  const double step = 2.0 / static_cast<double>(mesh_bins - 1);
+  return 0.5 + step * static_cast<double>(idx);
+}
+
+bool projection_density_is_local_maximum(const vector<double> &scores,
+                                         size_t mesh_bins, size_t ix,
+                                         size_t iy) {
+  const double score = scores[ix * mesh_bins + iy];
+  if (!(score > 0.0))
+    return false;
+
+  for (int dx = -1; dx <= 1; ++dx) {
+    for (int dy = -1; dy <= 1; ++dy) {
+      if (dx == 0 && dy == 0)
+        continue;
+      const long long nx_ll = static_cast<long long>(ix) + dx;
+      const long long ny_ll = static_cast<long long>(iy) + dy;
+      if (nx_ll < 0 || ny_ll < 0)
+        continue;
+      const size_t nx = static_cast<size_t>(nx_ll);
+      const size_t ny = static_cast<size_t>(ny_ll);
+      if (nx >= mesh_bins || ny >= mesh_bins)
+        continue;
+      const double neighbor = scores[nx * mesh_bins + ny];
+      if (neighbor > score + 1.0e-12)
+        return false;
+      if (fabs(neighbor - score) <= 1.0e-12 &&
+          (nx < ix || (nx == ix && ny < iy))) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool projection_seed2d_better(const PbctopoSeed2D &lhs,
+                              const PbctopoSeed2D &rhs) {
+  if (fabs(lhs.score - rhs.score) > 1.0e-12)
+    return lhs.score > rhs.score;
+  if (lhs.ix != rhs.ix)
+    return lhs.ix < rhs.ix;
+  return lhs.iy < rhs.iy;
+}
+
+void collect_projection_plane_hotspots(const vector<double> &scores,
+                                       size_t mesh_bins, size_t top_k,
+                                       vector<PbctopoSeed2D> &hotspots) {
+  hotspots.clear();
+  if (mesh_bins == 0 || top_k == 0 || scores.size() != mesh_bins * mesh_bins)
+    return;
+
+  vector<PbctopoSeed2D> local_maxima;
+  vector<PbctopoSeed2D> ranked_cells;
+  local_maxima.reserve(mesh_bins * mesh_bins / 4 + 1);
+  ranked_cells.reserve(mesh_bins * mesh_bins);
+
+  for (size_t ix = 0; ix < mesh_bins; ++ix) {
+    const double cx = projection_grid_center(mesh_bins, ix);
+    for (size_t iy = 0; iy < mesh_bins; ++iy) {
+      const double score = scores[ix * mesh_bins + iy];
+      if (!(score > 0.0))
+        continue;
+      PbctopoSeed2D seed{cx, projection_grid_center(mesh_bins, iy), score, ix,
+                         iy};
+      ranked_cells.push_back(seed);
+      if (projection_density_is_local_maximum(scores, mesh_bins, ix, iy))
+        local_maxima.push_back(seed);
+    }
+  }
+
+  sort(local_maxima.begin(), local_maxima.end(), projection_seed2d_better);
+  sort(ranked_cells.begin(), ranked_cells.end(), projection_seed2d_better);
+
+  auto append_from = [&](const vector<PbctopoSeed2D> &source,
+                         long long min_bin_gap) {
+    for (const auto &seed : source) {
+      if (hotspots.size() >= top_k)
+        break;
+      bool too_close = false;
+      for (const auto &existing : hotspots) {
+        const long long dx =
+            llabs(static_cast<long long>(existing.ix) -
+                  static_cast<long long>(seed.ix));
+        const long long dy =
+            llabs(static_cast<long long>(existing.iy) -
+                  static_cast<long long>(seed.iy));
+        if (max(dx, dy) <= min_bin_gap) {
+          too_close = true;
+          break;
+        }
+      }
+      if (!too_close)
+        hotspots.push_back(seed);
+    }
+  };
+
+  const long long nms_bin_gap = (mesh_bins >= 10) ? 1ll : 0ll;
+  append_from(local_maxima, nms_bin_gap);
+  if (hotspots.size() < min(top_k, static_cast<size_t>(4)))
+    append_from(ranked_cells, nms_bin_gap);
+  if (hotspots.size() < top_k)
+    append_from(ranked_cells, 0);
+}
+
+double projection_grid_score(const vector<double> &scores, size_t mesh_bins,
+                             size_t ia, size_t ib) {
+  if (ia >= mesh_bins || ib >= mesh_bins || scores.size() != mesh_bins * mesh_bins)
+    return 0.0;
+  return scores[ia * mesh_bins + ib];
+}
+
+void append_dense_projection_volume_seeds(const vector<double> &xy_scores,
+                                          const vector<double> &xz_scores,
+                                          const vector<double> &yz_scores,
+                                          size_t mesh_bins, size_t top_k,
+                                          vector<PbctopoSeed3D> &seeds) {
+  for (size_t ix = 0; ix < mesh_bins; ++ix) {
+    const double cx = projection_grid_center(mesh_bins, ix);
+    for (size_t iy = 0; iy < mesh_bins; ++iy) {
+      const double cy = projection_grid_center(mesh_bins, iy);
+      const double xy_score = projection_grid_score(xy_scores, mesh_bins, ix, iy);
+      for (size_t iz = 0; iz < mesh_bins; ++iz) {
+        const double score =
+            xy_score + projection_grid_score(xz_scores, mesh_bins, ix, iz) +
+            projection_grid_score(yz_scores, mesh_bins, iy, iz);
+        push_unique_xyz_seed(
+            seeds,
+            {cx, cy, projection_grid_center(mesh_bins, iz), score, ix, iy, iz},
+            top_k);
+      }
+    }
+  }
+}
+
 void collect_projection_volume_seeds(const vector<PbctopoAtom> &atoms,
                                      size_t mesh_bins, size_t top_k,
                                      double radius,
@@ -5091,24 +7087,82 @@ void collect_projection_volume_seeds(const vector<PbctopoAtom> &atoms,
   const auto yz_scores =
       build_projection_density_grid(atoms, mesh_bins, radius, 'y', 'z');
 
-  const double span = 2.0;
-  const double step =
-      (mesh_bins == 1) ? 0.0 : span / static_cast<double>(mesh_bins - 1);
+  vector<PbctopoSeed2D> xy_hotspots;
+  vector<PbctopoSeed2D> xz_hotspots;
+  vector<PbctopoSeed2D> yz_hotspots;
+  const size_t plane_top_k =
+      min(mesh_bins * mesh_bins, max<size_t>(top_k * 2, static_cast<size_t>(12)));
+  collect_projection_plane_hotspots(xy_scores, mesh_bins, plane_top_k,
+                                    xy_hotspots);
+  collect_projection_plane_hotspots(xz_scores, mesh_bins, plane_top_k,
+                                    xz_hotspots);
+  collect_projection_plane_hotspots(yz_scores, mesh_bins, plane_top_k,
+                                    yz_hotspots);
+
   seeds.reserve(top_k);
-  for (size_t ix = 0; ix < mesh_bins; ++ix) {
-    const double cx = 0.5 + step * static_cast<double>(ix);
-    for (size_t iy = 0; iy < mesh_bins; ++iy) {
-      const double cy = 0.5 + step * static_cast<double>(iy);
-      const double xy_score = xy_scores[ix * mesh_bins + iy];
-      for (size_t iz = 0; iz < mesh_bins; ++iz) {
-        const double cz = 0.5 + step * static_cast<double>(iz);
-        const double score =
-            xy_score + xz_scores[ix * mesh_bins + iz] +
-            yz_scores[iy * mesh_bins + iz];
-        push_unique_xyz_seed(seeds, {cx, cy, cz, score}, top_k);
+  auto push_seed = [&](size_t ix, size_t iy, size_t iz, double score) {
+    push_unique_xyz_seed(
+        seeds,
+        {projection_grid_center(mesh_bins, ix), projection_grid_center(mesh_bins, iy),
+         projection_grid_center(mesh_bins, iz), score, ix, iy, iz},
+        top_k);
+  };
+
+  for (const auto &xy_seed : xy_hotspots) {
+    for (const auto &xz_seed : xz_hotspots) {
+      if (xy_seed.ix != xz_seed.ix)
+        continue;
+      for (const auto &yz_seed : yz_hotspots) {
+        if (xy_seed.iy != yz_seed.ix || xz_seed.iy != yz_seed.iy)
+          continue;
+        push_seed(xy_seed.ix, xy_seed.iy, xz_seed.iy,
+                  xy_seed.score + xz_seed.score + yz_seed.score);
       }
     }
   }
+
+  if (seeds.size() < top_k) {
+    for (const auto &xy_seed : xy_hotspots) {
+      for (const auto &xz_seed : xz_hotspots) {
+        if (xy_seed.ix != xz_seed.ix)
+          continue;
+        push_seed(xy_seed.ix, xy_seed.iy, xz_seed.iy,
+                  xy_seed.score + xz_seed.score +
+                      projection_grid_score(yz_scores, mesh_bins, xy_seed.iy,
+                                            xz_seed.iy));
+      }
+    }
+  }
+
+  if (seeds.size() < top_k) {
+    for (const auto &xy_seed : xy_hotspots) {
+      for (const auto &yz_seed : yz_hotspots) {
+        if (xy_seed.iy != yz_seed.ix)
+          continue;
+        push_seed(xy_seed.ix, xy_seed.iy, yz_seed.iy,
+                  xy_seed.score + yz_seed.score +
+                      projection_grid_score(xz_scores, mesh_bins, xy_seed.ix,
+                                            yz_seed.iy));
+      }
+    }
+  }
+
+  if (seeds.size() < top_k) {
+    for (const auto &xz_seed : xz_hotspots) {
+      for (const auto &yz_seed : yz_hotspots) {
+        if (xz_seed.iy != yz_seed.iy)
+          continue;
+        push_seed(xz_seed.ix, yz_seed.ix, xz_seed.iy,
+                  xz_seed.score + yz_seed.score +
+                      projection_grid_score(xy_scores, mesh_bins, xz_seed.ix,
+                                            yz_seed.ix));
+      }
+    }
+  }
+
+  if (seeds.size() < top_k)
+    append_dense_projection_volume_seeds(xy_scores, xz_scores, yz_scores,
+                                         mesh_bins, top_k, seeds);
 }
 
 [[maybe_unused]] vector<PbctopoSeed2D>
@@ -5296,12 +7350,13 @@ build_virtual_box_positions(const vector<PbctopoAtom> &atoms, box Box,
 PbctopoCutCandidate evaluate_virtual_box_candidate(
     const vector<PbctopoAtom> &atoms, const vector<PbctopoLocalEdge> &local_edges,
     const unordered_set<uint64_t> &edge_set,
-    const PbctopoTranslationCache &translation_cache, double cut_x, double cut_y,
-    double cut_z, double gap_score, vector<Vec3> &placed_points,
+    const PbctopoTranslationCache &translation_cache, box Box, double cut_x,
+    double cut_y, double cut_z, double gap_score, vector<Vec3> &placed_points,
     double clash_cutoff, const vector<PbctopoContinuityPair> *continuity_pairs,
     const vector<size_t> *anchor_indices,
+    const vector<pair<int, int>> *contacting_owner_pairs,
     double continuity_cutoff, const PbctopoCutCandidate *incumbent,
-    bool skip_clash) {
+    bool skip_clash, double frame_time_ps, const char *reject_context) {
   PbctopoCutCandidate candidate;
   candidate.cut_x = clamp_virtual_box_center(cut_x);
   candidate.cut_y = clamp_virtual_box_center(cut_y);
@@ -5358,6 +7413,27 @@ PbctopoCutCandidate evaluate_virtual_box_candidate(
   if (stats.count != atoms.size())
     return PbctopoCutCandidate{};
 
+  if (contacting_owner_pairs != nullptr) {
+    PbctopoOwnerPairSplitDetail split_detail;
+    if (candidate_has_split_contacting_owners(
+            placed_points, atoms, Box, *contacting_owner_pairs,
+            candidate.split_owner_pairs, candidate.max_owner_raw_minus_minimg_delta,
+            &split_detail)) {
+      if (reject_context != nullptr && split_detail.valid &&
+          isfinite(frame_time_ps)) {
+        append_pbctopo_log_line(
+            "[pbctopo] reject split_contacting_owner_pair at frame " +
+            to_string(static_cast<long long>(frame_time_ps)) + " via " +
+            reject_context + ": owners=" + to_string(split_detail.owner_a) + "-" +
+            to_string(split_detail.owner_b) +
+            ", raw_delta_scaled=" + format_vec3(split_detail.raw_delta_scaled) +
+            ", min_image_delta_scaled=" +
+            format_vec3(split_detail.minimg_delta_scaled));
+      }
+      return candidate;
+    }
+  }
+
   if (continuity_pairs != nullptr) {
     double continuity_path = numeric_limits<double>::infinity();
     double continuity_max_d2 = numeric_limits<double>::infinity();
@@ -5380,20 +7456,16 @@ PbctopoCutCandidate evaluate_virtual_box_candidate(
     candidate.anchor_max_d2 = anchor_max_d2;
   }
 
-  candidate.bbox_volume =
-      max(0.0, stats.max_x - stats.min_x) * max(0.0, stats.max_y - stats.min_y) *
-      max(0.0, stats.max_z - stats.min_z);
-  const double inv_count = 1.0 / static_cast<double>(stats.count);
-  const double mean_x = stats.sum_x * inv_count;
-  const double mean_y = stats.sum_y * inv_count;
-  const double mean_z = stats.sum_z * inv_count;
-  candidate.rg2 = max(
-      0.0, stats.sum_sq * inv_count -
-               (mean_x * mean_x + mean_y * mean_y + mean_z * mean_z));
+  candidate.bbox_volume = compute_bbox_volume(stats);
+  candidate.rg2 = compute_rg2_from_stats(stats);
   const array<double, 3> principal_rg2 = compute_principal_rg2(stats);
   candidate.principal_rg2_max = principal_rg2[0];
   candidate.principal_rg2_mid = principal_rg2[1];
   candidate.principal_rg2_min = principal_rg2[2];
+  const auto shape_metrics = compute_gyration_shape_metrics(principal_rg2);
+  candidate.shape_kappa2 = shape_metrics.kappa2;
+  candidate.shape_asphericity = shape_metrics.asphericity;
+  candidate.shape_acylindricity = shape_metrics.acylindricity;
 
   for (const auto &edge : local_edges) {
     const Vec3 delta = placed_points[edge.a] - placed_points[edge.b];
@@ -5546,20 +7618,16 @@ PbctopoCutCandidate score_cut_candidate(const vector<PbctopoLocalEdge> &local_ed
   if (stats.count == 0 || placed_points.empty())
     return candidate;
 
-  candidate.bbox_volume =
-      max(0.0, stats.max_x - stats.min_x) * max(0.0, stats.max_y - stats.min_y) *
-      max(0.0, stats.max_z - stats.min_z);
-  const double inv_count = 1.0 / static_cast<double>(stats.count);
-  const double mean_x = stats.sum_x * inv_count;
-  const double mean_y = stats.sum_y * inv_count;
-  const double mean_z = stats.sum_z * inv_count;
-  candidate.rg2 = max(
-      0.0, stats.sum_sq * inv_count -
-               (mean_x * mean_x + mean_y * mean_y + mean_z * mean_z));
+  candidate.bbox_volume = compute_bbox_volume(stats);
+  candidate.rg2 = compute_rg2_from_stats(stats);
   const array<double, 3> principal_rg2 = compute_principal_rg2(stats);
   candidate.principal_rg2_max = principal_rg2[0];
   candidate.principal_rg2_mid = principal_rg2[1];
   candidate.principal_rg2_min = principal_rg2[2];
+  const auto shape_metrics = compute_gyration_shape_metrics(principal_rg2);
+  candidate.shape_kappa2 = shape_metrics.kappa2;
+  candidate.shape_asphericity = shape_metrics.asphericity;
+  candidate.shape_acylindricity = shape_metrics.acylindricity;
   candidate.shift_norm2 = shift_norm2;
 
   candidate.broken_edges = (edge_context != nullptr)
@@ -5569,56 +7637,9 @@ PbctopoCutCandidate score_cut_candidate(const vector<PbctopoLocalEdge> &local_ed
                                ? edge_context->fixed_edge_stretch
                                : 0.0;
 
-  const bool use_soa =
-      edge_scan_soa != nullptr && edge_scan_soa->a.size() == local_edges.size() &&
-      edge_scan_soa->b.size() == local_edges.size() &&
-      edge_scan_soa->ref_d2.size() == local_edges.size() &&
-      edge_scan_soa->inv_ref_d2.size() == local_edges.size() &&
-      edge_scan_soa->break_cutoff_d2.size() == local_edges.size();
-
-  auto accumulate_edge = [&](size_t edge_idx) {
-    size_t atom_a = 0;
-    size_t atom_b = 0;
-    double ref_d2 = 0.0;
-    double inv_ref_d2 = 0.0;
-    double break_cutoff_d2 = 0.0;
-    if (use_soa) {
-      atom_a = edge_scan_soa->a[edge_idx];
-      atom_b = edge_scan_soa->b[edge_idx];
-      ref_d2 = edge_scan_soa->ref_d2[edge_idx];
-      inv_ref_d2 = edge_scan_soa->inv_ref_d2[edge_idx];
-      break_cutoff_d2 = edge_scan_soa->break_cutoff_d2[edge_idx];
-    } else {
-      const auto &edge = local_edges[edge_idx];
-      atom_a = edge.a;
-      atom_b = edge.b;
-      ref_d2 = edge.ref_d2;
-      inv_ref_d2 = edge.inv_ref_d2;
-      break_cutoff_d2 = edge.break_cutoff_d2;
-    }
-    const Vec3 delta = placed_points[atom_a] - placed_points[atom_b];
-    const double d2 = norm2(delta);
-    if (d2 > break_cutoff_d2)
-      ++candidate.broken_edges;
-    if (d2 > ref_d2)
-      candidate.edge_stretch += (d2 - ref_d2) * inv_ref_d2;
-    return edge_prune_threshold == nullptr ||
-           !edge_scan_cannot_beat_threshold(candidate, edge_prune_threshold,
-                                            phase);
-  };
-
-  if (edge_context != nullptr) {
-    for (size_t edge_idx : edge_context->variable_edge_indices) {
-      if (edge_idx >= local_edges.size())
-        continue;
-      if (!accumulate_edge(edge_idx))
-        return {};
-    }
-  } else {
-    for (size_t edge_idx = 0; edge_idx < local_edges.size(); ++edge_idx) {
-      if (!accumulate_edge(edge_idx))
-        return {};
-    }
+  if (!accumulate_edge_scan(candidate, local_edges, placed_points, edge_context,
+                            edge_scan_soa, edge_prune_threshold, phase)) {
+    return {};
   }
 
   candidate.valid = true;
@@ -5660,6 +7681,10 @@ PbctopoCutCandidate score_cut_candidate_principal_only(
   candidate.principal_rg2_max = principal_rg2[0];
   candidate.principal_rg2_mid = principal_rg2[1];
   candidate.principal_rg2_min = principal_rg2[2];
+  const auto shape_metrics = compute_gyration_shape_metrics(principal_rg2);
+  candidate.shape_kappa2 = shape_metrics.kappa2;
+  candidate.shape_asphericity = shape_metrics.asphericity;
+  candidate.shape_acylindricity = shape_metrics.acylindricity;
   candidate.shift_norm2 = shift_norm2;
 
   candidate.broken_edges = (edge_context != nullptr)
@@ -5669,70 +7694,16 @@ PbctopoCutCandidate score_cut_candidate_principal_only(
                                ? edge_context->fixed_edge_stretch
                                : 0.0;
 
-  const bool use_soa =
-      edge_scan_soa != nullptr && edge_scan_soa->a.size() == local_edges.size() &&
-      edge_scan_soa->b.size() == local_edges.size() &&
-      edge_scan_soa->ref_d2.size() == local_edges.size() &&
-      edge_scan_soa->inv_ref_d2.size() == local_edges.size() &&
-      edge_scan_soa->break_cutoff_d2.size() == local_edges.size();
-
-  auto accumulate_edge = [&](size_t edge_idx) {
-    size_t atom_a = 0;
-    size_t atom_b = 0;
-    double ref_d2 = 0.0;
-    double inv_ref_d2 = 0.0;
-    double break_cutoff_d2 = 0.0;
-    if (use_soa) {
-      atom_a = edge_scan_soa->a[edge_idx];
-      atom_b = edge_scan_soa->b[edge_idx];
-      ref_d2 = edge_scan_soa->ref_d2[edge_idx];
-      inv_ref_d2 = edge_scan_soa->inv_ref_d2[edge_idx];
-      break_cutoff_d2 = edge_scan_soa->break_cutoff_d2[edge_idx];
-    } else {
-      const auto &edge = local_edges[edge_idx];
-      atom_a = edge.a;
-      atom_b = edge.b;
-      ref_d2 = edge.ref_d2;
-      inv_ref_d2 = edge.inv_ref_d2;
-      break_cutoff_d2 = edge.break_cutoff_d2;
+  if (!accumulate_edge_scan(candidate, local_edges, placed_points, edge_context,
+                            edge_scan_soa, edge_prune_threshold,
+                            PbctopoRefineScorePhase::CoarseStage1)) {
+    if (breakdown != nullptr) {
+      breakdown->edge_scan_s +=
+          chrono::duration<double>(chrono::steady_clock::now() -
+                                   section_started)
+              .count();
     }
-    const Vec3 delta = placed_points[atom_a] - placed_points[atom_b];
-    const double d2 = norm2(delta);
-    if (d2 > break_cutoff_d2)
-      ++candidate.broken_edges;
-    if (d2 > ref_d2)
-      candidate.edge_stretch += (d2 - ref_d2) * inv_ref_d2;
-    return edge_prune_threshold == nullptr ||
-           !edge_scan_cannot_beat_threshold(candidate, edge_prune_threshold,
-                                            PbctopoRefineScorePhase::CoarseStage1);
-  };
-
-  if (edge_context != nullptr) {
-    for (size_t edge_idx : edge_context->variable_edge_indices) {
-      if (edge_idx >= local_edges.size())
-        continue;
-      if (!accumulate_edge(edge_idx)) {
-        if (breakdown != nullptr) {
-          breakdown->edge_scan_s +=
-              chrono::duration<double>(chrono::steady_clock::now() -
-                                       section_started)
-                  .count();
-        }
-        return {};
-      }
-    }
-  } else {
-    for (size_t edge_idx = 0; edge_idx < local_edges.size(); ++edge_idx) {
-      if (!accumulate_edge(edge_idx)) {
-        if (breakdown != nullptr) {
-          breakdown->edge_scan_s +=
-              chrono::duration<double>(chrono::steady_clock::now() -
-                                       section_started)
-                  .count();
-        }
-        return {};
-      }
-    }
+    return {};
   }
   if (breakdown != nullptr) {
     breakdown->edge_scan_s +=
@@ -5786,6 +7757,17 @@ bool better_stage1_cut_candidate(const PbctopoCutCandidate &lhs,
       compare_principal_rg2(lhs.principal_rg2_min, rhs.principal_rg2_min);
   if (principal_min_cmp != 0)
     return principal_min_cmp < 0;
+  const int kappa_cmp = compare_shape_kappa(lhs.shape_kappa2, rhs.shape_kappa2);
+  if (kappa_cmp != 0)
+    return kappa_cmp < 0;
+  const int asph_cmp =
+      compare_shape_moment(lhs.shape_asphericity, rhs.shape_asphericity);
+  if (asph_cmp != 0)
+    return asph_cmp < 0;
+  const int acyl_cmp =
+      compare_shape_moment(lhs.shape_acylindricity, rhs.shape_acylindricity);
+  if (acyl_cmp != 0)
+    return acyl_cmp < 0;
   if (fabs(lhs.edge_stretch - rhs.edge_stretch) > 1.0e-6)
     return lhs.edge_stretch < rhs.edge_stretch;
   if (fabs(lhs.gap_score - rhs.gap_score) > 1.0e-9)
@@ -5831,12 +7813,25 @@ bool better_preclash_cut_candidate(const PbctopoCutCandidate &lhs,
       compare_principal_rg2(lhs.principal_rg2_mid, rhs.principal_rg2_mid);
   if (principal_mid_cmp != 0)
     return principal_mid_cmp < 0;
+  const int principal_min_cmp =
+      compare_principal_rg2(lhs.principal_rg2_min, rhs.principal_rg2_min);
+  if (principal_min_cmp != 0)
+    return principal_min_cmp < 0;
+  const int kappa_cmp = compare_shape_kappa(lhs.shape_kappa2, rhs.shape_kappa2);
+  if (kappa_cmp != 0)
+    return kappa_cmp < 0;
+  const int asph_cmp =
+      compare_shape_moment(lhs.shape_asphericity, rhs.shape_asphericity);
+  if (asph_cmp != 0)
+    return asph_cmp < 0;
+  const int acyl_cmp =
+      compare_shape_moment(lhs.shape_acylindricity, rhs.shape_acylindricity);
+  if (acyl_cmp != 0)
+    return acyl_cmp < 0;
   if (fabs(lhs.edge_stretch - rhs.edge_stretch) > 1.0e-6)
     return lhs.edge_stretch < rhs.edge_stretch;
-  if (fabs(lhs.rg2 - rhs.rg2) > 1.0e-6)
-    return lhs.rg2 < rhs.rg2;
-  if (fabs(lhs.bbox_volume - rhs.bbox_volume) > 1.0e-6)
-    return lhs.bbox_volume < rhs.bbox_volume;
+  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-6)
+    return lhs.shift_norm2 < rhs.shift_norm2;
   if (fabs(lhs.gap_score - rhs.gap_score) > 1.0e-9)
     return lhs.gap_score > rhs.gap_score;
   return false;
@@ -5882,14 +7877,23 @@ bool better_cut_candidate(const PbctopoCutCandidate &lhs,
       compare_principal_rg2(lhs.principal_rg2_mid, rhs.principal_rg2_mid);
   if (principal_mid_cmp != 0)
     return principal_mid_cmp < 0;
+  const int principal_min_cmp =
+      compare_principal_rg2(lhs.principal_rg2_min, rhs.principal_rg2_min);
+  if (principal_min_cmp != 0)
+    return principal_min_cmp < 0;
+  const int kappa_cmp = compare_shape_kappa(lhs.shape_kappa2, rhs.shape_kappa2);
+  if (kappa_cmp != 0)
+    return kappa_cmp < 0;
+  const int asph_cmp =
+      compare_shape_moment(lhs.shape_asphericity, rhs.shape_asphericity);
+  if (asph_cmp != 0)
+    return asph_cmp < 0;
+  const int acyl_cmp =
+      compare_shape_moment(lhs.shape_acylindricity, rhs.shape_acylindricity);
+  if (acyl_cmp != 0)
+    return acyl_cmp < 0;
   if (fabs(lhs.edge_stretch - rhs.edge_stretch) > 1.0e-6)
     return lhs.edge_stretch < rhs.edge_stretch;
-  if (fabs(lhs.rg2 - rhs.rg2) > 1.0e-6)
-    return lhs.rg2 < rhs.rg2;
-  if (fabs(lhs.bbox_volume - rhs.bbox_volume) > 1.0e-6)
-    return lhs.bbox_volume < rhs.bbox_volume;
-  if (fabs(lhs.gap_score - rhs.gap_score) > 1.0e-9)
-    return lhs.gap_score > rhs.gap_score;
   if (fabs(lhs.min_pair_d2 - rhs.min_pair_d2) > 1.0e-9)
     return lhs.min_pair_d2 > rhs.min_pair_d2;
   if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-6)
@@ -5933,6 +7937,12 @@ bool cut_candidate_cannot_beat_incumbent(const PbctopoCutCandidate &partial,
                                         incumbent->principal_rg2_max) &&
       principal_rg2_significantly_worse(partial.principal_rg2_mid,
                                         incumbent->principal_rg2_mid)) {
+    return true;
+  }
+  if (shape_kappa_significantly_worse(partial.shape_kappa2,
+                                      incumbent->shape_kappa2) &&
+      shape_moment_significantly_worse(partial.shape_asphericity,
+                                       incumbent->shape_asphericity)) {
     return true;
   }
   if (partial.broken_edges == incumbent->broken_edges &&
@@ -6693,6 +8703,16 @@ score_coarse_node_combination(const vector<size_t> &component_nodes,
       max(0.0, max_x - min_x) * max(0.0, max_y - min_y) * max(0.0, max_z - min_z);
   candidate.rg2 = compute_rg2(centers);
   candidate.fragment_rg2 = candidate.rg2;
+  const PointStats center_stats = build_point_stats(centers);
+  const auto center_principal_rg2 = compute_principal_rg2(center_stats);
+  const auto center_shape_metrics =
+      compute_gyration_shape_metrics(center_principal_rg2);
+  candidate.shape_kappa2 = center_shape_metrics.kappa2;
+  candidate.shape_asphericity = center_shape_metrics.asphericity;
+  candidate.shape_acylindricity = center_shape_metrics.acylindricity;
+  candidate.fragment_kappa2 = center_shape_metrics.kappa2;
+  candidate.fragment_asphericity = center_shape_metrics.asphericity;
+  candidate.fragment_acylindricity = center_shape_metrics.acylindricity;
   candidate.fragment_mst2 = compute_mst2(centers);
   candidate.connectivity_edges =
       count_component_connectivity_edges(component_nodes, adjacency);
@@ -6710,12 +8730,32 @@ bool better_pbctopo_coarse_candidate(const PbctopoCandidate &lhs,
     return lhs.connectivity_edges > rhs.connectivity_edges;
   if (fabs(lhs.fragment_mst2 - rhs.fragment_mst2) > 1.0e-6)
     return lhs.fragment_mst2 < rhs.fragment_mst2;
-  if (fabs(lhs.fragment_rg2 - rhs.fragment_rg2) > 1.0e-6)
-    return lhs.fragment_rg2 < rhs.fragment_rg2;
+  const int fragment_kappa_cmp =
+      compare_shape_kappa(lhs.fragment_kappa2, rhs.fragment_kappa2);
+  if (fragment_kappa_cmp != 0)
+    return fragment_kappa_cmp < 0;
+  const int fragment_asph_cmp = compare_shape_moment(
+      lhs.fragment_asphericity, rhs.fragment_asphericity);
+  if (fragment_asph_cmp != 0)
+    return fragment_asph_cmp < 0;
+  const int fragment_acyl_cmp = compare_shape_moment(
+      lhs.fragment_acylindricity, rhs.fragment_acylindricity);
+  if (fragment_acyl_cmp != 0)
+    return fragment_acyl_cmp < 0;
   if (fabs(lhs.bbox_volume - rhs.bbox_volume) > 1.0e-6)
     return lhs.bbox_volume < rhs.bbox_volume;
-  if (fabs(lhs.rg2 - rhs.rg2) > 1.0e-6)
-    return lhs.rg2 < rhs.rg2;
+  const int shape_kappa_cmp =
+      compare_shape_kappa(lhs.shape_kappa2, rhs.shape_kappa2);
+  if (shape_kappa_cmp != 0)
+    return shape_kappa_cmp < 0;
+  const int shape_asph_cmp =
+      compare_shape_moment(lhs.shape_asphericity, rhs.shape_asphericity);
+  if (shape_asph_cmp != 0)
+    return shape_asph_cmp < 0;
+  const int shape_acyl_cmp =
+      compare_shape_moment(lhs.shape_acylindricity, rhs.shape_acylindricity);
+  if (shape_acyl_cmp != 0)
+    return shape_acyl_cmp < 0;
   if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-6)
     return lhs.shift_norm2 < rhs.shift_norm2;
   return lhs.node_ids < rhs.node_ids;
@@ -6769,319 +8809,6 @@ enumerate_small_fragment_shift_combinations(
   return components;
 }
 
-Vec3 compute_points_centroid(const vector<Vec3> &points) {
-  Vec3 centroid{};
-  if (points.empty())
-    return centroid;
-  for (const auto &point : points)
-    centroid = centroid + point;
-  const double inv_n = 1.0 / static_cast<double>(points.size());
-  return centroid * inv_n;
-}
-
-double compute_rg2(const vector<Vec3> &points) {
-  if (points.empty())
-    return numeric_limits<double>::infinity();
-  const Vec3 centroid = compute_points_centroid(points);
-  double rg2 = 0.0;
-  for (const auto &point : points)
-    rg2 += norm2(point - centroid);
-  return rg2 / static_cast<double>(points.size());
-}
-
-array<double, 3> compute_principal_rg2(const PointStats &stats) {
-  if (stats.count == 0)
-    return {numeric_limits<double>::infinity(),
-            numeric_limits<double>::infinity(),
-            numeric_limits<double>::infinity()};
-  const double inv_n = 1.0 / static_cast<double>(stats.count);
-  const double mx = stats.sum_x * inv_n;
-  const double my = stats.sum_y * inv_n;
-  const double mz = stats.sum_z * inv_n;
-  double a[3][3] = {
-      {max(0.0, stats.sum_x2 * inv_n - mx * mx),
-       stats.sum_xy * inv_n - mx * my,
-       stats.sum_xz * inv_n - mx * mz},
-      {stats.sum_xy * inv_n - mx * my,
-       max(0.0, stats.sum_y2 * inv_n - my * my),
-       stats.sum_yz * inv_n - my * mz},
-      {stats.sum_xz * inv_n - mx * mz,
-       stats.sum_yz * inv_n - my * mz,
-       max(0.0, stats.sum_z2 * inv_n - mz * mz)}};
-
-  for (int iter = 0; iter < 12; ++iter) {
-    int p = 0;
-    int q = 1;
-    double max_off = fabs(a[0][1]);
-    if (fabs(a[0][2]) > max_off) {
-      p = 0;
-      q = 2;
-      max_off = fabs(a[0][2]);
-    }
-    if (fabs(a[1][2]) > max_off) {
-      p = 1;
-      q = 2;
-      max_off = fabs(a[1][2]);
-    }
-    if (max_off <= 1.0e-12)
-      break;
-    const double app = a[p][p];
-    const double aqq = a[q][q];
-    const double apq = a[p][q];
-    const double tau = (aqq - app) / (2.0 * apq);
-    const double t = ((tau >= 0.0) ? 1.0 : -1.0) /
-                     (fabs(tau) + sqrt(1.0 + tau * tau));
-    const double c = 1.0 / sqrt(1.0 + t * t);
-    const double s = t * c;
-    a[p][p] = app - t * apq;
-    a[q][q] = aqq + t * apq;
-    a[p][q] = 0.0;
-    a[q][p] = 0.0;
-    for (int r = 0; r < 3; ++r) {
-      if (r == p || r == q)
-        continue;
-      const double arp = a[r][p];
-      const double arq = a[r][q];
-      a[r][p] = c * arp - s * arq;
-      a[p][r] = a[r][p];
-      a[r][q] = c * arq + s * arp;
-      a[q][r] = a[r][q];
-    }
-  }
-
-  array<double, 3> eig{max(0.0, a[0][0]), max(0.0, a[1][1]), max(0.0, a[2][2])};
-  sort(eig.begin(), eig.end(), greater<double>());
-  return eig;
-}
-
-[[maybe_unused]] double compute_bbox_volume(const vector<Vec3> &points) {
-  if (points.empty())
-    return numeric_limits<double>::infinity();
-  double min_x = numeric_limits<double>::infinity();
-  double min_y = numeric_limits<double>::infinity();
-  double min_z = numeric_limits<double>::infinity();
-  double max_x = -numeric_limits<double>::infinity();
-  double max_y = -numeric_limits<double>::infinity();
-  double max_z = -numeric_limits<double>::infinity();
-  for (const auto &point : points) {
-    min_x = min(min_x, point.x);
-    min_y = min(min_y, point.y);
-    min_z = min(min_z, point.z);
-    max_x = max(max_x, point.x);
-    max_y = max(max_y, point.y);
-    max_z = max(max_z, point.z);
-  }
-  return max(0.0, max_x - min_x) * max(0.0, max_y - min_y) *
-         max(0.0, max_z - min_z);
-}
-
-double signed_distance_to_face(const HullFace &face, const vector<Vec3> &points,
-                               const Vec3 &point) {
-  return dot(face.normal, point - points[static_cast<size_t>(face.a)]);
-}
-
-bool orient_face(HullFace &face, const vector<Vec3> &points,
-                 const Vec3 &interior_point) {
-  if (face.a < 0 || face.b < 0 || face.c < 0)
-    return false;
-  face.normal = cross(points[static_cast<size_t>(face.b)] -
-                          points[static_cast<size_t>(face.a)],
-                      points[static_cast<size_t>(face.c)] -
-                          points[static_cast<size_t>(face.a)]);
-  if (norm2(face.normal) <= kHullEps * kHullEps)
-    return false;
-  if (signed_distance_to_face(face, points, interior_point) > 0.0) {
-    swap(face.b, face.c);
-    face.normal = cross(points[static_cast<size_t>(face.b)] -
-                            points[static_cast<size_t>(face.a)],
-                        points[static_cast<size_t>(face.c)] -
-                            points[static_cast<size_t>(face.a)]);
-    if (norm2(face.normal) <= kHullEps * kHullEps)
-      return false;
-  }
-  face.valid = true;
-  return true;
-}
-
-Vec3 compute_hull_interior_point(const vector<HullFace> &faces,
-                                 const vector<Vec3> &points) {
-  unordered_set<int> unique_vertices;
-  Vec3 centroid{};
-  for (const auto &face : faces) {
-    if (!face.valid)
-      continue;
-    unique_vertices.insert(face.a);
-    unique_vertices.insert(face.b);
-    unique_vertices.insert(face.c);
-  }
-  if (unique_vertices.empty())
-    return centroid;
-  for (int index : unique_vertices)
-    centroid = centroid + points[static_cast<size_t>(index)];
-  return centroid * (1.0 / static_cast<double>(unique_vertices.size()));
-}
-
-bool build_initial_tetrahedron(const vector<Vec3> &points, array<int, 4> &seed,
-                               Vec3 &interior_point) {
-  if (points.size() < 4)
-    return false;
-
-  int min_x = 0;
-  int max_x = 0;
-  for (size_t i = 1; i < points.size(); ++i) {
-    if (points[i].x < points[static_cast<size_t>(min_x)].x)
-      min_x = static_cast<int>(i);
-    if (points[i].x > points[static_cast<size_t>(max_x)].x)
-      max_x = static_cast<int>(i);
-  }
-  if (norm2(points[static_cast<size_t>(max_x)] -
-            points[static_cast<size_t>(min_x)]) <= kHullEps * kHullEps) {
-    return false;
-  }
-
-  int far_line = -1;
-  double max_line_dist2 = -1.0;
-  const Vec3 line = points[static_cast<size_t>(max_x)] -
-                    points[static_cast<size_t>(min_x)];
-  for (size_t i = 0; i < points.size(); ++i) {
-    if (static_cast<int>(i) == min_x || static_cast<int>(i) == max_x)
-      continue;
-    const Vec3 rel = points[i] - points[static_cast<size_t>(min_x)];
-    const double dist2 = norm2(cross(line, rel));
-    if (dist2 > max_line_dist2) {
-      max_line_dist2 = dist2;
-      far_line = static_cast<int>(i);
-    }
-  }
-  if (far_line < 0 || max_line_dist2 <= kHullEps * kHullEps)
-    return false;
-
-  int far_plane = -1;
-  double max_plane_dist = -1.0;
-  const Vec3 plane_normal =
-      cross(points[static_cast<size_t>(max_x)] - points[static_cast<size_t>(min_x)],
-            points[static_cast<size_t>(far_line)] - points[static_cast<size_t>(min_x)]);
-  for (size_t i = 0; i < points.size(); ++i) {
-    if (static_cast<int>(i) == min_x || static_cast<int>(i) == max_x ||
-        static_cast<int>(i) == far_line)
-      continue;
-    const double dist =
-        fabs(dot(plane_normal, points[i] - points[static_cast<size_t>(min_x)]));
-    if (dist > max_plane_dist) {
-      max_plane_dist = dist;
-      far_plane = static_cast<int>(i);
-    }
-  }
-  if (far_plane < 0 || max_plane_dist <= kHullEps * kHullEps)
-    return false;
-
-  seed = {min_x, max_x, far_line, far_plane};
-  interior_point = (points[static_cast<size_t>(seed[0])] +
-                    points[static_cast<size_t>(seed[1])] +
-                    points[static_cast<size_t>(seed[2])] +
-                    points[static_cast<size_t>(seed[3])]) *
-                   0.25;
-  return true;
-}
-
-void add_point_to_hull(int point_index, const vector<Vec3> &points,
-                       vector<HullFace> &faces) {
-  vector<size_t> visible_faces;
-  const Vec3 point = points[static_cast<size_t>(point_index)];
-  for (size_t i = 0; i < faces.size(); ++i) {
-    if (!faces[i].valid)
-      continue;
-    if (signed_distance_to_face(faces[i], points, point) > kHullEps)
-      visible_faces.push_back(i);
-  }
-  if (visible_faces.empty())
-    return;
-
-  const Vec3 interior_point = compute_hull_interior_point(faces, points);
-  unordered_map<uint64_t, pair<int, int>> horizon_edges;
-  auto push_edge = [&](int u, int v) {
-    const uint64_t reverse_key = oriented_edge_key(v, u);
-    const auto it = horizon_edges.find(reverse_key);
-    if (it != horizon_edges.end()) {
-      horizon_edges.erase(it);
-    } else {
-      horizon_edges.emplace(oriented_edge_key(u, v), make_pair(u, v));
-    }
-  };
-
-  for (size_t face_idx : visible_faces) {
-    HullFace &face = faces[face_idx];
-    push_edge(face.a, face.b);
-    push_edge(face.b, face.c);
-    push_edge(face.c, face.a);
-    face.valid = false;
-  }
-
-  for (const auto &kv : horizon_edges) {
-    HullFace face;
-    face.a = kv.second.first;
-    face.b = kv.second.second;
-    face.c = point_index;
-    if (orient_face(face, points, interior_point))
-      faces.push_back(face);
-  }
-}
-
-[[maybe_unused]] bool quickhull_volume(const vector<Vec3> &points, double &out_volume) {
-  out_volume = numeric_limits<double>::infinity();
-  if (points.size() < 4)
-    return false;
-
-  array<int, 4> seed{};
-  Vec3 interior_point{};
-  if (!build_initial_tetrahedron(points, seed, interior_point))
-    return false;
-
-  vector<HullFace> faces;
-  faces.reserve(points.size() * 2);
-  array<array<int, 3>, 4> seed_faces = {
-      array<int, 3>{seed[0], seed[1], seed[2]},
-      array<int, 3>{seed[0], seed[3], seed[1]},
-      array<int, 3>{seed[0], seed[2], seed[3]},
-      array<int, 3>{seed[1], seed[3], seed[2]}};
-  for (const auto &seed_face : seed_faces) {
-    HullFace face;
-    face.a = seed_face[0];
-    face.b = seed_face[1];
-    face.c = seed_face[2];
-    if (!orient_face(face, points, interior_point))
-      return false;
-    faces.push_back(face);
-  }
-
-  vector<char> is_seed(points.size(), 0);
-  for (int seed_idx : seed)
-    is_seed[static_cast<size_t>(seed_idx)] = 1;
-
-  for (size_t i = 0; i < points.size(); ++i) {
-    if (is_seed[i] != 0)
-      continue;
-    add_point_to_hull(static_cast<int>(i), points, faces);
-  }
-
-  double signed_volume = 0.0;
-  size_t valid_face_count = 0;
-  for (const auto &face : faces) {
-    if (!face.valid)
-      continue;
-    ++valid_face_count;
-    signed_volume +=
-        dot(points[static_cast<size_t>(face.a)],
-            cross(points[static_cast<size_t>(face.b)],
-                  points[static_cast<size_t>(face.c)]));
-  }
-  if (valid_face_count < 4)
-    return false;
-
-  out_volume = fabs(signed_volume) / 6.0;
-  return std::isfinite(out_volume) && out_volume > kHullEps;
-}
-
 [[maybe_unused]] PbctopoCandidate
 score_component_candidate(const vector<size_t> &component_nodes,
                           const vector<PbctopoFragmentCopyNode> &nodes,
@@ -7112,18 +8839,22 @@ score_component_candidate(const vector<size_t> &component_nodes,
   candidate.hull_valid = false;
   candidate.hull_volume = numeric_limits<double>::infinity();
   if (stats.count > 0) {
-    candidate.bbox_volume =
-        max(0.0, stats.max_x - stats.min_x) * max(0.0, stats.max_y - stats.min_y) *
-        max(0.0, stats.max_z - stats.min_z);
-    const double inv_count = 1.0 / static_cast<double>(stats.count);
-    const double mean_x = stats.sum_x * inv_count;
-    const double mean_y = stats.sum_y * inv_count;
-    const double mean_z = stats.sum_z * inv_count;
-    candidate.rg2 = max(
-        0.0, stats.sum_sq * inv_count - (mean_x * mean_x + mean_y * mean_y +
-                                         mean_z * mean_z));
+    candidate.bbox_volume = compute_bbox_volume(stats);
+    candidate.rg2 = compute_rg2_from_stats(stats);
+    const auto principal_rg2 = compute_principal_rg2(stats);
+    const auto shape_metrics = compute_gyration_shape_metrics(principal_rg2);
+    candidate.shape_kappa2 = shape_metrics.kappa2;
+    candidate.shape_asphericity = shape_metrics.asphericity;
+    candidate.shape_acylindricity = shape_metrics.acylindricity;
   }
   candidate.fragment_rg2 = compute_rg2(centers);
+  const PointStats center_stats = build_point_stats(centers);
+  const auto center_principal_rg2 = compute_principal_rg2(center_stats);
+  const auto center_shape_metrics =
+      compute_gyration_shape_metrics(center_principal_rg2);
+  candidate.fragment_kappa2 = center_shape_metrics.kappa2;
+  candidate.fragment_asphericity = center_shape_metrics.asphericity;
+  candidate.fragment_acylindricity = center_shape_metrics.acylindricity;
   candidate.fragment_mst2 = compute_mst2(centers);
   candidate.connectivity_edges =
       count_component_connectivity_edges(component_nodes, adjacency);
@@ -7205,10 +8936,30 @@ better_pbctopo_candidate(const PbctopoCandidate &lhs,
     return lhs.connectivity_edges > rhs.connectivity_edges;
   if (fabs(lhs.fragment_mst2 - rhs.fragment_mst2) > 1.0e-6)
     return lhs.fragment_mst2 < rhs.fragment_mst2;
-  if (fabs(lhs.fragment_rg2 - rhs.fragment_rg2) > 1.0e-6)
-    return lhs.fragment_rg2 < rhs.fragment_rg2;
-  if (fabs(lhs.rg2 - rhs.rg2) > 1.0e-6)
-    return lhs.rg2 < rhs.rg2;
+  const int fragment_kappa_cmp =
+      compare_shape_kappa(lhs.fragment_kappa2, rhs.fragment_kappa2);
+  if (fragment_kappa_cmp != 0)
+    return fragment_kappa_cmp < 0;
+  const int fragment_asph_cmp = compare_shape_moment(
+      lhs.fragment_asphericity, rhs.fragment_asphericity);
+  if (fragment_asph_cmp != 0)
+    return fragment_asph_cmp < 0;
+  const int fragment_acyl_cmp = compare_shape_moment(
+      lhs.fragment_acylindricity, rhs.fragment_acylindricity);
+  if (fragment_acyl_cmp != 0)
+    return fragment_acyl_cmp < 0;
+  const int shape_kappa_cmp =
+      compare_shape_kappa(lhs.shape_kappa2, rhs.shape_kappa2);
+  if (shape_kappa_cmp != 0)
+    return shape_kappa_cmp < 0;
+  const int shape_asph_cmp =
+      compare_shape_moment(lhs.shape_asphericity, rhs.shape_asphericity);
+  if (shape_asph_cmp != 0)
+    return shape_asph_cmp < 0;
+  const int shape_acyl_cmp =
+      compare_shape_moment(lhs.shape_acylindricity, rhs.shape_acylindricity);
+  if (shape_acyl_cmp != 0)
+    return shape_acyl_cmp < 0;
   if (fabs(lhs.bbox_volume - rhs.bbox_volume) > 1.0e-6)
     return lhs.bbox_volume < rhs.bbox_volume;
   if (lhs.hull_valid && rhs.hull_valid &&
@@ -7278,6 +9029,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       build_pbctopo_trajectory_context(*this, mol2, frame_count);
   PbctopoFrameScratch scratch;
   scratch.reserve_from_context(trajectory_context);
+  PbctopoHullScratch hull_scratch;
+  hull_scratch.reserve(trajectory_context.total_atoms_hint);
   auto &base_atoms = scratch.base_atoms;
   auto &projection_atoms = scratch.projection_atoms;
   auto &component_atoms = scratch.component_atoms;
@@ -7309,6 +9062,10 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
   auto &y_planes = scratch.y_planes;
   auto &z_planes = scratch.z_planes;
   auto &projection_index = scratch.projection_index;
+  vector<PbctopoHullSpan> hull_owner_spans;
+  hull_owner_spans.reserve(8);
+  vector<Vec3> hull_rescue_points;
+  hull_rescue_points.reserve(trajectory_context.total_atoms_hint);
   bool projection_clash_skip_active = false;
   auto fallback_pbci_frame = [&](size_t frame_index) {
     int chain_ref = Arguments.pbc.chain_ref;
@@ -7323,6 +9080,45 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     this->find_best_image_envelope(frame_index, chain_ref, Arguments);
     if (frame_index < mol2.m_mol.size() && !mol2.m_mol[frame_index].pos.x.empty())
       this->find_best_image_of_mol2(mol2, frame_index, chain_ref, Arguments);
+
+    vector<PbctopoAtom> fallback_atoms;
+    fallback_atoms.reserve(trajectory_context.total_atoms_hint);
+    append_atoms_for_system(this->m_mol[frame_index], &this->info,
+                            &trajectory_context.rec_static, 0, fallback_atoms);
+    if (frame_index < mol2.m_mol.size() && !mol2.m_mol[frame_index].pos.x.empty()) {
+      append_atoms_for_system(mol2.m_mol[frame_index], &mol2.info,
+                              &trajectory_context.lig_static, 1, fallback_atoms);
+    }
+    vector<pair<int, int>> fallback_contacting_owner_pairs =
+        build_contacting_owner_pairs({}, fallback_atoms,
+                                     this->m_mol[frame_index].Box,
+                                     runtime_cutoffs.pair_contact_cutoff);
+    vector<Vec3> fallback_points;
+    fallback_points.reserve(fallback_atoms.size());
+    for (const auto &atom : fallback_atoms)
+      fallback_points.push_back({atom.x, atom.y, atom.z});
+    if (!reimage_contacting_owner_points_minimum_image(
+            fallback_points, fallback_atoms, this->m_mol[frame_index].Box,
+            fallback_contacting_owner_pairs)) {
+      return;
+    }
+    for (size_t atom_idx = 0; atom_idx < fallback_atoms.size(); ++atom_idx) {
+      const auto &atom = fallback_atoms[atom_idx];
+      const auto &point = fallback_points[atom_idx];
+      if (atom.owner == 0) {
+        this->m_mol[frame_index].pos.x[atom.local_atom_index] = point.x;
+        this->m_mol[frame_index].pos.y[atom.local_atom_index] = point.y;
+        this->m_mol[frame_index].pos.z[atom.local_atom_index] = point.z;
+      } else if (frame_index < mol2.m_mol.size()) {
+        mol2.m_mol[frame_index].pos.x[atom.local_atom_index] = point.x;
+        mol2.m_mol[frame_index].pos.y[atom.local_atom_index] = point.y;
+        mol2.m_mol[frame_index].pos.z[atom.local_atom_index] = point.z;
+      }
+    }
+    append_pbctopo_log_line(
+        "[pbctopo] fallback pbci=0 reimaged contacting owners at frame " +
+        to_string(static_cast<long long>(this->m_mol[frame_index].time_of_snap)));
+    ++timing.pbci_fallback_frames;
   };
 
   for (size_t frame_idx = 0; frame_idx < frame_count; ++frame_idx) {
@@ -7370,6 +9166,14 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     build_projection_anchor_subset(base_atoms,
                                    trajectory_context.continuity_anchor_indices,
                                    projection_anchor_indices, projection_index);
+    const vector<pair<int, int>> local_contacting_owner_pairs =
+        build_contacting_owner_pairs(local_edges, base_atoms,
+                                     this->m_mol[frame_idx].Box,
+                                     runtime_cutoffs.pair_contact_cutoff);
+    const vector<pair<int, int>> projection_contacting_owner_pairs =
+        build_contacting_owner_pairs(projection_edges, projection_atoms,
+                                     this->m_mol[frame_idx].Box,
+                                     runtime_cutoffs.pair_contact_cutoff);
     timing.projection_edge_s +=
         chrono::duration<double>(clock::now() - stage_started).count();
 
@@ -7377,8 +9181,11 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     components = build_connected_components_from_local_edges(base_atoms.size(), local_edges);
     timing.component_split_s +=
         chrono::duration<double>(clock::now() - stage_started).count();
+    const size_t raw_component_count = components.size();
+    const PbctopoComponentMode component_mode =
+        select_pbctopo_component_mode(raw_component_count);
     const bool can_use_component_logic =
-        !components.empty() && components.size() <= 6;
+        component_mode != PbctopoComponentMode::Disabled;
     component_sizes = component_size_signature(components);
     const bool same_component_warm_layout =
         warm_state.has_component_offsets &&
@@ -7424,30 +9231,163 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     vector<Vec3> prefetched_safe_points;
     prefetched_safe_points.reserve(base_atoms.size());
     PbctopoCutCandidate prefetched_safe_candidate;
+    vector<Vec3> split_rescue_points;
+    split_rescue_points.reserve(base_atoms.size());
+    PbctopoCutCandidate split_rescue_candidate;
+    PbctopoOwnerPairSplitDetail split_rescue_detail;
+    string split_rescue_source;
+    bool split_rescue_available = false;
+    auto record_split_rescue_seed =
+        [&](const PbctopoCutCandidate &candidate,
+            const vector<Vec3> &candidate_points,
+            const PbctopoOwnerPairSplitDetail &detail,
+            const string &source_label) {
+          if (!candidate.valid || candidate.ultra_clash || !detail.valid ||
+              candidate_points.size() != base_atoms.size()) {
+            return;
+          }
+          const bool better_seed =
+              !split_rescue_available ||
+              detail.raw_norm + 1.0e-9 < split_rescue_detail.raw_norm ||
+              (fabs(detail.raw_norm - split_rescue_detail.raw_norm) <= 1.0e-9 &&
+               detail.minimg_norm + 1.0e-9 < split_rescue_detail.minimg_norm);
+          if (!better_seed)
+            return;
+          split_rescue_available = true;
+          split_rescue_candidate = candidate;
+          split_rescue_points = candidate_points;
+          split_rescue_detail = detail;
+          split_rescue_source = source_label;
+        };
+    auto validate_rescue_candidate_points =
+        [&](const vector<Vec3> &candidate_points,
+            const PbctopoCutCandidate *incumbent_cut,
+            PbctopoCutCandidate &candidate_out) {
+          if (candidate_points.size() != base_atoms.size())
+            return false;
+          size_t split_owner_pairs = 0;
+          double split_gap = 0.0;
+          PbctopoOwnerPairSplitDetail detail;
+          if (candidate_has_split_contacting_owners(
+                  candidate_points, base_atoms, this->m_mol[frame_idx].Box,
+                  local_contacting_owner_pairs, split_owner_pairs, split_gap,
+                  &detail)) {
+            return false;
+          }
+
+          const vector<Int3> rescue_offsets = extract_component_offsets_from_points(
+              base_atoms, components, this->m_mol[frame_idx].Box,
+              candidate_points);
+          double rescue_shift_norm2 = 0.0;
+          for (size_t comp_idx = 0; comp_idx < rescue_offsets.size() &&
+                                   comp_idx < components.size();
+               ++comp_idx) {
+            const auto &offset = rescue_offsets[comp_idx];
+            const double comp_shift_norm2 = static_cast<double>(
+                offset.x * offset.x + offset.y * offset.y + offset.z * offset.z);
+            rescue_shift_norm2 +=
+                comp_shift_norm2 * static_cast<double>(components[comp_idx].size());
+          }
+
+          const BoxMatrix rescue_box(this->m_mol[frame_idx].Box);
+          double min_sx = numeric_limits<double>::infinity();
+          double min_sy = numeric_limits<double>::infinity();
+          double min_sz = numeric_limits<double>::infinity();
+          double max_sx = -numeric_limits<double>::infinity();
+          double max_sy = -numeric_limits<double>::infinity();
+          double max_sz = -numeric_limits<double>::infinity();
+          for (const auto &point : candidate_points) {
+            const double sx = rescue_box.inv[0][0] * point.x +
+                              rescue_box.inv[0][1] * point.y +
+                              rescue_box.inv[0][2] * point.z;
+            const double sy = rescue_box.inv[1][0] * point.x +
+                              rescue_box.inv[1][1] * point.y +
+                              rescue_box.inv[1][2] * point.z;
+            const double sz = rescue_box.inv[2][0] * point.x +
+                              rescue_box.inv[2][1] * point.y +
+                              rescue_box.inv[2][2] * point.z;
+            min_sx = min(min_sx, sx);
+            min_sy = min(min_sy, sy);
+            min_sz = min(min_sz, sz);
+            max_sx = max(max_sx, sx);
+            max_sy = max(max_sy, sy);
+            max_sz = max(max_sz, sz);
+          }
+          auto normalize_rescue_center = [](double center) {
+            if (!isfinite(center))
+              return 1.5;
+            center = fmod(center - 0.5, 1.0);
+            if (center < 0.0)
+              center += 1.0;
+            return clamp_virtual_box_center(center + 0.5);
+          };
+          const double rescue_cut_x =
+              normalize_rescue_center(0.5 * (min_sx + max_sx));
+          const double rescue_cut_y =
+              normalize_rescue_center(0.5 * (min_sy + max_sy));
+          const double rescue_cut_z =
+              normalize_rescue_center(0.5 * (min_sz + max_sz));
+
+          const PointStats rescue_stats = build_point_stats(candidate_points);
+          candidate_out = score_cut_candidate(
+              component_scoring_edges, candidate_points, rescue_cut_x,
+              rescue_cut_y, rescue_cut_z, 0.0, rescue_stats,
+              rescue_shift_norm2);
+          double continuity_path = numeric_limits<double>::infinity();
+          double continuity_max_d2 = numeric_limits<double>::infinity();
+          double anchor_mst2 = numeric_limits<double>::infinity();
+          double anchor_max_d2 = numeric_limits<double>::infinity();
+          const bool rescue_ok =
+              candidate_out.valid &&
+              continuity_metrics_ok(candidate_points,
+                                    trajectory_context.continuity_pairs,
+                                    runtime_cutoffs.continuity_cutoff,
+                                    continuity_path, continuity_max_d2,
+                                    incumbent_cut) &&
+              anchor_graph_metrics_ok(
+                  candidate_points, trajectory_context.continuity_anchor_indices,
+                  anchor_mst2, anchor_max_d2, incumbent_cut);
+          if (!rescue_ok)
+            return false;
+
+          candidate_out.continuity_path = continuity_path;
+          candidate_out.continuity_max_d2 = continuity_max_d2;
+          candidate_out.anchor_mst2 = anchor_mst2;
+          candidate_out.anchor_max_d2 = anchor_max_d2;
+          analyze_cut_candidate_ultraclash(candidate_points, local_edge_set,
+                                           candidate_out,
+                                           runtime_cutoffs.clash_cutoff);
+          return !candidate_out.ultra_clash;
+        };
     if (warm_state.has_projection_candidate) {
       const auto early_projection_started = clock::now();
       PbctopoCutCandidate early_projection_coarse = evaluate_virtual_box_candidate(
           projection_atoms, projection_edges, projection_edge_set,
-          translation_cache,
+          translation_cache, this->m_mol[frame_idx].Box,
           warm_state.previous_projection_candidate.cut_x,
           warm_state.previous_projection_candidate.cut_y,
           warm_state.previous_projection_candidate.cut_z,
           warm_state.previous_projection_candidate.gap_score, coarse_warm_points,
           runtime_cutoffs.clash_cutoff, &projection_continuity_pairs,
-          &projection_anchor_indices, runtime_cutoffs.continuity_cutoff, nullptr,
-          skip_projection_candidate_clash);
+          &projection_anchor_indices, &projection_contacting_owner_pairs,
+          runtime_cutoffs.continuity_cutoff, nullptr,
+          skip_projection_candidate_clash, numeric_limits<double>::quiet_NaN(),
+          nullptr);
       if (skip_projection_candidate_clash)
         ++timing.projection_clash_skip_evals;
       if (early_projection_coarse.valid && !early_projection_coarse.ultra_clash) {
         PbctopoCutCandidate early_projection = evaluate_virtual_box_candidate(
             base_atoms, local_edges, local_edge_set, translation_cache,
+            this->m_mol[frame_idx].Box,
             warm_state.previous_projection_candidate.cut_x,
             warm_state.previous_projection_candidate.cut_y,
             warm_state.previous_projection_candidate.cut_z,
             warm_state.previous_projection_candidate.gap_score, warm_points,
             runtime_cutoffs.clash_cutoff, &trajectory_context.continuity_pairs,
             &trajectory_context.continuity_anchor_indices,
-            runtime_cutoffs.continuity_cutoff);
+            &local_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
+            nullptr, false, this->m_mol[frame_idx].time_of_snap,
+            "warm_projection");
         if (early_projection.valid && !early_projection.ultra_clash &&
           candidate_close_enough_to_skip_search(
               early_projection, warm_state.previous_projection_candidate)) {
@@ -7482,7 +9422,32 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           &warm_state.previous_projection_candidate, nullptr, true,
           PbctopoRefineScorePhase::Exact, nullptr, nullptr, nullptr,
           anchor_backend);
-      if (early_component.valid && !early_component.ultra_clash &&
+      PbctopoOwnerPairSplitDetail early_component_split_detail;
+      size_t early_component_split_owner_pairs = 0;
+      double early_component_split_gap = 0.0;
+      const bool early_component_split =
+          early_component.valid && !early_component.ultra_clash &&
+          candidate_has_split_contacting_owners(
+              warm_points, base_atoms, this->m_mol[frame_idx].Box,
+              local_contacting_owner_pairs, early_component_split_owner_pairs,
+              early_component_split_gap, &early_component_split_detail);
+      if (early_component_split && early_component_split_detail.valid) {
+        record_split_rescue_seed(early_component, warm_points,
+                                 early_component_split_detail,
+                                 "warm_component");
+        append_pbctopo_log_line(
+            "[pbctopo] reject split_contacting_owner_pair at frame " +
+            to_string(static_cast<long long>(this->m_mol[frame_idx].time_of_snap)) +
+            " via warm_component: owners=" +
+            to_string(early_component_split_detail.owner_a) + "-" +
+            to_string(early_component_split_detail.owner_b) +
+            ", raw_delta_scaled=" +
+            format_vec3(early_component_split_detail.raw_delta_scaled) +
+            ", min_image_delta_scaled=" +
+            format_vec3(early_component_split_detail.minimg_delta_scaled));
+      }
+      if (!early_component_split && early_component.valid &&
+          !early_component.ultra_clash &&
           candidate_close_enough_to_skip_search(
               early_component, warm_state.previous_projection_candidate)) {
         ++timing.component_warm_used;
@@ -7533,6 +9498,21 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     PbctopoCutCandidate best_candidate;
     PbctopoCutCandidate best_safe_candidate;
     size_t safe_candidates = 0;
+    auto accept_rescue_candidate =
+        [&](const vector<Vec3> &candidate_points,
+            const PbctopoCutCandidate &candidate) {
+          best_safe_candidate = candidate;
+          best_candidate = candidate;
+          best_safe_points = candidate_points;
+          best_points = candidate_points;
+          safe_candidates = max<size_t>(safe_candidates, 1);
+          projection_clash_skip_active =
+              candidate_has_projection_clash_margin(best_safe_candidate,
+                                                    runtime_cutoffs.clash_cutoff);
+          warm_state.previous_projection_candidate = best_safe_candidate;
+          warm_state.has_projection_candidate = true;
+          apply_cut_candidate_timed(best_safe_points);
+        };
     placed_points.reserve(projection_atoms.size());
     best_points.reserve(base_atoms.size());
     best_safe_points.reserve(base_atoms.size());
@@ -7575,11 +9555,14 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
               const auto &seed = coarse_seed_options[option_idx].seed;
               coarse_results[option_idx] = evaluate_virtual_box_candidate(
                   projection_atoms, projection_edges, projection_edge_set,
-                  translation_cache, seed.cx, seed.cy, seed.cz, seed.score,
+                  translation_cache, this->m_mol[frame_idx].Box, seed.cx,
+                  seed.cy, seed.cz, seed.score,
                   local_points, runtime_cutoffs.clash_cutoff,
                   &projection_continuity_pairs, &projection_anchor_indices,
+                  &projection_contacting_owner_pairs,
                   runtime_cutoffs.continuity_cutoff, nullptr,
-                  skip_projection_candidate_clash);
+                  skip_projection_candidate_clash,
+                  numeric_limits<double>::quiet_NaN(), nullptr);
               if (skip_projection_candidate_clash)
                 coarse_projection_skip_evals.fetch_add(
                     1, memory_order_relaxed);
@@ -7587,7 +9570,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           });
     } else if (coarse_threads > 1 && coarse_seed_options.size() >= 4 &&
                projection_atoms.size() >= 2000) {
-      vector<jthread> workers;
+      vector<titan::jthread> workers;
       workers.reserve(coarse_threads);
       const size_t chunk =
           (coarse_seed_options.size() + coarse_threads - 1) / coarse_threads;
@@ -7603,11 +9586,14 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             const auto &seed = coarse_seed_options[option_idx].seed;
             coarse_results[option_idx] = evaluate_virtual_box_candidate(
                 projection_atoms, projection_edges, projection_edge_set,
-                translation_cache, seed.cx, seed.cy, seed.cz, seed.score,
+                translation_cache, this->m_mol[frame_idx].Box, seed.cx, seed.cy,
+                seed.cz, seed.score,
                 local_points, runtime_cutoffs.clash_cutoff,
                 &projection_continuity_pairs, &projection_anchor_indices,
+                &projection_contacting_owner_pairs,
                 runtime_cutoffs.continuity_cutoff, nullptr,
-                skip_projection_candidate_clash);
+                skip_projection_candidate_clash,
+                numeric_limits<double>::quiet_NaN(), nullptr);
             if (skip_projection_candidate_clash)
               coarse_projection_skip_evals.fetch_add(
                   1, memory_order_relaxed);
@@ -7620,11 +9606,13 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
         const auto &seed = coarse_seed_options[option_idx].seed;
         coarse_results[option_idx] = evaluate_virtual_box_candidate(
             projection_atoms, projection_edges, projection_edge_set,
-            translation_cache, seed.cx, seed.cy, seed.cz, seed.score,
+            translation_cache, this->m_mol[frame_idx].Box, seed.cx, seed.cy,
+            seed.cz, seed.score,
             placed_points, runtime_cutoffs.clash_cutoff,
             &projection_continuity_pairs, &projection_anchor_indices,
-            runtime_cutoffs.continuity_cutoff, nullptr,
-            skip_projection_candidate_clash);
+            &projection_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
+            nullptr, skip_projection_candidate_clash,
+            numeric_limits<double>::quiet_NaN(), nullptr);
         if (skip_projection_candidate_clash)
           coarse_projection_skip_evals.fetch_add(1, memory_order_relaxed);
       }
@@ -7651,11 +9639,13 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
          return PbctopoCutCandidate{};
         PbctopoCutCandidate candidate = evaluate_virtual_box_candidate(
             projection_atoms, projection_edges, projection_edge_set,
-            translation_cache, clamped_x, clamped_y, clamped_z, gap_score,
+            translation_cache, this->m_mol[frame_idx].Box, clamped_x, clamped_y,
+            clamped_z, gap_score,
             scratch_points, runtime_cutoffs.clash_cutoff,
             &projection_continuity_pairs, &projection_anchor_indices,
-            runtime_cutoffs.continuity_cutoff, incumbent,
-            skip_projection_candidate_clash);
+            &projection_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
+            incumbent, skip_projection_candidate_clash,
+            numeric_limits<double>::quiet_NaN(), nullptr);
         if (skip_projection_candidate_clash)
           ++timing.projection_clash_skip_evals;
         ++timing.refine_candidates;
@@ -7671,17 +9661,29 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     if (coarse_candidates.size() >= 2) {
       const auto &top1 = coarse_candidates[0];
       const auto &top2 = coarse_candidates[1];
+      const bool top1_clear_principal =
+          compare_principal_rg2(top1.principal_rg2_max, top2.principal_rg2_max) <
+              0 &&
+          compare_principal_rg2(top1.principal_rg2_mid, top2.principal_rg2_mid) <
+              0 &&
+          compare_principal_rg2(top1.principal_rg2_min, top2.principal_rg2_min) <
+              0;
       if (top1.broken_edges + 1 < top2.broken_edges ||
           top1.edge_stretch + 1.0e-6 < top2.edge_stretch * 0.85 ||
-          top1.rg2 + 1.0e-6 < top2.rg2 * 0.98 ||
-          top1.bbox_volume + 1.0e-6 < top2.bbox_volume * 0.98) {
+          top1_clear_principal) {
         refine_limit = 1;
       } else if (coarse_candidates.size() >= 3) {
         const auto &top3 = coarse_candidates[2];
+        const bool top2_clear_principal =
+            compare_principal_rg2(top2.principal_rg2_max,
+                                  top3.principal_rg2_max) < 0 &&
+            compare_principal_rg2(top2.principal_rg2_mid,
+                                  top3.principal_rg2_mid) < 0 &&
+            compare_principal_rg2(top2.principal_rg2_min,
+                                  top3.principal_rg2_min) < 0;
         if (top2.broken_edges + 1 < top3.broken_edges ||
             top2.edge_stretch + 1.0e-6 < top3.edge_stretch * 0.85 ||
-            top2.rg2 + 1.0e-6 < top3.rg2 * 0.98 ||
-            top2.bbox_volume + 1.0e-6 < top3.bbox_volume * 0.98) {
+            top2_clear_principal) {
           refine_limit = 2;
         }
       }
@@ -7727,10 +9729,13 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
               : nullptr;
       PbctopoCutCandidate verified_candidate = evaluate_virtual_box_candidate(
           base_atoms, local_edges, local_edge_set, translation_cache,
+          this->m_mol[frame_idx].Box,
           center_x, center_y, center_z, coarse.gap_score, verify_points,
           runtime_cutoffs.clash_cutoff, &trajectory_context.continuity_pairs,
           &trajectory_context.continuity_anchor_indices,
-          runtime_cutoffs.continuity_cutoff, verify_incumbent);
+          &local_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
+          verify_incumbent, false, this->m_mol[frame_idx].time_of_snap,
+          "verified_candidate");
       if (!verified_candidate.valid)
         continue;
       if (!verified_candidate.ultra_clash) {
@@ -7759,12 +9764,10 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       ensure_component_context();
       timing.component_prep_s +=
           chrono::duration<double>(clock::now() - stage_started).count();
-      double component_shift_norm2 = 0.0;
-      PbctopoCutCandidate graph_as_cut;
-      vector<Int3> graph_tree_offsets;
-      vector<Int3> graph_refined_offsets;
-      vector<PbctopoGraphEdge> graph_tree_edges;
+      size_t effective_component_count = components.size();
       string component_graph_fallthrough_reason;
+      const string component_mode_label =
+          pbctopo_component_mode_name(component_mode);
       const PbctopoCutCandidate *component_warm_reference =
           (best_safe_candidate.valid && !best_safe_candidate.ultra_clash)
               ? &best_safe_candidate
@@ -7773,6 +9776,110 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                   !warm_state.previous_projection_candidate.ultra_clash)
                      ? &warm_state.previous_projection_candidate
                      : nullptr);
+      auto accept_component_cut = [&](const PbctopoCutCandidate &candidate,
+                                      const vector<Vec3> &candidate_points,
+                                      const vector<Int3> *accepted_offsets,
+                                      const string &source_label) {
+        if (!candidate.valid || candidate.ultra_clash ||
+            candidate_points.size() != base_atoms.size()) {
+          return false;
+        }
+        PbctopoOwnerPairSplitDetail split_detail;
+        size_t split_owner_pairs = 0;
+        double max_owner_raw_minus_minimg_delta = 0.0;
+        if (candidate_has_split_contacting_owners(
+                candidate_points, base_atoms, this->m_mol[frame_idx].Box,
+                local_contacting_owner_pairs, split_owner_pairs,
+                max_owner_raw_minus_minimg_delta, &split_detail)) {
+          if (split_detail.valid) {
+            record_split_rescue_seed(candidate, candidate_points, split_detail,
+                                     source_label);
+            append_pbctopo_log_line(
+                "[pbctopo] reject split_contacting_owner_pair at frame " +
+                to_string(static_cast<long long>(
+                    this->m_mol[frame_idx].time_of_snap)) +
+                " via " + source_label + ": owners=" +
+                to_string(split_detail.owner_a) + "-" +
+                to_string(split_detail.owner_b) +
+                ", raw_delta_scaled=" +
+                format_vec3(split_detail.raw_delta_scaled) +
+                ", min_image_delta_scaled=" +
+                format_vec3(split_detail.minimg_delta_scaled));
+          }
+          return false;
+        }
+        bool accepted = false;
+        bool better_than_best = false;
+        if (!best_safe_candidate.valid ||
+            better_cut_candidate(candidate, best_safe_candidate)) {
+          best_safe_candidate = candidate;
+          best_safe_points = candidate_points;
+          accepted = true;
+          better_than_best = true;
+        } else if (candidate_close_enough_to_skip_search(candidate,
+                                                         best_safe_candidate)) {
+          accepted = true;
+        }
+        if (!accepted)
+          return false;
+        component_search_used = true;
+        if (accepted_offsets != nullptr &&
+            accepted_offsets->size() == components.size()) {
+          warm_state.previous_component_offsets = *accepted_offsets;
+        } else {
+          warm_state.previous_component_offsets =
+              extract_offsets_and_time(component_atoms, candidate_points);
+        }
+        if (better_than_best) {
+          append_pbctopo_log_line(
+              "[pbctopo] " + source_label + ": mode=" + component_mode_label +
+              ", raw_components=" + to_string(raw_component_count) +
+              ", effective_components=" +
+              to_string(effective_component_count) + ", min_pair_d2=" +
+              to_string(candidate.min_pair_d2) + ", kappa2=" +
+              to_string(candidate.shape_kappa2) + ", asph=" +
+              to_string(candidate.shape_asphericity) + ", bbox=" +
+              to_string(candidate.bbox_volume));
+        }
+        return true;
+      };
+      auto accept_component_candidate =
+          [&](const PbctopoComponentCandidate &component_candidate,
+              const vector<Vec3> &candidate_points,
+              const vector<Int3> *accepted_offsets,
+              const string &source_label) {
+            if (!component_candidate.valid || component_candidate.ultra_clash ||
+                candidate_points.size() != base_atoms.size()) {
+              return false;
+            }
+            PointStats component_score_stats;
+            for (const auto &point : candidate_points)
+              component_score_stats.add(point.x, point.y, point.z);
+            double continuity_path = numeric_limits<double>::infinity();
+            double continuity_max_d2 = numeric_limits<double>::infinity();
+            if (!continuity_metrics_ok(candidate_points,
+                                       trajectory_context.continuity_pairs,
+                                       runtime_cutoffs.continuity_cutoff,
+                                       continuity_path, continuity_max_d2,
+                                       &best_safe_candidate)) {
+              return false;
+            }
+            PbctopoCutCandidate component_as_cut =
+                score_cut_candidate(component_scoring_edges, candidate_points,
+                                    1.5, 1.5, 1.5, 0.0, component_score_stats,
+                                    component_candidate.shift_norm2);
+            component_as_cut.min_pair_d2 = component_candidate.min_pair_d2;
+            component_as_cut.continuity_path = continuity_path;
+            component_as_cut.continuity_max_d2 = continuity_max_d2;
+            component_as_cut.anchor_mst2 = component_candidate.anchor_mst2;
+            component_as_cut.anchor_max_d2 = component_candidate.anchor_max_d2;
+            component_as_cut.clash_atom_a = component_candidate.clash_atom_a;
+            component_as_cut.clash_atom_b = component_candidate.clash_atom_b;
+            component_as_cut.ultra_clash = component_candidate.ultra_clash;
+            component_as_cut.valid = component_candidate.valid;
+            return accept_component_cut(component_as_cut, candidate_points,
+                                        accepted_offsets, source_label);
+          };
       if (same_component_warm_layout) {
         vector<Int3> warm_offsets = warm_state.previous_component_offsets;
         rebase_component_offsets(warm_offsets, components);
@@ -7785,7 +9892,32 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             runtime_cutoffs.continuity_cutoff, component_points, anchor_backend,
             &timing,
             &warm_state, component_warm_reference);
-        if (warm_cut.valid && !warm_cut.ultra_clash) {
+        PbctopoOwnerPairSplitDetail warm_cut_split_detail;
+        size_t warm_cut_split_owner_pairs = 0;
+        double warm_cut_split_gap = 0.0;
+        const bool warm_cut_split =
+            warm_cut.valid && !warm_cut.ultra_clash &&
+            candidate_has_split_contacting_owners(
+                component_points, base_atoms, this->m_mol[frame_idx].Box,
+                local_contacting_owner_pairs, warm_cut_split_owner_pairs,
+                warm_cut_split_gap, &warm_cut_split_detail);
+        if (warm_cut_split && warm_cut_split_detail.valid) {
+          record_split_rescue_seed(warm_cut, component_points,
+                                   warm_cut_split_detail,
+                                   "warm_component_local_improve");
+          append_pbctopo_log_line(
+              "[pbctopo] reject split_contacting_owner_pair at frame " +
+              to_string(
+                  static_cast<long long>(this->m_mol[frame_idx].time_of_snap)) +
+              " via warm_component_local_improve: owners=" +
+              to_string(warm_cut_split_detail.owner_a) + "-" +
+              to_string(warm_cut_split_detail.owner_b) +
+              ", raw_delta_scaled=" +
+              format_vec3(warm_cut_split_detail.raw_delta_scaled) +
+              ", min_image_delta_scaled=" +
+              format_vec3(warm_cut_split_detail.minimg_delta_scaled));
+        }
+        if (!warm_cut_split && warm_cut.valid && !warm_cut.ultra_clash) {
           bool warm_accepted = false;
           if (!best_safe_candidate.valid ||
               better_cut_candidate(warm_cut, best_safe_candidate)) {
@@ -7802,173 +9934,245 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           }
         }
       }
-      if (!component_search_used) {
-        const auto component_graph_started = clock::now();
-        const bool graph_ok = solve_component_offsets_via_pair_graph(
-            component_atoms, this->m_mol[frame_idx].Box, components, shifts,
-            component_scoring_edges, local_edge_set, component_points,
-            trajectory_context.continuity_pairs,
-            trajectory_context.continuity_anchor_indices, runtime_cutoffs, graph_as_cut,
-            component_shift_norm2, &timing, anchor_backend,
-            same_component_warm_layout ? &warm_state.previous_component_offsets
-                                       : nullptr,
-            &warm_state, component_warm_reference, &graph_tree_offsets,
-            &graph_refined_offsets, &graph_tree_edges);
-        timing.component_graph_s +=
-            chrono::duration<double>(clock::now() - component_graph_started)
-                .count();
-        if (!graph_ok) {
-          ++timing.component_graph_failed;
-          component_graph_fallthrough_reason = "graph_fail";
-          clear_component_trial_hints(warm_state);
-        }
-        if (graph_ok && component_points.size() != base_atoms.size()) {
-          ++timing.component_graph_points_mismatch;
-          component_graph_fallthrough_reason = "points_mismatch";
-        }
-        if (graph_ok && component_points.size() == base_atoms.size()) {
-          if (graph_as_cut.valid && !graph_as_cut.ultra_clash &&
-              (!best_safe_candidate.valid ||
-               better_cut_candidate(graph_as_cut, best_safe_candidate))) {
-            best_safe_candidate = graph_as_cut;
-            best_safe_points = component_points;
-            component_search_used = true;
-            ++timing.component_graph_used;
-            warm_state.previous_component_offsets =
-                extract_offsets_and_time(component_atoms, component_points);
-            append_pbctopo_log_line(
-                "[pbctopo] component graph solve: components=" +
-                to_string(components.size()) + ", min_pair_d2=" +
-                to_string(graph_as_cut.min_pair_d2) + ", rg2=" +
-                to_string(graph_as_cut.rg2) + ", bbox=" +
-                to_string(graph_as_cut.bbox_volume));
-          } else if (graph_as_cut.valid && !graph_as_cut.ultra_clash &&
-                     candidate_close_enough_to_skip_search(graph_as_cut,
-                                                           best_safe_candidate)) {
-            component_search_used = true;
-            ++timing.component_graph_used;
-            warm_state.previous_component_offsets =
-                extract_offsets_and_time(component_atoms, component_points);
-          } else if (!graph_as_cut.valid) {
-            ++timing.component_graph_invalid;
-            component_graph_fallthrough_reason = "invalid";
-          } else if (graph_as_cut.ultra_clash) {
-            ++timing.component_graph_ultraclash;
-            component_graph_fallthrough_reason = "ultra_clash";
-          } else {
-            ++timing.component_graph_not_better_not_close;
-            const char *close_reject_reason =
-                candidate_skip_search_reject_reason(graph_as_cut,
-                                                    best_safe_candidate);
-            component_graph_fallthrough_reason =
-                string("not_better_not_close/") +
-                (close_reject_reason != nullptr ? close_reject_reason : "unknown");
+      if (component_mode == PbctopoComponentMode::Exact) {
+        double component_shift_norm2 = 0.0;
+        PbctopoCutCandidate graph_as_cut;
+        vector<Int3> graph_tree_offsets;
+        vector<Int3> graph_refined_offsets;
+        vector<PbctopoGraphEdge> graph_tree_edges;
+        if (!component_search_used) {
+          const auto component_graph_started = clock::now();
+          const bool graph_ok = solve_component_offsets_via_pair_graph(
+              component_atoms, this->m_mol[frame_idx].Box, components, shifts,
+              component_scoring_edges, local_edge_set, component_points,
+              trajectory_context.continuity_pairs,
+              trajectory_context.continuity_anchor_indices, runtime_cutoffs,
+              graph_as_cut, component_shift_norm2, &timing, anchor_backend,
+              same_component_warm_layout ? &warm_state.previous_component_offsets
+                                         : nullptr,
+              &warm_state, component_warm_reference, &graph_tree_offsets,
+              &graph_refined_offsets, &graph_tree_edges);
+          timing.component_graph_s +=
+              chrono::duration<double>(clock::now() - component_graph_started)
+                  .count();
+          if (!graph_ok) {
+            ++timing.component_graph_failed;
+            component_graph_fallthrough_reason = "graph_fail";
+            clear_component_trial_hints(warm_state);
           }
-        }
-      }
-
-      if (!component_search_used) {
-        ++timing.component_search_frames;
-        append_pbctopo_log_line(
-            "[pbctopo] component graph fell through to search at frame " +
-            to_string(static_cast<long long>(this->m_mol[frame_idx].time_of_snap)) +
-            ": reason=" + component_graph_fallthrough_reason +
-            ", anchor_count=" +
-            to_string(trajectory_context.continuity_anchor_indices.size()) +
-            ", anchor_policy=full" +
-            ", graph_valid=" + string(graph_as_cut.valid ? "yes" : "no") +
-            ", graph_ultra_clash=" +
-            string(graph_as_cut.ultra_clash ? "yes" : "no") +
-            ", graph_anchor_max_d2=" + to_string(graph_as_cut.anchor_max_d2) +
-            ", ref_anchor_max_d2=" + to_string(best_safe_candidate.anchor_max_d2) +
-            ", graph_anchor_mst2=" + to_string(graph_as_cut.anchor_mst2) +
-            ", ref_anchor_mst2=" + to_string(best_safe_candidate.anchor_mst2) +
-            ", graph_min_pair_d2=" + to_string(graph_as_cut.min_pair_d2) +
-            ", graph_rg2=" + to_string(graph_as_cut.rg2) +
-            ", graph_bbox=" + to_string(graph_as_cut.bbox_volume));
-        append_pbctopo_log_line(
-            "[pbctopo] component graph offsets at frame " +
-            to_string(static_cast<long long>(this->m_mol[frame_idx].time_of_snap)) +
-            ": tree_offsets=" + format_component_offsets(graph_tree_offsets) +
-            ", refined_offsets=" + format_component_offsets(graph_refined_offsets) +
-            ", tree_edges=" + format_graph_edges(graph_tree_edges));
-        const auto component_search_started = clock::now();
-        PbctopoComponentCandidate component_candidate =
-            search_component_shift_candidate(component_atoms,
-                                             this->m_mol[frame_idx].Box,
-                                             components, shifts,
-                                             trajectory_context.continuity_pairs,
-                                             trajectory_context.continuity_anchor_indices,
-                                             runtime_cutoffs, component_points,
-                                             same_component_warm_layout
-                                                 ? &warm_state.previous_component_offsets
-                                                 : nullptr,
-                                             (best_safe_candidate.valid &&
-                                              !best_safe_candidate.ultra_clash)
-                                                 ? &best_safe_candidate
-                                                 : nullptr,
-                                             (best_safe_candidate.valid &&
-                                              !best_safe_candidate.ultra_clash &&
-                                              best_safe_points.size() == base_atoms.size())
-                                                 ? &best_safe_points
-                                                 : nullptr,
-                                             &timing);
-        timing.component_search_s +=
-            chrono::duration<double>(clock::now() - component_search_started)
-                .count();
-        if (component_candidate.valid && !component_candidate.ultra_clash &&
-            component_points.size() == base_atoms.size()) {
-          PointStats component_score_stats;
-          for (const auto &point : component_points)
-            component_score_stats.add(point.x, point.y, point.z);
-          double continuity_path = numeric_limits<double>::infinity();
-          double continuity_max_d2 = numeric_limits<double>::infinity();
-          if (!continuity_metrics_ok(component_points,
-                                     trajectory_context.continuity_pairs,
-                                     runtime_cutoffs.continuity_cutoff,
-                                     continuity_path, continuity_max_d2,
-                                     &best_safe_candidate)) {
-            component_candidate.valid = false;
+          if (graph_ok && component_points.size() != base_atoms.size()) {
+            ++timing.component_graph_points_mismatch;
+            component_graph_fallthrough_reason = "points_mismatch";
           }
-          if (component_candidate.valid) {
-            PbctopoCutCandidate component_as_cut =
-                score_cut_candidate(component_scoring_edges, component_points,
-                                    1.5, 1.5, 1.5,
-                                    0.0, component_score_stats,
-                                    component_candidate.shift_norm2);
-            component_as_cut.min_pair_d2 = component_candidate.min_pair_d2;
-            component_as_cut.continuity_path = continuity_path;
-            component_as_cut.continuity_max_d2 = continuity_max_d2;
-            component_as_cut.anchor_mst2 = component_candidate.anchor_mst2;
-            component_as_cut.anchor_max_d2 = component_candidate.anchor_max_d2;
-            component_as_cut.clash_atom_a = component_candidate.clash_atom_a;
-            component_as_cut.clash_atom_b = component_candidate.clash_atom_b;
-            component_as_cut.ultra_clash = component_candidate.ultra_clash;
-            component_as_cut.valid = component_candidate.valid;
-            if (!best_safe_candidate.valid ||
-                better_cut_candidate(component_as_cut, best_safe_candidate)) {
-              best_safe_candidate = component_as_cut;
-              best_safe_points = component_points;
-              component_search_used = true;
-              const vector<Int3> search_offsets =
-                  extract_offsets_and_time(component_atoms, component_points);
-              warm_state.previous_component_offsets = search_offsets;
-              append_pbctopo_log_line(
-                  "[pbctopo] component search winner offsets at frame " +
-                  to_string(static_cast<long long>(
-                      this->m_mol[frame_idx].time_of_snap)) +
-                  ": offsets=" + format_component_offsets(search_offsets));
+          if (graph_ok && component_points.size() == base_atoms.size()) {
+            if (accept_component_cut(graph_as_cut, component_points, nullptr,
+                                     "component graph solve")) {
+              ++timing.component_graph_used;
+            } else if (!graph_as_cut.valid) {
+              ++timing.component_graph_invalid;
+              component_graph_fallthrough_reason = "invalid";
+            } else if (graph_as_cut.ultra_clash) {
+              ++timing.component_graph_ultraclash;
+              component_graph_fallthrough_reason = "ultra_clash";
+            } else {
+              ++timing.component_graph_not_better_not_close;
+              const char *close_reject_reason =
+                  candidate_skip_search_reject_reason(graph_as_cut,
+                                                      best_safe_candidate);
+              component_graph_fallthrough_reason =
+                  string("not_better_not_close/") +
+                  (close_reject_reason != nullptr ? close_reject_reason
+                                                 : "unknown");
             }
           }
         }
-        if (component_search_used || !best_safe_candidate.valid) {
+
+        if (!component_search_used) {
+          ++timing.component_search_frames;
           append_pbctopo_log_line(
-              "[pbctopo] component-shift search: components=" +
-              to_string(components.size()) + ", ultra_clash=" +
-              string(component_candidate.ultra_clash ? "yes" : "no") +
-              ", min_pair_d2=" + to_string(component_candidate.min_pair_d2) +
-              ", rg2=" + to_string(component_candidate.rg2) +
-              ", bbox=" + to_string(component_candidate.bbox_volume));
+              "[pbctopo] component graph fell through to search at frame " +
+              to_string(static_cast<long long>(
+                  this->m_mol[frame_idx].time_of_snap)) +
+              ": mode=" + component_mode_label +
+              ", raw_components=" + to_string(raw_component_count) +
+              ", effective_components=" +
+              to_string(effective_component_count) + ", reason=" +
+              component_graph_fallthrough_reason + ", anchor_count=" +
+              to_string(trajectory_context.continuity_anchor_indices.size()) +
+              ", anchor_policy=full" +
+              ", graph_valid=" + string(graph_as_cut.valid ? "yes" : "no") +
+              ", graph_ultra_clash=" +
+              string(graph_as_cut.ultra_clash ? "yes" : "no") +
+              ", graph_anchor_max_d2=" + to_string(graph_as_cut.anchor_max_d2) +
+              ", ref_anchor_max_d2=" + to_string(best_safe_candidate.anchor_max_d2) +
+              ", graph_anchor_mst2=" + to_string(graph_as_cut.anchor_mst2) +
+              ", ref_anchor_mst2=" + to_string(best_safe_candidate.anchor_mst2) +
+              ", graph_min_pair_d2=" + to_string(graph_as_cut.min_pair_d2) +
+              ", graph_kappa2=" + to_string(graph_as_cut.shape_kappa2) +
+              ", graph_asph=" + to_string(graph_as_cut.shape_asphericity) +
+              ", graph_bbox=" + to_string(graph_as_cut.bbox_volume));
+          append_pbctopo_log_line(
+              "[pbctopo] component graph offsets at frame " +
+              to_string(static_cast<long long>(
+                  this->m_mol[frame_idx].time_of_snap)) +
+              ": tree_offsets=" + format_component_offsets(graph_tree_offsets) +
+              ", refined_offsets=" + format_component_offsets(graph_refined_offsets) +
+              ", tree_edges=" + format_graph_edges(graph_tree_edges));
+          const auto component_search_started = clock::now();
+          PbctopoComponentCandidate component_candidate =
+              search_component_shift_candidate(
+                  component_atoms, this->m_mol[frame_idx].Box, components, shifts,
+                  trajectory_context.continuity_pairs,
+                  trajectory_context.continuity_anchor_indices, runtime_cutoffs,
+                  component_points,
+                  same_component_warm_layout
+                      ? &warm_state.previous_component_offsets
+                      : nullptr,
+                  (best_safe_candidate.valid && !best_safe_candidate.ultra_clash)
+                      ? &best_safe_candidate
+                      : nullptr,
+                  (best_safe_candidate.valid && !best_safe_candidate.ultra_clash &&
+                   best_safe_points.size() == base_atoms.size())
+                      ? &best_safe_points
+                      : nullptr,
+                  &timing);
+          timing.component_search_s +=
+              chrono::duration<double>(clock::now() - component_search_started)
+                  .count();
+          if (accept_component_candidate(component_candidate, component_points,
+                                         nullptr, "component search winner")) {
+            const vector<Int3> search_offsets =
+                extract_offsets_and_time(component_atoms, component_points);
+            warm_state.previous_component_offsets = search_offsets;
+            append_pbctopo_log_line(
+                "[pbctopo] component search winner offsets at frame " +
+                to_string(static_cast<long long>(
+                    this->m_mol[frame_idx].time_of_snap)) +
+                ": offsets=" + format_component_offsets(search_offsets));
+          }
+          if (component_search_used || !best_safe_candidate.valid) {
+            append_pbctopo_log_line(
+                "[pbctopo] component-shift search: mode=" + component_mode_label +
+                ", raw_components=" + to_string(raw_component_count) +
+                ", effective_components=" +
+                to_string(effective_component_count) + ", components=" +
+                to_string(components.size()) + ", ultra_clash=" +
+                string(component_candidate.ultra_clash ? "yes" : "no") +
+                ", min_pair_d2=" + to_string(component_candidate.min_pair_d2) +
+                ", kappa2=" + to_string(component_candidate.shape_kappa2) +
+                ", asph=" + to_string(component_candidate.shape_asphericity) +
+                ", bbox=" + to_string(component_candidate.bbox_volume));
+          }
+        }
+      } else if (component_mode == PbctopoComponentMode::MergeThenGraph) {
+        ++timing.component_large_mode_merge_frames;
+        const PbctopoMergedComponentPlan merge_plan =
+            build_chain_merged_component_plan(component_atoms, components);
+        effective_component_count = merge_plan.merged_components.size();
+        if (raw_component_count > effective_component_count)
+          timing.component_large_mode_merge_count +=
+              raw_component_count - effective_component_count;
+        const bool allow_exact_search_on_merged =
+            effective_component_count <= kPbctopoExactComponentLimit;
+        if (!allow_exact_search_on_merged)
+          ++timing.component_large_mode_pair_only_frames;
+
+        PbctopoCutCandidate merged_mode_cut;
+        vector<Int3> merged_mode_raw_offsets;
+        double component_shift_norm2 = 0.0;
+        const auto merge_mode_started = clock::now();
+        const bool merge_ok = solve_large_component_merge_mode(
+            component_atoms, this->m_mol[frame_idx].Box, components, merge_plan,
+            shifts, component_scoring_edges, local_edge_set, component_points,
+            trajectory_context.continuity_pairs,
+            trajectory_context.continuity_anchor_indices, runtime_cutoffs,
+            merged_mode_cut, component_shift_norm2, &timing, anchor_backend,
+            same_component_warm_layout ? &warm_state.previous_component_offsets
+                                       : nullptr,
+            &warm_state, component_warm_reference, allow_exact_search_on_merged,
+            &merged_mode_raw_offsets);
+        timing.component_graph_s +=
+            chrono::duration<double>(clock::now() - merge_mode_started).count();
+        if (merge_ok &&
+            accept_component_cut(merged_mode_cut, component_points,
+                                 &merged_mode_raw_offsets,
+                                 "component merge-graph solve")) {
+          ++timing.component_graph_used;
+        } else {
+          ++timing.component_large_mode_fallback_frames;
+          const char *merge_reject_reason =
+              merge_ok ? candidate_skip_search_reject_reason(
+                             merged_mode_cut, best_safe_candidate)
+                       : nullptr;
+          component_graph_fallthrough_reason = !merge_ok
+                                                   ? "graph_invalid"
+                                                   : string("not_better_not_close/") +
+                                                          (merge_reject_reason != nullptr
+                                                               ? merge_reject_reason
+                                                               : "unknown");
+          append_pbctopo_log_line(
+              "[pbctopo] large-component merge mode fell back at frame " +
+              to_string(static_cast<long long>(
+                  this->m_mol[frame_idx].time_of_snap)) +
+              ": mode=" + component_mode_label +
+              ", raw_components=" + to_string(raw_component_count) +
+              ", effective_components=" +
+              to_string(effective_component_count) + ", reason=" +
+              component_graph_fallthrough_reason);
+        }
+      } else if (component_mode == PbctopoComponentMode::Beam) {
+        ++timing.component_large_mode_beam_frames;
+        effective_component_count = components.size();
+        const auto beam_started = clock::now();
+        PbctopoComponentCandidate beam_candidate =
+            search_component_shift_candidate_beam(
+                component_atoms, this->m_mol[frame_idx].Box, components, shifts,
+                trajectory_context.continuity_pairs,
+                trajectory_context.continuity_anchor_indices, runtime_cutoffs,
+                component_points,
+                same_component_warm_layout
+                    ? &warm_state.previous_component_offsets
+                    : nullptr,
+                (best_safe_candidate.valid && !best_safe_candidate.ultra_clash)
+                    ? &best_safe_candidate
+                    : nullptr,
+                (best_safe_candidate.valid && !best_safe_candidate.ultra_clash &&
+                 best_safe_points.size() == base_atoms.size())
+                    ? &best_safe_points
+                    : nullptr,
+                &timing);
+        timing.component_search_s +=
+            chrono::duration<double>(clock::now() - beam_started).count();
+        if (!accept_component_candidate(beam_candidate, component_points, nullptr,
+                                        "component beam solve")) {
+          ++timing.component_large_mode_fallback_frames;
+          PbctopoCutCandidate beam_as_cut =
+              component_candidate_to_cut_candidate(beam_candidate);
+          const char *beam_reject_reason =
+              (beam_candidate.valid && !beam_candidate.ultra_clash)
+                  ? candidate_skip_search_reject_reason(beam_as_cut,
+                                                        best_safe_candidate)
+                  : nullptr;
+          component_graph_fallthrough_reason =
+              beam_candidate.valid && !beam_candidate.ultra_clash
+                  ? string("not_better_not_close/") +
+                        (beam_reject_reason != nullptr
+                             ? beam_reject_reason
+                             : "unknown")
+                  : "beam_no_complete_assignment";
+          append_pbctopo_log_line(
+              "[pbctopo] large-component beam mode fell back at frame " +
+              to_string(static_cast<long long>(
+                  this->m_mol[frame_idx].time_of_snap)) +
+              ": mode=" + component_mode_label +
+              ", raw_components=" + to_string(raw_component_count) +
+              ", effective_components=" +
+              to_string(effective_component_count) + ", reason=" +
+              component_graph_fallthrough_reason + ", min_pair_d2=" +
+              to_string(beam_candidate.min_pair_d2) + ", kappa2=" +
+              to_string(beam_candidate.shape_kappa2) + ", asph=" +
+              to_string(beam_candidate.shape_asphericity) + ", bbox=" +
+              to_string(beam_candidate.bbox_volume));
         }
       }
     } else {
@@ -7993,14 +10197,113 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       continue;
     }
 
+    if ((!best_safe_candidate.valid || best_safe_candidate.ultra_clash) &&
+        split_rescue_available) {
+      ensure_component_context();
+      ++timing.hull_rescue_attempts;
+      PbctopoCutCandidate best_hull_candidate;
+      vector<Vec3> best_hull_points;
+      best_hull_points.reserve(base_atoms.size());
+      Int3 best_hull_shift{};
+      int best_hull_owner = -1;
+      double best_hull_volume = numeric_limits<double>::infinity();
+      size_t hull_valid_candidates = 0;
+      vector<int> rescue_owner_candidates;
+      rescue_owner_candidates.reserve(2);
+      rescue_owner_candidates.push_back(split_rescue_detail.owner_b);
+      if (split_rescue_detail.owner_a != split_rescue_detail.owner_b)
+        rescue_owner_candidates.push_back(split_rescue_detail.owner_a);
+      for (int rescue_owner : rescue_owner_candidates) {
+        build_owner_spans(base_atoms, rescue_owner, hull_owner_spans);
+        if (hull_owner_spans.empty())
+          continue;
+        for (const auto &shift : shifts) {
+          if (shift.ix == 0 && shift.iy == 0 && shift.iz == 0)
+            continue;
+          hull_rescue_points.clear();
+          pbctopo_hull::shift_points_by_spans(
+              split_rescue_points, hull_owner_spans,
+              Vec3{shift.tx, shift.ty, shift.tz}, hull_rescue_points,
+              &hull_scratch);
+          PbctopoCutCandidate hull_candidate;
+          const PbctopoCutCandidate *hull_incumbent =
+              best_hull_candidate.valid ? &best_hull_candidate : nullptr;
+          if (!validate_rescue_candidate_points(hull_rescue_points,
+                                                hull_incumbent,
+                                                hull_candidate)) {
+            continue;
+          }
+          double hull_volume = numeric_limits<double>::infinity();
+          if (!pbctopo_hull::quickhull_volume(hull_rescue_points, hull_volume,
+                                              &hull_scratch)) {
+            continue;
+          }
+          ++hull_valid_candidates;
+          const bool better_hull =
+              !best_hull_candidate.valid ||
+              hull_volume + 1.0e-6 < best_hull_volume ||
+              (fabs(hull_volume - best_hull_volume) <= 1.0e-6 &&
+               better_cut_candidate(hull_candidate, best_hull_candidate));
+          if (!better_hull)
+            continue;
+          best_hull_candidate = hull_candidate;
+          best_hull_volume = hull_volume;
+          best_hull_shift = {shift.ix, shift.iy, shift.iz};
+          best_hull_owner = rescue_owner;
+          best_hull_points = hull_rescue_points;
+        }
+      }
+      if (best_hull_candidate.valid) {
+        ++timing.hull_rescue_successes;
+        append_pbctopo_log_line(
+            "[pbctopo] hull rescue candidate at frame " +
+            to_string(static_cast<long long>(
+                this->m_mol[frame_idx].time_of_snap)) +
+            " from " + split_rescue_source + ": moved_owner=" +
+            to_string(best_hull_owner) + ", applied_shift=" +
+            format_int3(best_hull_shift) + ", hull_volume=" +
+            to_string(best_hull_volume) + ", valid_candidates=" +
+            to_string(hull_valid_candidates) + ", avx2=" +
+            string(pbctopo_hull::avx2_available() ? "on" : "off"));
+        accept_rescue_candidate(best_hull_points, best_hull_candidate);
+        continue;
+      }
+
+      ++timing.distance_rescue_attempts;
+      vector<Vec3> rescued_points;
+      rescued_points.reserve(base_atoms.size());
+      Int3 rescue_shift{};
+      double rescue_raw_delta_norm = numeric_limits<double>::infinity();
+      if (rescue_split_contacting_owner_candidate(
+              split_rescue_points, base_atoms, this->m_mol[frame_idx].Box,
+              local_contacting_owner_pairs, shifts, split_rescue_detail,
+              rescued_points, rescue_shift, rescue_raw_delta_norm)) {
+        PbctopoCutCandidate rescued_candidate;
+        if (validate_rescue_candidate_points(rescued_points, nullptr,
+                                             rescued_candidate)) {
+          ++timing.distance_rescue_successes;
+          append_pbctopo_log_line(
+              "[pbctopo] distance rescue candidate at frame " +
+              to_string(static_cast<long long>(
+                  this->m_mol[frame_idx].time_of_snap)) +
+              " from " + split_rescue_source + ": applied_shift=" +
+              format_int3(rescue_shift) + ", rescued_raw_delta_norm=" +
+              to_string(rescue_raw_delta_norm));
+          accept_rescue_candidate(rescued_points, rescued_candidate);
+          continue;
+        }
+      }
+    }
+
     if (!best_candidate.valid || best_candidate.ultra_clash) {
       const string fallback_message =
           "[pbctopo] frame " +
           to_string(static_cast<long long>(this->m_mol[frame_idx].time_of_snap)) +
           " fell back to pbci=0 after unsafe virtual-box search: safe_candidates=" +
           to_string(safe_candidates) + ", best.min_pair_d2=" +
-          to_string(best_candidate.min_pair_d2) + ", best.rg2=" +
-          to_string(best_candidate.rg2) + ", best.bbox=" +
+          to_string(best_candidate.min_pair_d2) + ", best.kappa2=" +
+          to_string(best_candidate.shape_kappa2) + ", best.asph=" +
+          to_string(best_candidate.shape_asphericity) + ", best.bbox=" +
           to_string(best_candidate.bbox_volume);
       append_pbctopo_log_line(fallback_message);
       TitanUI::print_warning(
@@ -8107,6 +10410,13 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.projection_clash_skip_evals) + ", component_frames=" +
       to_string(timing.component_frames) + ", component_shift_trials=" +
       to_string(timing.component_shift_trials) +
+      ", hull_rescue_attempts=" + to_string(timing.hull_rescue_attempts) +
+      ", hull_rescue_successes=" + to_string(timing.hull_rescue_successes) +
+      ", distance_rescue_attempts=" +
+      to_string(timing.distance_rescue_attempts) +
+      ", distance_rescue_successes=" +
+      to_string(timing.distance_rescue_successes) +
+      ", pbci_fallback_frames=" + to_string(timing.pbci_fallback_frames) +
       ", early_projection_used=" + to_string(timing.early_projection_used) +
       ", previous_seed_used=" + to_string(timing.previous_seed_used) +
        ", component_graph_edges=" + to_string(timing.component_graph_edges) +
@@ -8183,6 +10493,30 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.component_search_seed_graph) +
       ", component_search_seed_none=" +
       to_string(timing.component_search_seed_none) +
+      ", component_large_mode_merge_frames=" +
+      to_string(timing.component_large_mode_merge_frames) +
+      ", component_large_mode_pair_only_frames=" +
+      to_string(timing.component_large_mode_pair_only_frames) +
+      ", component_large_mode_beam_frames=" +
+      to_string(timing.component_large_mode_beam_frames) +
+      ", component_large_mode_merge_count=" +
+      to_string(timing.component_large_mode_merge_count) +
+      ", component_large_mode_graph_seed_count=" +
+      to_string(timing.component_large_mode_graph_seed_count) +
+      ", component_large_mode_graph_seed_refined=" +
+      to_string(timing.component_large_mode_graph_seed_refined) +
+      ", component_large_mode_graph_seed_nonbaseline_win=" +
+      to_string(timing.component_large_mode_graph_seed_nonbaseline_win) +
+      ", component_large_mode_beam_expanded=" +
+      to_string(timing.component_large_mode_beam_expanded) +
+      ", component_large_mode_beam_kept=" +
+      to_string(timing.component_large_mode_beam_kept) +
+      ", component_large_mode_beam_complete_assignments=" +
+      to_string(timing.component_large_mode_beam_complete_assignments) +
+      ", component_large_mode_beam_final_rescored=" +
+      to_string(timing.component_large_mode_beam_final_rescored) +
+      ", component_large_mode_fallback_frames=" +
+      to_string(timing.component_large_mode_fallback_frames) +
       ", component_search_shift_warm_hits=" +
       to_string(timing.component_search_shift_warm_hits) +
       ", component_graph_outlier_rejects=" +

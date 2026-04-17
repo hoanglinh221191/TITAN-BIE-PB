@@ -112,8 +112,36 @@ int arguments::post_process() {
     cout << "Time interval must not be negative!\n";
     exit(EXIT_FAILURE);
   }
-  if ((msm.flag_msm || dham.flag_dham) && msm.msm_lag <= 0) {
-    TitanUI::print_error("MSM/DHAM: -msm-lag must be > 0.");
+  if (mbar.flag_mbar) {
+    std::transform(mbar.domain.begin(), mbar.domain.end(), mbar.domain.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::transform(mbar.ensemble.begin(), mbar.ensemble.end(),
+                   mbar.ensemble.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::transform(mbar.window_match.begin(), mbar.window_match.end(),
+                   mbar.window_match.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::transform(mbar.temp_mode.begin(), mbar.temp_mode.end(),
+                   mbar.temp_mode.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    flag_network = true;
+    if (mbar.domain == "tica" || mbar.domain == "both") {
+      msm.flag_tica = true;
+      msm.flag_msm = true;
+    }
+    if (mbar.domain == "pca" || mbar.domain == "both") {
+      flag_pca = true;
+    }
+  }
+  if ((msm.flag_msm || dham.flag_dham ||
+       (mbar.flag_mbar && (mbar.domain == "tica" || mbar.domain == "both"))) &&
+      msm.msm_lag <= 0) {
+    TitanUI::print_error("MSM/DHAM/MBAR: -msm-lag must be > 0.");
     exit(EXIT_FAILURE);
   }
   if (dham.flag_dham) {
@@ -154,6 +182,70 @@ int arguments::post_process() {
     if (dham.dt_energy_ps < 0.0) {
       TitanUI::print_error("DHAM: -dham-dt-energy must be >= 0.");
       exit(EXIT_FAILURE);
+    }
+  }
+  if (mbar.flag_mbar) {
+    if (mbar.domain != "tica" && mbar.domain != "pca" &&
+        mbar.domain != "both") {
+      TitanUI::print_error("MBAR: -mbar-domain must be tica, pca, or both.");
+      exit(EXIT_FAILURE);
+    }
+    if (mbar.ensemble != "nvt" && mbar.ensemble != "npt") {
+      TitanUI::print_error("MBAR: -mbar-ensemble must be either nvt or npt.");
+      exit(EXIT_FAILURE);
+    }
+    if (mbar.window_match != "auto" && mbar.window_match != "off" &&
+        mbar.window_match != "strict") {
+      TitanUI::print_error(
+          "MBAR: -mbar-window-match must be auto, off, or strict.");
+      exit(EXIT_FAILURE);
+    }
+    if (mbar.temp_mode != "fixed" && mbar.temp_mode != "per_frame") {
+      TitanUI::print_error(
+          "MBAR: -mbar-temp-mode must be fixed or per_frame.");
+      exit(EXIT_FAILURE);
+    }
+    if (mbar.temps_file.empty() && mbar.temp_mode != "per_frame") {
+      TitanUI::print_error(
+          "MBAR: omitting -mbar-temps is only supported with "
+          "-mbar-temp-mode per_frame.");
+      exit(EXIT_FAILURE);
+    }
+    if (mbar.target_temp <= 0.0) {
+      TitanUI::print_error("MBAR: -mbar-target-temp must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (mbar.target_pressure_bar < 0.0) {
+      TitanUI::print_error("MBAR: -mbar-pressure-bar must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (mbar.dt_energy_ps < 0.0) {
+      TitanUI::print_error("MBAR: -mbar-dt-energy must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (mbar.temp_column < 1) {
+      TitanUI::print_error("MBAR: -mbar-temp-col must be >= 1.");
+      exit(EXIT_FAILURE);
+    }
+    if (mbar.temp_mode == "per_frame" && mbar.demux_map_file.empty() &&
+        mbar.temp_column < 2) {
+      TitanUI::print_error(
+          "MBAR: raw per-frame mode expects a 3-column XVG layout "
+          "(time, observable, temperature), so -mbar-temp-col must be >= 2.");
+      exit(EXIT_FAILURE);
+    }
+    if (mbar.bootstrap_samples < 0) {
+      TitanUI::print_error("MBAR: -mbar-bootstrap must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (mbar.scan_points < 0) {
+      TitanUI::print_error("MBAR: -mbar-scan-points must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (!mbar.demux_map_file.empty() && mbar.temp_mode != "per_frame") {
+      TitanUI::print_info(
+          "MBAR: -mbar-demux-map is only used with -mbar-temp-mode per_frame. "
+          "Fixed-temperature mode will ignore it.");
     }
   }
   if (tpt.flag_tpt) {
@@ -276,6 +368,35 @@ int arguments::post_process() {
       }
     }
   }
+  if (awh.flag_awh_ifp) {
+    if (!ifp.flag_ifp) {
+      TitanUI::print_error(
+          "AWH: -awh-ifp requires IFP to be enabled.");
+      exit(EXIT_FAILURE);
+    }
+    if (awh.xvg_list_file.empty()) {
+      TitanUI::print_error(
+          "AWH: -awh-xvg <filelist> is required when -awh-ifp is enabled.");
+      exit(EXIT_FAILURE);
+    }
+    if (awh.xvg_value_column < 1) {
+      TitanUI::print_error("AWH: -awh-xvg-col must be >= 1.");
+      exit(EXIT_FAILURE);
+    }
+    if (awh.n_bins <= 0) {
+      TitanUI::print_error("AWH: -awh-bins must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (flag_nocal) {
+      TitanUI::print_error(
+          "AWH: -awh-ifp currently requires two-group analysis and does not support -nocal.");
+      exit(EXIT_FAILURE);
+    }
+    if (awh.output_prefix.empty()) {
+      awh.output_prefix = "awh";
+    }
+  }
+
   if (community.flag_community) {
     std::transform(community.method.begin(), community.method.end(),
                    community.method.begin(), [](unsigned char c) {
@@ -285,6 +406,30 @@ int arguments::post_process() {
       TitanUI::print_error("Community: unsupported method '" +
                            community.method +
                            "'. V1 supports only -community=louvain.");
+      exit(EXIT_FAILURE);
+    }
+  }
+  if (msm.flag_msm || dham.flag_dham) {
+    if (msm.msm_nts <= 0) {
+      TitanUI::print_error("MSM: -msm-nts must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (msm.msm_its_topk < 0) {
+      TitanUI::print_error("MSM: -msm-its-topk must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (msm.msm_its_max_k_full <= 0) {
+      TitanUI::print_error("MSM: -msm-its-max-k-full must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+  }
+  if (flag_pca) {
+    if (msm.pca_topk < 0) {
+      TitanUI::print_error("PCA: -pca-topk must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (msm.pca_max_k_full <= 0) {
+      TitanUI::print_error("PCA: -pca-max-k-full must be > 0.");
       exit(EXIT_FAILURE);
     }
   }
@@ -695,6 +840,23 @@ int arguments::post_process() {
           "Allostery: -allostery-knn-contact-cut must be > 0.");
       exit(EXIT_FAILURE);
     }
+    std::string estimator = allostery_estimator;
+    std::transform(estimator.begin(), estimator.end(), estimator.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (estimator == "histogram")
+      estimator = "hist";
+    if (estimator != "hist" && estimator != "knn" && estimator != "kde") {
+      TitanUI::print_error(
+          "Allostery: -allostery-estimator must be one of hist, knn, kde.");
+      exit(EXIT_FAILURE);
+    }
+    allostery_estimator = estimator;
+    if (allostery_kde_bandwidth < 0.0) {
+      TitanUI::print_error("Allostery: -allostery-kde-bandwidth must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
   }
 
   const bool lj_trace_free_kinetics =
@@ -727,35 +889,34 @@ int arguments::post_process() {
         "PBCTOPO: -pbctopo-anchor-backend must be one of auto, prim, spatial-all.");
     exit(EXIT_FAILURE);
   }
-  if ((flag_nocal || rms.flag_rms || lj.flag_lj) && !has_explicit_pbc_mode) {
+  if (rg.flag_rg2 && rg.hist_bins <= 0) {
+    TitanUI::print_error("RG2: -rg2-hist-bins must be a positive integer.");
+    exit(EXIT_FAILURE);
+  }
+  if ((flag_nocal || rms.flag_rms || rg.flag_rg2 || lj.flag_lj) &&
+      !has_explicit_pbc_mode) {
     pbc.solv_pbc_int = 1;
     pbc.solv_pbc = 0;
     pbc.chain_ref = 0;
     pbc.auto_enabled_pbci = true;
+    vector<string> modules;
+    if (flag_nocal)
+      modules.push_back("Nocal");
+    if (rms.flag_rms)
+      modules.push_back("RMSD/RMSF");
+    if (rg.flag_rg2)
+      modules.push_back("Rg2");
+    if (lj.flag_lj)
+      modules.push_back("LJ");
     std::string reason;
-    if (flag_nocal && rms.flag_rms && lj.flag_lj) {
-      reason = "Nocal, RMSD/RMSF, and LJ requested without an explicit PBC "
-               "mode. Auto-enabling -pbci 0.";
-    } else if (flag_nocal && rms.flag_rms) {
-      reason = "Nocal and RMSD/RMSF requested without an explicit PBC mode. "
-               "Auto-enabling -pbci 0.";
-    } else if (flag_nocal && lj.flag_lj) {
-      reason = "Nocal and LJ requested without an explicit PBC mode. "
-               "Auto-enabling -pbci 0.";
-    } else if (flag_nocal) {
-      reason = "Nocal requested without an explicit PBC mode. "
-               "Auto-enabling -pbci 0.";
-    } else if (rms.flag_rms && lj.flag_lj) {
-      reason = "RMSD/RMSF and LJ analysis requested without an explicit PBC "
-               "mode. Auto-enabling -pbci 0.";
-    } else if (lj.flag_lj) {
-      reason =
-          "LJ analysis requested without an explicit PBC mode. Auto-enabling "
-          "-pbci 0.";
-    } else {
-      reason = "RMSD/RMSF requested without an explicit PBC mode. "
-               "Auto-enabling -pbci 0.";
+    for (size_t i = 0; i < modules.size(); ++i) {
+      if (i > 0)
+        reason += (i + 1 == modules.size()) ? " and " : ", ";
+      reason += modules[i];
     }
+    if (modules.size() == 1 && modules.front() == "LJ")
+      reason += " analysis";
+    reason += " requested without an explicit PBC mode. Auto-enabling -pbci 0.";
     TitanUI::print_warning(reason);
   }
 

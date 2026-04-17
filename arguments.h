@@ -27,6 +27,17 @@ struct PbcArgs {
 };
 
 struct MsmArgs {
+  enum class ItsSolverMode {
+    Full,
+    Schur,
+    Partial,
+  };
+
+  enum class PcaSolverMode {
+    Full,
+    Partial,
+  };
+
   bool flag_msm{false};
   bool flag_tica{false};
   // Default/cap for MSM microstates when the user does not pass
@@ -43,9 +54,16 @@ struct MsmArgs {
   bool msm_run_pcca{true};
   bool msm_run_its{true};
   vector<int> msm_its_lags{};
+  ItsSolverMode msm_its_solver{ItsSolverMode::Full};
+  int msm_its_topk{0};
+  int msm_its_max_k_full{256};
   int tica_lag{10}, tica_components{5};
   std::string tica_backend{"auto"};
   int tica_rank{64};
+  PcaSolverMode pca_solver{PcaSolverMode::Full};
+  int pca_topk{0};
+  int pca_max_k_full{512};
+  bool pca_symmetry_aware{false};
 };
 
 struct GistArgs {
@@ -120,6 +138,13 @@ struct IfpArgs {
   std::string output_filename {};  // empty → uses info.get_ifp_filename()
 };
 
+struct AwhArgs {
+  bool flag_awh_ifp{false};
+  std::string xvg_list_file{};
+  int xvg_value_column{1};
+  int n_bins{20};
+  std::string output_prefix{};
+};
 struct DhamArgs {
   bool   flag_dham       {false};
   std::string temps_file {};       // file with replica temperatures (K)
@@ -132,6 +157,23 @@ struct DhamArgs {
   double tolerance       {1e-6};
   int    n_replicas      {0};      // explicit validation (0 = auto from temps)
   double dt_energy_ps    {0.0};    // energy .xvg output freq (ps); 0 = auto from file
+};
+
+struct MbarArgs {
+  bool flag_mbar{false};
+  std::string temps_file{};       // optional ladder temperatures (K)
+  std::string ener_list_file{};   // file listing paths to .xvg energy files
+  std::string domain{"tica"};     // tica | pca | both
+  std::string ensemble{"nvt"};    // nvt | npt
+  std::string window_match{"auto"}; // auto | off | strict
+  std::string temp_mode{"fixed"}; // fixed | per_frame
+  double target_temp{300.0};      // target reweighting temperature (K)
+  double target_pressure_bar{1.0}; // target pressure for NPT reweighting (bar)
+  double dt_energy_ps{0.0};       // energy .xvg output freq (ps); 0 = auto
+  int temp_column{2};             // xvg temperature/state-label column
+  int bootstrap_samples{0};       // 0 = off
+  int scan_points{0};             // 0/1 = no scan output, >1 = write mbar_cv.dat
+  std::string demux_map_file{};   // optional per-frame temperature-state map
 };
 
 struct TptArgs {
@@ -172,6 +214,11 @@ struct DsspArgs {
 
 struct RmsArgs {
   bool flag_rms{false};
+};
+
+struct RgArgs {
+  bool flag_rg2{false};
+  int hist_bins{100};
 };
 
 struct LjArgs {
@@ -216,12 +263,15 @@ public:
   DeArgs de;
   LlpsArgs llps;
   IfpArgs ifp;
+  AwhArgs awh;
   DhamArgs dham;
+  MbarArgs mbar;
   TptArgs tpt;
   CommunityArgs community;
   UmapArgs umap;
   DsspArgs dssp;
   RmsArgs rms;
+  RgArgs rg;
   LjArgs lj;
   ZtsArgs zts;
 
@@ -270,6 +320,8 @@ public:
   bool allostery_use_avg_cutoff;
   bool allostery_knn_use_contact_prior;
   bool allostery_compute_te;
+  std::string allostery_estimator;
+  double allostery_kde_bandwidth;
   // XDR trajectory (XTC/TRR)
   string traj_file;
   bool flag_xdr;
@@ -334,6 +386,8 @@ public:
         allostery_use_avg_cutoff{true},
         allostery_knn_use_contact_prior{false},
         allostery_compute_te{true},
+        allostery_estimator{"hist"},
+        allostery_kde_bandwidth{0.0},
         // XDR
         traj_file{}, flag_xdr{false}, xdr_type{},
         // size_t

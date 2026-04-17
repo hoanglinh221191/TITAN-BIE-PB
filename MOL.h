@@ -13,6 +13,7 @@
 #include "h_bond.h"
 #include "index_v2.h"
 #include "miscellaneous.h"
+#include "titan_simd_dispatch.h"
 #include "uti_func.h"
 #include <string_view>
 using std::string_view;
@@ -20,7 +21,6 @@ using std::string_view;
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
-#include <immintrin.h>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -258,18 +258,12 @@ public:
       const double *local_y = thread_local_forces[t].y.data();
       const double *local_z = thread_local_forces[t].z.data();
 
-#pragma omp simd
-      for (size_t i = 0; i < vec_size; i += 4) {
-        _mm256_store_pd(&target_x[i],
-                        _mm256_add_pd(_mm256_load_pd(&target_x[i]),
-                                      _mm256_load_pd(&local_x[i])));
-        _mm256_store_pd(&target_y[i],
-                        _mm256_add_pd(_mm256_load_pd(&target_y[i]),
-                                      _mm256_load_pd(&local_y[i])));
-        _mm256_store_pd(&target_z[i],
-                        _mm256_add_pd(_mm256_load_pd(&target_z[i]),
-                                      _mm256_load_pd(&local_z[i])));
-      }
+      titan_simd_dispatch::add_row_inplace(target_x, local_x,
+                                           static_cast<int>(vec_size));
+      titan_simd_dispatch::add_row_inplace(target_y, local_y,
+                                           static_cast<int>(vec_size));
+      titan_simd_dispatch::add_row_inplace(target_z, local_z,
+                                           static_cast<int>(vec_size));
 
       for (size_t i = vec_size; i < n_atoms; ++i) {
         target_x[i] += local_x[i];

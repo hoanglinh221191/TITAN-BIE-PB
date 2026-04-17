@@ -1,5 +1,6 @@
 #include "titan_tpt.h"
 #include "titan_executor.h"
+#include "titan_thread_compat.h"
 
 #include <algorithm>
 #include <Eigen/Sparse>
@@ -14,6 +15,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 
 namespace {
 
@@ -236,7 +238,30 @@ void TitanTPT::build_sparse_transition_backend(
       static_cast<int>(tpm_col_indices.size());
   tpm_graph_.assign(n_states_, std::move(tpm_row_offsets),
                     std::move(tpm_col_indices), std::move(tpm_values));
-
+  reverse_edge_lookup_.assign(tpm_graph_.values().size(), -1);
+  auto edge_key = [](int from, int to) -> std::uint64_t {
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(from)) << 32) |
+           static_cast<std::uint32_t>(to);
+  };
+  std::unordered_map<std::uint64_t, int> edge_index_map;
+  edge_index_map.reserve(tpm_graph_.values().size() * 2);
+  for (int from = 0; from < n_states_; ++from) {
+    for (int edge_idx = tpm_graph_.row_begin(from);
+         edge_idx < tpm_graph_.row_end(from); ++edge_idx) {
+      const int to = tpm_graph_.col_index(edge_idx);
+      edge_index_map.emplace(edge_key(from, to), edge_idx);
+    }
+  }
+  for (int from = 0; from < n_states_; ++from) {
+    for (int edge_idx = tpm_graph_.row_begin(from);
+         edge_idx < tpm_graph_.row_end(from); ++edge_idx) {
+      const int to = tpm_graph_.col_index(edge_idx);
+      const auto it = edge_index_map.find(edge_key(to, from));
+      if (it != edge_index_map.end()) {
+        reverse_edge_lookup_[static_cast<size_t>(edge_idx)] = it->second;
+      }
+    }
+  }
   std::vector<int> reverse_counts(static_cast<size_t>(n_states_), 0);
   std::vector<double> reverse_row_sums(static_cast<size_t>(n_states_), 0.0);
   for (int from = 0; from < n_states_; ++from) {
@@ -464,21 +489,6 @@ void TitanTPT::compute_reactive_densities() {
   }
 }
 
-double TitanTPT::find_transition_probability(int from, int to) const {
-  return tpm_graph_.find_value(from, to, 0.0);
-}
-
-double TitanTPT::compute_gross_flux_value(int from, int to) const {
-  if (from < 0 || from >= n_states_ || to < 0 || to >= n_states_ || from == to)
-    return 0.0;
-  const double prefactor = stationary_dist_[from] * q_backward_[from];
-  if (prefactor <= 0.0)
-    return 0.0;
-  const double probability = find_transition_probability(from, to);
-  if (probability <= 0.0)
-    return 0.0;
-  return prefactor * probability * q_forward_[to];
-}
 
 void TitanTPT::compute_flux_matrices(TitanExecutor *executor, int n_threads,
                                      double flux_cut) {
@@ -530,14 +540,19 @@ void TitanTPT::compute_flux_matrices(TitanExecutor *executor, int n_threads,
           gross_in_local[j] += fij;
         }
 
-        const double reverse_probability = find_transition_probability(j, i);
-        const bool reverse_exists = reverse_probability > 0.0;
+        const int reverse_edge_idx = reverse_edge_lookup_[static_cast<size_t>(edge_idx)];
+        const bool reverse_exists = reverse_edge_idx >= 0;
         if (i > j && reverse_exists)
           continue;
 
-        const double fji =
-            reverse_exists ? compute_gross_flux_value(j, i) : 0.0;
-
+        double fji = 0.0;
+        if (reverse_exists) {
+          const double reverse_probability = tpm_graph_.value(reverse_edge_idx);
+          const double reverse_prefactor = stationary_dist_[j] * q_backward_[j];
+          if (reverse_prefactor > 0.0 && reverse_probability > 0.0) {
+            fji = reverse_prefactor * reverse_probability * q_forward_[i];
+          }
+        }
         if (fij > fji) {
           const double net = fij - fji;
           if (net <= 0.0)
@@ -576,7 +591,7 @@ void TitanTPT::compute_flux_matrices(TitanExecutor *executor, int n_threads,
       compute_rows(0, 0, n_states_);
     }
   } else {
-    std::vector<std::jthread> workers;
+    std::vector<titan::jthread> workers;
     workers.reserve(static_cast<size_t>(threads));
     const int chunk = (n_states_ + threads - 1) / threads;
     for (int tid = 0; tid < threads; ++tid) {

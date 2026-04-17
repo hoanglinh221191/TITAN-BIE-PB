@@ -3,6 +3,7 @@
 // ============================================================================
 #include "titan_msm.h"
 #include "titan_executor.h"
+#include "titan_simd_dispatch.h"
 
 #include "titan_kinetics.h"
 #include <Eigen/Dense>
@@ -12,6 +13,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <immintrin.h>
 #include <limits>
 #include <numeric>
@@ -30,31 +32,7 @@ constexpr int kMSMCentroidBlock = 8;
 inline double squared_distance_rowmajor_avx2(const double *lhs,
                                              const double *rhs,
                                              int dim) noexcept {
-#if defined(__AVX2__)
-  __m256d acc = _mm256_setzero_pd();
-  int c = 0;
-  for (; c + 4 <= dim; c += 4) {
-    const __m256d a = _mm256_loadu_pd(lhs + c);
-    const __m256d b = _mm256_loadu_pd(rhs + c);
-    const __m256d diff = _mm256_sub_pd(a, b);
-    acc = _mm256_add_pd(acc, _mm256_mul_pd(diff, diff));
-  }
-  alignas(32) double lane_sum[4];
-  _mm256_store_pd(lane_sum, acc);
-  double total = lane_sum[0] + lane_sum[1] + lane_sum[2] + lane_sum[3];
-  for (; c < dim; ++c) {
-    const double diff = lhs[c] - rhs[c];
-    total += diff * diff;
-  }
-  return total;
-#else
-  double total = 0.0;
-  for (int c = 0; c < dim; ++c) {
-    const double diff = lhs[c] - rhs[c];
-    total += diff * diff;
-  }
-  return total;
-#endif
+  return titan_simd_dispatch::squared_distance_rowmajor(lhs, rhs, dim);
 }
 
 inline void prefetch_row_read(const double *ptr) noexcept {
@@ -66,21 +44,226 @@ inline void prefetch_row_read(const double *ptr) noexcept {
 }
 
 inline void add_row_inplace(double *dst, const double *src, int dim) noexcept {
-#if defined(__AVX2__)
-  int c = 0;
-  for (; c + 4 <= dim; c += 4) {
-    const __m256d a = _mm256_loadu_pd(dst + c);
-    const __m256d b = _mm256_loadu_pd(src + c);
-    _mm256_storeu_pd(dst + c, _mm256_add_pd(a, b));
+  titan_simd_dispatch::add_row_inplace(dst, src, dim);
+}
+
+inline std::vector<int> build_segment_boundaries(
+    const std::vector<int> &traj_break_indices, int n_frames) {
+  std::vector<int> boundaries;
+  boundaries.reserve(traj_break_indices.size() + 2);
+  boundaries.push_back(0);
+  for (int b : traj_break_indices) {
+    if (b > 0 && b < n_frames)
+      boundaries.push_back(b);
   }
-  for (; c < dim; ++c) {
-    dst[c] += src[c];
+  if (boundaries.back() != n_frames)
+    boundaries.push_back(n_frames);
+  return boundaries;
+}
+
+inline void build_tpm_for_lag(const std::vector<int> &discrete_traj,
+                              const std::vector<int> &boundaries, int n_k,
+                              int lag, Eigen::MatrixXd &count_tmp,
+                              Eigen::MatrixXd &c_sym_tmp,
+                              Eigen::MatrixXd &tpm_tmp) {
+  count_tmp.setZero();
+  for (std::size_t s = 0; s + 1 < boundaries.size(); ++s) {
+    const int seg_start = boundaries[s];
+    const int seg_end = boundaries[s + 1];
+    for (int i = seg_start; i < seg_end - lag; ++i) {
+      count_tmp(discrete_traj[static_cast<size_t>(i)],
+                discrete_traj[static_cast<size_t>(i + lag)]) += 1.0;
+    }
   }
-#else
-  for (int c = 0; c < dim; ++c) {
-    dst[c] += src[c];
+
+  c_sym_tmp.noalias() = 0.5 * (count_tmp + count_tmp.transpose());
+  tpm_tmp.setZero();
+  const double uniform_prob = 1.0 / static_cast<double>(n_k);
+  for (int i = 0; i < n_k; ++i) {
+    const double row_sum = c_sym_tmp.row(i).sum();
+    if (row_sum < 1e-10) {
+      tpm_tmp.row(i).setConstant(uniform_prob);
+    } else {
+      tpm_tmp.row(i) = c_sym_tmp.row(i) / row_sum;
+    }
   }
-#endif
+}
+
+inline std::vector<double> compute_its_values_from_eigenvalues(
+    const Eigen::VectorXcd &evals, int n_k, int lag, double dt_ns,
+    int n_timescales) {
+  std::vector<int> idx(static_cast<size_t>(n_k));
+  std::iota(idx.begin(), idx.end(), 0);
+  std::sort(idx.begin(), idx.end(), [&](int a, int b) {
+    return std::abs(evals[a]) > std::abs(evals[b]);
+  });
+
+  std::vector<double> values;
+  values.reserve(static_cast<size_t>(std::max(0, n_timescales)));
+  int written = 0;
+  for (int rank = 1; rank < n_k && written < n_timescales; ++rank) {
+    const int ei = idx[rank];
+    const double abs_l = std::abs(evals[ei]);
+    const double im_l = std::abs(evals[ei].imag());
+    if (abs_l >= 1.0 || im_l > 1e-6 || abs_l < 1e-15) {
+      values.push_back(std::numeric_limits<double>::quiet_NaN());
+    } else {
+      values.push_back(-static_cast<double>(lag) * dt_ns / std::log(abs_l));
+    }
+    ++written;
+  }
+  while (written < n_timescales) {
+    values.push_back(std::numeric_limits<double>::quiet_NaN());
+    ++written;
+  }
+  return values;
+}
+
+inline std::string format_its_value(double v) {
+  if (!std::isfinite(v))
+    return "  nan";
+  std::ostringstream oss;
+  oss << std::fixed << "  " << v;
+  return oss.str();
+}
+
+inline bool solve_its_eigenvalues(
+    const Eigen::MatrixXd &tpm, TitanMSMItsSolverMode mode, int n_timescales,
+    int its_topk, int its_max_k_full, Eigen::VectorXcd &out_evals,
+    std::string &effective_solver_mode) {
+  const int n_k = static_cast<int>(tpm.rows());
+  TitanMSMItsSolverMode chosen_mode = mode;
+  if (chosen_mode == TitanMSMItsSolverMode::Full && n_k > its_max_k_full) {
+    chosen_mode = TitanMSMItsSolverMode::Schur;
+  }
+
+  auto try_full = [&]() -> bool {
+    Eigen::EigenSolver<Eigen::MatrixXd> es(tpm, /*computeEigenvectors=*/false);
+    if (es.info() != Eigen::Success)
+      return false;
+    out_evals = es.eigenvalues();
+    effective_solver_mode = "full";
+    return true;
+  };
+
+  auto try_schur = [&]() -> bool {
+    Eigen::RealSchur<Eigen::MatrixXd> schur;
+    schur.compute(tpm, /*computeU=*/false);
+    if (schur.info() != Eigen::Success)
+      return false;
+    const Eigen::MatrixXd T = schur.matrixT();
+    out_evals.resize(n_k);
+    int i = 0;
+    while (i < n_k) {
+      if (i + 1 < n_k && std::abs(T(i + 1, i)) > 1e-12) {
+        const double a = T(i, i);
+        const double b = T(i, i + 1);
+        const double c = T(i + 1, i);
+        const double d = T(i + 1, i + 1);
+        const double tr = a + d;
+        const double det = a * d - b * c;
+        const double disc = tr * tr - 4.0 * det;
+        if (disc >= 0.0) {
+          const double root = std::sqrt(disc);
+          out_evals[i] = std::complex<double>((tr + root) * 0.5, 0.0);
+          out_evals[i + 1] = std::complex<double>((tr - root) * 0.5, 0.0);
+        } else {
+          const double im = std::sqrt(-disc) * 0.5;
+          out_evals[i] = std::complex<double>(tr * 0.5, im);
+          out_evals[i + 1] = std::complex<double>(tr * 0.5, -im);
+        }
+        i += 2;
+      } else {
+        out_evals[i] = std::complex<double>(T(i, i), 0.0);
+        ++i;
+      }
+    }
+    effective_solver_mode = "schur";
+    return true;
+  };
+
+  auto try_partial = [&]() -> bool {
+    int topk = its_topk;
+    if (topk <= 0)
+      topk = std::max(1, n_timescales + 4);
+    topk = std::min(topk, n_k);
+    if (topk <= 1) {
+      return try_full();
+    }
+
+    constexpr int max_subspace_iter = 64;
+    constexpr double subspace_tol = 1e-8;
+
+    Eigen::MatrixXd Q = Eigen::MatrixXd::Random(n_k, topk);
+    Q.col(0).setConstant(1.0);
+
+    auto orthonormalize = [&](Eigen::MatrixXd &M) {
+      Eigen::HouseholderQR<Eigen::MatrixXd> qr(M);
+      M = qr.householderQ() * Eigen::MatrixXd::Identity(M.rows(), M.cols());
+    };
+
+    orthonormalize(Q);
+
+    Eigen::MatrixXd Z(n_k, topk);
+    Eigen::MatrixXd B(topk, topk);
+    Eigen::MatrixXd B_prev = Eigen::MatrixXd::Zero(topk, topk);
+
+    for (int it = 0; it < max_subspace_iter; ++it) {
+      Z.noalias() = tpm * Q;
+      orthonormalize(Z);
+      Q.swap(Z);
+      B.noalias() = Q.transpose() * tpm * Q;
+
+      if (it > 0) {
+        const double diff = (B - B_prev).norm();
+        const double scale = std::max(1.0, B.norm());
+        if (diff <= subspace_tol * scale)
+          break;
+      }
+      B_prev = B;
+    }
+
+    Eigen::EigenSolver<Eigen::MatrixXd> es_small(B, /*computeEigenvectors=*/false);
+    if (es_small.info() != Eigen::Success)
+      return false;
+
+    const auto evals_small = es_small.eigenvalues();
+    std::vector<int> idx_local(static_cast<size_t>(topk));
+    std::iota(idx_local.begin(), idx_local.end(), 0);
+    std::sort(idx_local.begin(), idx_local.end(),
+              [&](int a, int b) {
+                return std::abs(evals_small[a]) > std::abs(evals_small[b]);
+              });
+
+    out_evals.resize(topk);
+    for (int i = 0; i < topk; ++i)
+      out_evals[i] = evals_small[idx_local[static_cast<size_t>(i)]];
+
+    effective_solver_mode = "partial(subspace)";
+    return true;
+  };
+
+  bool ok = false;
+  switch (chosen_mode) {
+  case TitanMSMItsSolverMode::Partial:
+    ok = try_partial();
+    break;
+  case TitanMSMItsSolverMode::Schur:
+    ok = try_schur();
+    break;
+  case TitanMSMItsSolverMode::Full:
+  default:
+    ok = try_full();
+    break;
+  }
+
+  if (!ok && chosen_mode != TitanMSMItsSolverMode::Full) {
+    ok = try_full();
+    if (ok) {
+      effective_solver_mode = "full(fallback)";
+    }
+  }
+  return ok;
 }
 
 template <typename RowConsumer>
@@ -1095,10 +1278,11 @@ int TitanMSM::auto_detect_macrostates(
 // ============================================================================
 // export_results — write all output files + run ITS scan + PCCA
 // ============================================================================
-void TitanMSM::export_results(TitanExecutor &executor, const info &info_output,
-                              std::fstream &log, int n_timescales, bool msm_run_its,
-                              bool msm_run_pcca, int msm_macrostates,
-                              const std::vector<int> &its_lags) const {
+void TitanMSM::export_results(
+    TitanExecutor &executor, const info &info_output, std::fstream &log,
+    int n_timescales, bool msm_run_its, bool msm_run_pcca, int msm_macrostates,
+    const std::vector<int> &its_lags, TitanMSMItsSolverMode its_solver_mode,
+    int its_topk, int its_max_k_full) const {
   if (!msm_built_) {
     TitanUI::print_error(
         "TitanMSM::export_results: build_markov_model() must run first.");
@@ -1259,6 +1443,7 @@ void TitanMSM::export_results(TitanExecutor &executor, const info &info_output,
   }
 
   // =========================================================================
+  // =========================================================================
   // 6. ITS scan (multi-lag)
   // =========================================================================
   if (msm_run_its) {
@@ -1276,127 +1461,82 @@ void TitanMSM::export_results(TitanExecutor &executor, const info &info_output,
           f << "  t" << (t + 1) << "_ns";
         f << '\n';
 
-        // Per-lag result struct (computed by workers, written in order)
         struct LagResult {
           int lag = 0;
           bool ok = false;
-          Eigen::MatrixXd T_tmp;
-          std::vector<std::string> its_values;
+          std::vector<double> its_values;
+          std::string solver_mode;
         };
 
         const int n_lags = static_cast<int>(lags_to_use.size());
-        std::vector<LagResult> results(n_lags);
+        std::vector<LagResult> results(static_cast<size_t>(n_lags));
 
-        // Pre-build segment boundaries (read-only, shared)
-        const int N_frames = static_cast<int>(n_proj_frames_);
-        std::vector<int> boundaries;
-        boundaries.push_back(0);
-        for (int b : traj_break_indices_) {
-          if (b > 0 && b < N_frames)
-            boundaries.push_back(b);
-        }
-        if (boundaries.back() != N_frames)
-          boundaries.push_back(N_frames);
+        const int n_frames = static_cast<int>(n_proj_frames_);
+        const std::vector<int> boundaries =
+            build_segment_boundaries(traj_break_indices_, n_frames);
+        const int n_workers = std::max(1, std::min(n_lags, n_threads_));
 
-        // Cap worker count at n_lags
-        const int n_workers = std::min(n_lags, n_threads_);
+        const auto its_start = std::chrono::steady_clock::now();
+        const auto matrix_start = std::chrono::steady_clock::now();
+        executor.parallel_do(static_cast<size_t>(n_workers), [&](size_t w_sz) {
+          const int w = static_cast<int>(w_sz);
+          const int shard_begin = n_lags * w / n_workers;
+          const int shard_end = n_lags * (w + 1) / n_workers;
+          if (shard_begin >= shard_end)
+            return;
 
-        // Launch jthread workers — each processes a shard of lags
-        {
-          executor.parallel_do(static_cast<size_t>(n_workers), [&](size_t w_sz) {
-            const int w = static_cast<int>(w_sz);
-            const int shard_begin = n_lags * w / n_workers;
-            const int shard_end = n_lags * (w + 1) / n_workers;
-            if (shard_begin >= shard_end)
-              return;
-              Eigen::MatrixXd C_tmp(n_k_, n_k_);
-              Eigen::MatrixXd T_tmp_local(n_k_, n_k_);
+          Eigen::MatrixXd c_tmp(n_k_, n_k_);
+          Eigen::MatrixXd c_sym_tmp(n_k_, n_k_);
+          Eigen::MatrixXd t_tmp(n_k_, n_k_);
+          Eigen::VectorXcd evals_tmp;
 
-              for (int li = shard_begin; li < shard_end; ++li) {
-                int lag = lags_to_use[static_cast<size_t>(li)];
-                LagResult &res = results[static_cast<size_t>(li)];
-                res.lag = lag;
+          for (int li = shard_begin; li < shard_end; ++li) {
+            const int lag = lags_to_use[static_cast<size_t>(li)];
+            LagResult &res = results[static_cast<size_t>(li)];
+            res.lag = lag;
 
-                // Build count matrix for this lag
-                C_tmp.setZero();
-                for (std::size_t s = 0; s + 1 < boundaries.size(); ++s) {
-                  const int seg_start = boundaries[s];
-                  const int seg_end = boundaries[s + 1];
-                  for (int i = seg_start; i < seg_end - lag; ++i) {
-                    C_tmp(discrete_traj_[i], discrete_traj_[i + lag]) += 1.0;
-                  }
-                }
+            build_tpm_for_lag(discrete_traj_, boundaries, n_k_, lag, c_tmp,
+                              c_sym_tmp, t_tmp);
 
-                // Symmetrize + row-normalize
-                Eigen::MatrixXd C_sym = 0.5 * (C_tmp + C_tmp.transpose());
-                T_tmp_local.setZero();
-                for (int i = 0; i < n_k_; ++i) {
-                  double rs = C_sym.row(i).sum();
-                  if (rs < 1e-10)
-                    T_tmp_local.row(i) =
-                        Eigen::VectorXd::Constant(n_k_, 1.0 / n_k_).transpose();
-                  else
-                    T_tmp_local.row(i) = C_sym.row(i) / rs;
-                }
+            std::string effective_mode;
+            if (!solve_its_eigenvalues(t_tmp, its_solver_mode, n_timescales,
+                                       its_topk, its_max_k_full, evals_tmp,
+                                       effective_mode)) {
+              res.its_values.assign(static_cast<size_t>(std::max(0, n_timescales)),
+                                    std::numeric_limits<double>::quiet_NaN());
+              res.solver_mode = "failed";
+              res.ok = true;
+              continue;
+            }
 
-                // EigenSolver (thread-local instance)
-                Eigen::EigenSolver<Eigen::MatrixXd> es_tmp(T_tmp_local);
-                if (es_tmp.info() != Eigen::Success) {
-                  res.its_values.assign(n_timescales, "  nan");
-                  res.T_tmp = T_tmp_local;
-                  res.ok = true;
-                  continue;
-                }
-                auto evals_tmp = es_tmp.eigenvalues();
+            res.its_values = compute_its_values_from_eigenvalues(
+                evals_tmp, static_cast<int>(evals_tmp.size()), lag, dt_ns_,
+                n_timescales);
+            res.solver_mode = effective_mode;
+            res.ok = true;
+          }
+        });
+        const auto matrix_end = std::chrono::steady_clock::now();
 
-                std::vector<int> idx_tmp(n_k_);
-                std::iota(idx_tmp.begin(), idx_tmp.end(), 0);
-                std::sort(idx_tmp.begin(), idx_tmp.end(), [&](int a, int b) {
-                  return std::abs(evals_tmp[a]) > std::abs(evals_tmp[b]);
-                });
-
-                int written = 0;
-                for (int rank = 1; rank < n_k_ && written < n_timescales;
-                     ++rank) {
-                  int ei = idx_tmp[rank];
-                  double abs_l = std::abs(evals_tmp[ei]);
-                  double im_l = std::abs(evals_tmp[ei].imag());
-                  if (abs_l >= 1.0 || im_l > 1e-6 || abs_l < 1e-15) {
-                    res.its_values.push_back("  nan");
-                  } else {
-                    double t_i =
-                        -static_cast<double>(lag) * dt_ns_ / std::log(abs_l);
-                    std::ostringstream oss;
-                    oss << std::fixed << "  " << t_i;
-                    res.its_values.push_back(oss.str());
-                  }
-                  ++written;
-                }
-                while (written < n_timescales) {
-                  res.its_values.push_back("  nan");
-                  ++written;
-                }
-
-                res.T_tmp = T_tmp_local;
-                res.ok = true;
-              }
-          });
-        }
-
-        // Write results IN ORDER (single-threaded, after all workers joined)
         std::filesystem::create_directories(info_output.get_msm_its_tpm_dir());
 
+        Eigen::MatrixXd c_tmp_write(n_k_, n_k_);
+        Eigen::MatrixXd c_sym_tmp_write(n_k_, n_k_);
+        Eigen::MatrixXd t_tmp_write(n_k_, n_k_);
+        std::unordered_map<std::string, int> solver_hist;
         for (int li = 0; li < n_lags; ++li) {
           const LagResult &res = results[static_cast<size_t>(li)];
           if (!res.ok)
             continue;
 
-          int lag = res.lag;
+          const int lag = res.lag;
+          solver_hist[res.solver_mode] += 1;
 
-          // Write per-lag TPM file
+          build_tpm_for_lag(discrete_traj_, boundaries, n_k_, lag, c_tmp_write,
+                            c_sym_tmp_write, t_tmp_write);
           {
-            std::string tpm_path = info_output.get_msm_its_tpm_dir() +
-                                   "/tpm_lag" + std::to_string(lag) + ".dat";
+            const std::string tpm_path = info_output.get_msm_its_tpm_dir() +
+                                         "/tpm_lag" + std::to_string(lag) + ".dat";
             std::ofstream ft(tpm_path);
             if (ft.is_open()) {
               ft << "# TPM lag=" << lag << "  dt=" << dt_ns_
@@ -1406,31 +1546,45 @@ void TitanMSM::export_results(TitanExecutor &executor, const info &info_output,
                 for (int j = 0; j < n_k_; ++j) {
                   if (j > 0)
                     ft << ' ';
-                  ft << res.T_tmp(i, j);
+                  ft << t_tmp_write(i, j);
                 }
                 ft << '\n';
               }
             }
           }
 
-          // Write ITS scan row
-          double lag_ns = static_cast<double>(lag) * dt_ns_;
+          const double lag_ns = static_cast<double>(lag) * dt_ns_;
           f << std::fixed << lag << "  " << lag_ns;
-          for (const auto &s : res.its_values)
-            f << s;
+          for (double v : res.its_values)
+            f << format_its_value(v);
           f << '\n';
         }
+        const auto its_end = std::chrono::steady_clock::now();
 
         TitanUI::print_info("  Written: " + info_output.get_msm_its_filename());
-        TitanUI::log_kv(log, "ITS Scan Lags",
-                        std::to_string(lags_to_use.size()));
+        TitanUI::log_kv(log, "ITS Scan Lags", std::to_string(lags_to_use.size()));
+        const double matrix_sec =
+            std::chrono::duration<double>(matrix_end - matrix_start).count();
+        const double total_sec =
+            std::chrono::duration<double>(its_end - its_start).count();
+        TitanUI::log_time(log, "ITS Matrix+Spectral", matrix_sec);
+        TitanUI::log_time(log, "ITS Total", total_sec);
+        std::ostringstream solver_oss;
+        bool first_mode = true;
+        for (const auto &kv : solver_hist) {
+          if (!first_mode)
+            solver_oss << ", ";
+          first_mode = false;
+          solver_oss << kv.first << "=" << kv.second;
+        }
+        TitanUI::log_kv(log, "ITS Solver Usage",
+                        solver_hist.empty() ? std::string("none")
+                                            : solver_oss.str());
       }
     }
   } else {
     TitanUI::log_kv(log, "ITS Scan", "disabled");
   }
-
-  // =========================================================================
   // 7. PCCA crisp macrostate lumping
   // =========================================================================
   int n_macro_used = 0;
