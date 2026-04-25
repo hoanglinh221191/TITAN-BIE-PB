@@ -14,7 +14,6 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
-#include <map>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -47,6 +46,21 @@ using IFP_Frame = std::vector<IFP_Contact>;
 // Order: (chainid_rec, resnr_rec, chainid_lig, resnr_lig)
 using ResKey = std::tuple<size_t, size_t, size_t, size_t>;
 
+struct ResKeyHash {
+  size_t operator()(const ResKey &key) const noexcept {
+    const auto mix = [](size_t seed, size_t value) {
+      seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+      return seed;
+    };
+    size_t seed = 0;
+    seed = mix(seed, std::get<0>(key));
+    seed = mix(seed, std::get<1>(key));
+    seed = mix(seed, std::get<2>(key));
+    seed = mix(seed, std::get<3>(key));
+    return seed;
+  }
+};
+
 // ─── Free helper functions ─────────────────────────────────
 
 /// Returns [start, end) as 0-based indices into mol.pos.*
@@ -74,8 +88,18 @@ get_atom_range(const std::vector<class index> &Index, size_t chainid,
 
 
 // ─── Main TitanIFP class ───────────────────────────────────
+class TitanExecutor;
 class TitanIFP {
 public:
+  struct InteractionCountRecord {
+    size_t resnr_rec{}, resnr_lig{};
+    size_t chainid_rec{}, chainid_lig{};
+    std::string res_name_rec, res_name_lig;
+    std::array<size_t, 6> counts{};
+  };
+  using ContactCountAccumulator =
+      std::unordered_map<ResKey, InteractionCountRecord, ResKeyHash>;
+
   IFP_Frame collect_frame_contacts(const MOL &rec_mol, const MOL &lig_mol,
                                    const std::vector<mol_info> &rec_info,
                                    const std::vector<mol_info> &lig_info,
@@ -92,12 +116,19 @@ public:
                      const std::vector<class index> &rec_index,
                      const std::vector<class index> &lig_index,
                      size_t rec_total_atoms, size_t lig_total_atoms,
-                     const std::vector<d_min> &dis_min, const IfpArgs &args);
+                     const std::vector<d_min> &dis_min, const IfpArgs &args,
+                     TitanExecutor &executor, size_t requested_workers,
+                     bool build_awh_accumulators);
 
   void aggregate_occupancy();  // converts counts -> percentage
   void export_csv(const std::string &filename) const;
   void export_rna_annotations_csv(const std::string &filename) const;
   bool has_rna_annotations() const { return !rna_region_map_.empty(); }
+  const std::vector<ContactCountAccumulator> &last_frame_contact_accumulators()
+      const {
+    return worker_contact_accumulators_;
+  }
+  size_t last_frame_active_workers() const { return last_frame_active_workers_; }
 
 private:
   size_t total_frames_{0};  // online frame counter
@@ -110,7 +141,7 @@ private:
     std::array<size_t, 6> counts{};    // one per IFPBit
     std::array<double, 6> occupancy{}; // filled by aggregate_occupancy()
   };
-  std::map<ResKey, OccupancyRecord> occupancy_map_;
+  std::unordered_map<ResKey, OccupancyRecord, ResKeyHash> occupancy_map_;
 
   struct RnaRegionRecord {
     size_t resnr_rec{}, resnr_lig{};
@@ -119,7 +150,7 @@ private:
     std::array<size_t, 3> counts{};
     std::array<double, 3> occupancy{};
   };
-  std::map<ResKey, RnaRegionRecord> rna_region_map_;
+  std::unordered_map<ResKey, RnaRegionRecord, ResKeyHash> rna_region_map_;
 
   struct FrameRnaRegionContact {
     size_t resnr_rec{}, resnr_lig{};
@@ -133,6 +164,15 @@ private:
     std::vector<FrameRnaRegionContact> rna_regions;
   };
 
+  struct PreparedResiduePair {
+    dmin_base contact;
+    size_t rs{};
+    size_t re{};
+    size_t ls{};
+    size_t le{};
+    bool pair_has_nucleic{false};
+  };
+
   FrameAnalysisResult analyze_frame(const MOL &rec_mol, const MOL &lig_mol,
                                    const std::vector<mol_info> &rec_info,
                                    const std::vector<mol_info> &lig_info,
@@ -143,7 +183,25 @@ private:
                                    const std::vector<d_min> &dis_min,
                                    const IfpArgs &args) const;
 
+  void ensure_worker_storage(size_t worker_count);
+  std::vector<PreparedResiduePair>
+  build_prepared_pairs(const std::vector<d_min> &dis_min,
+                       const std::vector<class index> &rec_index,
+                       const std::vector<class index> &lig_index,
+                       size_t rec_total_atoms, size_t lig_total_atoms) const;
+  bool analyze_prepared_pair(const PreparedResiduePair &pair,
+                             const MOL &rec_mol, const MOL &lig_mol,
+                             const std::vector<mol_info> &rec_info,
+                             const std::vector<mol_info> &lig_info,
+                             const IfpArgs &args, IFP_Contact &result,
+                             std::array<bool, 3> &region_flags) const;
   void accumulate_frame(const FrameAnalysisResult &frame);
+  static void accumulate_contact_counts(ContactCountAccumulator &accumulator,
+                                        const IFP_Contact &contact);
+
+  std::vector<FrameAnalysisResult> worker_frame_results_;
+  std::vector<ContactCountAccumulator> worker_contact_accumulators_;
+  size_t last_frame_active_workers_{0};
 
   // ── Perf cache: (chainid, resnr) → respos ──
 

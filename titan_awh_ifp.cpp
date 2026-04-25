@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <sstream>
 
 namespace fs = std::filesystem;
@@ -142,11 +143,15 @@ bool TitanAwhIfp::initialize(const arguments &args, const info &info_output,
   return true;
 }
 
-void TitanAwhIfp::consume_frame(int replica_id, double time_ps,
-                                std::int64_t global_frame_index, const IFP_Frame &contacts, const MOL &rec_mol,
-                                const MOL &lig_mol) {
+TitanAwhIfp::AwhFrameContext
+TitanAwhIfp::prepare_frame(int replica_id, double time_ps,
+                           std::int64_t global_frame_index) {
+  AwhFrameContext frame_ctx;
+  frame_ctx.replica_id = replica_id;
+  frame_ctx.time_ps = time_ps;
+  frame_ctx.global_frame_index = global_frame_index;
   if (!initialized_)
-    return;
+    return frame_ctx;
 
   const bool valid_replica =
       replica_id >= 0 && static_cast<size_t>(replica_id) < walkers_.size();
@@ -155,7 +160,7 @@ void TitanAwhIfp::consume_frame(int replica_id, double time_ps,
     ++unmatched_frames_;
     if (valid_replica)
       ++walker_diagnostics_[static_cast<size_t>(replica_id)].unmatched_frames;
-    return;
+    return frame_ctx;
   }
 
   ++matched_frames_;
@@ -167,34 +172,49 @@ void TitanAwhIfp::consume_frame(int replica_id, double time_ps,
   if (valid_replica && static_cast<size_t>(replica_id) < bin.walker_frame_counts.size())
     ++bin.walker_frame_counts[static_cast<size_t>(replica_id)];
   bin.matched_frames.push_back({replica_id, global_frame_index, time_ps, rc_value});
+  frame_ctx.matched = true;
+  frame_ctx.rc_value = rc_value;
+  frame_ctx.bin_idx = bin_idx;
+  frame_ctx.delta_to_center = std::abs(rc_value - bin_center(bin_idx));
+  return frame_ctx;
+}
 
-  for (const auto &contact : contacts) {
-    const ResKey key{contact.chainid_rec, contact.resnr_rec, contact.chainid_lig,
-                     contact.resnr_lig};
-    auto &record = bin.contacts[key];
-    if (record.res_name_rec.empty()) {
-      record.resnr_rec = contact.resnr_rec;
-      record.resnr_lig = contact.resnr_lig;
-      record.chainid_rec = contact.chainid_rec;
-      record.chainid_lig = contact.chainid_lig;
-      record.res_name_rec = contact.res_name_rec;
-      record.res_name_lig = contact.res_name_lig;
-    }
-    for (int bit = 0; bit < 6; ++bit) {
-      if (contact.interactions[bit])
-        record.counts[static_cast<size_t>(bit)]++;
+void TitanAwhIfp::consume_frame(
+    const AwhFrameContext &frame_ctx,
+    const std::vector<TitanIFP::ContactCountAccumulator> &worker_accumulators,
+    size_t active_workers, const MOL &rec_mol, const MOL &lig_mol) {
+  if (!initialized_ || !frame_ctx.matched)
+    return;
+
+  auto &bin = bins_[frame_ctx.bin_idx];
+  const size_t reduce_workers =
+      std::min(active_workers, worker_accumulators.size());
+  for (size_t worker_id = 0; worker_id < reduce_workers; ++worker_id) {
+    for (const auto &[key, record] : worker_accumulators[worker_id]) {
+      auto &bin_record = bin.contacts[key];
+      if (bin_record.res_name_rec.empty()) {
+        bin_record.resnr_rec = record.resnr_rec;
+        bin_record.resnr_lig = record.resnr_lig;
+        bin_record.chainid_rec = record.chainid_rec;
+        bin_record.chainid_lig = record.chainid_lig;
+        bin_record.res_name_rec = record.res_name_rec;
+        bin_record.res_name_lig = record.res_name_lig;
+      }
+      for (size_t bit = 0; bit < bin_record.counts.size(); ++bit)
+        bin_record.counts[bit] += record.counts[bit];
     }
   }
 
   auto &rep = bin.representative;
-  const double delta = std::abs(rc_value - bin_center(bin_idx));
-  if (!rep.valid || delta < rep.delta_to_center) {
+  constexpr double kRepresentativeTieTolerance = 1e-12;
+  if (!rep.valid || frame_ctx.delta_to_center + kRepresentativeTieTolerance <
+                        rep.delta_to_center) {
     rep.valid = true;
-    rep.global_frame_index = global_frame_index;
-    rep.replica_id = replica_id;
-    rep.time_ps = time_ps;
-    rep.rc_value = rc_value;
-    rep.delta_to_center = delta;
+    rep.global_frame_index = frame_ctx.global_frame_index;
+    rep.replica_id = frame_ctx.replica_id;
+    rep.time_ps = frame_ctx.time_ps;
+    rep.rc_value = frame_ctx.rc_value;
+    rep.delta_to_center = frame_ctx.delta_to_center;
     rep.rec_frame = rec_mol;
     rep.lig_frame = lig_mol;
   }

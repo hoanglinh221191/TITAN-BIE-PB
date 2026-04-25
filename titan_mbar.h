@@ -71,6 +71,8 @@ struct CoreResult {
   bool used_per_frame_temperature{false};
   bool box_volume_metadata_available{false};
   std::string abort_reason{};
+  std::string solver_method{"n/a"};
+  std::string convergence_note{"n/a"};
   std::string temperature_ladder_source{"file"};
   std::vector<double> sampled_temperatures_k{};
   std::vector<int> sampled_counts{};
@@ -82,11 +84,18 @@ struct CoreResult {
   std::size_t active_sampled_states{0};
   std::size_t total_usable_samples{0};
   std::size_t mapped_global_frames{0};
+  std::size_t solver_iterations{0};
+  std::size_t solver_line_search_backtracks{0};
   double target_temp_k{300.0};
   double target_mean_energy{0.0};
   double target_heat_capacity{0.0};
   double target_std_energy{0.0};
   double target_std_heat_capacity{0.0};
+  double residual_inf{0.0};
+  double residual_rms{0.0};
+  double target_effective_sample_size{0.0};
+  double min_state_effective_sample_size{0.0};
+  double min_adjacent_overlap{0.0};
 };
 
 CoreResult run_temperature_ladder_reweighting(const arguments &args,

@@ -5,8 +5,10 @@
 #include "force.h"
 #include "info.h"
 #include "miscellaneous.h"
+#include "titan_ui.h"
 #include "uti_func.h"
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -16,6 +18,19 @@
 #include <unordered_set>
 
 using namespace std;
+
+namespace {
+std::string snap_count_source_label(const arguments &Arguments) {
+  if (Arguments.flag_xdr && !Arguments.traj_file.empty())
+    return TitanUI::compact_source_label(Arguments.traj_file, 64);
+  return TitanUI::compact_source_label(Arguments.pdb_name, 64);
+}
+
+bool &abnormal_snap_warning_emitted() {
+  static bool emitted = false;
+  return emitted;
+}
+} // namespace
 
 int Multi_MOL::tran_multi_mol(std::span<double> TranVec) {
   for (size_t i{}; i < m_mol.size(); ++i)
@@ -738,8 +753,12 @@ int process_adding_energies_forces(
       Force_v_vector[num_snap].emplace_back(f_v_);
       ++size_snap[num_snap];
     } else {
-      cout << "WARNING! Number of snaps of " << Arguments.pdb_name
-           << " is abnormal!\n";
+      if (!abnormal_snap_warning_emitted()) {
+        abnormal_snap_warning_emitted() = true;
+        TitanUI::print_warning("Number of snaps of " +
+                               snap_count_source_label(Arguments) +
+                               " is abnormal! Further repeats suppressed.");
+      }
       E_v.emplace_back(E_V_);
       E_e.emplace_back(E_E_);
       Force_e.emplace_back(f_e_);

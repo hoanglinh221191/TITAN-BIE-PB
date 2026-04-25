@@ -429,6 +429,83 @@ inline double centered_sq_sum_xyz(const double *x, const double *y,
   return kernel(x, y, z, n, cx, cy, cz);
 }
 
+inline double squared_displacement_sum_xyz_scalar(const double *dx,
+                                                  const double *dy,
+                                                  const double *dz,
+                                                  std::size_t n) noexcept {
+  double total = 0.0;
+  for (std::size_t i = 0; i < n; ++i)
+    total += dx[i] * dx[i] + dy[i] * dy[i] + dz[i] * dz[i];
+  return total;
+}
+
+#if TITAN_SIMD_X86
+TITAN_TARGET_AVX2
+inline double squared_displacement_sum_xyz_avx2(const double *dx,
+                                                const double *dy,
+                                                const double *dz,
+                                                std::size_t n) noexcept {
+  std::size_t i = 0;
+  __m256d acc = _mm256_setzero_pd();
+  for (; i + 4 <= n; i += 4) {
+    const __m256d vdx = _mm256_loadu_pd(dx + i);
+    const __m256d vdy = _mm256_loadu_pd(dy + i);
+    const __m256d vdz = _mm256_loadu_pd(dz + i);
+    const __m256d dxy2 =
+        _mm256_add_pd(_mm256_mul_pd(vdx, vdx), _mm256_mul_pd(vdy, vdy));
+    acc = _mm256_add_pd(acc, _mm256_add_pd(dxy2, _mm256_mul_pd(vdz, vdz)));
+  }
+  alignas(32) double lane[4];
+  _mm256_store_pd(lane, acc);
+  double total = lane[0] + lane[1] + lane[2] + lane[3];
+  for (; i < n; ++i)
+    total += dx[i] * dx[i] + dy[i] * dy[i] + dz[i] * dz[i];
+  return total;
+}
+
+TITAN_TARGET_AVX2_FMA
+inline double squared_displacement_sum_xyz_avx2_fma(const double *dx,
+                                                    const double *dy,
+                                                    const double *dz,
+                                                    std::size_t n) noexcept {
+  std::size_t i = 0;
+  __m256d acc = _mm256_setzero_pd();
+  for (; i + 4 <= n; i += 4) {
+    const __m256d vdx = _mm256_loadu_pd(dx + i);
+    const __m256d vdy = _mm256_loadu_pd(dy + i);
+    const __m256d vdz = _mm256_loadu_pd(dz + i);
+    const __m256d r2 = _mm256_fmadd_pd(
+        vdz, vdz, _mm256_fmadd_pd(vdy, vdy, _mm256_mul_pd(vdx, vdx)));
+    acc = _mm256_add_pd(acc, r2);
+  }
+  alignas(32) double lane[4];
+  _mm256_store_pd(lane, acc);
+  double total = lane[0] + lane[1] + lane[2] + lane[3];
+  for (; i < n; ++i)
+    total += dx[i] * dx[i] + dy[i] * dy[i] + dz[i] * dz[i];
+  return total;
+}
+#endif
+
+inline double squared_displacement_sum_xyz(const double *dx, const double *dy,
+                                           const double *dz,
+                                           std::size_t n) noexcept {
+  using Kernel = double (*)(const double *, const double *, const double *,
+                            std::size_t) noexcept;
+  static const Kernel kernel = []() noexcept -> Kernel {
+#if TITAN_SIMD_X86 && TITAN_RUNTIME_TARGET_ATTRS
+    if (runtime_has_avx2_fma())
+      return &squared_displacement_sum_xyz_avx2_fma;
+    if (runtime_has_avx2())
+      return &squared_displacement_sum_xyz_avx2;
+    return &squared_displacement_sum_xyz_scalar;
+#else
+    return &squared_displacement_sum_xyz_scalar;
+#endif
+  }();
+  return kernel(dx, dy, dz, n);
+}
+
 inline unsigned point_vs_four_cutoff_mask_scalar(
     double px, double py, double pz, const double *xs, const double *ys,
     const double *zs, double cutoff_sq, double min_sq,

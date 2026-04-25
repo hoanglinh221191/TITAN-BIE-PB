@@ -70,6 +70,12 @@ struct FesPostprocMetrics {
   std::chrono::milliseconds zts_time{0};
 };
 
+struct WeightContext {
+  std::string source_name{"equilibrium"};
+  std::string mode_label{"uniform"};
+  double target_temp{300.0};
+};
+
 bool export_projection_fes_analysis(
     const std::string &label, const std::string &space_name,
     const arguments &args,
@@ -92,6 +98,7 @@ void execute_pca_fes_analysis(
     const std::vector<int> &ca_is_lig, TitanExecutor &executor, info &info_out,
     std::fstream &log,
     const std::vector<double> &frame_weights = {},
+    const WeightContext &weight_context = WeightContext{},
     const std::vector<double> &traj_times = {},
     const std::vector<int> &traj_replicas = {},
     const std::vector<std::string> &replica_traj_files = {},
@@ -102,6 +109,7 @@ void execute_tica_fes_analysis(
     int64_t n_actual_frames, const std::vector<int64_t> &frame_global_indices,
     TitanExecutor &executor, info &info_out, std::fstream &log,
     const std::vector<double> &frame_weights = {},
+    const WeightContext &weight_context = WeightContext{},
     FesPostprocMetrics *metrics = nullptr);
 
 } // namespace TitanPCA

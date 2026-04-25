@@ -112,6 +112,16 @@ int arguments::post_process() {
     cout << "Time interval must not be negative!\n";
     exit(EXIT_FAILURE);
   }
+  std::transform(eq_weight_source.begin(), eq_weight_source.end(),
+                 eq_weight_source.begin(), [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  if (eq_weight_source != "auto" && eq_weight_source != "uniform" &&
+      eq_weight_source != "dham" && eq_weight_source != "mbar") {
+    TitanUI::print_error(
+        "-eq-weight-source must be auto, uniform, dham, or mbar.");
+    exit(EXIT_FAILURE);
+  }
   if (mbar.flag_mbar) {
     std::transform(mbar.domain.begin(), mbar.domain.end(), mbar.domain.begin(),
                    [](unsigned char c) {
@@ -401,11 +411,128 @@ int arguments::post_process() {
     std::transform(community.method.begin(), community.method.end(),
                    community.method.begin(), [](unsigned char c) {
                      return static_cast<char>(std::tolower(c));
-                   });
+                    });
     if (community.method != "louvain") {
       TitanUI::print_error("Community: unsupported method '" +
                            community.method +
                            "'. V1 supports only -community=louvain.");
+      exit(EXIT_FAILURE);
+    }
+  }
+  if (graph.flag_graph || community.flag_community) {
+    graph.flag_graph = true;
+    if (graph.filter_topk < 0) {
+      TitanUI::print_error("Graph: -graph-filter-topk must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+
+    std::transform(graph.community_method.begin(), graph.community_method.end(),
+                   graph.community_method.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (graph.community_method.empty())
+      graph.community_method = "auto";
+    if (graph.community_method != "auto" && graph.community_method != "off" &&
+        graph.community_method != "louvain") {
+      TitanUI::print_error(
+          "Graph: -graph-community must be one of auto, off, louvain.");
+      exit(EXIT_FAILURE);
+    }
+    if (community.flag_community && graph.community_method == "auto")
+      graph.community_method = community.method;
+
+    std::transform(graph.filter_component.begin(), graph.filter_component.end(),
+                   graph.filter_component.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (graph.filter_component.empty())
+      graph.filter_component = "all";
+    if (graph.filter_component != "all" &&
+        graph.filter_component != "largest") {
+      TitanUI::print_error(
+          "Graph: -graph-filter-component must be one of all or largest.");
+      exit(EXIT_FAILURE);
+    }
+
+    std::vector<std::string> normalized_sources;
+    normalized_sources.reserve(graph.sources.size());
+    bool use_auto_sources = graph.sources.empty();
+    for (const std::string &raw_source : graph.sources) {
+      std::string source = raw_source;
+      std::transform(source.begin(), source.end(), source.begin(),
+                     [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                     });
+      if (source.empty())
+        continue;
+      if (source == "auto") {
+        use_auto_sources = true;
+        continue;
+      }
+      if (source == "network")
+        source = "dccm";
+      else if (source == "allostery_gc" || source == "allostery-gc-graph")
+        source = "allostery-gc";
+      else if (source == "allostery_te" || source == "allostery-te-graph")
+        source = "allostery-te";
+      if (source != "dccm" && source != "lspmd" && source != "allostery-gc" &&
+          source != "allostery-te" && source != "tpt") {
+        TitanUI::print_error(
+            "Graph: -graph-source must be one of dccm, lspmd, allostery-gc, allostery-te, tpt.");
+        exit(EXIT_FAILURE);
+      }
+      if (std::find(normalized_sources.begin(), normalized_sources.end(),
+                    source) == normalized_sources.end()) {
+        normalized_sources.push_back(source);
+      }
+    }
+
+    if (!use_auto_sources && community.flag_community &&
+        std::find(normalized_sources.begin(), normalized_sources.end(),
+                  "dccm") == normalized_sources.end()) {
+      normalized_sources.insert(normalized_sources.begin(), "dccm");
+    }
+
+    if (use_auto_sources || normalized_sources.empty()) {
+      graph.sources = {"auto"};
+    } else {
+      graph.sources = std::move(normalized_sources);
+    }
+
+    const auto graph_has_source = [&](const char *name) {
+      return std::find(graph.sources.begin(), graph.sources.end(), name) !=
+             graph.sources.end();
+    };
+    const bool graph_auto_sources =
+        graph.sources.size() == 1 && graph.sources.front() == "auto";
+
+    if (!graph_auto_sources) {
+      if (graph_has_source("dccm")) {
+        flag_network = true;
+        flag_network_explicit = true;
+      }
+      if (graph_has_source("allostery-gc") || graph_has_source("allostery-te")) {
+        flag_allostery = true;
+        flag_network = true;
+      }
+      if (graph_has_source("lspmd")) {
+        lspmd.flag_lspmd = true;
+      }
+      if (graph_has_source("tpt")) {
+        tpt.flag_tpt = true;
+      }
+    }
+
+    const bool dccm_source_active =
+        flag_network_explicit || flag_pca || flag_allostery ||
+        corr_knn.flag_corr_knn || community.flag_community;
+    const bool allostery_source_active = flag_allostery;
+    const bool lspmd_source_active = lspmd.flag_lspmd;
+    const bool tpt_source_active = tpt.flag_tpt;
+    if (graph_auto_sources && !dccm_source_active && !allostery_source_active &&
+        !lspmd_source_active && !tpt_source_active) {
+      TitanUI::print_error(
+          "Graph: -graph with auto sources requires at least one active source producer (dccm/network, allostery, lspmd, or tpt).");
       exit(EXIT_FAILURE);
     }
   }
@@ -809,6 +936,200 @@ int arguments::post_process() {
     if (lj.lj_crystal_tol <= 0.0) {
       TitanUI::print_error("LJ: -lj-crystal-tol must be > 0.");
       exit(EXIT_FAILURE);
+      }
+  }
+  if (hbk.flag_hbk) {
+    if (hbk.hbk_maxlag <= 0) {
+      TitanUI::print_error("HBond kinetics: -hbk-maxlag must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (!hbk.hbk_hbond_cutoff_explicit)
+      hbk.hbk_hbond_cutoff = dis_h;
+    if (!hbk.hbk_angle_explicit)
+      hbk.hbk_angle_deg = angle_h;
+    if (!hbk.hbk_water_cutoff_explicit)
+      hbk.hbk_water_cutoff = d_crit_water;
+    if (hbk.hbk_hbond_cutoff <= 0.0) {
+      TitanUI::print_error("HBond kinetics: -hbk-hbond-cutoff must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (hbk.hbk_angle_deg <= 0.0 || hbk.hbk_angle_deg >= 180.0) {
+      TitanUI::print_error("HBond kinetics: -hbk-angle must be in (0, 180).");
+      exit(EXIT_FAILURE);
+    }
+    if (hbk.hbk_salt_cutoff <= 0.0) {
+      TitanUI::print_error("HBond kinetics: -hbk-salt-cutoff must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (hbk.hbk_water_cutoff <= 0.0) {
+      TitanUI::print_error("HBond kinetics: -hbk-water-cutoff must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+
+    std::string domain = hbk.hbk_domain;
+    std::transform(domain.begin(), domain.end(), domain.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (domain != "inter" && domain != "intra" && domain != "both") {
+      TitanUI::print_error(
+          "HBond kinetics: -hbk-domain must be one of inter, intra, both.");
+      exit(EXIT_FAILURE);
+    }
+    hbk.hbk_domain = domain;
+
+    std::vector<std::string> normalized_kinds;
+    normalized_kinds.reserve(hbk.hbk_kinds.size());
+    bool use_all = hbk.hbk_kinds.empty();
+    for (const std::string &raw_kind : hbk.hbk_kinds) {
+      std::string kind = raw_kind;
+      std::transform(kind.begin(), kind.end(), kind.begin(),
+                     [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                     });
+      if (kind.empty())
+        continue;
+      if (kind == "all") {
+        use_all = true;
+        break;
+      }
+      if (kind != "hbond" && kind != "salt" && kind != "water") {
+        TitanUI::print_error(
+            "HBond kinetics: -hbk-kind must be one of all, hbond, salt, water.");
+        exit(EXIT_FAILURE);
+      }
+      if (std::find(normalized_kinds.begin(), normalized_kinds.end(), kind) ==
+          normalized_kinds.end()) {
+        normalized_kinds.push_back(kind);
+      }
+    }
+    if (use_all)
+      normalized_kinds = {"hbond", "salt", "water"};
+    hbk.hbk_kinds = std::move(normalized_kinds);
+  }
+  if (sq.flag_sq) {
+    if (sq.sq_rdf_bin <= 0.0) {
+      TitanUI::print_error("SQ: -sq-rdf-bin must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (!sq.sq_rdf_max_auto && sq.sq_rdf_max <= 0.0) {
+      TitanUI::print_error("SQ: -sq-rdf-max must be > 0 or auto.");
+      exit(EXIT_FAILURE);
+    }
+    if (!sq.sq_rdf_max_auto && sq.sq_rdf_max < sq.sq_rdf_bin) {
+      TitanUI::print_error("SQ: -sq-rdf-max must be >= -sq-rdf-bin.");
+      exit(EXIT_FAILURE);
+    }
+    if (sq.sq_q_bin <= 0.0) {
+      TitanUI::print_error("SQ: -sq-q-bin must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (!sq.sq_q_max_auto && sq.sq_q_max <= 0.0) {
+      TitanUI::print_error("SQ: -sq-q-max must be > 0 or auto.");
+      exit(EXIT_FAILURE);
+    }
+    if (!sq.sq_q_max_auto && sq.sq_q_max < sq.sq_q_bin) {
+      TitanUI::print_error("SQ: -sq-q-max must be >= -sq-q-bin.");
+      exit(EXIT_FAILURE);
+    }
+
+    std::vector<std::string> normalized_channels;
+    normalized_channels.reserve(sq.sq_channels.size());
+    for (const std::string &raw_channel : sq.sq_channels) {
+      std::string channel = raw_channel;
+      std::transform(channel.begin(), channel.end(), channel.begin(),
+                     [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                     });
+      if (channel.empty())
+        continue;
+      if (channel != "all" && channel != "trace" && channel != "backbone" &&
+          channel != "sticker") {
+        TitanUI::print_error(
+            "SQ: -sq-channel must be one of all, trace, backbone, sticker.");
+        exit(EXIT_FAILURE);
+      }
+      if (std::find(normalized_channels.begin(), normalized_channels.end(),
+                    channel) == normalized_channels.end()) {
+        normalized_channels.push_back(channel);
+      }
+    }
+    if (normalized_channels.empty())
+      normalized_channels.push_back("all");
+    sq.sq_channels = std::move(normalized_channels);
+  }
+
+  if (corr_knn.flag_corr_knn) {
+    flag_network = true;
+    if (corr_knn.estimator_k <= 0) {
+      TitanUI::print_error("Corr-kNN: -corr-knn-k must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (corr_knn.tau_lag <= 0) {
+      TitanUI::print_error("Corr-kNN: -corr-knn-tau must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (corr_knn.pair_cutoff_ang < 0.0) {
+      TitanUI::print_error("Corr-kNN: -corr-knn-pair-cut must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (corr_knn.pair_topk < 0) {
+      TitanUI::print_error("Corr-kNN: -corr-knn-pair-topk must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (corr_knn.pair_use_contact_prior &&
+        corr_knn.pair_contact_cutoff_ang <= 0.0) {
+      TitanUI::print_error(
+          "Corr-kNN: -corr-knn-pair-contact-cut must be > 0.");
+        exit(EXIT_FAILURE);
+    }
+  }
+
+  if (validation.flag_validation) {
+    flag_network = true;
+    msm.flag_tica = true;
+    msm.flag_msm = true;
+
+    auto normalize_positive_int_list =
+        [](std::vector<int> &values, const char *flag_name) {
+          std::vector<int> normalized;
+          normalized.reserve(values.size());
+          for (int value : values) {
+            if (value <= 0) {
+              TitanUI::print_error(std::string("Validation: ") + flag_name +
+                                   " entries must be > 0.");
+              exit(EXIT_FAILURE);
+            }
+            if (std::find(normalized.begin(), normalized.end(), value) ==
+                normalized.end()) {
+              normalized.push_back(value);
+            }
+          }
+          values = std::move(normalized);
+        };
+
+    normalize_positive_int_list(validation.ck_multiples,
+                                "-validation-ck-multiples");
+    if (!validation.vamp_components.empty()) {
+      normalize_positive_int_list(validation.vamp_components,
+                                  "-validation-vamp-components");
+    }
+    if (!validation.vamp_lags.empty()) {
+      normalize_positive_int_list(validation.vamp_lags,
+                                  "-validation-vamp-lags");
+    }
+    if (!validation.vamp_clusters.empty()) {
+      normalize_positive_int_list(validation.vamp_clusters,
+                                  "-validation-vamp-clusters");
+    }
+    if (validation.vamp_folds <= 0) {
+      TitanUI::print_error("Validation: -validation-vamp-folds must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (validation.bootstrap_samples < 0) {
+      TitanUI::print_error(
+          "Validation: -validation-bootstrap must be >= 0.");
+      exit(EXIT_FAILURE);
     }
   }
 
@@ -853,6 +1174,10 @@ int arguments::post_process() {
       exit(EXIT_FAILURE);
     }
     allostery_estimator = estimator;
+    if (allostery_estimator == "knn" && allostery_estimator_k <= 0) {
+      TitanUI::print_error("Allostery: -allostery-estimator-k must be > 0.");
+      exit(EXIT_FAILURE);
+    }
     if (allostery_kde_bandwidth < 0.0) {
       TitanUI::print_error("Allostery: -allostery-kde-bandwidth must be >= 0.");
       exit(EXIT_FAILURE);
@@ -864,6 +1189,7 @@ int arguments::post_process() {
                      tpt.flag_tpt ||
                      umap.flag_umap) &&
       !flag_network_explicit && !flag_pca && !flag_allostery &&
+      !corr_knn.flag_corr_knn &&
       !community.flag_community && !lspmd.flag_lspmd;
   if (lj_trace_free_kinetics && flag_network) {
     flag_network = false;
@@ -893,7 +1219,7 @@ int arguments::post_process() {
     TitanUI::print_error("RG2: -rg2-hist-bins must be a positive integer.");
     exit(EXIT_FAILURE);
   }
-  if ((flag_nocal || rms.flag_rms || rg.flag_rg2 || lj.flag_lj) &&
+  if ((flag_nocal || rms.flag_rms || rg.flag_rg2 || lj.flag_lj || sq.flag_sq) &&
       !has_explicit_pbc_mode) {
     pbc.solv_pbc_int = 1;
     pbc.solv_pbc = 0;
@@ -908,13 +1234,16 @@ int arguments::post_process() {
       modules.push_back("Rg2");
     if (lj.flag_lj)
       modules.push_back("LJ");
+    if (sq.flag_sq)
+      modules.push_back("SQ");
     std::string reason;
     for (size_t i = 0; i < modules.size(); ++i) {
       if (i > 0)
         reason += (i + 1 == modules.size()) ? " and " : ", ";
       reason += modules[i];
     }
-    if (modules.size() == 1 && modules.front() == "LJ")
+    if (modules.size() == 1 &&
+        (modules.front() == "LJ" || modules.front() == "SQ"))
       reason += " analysis";
     reason += " requested without an explicit PBC mode. Auto-enabling -pbci 0.";
     TitanUI::print_warning(reason);

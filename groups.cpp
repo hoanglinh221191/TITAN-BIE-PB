@@ -1,15 +1,345 @@
 #include "groups.h"
 #include "Multi_MOL.h"
+#include "titan_charconv_compat.h"
+#include "titan_ui.h"
 #include "uti_func.h"
+#include <algorithm>
+#include <cctype>
+#include <expected>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <initializer_list>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <unordered_map>
 #include <vector>
 
 using namespace std;
+
+namespace {
+
+std::string trim_copy(std::string_view text) {
+  while (!text.empty() &&
+         std::isspace(static_cast<unsigned char>(text.front())) != 0)
+    text.remove_prefix(1);
+  while (!text.empty() &&
+         std::isspace(static_cast<unsigned char>(text.back())) != 0)
+    text.remove_suffix(1);
+  return std::string(text);
+}
+
+std::string uppercase_copy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::toupper(c));
+                 });
+  return value;
+}
+
+bool in_list(std::string_view value,
+             std::initializer_list<std::string_view> values) {
+  for (std::string_view candidate : values)
+    if (value == candidate)
+      return true;
+  return false;
+}
+
+std::string normalize_group_type(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+
+  if (value == "ion" || value == "ions")
+    return "ions";
+  if (value == "lig" || value == "ligand")
+    return "ligand";
+  if (value == "protein" || value == "rna" || value == "dna" ||
+      value == "water" || value == "lipid")
+    return value;
+  return {};
+}
+
+std::string sanitize_group_suffix(std::string value, std::size_t fallback_id) {
+  value = trim_copy(std::string_view{value.data(), value.size()});
+  if (value.empty() || value == "NULL" || value == "NULL_S")
+    value = std::to_string(fallback_id);
+
+  for (char &c : value) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    if (std::isalnum(uc) == 0 && c != '_' && c != '-' && c != '.')
+      c = '_';
+  }
+  return value.empty() ? std::to_string(fallback_id) : value;
+}
+
+std::expected<std::vector<group_cal>, std::string>
+parse_ndx_fast(const std::string &filename) {
+  std::ifstream input(filename, std::ios::binary);
+  if (!input.is_open())
+    return std::unexpected("index file is not found: " + filename);
+
+  input.seekg(0, std::ios::end);
+  const std::streamoff file_size = input.tellg();
+  if (file_size < 0)
+    return std::unexpected("cannot determine index file size: " + filename);
+  input.seekg(0, std::ios::beg);
+
+  std::string buffer(static_cast<std::size_t>(file_size), '\0');
+  if (!buffer.empty())
+    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+  if (!input && input.gcount() != static_cast<std::streamsize>(buffer.size()))
+    return std::unexpected("cannot read complete index file: " + filename);
+
+  std::vector<group_cal> parsed_groups;
+  parsed_groups.reserve(64);
+
+  group_cal *current_group = nullptr;
+  const char *const data = buffer.data();
+  const char *const end = data + buffer.size();
+  const char *line_begin = data;
+  std::size_t line_number = 1;
+
+  auto parse_line = [&](const char *begin,
+                        const char *line_end) -> std::expected<void, std::string> {
+    const char *logical_end = line_end;
+    for (const char *p = begin; p < line_end; ++p) {
+      if (*p == ';') {
+        logical_end = p;
+        break;
+      }
+    }
+
+    while (begin < logical_end &&
+           std::isspace(static_cast<unsigned char>(*begin)) != 0)
+      ++begin;
+    while (logical_end > begin &&
+           std::isspace(static_cast<unsigned char>(*(logical_end - 1))) != 0)
+      --logical_end;
+    if (begin == logical_end)
+      return {};
+
+    if (*begin == '[') {
+      const char *close = std::find(begin + 1, logical_end, ']');
+      if (close == logical_end) {
+        return std::unexpected("invalid NDX header at line " +
+                               std::to_string(line_number));
+      }
+
+      const std::string name =
+          trim_copy(std::string_view(begin + 1,
+                                     static_cast<std::size_t>(close - begin -
+                                                              1)));
+      if (name.empty()) {
+        return std::unexpected("empty NDX group name at line " +
+                               std::to_string(line_number));
+      }
+
+      parsed_groups.emplace_back(name);
+      current_group = &parsed_groups.back();
+      current_group->atom_index.reserve(4096);
+      return {};
+    }
+
+    if (current_group == nullptr) {
+      return std::unexpected("atom indices appear before the first NDX group at line " +
+                             std::to_string(line_number));
+    }
+
+    const char *p = begin;
+    while (p < logical_end) {
+      while (p < logical_end &&
+             std::isspace(static_cast<unsigned char>(*p)) != 0)
+        ++p;
+      if (p >= logical_end)
+        break;
+
+      std::size_t atom{};
+      const auto parsed = titan::from_chars_compat(p, logical_end, atom);
+      if (parsed.ec != std::errc{} || parsed.ptr == p || atom == 0) {
+        return std::unexpected("invalid atom index at line " +
+                               std::to_string(line_number));
+      }
+      if (parsed.ptr < logical_end &&
+          std::isspace(static_cast<unsigned char>(*parsed.ptr)) == 0) {
+        return std::unexpected("invalid atom-index token at line " +
+                               std::to_string(line_number));
+      }
+
+      current_group->atom_index.emplace_back(atom);
+      p = parsed.ptr;
+    }
+
+    return {};
+  };
+
+  for (const char *p = data; p < end; ++p) {
+    if (*p != '\n')
+      continue;
+    auto parsed = parse_line(line_begin, p);
+    if (!parsed)
+      return std::unexpected(parsed.error());
+    line_begin = p + 1;
+    ++line_number;
+  }
+
+  if (line_begin < end) {
+    auto parsed = parse_line(line_begin, end);
+    if (!parsed)
+      return std::unexpected(parsed.error());
+  }
+
+  if (parsed_groups.empty())
+    return std::unexpected("index file contains no groups: " + filename);
+
+  for (const group_cal &group : parsed_groups) {
+    if (group.atom_index.empty()) {
+      TitanUI::print_warning("Index group \"" + group.name +
+                             "\" is empty.");
+    }
+  }
+
+  return parsed_groups;
+}
+
+bool residue_has_o2_prime(const Multi_MOL &mol_in, std::size_t begin_atom,
+                          std::size_t end_atom_exclusive) {
+  if (begin_atom == 0 || end_atom_exclusive <= begin_atom)
+    return false;
+  const std::size_t begin = begin_atom - 1;
+  const std::size_t end_atom =
+      std::min(end_atom_exclusive - 1, mol_in.info.size());
+  for (std::size_t atom = begin; atom < end_atom; ++atom) {
+    if (mol_in.info[atom].get_atom() == "O2'" ||
+        mol_in.info[atom].get_original_res_name() == "U")
+      return true;
+  }
+  return false;
+}
+
+std::string classify_residue_type(const Multi_MOL &mol_in,
+                                  const amino_acid &amine,
+                                  std::size_t chain_index,
+                                  std::size_t residue_index,
+                                  std::size_t begin_atom,
+                                  std::size_t end_atom_exclusive) {
+  const auto &idx = mol_in.Index[chain_index];
+
+  if (begin_atom == 0 || begin_atom - 1 >= mol_in.info.size()) {
+    const std::string chain_type = normalize_group_type(idx.get_type());
+    return chain_type.empty() ? "ligand" : chain_type;
+  }
+
+  std::string res_name = mol_in.info[begin_atom - 1].get_original_res_name();
+  if (res_name.empty() || res_name == "UND")
+    res_name = mol_in.info[begin_atom - 1].get_res_name();
+  res_name = uppercase_copy(res_name);
+
+  if (res_name.size() > 3 &&
+      (res_name.front() == 'N' || res_name.front() == 'C'))
+    res_name = res_name.substr(1);
+
+  const std::string_view res_view{res_name.data(), res_name.size()};
+
+  if (in_list(res_view, {"SOL", "WAT", "HOH", "TIP3", "TIP3P", "H2O",
+                         "OH2"}))
+    return "water";
+
+  if (in_list(res_view, {"AG", "AG+", "AL", "AL3", "AL3+", "BA", "BA2",
+                         "BA2+", "BR", "BR-", "CA", "CAL", "CA2", "CA2+",
+                         "CD", "CD2", "CD2+", "CL", "CL-", "CLA", "CS",
+                         "CS+", "CU", "CU+", "CU1", "CU1+", "CU2", "CU2+",
+                         "F", "F-", "FE", "FE2", "FE2+", "FE3", "FE3+",
+                         "HG", "HG2", "HG2+", "I", "I-", "IOD", "IOD-",
+                         "K", "K+", "LI", "LI+", "MG", "MG2", "MG2+",
+                         "MN", "MN2", "MN2+", "NA", "NA+", "POT", "RB",
+                         "RB+", "SOD", "SR", "SR2", "SR2+", "ZN", "ZN2",
+                         "ZN2+"}))
+    return "ions";
+
+  if (in_list(res_view, {"U", "RU", "URA"}))
+    return "rna";
+  if (in_list(res_view, {"DA", "DC", "DG", "DT", "THY"}))
+    return "dna";
+  if (in_list(res_view, {"RA", "RC", "RG", "ADE", "CYT", "GUA"}))
+    return residue_has_o2_prime(mol_in, begin_atom, end_atom_exclusive) ? "rna"
+                                                                        : "dna";
+  if (in_list(res_view, {"A", "C", "G", "T"}))
+    return residue_has_o2_prime(mol_in, begin_atom, end_atom_exclusive) ? "rna"
+                                                                        : "dna";
+
+  if (in_list(res_view, {"DOPA", "DOPC", "DOPE", "DOPG", "DOPS", "DMPA",
+                         "DMPC", "DMPG", "DMPI", "DMPR", "DMPS", "DMPU",
+                         "DDPC", "DPPA", "DPPC", "DPPE", "DPPG", "DPPS",
+                         "DPRO", "CER1", "BGAL", "BGAM", "BGAN", "BGLC",
+                         "ANE5", "POPC", "CHL1", "PSM"}))
+    return "lipid";
+
+  const std::string type_base =
+      normalize_group_type(idx.get_type_base(residue_index));
+  if (!type_base.empty())
+    return type_base;
+
+  if (amine.check_res_name(res_name) ||
+      in_list(res_view, {"ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU",
+                         "GLY", "HIS", "HID", "HIE", "HIP", "ILE", "LEU",
+                         "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP",
+                         "TYR", "VAL"}))
+    return "protein";
+
+  const std::string chain_type = normalize_group_type(idx.get_type());
+  if (!chain_type.empty() && chain_type != "protein")
+    return chain_type;
+
+  return "ligand";
+}
+
+class AutoIndexBuilder {
+  std::vector<group_cal> groups_;
+  std::unordered_map<std::string, std::size_t> lookup_;
+
+public:
+  void add_atom(const std::string &name, std::size_t atom) {
+    auto it = lookup_.find(name);
+    if (it == lookup_.end()) {
+      const std::size_t group_index = groups_.size();
+      groups_.emplace_back(name);
+      lookup_.emplace(name, group_index);
+      it = lookup_.find(name);
+    }
+    groups_[it->second].atom_index.emplace_back(atom);
+  }
+
+  std::vector<group_cal> release() { return std::move(groups_); }
+};
+
+int write_index_file(const std::string &filename,
+                     const std::vector<group_cal> &groups) {
+  std::ofstream out_index_file(filename, std::ios::out | std::ios::trunc);
+  if (!out_index_file.is_open()) {
+    TitanUI::print_error("Cannot write index file: " + filename);
+    return 1;
+  }
+
+  for (const group_cal &group : groups) {
+    out_index_file << "[ " << group.name << " ]\n";
+    for (std::size_t j{}; j < group.atom_index.size(); ++j) {
+      out_index_file << std::setw(8) << group.atom_index[j];
+      if ((j + 1) % 15 == 0)
+        out_index_file << '\n';
+    }
+    out_index_file << "\n";
+  }
+
+  return 0;
+}
+
+} // namespace
+
 int s_cal_energy(cache_sigma_epsilon &CachedData, const Multi_MOL &rec,
                  const Multi_MOL &lg, size_t begin_mol_1, size_t end_mol_1,
                  size_t begin_mol_2, size_t end_mol_2, size_t num_snap,
@@ -17,35 +347,23 @@ int s_cal_energy(cache_sigma_epsilon &CachedData, const Multi_MOL &rec,
 int groups_cal::index(arguments &Arguments) {
   if (Arguments.flag_index == false)
     return 1;
-  fstream index_file(Arguments.index_name, ios::in);
-  group_cal group_temp;
-  int flag_f{};
-  if (!index_file.is_open()) {
-    cout << "index file is not found!\n";
-    // Arguments.flag_index = false;
+
+  auto parsed_groups = parse_ndx_fast(Arguments.index_name);
+  if (!parsed_groups) {
+    TitanUI::print_warning(parsed_groups.error());
     return 1;
   }
-  for (string temp{}; getline(index_file, temp);) {
-    size_t found_1 = temp.find("[ ");
-    size_t found_2 = temp.find(" ]");
-    if (found_1 != string::npos && found_2 != string::npos) {
-      ++flag_f;
-      if (flag_f >= 2) {
-        groups.emplace_back(group_temp);
-        group_temp.atom_index.clear();
-      }
-      group_temp.name = temp.substr(2, temp.length() - 4);
-    } else {
-      istringstream isstream_temp(temp);
-      size_t atom{};
-      while (isstream_temp >> atom) {
-        group_temp.atom_index.emplace_back(atom);
-      }
-    }
+  groups = std::move(parsed_groups.value());
+
+  return finalize_index_groups(Arguments);
+}
+
+int groups_cal::finalize_index_groups(arguments &Arguments) {
+  if (groups.empty()) {
+    TitanUI::print_error("No groups are available in index data.");
+    return 1;
   }
-  index_file.close();
-  groups.emplace_back(group_temp);
-  group_temp.atom_index.clear();
+
   if (Arguments.group_1 == 0 && Arguments.group_2 == 0 &&
       Arguments.flag_nocal == false)
     this->select_groups_to_cal_energy();
@@ -352,42 +670,115 @@ groups_cal::groups_cal(const vector<class index> &Index)
     : entropy{false}, group_1{}, group_2{}, group_entropy_com{},
       group_entropy_rec{}, group_entropy_lg{} {}
 
-int groups_cal::creat_index_file(arguments &Arguments, Multi_MOL &mol_in) {
-  for (size_t i{}; i < mol_in.Index.size() - 1; ++i) {
-    bool check_in{false};
-    for (size_t j{}; j < groups.size(); ++j) {
-      if (mol_in.Index[i].get_type() == groups[j].name) {
-        check_in = true;
-        break;
-      }
+int groups_cal::create_auto_index_file(arguments &Arguments, Multi_MOL &mol_in,
+                                       const amino_acid &amine) {
+  if (mol_in.Index.size() < 2 || mol_in.info.empty()) {
+    TitanUI::print_error("Cannot auto-create index: reference topology is empty.");
+    return 1;
+  }
+
+  const std::size_t atom_count =
+      !mol_in.m_mol.empty() ? mol_in.m_mol[0].size() : mol_in.info.size();
+  if (atom_count == 0) {
+    TitanUI::print_error("Cannot auto-create index: reference has no atoms.");
+    return 1;
+  }
+
+  AutoIndexBuilder builder;
+  for (std::size_t atom = 1; atom <= atom_count; ++atom)
+    builder.add_atom("System", atom);
+
+  std::vector<std::string> chain_group_order;
+  std::vector<std::string> type_chain_group_order;
+  std::unordered_map<std::string, bool> seen_chain_group;
+  std::unordered_map<std::string, bool> seen_type_chain_group;
+
+  for (std::size_t chain_idx{}; chain_idx + 1 < mol_in.Index.size();
+       ++chain_idx) {
+    const auto &chain_index = mol_in.Index[chain_idx];
+    const std::string chain_suffix =
+        sanitize_group_suffix(chain_index.get_chain(), chain_idx + 1);
+    const std::string chain_group = "chain_" + chain_suffix;
+    if (!seen_chain_group[chain_group]) {
+      seen_chain_group[chain_group] = true;
+      chain_group_order.emplace_back(chain_group);
     }
 
-    if (check_in == false)
-      groups.emplace_back(mol_in.Index[i].get_type());
-  }
+    for (std::size_t res_idx{}; res_idx < chain_index.get_size_v();
+         ++res_idx) {
+      const std::size_t begin_atom = chain_index.get_res_pos_e(res_idx);
+      std::size_t end_atom_exclusive =
+          (res_idx + 1 < chain_index.get_size_v())
+              ? chain_index.get_res_pos_e(res_idx + 1)
+              : mol_in.Index[chain_idx + 1].get_res_pos_e(0);
 
-  for (size_t i{}; i < groups.size(); ++i) {
-    for (size_t j{}; j < mol_in.Index.size() - 1; ++j)
-      if (mol_in.Index[j].get_type() == groups[i].name) {
-        for (size_t k{mol_in.Index[j].get_res_pos_e(0)};
-             k < mol_in.Index[j + 1].get_res_pos_e(0); ++k)
-          groups[i].atom_index.emplace_back(k);
+      if (begin_atom == 0 || begin_atom > atom_count)
+        continue;
+      end_atom_exclusive =
+          std::min(end_atom_exclusive, atom_count + static_cast<std::size_t>(1));
+      if (end_atom_exclusive <= begin_atom)
+        end_atom_exclusive = begin_atom + 1;
+
+      const std::string type_group =
+          classify_residue_type(mol_in, amine, chain_idx, res_idx, begin_atom,
+                                end_atom_exclusive);
+      const std::string type_chain_group = type_group + "_chain_" + chain_suffix;
+      if (!seen_type_chain_group[type_chain_group]) {
+        seen_type_chain_group[type_chain_group] = true;
+        type_chain_group_order.emplace_back(type_chain_group);
       }
-  }
 
-  fstream out_index_file(Arguments.index_name, ios::out);
-  for (size_t i{}; i < groups.size(); ++i) {
-    out_index_file << "[ " << groups[i].name << " ]\n";
-    for (size_t j{}; j < groups[i].atom_index.size(); ++j) {
-      out_index_file << setw(8) << groups[i].atom_index[j];
-      if (to_string(groups[i].atom_index[j]).length() > 8)
-        out_index_file << " ";
-      if (j != 0 && j % 15 == 0)
-        out_index_file << '\n';
+      for (std::size_t atom = begin_atom; atom < end_atom_exclusive; ++atom) {
+        builder.add_atom(type_group, atom);
+        builder.add_atom(chain_group, atom);
+        builder.add_atom(type_chain_group, atom);
+      }
     }
   }
 
+  std::vector<group_cal> built_groups = builder.release();
+  std::vector<group_cal> ordered_groups;
+  ordered_groups.reserve(built_groups.size());
+  std::unordered_map<std::string, bool> emitted;
+
+  auto append_if_present = [&](const std::string &name) {
+    if (emitted[name])
+      return;
+    auto it = std::find_if(
+        built_groups.begin(), built_groups.end(),
+        [&](const group_cal &group) { return group.name == name; });
+    if (it == built_groups.end() || it->atom_index.empty())
+      return;
+    emitted[name] = true;
+    ordered_groups.emplace_back(std::move(*it));
+  };
+
+  append_if_present("System");
+  for (const std::string &name :
+       {"protein", "rna", "dna", "ligand", "water", "ions", "lipid"})
+    append_if_present(name);
+  for (const std::string &name : chain_group_order)
+    append_if_present(name);
+  for (const std::string &name : type_chain_group_order)
+    append_if_present(name);
+  for (group_cal &group : built_groups)
+    append_if_present(group.name);
+
+  groups = std::move(ordered_groups);
+  for (group_cal &group : groups)
+    group.check_conti();
+
+  if (write_index_file(Arguments.index_name, groups) != 0)
+    return 1;
+
+  Arguments.flag_index = true;
+  TitanUI::print_info("Auto-created index file: " + Arguments.index_name);
   return 0;
+}
+
+int groups_cal::creat_index_file(arguments &Arguments, Multi_MOL &mol_in) {
+  amino_acid empty_amine;
+  return create_auto_index_file(Arguments, mol_in, empty_amine);
 }
 
 int groups_cal::add_sub_group_1(arguments &Arguments) {

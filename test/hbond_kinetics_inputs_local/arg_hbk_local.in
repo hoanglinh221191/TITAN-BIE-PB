@@ -1,0 +1,14 @@
+-ff=AMBER14SB
+-f=mini_corr_knn.pdb
+-pbci=0
+-g=1-0
+-1pdb
+-hbk
+-hbk-kind=hbond
+-hbk-kind=salt
+-hbk-domain=intra
+-hbk-maxlag=8
+-nt=1
+-n=index.ndx
+-path-a=../../lib_ff
+-path-n=../../lib_ff

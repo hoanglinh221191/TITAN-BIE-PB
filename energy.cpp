@@ -1537,8 +1537,10 @@ int wrap_cal_energy_map(TitanExecutor &executor, Multi_MOL &mol1,
   // Arguments.mol_2_type
   //	<<" "<< Arguments.energy_map << " " <<
   // Arguments.emap_type << '\n';
-  const bool is_lig1 = (Arguments.mol_1_type == "lig");
-  const bool is_lig2 = (Arguments.mol_2_type == "lig");
+  const bool is_lig1 =
+      (Arguments.mol_1_type == "ligand" || Arguments.mol_1_type == "lig");
+  const bool is_lig2 =
+      (Arguments.mol_2_type == "ligand" || Arguments.mol_2_type == "lig");
 
   if ((is_lig1 && is_lig2) ||
       (Arguments.energy_map == 3 && Arguments.emap_type == "atom-atom")) {

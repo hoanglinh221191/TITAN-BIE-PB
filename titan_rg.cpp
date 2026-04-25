@@ -2,6 +2,7 @@
 
 #include "titan_executor.h"
 #include "titan_gyration.h"
+#include "titan_selection_utils.h"
 #include "titan_ui.h"
 
 #include <algorithm>
@@ -14,43 +15,6 @@
 
 namespace {
 
-const char *trace_kind_name(TitanRgAnalyzer::TraceKind kind) noexcept {
-  switch (kind) {
-  case TitanRgAnalyzer::TraceKind::CA:
-    return "CA";
-  case TitanRgAnalyzer::TraceKind::C4Prime:
-    return "C4'";
-  case TitanRgAnalyzer::TraceKind::MartiniBB:
-    return "BB";
-  case TitanRgAnalyzer::TraceKind::None:
-  default:
-    return "none";
-  }
-}
-
-int trace_priority(TitanRgAnalyzer::TraceKind kind,
-                   const std::string &atom_name) noexcept {
-  switch (kind) {
-  case TitanRgAnalyzer::TraceKind::CA:
-    return atom_name == "CA" ? 2 : (atom_name == "CA " ? 1 : -1);
-  case TitanRgAnalyzer::TraceKind::C4Prime:
-    if (atom_name == "C4'")
-      return 2;
-    if (atom_name == "C4*")
-      return 1;
-    return -1;
-  case TitanRgAnalyzer::TraceKind::MartiniBB:
-    if (atom_name == "BB")
-      return 2;
-    if (atom_name == "BB2")
-      return 1;
-    return -1;
-  case TitanRgAnalyzer::TraceKind::None:
-  default:
-    return -1;
-  }
-}
-
 std::size_t effective_worker_count(std::size_t requested_threads,
                                    std::size_t work_items) noexcept {
   if (requested_threads == 0 || work_items < 512)
@@ -62,24 +26,16 @@ std::size_t effective_worker_count(std::size_t requested_threads,
 } // namespace
 
 std::string TitanRgAnalyzer::uppercase_copy(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(),
-                 [](unsigned char c) {
-                   return static_cast<char>(std::toupper(c));
-                 });
-  return value;
+  return titan_selection::uppercase_copy(std::move(value));
 }
 
 std::string TitanRgAnalyzer::trim_copy(std::string value) {
-  const auto first = value.find_first_not_of(" \t");
-  if (first == std::string::npos)
-    return {};
-  const auto last = value.find_last_not_of(" \t");
-  return value.substr(first, last - first + 1);
+  return titan_selection::trim_copy(std::move(value));
 }
 
 bool TitanRgAnalyzer::is_traceable_atom(const std::string &atom_name,
                                         TraceKind trace_kind) noexcept {
-  return trace_priority(trace_kind, atom_name) >= 0;
+  return titan_selection::is_traceable_atom(atom_name, trace_kind);
 }
 
 void TitanRgAnalyzer::configure(const RgArgs &args) {
@@ -91,80 +47,14 @@ void TitanRgAnalyzer::configure(const RgArgs &args) {
 TitanRgAnalyzer::TraceKind
 TitanRgAnalyzer::select_trace_kind(const std::string &mol_type,
                                    const std::string &force_field) const {
-  const std::string type = uppercase_copy(mol_type);
-  const std::string ff = uppercase_copy(force_field);
-
-  if (ff == "MARTINI") {
-    if (type == "LIG" || type == "LIGAND")
-      return TraceKind::None;
-    return TraceKind::MartiniBB;
-  }
-
-  if (type == "PROTEIN" || type == "PROTEIN-USER")
-    return TraceKind::CA;
-  if (type == "RNA" || type == "DNA")
-    return TraceKind::C4Prime;
-  return TraceKind::None;
+  return titan_selection::select_trace_kind(mol_type, force_field);
 }
 
 void TitanRgAnalyzer::build_trace_atoms(const Multi_MOL &mol,
                                         const std::string &mol_type,
                                         const std::string &force_field,
                                         std::vector<TraceAtom> &trace_atoms) {
-  trace_atoms.clear();
-  const TraceKind trace_kind = select_trace_kind(mol_type, force_field);
-  if (trace_kind == TraceKind::None || mol.info.empty())
-    return;
-
-  std::size_t prev_chain = std::numeric_limits<std::size_t>::max();
-  std::size_t prev_resnr = std::numeric_limits<std::size_t>::max();
-  std::size_t ordinal = 0;
-  int best_priority = -1;
-  TraceAtom current{};
-  bool has_residue = false;
-
-  auto flush_current = [&]() {
-    if (has_residue && current.atom_index >= 0) {
-      current.ordinal = trace_atoms.size() + 1;
-      trace_atoms.push_back(current);
-    }
-  };
-
-  for (std::size_t atom_idx = 0; atom_idx < mol.info.size(); ++atom_idx) {
-    const auto &atom = mol.info[atom_idx];
-    const std::size_t chainnum = atom.get_chainnum();
-    const std::size_t resnr = atom.get_resnr();
-    const bool new_residue =
-        !has_residue || chainnum != prev_chain || resnr != prev_resnr;
-
-    if (new_residue) {
-      flush_current();
-      prev_chain = chainnum;
-      prev_resnr = resnr;
-      ++ordinal;
-      has_residue = true;
-      best_priority = -1;
-      current = TraceAtom{};
-      current.ordinal = ordinal;
-      current.resnr = resnr;
-      current.chainnum = chainnum;
-      current.chain = atom.get_chain();
-      current.resname = atom.get_res_name();
-    }
-
-    const std::string atom_name = uppercase_copy(trim_copy(atom.get_atom()));
-    if (!is_traceable_atom(atom_name, trace_kind))
-      continue;
-
-    const int priority = trace_priority(trace_kind, atom_name);
-    if (priority > best_priority) {
-      best_priority = priority;
-      current.atom_index = static_cast<int>(atom_idx);
-      current.atom_name = trim_copy(atom.get_atom());
-    }
-  }
-
-  flush_current();
+  titan_selection::build_trace_atoms(mol, mol_type, force_field, trace_atoms);
 }
 
 void TitanRgAnalyzer::reset_runtime_buffers() {
@@ -214,13 +104,13 @@ void TitanRgAnalyzer::init(const Multi_MOL &mol1, const Multi_MOL &mol2,
     const TraceKind mol1_kind = select_trace_kind(args.mol_1_type, args.force_f);
     TitanUI::log_kv(log, "RG2 Trace mol1",
                     std::to_string(mol1_trace_.size()) + " (" +
-                        trace_kind_name(mol1_kind) + ")");
+                        titan_selection::trace_kind_name(mol1_kind) + ")");
     if (!nocal_mode_) {
       const TraceKind mol2_kind =
           select_trace_kind(args.mol_2_type, args.force_f);
       TitanUI::log_kv(log, "RG2 Trace mol2",
                       std::to_string(mol2_trace_.size()) + " (" +
-                          trace_kind_name(mol2_kind) + ")");
+                          titan_selection::trace_kind_name(mol2_kind) + ")");
     }
   }
 }

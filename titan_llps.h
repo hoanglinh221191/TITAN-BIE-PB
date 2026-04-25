@@ -2,12 +2,10 @@
 #ifndef TITAN_LLPS_H
 #define TITAN_LLPS_H
 
-#include "MOL.h"
-#include "MOL_info.h"
 #include "aligned_allocator.h"
-#include "info.h"
 #include "titan_neighbor_grid.h"
 #include "titan_thread_compat.h"
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -17,7 +15,13 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
+
+class TitanExecutor;
+class MOL;
+class info;
+class mol_info;
 
 // ============================================================================
 // Structs
@@ -32,8 +36,8 @@ struct LLPSFrameResult {
   int gcc_size;         // macro-nodes in giant connected component
   float gcc_rg_nm;      // Rg of GCC (nm), PBC-corrected
   float mean_degree;    // <k> = 2*edges / n_macronodes
-  float density_dense;  // macro-nodes/nm³ inside GCC (sphere approx)
-  float density_dilute; // macro-nodes/nm³ outside GCC
+  float density_dense;  // macro-nodes/nm^3 inside GCC (sphere approx)
+  float density_dilute; // macro-nodes/nm^3 outside GCC
 };
 
 /// Full-trajectory LLPS results
@@ -51,71 +55,88 @@ struct LLPSResult {
   std::vector<int> sticker_residue_indices;     // residue numbers for rows/cols
 };
 
+struct LLPSLifetimeDistributionResult {
+  std::vector<double> lifetime_ns;
+  std::vector<uint64_t> counts;
+  uint64_t total_events{0};
+  double mean_ns{0.0};
+  double median_ns{0.0};
+  double p90_ns{0.0};
+  double max_ns{0.0};
+};
+
+struct LLPSContactDynamicsResult {
+  LLPSLifetimeDistributionResult sticker_contact_lifetime;
+  LLPSLifetimeDistributionResult protein_rna_contact_lifetime;
+  double protein_neighbor_persistence{0.0};
+  double rna_neighbor_persistence{0.0};
+  double global_neighbor_persistence{0.0};
+  double protein_rewiring_rate_per_ns{0.0};
+  double rna_rewiring_rate_per_ns{0.0};
+  double global_rewiring_rate_per_ns{0.0};
+  double interface_new_contacts_per_ns{0.0};
+  double interface_lost_contacts_per_ns{0.0};
+  double interface_net_change_per_ns{0.0};
+  uint64_t interface_new_contacts{0};
+  uint64_t interface_lost_contacts{0};
+};
+
+enum class LlpsKernelMode : unsigned char { Auto, Scalar, Avx2 };
+
 // ============================================================================
 // TitanLLPS
 // ============================================================================
 class TitanLLPS {
 public:
-  // ---- Construction --------------------------------------------------------
-  // n_chains       : number of CG chains from impl_martini chainnum assignment
-  // chain_start    : chain_start[i] = first atom index of chain i
-  // chain_len      : chain_len[i]   = number of atoms in chain i
-  // r_cut_nm       : contact cutoff (nm), default 0.7 for Martini
-  // perc_thr       : GCC fraction threshold to declare percolation
-  // dimer_size     : group every N consecutive chains into 1 macro-node
-  // (default 1) contacts_on    : enable residue contact frequency map
   TitanLLPS(int n_chains, const std::vector<int> &chain_start,
             const std::vector<int> &chain_len, float r_cut_nm = 0.7f,
-            float perc_thr = 0.5f, int dimer_size = 1, bool contacts_on = false,
-            float voxel_size_nm = 0.5f);
+            float perc_thr = 0.5f, int dimer_size = 1,
+            bool contacts_on = false, float voxel_size_nm = 0.5f,
+            bool dynamics_enabled = false, bool dynamics_detailed = false,
+            float prna_cutoff_nm = 0.0f, const std::string &kernel_mode = "auto",
+            const std::string &density_mode = "auto");
 
-  // ---- Setup ---------------------------------------------------------------
-  // Parse sticker bead names (comma-sep) and auto-detect backbone bead per
-  // macro-node
   void set_sticker_beads(const std::vector<mol_info> &info,
                          const std::string &sticker_str);
+  void set_rna_metadata(const std::vector<mol_info> &rna_info);
+  void configure_dynamics(bool enabled, bool detailed,
+                          float prna_cutoff_nm = 0.0f);
+  void configure_trace_outputs(const info &info_output);
 
-  // ---- Hot loop ------------------------------------------------------------
-  // Called AFTER Titan's PBC solver for each frame.
-  // mol_frame : pro_in.m_mol[chunk_snap_idx] — provides pos.x/y/z in Å
-  // (post-PBC) info      : pro_in.info — provides atom names for sticker mask
-  // box_nm    : box side lengths in nm (from header or 0 if non-periodic PDB)
   void process_frame(const MOL &mol_frame, const std::vector<mol_info> &info,
                      float box_x_nm, float box_y_nm, float box_z_nm,
                      float time_ns, int frame_idx,
                      const MOL *rna_frame = nullptr,
                      const std::vector<mol_info> *rna_info = nullptr);
 
-  // ---- Async pipeline (jthread) -------------------------------------------
-  // Enable pipeline: spins up a dedicated worker thread.
   void start_async();
-
-  // Async version: packages data and pushes to queue. Returns immediately.
   void process_frame_async(const MOL &mol_frame,
                            const std::vector<mol_info> &info, float box_x_nm,
                            float box_y_nm, float box_z_nm, float time_ns,
                            int frame_idx, const MOL *rna_frame = nullptr,
                            const std::vector<mol_info> *rna_info = nullptr);
-
-  // Block until queue is drained (call before finalize()).
   void flush_async();
 
-  // ---- Post-processing -----------------------------------------------------
-  void finalize(int n_threads, int max_lag_frames);
-
-  // ---- Export --------------------------------------------------------------
+  void finalize(TitanExecutor &executor, int max_lag_frames);
   void export_results(const info &info_output, std::fstream &log) const;
 
 #ifdef TITAN_LLPS_TESTING
   void debug_build_contacts(const std::vector<float> &pos_nm, float bx,
                             float by, float bz,
                             std::vector<std::pair<int, int>> &macro_contacts) {
-    build_contacts(pos_nm, bx, by, bz, macro_contacts);
+    std::vector<uint64_t> packed;
+    build_contacts(pos_nm, bx, by, bz, packed);
+    macro_contacts.clear();
+    macro_contacts.reserve(packed.size());
+    for (uint64_t key : packed)
+      macro_contacts.push_back(unpack_pair(key));
   }
 #endif
 
-  // ---- Accessors -----------------------------------------------------------
   const LLPSResult &result() const { return result_; }
+  const LLPSContactDynamicsResult &contact_dynamics() const {
+    return contact_dynamics_result_;
+  }
   bool is_percolated() const { return result_.is_percolated; }
   int n_frames_processed() const {
     return static_cast<int>(result_.frames.size());
@@ -123,108 +144,167 @@ public:
   int n_macronodes() const { return n_macro_; }
 
 private:
-  // ---- Async pipeline (jthread worker) -------------------------------------
   struct FrameWorkItem {
-    std::vector<float> pos_nm;                // n_atoms*3, already in nm
-    std::optional<std::vector<float>> rna_nm; // present if rna_frame
+    std::vector<float> pos_nm;
+    std::optional<std::vector<float>> rna_nm;
     float bx, by, bz;
     float time_ns;
     int frame_idx;
     int n_rna = 0;
   };
+
+  struct ActiveContactRun {
+    double start_time_ns{0.0};
+    double last_time_ns{0.0};
+    int start_frame_idx{0};
+    int last_frame_idx{0};
+  };
+
+  struct ContactEventRow {
+    double time_ns{0.0};
+    std::string contact_type{};
+    uint64_t key{0};
+    int a_id{-1};
+    int b_id{-1};
+    int state{0};
+    double duration_ns{0.0};
+  };
+
+  struct NeighborFrameMetric {
+    double time_ns{0.0};
+    double dt_ns{0.0};
+    double protein_persistence{0.0};
+    double rna_persistence{0.0};
+    double global_persistence{0.0};
+    uint64_t protein_changes{0};
+    uint64_t rna_changes{0};
+    uint64_t global_changes{0};
+  };
+
+  struct InterfaceTurnoverFrame {
+    double time_ns{0.0};
+    double dt_ns{0.0};
+    uint64_t new_contacts{0};
+    uint64_t lost_contacts{0};
+  };
+
+  struct PerformanceCounters {
+    uint64_t frames_processed{0};
+    uint64_t macro_contact_pairs{0};
+    uint64_t sticker_contact_pairs{0};
+    uint64_t protein_chain_pairs{0};
+    uint64_t protein_rna_pairs{0};
+    double pack_seconds{0.0};
+    double contact_seconds{0.0};
+    double protein_rna_seconds{0.0};
+    double graph_seconds{0.0};
+    double density_seconds{0.0};
+    double polymer_scaling_seconds{0.0};
+    double dynamics_seconds{0.0};
+    double finalize_ct_seconds{0.0};
+    double finalize_contact_map_seconds{0.0};
+    double finalize_seconds{0.0};
+    double export_seconds{0.0};
+    std::size_t max_queue_depth{0};
+    std::size_t finalize_executor_workers{1};
+  };
+
   std::queue<FrameWorkItem> work_queue_;
+  std::vector<FrameWorkItem> free_work_items_;
   std::mutex queue_mtx_;
   std::condition_variable queue_cv_;
   bool worker_stop_ = false;
   titan::jthread worker_thread_;
   bool async_mode_ = false;
+  bool worker_processing_ = false;
   static constexpr int MAX_QUEUE_SIZE_ = 4;
-  std::condition_variable queue_full_cv_; // backpressure
+  std::condition_variable queue_full_cv_;
 
   void worker_loop(titan::stop_token stoken);
-
-  // Internal implementation accepting pre-converted nm coordinates.
   void process_frame_impl(const std::vector<float> &pos_nm,
                           const float *rna_nm_data, int n_rna, float bx,
                           float by, float bz, float time_ns, int frame_idx);
 
-  // ---- Configuration -------------------------------------------------------
-  int n_chains_;   // raw chains from Martini
-  int dimer_size_; // chains per macro-node
-  int n_macro_;    // n_chains_ / dimer_size_
-  float r_cut_;    // contact cutoff nm
-  float r_cut2_;   // r_cut²
+  int n_chains_;
+  int dimer_size_;
+  int n_macro_;
+  float r_cut_;
+  float r_cut2_;
   float perc_thr_;
   bool contacts_on_;
+  bool dynamics_enabled_{false};
+  bool dynamics_detailed_{false};
+  float prna_cutoff_nm_{0.0f};
+  float prna_cutoff2_nm_{0.0f};
+  LlpsKernelMode kernel_mode_{LlpsKernelMode::Auto};
+  std::string density_mode_{"auto"};
+  bool density_disabled_by_budget_{false};
 
-  // ---- Chain layout --------------------------------------------------------
-  std::vector<int> chain_start_; // atom offset per chain
-  std::vector<int> chain_len_;   // atom count per chain
-  // macro-node → list of raw chain indices
+  std::vector<int> chain_start_;
+  std::vector<int> chain_len_;
   std::vector<std::vector<int>> macro_chains_;
-  // macro-node → representative backbone atom index (for Rg center)
   std::vector<int> bb_atom_;
 
-  // ---- Sticker mask --------------------------------------------------------
-  std::vector<bool> sticker_mask_;    // [n_atoms_total]
-  std::vector<int> sticker_atom_idx_; // sorted list of sticker atom indices
+  std::vector<bool> sticker_mask_;
+  std::vector<int> sticker_atom_idx_;
 
-  // ---- Frame storage for C(t) — SLIDING WINDOW ----------------------------
-  int n_pairs_;              // n_macro_*(n_macro_-1)/2
-  int n_words_;              // ceil(n_pairs_/64)
-  int max_lag_frames_ = 500; // sliding window size
-  // Ring buffer: adj_ring_[frame_idx % max_lag_frames_][word]
+  int n_pairs_;
+  int n_words_;
+  int max_lag_frames_ = 500;
   std::vector<std::vector<uint64_t>> adj_ring_;
-  int ring_head_ = 0;    // next write position in ring
-  int ring_count_ = 0;   // current number of valid entries
-  int max_ring_cap_ = 0; // actual ring capacity (memory-budgeted)
-  // Online C(t) accumulators: ct_num_[lag], ct_den_[lag]
-  std::vector<double> ct_num_; // numerator accumulator per lag
-  std::vector<double> ct_den_; // denominator accumulator per lag
-  std::vector<int> ct_count_;  // number of pairs counted per lag
-  int ct_total_frames_ = 0;    // total frames seen (for ring indexing)
-  // mean_adj built incrementally (pair contact count over all frames)
-  std::vector<int> pair_contact_cnt_; // [n_pairs_] — count how many frames each
-                                      // pair is in contact
+  int ring_count_ = 0;
+  int max_ring_cap_ = 0;
+  std::vector<double> ct_num_;
+  std::vector<double> ct_den_;
+  std::vector<int> ct_count_;
+  int ct_total_frames_ = 0;
+  std::vector<int> pair_contact_cnt_;
 
-  // ---- Degree distribution (ONLINE) ----------------------------------------
   int pk_max_k_ = -1;
-  std::vector<double> pk_sum_; // [k] — sum of P(k) across frames
-  std::vector<double> pk_sq_;  // [k] — sum of P(k)^2 across frames
+  std::vector<double> pk_sum_;
+  std::vector<double> pk_sq_;
 
-  // ---- Contact frequency accumulator (sticker beads) ----------------------
-  int n_stickers_; // number of unique sticker residues in contact map output
-  std::vector<std::vector<float>> contact_accum_; // [n_residue][n_residue]
-  std::vector<int> sticker_seen_gen_;             // per-frame residue-pair dedup
+  int n_stickers_;
+  std::vector<float> contact_accum_upper_;
+  std::vector<int> sticker_seen_gen_;
   int sticker_cur_gen_ = 0;
 
-  // ---- RNA detection (via mol_type) ----------------------------------------
   bool has_rna_ = false;
-
-  // ---- Precomputed atom → macro-node map (fix #1: avoid per-frame rebuild) --
   std::vector<int> atom_macro_;
-
-  // ---- Generation counter for seen[] (fix #2: avoid per-frame alloc+zero) ---
   std::vector<int> seen_gen_;
   int cur_gen_ = 0;
 
-  // ---- Reusable buffers (fix #3: avoid per-frame heap alloc) ----------------
   mutable std::vector<float> shifted_pos_buf_;
   mutable std::vector<float> rna_nm_buf_;
-  mutable std::vector<float> pos_nm_buf_;                 // B1
+  mutable std::vector<float> pos_nm_buf_;
   mutable AlignedDoubleVector gcc_rg_x_buf_;
   mutable AlignedDoubleVector gcc_rg_y_buf_;
   mutable AlignedDoubleVector gcc_rg_z_buf_;
-  mutable std::vector<std::pair<int, int>> contacts_buf_; // B3
-  mutable std::vector<int> degree_buf_;                   // B4
-  mutable std::vector<int> gcc_macros_buf_;               // B5
-  std::vector<int> sticker_local_idx_; // B7: atom → sticker residue index
+  mutable std::vector<std::pair<int, int>> contacts_buf_;
+  mutable std::vector<uint64_t> macro_contact_keys_buf_;
+  mutable std::vector<int> degree_buf_;
+  mutable std::vector<int> gcc_macros_buf_;
+  mutable std::vector<uint64_t> sticker_pair_keys_buf_;
+  mutable std::vector<uint64_t> protein_chain_pair_keys_buf_;
+  mutable std::vector<uint64_t> protein_rna_pair_keys_buf_;
+  mutable std::vector<std::size_t> neighbor_offsets_buf_;
+  mutable std::vector<std::size_t> neighbor_write_pos_buf_;
+  mutable std::vector<int> neighbor_flat_buf_;
+  std::vector<std::size_t> prev_neighbor_offsets_;
+  std::vector<int> prev_neighbor_flat_;
+  std::vector<std::size_t> current_neighbor_offsets_buf_;
+  std::vector<int> current_neighbor_flat_buf_;
+  std::vector<int> sticker_local_idx_;
   titan_neighbor::HalfShellGrid contact_grid_;
+  titan_neighbor::HalfShellGrid prna_grid_;
 
-  // ---- Atom-to-chain precomputed map ---------------------------------------
   std::vector<int> atom_chain_;
+  std::vector<int> atom_residue_;
+  std::vector<int> rna_atom_chain_;
+  std::vector<int> rna_atom_residue_;
+  std::vector<int> rna_chain_raw_ids_;
+  std::unordered_map<int, int> rna_chain_raw_to_local_;
 
-  // ---- Feature 1: 3D Density Map -------------------------------------------
   float voxel_size_nm_ = 0.5f;
   int grid_nx_ = 0, grid_ny_ = 0, grid_nz_ = 0;
   mutable std::vector<uint64_t> vox_pro_;
@@ -232,46 +312,88 @@ private:
   int density_frame_count_ = 0;
   float grid_bx_ = 0, grid_by_ = 0, grid_bz_ = 0;
 
-  // ---- Feature 2: Polymer Scaling (RNA only) --------------------------------
   int max_rna_chain_len_ = 0;
-  std::vector<int> rna_chain_starts_; // auto-detected chain boundaries
+  std::vector<int> rna_chain_starts_;
   std::vector<double> sum_R2_s_;
   std::vector<uint64_t> count_R2_s_;
 
-  // ---- Results -------------------------------------------------------------
   LLPSResult result_;
+  LLPSContactDynamicsResult contact_dynamics_result_;
   int percolation_frame_idx_ = -1;
 
-  // ---- Union-Find ----------------------------------------------------------
+  std::unordered_map<uint64_t, ActiveContactRun> active_sticker_contacts_;
+  std::unordered_map<uint64_t, ActiveContactRun> active_prna_contacts_;
+  std::vector<double> sticker_contact_lifetimes_ns_;
+  std::vector<double> prna_contact_lifetimes_ns_;
+  std::vector<ContactEventRow> contact_trace_rows_;
+  std::ofstream contact_trace_out_;
+  bool contact_trace_streaming_{false};
+  std::vector<NeighborFrameMetric> neighbor_frame_metrics_;
+  std::vector<InterfaceTurnoverFrame> interface_turnover_frames_;
+  std::vector<uint64_t> prev_prna_contacts_;
+  double first_contact_time_ns_{0.0};
+  double last_contact_time_ns_{0.0};
+  bool have_contact_time_window_{false};
+  double sum_protein_neighbor_persistence_{0.0};
+  double sum_rna_neighbor_persistence_{0.0};
+  double sum_global_neighbor_persistence_{0.0};
+  uint64_t count_protein_neighbor_persistence_{0};
+  uint64_t count_rna_neighbor_persistence_{0};
+  uint64_t count_global_neighbor_persistence_{0};
+  uint64_t total_protein_neighbor_changes_{0};
+  uint64_t total_rna_neighbor_changes_{0};
+  uint64_t total_global_neighbor_changes_{0};
+  double total_neighbor_dt_ns_{0.0};
+  uint64_t total_new_interface_contacts_{0};
+  uint64_t total_lost_interface_contacts_{0};
+  double total_interface_dt_ns_{0.0};
+  PerformanceCounters perf_;
+
   struct UF {
     std::vector<int> parent, rank_, size_;
-    void init(int n);  // allocate once
-    void reset(int n); // reset each frame (no realloc)
+    void init(int n);
+    void reset(int n);
     int find(int x);
     void merge(int a, int b);
     int largest_component() const;
   } uf_;
 
-  // ---- Helpers -------------------------------------------------------------
-  // Build macro-node contact list via cell-list O(N).
-  // pos_nm: flat float[n_atoms*3] in nm (post Å→nm conversion + PBC)
-  // box: nm
   void build_contacts(const std::vector<float> &pos_nm, float bx, float by,
                       float bz,
-                      std::vector<std::pair<int, int>> &macro_contacts);
+                      std::vector<uint64_t> &macro_contact_keys,
+                      std::vector<uint64_t> *sticker_pair_keys = nullptr,
+                      std::vector<uint64_t> *protein_chain_pair_keys = nullptr);
+  void build_protein_rna_contacts(const std::vector<float> &pos_nm,
+                                  const float *rna_nm_data, int n_rna,
+                                  float bx, float by, float bz,
+                                  std::vector<uint64_t> &protein_rna_pairs);
+  void update_contact_dynamics(double time_ns, int frame_idx,
+                               const std::vector<uint64_t> &sticker_pairs,
+                               const std::vector<uint64_t> &protein_pairs,
+                               const std::vector<uint64_t> &protein_rna_pairs);
+  void finalize_contact_dynamics();
+  void export_contact_dynamics(const info &info_output,
+                               std::fstream &log) const;
+  void export_sticker_hotspots(const info &info_output,
+                               std::fstream &log) const;
 
-  // Compute GCC Rg using macro-node backbone atoms (nm, PBC unwrapped)
   float compute_gcc_rg(const std::vector<float> &pos_nm, float bx, float by,
                        float bz, const std::vector<int> &gcc_macros) const;
 
   static float pbc_dist2(float dx, float dy, float dz, float bx, float by,
                          float bz);
-
-  inline int pair_index(int i, int j) const;
-  inline void set_adj_bit(std::vector<uint64_t> &words, int i, int j) const;
-
+  int pair_index(int i, int j) const;
+  std::size_t contact_upper_index(int i, int j) const;
+  void set_adj_bit(std::vector<uint64_t> &words, int i, int j) const;
   double fit_tau(const std::vector<double> &ct,
                  const std::vector<double> &lags_ns) const;
+  bool kernel_allows_avx2() const noexcept;
+  static LlpsKernelMode parse_kernel_mode(const std::string &mode);
+  void expand_contact_map_result(int n_frames);
+
+  static uint64_t pack_ordered_pair(int a, int b);
+  static uint64_t pack_prna_pair(int protein_chain, int rna_chain_local);
+  static std::pair<int, int> unpack_pair(uint64_t key);
 };
 
 #endif // TITAN_LLPS_H

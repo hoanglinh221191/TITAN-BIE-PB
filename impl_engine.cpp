@@ -29,9 +29,13 @@
 #include "titan_ifp.h"
 #include "titan_pca.h" // Ensured inclusion as per instruction
 #include "titan_dssp.h"
+#include "titan_hbond_kinetics.h"
 #include "titan_lj.h"
 #include "titan_rg.h"
 #include "titan_rms.h"
+#include "titan_sparse_graph_module.h"
+#include "titan_sg_streaming.h"
+#include "titan_sq.h"
 #include "titan_umap.h"
 #include "water_analysis.h"
 
@@ -93,6 +97,16 @@ std::string format_time_ps(double time_ps) {
   std::ostringstream oss;
   oss << std::fixed << std::setprecision(4) << time_ps << " ps";
   return oss.str();
+}
+
+std::string progress_source_label(const arguments &Arguments,
+                                  const std::string &name_pro) {
+  if (Arguments.flag_xdr && !Arguments.traj_file.empty()) {
+    return TitanUI::compact_source_label(Arguments.traj_file, 18);
+  } else if (Arguments.flag_1_pdb) {
+    return TitanUI::compact_source_label(Arguments.pdb_name, 18);
+  }
+  return TitanUI::compact_source_label(name_pro, 18);
 }
 
 std::string pull_direct_selection_rule(const arguments &Arguments) {
@@ -336,10 +350,13 @@ bool should_enable_dense_pair_cache(const arguments &Arguments,
     return false;
   }
 
+  const bool sg_cache_requested =
+      Arguments.flag_sub_groups &&
+      (Arguments.sg_mode == "cache" || Arguments.sg_cache == "on");
   if (!(Arguments.flag_cache == 1 || Arguments.force_map == 1 ||
         Arguments.force_map == 3 || Arguments.flag_new_emap == true ||
         Arguments.energy_map == 1 || Arguments.energy_map == 3 ||
-        Arguments.energy_map == 4)) {
+        Arguments.energy_map == 4 || sg_cache_requested)) {
     reason = "not requested by active modules";
     return false;
   }
@@ -501,6 +518,8 @@ int engine(arguments &Arguments) {
   vector<energy_res> Force_res_stat_mol1, Force_res_stat_mol2;
   vector<vector<energy_res>> Energy_res_stat_1, Energy_res_stat_2;
   vector<vector<energy_groups>> EF_subgroups;
+  SgStreamingAnalyzer sg_streaming_analyzer;
+  bool sg_streaming_initialized{false};
   vector<vector<map_pos>> average_contact_matrix;
   vector<mindistance_group> MIN_DIS;
   vector<vector<size_t>> Hbonds_vector, sidechain_contact_num;
@@ -647,12 +666,16 @@ int engine(arguments &Arguments) {
   }
   if (Arguments.lj.flag_lj)
     append_module_label(active_modules, "LJ");
+  if (Arguments.sq.flag_sq)
+    append_module_label(active_modules, "SQ");
   if (Arguments.rg.flag_rg2)
     append_module_label(active_modules, "Rg2");
   if (Arguments.rms.flag_rms)
     append_module_label(active_modules, "RMSD/RMSF");
   if (Arguments.flag_network || Arguments.community.flag_community)
     append_module_label(active_modules, "DCCM/Network");
+  if (Arguments.corr_knn.flag_corr_knn)
+    append_module_label(active_modules, "Corr-kNN");
   if (Arguments.community.flag_community)
     append_module_label(active_modules, "Community");
   if (Arguments.flag_pca)
@@ -717,6 +740,8 @@ int engine(arguments &Arguments) {
         auto_pbc_modules.push_back("Rg2");
       if (Arguments.lj.flag_lj)
         auto_pbc_modules.push_back("LJ");
+      if (Arguments.sq.flag_sq)
+        auto_pbc_modules.push_back("SQ");
       std::string auto_pbc_message;
       for (std::size_t i = 0; i < auto_pbc_modules.size(); ++i) {
         if (i > 0)
@@ -724,7 +749,9 @@ int engine(arguments &Arguments) {
               (i + 1 == auto_pbc_modules.size()) ? " and " : ", ";
         auto_pbc_message += auto_pbc_modules[i];
       }
-      if (auto_pbc_modules.size() == 1 && auto_pbc_modules.front() == "LJ")
+      if (auto_pbc_modules.size() == 1 &&
+          (auto_pbc_modules.front() == "LJ" ||
+           auto_pbc_modules.front() == "SQ"))
         auto_pbc_message += " analysis";
       auto_pbc_message +=
           " requested without explicit PBC mode; enabled -pbci 0";
@@ -765,7 +792,9 @@ int engine(arguments &Arguments) {
   CASAnalyzer cas_analyzer;
   TitanDSSPAnalyzer dssp_mol1_analyzer;
   TitanDSSPAnalyzer dssp_mol2_analyzer;
+  TitanHBondKineticsAnalyzer hbk_analyzer;
   TitanLJAnalyzer lj_analyzer;
+  TitanSqAnalyzer sq_analyzer;
   TitanRgAnalyzer rg_analyzer;
   TitanRMSAnalyzer rms_analyzer;
   std::vector<std::string> lj_feature_files;
@@ -776,9 +805,10 @@ int engine(arguments &Arguments) {
   // Network Analysis (DCCM) Variables
   DCCMNetwork dccm_analyzer;
   std::chrono::milliseconds time_gbsa{0}, time_cas{0}, time_dssp{0},
-      time_lj{0}, time_rg{0}, time_rms{0},
+      time_hbk{0}, time_lj{0}, time_sq{0}, time_rg{0}, time_rms{0},
       time_network{0}, time_tda{0}, time_llps{0}, time_tica{0};
   std::unique_ptr<TitanLLPSCluster> dbscan_llps;
+  EnergyDecompositionProvider llps_energy_provider;
   std::chrono::milliseconds time_llps_dbscan{0};
 
   WaterAnalyzer water_analyzer;
@@ -791,7 +821,9 @@ int engine(arguments &Arguments) {
 
   dssp_mol1_analyzer.configure(Arguments.dssp);
   dssp_mol2_analyzer.configure(Arguments.dssp);
+  hbk_analyzer.configure(Arguments.hbk);
   lj_analyzer.configure(Arguments.lj);
+  sq_analyzer.configure(Arguments.sq);
   rg_analyzer.configure(Arguments.rg);
   rms_analyzer.configure(Arguments.rms);
 
@@ -840,7 +872,9 @@ int engine(arguments &Arguments) {
     const auto time_gbsa_base = time_gbsa;
     const auto time_cas_base = time_cas;
     const auto time_dssp_base = time_dssp;
+    const auto time_hbk_base = time_hbk;
     const auto time_lj_base = time_lj;
+    const auto time_sq_base = time_sq;
     const auto time_rg_base = time_rg;
     const auto time_rms_base = time_rms;
     const auto time_network_base = time_network;
@@ -1103,6 +1137,10 @@ int engine(arguments &Arguments) {
         PolymerClassification::is_nucleic_type(Arguments.mol_2_type) ||
         !PolymerClassification::detect_nucleic_polymer_type(pro_in.info).empty() ||
         !PolymerClassification::detect_nucleic_polymer_type(lig.info).empty();
+    if (global_has_nucleic_acid) {
+      na_profiler.initialize_if_needed(pro_in.Index, lig.Index, pro_in.info,
+                                       lig.info);
+    }
 
     cache_sigma_epsilon CachedData{Arguments.distance_energy_cutoff};
     CachedData.force_field_name = force_f;
@@ -1294,6 +1332,12 @@ int engine(arguments &Arguments) {
                       martini::electrostatics_summary(Arguments));
     }
 
+    if (Arguments.flag_sub_groups && !sg_streaming_initialized) {
+      sg_streaming_analyzer.init(Groups_from_index_file, pro_in, lig,
+                                 CachedData, Arguments, available_ram, &log);
+      sg_streaming_initialized = true;
+    }
+
     if (Arguments.de.flag_find_pulling_direct) {
       auto snapshot_status = prepare_pull_direct_snapshot(
           Arguments, DE_arguments, force_f, name_pro, name_lig, pro_in, lig,
@@ -1359,6 +1403,15 @@ int engine(arguments &Arguments) {
     if (Arguments.lj.flag_lj) {
       lj_analyzer.init(pro_in, Arguments, log);
     }
+    if (Arguments.hbk.flag_hbk) {
+      const bool water_stream_available =
+          Arguments.n_wat >= 0 && !water_traj.m_mol.empty();
+      const Multi_MOL *lig_ptr = lig.m_mol.empty() ? nullptr : &lig;
+      hbk_analyzer.init(pro_in, lig_ptr, water_stream_available, Arguments, log);
+    }
+    if (Arguments.sq.flag_sq) {
+      sq_analyzer.init(pro_in, Arguments, log);
+    }
     if (Arguments.rg.flag_rg2) {
       rg_analyzer.init(pro_in, lig, Arguments, log);
     }
@@ -1366,8 +1419,13 @@ int engine(arguments &Arguments) {
       rms_analyzer.init(pro_in, lig, Arguments, log);
     }
 
-    if (Arguments.flag_network || Arguments.flag_pca) {
+    if (Arguments.flag_network || Arguments.flag_pca ||
+        Arguments.corr_knn.flag_corr_knn) {
       dccm_analyzer.init(pro_in, lig, Arguments);
+      const bool needs_side_trace_cache =
+          Arguments.flag_allostery ||
+          (Arguments.corr_knn.flag_corr_knn &&
+           Arguments.corr_knn.pair_use_contact_prior);
       TitanUI::log_kv(log, "Network/PCA Nodes",
                       std::to_string(dccm_analyzer.get_resnrs().size()));
       TitanUI::log_kv(
@@ -1377,15 +1435,19 @@ int engine(arguments &Arguments) {
               : "mol1 + mol2 (compatible trace nodes only)");
       TitanUI::log_kv(log, "DCCM Trace Cache",
                       dccm_analyzer.stores_full_trajectory()
-                          ? (Arguments.flag_allostery ? "full CA + Cbeta/N "
-                                                       "trajectory"
-                                                     : "full CA trajectory")
+                          ? (needs_side_trace_cache
+                                 ? "full CA + Cbeta/N trajectory"
+                                 : "full CA trajectory")
                           : "latest CA frame only (TICA streaming)");
     }
     // LSP-MD standalone: init DCCM data collector without DCCM/PCA
     if (Arguments.lspmd.flag_lspmd && !Arguments.flag_network &&
         !Arguments.flag_pca) {
       dccm_analyzer.init(pro_in, lig, Arguments);
+      const bool needs_side_trace_cache =
+          Arguments.flag_allostery ||
+          (Arguments.corr_knn.flag_corr_knn &&
+           Arguments.corr_knn.pair_use_contact_prior);
       TitanUI::log_kv(log, "LSP-MD Nodes",
                       std::to_string(dccm_analyzer.get_resnrs().size()));
       TitanUI::log_kv(
@@ -1395,9 +1457,9 @@ int engine(arguments &Arguments) {
               : "mol1 + mol2 (compatible trace nodes only)");
       TitanUI::log_kv(log, "DCCM Trace Cache",
                       dccm_analyzer.stores_full_trajectory()
-                          ? (Arguments.flag_allostery ? "full CA + Cbeta/N "
-                                                       "trajectory"
-                                                     : "full CA trajectory")
+                          ? (needs_side_trace_cache
+                                 ? "full CA + Cbeta/N trajectory"
+                                 : "full CA trajectory")
                           : "latest CA frame only (TICA streaming)");
     }
 
@@ -1671,16 +1733,40 @@ int engine(arguments &Arguments) {
           n_chains_llps, llps_chain_start, llps_chain_len,
           Arguments.llps.llps_rcut, Arguments.llps.llps_perc_thr,
           Arguments.llps.llps_dimer_size, Arguments.llps.llps_contacts,
-          Arguments.llps.llps_voxel_size);
+          Arguments.llps.llps_voxel_size, Arguments.llps.llps_dynamics,
+          Arguments.llps.llps_dynamics_detailed,
+          Arguments.llps.llps_prna_rcut, Arguments.llps.llps_kernel,
+          Arguments.llps.llps_density);
       llps_analyzer->set_sticker_beads(mol_info_vec,
                                        Arguments.llps.llps_sticker_beads);
+      if ((Arguments.mol_2_type.find("rna") != std::string::npos ||
+           Arguments.mol_2_type.find("RNA") != std::string::npos) &&
+          !lig.info.empty()) {
+        llps_analyzer->set_rna_metadata(lig.info);
+      }
+      llps_analyzer->configure_trace_outputs(info_output);
+      TitanUI::log_section(log, "LLPS Run Context");
+      TitanUI::log_kv(log, "LLPS Enabled", "Yes");
       TitanUI::log_kv(log, "LLPS Chains", std::to_string(n_chains_llps));
       TitanUI::log_kv(log, "LLPS Macro-Nodes",
                       std::to_string(llps_analyzer->n_macronodes()));
       TitanUI::log_kv(log, "LLPS Dimer Size",
                       std::to_string(Arguments.llps.llps_dimer_size));
-      TitanUI::log_kv(log, "LLPS Rcut (nm)",
+      TitanUI::log_kv(log, "LLPS Contact Rcut (nm)",
                       std::to_string(Arguments.llps.llps_rcut));
+      TitanUI::log_kv(log, "LLPS Percolation Threshold",
+                      std::to_string(Arguments.llps.llps_perc_thr));
+      TitanUI::log_kv(log, "LLPS Density Mode",
+                      Arguments.llps.llps_density);
+      TitanUI::log_kv(log, "LLPS Kernel Policy",
+                      Arguments.llps.llps_kernel);
+      TitanUI::log_kv(log, "LLPS Dynamics",
+                      Arguments.llps.llps_dynamics ? "enabled" : "disabled");
+      TitanUI::log_kv(log, "LLPS Detailed Dynamics",
+                      Arguments.llps.llps_dynamics_detailed ? "enabled"
+                                                            : "disabled");
+      TitanUI::log_kv(log, "LLPS Stickers",
+                      Arguments.llps.llps_sticker_beads);
       // Start dedicated LLPS worker thread (pipeline mode)
       llps_analyzer->start_async();
     }
@@ -1701,6 +1787,75 @@ int engine(arguments &Arguments) {
                       std::to_string(Arguments.llps.llps_dbscan_minpts));
       dbscan_llps->init(Arguments.llps.llps_dbscan_eps,
                         Arguments.llps.llps_dbscan_minpts, pdb_out, csv_out);
+      dbscan_llps->configure_dynamics(
+          Arguments.llps.llps_dynamics, Arguments.llps.llps_dynamics_detailed,
+          Arguments.llps.llps_maxlag, Arguments.llps.llps_lineage_overlap,
+          std::max(1, Arguments.llps.llps_dimer_size),
+          Arguments.llps.llps_msd_fit_start_ns,
+          Arguments.llps.llps_msd_fit_end_ns);
+      std::string llps_mol2_type = Arguments.mol_2_type;
+      std::transform(llps_mol2_type.begin(), llps_mol2_type.end(),
+                     llps_mol2_type.begin(), [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                     });
+      const bool llps_has_rna =
+          llps_mol2_type.find("rna") != std::string::npos && !lig.info.empty();
+      const float prna_rcut =
+          (Arguments.llps.llps_prna_rcut > 0.0f)
+              ? Arguments.llps.llps_prna_rcut
+              : Arguments.llps.llps_rcut;
+      const float intra_rcut =
+          (Arguments.llps.llps_rna_intra_rcut > 0.0f)
+              ? Arguments.llps.llps_rna_intra_rcut
+              : Arguments.llps.llps_rcut;
+      TitanUI::log_kv(log, "LLPS-DBSCAN Output PDB", pdb_out);
+      TitanUI::log_kv(log, "LLPS-DBSCAN Output CSV", csv_out);
+      TitanUI::log_kv(log, "LLPS-Fuzzy",
+                      Arguments.llps.llps_fuzzy ? "enabled" : "disabled");
+      TitanUI::log_kv(log, "LLPS RNA Detected",
+                      llps_has_rna ? "yes" : "no");
+      TitanUI::log_kv(log, "LLPS Protein-RNA Rcut (nm)",
+                      std::to_string(prna_rcut));
+      TitanUI::log_kv(log, "LLPS RNA Intra Rcut (nm)",
+                      std::to_string(intra_rcut));
+      TitanUI::log_kv(log, "LLPS RNA Compaction Mode",
+                      Arguments.llps.llps_rna_compaction);
+      TitanUI::log_kv(log, "LLPS RNA Information Mode",
+                      Arguments.llps.llps_rna_information);
+      TitanUI::log_kv(log, "LLPS RNA Topology Mode",
+                      Arguments.llps.llps_rna_topology);
+      TitanUI::log_kv(log, "LLPS RNA Topology Detailed",
+                      Arguments.llps.llps_rna_topology_detailed ? "enabled"
+                                                                : "disabled");
+      TitanUI::log_kv(log, "LLPS Energy Correlation",
+                      Arguments.llps.llps_energy_correlation);
+      dbscan_llps->configure_rna_compaction(
+          Arguments.llps.llps_rna_compaction, Arguments.llps.llps_dynamics,
+          Arguments.llps.llps_dynamics_detailed, llps_has_rna,
+          Arguments.llps.llps_sticker_beads, prna_rcut, intra_rcut,
+          Arguments.llps.llps_rna_longrange_min);
+      dbscan_llps->configure_rna_information(
+          Arguments.llps.llps_rna_information, Arguments.llps.llps_dynamics,
+          Arguments.llps.llps_dynamics_detailed, llps_has_rna,
+          Arguments.llps.llps_rna_info_rg_bins,
+          Arguments.llps.llps_rna_info_longrange_bins);
+      dbscan_llps->configure_rna_topology(
+          Arguments.llps.llps_rna_topology, Arguments.llps.llps_dynamics,
+          Arguments.llps.llps_rna_topology_detailed, llps_has_rna,
+          Arguments.llps.llps_rcut, prna_rcut,
+          Arguments.llps.llps_rna_longrange_min,
+          Arguments.llps.llps_rna_bridge_geom_min,
+          Arguments.llps.llps_rna_patch_gap_max,
+          Arguments.llps.llps_rna_clamp_require_loop, info_output);
+      llps_energy_provider.configure(pro_in, lig, CachedData, Arguments,
+                                     static_cast<double>(prna_rcut),
+                                     prna_rcut > 0.0f);
+      dbscan_llps->configure_energy_correlation(
+          Arguments.llps.llps_energy_correlation, Arguments.llps.llps_dynamics,
+          llps_has_rna, Arguments.flag_nocal, &llps_energy_provider,
+          Arguments.llps.llps_energy_detailed, info_output);
+      dbscan_llps->set_kernel_mode(Arguments.llps.llps_kernel);
+      dbscan_llps->configure_trace_outputs(info_output);
       if (Arguments.llps.llps_fuzzy) {
         dbscan_llps->enable_fuzzy(true);
         TitanUI::print_info("[LLPS-Fuzzy] Fuzzy EM refinement enabled.");
@@ -1813,6 +1968,8 @@ int engine(arguments &Arguments) {
     append_module_label(resolved_modules, "RMSD/RMSF");
   if (Arguments.flag_network || Arguments.community.flag_community)
     append_module_label(resolved_modules, "DCCM/Network");
+    if (Arguments.corr_knn.flag_corr_knn)
+      append_module_label(resolved_modules, "Corr-kNN");
   if (Arguments.community.flag_community)
     append_module_label(resolved_modules, "Community");
   if (Arguments.flag_pca)
@@ -1859,11 +2016,14 @@ int engine(arguments &Arguments) {
       append_module_label(streaming_modules, "DSSP");
     if (lj_analyzer.enabled())
       append_module_label(streaming_modules, "LJ");
+    if (sq_analyzer.enabled())
+      append_module_label(streaming_modules, "SQ");
     if (rg_analyzer.enabled())
       append_module_label(streaming_modules, "Rg2");
     if (rms_analyzer.enabled())
       append_module_label(streaming_modules, "RMSD/RMSF");
     if (Arguments.flag_network || Arguments.community.flag_community ||
+        Arguments.corr_knn.flag_corr_knn ||
         Arguments.flag_pca || Arguments.lspmd.flag_lspmd) {
       append_module_label(streaming_modules, "DCCM/PCA");
     }
@@ -1916,7 +2076,8 @@ int engine(arguments &Arguments) {
           Arguments.energy_map == 4)) ||
         (Arguments.flag_cal_force &&
          (Arguments.force_map == 1 || Arguments.force_map == 3)) ||
-        Arguments.flag_sub_groups || need_com_distance;
+        (Arguments.flag_sub_groups && Arguments.flag_cal_mindis) ||
+        need_com_distance;
 
     // ========================================================================
     // MAIN STREAMING LOOP
@@ -2016,11 +2177,8 @@ int engine(arguments &Arguments) {
               std::to_string(global_snap_idx + 1) + " | Global " +
               std::to_string((tot_snap_allfiles + global_snap_idx + 1));
 
-          std::filesystem::path current_pdb =
-              Arguments.flag_1_pdb ? Arguments.pdb_name : name_pro;
-          std::string module_name = current_pdb.filename().string();
-          if (module_name.length() > 20)
-            module_name = module_name.substr(0, 17) + "...";
+          const std::string module_name =
+              progress_source_label(Arguments, name_pro);
 
           if (Arguments.flag_xdr) {
             TitanUI::show_continuous_progress(module_name, global_snap_idx + 1,
@@ -2075,6 +2233,13 @@ int engine(arguments &Arguments) {
             lj_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
             time_lj += std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start_lj);
+          }
+
+          if (sq_analyzer.enabled()) {
+            auto start_sq = std::chrono::steady_clock::now();
+            sq_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
+            time_sq += std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_sq);
           }
 
           if (rg_analyzer.enabled()) {
@@ -2133,6 +2298,7 @@ int engine(arguments &Arguments) {
 
           auto start_network = std::chrono::steady_clock::now();
           if (Arguments.flag_network || Arguments.flag_pca ||
+              Arguments.corr_knn.flag_corr_knn ||
               Arguments.lspmd.flag_lspmd ||
               (Arguments.msm.flag_tica && !use_lj_tica_features)) {
             dccm_analyzer.process_frame(
@@ -2338,8 +2504,8 @@ int engine(arguments &Arguments) {
           // from the same trajectory frame. If lig were ever loaded from a
           // separate file with a different box, MIC for RNA nodes would be
           // wrong — document that here.
-          dbscan_llps->process_frame(pro_in.m_mol[chunk_snap_idx], pro_in.info,
-                                     rna_mol ? *rna_mol : empty_mol,
+          dbscan_llps->process_frame(executor, pro_in.m_mol[chunk_snap_idx],
+                                     pro_in.info, rna_mol ? *rna_mol : empty_mol,
                                      rna_info ? *rna_info : empty_info,
                                      pro_in.m_mol[chunk_snap_idx].time_of_snap,
                                      static_cast<int>(global_snap_idx + 1));
@@ -2354,11 +2520,7 @@ int engine(arguments &Arguments) {
             std::to_string(global_snap_idx + 1) + " | Global " +
             std::to_string((tot_snap_allfiles + global_snap_idx + 1));
 
-        std::filesystem::path current_pdb =
-            Arguments.flag_1_pdb ? Arguments.pdb_name : name_pro;
-        std::string module_name = current_pdb.filename().string();
-        if (module_name.length() > 20)
-          module_name = module_name.substr(0, 17) + "...";
+        const std::string module_name = progress_source_label(Arguments, name_pro);
 
         if (Arguments.flag_xdr) {
           TitanUI::show_continuous_progress(module_name, global_snap_idx + 1,
@@ -2873,16 +3035,12 @@ int engine(arguments &Arguments) {
         if (Arguments.ifp.flag_ifp && ifp_analyzer) {
           auto start_ifp = std::chrono::steady_clock::now();
           size_t lg_snap_ifp = (lig.m_mol.size() > 1) ? chunk_snap_idx : 0;
+          TitanAwhIfp::AwhFrameContext awh_frame_ctx;
           if (Arguments.awh.flag_awh_ifp && awh_ifp_analyzer) {
             const int current_replica = input_name - Arguments.b_input;
-            const auto awh_contacts = ifp_analyzer->collect_frame_contacts(
-                pro_in.m_mol[chunk_snap_idx], lig.m_mol[lg_snap_ifp], pro_in.info,
-                lig.info, pro_in.Index, lig.Index, pro_in.info.size(),
-                lig.info.size(), dis_min, Arguments.ifp);
-            awh_ifp_analyzer->consume_frame(
-                current_replica, pro_in.m_mol[chunk_snap_idx].time_of_snap, static_cast<int64_t>(tot_snap_allfiles + global_snap_idx),
-                awh_contacts, pro_in.m_mol[chunk_snap_idx],
-                lig.m_mol[lg_snap_ifp]);
+            awh_frame_ctx = awh_ifp_analyzer->prepare_frame(
+                current_replica, pro_in.m_mol[chunk_snap_idx].time_of_snap,
+                static_cast<int64_t>(tot_snap_allfiles + global_snap_idx));
           }
           ifp_analyzer->process_frame(
               pro_in.m_mol[chunk_snap_idx],
@@ -2892,8 +3050,18 @@ int engine(arguments &Arguments) {
               pro_in.info.size(),
               lig.info.size(),
               dis_min,
-              Arguments.ifp
+              Arguments.ifp,
+              executor,
+              num_threads,
+              awh_frame_ctx.matched
           );
+          if (awh_frame_ctx.matched && awh_ifp_analyzer) {
+            awh_ifp_analyzer->consume_frame(
+                awh_frame_ctx,
+                ifp_analyzer->last_frame_contact_accumulators(),
+                ifp_analyzer->last_frame_active_workers(),
+                pro_in.m_mol[chunk_snap_idx], lig.m_mol[lg_snap_ifp]);
+          }
           time_ifp += std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - start_ifp);
         }
@@ -2912,7 +3080,8 @@ int engine(arguments &Arguments) {
           na_profiler.process_frame(
               pro_in.m_mol[chunk_snap_idx], lig.m_mol[chunk_snap_idx],
               pro_in.info, lig.info, pro_in.Index, lig.Index, chunk_snap_idx,
-              pro_in.m_mol[chunk_snap_idx].time_of_snap);
+              pro_in.m_mol[chunk_snap_idx].time_of_snap, executor,
+              num_threads);
           time_na += std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - start_na);
         }
@@ -2933,6 +3102,28 @@ int engine(arguments &Arguments) {
             lj_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
           time_lj += std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - start_lj);
+        }
+
+        if (sq_analyzer.enabled()) {
+          auto start_sq = std::chrono::steady_clock::now();
+          sq_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
+          time_sq += std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - start_sq);
+        }
+
+        if (hbk_analyzer.enabled()) {
+          auto start_hbk = std::chrono::steady_clock::now();
+          size_t lig_snap_hbk = (lig.m_mol.size() > 1) ? chunk_snap_idx : 0;
+          const MOL *lig_frame_hbk =
+              lig.m_mol.empty() ? nullptr : &lig.m_mol[lig_snap_hbk];
+          size_t water_snap_hbk =
+              (water_traj.m_mol.size() > 1) ? chunk_snap_idx : 0;
+          const MOL *water_frame_hbk =
+              water_traj.m_mol.empty() ? nullptr : &water_traj.m_mol[water_snap_hbk];
+          hbk_analyzer.process_frame(pro_in.m_mol[chunk_snap_idx], lig_frame_hbk,
+                                     water_frame_hbk, executor);
+          time_hbk += std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - start_hbk);
         }
 
         if (rg_analyzer.enabled()) {
@@ -2980,6 +3171,7 @@ int engine(arguments &Arguments) {
         // Network Analysis (DCCM) Data Collection
         auto start_network = std::chrono::steady_clock::now();
         if (Arguments.flag_network || Arguments.flag_pca ||
+            Arguments.corr_knn.flag_corr_knn ||
             Arguments.lspmd.flag_lspmd) {
           dccm_analyzer.process_frame(
               pro_in, lig, chunk_snap_idx, absolute_global_snap_idx,
@@ -3262,15 +3454,27 @@ int engine(arguments &Arguments) {
         time_new_emap += clock() - start_new_emap;
         // cout << "check new emap..";
         auto start_subgroups = std::chrono::steady_clock::now();
-        if (Arguments.flag_sub_groups == true && Arguments.flag_gbsa == false &&
-            !CachedData.elec_ener.empty()) {
-          Energy_force_subgroups(Groups_from_index_file, pro_in, lig,
-                                 CachedData, EF_subgroups, Energy_groups_out,
-                                 chunk_snap_idx, NUM, Arguments, executor);
-          if (Arguments.flag_cal_mindis == true)
-            mindis_subgroups(Groups_from_index_file, pro_in, lig,
-                             chunk_snap_idx, NUM, Arguments, executor,
-                             MIN_DIS);
+        if (Arguments.flag_sub_groups == true && Arguments.flag_gbsa == false) {
+          if (sg_streaming_analyzer.active()) {
+            const std::size_t sg_lig_snap =
+                (lig.m_mol.size() > 1) ? chunk_snap_idx : 0;
+            sg_streaming_analyzer.process_frame(
+                pro_in.m_mol[chunk_snap_idx], lig.m_mol[sg_lig_snap], pro_in,
+                lig, CachedData, Arguments, executor,
+                static_cast<std::size_t>(input_name - Arguments.b_input));
+            if (Arguments.flag_cal_mindis == true)
+              mindis_subgroups(Groups_from_index_file, pro_in, lig,
+                               chunk_snap_idx, NUM, Arguments, executor,
+                               MIN_DIS);
+          } else if (!CachedData.elec_ener.empty()) {
+            Energy_force_subgroups(Groups_from_index_file, pro_in, lig,
+                                   CachedData, EF_subgroups, Energy_groups_out,
+                                   chunk_snap_idx, NUM, Arguments, executor);
+            if (Arguments.flag_cal_mindis == true)
+              mindis_subgroups(Groups_from_index_file, pro_in, lig,
+                               chunk_snap_idx, NUM, Arguments, executor,
+                               MIN_DIS);
+          }
         }
         time_subgroups_cal +=
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3377,6 +3581,28 @@ int engine(arguments &Arguments) {
                                       lj_feature_out,
                                       lj_summary_out, log);
       lj_feature_files.push_back(lj_feature_out);
+    }
+    if (sq_analyzer.enabled()) {
+      const std::size_t traj_index =
+          input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
+      const std::size_t path_index =
+          (Arguments.flag_separation_results && traj_index < paths.get_size())
+              ? traj_index
+              : 0;
+      const std::string base_dir = paths.get_path(path_index);
+      sq_analyzer.finalize_trajectory(base_dir, info_output, Arguments, input_line,
+                                      input_name, log);
+    }
+    if (hbk_analyzer.enabled()) {
+      const std::size_t traj_index =
+          input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
+      const std::size_t path_index =
+          (Arguments.flag_separation_results && traj_index < paths.get_size())
+              ? traj_index
+              : 0;
+      const std::string base_dir = paths.get_path(path_index);
+      hbk_analyzer.finalize_trajectory(base_dir, info_output, Arguments,
+                                       input_line, input_name, log);
     }
     if (rg_analyzer.enabled()) {
       const std::size_t traj_index =
@@ -3554,8 +3780,12 @@ int engine(arguments &Arguments) {
                       (time_cas - time_cas_base).count() / 1000.0);
     TitanUI::log_time(log, "DSSP Analysis",
                       (time_dssp - time_dssp_base).count() / 1000.0);
+    TitanUI::log_time(log, "HBond Kinetics Analysis",
+                      (time_hbk - time_hbk_base).count() / 1000.0);
     TitanUI::log_time(log, "LJ Analysis",
                       (time_lj - time_lj_base).count() / 1000.0);
+    TitanUI::log_time(log, "SQ Analysis",
+                      (time_sq - time_sq_base).count() / 1000.0);
     TitanUI::log_time(log, "RG2 Analysis",
                       (time_rg - time_rg_base).count() / 1000.0);
     TitanUI::log_time(log, "RMSD/RMSF Analysis",
@@ -3597,7 +3827,9 @@ int engine(arguments &Arguments) {
         (time_gbsa - time_gbsa_base).count() / 1000.0 +
         (time_cas - time_cas_base).count() / 1000.0 +
         (time_dssp - time_dssp_base).count() / 1000.0 +
+        (time_hbk - time_hbk_base).count() / 1000.0 +
         (time_lj - time_lj_base).count() / 1000.0 +
+        (time_sq - time_sq_base).count() / 1000.0 +
         (time_rg - time_rg_base).count() / 1000.0 +
         (time_rms - time_rms_base).count() / 1000.0 +
         (time_network - time_network_base).count() / 1000.0 +
@@ -3802,14 +4034,25 @@ int engine(arguments &Arguments) {
   }
 
   if (Arguments.flag_sub_groups == true) {
-    try {
-      post_process_Energy_force_subgroups(time_of_snap, EF_subgroups, paths,
-                                          Arguments, info_output);
-    } catch (const std::exception &e) {
-      std::cerr << "[ERROR] post_process_Energy_force_subgroups(): " << e.what()
-                << "\n";
-    } catch (...) {
-      std::cerr << "[ERROR] post_process_Energy_force_subgroups() crashed!\n";
+    if (sg_streaming_analyzer.active()) {
+      try {
+        sg_streaming_analyzer.finalize(Arguments);
+      } catch (const std::exception &e) {
+        std::cerr << "[ERROR] sg_streaming_analyzer.finalize(): " << e.what()
+                  << "\n";
+      } catch (...) {
+        std::cerr << "[ERROR] sg_streaming_analyzer.finalize() crashed!\n";
+      }
+    } else {
+      try {
+        post_process_Energy_force_subgroups(time_of_snap, EF_subgroups, paths,
+                                            Arguments, info_output);
+      } catch (const std::exception &e) {
+        std::cerr << "[ERROR] post_process_Energy_force_subgroups(): "
+                  << e.what() << "\n";
+      } catch (...) {
+        std::cerr << "[ERROR] post_process_Energy_force_subgroups() crashed!\n";
+      }
     }
 
     if (Arguments.flag_cal_mindis == true) {
@@ -3959,8 +4202,11 @@ int engine(arguments &Arguments) {
       std::chrono::steady_clock::now() - start_pp_dssp);
 
   auto start_pp_tica = std::chrono::steady_clock::now();
+  TitanValidation::RuntimeCache validation_runtime;
+  titan_sparse_graph_module::TitanUnifiedGraphRuntime graph_runtime;
+  graph_runtime.configure(Arguments);
   run_tica_msm_postproc(Arguments, dccm_analyzer, tica_analyzer, msm_analyzer,
-                        executor, info_output, log);
+                        executor, info_output, log, &validation_runtime);
   auto time_pp_tica = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_tica);
 
@@ -3971,28 +4217,46 @@ int engine(arguments &Arguments) {
   auto start_pp_dham = std::chrono::steady_clock::now();
   run_dham_postproc(Arguments, msm_analyzer, executor, info_output, log,
                     dham_frame_weights, &dham_tpt_tpm, &dham_tpt_pi,
-                    &dham_tpt_converged);
+                    &dham_tpt_converged, &validation_runtime.dham_context);
   auto time_pp_dham = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_dham);
+
+  std::vector<double> mbar_frame_weights;
+  auto start_pp_mbar = std::chrono::steady_clock::now();
+  const TitanMBAR::CoreResult mbar_result =
+      run_mbar_postproc(Arguments, msm_analyzer, &dccm_analyzer, executor,
+                        info_output, log, &mbar_frame_weights);
+  auto time_pp_mbar = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start_pp_mbar);
+
+  const PostprocEquilibriumWeights equilibrium_weights =
+      resolve_postproc_equilibrium_weights(Arguments, &dham_frame_weights,
+                                           &mbar_frame_weights, log);
+  run_msm_equilibrium_postproc(Arguments, msm_analyzer, info_output, log,
+                               equilibrium_weights);
 
   auto start_pp_tpt = std::chrono::steady_clock::now();
   run_tpt_postproc(Arguments, msm_analyzer, executor, info_output, log,
                    lj_feature_files, &rms_analyzer, &dssp_mol1_analyzer,
-                   &dham_tpt_tpm, &dham_tpt_pi,
-                   dham_tpt_converged);
+                    &dham_tpt_tpm, &dham_tpt_pi,
+                   dham_tpt_converged, &equilibrium_weights,
+                   &validation_runtime, &graph_runtime);
   auto time_pp_tpt = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_tpt);
+
+  run_validation_postproc(Arguments, tica_analyzer, msm_analyzer, executor,
+                          info_output, log, validation_runtime);
 
   TitanPCA::FesPostprocMetrics tica_fes_metrics;
   auto start_pp_tica_fes = std::chrono::steady_clock::now();
   run_tica_fes_postproc(Arguments, tica_analyzer, msm_analyzer, executor,
-                        info_output, log, dham_frame_weights,
+                        info_output, log, equilibrium_weights,
                         &tica_fes_metrics);
   auto time_pp_tica_fes = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_tica_fes);
 
   run_umap_postproc(Arguments, msm_analyzer, umap_analyzer, executor,
-                    info_output, log);
+                    info_output, log, equilibrium_weights);
 
   // Drain LLPS worker queue before finalize
   auto start_pp_llps = std::chrono::steady_clock::now();
@@ -4017,19 +4281,16 @@ int engine(arguments &Arguments) {
   auto start_pp_dccm = std::chrono::steady_clock::now();
   run_dccm_pca_postproc(Arguments, tot_snap_allfiles, dccm_analyzer,
                         executor, time_network, info_output, log,
-                        dham_frame_weights, replica_traj_files,
-                        &pca_fes_metrics);
+                        equilibrium_weights, replica_traj_files,
+                        &pca_fes_metrics, &graph_runtime);
   auto time_pp_dccm = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_dccm);
 
-  std::vector<double> mbar_frame_weights;
-  auto start_pp_mbar = std::chrono::steady_clock::now();
-  run_mbar_postproc(Arguments, msm_analyzer, &dccm_analyzer, executor,
-                    info_output, log, &mbar_frame_weights);
+  run_mbar_projection_exports_postproc(Arguments, msm_analyzer, &dccm_analyzer,
+                                       executor, info_output, log,
+                                       mbar_result);
   run_awh_exploratory_postproc(Arguments, msm_analyzer, umap_analyzer,
                                &dccm_analyzer, info_output, log);
-  auto time_pp_mbar = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::steady_clock::now() - start_pp_mbar);
   {
     std::vector<std::string> fes_outputs;
     if (Arguments.msm.flag_tica && msm_analyzer && msm_analyzer->n_frames() > 0 &&
@@ -4054,9 +4315,15 @@ int engine(arguments &Arguments) {
   }
 
   auto start_pp_lspmd = std::chrono::steady_clock::now();
-  run_lspmd_postproc(Arguments, dccm_analyzer, executor, info_output, log);
+  run_lspmd_postproc(Arguments, dccm_analyzer, executor, info_output, log,
+                     equilibrium_weights, &graph_runtime);
   auto time_pp_lspmd = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_lspmd);
+
+  auto start_pp_graph = std::chrono::steady_clock::now();
+  graph_runtime.export_all(Arguments, dccm_analyzer, executor, info_output, log);
+  auto time_pp_graph = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start_pp_graph);
 
   auto start_pp_water = std::chrono::steady_clock::now();
   if (Arguments.n_wat >= 0) {
@@ -4084,6 +4351,22 @@ int engine(arguments &Arguments) {
     TitanUI::print_module_header("LLPS DBSCAN Cluster Analysis");
     dbscan_llps->export_timeseries(
         info_output.get_llps_dbscan_timeseries_filename());
+    TitanUI::log_section(log, "LLPS DBSCAN Output Audit");
+    TitanUI::log_kv(log, info_output.get_llps_dbscan_timeseries_filename(),
+                    "emitted");
+    TitanUI::log_kv(log, info_output.get_llps_dbscan_droplets_filename(),
+                    "emitted");
+    TitanUI::log_kv(log, info_output.get_llps_droplet_shape_timeseries_filename(),
+                    "emitted");
+    TitanUI::log_kv(log, "LLPS Dynamics Outputs",
+                    Arguments.llps.llps_dynamics ? "enabled" : "skipped");
+    if (Arguments.llps.llps_dynamics) {
+      dbscan_llps->finalize_dynamics(executor);
+      dbscan_llps->export_dynamics(
+          info_output, log,
+          llps_analyzer ? &llps_analyzer->contact_dynamics() : nullptr);
+    }
+    dbscan_llps->export_performance_report(info_output, executor);
     TitanUI::log_time(log, "LLPS DBSCAN", time_llps_dbscan.count() / 1000.0);
   }
 
@@ -4108,6 +4391,7 @@ int engine(arguments &Arguments) {
   TitanUI::log_time(log, "DCCM/PCA Postproc", time_pp_dccm.count() / 1000.0);
   TitanUI::log_time(log, "MBAR Postproc", time_pp_mbar.count() / 1000.0);
   TitanUI::log_time(log, "LSP-MD Postproc", time_pp_lspmd.count() / 1000.0);
+  TitanUI::log_time(log, "Graph Analytics", time_pp_graph.count() / 1000.0);
   TitanUI::log_time(log, "Water Bridges Export",
                     time_pp_water.count() / 1000.0);
   TitanUI::log_time(log, "GIST Thermodynamics", time_pp_gist.count() / 1000.0);

@@ -100,10 +100,10 @@ public:
   }
   string getOutputDistanceRes2COM() const { return "_distances_res_2COM.dat"; }
   string getOuputAverageContactMap() const { return "average_contact_map.dat"; }
-  string getOuputEnerMaptypeAve() const { return "_energy_maptype.dat"; }
-  string getOutputAverageEmap() const { return "average_emap.dat"; }
+  string getOuputEnerMaptypeAve() const { return "_energy_maptype.tsv"; }
+  string getOutputAverageEmap() const { return "average_emap_pairs.tsv"; }
   string getOutputAverageEmapMatrix() const {
-    return "average_emap_matrix.dat";
+    return "average_emap_matrix.tsv";
   }
   string getOutputEnerPdbtypeAve() const { return "_energy_pdbtype.pdb"; }
   string get_gbsa_snapshots_filename() const { return "gbsa_snapshots.dat"; }
@@ -153,9 +153,44 @@ public:
   string get_network_te_edges_filename() const {
     return "network_te_edges.csv";
   }
+  string get_graph_summary_filename() const { return "graph_summary.dat"; }
+  string get_graph_edges_filename(const std::string &source) const {
+    return "graph_" + source + "_edges.csv";
+  }
+  string get_graph_nodes_filename(const std::string &source) const {
+    return "graph_" + source + "_nodes.csv";
+  }
+  string get_graph_communities_filename(const std::string &source) const {
+    return "graph_" + source + "_communities.csv";
+  }
+  string get_graph_community_summary_filename(const std::string &source) const {
+    return "graph_" + source + "_community_summary.csv";
+  }
+  string get_graph_supergraph_filename(const std::string &source) const {
+    return "graph_" + source + "_supergraph.csv";
+  }
+  string get_graph_bottleneck_edges_filename(const std::string &source) const {
+    return "graph_" + source + "_bottleneck_edges.csv";
+  }
+  string get_graph_bottleneck_nodes_filename(const std::string &source) const {
+    return "graph_" + source + "_bottleneck_nodes.csv";
+  }
+  string get_corr_knn_summary_filename() const {
+    return "corr_knn_summary.dat";
+  }
+  string get_corr_knn_mi_pairs_filename() const {
+    return "corr_knn_mi_pairs.csv";
+  }
+  string get_corr_knn_gc_pairs_filename() const {
+    return "corr_knn_gc_pairs.csv";
+  }
+  string get_corr_knn_te_pairs_filename() const {
+    return "corr_knn_te_pairs.csv";
+  }
   string get_network_community_summary_filename() const {
     return "network_community_summary.csv";
   }
+  string get_memory_report_filename() const { return "memory_report.dat"; }
   string get_network_supergraph_filename() const {
     return "network_supergraph.csv";
   }
@@ -304,6 +339,120 @@ public:
     return "lj_summary.dat";
   }
 
+  string get_sq_summary_filename(const arguments &Arguments,
+                                 const std::vector<string> &input_line,
+                                 int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "sq_summary.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "sq_summary_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "sq_summary.dat";
+  }
+  string get_sq_rdf_filename(const arguments &Arguments,
+                             const std::vector<string> &input_line,
+                             int input_name, const std::string &channel_a,
+                             const std::string &channel_b) const {
+    const std::string label =
+        (channel_a == channel_b) ? channel_a : (channel_a + "__" + channel_b);
+    if (Arguments.flag_separation_results)
+      return "sq_rdf_" + label + ".dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "sq_rdf_" + label + "_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "sq_rdf_" + label + ".dat";
+  }
+  string get_sq_structure_factor_filename(const arguments &Arguments,
+                                          const std::vector<string> &input_line,
+                                          int input_name,
+                                          const std::string &channel_a,
+                                          const std::string &channel_b) const {
+    const std::string label =
+        (channel_a == channel_b) ? channel_a : (channel_a + "__" + channel_b);
+    if (Arguments.flag_separation_results)
+      return "sq_structure_factor_" + label + ".dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "sq_structure_factor_" + label + "_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "sq_structure_factor_" + label + ".dat";
+  }
+
+  string get_hbond_kinetics_summary_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "hbond_kinetics_summary.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "hbond_kinetics_summary_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "hbond_kinetics_summary.dat";
+  }
+  string get_hbond_kinetics_pairs_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name, const std::string &kind) const {
+    if (Arguments.flag_separation_results)
+      return "hbond_kinetics_" + kind + "_pairs.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "hbond_kinetics_" + kind + "_pairs_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "hbond_kinetics_" + kind + "_pairs.csv";
+  }
+  string get_hbond_kinetics_ct_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name, const std::string &kind) const {
+    if (Arguments.flag_separation_results)
+      return "hbond_kinetics_" + kind + "_ct.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "hbond_kinetics_" + kind + "_ct_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "hbond_kinetics_" + kind + "_ct.dat";
+  }
+  string get_hbond_kinetics_lifetimes_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name, const std::string &kind) const {
+    if (Arguments.flag_separation_results)
+      return "hbond_kinetics_" + kind + "_lifetimes.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "hbond_kinetics_" + kind + "_lifetimes_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "hbond_kinetics_" + kind + "_lifetimes.dat";
+  }
+
   string get_global_water_bridges_timeseries() const {
     return "global_water_bridges_timeseries.csv";
   }
@@ -370,6 +519,13 @@ public:
   string get_umap_embedding_filename() const {
     return "titan_umap_embedding.csv";
   }
+  string get_umap_fes_2d_filename() const { return "umap_fes_2d.dat"; }
+  string get_umap_cluster_representatives_filename() const {
+    return "umap_cluster_representatives.csv";
+  }
+  string get_umap_equilibrium_summary_filename() const {
+    return "umap_equilibrium_summary.dat";
+  }
   // --- MSM Phase 2 output files ---
   string get_msm_tpm_filename() const { return "msm_tpm.dat"; }
   string get_msm_discrete_traj_filename() const {
@@ -387,6 +543,21 @@ public:
     return "msm_count_matrix.dat";
   }
   string get_msm_stationary_filename() const { return "msm_stationary.dat"; }
+  string get_msm_equilibrium_summary_filename() const {
+    return "msm_equilibrium_summary.dat";
+  }
+  string get_dccm_equilibrium_context_filename() const {
+    return "dccm_equilibrium_context.dat";
+  }
+  string get_allostery_equilibrium_ranking_filename() const {
+    return "allostery_equilibrium_ranking.csv";
+  }
+  string get_corr_knn_equilibrium_ranking_filename() const {
+    return "corr_knn_equilibrium_ranking.csv";
+  }
+  string get_lspmd_equilibrium_ranking_filename() const {
+    return "lspmd_equilibrium_ranking.csv";
+  }
   string get_msm_its_tpm_dir() const { return "msm_its_tpm"; }
   string get_out_mindis_subgroups() { return "mininum_distance_"; }
   string get_out_histogram_mindis() { return "histo_mindistance_"; }
@@ -399,6 +570,9 @@ public:
   string get_llps_contact_map_filename() const {
     return "llps_contact_map.dat";
   }
+  string get_llps_performance_report_filename() const {
+    return "llps_performance_report.dat";
+  }
   string get_llps_summary_filename() const { return "llps_summary.dat"; }
   string get_llps_density_pro_filename() const {
     return "llps_density_protein.dx";
@@ -407,11 +581,149 @@ public:
   string get_llps_polymer_scaling_filename() const {
     return "polymer_scaling.dat";
   }
+  string get_llps_sticker_hotspots_filename() const {
+    return "llps_sticker_hotspots.csv";
+  }
   // GIST output prefix
   string get_gist_prefix() const { return "gist"; }
   // LLPS DBSCAN output files
   string get_llps_dbscan_droplets_filename() const { return "llps_dbscan_droplets.pdb"; }
   string get_llps_dbscan_timeseries_filename() const { return "llps_dbscan_timeseries.csv"; }
+  string get_llps_membership_autocorr_protein_filename() const {
+    return "llps_membership_autocorr_protein.dat";
+  }
+  string get_llps_membership_autocorr_rna_filename() const {
+    return "llps_membership_autocorr_rna.dat";
+  }
+  string get_llps_residence_times_filename() const {
+    return "llps_residence_times.csv";
+  }
+  string get_llps_entry_exit_rates_filename() const {
+    return "llps_entry_exit_rates.dat";
+  }
+  string get_llps_cluster_lineage_filename() const {
+    return "llps_cluster_lineage.csv";
+  }
+  string get_llps_fusion_fission_filename() const {
+    return "llps_fusion_fission.dat";
+  }
+  string get_llps_droplet_genealogy_summary_filename() const {
+    return "llps_droplet_genealogy_summary.dat";
+  }
+  string get_llps_frap_recovery_proxy_filename() const {
+    return "llps_frap_recovery_proxy.dat";
+  }
+  string get_llps_droplet_shape_timeseries_filename() const {
+    return "llps_droplet_shape_timeseries.csv";
+  }
+  string get_llps_sticker_contact_lifetimes_filename() const {
+    return "llps_sticker_contact_lifetimes.dat";
+  }
+  string get_llps_prna_contact_lifetimes_filename() const {
+    return "llps_protein_rna_contact_lifetimes.dat";
+  }
+  string get_llps_neighbor_rewiring_filename() const {
+    return "llps_neighbor_rewiring.dat";
+  }
+  string get_llps_interface_turnover_filename() const {
+    return "llps_interface_turnover.dat";
+  }
+  string get_llps_dense_msd_protein_filename() const {
+    return "llps_dense_msd_protein.dat";
+  }
+  string get_llps_dense_msd_rna_filename() const {
+    return "llps_dense_msd_rna.dat";
+  }
+  string get_llps_liquidity_summary_filename() const {
+    return "llps_liquidity_summary.dat";
+  }
+  string get_llps_rna_compaction_binding_summary_filename() const {
+    return "llps_rna_compaction_binding_summary.dat";
+  }
+  string get_llps_rna_compaction_binding_binned_filename() const {
+    return "llps_rna_compaction_binding_binned.csv";
+  }
+  string get_llps_rna_chain_compaction_summary_filename() const {
+    return "llps_rna_chain_compaction_summary.csv";
+  }
+  string get_llps_rna_intrachain_contacts_summary_filename() const {
+    return "llps_rna_intrachain_contacts_summary.csv";
+  }
+  string get_llps_rna_compaction_trace_filename() const {
+    return "llps_rna_compaction_trace.csv";
+  }
+  string get_llps_rna_energy_compaction_summary_filename() const {
+    return "llps_rna_energy_compaction_summary.dat";
+  }
+  string get_llps_rna_energy_compaction_binned_filename() const {
+    return "llps_rna_energy_compaction_binned.csv";
+  }
+  string get_llps_rna_binding_energy_trace_filename() const {
+    return "llps_rna_binding_energy_trace.csv";
+  }
+  string get_llps_prna_pair_energy_trace_filename() const {
+    return "llps_prna_pair_energy_trace.csv";
+  }
+  string get_llps_rna_information_summary_filename() const {
+    return "llps_rna_information_summary.dat";
+  }
+  string get_llps_rna_information_per_chain_filename() const {
+    return "llps_rna_information_per_chain.csv";
+  }
+  string get_llps_rna_compaction_state_histogram_filename() const {
+    return "llps_rna_compaction_state_histogram.csv";
+  }
+  string get_llps_rna_partner_state_histogram_filename() const {
+    return "llps_rna_partner_state_histogram.csv";
+  }
+  string get_llps_rna_transition_information_filename() const {
+    return "llps_rna_transition_information.csv";
+  }
+  string get_llps_rna_binding_compaction_information_filename() const {
+    return "llps_rna_binding_compaction_information.csv";
+  }
+  string get_llps_rna_partner_state_trace_filename() const {
+    return "llps_rna_partner_state_trace.csv";
+  }
+  string get_llps_rna_topology_summary_filename() const {
+    return "llps_rna_topology_summary.dat";
+  }
+  string get_llps_rna_topology_per_chain_filename() const {
+    return "llps_rna_topology_per_chain.csv";
+  }
+  string get_llps_rna_topology_binding_binned_filename() const {
+    return "llps_rna_topology_binding_binned.csv";
+  }
+  string get_llps_rna_topology_state_histogram_filename() const {
+    return "llps_rna_topology_state_histogram.csv";
+  }
+  string get_llps_rna_bridge_lifetimes_filename() const {
+    return "llps_rna_bridge_lifetimes.dat";
+  }
+  string get_llps_rna_clamp_lifetimes_filename() const {
+    return "llps_rna_clamp_lifetimes.dat";
+  }
+  string get_llps_rna_loop_closure_efficiency_filename() const {
+    return "llps_rna_loop_closure_efficiency.dat";
+  }
+  string get_llps_rna_local_competition_summary_filename() const {
+    return "llps_rna_local_competition_summary.dat";
+  }
+  string get_llps_rna_topology_trace_filename() const {
+    return "llps_rna_topology_trace.csv";
+  }
+  string get_llps_rna_bridge_trace_filename() const {
+    return "llps_rna_bridge_trace.csv";
+  }
+  string get_llps_rna_clamp_trace_filename() const {
+    return "llps_rna_clamp_trace.csv";
+  }
+  string get_llps_chain_membership_trace_filename() const {
+    return "llps_chain_membership_trace.csv";
+  }
+  string get_llps_chain_contact_trace_filename() const {
+    return "llps_chain_contact_trace.csv";
+  }
   // IFP output file
   string get_ifp_filename() const { return "ifp_occupancy.csv"; }
   string get_ifp_rna_annotations_filename() const {
@@ -483,5 +795,33 @@ public:
   string get_tpt_path_clusters_filename() const { return "tpt_path_clusters.dat"; }
   string get_tpt_bottleneck_edges_filename() const { return "tpt_bottleneck_edges.dat"; }
   string get_tpt_bottleneck_states_filename() const { return "tpt_bottleneck_states.dat"; }
+  string get_tpt_equilibrium_overlay_filename() const {
+    return "tpt_equilibrium_overlay.dat";
+  }
+  string get_validation_summary_filename() const { return "validation_summary.dat"; }
+  string get_validation_ck_summary_filename() const {
+    return "validation_ck_summary.dat";
+  }
+  string get_validation_ck_states_filename() const {
+    return "validation_ck_states.dat";
+  }
+  string get_validation_vamp2_ranking_filename() const {
+    return "validation_vamp2_ranking.csv";
+  }
+  string get_validation_selected_model_filename() const {
+    return "validation_selected_model.dat";
+  }
+  string get_validation_msm_bootstrap_summary_filename() const {
+    return "validation_msm_bootstrap_summary.dat";
+  }
+  string get_validation_msm_bootstrap_states_filename() const {
+    return "validation_msm_bootstrap_states.dat";
+  }
+  string get_validation_tpt_bootstrap_summary_filename() const {
+    return "validation_tpt_bootstrap_summary.dat";
+  }
+  string get_validation_tpt_bootstrap_states_filename() const {
+    return "validation_tpt_bootstrap_states.dat";
+  }
 };
 #endif

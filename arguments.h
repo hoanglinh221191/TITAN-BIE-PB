@@ -121,6 +121,27 @@ struct LlpsArgs {
   bool llps_contacts{false};
   std::string llps_sticker_beads{"BB,SC1,SC2,BB1,BB2,BB3,SC3,SC4"};
   float llps_voxel_size{0.5f};
+  bool llps_dynamics{false};
+  bool llps_dynamics_detailed{false};
+  double llps_lineage_overlap{0.30};
+  float llps_prna_rcut{0.0f};
+  double llps_msd_fit_start_ns{-1.0};
+  double llps_msd_fit_end_ns{-1.0};
+  std::string llps_density{"auto"};
+  std::string llps_kernel{"auto"};
+  std::string llps_rna_compaction{"auto"};
+  std::string llps_rna_information{"auto"};
+  std::string llps_rna_topology{"auto"};
+  bool llps_rna_topology_detailed{true};
+  float llps_rna_intra_rcut{0.0f};
+  int llps_rna_longrange_min{10};
+  float llps_rna_bridge_geom_min{-1.0f};
+  int llps_rna_patch_gap_max{1};
+  bool llps_rna_clamp_require_loop{true};
+  int llps_rna_info_rg_bins{16};
+  int llps_rna_info_longrange_bins{16};
+  std::string llps_energy_correlation{"auto"};
+  bool llps_energy_detailed{false};
   // DBSCAN bead-level morphology parameters (unit: Angstrom)
   double llps_dbscan_eps{15.0};    // epsilon (Å); default 15 Å ≈ 1.5 nm
   int    llps_dbscan_minpts{5};    // min neighbours (self excluded)
@@ -194,6 +215,14 @@ struct CommunityArgs {
   std::string method{};
 };
 
+struct GraphArgs {
+  bool flag_graph{false};
+  std::vector<std::string> sources{};
+  std::string community_method{"auto"};
+  int filter_topk{0};
+  std::string filter_component{"all"};
+};
+
 struct UmapArgs {
   bool flag_umap{false};
   int umap_neighbors{15};
@@ -232,6 +261,55 @@ struct LjArgs {
   double lj_crystal_tol{0.08};
 };
 
+struct SqArgs {
+  bool flag_sq{false};
+  std::vector<std::string> sq_channels{"all"};
+  double sq_rdf_bin{1.0};
+  double sq_rdf_max{0.0};
+  bool sq_rdf_max_auto{true};
+  double sq_q_bin{0.05};
+  double sq_q_max{0.0};
+  bool sq_q_max_auto{true};
+};
+
+struct CorrKnnArgs {
+  bool flag_corr_knn{false};
+  int estimator_k{4};
+  int tau_lag{5};
+  double pair_cutoff_ang{0.0};
+  int pair_topk{0};
+  bool pair_use_contact_prior{false};
+  double pair_contact_cutoff_ang{8.0};
+  bool use_avg_cutoff{true};
+  bool compute_te{true};
+};
+
+struct ValidationArgs {
+  bool flag_validation{false};
+  std::vector<int> ck_multiples{2, 3, 4, 5};
+  std::vector<int> vamp_components{};
+  std::vector<int> vamp_lags{};
+  std::vector<int> vamp_clusters{};
+  int vamp_folds{5};
+  bool auto_pick{false};
+  int bootstrap_samples{0};
+  unsigned int bootstrap_seed{42};
+};
+
+struct HBondKineticsArgs {
+  bool flag_hbk{false};
+  std::vector<std::string> hbk_kinds{"all"};
+  std::string hbk_domain{"both"};
+  int hbk_maxlag{500};
+  double hbk_hbond_cutoff{0.0};
+  bool hbk_hbond_cutoff_explicit{false};
+  double hbk_angle_deg{0.0};
+  bool hbk_angle_explicit{false};
+  double hbk_salt_cutoff{4.0};
+  double hbk_water_cutoff{0.0};
+  bool hbk_water_cutoff_explicit{false};
+};
+
 struct ZtsArgs {
   bool flag_zts{false};
   int zts_images{50};
@@ -268,12 +346,18 @@ public:
   MbarArgs mbar;
   TptArgs tpt;
   CommunityArgs community;
+  GraphArgs graph;
   UmapArgs umap;
   DsspArgs dssp;
   RmsArgs rms;
   RgArgs rg;
   LjArgs lj;
+  SqArgs sq;
+  CorrKnnArgs corr_knn;
+  ValidationArgs validation;
+  HBondKineticsArgs hbk;
   ZtsArgs zts;
+  std::string eq_weight_source{"auto"};
 
   // LSP-MD (Kornev, JCTC 2025) — Local Spatial Pattern network analysis
   struct LSPMDArgs {
@@ -321,7 +405,24 @@ public:
   bool allostery_knn_use_contact_prior;
   bool allostery_compute_te;
   std::string allostery_estimator;
+  int allostery_estimator_k;
   double allostery_kde_bandwidth;
+  std::string mem_budget_gb_raw{"auto"};
+  double mem_budget_gb{-1.0};
+  bool low_memory{false};
+  std::string network_mode{"auto"};
+  double network_sparse_cut{30.0};
+  int network_sparse_k{24};
+  std::string network_cache_precision{"auto"};
+  std::string sg_mode{"auto"};
+  std::string sg_cache{"auto"};
+  std::string sg_memory_gb_raw{"auto"};
+  double sg_memory_gb{-1.0};
+  std::string sg_timeseries{"auto"};
+  std::string sg_kernel{"auto"};
+  std::string sg_cutoff{"auto"};
+  double sg_cutoff_value_nm{-1.0};
+  size_t tda_max_points{200000};
   // XDR trajectory (XTC/TRR)
   string traj_file;
   bool flag_xdr;
@@ -387,6 +488,7 @@ public:
         allostery_knn_use_contact_prior{false},
         allostery_compute_te{true},
         allostery_estimator{"hist"},
+        allostery_estimator_k{4},
         allostery_kde_bandwidth{0.0},
         // XDR
         traj_file{}, flag_xdr{false}, xdr_type{},

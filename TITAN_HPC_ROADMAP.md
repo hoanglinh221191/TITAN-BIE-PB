@@ -879,16 +879,35 @@ da tao duoc nen tang sparse / flat-buffer tot.
 
 Status:
 
-- `5.1a core + frame weights + thermo scan`: done
-- `5.1b weighted TICA FES`: done
-- `5.1c weighted PCA FES`: done
-- `5.1d NPT enthalpy extension`: done
-- `5.1e per-frame temperature / demux-aware MBAR`: done
+- `Shipped core + standalone outputs`
+  - `5.1a core + frame weights + thermo scan`
+  - `5.1b weighted TICA FES`
+  - `5.1c weighted PCA FES`
+  - `5.1d NPT enthalpy-like observable path`
+- `Shipped equilibrium integrations`
+  - `5.1e per-frame temperature / demux-aware MBAR`
+  - current regression artifacts `per_frame`, `demux`, va `NPT` da ghi
+    `MBAR Converged: yes` trong native/portable outputs hien tai
+  - `5.1f MBAR hardening + fail-closed gate`
+  - `5.1g shared equilibrium weight-source abstraction`
+  - `5.1h optional default weighted TICA/PCA selector`
+  - `5.1i MBAR-weighted MSM occupancy summaries`
+  - `5.1j TPT context-only overlays from MBAR populations`
+  - `5.1k MBAR-weighted UMAP postproc (phase 1)`
+  - `5.1l MBAR-weighted DCCM/allostery/LSP-MD context (phase 1)`
+- `Production boundaries`
+  - standalone core + optional equilibrium postproc source; khong overwrite hay
+    thay the DHAM
+  - interface production cho integration la
+    `-eq-weight-source <auto|uniform|dham|mbar>`
+  - `auto` van giu DHAM la default neu co weights hop le; `mbar` chi kich hoat
+    khi user opt-in ro rang
+  - khong doi kinetics hay thay `TPM/pi` cua `MSM/TPT/DHAM`; MBAR hien chua la
+    kinetic reweighting engine production
 
-Pham vi v1 da chot:
+Pham vi v1 da ship:
 
 - MBAR cho `temperature ladder` REMD/HREMD
-- standalone only, khong overwrite hay thay the DHAM
 - xuat `mbar_frame_weights.dat`, `mbar_summary.dat`,
   `mbar_window_audit.dat`
 - neu `-mbar-scan-points > 1` thi xuat `mbar_cv.dat`
@@ -907,7 +926,7 @@ Ung dung trong Titan:
 - heat-capacity / melting / phase-transition diagnostics cho protein va LJ
 - xu ly nhanh workflow reweighting nghiem tuc hon so voi histogram FES thuan
 
-Tich hop vao Titan:
+Tich hop vao Titan hien tai:
 
 - tai su dung shape input cua DHAM:
   `energy_list.txt`, va `temps.txt` chi con la optional ladder override
@@ -915,6 +934,15 @@ Tich hop vao Titan:
 - `-mbar-domain=pca` di qua metadata PCA va `pca_fel.csv`
 - `-mbar-domain=both` xuat ca hai khong doi logic output cu
 - `window-match` va `dt-energy` dung cung semantics voi DHAM
+- MBAR solver duoc tach khoi standalone export de co the cap frame weights som
+  hon cho tang postproc equilibrium
+- `-eq-weight-source auto` van giu `DHAM -> PCA/TICA` weighted path lam mac dinh
+- `-eq-weight-source mbar` la interface production duy nhat de opt-in MBAR vao
+  default `TICA/PCA` FES, `msm_equilibrium_summary.dat`, va
+  `tpt_equilibrium_overlay.dat`
+- consumer equilibrium hien tai cua MBAR la `TICA/PCA/MSM/TPT`; tat ca deu di
+  theo policy explicit opt-in va khong co implicit promotion tu `auto` sang
+  `mbar`
 
 Luu y thiet ke:
 
@@ -926,12 +954,122 @@ Luu y thiet ke:
   assignment va suy ra ladder trung binh theo state
 - `-mbar-demux-map` la duong authoritative cho state assignment; neu khong co,
   TITAN fallback sang nearest-ladder mapping tu XVG temperature column
-- v1 chua feed weights vao TPT/MSM/DHAM/PCA/TICA defaults
+- MBAR trong repo hien tai duoc xem nhu `equilibrium reweighting engine`, khong
+  phai kinetic reweighting engine
 - `WHAM` khong con la deliverable chinh o Phase 5; neu can thi de lai
   nhu note compatibility ve sau
 - NPT pressure-shift MBAR tong quat tu `E + P*V` van la mot extension sau;
   `5.1d` hien tai tap trung vao enthalpy-like observable path on dinh cho
   workflow GROMACS NPT
+
+Delivered hardening + current equilibrium-safe slices:
+
+- [done] `5.1f MBAR hardening + fail-closed gate`
+  - downstream `mbar_*` weighted FES da chuyen sang fail-closed theo
+    `converged=true`
+  - benchmark harness da co `mbar_fixed_tica` va `mbar_per_frame_tica`
+  - regression native/portable explicit da cover `fixed`, `per_frame`,
+    `demux`, va `NPT`
+- [done] `5.1g shared equilibrium weight-source abstraction`
+  - da tach abstraction chung `auto | uniform | DHAM | MBAR` o tang
+    postproc equilibrium
+  - duoc dung lai cho default FES va equilibrium-only summaries; khong di vao
+    kinetics
+- [done] `5.1h optional default weighted TICA/PCA selector`
+  - da co `-eq-weight-source <auto|uniform|dham|mbar>`
+  - `auto` giu behavior cu; chi khi opt-in `mbar` moi feed vao
+    `tica_fes_2d.dat` / `pca_fes_2d.dat`
+- [done] `5.1i MBAR-weighted MSM occupancy summaries`
+  - da them `msm_equilibrium_summary.dat` cho microstate/macrostate populations
+    tu MBAR weights
+  - khong rebuild TPM, khong doi ITS, khong doi committor inputs
+- [done] `5.1j TPT context-only overlays from MBAR populations`
+  - da them `tpt_equilibrium_overlay.dat` cho basin/source/sink populations va
+    per-state equilibrium context
+  - `TPT Model Source` va kinetics van giu nguyen; MBAR khong thay `TPM/pi`
+- [done] `5.1k MBAR-weighted UMAP postproc (phase 1)`
+  - da them `umap_fes_2d.dat`, `umap_cluster_representatives.csv`, va
+    `umap_equilibrium_summary.dat` khi `-eq-weight-source mbar`
+  - embedding fit van giu unweighted; MBAR chi anh huong equilibrium sidecars
+    va khong doi output mac dinh neu user khong opt-in
+- [done] `5.1l MBAR-weighted DCCM/allostery/LSP-MD context (phase 1)`
+  - da them `dccm_equilibrium_context.dat`,
+    `allostery_equilibrium_ranking.csv`, va
+    `lspmd_equilibrium_ranking.csv`
+  - core correlation / network construction / LSP-MD estimator van giu nguyen;
+    MBAR chi them contextual overlay va ranking
+- [done] `5.1m Cross-module MBAR validation matrix (phase 1)`
+  - benchmark harness da cover regression cho `fixed`, `per_frame`, `demux`,
+    `NPT`, selector `PCA`, `UMAP`, `MSM`, `TPT`, `DCCM/allostery`, `LSP-MD`
+  - da them guard cases cho `auto`, `uniform`, explicit `dham`, va requested
+    `mbar` nhung khong resolve duoc
+  - da them cross-case hash guard de khoa invariant `auto == uniform` tren mot
+    so output dai dien khi khong co implicit promotion sang `mbar`
+
+Follow-up sau `5.1m` phase 1:
+
+- mo rong validation matrix tren fixture lon hon / data REMD thuc hon neu can
+- co the them hash/content gates cho nhieu output hon neu sau nay can freeze
+  regression o muc chi tiet hon
+
+Khong plan trong dot nay:
+
+- khong lam `MBAR -> DHAM`
+- khong reuse `-eq-weight-source` cho kinetics
+- khong xem `MBAR -> MSM/TPT` kinetics nhu production deliverable trong wave nay
+
+MBAR kinetics research track:
+
+- exploratory / experimental only; tach khoi production roadmap equilibrium
+- huong nay chi duoc mo bang interface experimental rieng trong tuong lai,
+  khong dung chung contract voi `-eq-weight-source`
+- `MBAR -> MSM kinetic reweighting` la research-only cho toi khi co validation
+  synthetic/analytic ro rang
+- `MBAR -> TPT core kinetics` la research-only; khong duoc mo ta nhu thay the
+  `TPM/pi` core trong wave hien tai
+- khong muc nao trong research track duoc danh dau production-ready neu chua co
+  gate validation rieng
+
+Acceptance cho wave tich hop tiep theo:
+
+- roadmap phai giu dung ground truth hien tai:
+  - MBAR da co standalone weighted `TICA/PCA` exports
+  - default `DHAM -> PCA/TICA` path van la mac dinh khi `-eq-weight-source auto`
+  - `-eq-weight-source mbar` chi feed MBAR vao equilibrium FES/summaries
+  - `TPT` core van chi nhan built MSM hoac `DHAM TPM/pi`; khong nhan MBAR
+- truth sync:
+  - current `per_frame`, `demux`, va `NPT` MBAR artifacts phai duoc ghi dung la
+    `Converged: yes`
+  - roadmap khong con mo ta MBAR la standalone-only
+- cho `5.1f`:
+  - tat ca case `fixed` native/portable converge
+  - case `per_frame/demux/NPT` hoac converge, hoac fail closed va khong xuat
+    weighted downstream outputs
+  - benchmark harness co it nhat 1 case MBAR `fixed` va 1 case MBAR
+    `per_frame`
+- cho `5.1h-5.1j`:
+  - da giu nguyen hanh vi o default outputs neu user khong chon MBAR explicit
+  - cac tich hop MBAR moi chi anh huong den equilibrium summaries/FES, khong doi
+    kinetics
+  - smoke guard da xac nhan `auto` khong sinh `msm_equilibrium_summary.dat` hay
+    `tpt_equilibrium_overlay.dat`
+- equilibrium postproc invariants:
+  - `TICA/PCA/MSM/TPT` hien da la MBAR consumer o muc equilibrium-only
+  - `UMAP` va `DCCM/allostery/LSP-MD` da ship phase 1 voi explicit opt-in
+    invariant
+  - default outputs duoi `auto` phai giu nguyen hanh vi cu
+- cho `5.1k-5.1m`:
+  - benchmark harness da co explicit regression cho `UMAP`, `TPT overlay`,
+    `DCCM/allostery/LSP-MD`, `auto`, `uniform`, `dham`, va unresolved-`mbar`
+  - cross-case hash checks da xac nhan mot nhom output dai dien la identical
+    giua `auto` va `uniform` khi khong co `DHAM` de implicit promotion
+- research-track invariants:
+  - moi huong `MBAR -> MSM/TPT kinetics` phai co validation gate rieng
+  - khong muc nao trong research track duoc danh dau `done` hay production-ready
+    neu chua co synthetic/analytic validation
+- validation matrix:
+  - moi consumer moi cua shared equilibrium weights phai co regression rieng
+  - production acceptance va research acceptance phai duoc tach ro
 
 7.2 `titan_hbond_kinetics`
 
@@ -940,11 +1078,48 @@ Luu y thiet ke:
 - water bridge
 - residence time / intermittent correlation
 
+Status:
+
+- [done] Public `hbond kinetics` module da co trong workspace
+  - da them interface `-hbk` voi `kind = hbond|salt|water`, `domain =
+    inter|intra|both`, `maxlag`, va cutoff/angle controls; parser accept ca
+    `-opt=value` va `-opt value`, trong khi help/fixtures canonicalize ro
+    `arg.in =` va `CLI space`
+  - analyzer moi la streaming time-correlation core cho `continuous` /
+    `intermittent C(t)`, residence statistics, va lifetime histogram; khong
+    thay doi contract cua legacy `-hb`, `IFP`, hay `global_water_bridges_*`
+  - primitive detection da duoc tach ra helper dung chung de reuse donor /
+    acceptor / hydrogen lookup, salt typing, va water-neighbor logic ma khong
+    copy lai detector
+  - output moi gom `hbond_kinetics_summary.dat`,
+    `hbond_kinetics_{hbond,salt,water}_pairs.csv`,
+    `hbond_kinetics_{hbond,salt,water}_ct.dat`, va
+    `hbond_kinetics_{hbond,salt,water}_lifetimes.dat`
+  - smoke C++ `test/titan_hbond_kinetics_smoke.cpp` da pass; fixture local va
+    benchmark harness cases cho `-hbk` da co trong workspace hien tai
+
 7.3 `titan_validation`
 
 - Chapman-Kolmogorov test
 - VAMP-2 / score-based model selection
 - bootstrap uncertainty cho MSM / TPT
+
+Status:
+
+- [done] Public `validation` module da co trong workspace
+  - da them interface `-validation` voi CK multiples, VAMP candidate grid,
+    `-validation-auto-pick`, va bootstrap seed/sample controls
+  - preselect phase da chen vao sau khi TICA solve xong va truoc khi build MSM
+    chinh; `auto-pick` co the route nguoc selected `(components, lag, clusters)`
+    vao pipeline `MSM -> DHAM -> TPT`
+  - postproc validation da xuat `validation_summary.dat`,
+    `validation_ck_summary.dat`, `validation_ck_states.dat`,
+    `validation_vamp2_ranking.csv`, `validation_selected_model.dat`,
+    va bootstrap sidecars cho `MSM/TPT`
+  - kinetic `tpt_kinetics.dat` va legacy `tpt_bootstrap_*` da route sang shared
+    validation core; DHAM-backed TPT bootstrap da co path thuc thi
+  - build `native` va `portable` da pass; smoke C++ `test/titan_validation_smoke.cpp`
+    da pass trong workspace hien tai
 
 7.4 `titan_corr_knn`
 
@@ -952,11 +1127,37 @@ Luu y thiet ke:
 - mutual information
 - transfer entropy bang estimator tot hon histogram dense
 
+Status:
+
+- [done] Public `corr-knn` module + exact kNN estimators da co trong workspace
+  - da them interface `-corr-knn` voi `k`, `tau`, pair-pruning, `no-te`, va raw
+    outputs `corr_knn_summary.dat`, `corr_knn_mi_pairs.csv`,
+    `corr_knn_gc_pairs.csv`, `corr_knn_te_pairs.csv`
+  - `MI` dung KSG type-1 tren fluctuation vector 3D theo residue node; `TE` dung
+    conditional-MI kieu Frenzel-Pompe; `GC` duoc suy ra tu `MI`
+  - `-allostery-estimator=knn` da route sang core moi de giu compatibility, trong
+    khi `hist` va `kde` van giu path cu
+  - smoke C++ va benchmark local native/portable cho `corr_knn`,
+    `allostery hist/kde/knn`, va reuse path da pass trong workspace hien tai
+
 7.5 `titan_sq`
 
 - structure factor `S(q)`
 - streaming RDF / pair correlation
 - phu hop LJ / LLPS / condensed-phase workflows
+
+Status:
+
+- [done] Streaming `RDF/S(q)` analyzer da co trong workspace
+  - da them `-sq`, channel `all|trace|backbone|sticker`, partials theo channel,
+    auto-PBC policy, va output `sq_summary.dat`, `sq_rdf_*`,
+    `sq_structure_factor_*`
+  - core tinh toan la streaming pair-correlation; `S(q)` duoc suy ra o cuoi run tu
+    `RDF` bang isotropic transform co Lorch window
+  - orthorhombic periodic path dung neighbor-grid; triclinic/dodecahedron fallback
+    sang dense pair loop + `MIC`; non-PBC chi warn va skip
+  - smoke/test fixture/harness local cho `-sq` da pass trong workspace hien tai,
+    gom case nho native/portable va case `example/5` cho `backbone/sticker`
 
 7.6 `titan_sparse_graph`
 
@@ -964,6 +1165,26 @@ Luu y thiet ke:
 - community detection
 - edge filtering
 - bottleneck ranking
+
+Status:
+
+- [done] Public unified sparse-graph analytics layer da co trong workspace
+  - da them interface `-graph`, `-graph-source`, `-graph-community`,
+    `-graph-filter-topk`, `-graph-filter-component`, voi canonical syntax
+    `arg.in =` / `CLI space`
+  - core moi da consume graph noi bo tu `DCCM`, `LSP-MD`, thresholded
+    `allostery GC/TE`, va `TPT`; export `graph_summary.dat`,
+    `graph_<source>_edges.csv`, `graph_<source>_nodes.csv`,
+    `graph_<source>_communities.csv`, `graph_<source>_community_summary.csv`,
+    `graph_<source>_supergraph.csv`, `graph_<source>_bottleneck_edges.csv`, va
+    `graph_<source>_bottleneck_nodes.csv`
+  - compatibility/fan-out da co cho legacy community outputs cua DCCM,
+    `lspmd_*` centrality files, va `tpt_bottleneck_*`; `-community=louvain`
+    da route vao graph core cho source `dccm`
+  - build `native` va `portable` da pass; smoke
+    `test/titan_sparse_graph_smoke.cpp` va benchmark local native/portable cho
+    `graph_dccm`, `graph_lspmd`, `graph_allostery_gc`, `graph_allostery_te`,
+    `graph_tpt`, va `graph_auto` da pass trong workspace hien tai
 
 7.7 `titan_awh_analysis`
 

@@ -6,10 +6,11 @@
 #include "arguments.h"
 #include "index_v2.h"
 #include <map>
-#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
+class TitanExecutor;
 
 struct NA_Interaction {
   int frame;
@@ -22,12 +23,43 @@ struct NA_Interaction {
 
 class NucleicProfiler {
 private:
+  struct ResidueRangeRef {
+    size_t chain_pos{};
+    size_t res_idx{};
+    size_t start_idx{};
+    size_t end_idx{};
+    int resnr{};
+    std::string resname;
+    size_t slot_index{};
+  };
+
+  struct ProteinResidueSlot {
+    int resnr{};
+    std::string resname;
+  };
+
+  struct ProteinAtomInfo {
+    size_t slot_index{};
+    double x{};
+    double y{};
+    double z{};
+  };
+
+  struct RecognitionCount {
+    int base_contacts{};
+    int backbone_contacts{};
+  };
+
   std::vector<NA_Interaction> interaction_timeline;
 
-  std::map<int, std::pair<int, int>>
-      global_recognition_profile; // Key: Protein ResNum, Value: <Base_Contacts,
-                                  // Backbone_Contacts>
-  std::map<int, std::string> resnum_to_name;
+  std::vector<ProteinResidueSlot> protein_slots_;
+  std::vector<ResidueRangeRef> protein_residues_;
+  std::vector<ResidueRangeRef> nucleic_residues_;
+  std::vector<RecognitionCount> global_recognition_profile_;
+  std::vector<ProteinAtomInfo> protein_atom_buffer_;
+  std::vector<std::vector<unsigned char>> worker_base_hits_;
+  std::vector<std::vector<unsigned char>> worker_backbone_hits_;
+  bool initialized_ = false;
   size_t total_frames_processed = 0;
 
   std::vector<double> calc_residue_center(const MOL &frame,
@@ -35,6 +67,11 @@ private:
                                           const class index &chain_idx,
                                           size_t res_idx_in_chain,
                                           const std::string &center_type);
+  void initialize(const std::vector<class index> &pro_index,
+                  const std::vector<class index> &na_index,
+                  const std::vector<mol_info> &pro_info,
+                  const std::vector<mol_info> &na_info);
+  void ensure_worker_storage(size_t worker_capacity);
 
   inline bool is_backbone(const std::string &atom_name) const {
     return (atom_name == "P" || atom_name == "OP1" || atom_name == "OP2" ||
@@ -58,12 +95,17 @@ private:
 
 public:
   void reset();
+  void initialize_if_needed(const std::vector<class index> &pro_index,
+                            const std::vector<class index> &na_index,
+                            const std::vector<mol_info> &pro_info,
+                            const std::vector<mol_info> &na_info);
   void process_frame(const MOL &pro_frame, const MOL &na_frame,
                      const std::vector<mol_info> &pro_info,
                      const std::vector<mol_info> &na_info,
                      const std::vector<class index> &pro_index,
                      const std::vector<class index> &na_index, size_t num_snap,
-                     double time_ps);
+                     double time_ps, TitanExecutor &executor,
+                     size_t requested_workers);
 
   void export_results(const std::string &csv_filename);
 };

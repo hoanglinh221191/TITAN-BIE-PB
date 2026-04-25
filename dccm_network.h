@@ -4,6 +4,7 @@
 #include "Multi_MOL.h"
 #include "aligned_allocator.h"
 #include "arguments.h"
+#include "titan_sparse_graph.h"
 #include <Eigen/Dense>
 #include <cstdint>
 #include <string>
@@ -36,6 +37,13 @@ public:
     std::string method{};
   };
 
+  struct StoredEdge {
+    int source{-1};
+    int target{-1};
+    double raw_score{0.0};
+    double weight{0.0};
+  };
+
   struct CommunityResult {
     std::vector<int> membership;
     std::vector<int> community_sizes;
@@ -54,6 +62,7 @@ public:
     bool compute_te = true;
     std::string estimator{"hist"};
     double kde_bandwidth = 0.0;
+    bool force_sparse_candidates = false;
   };
 
   void calculate_allostery_information(TitanExecutor &executor, int tau_lag,
@@ -143,9 +152,39 @@ public:
   const TrajectoryRows &get_traj_cbx() const { return traj_cbx; }
   const TrajectoryRows &get_traj_cby() const { return traj_cby; }
   const TrajectoryRows &get_traj_cbz() const { return traj_cbz; }
+  const std::vector<StoredEdge> &get_last_network_graph_edges() const {
+    return last_network_graph_edges_;
+  }
+  const std::vector<StoredEdge> &get_last_allostery_gc_edges() const {
+    return last_allostery_gc_edges_;
+  }
+  const std::vector<StoredEdge> &get_last_allostery_te_edges() const {
+    return last_allostery_te_edges_;
+  }
+  void set_last_allostery_graph_edges(std::vector<StoredEdge> gc_edges,
+                                      std::vector<StoredEdge> te_edges) {
+    last_allostery_gc_edges_ = std::move(gc_edges);
+    last_allostery_te_edges_ = std::move(te_edges);
+  }
   const CommunityResult &get_last_community_result() const {
     return last_community_result_;
   }
+  void export_community_outputs_from_graph(
+      const titan_sparse::WeightedCSRGraph<double> &graph,
+      const std::vector<int> &membership, const info &info_output);
+  bool dense_postproc_skipped_due_memory() const {
+    return dense_postproc_skipped_due_memory_;
+  }
+  bool network_sparse_mode_active() const { return network_sparse_mode_active_; }
+
+  struct NetworkMemoryConfig {
+    std::string mode{"auto"};
+    double mem_budget_gb{-1.0};
+    bool low_memory{false};
+    double sparse_cut_ang{30.0};
+    int sparse_k{24};
+    std::string cache_precision{"auto"};
+  };
 
 private:
   std::vector<int> ca_indices;
@@ -174,8 +213,14 @@ private:
   TrajectoryRow latest_traj_y_;
   TrajectoryRow latest_traj_z_;
   bool kabsch_aligned_ = false;
+  bool dense_postproc_skipped_due_memory_ = false;
+  bool network_sparse_mode_active_ = false;
   size_t last_allostery_candidate_pairs_ = 0;
   size_t last_allostery_dense_pairs_ = 0;
+  std::vector<StoredEdge> last_network_graph_edges_;
+  std::vector<StoredEdge> last_allostery_gc_edges_;
+  std::vector<StoredEdge> last_allostery_te_edges_;
+  NetworkMemoryConfig network_memory_cfg_;
   CommunityConfig community_cfg_;
   CommunityResult last_community_result_;
   MOL first_pro_frame_;

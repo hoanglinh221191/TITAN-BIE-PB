@@ -1,5 +1,8 @@
 #include "nucleic_profiler.h"
 #include "polymer_classification.h"
+#include "titan_executor.h"
+
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 
@@ -78,9 +81,112 @@ bool residue_is_nucleic_candidate(const std::vector<class index> &indices,
 
 void NucleicProfiler::reset() {
   interaction_timeline.clear();
-  global_recognition_profile.clear();
-  resnum_to_name.clear();
+  protein_slots_.clear();
+  protein_residues_.clear();
+  nucleic_residues_.clear();
+  global_recognition_profile_.clear();
+  protein_atom_buffer_.clear();
+  worker_base_hits_.clear();
+  worker_backbone_hits_.clear();
+  initialized_ = false;
   total_frames_processed = 0;
+}
+
+void NucleicProfiler::initialize(
+    const std::vector<class index> &pro_index,
+    const std::vector<class index> &na_index,
+    const std::vector<mol_info> &pro_info,
+    const std::vector<mol_info> &na_info) {
+  protein_slots_.clear();
+  protein_residues_.clear();
+  nucleic_residues_.clear();
+  global_recognition_profile_.clear();
+  protein_atom_buffer_.clear();
+  worker_base_hits_.clear();
+  worker_backbone_hits_.clear();
+
+  for (size_t chain_pos = 0; chain_pos < pro_index.size(); ++chain_pos) {
+    const auto &chn = pro_index[chain_pos];
+    for (size_t r = 0; r < chn.get_size_v(); ++r) {
+      if (!residue_is_protein_candidate(chn, r))
+        continue;
+      const auto [start_idx, end_idx] =
+          residue_atom_range(pro_index, chain_pos, r, pro_info.size());
+      if (start_idx >= end_idx)
+        continue;
+
+      const size_t slot_index = protein_slots_.size();
+      ProteinResidueSlot slot;
+      slot.resnr = static_cast<int>(chn.get_res_num_e(r));
+      slot.resname = chn.get_res_name_e(r);
+      protein_slots_.push_back(std::move(slot));
+
+      ResidueRangeRef ref;
+      ref.chain_pos = chain_pos;
+      ref.res_idx = r;
+      ref.start_idx = start_idx;
+      ref.end_idx = end_idx;
+      ref.resnr = static_cast<int>(chn.get_res_num_e(r));
+      ref.resname = chn.get_res_name_e(r);
+      ref.slot_index = slot_index;
+      protein_residues_.push_back(std::move(ref));
+    }
+  }
+
+  for (size_t chain_pos = 0; chain_pos < na_index.size(); ++chain_pos) {
+    const auto &chn = na_index[chain_pos];
+    for (size_t r = 0; r < chn.get_size_v(); ++r) {
+      if (!residue_is_nucleic_candidate(na_index, chain_pos, r, na_info))
+        continue;
+      const auto [start_idx, end_idx] =
+          residue_atom_range(na_index, chain_pos, r, na_info.size());
+      if (start_idx >= end_idx)
+        continue;
+
+      ResidueRangeRef ref;
+      ref.chain_pos = chain_pos;
+      ref.res_idx = r;
+      ref.start_idx = start_idx;
+      ref.end_idx = end_idx;
+      ref.resnr = static_cast<int>(chn.get_res_num_e(r));
+      ref.resname = chn.get_res_name_e(r);
+      nucleic_residues_.push_back(std::move(ref));
+    }
+  }
+
+  global_recognition_profile_.assign(protein_slots_.size(), RecognitionCount{});
+  protein_atom_buffer_.reserve(pro_info.size());
+  initialized_ = true;
+}
+
+void NucleicProfiler::initialize_if_needed(
+    const std::vector<class index> &pro_index,
+    const std::vector<class index> &na_index,
+    const std::vector<mol_info> &pro_info,
+    const std::vector<mol_info> &na_info) {
+  if (!initialized_) {
+    initialize(pro_index, na_index, pro_info, na_info);
+  }
+}
+
+void NucleicProfiler::ensure_worker_storage(size_t worker_capacity) {
+  const size_t slot_count = protein_slots_.size();
+  if (worker_base_hits_.size() < worker_capacity) {
+    worker_base_hits_.resize(worker_capacity);
+    worker_backbone_hits_.resize(worker_capacity);
+  }
+  for (size_t i = 0; i < worker_capacity; ++i) {
+    if (worker_base_hits_[i].size() != slot_count)
+      worker_base_hits_[i].assign(slot_count, 0);
+    else
+      std::fill(worker_base_hits_[i].begin(), worker_base_hits_[i].end(), 0);
+
+    if (worker_backbone_hits_[i].size() != slot_count)
+      worker_backbone_hits_[i].assign(slot_count, 0);
+    else
+      std::fill(worker_backbone_hits_[i].begin(), worker_backbone_hits_[i].end(),
+                0);
+  }
 }
 
 std::vector<double> NucleicProfiler::calc_residue_center(
@@ -145,95 +251,88 @@ void NucleicProfiler::process_frame(const MOL &pro_frame, const MOL &na_frame,
                                     const std::vector<mol_info> &na_info,
                                     const std::vector<class index> &pro_index,
                                     const std::vector<class index> &na_index,
-                                    size_t num_snap, double time_ps) {
-
+                                    size_t num_snap, double time_ps,
+                                    TitanExecutor &executor,
+                                    size_t requested_workers) {
+  (void)num_snap;
+  (void)time_ps;
+  initialize_if_needed(pro_index, na_index, pro_info, na_info);
   total_frames_processed++;
+  if (protein_slots_.empty() || nucleic_residues_.empty())
+    return;
 
-  // Step 1: Gather all protein atoms
-  struct AtomInfo {
-    int resnr;
-    std::string resname;
-    double x, y, z;
-    AtomInfo(int r, std::string n, double x, double y, double z)
-        : resnr(r), resname(std::move(n)), x(x), y(y), z(z) {}
-  };
-  std::vector<AtomInfo> pro_atoms;
-
-  for (size_t chain_pos = 0; chain_pos < pro_index.size(); ++chain_pos) {
-    const auto &chn = pro_index[chain_pos];
-    for (size_t r = 0; r < chn.get_size_v(); ++r) {
-      if (!residue_is_protein_candidate(chn, r))
-        continue;
-
-      const auto [start_idx, end_idx] =
-          residue_atom_range(pro_index, chain_pos, r, pro_info.size());
-      for (size_t i = start_idx;
-           i < end_idx && i < pro_info.size() && i < pro_frame.pos.x.size();
-           ++i) {
-        pro_atoms.emplace_back(static_cast<int>(pro_info[i].get_resnr()),
-                               pro_info[i].get_res_name(), pro_frame.pos.x[i],
-                               pro_frame.pos.y[i], pro_frame.pos.z[i]);
-      }
+  protein_atom_buffer_.clear();
+  for (const auto &ref : protein_residues_) {
+    const size_t end_idx =
+        std::min(ref.end_idx, std::min(pro_info.size(), pro_frame.pos.x.size()));
+    for (size_t i = ref.start_idx; i < end_idx; ++i) {
+      protein_atom_buffer_.push_back(
+          {ref.slot_index, pro_frame.pos.x[i], pro_frame.pos.y[i],
+           pro_frame.pos.z[i]});
     }
   }
 
-  // To prevent double counting in the same frame
-  std::set<int> base_contact_resnrs;
-  std::set<int> backbone_contact_resnrs;
+  if (protein_atom_buffer_.empty())
+    return;
 
-  // Step 2: Iterate over Nucleic Acid Atoms and checking squared distance
-  // < 12.25
-  for (size_t chain_pos = 0; chain_pos < na_index.size(); ++chain_pos) {
-    const auto &chn = na_index[chain_pos];
-    for (size_t r = 0; r < chn.get_size_v(); ++r) {
-      if (!residue_is_nucleic_candidate(na_index, chain_pos, r, na_info))
-        continue;
+  const size_t total_residues = nucleic_residues_.size();
+  const size_t requested = std::max<size_t>(1, requested_workers);
+  const size_t grain_limited = (total_residues + 7) / 8;
+  const size_t active_workers =
+      std::max<size_t>(1, std::min(executor.capacity(),
+                                   std::min(requested, grain_limited)));
+  ensure_worker_storage(active_workers);
 
-      const auto [start_idx, end_idx] =
-          residue_atom_range(na_index, chain_pos, r, na_info.size());
-      for (size_t i = start_idx;
-           i < end_idx && i < na_info.size() && i < na_frame.pos.x.size(); ++i) {
-        double na_x = na_frame.pos.x[i];
-        double na_y = na_frame.pos.y[i];
-        double na_z = na_frame.pos.z[i];
-        std::string atom_name =
-            PC::normalize_nucleic_atom_name(na_info[i].get_atom());
+  executor.parallel_for(
+      total_residues, requested_workers, 8,
+      [&](size_t worker_id, size_t begin, size_t end) {
+        auto &base_hits = worker_base_hits_[worker_id];
+        auto &backbone_hits = worker_backbone_hits_[worker_id];
+        for (size_t residue_idx = begin; residue_idx < end; ++residue_idx) {
+          const auto &ref = nucleic_residues_[residue_idx];
+          const size_t end_idx = std::min(
+              ref.end_idx, std::min(na_info.size(), na_frame.pos.x.size()));
+          for (size_t i = ref.start_idx; i < end_idx; ++i) {
+            const std::string atom_name =
+                PC::normalize_nucleic_atom_name(na_info[i].get_atom());
+            const bool is_bb = is_backbone(atom_name);
+            const bool is_b = is_base(atom_name);
+            if (!is_bb && !is_b)
+              continue;
 
-        bool is_bb = is_backbone(atom_name);
-        bool is_b = is_base(atom_name);
-        if (!is_bb && !is_b)
-          continue;
-
-        // Compare against protein atoms
-        for (const auto &p_atom : pro_atoms) {
-          double dx = na_x - p_atom.x;
-          double dy = na_y - p_atom.y;
-          double dz = na_z - p_atom.z;
-          double dist_sq = dx * dx + dy * dy + dz * dz;
-
-          if (dist_sq < 12.25) { // 3.5^2
-            if (is_bb && backbone_contact_resnrs.find(p_atom.resnr) ==
-                             backbone_contact_resnrs.end()) {
-              backbone_contact_resnrs.insert(p_atom.resnr);
-              resnum_to_name.insert_or_assign(p_atom.resnr, p_atom.resname);
-            }
-            if (is_b && base_contact_resnrs.find(p_atom.resnr) ==
-                            base_contact_resnrs.end()) {
-              base_contact_resnrs.insert(p_atom.resnr);
-              resnum_to_name.insert_or_assign(p_atom.resnr, p_atom.resname);
+            const double na_x = na_frame.pos.x[i];
+            const double na_y = na_frame.pos.y[i];
+            const double na_z = na_frame.pos.z[i];
+            for (const auto &p_atom : protein_atom_buffer_) {
+              const double dx = na_x - p_atom.x;
+              const double dy = na_y - p_atom.y;
+              const double dz = na_z - p_atom.z;
+              const double dist_sq = dx * dx + dy * dy + dz * dz;
+              if (dist_sq < 12.25) {
+                if (is_bb)
+                  backbone_hits[p_atom.slot_index] = 1;
+                if (is_b)
+                  base_hits[p_atom.slot_index] = 1;
+              }
             }
           }
         }
-      }
-    }
-  }
+      });
 
-  // Step 3: Global update
-  for (int resnr : base_contact_resnrs) {
-    global_recognition_profile[resnr].first++;
-  }
-  for (int resnr : backbone_contact_resnrs) {
-    global_recognition_profile[resnr].second++;
+  for (size_t slot_idx = 0; slot_idx < protein_slots_.size(); ++slot_idx) {
+    bool base_hit = false;
+    bool backbone_hit = false;
+    for (size_t worker_id = 0; worker_id < active_workers; ++worker_id) {
+      base_hit = base_hit || (worker_base_hits_[worker_id][slot_idx] != 0);
+      backbone_hit =
+          backbone_hit || (worker_backbone_hits_[worker_id][slot_idx] != 0);
+      if (base_hit && backbone_hit)
+        break;
+    }
+    if (base_hit)
+      global_recognition_profile_[slot_idx].base_contacts++;
+    if (backbone_hit)
+      global_recognition_profile_[slot_idx].backbone_contacts++;
   }
 }
 
@@ -248,9 +347,11 @@ void NucleicProfiler::export_results(const std::string &csv_filename) {
   out << "Protein_ResNum,ResName,Base_Contact_Frames,Backbone_Contact_Frames,"
          "Base_Occupancy_%,Backbone_Occupancy_%,Recognition_Type\n";
 
-  for (const auto &[resnr, counts] : global_recognition_profile) {
-    int base_contacts = counts.first;
-    int backbone_contacts = counts.second;
+  for (size_t slot_idx = 0; slot_idx < protein_slots_.size(); ++slot_idx) {
+    const auto &slot = protein_slots_[slot_idx];
+    const auto &counts = global_recognition_profile_[slot_idx];
+    const int base_contacts = counts.base_contacts;
+    const int backbone_contacts = counts.backbone_contacts;
 
     double base_occ =
         (static_cast<double>(base_contacts) / total_frames_processed) * 100.0;
@@ -266,9 +367,9 @@ void NucleicProfiler::export_results(const std::string &csv_filename) {
         type = "Non_Specific_Backbone";
       }
 
-      out << resnr << "," << resnum_to_name[resnr] << "," << base_contacts
-          << "," << backbone_contacts << "," << base_occ << "," << back_occ
-          << "," << type << "\n";
+      out << slot.resnr << "," << slot.resname << "," << base_contacts << ","
+          << backbone_contacts << "," << base_occ << "," << back_occ << ","
+          << type << "\n";
     }
   }
 }

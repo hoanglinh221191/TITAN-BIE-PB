@@ -1,0 +1,15 @@
+-ff=AMBER14SB
+-f=mini_corr_knn.pdb
+-pbci=0
+-g=1-0
+-1pdb
+-allostery
+-allostery-tau=1
+-allostery-bins=8
+-allostery-no-te
+-graph
+-graph-source=allostery-gc
+-nt=1
+-n=index.ndx
+-path-a=../../lib_ff
+-path-n=../../lib_ff

@@ -137,6 +137,46 @@ public:
     return topology;
   }
 
+  static CSRTopology from_directed_edges(
+      int node_count, const std::vector<std::pair<int, int>> &edges) {
+    if (node_count < 0) {
+      throw std::invalid_argument("CSRTopology: node_count must be >= 0");
+    }
+
+    std::vector<int> row_offsets(static_cast<std::size_t>(node_count + 1), 0);
+    for (const auto &[from, to] : edges) {
+      if (from < 0 || to < 0 || from >= node_count || to >= node_count) {
+        throw std::invalid_argument(
+            "CSRTopology: directed edge index out of range");
+      }
+      if (from == to) {
+        continue;
+      }
+      ++row_offsets[static_cast<std::size_t>(from + 1)];
+    }
+
+    for (int node = 0; node < node_count; ++node) {
+      row_offsets[static_cast<std::size_t>(node + 1)] +=
+          row_offsets[static_cast<std::size_t>(node)];
+    }
+
+    std::vector<int> col_indices(
+        static_cast<std::size_t>(row_offsets[static_cast<std::size_t>(node_count)]),
+        -1);
+    std::vector<int> cursor = row_offsets;
+    for (const auto &[from, to] : edges) {
+      if (from == to) {
+        continue;
+      }
+      col_indices[static_cast<std::size_t>(cursor[static_cast<std::size_t>(from)]++)] =
+          to;
+    }
+
+    CSRTopology topology;
+    topology.assign(node_count, std::move(row_offsets), std::move(col_indices));
+    return topology;
+  }
+
 private:
   int node_count_{0};
   std::vector<int> row_offsets_;
@@ -203,6 +243,52 @@ public:
       const int rhs_slot = cursor[static_cast<std::size_t>(rhs)]++;
       col_indices[static_cast<std::size_t>(rhs_slot)] = lhs;
       values[static_cast<std::size_t>(rhs_slot)] = weight;
+    }
+
+    WeightedCSRGraph graph;
+    graph.assign(node_count, std::move(row_offsets), std::move(col_indices),
+                 std::move(values));
+    return graph;
+  }
+
+  static WeightedCSRGraph from_directed_edges(
+      int node_count, const std::vector<std::tuple<int, int, WeightT>> &edges) {
+    if (node_count < 0) {
+      throw std::invalid_argument(
+          "WeightedCSRGraph: node_count must be >= 0");
+    }
+
+    std::vector<int> row_offsets(static_cast<std::size_t>(node_count + 1), 0);
+    for (const auto &[from, to, weight] : edges) {
+      (void)weight;
+      if (from < 0 || to < 0 || from >= node_count || to >= node_count) {
+        throw std::invalid_argument(
+            "WeightedCSRGraph: directed edge index out of range");
+      }
+      if (from == to) {
+        continue;
+      }
+      ++row_offsets[static_cast<std::size_t>(from + 1)];
+    }
+
+    for (int node = 0; node < node_count; ++node) {
+      row_offsets[static_cast<std::size_t>(node + 1)] +=
+          row_offsets[static_cast<std::size_t>(node)];
+    }
+
+    std::vector<int> col_indices(
+        static_cast<std::size_t>(row_offsets[static_cast<std::size_t>(node_count)]),
+        -1);
+    std::vector<WeightT> values(col_indices.size(), WeightT{});
+    std::vector<int> cursor = row_offsets;
+
+    for (const auto &[from, to, weight] : edges) {
+      if (from == to) {
+        continue;
+      }
+      const int slot = cursor[static_cast<std::size_t>(from)]++;
+      col_indices[static_cast<std::size_t>(slot)] = to;
+      values[static_cast<std::size_t>(slot)] = weight;
     }
 
     WeightedCSRGraph graph;

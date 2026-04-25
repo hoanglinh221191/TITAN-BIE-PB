@@ -1,5 +1,7 @@
 #include "titan_ifp.h"
 #include "polymer_classification.h"
+#include "titan_executor.h"
+#include "titan_interaction_primitives.h"
 #include "titan_simd_dispatch.h"
 #include "titan_ui.h"
 
@@ -29,8 +31,8 @@ bool is_protein_aromatic_residue(const std::string &res_name_upper) {
          res_name_upper == "TRP" || is_his_variant(res_name_upper);
 }
 
-bool is_nucleic_base_donor(const std::string &atom_name,
-                           const std::string &res_name_upper) {
+[[maybe_unused]] bool is_nucleic_base_donor(const std::string &atom_name,
+                                            const std::string &res_name_upper) {
   const std::string atom = PC::normalize_nucleic_atom_name(atom_name);
   if (PC::is_purine_residue_name(res_name_upper)) {
     if (res_name_upper == "A" || res_name_upper == "RA" ||
@@ -53,8 +55,9 @@ bool is_nucleic_base_donor(const std::string &atom_name,
   return atom == "O2'";
 }
 
-bool is_nucleic_base_acceptor(const std::string &atom_name,
-                              const std::string &res_name_upper) {
+[[maybe_unused]] bool
+is_nucleic_base_acceptor(const std::string &atom_name,
+                         const std::string &res_name_upper) {
   const std::string atom = PC::normalize_nucleic_atom_name(atom_name);
   if (res_name_upper == "A" || res_name_upper == "RA" ||
       res_name_upper == "ADE" || res_name_upper == "RIA" ||
@@ -79,7 +82,7 @@ bool is_nucleic_base_acceptor(const std::string &atom_name,
   return false;
 }
 
-bool is_nucleic_sugar_acceptor(const std::string &atom_name) {
+[[maybe_unused]] bool is_nucleic_sugar_acceptor(const std::string &atom_name) {
   const std::string atom = PC::normalize_nucleic_atom_name(atom_name);
   return atom == "O2'" || atom == "O3'" || atom == "O4'" || atom == "O5'";
 }
@@ -168,87 +171,20 @@ bool TitanIFP::is_hydrophobic_atom(const std::string &atom_name,
 
 bool TitanIFP::is_hbond_donor(const std::string &atom,
                               const std::string &res_name) {
-  const std::string upper = PC::uppercase_copy(res_name);
-  if (PC::is_nucleic_residue_name(upper))
-    return is_nucleic_base_donor(atom, upper);
-
-  if (atom == "N")
-    return true;
-  if ((upper == "SER" || upper == "THR") && atom == "OG")
-    return true;
-  if (upper == "THR" && atom == "OG1")
-    return true;
-  if (upper == "TYR" && atom == "OH")
-    return true;
-  if (upper == "ARG" && (atom == "NH1" || atom == "NH2" || atom == "NE"))
-    return true;
-  if (upper == "LYS" && atom == "NZ")
-    return true;
-  if (is_his_variant(upper) && (atom == "ND1" || atom == "NE2"))
-    return true;
-  if (upper == "ASN" && atom == "ND2")
-    return true;
-  if (upper == "GLN" && atom == "NE2")
-    return true;
-  if (upper == "TRP" && atom == "NE1")
-    return true;
-  if (upper == "CYS" && atom == "SG")
-    return true;
-  return false;
+  return titan_interaction::is_hbond_donor(atom, res_name);
 }
 
 bool TitanIFP::is_hbond_acceptor(const std::string &atom,
                                  const std::string &res_name) {
-  const std::string upper = PC::uppercase_copy(res_name);
-  if (PC::is_nucleic_residue_name(upper)) {
-    return is_nucleic_base_acceptor(atom, upper) ||
-           is_nucleic_sugar_acceptor(atom) ||
-           PC::is_phosphate_oxygen(atom);
-  }
-
-  if (atom == "O")
-    return true;
-  if ((upper == "ASP" || upper == "ASH") &&
-      (atom == "OD1" || atom == "OD2"))
-    return true;
-  if ((upper == "GLU" || upper == "GLH") &&
-      (atom == "OE1" || atom == "OE2"))
-    return true;
-  if ((upper == "SER" || upper == "THR") && atom == "OG")
-    return true;
-  if (upper == "THR" && atom == "OG1")
-    return true;
-  if (upper == "TYR" && atom == "OH")
-    return true;
-  if (upper == "ASN" && atom == "OD1")
-    return true;
-  if (upper == "GLN" && atom == "OE1")
-    return true;
-  if (is_his_variant(upper) && (atom == "ND1" || atom == "NE2"))
-    return true;
-  if (upper == "MET" && atom == "SD")
-    return true;
-  return false;
+  return titan_interaction::is_hbond_acceptor(atom, res_name);
 }
 
 bool TitanIFP::is_acidic(const std::string &atom, const std::string &res_name) {
-  const std::string upper = PC::uppercase_copy(res_name);
-  if (upper == "ASP" && (atom == "OD1" || atom == "OD2"))
-    return true;
-  if (upper == "GLU" && (atom == "OE1" || atom == "OE2"))
-    return true;
-  return false;
+  return titan_interaction::is_acidic(atom, res_name);
 }
 
 bool TitanIFP::is_basic(const std::string &atom, const std::string &res_name) {
-  const std::string upper = PC::uppercase_copy(res_name);
-  if (upper == "ARG" && (atom == "NH1" || atom == "NH2" || atom == "NE"))
-    return true;
-  if (upper == "LYS" && atom == "NZ")
-    return true;
-  if (is_his_variant(upper) && (atom == "ND1" || atom == "NE2"))
-    return true;
-  return false;
+  return titan_interaction::is_basic(atom, res_name);
 }
 
 bool TitanIFP::is_halogen(const std::string &atom) {
@@ -361,17 +297,8 @@ size_t TitanIFP::find_bonded_hydrogen(const MOL &mol,
                                       const std::vector<mol_info> &info,
                                       size_t donor_idx, size_t res_start,
                                       size_t res_end) const {
-  for (size_t h = res_start; h < res_end; ++h) {
-    const auto &atom_name = info[h].get_atom();
-    if (atom_name.empty() || atom_name[0] != 'H')
-      continue;
-    const double dx = mol.pos.x[h] - mol.pos.x[donor_idx];
-    const double dy = mol.pos.y[h] - mol.pos.y[donor_idx];
-    const double dz = mol.pos.z[h] - mol.pos.z[donor_idx];
-    if ((dx * dx + dy * dy + dz * dz) < 1.44)
-      return h;
-  }
-  return SIZE_MAX;
+  return titan_interaction::find_bonded_hydrogen(mol, info, donor_idx,
+                                                 res_start, res_end);
 }
 
 bool TitanIFP::check_hbond(const MOL &rec_mol, const MOL &lig_mol,
@@ -592,16 +519,23 @@ bool TitanIFP::check_halogen(const MOL &rec_mol, const MOL &lig_mol,
   return false;
 }
 
-TitanIFP::FrameAnalysisResult TitanIFP::analyze_frame(
-    const MOL &rec_mol, const MOL &lig_mol,
-    const std::vector<mol_info> &rec_info,
-    const std::vector<mol_info> &lig_info,
-    const std::vector<class index> &rec_index,
-    const std::vector<class index> &lig_index, size_t rec_total_atoms,
-    size_t lig_total_atoms, const std::vector<d_min> &dis_min,
-    const IfpArgs &args) const {
-  FrameAnalysisResult analysis;
+void TitanIFP::ensure_worker_storage(size_t worker_count) {
+  if (worker_frame_results_.size() < worker_count)
+    worker_frame_results_.resize(worker_count);
+  if (worker_contact_accumulators_.size() < worker_count)
+    worker_contact_accumulators_.resize(worker_count);
 
+  for (size_t worker_id = 0; worker_id < worker_count; ++worker_id) {
+    worker_frame_results_[worker_id].contacts.clear();
+    worker_frame_results_[worker_id].rna_regions.clear();
+    worker_contact_accumulators_[worker_id].clear();
+  }
+}
+
+std::vector<TitanIFP::PreparedResiduePair> TitanIFP::build_prepared_pairs(
+    const std::vector<d_min> &dis_min, const std::vector<class index> &rec_index,
+    const std::vector<class index> &lig_index, size_t rec_total_atoms,
+    size_t lig_total_atoms) const {
   size_t total_contacts = 0;
   for (const auto &dm : dis_min)
     total_contacts += dm.base.size();
@@ -631,154 +565,195 @@ TitanIFP::FrameAnalysisResult TitanIFP::analyze_frame(
                   }),
       unique_pairs.end());
 
-  const double max_cutoff = std::max(
-      {args.cutoff_hbond, args.cutoff_salt_bridge, args.cutoff_hydrophobic,
-       args.cutoff_halogen, args.cutoff_pi_pi, args.cutoff_cation_pi});
-  const double max_cutoff_sq = max_cutoff * max_cutoff;
-
+  std::vector<PreparedResiduePair> prepared_pairs;
+  prepared_pairs.reserve(unique_pairs.size());
   for (const auto &contact : unique_pairs) {
-    const auto [rs, re] = get_atom_range(
-        rec_index, contact.chainid_rec, contact.respos_rec, rec_total_atoms);
-    if (rs >= re)
+    const auto [rs, re] = find_residue_full_range(
+        rec_index, contact.chainid_rec, contact.resnr_rec, rec_total_atoms);
+    if (rs == SIZE_MAX || rs >= re)
       continue;
 
     const auto [ls, le] = find_residue_full_range(
         lig_index, contact.chainid_ab, contact.resnr_ab, lig_total_atoms);
     if (ls == SIZE_MAX || ls >= le)
       continue;
-    if (rs >= rec_mol.size() || re > rec_mol.size() || ls >= lig_mol.size() ||
-        le > lig_mol.size()) {
-      continue;
-    }
 
-    IFP_Contact result;
-    result.resnr_rec = contact.resnr_rec;
-    result.resnr_lig = contact.resnr_ab;
-    result.chainid_rec = contact.chainid_rec;
-    result.chainid_lig = contact.chainid_ab;
-    result.res_name_rec = contact.res_name_rec;
-    result.res_name_lig = contact.res_name_ab;
-
-    const bool pair_has_nucleic =
+    PreparedResiduePair prepared;
+    prepared.contact = contact;
+    prepared.rs = rs;
+    prepared.re = re;
+    prepared.ls = ls;
+    prepared.le = le;
+    prepared.pair_has_nucleic =
         PC::is_nucleic_residue_name(PC::uppercase_copy(contact.res_name_rec)) ||
         PC::is_nucleic_residue_name(PC::uppercase_copy(contact.res_name_ab));
-    std::array<bool, 3> region_flags{};
+    prepared_pairs.push_back(std::move(prepared));
+  }
+  return prepared_pairs;
+}
 
-    for (size_t ar = rs; ar < re; ++ar) {
-      const double rx = rec_mol.pos.x[ar];
-      const double ry = rec_mol.pos.y[ar];
-      const double rz = rec_mol.pos.z[ar];
+bool TitanIFP::analyze_prepared_pair(const PreparedResiduePair &pair,
+                                     const MOL &rec_mol, const MOL &lig_mol,
+                                     const std::vector<mol_info> &rec_info,
+                                     const std::vector<mol_info> &lig_info,
+                                     const IfpArgs &args, IFP_Contact &result,
+                                     std::array<bool, 3> &region_flags) const {
+  if (pair.rs >= pair.re || pair.ls >= pair.le)
+    return false;
+  if (pair.rs >= rec_mol.size() || pair.re > rec_mol.size() ||
+      pair.ls >= lig_mol.size() || pair.le > lig_mol.size()) {
+    return false;
+  }
 
-      constexpr uint8_t pairwise_mask =
-          (1u << BIT_HBOND) | (1u << BIT_SALT) | (1u << BIT_HYDROPHOBIC) |
-          (1u << BIT_HALOGEN);
-      const bool all_pairwise_detected =
-          (result.interactions.to_ulong() & pairwise_mask) == pairwise_mask;
-      if (!pair_has_nucleic && all_pairwise_detected)
-        break;
-      if (pair_has_nucleic && all_pairwise_detected &&
-          region_flags[kBaseRegion] && region_flags[kSugarRegion] &&
-          region_flags[kPhosphateRegion]) {
-        break;
-      }
+  result.resnr_rec = pair.contact.resnr_rec;
+  result.resnr_lig = pair.contact.resnr_ab;
+  result.chainid_rec = pair.contact.chainid_rec;
+  result.chainid_lig = pair.contact.chainid_ab;
+  result.res_name_rec = pair.contact.res_name_rec;
+  result.res_name_lig = pair.contact.res_name_ab;
+  region_flags = {};
 
-      size_t al = ls;
-      const size_t vec_end = ls + ((le - ls) / 4) * 4;
-      for (; al < vec_end; al += 4) {
-        const unsigned bitmask = titan_simd_dispatch::point_vs_four_cutoff_mask(
-            rx, ry, rz, &lig_mol.pos.x[al], &lig_mol.pos.y[al],
-            &lig_mol.pos.z[al], max_cutoff_sq, 0.0, false);
-        if (bitmask == 0)
+  const double max_cutoff = std::max(
+      {args.cutoff_hbond, args.cutoff_salt_bridge, args.cutoff_hydrophobic,
+       args.cutoff_halogen, args.cutoff_pi_pi, args.cutoff_cation_pi});
+  const double max_cutoff_sq = max_cutoff * max_cutoff;
+
+  for (size_t ar = pair.rs; ar < pair.re; ++ar) {
+    const double rx = rec_mol.pos.x[ar];
+    const double ry = rec_mol.pos.y[ar];
+    const double rz = rec_mol.pos.z[ar];
+
+    constexpr uint8_t pairwise_mask =
+        (1u << BIT_HBOND) | (1u << BIT_SALT) | (1u << BIT_HYDROPHOBIC) |
+        (1u << BIT_HALOGEN);
+    const bool all_pairwise_detected =
+        (result.interactions.to_ulong() & pairwise_mask) == pairwise_mask;
+    if (!pair.pair_has_nucleic && all_pairwise_detected)
+      break;
+    if (pair.pair_has_nucleic && all_pairwise_detected &&
+        region_flags[kBaseRegion] && region_flags[kSugarRegion] &&
+        region_flags[kPhosphateRegion]) {
+      break;
+    }
+
+    size_t al = pair.ls;
+    const size_t vec_end = pair.ls + ((pair.le - pair.ls) / 4) * 4;
+    for (; al < vec_end; al += 4) {
+      const unsigned bitmask = titan_simd_dispatch::point_vs_four_cutoff_mask(
+          rx, ry, rz, &lig_mol.pos.x[al], &lig_mol.pos.y[al],
+          &lig_mol.pos.z[al], max_cutoff_sq, 0.0, false);
+      if (bitmask == 0)
+        continue;
+
+      for (int bit = 0; bit < 4; ++bit) {
+        if (!(bitmask & (1 << bit)))
           continue;
+        const size_t al_idx = al + static_cast<size_t>(bit);
+        const double ddx = rx - lig_mol.pos.x[al_idx];
+        const double ddy = ry - lig_mol.pos.y[al_idx];
+        const double ddz = rz - lig_mol.pos.z[al_idx];
+        const double d = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
 
-        for (int bit = 0; bit < 4; ++bit) {
-          if (!(bitmask & (1 << bit)))
-            continue;
-          const size_t al_idx = al + static_cast<size_t>(bit);
-          const double ddx = rx - lig_mol.pos.x[al_idx];
-          const double ddy = ry - lig_mol.pos.y[al_idx];
-          const double ddz = rz - lig_mol.pos.z[al_idx];
-          const double d = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
-
-          if (pair_has_nucleic) {
-            mark_nucleic_region(region_flags, rec_info[ar]);
-            mark_nucleic_region(region_flags, lig_info[al_idx]);
-          }
-
-          if (!result.interactions[BIT_HBOND] &&
-              check_hbond(rec_mol, lig_mol, rec_info, lig_info, ar, al_idx,
-                          rs, re, ls, le, d, args)) {
-            result.interactions.set(BIT_HBOND);
-          }
-          if (!result.interactions[BIT_SALT] && d < args.cutoff_salt_bridge &&
-              check_salt_bridge(rec_info[ar], lig_info[al_idx])) {
-            result.interactions.set(BIT_SALT);
-          }
-          if (!result.interactions[BIT_HYDROPHOBIC] &&
-              d < args.cutoff_hydrophobic &&
-              check_hydrophobic(rec_info[ar], lig_info[al_idx])) {
-            result.interactions.set(BIT_HYDROPHOBIC);
-          }
-          if (!result.interactions[BIT_HALOGEN] && d < args.cutoff_halogen &&
-              check_halogen(rec_mol, lig_mol, rec_info, lig_info, ar, al_idx,
-                            rs, re, ls, le, d)) {
-            result.interactions.set(BIT_HALOGEN);
-          }
-        }
-      }
-
-      for (; al < le; ++al) {
-        const double ddx = rx - lig_mol.pos.x[al];
-        const double ddy = ry - lig_mol.pos.y[al];
-        const double ddz = rz - lig_mol.pos.z[al];
-        const double d2 = ddx * ddx + ddy * ddy + ddz * ddz;
-        if (d2 >= max_cutoff_sq)
-          continue;
-        const double d = std::sqrt(d2);
-
-        if (pair_has_nucleic) {
+        if (pair.pair_has_nucleic) {
           mark_nucleic_region(region_flags, rec_info[ar]);
-          mark_nucleic_region(region_flags, lig_info[al]);
+          mark_nucleic_region(region_flags, lig_info[al_idx]);
         }
+
         if (!result.interactions[BIT_HBOND] &&
-            check_hbond(rec_mol, lig_mol, rec_info, lig_info, ar, al, rs, re,
-                        ls, le, d, args)) {
+            check_hbond(rec_mol, lig_mol, rec_info, lig_info, ar, al_idx,
+                        pair.rs, pair.re, pair.ls, pair.le, d, args)) {
           result.interactions.set(BIT_HBOND);
         }
         if (!result.interactions[BIT_SALT] && d < args.cutoff_salt_bridge &&
-            check_salt_bridge(rec_info[ar], lig_info[al])) {
+            check_salt_bridge(rec_info[ar], lig_info[al_idx])) {
           result.interactions.set(BIT_SALT);
         }
         if (!result.interactions[BIT_HYDROPHOBIC] &&
             d < args.cutoff_hydrophobic &&
-            check_hydrophobic(rec_info[ar], lig_info[al])) {
+            check_hydrophobic(rec_info[ar], lig_info[al_idx])) {
           result.interactions.set(BIT_HYDROPHOBIC);
         }
         if (!result.interactions[BIT_HALOGEN] && d < args.cutoff_halogen &&
-            check_halogen(rec_mol, lig_mol, rec_info, lig_info, ar, al, rs, re,
-                          ls, le, d)) {
+            check_halogen(rec_mol, lig_mol, rec_info, lig_info, ar, al_idx,
+                          pair.rs, pair.re, pair.ls, pair.le, d)) {
           result.interactions.set(BIT_HALOGEN);
         }
       }
     }
 
-    if (is_aromatic_residue(contact.res_name_rec) ||
-        is_aromatic_residue(contact.res_name_ab)) {
-      bool is_cat_pi = false;
-      if (check_pi_pi(rec_mol, lig_mol, rs, re, ls, le, rec_info, lig_info,
-                      contact.res_name_rec, contact.res_name_ab,
-                      args.cutoff_pi_pi, args.cutoff_cation_pi, is_cat_pi)) {
-        result.interactions.set(BIT_PI_PI);
+    for (; al < pair.le; ++al) {
+      const double ddx = rx - lig_mol.pos.x[al];
+      const double ddy = ry - lig_mol.pos.y[al];
+      const double ddz = rz - lig_mol.pos.z[al];
+      const double d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+      if (d2 >= max_cutoff_sq)
+        continue;
+      const double d = std::sqrt(d2);
+
+      if (pair.pair_has_nucleic) {
+        mark_nucleic_region(region_flags, rec_info[ar]);
+        mark_nucleic_region(region_flags, lig_info[al]);
       }
-      if (is_cat_pi)
-        result.interactions.set(BIT_CATION_PI);
+      if (!result.interactions[BIT_HBOND] &&
+          check_hbond(rec_mol, lig_mol, rec_info, lig_info, ar, al, pair.rs,
+                      pair.re, pair.ls, pair.le, d, args)) {
+        result.interactions.set(BIT_HBOND);
+      }
+      if (!result.interactions[BIT_SALT] && d < args.cutoff_salt_bridge &&
+          check_salt_bridge(rec_info[ar], lig_info[al])) {
+        result.interactions.set(BIT_SALT);
+      }
+      if (!result.interactions[BIT_HYDROPHOBIC] &&
+          d < args.cutoff_hydrophobic &&
+          check_hydrophobic(rec_info[ar], lig_info[al])) {
+        result.interactions.set(BIT_HYDROPHOBIC);
+      }
+      if (!result.interactions[BIT_HALOGEN] && d < args.cutoff_halogen &&
+          check_halogen(rec_mol, lig_mol, rec_info, lig_info, ar, al, pair.rs,
+                        pair.re, pair.ls, pair.le, d)) {
+        result.interactions.set(BIT_HALOGEN);
+      }
     }
+  }
 
-    if (result.interactions.any()) {
+  if (is_aromatic_residue(pair.contact.res_name_rec) ||
+      is_aromatic_residue(pair.contact.res_name_ab)) {
+    bool is_cat_pi = false;
+    if (check_pi_pi(rec_mol, lig_mol, pair.rs, pair.re, pair.ls, pair.le,
+                    rec_info, lig_info, pair.contact.res_name_rec,
+                    pair.contact.res_name_ab, args.cutoff_pi_pi,
+                    args.cutoff_cation_pi, is_cat_pi)) {
+      result.interactions.set(BIT_PI_PI);
+    }
+    if (is_cat_pi)
+      result.interactions.set(BIT_CATION_PI);
+  }
+
+  return result.interactions.any();
+}
+
+TitanIFP::FrameAnalysisResult TitanIFP::analyze_frame(
+    const MOL &rec_mol, const MOL &lig_mol,
+    const std::vector<mol_info> &rec_info,
+    const std::vector<mol_info> &lig_info,
+    const std::vector<class index> &rec_index,
+    const std::vector<class index> &lig_index, size_t rec_total_atoms,
+    size_t lig_total_atoms, const std::vector<d_min> &dis_min,
+    const IfpArgs &args) const {
+  FrameAnalysisResult analysis;
+  const auto prepared_pairs = build_prepared_pairs(
+      dis_min, rec_index, lig_index, rec_total_atoms, lig_total_atoms);
+
+  for (const auto &pair : prepared_pairs) {
+    IFP_Contact result;
+    std::array<bool, 3> region_flags{};
+    const bool has_contact =
+        analyze_prepared_pair(pair, rec_mol, lig_mol, rec_info, lig_info, args,
+                              result, region_flags);
+    if (has_contact)
       analysis.contacts.push_back(result);
-    }
 
-    if (pair_has_nucleic &&
+    if (pair.pair_has_nucleic &&
         (region_flags[kBaseRegion] || region_flags[kSugarRegion] ||
          region_flags[kPhosphateRegion])) {
       FrameRnaRegionContact region_contact;
@@ -848,6 +823,25 @@ void TitanIFP::accumulate_frame(const FrameAnalysisResult &frame) {
   }
 }
 
+void TitanIFP::accumulate_contact_counts(ContactCountAccumulator &accumulator,
+                                         const IFP_Contact &contact) {
+  const ResKey key{contact.chainid_rec, contact.resnr_rec, contact.chainid_lig,
+                   contact.resnr_lig};
+  auto &record = accumulator[key];
+  if (record.res_name_rec.empty()) {
+    record.resnr_rec = contact.resnr_rec;
+    record.resnr_lig = contact.resnr_lig;
+    record.chainid_rec = contact.chainid_rec;
+    record.chainid_lig = contact.chainid_lig;
+    record.res_name_rec = contact.res_name_rec;
+    record.res_name_lig = contact.res_name_lig;
+  }
+  for (int bit = 0; bit < 6; ++bit) {
+    if (contact.interactions[bit])
+      record.counts[static_cast<size_t>(bit)]++;
+  }
+}
+
 void TitanIFP::process_frame(
     const MOL &rec_mol, const MOL &lig_mol,
     const std::vector<mol_info> &rec_info,
@@ -855,11 +849,67 @@ void TitanIFP::process_frame(
     const std::vector<class index> &rec_index,
     const std::vector<class index> &lig_index, size_t rec_total_atoms,
     size_t lig_total_atoms, const std::vector<d_min> &dis_min,
-    const IfpArgs &args) {
+    const IfpArgs &args, TitanExecutor &executor, size_t requested_workers,
+    bool build_awh_accumulators) {
   ++total_frames_;
-  accumulate_frame(analyze_frame(rec_mol, lig_mol, rec_info, lig_info,
-                                 rec_index, lig_index, rec_total_atoms,
-                                 lig_total_atoms, dis_min, args));
+  const auto prepared_pairs = build_prepared_pairs(
+      dis_min, rec_index, lig_index, rec_total_atoms, lig_total_atoms);
+
+  if (prepared_pairs.empty()) {
+    last_frame_active_workers_ = 0;
+    for (auto &frame_result : worker_frame_results_) {
+      frame_result.contacts.clear();
+      frame_result.rna_regions.clear();
+    }
+    for (auto &accumulator : worker_contact_accumulators_)
+      accumulator.clear();
+    return;
+  }
+
+  const size_t requested = std::max<size_t>(1, requested_workers);
+  const size_t grain_limited = (prepared_pairs.size() + 63) / 64;
+  const size_t active_workers =
+      std::max<size_t>(1, std::min(executor.capacity(),
+                                   std::min(requested, grain_limited)));
+  ensure_worker_storage(active_workers);
+
+  executor.parallel_for(
+      prepared_pairs.size(), requested_workers, 64,
+      [&](size_t worker_id, size_t begin, size_t end) {
+        auto &frame_result = worker_frame_results_[worker_id];
+        auto &contact_counts = worker_contact_accumulators_[worker_id];
+        for (size_t pair_idx = begin; pair_idx < end; ++pair_idx) {
+          const auto &pair = prepared_pairs[pair_idx];
+          IFP_Contact result;
+          std::array<bool, 3> region_flags{};
+          const bool has_contact = analyze_prepared_pair(
+              pair, rec_mol, lig_mol, rec_info, lig_info, args, result,
+              region_flags);
+          if (has_contact) {
+            frame_result.contacts.push_back(result);
+            if (build_awh_accumulators)
+              accumulate_contact_counts(contact_counts, result);
+          }
+
+          if (pair.pair_has_nucleic &&
+              (region_flags[kBaseRegion] || region_flags[kSugarRegion] ||
+               region_flags[kPhosphateRegion])) {
+            FrameRnaRegionContact region_contact;
+            region_contact.resnr_rec = result.resnr_rec;
+            region_contact.resnr_lig = result.resnr_lig;
+            region_contact.chainid_rec = result.chainid_rec;
+            region_contact.chainid_lig = result.chainid_lig;
+            region_contact.res_name_rec = result.res_name_rec;
+            region_contact.res_name_lig = result.res_name_lig;
+            region_contact.flags = region_flags;
+            frame_result.rna_regions.push_back(std::move(region_contact));
+          }
+        }
+      });
+
+  last_frame_active_workers_ = active_workers;
+  for (size_t worker_id = 0; worker_id < active_workers; ++worker_id)
+    accumulate_frame(worker_frame_results_[worker_id]);
 }
 void TitanIFP::aggregate_occupancy() {
   if (total_frames_ == 0)

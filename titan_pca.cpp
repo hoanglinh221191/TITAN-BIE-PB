@@ -120,8 +120,8 @@ FrameWeightResolution resolve_frame_weights(const std::string &label,
 }
 
 AlignedDoubleVector map_global_weights_to_local_frames(
-    const std::string &label, int64_t n_frames,
-    const std::vector<int64_t> &frame_global_indices,
+    const std::string &label, const std::string &weight_source_name,
+    int64_t n_frames, const std::vector<int64_t> &frame_global_indices,
     const std::vector<double> &global_frame_weights) {
   if (global_frame_weights.empty())
     return {};
@@ -158,7 +158,7 @@ AlignedDoubleVector map_global_weights_to_local_frames(
     weight_sum += w;
   }
 
-  TitanUI::print_info(label + ": Mapped DHAM weights onto " +
+  TitanUI::print_info(label + ": Mapped " + weight_source_name + " weights onto " +
                       std::to_string(weighted_frames) + "/" +
                       std::to_string(local_frames) +
                       " projected frames (matched indices: " +
@@ -168,15 +168,16 @@ AlignedDoubleVector map_global_weights_to_local_frames(
     TitanUI::print_warning(label + ": Dropped " +
                            std::to_string(invalid_indices) +
                            " projected frames with invalid global indices "
-                           "during DHAM weight mapping.");
+                           "during " + weight_source_name + " weight mapping.");
   }
 
   return mapped;
 }
 
-double resolve_target_temperature(const arguments &args, bool use_weights) {
-  if (use_weights && args.dham.flag_dham && args.dham.target_temp > 0.0)
-    return args.dham.target_temp;
+double resolve_target_temperature(bool use_weights,
+                                  const TitanPCA::WeightContext &weight_context) {
+  if (use_weights && weight_context.target_temp > 0.0)
+    return weight_context.target_temp;
   return 300.0;
 }
 
@@ -1088,6 +1089,7 @@ void execute_pca_fes_analysis(
     const std::vector<int> &ca_is_lig, TitanExecutor &executor, info &info_out,
     std::fstream &log,
     const std::vector<double> &frame_weights,
+    const WeightContext &weight_context,
     const std::vector<double> &traj_times,
     const std::vector<int> &traj_replicas,
     const std::vector<std::string> &replica_traj_files,
@@ -1136,7 +1138,7 @@ void execute_pca_fes_analysis(
   TitanUI::log_kv(log, "PCA Snapshot Trace", std::to_string(num_frames));
   TitanUI::log_kv(log, "PCA Degrees of Freedom", std::to_string(dimensions));
   TitanUI::log_kv(log, "PCA Weight Mode",
-                  use_weights ? "DHAM-weighted" : "uniform");
+                  use_weights ? weight_context.mode_label : "uniform");
 
   FlatCoordinateMatrix aligned_traj(num_frames, dimensions, 0.0);
   for (size_t f = 0; f < num_frames; ++f) {
@@ -1314,12 +1316,12 @@ void execute_pca_fes_analysis(
   }
   pca_out.close();
 
-  const double target_temp = resolve_target_temperature(args, use_weights);
+  const double target_temp = resolve_target_temperature(use_weights, weight_context);
   FES2DResult fes_result;
   std::vector<ClusterNode> valid_clusters;
   if (!export_projection_fes_analysis(
           "PCA", "PCA", args, projections, analysis_weights, use_weights,
-          target_temp, "DHAM-weighted", executor, log,
+          target_temp, weight_context.mode_label, executor, log,
           info_out.get_pca_fes_2d_filename(),
           info_out.get_cluster_representatives_filename(),
           have_frame_metadata ? traj_times : std::vector<double>{},
@@ -1369,7 +1371,8 @@ void execute_tica_fes_analysis(
     const arguments &args, const MatrixXdAnyConstRef &tica_proj_mat,
     int64_t n_actual_frames, const std::vector<int64_t> &frame_global_indices,
     TitanExecutor &executor, info &info_out, std::fstream &log,
-    const std::vector<double> &frame_weights, FesPostprocMetrics *metrics) {
+    const std::vector<double> &frame_weights,
+    const WeightContext &weight_context, FesPostprocMetrics *metrics) {
   if (metrics)
     *metrics = {};
   if (n_actual_frames <= 0) {
@@ -1398,21 +1401,22 @@ void execute_tica_fes_analysis(
   }
 
   const auto local_frame_weights = map_global_weights_to_local_frames(
-      "TICA", clamped_frames, frame_global_indices, frame_weights);
+      "TICA", weight_context.source_name, clamped_frames, frame_global_indices,
+      frame_weights);
   const auto weight_state =
       resolve_frame_weights("TICA", num_frames, local_frame_weights);
   const bool use_weights = weight_state.use_weights;
 
   TitanUI::log_kv(log, "TICA FES Frames", std::to_string(num_frames));
   TitanUI::log_kv(log, "TICA Weight Mode",
-                  use_weights ? "DHAM-weighted" : "uniform");
+                  use_weights ? weight_context.mode_label : "uniform");
 
-  const double target_temp = resolve_target_temperature(args, use_weights);
+  const double target_temp = resolve_target_temperature(use_weights, weight_context);
   FES2DResult fes_result;
   std::vector<ClusterNode> valid_clusters;
   if (!export_projection_fes_analysis(
           "TICA", "TICA", args, projections, weight_state.analysis_weights,
-          use_weights, target_temp, "DHAM-weighted", executor, log,
+          use_weights, target_temp, weight_context.mode_label, executor, log,
           info_out.get_tica_fes_2d_filename(),
           info_out.get_tica_cluster_representatives_filename(), {}, {},
           &fes_result, &valid_clusters)) {

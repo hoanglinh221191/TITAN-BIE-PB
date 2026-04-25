@@ -9,6 +9,7 @@
 #include <iostream>
 #include <regex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -77,6 +78,70 @@ int arguments::parse_arguments(int argc, char **argv) {
         "Allostery: -allostery-knn-prior must be 'frame' or 'contact'.");
     exit(EXIT_FAILURE);
   };
+  auto parse_corr_knn_prune_window = [&](std::string raw_mode) {
+    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (raw_mode == "avg" || raw_mode == "all" || raw_mode == "mean") {
+      corr_knn.use_avg_cutoff = true;
+      return;
+    }
+    if (raw_mode == "first" || raw_mode == "frame0" || raw_mode == "instant") {
+      corr_knn.use_avg_cutoff = false;
+      return;
+    }
+    TitanUI::print_error(
+        "Corr-kNN: prune window must be 'avg' or 'first'.");
+    exit(EXIT_FAILURE);
+  };
+  auto parse_corr_knn_pair_prior = [&](std::string raw_mode) {
+    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (raw_mode == "frame" || raw_mode == "nearest" || raw_mode == "vote") {
+      corr_knn.pair_use_contact_prior = false;
+      return;
+    }
+    if (raw_mode == "contact" || raw_mode == "contacts" ||
+        raw_mode == "contact-frequency") {
+      corr_knn.pair_use_contact_prior = true;
+      return;
+    }
+    TitanUI::print_error(
+      "Corr-kNN: -corr-knn-pair-prior must be 'frame' or 'contact'.");
+    exit(EXIT_FAILURE);
+  };
+  auto parse_validation_int_list = [&](const std::string &raw_list,
+                                       std::vector<int> &out_values,
+                                       const char *flag_name) {
+    out_values.clear();
+    std::string normalized = raw_list;
+    std::replace(normalized.begin(), normalized.end(), ';', ',');
+    std::istringstream iss(normalized);
+    for (std::string token; std::getline(iss, token, ',');) {
+      token.erase(
+          std::remove_if(token.begin(), token.end(), [](unsigned char c) {
+            return std::isspace(c) != 0;
+          }),
+          token.end());
+      if (token.empty())
+        continue;
+      out_values.push_back(std::stoi(token));
+    }
+    if (out_values.empty()) {
+      TitanUI::print_error(std::string(flag_name) +
+                           " expects a comma-separated integer list.");
+      exit(EXIT_FAILURE);
+    }
+  };
+  auto enable_validation = [&]() {
+    validation.flag_validation = true;
+    msm.flag_msm = true;
+    msm.flag_tica = true;
+    flag_network = true;
+  };
   auto parse_allostery_estimator = [&](std::string raw_mode) {
     std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
                    [](unsigned char c) {
@@ -138,8 +203,169 @@ int arguments::parse_arguments(int argc, char **argv) {
         "PCA: -pca-solver must be one of full, partial.");
     exit(EXIT_FAILURE);
   };
+  auto parse_sq_auto_or_value = [&](const std::string &raw_value, double &out,
+                                    bool &auto_flag, const char *label) {
+    std::string value = raw_value;
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (value == "auto") {
+      out = 0.0;
+      auto_flag = true;
+      return;
+    }
+    try {
+      out = stod(raw_value);
+      auto_flag = false;
+    } catch (...) {
+      TitanUI::print_error(std::string("SQ: invalid value for ") + label +
+                           ". Use a positive number or 'auto'.");
+      exit(EXIT_FAILURE);
+    }
+  };
+  auto parse_hbk_domain = [&](std::string raw_mode) {
+    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (raw_mode == "inter" || raw_mode == "intra" || raw_mode == "both") {
+      hbk.hbk_domain = raw_mode;
+      return;
+    }
+    TitanUI::print_error(
+        "HBond kinetics: -hbk-domain must be one of inter, intra, both.");
+    exit(EXIT_FAILURE);
+  };
+  auto parse_bool_equals = [&](std::string raw_value, const char *flag_name) {
+    std::transform(raw_value.begin(), raw_value.end(), raw_value.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (raw_value.empty() || raw_value == "1" || raw_value == "true" ||
+        raw_value == "yes" || raw_value == "on")
+      return true;
+    if (raw_value == "0" || raw_value == "false" || raw_value == "no" ||
+        raw_value == "off")
+      return false;
+    TitanUI::print_error(std::string(flag_name) +
+                         " must be true/false (or 1/0, yes/no, on/off).");
+    exit(EXIT_FAILURE);
+  };
+  auto consume_option_value =
+      [&](const std::string &arg, std::initializer_list<const char *> flags,
+          std::string &value_out, int &arg_index) {
+        for (const char *flag : flags) {
+          const std::string flag_text(flag);
+          const std::string prefix = flag_text + "=";
+          if (arg.rfind(prefix, 0) == 0) {
+            value_out = arg.substr(prefix.size());
+            return true;
+          }
+          if (arg == flag_text && arg_index + 1 < argc) {
+            value_out = string(argv[arg_index + 1]);
+            ++arg_index;
+            return true;
+          }
+        }
+        return false;
+      };
+  auto consume_bool_option =
+      [&](const std::string &arg, std::initializer_list<const char *> flags,
+          bool &value_out) {
+        for (const char *flag : flags) {
+          const std::string flag_text(flag);
+          const std::string prefix = flag_text + "=";
+          if (arg == flag_text) {
+            value_out = true;
+            return true;
+          }
+          if (arg.rfind(prefix, 0) == 0) {
+            value_out = parse_bool_equals(arg.substr(prefix.size()), flag);
+            return true;
+          }
+        }
+        return false;
+      };
+  auto lowercase_copy = [](std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    return value;
+  };
+  auto require_choice = [&](std::string value,
+                            std::initializer_list<const char *> choices,
+                            const char *flag_name) {
+    value = lowercase_copy(value);
+    for (const char *choice : choices) {
+      if (value == choice)
+        return value;
+    }
+    std::ostringstream msg;
+    msg << flag_name << " must be one of ";
+    bool first = true;
+    for (const char *choice : choices) {
+      if (!first)
+        msg << ", ";
+      msg << choice;
+      first = false;
+    }
+    TitanUI::print_error(msg.str());
+    exit(EXIT_FAILURE);
+  };
+  auto parse_memory_budget = [&](std::string value) {
+    mem_budget_gb_raw = lowercase_copy(value);
+    if (mem_budget_gb_raw == "auto") {
+      mem_budget_gb = -1.0;
+      return;
+    }
+    try {
+      mem_budget_gb = stod(value);
+      if (mem_budget_gb <= 0.0)
+        throw std::invalid_argument("non-positive");
+    } catch (...) {
+      TitanUI::print_error(
+          "-mem-budget-gb expects 'auto' or a positive GB value.");
+      exit(EXIT_FAILURE);
+    }
+  };
+  auto parse_sg_memory_budget = [&](std::string value) {
+    sg_memory_gb_raw = lowercase_copy(value);
+    if (sg_memory_gb_raw == "auto") {
+      sg_memory_gb = -1.0;
+      return;
+    }
+    try {
+      sg_memory_gb = stod(value);
+      if (sg_memory_gb <= 0.0)
+        throw std::invalid_argument("non-positive");
+    } catch (...) {
+      TitanUI::print_error(
+          "-sg-memory-gb expects 'auto' or a positive GB value.");
+      exit(EXIT_FAILURE);
+    }
+  };
+  auto parse_sg_cutoff = [&](std::string value) {
+    sg_cutoff = lowercase_copy(value);
+    if (sg_cutoff == "auto" || sg_cutoff == "none") {
+      sg_cutoff_value_nm = -1.0;
+      return;
+    }
+    try {
+      sg_cutoff_value_nm = stod(value);
+      if (sg_cutoff_value_nm <= 0.0)
+        throw std::invalid_argument("non-positive");
+      sg_cutoff = "value";
+    } catch (...) {
+      TitanUI::print_error(
+          "-sg-cutoff expects auto, none, or a positive cutoff in nm.");
+      exit(EXIT_FAILURE);
+    }
+  };
   for (int i = 1; i < argc; ++i) {
     const std::string arg = string(argv[i]);
+    std::string common_value;
 
     if (arg.rfind("-mol-1-type=", 0) == 0) {
       assign_mol_type(arg.substr(12), true);
@@ -165,6 +391,131 @@ int arguments::parse_arguments(int argc, char **argv) {
       TitanUI::print_error(
           "Community: use -community=louvain (single dash, no spaces).");
       exit(EXIT_FAILURE);
+    }
+
+    if (consume_bool_option(arg, {"-graph", "--graph"}, graph.flag_graph)) {
+      continue;
+    }
+    if (consume_option_value(arg, {"-graph-source", "--graph-source"},
+                             common_value, i)) {
+      graph.flag_graph = true;
+      graph.sources.push_back(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-graph-community", "--graph-community"},
+                             common_value, i)) {
+      graph.flag_graph = true;
+      graph.community_method = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-graph-filter-topk",
+                                   "--graph-filter-topk"},
+                             common_value, i)) {
+      graph.flag_graph = true;
+      graph.filter_topk = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-graph-filter-component",
+                                   "--graph-filter-component"},
+                             common_value, i)) {
+      graph.flag_graph = true;
+      graph.filter_component = common_value;
+      continue;
+    }
+
+    if (consume_option_value(arg, {"-mem-budget-gb", "--mem-budget-gb"},
+                             common_value, i)) {
+      parse_memory_budget(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-sg-mode", "--sg-mode"},
+                             common_value, i)) {
+      sg_mode = require_choice(common_value, {"auto", "stream", "cache"},
+                               "-sg-mode");
+      continue;
+    }
+    if (consume_option_value(arg, {"-sg-cache", "--sg-cache"},
+                             common_value, i)) {
+      sg_cache = require_choice(common_value, {"auto", "off", "on"},
+                                "-sg-cache");
+      continue;
+    }
+    if (consume_option_value(arg, {"-sg-memory-gb", "--sg-memory-gb"},
+                             common_value, i)) {
+      parse_sg_memory_budget(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-sg-timeseries", "--sg-timeseries"},
+                             common_value, i)) {
+      sg_timeseries = require_choice(common_value,
+                                     {"auto", "full", "summary-only"},
+                                     "-sg-timeseries");
+      continue;
+    }
+    if (consume_option_value(arg, {"-sg-kernel", "--sg-kernel"},
+                             common_value, i)) {
+      sg_kernel = require_choice(common_value, {"auto", "scalar", "avx2"},
+                                 "-sg-kernel");
+      continue;
+    }
+    if (consume_option_value(arg, {"-sg-cutoff", "--sg-cutoff"},
+                             common_value, i)) {
+      parse_sg_cutoff(common_value);
+      continue;
+    }
+    if ((arg == "-low-memory" || arg == "--low-memory") && i + 1 < argc) {
+      const std::string next = string(argv[i + 1]);
+      const std::string next_lc = lowercase_copy(next);
+      if (next_lc == "true" || next_lc == "false" || next_lc == "1" ||
+          next_lc == "0" || next_lc == "yes" || next_lc == "no" ||
+          next_lc == "on" || next_lc == "off") {
+        low_memory = parse_bool_equals(next, "-low-memory");
+        ++i;
+        continue;
+      }
+    }
+    if (consume_bool_option(arg, {"-low-memory", "--low-memory"},
+                            low_memory)) {
+      continue;
+    }
+    if (consume_option_value(arg, {"-network-mode", "--network-mode"},
+                             common_value, i)) {
+      network_mode =
+          require_choice(common_value, {"auto", "dense", "sparse"},
+                         "-network-mode");
+      continue;
+    }
+    if (consume_option_value(arg, {"-network-sparse-cut",
+                                   "--network-sparse-cut"},
+                             common_value, i)) {
+      network_sparse_cut = stod(common_value);
+      if (network_sparse_cut <= 0.0) {
+        TitanUI::print_error("-network-sparse-cut must be positive.");
+        exit(EXIT_FAILURE);
+      }
+      continue;
+    }
+    if (consume_option_value(arg, {"-network-sparse-k", "--network-sparse-k"},
+                             common_value, i)) {
+      network_sparse_k = stoi(common_value);
+      if (network_sparse_k < 0) {
+        TitanUI::print_error("-network-sparse-k must be >= 0.");
+        exit(EXIT_FAILURE);
+      }
+      continue;
+    }
+    if (consume_option_value(arg, {"-network-cache-precision",
+                                   "--network-cache-precision"},
+                             common_value, i)) {
+      network_cache_precision =
+          require_choice(common_value, {"auto", "fp32", "fp64"},
+                         "-network-cache-precision");
+      continue;
+    }
+    if (consume_option_value(arg, {"-tda-max-points", "--tda-max-points"},
+                             common_value, i)) {
+      tda_max_points = static_cast<size_t>(stoull(common_value));
+      continue;
     }
 
     if (arg == "-gbsa") {
@@ -200,6 +551,88 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (arg == "-lj") {
       lj.flag_lj = true;
+    }
+    if (arg == "-hbk" || arg == "--hbk") {
+      hbk.flag_hbk = true;
+    }
+    if (arg.rfind("-hbk-kind=", 0) == 0 ||
+        arg.rfind("--hbk-kind=", 0) == 0) {
+      hbk.flag_hbk = true;
+      hbk.hbk_kinds.push_back(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-hbk-kind" || arg == "--hbk-kind") && i + 1 < argc) {
+      hbk.flag_hbk = true;
+      hbk.hbk_kinds.push_back(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-hbk-domain=", 0) == 0 ||
+        arg.rfind("--hbk-domain=", 0) == 0) {
+      hbk.flag_hbk = true;
+      parse_hbk_domain(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-hbk-domain" || arg == "--hbk-domain") && i + 1 < argc) {
+      hbk.flag_hbk = true;
+      parse_hbk_domain(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-hbk-maxlag=", 0) == 0 ||
+        arg.rfind("--hbk-maxlag=", 0) == 0) {
+      hbk.flag_hbk = true;
+      hbk.hbk_maxlag = stoi(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-hbk-maxlag" || arg == "--hbk-maxlag") && i + 1 < argc) {
+      hbk.flag_hbk = true;
+      hbk.hbk_maxlag = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-hbk-hbond-cutoff=", 0) == 0 ||
+        arg.rfind("--hbk-hbond-cutoff=", 0) == 0) {
+      hbk.flag_hbk = true;
+      hbk.hbk_hbond_cutoff = stod(arg.substr(arg.find('=') + 1));
+      hbk.hbk_hbond_cutoff_explicit = true;
+    }
+    if ((arg == "-hbk-hbond-cutoff" || arg == "--hbk-hbond-cutoff") &&
+        i + 1 < argc) {
+      hbk.flag_hbk = true;
+      hbk.hbk_hbond_cutoff = stod(string(argv[i + 1]));
+      hbk.hbk_hbond_cutoff_explicit = true;
+      ++i;
+    }
+    if (arg.rfind("-hbk-angle=", 0) == 0 ||
+        arg.rfind("--hbk-angle=", 0) == 0) {
+      hbk.flag_hbk = true;
+      hbk.hbk_angle_deg = stod(arg.substr(arg.find('=') + 1));
+      hbk.hbk_angle_explicit = true;
+    }
+    if ((arg == "-hbk-angle" || arg == "--hbk-angle") && i + 1 < argc) {
+      hbk.flag_hbk = true;
+      hbk.hbk_angle_deg = stod(string(argv[i + 1]));
+      hbk.hbk_angle_explicit = true;
+      ++i;
+    }
+    if (arg.rfind("-hbk-salt-cutoff=", 0) == 0 ||
+        arg.rfind("--hbk-salt-cutoff=", 0) == 0) {
+      hbk.flag_hbk = true;
+      hbk.hbk_salt_cutoff = stod(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-hbk-salt-cutoff" || arg == "--hbk-salt-cutoff") &&
+        i + 1 < argc) {
+      hbk.flag_hbk = true;
+      hbk.hbk_salt_cutoff = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-hbk-water-cutoff=", 0) == 0 ||
+        arg.rfind("--hbk-water-cutoff=", 0) == 0) {
+      hbk.flag_hbk = true;
+      hbk.hbk_water_cutoff = stod(arg.substr(arg.find('=') + 1));
+      hbk.hbk_water_cutoff_explicit = true;
+    }
+    if ((arg == "-hbk-water-cutoff" || arg == "--hbk-water-cutoff") &&
+        i + 1 < argc) {
+      hbk.flag_hbk = true;
+      hbk.hbk_water_cutoff = stod(string(argv[i + 1]));
+      hbk.hbk_water_cutoff_explicit = true;
+      ++i;
     }
     if (arg.rfind("-lj-cut=", 0) == 0 ||
         arg.rfind("--lj-cut=", 0) == 0) {
@@ -262,6 +695,230 @@ int arguments::parse_arguments(int argc, char **argv) {
       lj.lj_crystal_tol = stod(string(argv[i + 1]));
       ++i;
     }
+    if (arg == "-sq" || arg == "--sq") {
+      sq.flag_sq = true;
+    }
+    if (arg == "-corr-knn" || arg == "--corr-knn") {
+      corr_knn.flag_corr_knn = true;
+      flag_network = true;
+    }
+    if (arg.rfind("-sq-channel=", 0) == 0 ||
+        arg.rfind("--sq-channel=", 0) == 0) {
+      sq.sq_channels.push_back(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-sq-channel" || arg == "--sq-channel") && i + 1 < argc) {
+      sq.sq_channels.push_back(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-sq-rdf-bin=", 0) == 0 ||
+        arg.rfind("--sq-rdf-bin=", 0) == 0) {
+      sq.sq_rdf_bin = stod(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-sq-rdf-bin" || arg == "--sq-rdf-bin") && i + 1 < argc) {
+      sq.sq_rdf_bin = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-sq-rdf-max=", 0) == 0 ||
+        arg.rfind("--sq-rdf-max=", 0) == 0) {
+      parse_sq_auto_or_value(arg.substr(arg.find('=') + 1), sq.sq_rdf_max,
+                             sq.sq_rdf_max_auto, "-sq-rdf-max");
+    }
+    if ((arg == "-sq-rdf-max" || arg == "--sq-rdf-max") && i + 1 < argc) {
+      parse_sq_auto_or_value(string(argv[i + 1]), sq.sq_rdf_max,
+                             sq.sq_rdf_max_auto, "-sq-rdf-max");
+      ++i;
+    }
+    if (arg.rfind("-sq-q-bin=", 0) == 0 ||
+        arg.rfind("--sq-q-bin=", 0) == 0) {
+      sq.sq_q_bin = stod(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-sq-q-bin" || arg == "--sq-q-bin") && i + 1 < argc) {
+      sq.sq_q_bin = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-sq-q-max=", 0) == 0 ||
+        arg.rfind("--sq-q-max=", 0) == 0) {
+      parse_sq_auto_or_value(arg.substr(arg.find('=') + 1), sq.sq_q_max,
+                             sq.sq_q_max_auto, "-sq-q-max");
+    }
+    if ((arg == "-sq-q-max" || arg == "--sq-q-max") && i + 1 < argc) {
+      parse_sq_auto_or_value(string(argv[i + 1]), sq.sq_q_max,
+                             sq.sq_q_max_auto, "-sq-q-max");
+      ++i;
+    }
+    if (arg.rfind("-corr-knn-k=", 0) == 0 ||
+        arg.rfind("--corr-knn-k=", 0) == 0) {
+      corr_knn.estimator_k = stoi(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-corr-knn-k" || arg == "--corr-knn-k") && i + 1 < argc) {
+      corr_knn.estimator_k = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-corr-knn-tau=", 0) == 0 ||
+        arg.rfind("--corr-knn-tau=", 0) == 0) {
+      corr_knn.tau_lag = stoi(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-corr-knn-tau" || arg == "--corr-knn-tau") && i + 1 < argc) {
+      corr_knn.tau_lag = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-corr-knn-pair-cut=", 0) == 0 ||
+        arg.rfind("--corr-knn-pair-cut=", 0) == 0) {
+      corr_knn.pair_cutoff_ang = stod(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-corr-knn-pair-cut" || arg == "--corr-knn-pair-cut") &&
+        i + 1 < argc) {
+      corr_knn.pair_cutoff_ang = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-corr-knn-pair-topk=", 0) == 0 ||
+        arg.rfind("--corr-knn-pair-topk=", 0) == 0) {
+      corr_knn.pair_topk = stoi(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-corr-knn-pair-topk" || arg == "--corr-knn-pair-topk") &&
+        i + 1 < argc) {
+      corr_knn.pair_topk = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-corr-knn-pair-prior=", 0) == 0 ||
+        arg.rfind("--corr-knn-pair-prior=", 0) == 0) {
+      parse_corr_knn_pair_prior(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-corr-knn-pair-prior" || arg == "--corr-knn-pair-prior") &&
+        i + 1 < argc) {
+      parse_corr_knn_pair_prior(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-corr-knn-pair-contact-cut=", 0) == 0 ||
+        arg.rfind("--corr-knn-pair-contact-cut=", 0) == 0) {
+      corr_knn.pair_contact_cutoff_ang =
+          stod(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-corr-knn-pair-contact-cut" ||
+         arg == "--corr-knn-pair-contact-cut") &&
+        i + 1 < argc) {
+      corr_knn.pair_contact_cutoff_ang = stod(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-corr-knn-prune-window=", 0) == 0 ||
+        arg.rfind("--corr-knn-prune-window=", 0) == 0) {
+      parse_corr_knn_prune_window(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-corr-knn-prune-window" ||
+         arg == "--corr-knn-prune-window") &&
+        i + 1 < argc) {
+      parse_corr_knn_prune_window(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg == "-corr-knn-no-te" || arg == "--corr-knn-no-te") {
+      corr_knn.compute_te = false;
+    }
+    if (arg == "-validation" || arg == "--validation") {
+      enable_validation();
+    }
+    if (arg.rfind("-validation-ck-multiples=", 0) == 0 ||
+        arg.rfind("--validation-ck-multiples=", 0) == 0) {
+      enable_validation();
+      parse_validation_int_list(arg.substr(arg.find('=') + 1),
+                                validation.ck_multiples,
+                                "-validation-ck-multiples");
+    }
+    if ((arg == "-validation-ck-multiples" ||
+         arg == "--validation-ck-multiples") &&
+        i + 1 < argc) {
+      enable_validation();
+      parse_validation_int_list(string(argv[i + 1]), validation.ck_multiples,
+                                "-validation-ck-multiples");
+      ++i;
+    }
+    if (arg.rfind("-validation-vamp-components=", 0) == 0 ||
+        arg.rfind("--validation-vamp-components=", 0) == 0) {
+      enable_validation();
+      parse_validation_int_list(arg.substr(arg.find('=') + 1),
+                                validation.vamp_components,
+                                "-validation-vamp-components");
+    }
+    if ((arg == "-validation-vamp-components" ||
+         arg == "--validation-vamp-components") &&
+        i + 1 < argc) {
+      enable_validation();
+      parse_validation_int_list(string(argv[i + 1]),
+                                validation.vamp_components,
+                                "-validation-vamp-components");
+      ++i;
+    }
+    if (arg.rfind("-validation-vamp-lags=", 0) == 0 ||
+        arg.rfind("--validation-vamp-lags=", 0) == 0) {
+      enable_validation();
+      parse_validation_int_list(arg.substr(arg.find('=') + 1),
+                                validation.vamp_lags,
+                                "-validation-vamp-lags");
+    }
+    if ((arg == "-validation-vamp-lags" ||
+         arg == "--validation-vamp-lags") &&
+        i + 1 < argc) {
+      enable_validation();
+      parse_validation_int_list(string(argv[i + 1]), validation.vamp_lags,
+                                "-validation-vamp-lags");
+      ++i;
+    }
+    if (arg.rfind("-validation-vamp-clusters=", 0) == 0 ||
+        arg.rfind("--validation-vamp-clusters=", 0) == 0) {
+      enable_validation();
+      parse_validation_int_list(arg.substr(arg.find('=') + 1),
+                                validation.vamp_clusters,
+                                "-validation-vamp-clusters");
+    }
+    if ((arg == "-validation-vamp-clusters" ||
+         arg == "--validation-vamp-clusters") &&
+        i + 1 < argc) {
+      enable_validation();
+      parse_validation_int_list(string(argv[i + 1]), validation.vamp_clusters,
+                                "-validation-vamp-clusters");
+      ++i;
+    }
+    if (arg.rfind("-validation-vamp-folds=", 0) == 0 ||
+        arg.rfind("--validation-vamp-folds=", 0) == 0) {
+      enable_validation();
+      validation.vamp_folds = stoi(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-validation-vamp-folds" ||
+         arg == "--validation-vamp-folds") &&
+        i + 1 < argc) {
+      enable_validation();
+      validation.vamp_folds = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg == "-validation-auto-pick" || arg == "--validation-auto-pick") {
+      enable_validation();
+      validation.auto_pick = true;
+    }
+    if (arg.rfind("-validation-bootstrap=", 0) == 0 ||
+        arg.rfind("--validation-bootstrap=", 0) == 0) {
+      enable_validation();
+      validation.bootstrap_samples = stoi(arg.substr(arg.find('=') + 1));
+    }
+    if ((arg == "-validation-bootstrap" ||
+         arg == "--validation-bootstrap") &&
+        i + 1 < argc) {
+      enable_validation();
+      validation.bootstrap_samples = stoi(string(argv[i + 1]));
+      ++i;
+    }
+    if (arg.rfind("-validation-bootstrap-seed=", 0) == 0 ||
+        arg.rfind("--validation-bootstrap-seed=", 0) == 0) {
+      enable_validation();
+      validation.bootstrap_seed =
+          static_cast<unsigned int>(std::stoul(arg.substr(arg.find('=') + 1)));
+    }
+    if ((arg == "-validation-bootstrap-seed" ||
+         arg == "--validation-bootstrap-seed") &&
+        i + 1 < argc) {
+      enable_validation();
+      validation.bootstrap_seed =
+          static_cast<unsigned int>(std::stoul(string(argv[i + 1])));
+      ++i;
+    }
     if (arg.rfind("-dssp-hbond-cutoff=", 0) == 0 ||
         arg.rfind("--dssp-hbond-cutoff=", 0) == 0) {
       dssp.hbond_energy_cutoff = stod(arg.substr(arg.find('=') + 1));
@@ -303,10 +960,22 @@ int arguments::parse_arguments(int argc, char **argv) {
       allostery_tau =
           stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
     }
+    if ((string(argv[i]) == "--allostery-tau" ||
+         string(argv[i]) == "-allostery-tau") &&
+        i + 1 < argc) {
+      allostery_tau = stoi(string(argv[i + 1]));
+      ++i;
+    }
     if (string(argv[i]).find("--allostery-bins=") == 0 ||
         string(argv[i]).find("-allostery-bins=") == 0) {
       allostery_bins =
           stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--allostery-bins" ||
+         string(argv[i]) == "-allostery-bins") &&
+        i + 1 < argc) {
+      allostery_bins = stoi(string(argv[i + 1]));
+      ++i;
     }
     if (string(argv[i]).find("--allostery-knn=") == 0 ||
         string(argv[i]).find("-allostery-knn=") == 0) {
@@ -387,6 +1056,17 @@ int arguments::parse_arguments(int argc, char **argv) {
          string(argv[i]) == "-allostery-estimator") &&
         i + 1 < argc) {
       parse_allostery_estimator(string(argv[i + 1]));
+      ++i;
+    }
+    if (string(argv[i]).find("--allostery-estimator-k=") == 0 ||
+        string(argv[i]).find("-allostery-estimator-k=") == 0) {
+      allostery_estimator_k =
+          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+    }
+    if ((string(argv[i]) == "--allostery-estimator-k" ||
+         string(argv[i]) == "-allostery-estimator-k") &&
+        i + 1 < argc) {
+      allostery_estimator_k = stoi(string(argv[i + 1]));
       ++i;
     }
     if (string(argv[i]).find("--allostery-kde-bandwidth=") == 0 ||
@@ -762,46 +1442,213 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
 
     // --- LLPS flags ---
-    if (string(argv[i]) == "-llps") {
-      llps.flag_llps = true;
+    if (consume_bool_option(arg, {"-llps"}, llps.flag_llps)) {
     }
-    if (string(argv[i]) == "-llps-rcut" && i + 1 < argc) {
-      llps.llps_rcut = stof(argv[i + 1]);
-      ++i;
+    std::string llps_value;
+    if (consume_option_value(arg, {"-llps-rcut"}, llps_value, i)) {
+      llps.llps_rcut = stof(llps_value);
     }
-    if (string(argv[i]) == "-llps-perc" && i + 1 < argc) {
-      llps.llps_perc_thr = stof(argv[i + 1]);
-      ++i;
+    if (consume_option_value(arg, {"-llps-perc"}, llps_value, i)) {
+      llps.llps_perc_thr = stof(llps_value);
     }
-    if (string(argv[i]) == "-llps-maxlag" && i + 1 < argc) {
-      llps.llps_maxlag = stoi(argv[i + 1]);
-      ++i;
+    if (consume_option_value(arg, {"-llps-maxlag"}, llps_value, i)) {
+      llps.llps_maxlag = stoi(llps_value);
     }
-    if (string(argv[i]) == "-llps-dimer-size" && i + 1 < argc) {
-      llps.llps_dimer_size = stoi(argv[i + 1]);
-      ++i;
+    if (consume_option_value(arg, {"-llps-dimer-size"}, llps_value, i)) {
+      llps.llps_dimer_size = stoi(llps_value);
     }
-    if (string(argv[i]) == "-llps-contacts") {
-      llps.llps_contacts = true;
+    if (consume_bool_option(arg, {"-llps-contacts"}, llps.llps_contacts)) {
     }
-    if (string(argv[i]) == "-llps-sticker" && i + 1 < argc) {
-      llps.llps_sticker_beads = string(argv[i + 1]);
-      ++i;
+    if (consume_option_value(arg, {"-llps-sticker"}, llps_value, i)) {
+      llps.llps_sticker_beads = llps_value;
     }
-    if (string(argv[i]) == "-llps-voxel" && i + 1 < argc) {
-      llps.llps_voxel_size = stof(string(argv[i + 1]));
-      ++i;
+    if (consume_option_value(arg, {"-llps-voxel"}, llps_value, i)) {
+      llps.llps_voxel_size = stof(llps_value);
     }
-    if (string(argv[i]) == "-llps-dbscan-eps" && i + 1 < argc) {
-      llps.llps_dbscan_eps = stod(argv[i + 1]);
-      ++i;
+    if (consume_option_value(arg, {"-llps-density", "--llps-density"},
+                             llps_value, i)) {
+      llps.llps_density =
+          require_choice(llps_value, {"auto", "full", "projection", "off"},
+                         "-llps-density");
     }
-    if (string(argv[i]) == "-llps-dbscan-minpts" && i + 1 < argc) {
-      llps.llps_dbscan_minpts = stoi(argv[i + 1]);
-      ++i;
+    if (consume_option_value(arg, {"-llps-kernel", "--llps-kernel"},
+                             llps_value, i)) {
+      llps.llps_kernel =
+          require_choice(llps_value, {"auto", "scalar", "avx2"},
+                         "-llps-kernel");
     }
-    if (string(argv[i]) == "-llps-fuzzy") {
-      llps.llps_fuzzy = true;
+    if (consume_bool_option(arg, {"-llps-dynamics", "--llps-dynamics"},
+                            llps.llps_dynamics)) {
+    }
+    bool llps_detailed_flag = llps.llps_dynamics_detailed;
+    if (consume_bool_option(arg,
+                            {"-llps-dynamics-detailed",
+                             "--llps-dynamics-detailed"},
+                            llps_detailed_flag)) {
+      llps.llps_dynamics_detailed = llps_detailed_flag;
+      if (llps_detailed_flag)
+        llps.llps_dynamics = true;
+    }
+    if (consume_option_value(arg, {"-llps-lineage-overlap",
+                                   "--llps-lineage-overlap"},
+                             llps_value, i)) {
+      llps.llps_dynamics = true;
+      llps.llps_lineage_overlap = stod(llps_value);
+    }
+    if (consume_option_value(arg, {"-llps-prna-rcut", "--llps-prna-rcut"},
+                             llps_value, i)) {
+      llps.llps_dynamics = true;
+      llps.llps_prna_rcut = stof(llps_value);
+    }
+    if (consume_option_value(arg,
+                             {"-llps-msd-fit-start-ns",
+                              "--llps-msd-fit-start-ns"},
+                             llps_value, i)) {
+      llps.llps_dynamics = true;
+      if (llps_value == "auto" || llps_value == "AUTO" || llps_value == "Auto")
+        llps.llps_msd_fit_start_ns = -1.0;
+      else
+        llps.llps_msd_fit_start_ns = stod(llps_value);
+    }
+    if (consume_option_value(arg,
+                             {"-llps-msd-fit-end-ns",
+                              "--llps-msd-fit-end-ns"},
+                             llps_value, i)) {
+      llps.llps_dynamics = true;
+      if (llps_value == "auto" || llps_value == "AUTO" || llps_value == "Auto")
+        llps.llps_msd_fit_end_ns = -1.0;
+      else
+        llps.llps_msd_fit_end_ns = stod(llps_value);
+    }
+    if (consume_option_value(arg,
+                             {"-llps-rna-compaction",
+                              "--llps-rna-compaction"},
+                             llps_value, i)) {
+      llps.llps_rna_compaction =
+          require_choice(llps_value, {"auto", "true", "false", "yes", "no",
+                                      "on", "off", "1", "0"},
+                         "-llps-rna-compaction");
+      if (llps.llps_rna_compaction == "true" ||
+          llps.llps_rna_compaction == "yes" ||
+          llps.llps_rna_compaction == "on" ||
+          llps.llps_rna_compaction == "1")
+          llps.llps_dynamics = true;
+    }
+    if (consume_option_value(arg,
+                             {"-llps-rna-information",
+                              "--llps-rna-information"},
+                             llps_value, i)) {
+      llps.llps_rna_information =
+          require_choice(llps_value, {"auto", "true", "false", "yes", "no",
+                                      "on", "off", "1", "0"},
+                         "-llps-rna-information");
+    }
+    if (consume_option_value(arg,
+                             {"-llps-rna-topology",
+                              "--llps-rna-topology"},
+                             llps_value, i)) {
+      llps.llps_rna_topology =
+          require_choice(llps_value, {"auto", "true", "false", "yes", "no",
+                                      "on", "off", "1", "0"},
+                         "-llps-rna-topology");
+      if (llps.llps_rna_topology == "true" ||
+          llps.llps_rna_topology == "yes" ||
+          llps.llps_rna_topology == "on" ||
+          llps.llps_rna_topology == "1")
+        llps.llps_dynamics = true;
+    }
+    bool llps_rna_topology_detailed_flag = llps.llps_rna_topology_detailed;
+    if (consume_bool_option(arg,
+                            {"-llps-rna-topology-detailed",
+                             "--llps-rna-topology-detailed"},
+                            llps_rna_topology_detailed_flag)) {
+      llps.llps_rna_topology_detailed = llps_rna_topology_detailed_flag;
+      if (llps_rna_topology_detailed_flag) {
+        llps.llps_dynamics = true;
+        if (llps.llps_rna_topology == "auto")
+          llps.llps_rna_topology = "true";
+      }
+    }
+    if (consume_option_value(arg,
+                             {"-llps-energy-correlation",
+                              "--llps-energy-correlation"},
+                             llps_value, i)) {
+      llps.llps_energy_correlation =
+          require_choice(llps_value, {"auto", "true", "false", "yes", "no",
+                                      "on", "off", "1", "0"},
+                         "-llps-energy-correlation");
+      if (llps.llps_energy_correlation == "true" ||
+          llps.llps_energy_correlation == "yes" ||
+          llps.llps_energy_correlation == "on" ||
+          llps.llps_energy_correlation == "1")
+        llps.llps_dynamics = true;
+    }
+    bool llps_energy_detailed_flag = llps.llps_energy_detailed;
+    if (consume_bool_option(arg,
+                            {"-llps-energy-detailed",
+                             "--llps-energy-detailed"},
+                            llps_energy_detailed_flag)) {
+      llps.llps_energy_detailed = llps_energy_detailed_flag;
+      if (llps_energy_detailed_flag) {
+        llps.llps_dynamics = true;
+        if (llps.llps_energy_correlation == "auto")
+          llps.llps_energy_correlation = "true";
+      }
+    }
+    if (consume_option_value(arg,
+                             {"-llps-rna-intra-rcut",
+                              "--llps-rna-intra-rcut"},
+                             llps_value, i)) {
+      llps.llps_rna_intra_rcut = stof(llps_value);
+    }
+    if (consume_option_value(arg,
+                             {"-llps-rna-longrange-min",
+                              "--llps-rna-longrange-min"},
+                             llps_value, i)) {
+      llps.llps_rna_longrange_min = std::max(0, stoi(llps_value));
+    }
+    if (consume_option_value(arg,
+                             {"-llps-rna-bridge-geom-min",
+                              "--llps-rna-bridge-geom-min"},
+                             llps_value, i)) {
+      if (llps_value == "auto" || llps_value == "AUTO" || llps_value == "Auto")
+        llps.llps_rna_bridge_geom_min = -1.0f;
+      else
+        llps.llps_rna_bridge_geom_min = stof(llps_value);
+    }
+    if (consume_option_value(arg,
+                             {"-llps-rna-patch-gap-max",
+                              "--llps-rna-patch-gap-max"},
+                             llps_value, i)) {
+      llps.llps_rna_patch_gap_max = std::max(0, stoi(llps_value));
+    }
+    bool llps_rna_clamp_require_loop_flag =
+        llps.llps_rna_clamp_require_loop;
+    if (consume_bool_option(arg,
+                            {"-llps-rna-clamp-require-loop",
+                             "--llps-rna-clamp-require-loop"},
+                            llps_rna_clamp_require_loop_flag)) {
+      llps.llps_rna_clamp_require_loop = llps_rna_clamp_require_loop_flag;
+    }
+    if (consume_option_value(arg,
+                             {"-llps-rna-info-rg-bins",
+                              "--llps-rna-info-rg-bins"},
+                             llps_value, i)) {
+      llps.llps_rna_info_rg_bins = std::max(1, stoi(llps_value));
+    }
+    if (consume_option_value(arg,
+                             {"-llps-rna-info-longrange-bins",
+                              "--llps-rna-info-longrange-bins"},
+                             llps_value, i)) {
+      llps.llps_rna_info_longrange_bins = std::max(1, stoi(llps_value));
+    }
+    if (consume_option_value(arg, {"-llps-dbscan-eps"}, llps_value, i)) {
+      llps.llps_dbscan_eps = stod(llps_value);
+    }
+    if (consume_option_value(arg, {"-llps-dbscan-minpts"}, llps_value, i)) {
+      llps.llps_dbscan_minpts = stoi(llps_value);
+    }
+    if (consume_bool_option(arg, {"-llps-fuzzy"}, llps.llps_fuzzy)) {
     }
     // --- GIST Water Thermodynamics flags ---
     if (string(argv[i]) == "-gist") {
@@ -1243,9 +2090,28 @@ int arguments::parse_arguments(int argc, char **argv) {
       if (group_1 == group_2)
         self_int = true;
     }
-    if (string(argv[i]) == "-sg" && i + 1 < argc) {
-      string spec = string(argv[i + 1]);
-      int consumed_tokens = 1;
+    const string current_arg = string(argv[i]);
+    if (current_arg == "-sg" || current_arg == "--sg" ||
+        current_arg.rfind("-sg=", 0) == 0 ||
+        current_arg.rfind("--sg=", 0) == 0) {
+      string spec;
+      int consumed_tokens = 0;
+      if (current_arg == "-sg" || current_arg == "--sg") {
+        if (i + 1 < argc) {
+          spec = string(argv[i + 1]);
+          consumed_tokens = 1;
+        }
+      } else {
+        const auto eq_pos = current_arg.find('=');
+        spec = current_arg.substr(eq_pos + 1);
+        if (spec.empty() && i + 1 < argc) {
+          const string next_token = string(argv[i + 1]);
+          if (!next_token.empty() && next_token[0] != '-') {
+            spec = next_token;
+            consumed_tokens = 1;
+          }
+        }
+      }
       while (i + consumed_tokens + 1 < argc) {
         const string next_token = string(argv[i + consumed_tokens + 1]);
         if (!next_token.empty() && next_token[0] == '-' && next_token != "-" &&
@@ -1294,7 +2160,7 @@ int arguments::parse_arguments(int argc, char **argv) {
         emap_type = string(argv[i + 1]);
     }
     if (string(argv[i]) == "-emap-level" && i + 1 < argc) {
-      if (string(argv[1 + 1]) == "all" || string(argv[i + 1]) == "per-res")
+      if (string(argv[i + 1]) == "all" || string(argv[i + 1]) == "per-res")
         emap_level = string(argv[i + 1]);
     }
     if (string(argv[i]) == "-fmap") {
@@ -1306,7 +2172,7 @@ int arguments::parse_arguments(int argc, char **argv) {
         fmap_type = string(argv[i + 1]);
     }
     if (string(argv[i]) == "-fmap-level" && i + 1 < argc) {
-      if (string(argv[1 + 1]) == "all" || string(argv[i + 1]) == "per-res")
+      if (string(argv[i + 1]) == "all" || string(argv[i + 1]) == "per-res")
         fmap_level = string(argv[i + 1]);
     }
     if (string(argv[i]) == "-nt" && i + 1 < argc) {
@@ -1598,6 +2464,17 @@ int arguments::parse_arguments(int argc, char **argv) {
         flag_cal_contact = false;
       else if (val == "yes")
         flag_cal_contact = true;
+      ++i;
+    }
+    if (string(argv[i]).find("-eq-weight-source=") == 0 ||
+        string(argv[i]).find("--eq-weight-source=") == 0) {
+      eq_weight_source =
+          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    }
+    if ((string(argv[i]) == "-eq-weight-source" ||
+         string(argv[i]) == "--eq-weight-source") &&
+        i + 1 < argc) {
+      eq_weight_source = string(argv[i + 1]);
       ++i;
     }
     // --- DHAM (Dynamic Histogram Analysis Method) flags ---

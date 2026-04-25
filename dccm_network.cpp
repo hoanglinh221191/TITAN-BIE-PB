@@ -1,7 +1,9 @@
 #include "dccm_network.h"
 #include "titan_alignment.h"
+#include "titan_corr_knn_shared.h"
 #include "titan_executor.h"
 #include "titan_graph_community.h"
+#include "memory_utils.h"
 #include "titan_neighbor_grid.h"
 #include "titan_simd_dispatch.h"
 #include "titan_sparse_graph.h"
@@ -18,6 +20,7 @@
 #include <queue>
 #include <sstream>
 #include <thread>
+#include <unordered_set>
 
 namespace {
 
@@ -94,6 +97,129 @@ std::string build_network_node_id(const std::vector<std::string> &ca_resname,
                                   size_t index) {
   return ca_resname[index] + std::to_string(ca_resnrs[index]) + "_" +
          ca_chain[index];
+}
+
+std::string format_gib(long double bytes) {
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(2)
+      << static_cast<double>(bytes / (1024.0L * 1024.0L * 1024.0L)) << " GiB";
+  return oss.str();
+}
+
+long double resolve_memory_budget_bytes(
+    const DCCMNetwork::NetworkMemoryConfig &cfg) {
+  if (cfg.mem_budget_gb > 0.0) {
+    return static_cast<long double>(cfg.mem_budget_gb) * 1024.0L * 1024.0L *
+           1024.0L;
+  }
+
+  const size_t available = get_available_ram();
+  const size_t total = get_total_ram();
+  const long double fraction = cfg.low_memory ? 0.45L : 0.60L;
+  if (available > 0)
+    return static_cast<long double>(available) * fraction;
+  if (total > 0)
+    return static_cast<long double>(total) * (cfg.low_memory ? 0.25L : 0.35L);
+  return 2.0L * 1024.0L * 1024.0L * 1024.0L;
+}
+
+void append_memory_report(const info &info_output, const std::string &module,
+                          const std::string &mode, size_t nodes,
+                          size_t frames, long double estimated_bytes,
+                          long double budget_bytes, long double pairs,
+                          const std::string &reason) {
+  const std::string filename = info_output.get_memory_report_filename();
+  const bool new_file = !static_cast<bool>(std::ifstream(filename));
+  std::ofstream out(filename, std::ios::app);
+  if (!out.is_open())
+    return;
+  if (new_file) {
+    out << "Module,Mode,Nodes,Frames,EstimatedExtraGiB,BudgetGiB,Pairs,Reason\n";
+  }
+  const long double gib = 1024.0L * 1024.0L * 1024.0L;
+  out << module << "," << mode << "," << nodes << "," << frames << ","
+      << std::fixed << std::setprecision(3)
+      << static_cast<double>(estimated_bytes / gib) << ","
+      << static_cast<double>(budget_bytes / gib) << ","
+      << static_cast<unsigned long long>(pairs) << "," << reason << "\n";
+}
+
+std::pair<size_t, size_t> upper_triangle_pair_from_index(size_t linear,
+                                                        size_t n) {
+  long double lo = 0.0L;
+  long double hi = static_cast<long double>(n);
+  const long double target = static_cast<long double>(linear);
+  while (hi - lo > 1.0L) {
+    const long double mid = std::floor((lo + hi) * 0.5L);
+    const long double before = mid * static_cast<long double>(n) -
+                               (mid * (mid - 1.0L)) * 0.5L;
+    if (before <= target)
+      lo = mid;
+    else
+      hi = mid;
+  }
+  size_t i = static_cast<size_t>(lo);
+  size_t before_i = i * n - (i * (i - 1)) / 2;
+  while (i + 1 < n && before_i + (n - i) <= linear) {
+    before_i += n - i;
+    ++i;
+  }
+  while (i > 0 && before_i > linear) {
+    --i;
+    before_i -= n - i;
+  }
+  return {i, i + (linear - before_i)};
+}
+
+bool should_skip_dense_dccm_postproc(size_t num_nodes, size_t num_frames,
+                                     const DCCMNetwork::NetworkMemoryConfig &cfg,
+                                     long double &estimated_extra_bytes,
+                                     long double &budget_bytes,
+                                     long double &pair_count) {
+  const size_t frame_stride =
+      ((num_frames + FlatAlignedMatrix::kSimdLaneWidth - 1) /
+       FlatAlignedMatrix::kSimdLaneWidth) *
+      FlatAlignedMatrix::kSimdLaneWidth;
+  const size_t node_stride =
+      ((num_nodes + FlatAlignedMatrix::kSimdLaneWidth - 1) /
+       FlatAlignedMatrix::kSimdLaneWidth) *
+      FlatAlignedMatrix::kSimdLaneWidth;
+  pair_count = static_cast<long double>(num_nodes) *
+               static_cast<long double>(num_nodes + 1) * 0.5L;
+  const long double dev_bytes =
+      3.0L * static_cast<long double>(num_nodes) *
+      static_cast<long double>(frame_stride) * sizeof(double);
+  const long double cov_bytes = static_cast<long double>(num_nodes) *
+                                static_cast<long double>(node_stride) *
+                                sizeof(double);
+  constexpr long double safety_bytes =
+      512.0L * 1024.0L * 1024.0L; // Eigen scratch, CSV buffers, graph edges.
+  estimated_extra_bytes = dev_bytes + cov_bytes + safety_bytes;
+
+  budget_bytes = resolve_memory_budget_bytes(cfg);
+
+  constexpr long double max_dense_pairs = 50'000'000.0L;
+  return estimated_extra_bytes > budget_bytes || pair_count > max_dense_pairs;
+}
+
+void write_header_only_network_outputs(const std::vector<std::string> &ca_resname,
+                                       const std::vector<int> &ca_resnrs,
+                                       const std::vector<std::string> &ca_chain,
+                                       const std::vector<int> &ca_is_lig) {
+  {
+    std::ofstream edges_out("network_edges.csv");
+    edges_out << "Source,Target,Correlation\n";
+  }
+  {
+    std::ofstream nodes_out("network_nodes.csv");
+    nodes_out << "Id,Label,Type,AtomName\n";
+    for (size_t i = 0; i < ca_resname.size(); ++i) {
+      nodes_out << build_network_node_id(ca_resname, ca_resnrs, ca_chain, i)
+                << "," << ca_resnrs[i] << ","
+                << (ca_is_lig[i] ? "Ligand" : "Receptor") << ","
+                << ca_resname[i] << "\n";
+    }
+  }
 }
 
 struct ResidueKey {
@@ -420,6 +546,38 @@ void export_community_pdbs(
       participation_bfactors.ligand);
 }
 
+} // namespace
+
+void DCCMNetwork::export_community_outputs_from_graph(
+    const titan_sparse::WeightedCSRGraph<double> &graph,
+    const std::vector<int> &membership, const info &info_output) {
+  last_community_result_ = CommunityResult{};
+  if (graph.empty() || membership.size() != static_cast<std::size_t>(graph.node_count())) {
+    write_empty_community_outputs(info_output);
+    return;
+  }
+
+  titan_graph_community::LouvainResult result;
+  result.membership = membership;
+  result.stats = titan_graph_community::summarize_partition(graph, membership);
+  last_community_result_.membership = result.membership;
+  last_community_result_.community_sizes = result.stats.community_sizes;
+  last_community_result_.modularity = result.stats.modularity;
+  last_community_result_.has_result = true;
+
+  export_community_outputs(graph, result, ca_resname, ca_resnrs, ca_chain,
+                           ca_is_lig, info_output);
+  if (has_first_snapshot_frame_) {
+    export_community_pdbs(graph, result, ca_indices, ca_resnrs, ca_is_lig,
+                          ca_chain, first_pro_frame_, first_pro_info_,
+                          first_lig_frame_, first_lig_info_, info_output);
+  } else {
+    TitanUI::print_warning("Community: first snapshot was not cached, "
+                           "skipping B-factor PDB export.");
+  }
+}
+
+namespace {
 inline size_t upper_triangle_pair_index(size_t i, size_t j,
                                         size_t node_count) noexcept {
   return i * (2 * node_count - i - 1) / 2 + (j - i - 1);
@@ -508,6 +666,140 @@ std::vector<std::pair<size_t, size_t>> build_lspmd_candidate_pairs(
   return pairs;
 }
 
+std::uint64_t pack_sparse_pair_key(size_t i, size_t j) noexcept {
+  const std::uint64_t a = static_cast<std::uint64_t>(std::min(i, j));
+  const std::uint64_t b = static_cast<std::uint64_t>(std::max(i, j));
+  return (a << 32) | b;
+}
+
+std::pair<size_t, size_t> unpack_sparse_pair_key(std::uint64_t key) noexcept {
+  return {static_cast<size_t>(key >> 32),
+          static_cast<size_t>(key & 0xffffffffULL)};
+}
+
+std::vector<std::pair<size_t, size_t>> build_sparse_spatial_candidate_pairs(
+    const DCCMNetwork::TrajectoryRows &traj_x,
+    const DCCMNetwork::TrajectoryRows &traj_y,
+    const DCCMNetwork::TrajectoryRows &traj_z, size_t num_ca,
+    size_t total_frames, double cutoff_ang, int top_k) {
+  struct Neighbor {
+    float dist2{0.0f};
+    size_t partner{0};
+  };
+
+  std::vector<std::pair<size_t, size_t>> pairs;
+  if (num_ca < 2 || total_frames == 0 || cutoff_ang <= 0.0 ||
+      traj_x.size() < total_frames || traj_y.size() < total_frames ||
+      traj_z.size() < total_frames) {
+    return pairs;
+  }
+  if (num_ca > static_cast<size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    TitanUI::print_warning(
+        "Sparse network pair key limit exceeded; outputs contain headers only.");
+    return pairs;
+  }
+
+  std::vector<double> x_mean(num_ca, 0.0), y_mean(num_ca, 0.0),
+      z_mean(num_ca, 0.0);
+  for (size_t f = 0; f < total_frames; ++f) {
+    if (traj_x[f].size() < num_ca || traj_y[f].size() < num_ca ||
+        traj_z[f].size() < num_ca) {
+      return pairs;
+    }
+    for (size_t a = 0; a < num_ca; ++a) {
+      x_mean[a] += traj_x[f][a];
+      y_mean[a] += traj_y[f][a];
+      z_mean[a] += traj_z[f][a];
+    }
+  }
+  const double inv_frames = 1.0 / static_cast<double>(total_frames);
+  for (size_t a = 0; a < num_ca; ++a) {
+    x_mean[a] *= inv_frames;
+    y_mean[a] *= inv_frames;
+    z_mean[a] *= inv_frames;
+  }
+  const auto [xmin, xmax] =
+      std::minmax_element(x_mean.begin(), x_mean.end());
+  const auto [ymin, ymax] =
+      std::minmax_element(y_mean.begin(), y_mean.end());
+  const auto [zmin, zmax] =
+      std::minmax_element(z_mean.begin(), z_mean.end());
+
+  titan_neighbor::OrthorhombicGridSpec spec;
+  spec.cutoff = cutoff_ang;
+  spec.shift_x = -(*xmin) + cutoff_ang;
+  spec.shift_y = -(*ymin) + cutoff_ang;
+  spec.shift_z = -(*zmin) + cutoff_ang;
+  spec.len_x = (*xmax - *xmin) + 2.0 * cutoff_ang;
+  spec.len_y = (*ymax - *ymin) + 2.0 * cutoff_ang;
+  spec.len_z = (*zmax - *zmin) + 2.0 * cutoff_ang;
+  spec.periodic = false;
+
+  const double cutoff2 = cutoff_ang * cutoff_ang;
+  std::vector<std::uint64_t> keys;
+  keys.reserve(num_ca * static_cast<size_t>(std::max(4, top_k)));
+  std::vector<std::vector<Neighbor>> ranked_neighbors;
+  const bool use_knn = top_k > 0;
+  if (use_knn)
+    ranked_neighbors.resize(num_ca);
+
+  titan_neighbor::HalfShellGrid neighbor_grid;
+  neighbor_grid.for_each_pair(
+      num_ca, spec,
+      [&](std::size_t atom_index, double &x, double &y, double &z) {
+        x = x_mean[atom_index];
+        y = y_mean[atom_index];
+        z = z_mean[atom_index];
+      },
+      [&](std::size_t atom_index) { return atom_index < num_ca; },
+      [&](std::size_t lhs, std::size_t rhs) {
+        const double dx = x_mean[lhs] - x_mean[rhs];
+        const double dy = y_mean[lhs] - y_mean[rhs];
+        const double dz = z_mean[lhs] - z_mean[rhs];
+        const double dist2 = dx * dx + dy * dy + dz * dz;
+        if (dist2 > cutoff2)
+          return;
+        const std::uint64_t key = pack_sparse_pair_key(lhs, rhs);
+        keys.push_back(key);
+        if (use_knn) {
+          const float d2 = static_cast<float>(dist2);
+          ranked_neighbors[lhs].push_back(Neighbor{d2, rhs});
+          ranked_neighbors[rhs].push_back(Neighbor{d2, lhs});
+        }
+      });
+
+  if (use_knn) {
+    auto better = [](const Neighbor &lhs, const Neighbor &rhs) {
+      if (lhs.dist2 != rhs.dist2)
+        return lhs.dist2 < rhs.dist2;
+      return lhs.partner < rhs.partner;
+    };
+    const size_t keep_k =
+        std::min<size_t>(static_cast<size_t>(top_k), num_ca - 1);
+    for (size_t i = 0; i < num_ca; ++i) {
+      auto &neighbors = ranked_neighbors[i];
+      if (neighbors.empty())
+        continue;
+      if (neighbors.size() > keep_k) {
+        std::nth_element(neighbors.begin(),
+                         neighbors.begin() +
+                             static_cast<std::ptrdiff_t>(keep_k),
+                         neighbors.end(), better);
+        neighbors.resize(keep_k);
+      }
+      for (const auto &neighbor : neighbors)
+        keys.push_back(pack_sparse_pair_key(i, neighbor.partner));
+    }
+  }
+
+  std::sort(keys.begin(), keys.end());
+  keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+  pairs.reserve(keys.size());
+  for (const std::uint64_t key : keys)
+    pairs.push_back(unpack_sparse_pair_key(key));
+  return pairs;
+}
+
 std::vector<std::pair<size_t, size_t>> build_allostery_candidate_pairs(
     const DCCMNetwork::TrajectoryRows &traj_x,
     const DCCMNetwork::TrajectoryRows &traj_y,
@@ -524,6 +816,28 @@ std::vector<std::pair<size_t, size_t>> build_allostery_candidate_pairs(
 
   const size_t dense_pair_count =
       num_ca < 2 ? 0 : num_ca * (num_ca - 1) / 2;
+  constexpr size_t kSafeDensePairVectorLimit = 50'000'000;
+  if (cfg.force_sparse_candidates ||
+      (dense_pair_count > kSafeDensePairVectorLimit &&
+       (cfg.cutoff_ang > 0.0 || cfg.knn > 0))) {
+    const double cutoff = cfg.cutoff_ang > 0.0 ? cfg.cutoff_ang : 30.0;
+    const int k = cfg.knn > 0 ? cfg.knn : 24;
+    if (!cfg.force_sparse_candidates) {
+      TitanUI::print_warning(
+          "Allostery candidate pruning switched to memory-safe frame-0 "
+          "spatial sparse mode; dense pair-vote buffers would exceed budget.");
+    }
+    return build_sparse_spatial_candidate_pairs(traj_x, traj_y, traj_z, num_ca,
+                                                total_frames, cutoff, k);
+  }
+  if (dense_pair_count > kSafeDensePairVectorLimit && cfg.cutoff_ang <= 0.0 &&
+      cfg.knn <= 0) {
+    TitanUI::print_warning(
+        "Allostery dense all-pairs request exceeds the safe pair-vector "
+        "limit; using sparse defaults (30 A + top-24) instead.");
+    return build_sparse_spatial_candidate_pairs(traj_x, traj_y, traj_z, num_ca,
+                                                total_frames, 30.0, 24);
+  }
   if (cfg.cutoff_ang <= 0.0 && cfg.knn <= 0)
     return build_dense_upper_triangle_pairs(num_ca);
 
@@ -864,7 +1178,9 @@ size_t calculate_allostery_information_flat_impl(
     TitanExecutor &executor, const DCCMNetwork::AllosteryConfig &cfg, int B,
     const std::string &gc_filename, const std::string &mi_filename,
     const std::string &te_filename,
-    size_t *dense_pair_count_out = nullptr) {
+    size_t *dense_pair_count_out = nullptr,
+    std::vector<DCCMNetwork::StoredEdge> *gc_edges_out = nullptr,
+    std::vector<DCCMNetwork::StoredEdge> *te_edges_out = nullptr) {
   if (total_frames == 0 || node_labels.empty())
     return 0;
   const size_t num_ca = node_labels.size();
@@ -894,9 +1210,15 @@ size_t calculate_allostery_information_flat_impl(
   const size_t dense_pair_count = num_ca * (num_ca - 1) / 2;
   if (dense_pair_count_out != nullptr)
     *dense_pair_count_out = dense_pair_count;
-  const auto pairs =
-      build_allostery_candidate_pairs(traj_x, traj_y, traj_z, anchor_x, anchor_y,
-                                      anchor_z, num_ca, total_frames, cfg);
+  titan_corr_knn::PairPruningConfig pruning_cfg;
+  pruning_cfg.pair_topk = cfg.knn;
+  pruning_cfg.pair_cutoff_ang = cfg.cutoff_ang;
+  pruning_cfg.use_avg_cutoff = cfg.use_avg_cutoff;
+  pruning_cfg.pair_use_contact_prior = cfg.knn_use_contact_prior;
+  pruning_cfg.pair_contact_cutoff_ang = cfg.knn_contact_cutoff;
+  const auto pairs = titan_corr_knn::build_candidate_pairs(
+      traj_x, traj_y, traj_z, anchor_x, anchor_y, anchor_z, num_ca,
+      total_frames, pruning_cfg, dense_pair_count_out);
   const size_t n_pairs = pairs.size();
   std::ofstream gc_out(gc_filename);
   gc_out << "Source,Target,GC\n";
@@ -904,6 +1226,10 @@ size_t calculate_allostery_information_flat_impl(
   mi_out << "Source,Target,MI\n";
   std::ofstream te_out(te_filename);
   te_out << "Source,Target,Net_TE\n";
+  if (gc_edges_out != nullptr)
+    gc_edges_out->clear();
+  if (te_edges_out != nullptr)
+    te_edges_out->clear();
   if (n_pairs == 0)
     return 0;
 
@@ -1154,13 +1480,17 @@ size_t calculate_allostery_information_flat_impl(
   mi_out.close();
 
   for (size_t p = 0; p < n_pairs; ++p) {
-    if (gc_vals[p] > 0.35) {
-      const size_t i = pairs[p].first;
-      const size_t j = pairs[p].second;
-      gc_out << node_labels[i] << "," << node_labels[j] << "," << gc_vals[p]
-             << "\n";
+      if (gc_vals[p] > 0.35) {
+        const size_t i = pairs[p].first;
+        const size_t j = pairs[p].second;
+        gc_out << node_labels[i] << "," << node_labels[j] << "," << gc_vals[p]
+               << "\n";
+        if (gc_edges_out != nullptr) {
+          gc_edges_out->push_back({static_cast<int>(i), static_cast<int>(j),
+                                   gc_vals[p], gc_vals[p]});
+        }
+      }
     }
-  }
   gc_out.close();
 
   if (cfg.compute_te) {
@@ -1172,6 +1502,11 @@ size_t calculate_allostery_information_flat_impl(
           std::swap(drv, tgt);
         te_out << node_labels[drv] << "," << node_labels[tgt] << ","
                << std::abs(net_te_vals[p]) << "\n";
+        if (te_edges_out != nullptr) {
+          te_edges_out->push_back({static_cast<int>(drv), static_cast<int>(tgt),
+                                   std::abs(net_te_vals[p]),
+                                   std::abs(net_te_vals[p])});
+        }
       }
     }
   }
@@ -1240,13 +1575,27 @@ void DCCMNetwork::init(const Multi_MOL &pro_in, const Multi_MOL &lig,
   has_first_snapshot_frame_ = false;
   total_frames = 0;
   kabsch_aligned_ = false;
-  community_cfg_.enabled = args.community.flag_community;
+  dense_postproc_skipped_due_memory_ = false;
+  network_sparse_mode_active_ = false;
+  last_network_graph_edges_.clear();
+  last_allostery_gc_edges_.clear();
+  last_allostery_te_edges_.clear();
+  network_memory_cfg_.mode = args.network_mode;
+  network_memory_cfg_.mem_budget_gb = args.mem_budget_gb;
+  network_memory_cfg_.low_memory = args.low_memory;
+  network_memory_cfg_.sparse_cut_ang = args.network_sparse_cut;
+  network_memory_cfg_.sparse_k = args.network_sparse_k;
+  network_memory_cfg_.cache_precision = args.network_cache_precision;
+  community_cfg_.enabled = args.community.flag_community && !args.graph.flag_graph;
   community_cfg_.method = args.community.method;
   last_community_result_ = CommunityResult{};
   store_full_traj_ =
       args.flag_network_explicit || args.flag_pca || args.flag_allostery ||
-      args.community.flag_community || args.lspmd.flag_lspmd;
-  store_cb_traj_ = args.flag_allostery || args.lspmd.flag_lspmd;
+      args.corr_knn.flag_corr_knn || args.community.flag_community ||
+      args.lspmd.flag_lspmd;
+  store_cb_traj_ = args.flag_allostery || args.lspmd.flag_lspmd ||
+                   (args.corr_knn.flag_corr_knn &&
+                    args.corr_knn.pair_use_contact_prior);
 
   const size_t pro_coord_count =
       pro_in.m_mol.empty() ? 0 : coord_count(pro_in.m_mol.front());
@@ -1300,6 +1649,7 @@ void DCCMNetwork::init(const Multi_MOL &pro_in, const Multi_MOL &lig,
   }
 
   // Only allostery needs the heavier Cβ/N side trace cache.
+  // Corr-kNN only needs this cache when contact-frequency pruning is active.
   if (store_cb_traj_) {
     cb_indices.resize(ca_indices.size());
     for (size_t i = 0; i < ca_indices.size(); ++i) {
@@ -1486,6 +1836,8 @@ void DCCMNetwork::process_frame(const Multi_MOL &pro_in, const Multi_MOL &lig,
 
 void DCCMNetwork::calculate_and_export(TitanExecutor &executor,
                                        const info &info_output) {
+  dense_postproc_skipped_due_memory_ = false;
+  network_sparse_mode_active_ = false;
   if (total_frames == 0 || ca_indices.empty()) {
     last_community_result_ = CommunityResult{};
     if (community_cfg_.enabled) {
@@ -1497,6 +1849,57 @@ void DCCMNetwork::calculate_and_export(TitanExecutor &executor,
     return;
   }
   size_t num_ca = ca_indices.size();
+
+  long double estimated_extra_bytes = 0.0L;
+  long double budget_bytes = 0.0L;
+  long double pair_count = 0.0L;
+  const bool dense_over_budget = should_skip_dense_dccm_postproc(
+      num_ca, total_frames, network_memory_cfg_, estimated_extra_bytes,
+      budget_bytes, pair_count);
+  const bool force_dense = network_memory_cfg_.mode == "dense";
+  const bool force_sparse = network_memory_cfg_.mode == "sparse";
+  const bool run_sparse = force_sparse || (!force_dense && dense_over_budget);
+  if (force_dense && dense_over_budget) {
+    dense_postproc_skipped_due_memory_ = true;
+    last_community_result_ = CommunityResult{};
+    write_header_only_network_outputs(ca_resname, ca_resnrs, ca_chain,
+                                      ca_is_lig);
+    if (community_cfg_.enabled)
+      write_empty_community_outputs(info_output);
+    append_memory_report(info_output, "DCCM/network", "dense-skip", num_ca,
+                         total_frames, estimated_extra_bytes, budget_bytes,
+                         pair_count, "forced dense exceeds budget");
+    std::ostringstream oss;
+    oss << "DCCM Network: skipping dense all-pairs post-processing for "
+        << num_ca << " nodes x " << total_frames << " frames ("
+        << std::fixed << std::setprecision(1)
+        << static_cast<double>(pair_count / 1.0e6L)
+        << "M node pairs). Estimated extra memory "
+        << format_gib(estimated_extra_bytes) << " exceeds safe budget "
+        << format_gib(budget_bytes)
+        << ". Use -network-mode=auto or -network-mode=sparse for a memory-safe "
+           "edge-streaming network.";
+    TitanUI::print_warning(oss.str());
+    return;
+  }
+  if (run_sparse) {
+    append_memory_report(info_output, "DCCM/network", "sparse", num_ca,
+                         total_frames, estimated_extra_bytes, budget_bytes,
+                         pair_count, force_sparse ? "forced sparse"
+                                                  : "auto sparse over budget");
+    std::ostringstream oss;
+    oss << "DCCM Network: using sparse edge-streaming mode for " << num_ca
+        << " nodes x " << total_frames << " frames (dense estimate "
+        << format_gib(estimated_extra_bytes) << ", budget "
+        << format_gib(budget_bytes) << ", mean-coordinate cutoff "
+        << network_memory_cfg_.sparse_cut_ang << " A + top-"
+        << network_memory_cfg_.sparse_k << " neighbors/node).";
+    TitanUI::print_warning(oss.str());
+  } else {
+    append_memory_report(info_output, "DCCM/network", "dense", num_ca,
+                         total_frames, estimated_extra_bytes, budget_bytes,
+                         pair_count, "within budget");
+  }
 
   // ── STEP 0: Kabsch align (guarded — skip if already aligned) ───────────────
   if (!kabsch_aligned_) {
@@ -1536,6 +1939,157 @@ void DCCMNetwork::calculate_and_export(TitanExecutor &executor,
       }
     }
     kabsch_aligned_ = true;
+  }
+
+  if (run_sparse) {
+    network_sparse_mode_active_ = true;
+    const auto candidate_pairs = build_sparse_spatial_candidate_pairs(
+        traj_x, traj_y, traj_z, num_ca, total_frames,
+        network_memory_cfg_.sparse_cut_ang, network_memory_cfg_.sparse_k);
+    TitanUI::print_info("[DCCM] Sparse candidate pairs: " +
+                        std::to_string(candidate_pairs.size()) + " / " +
+                        std::to_string(static_cast<unsigned long long>(
+                            num_ca * (num_ca - 1) / 2)));
+
+    std::ofstream nodes_out("network_nodes.csv");
+    nodes_out << "Id,Label,Type,AtomName\n";
+    for (size_t i = 0; i < num_ca; ++i) {
+      nodes_out << build_network_node_id(ca_resname, ca_resnrs, ca_chain, i)
+                << "," << ca_resnrs[i] << ","
+                << (ca_is_lig[i] ? "Ligand" : "Receptor") << ","
+                << ca_resname[i] << "\n";
+    }
+    nodes_out.close();
+
+    std::ofstream edges_out("network_edges.csv");
+    edges_out << "Source,Target,Correlation\n";
+
+    std::vector<std::tuple<int, int, double>> community_edges;
+    last_network_graph_edges_.clear();
+    last_community_result_ = CommunityResult{};
+    if (!candidate_pairs.empty()) {
+      std::vector<double> mean_x(num_ca, 0.0), mean_y(num_ca, 0.0),
+          mean_z(num_ca, 0.0), var(num_ca, 0.0);
+      for (size_t f = 0; f < total_frames; ++f) {
+        for (size_t a = 0; a < num_ca; ++a) {
+          mean_x[a] += traj_x[f][a];
+          mean_y[a] += traj_y[f][a];
+          mean_z[a] += traj_z[f][a];
+        }
+      }
+      const double inv_total_frames = 1.0 / static_cast<double>(total_frames);
+      for (size_t a = 0; a < num_ca; ++a) {
+        mean_x[a] *= inv_total_frames;
+        mean_y[a] *= inv_total_frames;
+        mean_z[a] *= inv_total_frames;
+      }
+      for (size_t f = 0; f < total_frames; ++f) {
+        for (size_t a = 0; a < num_ca; ++a) {
+          const double dx = traj_x[f][a] - mean_x[a];
+          const double dy = traj_y[f][a] - mean_y[a];
+          const double dz = traj_z[f][a] - mean_z[a];
+          var[a] += dx * dx + dy * dy + dz * dz;
+        }
+      }
+
+      const size_t worker_count = std::max<size_t>(1, executor.capacity());
+      const size_t chunk =
+          (candidate_pairs.size() + worker_count - 1) / worker_count;
+      std::vector<std::vector<std::tuple<size_t, size_t, double>>> edge_shards(
+          worker_count);
+      executor.parallel_do(worker_count, [&](size_t t) {
+        const size_t start = t * chunk;
+        const size_t end = std::min(start + chunk, candidate_pairs.size());
+        if (start >= end)
+          return;
+        auto &local_edges = edge_shards[t];
+        local_edges.reserve((end - start) / 8 + 1);
+        for (size_t p = start; p < end; ++p) {
+          const size_t i = candidate_pairs[p].first;
+          const size_t j = candidate_pairs[p].second;
+          const double denom = std::sqrt(var[i] * var[j]);
+          if (denom <= 1e-12)
+            continue;
+          double dot = 0.0;
+          const double mix = mean_x[i], miy = mean_y[i], miz = mean_z[i];
+          const double mjx = mean_x[j], mjy = mean_y[j], mjz = mean_z[j];
+          for (size_t f = 0; f < total_frames; ++f) {
+            dot += (traj_x[f][i] - mix) * (traj_x[f][j] - mjx) +
+                   (traj_y[f][i] - miy) * (traj_y[f][j] - mjy) +
+                   (traj_z[f][i] - miz) * (traj_z[f][j] - mjz);
+          }
+          const double corr = dot / denom;
+          if (std::abs(corr) > 0.4)
+            local_edges.emplace_back(i, j, corr);
+        }
+      });
+
+      size_t sparse_edge_count = 0;
+      for (const auto &shard : edge_shards)
+        sparse_edge_count += shard.size();
+      last_network_graph_edges_.reserve(sparse_edge_count);
+      if (community_cfg_.enabled)
+        community_edges.reserve(sparse_edge_count);
+      for (const auto &shard : edge_shards) {
+        for (const auto &[i, j, corr] : shard) {
+          edges_out << build_network_node_id(ca_resname, ca_resnrs, ca_chain, i)
+                    << ","
+                    << build_network_node_id(ca_resname, ca_resnrs, ca_chain, j)
+                    << "," << corr << "\n";
+          last_network_graph_edges_.push_back(
+              {static_cast<int>(i), static_cast<int>(j), corr, std::abs(corr)});
+          if (community_cfg_.enabled) {
+            community_edges.emplace_back(static_cast<int>(i),
+                                         static_cast<int>(j), std::abs(corr));
+          }
+        }
+      }
+      TitanUI::print_info("[DCCM] Sparse thresholded edges: " +
+                          std::to_string(sparse_edge_count));
+    }
+    edges_out.close();
+
+    if (!community_cfg_.enabled)
+      return;
+    if (community_cfg_.method != "louvain") {
+      TitanUI::print_warning("Community: skipping unsupported method '" +
+                             community_cfg_.method + "'.");
+      write_empty_community_outputs(info_output);
+      return;
+    }
+    if (community_edges.empty()) {
+      TitanUI::print_warning(
+          "Community: sparse DCCM graph has no thresholded edges; writing "
+          "header-only community outputs.");
+      write_empty_community_outputs(info_output);
+      return;
+    }
+
+    const auto community_graph =
+        titan_sparse::WeightedCSRGraph<double>::from_undirected_edges(
+            static_cast<int>(num_ca), community_edges);
+    const auto louvain_result =
+        titan_graph_community::run_louvain(community_graph);
+
+    last_community_result_.membership = louvain_result.membership;
+    last_community_result_.community_sizes =
+        louvain_result.stats.community_sizes;
+    last_community_result_.modularity = louvain_result.stats.modularity;
+    last_community_result_.has_result = true;
+
+    export_community_outputs(community_graph, louvain_result, ca_resname,
+                             ca_resnrs, ca_chain, ca_is_lig, info_output);
+    if (has_first_snapshot_frame_) {
+      export_community_pdbs(community_graph, louvain_result, ca_indices,
+                            ca_resnrs, ca_is_lig, ca_chain, first_pro_frame_,
+                            first_pro_info_, first_lig_frame_,
+                            first_lig_info_, info_output);
+    } else {
+      TitanUI::print_warning("Community: first snapshot was not cached, "
+                             "skipping B-factor PDB export.");
+    }
+    TitanUI::print_info("[Community] Exported sparse-mode community outputs.");
+    return;
   }
 
   // 1. Pivot Data [atom][frame] for cache locality using aligned rows.
@@ -1587,17 +2141,10 @@ void DCCMNetwork::calculate_and_export(TitanExecutor &executor,
   //         no mirror-write in workers to avoid data race.
   FlatAlignedMatrix cov(num_ca, num_ca, 0.0);
 
-  // Build upper-triangle pair list (including diagonal)
-  std::vector<std::pair<size_t, size_t>> pairs;
-  pairs.reserve(num_ca * (num_ca + 1) / 2);
-  for (size_t i = 0; i < num_ca; ++i)
-    for (size_t j = i; j < num_ca; ++j)
-      pairs.emplace_back(i, j);
-
   // Worker: each thread processes a contiguous slice of pairs
   auto calc_cov_worker = [&](size_t p_start, size_t p_end) {
     for (size_t p = p_start; p < p_end; ++p) {
-      auto [i, j] = pairs[p];
+      auto [i, j] = upper_triangle_pair_from_index(p, num_ca);
       const double *dx_i = dev_x.row_data(i);
       const double *dx_j = dev_x.row_data(j);
       const double *dy_i = dev_y.row_data(i);
@@ -1614,7 +2161,7 @@ void DCCMNetwork::calculate_and_export(TitanExecutor &executor,
 
   // Distribute pairs equally among threads
   const size_t cov_worker_count = std::max<size_t>(1, executor.capacity());
-  const size_t total_pairs = pairs.size();
+  const size_t total_pairs = num_ca * (num_ca + 1) / 2;
   const size_t chunk = (total_pairs + cov_worker_count - 1) / cov_worker_count;
   executor.parallel_do(cov_worker_count, [&](size_t t) {
     const size_t start = t * chunk;
@@ -1630,6 +2177,7 @@ void DCCMNetwork::calculate_and_export(TitanExecutor &executor,
 
   // 3. Tính Correlation và Xuất File
   std::vector<std::tuple<int, int, double>> community_edges;
+  last_network_graph_edges_.clear();
   if (community_cfg_.enabled) {
     community_edges.reserve(num_ca * 8);
   }
@@ -1644,6 +2192,8 @@ void DCCMNetwork::calculate_and_export(TitanExecutor &executor,
           edges_out << ca_resname[i] << ca_resnrs[i] << "_" << ca_chain[i]
                     << "," << ca_resname[j] << ca_resnrs[j] << "_"
                     << ca_chain[j] << "," << corr << "\n";
+          last_network_graph_edges_.push_back(
+              {static_cast<int>(i), static_cast<int>(j), corr, std::abs(corr)});
           if (community_cfg_.enabled) {
             community_edges.emplace_back(static_cast<int>(i),
                                          static_cast<int>(j), std::abs(corr));
@@ -1732,6 +2282,8 @@ void DCCMNetwork::calculate_allostery_information(
     const std::string &te_filename) {
   last_allostery_candidate_pairs_ = 0;
   last_allostery_dense_pairs_ = 0;
+  last_allostery_gc_edges_.clear();
+  last_allostery_te_edges_.clear();
   const int resolved_bin_count =
       resolve_allostery_bin_count(total_frames, cfg.num_bins);
   const auto dispatch_node_labels =
@@ -1756,7 +2308,8 @@ void DCCMNetwork::calculate_allostery_information(
           traj_x, traj_y, traj_z, anchor_x, anchor_y, anchor_z,
           dispatch_node_labels, total_frames, executor, cfg, resolved_bin_count,
           gc_filename, mi_filename, te_filename,
-          &last_allostery_dense_pairs_);
+          &last_allostery_dense_pairs_, &last_allostery_gc_edges_,
+          &last_allostery_te_edges_);
 }
 
 void DCCMNetwork::calculate_allostery_information_optimized(
@@ -1776,6 +2329,8 @@ void DCCMNetwork::calculate_allostery_information_optimized(
     const std::string &te_filename) {
   last_allostery_candidate_pairs_ = 0;
   last_allostery_dense_pairs_ = 0;
+  last_allostery_gc_edges_.clear();
+  last_allostery_te_edges_.clear();
   const int resolved_bin_count =
       resolve_allostery_bin_count(total_frames, cfg.num_bins);
   const auto dispatch_node_labels =
@@ -1804,8 +2359,8 @@ void DCCMNetwork::calculate_allostery_information_optimized(
             traj_x, traj_y, traj_z, anchor_x, anchor_y, anchor_z,
             dispatch_node_labels, total_frames, executor, cfg,
             resolved_bin_count, gc_filename, mi_filename,
-            te_filename,
-            &last_allostery_dense_pairs_);
+            te_filename, &last_allostery_dense_pairs_,
+            &last_allostery_gc_edges_, &last_allostery_te_edges_);
   } else if (resolved_bin_count_sz <=
              static_cast<size_t>(std::numeric_limits<std::uint16_t>::max())) {
     last_allostery_candidate_pairs_ =
@@ -1813,16 +2368,16 @@ void DCCMNetwork::calculate_allostery_information_optimized(
             traj_x, traj_y, traj_z, anchor_x, anchor_y, anchor_z,
             dispatch_node_labels, total_frames, executor, cfg,
             resolved_bin_count, gc_filename, mi_filename,
-            te_filename,
-            &last_allostery_dense_pairs_);
+            te_filename, &last_allostery_dense_pairs_,
+            &last_allostery_gc_edges_, &last_allostery_te_edges_);
   } else {
     last_allostery_candidate_pairs_ =
         calculate_allostery_information_flat_impl<std::uint32_t>(
             traj_x, traj_y, traj_z, anchor_x, anchor_y, anchor_z,
             dispatch_node_labels, total_frames, executor, cfg,
             resolved_bin_count, gc_filename, mi_filename,
-            te_filename,
-            &last_allostery_dense_pairs_);
+            te_filename, &last_allostery_dense_pairs_,
+            &last_allostery_gc_edges_, &last_allostery_te_edges_);
   }
 }
 // =============================================================================

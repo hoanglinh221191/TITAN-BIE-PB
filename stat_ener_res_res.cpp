@@ -1,14 +1,138 @@
 #include "stat_ener_res_res.h"
 #include "Multi_MOL.h"
 #include "info.h"
+#include "titan_energy_stats.h"
+#include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <fstream>
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <tuple>
 #include <vector>
 
 using namespace std;
+
+namespace {
+
+double average_component(double value, size_t num_snap,
+                         const arguments &Arguments) {
+  return value / (num_snap > 0 ? num_snap : 1) / Arguments.eu_par;
+}
+
+void write_matrix_tsv(const string &filename,
+                      const titan_energy_stats::EnergyAxis &axis1,
+                      const titan_energy_stats::EnergyAxis &axis2,
+                      const vector<vector<double>> &matrix, size_t num_snap,
+                      const arguments &Arguments) {
+  fstream out(filename, ios::out);
+  if (!out.is_open())
+    return;
+
+  out << "entity";
+  for (const auto &entry : axis2.entries)
+    out << '\t' << titan_energy_stats::axis_label(entry);
+  out << '\n';
+
+  out << fixed << setprecision(6);
+  for (size_t i{}; i < matrix.size(); ++i) {
+    const string label =
+        i < axis1.entries.size() ? titan_energy_stats::axis_label(axis1.entries[i])
+                                 : ("row_" + to_string(i));
+    out << label;
+    for (size_t j{}; j < matrix[i].size(); ++j)
+      out << '\t' << average_component(matrix[i][j], num_snap, Arguments);
+    out << '\n';
+  }
+}
+
+void write_total_matrix_tsv(const string &filename,
+                            const titan_energy_stats::EnergyAxis &axis1,
+                            const titan_energy_stats::EnergyAxis &axis2,
+                            const vector<vector<double>> &emap_elec,
+                            const vector<vector<double>> &emap_vdw,
+                            size_t num_snap, const arguments &Arguments) {
+  fstream out(filename, ios::out);
+  if (!out.is_open())
+    return;
+
+  out << "entity";
+  for (const auto &entry : axis2.entries)
+    out << '\t' << titan_energy_stats::axis_label(entry);
+  out << '\n';
+
+  out << fixed << setprecision(6);
+  for (size_t i{}; i < emap_elec.size(); ++i) {
+    const string label =
+        i < axis1.entries.size() ? titan_energy_stats::axis_label(axis1.entries[i])
+                                 : ("row_" + to_string(i));
+    out << label;
+    for (size_t j{}; j < emap_elec[i].size(); ++j)
+      out << '\t'
+          << average_component(emap_elec[i][j] + emap_vdw[i][j], num_snap,
+                               Arguments);
+    out << '\n';
+  }
+}
+
+tuple<size_t, double, double>
+find_entity_energy(const info_ener_1mol_res &stats, size_t chain_id,
+                   size_t key_id) {
+  const auto it = stats.info_energy_1mol_respair.find(
+      info_ener_1mol(chain_id, key_id));
+  if (it == stats.info_energy_1mol_respair.end())
+    return {0u, 0.0, 0.0};
+  return it->second;
+}
+
+double pdb_bfactor_for_atom(const Multi_MOL &mol,
+                            const info_ener_1mol_res &stats,
+                            size_t atom_index0, size_t num_snap,
+                            const arguments &Arguments) {
+  const auto key = titan_energy_stats::axis_lookup_key_for_atom(mol, atom_index0);
+  const auto [count, elec, vdw] =
+      find_entity_energy(stats, key.first, key.second);
+  (void)count;
+  return average_component(elec + vdw, num_snap, Arguments);
+}
+
+string pdb_chain_label(const mol_info &info) {
+  const auto &chain = info.get_chain();
+  if (chain.empty() || std::isdigit(static_cast<unsigned char>(chain[0])))
+    return " ";
+  return chain;
+}
+
+void write_pdb_atoms(fstream &output, const Multi_MOL &mol,
+                     const info_ener_1mol_res &stats, size_t num_snap,
+                     const arguments &Arguments) {
+  if (mol.m_mol.empty())
+    return;
+  size_t num{};
+  for (size_t atom{}; atom < mol.m_mol[0].size() && atom < mol.info.size();
+       ++atom) {
+    atom > 99998 ? num = 99999 : num = atom;
+    const string chain = pdb_chain_label(mol.info[atom]);
+    output << setw(4) << "ATOM" << setw(7) << num + 1 << setw(5)
+           << mol.info[atom].get_atom() << " " << setw(4) << left
+           << mol.info[atom].get_original_res_name() << right << setw(1)
+           << chain << setw(4) << mol.info[atom].get_resnr() << setw(12)
+           << fixed << mol.m_mol[0].pos.x[atom] << setw(8) << fixed
+           << mol.m_mol[0].pos.y[atom] << setw(8) << mol.m_mol[0].pos.z[atom]
+           << setw(6) << "1.00" << setw(7)
+           << pdb_bfactor_for_atom(mol, stats, atom, num_snap, Arguments)
+           << '\n';
+  }
+}
+
+struct AverageEmapRow {
+  size_t left{};
+  size_t right{};
+  size_t idx{};
+};
+
+} // namespace
 
 /*bool info_ener_res::check_in(pair<info_ener, tuple<size_t, double, double>>&
 rhs)
@@ -141,59 +265,44 @@ int info_ener_res::wrapper_impl_ener_maptype(Multi_MOL &mol1, Multi_MOL &mol2,
 int info_ener_res::build_pos_map(Multi_MOL &mol1, Multi_MOL &mol2,
                                  vector<vector<size_t>> &pos_map,
                                  const arguments &Arguments) {
-  size_t pos1{};
-  for (size_t i{}; i < mol1.Index.size() - 1; ++i)
-    for (size_t j{}; j < mol1.Index[i].get_size_v(); ++j) {
-      size_t pos2{};
-      for (size_t k{}; k < mol2.Index.size() - 1; ++k)
-        for (size_t l{}; l < mol2.Index[k].get_size_v(); ++l) {
-          if (pos1 >= pos_map.size() || pos2 >= pos_map[pos1].size()) {
-            break;
-          }
-
-          ;
-
-          size_t int_resnr1 = mol1.info[mol1.Index[i].get_res_pos_e(j) - 1]
-                                  .get_internal_resnr();
-          size_t int_resnr2 = mol2.info[mol2.Index[k].get_res_pos_e(l) - 1]
-                                  .get_internal_resnr();
-          size_t chain1 =
-              mol1.info[mol1.Index[i].get_res_pos_e(j) - 1].get_chainnum();
-          size_t chain2 =
-              mol2.info[mol2.Index[k].get_res_pos_e(l) - 1].get_chainnum();
-          vector<size_t> find_result(Arguments.nt);
-          find(tuple<size_t, size_t, size_t, size_t>(chain1, chain2, int_resnr1,
-                                                     int_resnr2),
-               0, emap_ee.size(), find_result[i]);
-
-          size_t pos{emap_ee.size()};
-          for (auto &elec : find_result)
-            if (elec < emap_ee.size())
-              pos = elec;
-
-          pos_map[pos1][pos2] = pos;
-
-          ++pos2;
-        }
-      ++pos1;
+  (void)Arguments;
+  const auto axis1 = titan_energy_stats::build_energy_axis(mol1);
+  const auto axis2 = titan_energy_stats::build_energy_axis(mol2);
+  for (size_t pos1{}; pos1 < axis1.entries.size() && pos1 < pos_map.size();
+       ++pos1) {
+    for (size_t pos2{}; pos2 < axis2.entries.size() &&
+                       pos2 < pos_map[pos1].size();
+         ++pos2) {
+      const auto &left = axis1.entries[pos1];
+      const auto &right = axis2.entries[pos2];
+      size_t pos{emap_ee.size()};
+      find(tuple<size_t, size_t, size_t, size_t>(
+               left.chain_id, right.chain_id, left.key_id, right.key_id),
+           0, emap_ee.size(), pos);
+      pos_map[pos1][pos2] = pos;
     }
+  }
   return 0;
 }
 
 size_t info_ener_res::determine_pos(Multi_MOL &mol1, Multi_MOL &mol2,
                                     const arguments &Arguments, size_t i,
                                     size_t j, size_t l, size_t k) {
+  (void)Arguments;
   size_t pos{};
-  size_t int_resnr1 =
-      mol1.info[mol1.Index[i].get_res_pos_e(j) - 1].get_internal_resnr();
-  size_t int_resnr2 =
-      mol2.info[mol2.Index[k].get_res_pos_e(l) - 1].get_internal_resnr();
-  size_t chain1 = mol1.info[mol1.Index[i].get_res_pos_e(j) - 1].get_chainnum();
-  size_t chain2 = mol2.info[mol2.Index[k].get_res_pos_e(l) - 1].get_chainnum();
+  if (i >= mol1.Index.size() || k >= mol2.Index.size() ||
+      j >= mol1.Index[i].get_size_v() || l >= mol2.Index[k].get_size_v())
+    return emap_ee.size();
 
-  find(tuple<size_t, size_t, size_t, size_t>(chain1, chain2,
-                                             mol1.Index[i].get_res_num_e(j),
-                                             mol2.Index[k].get_res_num_e(l)),
+  const size_t atom1 = mol1.Index[i].get_res_pos_e(j);
+  const size_t atom2 = mol2.Index[k].get_res_pos_e(l);
+  if (atom1 == 0 || atom2 == 0)
+    return emap_ee.size();
+
+  const auto key1 = titan_energy_stats::axis_lookup_key_for_atom(mol1, atom1 - 1);
+  const auto key2 = titan_energy_stats::axis_lookup_key_for_atom(mol2, atom2 - 1);
+  find(tuple<size_t, size_t, size_t, size_t>(key1.first, key2.first,
+                                             key1.second, key2.second),
        0, emap_ee.size(), pos);
   return pos;
 }
@@ -205,121 +314,73 @@ int info_ener_res::cal_energy_maptype(Multi_MOL &mol1, Multi_MOL &mol2,
                                       info_ener_1mol_res &mol2_ener_res,
                                       const arguments &Arguments,
                                       size_t num_snap) {
+  (void)Arguments;
+  (void)num_snap;
   if (emap_ee.empty()) {
     cout << "info energy is empty" << std::endl;
     return 1;
   }
 
-  size_t num_res_1{}, num_res_2{};
-
-  for (size_t i{}; i < mol1.Index.size() - 1; ++i)
-    num_res_1 += mol1.Index[i].get_size_v();
-
-  for (size_t i{}; i < mol2.Index.size() - 1; ++i)
-    num_res_2 += mol2.Index[i].get_size_v();
+  const auto axis1 = titan_energy_stats::build_energy_axis(mol1);
+  const auto axis2 = titan_energy_stats::build_energy_axis(mol2);
+  const size_t num_res_1 = axis1.entries.size();
+  const size_t num_res_2 = axis2.entries.size();
 
   if (num_res_1 == 0 || num_res_2 == 0) {
     return 1;
   }
 
-  emap_elec = vector<vector<double>>(num_res_1);
-  emap_vdw = vector<vector<double>>(num_res_1);
-  for (size_t i{}; i < emap_elec.size(); ++i) {
-    emap_elec[i] = vector<double>(num_res_2, 0.);
-    emap_vdw[i] = vector<double>(num_res_2, 0.);
-  }
-
-  // vector<thread> threads(Arguments.nt);
-
-  struct fast_info {
-    string chain;
-    size_t chainid;
-    size_t res_num;
-  };
-  vector<fast_info> fast1, fast2;
-  unordered_map<pair<size_t, size_t>, size_t, pair_hash> lookup1, lookup2;
-
-  size_t pos1{};
-  bool is_lig1 =
-      (mol1.get_mol_type() == "ligand" || mol1.get_mol_type() == "lig");
-  for (size_t i{}; i < mol1.Index.size() - 1; ++i) {
-    for (size_t j{}; j < mol1.Index[i].get_size_v(); ++j) {
-      size_t int_resnr = is_lig1 ? mol1.Index[i].get_res_pos_e(j)
-                                 : mol1.info[mol1.Index[i].get_res_pos_e(j) - 1]
-                                       .get_internal_resnr();
-      size_t chain_num =
-          mol1.info[mol1.Index[i].get_res_pos_e(j) - 1].get_chainnum();
-      size_t res_num1 = is_lig1 ? mol1.Index[i].get_res_pos_e(j)
-                                : mol1.Index[i].get_res_num_e(j);
-      fast1.emplace_back(mol1.Index[i].get_chain(), chain_num, res_num1);
-      lookup1[make_pair(chain_num, int_resnr)] = pos1++;
-    }
-  }
-
-  size_t pos2{};
-  bool is_lig2 =
-      (mol2.get_mol_type() == "ligand" || mol2.get_mol_type() == "lig");
-  for (size_t k{}; k < mol2.Index.size() - 1; ++k) {
-    for (size_t l{}; l < mol2.Index[k].get_size_v(); ++l) {
-      size_t int_resnr = is_lig2 ? mol2.Index[k].get_res_pos_e(l)
-                                 : mol2.info[mol2.Index[k].get_res_pos_e(l) - 1]
-                                       .get_internal_resnr();
-      size_t chain_num =
-          mol2.info[mol2.Index[k].get_res_pos_e(l) - 1].get_chainnum();
-      size_t res_num2 = is_lig2 ? mol2.Index[k].get_res_pos_e(l)
-                                : mol2.Index[k].get_res_num_e(l);
-      fast2.emplace_back(mol2.Index[k].get_chain(), chain_num, res_num2);
-      lookup2[make_pair(chain_num, int_resnr)] = pos2++;
-    }
-  }
+  emap_elec.assign(num_res_1, vector<double>(num_res_2, 0.0));
+  emap_vdw.assign(num_res_1, vector<double>(num_res_2, 0.0));
 
   size_t match_count = 0;
   size_t miss_count = 0;
-  try {
-    for (const auto &[key, pos] : position_map) {
-      if (pos >= emap_ee.size())
-        continue;
+  for (const auto &[key, pos] : position_map) {
+    if (pos >= emap_ee.size())
+      continue;
 
-      size_t chain1 = get<0>(key);
-      size_t chain2 = get<1>(key);
-      size_t res1 = get<2>(key);
-      size_t res2 = get<3>(key);
+    const size_t chain1 = get<0>(key);
+    const size_t chain2 = get<1>(key);
+    const size_t entity1 = get<2>(key);
+    const size_t entity2 = get<3>(key);
 
-      auto it1 = lookup1.find(make_pair(chain1, res1));
-      auto it2 = lookup2.find(make_pair(chain2, res2));
+    const auto it1 = axis1.lookup.find(make_pair(chain1, entity1));
+    const auto it2 = axis2.lookup.find(make_pair(chain2, entity2));
 
-      if (it1 != lookup1.end() && it2 != lookup2.end()) {
-        match_count++;
-        size_t p1 = it1->second;
-        size_t p2 = it2->second;
-
-        if (p1 >= emap_elec.size() || p2 >= emap_elec[p1].size()) {
-          std::cout << "CRASH: p1=" << p1 << " >= " << emap_elec.size()
-                    << " OR p2=" << p2 << " >= " << emap_elec[p1].size()
-                    << std::endl;
-        }
-        emap_elec[p1][p2] += emap_ee[pos];
-        emap_vdw[p1][p2] += emap_ev[pos];
-
-        info_ener_1mol ener_1mol_temp(fast1[p1].chainid, fast1[p1].res_num);
-        ++get<0>(mol1_ener_res.info_energy_1mol_respair[ener_1mol_temp]);
-        get<1>(mol1_ener_res.info_energy_1mol_respair[ener_1mol_temp]) +=
-            emap_ee[pos];
-        get<2>(mol1_ener_res.info_energy_1mol_respair[ener_1mol_temp]) +=
-            emap_ev[pos];
-
-        info_ener_1mol ener_1mol_temp2(fast2[p2].chainid, fast2[p2].res_num);
-        ++get<0>(mol2_ener_res.info_energy_1mol_respair[ener_1mol_temp2]);
-        get<1>(mol2_ener_res.info_energy_1mol_respair[ener_1mol_temp2]) +=
-            emap_ee[pos];
-        get<2>(mol2_ener_res.info_energy_1mol_respair[ener_1mol_temp2]) +=
-            emap_ev[pos];
-      } else {
-        miss_count++;
-      }
+    if (it1 == axis1.lookup.end() || it2 == axis2.lookup.end()) {
+      ++miss_count;
+      continue;
     }
-  } catch (const std::exception &e) {
-    std::cout << "CRASH: " << e.what() << std::endl;
+
+    ++match_count;
+    const size_t p1 = it1->second;
+    const size_t p2 = it2->second;
+    if (p1 >= emap_elec.size() || p2 >= emap_elec[p1].size())
+      continue;
+
+    emap_elec[p1][p2] += emap_ee[pos];
+    emap_vdw[p1][p2] += emap_ev[pos];
+
+    const auto &entry1 = axis1.entries[p1];
+    const auto &entry2 = axis2.entries[p2];
+    auto &left =
+        mol1_ener_res.info_energy_1mol_respair[info_ener_1mol(
+            entry1.chain_id, entry1.key_id)];
+    ++get<0>(left);
+    get<1>(left) += emap_ee[pos];
+    get<2>(left) += emap_ev[pos];
+
+    auto &right =
+        mol2_ener_res.info_energy_1mol_respair[info_ener_1mol(
+            entry2.chain_id, entry2.key_id)];
+    ++get<0>(right);
+    get<1>(right) += emap_ee[pos];
+    get<2>(right) += emap_ev[pos];
+  }
+  if (miss_count > 0) {
+    cout << "WARNING: skipped " << miss_count
+         << " energy-map entries that did not match current molecule axes; "
+         << "matched " << match_count << ".\n";
   }
   return 0;
 }
@@ -330,107 +391,19 @@ int info_ener_res::print_energy_maptype(Multi_MOL &mol1, Multi_MOL &mol2,
                                         size_t num_snap, info &output_info,
                                         const arguments &Arguments,
                                         const std::string &prefix) {
-  fstream output_elec(prefix + "electrostatic" +
-                          output_info.getOuputEnerMaptypeAve(),
-                      ios::out),
-      output_vdw(prefix + "vanderWaals" + output_info.getOuputEnerMaptypeAve(),
-                 ios::out),
-      output_total(prefix + "total" + output_info.getOuputEnerMaptypeAve(),
-                   ios::out);
-
-  output_elec.precision(4);
-  output_vdw.precision(4);
-  output_total.precision(4);
-  for (size_t i{}; i < emap_elec.size(); ++i) {
-    for (size_t j{}; j < emap_elec[i].size(); ++j) {
-      output_elec << fixed << left << setw(9)
-                  << emap_elec[i][j] / (num_snap > 0 ? num_snap : 1) /
-                         Arguments.eu_par
-                  << " ";
-      output_vdw << fixed << left << setw(9)
-                 << emap_vdw[i][j] / (num_snap > 0 ? num_snap : 1) /
-                        Arguments.eu_par
-                 << " ";
-      output_total << fixed << left << setw(9)
-                   << (emap_elec[i][j] + emap_vdw[i][j]) /
-                          (num_snap > 0 ? num_snap : 1) / Arguments.eu_par
-                   << " ";
-    }
-    output_elec << '\n';
-    output_vdw << '\n';
-    output_total << '\n';
-  }
-
-  fstream output_matrix(prefix + output_info.getOutputAverageEmapMatrix(),
-                        ios::out);
-  if (output_matrix.is_open()) {
-    size_t max_internal_1 = 0;
-    for (auto &a : mol1.info) {
-      if (a.get_internal_resnr() > max_internal_1)
-        max_internal_1 = a.get_internal_resnr();
-    }
-    vector<size_t> int_to_resnr1(max_internal_1 + 1, 0);
-    for (auto &a : mol1.info)
-      int_to_resnr1[a.get_internal_resnr()] = a.get_resnr();
-
-    size_t max_internal_2 = 0;
-    for (auto &a : mol2.info) {
-      if (a.get_internal_resnr() > max_internal_2)
-        max_internal_2 = a.get_internal_resnr();
-    }
-    vector<size_t> int_to_resnr2(max_internal_2 + 1, 0);
-    for (auto &a : mol2.info)
-      int_to_resnr2[a.get_internal_resnr()] = a.get_resnr();
-
-    vector<size_t> res_nums1;
-    for (size_t i{}; i < mol1.Index.size() - 1; ++i) {
-      for (size_t j{}; j < mol1.Index[i].get_size_v(); ++j) {
-        res_nums1.emplace_back(mol1.Index[i].get_res_num_e(j));
-      }
-    }
-
-    bool is_lig =
-        (mol2.get_mol_type() == "ligand" || mol2.get_mol_type() == "lig");
-    vector<size_t> res_nums2;
-    for (size_t k{}; k < mol2.Index.size() - 1; ++k) {
-      for (size_t l{}; l < mol2.Index[k].get_size_v(); ++l) {
-        if (is_lig) {
-          res_nums2.emplace_back(mol2.Index[k].get_res_pos_e(l));
-        } else {
-          res_nums2.emplace_back(mol2.Index[k].get_res_num_e(l));
-        }
-      }
-    }
-
-    output_matrix.precision(4);
-    output_matrix << left << setw(9) << " ";
-    if (emap_elec.size() > 0 && emap_elec[0].size() > 0 &&
-        res_nums2.size() >= emap_elec[0].size()) {
-      for (size_t j{}; j < emap_elec[0].size(); ++j) {
-        output_matrix << left << setw(9) << ("#" + to_string(res_nums2[j]))
-                      << " ";
-      }
-    }
-    output_matrix << '\n';
-
-    for (size_t i{}; i < emap_elec.size(); ++i) {
-      if (i < res_nums1.size()) {
-        output_matrix << left << setw(9) << ("#" + to_string(res_nums1[i]))
-                      << " ";
-      } else {
-        output_matrix << left << setw(9) << ("#?") << " ";
-      }
-      for (size_t j{}; j < emap_elec[i].size(); ++j) {
-        output_matrix << fixed << left << setw(9)
-                      << (emap_elec[i][j] + emap_vdw[i][j]) /
-                             (num_snap > 0 ? num_snap : 1) / Arguments.eu_par
-                      << " ";
-      }
-      output_matrix << '\n';
-    }
-    output_matrix.close();
-  }
-
+  const auto axis1 = titan_energy_stats::build_energy_axis(mol1);
+  const auto axis2 = titan_energy_stats::build_energy_axis(mol2);
+  write_matrix_tsv(prefix + "electrostatic" +
+                       output_info.getOuputEnerMaptypeAve(),
+                   axis1, axis2, emap_elec, num_snap, Arguments);
+  write_matrix_tsv(prefix + "vanderWaals" + output_info.getOuputEnerMaptypeAve(),
+                   axis1, axis2, emap_vdw, num_snap, Arguments);
+  write_total_matrix_tsv(prefix + "total" + output_info.getOuputEnerMaptypeAve(),
+                         axis1, axis2, emap_elec, emap_vdw, num_snap,
+                         Arguments);
+  write_total_matrix_tsv(prefix + output_info.getOutputAverageEmapMatrix(),
+                         axis1, axis2, emap_elec, emap_vdw, num_snap,
+                         Arguments);
   return 0;
 }
 
@@ -443,80 +416,8 @@ int info_ener_res::print_energy_pdbtype(Multi_MOL &mol1, Multi_MOL &mol2,
   fstream output(prefix + "total" + output_info.getOutputEnerPdbtypeAve(),
                  ios::out);
   output.precision(3);
-
-  size_t num{};
-  if (mol1.m_mol.empty() || mol2.m_mol.empty())
-    return 0;
-  for (size_t l{}; l < mol1.m_mol[0].size(); ++l) {
-    l > 99998 ? num = 99999 : num = l;
-    size_t factor{get<0>(mol1_ener_res.info_energy_1mol_respair[info_ener_1mol(
-        mol1.info[l].get_chainnum(), mol1.info[l].get_resnr())])};
-    if (factor == 0 || Arguments.mol_1_type.find("protein") != string::npos)
-      factor = 1;
-    string chain{" "};
-    if (!isdigit(mol1.info[l].get_chain()[0]))
-      chain = mol1.info[l].get_chain();
-
-    output << setw(4) << "ATOM" << setw(7) << num + 1 << setw(5)
-           << mol1.info[l].get_atom() << " " << setw(4) << left
-           << mol1.info[l].get_original_res_name() << right << setw(1) << chain
-           << setw(4) << mol1.info[l].get_resnr() << setw(12) << fixed
-           << mol1.m_mol[0].pos.x[l] << setw(8) << fixed
-           << mol1.m_mol[0].pos.y[l] << setw(8) << mol1.m_mol[0].pos.z[l]
-           << setw(6) << "1.00" << setw(7)
-           << (get<1>(mol1_ener_res.info_energy_1mol_respair[info_ener_1mol(
-                   mol1.info[l].get_chainnum(), mol1.info[l].get_resnr())]) /
-                   (num_snap > 0 ? num_snap : 1) +
-               get<2>(mol1_ener_res.info_energy_1mol_respair[info_ener_1mol(
-                   mol1.info[l].get_chainnum(), mol1.info[l].get_resnr())]) /
-                   (num_snap > 0 ? num_snap : 1)) /
-                  Arguments.eu_par / (factor > 0 ? factor : 1)
-           << '\n';
-  }
-
-  for (size_t l{}; l < mol2.m_mol[0].size(); ++l) {
-    size_t factor{1};
-    if (Arguments.mol_2_type == "lig") {
-      size_t divisor =
-          get<0>(mol1_ener_res.info_energy_1mol_respair[info_ener_1mol(
-              mol1.info[0].get_chainnum(), mol1.info[0].get_resnr())]);
-      if (divisor > 0) {
-        factor = get<0>(mol2_ener_res.info_energy_1mol_respair[info_ener_1mol(
-                     mol2.info[l].get_chainnum(), mol2.info[l].get_resnr())]) /
-                 divisor;
-      } else {
-        factor = 1;
-      }
-    }
-
-    factor *= get<0>(mol2_ener_res.info_energy_1mol_respair[info_ener_1mol(
-        mol2.info[l].get_chainnum(), mol2.info[l].get_resnr())]);
-
-    if (factor == 0 || Arguments.mol_2_type.find("protein") != string::npos ||
-        get<0>(mol2_ener_res.info_energy_1mol_respair[info_ener_1mol(
-            mol2.info[l].get_chainnum(), mol2.info[l].get_resnr())]) == 0)
-      factor = 1;
-
-    l > 99998 ? num = 99999 : num = l;
-    string chain{" "};
-    if (!isdigit(mol2.info[l].get_chain()[0]))
-      chain = mol2.info[l].get_chain();
-    output << setw(4) << "ATOM" << setw(7) << num + 1 << setw(5)
-           << mol2.info[l].get_atom() << " " << setw(4) << left
-           << mol2.info[l].get_original_res_name() << right << setw(1) << chain
-           << setw(4) << mol2.info[l].get_resnr() << setw(12) << fixed
-           << mol2.m_mol[0].pos.x[l] << setw(8) << fixed
-           << mol2.m_mol[0].pos.y[l] << setw(8) << mol2.m_mol[0].pos.z[l]
-           << setw(6) << "1.00" << setw(7)
-           << (get<1>(mol2_ener_res.info_energy_1mol_respair[info_ener_1mol(
-                   mol2.info[l].get_chainnum(), mol2.info[l].get_resnr())]) /
-                   (num_snap > 0 ? num_snap : 1) +
-               get<2>(mol2_ener_res.info_energy_1mol_respair[info_ener_1mol(
-                   mol2.info[l].get_chainnum(), mol2.info[l].get_resnr())]) /
-                   (num_snap > 0 ? num_snap : 1)) /
-                  Arguments.eu_par / (factor > 0 ? factor : 1)
-           << '\n';
-  }
+  write_pdb_atoms(output, mol1, mol1_ener_res, num_snap, Arguments);
+  write_pdb_atoms(output, mol2, mol2_ener_res, num_snap, Arguments);
   output.close();
   return 0;
 }
@@ -529,58 +430,55 @@ int info_ener_res::print_average_emap(Multi_MOL &mol1, Multi_MOL &mol2,
   if (!output.is_open())
     return 1;
 
-  size_t max_internal_1 = 0;
-  for (auto &a : mol1.info) {
-    if (a.get_internal_resnr() > max_internal_1)
-      max_internal_1 = a.get_internal_resnr();
-  }
-  vector<size_t> int_to_resnr1(max_internal_1 + 1, 0);
-  for (auto &a : mol1.info)
-    int_to_resnr1[a.get_internal_resnr()] = a.get_resnr();
-
-  size_t max_internal_2 = 0;
-  for (auto &a : mol2.info) {
-    if (a.get_internal_resnr() > max_internal_2)
-      max_internal_2 = a.get_internal_resnr();
-  }
-  vector<size_t> int_to_resnr2(max_internal_2 + 1, 0);
-  for (auto &a : mol2.info)
-    int_to_resnr2[a.get_internal_resnr()] = a.get_resnr();
-
-  const bool mol1_is_lig =
-      (mol1.get_mol_type() == "ligand" || mol1.get_mol_type() == "lig");
-  const bool mol2_is_lig =
-      (mol2.get_mol_type() == "ligand" || mol2.get_mol_type() == "lig");
-  const char *label1 = mol1_is_lig ? "Atom1(Lig)" : "Res1(Rec)";
-  const char *label2 = mol2_is_lig ? "Atom2(Lig)" : "Res2(Lig)";
-
-  output << "#" << label1 << " | " << label2
-         << " | Avg Elec | Avg VdW | Avg Total\n";
-  output.precision(4);
-
+  const auto axis1 = titan_energy_stats::build_energy_axis(mol1);
+  const auto axis2 = titan_energy_stats::build_energy_axis(mol2);
+  vector<AverageEmapRow> rows;
+  rows.reserve(position_map.size());
   for (const auto &pair : position_map) {
-    size_t mol1_chainid = get<0>(pair.first);
-    size_t mol2_chainid = get<1>(pair.first);
-
-    size_t int_res1 = get<2>(pair.first);
-    size_t int_res2 = get<3>(pair.first);
-
-    size_t mol1_resnr =
-        int_res1 < int_to_resnr1.size() ? int_to_resnr1[int_res1] : int_res1;
-    size_t mol2_resnr =
-        int_res2 < int_to_resnr2.size() ? int_to_resnr2[int_res2] : int_res2;
-    size_t idx = pair.second;
-
-    double ee = emap_ee[idx] / (num_snap > 0 ? num_snap : 1) / Arguments.eu_par;
-    double ev = emap_ev[idx] / (num_snap > 0 ? num_snap : 1) / Arguments.eu_par;
-    double total = ee + ev;
-
-    output << left << setw(8) << mol1_resnr << " " << setw(4) << mol1_chainid
-           << " | " << left << setw(8) << mol2_resnr << " " << setw(4)
-           << mol2_chainid << " | " << right << fixed << setw(10) << ee << " | "
-           << right << fixed << setw(10) << ev << " | " << right << fixed
-           << setw(10) << total << '\n';
+    const auto key = pair.first;
+    const auto it1 = axis1.lookup.find(make_pair(get<0>(key), get<2>(key)));
+    const auto it2 = axis2.lookup.find(make_pair(get<1>(key), get<3>(key)));
+    if (it1 == axis1.lookup.end() || it2 == axis2.lookup.end())
+      continue;
+    if (pair.second >= emap_ee.size() || pair.second >= emap_ev.size())
+      continue;
+    rows.push_back({it1->second, it2->second, pair.second});
   }
+  sort(rows.begin(), rows.end(), [](const AverageEmapRow &a,
+                                    const AverageEmapRow &b) {
+    return tie(a.left, a.right, a.idx) < tie(b.left, b.right, b.idx);
+  });
+
+  output << "left_label\tleft_kind\tleft_chain_id\tleft_chain\tleft_key_id"
+         << "\tleft_resnr\tleft_internal_resnr\tleft_atom_index"
+         << "\tright_label\tright_kind\tright_chain_id\tright_chain"
+         << "\tright_key_id\tright_resnr\tright_internal_resnr"
+         << "\tright_atom_index\tavg_elec_" << Arguments.eu << "\tavg_vdw_"
+         << Arguments.eu << "\tavg_total_" << Arguments.eu
+         << "\tn_frames\tn_pairs\n";
+  output << fixed << setprecision(6);
+
+  for (const auto &row : rows) {
+    const auto &left = axis1.entries[row.left];
+    const auto &right = axis2.entries[row.right];
+    const double ee = average_component(emap_ee[row.idx], num_snap, Arguments);
+    const double ev = average_component(emap_ev[row.idx], num_snap, Arguments);
+    const size_t count = row.idx < emap_count.size() ? emap_count[row.idx] : 0u;
+    output << titan_energy_stats::axis_label(left) << '\t'
+           << (left.atom_level ? "atom" : "residue") << '\t' << left.chain_id
+           << '\t' << titan_energy_stats::tsv_escape(left.chain) << '\t'
+           << left.key_id << '\t' << left.resnr << '\t'
+           << left.internal_resnr << '\t' << left.atom_index1 << '\t'
+           << titan_energy_stats::axis_label(right) << '\t'
+           << (right.atom_level ? "atom" : "residue") << '\t'
+           << right.chain_id << '\t'
+           << titan_energy_stats::tsv_escape(right.chain) << '\t'
+           << right.key_id << '\t' << right.resnr << '\t'
+           << right.internal_resnr << '\t' << right.atom_index1 << '\t' << ee
+           << '\t' << ev << '\t' << ee + ev << '\t'
+           << (num_snap > 0 ? num_snap : 1) << '\t' << count << '\n';
+  }
+
   output.close();
   return 0;
 }

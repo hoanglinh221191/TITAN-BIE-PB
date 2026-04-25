@@ -1,151 +1,184 @@
-#include"miscellaneous.h"
-#include"folder.h"
-#include"uti_func.h"
-#include"info.h"
-#include<cmath>
-#include<fstream>
-#include<iomanip>
+#include "arguments.h"
+#include "folder.h"
+#include "info.h"
+#include "miscellaneous.h"
+#include "titan_energy_stats.h"
 
-int emplace_energy_res(energy_res& input, vector<energy_res>& output)
-{
-	bool check_in{ false };
-	size_t pos{};
-	for (size_t i{}; i < output.size(); ++i)
-	{
-		if (input.resnr == output[i].resnr && input.chain == output[i].chain)
-		{
-			pos = i;
-			check_in = true;
-			break;
-		}
-	}
+#include <fstream>
+#include <iomanip>
+#include <string>
+#include <vector>
 
-	if (check_in == true)
-	{
-		for (size_t i{}; i < input.base.size(); ++i)
-			output[pos].base.emplace_back(input.base[i]);
-	}
-	else
-	{
-		output.emplace_back(input);
-	}
-	return 0;
+using namespace std;
+
+namespace {
+
+double energy_out(double value, const arguments &Arguments) {
+  return value / Arguments.eu_par;
 }
 
-int print_stat_energy_res(vector<energy_res> & average_energy_res, vector<energy_res>& sd_energy_res, info& info_output
-, const arguments& Arguments, string name)
-{
-	fstream output_elec_energy_file("out_" + name +"_electrostatic_energy" + info_output.get_out_energy_res_motif(), ios::out),
-		output_vdw_energy_file("out_" + name +"_vanderwaals_energy" + info_output.get_out_energy_res_motif(), ios::out),
-		output_total_energy_file("out_" + name + "_total_energy" + info_output.get_out_energy_res_motif(), ios::out),
-		output_elec_force_file, output_vdw_force_file, output_total_force_file;
-
-	if (Arguments.print_force_res == true)
-	{
-		output_elec_force_file.open("out_"+name+"_electrostatic_force" + info_output.get_out_energy_res_motif(), ios::out);
-		output_vdw_force_file.open("out_" + name +"_vanderwaals_force" + info_output.get_out_energy_res_motif(), ios::out);
-		output_total_force_file.open("out_" + name +"_total_force" + info_output.get_out_energy_res_motif(), ios::out);
-		output_elec_force_file << "# ChainResidResname  Average force (" << Arguments.eu << ")    SD (" << Arguments.eu << ")\n";
-		output_total_force_file << "# ChainResidResname  Average force (" << Arguments.eu << ")    SD (" << Arguments.eu << ")\n";
-		output_vdw_force_file << "# ChainResidResname  Average force (" << Arguments.eu << ")    SD (" << Arguments.eu << ")\n";
-	}
-
-	output_elec_energy_file << "# ChainResidResname  Average energy (" << Arguments.eu << ")    SD (" << Arguments.eu << ")\n";
-	output_total_energy_file << "# ChainResidResname  Average energy (" << Arguments.eu << ")    SD (" << Arguments.eu << ")\n";
-	output_vdw_energy_file << "# ChainResidResname  Average energy (" << Arguments.eu << ")    SD (" << Arguments.eu << ")\n";
-
-	for (size_t i{}; i < average_energy_res.size(); ++i)
-	{	
-		for (size_t j{}; j < average_energy_res[i].base.size(); ++j)
-		{
-			output_elec_energy_file << average_energy_res[i].chain << setw(5)<< left << average_energy_res[i].resnr
-				<< setw(4) << average_energy_res[i].resname << right
-				<< setw(12) << setprecision(6) << average_energy_res[i].base[j].e_e / Arguments.eu_par
-				<< setw(12) << setprecision(6) << sd_energy_res[i].base[j].e_e / Arguments.eu_par << '\n';
-
-			output_vdw_energy_file<< average_energy_res[i].chain << setw(5) << left << average_energy_res[i].resnr
-				<< setw(4) << average_energy_res[i].resname << right
-				<< setw(12) << setprecision(6) << average_energy_res[i].base[j].e_v / Arguments.eu_par
-				<< setw(12) << setprecision(6) << sd_energy_res[i].base[j].e_v / Arguments.eu_par << '\n';
-
-			output_total_energy_file << average_energy_res[i].chain << setw(5) << left << average_energy_res[i].resnr
-				<< setw(4) << average_energy_res[i].resname << right
-				<< setw(12) << setprecision(6) << (average_energy_res[i].base[j].e_e + average_energy_res[i].base[j].e_v) / Arguments.eu_par
-				<< setw(12) << setprecision(6) << (sd_energy_res[i].base[j].e_e + sd_energy_res[i].base[j].e_v) / Arguments.eu_par << '\n';
-
-			if (Arguments.print_force_res == true)
-			{
-				output_elec_force_file << average_energy_res[i].chain << setw(5) << left << average_energy_res[i].resnr
-					<< setw(4) << average_energy_res[i].resname << right
-					<< setw(12) << setprecision(6) << force(average_energy_res[i].base[j].F_elec / Arguments.eu_par).modul()
-					<< setw(12) << setprecision(6) << force(sd_energy_res[i].base[j].F_elec / Arguments.eu_par).modul() << '\n';
-
-				output_vdw_force_file << average_energy_res[i].chain << setw(5) << left << average_energy_res[i].resnr
-					<< setw(4) << average_energy_res[i].resname << right
-					<< setw(12) << setprecision(6) << force(average_energy_res[i].base[j].F_vdw / Arguments.eu_par).modul()
-					<< setw(12) << setprecision(6) << force(sd_energy_res[i].base[j].F_vdw / Arguments.eu_par).modul() << '\n';
-
-				output_total_force_file << average_energy_res[i].chain << setw(5) << left << average_energy_res[i].resnr
-					<< setw(4) << average_energy_res[i].resname << right
-					<< setw(12) << setprecision(6) << force((average_energy_res[i].base[j].F_elec + average_energy_res[i].base[j].F_vdw) / Arguments.eu_par).modul()
-					<< setw(12) << setprecision(6) << force((sd_energy_res[i].base[j].F_elec + sd_energy_res[i].base[j].F_vdw) / Arguments.eu_par).modul() << '\n';
-			}
-		}
-	}
-	return 0;
+double force_out(double value, const arguments &Arguments) {
+  return value * Arguments.fu_par;
 }
 
-int stat_energy_res(vector<vector<energy_res>>& Energy_stat_res,
-	int file_num, const arguments& Arguments, info& info_output, string mol_name)
-{
-	vector<energy_res> out_energy_res;
+void print_energy_component_table(
+    const vector<titan_energy_stats::ResidueEnergySummary> &summaries,
+    const arguments &Arguments, const string &filename,
+    double titan_energy_stats::ResidueEnergySummary::*mean_member,
+    double titan_energy_stats::ResidueEnergySummary::*sd_member) {
+  fstream out(filename, ios::out);
+  out << "# ChainResidResname  Average energy (" << Arguments.eu << ")    SD ("
+      << Arguments.eu << ")\n";
+  for (const auto &summary : summaries) {
+    out << summary.key.chain << setw(5) << left << summary.key.resnr << setw(4)
+        << summary.key.resname << right << setw(12) << setprecision(6)
+        << energy_out(summary.*mean_member, Arguments) << setw(12)
+        << setprecision(6) << energy_out(summary.*sd_member, Arguments)
+        << '\n';
+  }
+}
 
-	for (size_t i{}; i < Energy_stat_res.size(); ++i)
-	{
-		for (size_t j{}; j < Energy_stat_res[i].size(); ++j)
-		{
-			emplace_energy_res(Energy_stat_res[i][j], out_energy_res);
-		}
-	}
+void print_force_component_table(
+    const vector<titan_energy_stats::ResidueEnergySummary> &summaries,
+    const arguments &Arguments, const string &filename,
+    double titan_energy_stats::ResidueEnergySummary::*mean_member,
+    double titan_energy_stats::ResidueEnergySummary::*sd_member) {
+  fstream out(filename, ios::out);
+  out << "# ChainResidResname  Average force (" << Arguments.fu << ")    SD ("
+      << Arguments.fu << ")\n";
+  for (const auto &summary : summaries) {
+    out << summary.key.chain << setw(5) << left << summary.key.resnr << setw(4)
+        << summary.key.resname << right << setw(12) << setprecision(6)
+        << force_out(summary.*mean_member, Arguments) << setw(12)
+        << setprecision(6) << force_out(summary.*sd_member, Arguments) << '\n';
+  }
+}
 
-	vector<energy_res> average_energy_res, sd_energy_res;
+void print_energy_stat_tsv(
+    const vector<titan_energy_stats::ResidueEnergySummary> &summaries,
+    info &info_output, const arguments &Arguments, const string &name) {
+  (void)info_output;
+  fstream out("out_" + name + "_energy_stat_res.tsv", ios::out);
+  out << "chain\tresnr\tresname\tsamples\tmean_elec_" << Arguments.eu
+      << "\tsd_elec_" << Arguments.eu << "\tmean_vdw_" << Arguments.eu
+      << "\tsd_vdw_" << Arguments.eu << "\tmean_total_" << Arguments.eu
+      << "\tsd_total_" << Arguments.eu << '\n';
+  out << setprecision(10);
+  for (const auto &summary : summaries) {
+    out << titan_energy_stats::tsv_escape(summary.key.chain) << '\t'
+        << summary.key.resnr << '\t'
+        << titan_energy_stats::tsv_escape(summary.key.resname) << '\t'
+        << summary.samples << '\t'
+        << energy_out(summary.mean_elec, Arguments) << '\t'
+        << energy_out(summary.sd_elec, Arguments) << '\t'
+        << energy_out(summary.mean_vdw, Arguments) << '\t'
+        << energy_out(summary.sd_vdw, Arguments) << '\t'
+        << energy_out(summary.mean_total, Arguments) << '\t'
+        << energy_out(summary.sd_total, Arguments) << '\n';
+  }
+}
 
-	for (size_t i{}; i < out_energy_res.size(); ++i)
-	{
-		double e_elec{}, e_vdw{};
-		force f_elec{}, f_vdw{};
-		for (size_t j{}; j < out_energy_res[i].base.size(); ++j)
-		{
-			e_elec += out_energy_res[i].base[j].e_e;
-			e_vdw += out_energy_res[i].base[j].e_v;
-			f_elec += out_energy_res[i].base[j].F_elec;
-			f_vdw += out_energy_res[i].base[j].F_vdw;
-		}
+void print_force_stat_tsv(
+    const vector<titan_energy_stats::ResidueEnergySummary> &summaries,
+    const arguments &Arguments, const string &name) {
+  fstream out("out_" + name + "_force_stat_res.tsv", ios::out);
+  out << "chain\tresnr\tresname\tsamples\tmean_elec_mag_" << Arguments.fu
+      << "\tsd_elec_mag_" << Arguments.fu << "\tmean_vdw_mag_" << Arguments.fu
+      << "\tsd_vdw_mag_" << Arguments.fu << "\tmean_total_mag_"
+      << Arguments.fu << "\tsd_total_mag_" << Arguments.fu
+      << "\tmean_elec_fx\tmean_elec_fy\tmean_elec_fz"
+      << "\tsd_elec_fx\tsd_elec_fy\tsd_elec_fz"
+      << "\tmean_vdw_fx\tmean_vdw_fy\tmean_vdw_fz"
+      << "\tsd_vdw_fx\tsd_vdw_fy\tsd_vdw_fz"
+      << "\tmean_total_fx\tmean_total_fy\tmean_total_fz"
+      << "\tsd_total_fx\tsd_total_fy\tsd_total_fz\n";
+  out << setprecision(10);
+  for (const auto &summary : summaries) {
+    out << titan_energy_stats::tsv_escape(summary.key.chain) << '\t'
+        << summary.key.resnr << '\t'
+        << titan_energy_stats::tsv_escape(summary.key.resname) << '\t'
+        << summary.samples << '\t'
+        << force_out(summary.mean_force_elec_mag, Arguments) << '\t'
+        << force_out(summary.sd_force_elec_mag, Arguments) << '\t'
+        << force_out(summary.mean_force_vdw_mag, Arguments) << '\t'
+        << force_out(summary.sd_force_vdw_mag, Arguments) << '\t'
+        << force_out(summary.mean_force_total_mag, Arguments) << '\t'
+        << force_out(summary.sd_force_total_mag, Arguments) << '\t'
+        << force_out(summary.mean_force_elec.Fx, Arguments) << '\t'
+        << force_out(summary.mean_force_elec.Fy, Arguments) << '\t'
+        << force_out(summary.mean_force_elec.Fz, Arguments) << '\t'
+        << force_out(summary.sd_force_elec.Fx, Arguments) << '\t'
+        << force_out(summary.sd_force_elec.Fy, Arguments) << '\t'
+        << force_out(summary.sd_force_elec.Fz, Arguments) << '\t'
+        << force_out(summary.mean_force_vdw.Fx, Arguments) << '\t'
+        << force_out(summary.mean_force_vdw.Fy, Arguments) << '\t'
+        << force_out(summary.mean_force_vdw.Fz, Arguments) << '\t'
+        << force_out(summary.sd_force_vdw.Fx, Arguments) << '\t'
+        << force_out(summary.sd_force_vdw.Fy, Arguments) << '\t'
+        << force_out(summary.sd_force_vdw.Fz, Arguments) << '\t'
+        << force_out(summary.mean_force_total.Fx, Arguments) << '\t'
+        << force_out(summary.mean_force_total.Fy, Arguments) << '\t'
+        << force_out(summary.mean_force_total.Fz, Arguments) << '\t'
+        << force_out(summary.sd_force_total.Fx, Arguments) << '\t'
+        << force_out(summary.sd_force_total.Fy, Arguments) << '\t'
+        << force_out(summary.sd_force_total.Fz, Arguments) << '\n';
+  }
+}
 
-		e_elec /= out_energy_res[i].base.size();
-		e_vdw /= out_energy_res[i].base.size();
-		f_elec /= 1.* out_energy_res[i].base.size();
-		f_vdw /= 1.* out_energy_res[i].base.size();
+} // namespace
 
-		average_energy_res.emplace_back(out_energy_res[i].resnr, out_energy_res[i].chain, out_energy_res[i].resname, e_elec, e_vdw, f_elec, f_vdw, 0.);
+int print_stat_energy_res(
+    vector<titan_energy_stats::ResidueEnergySummary> &summaries,
+    info &info_output, const arguments &Arguments, string name) {
+  print_energy_component_table(
+      summaries, Arguments,
+      "out_" + name + "_electrostatic_energy" +
+          info_output.get_out_energy_res_motif(),
+      &titan_energy_stats::ResidueEnergySummary::mean_elec,
+      &titan_energy_stats::ResidueEnergySummary::sd_elec);
+  print_energy_component_table(
+      summaries, Arguments,
+      "out_" + name + "_vanderwaals_energy" +
+          info_output.get_out_energy_res_motif(),
+      &titan_energy_stats::ResidueEnergySummary::mean_vdw,
+      &titan_energy_stats::ResidueEnergySummary::sd_vdw);
+  print_energy_component_table(
+      summaries, Arguments,
+      "out_" + name + "_total_energy" + info_output.get_out_energy_res_motif(),
+      &titan_energy_stats::ResidueEnergySummary::mean_total,
+      &titan_energy_stats::ResidueEnergySummary::sd_total);
+  print_energy_stat_tsv(summaries, info_output, Arguments, name);
 
-		double sd_e_elec{}, sd_e_vdw{};
-		force sd_f_elec{}, sd_f_vdw{};
-		for (size_t j{}; j < out_energy_res[i].base.size(); ++j)
-		{
-			sd_e_elec += square(out_energy_res[i].base[j].e_e - e_elec);
-			sd_e_vdw += square(out_energy_res[i].base[j].e_v - e_vdw);
-			sd_f_elec += force(square(out_energy_res[i].base[j].F_elec.Fx - f_elec.Fx), square(out_energy_res[i].base[j].F_elec.Fy - f_elec.Fy)
-				, square(out_energy_res[i].base[j].F_elec.Fz - f_elec.Fz));
-			sd_f_vdw += force(square(out_energy_res[i].base[j].F_vdw.Fx - f_vdw.Fx), square(out_energy_res[i].base[j].F_vdw.Fy - f_vdw.Fy)
-				, square(out_energy_res[i].base[j].F_vdw.Fz - f_vdw.Fz));
-		}
+  if (Arguments.print_force_res == true) {
+    print_force_component_table(
+        summaries, Arguments,
+        "out_" + name + "_electrostatic_force" +
+            info_output.get_out_energy_res_motif(),
+        &titan_energy_stats::ResidueEnergySummary::mean_force_elec_mag,
+        &titan_energy_stats::ResidueEnergySummary::sd_force_elec_mag);
+    print_force_component_table(
+        summaries, Arguments,
+        "out_" + name + "_vanderwaals_force" +
+            info_output.get_out_energy_res_motif(),
+        &titan_energy_stats::ResidueEnergySummary::mean_force_vdw_mag,
+        &titan_energy_stats::ResidueEnergySummary::sd_force_vdw_mag);
+    print_force_component_table(
+        summaries, Arguments,
+        "out_" + name + "_total_force" + info_output.get_out_energy_res_motif(),
+        &titan_energy_stats::ResidueEnergySummary::mean_force_total_mag,
+        &titan_energy_stats::ResidueEnergySummary::sd_force_total_mag);
+    print_force_stat_tsv(summaries, Arguments, name);
+  }
+  return 0;
+}
 
-		sd_e_elec = sqrt(sd_e_elec / out_energy_res[i].base.size());
-		sd_e_vdw = sqrt(sd_e_vdw / out_energy_res[i].base.size());
-		sd_energy_res.emplace_back(out_energy_res[i].resnr, out_energy_res[i].chain, out_energy_res[i].resname, sd_e_elec, sd_e_vdw, sd_f_elec, sd_f_vdw, 0.);
-	}
-
-	print_stat_energy_res(average_energy_res, sd_energy_res, info_output, Arguments, mol_name);
-	return 0;
+int stat_energy_res(vector<vector<energy_res>> &Energy_stat_res, int file_num,
+                    const arguments &Arguments, info &info_output,
+                    string mol_name) {
+  (void)file_num;
+  auto summaries = titan_energy_stats::summarize_residue_energy(Energy_stat_res);
+  if (summaries.empty())
+    return 0;
+  print_stat_energy_res(summaries, info_output, Arguments, mol_name);
+  return 0;
 }

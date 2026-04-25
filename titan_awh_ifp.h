@@ -9,17 +9,30 @@
 
 #include <cstdint>
 #include <array>
-#include <map>
 #include <string>
 #include <vector>
 
 class TitanAwhIfp {
 public:
+  struct AwhFrameContext {
+    bool matched{false};
+    int replica_id{-1};
+    std::int64_t global_frame_index{-1};
+    double time_ps{0.0};
+    double rc_value{0.0};
+    size_t bin_idx{0};
+    double delta_to_center{0.0};
+  };
+
   bool initialize(const arguments &args, const info &info_output,
                   size_t expected_walkers);
 
-  void consume_frame(int replica_id, double time_ps, std::int64_t global_frame_index,
-                     const IFP_Frame &contacts, const MOL &rec_mol, const MOL &lig_mol);
+  AwhFrameContext prepare_frame(int replica_id, double time_ps,
+                                std::int64_t global_frame_index);
+  void consume_frame(
+      const AwhFrameContext &frame_ctx,
+      const std::vector<TitanIFP::ContactCountAccumulator> &worker_accumulators,
+      size_t active_workers, const MOL &rec_mol, const MOL &lig_mol);
 
   void export_results(const arguments &args, const info &info_output,
                       const std::vector<mol_info> &rec_info,
@@ -52,12 +65,7 @@ private:
     std::size_t unmatched_frames{0};
   };
 
-  struct ContactRecord {
-    size_t resnr_rec{}, resnr_lig{};
-    size_t chainid_rec{}, chainid_lig{};
-    std::string res_name_rec, res_name_lig;
-    std::array<size_t, 6> counts{};
-  };
+  using ContactRecord = TitanIFP::InteractionCountRecord;
 
   struct RepresentativeFrame {
     bool valid{false};
@@ -79,7 +87,7 @@ private:
 
   struct BinData {
     size_t frame_count{0};
-    std::map<ResKey, ContactRecord> contacts;
+    TitanIFP::ContactCountAccumulator contacts;
     std::vector<size_t> walker_frame_counts;
     std::vector<MatchedFrameMeta> matched_frames;
     RepresentativeFrame representative;

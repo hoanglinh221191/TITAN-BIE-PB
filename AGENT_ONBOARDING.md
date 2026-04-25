@@ -12,13 +12,13 @@ Read this first together with:
 ================================================================================
 
 TITAN is a high-performance molecular trajectory analysis engine centered on:
-- interaction energy / force analysis
-- GBSA / ALPB
-- hydrogen bonds and geometry observables
-- RMSD / RMSF / DSSP / LJ order parameters
-- DCCM / network / PCA / allostery
-- TICA / MSM / DHAM / UMAP / TPT
-- LLPS / GIST / IFP / LSP-MD
+- interaction energy / force analysis / subgroup decomposition (`-sg`)
+- GBSA / ALPB / screening-style reweighting helpers
+- hydrogen bonds, HBond/salt/water kinetics, and geometry observables
+- RMSD / RMSF / DSSP / Rg2 / LJ condensation / structure factor `S(q)`
+- DCCM / network / communities / PCA / allostery / corr-kNN / LSP-MD
+- TICA / MSM / Validation / DHAM / MBAR / UMAP / TPT / ZTS
+- LLPS / GIST / IFP / AWH RC-binned IFP
 
 The project is performance-sensitive. Most heavy loops are expected to be
 streaming, cache-aware, SIMD-friendly, and conservative about allocations.
@@ -30,37 +30,51 @@ streaming, cache-aware, SIMD-friendly, and conservative about allocations.
 If you only have a few minutes, read these in order:
 
 1. `arguments.h`
-   Central runtime configuration and default values.
+   Central runtime configuration and grouped defaults (`MsmArgs`, `DhamArgs`,
+   `MbarArgs`, `ValidationArgs`, `CorrKnnArgs`, `SqArgs`,
+   `HBondKineticsArgs`, `LlpsArgs`, `AwhArgs`, PBC knobs, subgroup `-sg`
+   knobs, etc.).
 
 2. `parse_arguments.cpp`
-   CLI parsing, module implication rules, and option semantics.
+   CLI parsing, module implication rules, option normalization, and validation
+   glue for new modules such as `-corr-knn`, `-validation`, `-mbar`, `-sq`,
+   `-hbk`, and `-sg`.
 
 3. `impl_engine.cpp`
-   Main orchestration file. This is where setup, streaming, module dispatch,
-   and data collection all meet.
+   Main orchestration file. This is where setup, streaming analyzers (`HBK`,
+   `SQ`, `Rg2`, `IFP`, `AWH`, subgroup decomposition), and postproc launch all
+   meet.
 
 4. `chunk_streamer.h` and `chunk_streamer.cpp`
    Input streaming layer for PDB and XTC/TRR trajectories.
 
 5. `engine_postproc.h` and `engine_postproc.cpp`
-   Post-loop analysis orchestration for TICA, MSM, DHAM, PCA, UMAP, LLPS, etc.
+   Post-loop solve/export orchestration for TICA, MSM, Validation, DHAM, MBAR,
+   TPT, UMAP, LLPS, corr-kNN, and LSP-MD.
 
-6. `info.h`
-   Output filename source of truth.
+6. `dccm_network.cpp`
+   DCCM cache, allostery, community export, aligned-trace ownership, and the
+   LSP-MD implementation used downstream.
 
-7. `manual.txt` and `help.cpp`
-   User-facing documentation. If behavior changes, these often need updates.
+7. `titan_kinetics.*`, `titan_msm.*`, `titan_dham.*`, `titan_validation.*`
+   The core kinetics / reweighting / uncertainty pipeline.
 
-8. `titan_gyration.h` and `titan_gyration.cpp`
-   Shared gyration / shape-metric math used by `-rg2`, LLPS, and VIBE-pbctopo.
-   This is also where the reusable AVX2 SoA point-stat accumulation lives.
+8. `titan_corr_knn.*`, `titan_sq.*`, `titan_hbond_kinetics.*`,
+   `titan_llps.*`, `titan_llps_cluster.*`
+   Exact continuous MI/GC/TE, RDF/S(q), streaming HBond/salt/water
+   kinetics, and the upgraded LLPS stack (macro-contact core, DBSCAN/fuzzy
+   morphology, lineage, dense-phase mobility, and RNA/topology layers).
 
-9. `titan_rg.h` and `titan_rg.cpp`
-   `-rg2` analyzer, per-trajectory export, and multi-input aggregate export.
+9. `titan_ifp.*`, `titan_awh_ifp.*`, `titan_interaction_primitives.*`,
+   `titan_selection_utils.*`, `titan_sg_streaming.*`,
+   `titan_energy_decomposition.*`
+   Interaction fingerprinting, AWH binning, shared interaction helpers, and
+   the subgroup cache-vs-stream decomposition path.
 
-10. `solv_pbc_pbctopo.cpp`
-   VIBE-pbctopo (`-pbctopo`) topology-aware PBC solver. Read this first before
-   touching pbctopo heuristics, warm-start behavior, or PBC-safe reconstruction.
+10. `manual.txt`, `help.cpp`, `info.h`, `compile.bat`, `Makefile`,
+    `solv_pbc_pbctopo.cpp`
+    User docs, output filename source of truth, real build flow, and the main
+    topology-aware PBC hotspot.
 
 ================================================================================
 3. High-level runtime workflow
@@ -90,7 +104,9 @@ Important pattern:
 
 CLI and configuration:
 - `arguments.h`: defaults and grouped config structs (`MsmArgs`, `DhamArgs`,
-  `LlpsArgs`, `GistArgs`, `UmapArgs`, etc.).
+  `MbarArgs`, `ValidationArgs`, `CorrKnnArgs`, `SqArgs`,
+  `HBondKineticsArgs`, `LlpsArgs`, `GistArgs`, `UmapArgs`, `AwhArgs`, subgroup
+  `-sg` settings, etc.).
 - `parse_arguments.cpp`: parsing and module dependency activation.
 - `arguments.cpp`: validation and post-processing of options.
 
@@ -119,21 +135,56 @@ Analysis modules:
 - `titan_rg.cpp`
 - `titan_dssp.cpp`
 - `titan_lj.cpp`
+- `titan_sq.cpp`, `titan_sq_core.cpp`
+- `titan_hbond_kinetics.cpp`
 - `titan_pca.cpp`
 - `titan_kinetics.cpp` for TICA
 - `titan_msm.cpp` for MSM
 - `titan_dham.cpp` for DHAM
+- `titan_validation.cpp`, `titan_validation_core.cpp`
 - `titan_tpt.cpp` for TPT
 - `titan_umap.cpp`, `titan_umap_knn.cpp`
-- `titan_llps.cpp`, `titan_llps_cluster.cpp`
+- `titan_corr_knn.cpp`, `titan_corr_knn_core.cpp`, `titan_corr_knn_shared.cpp`
+- `titan_llps.cpp`, `titan_llps_contacts.cpp`, `titan_llps_async.cpp`,
+  `titan_llps_dynamics.cpp`, `titan_llps_export.cpp`
+- `titan_llps_cluster.cpp`, `titan_llps_cluster_dbscan.cpp`,
+  `titan_llps_cluster_dynamics.cpp`,
+  `titan_llps_cluster_rna_compaction.cpp`,
+  `titan_llps_cluster_rna_information.cpp`,
+  `titan_llps_cluster_rna_topology.cpp`,
+  `titan_llps_cluster_export.cpp`, `titan_llps_stats.*`
 - `titan_gist.cpp`
 - `titan_ifp.cpp`
+- `titan_awh_ifp.cpp`
+- `titan_sg_streaming.cpp`, `titan_energy_decomposition.cpp`
+- `titan_interaction_primitives.cpp`, `titan_selection_utils.cpp`
 - `cas_analysis.cpp`
 - `water_analysis.cpp`
+
+LLPS split of responsibility:
+- `titan_llps.cpp`: macro-node facade, config, frame orchestration, C(t)
+  finalize, and per-frame accumulation flow.
+- `titan_llps_contacts.cpp`: macro contacts, protein-RNA contact search,
+  pair packing, PBC distance helpers, GCC Rg, and LLPS kernel dispatch.
+- `titan_llps_async.cpp`: bounded async frame queue and worker lifecycle.
+- `titan_llps_dynamics.cpp`: contact lifetimes, rewiring, interface turnover,
+  and detailed contact traces.
+- `titan_llps_export.cpp`: macro summary, density/performance/memory reports,
+  sticker-hotspot export, output audit, and log.txt LLPS diagnostics.
+- `titan_llps_cluster*.cpp`: bead-level DBSCAN/fuzzy morphology, lineage,
+  droplet-shape timeseries, genealogy/FRAP proxies, dense-phase MSD/liquidity,
+  RNA compaction/information/topology, and DBSCAN/RNA export families.
+- `titan_llps_stats.*`: shared LLPS percentile, fitting, entropy, binning,
+  CSV-formatting, and small packing helpers.
 
 Shared math / reusable numerics:
 - `titan_gyration.cpp`: reusable `Rg`, `Rg^2`, principal gyration axes, shape
   descriptors, and AVX2 SoA point-stat accumulation
+- `titan_validation_core.cpp`: CK/VAMP/bootstrap math shared by Validation and
+  TPT uncertainty flows
+- `titan_corr_knn_shared.cpp`: pair filtering / config-sharing logic reused by
+  corr-kNN and allostery kNN mode
+- `titan_sq_core.cpp`: RDF/S(q) kernel helpers and isotropic Fourier path
 - `pbctopo_hull.cpp`: reusable convex-hull volume and hull-rescue support for
   pbctopo-style reconstruction paths
 
@@ -154,29 +205,50 @@ PBC and topology-aware reconstruction:
 Important implied flags from parsing:
 - `-pca` implies `-network`
 - `-allostery` implies `-network`
+- `-corr-knn` implies `-network`
 - `-tica` implies `-network`
 - `-umap` implies `-tica` and `-network`
 - `-msm` implies `-tica` and `-network`
 - `-dham` implies `-msm`, `-tica`, and `-network`
+- `-validation` implies `-msm`, `-tica`, and `-network`
+- `-mbar` is standalone REMD/HREMD reweighting; `domain=tica` implies
+  `-msm/-tica/-network`, `domain=pca` implies `-pca/-network`, and
+  `domain=both` enables both paths
 - `-tpt` implies `-msm`, `-tica`, and currently defaults to `-network`
 - `-dssp` enables a secondary-structure feature module; do not assume it is
   only a side effect of protein workflows
 - `-lspmd` is standalone and does not need `-network`
-- `-rms`, `-lj`, and `-rg2` auto-enable a safe PBC path when the user did not
-  choose an explicit PBC mode
+- `-rms`, `-lj`, `-rg2`, and `-sq` auto-enable a safe PBC path when the user
+  did not choose an explicit PBC mode
+- `-hbk`, `-ifp`, `-awh-ifp`, and `-sg` stay in the main streaming loop and do
+  not depend on the DCCM/TICA stack
 - `-lj` used with `-tica` / `-msm` / `-dham` / `-umap` / `-tpt` may disable an
   auto-enabled `-network` path and use permutation-invariant LJ phase-2
   features instead
 
 Interpretation:
-- `network` owns the aligned Ca/backbone trajectory used downstream.
+- `network` owns the aligned Ca/backbone trajectory used downstream by
+  allostery, corr-kNN, TICA, and optional equilibrium overlays.
+- `corr-knn` reuses the aligned DCCM trace cache and can also back
+  `-allostery-estimator=knn`.
 - `tica` consumes aligned network-derived features.
 - `lj` can also act as a trace-free phase-2 feature source for kinetics-style
   workflows.
 - `dssp` is its own feature pipeline and should be reviewed as such.
 - `msm` consumes TICA projections.
 - `dham` consumes MSM states plus temperature/energy metadata.
+- `validation` reuses solved TICA/MSM/TPT context; it should not trigger a
+  second raw-trajectory collection path.
+- `mbar` is a standalone reweighting solver whose frame weights only become
+  default downstream weights when `-eq-weight-source mbar` resolves.
 - `tpt` consumes the built MSM TPM plus source/sink basin definitions.
+- `sq`, `hbk`, `ifp`, `awh-ifp`, and `sg` are streaming analyzers with their
+  own outputs and caches.
+- `llps` is a hybrid path: per-frame macro contact accumulation starts in
+  `TitanLLPS`, while richer morphology/dynamics/RNA exports complete through
+  `TitanLLPSCluster` finalize/export work after streaming.
+  Detailed chain/RNA traces are streamed when possible; DBSCAN shape output is
+  written as `llps_droplet_shape_timeseries.csv`.
 - `pca` can consume DHAM frame weights if DHAM converges.
 
 ================================================================================
@@ -240,12 +312,30 @@ Stage G: DHAM
   weights forward into PCA/FES and TICA-FES.
 - If DHAM fails, the rest of the workflow still runs in uniform-weight mode.
 
+Stage H: MBAR
+- Implemented in `engine_postproc.cpp`.
+- MBAR v1 is standalone temperature-ladder reweighting and writes `mbar_*`
+  outputs.
+- `domain=tica|pca|both` decides which solved metadata path(s) it reuses.
+- MBAR only changes downstream default equilibrium weighting when
+  `-eq-weight-source mbar` is selected.
+
+Stage I: Validation / TPT overlays
+- `TitanValidation::RuntimeCache` is allocated in `impl_engine.cpp` and filled
+  during postproc.
+- Validation can preselect a better MSM model (`-validation-auto-pick`) before
+  the final build, then run CK/VAMP/bootstrap after the model is solved.
+- TPT bootstrap uncertainty can be driven either from legacy TPT flags or from
+  the shared validation cache when the requested bootstrap settings match.
+
 Files to inspect for this pipeline:
 - `impl_engine.cpp`
 - `engine_postproc.cpp`
 - `titan_kinetics.h` and `titan_kinetics.cpp`
 - `titan_msm.h` and `titan_msm.cpp`
 - `titan_dham.h` and `titan_dham.cpp`
+- `titan_validation.h`, `titan_validation.cpp`, and `titan_validation_core.cpp`
+- `titan_tpt.cpp`
 - `titan_pca.cpp`
 
 ================================================================================
@@ -280,7 +370,7 @@ If you add a new module:
 ================================================================================
 
 Current build intent:
-- Windows: MSYS2 UCRT64 `clang++` via `compile.bat` and `mingw32-make.exe`
+- Windows: `compile.bat` -> MSYS2 UCRT64 `mingw32-make.exe` -> `clang++.exe`
 - Linux: either `g++` (GCC 13-era target) or `TOOLCHAIN=clang` with LLVM 22 +
   libc++ as configured in `Makefile`
 
@@ -288,8 +378,10 @@ Important practical rule:
 - Treat Linux support as "C++23 syntax with GCC 13-era reality".
 - Do not assume full latest-standard library coverage just because `-std=c++23`
   is enabled.
-- Current local build policy uses `-march=native` in `Makefile`.
-  This is good for workstation tuning, but it is not a portability contract.
+- `PROFILE=native` uses `-march=native`; `PROFILE=portable` currently uses
+  generic AVX2/FMA tuning (`-mavx2 -mfma -mtune=generic`) in `Makefile`.
+- The local native profile is good for workstation tuning, but it is not a
+  portability contract.
 
 Allowed / encouraged:
 - `std::string::contains`
@@ -303,9 +395,15 @@ Avoid or treat as unsupported:
 - `<print>`
 
 Build workflow:
-- Use `compile.bat` on Windows for project builds.
+- Use `compile.bat [native|portable] [all|release|clean|print-config]` on
+  Windows for project builds.
 - If compilation behavior needs changing, edit `Makefile`, not ad-hoc compile
   commands.
+- The batch wrapper intentionally calls `mingw32-make ... -j1` today to cap
+  peak RAM. Do not assume higher `-j` is safe just because the repo is using
+  incremental object builds.
+- `compile.bat all` cleans the selected profile first, then snapshots the built
+  binary into `test/bin/<profile>/`.
 - `release` target adds LTO flags.
 - Keep AVX2/FMA assumptions paired with scalar fallback paths; do not assume
   every supported build machine is identical to the local workstation.
@@ -317,6 +415,11 @@ Build workflow:
 - On Windows, `titan.exe` may occasionally be file-locked by an active run.
   In that case, linking an alternate target name is acceptable for validation,
   but keep `Makefile` as the source of truth.
+- `test/` is the local regression workspace. Keep new generated outputs in
+  dedicated scenario subdirectories there instead of spraying files into the
+  repo root.
+- `test/bin/native` and `test/bin/portable` are the intended snapshot locations
+  for profile-specific binaries used by local regression scripts.
 
 When changing headers or build rules:
 - Recheck `Makefile`.
@@ -443,7 +546,19 @@ If you change TICA/MSM/DHAM behavior:
 - inspect `titan_kinetics.cpp`
 - inspect `titan_msm.cpp`
 - inspect `titan_dham.cpp`
+- inspect `titan_validation.cpp` / `titan_validation_core.cpp` when the change
+  affects model selection, CK, bootstrap, or TPT uncertainty
 - inspect `titan_pca.cpp` for downstream weight coupling
+
+If you change corr-kNN / allostery-kNN / MBAR behavior:
+- inspect `engine_postproc.cpp`
+- inspect `titan_corr_knn.cpp`, `titan_corr_knn_core.cpp`, and
+  `titan_corr_knn_shared.cpp`
+- inspect `dccm_network.cpp` because corr-kNN reuses the aligned trace cache
+- inspect `titan_validation.cpp` if the change affects equilibrium overlays or
+  shared bootstrap/model-selection context
+- inspect `manual.txt`, `help.cpp`, and `info.h` when pair-score or summary
+  outputs change
 
 If you change trajectory streaming:
 - inspect `chunk_streamer.cpp`
@@ -456,9 +571,34 @@ If you change RMS / DSSP / LJ / TPT behavior:
 - inspect `titan_rg.cpp` if the change affects trace-atom geometry observables
 - inspect `titan_dssp.cpp`
 - inspect `titan_lj.cpp`
+- inspect `titan_sq.cpp` / `titan_sq_core.cpp` if the change touches trace
+  atom or condensed-phase channel semantics
 - inspect `titan_tpt.cpp`
 - inspect `arguments.cpp` and `parse_arguments.cpp` for implied-module and PBC
   semantics
+
+If you change IFP / HBK / AWH / subgroup decomposition behavior:
+- inspect `titan_ifp.cpp`
+- inspect `titan_hbond_kinetics.cpp`
+- inspect `titan_awh_ifp.cpp`
+- inspect `titan_interaction_primitives.cpp` and `titan_selection_utils.cpp`
+- inspect `titan_sg_streaming.cpp` and `titan_energy_decomposition.cpp`
+- inspect `info.h`, `parse_arguments.cpp`, `manual.txt`, and `help.cpp` if
+  filenames, flags, or representative exports move
+
+If you change LLPS behavior:
+- inspect the relevant `titan_llps*.cpp` or `titan_llps_cluster*.cpp` split
+  file, not only the facade files
+- inspect `arguments.h` and `parse_arguments.cpp` because LLPS option coupling
+  now spans density policy, kernel policy, RNA analysis, and energy correlation
+- inspect `info.h`, `manual.txt`, and `help.cpp` if any LLPS output family,
+  filename, or flag wording changes
+- keep LLPS run metadata in `log.txt` through `TitanUI`; do not add a manifest
+  sidecar unless the user explicitly asks for one
+- benchmark both `-llps-kernel=scalar` and `-llps-kernel=avx2` sensitive paths
+  when touching contact kernels, density accumulation, or gyration reuse
+- recheck no-RNA, `-nocal`, and protein-only fallback paths when touching
+  protein-RNA, compaction, topology, or energy-correlation logic
 
 If you change gyration / shape-metric behavior:
 - inspect `titan_gyration.cpp`
@@ -483,17 +623,27 @@ If you change VIBE-pbctopo behavior:
 
 - Do not break module implication logic in `parse_arguments.cpp`.
 - Do not hardcode filenames when `info.h` already owns them.
+- Do not let `manual.txt` and the embedded raw-string manual in `help.cpp`
+  drift apart.
 - Do not add raw `std::cout` in hot engine paths if `TitanUI` is the intended
   logging interface.
 - Do not accidentally disable boundary-aware lag handling in TICA/MSM.
 - Do not add memory-hungry caches without considering XDR and multi-replica
   workflows.
+- Do not assume `compile.bat` is conservative by accident; the current `-j1`
+  wrapper is there to control memory pressure.
 - Do not bypass dense pair-cache guards just because a workstation build has
   enough RAM today.
 - Do not move detailed VIBE-pbctopo diagnostics back into `log.txt`; use
   `pbctopo_debug.log` for that path.
 - Do not assume `exact_dense` TICA is safe for workflows that need projection
   replay.
+- Do not assume MBAR mutates DHAM/TICA/PCA/TPT default behavior unless
+  `-eq-weight-source mbar` is actually active.
+- Do not recompute large alignment/feature caches inside Validation when the
+  `TitanValidation::RuntimeCache` is already the intended reuse path.
+- Do not treat `-sg` as "just an export layer"; it now has real cache-vs-stream
+  memory policy and kernel-selection logic.
 - Do not treat LJ phase-2 kinetics, DSSP features, RMS traces, and network-
   derived TICA features as interchangeable; the runtime chooses among them
   based on flags.
@@ -507,6 +657,35 @@ If you change VIBE-pbctopo behavior:
 
 This section is intentionally current-state and should be kept in sync with
 recent engine work.
+
+Current user-facing stack additions:
+- Exact corr-kNN is live in `titan_corr_knn.*` and can be reused by
+  `-allostery-estimator=knn` without recollecting the aligned DCCM trace cache.
+- Validation is now a first-class postproc layer (`titan_validation.*`) with
+  VAMP-2 sweeps, CK checks, optional bootstrap, and optional auto-pick reuse of
+  the winning MSM model.
+- MBAR v1 is standalone reweighting in `engine_postproc.cpp`; it writes
+  `mbar_*` outputs and only changes downstream default equilibrium overlays when
+  `-eq-weight-source mbar` is selected.
+- Streaming analyzers now include `-hbk`, `-sq`, `-rg2`, `-ifp`, `-awh`
+  RC-binned IFP, and subgroup decomposition (`-sg`). Most are initialized in
+  `impl_engine.cpp` and export via `info.h`.
+- `-sg` now routes through `SgStreamingAnalyzer` plus
+  `EnergyDecompositionProvider` and chooses cache/stream internals from memory
+  heuristics. Treat changes there as benchmark-sensitive.
+- LLPS is no longer just a coarse phase detector. The current stack adds
+  `-llps-density`, `-llps-kernel`, DBSCAN/fuzzy droplet morphology, lineage and
+  fusion/fission tracking, dense-phase MSD/liquidity, protein-RNA contact
+  turnover, sticker hotspot ranking, droplet-shape/genealogy summaries,
+  FRAP-like recovery proxies, detailed performance reporting, and `log.txt`
+  run-context/output audit sections instead of a separate manifest file.
+- RNA-aware LLPS analysis now has three higher-level layers behind
+  `titan_llps_cluster.*`: compaction/binding coupling, information-style state
+  metrics, and topology outputs (bridge/clamp/loop closure/local competition),
+  with optional detailed trace exports.
+- `test/` doubles as the local regression matrix plus binary snapshot area.
+  Scenario directories are intentionally numerous; keep new outputs isolated in
+  dedicated subdirectories.
 
 Reusable gyration / `-rg2`:
 - `titan_gyration.*` is now the shared source of truth for:

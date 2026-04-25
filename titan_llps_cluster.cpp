@@ -1,46 +1,52 @@
-// titan_llps_cluster.cpp — DBSCAN Phase Separation Analysis
-// Fix 1: BoxMatrix MIC for triclinic/dodecahedron boxes
-// Fix 2: Cell dedup (static array) + std::floor for negative coords
-// Fix 3: Zero-allocation — head_, nxt_, adj_, bfs_q_ reused every frame
-// Fix 4: min_pts counts self (adj.size()+1) + snprintf PDB columns
-//        Streaming CSV: open in init(), write per-frame (crash-safe)
-// Fix 5: Hybrid-36 resSeq encoding for >9999 chains (VMD-compatible)
+﻿// titan_llps_cluster.cpp - DBSCAN Phase Separation Analysis
 #include "titan_llps_cluster.h"
 #include "BoxMatrix.h"
+#include "MOL.h"
+#include "MOL_info.h"
+#include "box_type.h"
+#include "info.h"
+#include "titan_executor.h"
+#include "titan_energy_decomposition.h"
+#include "titan_llps.h"
+#include "titan_llps_stats.h"
+#include "titan_simd_dispatch.h"
 #include "titan_ui.h"
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <iomanip>
+#include <limits>
+#include <numeric>
+#include <sstream>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 
-// ─────────────────────────────────────────────────────────────
-// encode_hybrid36 — encode integer n into a hybrid-36 string (width 4)
-// Standard PDB resSeq is decimal [0, 9999].
-// For n >= 10000: encode with A-Z (10000–35999) then a-z (36000–61999).
-// This matches the CCP4/VMD hybrid-36 convention.
-// ─────────────────────────────────────────────────────────────
+using namespace titan_llps_stats;
+
+// ============================================================================
+// encode_hybrid36
+// ============================================================================
 std::string TitanLLPSCluster::encode_hybrid36(int n) {
-  const int width = 4;
-  // Decimal range [0..9999]
   constexpr int dec_max = 9999;
   if (n <= dec_max) {
     char buf[8];
     std::snprintf(buf, sizeof(buf), "%4d", (n < 0 ? 0 : n));
     return std::string(buf);
   }
-  // Alpha range: base-26 after offset
-  // A-Z covers offset 10000..10000+26^4-1, a-z continues
   static const char upper[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   static const char lower[] = "abcdefghijklmnopqrstuvwxyz";
   int rem = n - (dec_max + 1);
-  const int base26_max = 26 * 26 * 26 * 26; // 456976
+  constexpr int base26_max = 26 * 26 * 26 * 26;
   const char *alpha = (rem < base26_max) ? upper : lower;
   if (rem >= base26_max)
     rem -= base26_max;
   char result[8];
-  // Encode 4-char base-26 column-major
   result[3] = alpha[rem % 26];
   rem /= 26;
   result[2] = alpha[rem % 26];
@@ -52,15 +58,59 @@ std::string TitanLLPSCluster::encode_hybrid36(int n) {
   return std::string(result);
 }
 
-// ─────────────────────────────────────────────────────────────
+std::string TitanLLPSCluster::species_label(int species) {
+  return (species == 0) ? "protein" : "rna";
+}
+
+uint64_t TitanLLPSCluster::pack_chain_key(int species, int raw_chain_id) {
+  return (static_cast<uint64_t>(static_cast<uint32_t>(species)) << 32) |
+         static_cast<uint32_t>(raw_chain_id);
+}
+
+void TitanLLPSCluster::RunningStats::add(double value) {
+  ++n;
+  sum += value;
+  sum_sq += value * value;
+}
+
+double TitanLLPSCluster::RunningStats::mean() const {
+  return (n > 0) ? (sum / static_cast<double>(n)) : 0.0;
+}
+
+double TitanLLPSCluster::RunningStats::stddev() const {
+  if (n < 2)
+    return 0.0;
+  const double m = mean();
+  const double var = sum_sq / static_cast<double>(n) - m * m;
+  return std::sqrt(std::max(0.0, var));
+}
+
+// ============================================================================
+// Lifecycle
+// ============================================================================
 TitanLLPSCluster::~TitanLLPSCluster() {
   if (vmd_out_.is_open())
     vmd_out_.close();
   if (ts_out_.is_open())
     ts_out_.close();
+  if (rna_binding_energy_trace_out_.is_open())
+    rna_binding_energy_trace_out_.close();
+  if (prna_pair_energy_trace_out_.is_open())
+    prna_pair_energy_trace_out_.close();
+  if (rna_topology_trace_out_.is_open())
+    rna_topology_trace_out_.close();
+  if (rna_bridge_trace_out_.is_open())
+    rna_bridge_trace_out_.close();
+  if (rna_clamp_trace_out_.is_open())
+    rna_clamp_trace_out_.close();
+  if (membership_trace_out_.is_open())
+    membership_trace_out_.close();
+  if (rna_compaction_trace_out_.is_open())
+    rna_compaction_trace_out_.close();
+  if (droplet_shape_out_.is_open())
+    droplet_shape_out_.close();
 }
 
-// ─────────────────────────────────────────────────────────────
 void TitanLLPSCluster::init(double eps_angstrom, int min_pts,
                             const std::string &out_pdb_name,
                             const std::string &out_csv_name) {
@@ -70,14 +120,50 @@ void TitanLLPSCluster::init(double eps_angstrom, int min_pts,
   frame_count_ = 0;
   timeseries_.clear();
   streaming_csv_ = false;
-
   if (vmd_out_.is_open())
     vmd_out_.close();
+  if (rna_binding_energy_trace_out_.is_open())
+    rna_binding_energy_trace_out_.close();
+  if (prna_pair_energy_trace_out_.is_open())
+    prna_pair_energy_trace_out_.close();
+  if (rna_topology_trace_out_.is_open())
+    rna_topology_trace_out_.close();
+  if (rna_bridge_trace_out_.is_open())
+    rna_bridge_trace_out_.close();
+  if (rna_clamp_trace_out_.is_open())
+    rna_clamp_trace_out_.close();
+  if (membership_trace_out_.is_open())
+    membership_trace_out_.close();
+  if (rna_compaction_trace_out_.is_open())
+    rna_compaction_trace_out_.close();
+  if (droplet_shape_out_.is_open())
+    droplet_shape_out_.close();
+  membership_trace_streaming_ = false;
+  rna_compaction_trace_streaming_ = false;
+  droplet_shape_streaming_ = false;
   if (!out_pdb_name.empty())
     vmd_out_.open(out_pdb_name);
 
-  // [Issue 4] Open streaming CSV immediately — data is flushed per-frame
-  // so it survives crashes mid-trajectory.
+  rna_compaction_samples_.clear();
+  droplet_shape_rows_.clear();
+  rna_compaction_topology_cache_ = {};
+  rna_chain_compaction_stats_.clear();
+  rna_binding_bin_stats_.clear();
+  rna_energy_bin_stats_.clear();
+  rna_compaction_trace_rows_.clear();
+  rna_partner_state_to_id_.clear();
+  rna_partner_state_labels_.clear();
+  rna_partner_state_labels_.push_back("unbound");
+  rna_information_rg_edges_.clear();
+  rna_information_longrange_edges_.clear();
+  rna_information_summary_rows_.clear();
+  rna_information_per_chain_rows_.clear();
+  rna_compaction_state_histogram_rows_.clear();
+  rna_partner_state_histogram_rows_.clear();
+  rna_transition_information_rows_.clear();
+  rna_binding_compaction_information_rows_.clear();
+  rna_information_primary_scope_ = "none";
+
   if (!out_csv_name.empty()) {
     if (ts_out_.is_open())
       ts_out_.close();
@@ -99,307 +185,663 @@ void TitanLLPSCluster::init(double eps_angstrom, int min_pts,
     TitanUI::print_info("[LLPS-DBSCAN] Streaming PDB -> " + out_pdb_name);
 }
 
-// ─────────────────────────────────────────────────────────────
-// extract_nodes — backbone / Cα / P beads only
-// ─────────────────────────────────────────────────────────────
-std::vector<LLPSNode> TitanLLPSCluster::extract_nodes(
-    const MOL &pro, const std::vector<mol_info> &pro_info, const MOL &lig,
-    const std::vector<mol_info> &lig_info) const {
-  std::vector<LLPSNode> nodes;
-  nodes.reserve(pro.pos.x.size() + lig.pos.x.size());
-  int nid = 1;
+void TitanLLPSCluster::configure_dynamics(bool enabled, bool detailed,
+                                          int max_lag_frames,
+                                          double lineage_overlap_threshold,
+                                          int min_lineage_cluster_size,
+                                          double msd_fit_start_ns,
+                                          double msd_fit_end_ns) {
+  dynamics_enabled_ = enabled;
+  dynamics_detailed_ = detailed;
+  dynamics_max_lag_frames_ = std::max(1, max_lag_frames);
+  dynamics_ring_cap_ = dynamics_max_lag_frames_ + 1;
+  lineage_overlap_threshold_ = lineage_overlap_threshold;
+  min_lineage_cluster_size_ = std::max(1, min_lineage_cluster_size);
+  msd_fit_start_ns_ = msd_fit_start_ns;
+  msd_fit_end_ns_ = msd_fit_end_ns;
 
-  auto add_mol = [&](const MOL &m, const std::vector<mol_info> &info,
-                     int mol_type) {
-    if (m.pos.x.empty())
-      return;
-    const size_t n =
-        std::min({m.pos.x.size(), m.pos.y.size(), m.pos.z.size(), info.size()});
-    for (size_t i = 0; i < n; ++i) {
-      const std::string &a = info[i].get_atom();
-      if (a == "BB" || a == "CA" || a == "BB1" || a == "BB2" || a == "BB3" ||
-          a == "P") {
-        nodes.push_back({nid++, mol_type,
-                         static_cast<int>(info[i].get_chainnum()), m.pos.x[i],
-                         m.pos.y[i], m.pos.z[i], 0, false});
-      }
-    }
-  };
-
-  add_mol(pro, pro_info, 1); // protein
-  add_mol(lig, lig_info, 2); // RNA / ligand
-  return nodes;
-}
-
-// ─────────────────────────────────────────────────────────────
-// run_dbscan — Cell-List O(N) + BoxMatrix MIC + BFS labelling
-// ─────────────────────────────────────────────────────────────
-void TitanLLPSCluster::run_dbscan(std::vector<LLPSNode> &nodes,
-                                  const box &Box) {
-  if (nodes.empty())
+  if (!dynamics_enabled_)
     return;
 
-  const double bx = Box.get_a(), by = Box.get_b(), bz = Box.get_c();
-  if (bx <= 0.0 || by <= 0.0 || bz <= 0.0)
-    return;
+  dynamics_ring_chain_capacity_ = 0;
+  membership_lag_chain_capacity_ = 0;
+  frame_time_ring_.assign(static_cast<std::size_t>(dynamics_ring_cap_), 0.0);
+  frame_present_ring_.clear();
+  frame_inside_ring_.clear();
+  frame_episode_ring_.clear();
+  frame_unwrapped_x_ring_.clear();
+  frame_unwrapped_y_ring_.clear();
+  frame_unwrapped_z_ring_.clear();
 
-  // [Fix 1] BoxMatrix handles triclinic / rhombic-dodecahedron boxes
-  const BoxMatrix bmat(Box);
-
-  // ── 1. Build Cell-List ──────────────────────────────────────
-  const int nx = std::max(1, static_cast<int>(bx / eps_));
-  const int ny = std::max(1, static_cast<int>(by / eps_));
-  const int nz = std::max(1, static_cast<int>(bz / eps_));
-  const double cx = bx / nx, cy = by / ny, cz = bz / nz;
-  const int ncells = nx * ny * nz;
-
-  // [Fix 3] Reuse persistent buffers (zero heap allocations per frame)
-  head_.assign(ncells, -1);
-  nxt_.assign(nodes.size(), -1);
-  if (adj_.size() < nodes.size())
-    adj_.resize(nodes.size());
-  for (size_t i = 0; i < nodes.size(); ++i)
-    adj_[i].clear();
-
-  // [Fix 2] std::floor correct for negative coordinates
-  auto cell_of = [&](double x, double y, double z) -> int {
-    int ix = static_cast<int>(std::floor(x / cx));
-    ix = ((ix % nx) + nx) % nx;
-    int iy = static_cast<int>(std::floor(y / cy));
-    iy = ((iy % ny) + ny) % ny;
-    int iz = static_cast<int>(std::floor(z / cz));
-    iz = ((iz % nz) + nz) % nz;
-    return ix * ny * nz + iy * nz + iz;
-  };
-
-  for (size_t i = 0; i < nodes.size(); ++i) {
-    int c = cell_of(nodes[i].x, nodes[i].y, nodes[i].z);
-    nxt_[i] = head_[c];
-    head_[c] = static_cast<int>(i);
-  }
-
-  // ── 2. Neighbour search with cell dedup ─────────────────────
-  int checked_cells[27]; // static array — no heap, max 3³ = 27 cells
-  for (size_t i = 0; i < nodes.size(); ++i) {
-    int ix = static_cast<int>(std::floor(nodes[i].x / cx));
-    ix = ((ix % nx) + nx) % nx;
-    int iy = static_cast<int>(std::floor(nodes[i].y / cy));
-    iy = ((iy % ny) + ny) % ny;
-    int iz = static_cast<int>(std::floor(nodes[i].z / cz));
-    iz = ((iz % nz) + nz) % nz;
-
-    int num_checked = 0;
-    for (int ddx = -1; ddx <= 1; ++ddx) {
-      int cx2 = ((ix + ddx) % nx + nx) % nx;
-      for (int ddy = -1; ddy <= 1; ++ddy) {
-        int cy2 = ((iy + ddy) % ny + ny) % ny;
-        for (int ddz = -1; ddz <= 1; ++ddz) {
-          int cz2 = ((iz + ddz) % nz + nz) % nz;
-          int cell = cx2 * ny * nz + cy2 * nz + cz2;
-          // [Fix 2] Skip duplicate cells (happens when nx/ny/nz ≤ 2)
-          bool dup = false;
-          for (int k = 0; k < num_checked; ++k)
-            if (checked_cells[k] == cell) {
-              dup = true;
-              break;
-            }
-          if (!dup)
-            checked_cells[num_checked++] = cell;
-        }
-      }
-    }
-
-    for (int k = 0; k < num_checked; ++k) {
-      for (int j = head_[checked_cells[k]]; j != -1; j = nxt_[j]) {
-        if (static_cast<size_t>(j) == i)
-          continue;
-        double dx = nodes[i].x - nodes[j].x;
-        double dy = nodes[i].y - nodes[j].y;
-        double dz = nodes[i].z - nodes[j].z;
-        // [Fix 1] Triclinic MIC via BoxMatrix
-        bmat.apply_mic(dx, dy, dz);
-        if (dx * dx + dy * dy + dz * dz <= eps_sq_)
-          adj_[i].push_back(j);
-      }
-    }
-
-    // [Fix 4] DBSCAN standard: core point if |neighbours| + 1 (self) >= min_pts
-    if (adj_[i].size() + 1 >= static_cast<size_t>(min_pts_))
-      nodes[i].is_core = true;
-  }
-
-  // ── 3. BFS cluster labelling ────────────────────────────────
-  // [Issue 3] Use bfs_q_ (persistent member vector) instead of std::queue.
-  // Avoids 5M+ malloc/free calls in large MARTINI trajectories.
-  // Vector-as-queue: clear() + indexed iteration — O(N) same as deque BFS.
-  int cur_cluster = 0;
-  for (size_t i = 0; i < nodes.size(); ++i) {
-    if (nodes[i].cluster_id != 0 || !nodes[i].is_core)
-      continue;
-    ++cur_cluster;
-    nodes[i].cluster_id = cur_cluster;
-    bfs_q_.clear();
-    bfs_q_.push_back(static_cast<int>(i));
-    for (size_t qi = 0; qi < bfs_q_.size(); ++qi) {
-      int curr = bfs_q_[qi];
-      for (int nb : adj_[curr]) {
-        if (nodes[nb].cluster_id == 0) {
-          nodes[nb].cluster_id = cur_cluster;
-          if (nodes[nb].is_core)
-            bfs_q_.push_back(nb);
-        }
-      }
-    }
-  }
-
-  for (auto &n : nodes)
-    if (n.cluster_id == 0)
-      n.cluster_id = -1;
+  membership_joint_inside_.clear();
+  membership_pair_counts_.clear();
+  protein_autocorr_lag_time_sum_.assign(
+      static_cast<std::size_t>(dynamics_max_lag_frames_ + 1), 0.0);
+  rna_autocorr_lag_time_sum_.assign(
+      static_cast<std::size_t>(dynamics_max_lag_frames_ + 1), 0.0);
+  protein_autocorr_lag_time_count_.assign(
+      static_cast<std::size_t>(dynamics_max_lag_frames_ + 1), 0);
+  rna_autocorr_lag_time_count_.assign(
+      static_cast<std::size_t>(dynamics_max_lag_frames_ + 1), 0);
+  msd_sum_protein_.assign(static_cast<std::size_t>(dynamics_max_lag_frames_ + 1),
+                          0.0);
+  msd_sum_rna_.assign(static_cast<std::size_t>(dynamics_max_lag_frames_ + 1), 0.0);
+  msd_count_protein_.assign(
+      static_cast<std::size_t>(dynamics_max_lag_frames_ + 1), 0);
+  msd_count_rna_.assign(static_cast<std::size_t>(dynamics_max_lag_frames_ + 1), 0);
+  msd_time_sum_protein_.assign(
+      static_cast<std::size_t>(dynamics_max_lag_frames_ + 1), 0.0);
+  msd_time_sum_rna_.assign(
+      static_cast<std::size_t>(dynamics_max_lag_frames_ + 1), 0.0);
+  msd_time_count_protein_.assign(
+      static_cast<std::size_t>(dynamics_max_lag_frames_ + 1), 0);
+  msd_time_count_rna_.assign(
+      static_cast<std::size_t>(dynamics_max_lag_frames_ + 1), 0);
 }
 
-// ─────────────────────────────────────────────────────────────
-// process_frame
-// ─────────────────────────────────────────────────────────────
-void TitanLLPSCluster::process_frame(const MOL &pro,
+void TitanLLPSCluster::configure_trace_outputs(const info &info_output) {
+  membership_trace_streaming_ = false;
+  rna_compaction_trace_streaming_ = false;
+  droplet_shape_streaming_ = false;
+  if (membership_trace_out_.is_open())
+    membership_trace_out_.close();
+  if (rna_compaction_trace_out_.is_open())
+    rna_compaction_trace_out_.close();
+  if (droplet_shape_out_.is_open())
+    droplet_shape_out_.close();
+
+  droplet_shape_out_.open(info_output.get_llps_droplet_shape_timeseries_filename());
+  if (droplet_shape_out_.is_open()) {
+    droplet_shape_out_
+        << "Time_ps,Frame,ClusterID,Nodes,ProteinNodes,RnaNodes,Rg_A,"
+           "Asphericity_A2,Acylindricity_A2,RelativeShapeAnisotropy,"
+           "SphericityProxy\n";
+    droplet_shape_out_ << std::fixed << std::setprecision(6);
+    droplet_shape_streaming_ = true;
+    droplet_shape_rows_.clear();
+  } else {
+    TitanUI::print_warning("[LLPS-DBSCAN] Cannot open " +
+                           info_output.get_llps_droplet_shape_timeseries_filename());
+  }
+
+  if (dynamics_enabled_ && dynamics_detailed_) {
+    membership_trace_out_.open(
+        info_output.get_llps_chain_membership_trace_filename());
+    if (membership_trace_out_.is_open()) {
+      membership_trace_out_
+          << "Time_ns,Species,ChainID,EpisodeID,InsideDense,Event\n";
+      membership_trace_out_ << std::fixed << std::setprecision(6);
+      membership_trace_streaming_ = true;
+      membership_trace_rows_.clear();
+    } else {
+      TitanUI::print_warning("[LLPS-DBSCAN] Cannot open " +
+                             info_output
+                                 .get_llps_chain_membership_trace_filename());
+    }
+  }
+
+  if (rna_compaction_enabled_ && rna_compaction_detailed_) {
+    rna_compaction_trace_out_.open(
+        info_output.get_llps_rna_compaction_trace_filename());
+    if (rna_compaction_trace_out_.is_open()) {
+      rna_compaction_trace_out_
+          << "Time_ns,Frame,RNAChainID,InsideDense,ClusterID,"
+             "BoundProteinChains,ProteinRNABeadContacts,Rg_nm,EndToEnd_nm,"
+             "Asphericity_nm2,NormalizedAsphericity,Acylindricity_nm2,"
+             "RelativeShapeAnisotropy,AspectRatio,IntrachainContacts,"
+             "LongRangeIntrachainContacts,LongRangeContactFraction\n";
+      rna_compaction_trace_out_ << std::fixed << std::setprecision(6);
+      rna_compaction_trace_streaming_ = true;
+      rna_compaction_trace_rows_.clear();
+    } else {
+      TitanUI::print_warning("[LLPS-RNA] Cannot open " +
+                             info_output
+                                 .get_llps_rna_compaction_trace_filename());
+    }
+  }
+}
+
+void TitanLLPSCluster::configure_rna_compaction(
+    const std::string &mode, bool dynamics_enabled, bool detailed, bool has_rna,
+    const std::string &sticker_beads, float protein_rna_cutoff_nm,
+    float intra_cutoff_nm, int longrange_min) {
+  std::string normalized = mode;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+
+  const bool explicitly_on =
+      normalized == "true" || normalized == "yes" || normalized == "on" ||
+      normalized == "1";
+  const bool explicitly_off =
+      normalized == "false" || normalized == "no" || normalized == "off" ||
+      normalized == "0";
+  rna_compaction_enabled_ =
+      explicitly_on || (!explicitly_off && dynamics_enabled && has_rna);
+  rna_compaction_detailed_ = rna_compaction_enabled_ && detailed;
+  rna_compaction_prna_cutoff_angstrom_ =
+      10.0 * static_cast<double>(std::max(0.0f, protein_rna_cutoff_nm));
+  rna_compaction_intra_cutoff_angstrom_ =
+      10.0 * static_cast<double>(std::max(0.0f, intra_cutoff_nm));
+  rna_compaction_longrange_min_ = std::max(0, longrange_min);
+  rna_compaction_sticker_names_ = split_csv_set(sticker_beads);
+
+  if (!rna_compaction_enabled_)
+    return;
+  if (!has_rna) {
+    rna_compaction_enabled_ = false;
+    TitanUI::print_warning(
+        "[LLPS-RNA] RNA compaction requested but no RNA molecule was detected; "
+        "skipping RNA compaction outputs.");
+    return;
+  }
+  if (rna_compaction_prna_cutoff_angstrom_ <= 0.0 ||
+      rna_compaction_intra_cutoff_angstrom_ <= 0.0) {
+    rna_compaction_enabled_ = false;
+    TitanUI::print_warning(
+        "[LLPS-RNA] RNA compaction cutoff is non-positive; skipping RNA "
+        "compaction outputs.");
+    return;
+  }
+
+  TitanUI::print_info("[LLPS-RNA] RNA compaction vs protein binding enabled.");
+}
+
+void TitanLLPSCluster::configure_rna_information(const std::string &mode,
+                                                 bool dynamics_enabled,
+                                                 bool detailed, bool has_rna,
+                                                 int rg_bins,
+                                                 int longrange_bins) {
+  std::string normalized = mode;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+
+  const bool explicitly_on =
+      normalized == "true" || normalized == "yes" || normalized == "on" ||
+      normalized == "1";
+  const bool explicitly_off =
+      normalized == "false" || normalized == "no" || normalized == "off" ||
+      normalized == "0";
+  const bool prerequisites_met =
+      dynamics_enabled && rna_compaction_enabled_ && has_rna;
+
+  rna_information_rg_bins_ = std::max(1, rg_bins);
+  rna_information_longrange_bins_ = std::max(1, longrange_bins);
+  rna_information_enabled_ = !explicitly_off && prerequisites_met;
+  rna_information_detailed_ = rna_information_enabled_ && detailed;
+
+  if (!rna_information_enabled_) {
+    if (explicitly_on && !prerequisites_met) {
+      TitanUI::print_warning(
+          "[LLPS-RNA-Info] RNA information metrics requested but "
+          "requirements are not met; skipping RNA information outputs.");
+    }
+    return;
+  }
+
+  TitanUI::print_info(
+      "[LLPS-RNA-Info] RNA information-theoretic entropy proxies enabled.");
+}
+
+void TitanLLPSCluster::configure_rna_topology(
+    const std::string &mode, bool dynamics_enabled, bool detailed, bool has_rna,
+    float protein_protein_cutoff_nm, float protein_rna_cutoff_nm,
+    int longrange_min, float bridge_geom_min_nm, int patch_gap_max,
+    bool clamp_require_loop, const info &info_output) {
+  std::string normalized = mode;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  const bool explicitly_on =
+      normalized == "true" || normalized == "yes" || normalized == "on" ||
+      normalized == "1";
+  const bool explicitly_off =
+      normalized == "false" || normalized == "no" || normalized == "off" ||
+      normalized == "0";
+  const bool prerequisites_met =
+      dynamics_enabled && rna_compaction_enabled_ && has_rna;
+
+  rna_topology_enabled_ = explicitly_on || (!explicitly_off && prerequisites_met);
+  rna_topology_detailed_ = rna_topology_enabled_ && detailed;
+  rna_topology_patch_gap_max_ = std::max(0, patch_gap_max);
+  rna_topology_clamp_require_loop_ = clamp_require_loop;
+  rna_topology_pp_cutoff_angstrom_ =
+      10.0 * static_cast<double>(std::max(0.0f, protein_protein_cutoff_nm));
+  rna_topology_bridge_geom_min_angstrom_ =
+      (bridge_geom_min_nm > 0.0f)
+          ? 10.0 * static_cast<double>(bridge_geom_min_nm)
+          : 20.0 * static_cast<double>(std::max(0.0f, protein_rna_cutoff_nm));
+  if (rna_topology_bridge_geom_min_angstrom_ <= 0.0)
+    rna_topology_bridge_geom_min_angstrom_ = 2.0 * rna_compaction_prna_cutoff_angstrom_;
+
+  if (rna_topology_trace_out_.is_open())
+    rna_topology_trace_out_.close();
+  if (rna_bridge_trace_out_.is_open())
+    rna_bridge_trace_out_.close();
+  if (rna_clamp_trace_out_.is_open())
+    rna_clamp_trace_out_.close();
+
+  if (!rna_topology_enabled_) {
+    if (explicitly_on && !prerequisites_met) {
+      TitanUI::print_warning(
+          "[LLPS-RNA-Topology] RNA topology requested but requirements are "
+          "not met; skipping topology outputs.");
+    }
+    return;
+  }
+
+  if (rna_topology_detailed_) {
+    rna_topology_trace_out_.open(info_output.get_llps_rna_topology_trace_filename());
+    if (rna_topology_trace_out_.is_open()) {
+      rna_topology_trace_out_
+          << "Time_ns,Frame,RNAChainID,InsideDense,ClusterID,BoundProteinChains,"
+             "TopologyState,AnyBridge,NumBridgeProteins,AnyClamp,NumClampPairs,"
+             "BridgeResidueSpanMax,BridgeGeomSpanMax_nm,"
+             "LongRangeIntrachainContacts,ClampSupportedLongRangeContacts,"
+             "BridgeTotal_kJmol,NonBridgeTotal_kJmol,"
+             "BridgeAttractionStrength_kJmol,NonBridgeAttractionStrength_kJmol,"
+             "PRNAAttractionStrength_kJmol,LocalPPStickerContacts,"
+             "LocalPPElec_kJmol,LocalPPVdw_kJmol,LocalPPTotal_kJmol,"
+             "LocalPPAttractionStrength_kJmol,LocalPPtoPRNAContactRatio,"
+             "LocalPPtoPRNAAttractionRatio,LocalPPtoBridgeAttractionRatio\n";
+    } else {
+      TitanUI::print_warning("[LLPS-RNA-Topology] Cannot open " +
+                             info_output.get_llps_rna_topology_trace_filename());
+    }
+
+    rna_bridge_trace_out_.open(info_output.get_llps_rna_bridge_trace_filename());
+    if (rna_bridge_trace_out_.is_open()) {
+      rna_bridge_trace_out_
+          << "Time_ns,Frame,RNAChainID,ProteinChainID,PatchCount,BridgeCount,"
+             "BridgeResidueSpanMax,BridgeGeomSpanMax_nm,BridgeContactCount,"
+             "BridgeTotal_kJmol,BridgeAttractionStrength_kJmol,"
+             "SupportsLongRangeContact\n";
+    } else {
+      TitanUI::print_warning("[LLPS-RNA-Topology] Cannot open " +
+                             info_output.get_llps_rna_bridge_trace_filename());
+    }
+
+    rna_clamp_trace_out_.open(info_output.get_llps_rna_clamp_trace_filename());
+    if (rna_clamp_trace_out_.is_open()) {
+      rna_clamp_trace_out_
+          << "Time_ns,Frame,RNAChainID,ProteinChainID_A,ProteinChainID_B,"
+             "ClampCount,ClampResidueSpanMax,ClampGeomSpanMax_nm,"
+             "ClampSupportedLongRangeContacts,ClampTotal_kJmol,"
+             "ClampAttractionStrength_kJmol\n";
+    } else {
+      TitanUI::print_warning("[LLPS-RNA-Topology] Cannot open " +
+                             info_output.get_llps_rna_clamp_trace_filename());
+    }
+  }
+
+  TitanUI::print_info(
+      "[LLPS-RNA-Topology] RNA bridge/clamp topology analysis enabled.");
+}
+
+void TitanLLPSCluster::configure_energy_correlation(
+    const std::string &mode, bool dynamics_enabled, bool has_rna, bool nocal,
+    const EnergyDecompositionProvider *energy_provider, bool detailed,
+    const info &info_output) {
+  std::string normalized = mode;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  const bool explicitly_on =
+      normalized == "true" || normalized == "yes" || normalized == "on" ||
+      normalized == "1";
+  const bool explicitly_off =
+      normalized == "false" || normalized == "no" || normalized == "off" ||
+      normalized == "0";
+
+  energy_provider_ = energy_provider;
+  energy_correlation_enabled_ =
+      explicitly_on || (!explicitly_off && dynamics_enabled && has_rna &&
+                        rna_compaction_enabled_ && !nocal &&
+                        energy_provider_ != nullptr &&
+                        energy_provider_->ready());
+  energy_correlation_detailed_ = energy_correlation_enabled_ && detailed;
+
+  if (!energy_correlation_enabled_) {
+    if (explicitly_on) {
+      TitanUI::print_warning(
+          "[LLPS-Energy] Protein-RNA energy correlation requested but "
+          "requirements are not met; skipping energy-correlation outputs.");
+    }
+    return;
+  }
+
+  if (rna_binding_energy_trace_out_.is_open())
+    rna_binding_energy_trace_out_.close();
+  rna_binding_energy_trace_out_.open(
+      info_output.get_llps_rna_binding_energy_trace_filename());
+  if (rna_binding_energy_trace_out_.is_open()) {
+    rna_binding_energy_trace_out_
+        << "Time_ns,Frame,RNAChainID,InsideDense,ClusterID,"
+           "BoundProteinChains,ProteinRNABeadContacts,Rg_nm,EndToEnd_nm,"
+           "RelativeShapeAnisotropy,LongRangeContactFraction,"
+           "Eelec_ProteinRNA_kJmol,Evdw_ProteinRNA_kJmol,"
+           "Etotal_ProteinRNA_kJmol\n";
+  } else {
+    TitanUI::print_warning("[LLPS-Energy] Cannot open " +
+                           info_output.get_llps_rna_binding_energy_trace_filename());
+  }
+
+  if (energy_correlation_detailed_) {
+    if (prna_pair_energy_trace_out_.is_open())
+      prna_pair_energy_trace_out_.close();
+    prna_pair_energy_trace_out_.open(
+        info_output.get_llps_prna_pair_energy_trace_filename());
+    if (prna_pair_energy_trace_out_.is_open()) {
+      prna_pair_energy_trace_out_
+          << "Time_ns,Frame,ProteinChainID,RNAChainID,ContactCount,"
+             "Eelec_kJmol,Evdw_kJmol,Etotal_kJmol,RNA_Rg_nm,"
+             "RNA_LongRangeContactFraction\n";
+    } else {
+      TitanUI::print_warning("[LLPS-Energy] Cannot open " +
+                             info_output.get_llps_prna_pair_energy_trace_filename());
+    }
+  }
+
+  TitanUI::print_info(
+      "[LLPS-Energy] Protein-RNA energy vs RNA compaction enabled.");
+}
+
+int TitanLLPSCluster::register_rna_partner_state(
+    const std::vector<int> &protein_chain_ids) {
+  if (protein_chain_ids.empty())
+    return 0;
+  const std::string key = join_ints_pipe(protein_chain_ids);
+  const auto hit = rna_partner_state_to_id_.find(key);
+  if (hit != rna_partner_state_to_id_.end())
+    return hit->second;
+  const int id = static_cast<int>(rna_partner_state_labels_.size());
+  rna_partner_state_to_id_[key] = id;
+  rna_partner_state_labels_.push_back(key);
+  return id;
+}
+
+// ============================================================================
+// Extract / DBSCAN
+// ============================================================================
+
+
+// ============================================================================
+// Process frame
+// ============================================================================
+void TitanLLPSCluster::process_frame(TitanExecutor &executor, const MOL &pro,
                                      const std::vector<mol_info> &pro_info,
                                      const MOL &lig,
                                      const std::vector<mol_info> &lig_info,
                                      double current_time_ps, int frame_idx) {
+  const auto extract_begin = std::chrono::steady_clock::now();
   auto nodes = extract_nodes(pro, pro_info, lig, lig_info);
+  perf_.extract_seconds += std::chrono::duration<double>(
+                               std::chrono::steady_clock::now() - extract_begin)
+                               .count();
   if (nodes.empty())
     return;
+  perf_.frames_processed += 1;
+  perf_.node_count_accum += static_cast<uint64_t>(nodes.size());
 
-  run_dbscan(nodes, pro.Box);
+  const auto dbscan_begin = std::chrono::steady_clock::now();
+  run_dbscan(executor, nodes, pro.Box);
+  perf_.dbscan_seconds += std::chrono::duration<double>(
+                              std::chrono::steady_clock::now() - dbscan_begin)
+                              .count();
 
-  // ── [BUG 1 FIX] Count ALL unique protein chains from nodes ──
-  // (not just clustered ones — noise chains must be included for
-  //  the 5% threshold to work correctly)
+  const auto summary_begin = std::chrono::steady_clock::now();
   int total_pro_chains = 0;
   {
-    std::vector<int> all_pc;
-    all_pc.reserve(nodes.size());
-    for (const auto &n : nodes)
-      if (n.type == 1) all_pc.push_back(n.chain_idx);
-    std::sort(all_pc.begin(), all_pc.end());
-    all_pc.erase(std::unique(all_pc.begin(), all_pc.end()), all_pc.end());
-    total_pro_chains = static_cast<int>(all_pc.size());
+    std::vector<int> all_protein;
+    all_protein.reserve(nodes.size());
+    for (const auto &node : nodes)
+      if (node.type == 1)
+        all_protein.push_back(node.chain_idx);
+    std::sort(all_protein.begin(), all_protein.end());
+    all_protein.erase(std::unique(all_protein.begin(), all_protein.end()),
+                      all_protein.end());
+    total_pro_chains = static_cast<int>(all_protein.size());
   }
 
-  // Chain-level statistics via unique chain deduplication
   int max_cid = 0;
-  for (const auto &n : nodes)
-    if (n.cluster_id > max_cid)
-      max_cid = n.cluster_id;
+  for (const auto &node : nodes)
+    if (node.cluster_id > max_cid)
+      max_cid = node.cluster_id;
 
-  std::vector<std::vector<int>> cpro(max_cid + 1), crna(max_cid + 1);
+  std::vector<std::vector<int>> cluster_pro(static_cast<std::size_t>(max_cid + 1));
+  std::vector<std::vector<int>> cluster_rna(static_cast<std::size_t>(max_cid + 1));
   int noise_cnt = 0;
-
-  for (const auto &n : nodes) {
-    if (n.cluster_id > 0) {
-      if (n.type == 1)
-        cpro[n.cluster_id].push_back(n.chain_idx);
+  for (const auto &node : nodes) {
+    if (node.cluster_id > 0) {
+      if (node.type == 1)
+        cluster_pro[static_cast<std::size_t>(node.cluster_id)].push_back(
+            node.chain_idx);
       else
-        crna[n.cluster_id].push_back(n.chain_idx);
+        cluster_rna[static_cast<std::size_t>(node.cluster_id)].push_back(
+            node.chain_idx);
     } else {
       ++noise_cnt;
     }
   }
 
-  int lrg_pro = 0, lrg_rna = 0, n_valid = 0;
+  int largest_pro = 0;
+  int largest_rna = 0;
+  int n_valid = 0;
   int giant_cluster_id = -1;
-  for (int c = 1; c <= max_cid; ++c) {
-    std::sort(cpro[c].begin(), cpro[c].end());
-    cpro[c].erase(std::unique(cpro[c].begin(), cpro[c].end()), cpro[c].end());
-    std::sort(crna[c].begin(), crna[c].end());
-    crna[c].erase(std::unique(crna[c].begin(), crna[c].end()), crna[c].end());
-
-    int np = static_cast<int>(cpro[c].size());
+  for (int cid = 1; cid <= max_cid; ++cid) {
+    auto &pro_chains = cluster_pro[static_cast<std::size_t>(cid)];
+    auto &rna_chains = cluster_rna[static_cast<std::size_t>(cid)];
+    std::sort(pro_chains.begin(), pro_chains.end());
+    pro_chains.erase(std::unique(pro_chains.begin(), pro_chains.end()),
+                     pro_chains.end());
+    std::sort(rna_chains.begin(), rna_chains.end());
+    rna_chains.erase(std::unique(rna_chains.begin(), rna_chains.end()),
+                     rna_chains.end());
+    const int np = static_cast<int>(pro_chains.size());
     if (np > 1) {
       ++n_valid;
-      if (np > lrg_pro) {
-        lrg_pro = np;
-        lrg_rna = static_cast<int>(crna[c].size());
-        giant_cluster_id = c;
+      if (np > largest_pro) {
+        largest_pro = np;
+        largest_rna = static_cast<int>(rna_chains.size());
+        giant_cluster_id = cid;
       }
     }
   }
-
-  // [BUG 1 FIX] Now uses total from ALL chains (including noise)
-  if (lrg_pro < std::max(2, total_pro_chains / 20))
+  if (largest_pro < std::max(2, total_pro_chains / 20))
     giant_cluster_id = -1;
+  perf_.cluster_summary_seconds += std::chrono::duration<double>(
+                                       std::chrono::steady_clock::now() -
+                                       summary_begin)
+                                       .count();
 
-  // ════════════════════════════════════════════════════════════
-  // Per-bead dense/dilute classification + PDB metadata
-  // ════════════════════════════════════════════════════════════
   const int N = static_cast<int>(nodes.size());
-  std::vector<bool> bead_is_dense(N, false);
-  std::vector<double> bfactor(N, 0.0);
-  std::vector<double> occupancy(N, 0.0);
-
+  std::vector<bool> bead_is_dense(static_cast<std::size_t>(N), false);
+  std::vector<double> bfactor(static_cast<std::size_t>(N), 0.0);
+  std::vector<double> occupancy(static_cast<std::size_t>(N), 0.0);
   if (fuzzy_enabled_ && giant_cluster_id > 0) {
-    // ── Stage 2: Fuzzy EM → per-bead classification ──
-    fuzzy_refine(nodes, pro.Box, giant_cluster_id,
-                 bead_is_dense, bfactor, occupancy);
+    const auto fuzzy_begin = std::chrono::steady_clock::now();
+    fuzzy_refine(executor, nodes, pro.Box, giant_cluster_id, bead_is_dense,
+                 bfactor, occupancy);
+    perf_.fuzzy_seconds += std::chrono::duration<double>(
+                               std::chrono::steady_clock::now() - fuzzy_begin)
+                               .count();
   } else {
-    // ── DBSCAN hard classification ──
-    // Per-bead: in giant cluster → dense, else dilute
     for (int i = 0; i < N; ++i) {
-      bool dense = (giant_cluster_id > 0 &&
-                    nodes[i].cluster_id == giant_cluster_id);
-      bead_is_dense[i] = dense;
-      bfactor[i] = (nodes[i].cluster_id > 0) ? 1.0 : 0.0;  // any cluster
-      occupancy[i] = dense ? 1.0 : 0.0;  // 1.0=core, 0.0=dilute
+      const bool dense = (giant_cluster_id > 0 &&
+                          nodes[static_cast<std::size_t>(i)].cluster_id ==
+                              giant_cluster_id);
+      bead_is_dense[static_cast<std::size_t>(i)] = dense;
+      bfactor[static_cast<std::size_t>(i)] =
+          (nodes[static_cast<std::size_t>(i)].cluster_id > 0) ? 1.0 : 0.0;
+      occupancy[static_cast<std::size_t>(i)] = dense ? 1.0 : 0.0;
     }
   }
 
-  // ════════════════════════════════════════════════════════════
-  // [ISSUE 3 FIX] Save PDB coords BEFORE sort+unwrap
-  // ════════════════════════════════════════════════════════════
-  auto nodes_pdb = nodes; // snapshot for PDB output
-
-  // ════════════════════════════════════════════════════════════
-  // RADIUS OF GYRATION — per-phase, per-chain (same logic for both paths)
-  // [BUG 2 FIX] Both fuzzy and non-fuzzy now use identical per-chain Rg
-  // ════════════════════════════════════════════════════════════
-  // Sort by (type, chain_idx) for linear chain scan
-  // We need a parallel sort of bead_is_dense with nodes
-  std::vector<int> order(N);
-  for (int i = 0; i < N; ++i) order[i] = i;
+  auto nodes_pdb = nodes;
+  std::vector<int> order(static_cast<std::size_t>(N));
+  for (int i = 0; i < N; ++i)
+    order[static_cast<std::size_t>(i)] = i;
   std::sort(order.begin(), order.end(), [&](int a, int b) {
-    if (nodes[a].type != nodes[b].type) return nodes[a].type < nodes[b].type;
-    if (nodes[a].chain_idx != nodes[b].chain_idx) return nodes[a].chain_idx < nodes[b].chain_idx;
-    return nodes[a].id < nodes[b].id;  // preserve backbone order within chain
+    if (nodes[static_cast<std::size_t>(a)].type !=
+        nodes[static_cast<std::size_t>(b)].type)
+      return nodes[static_cast<std::size_t>(a)].type <
+             nodes[static_cast<std::size_t>(b)].type;
+    if (nodes[static_cast<std::size_t>(a)].chain_idx !=
+        nodes[static_cast<std::size_t>(b)].chain_idx)
+      return nodes[static_cast<std::size_t>(a)].chain_idx <
+             nodes[static_cast<std::size_t>(b)].chain_idx;
+    return nodes[static_cast<std::size_t>(a)].id <
+           nodes[static_cast<std::size_t>(b)].id;
   });
-  // Apply permutation to nodes and bead_is_dense
+
   {
-    std::vector<LLPSNode> sorted_nodes(N);
-    std::vector<bool> sorted_dense(N);
+    std::vector<LLPSNode> sorted_nodes(static_cast<std::size_t>(N));
+    std::vector<bool> sorted_dense(static_cast<std::size_t>(N), false);
     for (int i = 0; i < N; ++i) {
-      sorted_nodes[i] = nodes[order[i]];
-      sorted_dense[i] = bead_is_dense[order[i]];
+      sorted_nodes[static_cast<std::size_t>(i)] =
+          nodes[static_cast<std::size_t>(order[static_cast<std::size_t>(i)])];
+      sorted_dense[static_cast<std::size_t>(i)] =
+          bead_is_dense[static_cast<std::size_t>(order[static_cast<std::size_t>(i)])];
     }
     nodes = std::move(sorted_nodes);
     bead_is_dense = std::move(sorted_dense);
   }
 
   const BoxMatrix bmat(pro.Box);
-  double sum_rg_pro_dilute = 0.0, sum_rg_pro_dense = 0.0;
-  double sum_rg_rna_dilute = 0.0, sum_rg_rna_dense = 0.0;
-  int cnt_pro_dilute = 0, cnt_pro_dense = 0;
-  int cnt_rna_dilute = 0, cnt_rna_dense = 0;
+  auto emit_droplet_shape = [&](const DropletShapeFrame &row) {
+    if (droplet_shape_streaming_ && droplet_shape_out_.is_open()) {
+      droplet_shape_out_ << row.time_ps << "," << row.frame << ","
+                         << row.cluster_id << "," << row.nodes << ","
+                         << row.protein_nodes << "," << row.rna_nodes << ","
+                         << row.rg_angstrom << "," << row.asphericity_angstrom2
+                         << "," << row.acylindricity_angstrom2 << ","
+                         << row.relative_shape_anisotropy << ","
+                         << row.sphericity_proxy << "\n";
+      if (frame_count_ % 100 == 0)
+        droplet_shape_out_.flush();
+    } else {
+      droplet_shape_rows_.push_back(row);
+    }
+  };
 
-  size_t ci = 0;
-  while (ci < static_cast<size_t>(N)) {
-    size_t cj = ci;
-    int cur_type = nodes[ci].type;
-    int cur_chain = nodes[ci].chain_idx;
-    while (cj < static_cast<size_t>(N) && nodes[cj].type == cur_type &&
+  DropletShapeFrame shape_row;
+  shape_row.time_ps = current_time_ps;
+  shape_row.frame = frame_idx;
+  shape_row.cluster_id = giant_cluster_id;
+  if (giant_cluster_id > 0) {
+    int ref_idx = -1;
+    for (int i = 0; i < N; ++i) {
+      if (nodes[static_cast<std::size_t>(i)].cluster_id == giant_cluster_id) {
+        ref_idx = i;
+        break;
+      }
+    }
+    if (ref_idx >= 0) {
+      const auto &ref = nodes[static_cast<std::size_t>(ref_idx)];
+      std::vector<std::array<double, 3>> xyz;
+      xyz.reserve(static_cast<std::size_t>(N));
+      for (const auto &node : nodes) {
+        if (node.cluster_id != giant_cluster_id)
+          continue;
+        double dx = node.x - ref.x;
+        double dy = node.y - ref.y;
+        double dz = node.z - ref.z;
+        bmat.apply_mic(dx, dy, dz);
+        xyz.push_back({ref.x + dx, ref.y + dy, ref.z + dz});
+        ++shape_row.nodes;
+        if (node.type == 1)
+          ++shape_row.protein_nodes;
+        else
+          ++shape_row.rna_nodes;
+      }
+      if (!xyz.empty()) {
+        double cx = 0.0;
+        double cy = 0.0;
+        double cz = 0.0;
+        for (const auto &p : xyz) {
+          cx += p[0];
+          cy += p[1];
+          cz += p[2];
+        }
+        const double inv_n = 1.0 / static_cast<double>(xyz.size());
+        cx *= inv_n;
+        cy *= inv_n;
+        cz *= inv_n;
+        double xx = 0.0;
+        double xy = 0.0;
+        double xz = 0.0;
+        double yy = 0.0;
+        double yz = 0.0;
+        double zz = 0.0;
+        for (const auto &p : xyz) {
+          const double dx = p[0] - cx;
+          const double dy = p[1] - cy;
+          const double dz = p[2] - cz;
+          xx += dx * dx;
+          xy += dx * dy;
+          xz += dx * dz;
+          yy += dy * dy;
+          yz += dy * dz;
+          zz += dz * dz;
+        }
+        xx *= inv_n;
+        xy *= inv_n;
+        xz *= inv_n;
+        yy *= inv_n;
+        yz *= inv_n;
+        zz *= inv_n;
+        const auto eig =
+            eigenvalues_symmetric_3x3(xx, xy, xz, yy, yz, zz);
+        const double l1 = std::max(0.0, eig[0]);
+        const double l2 = std::max(0.0, eig[1]);
+        const double l3 = std::max(0.0, eig[2]);
+        const double rg2 = std::max(0.0, l1 + l2 + l3);
+        shape_row.rg_angstrom = std::sqrt(rg2);
+        shape_row.asphericity_angstrom2 = l1 - 0.5 * (l2 + l3);
+        shape_row.acylindricity_angstrom2 = l2 - l3;
+        const double mean_l = rg2 / 3.0;
+        shape_row.relative_shape_anisotropy =
+            (rg2 > 0.0)
+                ? (1.5 * ((l1 - mean_l) * (l1 - mean_l) +
+                          (l2 - mean_l) * (l2 - mean_l) +
+                          (l3 - mean_l) * (l3 - mean_l)) /
+                   (rg2 * rg2))
+                : 0.0;
+        shape_row.sphericity_proxy =
+            std::max(0.0, std::min(1.0,
+                                   1.0 - shape_row.relative_shape_anisotropy));
+      }
+    }
+  }
+  emit_droplet_shape(shape_row);
+
+  double sum_rg_pro_dilute = 0.0;
+  double sum_rg_pro_dense = 0.0;
+  double sum_rg_rna_dilute = 0.0;
+  double sum_rg_rna_dense = 0.0;
+  int cnt_pro_dilute = 0;
+  int cnt_pro_dense = 0;
+  int cnt_rna_dilute = 0;
+  int cnt_rna_dense = 0;
+  std::vector<ChainFrameSummary> frame_chains;
+  frame_chains.reserve(static_cast<std::size_t>(N));
+
+  std::size_t ci = 0;
+  while (ci < static_cast<std::size_t>(N)) {
+    std::size_t cj = ci;
+    const int cur_type = nodes[ci].type;
+    const int cur_chain = nodes[ci].chain_idx;
+    while (cj < static_cast<std::size_t>(N) && nodes[cj].type == cur_type &&
            nodes[cj].chain_idx == cur_chain)
       ++cj;
-    int n_beads = static_cast<int>(cj - ci);
+    const int n_beads = static_cast<int>(cj - ci);
 
-    // Sequential PBC unwrap for Rg
-    for (size_t k = ci + 1; k < cj; ++k) {
+    for (std::size_t k = ci + 1; k < cj; ++k) {
       double dx = nodes[k].x - nodes[k - 1].x;
       double dy = nodes[k].y - nodes[k - 1].y;
       double dz = nodes[k].z - nodes[k - 1].z;
@@ -409,51 +851,82 @@ void TitanLLPSCluster::process_frame(const MOL &pro,
       nodes[k].z = nodes[k - 1].z + dz;
     }
 
-    // Classify chain: ≥50% dense beads → Dense chain
     int dense_beads = 0;
-    for (size_t k = ci; k < cj; ++k)
-      if (bead_is_dense[k]) ++dense_beads;
+    std::unordered_map<int, int> cluster_counts;
+    for (std::size_t k = ci; k < cj; ++k) {
+      if (bead_is_dense[k])
+        ++dense_beads;
+      ++cluster_counts[nodes[k].cluster_id];
+    }
     bool chain_dense = (dense_beads > n_beads / 2);
 
-    // COM
-    double ccx = 0, ccy = 0, ccz = 0;
-    for (size_t k = ci; k < cj; ++k) {
-      ccx += nodes[k].x; ccy += nodes[k].y; ccz += nodes[k].z;
+    double ccx = 0.0;
+    double ccy = 0.0;
+    double ccz = 0.0;
+    for (std::size_t k = ci; k < cj; ++k) {
+      ccx += nodes[k].x;
+      ccy += nodes[k].y;
+      ccz += nodes[k].z;
     }
-    ccx /= n_beads; ccy /= n_beads; ccz /= n_beads;
+    ccx /= n_beads;
+    ccy /= n_beads;
+    ccz /= n_beads;
 
-    // Rg
     double rg_sq = 0.0;
-    for (size_t k = ci; k < cj; ++k) {
-      double dx = nodes[k].x - ccx;
-      double dy = nodes[k].y - ccy;
-      double dz = nodes[k].z - ccz;
+    for (std::size_t k = ci; k < cj; ++k) {
+      const double dx = nodes[k].x - ccx;
+      const double dy = nodes[k].y - ccy;
+      const double dz = nodes[k].z - ccz;
       rg_sq += dx * dx + dy * dy + dz * dz;
     }
-    double rg = std::sqrt(rg_sq / n_beads);
+    const double rg = std::sqrt(rg_sq / n_beads);
 
     if (cur_type == 1) {
-      if (chain_dense) { sum_rg_pro_dense += rg; ++cnt_pro_dense; }
-      else { sum_rg_pro_dilute += rg; ++cnt_pro_dilute; }
+      if (chain_dense) {
+        sum_rg_pro_dense += rg;
+        ++cnt_pro_dense;
+      } else {
+        sum_rg_pro_dilute += rg;
+        ++cnt_pro_dilute;
+      }
     } else {
-      if (chain_dense) { sum_rg_rna_dense += rg; ++cnt_rna_dense; }
-      else { sum_rg_rna_dilute += rg; ++cnt_rna_dilute; }
+      if (chain_dense) {
+        sum_rg_rna_dense += rg;
+        ++cnt_rna_dense;
+      } else {
+        sum_rg_rna_dilute += rg;
+        ++cnt_rna_dilute;
+      }
     }
+
+    int dominant_cluster = -1;
+    int dominant_count = -1;
+    for (const auto &entry : cluster_counts) {
+      if (entry.second > dominant_count) {
+        dominant_count = entry.second;
+        dominant_cluster = entry.first;
+      }
+    }
+    frame_chains.push_back(
+        {cur_type == 1 ? 0 : 1, cur_chain, chain_dense, dominant_cluster, ccx,
+         ccy, ccz});
     ci = cj;
   }
 
-  double rg_pd = (cnt_pro_dilute > 0) ? sum_rg_pro_dilute / cnt_pro_dilute : 0.0;
-  double rg_pD = (cnt_pro_dense > 0) ? sum_rg_pro_dense / cnt_pro_dense : 0.0;
-  double rg_rd = (cnt_rna_dilute > 0) ? sum_rg_rna_dilute / cnt_rna_dilute : 0.0;
-  double rg_rD = (cnt_rna_dense > 0) ? sum_rg_rna_dense / cnt_rna_dense : 0.0;
+  const double rg_pd =
+      (cnt_pro_dilute > 0) ? (sum_rg_pro_dilute / cnt_pro_dilute) : 0.0;
+  const double rg_pD =
+      (cnt_pro_dense > 0) ? (sum_rg_pro_dense / cnt_pro_dense) : 0.0;
+  const double rg_rd =
+      (cnt_rna_dilute > 0) ? (sum_rg_rna_dilute / cnt_rna_dilute) : 0.0;
+  const double rg_rD =
+      (cnt_rna_dense > 0) ? (sum_rg_rna_dense / cnt_rna_dense) : 0.0;
 
-  // Write CSV
   if (streaming_csv_ && ts_out_.is_open()) {
-    ts_out_ << std::fixed << std::setprecision(1) << current_time_ps << ","
-            << N << "," << n_valid << ","
-            << lrg_pro << "," << lrg_rna << "," << noise_cnt << ","
-            << std::setprecision(3) << rg_pd << "," << rg_pD << "," << rg_rd
-            << "," << rg_rD << "\n";
+    ts_out_ << std::fixed << std::setprecision(1) << current_time_ps << "," << N
+            << "," << n_valid << "," << largest_pro << "," << largest_rna << ","
+            << noise_cnt << "," << std::setprecision(3) << rg_pd << "," << rg_pD
+            << "," << rg_rd << "," << rg_rD << "\n";
     if (frame_count_ % 100 == 0)
       ts_out_.flush();
   } else {
@@ -461,8 +934,8 @@ void TitanLLPSCluster::process_frame(const MOL &pro,
     m.time_ps = current_time_ps;
     m.num_nodes = N;
     m.num_clusters = n_valid;
-    m.largest_cluster_pro_chains = lrg_pro;
-    m.largest_cluster_rna_chains = lrg_rna;
+    m.largest_cluster_pro_chains = largest_pro;
+    m.largest_cluster_rna_chains = largest_rna;
     m.noise_count = noise_cnt;
     m.rg_pro_dilute = rg_pd;
     m.rg_pro_dense = rg_pD;
@@ -471,276 +944,55 @@ void TitanLLPSCluster::process_frame(const MOL &pro,
     timeseries_.push_back(m);
   }
 
-  // PDB output: check stride BEFORE increment so frame 0 is always written
+  if (dynamics_enabled_) {
+    const auto dynamics_begin = std::chrono::steady_clock::now();
+    update_dynamics(pro.Box, current_time_ps / 1000.0, giant_cluster_id,
+                    cluster_pro, cluster_rna, frame_chains);
+    perf_.dynamics_seconds += std::chrono::duration<double>(
+                                  std::chrono::steady_clock::now() -
+                                  dynamics_begin)
+                                  .count();
+  }
+  if (rna_compaction_enabled_) {
+    const auto rna_begin = std::chrono::steady_clock::now();
+    update_rna_compaction(pro, pro_info, lig, lig_info, pro.Box,
+                          current_time_ps / 1000.0, frame_idx, frame_chains);
+    perf_.rna_compaction_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      rna_begin)
+            .count();
+  }
+
   if (frame_count_ % write_pdb_stride_ == 0)
     write_frame_to_pdb(nodes_pdb, frame_idx, bfactor, occupancy);
   ++frame_count_;
 }
 
-// ─────────────────────────────────────────────────────────────
-// fuzzy_refine — Stage 2: Fuzzy EM refinement after DBSCAN
-// Now outputs per-bead classification + PDB metadata, NOT Rg.
-// ─────────────────────────────────────────────────────────────
-void TitanLLPSCluster::fuzzy_refine(
-    const std::vector<LLPSNode>& nodes, const box& Box,
-    int giant_cluster_id,
-    std::vector<bool>& is_dense,
-    std::vector<double>& bfactor,
-    std::vector<double>& occupancy) {
 
-  const int N = static_cast<int>(nodes.size());
-  is_dense.assign(N, false);
-  bfactor.assign(N, 0.0);
-  occupancy.assign(N, 0.0);
-  if (N == 0) return;
+// ============================================================================
+// Dynamics helpers
+// ============================================================================
 
-  const BoxMatrix bmat(Box);
 
-  // ── Find distinct cluster IDs ──
-  int max_cid = 0;
-  for (const auto& n : nodes)
-    if (n.cluster_id > max_cid) max_cid = n.cluster_id;
-  if (max_cid == 0) return;
 
-  std::vector<int> cid_list;
-  cid_list.reserve(max_cid);
-  for (int c = 1; c <= max_cid; ++c) {
-    bool has = false;
-    for (const auto& n : nodes)
-      if (n.cluster_id == c) { has = true; break; }
-    if (has) cid_list.push_back(c);
-  }
-  const int K_dense = static_cast<int>(cid_list.size());
-  if (K_dense == 0) return;
-  const int K_total = K_dense + 1;
-  const int dilute_k = K_dense;
 
-  std::vector<int> cid_to_idx(max_cid + 1, -1);
-  for (int k = 0; k < K_dense; ++k)
-    cid_to_idx[cid_list[k]] = k;
 
-  int giant_k = (giant_cluster_id > 0 && giant_cluster_id <= max_cid)
-                    ? cid_to_idx[giant_cluster_id] : -1;
 
-  // ── Scale parameters from giant cluster ──
-  std::vector<std::array<double,3>> X_k(K_total);
-  {
-    int ref_idx = -1;
-    for (int i = 0; i < N; ++i)
-      if (nodes[i].cluster_id == giant_cluster_id) { ref_idx = i; break; }
-    if (ref_idx < 0) return;
 
-    double sx = 0, sy = 0, sz = 0;
-    int cnt = 0;
-    for (int i = 0; i < N; ++i) {
-      if (nodes[i].cluster_id != giant_cluster_id) continue;
-      double dx = nodes[i].x - nodes[ref_idx].x;
-      double dy = nodes[i].y - nodes[ref_idx].y;
-      double dz = nodes[i].z - nodes[ref_idx].z;
-      bmat.apply_mic(dx, dy, dz);
-      sx += nodes[ref_idx].x + dx;
-      sy += nodes[ref_idx].y + dy;
-      sz += nodes[ref_idx].z + dz;
-      ++cnt;
-    }
-    double gx = sx / cnt, gy = sy / cnt, gz = sz / cnt;
 
-    double sum_sq = 0.0;
-    for (int i = 0; i < N; ++i) {
-      if (nodes[i].cluster_id != giant_cluster_id) continue;
-      double dx = nodes[i].x - gx;
-      double dy = nodes[i].y - gy;
-      double dz = nodes[i].z - gz;
-      bmat.apply_mic(dx, dy, dz);
-      sum_sq += dx*dx + dy*dy + dz*dz;
-    }
-    double r_bar = std::sqrt(sum_sq / cnt);
-    if (r_bar < 1.0) r_bar = 1.0;
+// ============================================================================
+// Export
+// ============================================================================
 
-    double r_cutoff = 2.0 * r_bar;
-    double sigma_pos = r_bar / 3.0;
-    double lambda = 15.0 * sigma_pos * r_bar;
-    double r_cutoff_sq = r_cutoff * r_cutoff;
 
-    // Initialize cluster centers
-    for (int k = 0; k < K_dense; ++k) {
-      int cid = cid_list[k];
-      int ref = -1;
-      for (int i = 0; i < N; ++i)
-        if (nodes[i].cluster_id == cid) { ref = i; break; }
-      double wsx = 0, wsy = 0, wsz = 0;
-      int wcnt = 0;
-      for (int i = 0; i < N; ++i) {
-        if (nodes[i].cluster_id != cid) continue;
-        double dx = nodes[i].x - nodes[ref].x;
-        double dy = nodes[i].y - nodes[ref].y;
-        double dz = nodes[i].z - nodes[ref].z;
-        bmat.apply_mic(dx, dy, dz);
-        wsx += nodes[ref].x + dx;
-        wsy += nodes[ref].y + dy;
-        wsz += nodes[ref].z + dz;
-        ++wcnt;
-      }
-      X_k[k] = {wsx/wcnt, wsy/wcnt, wsz/wcnt};
-    }
 
-    // Dilute pseudo-cluster: no centroid needed.
-    // Dilute beads are scattered uniformly; their "centroid" is a
-    // physically meaningless point. Instead we assign a uniform
-    // background probability in the E-step (see below).
-    X_k[dilute_k] = {0.0, 0.0, 0.0}; // placeholder, not used in E-step
 
-    // ── EM iterations ──
-    // [FIX 2] Flat 1D matrix — single allocation, cache-friendly
-    std::vector<double> u(static_cast<size_t>(N) * K_total, 0.0);
-    auto U = [&](int i, int k) -> double& { return u[i * K_total + k]; };
-    constexpr int MAX_ITER = 50;
-    constexpr double CONV_THR = 0.01;
-    constexpr double DILUTE_BG = 1e-4; // uniform background for dilute
 
-    for (int iter = 0; iter < MAX_ITER; ++iter) {
-      // E-step
-      for (int i = 0; i < N; ++i) {
-        double sum_raw = 0.0;
-        // Dense clusters: distance-based kernel
-        for (int k = 0; k < K_dense; ++k) {
-          double dx = nodes[i].x - X_k[k][0];
-          double dy = nodes[i].y - X_k[k][1];
-          double dz = nodes[i].z - X_k[k][2];
-          bmat.apply_mic(dx, dy, dz);
-          double d_sq = dx*dx + dy*dy + dz*dz;
-          if (d_sq < r_cutoff_sq) {
-            double t = std::sqrt(d_sq) / r_cutoff;
-            double C = 1.0 - 3.0*t*t + 2.0*t*t*t;
-            U(i,k) = std::exp(-d_sq / lambda) * C;
-          } else {
-            U(i,k) = 0.0;
-          }
-          sum_raw += U(i,k);
-        }
-        // [FIX 3] Dilute pseudo-cluster: uniform background probability
-        U(i, dilute_k) = DILUTE_BG;
-        sum_raw += DILUTE_BG;
-        // Normalize
-        if (sum_raw > 0.0) {
-          for (int k = 0; k < K_total; ++k) U(i,k) /= sum_raw;
-        } else {
-          for (int k = 0; k < K_total; ++k) U(i,k) = 1.0 / K_total;
-        }
-      }
 
-      // M-step (only dense clusters — dilute has no centroid)
-      double max_shift = 0.0;
-      for (int k = 0; k < K_dense; ++k) {
-        int best_i = 0;
-        double best_u = U(0,k);
-        for (int i = 1; i < N; ++i)
-          if (U(i,k) > best_u) { best_u = U(i,k); best_i = i; }
+// ============================================================================
+// Fuzzy refine / PDB
+// ============================================================================
 
-        double wsx = 0, wsy = 0, wsz = 0, wsum = 0;
-        for (int i = 0; i < N; ++i) {
-          if (U(i,k) < 1e-8) continue;
-          double dx = nodes[i].x - nodes[best_i].x;
-          double dy = nodes[i].y - nodes[best_i].y;
-          double dz = nodes[i].z - nodes[best_i].z;
-          bmat.apply_mic(dx, dy, dz);
-          wsx += U(i,k) * (nodes[best_i].x + dx);
-          wsy += U(i,k) * (nodes[best_i].y + dy);
-          wsz += U(i,k) * (nodes[best_i].z + dz);
-          wsum += U(i,k);
-        }
-        if (wsum > 0) {
-          double nx = wsx/wsum, ny = wsy/wsum, nz = wsz/wsum;
-          // [FIX 4] MIC on convergence shift — prevents PBC wrap artifacts
-          double sdx = nx - X_k[k][0], sdy = ny - X_k[k][1], sdz = nz - X_k[k][2];
-          bmat.apply_mic(sdx, sdy, sdz);
-          double shift = sdx*sdx + sdy*sdy + sdz*sdz;
-          if (shift > max_shift) max_shift = shift;
-          X_k[k] = {nx, ny, nz};
-        }
-      }
-      if (std::sqrt(max_shift) < CONV_THR) break;
-    }
 
-    // ── Classify beads + compute PDB metadata ──
-    for (int i = 0; i < N; ++i) {
-      int dom_k = 0;
-      for (int k = 1; k < K_total; ++k)
-        if (U(i,k) > U(i,dom_k)) dom_k = k;
-
-      bool dense = (dom_k != dilute_k) && (U(i,dom_k) > 0.4);
-      is_dense[i] = dense;
-
-      // B-factor = membership to giant cluster
-      double u_giant = (giant_k >= 0) ? U(i,giant_k) : 0.0;
-      bfactor[i] = std::max(0.0, std::min(1.0, u_giant));
-
-      // Occupancy = phase tag
-      if (u_giant < 0.2)       occupancy[i] = 0.00; // dilute
-      else if (u_giant < 0.8)  occupancy[i] = 0.50; // interface
-      else                     occupancy[i] = 1.00; // core
-    }
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// write_frame_to_pdb
-// [ISSUE 4 FIX] chain A/B, per-bead B-factor + occupancy
-// ─────────────────────────────────────────────────────────────
-void TitanLLPSCluster::write_frame_to_pdb(const std::vector<LLPSNode> &nodes,
-                                          int frame_idx,
-                                          const std::vector<double>& bfactor,
-                                          const std::vector<double>& occupancy) {
-  if (!vmd_out_.is_open())
-    return;
-  char buf[128];
-  std::snprintf(buf, sizeof(buf), "MODEL     %4d\n", frame_idx);
-  vmd_out_ << buf;
-  for (size_t i = 0; i < nodes.size(); ++i) {
-    const auto &n = nodes[i];
-    const char *resname = (n.type == 1) ? "PRO" : "RNA";
-    char chain_id = (n.type == 1) ? 'A' : 'B'; // protein=A, RNA=B
-    double bf = (i < bfactor.size()) ? bfactor[i] : 0.0;
-    double occ = (i < occupancy.size()) ? occupancy[i] : 1.0;
-    int atom_serial = (n.id - 1) % 99999 + 1;
-    std::string res_str = encode_hybrid36(n.chain_idx);
-    std::snprintf(buf, sizeof(buf),
-                  "ATOM  %5d  CA  %3s %c%4s    %8.3f%8.3f%8.3f%6.2f%6.2f\n",
-                  atom_serial, resname, chain_id, res_str.c_str(),
-                  n.x, n.y, n.z, occ, bf);
-    vmd_out_ << buf;
-  }
-  vmd_out_ << "ENDMDL\n";
-}
-
-// ─────────────────────────────────────────────────────────────
-// export_timeseries
-// If streaming CSV was opened in init(), data is already written; this is a
-// no-op that just flushes and logs. Otherwise, writes all buffered data.
-// ─────────────────────────────────────────────────────────────
-void TitanLLPSCluster::export_timeseries(const std::string &out_csv) const {
-  if (streaming_csv_) {
-    // Data already written per-frame. Just flush the file handle.
-    if (ts_out_.is_open())
-      const_cast<std::ofstream &>(ts_out_).flush();
-    TitanUI::print_info("[LLPS-DBSCAN] Timeseries already streamed to CSV.");
-    return;
-  }
-  // Fallback: in-memory buffer path (no CSV name was given to init)
-  std::ofstream out(out_csv);
-  if (!out.is_open()) {
-    TitanUI::print_warning("[LLPS-DBSCAN] Cannot open " + out_csv);
-    return;
-  }
-  out << "Time_ps,TotalBeads,NumCondensates,"
-         "GiantCluster_ProChains,GiantCluster_RnaChains,NoiseBeads,"
-         "Rg_Pro_Dilute,Rg_Pro_Dense,Rg_RNA_Dilute,Rg_RNA_Dense\n";
-  for (const auto &m : timeseries_) {
-    out << std::fixed << std::setprecision(1) << m.time_ps << "," << m.num_nodes
-        << "," << m.num_clusters << "," << m.largest_cluster_pro_chains << ","
-        << m.largest_cluster_rna_chains << "," << m.noise_count << ","
-        << std::setprecision(3) << m.rg_pro_dilute << "," << m.rg_pro_dense
-        << "," << m.rg_rna_dilute << "," << m.rg_rna_dense << "\n";
-  }
-  TitanUI::print_info("[LLPS-DBSCAN] Written: " + out_csv);
-}
+#ifdef TITAN_LLPS_TESTING
+#endif

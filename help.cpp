@@ -18,7 +18,8 @@ SYNOPSIS
   DESCRIPTION
     Titan is a high-performance molecular analysis engine for computing
     electrostatic and van der Waals interactions, GBSA/ALPB solvation,
-    hydrogen bonds, DCCM network analysis, PCA/FES, allostery, TICA, MSM,
+    hydrogen bonds, DCCM network analysis, PCA/FES, allostery, corr-kNN,
+    TICA, MSM,
     ZTS minimum-energy paths, DHAM/MBAR reweighting, TPT pathway analysis,
     LJ condensation, LLPS, GIST water thermodynamics, IFP occupancy,
     LSP-MD, and related observables from PDB/XTC/TRR trajectories.
@@ -65,6 +66,7 @@ CORE DEPENDENCY CHAIN
 
   -pca        implies -network
   -allostery  implies -network
+  -corr-knn   implies -network
   -tica       implies -network
   -zts        requires -pca or -tica; if both are active, set -zts-domain
   -umap       implies -tica and -network
@@ -77,6 +79,10 @@ CORE DEPENDENCY CHAIN
   -tpt        implies -msm and -tica; phase 0 uses the built MSM TPM +
               stationary distribution directly
   -community=louvain implies -network
+  -graph-source=dccm implies -network
+  -graph-source=lspmd implies -lspmd
+  -graph-source=allostery-gc / allostery-te imply -allostery
+  -graph-source=tpt implies -tpt
   -lspmd      runs as its own network-style module and does not need -network
 
 GENERAL OUTPUT BEHAVIOR
@@ -95,13 +101,14 @@ IMPORTANT NOTES
     pipeline still works normally. PCA, FES, basin extraction, TICA, MSM,
     LLPS, GIST, and other active modules continue in their standard mode.
 
-  - If DHAM converges, PCA/FES automatically uses DHAM frame weights at the
-    requested target temperature. This enables weighted FES without changing
-    the rest of the PCA workflow.
+  - Default equilibrium weighting uses `-eq-weight-source auto`:
+    if DHAM converges, PCA/FES uses DHAM frame weights at the requested
+    target temperature; otherwise TITAN falls back to uniform weights.
 
   - MBAR v1 is standalone-only. It writes `mbar_*` outputs, reweights to a
     target temperature from REMD/HREMD energy ladders, and does not overwrite
-    the standard PCA/TICA/DHAM outputs.
+    the standard PCA/TICA/DHAM outputs unless you explicitly opt in with
+    `-eq-weight-source mbar`.
 
   - PCA basin extraction writes an auto-generated shell script:
       extract_basins.sh
@@ -131,8 +138,8 @@ IMPORTANT NOTES
   Typical outputs:
     cal.txt
     cal.xvg
-    average_emap.dat
-    average_emap_matrix.dat
+    average_emap_pairs.tsv
+    average_emap_matrix.tsv
     out_dis_com_energy.dat
     out_dis_com.dat
 
@@ -150,8 +157,8 @@ IMPORTANT NOTES
     gbsa_timeseries_avg.dat
     gbsa_summary.dat
     gbsa_decomposition.dat
-    gbsa_average_emap.dat
-    gbsa_total_energy_maptype.dat
+    gbsa_average_emap_pairs.tsv
+    gbsa_total_energy_maptype.tsv
     out_entropy.dat   (auto-enabled by -gbsa for free-energy completeness)
 
 2.3 Hydrogen Bonds
@@ -170,6 +177,52 @@ IMPORTANT NOTES
     out_hydrogen_bonds.dat
     out_hydrogen_bonds_receptor.dat
     out_hydrogen_bonds_ligand.dat
+
+2.3k HBond / Salt / Water Kinetics
+
+  Purpose:
+    Track primitive hydrogen bonds, salt bridges, and water bridges as
+    time-resolved on/off events, then export residence / lifetime statistics
+    plus continuous and intermittent correlation functions.
+
+  Main inputs:
+    -hbk
+    -hbk-kind <all|hbond|salt|water>
+    -hbk-domain <inter|intra|both>
+    -hbk-maxlag <N>
+    -hbk-hbond-cutoff <A>
+    -hbk-angle <deg>
+    -hbk-salt-cutoff <A>
+    -hbk-water-cutoff <A>
+
+  Typical outputs:
+    hbond_kinetics_summary.dat
+    hbond_kinetics_hbond_pairs.csv
+    hbond_kinetics_salt_pairs.csv
+    hbond_kinetics_water_pairs.csv
+    hbond_kinetics_hbond_ct.dat
+    hbond_kinetics_salt_ct.dat
+    hbond_kinetics_water_ct.dat
+    hbond_kinetics_hbond_lifetimes.dat
+    hbond_kinetics_salt_lifetimes.dat
+    hbond_kinetics_water_lifetimes.dat
+
+  Notes:
+    - `-hbk` is a new kinetics module. It does not replace legacy `-hb`,
+      `-ifp`, or the classic `global_water_bridges_*` outputs.
+    - V1 supports `inter`, `intra`, and `both`; the default is `both`.
+    - `inter` means molecule 1 <-> molecule 2.
+    - `intra` means molecule 1, plus molecule 2 only outside `-nocal`.
+    - Primitive keys are not collapsed to residue-pairs:
+      hbond = donor / hydrogen / acceptor
+      salt = acidic atom / basic atom
+      water = water index / solute atom A / solute atom B
+    - Water-bridge kinetics are exported only when a water trajectory is
+      available. If water is requested but unavailable, TITAN warns and writes
+      header-only water files instead of failing the whole run.
+    - Canonical syntax:
+      arg.in uses `-hbk-kind=water`
+      CLI uses `-hbk-kind water`
 
 2.3a DSSP Secondary Structure
 
@@ -311,7 +364,41 @@ IMPORTANT NOTES
     - If no explicit PBC mode is requested, Titan auto-enables -pbci 0 for LJ
       analysis and logs that decision.
 
-2.4 DCCM Network
+  2.3e Structure Factor / Pair Correlation
+
+  Purpose:
+    Build streaming RDF / pair-correlation histograms on molecule 1 and derive
+    isotropic structure factors S(q) at finalize time.
+
+  Main inputs:
+    -sq
+    -sq-channel <all|trace|backbone|sticker>
+    -sq-rdf-bin <A>
+    -sq-rdf-max <A|auto>
+    -sq-q-bin <A^-1>
+    -sq-q-max <A^-1|auto>
+
+  Typical outputs:
+    sq_summary.dat
+    sq_rdf_<channel>.dat
+    sq_structure_factor_<channel>.dat
+    sq_rdf_<channelA>__<channelB>.dat
+    sq_structure_factor_<channelA>__<channelB>.dat
+
+  Notes:
+    - SQ analysis always reads molecule 1 only.
+    - `all` uses all molecule-1 atoms/beads.
+    - `trace` reuses the RMS/Rg trace-selection rules.
+    - `backbone` uses CA, C4', C4*, BB, BB1, BB2, and BB3 atoms/beads.
+    - `sticker` reuses the -llps-sticker bead list.
+    - TITAN only exports RDF / S(q) from valid periodic condensed-phase frames.
+      Invalid / non-periodic boxes are skipped with a warning.
+    - S(q) is derived from RDF using an isotropic Fourier transform with a
+      Lorch window to reduce finite-cutoff ripple.
+    - If no explicit PBC mode is requested, Titan auto-enables -pbci 0 for SQ
+      analysis and logs that decision.
+
+  2.4 DCCM Network
 
   Purpose:
     Build an aligned CA/backbone trajectory and compute dynamic
@@ -324,6 +411,12 @@ IMPORTANT NOTES
   Typical outputs:
     network_edges.csv
     network_nodes.csv
+    dccm_equilibrium_context.dat     (when -eq-weight-source mbar resolves)
+    allostery_equilibrium_ranking.csv (when -allostery and -eq-weight-source mbar resolve)
+
+  Integration note:
+    `-eq-weight-source mbar` only adds equilibrium/context sidecars for DCCM
+    and allostery. It does not alter correlation, MI, GC, or TE calculations.
 
 2.4a Community Detection
 
@@ -341,6 +434,41 @@ IMPORTANT NOTES
     network_supergraph.csv
     network_community_id_bfactor.pdb
     network_participation_coeff_bfactor.pdb
+
+2.4b Unified Sparse Graph Analytics
+
+  Purpose:
+    Run one shared sparse-graph analytics layer on top of internal TITAN graph
+    sources from DCCM, LSP-MD, thresholded allostery GC/TE, and TPT.
+
+  Main inputs:
+    -graph
+    -graph-source <dccm|lspmd|allostery-gc|allostery-te|tpt>
+    -graph-community <auto|off|louvain>
+    -graph-filter-topk <N>
+    -graph-filter-component <all|largest>
+
+  Typical outputs:
+    graph_summary.dat
+    graph_<source>_edges.csv
+    graph_<source>_nodes.csv
+    graph_<source>_communities.csv
+    graph_<source>_community_summary.csv
+    graph_<source>_supergraph.csv
+    graph_<source>_bottleneck_edges.csv
+    graph_<source>_bottleneck_nodes.csv
+
+  Notes:
+    - V1 consumes only in-memory graph data already produced inside TITAN.
+      It does not read standalone CSV edge lists.
+    - `dccm`, `lspmd`, and `allostery-gc` can run Louvain communities.
+    - Directed sources (`allostery-te`, `tpt`) skip community detection in V1
+      and export bottleneck-style node/edge rankings instead.
+    - `-community=louvain` is treated as a compatibility alias onto the new
+      graph core for the DCCM source.
+    - Canonical syntax:
+      arg.in uses `-graph-source=dccm`
+      CLI uses `-graph-source dccm`
 
 2.5 PCA / FES / Basin Extraction
 
@@ -388,6 +516,9 @@ IMPORTANT NOTES
     optional: -allostery-knn-contact-cut=<A>
     optional: -allostery-cut=<A>, -allostery-prune-window=<avg|first>
     optional: -allostery-no-te
+    optional: -allostery-estimator=<hist|knn|kde>
+    optional: -allostery-estimator-k=<N>
+    optional: -allostery-kde-bandwidth=<val>
 
   Typical outputs:
     raw_mi_edges.csv
@@ -403,6 +534,11 @@ IMPORTANT NOTES
     - `network_gc_edges.csv` remains a thresholded coupling graph, while
       `raw_mi_edges.csv` stores the unthresholded MI values for the same
       candidate-pair set.
+    - `-allostery-estimator=knn` routes through the exact continuous 3D
+      corr-kNN backend. `-allostery-estimator-k` controls the estimator
+      neighborhood size, while `-allostery-knn` still means pair-pruning top-k.
+    - `-allostery-bins` and `-allostery-kde-bandwidth` are ignored in
+      knn mode and TITAN logs that decision.
 
 2.6a Mutual Information / Generalized Correlation
 
@@ -413,7 +549,39 @@ IMPORTANT NOTES
       nonlinear dependence onto the bounded interval [0, 1).
     - `network_te_edges.csv` remains the directed lagged-information export.
 
-2.7 TICA
+  2.6b Corr-kNN
+
+  Purpose:
+    Export raw continuous-estimator MI / GC / TE tables from aligned
+    residue-trace fluctuations using exact kNN estimators.
+
+  Main inputs:
+    -corr-knn
+    optional: -corr-knn-k=<N>, -corr-knn-tau=<N>
+    optional: -corr-knn-pair-cut=<A>, -corr-knn-pair-topk=<N>
+    optional: -corr-knn-pair-prior=<frame|contact>
+    optional: -corr-knn-pair-contact-cut=<A>
+    optional: -corr-knn-prune-window=<avg|first>
+    optional: -corr-knn-no-te
+
+  Typical outputs:
+    corr_knn_summary.dat
+    corr_knn_mi_pairs.csv
+    corr_knn_gc_pairs.csv
+    corr_knn_te_pairs.csv
+    corr_knn_equilibrium_ranking.csv   (when -eq-weight-source mbar resolves)
+
+  Notes:
+    - `-corr-knn` implies `-network` and reuses the aligned DCCM trace cache.
+    - MI uses exact KSG type-1 on 3D fluctuation vectors.
+    - TE uses continuous conditional-MI (Frenzel-Pompe style) on
+      (source[t-tau], target[t], target[t-tau]).
+    - GC is derived from MI using the 3D vector form:
+        GC = sqrt(1 - exp(-2 * MI / 3))
+    - Outputs are raw tables only; thresholded graph policy stays with the
+      legacy allostery/network path.
+
+  2.7 TICA
 
   Purpose:
     Extract slow collective coordinates from time-lagged covariance and
@@ -471,7 +639,47 @@ IMPORTANT NOTES
     msm_macrostate_traj.dat
     msm_count_matrix.dat
     msm_stationary.dat
+    msm_equilibrium_summary.dat       (when -eq-weight-source mbar resolves)
     msm_its_tpm/
+
+2.8a Validation
+
+  Purpose:
+    Run Chapman-Kolmogorov checks, VAMP-2 candidate ranking, and optional
+    bootstrap uncertainty on the current TICA -> MSM -> TPT workflow.
+
+  Main inputs:
+    -validation
+    optional:
+      -validation-ck-multiples <m1,m2,...>
+      -validation-vamp-components <c1,c2,...>
+      -validation-vamp-lags <l1,l2,...>
+      -validation-vamp-clusters <k1,k2,...>
+      -validation-vamp-folds <N>
+      -validation-auto-pick
+      -validation-bootstrap <N>
+      -validation-bootstrap-seed <N>
+
+  Typical outputs:
+    validation_summary.dat
+    validation_ck_summary.dat
+    validation_ck_states.dat
+    validation_vamp2_ranking.csv
+    validation_selected_model.dat
+    validation_msm_bootstrap_summary.dat
+    validation_msm_bootstrap_states.dat
+    validation_tpt_bootstrap_summary.dat
+    validation_tpt_bootstrap_states.dat
+
+  Notes:
+    - `-validation` implies `-msm` and reuses the solved TICA embedding plus
+      cached MSM segments.
+    - VAMP-2 candidate sweeps only vary component-prefix, MSM lag, and cluster
+      count inside the already solved TICA space.
+    - `-validation-auto-pick` is opt-in; when off, TITAN only reports ranking
+      and leaves the current MSM/TPT pipeline unchanged.
+    - `-validation-bootstrap` covers MSM uncertainty and, when `-tpt` is also
+      active, TPT uncertainty. Legacy `-tpt-bootstrap` files remain available.
 
 2.9 UMAP
 
@@ -499,6 +707,14 @@ IMPORTANT NOTES
 
   Typical outputs:
     titan_umap_embedding.csv
+    umap_fes_2d.dat                  (when -eq-weight-source mbar resolves)
+    umap_cluster_representatives.csv (when -eq-weight-source mbar resolves)
+    umap_equilibrium_summary.dat     (when -eq-weight-source mbar resolves)
+
+  Integration note:
+    `-eq-weight-source mbar` adds equilibrium-only UMAP sidecars without
+    changing the embedding fit itself. Default UMAP behavior is unchanged
+    unless MBAR is requested explicitly.
 
 2.10 DHAM Reweighting
 
@@ -538,7 +754,8 @@ IMPORTANT NOTES
     dham_window_audit.dat
 
   Integration note:
-    If DHAM converges, PCA/FES uses DHAM frame weights automatically.
+    `-eq-weight-source auto` prefers converged DHAM frame weights for the
+    default PCA/TICA FES outputs.
     If DHAM does not converge, Titan prints a warning and PCA/FES falls back
     to uniform weights while other active modules continue normally.
     NVT mode uses energy-based reweighting.
@@ -589,7 +806,11 @@ IMPORTANT NOTES
     `pca_fel.csv` projection export.
     `-mbar-domain both` runs both standalone weighted exports.
     MBAR uses DHAM-style window alignment controls, but does not replace DHAM
-    and does not feed weights back into MSM/TPT/PCA/TICA defaults automatically.
+    automatically.
+    `-eq-weight-source mbar` can opt MBAR weights into the default PCA/TICA
+    FES path plus equilibrium-only MSM/TPT summaries and UMAP/DCCM/LSP-MD
+    context sidecars.
+    It does not reweight MSM kinetics, DHAM, or TPT core TPM/pi.
     If a requested projection domain is unavailable, TITAN warns and skips it.
 
   Typical outputs:
@@ -605,7 +826,7 @@ IMPORTANT NOTES
   Integration note:
     MBAR outputs are intentionally standalone in v1.
     Standard `tica_fes_2d.dat`, `pca_fes_2d.dat`, and DHAM/TPT outputs keep
-    their original behavior.
+    their original behavior unless `-eq-weight-source mbar` is requested.
 
 2.10b TPT
 
@@ -644,13 +865,18 @@ IMPORTANT NOTES
     In ensemble mode, TITAN can use the converged DHAM-reweighted TPM/pi
     when `-tpt-use-dham yes` (default). If DHAM does not converge, TITAN
     falls back to the built MSM model automatically.
+    `-eq-weight-source mbar` only adds an equilibrium overlay summary from
+    MBAR populations. It does not change committors, rates, MFPTs, dominant
+    paths, or the TPT model source.
     In kinetic mode, TITAN always uses the built MSM model and writes
     `tpt_kinetics.dat` diagnostics; it still does not certify kinetic
     validity automatically. If `-tpt-demux-map <file>` is supplied, TITAN
     rebuilds a kinetic MSM from the demuxed microstate segments before TPT.
-    Kinetic diagnostics now include a first-pass CK / Markov sanity check.
-    `-tpt-bootstrap <N>` enables segment bootstrap uncertainty for MSM-backed
-    TPT models. DHAM-reweighted bootstrap is not implemented yet.
+    Kinetic diagnostics now include CK / Markov sanity metrics from the shared
+    validation core.
+    `-tpt-bootstrap <N>` enables bootstrap uncertainty for both MSM-backed and
+    DHAM-backed TPT models. When `-validation-bootstrap` matches the legacy
+    TPT bootstrap config, TITAN computes once and writes both file sets.
 
   Typical outputs:
     tpt_summary.dat
@@ -667,6 +893,7 @@ IMPORTANT NOTES
     tpt_path_clusters.dat
     tpt_bottleneck_edges.dat
     tpt_bottleneck_states.dat
+    tpt_equilibrium_overlay.dat       (when -eq-weight-source mbar resolves)
     `tpt_summary.dat` now appends a compact top-bottleneck table.
     `tpt_state_labels.dat` always contains generic state columns.
     For LJ jobs, TITAN appends LJ microstate-mean order parameters.
@@ -681,6 +908,14 @@ IMPORTANT NOTES
   Purpose:
     Detect dense and dilute phases, percolation, spatial clustering, and
     time-autocorrelation for condensate-like systems.
+    The current LLPS stack also covers contact dynamics, dense-phase mobility,
+    protein-RNA coupling, RNA compaction/information metrics, and RNA topology
+    signatures such as bridges and clamps. Paper-facing sidecars include
+    sticker hotspot ranking, droplet shape anisotropy/sphericity proxies,
+    droplet genealogy summaries, and FRAP-like residence/recovery proxies.
+    Run metadata and diagnostics are written into the central TITAN log
+    (`log.txt`) under LLPS Run Context / Output Audit sections; TITAN does not
+    create a separate LLPS manifest sidecar.
 
   Main inputs:
     -llps
@@ -688,6 +923,8 @@ IMPORTANT NOTES
       -llps-rcut
       -llps-perc
       -llps-fuzzy
+      -llps-dynamics
+      -llps-dynamics-detailed
       -llps-maxlag
       -llps-dimer-size
       -llps-contacts
@@ -695,18 +932,86 @@ IMPORTANT NOTES
       -llps-voxel
       -llps-dbscan-eps
       -llps-dbscan-minpts
+      -llps-lineage-overlap
+      -llps-prna-rcut
+      -llps-msd-fit-start-ns
+      -llps-msd-fit-end-ns
+      -llps-rna-compaction
+      -llps-rna-information
+      -llps-rna-topology
+      -llps-rna-topology-detailed
+      -llps-rna-intra-rcut
+      -llps-rna-bridge-geom-min
+      -llps-rna-patch-gap-max
+      -llps-rna-clamp-require-loop
+      -llps-rna-info-rg-bins
+      -llps-rna-info-longrange-bins
+      -llps-rna-longrange-min
+      -llps-energy-correlation
+      -llps-energy-detailed
 
   Typical outputs:
     llps_timeseries.dat
     llps_autocorr.dat
     llps_degree_dist.dat
     llps_contact_map.dat
+    llps_sticker_hotspots.csv
+    llps_performance_report.dat
     llps_summary.dat
     llps_density_protein.dx
     llps_density_rna.dx
     polymer_scaling.dat
     llps_dbscan_droplets.pdb
     llps_dbscan_timeseries.csv
+    llps_droplet_shape_timeseries.csv
+    llps_membership_autocorr_protein.dat
+    llps_membership_autocorr_rna.dat
+    llps_residence_times.csv
+    llps_entry_exit_rates.dat
+    llps_cluster_lineage.csv
+    llps_fusion_fission.dat
+    llps_droplet_genealogy_summary.dat
+    llps_frap_recovery_proxy.dat
+    llps_sticker_contact_lifetimes.dat
+    llps_protein_rna_contact_lifetimes.dat
+    llps_neighbor_rewiring.dat
+    llps_interface_turnover.dat
+    llps_dense_msd_protein.dat
+    llps_dense_msd_rna.dat
+    llps_liquidity_summary.dat
+    llps_rna_compaction_binding_summary.dat
+    llps_rna_compaction_binding_binned.csv
+    llps_rna_chain_compaction_summary.csv
+    llps_rna_intrachain_contacts_summary.csv
+    llps_rna_compaction_trace.csv (with -llps-dynamics-detailed=true)
+    llps_rna_energy_compaction_summary.dat
+    llps_rna_energy_compaction_binned.csv
+    llps_rna_binding_energy_trace.csv
+    llps_prna_pair_energy_trace.csv (with -llps-energy-detailed=true)
+    llps_rna_information_summary.dat
+    llps_rna_information_per_chain.csv
+    llps_rna_compaction_state_histogram.csv
+    llps_rna_partner_state_histogram.csv
+    llps_rna_transition_information.csv
+    llps_rna_binding_compaction_information.csv
+    llps_rna_partner_state_trace.csv (with -llps-dynamics-detailed=true)
+    llps_rna_topology_summary.dat
+    llps_rna_topology_per_chain.csv
+    llps_rna_topology_binding_binned.csv
+    llps_rna_topology_state_histogram.csv
+    llps_rna_bridge_lifetimes.dat
+    llps_rna_clamp_lifetimes.dat
+    llps_rna_loop_closure_efficiency.dat
+    llps_rna_local_competition_summary.dat
+    llps_rna_topology_trace.csv
+    llps_rna_bridge_trace.csv
+    llps_rna_clamp_trace.csv
+    log.txt sections:
+      LLPS Run Context
+      LLPS Macro Summary
+      LLPS Output Audit
+      LLPS DBSCAN Output Audit
+      LLPS Dynamics Output Audit
 
 2.12 GIST
 
@@ -799,6 +1104,12 @@ IMPORTANT NOTES
     lspmd_edges.csv
     lspmd_degree_centrality.csv
     lspmd_betweenness_centrality.csv
+    dccm_equilibrium_context.dat     (when -eq-weight-source mbar resolves)
+    lspmd_equilibrium_ranking.csv    (when -eq-weight-source mbar resolves)
+
+  Integration note:
+    `-eq-weight-source mbar` only adds contextual ranking/overlay sidecars.
+    TITAN does not rewrite core LSP-MD graph construction or centrality values.
 
 2.14 Other Modules
 
@@ -865,12 +1176,41 @@ IMPORTANT NOTES
       -allostery-knn=4 -allostery-knn-prior=contact \
       -allostery-knn-contact-cut=8 -allostery-no-te
 
+  titan.exe -s reference.pdb -traj md.xtc -allostery \
+      -allostery-estimator=knn -allostery-estimator-k=4 \
+      -allostery-knn=6 -allostery-cut=12
+
   Inspect:
     raw_mi_edges.csv for unthresholded mutual information
     network_gc_edges.csv for the derived GC network
     network_te_edges.csv for directed transfer entropy
 
-3.7 TICA + MSM workflow
+  3.6a Corr-kNN raw information export
+
+  titan.exe -s reference.pdb -traj md.xtc -corr-knn \
+      -corr-knn-k=4 -corr-knn-tau=10 -corr-knn-pair-cut=12
+
+  titan.exe -s reference.pdb -traj md.xtc -corr-knn \
+      -corr-knn-pair-topk=6 -corr-knn-pair-prior=contact \
+      -corr-knn-pair-contact-cut=8 -corr-knn-no-te
+
+  3.6b HBond kinetics
+
+  CLI:
+    titan.exe -s reference.pdb -traj md.xtc -hbk \
+        -hbk-kind hbond -hbk-kind salt -hbk-domain both -hbk-maxlag 250
+
+  arg.in:
+    -hbk
+    -hbk-kind=hbond
+    -hbk-kind=salt
+    -hbk-domain=both
+    -hbk-maxlag=250
+    -hbk-hbond-cutoff=3.5
+    -hbk-angle=135
+    -hbk-salt-cutoff=4.0
+
+  3.7 TICA + MSM workflow
 
   titan.exe -s reference.pdb -i input.txt -tica -tica-lag=10 \
       -tica-components=5 -msm -msm-clusters 150 -msm-lag 10
@@ -1072,7 +1412,18 @@ IMPORTANT NOTES
 4.2 Groups / Molecules / Time
 
   -g <G1>&<G2>          Interaction groups
-  -sg <SG1>-<SG2>       Sub-groups within main groups
+  -sg <SG1>-<SG2>       CLI sub-groups within main groups
+  -sg= <SG1>-<SG2>      arg.in sub-groups within main groups
+  -sg-mode=auto|stream|cache
+                        Sub-group energy mode. stream avoids dense pair cache.
+  -sg-cache=auto|off|on Dense pair-cache preference for -sg
+  -sg-memory-gb=auto|N  RAM budget for -sg auto mode
+  -sg-timeseries=auto|full|summary-only
+                        Control -sg time-series output volume
+  -sg-kernel=auto|scalar|avx2
+                        Streaming -sg compute kernel preference
+  -sg-cutoff=auto|VALUE|none
+                        Streaming -sg cutoff in nm; auto uses energy cutoff
   -mol-1-type <type>    protein, complex, lig, rna, dna
   -mol-2-type <type>    protein, protein-user, complex, lig, rna, dna
   -mol2 <N>             Starting residue/atom index for molecule 2
@@ -1156,8 +1507,60 @@ IMPORTANT NOTES
   -allostery-no-te      Skip Transfer Entropy stage and emit header-only TE CSV
   -allostery-estimator=<mode>
                         hist | knn | kde. Default: hist
+  -allostery-estimator-k=<N>
+                        Exact kNN estimator neighborhood size. Default: 4
   -allostery-kde-bandwidth=<val>
                         KDE bandwidth override for estimator=kde. Default: 0 (auto)
+
+  -mem-budget-gb=<auto|N>
+                        Shared post-processing RAM budget. Default: auto
+                        (60% currently available RAM; lower in low-memory mode)
+  -low-memory=<true|false>
+                        Prefer RAM-saving fallbacks when estimates are large
+  -network-mode=<auto|dense|sparse>
+                        DCCM network memory policy. Default: auto
+  -network-sparse-cut=<A>
+                        Sparse candidate cutoff in Angstrom. Default: 30
+  -network-sparse-k=<N>
+                        Sparse top-N nearest candidates per node. Default: 24
+  -network-cache-precision=<auto|fp32|fp64>
+                        Cache precision policy metadata for large network runs
+  -graph                Unified sparse graph analytics
+  -graph-source <name>  dccm | lspmd | allostery-gc | allostery-te | tpt
+                        Repeatable. Default: auto (attach to active producers)
+  -graph-community <m>  auto | off | louvain. Default: auto
+  -graph-filter-topk <N>
+                        Keep only top-N weighted edges per node after source
+                        construction. Default: 0
+  -graph-filter-component <m>
+                        all | largest. Default: all
+
+  -corr-knn             Raw continuous kNN MI / GC / TE export
+  -corr-knn-k=<N>       Exact kNN estimator neighborhood size. Default: 4
+  -corr-knn-tau=<N>     TE lag in frames. Default: 5
+  -corr-knn-pair-cut=<A>
+                        Distance-prune candidate residue pairs. Default: off
+  -corr-knn-pair-topk=<N>
+                        Keep top-N ranked partners per residue. Default: 0
+  -corr-knn-pair-prior=<frame|contact>
+                        frame = nearest-neighbor votes; contact = Cbeta/N contact frequency
+  -corr-knn-pair-contact-cut=<A>
+                        Anchor-contact cutoff for contact prior. Default: 8 A
+  -corr-knn-prune-window=<avg|first>
+                         avg scans all stored frames; first only frame 0 for pruning
+  -corr-knn-no-te       Skip Transfer Entropy stage and emit header-only TE CSV
+
+  -hbk                  HBond / salt / water kinetics analysis
+  -hbk-kind <mode>      all | hbond | salt | water. Repeatable. Default: all
+  -hbk-domain <mode>    inter | intra | both. Default: both
+  -hbk-maxlag <N>       Max lag in frames for C(t). Default: 500
+  -hbk-hbond-cutoff <A>
+                        HBond donor-acceptor cutoff. Default: effective -dhb or 3.5
+  -hbk-angle <deg>      HBond angle cutoff. Default: effective -ahb or 135
+  -hbk-salt-cutoff <A>  Salt-bridge cutoff. Default: 4.0
+  -hbk-water-cutoff <A>
+                        Water-bridge O...solute cutoff. Default: effective
+                        -dis-water or 3.5
 
   -tica                 TICA analysis
   -tica-lag=<N>         TICA lag. Default: 10
@@ -1192,7 +1595,12 @@ IMPORTANT NOTES
   -msm-its-solver <m>   ITS spectral solver: full | schur | partial (default: full)
   -msm-its-topk <N>     Top spectrum size for partial solver; 0 = auto from -msm-nts
   -msm-its-max-k-full <N>
-                        Full solver cutoff K; if K > cutoff, auto-switch full -> schur
+                         Full solver cutoff K; if K > cutoff, auto-switch full -> schur
+  -eq-weight-source <mode>
+                        auto | uniform | dham | mbar. Default: auto
+                        Controls which equilibrium frame weights feed the
+                        default PCA/TICA FES path and equilibrium-only
+                        MSM/TPT summaries. `auto` preserves legacy behavior.
 
   -dham                 DHAM reweighting
   -dham-temps <file>    Replica temperatures in K
@@ -1207,6 +1615,7 @@ IMPORTANT NOTES
   -dham-dt-energy <ps>  Energy sampling interval in ps; 0 = auto
   -dham-window-match <mode>
                         auto | off | strict. Default: auto
+                        Raw DHAM .xvg input also honors global -b/-e/-dt
 
   -mbar                 MBAR reweighting for REMD/HREMD temperature ladders
 -mbar-temps <file>    Optional ladder temperatures in K; required for fixed mode,
@@ -1229,6 +1638,7 @@ IMPORTANT NOTES
   -mbar-dt-energy <ps>  Energy sampling interval in ps; 0 = auto
   -mbar-bootstrap <N>   Bootstrap replicates for Cv/<E> uncertainty. Default: 0
   -mbar-scan-points <N> Number of temperature scan points; >1 writes mbar_cv.dat
+                        Raw MBAR .xvg input also honors global -b/-e/-dt
 
   -tpt                  Transition Path Theory on the built MSM
   -tpt-mode <mode>      ensemble | kinetic. Default: ensemble
@@ -1248,16 +1658,58 @@ IMPORTANT NOTES
   -tpt-bootstrap <N>    Segment bootstrap replicates for uncertainty. Default: 0
   -tpt-bootstrap-seed <N>
                         RNG seed for TPT bootstrap. Default: 42
+                        `-eq-weight-source mbar` writes
+                        tpt_equilibrium_overlay.dat without changing kinetics
 
   -llps                 LLPS analysis
   -llps-rcut <val>      Contact cutoff (nm). Default: 0.7
   -llps-perc <val>      Percolation threshold. Default: 0.5
   -llps-fuzzy           Fuzzy EM refinement after DBSCAN
+  -llps-dynamics        Enable liquid-like dynamics outputs
+  -llps-dynamics-detailed
+                        Export detailed chain/pair transition traces
   -llps-maxlag <N>      Max lag for C(t). Default: 500
   -llps-dimer-size <N>  Chains per macro-node. Default: 1
   -llps-contacts        Export contact map data
   -llps-sticker <beads> Sticker bead names
   -llps-voxel <val>     Voxel size for acceleration. Default: 0.5
+  -llps-lineage-overlap <val>
+                        Jaccard threshold for lineage matching. Default: 0.30
+  -llps-prna-rcut <val> Protein-RNA chain contact cutoff (nm). Default: llps-rcut
+  -llps-density=<auto|full|projection|off>
+                        Density accumulation policy. Default: auto
+  -llps-kernel=<auto|scalar|avx2>
+                        LLPS hot-kernel policy for benchmark/regression. Default: auto
+  -llps-rna-compaction=<auto|true|false>
+                        RNA compaction vs protein-binding metrics. Default: auto
+  -llps-energy-correlation=<auto|true|false>
+                        Contact-gated protein-RNA energy vs RNA compaction
+  -llps-energy-detailed=<true|false>
+                        Export protein-chain/RNA-chain energy trace. Default: false
+  -llps-rna-information=<auto|true|false>
+                        RNA information-theoretic entropy and coupling metrics
+  -llps-rna-topology=<auto|true|false>
+                        RNA bridge/clamp/topology metrics in dense phase. Default: auto
+  -llps-rna-topology-detailed=<true|false>
+                        Export detailed topology/bridge/clamp traces. Default: true
+  -llps-rna-intra-rcut <val>
+                        RNA intra-chain contact cutoff (nm). Default: llps-rcut
+  -llps-rna-longrange-min <N>
+                        Minimum residue span counted as long-range RNA contact. Default: 10
+  -llps-rna-bridge-geom-min <val|auto>
+                        Minimum geometric bridge span (nm). Default: auto
+  -llps-rna-patch-gap-max <N>
+                        Max residue gap merged into an RNA patch. Default: 1
+  -llps-rna-clamp-require-loop <true|false>
+                        Require loop support when calling RNA clamps. Default: true
+  -llps-rna-info-rg-bins <N>
+                        Number of Rg bins for RNA information states. Default: 16
+  -llps-rna-info-longrange-bins <N>
+                        Number of long-range-contact bins for RNA information states. Default: 16
+  -llps-msd-fit-start-ns <val|auto>
+                        Dense-phase MSD fit window start. Default: auto
+  -llps-msd-fit-end-ns <val|auto>
+                        Dense-phase MSD fit window end. Default: auto
   -llps-dbscan-eps <val>
                         DBSCAN epsilon in Angstrom. Default: 15.0
   -llps-dbscan-minpts <N>
@@ -1313,6 +1765,14 @@ IMPORTANT NOTES
   -lj-solid-q6 <val>    q6 threshold for solid-like atoms. Default: 0.40
   -lj-solid-min-cn <N>  Minimum CN for dense/solid-like atoms. Default: 6
   -lj-crystal-tol <val> Crystal classification tolerance. Default: 0.08
+  -sq                   Structure-factor / RDF analysis on molecule 1
+                        Channels: all, trace, backbone, sticker
+                        If no PBC mode is set, Titan auto-enables -pbci 0
+  -sq-channel <name>    Repeated selection channel. Default: all
+  -sq-rdf-bin <val>     RDF bin width in Angstrom. Default: 1.0
+  -sq-rdf-max <val>     RDF max radius in Angstrom. Default: auto
+  -sq-q-bin <val>       S(q) bin width in A^-1. Default: 0.05
+  -sq-q-max <val>       S(q) max q in A^-1. Default: auto
 
   -rms                  RMSD + RMSF analysis
                         Atomistic protein/protein-user uses CA
@@ -1333,6 +1793,7 @@ IMPORTANT NOTES
 
   -cas                  Computational alanine scanning
   -tda                  Topological data analysis
+  -tda-max-points=<N>   Reservoir cap for TDA point-cloud CSV. Default: 200000
   -ml                   ML affinity prediction
 
 4.6 Hydrogen Bonds / Water / Geometry

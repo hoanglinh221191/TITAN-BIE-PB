@@ -2,6 +2,8 @@
 #define TITAN_UI_H
 
 #include <fstream>
+#include <chrono>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <ostream>
@@ -9,6 +11,37 @@
 #include <string>
 
 namespace TitanUI {
+
+inline bool &progress_line_active() {
+  static bool active = false;
+  return active;
+}
+
+inline std::chrono::steady_clock::time_point &last_progress_render_time() {
+  static auto last = std::chrono::steady_clock::time_point{};
+  return last;
+}
+
+inline bool should_render_progress(bool force = false) {
+  using clock = std::chrono::steady_clock;
+  constexpr auto kProgressRefresh = std::chrono::milliseconds(500);
+
+  auto &last = last_progress_render_time();
+  const auto now = clock::now();
+  if (force || last.time_since_epoch().count() == 0 ||
+      now - last >= kProgressRefresh) {
+    last = now;
+    return true;
+  }
+  return false;
+}
+
+inline void prepare_message_line(std::ostream &out) {
+  if (!progress_line_active())
+    return;
+  out << "\n\r\033[K";
+  progress_line_active() = false;
+}
 
 inline std::string clamp_display_text(const std::string &text,
                                       std::size_t max_width) {
@@ -19,10 +52,29 @@ inline std::string clamp_display_text(const std::string &text,
   return text.substr(0, max_width - 3) + "...";
 }
 
+inline std::string compact_source_label(const std::string &path_text,
+                                        std::size_t max_width = 18) {
+  const std::filesystem::path path(path_text);
+  std::string label;
+
+  const auto filename = path.filename().string();
+  const auto parent = path.parent_path().filename().string();
+  if (!parent.empty() && parent != "." && parent != ".." && !filename.empty()) {
+    label = (std::filesystem::path(parent) / filename).generic_string();
+  } else if (!filename.empty()) {
+    label = filename;
+  } else {
+    label = path.generic_string();
+  }
+
+  return clamp_display_text(label, max_width);
+}
+
 inline void print_runtime_module_summary(const std::string &requested,
                                          const std::string &active,
                                          const std::string &skipped = {},
                                          const std::string &streaming = {}) {
+  prepare_message_line(std::cout);
   if (requested.empty() && active.empty() && skipped.empty() &&
       streaming.empty())
     return;
@@ -40,24 +92,32 @@ inline void print_runtime_module_summary(const std::string &requested,
 }
 
 inline void write_logo_art(std::ostream &out) {
-  // TITAN: yellow/earth | 2026: red/fire
-  out << "  \033[1;33m████████╗██╗████████╗ █████╗ ███╗   ██╗\033[0m\n"
-      << "  \033[1;33m╚══██╔══╝██║╚══██╔══╝██╔══██╗████╗  ██║\033[0m         \033[1;31m███╗   ███╗  ███╗   ███╗\033[0m \n"
-      << "  \033[1;33m   ██║   ██║   ██║   ███████║██╔██╗ ██║\033[0m        \033[1;31m╔══██╗ ██╔═██╗╔══██╗ ██╔════╝\033[0m \n"
-      << "  \033[1;33m   ██║   ██║   ██║   ██╔══██║██║╚██╗██║\033[0m        \033[1;31m████╔╝ ██║ ██║████╔╝ ██████╗\033[0m \n"
-      << "  \033[1;33m   ██║   ██║   ██║   ██║  ██║██║ ╚████║\033[0m        \033[1;31m██╔══╝ ██║ ██║██╔══╝ ██╔═██╗\033[0m \n"
-      << "  \033[1;33m   ╚═╝   ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═══╝\033[0m        \033[1;31m██████╗╚████╔╝██████╗╚████╔╝\033[0m \n"
-      << "                                                  \033[1;31m╚═════╝ ╚═══╝ ╚═════╝ ╚═══╝\033[0m \n";
+    // Gradient Lửa (Vàng -> Đỏ sáng -> Đỏ sậm) cho TITAN, Cyan cho 2026
+    out << "\033[1;33m" // Yellow (Đỉnh chữ TITAN)
+        << "  ████████╗██╗████████╗ █████╗ ███╗   ██╗        \033[1;36m██████╗  ██████╗ ██████╗  ██████╗\n"
+        << "\033[1;33m" // Khôi phục lại màu Vàng cho dòng 2 của TITAN
+        << "  ╚══██╔══╝██║╚══██╔══╝██╔══██╗████╗  ██║        \033[1;36m╚════██╗██╔═████╗╚════██╗██╔════╝\n"
+        << "\033[1;31m" // Bright Red (Giữa chữ TITAN)
+        << "     ██║   ██║   ██║   ███████║██╔██╗ ██║        \033[1;36m █████╔╝██║██╔██║ █████╔╝███████╗\n"
+        << "\033[1;31m" 
+        << "     ██║   ██║   ██║   ██╔══██║██║╚██╗██║        \033[1;36m██╔═══╝ ████╔╝██║██╔═══╝ ██╔═══██╗\n"
+        << "\033[0;31m" // Dark Red (Chân chữ TITAN)
+        << "     ██║   ██║   ██║   ██║  ██║██║ ╚████║        \033[1;36m███████╗╚██████╔╝███████╗╚██████╔╝\n"
+        << "\033[0;31m" 
+        << "     ╚═╝   ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═══╝        \033[1;36m╚══════╝ ╚═════╝ ╚══════╝ ╚═════╝\n"
+        << "\033[0m";  // Reset màu về mặc định
 }
 
 inline void write_logo_art_log(std::ostream &out) {
-  out << "   _______  ___  _______  _______  __    _         ___    ___   ___    __   \n"
-      << "  |       ||   ||       ||   _   ||  |  | |       |__ \\  / _ \\ |__ \\  / /   \n"
-      << "  |_     _||   ||_     _||  |_|  ||   |_| |          ) || | | |   ) |/ /_   \n"
-      << "    |   |  |   |  |   |  |       ||       |         / / | | | |  / /| '_ \\  \n"
-      << "    |   |  |   |  |   |  |       ||  _    |        / /_ | |_| | / /_| (_) | \n"
-      << "    |___|  |___|  |___|  |___|___||__| |__|       |____| \\___/ |____|\\___/  \n";
+    // Standard ASCII (Font "Big") đảm bảo monospace tuyệt đối trong file text/log
+    out << "  _______  _____  _______          _   _             ___   ___   ___   __ \n";
+    out << " |__   __||_   _||__   __|   /\\   | \\ | |           |__ \\ / _ \\ |__ \\ / / \n";
+    out << "    | |     | |     | |     /  \\  |  \\| |              ) | | | |   ) / /_ \n";
+    out << "    | |     | |     | |    / /\\ \\ | . ` |             / /| | | |  / / '_ \\\n";
+    out << "    | |    _| |_    | |   / ____ \\| |\\  |            / /_| |_| | / /| (_) |\n";
+    out << "    |_|   |_____|   |_|  /_/    \\_\\_| \\_|           |____|\\___/ |____|\\___/\n";
 }
+
 
 inline void show_progress(const std::string &module_name, size_t current,
                           size_t total, const std::string &status_text = "",
@@ -65,6 +125,11 @@ inline void show_progress(const std::string &module_name, size_t current,
   if (total == 0)
     return;
 
+  const bool is_final = (current + 1 >= total);
+  if (!should_render_progress(is_final))
+    return;
+
+  progress_line_active() = true;
   float progress = static_cast<float>(current + 1) / total;
   int barWidth = 28;
   const std::string display_name = clamp_display_text(module_name, 18);
@@ -91,8 +156,9 @@ inline void show_progress(const std::string &module_name, size_t current,
     std::cout << " | Active: " << display_modules;
   std::cout << "\033[K" << std::flush;
 
-  if (current + 1 >= total) {
+  if (is_final) {
     std::cout << std::endl;
+    progress_line_active() = false;
   }
 }
 
@@ -103,6 +169,11 @@ inline void show_progress_exact(const std::string &module_name, size_t completed
   if (total == 0)
     return;
 
+  const bool is_final = (completed >= total);
+  if (!should_render_progress(is_final))
+    return;
+
+  progress_line_active() = true;
   const float progress =
       static_cast<float>(std::min(completed, total)) / static_cast<float>(total);
   const int barWidth = 28;
@@ -131,14 +202,20 @@ inline void show_progress_exact(const std::string &module_name, size_t completed
     std::cout << " | Active: " << display_modules;
   std::cout << "\033[K" << std::flush;
 
-  if (completed >= total)
+  if (is_final) {
     std::cout << std::endl;
+    progress_line_active() = false;
+  }
 }
 
 inline void show_continuous_progress(const std::string &module_name,
                                      size_t current_frame,
                                      const std::string &status_text = "",
                                      const std::string &module_text = "") {
+  if (!should_render_progress())
+    return;
+
+  progress_line_active() = true;
   const std::string display_name = clamp_display_text(module_name, 18);
   const std::string display_status = clamp_display_text(status_text, 44);
   const std::string display_modules = clamp_display_text(module_text, 40);
@@ -156,10 +233,12 @@ inline void show_continuous_progress(const std::string &module_name,
 }
 
 inline void print_module_header(const std::string &header_name) {
+  prepare_message_line(std::cout);
   std::cout << "\n\033[1;35m>>> " << header_name << " <<<\033[0m\n";
 }
 
 inline void print_logo() {
+  prepare_message_line(std::cout);
   std::cout << "\n";
   write_logo_art(std::cout);
   std::cout
@@ -211,14 +290,17 @@ inline void log_time(std::fstream &log_file, const std::string &task,
 }
 
 inline void print_error(const std::string &error_msg) {
+  prepare_message_line(std::cerr);
   std::cerr << "\n\033[1;31m[ERROR]\033[0m " << error_msg << "\n";
 }
 
 inline void print_warning(const std::string &warning_msg) {
-  std::cout << "\n\033[1;33m[WARNING]\033[0m " << warning_msg << "\n";
+  prepare_message_line(std::cout);
+  std::cout << "\033[1;33m[WARNING]\033[0m " << warning_msg << "\n";
 }
 
 inline void print_info(const std::string &info_msg) {
+  prepare_message_line(std::cout);
   std::cout << info_msg << "\n";
 }
 

@@ -3,9 +3,12 @@
 // Each function manages its own timing via std::chrono and logs via fstream.
 #include "engine_postproc.h"
 #include "titan_alignment.h"
+#include "titan_corr_knn.h"
 #include "titan_executor.h"
+#include "titan_sparse_graph_module.h"
 #include "titan_ui.h"
 #include <Eigen/Dense>
+#include <algorithm>
 #include <mutex>
 #include <thread>
 
@@ -34,6 +37,7 @@ void _eigen_force_dtor() {
 namespace {
 
 constexpr double kBarNm3ToKJPerMol = 0.06022140857;
+constexpr double kEnergyTimeFilterTolerancePs = 1e-3;
 constexpr int kLjFeatureColumns = 20;
 
 struct LjMicrostateSummary {
@@ -60,51 +64,8 @@ struct ProteinMicrostateSummary {
 
 enum class TptBasinLabel : unsigned char { Intermediate = 0, Source = 1, Sink = 2 };
 
-struct TptKineticDiagnostics {
-  int n_segments{0};
-  int segments_with_source{0};
-  int segments_with_sink{0};
-  int segments_with_both{0};
-  int min_segment_length_frames{0};
-  int max_segment_length_frames{0};
-  double mean_segment_length_frames{0.0};
-  int64_t total_frames{0};
-  int64_t frames_source{0};
-  int64_t frames_sink{0};
-  int64_t frames_intermediate{0};
-  int observed_a_to_b_events{0};
-  int observed_b_to_a_events{0};
-  int observed_round_trips{0};
-  double observed_source_fraction{0.0};
-  double observed_sink_fraction{0.0};
-  double observed_intermediate_fraction{0.0};
-  double lag_time_ns{0.0};
-  double model_rate_ab_per_lag{0.0};
-  double model_rate_ab_per_ns{0.0};
-  double model_mfpt_ab_lags{std::numeric_limits<double>::infinity()};
-  double model_mfpt_ab_ns{std::numeric_limits<double>::infinity()};
-  int ck_rows_compared{0};
-  double ck_mean_abs_error{std::numeric_limits<double>::quiet_NaN()};
-  double ck_max_abs_error{std::numeric_limits<double>::quiet_NaN()};
-  double ck_weighted_frobenius{std::numeric_limits<double>::quiet_NaN()};
-  std::string markov_sanity{"not_available"};
-  std::string suitability{
-      "insufficient: kinetic diagnostics not computed"};
-};
-
-struct TptBootstrapAggregate {
-  int requested_samples{0};
-  int successful_samples{0};
-  std::vector<double> total_reactive_flux;
-  std::vector<double> rate_source_to_sink_per_lag;
-  std::vector<double> mfpt_source_to_sink_lags;
-  std::vector<double> source_population;
-  std::vector<double> sink_population;
-  Eigen::VectorXd q_forward_sum;
-  Eigen::VectorXd q_forward_sq_sum;
-  Eigen::VectorXd reactive_density_sum;
-  Eigen::VectorXd reactive_density_sq_sum;
-};
+using TptKineticDiagnostics = TitanValidation::TptKineticDiagnostics;
+using TptBootstrapAggregate = TitanValidation::TptBootstrapAggregate;
 
 struct DhamWindowAuditRow {
   int replica_id{-1};
@@ -128,6 +89,22 @@ struct DhamWindowAuditRow {
   double overlap_end_ps{std::numeric_limits<double>::quiet_NaN()};
   double inferred_dt_energy_ps{std::numeric_limits<double>::quiet_NaN()};
   std::string status{"uninitialized"};
+};
+
+struct MappedEquilibriumFrameWeights {
+  AlignedDoubleVector local_weights{};
+  bool use_weights{false};
+  std::size_t matched_frames{0};
+  std::size_t invalid_frames{0};
+  double raw_weight_sum{0.0};
+  double ess{0.0};
+  std::vector<std::size_t> ranked_local_indices{};
+};
+
+struct PairScoreRow {
+  std::string source{};
+  std::string target{};
+  double score{0.0};
 };
 
 struct TptPathCluster {
@@ -189,6 +166,87 @@ struct TptBottleneckStateRow {
   int dominant_path_count{0};
 };
 
+titan_sparse_graph_module::TptCapturedEdgeRow
+to_graph_tpt_edge_row(const TptBottleneckEdgeRow &row) {
+  titan_sparse_graph_module::TptCapturedEdgeRow out;
+  out.from = row.from;
+  out.to = row.to;
+  out.from_macro = row.from_macro;
+  out.to_macro = row.to_macro;
+  out.gross_flux = row.gross_flux;
+  out.net_flux = row.net_flux;
+  out.relative_net_flux = row.relative_net_flux;
+  out.from_q = row.from_q;
+  out.to_q = row.to_q;
+  out.midpoint_q = row.midpoint_q;
+  out.transition_proximity = row.transition_proximity;
+  out.bottleneck_score = row.bottleneck_score;
+  out.dominant_path_support_flux = row.dominant_path_support_flux;
+  out.dominant_path_support_fraction = row.dominant_path_support_fraction;
+  out.dominant_path_count =
+      static_cast<std::size_t>(std::max(row.dominant_path_count, 0));
+  return out;
+}
+
+titan_sparse_graph_module::TptCapturedNodeRow
+to_graph_tpt_node_row(const TptBottleneckStateRow &row) {
+  titan_sparse_graph_module::TptCapturedNodeRow out;
+  out.state = row.state;
+  out.label = row.label;
+  out.macro = row.macro;
+  out.pi = row.pi;
+  out.q_plus = row.q_plus;
+  out.q_minus = row.q_minus;
+  out.reactive_density = row.reactive_density;
+  out.net_in_flux = row.net_in_flux;
+  out.net_out_flux = row.net_out_flux;
+  out.through_flux = row.through_flux;
+  out.transition_proximity = row.transition_proximity;
+  out.bottleneck_score = row.bottleneck_score;
+  out.dominant_path_support_flux = row.dominant_path_support_flux;
+  out.dominant_path_support_fraction = row.dominant_path_support_fraction;
+  out.dominant_path_count =
+      static_cast<std::size_t>(std::max(row.dominant_path_count, 0));
+  return out;
+}
+
+void store_allostery_graph_edges_from_corr_knn(
+    DCCMNetwork &dccm_analyzer, const TitanCorrKnnAnalyzer &analyzer) {
+  const auto &result = analyzer.result();
+  std::vector<DCCMNetwork::StoredEdge> gc_edges;
+  std::vector<DCCMNetwork::StoredEdge> te_edges;
+  gc_edges.reserve(result.candidate_pairs.size());
+  te_edges.reserve(result.candidate_pairs.size());
+
+  for (std::size_t pair_idx = 0; pair_idx < result.candidate_pairs.size();
+       ++pair_idx) {
+    const auto [i, j] = result.candidate_pairs[pair_idx];
+    const int source = static_cast<int>(i);
+    const int target = static_cast<int>(j);
+
+    if (pair_idx < result.gc_values.size()) {
+      const double gc = result.gc_values[pair_idx];
+      if (gc > 0.35) {
+        gc_edges.push_back({source, target, gc, gc});
+      }
+    }
+
+    if (result.te_available && pair_idx < result.te_forward_values.size() &&
+        pair_idx < result.te_reverse_values.size()) {
+      const double net_te =
+          result.te_forward_values[pair_idx] - result.te_reverse_values[pair_idx];
+      if (std::abs(net_te) > 0.05) {
+        const int driver = (net_te >= 0.0) ? source : target;
+        const int sink = (net_te >= 0.0) ? target : source;
+        te_edges.push_back({driver, sink, std::abs(net_te), std::abs(net_te)});
+      }
+    }
+  }
+
+  dccm_analyzer.set_last_allostery_graph_edges(std::move(gc_edges),
+                                               std::move(te_edges));
+}
+
 std::vector<std::vector<int>>
 build_msm_state_segments(const TitanMSM &msm_analyzer);
 
@@ -214,6 +272,43 @@ double percentile_sorted(std::vector<double> values, double frac) {
   const std::size_t hi = static_cast<std::size_t>(std::ceil(pos));
   const double alpha = pos - static_cast<double>(lo);
   return values[lo] * (1.0 - alpha) + values[hi] * alpha;
+}
+
+[[nodiscard]] bool keep_postproc_energy_time(const arguments &args,
+                                             double time_ps) noexcept {
+  if (args.flag_begin_set &&
+      time_ps < args.begin_time - kEnergyTimeFilterTolerancePs) {
+    return false;
+  }
+  if (args.flag_end_set &&
+      time_ps > args.end_time + kEnergyTimeFilterTolerancePs) {
+    return false;
+  }
+  if (args.dt > 0.0) {
+    const double ref_time = args.flag_begin_set ? args.begin_time : 0.0;
+    const double diff = time_ps - ref_time;
+    if (diff < -kEnergyTimeFilterTolerancePs)
+      return false;
+    const long long steps = std::lround(diff / args.dt);
+    if (std::abs(diff - static_cast<double>(steps) * args.dt) >
+        kEnergyTimeFilterTolerancePs) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<std::pair<double, double>>
+filter_postproc_energy_pairs(const std::vector<std::pair<double, double>> &rows,
+                             const arguments &args) {
+  std::vector<std::pair<double, double>> filtered;
+  filtered.reserve(rows.size());
+  for (const auto &row : rows) {
+    if (!keep_postproc_energy_time(args, row.first))
+      continue;
+    filtered.push_back(row);
+  }
+  return filtered;
 }
 
 void append_if_finite(std::vector<double> &dst, double value) {
@@ -1566,7 +1661,7 @@ bool build_tpt_model_from_segments(
   return true;
 }
 
-TptKineticDiagnostics compute_tpt_kinetic_diagnostics_from_segments(
+[[maybe_unused]] TptKineticDiagnostics compute_tpt_kinetic_diagnostics_from_segments(
     const std::vector<std::vector<int>> &segments, int n_states,
     int lag_frames, double lag_time_ns, const TitanTPT &tpt_analyzer) {
   TptKineticDiagnostics diag;
@@ -1767,7 +1862,7 @@ TptKineticDiagnostics compute_tpt_kinetic_diagnostics_from_segments(
   return diag;
 }
 
-bool run_tpt_bootstrap(
+[[maybe_unused]] bool run_tpt_bootstrap(
     const std::vector<std::vector<int>> &base_segments, int n_states,
     int lag_frames, double lag_time_ns, bool symmetrize_counts,
     const std::vector<int> &source_states, const std::vector<int> &sink_states,
@@ -2582,45 +2677,696 @@ void write_dham_window_audit_file(const std::string &filename,
   }
 }
 
-AlignedDoubleVector map_global_weights_to_local_indices(
+bool is_mbar_equilibrium_weight_source(
+    const PostprocEquilibriumWeights &weight_selection) {
+  return weight_selection.resolved_source == "mbar" &&
+         weight_selection.global_frame_weights &&
+         !weight_selection.global_frame_weights->empty();
+}
+
+MappedEquilibriumFrameWeights map_global_weights_to_local_frame_context(
     const std::string &label, const std::vector<int64_t> &local_global_indices,
-    const std::vector<double> &global_frame_weights, bool &use_weights) {
-  AlignedDoubleVector mapped(local_global_indices.size(), 0.0);
-  use_weights = false;
+    const std::vector<double> &global_frame_weights) {
+  MappedEquilibriumFrameWeights mapped;
+  mapped.local_weights.assign(local_global_indices.size(), 0.0);
   if (local_global_indices.empty() || global_frame_weights.empty())
     return mapped;
 
-  std::size_t matched_frames = 0;
+  double sum_sq = 0.0;
   std::size_t weighted_frames = 0;
-  double weight_sum = 0.0;
   for (std::size_t idx = 0; idx < local_global_indices.size(); ++idx) {
     const int64_t global_idx = local_global_indices[idx];
     if (global_idx < 0 ||
         static_cast<std::size_t>(global_idx) >= global_frame_weights.size()) {
+      ++mapped.invalid_frames;
       continue;
     }
-    const double weight = global_frame_weights[static_cast<std::size_t>(global_idx)];
-    mapped[idx] = weight;
-    ++matched_frames;
+    const double weight =
+        global_frame_weights[static_cast<std::size_t>(global_idx)];
+    if (!std::isfinite(weight) || weight < 0.0) {
+      ++mapped.invalid_frames;
+      continue;
+    }
+    mapped.local_weights[idx] = weight;
+    mapped.raw_weight_sum += weight;
+    sum_sq += weight * weight;
+    ++mapped.matched_frames;
     if (weight > 0.0)
       ++weighted_frames;
-    weight_sum += weight;
+    mapped.ranked_local_indices.push_back(idx);
   }
 
-  if (weight_sum <= 0.0) {
-    TitanUI::print_warning(label + ": mapped MBAR weights sum to zero. Skipping "
-                                   "weighted FES export.");
+  if (mapped.raw_weight_sum <= 0.0) {
+    TitanUI::print_warning(label + ": mapped equilibrium weights sum to zero. "
+                                   "Skipping weighted sidecar export.");
     return mapped;
   }
 
-  use_weights = true;
-  TitanUI::print_info(label + ": Mapped MBAR weights onto " +
+  mapped.use_weights = true;
+  mapped.ess =
+      (sum_sq > 0.0) ? (mapped.raw_weight_sum * mapped.raw_weight_sum / sum_sq)
+                     : 0.0;
+  std::stable_sort(mapped.ranked_local_indices.begin(),
+                   mapped.ranked_local_indices.end(),
+                   [&](std::size_t lhs, std::size_t rhs) {
+                     const double wl = mapped.local_weights[lhs];
+                     const double wr = mapped.local_weights[rhs];
+                     if (wl != wr)
+                       return wl > wr;
+                     return lhs < rhs;
+                   });
+
+  TitanUI::print_info(label + ": Mapped equilibrium weights onto " +
                       std::to_string(weighted_frames) + "/" +
                       std::to_string(local_global_indices.size()) +
                       " frames (matched indices: " +
-                      std::to_string(matched_frames) + ", weight sum = " +
-                      std::to_string(weight_sum) + ").");
+                      std::to_string(mapped.matched_frames) +
+                      ", invalid frames: " +
+                      std::to_string(mapped.invalid_frames) +
+                      ", weight sum = " +
+                      std::to_string(mapped.raw_weight_sum) + ").");
   return mapped;
+}
+
+std::string residue_label(const std::string &resname, int resnr,
+                          const std::string &chain) {
+  return resname + std::to_string(resnr) + "_" + chain;
+}
+
+void ensure_csv_header_if_missing(const std::string &filename,
+                                  const std::string &header) {
+  bool has_content = false;
+  {
+    std::ifstream in(filename);
+    if (in.is_open()) {
+      std::string first_line;
+      if (std::getline(in, first_line) && !first_line.empty())
+        has_content = true;
+    }
+  }
+  if (has_content)
+    return;
+
+  std::ofstream out(filename);
+  if (!out.is_open()) {
+    TitanUI::print_warning("Cannot open " + filename +
+                           " to create a header-only placeholder.");
+    return;
+  }
+  out << header << "\n";
+}
+
+void write_equilibrium_provenance(std::ofstream &out,
+                                  const PostprocEquilibriumWeights &selection,
+                                  const MappedEquilibriumFrameWeights &mapped,
+                                  const std::string &note,
+                                  int embedding_dims = -1) {
+  out << "# source " << selection.resolved_source << "\n";
+  out << "# target_temp_k " << std::setprecision(15) << selection.target_temp_k
+      << "\n";
+  out << "# matched_frames " << mapped.matched_frames << "\n";
+  out << "# invalid_frames " << mapped.invalid_frames << "\n";
+  out << "# raw_weight_sum " << mapped.raw_weight_sum << "\n";
+  out << "# ess " << mapped.ess << "\n";
+  if (embedding_dims >= 0)
+    out << "# embedding_dims " << embedding_dims << "\n";
+  out << "# note " << note << "\n";
+}
+
+void write_umap_equilibrium_summary_file(
+    const std::string &filename, const TitanUMAP &umap_analyzer,
+    const TitanMSM &msm_analyzer, const MappedEquilibriumFrameWeights &mapped,
+    const PostprocEquilibriumWeights &weight_selection) {
+  std::ofstream out(filename);
+  if (!out.is_open()) {
+    TitanUI::print_warning("UMAP: cannot open " + filename +
+                           " for equilibrium summary export.");
+    return;
+  }
+
+  const auto &embedding = umap_analyzer.embedding();
+  write_equilibrium_provenance(
+      out, weight_selection, mapped,
+      "contextual_only raw UMAP embedding; MBAR weights apply only to this "
+      "summary and optional UMAP FES sidecars.",
+      static_cast<int>(embedding.cols()));
+  out << "Rank LocalFrame GlobalFrame ReplicaID Time_ps Weight NormalizedWeight "
+         "UMAP1 UMAP2 UMAP3\n";
+  out << std::setprecision(15);
+
+  const auto &global_indices = msm_analyzer.get_frame_global_indices();
+  const auto &replica_ids = msm_analyzer.get_frame_replica_ids();
+  const auto &timestamps = msm_analyzer.get_frame_timestamps();
+  const double weight_norm =
+      (mapped.raw_weight_sum > 0.0) ? mapped.raw_weight_sum : 1.0;
+
+  for (std::size_t rank = 0; rank < mapped.ranked_local_indices.size(); ++rank) {
+    const std::size_t local_idx = mapped.ranked_local_indices[rank];
+    const double weight = mapped.local_weights[local_idx];
+    const int64_t global_idx =
+        (local_idx < global_indices.size()) ? global_indices[local_idx] : -1;
+    const int replica_id =
+        (local_idx < replica_ids.size()) ? replica_ids[local_idx] : -1;
+    const double time_ps =
+        (local_idx < timestamps.size())
+            ? timestamps[local_idx]
+            : std::numeric_limits<double>::quiet_NaN();
+    const double umap1 =
+        (local_idx < static_cast<std::size_t>(embedding.rows()) &&
+         embedding.cols() > 0)
+            ? embedding(static_cast<Eigen::Index>(local_idx), 0)
+            : std::numeric_limits<double>::quiet_NaN();
+    const double umap2 =
+        (local_idx < static_cast<std::size_t>(embedding.rows()) &&
+         embedding.cols() > 1)
+            ? embedding(static_cast<Eigen::Index>(local_idx), 1)
+            : std::numeric_limits<double>::quiet_NaN();
+    const double umap3 =
+        (local_idx < static_cast<std::size_t>(embedding.rows()) &&
+         embedding.cols() > 2)
+            ? embedding(static_cast<Eigen::Index>(local_idx), 2)
+            : std::numeric_limits<double>::quiet_NaN();
+    out << (rank + 1) << ' ' << local_idx << ' ' << global_idx << ' '
+        << replica_id << ' ' << time_ps << ' ' << weight << ' '
+        << (weight / weight_norm) << ' ' << umap1 << ' ' << umap2 << ' '
+        << umap3 << '\n';
+  }
+}
+
+void write_dccm_equilibrium_context_file(
+    const std::string &filename, const DCCMNetwork &dccm_analyzer,
+    const MappedEquilibriumFrameWeights &mapped,
+    const PostprocEquilibriumWeights &weight_selection) {
+  std::ofstream out(filename);
+  if (!out.is_open()) {
+    TitanUI::print_warning("DCCM: cannot open " + filename +
+                           " for equilibrium context export.");
+    return;
+  }
+
+  write_equilibrium_provenance(
+      out, weight_selection, mapped,
+      "contextual_only ranked DCCM/LSP-MD frames under MBAR equilibrium "
+      "weights; no network or allostery scores are reweighted.");
+  out << "Rank LocalFrame GlobalFrame ReplicaID Time_ps Weight NormalizedWeight\n";
+  out << std::setprecision(15);
+
+  const auto &global_indices = dccm_analyzer.get_global_frame_indices();
+  const auto &replica_ids = dccm_analyzer.get_traj_replicas();
+  const auto &timestamps = dccm_analyzer.get_traj_times();
+  const double weight_norm =
+      (mapped.raw_weight_sum > 0.0) ? mapped.raw_weight_sum : 1.0;
+
+  for (std::size_t rank = 0; rank < mapped.ranked_local_indices.size(); ++rank) {
+    const std::size_t local_idx = mapped.ranked_local_indices[rank];
+    const double weight = mapped.local_weights[local_idx];
+    const int64_t global_idx =
+        (local_idx < global_indices.size()) ? global_indices[local_idx] : -1;
+    const int replica_id =
+        (local_idx < replica_ids.size()) ? replica_ids[local_idx] : -1;
+    const double time_ps =
+        (local_idx < timestamps.size())
+            ? timestamps[local_idx]
+            : std::numeric_limits<double>::quiet_NaN();
+    out << (rank + 1) << ' ' << local_idx << ' ' << global_idx << ' '
+        << replica_id << ' ' << time_ps << ' ' << weight << ' '
+        << (weight / weight_norm) << '\n';
+  }
+}
+
+std::vector<PairScoreRow> read_pair_score_rows(const std::string &path) {
+  std::ifstream in(path);
+  if (!in.is_open())
+    return {};
+
+  std::vector<PairScoreRow> rows;
+  std::string line;
+  bool header_skipped = false;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#')
+      continue;
+    if (!header_skipped) {
+      header_skipped = true;
+      if (line.find("Source") != std::string::npos &&
+          line.find("Target") != std::string::npos) {
+        continue;
+      }
+    }
+    std::stringstream ss(line);
+    std::string token;
+    std::vector<std::string> cols;
+    while (std::getline(ss, token, ','))
+      cols.push_back(token);
+    if (cols.size() < 3)
+      continue;
+    try {
+      PairScoreRow row;
+      row.source = cols[0];
+      row.target = cols[1];
+      row.score = std::stod(cols[2]);
+      rows.push_back(std::move(row));
+    } catch (...) {
+      continue;
+    }
+  }
+
+  return rows;
+}
+
+void append_ranked_pair_scores(std::ofstream &out, const std::string &metric,
+                               std::vector<PairScoreRow> rows) {
+  std::stable_sort(rows.begin(), rows.end(),
+                   [](const PairScoreRow &lhs, const PairScoreRow &rhs) {
+                     if (lhs.score != rhs.score)
+                       return lhs.score > rhs.score;
+                     if (lhs.source != rhs.source)
+                       return lhs.source < rhs.source;
+                     return lhs.target < rhs.target;
+                   });
+  for (std::size_t idx = 0; idx < rows.size(); ++idx) {
+    out << metric << ',' << (idx + 1) << ',' << rows[idx].source << ','
+        << rows[idx].target << ',' << std::setprecision(15) << rows[idx].score
+        << "\n";
+  }
+}
+
+void write_allostery_equilibrium_ranking_file(
+    const std::string &filename, const info &info_output,
+    const MappedEquilibriumFrameWeights &mapped,
+    const PostprocEquilibriumWeights &weight_selection) {
+  std::ofstream out(filename);
+  if (!out.is_open()) {
+    TitanUI::print_warning("Allostery: cannot open " + filename +
+                           " for equilibrium ranking export.");
+    return;
+  }
+
+  write_equilibrium_provenance(
+      out, weight_selection, mapped,
+      "contextual_only raw MI/GC/TE exports are ranked under MBAR frame "
+      "context; scores below are not reweighted.");
+  out << "Metric,Rank,Source,Target,Score\n";
+  append_ranked_pair_scores(
+      out, "MI",
+      read_pair_score_rows(info_output.get_network_mi_edges_filename()));
+  append_ranked_pair_scores(
+      out, "GC",
+      read_pair_score_rows(info_output.get_network_gc_edges_filename()));
+  append_ranked_pair_scores(
+      out, "TE",
+      read_pair_score_rows(info_output.get_network_te_edges_filename()));
+}
+
+void write_corr_knn_equilibrium_ranking_file(
+    const std::string &filename, const info &info_output,
+    const MappedEquilibriumFrameWeights &mapped,
+    const PostprocEquilibriumWeights &weight_selection) {
+  std::ofstream out(filename);
+  if (!out.is_open()) {
+    TitanUI::print_warning("Corr-kNN: cannot open " + filename +
+                           " for equilibrium ranking export.");
+    return;
+  }
+
+  write_equilibrium_provenance(
+      out, weight_selection, mapped,
+      "contextual_only raw corr-kNN MI/GC/TE exports are ranked under MBAR "
+      "frame context; scores below are not reweighted.");
+  out << "Metric,Rank,Source,Target,Score\n";
+  append_ranked_pair_scores(
+      out, "MI",
+      read_pair_score_rows(info_output.get_corr_knn_mi_pairs_filename()));
+  append_ranked_pair_scores(
+      out, "GC",
+      read_pair_score_rows(info_output.get_corr_knn_gc_pairs_filename()));
+  append_ranked_pair_scores(
+      out, "TE",
+      read_pair_score_rows(info_output.get_corr_knn_te_pairs_filename()));
+}
+
+void write_lspmd_equilibrium_ranking_file(
+    const std::string &filename, const DCCMNetwork &dccm_analyzer,
+    const DCCMNetwork::LSPMDResult &result,
+    const MappedEquilibriumFrameWeights &mapped,
+    const PostprocEquilibriumWeights &weight_selection) {
+  std::ofstream out(filename);
+  if (!out.is_open()) {
+    TitanUI::print_warning("LSP-MD: cannot open " + filename +
+                           " for equilibrium ranking export.");
+    return;
+  }
+
+  write_equilibrium_provenance(
+      out, weight_selection, mapped,
+      "contextual_only raw LSP-MD centrality and edge weights are ranked under "
+      "MBAR frame context; scores below are not reweighted.");
+  out << "EntityKind,Metric,Rank,Label,Source,Target,Score,ScoreNorm\n";
+  out << std::setprecision(15);
+
+  struct ResidueMetricRow {
+    std::string label{};
+    double score{0.0};
+    double score_norm{0.0};
+  };
+
+  const auto &resnames = dccm_analyzer.get_resnames();
+  const auto &resnrs = dccm_analyzer.get_resnrs();
+  const auto &chains = dccm_analyzer.get_chains();
+
+  const auto build_residue_rows = [&](const std::vector<double> &values) {
+    std::vector<ResidueMetricRow> rows;
+    rows.reserve(values.size());
+    double max_value = 0.0;
+    for (double value : values) {
+      if (std::isfinite(value))
+        max_value = std::max(max_value, value);
+    }
+    if (max_value <= 0.0)
+      max_value = 1.0;
+    for (std::size_t idx = 0; idx < values.size(); ++idx) {
+      const double value = values[idx];
+      ResidueMetricRow row;
+      row.label =
+          residue_label(idx < resnames.size() ? resnames[idx] : "UNK",
+                        idx < resnrs.size() ? resnrs[idx] : -1,
+                        idx < chains.size() ? chains[idx] : "?");
+      row.score = value;
+      row.score_norm = value / max_value;
+      rows.push_back(std::move(row));
+    }
+    std::stable_sort(rows.begin(), rows.end(),
+                     [](const ResidueMetricRow &lhs,
+                        const ResidueMetricRow &rhs) {
+                       if (lhs.score_norm != rhs.score_norm)
+                         return lhs.score_norm > rhs.score_norm;
+                       if (lhs.score != rhs.score)
+                         return lhs.score > rhs.score;
+                       return lhs.label < rhs.label;
+                     });
+    return rows;
+  };
+
+  const auto dc_rows = build_residue_rows(result.dc);
+  for (std::size_t idx = 0; idx < dc_rows.size(); ++idx) {
+    out << "residue,DC_norm," << (idx + 1) << ',' << dc_rows[idx].label
+        << ",,," << dc_rows[idx].score << ',' << dc_rows[idx].score_norm
+        << "\n";
+  }
+  const auto bc_rows = build_residue_rows(result.bc);
+  for (std::size_t idx = 0; idx < bc_rows.size(); ++idx) {
+    out << "residue,BC_norm," << (idx + 1) << ',' << bc_rows[idx].label
+        << ",,," << bc_rows[idx].score << ',' << bc_rows[idx].score_norm
+        << "\n";
+  }
+
+  struct EdgeMetricRow {
+    std::string source{};
+    std::string target{};
+    double score{0.0};
+    double score_norm{0.0};
+  };
+
+  std::vector<EdgeMetricRow> edge_rows;
+  edge_rows.reserve(result.edges.size());
+  double max_weight = 0.0;
+  for (const auto &[i, j, weight] : result.edges) {
+    if (std::isfinite(weight))
+      max_weight = std::max(max_weight, weight);
+    EdgeMetricRow row;
+    row.source =
+        residue_label((i >= 0 && static_cast<std::size_t>(i) < resnames.size())
+                          ? resnames[static_cast<std::size_t>(i)]
+                          : "UNK",
+                      (i >= 0 && static_cast<std::size_t>(i) < resnrs.size())
+                          ? resnrs[static_cast<std::size_t>(i)]
+                          : -1,
+                      (i >= 0 && static_cast<std::size_t>(i) < chains.size())
+                          ? chains[static_cast<std::size_t>(i)]
+                          : "?");
+    row.target =
+        residue_label((j >= 0 && static_cast<std::size_t>(j) < resnames.size())
+                          ? resnames[static_cast<std::size_t>(j)]
+                          : "UNK",
+                      (j >= 0 && static_cast<std::size_t>(j) < resnrs.size())
+                          ? resnrs[static_cast<std::size_t>(j)]
+                          : -1,
+                      (j >= 0 && static_cast<std::size_t>(j) < chains.size())
+                          ? chains[static_cast<std::size_t>(j)]
+                          : "?");
+    row.score = weight;
+    edge_rows.push_back(std::move(row));
+  }
+  if (max_weight <= 0.0)
+    max_weight = 1.0;
+  for (auto &row : edge_rows)
+    row.score_norm = row.score / max_weight;
+  std::stable_sort(edge_rows.begin(), edge_rows.end(),
+                   [](const EdgeMetricRow &lhs, const EdgeMetricRow &rhs) {
+                     if (lhs.score != rhs.score)
+                       return lhs.score > rhs.score;
+                     if (lhs.source != rhs.source)
+                       return lhs.source < rhs.source;
+                     return lhs.target < rhs.target;
+                   });
+  for (std::size_t idx = 0; idx < edge_rows.size(); ++idx) {
+    out << "edge,Weight," << (idx + 1) << ",," << edge_rows[idx].source << ','
+        << edge_rows[idx].target << ',' << edge_rows[idx].score << ','
+        << edge_rows[idx].score_norm << "\n";
+  }
+}
+
+AlignedDoubleVector map_global_weights_to_local_indices(
+    const std::string &label, const std::vector<int64_t> &local_global_indices,
+    const std::vector<double> &global_frame_weights, bool &use_weights) {
+  const auto mapped_context = map_global_weights_to_local_frame_context(
+      label, local_global_indices, global_frame_weights);
+  use_weights = mapped_context.use_weights;
+  return mapped_context.local_weights;
+}
+
+struct EquilibriumPopulationSummary {
+  std::vector<double> microstate_populations{};
+  std::vector<double> macrostate_populations{};
+  std::vector<int64_t> microstate_frame_counts{};
+  std::vector<int64_t> macrostate_frame_counts{};
+  std::size_t matched_frames{0};
+  std::size_t invalid_frames{0};
+  double raw_weight_sum{0.0};
+};
+
+TitanPCA::WeightContext
+make_pca_weight_context(const PostprocEquilibriumWeights &weight_selection) {
+  TitanPCA::WeightContext context;
+  context.source_name = weight_selection.source_name;
+  context.mode_label = weight_selection.mode_label;
+  context.target_temp = weight_selection.target_temp_k;
+  return context;
+}
+
+bool compute_equilibrium_populations(
+    const TitanMSM &msm_analyzer, const std::vector<double> &global_frame_weights,
+    const std::vector<int> &macro_assignments,
+    EquilibriumPopulationSummary &summary) {
+  summary = {};
+  if (!msm_analyzer.is_built() || global_frame_weights.empty())
+    return false;
+
+  const int n_states = msm_analyzer.n_clusters();
+  if (n_states <= 0)
+    return false;
+
+  const auto &discrete_traj = msm_analyzer.discrete_traj();
+  const auto &frame_global_indices = msm_analyzer.get_frame_global_indices();
+  const std::size_t tracked_frames =
+      std::min(discrete_traj.size(), frame_global_indices.size());
+  if (tracked_frames == 0)
+    return false;
+
+  summary.microstate_populations.assign(static_cast<std::size_t>(n_states), 0.0);
+  summary.microstate_frame_counts.assign(static_cast<std::size_t>(n_states), 0);
+  if (macro_assignments.size() == static_cast<std::size_t>(n_states)) {
+    const int n_macro =
+        1 + *std::max_element(macro_assignments.begin(), macro_assignments.end());
+    if (n_macro > 0) {
+      summary.macrostate_populations.assign(static_cast<std::size_t>(n_macro),
+                                            0.0);
+      summary.macrostate_frame_counts.assign(static_cast<std::size_t>(n_macro), 0);
+    }
+  }
+
+  for (std::size_t frame = 0; frame < tracked_frames; ++frame) {
+    const int state = discrete_traj[frame];
+    const int64_t global_index = frame_global_indices[frame];
+    if (state < 0 || state >= n_states || global_index < 0 ||
+        static_cast<std::size_t>(global_index) >= global_frame_weights.size()) {
+      ++summary.invalid_frames;
+      continue;
+    }
+    const double weight = global_frame_weights[static_cast<std::size_t>(global_index)];
+    if (!std::isfinite(weight) || weight < 0.0) {
+      ++summary.invalid_frames;
+      continue;
+    }
+    const std::size_t state_index = static_cast<std::size_t>(state);
+    summary.microstate_populations[state_index] += weight;
+    summary.microstate_frame_counts[state_index] += 1;
+    summary.raw_weight_sum += weight;
+    ++summary.matched_frames;
+
+    if (!summary.macrostate_populations.empty()) {
+      const int macro = macro_assignments[state_index];
+      if (macro >= 0 &&
+          static_cast<std::size_t>(macro) < summary.macrostate_populations.size()) {
+        const std::size_t macro_index = static_cast<std::size_t>(macro);
+        summary.macrostate_populations[macro_index] += weight;
+        summary.macrostate_frame_counts[macro_index] += 1;
+      }
+    }
+  }
+
+  if (summary.raw_weight_sum <= 0.0)
+    return false;
+
+  for (double &value : summary.microstate_populations)
+    value /= summary.raw_weight_sum;
+  for (double &value : summary.macrostate_populations)
+    value /= summary.raw_weight_sum;
+  return true;
+}
+
+void write_msm_equilibrium_summary_file(
+    const std::string &filename, const TitanMSM &msm_analyzer,
+    const std::vector<int> &macro_assignments,
+    const EquilibriumPopulationSummary &summary,
+    const PostprocEquilibriumWeights &weight_selection) {
+  std::ofstream out(filename);
+  out << "# source " << weight_selection.resolved_source << "\n";
+  out << "# target_temp_k " << weight_selection.target_temp_k << "\n";
+  out << "# matched_frames " << summary.matched_frames << "\n";
+  out << "# invalid_frames " << summary.invalid_frames << "\n";
+  out << "# raw_weight_sum " << std::setprecision(15) << summary.raw_weight_sum
+      << "\n";
+  out << "# microstate frame_count equilibrium_population msm_pi pi_ratio "
+         "tica_c1 tica_c2\n";
+  out << std::setprecision(15);
+  for (int state = 0; state < msm_analyzer.n_clusters(); ++state) {
+    const std::size_t idx = static_cast<std::size_t>(state);
+    const double eq_pi =
+        (idx < summary.microstate_populations.size())
+            ? summary.microstate_populations[idx]
+            : 0.0;
+    const double msm_pi =
+        (state < msm_analyzer.stationary_dist().size())
+            ? msm_analyzer.stationary_dist()[state]
+            : std::numeric_limits<double>::quiet_NaN();
+    const double ratio =
+        (std::isfinite(msm_pi) && msm_pi > 0.0)
+            ? (eq_pi / msm_pi)
+            : std::numeric_limits<double>::quiet_NaN();
+    const double pc1 =
+        (msm_analyzer.centroids().cols() > 0)
+            ? msm_analyzer.centroids()(state, 0)
+            : std::numeric_limits<double>::quiet_NaN();
+    const double pc2 =
+        (msm_analyzer.centroids().cols() > 1)
+            ? msm_analyzer.centroids()(state, 1)
+            : std::numeric_limits<double>::quiet_NaN();
+    out << state << ' '
+        << ((idx < summary.microstate_frame_counts.size())
+                ? summary.microstate_frame_counts[idx]
+                : 0)
+        << ' ' << eq_pi << ' ' << msm_pi << ' ' << ratio << ' ' << pc1 << ' '
+        << pc2 << '\n';
+  }
+
+  if (!summary.macrostate_populations.empty() &&
+      macro_assignments.size() == static_cast<std::size_t>(msm_analyzer.n_clusters())) {
+    std::vector<int64_t> macro_microstate_counts(summary.macrostate_populations.size(),
+                                                 0);
+    for (int macro : macro_assignments) {
+      if (macro >= 0 &&
+          static_cast<std::size_t>(macro) < macro_microstate_counts.size()) {
+        macro_microstate_counts[static_cast<std::size_t>(macro)] += 1;
+      }
+    }
+    out << "\n# macrostate microstate_count frame_count equilibrium_population\n";
+    for (std::size_t macro = 0; macro < summary.macrostate_populations.size();
+         ++macro) {
+      out << macro << ' ' << macro_microstate_counts[macro] << ' '
+          << ((macro < summary.macrostate_frame_counts.size())
+                  ? summary.macrostate_frame_counts[macro]
+                  : 0)
+          << ' ' << summary.macrostate_populations[macro] << '\n';
+    }
+  }
+}
+
+void write_tpt_equilibrium_overlay_file(
+    const std::string &filename, const TitanTPT &tpt_analyzer,
+    const std::vector<int> &macro_assignments,
+    const EquilibriumPopulationSummary &summary,
+    const PostprocEquilibriumWeights &weight_selection) {
+  std::ofstream out(filename);
+  out << "# source " << weight_selection.resolved_source << "\n";
+  out << "# target_temp_k " << weight_selection.target_temp_k << "\n";
+  out << "# matched_frames " << summary.matched_frames << "\n";
+  out << "# invalid_frames " << summary.invalid_frames << "\n";
+  out << "# raw_weight_sum " << std::setprecision(15) << summary.raw_weight_sum
+      << "\n";
+  out << std::setprecision(15);
+
+  const auto accumulate_population = [&](const std::vector<int> &states) {
+    double total = 0.0;
+    for (int state : states) {
+      if (state >= 0 &&
+          static_cast<std::size_t>(state) < summary.microstate_populations.size()) {
+        total += summary.microstate_populations[static_cast<std::size_t>(state)];
+      }
+    }
+    return total;
+  };
+
+  const double source_eq = accumulate_population(tpt_analyzer.source_states());
+  const double sink_eq = accumulate_population(tpt_analyzer.sink_states());
+  const double intermediate_eq = std::max(0.0, 1.0 - source_eq - sink_eq);
+  out << "source_population_eq " << source_eq << "\n";
+  out << "sink_population_eq " << sink_eq << "\n";
+  out << "intermediate_population_eq " << intermediate_eq << "\n";
+  out << "source_population_model " << tpt_analyzer.summary().source_population
+      << "\n";
+  out << "sink_population_model " << tpt_analyzer.summary().sink_population
+      << "\n";
+  out << "intermediate_population_model "
+      << tpt_analyzer.summary().intermediate_population << "\n\n";
+
+  out << "# state set macrostate model_pi equilibrium_pi eq_over_model_pi\n";
+  const auto &source_states = tpt_analyzer.source_states();
+  const auto &sink_states = tpt_analyzer.sink_states();
+  for (int state = 0; state < tpt_analyzer.n_states(); ++state) {
+    char label = 'I';
+    if (std::find(source_states.begin(), source_states.end(), state) !=
+        source_states.end()) {
+      label = 'A';
+    } else if (std::find(sink_states.begin(), sink_states.end(), state) !=
+               sink_states.end()) {
+      label = 'B';
+    }
+    const int macro =
+        (macro_assignments.size() == static_cast<std::size_t>(tpt_analyzer.n_states()))
+            ? macro_assignments[static_cast<std::size_t>(state)]
+            : -1;
+    const double model_pi = tpt_analyzer.stationary_dist()[state];
+    const double eq_pi =
+        (static_cast<std::size_t>(state) < summary.microstate_populations.size())
+            ? summary.microstate_populations[static_cast<std::size_t>(state)]
+            : 0.0;
+    const double ratio =
+        (std::isfinite(model_pi) && model_pi > 0.0)
+            ? (eq_pi / model_pi)
+            : std::numeric_limits<double>::quiet_NaN();
+    out << state << ' ' << label << ' ' << macro << ' ' << model_pi << ' '
+        << eq_pi << ' ' << ratio << '\n';
+  }
 }
 
 std::vector<std::pair<double, double>>
@@ -2798,6 +3544,103 @@ void rebuild_msm_projections_from_dccm(const arguments &args,
 
 } // namespace
 
+PostprocEquilibriumWeights resolve_postproc_equilibrium_weights(
+    const arguments &args, const std::vector<double> *dham_frame_weights,
+    const std::vector<double> *mbar_frame_weights, std::fstream &log) {
+  PostprocEquilibriumWeights selection;
+  selection.requested_source = args.eq_weight_source;
+
+  const auto use_uniform = [&]() {
+    selection.resolved_source = "uniform";
+    selection.source_name = "equilibrium";
+    selection.mode_label = "uniform";
+    selection.target_temp_k = 300.0;
+    selection.global_frame_weights = nullptr;
+    selection.use_weights = false;
+  };
+  const auto try_source = [&](const std::string &source_name,
+                              const std::vector<double> *weights,
+                              double target_temp_k) {
+    if (weights && !weights->empty()) {
+      selection.resolved_source = source_name;
+      selection.source_name = source_name;
+      selection.mode_label =
+          (source_name == "mbar") ? "MBAR-weighted" : "DHAM-weighted";
+      selection.target_temp_k = target_temp_k;
+      selection.global_frame_weights = weights;
+      selection.use_weights = true;
+      return true;
+    }
+    return false;
+  };
+
+  use_uniform();
+  if (selection.requested_source == "auto") {
+    try_source("dham", dham_frame_weights, args.dham.target_temp);
+  } else if (selection.requested_source == "uniform") {
+    use_uniform();
+  } else if (selection.requested_source == "dham") {
+    if (!args.dham.flag_dham) {
+      TitanUI::print_warning(
+          "Equilibrium weights: -eq-weight-source dham requested without "
+          "-dham. Falling back to uniform.");
+    } else if (!try_source("dham", dham_frame_weights, args.dham.target_temp)) {
+      TitanUI::print_warning(
+          "Equilibrium weights: requested DHAM, but no converged DHAM frame "
+          "weights are available. Falling back to uniform.");
+    }
+  } else if (selection.requested_source == "mbar") {
+    if (!args.mbar.flag_mbar) {
+      TitanUI::print_warning(
+          "Equilibrium weights: -eq-weight-source mbar requested without "
+          "-mbar. Falling back to uniform.");
+    } else if (!try_source("mbar", mbar_frame_weights, args.mbar.target_temp)) {
+      TitanUI::print_warning(
+          "Equilibrium weights: requested MBAR, but no converged MBAR frame "
+          "weights are available. Falling back to uniform.");
+    }
+  }
+
+  TitanUI::log_kv(log, "Equilibrium Weight Source", selection.resolved_source);
+  if (selection.use_weights) {
+    TitanUI::log_kv(log, "Equilibrium Weight Target Temp",
+                    std::to_string(selection.target_temp_k));
+  }
+  return selection;
+}
+
+void run_msm_equilibrium_postproc(
+    const arguments &args, std::unique_ptr<TitanMSM> &msm_analyzer,
+    info &info_output, std::fstream &log,
+    const PostprocEquilibriumWeights &weight_selection) {
+  (void)args;
+  if (!(msm_analyzer && msm_analyzer->is_built() && weight_selection.use_weights &&
+        weight_selection.resolved_source == "mbar" &&
+        weight_selection.global_frame_weights)) {
+    return;
+  }
+
+  const auto macro_assignments =
+      msm_analyzer->compute_pcca_macrostates(args.msm.msm_macrostates);
+  EquilibriumPopulationSummary summary;
+  if (!compute_equilibrium_populations(*msm_analyzer,
+                                       *weight_selection.global_frame_weights,
+                                       macro_assignments, summary)) {
+    TitanUI::print_warning(
+        "MSM equilibrium summary: unable to map selected frame weights onto "
+        "MSM microstates.");
+    return;
+  }
+
+  write_msm_equilibrium_summary_file(
+      info_output.get_msm_equilibrium_summary_filename(), *msm_analyzer,
+      macro_assignments, summary, weight_selection);
+  TitanUI::log_kv(log, "MSM Equilibrium Summary",
+                  info_output.get_msm_equilibrium_summary_filename());
+  TitanUI::print_info("MSM: Exported equilibrium occupancy summary to " +
+                      info_output.get_msm_equilibrium_summary_filename());
+}
+
 // ============================================================================
 // 1. GBSA + ML + CAS + Nucleic Acid post-processing
 // ============================================================================
@@ -2924,7 +3767,8 @@ void run_tica_msm_postproc(const arguments &args,
                            std::unique_ptr<TitanKinetics> &tica_analyzer,
                            std::unique_ptr<TitanMSM> &msm_analyzer,
                            TitanExecutor &executor, info &info_output,
-                           std::fstream &log) {
+                           std::fstream &log,
+                           TitanValidation::RuntimeCache *validation_cache) {
   if (!(args.msm.flag_tica && tica_analyzer))
     return;
 
@@ -2966,6 +3810,16 @@ void run_tica_msm_postproc(const arguments &args,
                                           *msm_analyzer, log);
       }
 
+      if (args.msm.flag_msm && validation_cache && args.validation.auto_pick &&
+          !validation_cache->have_vamp_sweep && msm_analyzer->n_frames() > 0) {
+        const int projection_effective_k =
+            select_effective_msm_clusters(args, *tica_analyzer);
+        TitanValidation::maybe_run_preselect(args, *tica_analyzer,
+                                             projection_effective_k,
+                                             msm_analyzer, executor, log,
+                                             *validation_cache);
+      }
+
       if (msm_analyzer->n_frames() > 0) {
         tica_analyzer->write_projections(
             msm_analyzer->proj_mat_ref(), msm_analyzer->n_frames(),
@@ -2983,9 +3837,21 @@ void run_tica_msm_postproc(const arguments &args,
     if (args.msm.flag_msm && msm_analyzer) {
       const int effective_k =
           select_effective_msm_clusters(args, *tica_analyzer);
-      msm_analyzer->reconfigure_clusters(effective_k);
+      if (validation_cache) {
+        TitanValidation::maybe_run_preselect(args, *tica_analyzer, effective_k,
+                                             msm_analyzer, executor, log,
+                                             *validation_cache);
+      }
+      int msm_k_for_build = effective_k;
+      int msm_lag_for_build = args.msm.msm_lag;
+      if (validation_cache && validation_cache->auto_pick_applied &&
+          validation_cache->have_vamp_sweep) {
+        msm_k_for_build = validation_cache->vamp_sweep.selected.n_clusters;
+        msm_lag_for_build = validation_cache->vamp_sweep.selected.lag_frames;
+      }
+      msm_analyzer->reconfigure_clusters(msm_k_for_build);
       TitanUI::log_kv(log, "MSM Cluster Selection",
-                      describe_msm_cluster_selection(args, effective_k,
+                      describe_msm_cluster_selection(args, msm_k_for_build,
                                                      *tica_analyzer));
       TitanUI::print_module_header("MSM Phase 2 — Collecting TICA Projections");
       if (msm_analyzer->n_frames() == 0 &&
@@ -3006,11 +3872,20 @@ void run_tica_msm_postproc(const arguments &args,
       }
 
       if (msm_analyzer->n_frames() > 0) {
-        msm_analyzer->train_kmeans(executor, args.msm.msm_kmeans_iter,
-                                   static_cast<unsigned>(args.msm.msm_seed));
+        const bool already_selected_and_built =
+            msm_analyzer->is_built() &&
+            msm_analyzer->n_clusters() == msm_k_for_build &&
+            msm_analyzer->msm_lag_time() == msm_lag_for_build;
+        if (!already_selected_and_built) {
+          msm_analyzer->train_kmeans(executor, args.msm.msm_kmeans_iter,
+                                     static_cast<unsigned>(args.msm.msm_seed));
 
-        if (msm_analyzer->is_clustered())
-          msm_analyzer->build_markov_model(args.msm.msm_lag);
+          if (msm_analyzer->is_clustered())
+            msm_analyzer->build_markov_model(msm_lag_for_build);
+        } else {
+          TitanUI::log_kv(log, "Validation Auto-Pick Reuse",
+                          "reusing preselected MSM model");
+        }
 
         if (msm_analyzer->is_built()) {
           TitanMSMItsSolverMode its_solver_mode = TitanMSMItsSolverMode::Full;
@@ -3060,7 +3935,7 @@ void run_tica_fes_postproc(const arguments &args,
                            std::unique_ptr<TitanMSM> &msm_analyzer,
                            TitanExecutor &executor, info &info_output,
                            std::fstream &log,
-                           const std::vector<double> &frame_weights,
+                           const PostprocEquilibriumWeights &weight_selection,
                            TitanPCA::FesPostprocMetrics *metrics) {
   (void)tica_analyzer;
   if (!(args.msm.flag_tica && msm_analyzer))
@@ -3074,7 +3949,10 @@ void run_tica_fes_postproc(const arguments &args,
     TitanPCA::execute_tica_fes_analysis(
         args, msm_analyzer->proj_mat_ref(), msm_analyzer->n_frames(),
         msm_analyzer->get_frame_global_indices(), executor, info_output, log,
-        frame_weights, metrics);
+        weight_selection.global_frame_weights
+            ? *weight_selection.global_frame_weights
+            : std::vector<double>{},
+        make_pca_weight_context(weight_selection), metrics);
     auto time_tica_fes = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start_tica_fes);
     TitanUI::log_time(log, "TICA 2D FES", time_tica_fes.count() / 1000.0);
@@ -3089,7 +3967,8 @@ void run_umap_postproc(const arguments &args,
                        std::unique_ptr<TitanMSM> &msm_analyzer,
                        std::unique_ptr<TitanUMAP> &umap_analyzer,
                        TitanExecutor &executor,
-                       const info &info_output, std::fstream &log) {
+                       const info &info_output, std::fstream &log,
+                       const PostprocEquilibriumWeights &weight_selection) {
   if (!(args.umap.flag_umap && msm_analyzer && msm_analyzer->n_frames() > 0))
     return;
 
@@ -3139,6 +4018,54 @@ void run_umap_postproc(const arguments &args,
     if (umap_analyzer->is_fitted()) {
       umap_analyzer->write_embedding(
           info_output.get_umap_embedding_filename(), log);
+      if (is_mbar_equilibrium_weight_source(weight_selection)) {
+        const auto &embedding = umap_analyzer->embedding();
+        const auto &global_indices = msm_analyzer->get_frame_global_indices();
+        if (static_cast<std::size_t>(embedding.rows()) != global_indices.size()) {
+          TitanUI::print_warning(
+              "UMAP: frame/global-index count mismatch. Skipping MBAR sidecars.");
+        } else {
+          const auto mapped_context = map_global_weights_to_local_frame_context(
+              "UMAP", global_indices, *weight_selection.global_frame_weights);
+          if (mapped_context.use_weights) {
+            write_umap_equilibrium_summary_file(
+                info_output.get_umap_equilibrium_summary_filename(),
+                *umap_analyzer, *msm_analyzer, mapped_context, weight_selection);
+            TitanUI::log_kv(log, "UMAP Equilibrium Summary",
+                            info_output.get_umap_equilibrium_summary_filename());
+            TitanUI::print_info(
+                "UMAP: Exported MBAR equilibrium summary to " +
+                info_output.get_umap_equilibrium_summary_filename());
+
+            if (embedding.cols() >= 2) {
+              if (embedding.cols() > 2) {
+                TitanUI::print_info(
+                    "UMAP: MBAR-weighted FES uses UMAP1/UMAP2 while preserving "
+                    "the full 3D embedding export.");
+              }
+              std::vector<std::pair<double, double>> projections(
+                  static_cast<std::size_t>(embedding.rows()));
+              for (std::size_t frame = 0; frame < projections.size(); ++frame) {
+                projections[frame] = {
+                    embedding(static_cast<Eigen::Index>(frame), 0),
+                    embedding(static_cast<Eigen::Index>(frame), 1)};
+              }
+              TitanPCA::export_projection_fes_analysis(
+                  "UMAP", "UMAP", args, projections, mapped_context.local_weights,
+                  true, weight_selection.target_temp_k,
+                  weight_selection.mode_label, executor, log,
+                  info_output.get_umap_fes_2d_filename(),
+                  info_output.get_umap_cluster_representatives_filename(),
+                  msm_analyzer->get_frame_timestamps(),
+                  msm_analyzer->get_frame_replica_ids());
+            } else {
+              TitanUI::print_warning(
+                  "UMAP: fewer than 2 embedding components are available. "
+                  "Skipping MBAR UMAP FES sidecars.");
+            }
+          }
+        }
+      }
     }
 
     auto time_umap = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3165,8 +4092,7 @@ void run_llps_postproc(const arguments &args,
   try {
     auto start_llps = std::chrono::steady_clock::now();
     TitanUI::print_module_header("LLPS Analysis");
-    llps_analyzer->finalize(static_cast<int>(executor.capacity()),
-                            args.llps.llps_maxlag);
+    llps_analyzer->finalize(executor, args.llps.llps_maxlag);
     llps_analyzer->export_results(info_output, log);
     auto time_llps = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start_llps);
@@ -3183,103 +4109,317 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
                            DCCMNetwork &dccm_analyzer, TitanExecutor &executor,
                            std::chrono::milliseconds &time_network,
                            info &info_output, std::fstream &log,
-                           const std::vector<double> &frame_weights,
+                           const PostprocEquilibriumWeights &weight_selection,
                            const std::vector<std::string> &replica_traj_files,
-                           TitanPCA::FesPostprocMetrics *metrics) {
+                           TitanPCA::FesPostprocMetrics *metrics,
+                           titan_sparse_graph_module::TitanUnifiedGraphRuntime
+                               *graph_runtime) {
+  (void)graph_runtime;
   if (!(args.flag_network_explicit || args.flag_pca || args.flag_allostery ||
-        args.community.flag_community))
+        args.corr_knn.flag_corr_knn || args.community.flag_community))
     return;
 
   try {
     if (tot_snap_allfiles > 0) {
+      const bool want_mbar_sidecars =
+          is_mbar_equilibrium_weight_source(weight_selection);
+      MappedEquilibriumFrameWeights dccm_weight_context;
       auto start_dccm = std::chrono::steady_clock::now();
       TitanUI::print_module_header("DCCM Network Analysis");
 
       dccm_analyzer.calculate_and_export(executor, info_output);
+      if (dccm_analyzer.dense_postproc_skipped_due_memory()) {
+        TitanUI::print_warning(
+            "DCCM/PCA downstream modules skipped because dense DCCM network "
+            "post-processing exceeded the safe memory budget.");
+        ensure_csv_header_if_missing(info_output.get_network_mi_edges_filename(),
+                                     "Source,Target,MI");
+        ensure_csv_header_if_missing(info_output.get_network_gc_edges_filename(),
+                                     "Source,Target,GC");
+        ensure_csv_header_if_missing(info_output.get_network_te_edges_filename(),
+                                     "Source,Target,Net_TE");
+        time_network += std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_dccm);
+        TitanUI::log_time(log, "Network Output", time_network.count() / 1000.0);
+        TitanUI::log_kv(log, "DCCM Network Analysis",
+                        "skipped by memory guard");
+        return;
+      }
+
+      if (want_mbar_sidecars) {
+        dccm_weight_context = map_global_weights_to_local_frame_context(
+            "DCCM", dccm_analyzer.get_global_frame_indices(),
+            *weight_selection.global_frame_weights);
+      }
+
+      if (dccm_weight_context.use_weights &&
+          (args.flag_network_explicit || args.flag_allostery ||
+           args.corr_knn.flag_corr_knn ||
+           args.community.flag_community)) {
+        write_dccm_equilibrium_context_file(
+            info_output.get_dccm_equilibrium_context_filename(), dccm_analyzer,
+            dccm_weight_context, weight_selection);
+        TitanUI::log_kv(log, "DCCM Equilibrium Context",
+                        info_output.get_dccm_equilibrium_context_filename());
+      }
 
       time_network += std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now() - start_dccm);
       TitanUI::log_time(log, "Network Output", time_network.count() / 1000.0);
+
+      TitanCorrKnnAnalyzer corr_knn_cached_analyzer;
+      bool corr_knn_cached = false;
+      auto corr_knn_cfg =
+          TitanCorrKnnAnalyzer::from_corr_knn_args(args.corr_knn);
+      auto allostery_knn_cfg =
+          TitanCorrKnnAnalyzer::from_allostery_args(args);
+      if (dccm_analyzer.network_sparse_mode_active()) {
+        auto apply_auto_sparse_pruning = [&](TitanCorrKnnAnalyzer::Config &cfg) {
+          if (cfg.pair_pruning.pair_cutoff_ang <= 0.0)
+            cfg.pair_pruning.pair_cutoff_ang = args.network_sparse_cut;
+          if (cfg.pair_pruning.pair_topk <= 0)
+            cfg.pair_pruning.pair_topk = args.network_sparse_k;
+          cfg.pair_pruning.use_avg_cutoff = false;
+        };
+        apply_auto_sparse_pruning(corr_knn_cfg);
+        apply_auto_sparse_pruning(allostery_knn_cfg);
+        TitanUI::print_warning(
+            "Information-theory modules are using sparse pair pruning inherited "
+            "from DCCM auto-sparse mode.");
+      }
+      auto log_exact_corr_knn_result =
+          [&](const std::string &label_prefix,
+              const TitanCorrKnnAnalyzer &analyzer,
+              const std::string &summary_path, const std::string &mi_path,
+              const std::string &gc_path, const std::string &te_path) {
+            const auto &result = analyzer.result();
+            if (!summary_path.empty()) {
+              TitanUI::log_kv(log, label_prefix + " Summary File", summary_path);
+            }
+            TitanUI::log_kv(log, label_prefix + " MI File", mi_path);
+            TitanUI::log_kv(log, label_prefix + " GC File", gc_path);
+            TitanUI::log_kv(log, label_prefix + " TE File", te_path);
+            TitanUI::log_kv(
+                log, label_prefix + " TE Stage",
+                analyzer.config().compute_te ? "enabled" : "disabled");
+            TitanUI::log_kv(
+                log, label_prefix + " Estimator",
+                "knn (exact continuous 3D, k=" +
+                    std::to_string(analyzer.config().estimator_k) + ")");
+            TitanUI::log_kv(log, label_prefix + " Tau Lag",
+                            std::to_string(analyzer.config().tau_lag));
+            TitanUI::log_kv(
+                log, label_prefix + " Pair Filter",
+                titan_corr_knn::describe_pair_filter(
+                    analyzer.config().pair_pruning));
+            TitanUI::log_kv(
+                log, label_prefix + " Candidate Pairs",
+                std::to_string(result.candidate_pair_count) + " / " +
+                    std::to_string(result.dense_pair_count));
+            if (!result.mi_available) {
+              TitanUI::print_warning(
+                  label_prefix + ": insufficient effective frames for exact MI "
+                                 "with k=" +
+                  std::to_string(analyzer.config().estimator_k) +
+                  "; CSV outputs contain headers only.");
+            } else if (analyzer.config().compute_te && !result.te_available) {
+              TitanUI::print_warning(
+                  label_prefix +
+                  ": insufficient effective lagged samples for exact TE; TE "
+                  "CSV contains headers only.");
+            }
+            if (result.degenerate_node_count > 0 ||
+                result.degenerate_pair_count > 0) {
+              TitanUI::log_kv(
+                  log, label_prefix + " Degenerate Inputs",
+                  std::to_string(result.degenerate_node_count) + " nodes, " +
+                      std::to_string(result.degenerate_pair_count) + " pairs");
+            }
+            if (result.candidate_pair_count == 0 &&
+                result.dense_pair_count > 0) {
+              TitanUI::print_warning(
+                  label_prefix +
+                  ": pair pruning removed all candidate pairs; outputs contain "
+                  "headers only.");
+            }
+          };
+
+      if (args.corr_knn.flag_corr_knn) {
+        auto start_corr_knn = std::chrono::steady_clock::now();
+        TitanUI::print_module_header("Corr-kNN Information Analysis");
+        corr_knn_cached_analyzer.configure(corr_knn_cfg);
+        corr_knn_cached_analyzer.run(dccm_analyzer, executor, log);
+        corr_knn_cached_analyzer.export_module_outputs(info_output);
+        corr_knn_cached = true;
+        log_exact_corr_knn_result(
+            "Corr-kNN", corr_knn_cached_analyzer,
+            info_output.get_corr_knn_summary_filename(),
+            info_output.get_corr_knn_mi_pairs_filename(),
+            info_output.get_corr_knn_gc_pairs_filename(),
+            info_output.get_corr_knn_te_pairs_filename());
+        if (dccm_weight_context.use_weights) {
+          write_corr_knn_equilibrium_ranking_file(
+              info_output.get_corr_knn_equilibrium_ranking_filename(),
+              info_output, dccm_weight_context, weight_selection);
+          TitanUI::log_kv(log, "Corr-kNN Equilibrium Ranking",
+                          info_output.get_corr_knn_equilibrium_ranking_filename());
+        }
+        const auto time_corr_knn =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_corr_knn);
+        TitanUI::log_time(log, "Corr-kNN", time_corr_knn.count() / 1000.0);
+      }
 
       // Allosteric Information Theory (MI -> GC + Transfer Entropy)
       if (args.flag_allostery) {
         auto start_allost = std::chrono::steady_clock::now();
         TitanUI::print_module_header(
             "Allosteric Information Theory (MI, GC + TE)");
-        DCCMNetwork::AllosteryConfig cfg;
-        cfg.tau_lag = args.allostery_tau;
-        cfg.num_bins = args.allostery_bins;
-        cfg.knn = args.allostery_knn;
-        cfg.cutoff_ang = args.allostery_cutoff;
-        cfg.use_avg_cutoff = args.allostery_use_avg_cutoff;
-        cfg.knn_use_contact_prior = args.allostery_knn_use_contact_prior;
-        cfg.knn_contact_cutoff = args.allostery_knn_contact_cutoff;
-        cfg.estimator = args.allostery_estimator;
-        cfg.kde_bandwidth = args.allostery_kde_bandwidth;
-        cfg.compute_te = args.allostery_compute_te;
-        dccm_analyzer.calculate_allostery_information_optimized(
-            executor, cfg, info_output.get_network_gc_edges_filename(),
-            info_output.get_network_mi_edges_filename(),
-            info_output.get_network_te_edges_filename());
-        TitanUI::log_kv(log, "Allostery MI File",
-                        info_output.get_network_mi_edges_filename());
-        TitanUI::log_kv(log, "Allostery GC File",
-                        info_output.get_network_gc_edges_filename());
-        TitanUI::log_kv(log, "Allostery TE File",
-                        info_output.get_network_te_edges_filename());
-        TitanUI::log_kv(log, "Allostery TE Stage",
-                        cfg.compute_te ? "enabled" : "disabled (GC only)");
-        TitanUI::log_kv(log, "Allostery Estimator",
-                        cfg.estimator == "kde"
-                            ? (std::string("kde (bandwidth=") +
-                               std::to_string(cfg.kde_bandwidth) + ")")
-                            : cfg.estimator);
-        TitanUI::log_kv(log, "Allostery Prune Window",
-                        cfg.use_avg_cutoff ? "union across frames"
-                                           : "frame-0 only");
-        if (cfg.knn > 0) {
-          std::ostringstream knn_prior;
-          if (cfg.knn_use_contact_prior) {
-            knn_prior << "contact-frequency (Cbeta/N anchors, "
-                      << cfg.knn_contact_cutoff << " A)";
-          } else {
-            knn_prior << "frame-voted nearest";
-          }
-          TitanUI::log_kv(log, "Allostery kNN Prior", knn_prior.str());
-        }
-        if (cfg.cutoff_ang > 0.0 || cfg.knn > 0) {
-          std::ostringstream pair_filter;
-          bool has_filter = false;
-          if (cfg.cutoff_ang > 0.0) {
-            pair_filter << cfg.cutoff_ang << " A cutoff";
-            has_filter = true;
-          }
-          if (cfg.knn > 0) {
-            if (has_filter)
-              pair_filter << " + ";
-            pair_filter << "top-" << cfg.knn << " "
-                        << (cfg.knn_use_contact_prior
-                                ? "contact-frequency kNN @ "
-                                : "frame-voted kNN");
-            if (cfg.knn_use_contact_prior)
-              pair_filter << cfg.knn_contact_cutoff << " A";
-          }
-          pair_filter << " ("
-                      << (cfg.use_avg_cutoff ? "union across frames"
-                                             : "frame-0 only")
-                      << ")";
-          TitanUI::log_kv(
-              log, "Allostery Pair Filter", pair_filter.str());
-          TitanUI::log_kv(
-              log, "Allostery Candidate Pairs",
-              std::to_string(dccm_analyzer.get_last_allostery_candidate_pairs()) +
-                  " / " +
-                  std::to_string(dccm_analyzer.get_last_allostery_dense_pairs()));
-          if (dccm_analyzer.get_last_allostery_candidate_pairs() == 0 &&
-              dccm_analyzer.get_last_allostery_dense_pairs() > 0) {
+        if (args.allostery_estimator == "knn") {
+          TitanUI::log_kv(log, "Allostery Backend Route",
+                          "knn -> titan_corr_knn_core");
+          TitanUI::log_kv(log, "Allostery Histogram Bins",
+                          "ignored in knn mode");
+          TitanUI::log_kv(log, "Allostery KDE Bandwidth",
+                          "ignored in knn mode");
+          if (args.allostery_bins > 0) {
             TitanUI::print_warning(
-                "Allostery pruning removed all candidate pairs; GC/TE outputs "
-                "contain headers only.");
+                "Allostery: -allostery-bins is ignored when "
+                "-allostery-estimator=knn.");
+          }
+          if (args.allostery_kde_bandwidth > 0.0) {
+            TitanUI::print_warning(
+                "Allostery: -allostery-kde-bandwidth is ignored when "
+                "-allostery-estimator=knn.");
+          }
+
+          const bool reuse_corr_knn =
+              corr_knn_cached &&
+              TitanCorrKnnAnalyzer::equivalent_config(corr_knn_cfg,
+                                                      allostery_knn_cfg);
+          TitanCorrKnnAnalyzer allostery_knn_analyzer;
+          const TitanCorrKnnAnalyzer *active_analyzer = nullptr;
+          if (reuse_corr_knn) {
+            corr_knn_cached_analyzer.export_legacy_allostery_outputs(
+                info_output.get_network_mi_edges_filename(),
+                info_output.get_network_gc_edges_filename(),
+                info_output.get_network_te_edges_filename());
+            store_allostery_graph_edges_from_corr_knn(dccm_analyzer,
+                                                     corr_knn_cached_analyzer);
+            TitanUI::log_kv(log, "Allostery kNN Reuse",
+                            "reused corr-kNN result");
+            active_analyzer = &corr_knn_cached_analyzer;
+          } else {
+            if (corr_knn_cached) {
+              TitanUI::log_kv(log, "Allostery kNN Reuse",
+                              "disabled (effective config differs from "
+                              "-corr-knn)");
+            }
+            allostery_knn_analyzer.configure(allostery_knn_cfg);
+            allostery_knn_analyzer.run(dccm_analyzer, executor, log);
+            allostery_knn_analyzer.export_legacy_allostery_outputs(
+                info_output.get_network_mi_edges_filename(),
+                info_output.get_network_gc_edges_filename(),
+                info_output.get_network_te_edges_filename());
+            store_allostery_graph_edges_from_corr_knn(dccm_analyzer,
+                                                     allostery_knn_analyzer);
+            active_analyzer = &allostery_knn_analyzer;
+          }
+          log_exact_corr_knn_result(
+              "Allostery", *active_analyzer, "",
+              info_output.get_network_mi_edges_filename(),
+              info_output.get_network_gc_edges_filename(),
+              info_output.get_network_te_edges_filename());
+        } else {
+          DCCMNetwork::AllosteryConfig cfg;
+          cfg.tau_lag = args.allostery_tau;
+          cfg.num_bins = args.allostery_bins;
+          cfg.knn = args.allostery_knn;
+          cfg.cutoff_ang = args.allostery_cutoff;
+          cfg.use_avg_cutoff = args.allostery_use_avg_cutoff;
+          cfg.knn_use_contact_prior = args.allostery_knn_use_contact_prior;
+          cfg.knn_contact_cutoff = args.allostery_knn_contact_cutoff;
+          cfg.estimator = args.allostery_estimator;
+          cfg.kde_bandwidth = args.allostery_kde_bandwidth;
+          cfg.compute_te = args.allostery_compute_te;
+          if (dccm_analyzer.network_sparse_mode_active()) {
+            cfg.force_sparse_candidates = true;
+            if (cfg.cutoff_ang <= 0.0)
+              cfg.cutoff_ang = args.network_sparse_cut;
+            if (cfg.knn <= 0)
+              cfg.knn = args.network_sparse_k;
+            cfg.use_avg_cutoff = false;
+          }
+          dccm_analyzer.calculate_allostery_information_optimized(
+              executor, cfg, info_output.get_network_gc_edges_filename(),
+              info_output.get_network_mi_edges_filename(),
+              info_output.get_network_te_edges_filename());
+          ensure_csv_header_if_missing(info_output.get_network_mi_edges_filename(),
+                                       "Source,Target,MI");
+          ensure_csv_header_if_missing(info_output.get_network_gc_edges_filename(),
+                                       "Source,Target,GC");
+          ensure_csv_header_if_missing(
+              info_output.get_network_te_edges_filename(),
+              "Source,Target,Net_TE");
+          TitanUI::log_kv(log, "Allostery MI File",
+                          info_output.get_network_mi_edges_filename());
+          TitanUI::log_kv(log, "Allostery GC File",
+                          info_output.get_network_gc_edges_filename());
+          TitanUI::log_kv(log, "Allostery TE File",
+                          info_output.get_network_te_edges_filename());
+          TitanUI::log_kv(log, "Allostery TE Stage",
+                          cfg.compute_te ? "enabled" : "disabled (GC only)");
+          TitanUI::log_kv(log, "Allostery Estimator",
+                          cfg.estimator == "kde"
+                              ? (std::string("kde (bandwidth=") +
+                                 std::to_string(cfg.kde_bandwidth) + ")")
+                              : cfg.estimator);
+          TitanUI::log_kv(log, "Allostery Prune Window",
+                          cfg.use_avg_cutoff ? "union across frames"
+                                             : "frame-0 only");
+          if (cfg.knn > 0) {
+            std::ostringstream knn_prior;
+            if (cfg.knn_use_contact_prior) {
+              knn_prior << "contact-frequency (Cbeta/N anchors, "
+                        << cfg.knn_contact_cutoff << " A)";
+            } else {
+              knn_prior << "frame-voted nearest";
+            }
+            TitanUI::log_kv(log, "Allostery kNN Prior", knn_prior.str());
+          }
+          if (cfg.cutoff_ang > 0.0 || cfg.knn > 0) {
+            std::ostringstream pair_filter;
+            bool has_filter = false;
+            if (cfg.cutoff_ang > 0.0) {
+              pair_filter << cfg.cutoff_ang << " A cutoff";
+              has_filter = true;
+            }
+            if (cfg.knn > 0) {
+              if (has_filter)
+                pair_filter << " + ";
+              pair_filter << "top-" << cfg.knn << " "
+                          << (cfg.knn_use_contact_prior
+                                  ? "contact-frequency kNN @ "
+                                  : "frame-voted kNN");
+              if (cfg.knn_use_contact_prior)
+                pair_filter << cfg.knn_contact_cutoff << " A";
+            }
+            pair_filter << " ("
+                        << (cfg.use_avg_cutoff ? "union across frames"
+                                               : "frame-0 only")
+                        << ")";
+            TitanUI::log_kv(log, "Allostery Pair Filter", pair_filter.str());
+            TitanUI::log_kv(
+                log, "Allostery Candidate Pairs",
+                std::to_string(dccm_analyzer.get_last_allostery_candidate_pairs()) +
+                    " / " +
+                    std::to_string(dccm_analyzer.get_last_allostery_dense_pairs()));
+            if (dccm_analyzer.get_last_allostery_candidate_pairs() == 0 &&
+                dccm_analyzer.get_last_allostery_dense_pairs() > 0) {
+              TitanUI::print_warning(
+                  "Allostery pruning removed all candidate pairs; GC/TE outputs "
+                  "contain headers only.");
+            }
           }
         }
         auto time_allost =
@@ -3287,6 +4427,14 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
                 std::chrono::steady_clock::now() - start_allost);
         TitanUI::log_time(log, "Allostery MI+GC+TE",
                           time_allost.count() / 1000.0);
+        if (dccm_weight_context.use_weights) {
+          write_allostery_equilibrium_ranking_file(
+              info_output.get_allostery_equilibrium_ranking_filename(),
+              info_output, dccm_weight_context, weight_selection);
+          TitanUI::log_kv(
+              log, "Allostery Equilibrium Ranking",
+              info_output.get_allostery_equilibrium_ranking_filename());
+        }
       }
 
       if (args.flag_pca) {
@@ -3295,7 +4443,9 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
         const auto &pca_traj_z = dccm_analyzer.get_traj_z();
         const size_t pca_frame_count = pca_traj_x.size();
         std::vector<double> pca_frame_weights;
-        if (!frame_weights.empty()) {
+        if (weight_selection.global_frame_weights &&
+            !weight_selection.global_frame_weights->empty()) {
+          const auto &global_weights = *weight_selection.global_frame_weights;
           const auto &dccm_global_indices = dccm_analyzer.get_global_frame_indices();
           if (dccm_global_indices.size() != pca_frame_count) {
             TitanUI::print_warning(
@@ -3309,12 +4459,12 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
             size_t weighted_frames = 0;
             double mapped_weight_sum = 0.0;
             for (size_t f = 0; f < dccm_global_indices.size(); ++f) {
-              int64_t global_idx = dccm_global_indices[f];
+              const int64_t global_idx = dccm_global_indices[f];
               if (global_idx < 0 ||
-                  static_cast<size_t>(global_idx) >= frame_weights.size()) {
+                  static_cast<size_t>(global_idx) >= global_weights.size()) {
                 continue;
               }
-              const double w = frame_weights[static_cast<size_t>(global_idx)];
+              const double w = global_weights[static_cast<size_t>(global_idx)];
               pca_frame_weights[f] = w;
               ++matched_frames;
               if (w > 0.0)
@@ -3322,7 +4472,7 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
               mapped_weight_sum += w;
             }
             TitanUI::print_info(
-                "PCA: Mapped DHAM weights onto " +
+                "PCA: Mapped " + weight_selection.source_name + " weights onto " +
                 std::to_string(weighted_frames) + "/" +
                 std::to_string(pca_frame_count) +
                 " frames (matched indices: " + std::to_string(matched_frames) +
@@ -3334,6 +4484,7 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
             dccm_analyzer.get_resnames(), dccm_analyzer.get_resnrs(),
             dccm_analyzer.get_chains(), dccm_analyzer.get_is_lig(), executor,
             info_output, log, pca_frame_weights,
+            make_pca_weight_context(weight_selection),
             dccm_analyzer.get_traj_times(), dccm_analyzer.get_traj_replicas(),
             replica_traj_files, metrics);
       }
@@ -3348,7 +4499,10 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
 // ============================================================================
 void run_lspmd_postproc(const arguments &args, DCCMNetwork &dccm_analyzer,
                         TitanExecutor &executor, info &info_output,
-                        std::fstream &log) {
+                        std::fstream &log,
+                        const PostprocEquilibriumWeights &weight_selection,
+                        titan_sparse_graph_module::TitanUnifiedGraphRuntime
+                            *graph_runtime) {
   if (!args.lspmd.flag_lspmd)
     return;
   if (dccm_analyzer.get_total_frames() == 0) {
@@ -3373,6 +4527,32 @@ void run_lspmd_postproc(const arguments &args, DCCMNetwork &dccm_analyzer,
     DCCMNetwork::LSPMDResult result;
     dccm_analyzer.calculate_lspmd(executor, cfg, result);
     dccm_analyzer.export_lspmd(result);
+    if (graph_runtime) {
+      graph_runtime->capture_lspmd(dccm_analyzer, result);
+    }
+    if (is_mbar_equilibrium_weight_source(weight_selection)) {
+      const auto mapped_context = map_global_weights_to_local_frame_context(
+          "LSP-MD", dccm_analyzer.get_global_frame_indices(),
+          *weight_selection.global_frame_weights);
+      if (mapped_context.use_weights) {
+        const bool dccm_context_already_written =
+            args.flag_network_explicit || args.flag_allostery ||
+            args.corr_knn.flag_corr_knn ||
+            args.community.flag_community;
+        if (!dccm_context_already_written) {
+          write_dccm_equilibrium_context_file(
+              info_output.get_dccm_equilibrium_context_filename(),
+              dccm_analyzer, mapped_context, weight_selection);
+          TitanUI::log_kv(log, "DCCM Equilibrium Context",
+                          info_output.get_dccm_equilibrium_context_filename());
+        }
+        write_lspmd_equilibrium_ranking_file(
+            info_output.get_lspmd_equilibrium_ranking_filename(),
+            dccm_analyzer, result, mapped_context, weight_selection);
+        TitanUI::log_kv(log, "LSP-MD Equilibrium Ranking",
+                        info_output.get_lspmd_equilibrium_ranking_filename());
+      }
+    }
 
     TitanUI::log_kv(log, "LSP-MD Edges",
                     std::to_string(result.edges.size()));
@@ -3394,7 +4574,9 @@ void run_dham_postproc(const arguments &args,
                        std::vector<double> &out_frame_weights,
                        Eigen::MatrixXd *out_reweighted_tpm,
                        Eigen::VectorXd *out_reweighted_pi,
-                       bool *out_converged) {
+                       bool *out_converged,
+                       TitanValidation::DhamRebuildContext
+                           *out_validation_dham_context) {
   out_frame_weights.clear();
   if (out_reweighted_tpm)
     out_reweighted_tpm->resize(0, 0);
@@ -3402,6 +4584,8 @@ void run_dham_postproc(const arguments &args,
     out_reweighted_pi->resize(0);
   if (out_converged)
     *out_converged = false;
+  if (out_validation_dham_context)
+    *out_validation_dham_context = {};
   if (!args.dham.flag_dham || !msm_analyzer)
     return;
 
@@ -3525,8 +4709,8 @@ void run_dham_postproc(const arguments &args,
       return;
     for (int k = ks; k < ke; ++k) {
       auto xvg_data = TitanDHAM::parse_xvg(ener_paths[static_cast<size_t>(k)]);
-      if (xvg_data.empty())
-        continue;
+      if (!xvg_data.empty())
+        xvg_data = filter_postproc_energy_pairs(xvg_data, args);
       std::lock_guard<std::mutex> lock(parsed_xvg_mutex);
       parsed_xvg[k] = std::move(xvg_data);
     }
@@ -3593,7 +4777,8 @@ void run_dham_postproc(const arguments &args,
     audit.replica_id = k;
     audit.traj_present =
         (it_dtraj != per_replica_dtrajs.end() && it_ts != per_replica_timestamps.end());
-    audit.energy_present = (it_xvg != parsed_xvg.end());
+    audit.energy_present =
+        (it_xvg != parsed_xvg.end() && !it_xvg->second.empty());
     if (audit.traj_present) {
       audit.traj_frames = it_dtraj->second.size();
       if (!it_ts->second.empty()) {
@@ -3601,14 +4786,15 @@ void run_dham_postproc(const arguments &args,
         audit.traj_max_ps = it_ts->second.back();
       }
     }
-    if (audit.energy_present) {
+    if (it_xvg != parsed_xvg.end()) {
       audit.energy_points = it_xvg->second.size();
       if (!it_xvg->second.empty()) {
         audit.energy_min_ps = it_xvg->second.front().first;
         audit.energy_max_ps = it_xvg->second.back().first;
       }
     }
-    if (it_xvg == parsed_xvg.end() || it_dtraj == per_replica_dtrajs.end() ||
+    if (it_xvg == parsed_xvg.end() || it_xvg->second.empty() ||
+        it_dtraj == per_replica_dtrajs.end() ||
         it_ts == per_replica_timestamps.end()) {
       if (!audit.energy_present)
         ++window_missing_energy_files;
@@ -3913,6 +5099,23 @@ void run_dham_postproc(const arguments &args,
     return;
   }
 
+  if (out_validation_dham_context) {
+    out_validation_dham_context->available = true;
+    out_validation_dham_context->n_states = msm_analyzer->n_clusters();
+    out_validation_dham_context->lag_frames = dham_lag;
+    out_validation_dham_context->n_replicas = n_replicas;
+    out_validation_dham_context->temps_k = temps;
+    out_validation_dham_context->target_temp_k = args.dham.target_temp;
+    out_validation_dham_context->max_iter = args.dham.max_iter;
+    out_validation_dham_context->tolerance = args.dham.tolerance;
+    out_validation_dham_context->ensemble = args.dham.ensemble;
+    out_validation_dham_context->per_replica_dtrajs = per_replica_dtrajs;
+    out_validation_dham_context->per_replica_timestamps_ps =
+        per_replica_timestamps;
+    out_validation_dham_context->per_replica_observables =
+        per_replica_observables;
+  }
+
   // 5. Determine number of microstates from MSM
   const int n_states = msm_analyzer->n_clusters();
 
@@ -4123,18 +5326,20 @@ void run_dham_postproc(const arguments &args,
   TitanUI::log_time(log, "DHAM Analysis", time_dham.count() / 1000.0);
 }
 
-void run_mbar_postproc(const arguments &args,
-                       std::unique_ptr<TitanMSM> &msm_analyzer,
-                       DCCMNetwork *dccm_analyzer, TitanExecutor &executor,
-                       info &info_output, std::fstream &log,
-                       std::vector<double> *out_frame_weights) {
+TitanMBAR::CoreResult
+run_mbar_postproc(const arguments &args,
+                  std::unique_ptr<TitanMSM> &msm_analyzer,
+                  DCCMNetwork *dccm_analyzer, TitanExecutor &executor,
+                  info &info_output, std::fstream &log,
+                  std::vector<double> *out_frame_weights) {
+  TitanMBAR::CoreResult mbar_result;
   if (out_frame_weights)
     out_frame_weights->clear();
   if (!args.mbar.flag_mbar)
-    return;
+    return mbar_result;
 
   auto start_mbar = std::chrono::steady_clock::now();
-  TitanUI::print_module_header("MBAR Post-Processing");
+  TitanUI::print_module_header("MBAR Reweighting");
 
   const bool want_tica =
       (args.mbar.domain == "tica" || args.mbar.domain == "both");
@@ -4155,8 +5360,8 @@ void run_mbar_postproc(const arguments &args,
     metadata.box_volumes_nm3 = msm_analyzer->get_frame_box_volumes_nm3();
   }
 
-  auto mbar_result = TitanMBAR::run_temperature_ladder_reweighting(
-      args, metadata, executor, log);
+  mbar_result =
+      TitanMBAR::run_temperature_ladder_reweighting(args, metadata, executor, log);
   TitanMBAR::write_window_audit_file(info_output.get_mbar_window_audit_filename(),
                                      mbar_result.window_audit);
   TitanMBAR::write_frame_weights_file(
@@ -4173,14 +5378,43 @@ void run_mbar_postproc(const arguments &args,
   TitanUI::log_kv(log, "MBAR Window Audit File",
                   info_output.get_mbar_window_audit_filename());
 
-  if (out_frame_weights)
-    *out_frame_weights = mbar_result.global_frame_weights;
   if (!mbar_result.solved) {
     auto time_mbar = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start_mbar);
     TitanUI::log_time(log, "MBAR Analysis", time_mbar.count() / 1000.0);
-    return;
+    return mbar_result;
   }
+  if (!mbar_result.converged) {
+    TitanUI::print_warning(
+        "MBAR: solver did not converge. Skipping MBAR-weighted downstream "
+        "FES exports.");
+    auto time_mbar = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_mbar);
+    TitanUI::log_time(log, "MBAR Analysis", time_mbar.count() / 1000.0);
+    return mbar_result;
+  }
+  if (out_frame_weights)
+    *out_frame_weights = mbar_result.global_frame_weights;
+
+  auto time_mbar = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start_mbar);
+  TitanUI::log_time(log, "MBAR Analysis", time_mbar.count() / 1000.0);
+  (void)want_tica;
+  (void)want_pca;
+  return mbar_result;
+}
+
+void run_mbar_projection_exports_postproc(
+    const arguments &args, std::unique_ptr<TitanMSM> &msm_analyzer,
+    DCCMNetwork *dccm_analyzer, TitanExecutor &executor, info &info_output,
+    std::fstream &log, const TitanMBAR::CoreResult &mbar_result) {
+  if (!args.mbar.flag_mbar || !mbar_result.solved || !mbar_result.converged)
+    return;
+
+  const bool want_tica =
+      (args.mbar.domain == "tica" || args.mbar.domain == "both");
+  const bool want_pca =
+      (args.mbar.domain == "pca" || args.mbar.domain == "both");
 
   if (want_tica) {
     if (!(msm_analyzer && msm_analyzer->n_frames() > 0 &&
@@ -4253,10 +5487,6 @@ void run_mbar_postproc(const arguments &args,
       }
     }
   }
-
-  auto time_mbar = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::steady_clock::now() - start_mbar);
-  TitanUI::log_time(log, "MBAR Analysis", time_mbar.count() / 1000.0);
 }
 
 void run_tpt_postproc(const arguments &args,
@@ -4268,7 +5498,11 @@ void run_tpt_postproc(const arguments &args,
                       const TitanDSSPAnalyzer *protein_dssp_analyzer,
                       const Eigen::MatrixXd *dham_tpm,
                       const Eigen::VectorXd *dham_pi,
-                      bool dham_converged) {
+                      bool dham_converged,
+                      const PostprocEquilibriumWeights *weight_selection,
+                      TitanValidation::RuntimeCache *validation_cache,
+                      titan_sparse_graph_module::TitanUnifiedGraphRuntime
+                          *graph_runtime) {
   if (!args.tpt.flag_tpt || !msm_analyzer)
     return;
 
@@ -4370,7 +5604,8 @@ void run_tpt_postproc(const arguments &args,
         TitanUI::log_kv(log, "TPT Demux Transitions",
                         std::to_string(demux_transition_count));
       } else {
-        kinetic_segments = build_msm_state_segments(*msm_analyzer);
+        kinetic_segments =
+            TitanValidation::build_msm_state_segments(*msm_analyzer);
       }
     } else if (can_use_dham) {
       model_tpm_ptr = dham_tpm;
@@ -4420,6 +5655,27 @@ void run_tpt_postproc(const arguments &args,
     write_tpt_state_labels(info_output.get_tpt_state_labels_filename(), analyzer,
                            *msm_analyzer, macro_assignments, lj_summary,
                            protein_summary, analyzer.stationary_dist());
+    if (weight_selection && weight_selection->use_weights &&
+        weight_selection->resolved_source == "mbar" &&
+        weight_selection->global_frame_weights) {
+      EquilibriumPopulationSummary equilibrium_summary;
+      if (compute_equilibrium_populations(*msm_analyzer,
+                                          *weight_selection->global_frame_weights,
+                                          macro_assignments,
+                                          equilibrium_summary)) {
+        write_tpt_equilibrium_overlay_file(
+            info_output.get_tpt_equilibrium_overlay_filename(), analyzer,
+            macro_assignments, equilibrium_summary, *weight_selection);
+        TitanUI::log_kv(log, "TPT Equilibrium Overlay",
+                        info_output.get_tpt_equilibrium_overlay_filename());
+        TitanUI::print_info("TPT: Exported equilibrium overlay to " +
+                            info_output.get_tpt_equilibrium_overlay_filename());
+      } else {
+        TitanUI::print_warning(
+            "TPT: unable to map selected equilibrium frame weights onto "
+            "microstates. Skipping equilibrium overlay.");
+      }
+    }
     const bool wrote_reactive_fes = write_tpt_reactive_fes_2d(
         info_output.get_tpt_reactive_fes_2d_filename(), analyzer,
         *msm_analyzer, log);
@@ -4456,6 +5712,22 @@ void run_tpt_postproc(const arguments &args,
                         info_output.get_tpt_bottleneck_edges_filename());
     TitanUI::print_info("TPT: Exported bottleneck states to " +
                         info_output.get_tpt_bottleneck_states_filename());
+    if (graph_runtime) {
+      std::vector<titan_sparse_graph_module::TptCapturedEdgeRow>
+          graph_edge_rows;
+      graph_edge_rows.reserve(bottleneck_edge_rows.size());
+      for (const auto &row : bottleneck_edge_rows) {
+        graph_edge_rows.push_back(to_graph_tpt_edge_row(row));
+      }
+      std::vector<titan_sparse_graph_module::TptCapturedNodeRow>
+          graph_node_rows;
+      graph_node_rows.reserve(bottleneck_state_rows.size());
+      for (const auto &row : bottleneck_state_rows) {
+        graph_node_rows.push_back(to_graph_tpt_node_row(row));
+      }
+      graph_runtime->capture_tpt(analyzer, macro_assignments, graph_edge_rows,
+                                 graph_node_rows);
+    }
 
     if (!macro_assignments.empty()) {
       Eigen::MatrixXd macro_tpm;
@@ -4476,10 +5748,11 @@ void run_tpt_postproc(const arguments &args,
     }
     if (kinetic_mode) {
       if (kinetic_segments.empty()) {
-        kinetic_segments = build_msm_state_segments(*msm_analyzer);
+        kinetic_segments =
+            TitanValidation::build_msm_state_segments(*msm_analyzer);
       }
-      const TptKineticDiagnostics kinetic_diag =
-          compute_tpt_kinetic_diagnostics_from_segments(
+      const TitanValidation::TptKineticDiagnostics kinetic_diag =
+          TitanValidation::compute_tpt_kinetic_diagnostics_from_segments(
               kinetic_segments, msm_analyzer->n_clusters(),
               msm_analyzer->msm_lag_time(), msm_analyzer->lag_time_ns(),
               analyzer);
@@ -4514,17 +5787,65 @@ void run_tpt_postproc(const arguments &args,
             "TPT kinetic diagnostics: CK / Markov consistency is only moderate.");
       }
     }
-    if (args.tpt.bootstrap_samples > 0) {
+    if (validation_cache) {
+      validation_cache->tpt_context.available = true;
+      validation_cache->tpt_context.kinetic_mode = kinetic_mode;
+      validation_cache->tpt_context.symmetrize_bootstrap = !kinetic_mode;
+      validation_cache->tpt_context.n_states = msm_analyzer->n_clusters();
+      validation_cache->tpt_context.lag_frames = msm_analyzer->msm_lag_time();
+      validation_cache->tpt_context.top_paths = args.tpt.top_paths;
+      validation_cache->tpt_context.flux_cut = args.tpt.flux_cut;
+      validation_cache->tpt_context.lag_time_ns = msm_analyzer->lag_time_ns();
+      validation_cache->tpt_context.model_source = model_source;
+      validation_cache->tpt_context.source_states = source_states;
+      validation_cache->tpt_context.sink_states = sink_states;
+      validation_cache->tpt_context.model_tpm = *model_tpm_ptr;
+      validation_cache->tpt_context.model_pi = *model_pi_ptr;
+      validation_cache->tpt_context.bootstrap_segments =
+          kinetic_mode
+              ? kinetic_segments
+              : TitanValidation::build_msm_state_segments(*msm_analyzer);
+    }
+    const bool defer_legacy_bootstrap =
+        validation_cache &&
+        TitanValidation::validation_bootstrap_matches_tpt_legacy(args);
+    if (args.tpt.bootstrap_samples > 0 && !defer_legacy_bootstrap) {
       if (model_source.rfind("dham_reweighted_", 0) == 0) {
-        TitanUI::print_warning(
-            "TPT bootstrap is not yet implemented for DHAM-reweighted models. Skipping bootstrap uncertainty.");
+        TitanValidation::TptBootstrapAggregate bootstrap;
+        std::string bootstrap_error;
+        if (TitanValidation::run_dham_tpt_bootstrap(
+                validation_cache ? validation_cache->dham_context
+                                 : TitanValidation::DhamRebuildContext{},
+                args.tpt.top_paths, args.tpt.flux_cut, source_states,
+                sink_states, args.tpt.bootstrap_samples, args.tpt.bootstrap_seed,
+                static_cast<int>(executor.capacity()), executor, bootstrap,
+                bootstrap_error)) {
+          write_tpt_bootstrap_files(
+              info_output.get_tpt_bootstrap_summary_filename(),
+              info_output.get_tpt_bootstrap_states_filename(), bootstrap,
+              analyzer, model_source);
+          TitanUI::log_kv(log, "TPT Bootstrap Requested",
+                          std::to_string(args.tpt.bootstrap_samples));
+          TitanUI::log_kv(log, "TPT Bootstrap Successful",
+                          std::to_string(bootstrap.successful_samples));
+          TitanUI::print_info(
+              "TPT: Exported bootstrap summary to " +
+              info_output.get_tpt_bootstrap_summary_filename());
+          TitanUI::print_info(
+              "TPT: Exported bootstrap state stats to " +
+              info_output.get_tpt_bootstrap_states_filename());
+        } else {
+          TitanUI::print_warning("TPT bootstrap: " + bootstrap_error);
+        }
       } else {
         std::vector<std::vector<int>> bootstrap_segments =
-            kinetic_mode ? kinetic_segments : build_msm_state_segments(*msm_analyzer);
+            kinetic_mode ? kinetic_segments
+                         : TitanValidation::build_msm_state_segments(
+                               *msm_analyzer);
         const bool symmetrize_bootstrap = !kinetic_mode;
-        TptBootstrapAggregate bootstrap;
+        TitanValidation::TptBootstrapAggregate bootstrap;
         std::string bootstrap_error;
-        if (run_tpt_bootstrap(
+        if (TitanValidation::run_tpt_bootstrap(
                 bootstrap_segments, msm_analyzer->n_clusters(),
                 msm_analyzer->msm_lag_time(), msm_analyzer->lag_time_ns(),
                 symmetrize_bootstrap, source_states, sink_states,
@@ -4550,6 +5871,9 @@ void run_tpt_postproc(const arguments &args,
           TitanUI::print_warning("TPT bootstrap: " + bootstrap_error);
         }
       }
+    } else if (defer_legacy_bootstrap) {
+      TitanUI::log_kv(log, "TPT Bootstrap Reuse",
+                      "validation core will write legacy bootstrap files");
     }
     TitanUI::log_kv(log, "TPT Source Basin", source_label);
     TitanUI::log_kv(log, "TPT Sink Basin", sink_label);
@@ -4579,6 +5903,18 @@ void run_tpt_postproc(const arguments &args,
   auto time_tpt = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_tpt);
   TitanUI::log_time(log, "TPT Analysis", time_tpt.count() / 1000.0);
+}
+
+void run_validation_postproc(const arguments &args,
+                             std::unique_ptr<TitanKinetics> &tica_analyzer,
+                             std::unique_ptr<TitanMSM> &msm_analyzer,
+                             TitanExecutor &executor, info &info_output,
+                             std::fstream &log,
+                             TitanValidation::RuntimeCache &validation_cache) {
+  if (!args.validation.flag_validation || !tica_analyzer || !msm_analyzer)
+    return;
+  TitanValidation::run_postproc(args, *tica_analyzer, msm_analyzer, executor,
+                                info_output, log, validation_cache);
 }
 
 namespace {

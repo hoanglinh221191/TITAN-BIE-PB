@@ -65,6 +65,9 @@ public:
   size_t group_entropy_lg_index() { return group_entropy_lg; }
   int create_group_entropy(const Multi_MOL &mol1, const Multi_MOL &mol2,
                            const arguments &Arguments, string name_group);
+  int finalize_index_groups(arguments &Arguments);
+  int create_auto_index_file(arguments &Arguments, Multi_MOL &mol_in,
+                             const amino_acid &amine);
   int creat_index_file(arguments &Arguments, Multi_MOL &mol_in);
 
   size_t atom_index(size_t group, size_t index) {

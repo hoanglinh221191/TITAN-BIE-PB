@@ -4,6 +4,7 @@
 #include "Multi_MOL.h"
 #include "aligned_allocator.h"
 #include "arguments.h"
+#include "titan_selection_utils.h"
 
 #include <cstdint>
 #include <cstddef>
@@ -15,22 +16,8 @@ class TitanExecutor;
 
 class TitanRgAnalyzer {
 public:
-  struct TraceAtom {
-    int atom_index{-1};
-    std::size_t ordinal{0};
-    std::size_t resnr{0};
-    std::size_t chainnum{0};
-    std::string chain{" "};
-    std::string resname{"UNK"};
-    std::string atom_name{"?"};
-  };
-
-  enum class TraceKind : std::uint8_t {
-    None = 0,
-    CA,
-    C4Prime,
-    MartiniBB
-  };
+  using TraceAtom = titan_selection::SelectedAtom;
+  using TraceKind = titan_selection::TraceKind;
 
   TitanRgAnalyzer() = default;
 

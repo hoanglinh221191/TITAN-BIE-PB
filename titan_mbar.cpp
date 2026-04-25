@@ -9,6 +9,7 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <immintrin.h>
 #include <limits>
 #include <numeric>
 #include <random>
@@ -19,11 +20,20 @@ namespace {
 
 constexpr double kBoltzmannKjPerMolK = 0.008314462618;
 constexpr double kLogGuard = 1e-20;
+constexpr double kTimeFilterTolerancePs = 1e-3;
 constexpr int kSciIterations = 200;
 constexpr int kSciIterationsFast = 12;
-constexpr int kNewtonIterations = 20;
-constexpr int kNewtonIterationsFast = 10;
-constexpr double kNewtonConvTol = 1e-4;
+constexpr int kNewtonIterations = 40;
+constexpr int kNewtonIterationsFast = 16;
+constexpr int kBarIterations = 100;
+constexpr int kLineSearchMaxBacktracks = 12;
+constexpr double kResidualConvTol = 1e-8;
+constexpr double kFixedPointStepTol = 1e-8;
+constexpr double kNewtonStepClamp = 10.0;
+constexpr double kAdjacentOverlapWarn = 0.03;
+constexpr double kMinStateEssWarn = 5.0;
+constexpr double kMinTargetEssFractionWarn = 0.20;
+constexpr std::size_t kAvxDoubleWidth = 4;
 
 struct ReplicaSeries {
   int replica_id{-1};
@@ -61,6 +71,24 @@ struct ObservableResult {
   AlignedDoubleVector normalized_weights{};
 };
 
+struct SolverEvaluation {
+  std::vector<double> residual{};
+  std::vector<double> hessian{};
+  std::vector<double> square_sums{};
+  AlignedDoubleVector log_denom{};
+  double residual_inf{0.0};
+  double residual_rms{0.0};
+  double objective{0.0};
+};
+
+struct SolverStats {
+  std::string method{"not_run"};
+  std::size_t iterations{0};
+  std::size_t line_search_backtracks{0};
+  double residual_inf{0.0};
+  double residual_rms{0.0};
+};
+
 struct RunningStats {
   std::size_t count{0};
   double mean{0.0};
@@ -80,6 +108,66 @@ struct RunningStats {
     return std::sqrt(std::max(0.0, m2 / static_cast<double>(count - 1)));
   }
 };
+
+struct TimeSelectionSummary {
+  std::size_t count{0};
+  double min_ps{0.0};
+  double max_ps{0.0};
+};
+
+[[nodiscard]] bool keep_mbar_energy_time(const arguments &args,
+                                         double time_ps) noexcept {
+  if (args.flag_begin_set && time_ps < args.begin_time - kTimeFilterTolerancePs)
+    return false;
+  if (args.flag_end_set && time_ps > args.end_time + kTimeFilterTolerancePs)
+    return false;
+  if (args.dt > 0.0) {
+    const double ref_time = args.flag_begin_set ? args.begin_time : 0.0;
+    const double diff = time_ps - ref_time;
+    if (diff < -kTimeFilterTolerancePs)
+      return false;
+    const long long steps = std::lround(diff / args.dt);
+    if (std::abs(diff - static_cast<double>(steps) * args.dt) >
+        kTimeFilterTolerancePs) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <typename Row, typename TimeAccessor>
+TimeSelectionSummary summarize_selected_times(const std::vector<Row> &rows,
+                                              TimeAccessor time_accessor,
+                                              const arguments &args) {
+  TimeSelectionSummary summary;
+  for (const auto &row : rows) {
+    const double time_ps = time_accessor(row);
+    if (!keep_mbar_energy_time(args, time_ps))
+      continue;
+    if (summary.count == 0) {
+      summary.min_ps = time_ps;
+      summary.max_ps = time_ps;
+    } else {
+      summary.min_ps = std::min(summary.min_ps, time_ps);
+      summary.max_ps = std::max(summary.max_ps, time_ps);
+    }
+    ++summary.count;
+  }
+  return summary;
+}
+
+std::vector<std::pair<double, double>>
+filter_time_value_pairs(const std::vector<std::pair<double, double>> &rows,
+                        const arguments &args) {
+  std::vector<std::pair<double, double>> filtered;
+  filtered.reserve(rows.size());
+  for (const auto &row : rows) {
+    if (!keep_mbar_energy_time(args, row.first))
+      continue;
+    filtered.push_back(row);
+  }
+  return filtered;
+}
 
 bool read_mbar_demux_map(const std::string &path,
                          std::vector<std::vector<int>> &rows_out,
@@ -164,7 +252,7 @@ int map_temperature_to_state(const std::vector<double> &temps,
 std::vector<double>
 infer_ladder_temperatures_from_observed_series(
     const std::vector<std::vector<TitanIO::XvgTimeTwoValues>> &series_by_replica,
-    std::size_t n_states, std::string &error_message) {
+    std::size_t n_states, const arguments &args, std::string &error_message) {
   error_message.clear();
   if (n_states == 0) {
     error_message = "cannot infer MBAR ladder temperatures for zero states";
@@ -174,6 +262,8 @@ infer_ladder_temperatures_from_observed_series(
   std::vector<double> observed_temperatures;
   for (const auto &series : series_by_replica) {
     for (const auto &row : series) {
+      if (!keep_mbar_energy_time(args, row.time_ps))
+        continue;
       if (std::isfinite(row.value2))
         observed_temperatures.push_back(row.value2);
     }
@@ -245,7 +335,7 @@ infer_ladder_temperatures_from_observed_series(
 std::vector<double> infer_ladder_temperatures_from_demux(
     const std::vector<std::vector<TitanIO::XvgTimeTwoValues>> &series_by_replica,
     const std::unordered_map<int, std::vector<int>> &per_replica_assignments,
-    std::size_t n_states, std::string &error_message) {
+    std::size_t n_states, const arguments &args, std::string &error_message) {
   error_message.clear();
   if (n_states == 0) {
     error_message = "cannot infer MBAR ladder temperatures for zero states";
@@ -264,6 +354,8 @@ std::vector<double> infer_ladder_temperatures_from_demux(
     const auto &assignments = assignment_it->second;
     const std::size_t n_rows = std::min(series.size(), assignments.size());
     for (std::size_t row_idx = 0; row_idx < n_rows; ++row_idx) {
+      if (!keep_mbar_energy_time(args, series[row_idx].time_ps))
+        continue;
       const int state_index = assignments[row_idx];
       if (state_index < 0 ||
           static_cast<std::size_t>(state_index) >= n_states ||
@@ -291,11 +383,14 @@ std::vector<double> infer_ladder_temperatures_from_demux(
 
 std::vector<std::pair<double, double>>
 make_time_value_pairs(const std::vector<TitanIO::XvgTimeTwoValues> &rows,
-                      bool use_second_value) {
+                      bool use_second_value, const arguments &args) {
   std::vector<std::pair<double, double>> result;
   result.reserve(rows.size());
-  for (const auto &row : rows)
+  for (const auto &row : rows) {
+    if (!keep_mbar_energy_time(args, row.time_ps))
+      continue;
     result.emplace_back(row.time_ps, use_second_value ? row.value2 : row.value1);
+  }
   return result;
 }
 
@@ -392,6 +487,115 @@ std::vector<double> build_temperature_scan(const std::vector<double> &temps,
   return targets;
 }
 
+void normalize_free_energies(std::vector<double> &f_k) {
+  if (f_k.empty())
+    return;
+  const double offset = f_k.front();
+  for (double &value : f_k)
+    value -= offset;
+}
+
+#if defined(__AVX2__)
+inline __m256d mbar_linear_terms_avx2(__m256d log_term, __m256d beta_term,
+                                      __m256d energy_term) {
+#if defined(__FMA__)
+  return _mm256_fnmadd_pd(beta_term, energy_term, log_term);
+#else
+  return _mm256_sub_pd(log_term, _mm256_mul_pd(beta_term, energy_term));
+#endif
+}
+
+double horizontal_max_avx2(__m256d value) {
+  alignas(32) double lanes[kAvxDoubleWidth];
+  _mm256_store_pd(lanes, value);
+  return std::max(std::max(lanes[0], lanes[1]), std::max(lanes[2], lanes[3]));
+}
+#endif
+
+double fill_mbar_linear_terms(double energy, const std::vector<double> &beta_k,
+                              const std::vector<double> &log_nk_plus_fk,
+                              double *terms_out) {
+  const std::size_t k_count = beta_k.size();
+  double max_v = -std::numeric_limits<double>::infinity();
+  std::size_t k = 0;
+
+#if defined(__AVX2__)
+  if (k_count >= kAvxDoubleWidth) {
+    const __m256d v_energy = _mm256_set1_pd(energy);
+    __m256d v_max = _mm256_set1_pd(-std::numeric_limits<double>::infinity());
+    const std::size_t simd_end = (k_count / kAvxDoubleWidth) * kAvxDoubleWidth;
+    for (; k < simd_end; k += kAvxDoubleWidth) {
+      const __m256d v_log = _mm256_loadu_pd(log_nk_plus_fk.data() + k);
+      const __m256d v_beta = _mm256_loadu_pd(beta_k.data() + k);
+      const __m256d v_terms = mbar_linear_terms_avx2(v_log, v_beta, v_energy);
+      _mm256_storeu_pd(terms_out + k, v_terms);
+      v_max = _mm256_max_pd(v_max, v_terms);
+    }
+    max_v = horizontal_max_avx2(v_max);
+  }
+#endif
+
+  for (; k < k_count; ++k) {
+    const double value = log_nk_plus_fk[k] - beta_k[k] * energy;
+    terms_out[k] = value;
+    if (value > max_v)
+      max_v = value;
+  }
+  return max_v;
+}
+
+double sum_shifted_exponentials(const double *terms, std::size_t count,
+                                double max_v, double *unnormalized_out) {
+  double sum = 0.0;
+  for (std::size_t k = 0; k < count; ++k) {
+    const double value = std::exp(terms[k] - max_v);
+    if (unnormalized_out)
+      unnormalized_out[k] = value;
+    sum += value;
+  }
+  return sum;
+}
+
+void normalize_weights_accumulate(const double *unnormalized_weights,
+                                  std::size_t count, double inv_denom,
+                                  double *normalized_out, double *residual_out,
+                                  double *square_sum_out) {
+  std::size_t k = 0;
+#if defined(__AVX2__)
+  if (count >= kAvxDoubleWidth) {
+    const __m256d v_inv = _mm256_set1_pd(inv_denom);
+    const std::size_t simd_end = (count / kAvxDoubleWidth) * kAvxDoubleWidth;
+    for (; k < simd_end; k += kAvxDoubleWidth) {
+      const __m256d v_unnorm = _mm256_loadu_pd(unnormalized_weights + k);
+      const __m256d v_weight = _mm256_mul_pd(v_unnorm, v_inv);
+      _mm256_storeu_pd(normalized_out + k, v_weight);
+      if (residual_out) {
+        const __m256d v_res = _mm256_loadu_pd(residual_out + k);
+        _mm256_storeu_pd(residual_out + k, _mm256_sub_pd(v_res, v_weight));
+      }
+      if (square_sum_out) {
+        const __m256d v_sq = _mm256_loadu_pd(square_sum_out + k);
+#if defined(__FMA__)
+        _mm256_storeu_pd(square_sum_out + k,
+                         _mm256_fmadd_pd(v_weight, v_weight, v_sq));
+#else
+        _mm256_storeu_pd(square_sum_out + k,
+                         _mm256_add_pd(v_sq, _mm256_mul_pd(v_weight, v_weight)));
+#endif
+      }
+    }
+  }
+#endif
+  for (; k < count; ++k) {
+    const double weight = unnormalized_weights[k] * inv_denom;
+    normalized_out[k] = weight;
+    if (residual_out)
+      residual_out[k] -= weight;
+    if (square_sum_out)
+      square_sum_out[k] += weight * weight;
+  }
+}
+
 void guess_free_energy_ti(const std::vector<double> &beta_k,
                           const std::vector<double> &energy_means,
                           std::vector<double> &f_k, double energy_min) {
@@ -436,27 +640,373 @@ void compute_log_denom(const AlignedDoubleVector &shifted_samples,
   executor.parallel_do(workers, [&](std::size_t worker) {
     const std::size_t begin = n_samples * worker / workers;
     const std::size_t end = n_samples * (worker + 1) / workers;
+    AlignedDoubleVector exp_terms(k_count, 0.0);
     for (std::size_t n = begin; n < end; ++n) {
       const double energy = shifted_samples[n];
+      const double max_v = fill_mbar_linear_terms(
+          energy, beta_k, log_nk_plus_fk, exp_terms.data());
+      const double sum =
+          sum_shifted_exponentials(exp_terms.data(), k_count, max_v, nullptr);
+      log_denom[n] = max_v + std::log(sum + kLogGuard);
+    }
+  });
+}
+
+SolverEvaluation evaluate_mbar_state(
+    const AlignedDoubleVector &shifted_samples,
+    const std::vector<double> &beta_k, const std::vector<int> &sample_counts,
+    const std::vector<double> &log_nk, const std::vector<double> &f_k,
+    TitanExecutor &executor, bool want_hessian) {
+  SolverEvaluation evaluation;
+  const std::size_t k_count = beta_k.size();
+  const std::size_t n_samples = shifted_samples.size();
+  evaluation.residual.assign(k_count, 0.0);
+  evaluation.square_sums.assign(k_count, 0.0);
+  evaluation.log_denom.assign(n_samples, 0.0);
+  if (want_hessian)
+    evaluation.hessian.assign(k_count * k_count, 0.0);
+  for (std::size_t k = 0; k < k_count; ++k)
+    evaluation.residual[k] = static_cast<double>(sample_counts[k]);
+  if (k_count == 0 || n_samples == 0)
+    return evaluation;
+
+  std::vector<double> log_nk_plus_fk(k_count, 0.0);
+  for (std::size_t k = 0; k < k_count; ++k)
+    log_nk_plus_fk[k] = log_nk[k] + f_k[k];
+  compute_log_denom(shifted_samples, beta_k, log_nk_plus_fk, executor,
+                    evaluation.log_denom);
+
+  const std::size_t workers =
+      std::max<std::size_t>(1, std::min(executor.capacity(), n_samples));
+  std::vector<std::vector<double>> residual_local(
+      workers, std::vector<double>(k_count, 0.0));
+  std::vector<std::vector<double>> square_local(
+      workers, std::vector<double>(k_count, 0.0));
+  std::vector<std::vector<double>> hessian_local;
+  if (want_hessian) {
+    hessian_local.assign(workers,
+                         std::vector<double>(k_count * k_count, 0.0));
+  }
+
+  executor.parallel_do(workers, [&](std::size_t worker) {
+    const std::size_t begin = n_samples * worker / workers;
+    const std::size_t end = n_samples * (worker + 1) / workers;
+    auto &res_local = residual_local[worker];
+    auto &sq_local = square_local[worker];
+    AlignedDoubleVector weights(k_count, 0.0);
+    AlignedDoubleVector exp_terms(k_count, 0.0);
+    if (!want_hessian) {
+      for (std::size_t n = begin; n < end; ++n) {
+        const double energy = shifted_samples[n];
+        const double max_v = fill_mbar_linear_terms(
+            energy, beta_k, log_nk_plus_fk, exp_terms.data());
+        const double denom = std::max(
+            sum_shifted_exponentials(exp_terms.data(), k_count, max_v,
+                                     weights.data()),
+            kLogGuard);
+        normalize_weights_accumulate(weights.data(), k_count, 1.0 / denom,
+                                     weights.data(), res_local.data(),
+                                     sq_local.data());
+      }
+      return;
+    }
+
+    auto &h_local = hessian_local[worker];
+    for (std::size_t n = begin; n < end; ++n) {
+      const double energy = shifted_samples[n];
+      const double max_v =
+          fill_mbar_linear_terms(energy, beta_k, log_nk_plus_fk,
+                                 exp_terms.data());
+      const double denom = std::max(
+          sum_shifted_exponentials(exp_terms.data(), k_count, max_v,
+                                   weights.data()),
+          kLogGuard);
+      normalize_weights_accumulate(weights.data(), k_count, 1.0 / denom,
+                                   weights.data(), res_local.data(),
+                                   sq_local.data());
+
+      for (std::size_t row = 0; row < k_count; ++row) {
+        const double w_row = weights[row];
+        const std::size_t diag_idx = row * k_count + row;
+        h_local[diag_idx] += w_row * (1.0 - w_row);
+        for (std::size_t col = row + 1; col < k_count; ++col) {
+          const double offdiag = -w_row * weights[col];
+          const std::size_t ij = row * k_count + col;
+          const std::size_t ji = col * k_count + row;
+          h_local[ij] += offdiag;
+          h_local[ji] += offdiag;
+        }
+      }
+    }
+  });
+
+  for (std::size_t worker = 0; worker < workers; ++worker) {
+    for (std::size_t k = 0; k < k_count; ++k) {
+      evaluation.residual[k] += residual_local[worker][k];
+      evaluation.square_sums[k] += square_local[worker][k];
+    }
+    if (!want_hessian)
+      continue;
+    for (std::size_t idx = 0; idx < k_count * k_count; ++idx)
+      evaluation.hessian[idx] += hessian_local[worker][idx];
+  }
+
+  const double total_samples =
+      static_cast<double>(std::max<std::size_t>(1, n_samples));
+  double max_abs_residual = 0.0;
+  double residual_sq_sum = 0.0;
+  for (double value : evaluation.residual) {
+    max_abs_residual = std::max(max_abs_residual, std::abs(value));
+    residual_sq_sum += value * value;
+  }
+  evaluation.residual_inf = max_abs_residual / total_samples;
+  evaluation.residual_rms =
+      std::sqrt(residual_sq_sum / static_cast<double>(std::max<std::size_t>(
+                     1, evaluation.residual.size()))) /
+      total_samples;
+  evaluation.objective = 0.5 * residual_sq_sum / (total_samples * total_samples);
+  return evaluation;
+}
+
+std::vector<double> compute_self_consistent_update(
+    const AlignedDoubleVector &shifted_samples, const std::vector<double> &beta_k,
+    const AlignedDoubleVector &log_denom, TitanExecutor &executor) {
+  const std::size_t k_count = beta_k.size();
+  const std::size_t n_samples = shifted_samples.size();
+  std::vector<double> update(k_count, 0.0);
+  if (k_count == 0 || n_samples == 0)
+    return update;
+
+  const std::size_t workers =
+      std::max<std::size_t>(1, std::min(executor.capacity(), k_count));
+  std::vector<std::vector<double>> partial(
+      workers, std::vector<double>(k_count, 0.0));
+  executor.parallel_do(workers, [&](std::size_t worker) {
+    const std::size_t begin = k_count * worker / workers;
+    const std::size_t end = k_count * (worker + 1) / workers;
+    auto &local = partial[worker];
+    for (std::size_t k = begin; k < end; ++k) {
       double max_v = -std::numeric_limits<double>::infinity();
-      for (std::size_t k = 0; k < k_count; ++k) {
-        const double value = log_nk_plus_fk[k] - beta_k[k] * energy;
+      for (std::size_t n = 0; n < n_samples; ++n) {
+        const double value = -beta_k[k] * shifted_samples[n] - log_denom[n];
         if (value > max_v)
           max_v = value;
       }
       double sum = 0.0;
-      for (std::size_t k = 0; k < k_count; ++k)
-        sum += std::exp(log_nk_plus_fk[k] - beta_k[k] * energy - max_v);
-      log_denom[n] = max_v + std::log(sum + kLogGuard);
+      for (std::size_t n = 0; n < n_samples; ++n)
+        sum += std::exp(-beta_k[k] * shifted_samples[n] - log_denom[n] - max_v);
+      local[k] = -(max_v + std::log(sum + kLogGuard));
     }
   });
+
+  for (std::size_t worker = 0; worker < workers; ++worker) {
+    const std::size_t begin = k_count * worker / workers;
+    const std::size_t end = k_count * (worker + 1) / workers;
+    for (std::size_t k = begin; k < end; ++k)
+      update[k] = partial[worker][k];
+  }
+  normalize_free_energies(update);
+  return update;
+}
+
+bool solve_dense_linear_system(std::vector<double> matrix,
+                               const std::vector<double> &rhs,
+                               std::vector<double> &solution) {
+  const std::size_t n = rhs.size();
+  solution = rhs;
+  if (n == 0)
+    return true;
+
+  for (std::size_t pivot = 0; pivot < n; ++pivot) {
+    std::size_t best_row = pivot;
+    double best_abs = std::abs(matrix[pivot * n + pivot]);
+    for (std::size_t row = pivot + 1; row < n; ++row) {
+      const double value = std::abs(matrix[row * n + pivot]);
+      if (value > best_abs) {
+        best_abs = value;
+        best_row = row;
+      }
+    }
+    if (best_abs < 1e-14)
+      return false;
+
+    if (best_row != pivot) {
+      for (std::size_t col = pivot; col < n; ++col)
+        std::swap(matrix[pivot * n + col], matrix[best_row * n + col]);
+      std::swap(solution[pivot], solution[best_row]);
+    }
+
+    const double diag = matrix[pivot * n + pivot];
+    for (std::size_t row = pivot + 1; row < n; ++row) {
+      const double factor = matrix[row * n + pivot] / diag;
+      if (!std::isfinite(factor))
+        return false;
+      matrix[row * n + pivot] = 0.0;
+      for (std::size_t col = pivot + 1; col < n; ++col)
+        matrix[row * n + col] -= factor * matrix[pivot * n + col];
+      solution[row] -= factor * solution[pivot];
+    }
+  }
+
+  for (std::size_t back = n; back-- > 0;) {
+    double value = solution[back];
+    for (std::size_t col = back + 1; col < n; ++col)
+      value -= matrix[back * n + col] * solution[col];
+    const double diag = matrix[back * n + back];
+    if (std::abs(diag) < 1e-14)
+      return false;
+    solution[back] = value / diag;
+    if (!std::isfinite(solution[back]))
+      return false;
+  }
+  return true;
+}
+
+double compute_effective_sample_size(const AlignedDoubleVector &weights) {
+  if (weights.empty())
+    return 0.0;
+  double sum_sq = 0.0;
+  for (double weight : weights)
+    sum_sq += weight * weight;
+  if (!(sum_sq > 0.0))
+    return 0.0;
+  return 1.0 / sum_sq;
+}
+
+double compute_min_state_effective_sample_size(
+    const SolverEvaluation &evaluation, const std::vector<int> &sample_counts) {
+  double min_ess = std::numeric_limits<double>::infinity();
+  for (std::size_t k = 0; k < evaluation.residual.size() &&
+                          k < evaluation.square_sums.size() &&
+                          k < sample_counts.size();
+       ++k) {
+    const double sum_weights =
+        static_cast<double>(sample_counts[k]) - evaluation.residual[k];
+    const double sum_sq = evaluation.square_sums[k];
+    if (!(sum_weights > 0.0) || !(sum_sq > 0.0))
+      continue;
+    const double ess = (sum_weights * sum_weights) / sum_sq;
+    if (std::isfinite(ess))
+      min_ess = std::min(min_ess, ess);
+  }
+  return std::isfinite(min_ess) ? min_ess : 0.0;
+}
+
+double compute_min_adjacent_overlap(const SolverEvaluation &evaluation) {
+  const std::size_t k_count = evaluation.residual.size();
+  if (k_count < 2 || evaluation.hessian.size() != k_count * k_count ||
+      evaluation.square_sums.size() != k_count)
+    return 1.0;
+
+  double min_overlap = std::numeric_limits<double>::infinity();
+  for (std::size_t k = 0; k + 1 < k_count; ++k) {
+    const double numerator = std::max(
+        0.0, -evaluation.hessian[k * k_count + (k + 1)]);
+    const double denom =
+        std::sqrt(std::max(0.0, evaluation.square_sums[k]) *
+                  std::max(0.0, evaluation.square_sums[k + 1]));
+    const double overlap = (denom > 0.0) ? (numerator / denom) : 0.0;
+    min_overlap = std::min(min_overlap, overlap);
+  }
+  return std::isfinite(min_overlap) ? min_overlap : 0.0;
+}
+
+std::string build_convergence_note(bool converged, std::size_t total_samples,
+                                   double target_ess, double min_state_ess,
+                                   double min_adjacent_overlap,
+                                   double residual_inf) {
+  if (converged)
+    return "converged";
+
+  const double target_ess_warn =
+      std::max(kMinStateEssWarn,
+               kMinTargetEssFractionWarn * static_cast<double>(total_samples));
+  if (min_adjacent_overlap < kAdjacentOverlapWarn)
+    return "insufficient adjacent-state overlap";
+  if ((min_state_ess > 0.0 && min_state_ess < kMinStateEssWarn) ||
+      (target_ess > 0.0 && target_ess < target_ess_warn)) {
+    return "insufficient effective samples";
+  }
+  if (residual_inf >= kResidualConvTol)
+    return "residual stalled before reaching tolerance";
+  return "not converged";
+}
+
+bool solve_two_state_bar_fallback(const AlignedDoubleVector &shifted_samples,
+                                  const std::vector<double> &beta_k,
+                                  const std::vector<int> &sample_counts,
+                                  std::vector<double> &f_k,
+                                  SolverStats &stats) {
+  if (beta_k.size() != 2 || sample_counts.size() != 2 ||
+      shifted_samples.empty() || sample_counts[0] <= 0 || sample_counts[1] <= 0)
+    return false;
+
+  const double log_n0 = std::log(static_cast<double>(sample_counts[0]));
+  const double log_n1 = std::log(static_cast<double>(sample_counts[1]));
+  const double total_samples = static_cast<double>(shifted_samples.size());
+  auto residual = [&](double delta) {
+    double value = static_cast<double>(sample_counts[1]);
+    for (double energy : shifted_samples) {
+      const double a0 = log_n0 - beta_k[0] * energy;
+      const double a1 = log_n1 + delta - beta_k[1] * energy;
+      const double max_v = std::max(a0, a1);
+      const double denom =
+          std::exp(a0 - max_v) + std::exp(a1 - max_v) + kLogGuard;
+      value -= std::exp(a1 - max_v) / denom;
+    }
+    return value;
+  };
+
+  double center = (f_k.size() >= 2) ? (f_k[1] - f_k[0]) : 0.0;
+  double width = 1.0;
+  double lower = center - width;
+  double upper = center + width;
+  double f_lower = residual(lower);
+  double f_upper = residual(upper);
+  for (int iter = 0; iter < 60 && f_lower * f_upper > 0.0; ++iter) {
+    width *= 2.0;
+    lower = center - width;
+    upper = center + width;
+    f_lower = residual(lower);
+    f_upper = residual(upper);
+  }
+  if (f_lower * f_upper > 0.0)
+    return false;
+
+  bool converged = false;
+  double delta = center;
+  for (int iter = 0; iter < kBarIterations; ++iter) {
+    delta = 0.5 * (lower + upper);
+    const double f_mid = residual(delta);
+    ++stats.iterations;
+    stats.residual_inf = std::abs(f_mid) / std::max(1.0, total_samples);
+    stats.residual_rms = stats.residual_inf;
+    if (stats.residual_inf < kResidualConvTol ||
+        std::abs(upper - lower) <
+            1e-12 * std::max({1.0, std::abs(lower), std::abs(upper)})) {
+      converged = true;
+      break;
+    }
+    if (f_mid > 0.0) {
+      lower = delta;
+    } else {
+      upper = delta;
+    }
+  }
+
+  f_k.assign(2, 0.0);
+  f_k[1] = delta;
+  normalize_free_energies(f_k);
+  stats.method = "bar_2state_fallback";
+  return converged;
 }
 
 bool solve_mbar(const AlignedDoubleVector &samples,
                 const std::vector<double> &beta_k,
                 const std::vector<int> &sample_counts,
                 std::vector<double> &f_k, double energy_min,
-                TitanExecutor &executor, bool fast_mode) {
+                TitanExecutor &executor, bool fast_mode,
+                SolverStats *solver_stats) {
   const std::size_t k_count = beta_k.size();
   const std::size_t n_samples = samples.size();
   if (k_count == 0 || n_samples == 0)
@@ -465,6 +1015,13 @@ bool solve_mbar(const AlignedDoubleVector &samples,
   const int sci_iters = fast_mode ? kSciIterationsFast : kSciIterations;
   const int newton_iters =
       fast_mode ? kNewtonIterationsFast : kNewtonIterations;
+  SolverStats local_stats;
+  SolverStats &stats = solver_stats ? *solver_stats : local_stats;
+  stats.method = "not_run";
+  stats.iterations = 0;
+  stats.line_search_backtracks = 0;
+  stats.residual_inf = 0.0;
+  stats.residual_rms = 0.0;
 
   std::vector<double> log_nk(k_count, -1e12);
   for (std::size_t k = 0; k < k_count; ++k) {
@@ -476,125 +1033,179 @@ bool solve_mbar(const AlignedDoubleVector &samples,
   for (std::size_t n = 0; n < n_samples; ++n)
     shifted_samples[n] = samples[n] - energy_min;
 
-  AlignedDoubleVector log_denom(n_samples, 0.0);
-  std::vector<double> f_old(k_count, 0.0);
-  std::vector<double> log_nk_plus_fk(k_count, 0.0);
+  normalize_free_energies(f_k);
+  SolverEvaluation current =
+      evaluate_mbar_state(shifted_samples, beta_k, sample_counts, log_nk, f_k,
+                          executor, false);
+  stats.residual_inf = current.residual_inf;
+  stats.residual_rms = current.residual_rms;
+  if (current.residual_inf < kResidualConvTol) {
+    stats.method = "fixed_point";
+    return true;
+  }
 
   for (int iter = 0; iter < sci_iters; ++iter) {
-    const double offset = f_k[0];
-    for (double &value : f_k)
-      value -= offset;
-    f_old = f_k;
-
-    for (std::size_t k = 0; k < k_count; ++k)
-      log_nk_plus_fk[k] = log_nk[k] + f_k[k];
-    compute_log_denom(shifted_samples, beta_k, log_nk_plus_fk, executor,
-                      log_denom);
-
-    const std::size_t workers =
-        std::max<std::size_t>(1, std::min(executor.capacity(), k_count));
-    std::vector<std::vector<double>> partial(
-        workers, std::vector<double>(k_count, 0.0));
-    executor.parallel_do(workers, [&](std::size_t worker) {
-      const std::size_t begin = k_count * worker / workers;
-      const std::size_t end = k_count * (worker + 1) / workers;
-      auto &local = partial[worker];
-      for (std::size_t k = begin; k < end; ++k) {
-        double max_v = -std::numeric_limits<double>::infinity();
-        for (std::size_t n = 0; n < n_samples; ++n) {
-          const double value = -beta_k[k] * shifted_samples[n] - log_denom[n];
-          if (value > max_v)
-            max_v = value;
-        }
-        double sum = 0.0;
-        for (std::size_t n = 0; n < n_samples; ++n)
-          sum +=
-              std::exp(-beta_k[k] * shifted_samples[n] - log_denom[n] - max_v);
-        local[k] = -(max_v + std::log(sum + kLogGuard));
-      }
-    });
-    for (std::size_t worker = 0; worker < workers; ++worker) {
-      const std::size_t begin = k_count * worker / workers;
-      const std::size_t end = k_count * (worker + 1) / workers;
-      for (std::size_t k = begin; k < end; ++k)
-        f_k[k] = partial[worker][k];
+    ++stats.iterations;
+    const auto fp_target = compute_self_consistent_update(
+        shifted_samples, beta_k, current.log_denom, executor);
+    std::vector<double> delta(k_count, 0.0);
+    double max_delta = 0.0;
+    for (std::size_t k = 0; k < k_count; ++k) {
+      delta[k] = fp_target[k] - f_k[k];
+      max_delta = std::max(max_delta, std::abs(delta[k]));
     }
+    if (max_delta < kFixedPointStepTol)
+      break;
 
-    if (iter > 5 && iter % 5 == 0) {
-      const double off = f_k[0];
-      double max_delta = 0.0;
-      for (std::size_t k = 0; k < k_count; ++k) {
-        f_k[k] -= off;
-        max_delta = std::max(max_delta, std::abs(f_k[k] - f_old[k]));
-      }
-      if (max_delta < 1e-3)
+    bool accepted = false;
+    for (int backtrack = 0; backtrack <= kLineSearchMaxBacktracks;
+         ++backtrack) {
+      const double alpha = std::ldexp(1.0, -backtrack);
+      std::vector<double> candidate = f_k;
+      for (std::size_t k = 0; k < k_count; ++k)
+        candidate[k] += alpha * delta[k];
+      normalize_free_energies(candidate);
+      auto candidate_eval =
+          evaluate_mbar_state(shifted_samples, beta_k, sample_counts, log_nk,
+                              candidate, executor, false);
+      if (candidate_eval.objective + 1e-14 < current.objective ||
+          candidate_eval.residual_inf < current.residual_inf) {
+        if (backtrack > 0)
+          stats.line_search_backtracks +=
+              static_cast<std::size_t>(backtrack);
+        f_k = std::move(candidate);
+        current = std::move(candidate_eval);
+        accepted = true;
         break;
+      }
+    }
+    if (!accepted)
+      break;
+    stats.residual_inf = current.residual_inf;
+    stats.residual_rms = current.residual_rms;
+    if (current.residual_inf < kResidualConvTol) {
+      stats.method = "fixed_point";
+      return true;
     }
   }
 
-  bool converged = false;
-  std::vector<double> gradient(k_count, 0.0);
-  std::vector<double> hessian(k_count, 0.0);
-  for (int iter = 0; iter < newton_iters; ++iter) {
-    const double offset = f_k[0];
-    for (double &value : f_k)
-      value -= offset;
-    for (std::size_t k = 0; k < k_count; ++k)
-      log_nk_plus_fk[k] = log_nk[k] + f_k[k];
-    compute_log_denom(shifted_samples, beta_k, log_nk_plus_fk, executor,
-                      log_denom);
+  current = evaluate_mbar_state(shifted_samples, beta_k, sample_counts, log_nk,
+                                f_k, executor, true);
+  stats.residual_inf = current.residual_inf;
+  stats.residual_rms = current.residual_rms;
+  if (current.residual_inf < kResidualConvTol) {
+    stats.method = "fixed_point";
+    return true;
+  }
 
-    std::fill(gradient.begin(), gradient.end(), 0.0);
-    std::fill(hessian.begin(), hessian.end(), 0.0);
-    const std::size_t workers =
-        std::max<std::size_t>(1, std::min(executor.capacity(), n_samples));
-    std::vector<std::vector<double>> grad_local(
-        workers, std::vector<double>(k_count, 0.0));
-    std::vector<std::vector<double>> hess_local(
-        workers, std::vector<double>(k_count, 0.0));
-    executor.parallel_do(workers, [&](std::size_t worker) {
-      const std::size_t begin = n_samples * worker / workers;
-      const std::size_t end = n_samples * (worker + 1) / workers;
-      auto &g = grad_local[worker];
-      auto &h = hess_local[worker];
-      for (std::size_t n = begin; n < end; ++n) {
-        const double energy = shifted_samples[n];
-        for (std::size_t k = 0; k < k_count; ++k) {
-          double log_w = log_nk_plus_fk[k] - beta_k[k] * energy - log_denom[n];
-          if (log_w <= -50.0)
-            continue;
-          if (log_w > 0.0)
-            log_w = 0.0;
-          const double w = std::exp(log_w);
-          g[k] -= w;
-          h[k] += w * (1.0 - w);
-        }
-      }
-    });
-    for (std::size_t worker = 0; worker < workers; ++worker) {
-      for (std::size_t k = 0; k < k_count; ++k) {
-        gradient[k] += grad_local[worker][k];
-        hessian[k] += hess_local[worker][k];
+  for (int iter = 0; iter < newton_iters; ++iter) {
+    ++stats.iterations;
+    if (current.residual_inf < kResidualConvTol) {
+      stats.method = "newton_dense";
+      return true;
+    }
+    if (k_count <= 1)
+      break;
+
+    const std::size_t dim = k_count - 1;
+    std::vector<double> residual_sub(dim, 0.0);
+    std::vector<double> hessian_sub(dim * dim, 0.0);
+    for (std::size_t row = 1; row < k_count; ++row) {
+      residual_sub[row - 1] = current.residual[row];
+      for (std::size_t col = 1; col < k_count; ++col) {
+        hessian_sub[(row - 1) * dim + (col - 1)] =
+            current.hessian[row * k_count + col];
       }
     }
+
+    double trace = 0.0;
+    for (std::size_t idx = 0; idx < dim; ++idx)
+      trace += hessian_sub[idx * dim + idx];
+    double ridge =
+        std::max(1e-10, 1e-10 * trace / static_cast<double>(std::max<std::size_t>(1, dim)));
+    std::vector<double> step_sub;
+    bool solved_step = false;
+    for (int attempt = 0; attempt < 6; ++attempt) {
+      std::vector<double> regularized = hessian_sub;
+      for (std::size_t idx = 0; idx < dim; ++idx)
+        regularized[idx * dim + idx] += ridge;
+      if (solve_dense_linear_system(regularized, residual_sub, step_sub)) {
+        solved_step = true;
+        break;
+      }
+      ridge *= 10.0;
+    }
+    if (!solved_step)
+      break;
 
     double max_step = 0.0;
-    for (std::size_t k = 0; k < k_count; ++k) {
-      double g = gradient[k] + static_cast<double>(sample_counts[k]);
-      double h = std::max(hessian[k], 1e-10);
-      double step = std::clamp(g / h, -2.0, 2.0);
-      f_k[k] += step;
-      max_step = std::max(max_step, std::abs(step));
+    for (double &value : step_sub) {
+      if (!std::isfinite(value)) {
+        solved_step = false;
+        break;
+      }
+      max_step = std::max(max_step, std::abs(value));
     }
-    const double off = f_k[0];
-    for (double &value : f_k)
-      value -= off;
-    if (max_step < kNewtonConvTol) {
-      converged = true;
+    if (!solved_step)
       break;
+    if (max_step > kNewtonStepClamp) {
+      const double scale = kNewtonStepClamp / max_step;
+      for (double &value : step_sub)
+        value *= scale;
+    }
+
+    bool accepted = false;
+    for (int backtrack = 0; backtrack <= kLineSearchMaxBacktracks;
+         ++backtrack) {
+      const double alpha = std::ldexp(1.0, -backtrack);
+      std::vector<double> candidate = f_k;
+      for (std::size_t k = 1; k < k_count; ++k)
+        candidate[k] += alpha * step_sub[k - 1];
+      normalize_free_energies(candidate);
+      auto candidate_eval =
+          evaluate_mbar_state(shifted_samples, beta_k, sample_counts, log_nk,
+                              candidate, executor, true);
+      if (candidate_eval.objective + 1e-14 < current.objective ||
+          candidate_eval.residual_inf < current.residual_inf) {
+        if (backtrack > 0)
+          stats.line_search_backtracks +=
+              static_cast<std::size_t>(backtrack);
+        f_k = std::move(candidate);
+        current = std::move(candidate_eval);
+        accepted = true;
+        break;
+      }
+    }
+    if (!accepted)
+      break;
+
+    stats.residual_inf = current.residual_inf;
+    stats.residual_rms = current.residual_rms;
+    if (current.residual_inf < kResidualConvTol) {
+      stats.method = "newton_dense";
+      return true;
     }
   }
-  return converged;
+
+  if (k_count == 2) {
+    SolverStats bar_stats;
+    if (solve_two_state_bar_fallback(shifted_samples, beta_k, sample_counts, f_k,
+                                     bar_stats)) {
+      stats.iterations += bar_stats.iterations;
+      stats.residual_inf = bar_stats.residual_inf;
+      stats.residual_rms = bar_stats.residual_rms;
+      stats.method = bar_stats.method;
+      return true;
+    }
+    stats.iterations += bar_stats.iterations;
+  }
+
+  current = evaluate_mbar_state(shifted_samples, beta_k, sample_counts, log_nk,
+                                f_k, executor, true);
+  stats.residual_inf = current.residual_inf;
+  stats.residual_rms = current.residual_rms;
+  stats.method = "newton_dense_stalled";
+  return false;
 }
 
 ObservableResult compute_observable_at_temperature(
@@ -862,11 +1473,11 @@ CoreResult run_temperature_ladder_reweighting(const arguments &args,
     if (use_demux_map) {
       temps = infer_ladder_temperatures_from_demux(parsed_xvg_with_temp,
                                                    per_replica_state_assignments,
-                                                   n_states, infer_error);
+                                                   n_states, args, infer_error);
       result.temperature_ladder_source = "demux-inferred";
     } else {
       temps = infer_ladder_temperatures_from_observed_series(parsed_xvg_with_temp,
-                                                             n_states,
+                                                             n_states, args,
                                                              infer_error);
       result.temperature_ladder_source = "replica-inferred";
     }
@@ -944,20 +1555,31 @@ CoreResult run_temperature_ladder_reweighting(const arguments &args,
   for (std::size_t k = 0; k < ener_paths.size(); ++k) {
     WindowAuditRow audit;
     audit.replica_id = static_cast<int>(k);
+    std::vector<std::pair<double, double>> filtered_energy_pairs;
+    std::vector<std::pair<double, double>> filtered_observable_pairs;
+    std::vector<std::pair<double, double>> filtered_temperature_pairs;
+    TimeSelectionSummary selected_energy{};
     if (need_temperature_series) {
-      audit.energy_present = !parsed_xvg_with_temp[k].empty();
-      audit.energy_points = parsed_xvg_with_temp[k].size();
-      if (!parsed_xvg_with_temp[k].empty()) {
-        audit.energy_min_ps = parsed_xvg_with_temp[k].front().time_ps;
-        audit.energy_max_ps = parsed_xvg_with_temp[k].back().time_ps;
+      filtered_observable_pairs =
+          make_time_value_pairs(parsed_xvg_with_temp[k], false, args);
+      if (!use_demux_map) {
+        filtered_temperature_pairs =
+            make_time_value_pairs(parsed_xvg_with_temp[k], true, args);
       }
+      selected_energy = summarize_selected_times(
+          parsed_xvg_with_temp[k],
+          [](const TitanIO::XvgTimeTwoValues &row) { return row.time_ps; }, args);
     } else {
-      audit.energy_present = !parsed_xvg[k].empty();
-      audit.energy_points = parsed_xvg[k].size();
-      if (!parsed_xvg[k].empty()) {
-        audit.energy_min_ps = parsed_xvg[k].front().first;
-        audit.energy_max_ps = parsed_xvg[k].back().first;
-      }
+      filtered_energy_pairs = filter_time_value_pairs(parsed_xvg[k], args);
+      selected_energy = summarize_selected_times(
+          parsed_xvg[k],
+          [](const std::pair<double, double> &row) { return row.first; }, args);
+    }
+    audit.energy_present = selected_energy.count > 0;
+    audit.energy_points = selected_energy.count;
+    if (selected_energy.count > 0) {
+      audit.energy_min_ps = selected_energy.min_ps;
+      audit.energy_max_ps = selected_energy.max_ps;
     }
 
     auto it_times = per_replica_times.find(static_cast<int>(k));
@@ -975,12 +1597,12 @@ CoreResult run_temperature_ladder_reweighting(const arguments &args,
       }
     }
 
-    if (!need_temperature_series && parsed_xvg[k].empty()) {
+    if (!need_temperature_series && filtered_energy_pairs.empty()) {
       audit.status = "missing_or_empty_energy";
       result.window_audit.push_back(std::move(audit));
       continue;
     }
-    if (need_temperature_series && parsed_xvg_with_temp[k].empty()) {
+    if (need_temperature_series && filtered_observable_pairs.empty()) {
       audit.status = "missing_or_empty_energy";
       result.window_audit.push_back(std::move(audit));
       continue;
@@ -1002,14 +1624,16 @@ CoreResult run_temperature_ladder_reweighting(const arguments &args,
       }
 
       if (need_temperature_series) {
-        series.observables.reserve(parsed_xvg_with_temp[k].size());
-        series.local_indices.reserve(parsed_xvg_with_temp[k].size());
-        series.times_ps.reserve(parsed_xvg_with_temp[k].size());
-        series.sampled_state_indices.reserve(parsed_xvg_with_temp[k].size());
-        series.sampled_temperatures_k.reserve(parsed_xvg_with_temp[k].size());
-        series.global_indices.reserve(parsed_xvg_with_temp[k].size());
+        series.observables.reserve(filtered_observable_pairs.size());
+        series.local_indices.reserve(filtered_observable_pairs.size());
+        series.times_ps.reserve(filtered_observable_pairs.size());
+        series.sampled_state_indices.reserve(filtered_observable_pairs.size());
+        series.sampled_temperatures_k.reserve(filtered_observable_pairs.size());
+        series.global_indices.reserve(filtered_observable_pairs.size());
         for (std::size_t idx = 0; idx < parsed_xvg_with_temp[k].size(); ++idx) {
           const auto &row = parsed_xvg_with_temp[k][idx];
+          if (!keep_mbar_energy_time(args, row.time_ps))
+            continue;
           int sampled_state_index = -1;
           double sampled_temperature_k =
               std::numeric_limits<double>::quiet_NaN();
@@ -1029,13 +1653,15 @@ CoreResult run_temperature_ladder_reweighting(const arguments &args,
                       sampled_temperature_k, -1);
         }
       } else {
-        series.observables.reserve(parsed_xvg[k].size());
-        series.local_indices.reserve(parsed_xvg[k].size());
-        series.times_ps.reserve(parsed_xvg[k].size());
-        series.sampled_state_indices.reserve(parsed_xvg[k].size());
-        series.sampled_temperatures_k.reserve(parsed_xvg[k].size());
-        series.global_indices.reserve(parsed_xvg[k].size());
+        series.observables.reserve(filtered_energy_pairs.size());
+        series.local_indices.reserve(filtered_energy_pairs.size());
+        series.times_ps.reserve(filtered_energy_pairs.size());
+        series.sampled_state_indices.reserve(filtered_energy_pairs.size());
+        series.sampled_temperatures_k.reserve(filtered_energy_pairs.size());
+        series.global_indices.reserve(filtered_energy_pairs.size());
         for (std::size_t idx = 0; idx < parsed_xvg[k].size(); ++idx) {
+          if (!keep_mbar_energy_time(args, parsed_xvg[k][idx].first))
+            continue;
           int sampled_state_index = static_cast<int>(k);
           double sampled_temperature_k =
               (k < temps.size()) ? temps[k]
@@ -1061,19 +1687,19 @@ CoreResult run_temperature_ladder_reweighting(const arguments &args,
       audit.inferred_dt_energy_ps =
           (args.mbar.dt_energy_ps > 0.0) ? args.mbar.dt_energy_ps : 0.0;
       if (need_temperature_series) {
-        const auto observable_pairs =
-            make_time_value_pairs(parsed_xvg_with_temp[k], false);
-        audit.sparse_energy = (observable_pairs.size() < 2);
+        audit.sparse_energy = (filtered_observable_pairs.size() < 2);
         audit.irregular_energy_dt =
-            detect_irregular_energy_dt(observable_pairs, args.mbar.dt_energy_ps);
+            detect_irregular_energy_dt(filtered_observable_pairs,
+                                       args.mbar.dt_energy_ps);
         audit.status =
             series.observables.empty()
                 ? "no_valid_temps"
                 : (use_demux_map ? "demux_energy_only" : "per_frame_energy_only");
       } else {
-        audit.sparse_energy = (parsed_xvg[k].size() < 2);
+        audit.sparse_energy = (filtered_energy_pairs.size() < 2);
         audit.irregular_energy_dt =
-            detect_irregular_energy_dt(parsed_xvg[k], args.mbar.dt_energy_ps);
+            detect_irregular_energy_dt(filtered_energy_pairs,
+                                       args.mbar.dt_energy_ps);
         audit.status =
             series.observables.empty()
                 ? "no_state_assignment"
@@ -1095,30 +1721,28 @@ CoreResult run_temperature_ladder_reweighting(const arguments &args,
       std::vector<double> aligned_observables;
       std::vector<double> aligned_temperatures;
       if (need_temperature_series) {
-        const auto observable_pairs =
-            make_time_value_pairs(parsed_xvg_with_temp[k], false);
         const auto matched = TitanDHAM::window_match_energy_to_dtraj(
-            it_times->second, observable_pairs, args.mbar.dt_energy_ps);
+            it_times->second, filtered_observable_pairs, args.mbar.dt_energy_ps);
         apply_match_to_audit(
-            audit, matched, observable_pairs.size() < 2,
-            detect_irregular_energy_dt(observable_pairs,
+            audit, matched, filtered_observable_pairs.size() < 2,
+            detect_irregular_energy_dt(filtered_observable_pairs,
                                        matched.inferred_dt_energy_ps));
         aligned_observables =
             materialize_aligned_values(it_times->second.size(), matched);
         if (!use_demux_map) {
-          const auto temperature_pairs =
-              make_time_value_pairs(parsed_xvg_with_temp[k], true);
           const auto matched_temps = TitanDHAM::window_match_energy_to_dtraj(
-              it_times->second, temperature_pairs, args.mbar.dt_energy_ps);
+              it_times->second, filtered_temperature_pairs,
+              args.mbar.dt_energy_ps);
           aligned_temperatures =
               materialize_aligned_values(it_times->second.size(), matched_temps);
         }
       } else {
         const auto matched = TitanDHAM::window_match_energy_to_dtraj(
-            it_times->second, parsed_xvg[k], args.mbar.dt_energy_ps);
+            it_times->second, filtered_energy_pairs, args.mbar.dt_energy_ps);
         apply_match_to_audit(
-            audit, matched, parsed_xvg[k].size() < 2,
-            detect_irregular_energy_dt(parsed_xvg[k], matched.inferred_dt_energy_ps));
+            audit, matched, filtered_energy_pairs.size() < 2,
+            detect_irregular_energy_dt(filtered_energy_pairs,
+                                       matched.inferred_dt_energy_ps));
         aligned_observables =
             materialize_aligned_values(it_times->second.size(), matched);
       }
@@ -1183,27 +1807,26 @@ CoreResult run_temperature_ladder_reweighting(const arguments &args,
     TitanDHAM::WindowMatchResult matched;
     std::vector<double> aligned_temperatures;
     if (need_temperature_series) {
-      const auto observable_pairs =
-          make_time_value_pairs(parsed_xvg_with_temp[k], false);
       matched = TitanDHAM::window_match_energy_to_dtraj(
-          it_times->second, observable_pairs, args.mbar.dt_energy_ps);
+          it_times->second, filtered_observable_pairs, args.mbar.dt_energy_ps);
       apply_match_to_audit(
-          audit, matched, observable_pairs.size() < 2,
-          detect_irregular_energy_dt(observable_pairs, matched.inferred_dt_energy_ps));
+          audit, matched, filtered_observable_pairs.size() < 2,
+          detect_irregular_energy_dt(filtered_observable_pairs,
+                                     matched.inferred_dt_energy_ps));
       if (!use_demux_map) {
-        const auto temperature_pairs =
-            make_time_value_pairs(parsed_xvg_with_temp[k], true);
         const auto matched_temps = TitanDHAM::window_match_energy_to_dtraj(
-            it_times->second, temperature_pairs, args.mbar.dt_energy_ps);
+            it_times->second, filtered_temperature_pairs,
+            args.mbar.dt_energy_ps);
         aligned_temperatures =
             materialize_aligned_values(it_times->second.size(), matched_temps);
       }
     } else {
       matched = TitanDHAM::window_match_energy_to_dtraj(
-          it_times->second, parsed_xvg[k], args.mbar.dt_energy_ps);
+          it_times->second, filtered_energy_pairs, args.mbar.dt_energy_ps);
       apply_match_to_audit(
-          audit, matched, parsed_xvg[k].size() < 2,
-          detect_irregular_energy_dt(parsed_xvg[k], matched.inferred_dt_energy_ps));
+          audit, matched, filtered_energy_pairs.size() < 2,
+          detect_irregular_energy_dt(filtered_energy_pairs,
+                                     matched.inferred_dt_energy_ps));
     }
 
     const bool no_usable_overlap = !matched.overlap_found || matched.kept_frames == 0;
@@ -1361,21 +1984,53 @@ CoreResult run_temperature_ladder_reweighting(const arguments &args,
   }
 
   std::vector<double> f_k(sampled_temperatures.size(), 0.0);
+  SolverStats solver_stats;
   guess_free_energy_ti(beta_sampled, observable_means, f_k, energy_min);
   result.converged =
       solve_mbar(samples, beta_sampled, sample_counts, f_k, energy_min,
-                 executor, false);
+                 executor, false, &solver_stats);
   result.solved = true;
+  result.solver_method = solver_stats.method;
+  result.solver_iterations = solver_stats.iterations;
+  result.solver_line_search_backtracks = solver_stats.line_search_backtracks;
   result.sampled_temperatures_k = sampled_temperatures;
   result.sampled_counts = sample_counts;
   result.active_sampled_states = sampled_temperatures.size();
   result.total_usable_samples = samples.size();
+  AlignedDoubleVector shifted_samples_eval(samples.size(), 0.0);
+  for (std::size_t n = 0; n < samples.size(); ++n)
+    shifted_samples_eval[n] = samples[n] - energy_min;
+  std::vector<double> log_nk_sampled(beta_sampled.size(), -1e12);
+  for (std::size_t k = 0; k < beta_sampled.size(); ++k) {
+    if (sample_counts[k] > 0)
+      log_nk_sampled[k] = std::log(static_cast<double>(sample_counts[k]));
+  }
+  const auto final_evaluation =
+      evaluate_mbar_state(shifted_samples_eval, beta_sampled, sample_counts,
+                          log_nk_sampled, f_k, executor, true);
+  result.residual_inf = final_evaluation.residual_inf;
+  result.residual_rms = final_evaluation.residual_rms;
+  result.min_state_effective_sample_size =
+      compute_min_state_effective_sample_size(final_evaluation, sample_counts);
+  result.min_adjacent_overlap = compute_min_adjacent_overlap(final_evaluation);
 
   const auto target_observable = compute_observable_at_temperature(
       samples, beta_sampled, sample_counts, f_k, args.mbar.target_temp,
       energy_min, executor, true);
   result.target_mean_energy = target_observable.mean_energy;
   result.target_heat_capacity = target_observable.heat_capacity;
+  result.target_effective_sample_size =
+      compute_effective_sample_size(target_observable.normalized_weights);
+  result.convergence_note = build_convergence_note(
+      result.converged, result.total_usable_samples,
+      result.target_effective_sample_size,
+      result.min_state_effective_sample_size, result.min_adjacent_overlap,
+      result.residual_inf);
+  if (!result.converged) {
+    TitanUI::print_warning(
+        "MBAR: not converged (" + result.convergence_note +
+        "), residual_inf = " + std::to_string(result.residual_inf) + ".");
+  }
 
   const auto scan_temperatures = build_temperature_scan(
       sampled_temperatures, args.mbar.target_temp, args.mbar.scan_points);
@@ -1448,8 +2103,9 @@ CoreResult run_temperature_ladder_reweighting(const arguments &args,
       }
       std::vector<double> f_boot(boot_temps.size(), 0.0);
       guess_free_energy_ti(beta_boot, boot_means, f_boot, boot_energy_min);
+      SolverStats boot_solver_stats;
       solve_mbar(boot_samples, beta_boot, boot_counts, f_boot,
-                 boot_energy_min, executor, true);
+                 boot_energy_min, executor, true, &boot_solver_stats);
       for (std::size_t idx = 0; idx < result.cv_scan.size(); ++idx) {
         const auto observable = compute_observable_at_temperature(
             boot_samples, beta_boot, boot_counts, f_boot,
@@ -1603,6 +2259,19 @@ void write_summary_file(const std::string &filename, const CoreResult &result,
   out << "MBAR Box Volume Metadata       : "
       << (result.box_volume_metadata_available ? "available" : "not_used")
       << "\n";
+  out << "MBAR Solver Method             : " << result.solver_method << "\n";
+  out << "MBAR Solver Iterations         : " << result.solver_iterations << "\n";
+  out << "MBAR Solver Backtracks         : "
+      << result.solver_line_search_backtracks << "\n";
+  out << "MBAR Residual Inf              : " << result.residual_inf << "\n";
+  out << "MBAR Residual RMS              : " << result.residual_rms << "\n";
+  out << "MBAR Target ESS               : "
+      << result.target_effective_sample_size << "\n";
+  out << "MBAR Min State ESS             : "
+      << result.min_state_effective_sample_size << "\n";
+  out << "MBAR Min Adjacent Overlap      : " << result.min_adjacent_overlap
+      << "\n";
+  out << "MBAR Convergence Note          : " << result.convergence_note << "\n";
   out << "MBAR Bootstrap Samples         : " << args.mbar.bootstrap_samples
       << "\n";
   out << "MBAR Scan Points Requested     : " << args.mbar.scan_points << "\n";
@@ -1631,6 +2300,18 @@ void write_summary_file(const std::string &filename, const CoreResult &result,
   TitanUI::log_kv(log, "MBAR Ladder Source",
                   result.temperature_ladder_source);
   TitanUI::log_kv(log, "MBAR Window Match", args.mbar.window_match);
+  TitanUI::log_kv(log, "MBAR Solver Method", result.solver_method);
+  TitanUI::log_kv(log, "MBAR Solver Iterations",
+                  std::to_string(result.solver_iterations));
+  TitanUI::log_kv(log, "MBAR Residual Inf",
+                  std::to_string(result.residual_inf));
+  TitanUI::log_kv(log, "MBAR Target ESS",
+                  std::to_string(result.target_effective_sample_size));
+  TitanUI::log_kv(log, "MBAR Min State ESS",
+                  std::to_string(result.min_state_effective_sample_size));
+  TitanUI::log_kv(log, "MBAR Min Adjacent Overlap",
+                  std::to_string(result.min_adjacent_overlap));
+  TitanUI::log_kv(log, "MBAR Convergence Note", result.convergence_note);
   TitanUI::log_kv(log, "MBAR Usable Samples",
                   std::to_string(result.total_usable_samples));
   TitanUI::log_kv(log, "MBAR Summary File", filename);

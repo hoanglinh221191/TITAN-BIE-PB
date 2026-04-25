@@ -13,10 +13,19 @@ int parse_begin_end_atoms_2mols(groups_cal &groups, arguments &Arguments,
                                 size_t end_mol_2, const amino_acid &amine,
                                 string type_mol) {
   if (groups.empty()) {
-    if (Arguments.flag_index == true && !PDB.m_mol.empty()) {
+    if (!PDB.m_mol.empty()) {
       PDB.wrapper_impl_post_proc(Arguments, type_mol, amine);
-      groups.creat_index_file(Arguments, PDB);
-      groups.select_groups_to_cal_energy();
+      if (groups.create_auto_index_file(Arguments, PDB, amine) != 0)
+        return 1;
+      if (groups.finalize_index_groups(Arguments) != 0)
+        return 1;
+
+      if (groups.groups_atom_number(groups.group_1_index()) == 0 ||
+          (!Arguments.flag_nocal &&
+           groups.groups_atom_number(groups.group_2_index()) == 0)) {
+        cout << "Selected index group is empty!\n";
+        return 1;
+      }
 
       begin_mol_1 = groups.atom_index(groups.group_1_index(), 0);
       begin_mol_2 = groups.atom_index(groups.group_2_index(), 0);
