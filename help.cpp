@@ -161,6 +161,81 @@ IMPORTANT NOTES
     gbsa_total_energy_maptype.tsv
     out_entropy.dat   (auto-enabled by -gbsa for free-energy completeness)
 
+2.2b PBE
+
+  Purpose:
+    Solve Poisson-Boltzmann electrostatics on each processed frame.
+    The v1 implementation uses CPU double precision, a two-dielectric model,
+    VDW/SAS/SES/DelPhi-like SES/DelPhi-like VDW surface classification,
+    Stern-aware linear ion screening, selectable Coulombic/dipolar/zero
+    boundaries, linear PB by default, optional nonlinear PB Picard/SOR
+    polishing on the fine grid, and reaction-field energy reporting.
+    `-pbsa` wraps this path for production two-molecule MM/PBSA: it enables
+    PBE deltaG_solv endpoint solves, force-field elec/vdw interaction energy,
+    SASA nonpolar energy, optional interaction entropy, and per-frame binding
+    energy CSV output. The SASA/SA nonpolar core is shared with GBSA, while
+    each workflow keeps its own residue grouping and output files.
+
+  Main inputs:
+    -pbe
+    -pbe-scale, -pbe-margin, -pbe-gridbox
+    -pbe-model, -pbe-biomodel, -pbe-dielectric
+    -pbe-int-diel, -pbe-ext-diel, -pbe-salt, -pbe-temp
+    -pbe-surface, -pbe-probe, -pbe-boundary, -pbe-charge-assignment,
+    -pbe-radius-convention
+    -pbe-ion-access, -pbe-ion-radius
+    -pbe-dgsolv
+    -pbsa
+    -pbsa-components, -pbsa-decomp, -pbsa-residue-frames
+    -pbsa-ie, -pbsa-ie-block, -pbsa-ie-min-samples
+    -pbsa-ie-filter-sigma, -pbsa-perf
+    -pbe-max-iter, -pbe-rms, -pbe-dphi, -pbe-omega
+    -pbe-nl-max-iter, -pbe-nl-inner-iter, -pbe-nl-stagnation
+    -pbe-nl-block, -pbe-nl-dphi, -pbe-nl-relax, -pbe-nl-clip
+    -pbe-nl-continuation, -pbe-nl-line-search, -pbe-nl-residual
+    -pbe-nl-solver, -pbe-nl-inner, -pbe-nl-multigrid
+    -pbe-gaussian-exp, -pbe-gaussian-sigma, -pbe-density-cutoff,
+    -pbe-surface-cutoff, -pbe-gap-diel
+    -pbe-focus, -pbe-multigrid, -pbe-focus-levels, -pbe-focus-margin
+    -pbe-mg-levels, -pbe-mg-pre, -pbe-mg-post, -pbe-mg-coarse-iter
+    -pbe-map, -pbe-map-frames, -pbe-max-grid, -pbe-kernel
+    hidden PQR parity only: -pbe-parity-dump, -pbe-parity-map-dump,
+    -pbe-test-charge-grid, -pbe-test-surface-map,
+    -pbe-test-midpoint-epsilon, -pbe-test-vdwms-remap,
+    -pbe-test-boundary-map,
+    -pbe-test-nl-source, -pbe-test-newton-derivative,
+    -pbe-test-energy-convention
+    In arg files use -flag=value; on the CLI use -flag value.
+    v1 requires normal charge/radius initialization; do not combine with -nocal
+    Zero-radius polar hydrogens from supported force fields use a small
+    Bondi-style PBE surface fallback radius while charges remain mandatory.
+
+  Typical outputs:
+    pbe_energy.csv
+    pbe_summary.dat
+    mm_pbsa_energy.csv, mm_pbsa_summary.dat, mm_pbsa_by_trajectory.csv,
+    mm_pbsa_ie_diagnostics.csv, and mm_pbsa_performance.dat when -pbsa is
+    enabled
+    optional: mm_pbsa_decomposition.dat and mm_pbsa_residue_*.csv when
+    -pbsa-decomp is molecule/residue
+    energies are reported in kJ/mol and kcal/mol; kT is retained for continuity
+    optional: pbe_phi_*.cube, pbe_epsilon_*.cube, and pbe_ion_*.cube
+    optional: pbe_probe_sites.csv when DelPhi focus/probe fixture knobs are used
+    hidden PQR parity only: pbe_parity_stage.csv and pbe_parity_points.csv
+    barnase PQR forensic mode additionally writes pbe_barnase_forensic_inputs.csv,
+    pbe_barnase_surface_audit.csv, pbe_barnase_operator_audit.csv, and
+    pbe_atom_phi_audit.csv; ISCM parity with -pbe-parity-dump=all writes
+    pbe_iscm_surface_charge_samples.csv; -pbe-parity-map-dump=samples writes
+    pbe_field_samples.csv, pbe_boundary_samples.csv, and
+    pbe_charge_grid_audit.csv. The hidden DelPhi map extractor script writes
+    oracle-side pbe_oracle_field_samples.csv, pbe_oracle_boundary_samples.csv,
+    pbe_oracle_midpoint_epsilon_samples.csv,
+    pbe_oracle_atom_radius_audit.csv, a replayable sparse
+    pbe_oracle_surface_map.csv with inside semantics, and
+    barnase_stage_oracle.tsv under test/tmp for stage comparison. With
+    -FullMidpointEpsilon it writes a full replayable midpoint-epsilon oracle
+    for one salt only, default 0.15 M, selectable with -FullMidpointSalt.
+
 2.3 Hydrogen Bonds
 
   Purpose:
@@ -913,6 +988,10 @@ IMPORTANT NOTES
     signatures such as bridges and clamps. Paper-facing sidecars include
     sticker hotspot ranking, droplet shape anisotropy/sphericity proxies,
     droplet genealogy summaries, and FRAP-like residence/recovery proxies.
+    `-llps-paper` is an opt-in Martini protein/RNA paper bundle that reuses
+    DBSCAN dense labels to export phase partitioning, composition profiles,
+    convergence checks, and manuscript-friendly summaries without changing
+    default `-llps` output volume.
     Run metadata and diagnostics are written into the central TITAN log
     (`log.txt`) under LLPS Run Context / Output Audit sections; TITAN does not
     create a separate LLPS manifest sidecar.
@@ -949,6 +1028,10 @@ IMPORTANT NOTES
       -llps-rna-longrange-min
       -llps-energy-correlation
       -llps-energy-detailed
+      -llps-paper
+      -llps-paper-profile-bin
+      -llps-paper-blocks
+      -llps-paper-geometry
 
   Typical outputs:
     llps_timeseries.dat
@@ -1006,12 +1089,22 @@ IMPORTANT NOTES
     llps_rna_topology_trace.csv
     llps_rna_bridge_trace.csv
     llps_rna_clamp_trace.csv
+    with -llps-paper:
+      llps_phase_partition_summary.dat
+      llps_radial_profiles.csv or llps_slab_profiles.csv
+      llps_composition_timeseries.csv
+      llps_contact_taxonomy.csv
+      llps_contact_taxonomy_summary.dat
+      llps_convergence_report.dat
+      llps_paper_summary.md
+      llps_paper_summary.json
     log.txt sections:
       LLPS Run Context
       LLPS Macro Summary
       LLPS Output Audit
       LLPS DBSCAN Output Audit
       LLPS Dynamics Output Audit
+      LLPS Paper Output Audit
 
 2.12 GIST
 
@@ -1405,6 +1498,13 @@ IMPORTANT NOTES
                         CHARMM36
                         OPLSAA
                         MARTINI
+  -fflib-auto on|off    Auto-assign charge/VDW from lib_ff when no topology is
+                        provided. Default: on
+  -fflib-missing warn|strict
+                        Missing lib_ff atom/template policy. Default: warn
+  -fflib-hydrogens reference|none
+                        Add missing hydrogens for PDB/reference inputs only.
+                        Default: reference
 
   -pattern-input <pat> [b] [e] [step]
                         Pattern input mode; <pat> must contain '*'
@@ -1443,6 +1543,221 @@ IMPORTANT NOTES
   -int_diel <val>       Internal dielectric. Default: 1.0
   -saltcon <val>        Salt concentration (M). Default: 0.15
   -epsilon_in <val>     Internal epsilon for solvation models
+
+  -pbe                  Enable frame-based PB electrostatics
+  -pbe-model <mode>     linear or nonlinear. Default: linear
+                        nonlinear uses the current linear off/focus/vcycle
+                        solve as a seed, then runs Picard/SOR or damped Newton
+                        on the final fine grid. Vacuum endpoints remain linear.
+  -pbe-biomodel <mode>  pbe or rpbe. Default: pbe
+  -pbe-dielectric <m>   two-dielectric or gaussian. Default: two-dielectric
+  -pbe-scale <val>      Grid scale in points/A. Default: 2.0
+  -pbe-margin <val>     Solvent margin around VDW surface (A). Default: 15.0
+  -pbe-gridbox <mode>   cuboidal or cubic. Default: cuboidal
+  -pbe-int-diel <val>   PBE internal dielectric. Default: 1.0
+  -pbe-ext-diel <val>   PBE external dielectric. Default: 80.0
+  -pbe-salt <val>       PBE salt concentration (M). Default: 0.15
+  -pbe-temp <val>       PBE temperature (K). Default: 298.15
+  -pbe-surface <mode>   vdw, sas, ses, delphi-ses, delphi-vdw, gaussian, or
+                        gaussian-cutoff. Default: vdw
+                        ses uses probe-excluded voxels plus boundary flood fill
+                        to identify solvent-accessible grid points.
+                        delphi-ses keeps the SES flood fill and refines
+                        dielectric faces by 2x2 midpoint-face sampling.
+                        delphi-vdw uses DelPhi-compatible discrete media
+                        indices at positive x/y/z half-grid faces: each
+                        midpoint is classified by VDW atom radius, then the
+                        PQR DelPhi-parity path applies a deterministic
+                        VDW-to-MS boundary remap before producing final
+                        midpoint epsilon. VDW media assignment uses explicit
+                        PQR/SIZ radii without small-atom floors; Bondi floors
+                        remain a fallback for non-PQR delphi-bondi paths.
+                        DelPhi-parity diagnostics append phase RF energies
+                        (solvent/vacuum), atom/grid corrected RF energy, and
+                        analytic Coulomb energy to pbe_energy.csv.
+  -pbe-boundary <mode>  coulombic, dipolar, or zero. Default: coulombic
+                        DelPhi parity harnesses can switch boundary mode
+                        without changing legacy default behavior.
+  -pbe-charge-assignment <mode>
+                        trilinear, delphi, or gaussian. Default: trilinear
+                        delphi enables strict-grid charge diagnostics for
+                        hidden PQR/DelPhi regression fixtures.
+  -pbe-radius-convention <mode>
+                        auto, native, or delphi-bondi. Default: auto
+  -pbe-probe <val>      SAS/SES probe radius (A). Default: 1.4
+  -pbe-ion-access <m>   dielectric or stern. Default: dielectric
+                        stern applies Debye screening only in ion-accessible
+                        solvent after excluding atom radius + ion radius.
+  -pbe-ion-radius <val> Ion probe radius for Stern accessibility (A). Default: 2.0
+  -pbe-dgsolv [bool]    For two-molecule systems, compute deltaG_solv by
+                        six solves: complex, mol1, mol2 each solvent/vacuum.
+                        Arg file: -pbe-dgsolv=true; CLI: -pbe-dgsolv
+  -pbsa [bool]          Enable MM/PBSA summary for two-molecule systems.
+                        Implies -pbe and -pbe-dgsolv; writes
+                        mm_pbsa_energy.csv and mm_pbsa_summary.dat with PB
+                        endpoint polar, SASA nonpolar, elec/vdw,
+                        interaction entropy, and final dG.
+                        Arg file: -pbsa=true; CLI: -pbsa true
+  -pbsa-components <m>  auto or complex,receptor,ligand. Default: auto
+  -pbsa-decomp <mode>   off, molecule, or residue. Default: off
+                        residue writes component decomposition without
+                        re-solving PB per residue.
+  -pbsa-ie <bool>       Enable interaction entropy correction. Default: true
+                        Uses the same Duan-Zhang interaction entropy core as
+                        TITAN's -entropy module, with PBSA diagnostics.
+                        Arg file: -pbsa-ie=true; CLI: -pbsa-ie true
+  -pbsa-residue-frames <mode>
+                        off or all. Default: off. all writes
+                        mm_pbsa_residue_frame.csv.
+  -pbsa-ie-block <N>    auto or positive block size. Default: auto
+  -pbsa-ie-min-samples <N>
+                        Minimum samples before IE correction is applied.
+                        Default: 10
+  -pbsa-ie-filter-sigma <val>
+                        Sigma filter for IE samples. Default: 2.0
+  -pbsa-perf <mode>     off, summary, or detail. Default: summary
+  -pbe-max-iter <N>     SOR iteration cap. Default: 10000
+  -pbe-rms <val>        SOR RMS convergence tolerance. Default: 1e-6
+  -pbe-dphi <val>       SOR max delta-phi tolerance. Default: 1e-5
+  -pbe-omega <val>      auto or SOR relaxation value in (0,2). Default: auto
+  -pbe-nl-max-iter <N>  Nonlinear Picard/SOR sweep cap or Newton work budget.
+                        Default: 80
+  -pbe-nl-inner-iter <N>
+                        Newton correction SOR sweeps or V-cycle cap per outer
+                        step.
+                        Default: 40
+  -pbe-nl-stagnation <N>
+                        Newton residual stagnation window. Default: 8
+  -pbe-nl-block <N>     Nonlinear diagnostic block size. Default: 5
+  -pbe-nl-dphi <val>    Nonlinear max delta-phi tolerance. Default: 1e-4
+  -pbe-nl-relax <val>   auto or Picard damping in [0.05,1.0]. Default: auto
+  -pbe-nl-clip <val>    Clip alpha*phi before sinh. Default: 20.0
+  -pbe-nl-continuation <mode>
+                        off or auto. Default: auto
+  -pbe-nl-line-search <mode>
+                        off or auto. Default: auto
+  -pbe-nl-residual <val>
+                        Nonlinear residual tolerance. Default: 1e-5
+  -pbe-nl-solver <mode> picard or newton. Default: picard
+  -pbe-nl-inner <mode>  auto, sor, or vcycle. Default: auto
+                        newton solves a stencil Jacobian correction with SOR
+                        or geometric V-cycle and appends correction residual,
+                        inner levels/cycles, Jacobian, lambda, and stop-reason
+                        diagnostics
+  -pbe-nl-multigrid <m> off or fas. Default: off
+  -pbe-gaussian-exp <v> Gaussian density exponent. Default: 2
+  -pbe-gaussian-sigma <v>
+                        Gaussian density sigma scale. Default: 1.0
+  -pbe-density-cutoff <v>
+                        Gaussian cutoff density. Default: 0.759
+  -pbe-surface-cutoff <v>
+                        auto or explicit Gaussian surface cutoff. Default: auto
+  -pbe-gap-diel <v>     Gaussian-cutoff gap dielectric. Default: 22.0
+  -pbe-max-grid <N>     Maximum grid points before preflight rejection
+  -pbe-map <mode>       off, phi, epsilon, ion, or all. Default: off
+  -pbe-map-frames <m>   none, first, last, or all. Default: none
+  -pbe-kernel <mode>    auto, scalar, or avx2. Default: auto
+                        v1 records the request but uses scalar-threaded SOR
+                        Arg file form: -pbe-kernel=auto
+                        CLI form:      -pbe-kernel auto
+  -pbe-focus <mode>     off, auto, or delphi. Default: off
+                        auto runs nested-grid focusing: coarse solve first,
+                        then interpolated coarse potential seeds fine-grid
+                        boundary/initial values.
+                        delphi uses the same nested parent phimap path and
+                        exposes hidden probe/focus fixture diagnostics.
+  -pbe-multigrid <mode> off, focus, auto, or vcycle. Default: off
+                        focus/auto keep the nested focusing path; vcycle runs
+                        a geometric V-cycle correction before final fine-grid
+                        convergence polish.
+  -pbe-focus-levels <N> Number of nested grids, 1..4. Values >1 imply auto.
+                        Default effective value: 1 when off, 2 when auto.
+  -pbe-focus-margin <A> Extra coarse-grid outer margin in Angstrom. Default: 8.0
+  -pbe-mg-levels <N>    auto or 1..4. Default: auto
+  -pbe-mg-pre <N>       V-cycle pre-smoothing sweeps. Default: 2
+  -pbe-mg-post <N>      V-cycle post-smoothing sweeps. Default: 2
+  -pbe-mg-coarse-iter <N>
+                        Coarsest-grid SOR iterations per cycle. Default: 200
+  Hidden PQR parity diagnostics:
+  -pbe-parity-dump <m>  off, summary, points, or all. Requires -pbe-test-pqr.
+                        Writes pbe_parity_stage.csv and optionally
+                        pbe_parity_points.csv for DelPhi root-cause reports.
+                        Barnase PQR rows also emit hidden forensic input,
+                        surface, operator, and per-atom phi audits so linear
+                        field/source/energy drift can be isolated before
+                        nonlinear Newton tuning.
+  -pbe-parity-map-dump <m>
+                        off, samples, or full. Requires -pbe-test-pqr.
+                        samples writes pbe_field_samples.csv,
+                        pbe_boundary_samples.csv, and
+                        pbe_charge_grid_audit.csv for barnase field-oracle
+                        comparison. full is intentionally large. Use
+                        test/pbe_delphi_export_maps.ps1 to generate optional
+                        DelPhi oracle CSVs outside production paths. The
+                        extractor normalizes pyDelPhi VDW surfmap semantics
+                        as 1=solvent and 0=solute and writes a sparse
+                        pbe_oracle_surface_map.csv containing inside=1 rows
+                        for replay. It also writes midpoint-epsilon samples by
+                        default, or a full pbe_oracle_midpoint_epsilon.csv for
+                        one salt (default 0.15 M, set with -FullMidpointSalt)
+                        when called with -FullMidpointEpsilon. If local pyDelPhi
+                        cannot export maps, the script remains report-only and
+                        strict barnase parity stays disabled.
+                        test/pbe_midpoint_oracle_roundtrip_smoke.ps1 verifies
+                        the full midpoint oracle layout, axis order, positive
+                        face convention, and midpoint six-face sum before
+                        native remap changes are trusted.
+                        test/pbe_barnase_field_oracle_smoke.ps1
+                        writes pbe_barnase_root_cause_report.csv, and
+                        test/pbe_barnase_timing_compare.ps1 compares TITAN and
+                        pyDelPhi wall-clock timing on the same barnase rows.
+  -pbe-test-charge-grid <m>
+                        native or oracle. Requires -pbe-test-pqr. oracle reads
+                        pbe_oracle_charge_grid.csv from the run directory.
+  -pbe-test-surface-map <m>
+                        native or oracle. Requires -pbe-test-pqr. oracle reads
+                        pbe_oracle_surface_map.csv with i,j,k,inside columns.
+  -pbe-test-midpoint-epsilon <m>
+                        native or oracle. Requires -pbe-test-pqr. oracle reads
+                        pbe_oracle_midpoint_epsilon.csv with
+                        i,j,k,eps_x,eps_y,eps_z columns and overrides
+                        positive-face epsilon before denominator/solver setup.
+  -pbe-test-vdwms-remap <m>
+                        auto or off. Requires -pbe-test-pqr. auto enables the
+                        DelPhi-parity VDW-to-MS midpoint-media remap; off keeps
+                        the raw VDW half-grid media map for forensic runs.
+                        pbe_parity_stage.csv and
+                        pbe_barnase_surface_audit.csv append
+                        midpoint_eps_sum_* columns to distinguish solver
+                        denominator audits from raw midpoint-epsilon sums.
+  -pbe-test-boundary-map <m>
+                        native or oracle. Requires -pbe-test-pqr. oracle reads
+                        a complete pbe_oracle_boundary_map.csv boundary phi
+                        map and fails clearly if any boundary point is absent.
+                        Oracle CSVs are hidden PQR parity inputs only; arg
+                        files use -flag=value, while direct CLI usage uses
+                        -flag value.
+  -pbe-test-nl-source <m>
+                        titan or delphi-dimensionless. Requires -pbe-test-pqr.
+                        delphi-dimensionless solves psi=alpha*phi with alpha-
+                        scaled RHS/source, then converts maps/energy back to
+                        physical phi for parity diagnostics.
+  -pbe-test-newton-derivative [bool]
+                        Finite-difference check for the Newton Jacobian.
+                        Requires -pbe-test-pqr.
+  -pbe-test-energy-convention <m>
+                        auto, atom, grid, delphi-corrected, or delphi-iscm.
+                        Requires -pbe-test-pqr. Production default remains auto.
+                        delphi-iscm is a hidden DelPhi two-dielectric parity
+                        convention for induced-surface-charge water RF energy;
+                        its final corrected RF follows the DelPhi VDW
+                        water-phase ISCM convention while keeping vacuum grid
+                        RF as an audit field.
+                        native/PBSA defaults still use the normal atom/grid
+                        convention unless this test path is selected.
+                        Use the DelPhi stage-oracle smoke scripts, not this
+                        hidden knob alone, to decide whether an energy mismatch
+                        is field/operator or reaction-energy convention drift.
 
   -emap [type]          Energy map type
   -emap-level <level>   per-res or all
@@ -1686,6 +2001,19 @@ IMPORTANT NOTES
                         Contact-gated protein-RNA energy vs RNA compaction
   -llps-energy-detailed=<true|false>
                         Export protein-chain/RNA-chain energy trace. Default: false
+  -llps-paper=<true|false>
+                        Opt-in Martini protein/RNA paper bundle. Enables LLPS,
+                        contacts, dynamics, DBSCAN paper summaries, composition
+                        profiles, partition proxies, and convergence report.
+                        Default: false
+  -llps-paper-profile-bin <nm>
+                        Profile bin width for radial/slab paper profiles.
+                        Default: 0.2
+  -llps-paper-blocks <N|auto>
+                        Block count for paper SEM/convergence summaries.
+                        Default: auto
+  -llps-paper-geometry=<auto|droplet|slab>
+                        Profile geometry policy. Default: auto
   -llps-rna-information=<auto|true|false>
                         RNA information-theoretic entropy and coupling metrics
   -llps-rna-topology=<auto|true|false>

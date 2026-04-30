@@ -1,11 +1,15 @@
 #include "Multi_MOL.h"
+#include "titan_fflib_assigner.h"
 #include <iostream>
 #include <string_view>
 using std::string_view;
 
 
 int Multi_MOL::take_charge(amino_acid &amine, const para &parameter, size_t end,
-                           size_t begin, string_view force_f, int flag) {
+                           size_t begin, string_view force_f, int flag,
+                           const arguments *ArgumentsPtr,
+                           TitanExecutor *executor,
+                           string_view molecule_label) {
   auto assign_type_ids = [&]() {
     for (size_t i = begin; i < end && i < info.size() && i < parameters.size();
          ++i) {
@@ -14,6 +18,15 @@ int Multi_MOL::take_charge(amino_acid &amine, const para &parameter, size_t end,
         parameters[i].set_type_id(static_cast<int>(it->second));
     }
   };
+
+  if (flag == 0 && ArgumentsPtr != nullptr && ArgumentsPtr->fflib_auto &&
+      begin == 0 && end >= info.size()) {
+    const string label =
+        molecule_label.empty() ? string(this->get_mol_type()) : string(molecule_label);
+    return TitanFfLib::assign_from_library(*this, amine, parameter,
+                                           *ArgumentsPtr, force_f, executor,
+                                           label);
+  }
 
   if (begin >= info.size() || end > info.size()) {
   }
@@ -312,17 +325,10 @@ int Multi_MOL::take_charge(amino_acid &amine, const para &parameter, size_t end,
       }
     }
   } else {
-    for (size_t i = begin; i < end; ++i)
-      for (size_t j = parameter.base.size(); j-- > 0;) {
-        if (info[i].get_atom_type() == parameter.base[j].atom_type) {
-          // Topology-local [ atomtypes ] are appended after the generic FF
-          // table and should override it when present.
-          parameters[i].set_epsilon_sigma_radius(parameter.base[j].c12_epsilon,
-                                                 parameter.base[j].c6_sigma,
-                                                 parameter.base[j].radius);
-          break;
-        }
-      }
+    for (size_t i = begin; i < end && i < info.size() && i < parameters.size();
+         ++i)
+      TitanFfLib::fill_vdw_from_atom_type(parameters, i, parameter,
+                                          info[i].get_atom_type());
   }
   assign_type_ids();
   return 0;

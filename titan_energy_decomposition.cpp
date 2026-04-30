@@ -105,6 +105,20 @@ EnergyPairDecomposition EnergyDecompositionProvider::lig_pair_energy(
                              lig_pos_b);
 }
 
+const mol_info *EnergyDecompositionProvider::rec_info(
+    std::size_t pos) const noexcept {
+  if (rec_ == nullptr || pos >= rec_->info.size())
+    return nullptr;
+  return &rec_->info[pos];
+}
+
+const mol_info *EnergyDecompositionProvider::lig_info(
+    std::size_t pos) const noexcept {
+  if (lig_ == nullptr || pos >= lig_->info.size())
+    return nullptr;
+  return &lig_->info[pos];
+}
+
 EnergyPairDecomposition EnergyDecompositionProvider::pair_energy_generic(
     const MOL &frame_a, const Multi_MOL &mol_a, std::size_t pos_a,
     const MOL &frame_b, const Multi_MOL &mol_b, std::size_t pos_b) const {

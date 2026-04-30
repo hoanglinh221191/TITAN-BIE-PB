@@ -1,14 +1,15 @@
 #include "gbsa_intrin.h"
 #include "charmm_nonbonded.h"
 #include "titan_simd_dispatch.h"
+#include "titan_sasa.h"
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <span>
 
 #ifdef __AVX__
 #include "avx_math.h"
@@ -87,156 +88,6 @@ void cal_effective_born_radii_avx2(const MOL &mol,
   }
 }
 
-// -----------------------------------------------------------------------------
-// Shrake-Rupley SASA Calculation
-// -----------------------------------------------------------------------------
-struct Point3D {
-  double x, y, z;
-};
-
-static std::vector<Point3D> generate_golden_spiral(int num_points) {
-  std::vector<Point3D> points(num_points);
-  double inc = 3.14159265358979323846 * (3.0 - std::sqrt(5.0));
-  double off = 2.0 / num_points;
-  for (int k = 0; k < num_points; ++k) {
-    double y = k * off - 1.0 + (off / 2.0);
-    double r = std::sqrt(1.0 - y * y);
-    double phi = k * inc;
-    points[k] = {std::cos(phi) * r, y, std::sin(phi) * r};
-  }
-  return points;
-}
-
-static const int SASA_NUM_POINTS = 96;
-static const std::vector<Point3D> SASA_SPHERE_POINTS =
-    generate_golden_spiral(SASA_NUM_POINTS);
-
-struct SASA_Grid {
-  std::unordered_map<int, std::vector<size_t>> cells;
-  double cell_size;
-};
-
-inline SASA_Grid build_sasa_grid(const MOL &mol, std::span<const double> radii,
-                                 double probe_radius) {
-  double max_radius = 0.0;
-  for (double r : radii)
-    max_radius = std::max(max_radius, r);
-  double cell_size = (max_radius + probe_radius) * 2.0;
-  if (cell_size < 1.0)
-    cell_size = 3.0;
-
-  SASA_Grid grid;
-  grid.cell_size = cell_size;
-
-  auto get_cell_key = [cell_size](double x, double y, double z) -> int {
-    int cx = static_cast<int>(std::floor(x / cell_size));
-    int cy = static_cast<int>(std::floor(y / cell_size));
-    int cz = static_cast<int>(std::floor(z / cell_size));
-    size_t h = static_cast<size_t>(cx);
-    h = h * 1000003 + static_cast<size_t>(cy);
-    h = h * 1000003 + static_cast<size_t>(cz);
-    return static_cast<int>(h);
-  };
-  size_t num_atoms = mol.size();
-  for (size_t i = 0; i < num_atoms; ++i) {
-    grid.cells[get_cell_key(mol.pos.x[i], mol.pos.y[i], mol.pos.z[i])]
-        .push_back(i);
-  }
-  return grid;
-}
-
-std::vector<double>
-compute_sasa_shrake_rupley(const MOL &mol, std::span<const double> radii,
-                           const std::vector<size_t> &targets,
-                           const SASA_Grid &grid, double probe_radius = 1.4) {
-  size_t num_atoms = mol.size();
-  std::vector<double> sasa(num_atoms, 0.0);
-  double area_per_point = (4.0 * 3.14159265358979323846) / SASA_NUM_POINTS;
-
-  double cell_size = grid.cell_size;
-  auto get_cell_key = [cell_size](double x, double y, double z) -> int {
-    int cx = static_cast<int>(std::floor(x / cell_size));
-    int cy = static_cast<int>(std::floor(y / cell_size));
-    int cz = static_cast<int>(std::floor(z / cell_size));
-    size_t h = static_cast<size_t>(cx);
-    h = h * 1000003 + static_cast<size_t>(cy);
-    h = h * 1000003 + static_cast<size_t>(cz);
-    return static_cast<int>(h);
-  };
-
-  // Evaluate ONLY targeted atoms for this thread
-  for (size_t i : targets) {
-    double x_i = mol.pos.x[i], y_i = mol.pos.y[i], z_i = mol.pos.z[i];
-    double R_i = radii[i] + probe_radius;
-    double R_i_sq = R_i * R_i;
-
-    std::vector<size_t> neighbors;
-    neighbors.reserve(64);
-    for (int dx = -1; dx <= 1; ++dx) {
-      for (int dy = -1; dy <= 1; ++dy) {
-        for (int dz = -1; dz <= 1; ++dz) {
-          int key = get_cell_key(x_i + dx * cell_size, y_i + dy * cell_size,
-                                 z_i + dz * cell_size);
-          if (grid.cells.count(key)) {
-            for (size_t j : grid.cells.at(key)) {
-              if (i != j) {
-                double R_j = radii[j] + probe_radius;
-                double dist_sq = (x_i - mol.pos.x[j]) * (x_i - mol.pos.x[j]) +
-                                 (y_i - mol.pos.y[j]) * (y_i - mol.pos.y[j]) +
-                                 (z_i - mol.pos.z[j]) * (z_i - mol.pos.z[j]);
-                if (dist_sq < (R_i + R_j) * (R_i + R_j)) {
-                  neighbors.push_back(j);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Use the shared runtime-dispatch helper so native/portable builds keep
-    // the same AVX2/scalar selection policy while preserving the original
-    // strict '< Rj^2' burial test.
-    std::array<std::array<double, 4>, 24> px{};
-    std::array<std::array<double, 4>, 24> py{};
-    std::array<std::array<double, 4>, 24> pz{};
-    std::array<unsigned, 24> buried_mask{};
-    for (int k = 0; k < 24; ++k) {
-      for (int lane = 0; lane < 4; ++lane) {
-        const auto &pt = SASA_SPHERE_POINTS[k * 4 + lane];
-        px[k][lane] = x_i + pt.x * R_i;
-        py[k][lane] = y_i + pt.y * R_i;
-        pz[k][lane] = z_i + pt.z * R_i;
-      }
-    }
-
-    for (size_t j : neighbors) {
-      const double cutoff_sq =
-          (radii[j] + probe_radius) * (radii[j] + probe_radius);
-      for (int k = 0; k < 24; ++k) {
-        buried_mask[k] |= titan_simd_dispatch::point_vs_four_cutoff_mask(
-            mol.pos.x[j], mol.pos.y[j], mol.pos.z[j], px[k].data(), py[k].data(),
-            pz[k].data(), cutoff_sq, -1.0, false);
-      }
-    }
-
-    int exposed_points = 0;
-    for (int k = 0; k < 24; ++k) {
-      const unsigned mask_int = buried_mask[k];
-      if ((mask_int & 1u) == 0u)
-        exposed_points++;
-      if ((mask_int & 2u) == 0u)
-        exposed_points++;
-      if ((mask_int & 4u) == 0u)
-        exposed_points++;
-      if ((mask_int & 8u) == 0u)
-        exposed_points++;
-    }
-    sasa[i] = exposed_points * area_per_point * R_i_sq;
-  }
-  return sasa;
-}
-
 static void build_complex_geometry(const MOL &rec, const MOL &lg,
                                    const Multi_MOL_parameters &rec_parameters,
                                    const Multi_MOL_parameters &lg_parameters,
@@ -262,6 +113,31 @@ static void build_complex_geometry(const MOL &rec, const MOL &lg,
   }
 }
 
+static std::vector<TitanSASA::Atom>
+make_sasa_atoms(const MOL &mol, std::span<const double> radii) {
+  const size_t n = mol.size();
+  std::vector<TitanSASA::Atom> atoms;
+  atoms.reserve(n);
+  for (size_t i = 0; i < n; ++i) {
+    const double radius = (i < radii.size()) ? radii[i] : 0.0;
+    atoms.push_back({mol.pos.x[i], mol.pos.y[i], mol.pos.z[i], radius});
+  }
+  return atoms;
+}
+
+static std::vector<double>
+compute_gbsa_sasa(const MOL &mol, std::span<const double> radii,
+                  std::span<const size_t> targets = {}) {
+  std::vector<TitanSASA::Atom> atoms = make_sasa_atoms(mol, radii);
+  TitanSASA::Options options;
+  options.probe_radius = TitanSASA::kDefaultProbeRadiusA;
+  options.min_cell_size = 3.0;
+  options.point_count = TitanSASA::kDefaultPointCount;
+  return TitanSASA::compute_per_atom_sasa(
+      std::span<const TitanSASA::Atom>(atoms.data(), atoms.size()), options,
+      targets);
+}
+
 void build_gbsa_sasa_cache(const MOL &rec, const MOL &lg,
                            const Multi_MOL_parameters &rec_parameters,
                            const Multi_MOL_parameters &lg_parameters,
@@ -283,28 +159,18 @@ void build_gbsa_sasa_cache(const MOL &rec, const MOL &lg,
   build_complex_geometry(rec, lg, rec_parameters, lg_parameters, complex_mol,
                          complex_radii);
 
-  const SASA_Grid rec_grid = build_sasa_grid(
+  cache_out.sasa_rec_free = compute_gbsa_sasa(
       rec, std::span<const double>(rec_parameters.radius.data(), rec_size),
-      1.4);
-  cache_out.sasa_rec_free = compute_sasa_shrake_rupley(
-      rec, std::span<const double>(rec_parameters.radius.data(), rec_size),
-      rec_targets, rec_grid);
+      std::span<const size_t>(rec_targets.data(), rec_targets.size()));
 
-  const SASA_Grid lig_grid = build_sasa_grid(
-      lg, std::span<const double>(lg_parameters.radius.data(), lg_size), 1.4);
-  cache_out.sasa_lig_free = compute_sasa_shrake_rupley(
+  cache_out.sasa_lig_free = compute_gbsa_sasa(
       lg, std::span<const double>(lg_parameters.radius.data(), lg_size),
-      lig_targets, lig_grid);
+      std::span<const size_t>(lig_targets.data(), lig_targets.size()));
 
-  const SASA_Grid com_grid =
-      build_sasa_grid(complex_mol,
-                      std::span<const double>(complex_radii.data(),
-                                              rec_size + lg_size),
-                      1.4);
-  cache_out.sasa_complex = compute_sasa_shrake_rupley(
+  cache_out.sasa_complex = compute_gbsa_sasa(
       complex_mol,
       std::span<const double>(complex_radii.data(), rec_size + lg_size),
-      com_targets, com_grid);
+      std::span<const size_t>(com_targets.data(), com_targets.size()));
 }
 
 int cal_energy_gbsa_avx2(
@@ -544,35 +410,25 @@ int cal_energy_gbsa_avx2(
     build_complex_geometry(rec, lg, rec_parameters, lg_parameters, complex_mol,
                            complex_radii);
 
-    const SASA_Grid rec_grid = build_sasa_grid(
+    local_sasa_rec_free = compute_gbsa_sasa(
         rec, std::span<const double>(rec_parameters.radius.data(), rec_size),
-        1.4);
-    local_sasa_rec_free = compute_sasa_shrake_rupley(
-        rec, std::span<const double>(rec_parameters.radius.data(), rec_size),
-        rec_targets, rec_grid);
+        std::span<const size_t>(rec_targets.data(), rec_targets.size()));
 
-    const SASA_Grid lig_grid = build_sasa_grid(
-        lg, std::span<const double>(lg_parameters.radius.data(), lg_size), 1.4);
-    local_sasa_lig_free = compute_sasa_shrake_rupley(
+    local_sasa_lig_free = compute_gbsa_sasa(
         lg, std::span<const double>(lg_parameters.radius.data(), lg_size),
-        lig_targets, lig_grid);
+        std::span<const size_t>(lig_targets.data(), lig_targets.size()));
 
-    const SASA_Grid com_grid =
-        build_sasa_grid(complex_mol,
-                        std::span<const double>(complex_radii.data(),
-                                                rec_size + lg_size),
-                        1.4);
-    local_sasa_complex = compute_sasa_shrake_rupley(
+    local_sasa_complex = compute_gbsa_sasa(
         complex_mol,
         std::span<const double>(complex_radii.data(), rec_size + lg_size),
-        com_targets, com_grid);
+        std::span<const size_t>(com_targets.data(), com_targets.size()));
 
     sasa_rec_free_ptr = &local_sasa_rec_free;
     sasa_lig_free_ptr = &local_sasa_lig_free;
     sasa_complex_ptr = &local_sasa_complex;
   }
 
-  double gamma_kj = 0.0072 * 4.184;
+  double gamma_kj = TitanSASA::kNonpolarGammaKJPerMolA2;
   std::vector<double> dG_np_rec(rec_size, 0.0);
   std::vector<double> dG_np_lig(lg_size, 0.0);
 

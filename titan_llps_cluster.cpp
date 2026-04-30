@@ -712,6 +712,11 @@ void TitanLLPSCluster::process_frame(TitanExecutor &executor, const MOL &pro,
     bead_is_dense = std::move(sorted_dense);
   }
 
+  if (paper_accumulator_.enabled()) {
+    paper_accumulator_.process_frame(current_time_ps, frame_idx, nodes,
+                                     bead_is_dense, giant_cluster_id, pro.Box);
+  }
+
   const BoxMatrix bmat(pro.Box);
   auto emit_droplet_shape = [&](const DropletShapeFrame &row) {
     if (droplet_shape_streaming_ && droplet_shape_out_.is_open()) {

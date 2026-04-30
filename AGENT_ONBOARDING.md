@@ -137,6 +137,7 @@ Analysis modules:
 - `titan_lj.cpp`
 - `titan_sq.cpp`, `titan_sq_core.cpp`
 - `titan_hbond_kinetics.cpp`
+- `titan_pbe.cpp`, `titan_pbe.h` for frame-based linear PB electrostatics
 - `titan_pca.cpp`
 - `titan_kinetics.cpp` for TICA
 - `titan_msm.cpp` for MSM
@@ -152,7 +153,8 @@ Analysis modules:
   `titan_llps_cluster_rna_compaction.cpp`,
   `titan_llps_cluster_rna_information.cpp`,
   `titan_llps_cluster_rna_topology.cpp`,
-  `titan_llps_cluster_export.cpp`, `titan_llps_stats.*`
+  `titan_llps_cluster_export.cpp`, `titan_llps_paper.cpp`,
+  `titan_llps_stats.*`
 - `titan_gist.cpp`
 - `titan_ifp.cpp`
 - `titan_awh_ifp.cpp`
@@ -174,6 +176,9 @@ LLPS split of responsibility:
 - `titan_llps_cluster*.cpp`: bead-level DBSCAN/fuzzy morphology, lineage,
   droplet-shape timeseries, genealogy/FRAP proxies, dense-phase MSD/liquidity,
   RNA compaction/information/topology, and DBSCAN/RNA export families.
+- `titan_llps_paper.cpp`: opt-in `-llps-paper` Martini protein/RNA paper
+  bundle, using DBSCAN dense labels for phase partitioning, radial/slab
+  profiles, composition time series, convergence summaries, and log audit.
 - `titan_llps_stats.*`: shared LLPS percentile, fitting, entropy, binning,
   CSV-formatting, and small packing helpers.
 
@@ -248,7 +253,9 @@ Interpretation:
   `TitanLLPS`, while richer morphology/dynamics/RNA exports complete through
   `TitanLLPSCluster` finalize/export work after streaming.
   Detailed chain/RNA traces are streamed when possible; DBSCAN shape output is
-  written as `llps_droplet_shape_timeseries.csv`.
+  written as `llps_droplet_shape_timeseries.csv`. The `-llps-paper` path is
+  opt-in and should keep default `-llps` output unchanged; it reuses DBSCAN
+  dense labels instead of rescanning contacts globally.
 - `pca` can consume DHAM frame weights if DHAM converges.
 
 ================================================================================
@@ -364,6 +371,238 @@ If you add a new module:
 - Prefer streaming accumulation over full-frame storage.
 - Reuse existing caches if they already contain the needed reduced data.
 - Avoid a second full-trajectory copy unless there is a strong reason.
+- PBE is intentionally a frame analyzer, not a standalone one-shot tool. Keep
+  `pbe_energy.csv` long-table output and memory preflight behavior intact when
+  extending nonlinear, Gaussian, or focusing variants.
+- PBE Phase 2 exposes VDW/SAS surface selection with `-pbe-surface`; default
+  behavior remains `vdw`, and `-pbe-probe` only changes the SAS radius inflate.
+- PBE Surface Phase adds `-pbe-surface=ses`: it marks probe-excluded voxels
+  and then flood-fills solvent-accessible grid points from the outer boundary.
+  The final solute dielectric is the complement of accessible solvent, so
+  buried probe-inaccessible cavities are handled without changing the solver.
+- PBE Accuracy Parity Phase 3 adds `-pbe-surface=delphi-ses`,
+  `-pbe-ion-access=stern`, `-pbe-ion-radius`, and `-pbe-map=ion`. The
+  DelPhi-like SES mode keeps the SES flood-fill center classification but
+  refines dielectric midpoint faces with 2x2 samples. Stern ion accessibility
+  uses a separate ion probe so salt screening is applied only in
+  ion-accessible solvent; the default remains `-pbe-surface=vdw` with
+  `-pbe-ion-access=dielectric` for legacy regression stability.
+- PBE nonlinear parity adds `-pbe-model=linear|nonlinear`. Keep the default
+  `linear`; nonlinear currently seeds from the selected linear off/focus/vcycle
+  solve and then runs damped Picard/SOR or the newer damped Newton path on the
+  final fine grid. Salt-free nonlinear requests intentionally fall back to the
+  linear effective solve with `nl_status=linearized_no_salt`; vacuum endpoints
+  in `-pbe-dgsolv` and `-pbsa` remain linear/no-salt. Public nonlinear knobs
+  include `-pbe-nl-solver=picard|newton`, `-pbe-nl-inner=auto|sor|vcycle`,
+  `-pbe-nl-multigrid=off|fas`, `-pbe-nl-max-iter`,
+  `-pbe-nl-inner-iter`, `-pbe-nl-stagnation`, `-pbe-nl-block`,
+  `-pbe-nl-dphi`, `-pbe-nl-relax`, and `-pbe-nl-clip`.
+- PBE Accuracy Parity Phase 4 adds discretization-lock diagnostics and knobs:
+  `-pbe-boundary=coulombic|dipolar|zero`,
+  `-pbe-charge-assignment=trilinear|delphi`, `-pbe-surface=delphi-vdw`,
+  `-pbe-nl-continuation`, `-pbe-nl-line-search`, and `-pbe-nl-residual`.
+  Keep the defaults legacy-compatible (`coulombic`, `trilinear`, `vdw`,
+  `linear`). `pbe_energy.csv` appends grid origin/center/spacing, charge
+  conservation/moment, boundary RMS/max, linear residual, nonlinear residual,
+  continuation steps, and backtracks for DelPhi parity debugging.
+- Hidden DelPhi PQR grids with `-pbe-test-grid-size` use coordinate-extrema
+  auto-centering to match DelPhi `acenter=NA`; public adaptive grids still use
+  radius-expanded bounds. `delphi-vdw` uses DelPhi-compatible discrete media
+  indices at positive x/y/z half-grid faces: each midpoint is classified by VDW
+  atom radius, then the PQR parity path applies the deterministic VDW-to-MS
+  midpoint-media remap controlled by hidden `-pbe-test-vdwms-remap=auto|off`.
+  For PQR parity, VDW media assignment uses the explicit radius read from
+  PQR/SIZ and does not apply small-atom floors; Bondi floors remain a fallback
+  for non-PQR `delphi-bondi` paths without explicit parity radii.
+- `pbe_energy.csv` appends DelPhi-parity corrected RF diagnostics:
+  solvent/vacuum phase RF energies, atom/grid corrected RF energies, the active
+  reaction-energy source, and analytic Coulomb energy.
+- PBE Accuracy Parity Roadmap adds opt-in Gaussian/RPB/focus-probe plumbing:
+  `-pbe-biomodel=pbe|rpbe`, `-pbe-dielectric=two-dielectric|gaussian`,
+  `-pbe-surface=gaussian|gaussian-cutoff`, Gaussian density knobs, and
+  `-pbe-radius-convention=auto|native|delphi-bondi`. Defaults remain legacy.
+  `-pbe-focus=delphi` is a parity/test path that writes `pbe_probe_sites.csv`
+  when probe residue/site fixture options are supplied.
+- PBE Accuracy Parity Phase 5 moves Newton from a diagonal-only update to a
+  full-stencil Jacobian correction solved by SOR smoothing. The CSV appends
+  `newton_inner_iterations`, residual-before/after, step norm, line-search
+  status, and Gaussian density/epsilon audit columns. Barnase `nwt` is still a
+  strict-parity diagnostic target; do not mark it OK unless `nl_status=ok` and
+  the residual/DelPhi tolerance gates pass.
+- PBE Accuracy Parity Phase 5b separates outer Newton steps
+  (`-pbe-nl-max-iter`) from correction sweeps (`-pbe-nl-inner-iter`) and adds
+  `-pbe-nl-stagnation`. The correction solver now reports residual RMS/max for
+  `J delta = residual`, Jacobian diagonal min/max, accepted lambda, rejected
+  line-search steps, active nonlinear points, and `newton_stop_reason`.
+  Expected not-converged statuses include explicit suffixes such as
+  `nonlinear_not_converged_stagnated` and
+  `nonlinear_not_converged_line_search_floor`.
+- PBE Accuracy Parity Phase 5c makes `-pbe-nl-inner=vcycle` a real Newton
+  correction solver for `J delta = residual`. The inner V-cycle uses zero
+  correction boundary values, the same epsilon off-diagonal stencil, and a
+  Jacobian diagonal of `eps_sum + screen*cosh(alpha*phi)`. CSV/summary/log
+  append `newton_inner_levels`, `newton_inner_cycles`,
+  `newton_inner_residual_before/after`, and `newton_inner_effective`. Keep
+  Gaussian/RPB/focus probes report-only until barnase `nwt` passes strict.
+- PBE Accuracy Parity Phase 5d adds hidden PQR-only root-cause diagnostics:
+  `-pbe-parity-dump=off|summary|points|all`, `-pbe-test-nl-source`,
+  `-pbe-test-newton-derivative`, and `-pbe-test-energy-convention`. These are
+  valid only with `-pbe-test-pqr`; do not expose them as production workflow.
+  Phase 5e makes `-pbe-test-nl-source=delphi-dimensionless` a full solve-units
+  convention, not a source-only toggle: nonlinear solves use
+  `psi=alpha*phi`, an alpha-scaled RHS, `sinh(psi)`, and convert back to
+  physical `phi` before interpolation, map output, and reaction-energy
+  selection. Without external DelPhi stage TSV evidence, keep this as a hidden
+  parity/debug path rather than changing public nonlinear defaults.
+  Phase 5f keeps that decision and makes stage-oracle TSV comparison the
+  acceptance boundary: `pbe_delphi_reference_smoke.ps1 -StageTsv <file>` checks
+  grid/charge, epsilon/screen, boundary, linear residual, nonlinear source,
+  Newton correction/derivative, and energy fields in order, reporting the first
+  failing stage before any final energy verdict.
+  `pbe_parity_stage.csv` records grid/charge/epsilon/screen/source/residual,
+  Newton correction, derivative, and reaction-energy convention fields.
+  `pbe_parity_points.csv` is only for `points|all` and dumps top residual
+  points plus deterministic sample points.
+- PBE Accuracy Parity Phase 5g keeps nonlinear/Newton work paused until the
+  linear barnase mismatch is explained. When `-pbe-test-pqr` points at barnase
+  and `-pbe-parity-dump` is enabled, TITAN now writes hidden forensic CSVs:
+  `pbe_barnase_forensic_inputs.csv`, `pbe_barnase_surface_audit.csv`,
+  `pbe_barnase_operator_audit.csv`, and `pbe_atom_phi_audit.csv`. The new
+  `test/pbe_barnase_discretization_matrix.ps1` varies charge assignment,
+  surface, radius convention, and boundary mode for salt 0/0.15/2.0 as a
+  report-only root-cause matrix; do not treat mismatch as a failing gate
+  without a real DelPhi stage TSV oracle.
+- PBE Accuracy Parity Phase 5h adds the hidden PQR-only
+  `-pbe-test-energy-convention=delphi-iscm` path for DelPhi two-dielectric
+  induced-surface-charge reaction-field energy. It records ISCM boundary
+  counts, induced-charge norms, water/vacuum/corrected RF energies in
+  `pbe_energy.csv`, `pbe_parity_stage.csv`, and barnase operator audit output;
+  `-pbe-parity-dump=all` also writes `pbe_iscm_surface_charge_samples.csv`.
+  The selected corrected RF follows DelPhi's VDW water-phase ISCM convention;
+  vacuum grid RF is retained as an audit field rather than subtracted in that
+  hidden mode.
+  Keep this as a DelPhi oracle/parity convention, not the PBSA/native default.
+  The companion scripts are `test/pbe_iscm_energy_smoke.ps1` and
+  `test/pbe_barnase_field_oracle_smoke.ps1`.
+- PBE Accuracy Parity Phase 5i keeps nonlinear/Gaussian/FAS/focus paused and
+  adds hidden barnase field-oracle tooling. `-pbe-parity-map-dump=off|samples|full`
+  is valid only with `-pbe-test-pqr`; `samples` writes
+  `pbe_field_samples.csv`, `pbe_boundary_samples.csv`, and
+  `pbe_charge_grid_audit.csv`. The test-only replay knobs
+  `-pbe-test-charge-grid=native|oracle`, `-pbe-test-surface-map=native|oracle`,
+  `-pbe-test-midpoint-epsilon=native|oracle`, and
+  `-pbe-test-boundary-map=native|oracle` read `pbe_oracle_*.csv` files from the
+  run directory and isolate charge-grid, surface, midpoint-epsilon, and
+  boundary-map drift one stage at a time. Do not expose these as production
+  PBE/PBSA behavior. The companion scripts are
+  `test/pbe_barnase_map_oracle_smoke.ps1` and
+  `test/pbe_barnase_stage_replay_smoke.ps1`.
+- PBE Accuracy Parity Phase 5j adds `test/pbe_delphi_export_maps.ps1`, which
+  calls the local `.codex_tmp/pyDelPhi` checkout as an external oracle for
+  barnase linear salt 0/0.15/2.0 and writes optional oracle CSVs under
+  `test/tmp`. Phase 5k hardens that extractor: pyDelPhi VDW `surfmap` is
+  normalized as `1=solvent, 0=solute`, the replayable
+  `pbe_oracle_surface_map.csv` is a sparse list of `inside=1` solute rows, and
+  sampled boundary data is written as `pbe_oracle_boundary_samples.csv` rather
+  than being advertised as a complete replay map. If pyDelPhi cannot expose the
+  needed maps or its dependencies are unavailable, the extractor writes a
+  report-only CSV instead of fabricating golden data.
+  Phase 5l switches `-pbe-surface=delphi-vdw` from the old fractional/harmonic
+  face approximation to DelPhi-style discrete positive-face midpoint epsilon.
+  `test/pbe_delphi_export_maps.ps1` writes
+  `pbe_oracle_midpoint_epsilon_samples.csv` by default and a full replayable
+  `pbe_oracle_midpoint_epsilon.csv` for one salt, default 0.15 M, with
+  `-FullMidpointEpsilon` and optional `-FullMidpointSalt`; stage replay can
+  then run `-pbe-test-midpoint-epsilon=oracle`.
+  Phase 5m locks radius/media assignment: barnase forensic output now includes
+  `pbe_barnase_radius_media_audit.csv` plus per-axis midpoint face counts in
+  `pbe_barnase_surface_audit.csv`. The DelPhi PDB+CRG+SIZ test adapter strips
+  inline `!`/`#` comments before taking SIZ radii, matching pyDelPhi rows such
+  as `HG SER 0.6000 ! ... 0.0001`; without this, generated PQR files assign
+  tiny placeholder H radii and poison midpoint-epsilon comparisons. Phase 5n
+  adds a clean-room VDW-to-MS remap layer and VDWMS audit fields
+  (`vdwms_enabled`, boundary counts, exposed-point count, and midpoint RMS).
+  Phase 5o adds `test/pbe_midpoint_oracle_roundtrip_smoke.ps1` and the
+  `midpoint_eps_sum_*` audit fields, separating oracle layout mistakes from
+  native remap mismatch. The full pyDelPhi midpoint replay now roundtrips, but
+  native `delphi-vdw` still has a `midpoint_epsilon` mismatch on barnase, so
+  keep barnase strict parity disabled until the VDW-to-MS remap itself matches
+  the oracle face counts.
+  `test/pbe_barnase_field_oracle_smoke.ps1 -OracleRoot <dir>` now compares
+  normalized surface/epsilon, boundary, water/vacuum/reaction phi, ISCM
+  samples, and writes `pbe_barnase_root_cause_report.csv`.
+  `test/pbe_barnase_timing_compare.ps1` is a report-only TITAN vs pyDelPhi
+  timing harness for barnase linear salt 0/0.15/2.0. Keep these oracle CSVs
+  hidden PQR parity inputs only. Arg files use `-flag=value`; direct CLI
+  invocations use `-flag value`.
+- The strict DelPhi scripts are diagnostic gates, not a reason to loosen
+  tolerances. `test/pbe_delphi_strict_linear_smoke.ps1` and
+  `test/pbe_barnase_nonlinear_smoke.ps1` can run non-strict to emit reports,
+  and `-Strict` turns those reports into failing gates once the linear
+  discretization is locked.
+- PBE Accuracy Parity Phase starts with nested-grid focusing via
+  `-pbe-focus=auto`, `-pbe-multigrid=focus`, `-pbe-focus-levels`, and
+  `-pbe-focus-margin`. This is a coarse-to-fine focusing path that interpolates
+  the previous level potential into the next level boundary/initial guess.
+- PBE Accuracy Parity Phase 2 adds `-pbe-multigrid=vcycle` plus
+  `-pbe-mg-levels`, `-pbe-mg-pre`, `-pbe-mg-post`, and
+  `-pbe-mg-coarse-iter`. The V-cycle path builds a geometric cuboidal
+  hierarchy, runs residual restriction/correction prolongation, then finishes
+  with the same fine-grid SOR convergence polish used by the baseline solver.
+  Keep `-pbe-multigrid=auto` mapped to nested focusing unless the public CLI
+  contract is deliberately changed.
+- PBE Phase 3 regression lives in `test/pbe_regression.ps1` with PQR fixtures
+  under `test/pbe_inputs_local/`. The hidden `-pbe-test-pqr` adapter is for
+  this harness only; do not document it as a public PBE input path.
+- PBE Accuracy Parity Phase 3 adds `test/pbe_stern_smoke.ps1`,
+  `test/pbe_delphi_surface_smoke.ps1`, and
+  `test/pbe_delphi_parity_matrix.ps1`. The matrix writes internal parity
+  results and treats external DelPhi/pyDelPhi reference energies as optional
+  `delphi_E_rxn_kJmol` columns when available.
+- The real DelPhi/pyDelPhi golden harness is
+  `test/pbe_delphi_generate_golden.ps1` plus
+  `test/pbe_delphi_reference_smoke.ps1`. It reads the external local checkout
+  under `.codex_tmp/pyDelPhi` or a DelPhi TSV and writes TITAN golden CSV only
+  when called with `-UpdateReference`; do not vendor or copy pyDelPhi source
+  into TITAN. Hidden parity-only knobs `-pbe-test-grid-size` and
+  `-pbe-test-center` are valid only with `-pbe-test-pqr` for reproducing
+  DelPhi scale/grid/center settings. Barnase root-cause reports now include
+  `test/pbe_barnase_linear_stage_smoke.ps1`,
+  `test/pbe_barnase_energy_convention_smoke.ps1`,
+  `test/pbe_barnase_forensic_smoke.ps1`,
+  `test/pbe_barnase_atom_phi_smoke.ps1`,
+  `test/pbe_barnase_discretization_matrix.ps1`,
+  `test/pbe_barnase_parity_stage_report.ps1`,
+  `test/pbe_delphi_export_maps.ps1`,
+  `test/pbe_nonlinear_source_convention_smoke.ps1`, and
+  `test/pbe_nonlinear_units_matrix_smoke.ps1`, and
+  `test/pbe_newton_derivative_smoke.ps1`.
+- PBE `-pbe-dgsolv` is opt-in because it runs six solves per frame for
+  two-molecule systems: complex, mol1, and mol2 each get solvent and vacuum
+  solves. Keep `deltaG_solv` and component energies in both kJ/mol and
+  kcal/mol when changing this path.
+- `-pbsa` is the public MM/PBSA wrapper on top of PBE. It implies `-pbe` and
+  `-pbe-dgsolv`, uses the native force-field elec/vdw provider plus
+  Shrake-Rupley-style SASA and optional interaction entropy. PBSA IE uses the
+  shared Duan-Zhang interaction entropy core also used by the `-entropy`
+  module, then adds PBSA-specific ESS/block/filter diagnostics. It writes
+  `mm_pbsa_energy.csv` plus `mm_pbsa_summary.dat` in both kJ/mol and kcal/mol.
+  `-pbsa-decomp=residue` writes additive component residue decomposition from
+  the existing six endpoint solves; it is not residue deletion/mutation PBSA.
+  PBSA also writes `mm_pbsa_by_trajectory.csv`,
+  `mm_pbsa_ie_diagnostics.csv`, and `mm_pbsa_performance.dat` unless disabled
+  with `-pbsa-perf=off`.
+- GBSA and PBSA share the `titan_sasa.*` Shrake-Rupley SASA/SA nonpolar core
+  so the same probe, 96-point sphere, and gamma conversion drive both
+  workflows. Keep residue decomposition in the caller: GBSA injects per-atom
+  nonpolar deltas into its existing residue aggregator, while PBSA groups the
+  shared per-atom SASA deltas by residue alongside PB reaction-field terms.
+- PBE still requires charges. Zero-radius polar hydrogens from supported force
+  fields get a small Bondi-style surface radius fallback so AMBER-style
+  zero-LJ hydrogens do not block PBSA.
+- TITAN arg files use `-flag=value`; direct CLI invocations use
+  `-flag value`. Keep examples in that convention, especially for decimal PBE
+  values.
 
 ================================================================================
 8. Build and toolchain constraints
@@ -595,6 +834,10 @@ If you change LLPS behavior:
   filename, or flag wording changes
 - keep LLPS run metadata in `log.txt` through `TitanUI`; do not add a manifest
   sidecar unless the user explicitly asks for one
+- for `-llps-paper`, keep the single-run bundle opt-in, emit `LLPS Paper Output
+  Audit` in `log.txt`, and keep multi-condition comparisons in
+  `plot_llps_paper.py --ensemble-manifest` rather than running multiple
+  trajectories in the engine
 - benchmark both `-llps-kernel=scalar` and `-llps-kernel=avx2` sensitive paths
   when touching contact kernels, density accumulation, or gyration reuse
 - recheck no-RNA, `-nocal`, and protein-only fallback paths when touching
@@ -677,8 +920,9 @@ Current user-facing stack additions:
   `-llps-density`, `-llps-kernel`, DBSCAN/fuzzy droplet morphology, lineage and
   fusion/fission tracking, dense-phase MSD/liquidity, protein-RNA contact
   turnover, sticker hotspot ranking, droplet-shape/genealogy summaries,
-  FRAP-like recovery proxies, detailed performance reporting, and `log.txt`
-  run-context/output audit sections instead of a separate manifest file.
+  FRAP-like recovery proxies, opt-in `-llps-paper` manuscript summaries,
+  detailed performance reporting, and `log.txt` run-context/output audit
+  sections instead of a separate manifest file.
 - RNA-aware LLPS analysis now has three higher-level layers behind
   `titan_llps_cluster.*`: compaction/binding coupling, information-style state
   metrics, and topology outputs (bridge/clamp/loop closure/local competition),
@@ -754,3 +998,5 @@ If you need one sentence per layer:
 - `manual.txt` and `help.cpp`: what users think the program does
 
 Keep those layers in sync.
+
+** C:\Users\ADMIN\OneDrive\Documents\antigravity\tools use rg in this folder

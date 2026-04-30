@@ -92,6 +92,101 @@ struct LLPSClusterLineageResult {
   uint64_t fission_events{0};
 };
 
+struct LLPSPaperConfig {
+  bool enabled{false};
+  double profile_bin_nm{0.2};
+  int requested_blocks{0}; // 0 = auto
+  std::string geometry{"auto"};
+};
+
+class LLPSPaperAccumulator {
+public:
+  void configure(const LLPSPaperConfig &config);
+  bool enabled() const { return config_.enabled; }
+  void process_frame(double time_ps, int frame_idx,
+                     const std::vector<LLPSNode> &nodes,
+                     const std::vector<bool> &is_dense,
+                     int giant_cluster_id, const box &Box);
+  void export_outputs(const info &info_output, std::fstream &log) const;
+
+public:
+  struct FrameRow {
+    double time_ns{0.0};
+    int frame{0};
+    std::string geometry{"none"};
+    int total_protein_nodes{0};
+    int total_rna_nodes{0};
+    int dense_protein_nodes{0};
+    int dense_rna_nodes{0};
+    int dilute_protein_nodes{0};
+    int dilute_rna_nodes{0};
+    double dense_fraction{0.0};
+    double dense_volume_nm3{0.0};
+    double dilute_volume_nm3{0.0};
+    double box_volume_nm3{0.0};
+    double dense_protein_conc{0.0};
+    double dilute_protein_conc{0.0};
+    double dense_rna_conc{0.0};
+    double dilute_rna_conc{0.0};
+    double protein_partition{0.0};
+    double rna_partition{0.0};
+    double protein_transfer_proxy{0.0};
+    double rna_transfer_proxy{0.0};
+    double dense_protein_rna_ratio{0.0};
+    double rna_enrichment{0.0};
+    double core_fraction{0.0};
+    double interface_fraction{0.0};
+    double dilute_fraction{0.0};
+    double radius_nm{0.0};
+    double interface_width_nm{0.0};
+  };
+
+  struct ProfileBin {
+    uint64_t samples{0};
+    double volume_nm3_sum{0.0};
+    double protein_count{0.0};
+    double rna_count{0.0};
+    double dense_protein_count{0.0};
+    double dense_rna_count{0.0};
+    double sticker_count{0.0};
+    double water_count{0.0};
+    double ion_count{0.0};
+  };
+
+  struct ContactFrameRow {
+    double time_ns{0.0};
+    int frame{0};
+    std::string metric{"cluster_comembership_proxy"};
+    uint64_t pp{0};
+    uint64_t prna{0};
+    uint64_t rr{0};
+    uint64_t pp_core{0};
+    uint64_t prna_core{0};
+    uint64_t rr_core{0};
+    uint64_t pp_interface{0};
+    uint64_t prna_interface{0};
+    uint64_t rr_interface{0};
+  };
+
+  struct RunningScalar {
+    uint64_t n{0};
+    double sum{0.0};
+    double sum_sq{0.0};
+    void add(double v);
+    double mean() const;
+    double sem() const;
+  };
+
+private:
+  LLPSPaperConfig config_;
+  std::vector<FrameRow> frames_;
+  std::vector<ContactFrameRow> contact_rows_;
+  std::vector<ProfileBin> profile_bins_;
+  uint64_t skipped_no_dense_{0};
+  uint64_t skipped_bad_box_{0};
+  std::string observed_geometry_{"none"};
+};
+
 class TitanLLPSCluster {
 public:
   TitanLLPSCluster() = default;
@@ -128,6 +223,7 @@ public:
       const EnergyDecompositionProvider *energy_provider, bool detailed,
       const info &info_output);
   void set_kernel_mode(const std::string &mode) { kernel_mode_ = mode; }
+  void configure_paper(const LLPSPaperConfig &config);
 
   void process_frame(TitanExecutor &executor, const MOL &pro,
                      const std::vector<mol_info> &pro_info, const MOL &lig,
@@ -140,6 +236,7 @@ public:
                        const LLPSContactDynamicsResult *contact_result) const;
   void export_performance_report(const info &info_output,
                                  const TitanExecutor &executor) const;
+  void export_paper_outputs(const info &info_output, std::fstream &log) const;
 
   const LLPSChainDynamicsResult &chain_dynamics() const {
     return chain_dynamics_result_;
@@ -560,6 +657,7 @@ private:
   LLPSChainDynamicsResult chain_dynamics_result_;
   LLPSClusterLineageResult cluster_lineage_result_;
   LLPSDenseMSDResult dense_msd_result_;
+  LLPSPaperAccumulator paper_accumulator_;
   std::vector<RNACompactionSample> rna_compaction_samples_;
   std::unordered_map<int, RNAChainCompactionStats> rna_chain_compaction_stats_;
   std::unordered_map<int, RNABindingBinStats> rna_binding_bin_stats_;

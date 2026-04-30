@@ -724,6 +724,33 @@ public:
   string get_llps_chain_contact_trace_filename() const {
     return "llps_chain_contact_trace.csv";
   }
+  string get_llps_phase_partition_summary_filename() const {
+    return "llps_phase_partition_summary.dat";
+  }
+  string get_llps_radial_profiles_filename() const {
+    return "llps_radial_profiles.csv";
+  }
+  string get_llps_slab_profiles_filename() const {
+    return "llps_slab_profiles.csv";
+  }
+  string get_llps_composition_timeseries_filename() const {
+    return "llps_composition_timeseries.csv";
+  }
+  string get_llps_contact_taxonomy_filename() const {
+    return "llps_contact_taxonomy.csv";
+  }
+  string get_llps_contact_taxonomy_summary_filename() const {
+    return "llps_contact_taxonomy_summary.dat";
+  }
+  string get_llps_convergence_report_filename() const {
+    return "llps_convergence_report.dat";
+  }
+  string get_llps_paper_summary_md_filename() const {
+    return "llps_paper_summary.md";
+  }
+  string get_llps_paper_summary_json_filename() const {
+    return "llps_paper_summary.json";
+  }
   // IFP output file
   string get_ifp_filename() const { return "ifp_occupancy.csv"; }
   string get_ifp_rna_annotations_filename() const {

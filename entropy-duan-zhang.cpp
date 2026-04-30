@@ -1,5 +1,6 @@
 #include "arguments.h"
 #include "folder.h"
+#include "titan_interaction_entropy.h"
 #include <cmath>
 #include <fstream>
 #include <iomanip>
@@ -13,43 +14,20 @@ double entropy_duan_zhang(std::span<const double> E_e,
   if (Arguments.entropy == false || E_e.empty())
     return 1;
 
-  double average_total_e{};
-  vector<double> E_tot(E_e.size());
-  for (size_t i{}; i < E_e.size(); ++i) {
-    E_tot[i] = E_e[i] + E_v[i];
-    average_total_e += E_tot[i];
-  }
-  average_total_e /= E_e.size();
-
-  double sigma{};
-  for (size_t i{}; i < E_e.size(); ++i)
-    sigma += square(E_tot[i] - average_total_e);
-  sigma = sqrt(sigma / E_e.size());
-
-  double exp_beta_deltaE{};
-  double const e_con{1.38064 * 0.3 * 6.02214 / Arguments.eu_par};
-  vector<double> energies;
-  for (size_t i{}; i < E_e.size(); ++i) {
-    if (fabs(E_tot[i] - average_total_e) <= 2. * sigma) {
-      energies.emplace_back((E_tot[i] - average_total_e) / e_con);
-    }
-  }
-
-  if (energies.empty()) {
+  const double e_con{1.38064 * 0.3 * 6.02214 / Arguments.eu_par};
+  TitanEntropy::InteractionEntropyOptions options;
+  options.rt_energy = e_con;
+  options.filter_sigma = 2.0;
+  options.min_samples = 1;
+  const TitanEntropy::InteractionEntropyResult entropy =
+      TitanEntropy::compute_interaction_entropy(E_e, E_v, options);
+  if (entropy.status == "no_filtered_samples") {
     return 0.0; // Safe fallback to prevent Segfault if no frames satisfy the
                 // sigma filter
   }
-  double max_e{energies[0]};
-  for (auto &e : energies)
-    if (e > max_e)
-      max_e = e;
-
-  double log_e{};
-  for (auto &e : energies)
-    log_e += exp(e - max_e);
-  log_e = max_e + log(log_e);
-
-  return -log(energies.size()) + log_e;
+  if (entropy.status != "ok")
+    return 0.0;
+  return entropy.dimensionless;
 }
 
 int print_average_entropy_duan_zhange_time(vector<double> &E_e,

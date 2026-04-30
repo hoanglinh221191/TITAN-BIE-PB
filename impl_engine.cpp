@@ -24,6 +24,7 @@
 #include "titan_llps.h"
 #include "titan_llps_cluster.h"
 #include "titan_msm.h"
+#include "titan_pbe.h"
 #include "titan_executor.h"
 #include "titan_awh_ifp.h"
 #include "titan_ifp.h"
@@ -650,6 +651,33 @@ int engine(arguments &Arguments) {
     TitanUI::log_kv(log, "Salt Concentration",
                     format_double(Arguments.saltcon) + " M");
   }
+  if (Arguments.pbe.flag_pbe) {
+    TitanUI::log_section(log, "PBE CONFIGURATION");
+    TitanUI::log_kv(log, "Model", "linear PB / two-dielectric");
+    TitanUI::log_kv(log, "Surface", Arguments.pbe.surface);
+    TitanUI::log_kv(log, "Probe Radius",
+                    format_double(Arguments.pbe.probe_radius) + " A");
+    if (!Arguments.pbe.test_pqr.empty())
+      TitanUI::log_kv(log, "Test PQR Adapter", Arguments.pbe.test_pqr);
+    TitanUI::log_kv(log, "Scale", format_double(Arguments.pbe.scale) + " pt/A");
+    TitanUI::log_kv(log, "Margin", format_double(Arguments.pbe.margin) + " A");
+    TitanUI::log_kv(log, "Gridbox", Arguments.pbe.gridbox);
+    TitanUI::log_kv(log, "Internal Dielectric",
+                    format_double(Arguments.pbe.int_diel));
+    TitanUI::log_kv(log, "External Dielectric",
+                    format_double(Arguments.pbe.ext_diel));
+    TitanUI::log_kv(log, "Salt Concentration",
+                    format_double(Arguments.pbe.salt) + " M");
+    TitanUI::log_kv(log, "DeltaG Solv",
+                    Arguments.pbe.dgsolv ? "enabled (complex/mol1/mol2)"
+                                         : "off");
+    TitanUI::log_kv(log, "MM/PBSA",
+                    Arguments.pbe.pbsa ? "enabled" : "off");
+    TitanUI::log_kv(log, "Kernel Effective",
+                    "scalar-threaded v1 (AVX2 reserved for later hot paths)");
+    TitanUI::log_kv(log, "Map Output",
+                    Arguments.pbe.map + " / " + Arguments.pbe.map_frames);
+  }
 
   const bool need_tica_projection_cache =
       Arguments.msm.flag_msm || Arguments.dham.flag_dham ||
@@ -657,6 +685,10 @@ int engine(arguments &Arguments) {
       (Arguments.zts.flag_zts && Arguments.zts.zts_domain == "tica");
 
   std::string active_modules;
+  if (Arguments.pbe.flag_pbe)
+    append_module_label(active_modules, "PBE");
+  if (Arguments.pbe.pbsa)
+    append_module_label(active_modules, "MM/PBSA");
   if (Arguments.flag_cas)
     append_module_label(active_modules, "CAS");
   if (Arguments.dssp.flag_dssp &&
@@ -818,6 +850,8 @@ int engine(arguments &Arguments) {
   std::unique_ptr<TitanUMAP> umap_analyzer;
   std::unique_ptr<TitanLLPS> llps_analyzer;
   std::unique_ptr<TitanGIST> gist_analyzer;
+  TitanPBE::Analyzer pbe_analyzer;
+  EnergyDecompositionProvider pbe_energy_provider;
 
   dssp_mol1_analyzer.configure(Arguments.dssp);
   dssp_mol2_analyzer.configure(Arguments.dssp);
@@ -826,6 +860,7 @@ int engine(arguments &Arguments) {
   sq_analyzer.configure(Arguments.sq);
   rg_analyzer.configure(Arguments.rg);
   rms_analyzer.configure(Arguments.rms);
+  pbe_analyzer.configure(Arguments);
 
   double time_new_emap{};
   std::chrono::milliseconds time_cal{}, time_emap{}, time_fmap{},
@@ -833,7 +868,7 @@ int engine(arguments &Arguments) {
       time_other{}, time_print_ener_res{}, time_print_force{}, time_maxforce{},
       time_new_emap_other{}, time_avg_emap{}, time_contact{},
       time_input_init{}, time_input_stream{},
-      time_cscd{0}, time_water{0}, time_na{0};
+      time_cscd{0}, time_water{0}, time_na{0}, time_pbe{0};
   Multi_MOL pro_in(force_f), lig(force_f), water_traj(force_f);
   bool topo_initialized = false;
   bool charge_initialized = false;
@@ -895,6 +930,7 @@ int engine(arguments &Arguments) {
     const auto time_input_stream_base = time_input_stream;
     const auto time_solve_pbc_base = time_solve_pbc;
     const auto time_llps_base = time_llps;
+    const auto time_pbe_base = time_pbe;
 
     if (!input_line.empty()) {
       if (Arguments.flag_all_folders == false) {
@@ -1095,29 +1131,29 @@ int engine(arguments &Arguments) {
         // Khi dùng common topo cho protein-protein, cả 2 phải dùng cờ 1
         // (chuẩn topology)
         pro_in.take_charge(amine, parameter, pro_in.m_mol[0].size(), 0ull,
-                           force_f, 1);
+                           force_f, 1, &Arguments, &executor, "mol1");
         lig.take_charge(amine, parameter, lig.m_mol[0].size(), 0ull, force_f,
-                        1);
+                        1, &Arguments, &executor, "mol2");
       } else if (topo_is_open && topo_2_is_open) {
         pro_in.take_charge(amine, parameter, pro_in.m_mol[0].size(), 0ull,
-                           force_f, 1);
+                           force_f, 1, &Arguments, &executor, "mol1");
         lig.take_charge(amine, parameter, lig.m_mol[0].size(), 0ull, force_f,
-                        1);
+                        1, &Arguments, &executor, "mol2");
       } else if (topo_is_open && Arguments.flag_topo_1 && !topo_2_is_open) {
         pro_in.take_charge(amine, parameter, pro_in.m_mol[0].size(), 0ull,
-                           force_f, 0);
+                           force_f, 0, &Arguments, &executor, "mol1");
         lig.take_charge(amine, parameter, lig.m_mol[0].size(), 0ull, force_f,
-                        1);
+                        1, &Arguments, &executor, "mol2");
       } else if (!topo_is_open && topo_2_is_open) {
         pro_in.take_charge(amine, parameter, pro_in.m_mol[0].size(), 0ull,
-                           force_f, 1);
+                           force_f, 1, &Arguments, &executor, "mol1");
         lig.take_charge(amine, parameter, lig.m_mol[0].size(), 0ull, force_f,
-                        0);
+                        0, &Arguments, &executor, "mol2");
       } else {
         pro_in.take_charge(amine, parameter, pro_in.m_mol[0].size(), 0ull,
-                           force_f, 0);
+                           force_f, 0, &Arguments, &executor, "mol1");
         lig.take_charge(amine, parameter, lig.m_mol[0].size(), 0ull, force_f,
-                        0);
+                        0, &Arguments, &executor, "mol2");
       }
       charge_initialized = true;
     }
@@ -1829,6 +1865,19 @@ int engine(arguments &Arguments) {
                                                                 : "disabled");
       TitanUI::log_kv(log, "LLPS Energy Correlation",
                       Arguments.llps.llps_energy_correlation);
+      TitanUI::log_kv(log, "LLPS Paper Bundle",
+                      Arguments.llps.llps_paper ? "enabled" : "disabled");
+      if (Arguments.llps.llps_paper) {
+        TitanUI::log_kv(log, "LLPS Paper Profile Bin (nm)",
+                        std::to_string(
+                            Arguments.llps.llps_paper_profile_bin_nm));
+        TitanUI::log_kv(log, "LLPS Paper Blocks",
+                        Arguments.llps.llps_paper_blocks > 0
+                            ? std::to_string(Arguments.llps.llps_paper_blocks)
+                            : "auto");
+        TitanUI::log_kv(log, "LLPS Paper Geometry",
+                        Arguments.llps.llps_paper_geometry);
+      }
       dbscan_llps->configure_rna_compaction(
           Arguments.llps.llps_rna_compaction, Arguments.llps.llps_dynamics,
           Arguments.llps.llps_dynamics_detailed, llps_has_rna,
@@ -1855,11 +1904,29 @@ int engine(arguments &Arguments) {
           llps_has_rna, Arguments.flag_nocal, &llps_energy_provider,
           Arguments.llps.llps_energy_detailed, info_output);
       dbscan_llps->set_kernel_mode(Arguments.llps.llps_kernel);
+      dbscan_llps->configure_paper(
+          {Arguments.llps.llps_paper,
+           Arguments.llps.llps_paper_profile_bin_nm,
+           Arguments.llps.llps_paper_blocks,
+           Arguments.llps.llps_paper_geometry});
       dbscan_llps->configure_trace_outputs(info_output);
       if (Arguments.llps.llps_fuzzy) {
         dbscan_llps->enable_fuzzy(true);
         TitanUI::print_info("[LLPS-Fuzzy] Fuzzy EM refinement enabled.");
       }
+    }
+
+    if (Arguments.pbe.pbsa) {
+      const double pbsa_cutoff_nm = titan_resolve_sg_cutoff_nm(Arguments);
+      pbe_energy_provider.configure(pro_in, lig, CachedData, Arguments,
+                                    pbsa_cutoff_nm, pbsa_cutoff_nm > 0.0);
+      TitanUI::log_kv(log, "MM/PBSA", "enabled");
+      TitanUI::log_kv(log, "MM/PBSA Energy Source",
+                      "PBE deltaG_solv + force-field elec/vdw + SASA IE");
+      TitanUI::log_kv(
+          log, "MM/PBSA Pair Cutoff",
+          pbsa_cutoff_nm > 0.0 ? std::to_string(pbsa_cutoff_nm) + " nm"
+                               : "none");
     }
 
     // --- GIST Water Thermodynamics Initialization ---
@@ -1950,6 +2017,10 @@ int engine(arguments &Arguments) {
 
     std::string resolved_modules;
     std::string skipped_modules;
+    if (pbe_analyzer.enabled())
+      append_module_label(resolved_modules, "PBE");
+    if (Arguments.pbe.pbsa)
+      append_module_label(resolved_modules, "MM/PBSA");
     if (Arguments.flag_cas)
       append_module_label(resolved_modules, "CAS");
     const bool dssp_runtime_enabled =
@@ -2006,6 +2077,10 @@ int engine(arguments &Arguments) {
     }
 
     std::string streaming_modules;
+    if (pbe_analyzer.enabled())
+      append_module_label(streaming_modules, "PBE");
+    if (Arguments.pbe.pbsa)
+      append_module_label(streaming_modules, "MM/PBSA");
     if (Arguments.flag_gbsa)
       append_module_label(streaming_modules, "GBSA");
     if (Arguments.flag_cas)
@@ -2046,6 +2121,11 @@ int engine(arguments &Arguments) {
         active_modules, resolved_modules.empty() ? "None" : resolved_modules,
         skipped_modules, streaming_modules);
 
+    if (pbe_analyzer.enabled()) {
+      pbe_analyzer.begin_trajectory(
+          static_cast<std::size_t>(input_name - Arguments.b_input + 1),
+          progress_source_label(Arguments, name_pro));
+    }
 
     size_t global_frame_counter = 0;
     bool is_streaming = true;
@@ -2187,6 +2267,23 @@ int engine(arguments &Arguments) {
             TitanUI::show_progress_exact(module_name, chunk_snap_idx + 1,
                                          std::max<size_t>(1, chunk_num_snaps),
                                          status_text, streaming_modules);
+          }
+
+          if (pbe_analyzer.enabled()) {
+            auto start_pbe = std::chrono::steady_clock::now();
+            const MOL *pbe_lig_frame =
+                (chunk_snap_idx < lig.m_mol.size()) ? &lig.m_mol[chunk_snap_idx]
+                                                    : nullptr;
+            const Multi_MOL_parameters *pbe_lig_params =
+                pbe_lig_frame ? &lig.parameters : nullptr;
+            pbe_analyzer.consume_frame(
+                pro_in.m_mol[chunk_snap_idx], pro_in.parameters, pbe_lig_frame,
+                pbe_lig_params,
+                static_cast<std::size_t>(progress_traj_id), global_snap_idx,
+                tot_snap_allfiles + global_snap_idx, executor, log,
+                Arguments.pbe.pbsa ? &pbe_energy_provider : nullptr);
+            time_pbe += std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_pbe);
           }
 
           // COM distance between molecules
@@ -2529,6 +2626,24 @@ int engine(arguments &Arguments) {
           TitanUI::show_progress_exact(module_name, chunk_snap_idx + 1,
                                        std::max<size_t>(1, chunk_num_snaps),
                                        status_text, streaming_modules);
+        }
+
+        if (pbe_analyzer.enabled()) {
+          auto start_pbe = std::chrono::steady_clock::now();
+          const size_t pbe_lg_snap = (lig.m_mol.size() > 1) ? chunk_snap_idx : 0;
+          const MOL *pbe_lig_frame =
+              (!lig.m_mol.empty() && pbe_lg_snap < lig.m_mol.size())
+                  ? &lig.m_mol[pbe_lg_snap]
+                  : nullptr;
+          const Multi_MOL_parameters *pbe_lig_params =
+              pbe_lig_frame ? &lig.parameters : nullptr;
+          pbe_analyzer.consume_frame(
+              pro_in.m_mol[chunk_snap_idx], pro_in.parameters, pbe_lig_frame,
+              pbe_lig_params, static_cast<std::size_t>(progress_traj_id),
+              global_snap_idx, tot_snap_allfiles + global_snap_idx, executor,
+              log, Arguments.pbe.pbsa ? &pbe_energy_provider : nullptr);
+          time_pbe += std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - start_pbe);
         }
 
         vector<d_min> dis_min(num_threads);
@@ -3529,6 +3644,23 @@ int engine(arguments &Arguments) {
 
     } // End of outer chunk while loop
 
+    if (pbe_analyzer.enabled() && global_frame_counter == 0 &&
+        !Arguments.flag_xdr && !saved_pro_frame0.empty()) {
+      auto start_pbe = std::chrono::steady_clock::now();
+      const MOL *pbe_lig_frame =
+          saved_lig_frame0.empty() ? nullptr : &saved_lig_frame0.front();
+      const Multi_MOL_parameters *pbe_lig_params =
+          pbe_lig_frame ? &lig.parameters : nullptr;
+      pbe_analyzer.consume_frame(
+          saved_pro_frame0.front(), pro_in.parameters, pbe_lig_frame,
+          pbe_lig_params,
+          static_cast<std::size_t>(input_name - Arguments.b_input + 1), 0,
+          tot_snap_allfiles, executor, log,
+          Arguments.pbe.pbsa ? &pbe_energy_provider : nullptr);
+      time_pbe += std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start_pbe);
+    }
+
     tot_snap_allfiles += global_frame_counter;
 
     // --- IFP post-trajectory export ---
@@ -3551,6 +3683,9 @@ int engine(arguments &Arguments) {
 
     if (Arguments.n_wat >= 0 && !water_traj.m_mol.empty()) {
       water_analyzer.finalize_trajectory();
+    }
+    if (pbe_analyzer.enabled()) {
+      pbe_analyzer.end_trajectory(log);
     }
     dssp_mol1_analyzer.finalize_trajectory();
     dssp_mol2_analyzer.finalize_trajectory();
@@ -3776,6 +3911,8 @@ int engine(arguments &Arguments) {
                       (time_solve_pbc - time_solve_pbc_base).count() / 1000.0);
     TitanUI::log_time(log, "GBSA Calculation",
                       (time_gbsa - time_gbsa_base).count() / 1000.0);
+    TitanUI::log_time(log, "PBE Calculation",
+                      (time_pbe - time_pbe_base).count() / 1000.0);
     TitanUI::log_time(log, "CAS Calculation",
                       (time_cas - time_cas_base).count() / 1000.0);
     TitanUI::log_time(log, "DSSP Analysis",
@@ -3825,6 +3962,7 @@ int engine(arguments &Arguments) {
         input_init_time + input_stream_time +
         (time_solve_pbc - time_solve_pbc_base).count() / 1000.0 +
         (time_gbsa - time_gbsa_base).count() / 1000.0 +
+        (time_pbe - time_pbe_base).count() / 1000.0 +
         (time_cas - time_cas_base).count() / 1000.0 +
         (time_dssp - time_dssp_base).count() / 1000.0 +
         (time_hbk - time_hbk_base).count() / 1000.0 +
@@ -3906,6 +4044,10 @@ int engine(arguments &Arguments) {
 
   TitanUI::print_info(
       "\033[3mFinalizing module calculations and aggregating data...\033[0m");
+
+  if (pbe_analyzer.enabled()) {
+    pbe_analyzer.finalize(log);
+  }
 
   // --- IFP: Aggregate occupancy and export CSV ---
   if (Arguments.ifp.flag_ifp && ifp_analyzer) {
@@ -4366,6 +4508,8 @@ int engine(arguments &Arguments) {
           info_output, log,
           llps_analyzer ? &llps_analyzer->contact_dynamics() : nullptr);
     }
+    if (Arguments.llps.llps_paper)
+      dbscan_llps->export_paper_outputs(info_output, log);
     dbscan_llps->export_performance_report(info_output, executor);
     TitanUI::log_time(log, "LLPS DBSCAN", time_llps_dbscan.count() / 1000.0);
   }

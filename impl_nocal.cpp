@@ -19,13 +19,8 @@ int impl_nocal(Multi_MOL &pro_in, Multi_MOL &lig, fstream &log,
   cout << "Nocal mode is turned on!\n";
   log << "Box type: " << pro_in.m_mol[0].Box.get_box_type() << '\n';
 
-  const size_t worker_count = std::max<size_t>(1, Arguments.nt);
-  executor.parallel_do(worker_count, [&](size_t i) {
-    pro_in.take_charge(amine, parameter,
-                       (i + 1) * pro_in.m_mol[0].size() / worker_count,
-                       i * pro_in.m_mol[0].size() / worker_count,
-                       Arguments.force_f, 0);
-  });
+  pro_in.take_charge(amine, parameter, pro_in.m_mol[0].size(), 0ull,
+                     Arguments.force_f, 0, &Arguments, &executor, "mol1");
 
   log << "Charge: " << pro_in.total_charge() << "e\n";
 

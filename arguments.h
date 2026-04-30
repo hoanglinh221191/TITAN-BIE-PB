@@ -76,6 +76,96 @@ struct GistArgs {
   double gist_cutoff{9.0};
 };
 
+struct PbeArgs {
+  bool flag_pbe{false};
+  double scale{2.0};
+  double margin{15.0};
+  std::string gridbox{"cuboidal"};
+  double int_diel{1.0};
+  double ext_diel{80.0};
+  double salt{0.15};
+  double temp{298.15};
+  std::string model{"linear"};
+  std::string biomodel{"pbe"};
+  std::string dielectric_model{"two-dielectric"};
+  std::string boundary{"coulombic"};
+  std::string charge_assignment{"trilinear"};
+  std::string surface{"vdw"};
+  std::string radius_convention{"auto"};
+  double probe_radius{1.4};
+  std::string ion_access{"dielectric"};
+  double ion_radius{2.0};
+  int max_iter{10000};
+  double rms_tol{1.0e-6};
+  double dphi_tol{1.0e-5};
+  std::string omega{"auto"};
+  double omega_value{0.0};
+  std::size_t max_grid_points{25000000ULL};
+  std::string map{"off"};
+  std::string map_frames{"none"};
+  std::string kernel{"auto"};
+  std::string focus{"off"};
+  std::string multigrid{"off"};
+  int focus_levels{1};
+  double focus_margin{8.0};
+  std::string mg_levels{"auto"};
+  int mg_pre{2};
+  int mg_post{2};
+  int mg_coarse_iter{200};
+  int nl_max_iter{80};
+  int nl_inner_iter{40};
+  int nl_stagnation{8};
+  int nl_block{5};
+  double nl_dphi{1.0e-4};
+  std::string nl_relax{"auto"};
+  double nl_relax_value{0.5};
+  double nl_clip{20.0};
+  std::string nl_continuation{"auto"};
+  std::string nl_line_search{"auto"};
+  double nl_residual{1.0e-5};
+  std::string nl_solver{"picard"};
+  std::string nl_inner{"auto"};
+  std::string nl_multigrid{"off"};
+  double gaussian_exp{2.0};
+  double gaussian_sigma{1.0};
+  double density_cutoff{0.759};
+  std::string surface_cutoff{"auto"};
+  double surface_cutoff_value{0.0};
+  double gap_diel{22.0};
+  std::string probe_residue{};
+  std::string probe_site{};
+  bool focus_center_user{false};
+  double focus_center_x{0.0};
+  double focus_center_y{0.0};
+  double focus_center_z{0.0};
+  bool dgsolv{false};
+  bool pbsa{false};
+  std::string pbsa_components{"auto"};
+  std::string pbsa_decomp{"off"};
+  bool pbsa_ie{true};
+  std::string pbsa_residue_frames{"off"};
+  std::string pbsa_ie_block{"auto"};
+  int pbsa_ie_min_samples{10};
+  double pbsa_ie_filter_sigma{2.0};
+  std::string pbsa_perf{"summary"};
+  std::string test_pqr{};
+  int test_grid_size{0};
+  bool test_center_user{false};
+  double test_center_x{0.0};
+  double test_center_y{0.0};
+  double test_center_z{0.0};
+  std::string parity_dump{"off"};
+  std::string parity_map_dump{"off"};
+  std::string test_charge_grid{"native"};
+  std::string test_surface_map{"native"};
+  std::string test_midpoint_epsilon{"native"};
+  std::string test_vdwms_remap{"auto"};
+  std::string test_boundary_map{"native"};
+  std::string test_nl_source{"titan"};
+  bool test_newton_derivative{false};
+  std::string test_energy_convention{"auto"};
+};
+
 struct DeArgs {
   bool flag_find_pulling_direct{false};
   std::string pull_opt{"de"};
@@ -142,6 +232,10 @@ struct LlpsArgs {
   int llps_rna_info_longrange_bins{16};
   std::string llps_energy_correlation{"auto"};
   bool llps_energy_detailed{false};
+  bool llps_paper{false};
+  double llps_paper_profile_bin_nm{0.2};
+  int llps_paper_blocks{0}; // 0 = auto
+  std::string llps_paper_geometry{"auto"};
   // DBSCAN bead-level morphology parameters (unit: Angstrom)
   double llps_dbscan_eps{15.0};    // epsilon (Å); default 15 Å ≈ 1.5 nm
   int    llps_dbscan_minpts{5};    // min neighbours (self excluded)
@@ -338,6 +432,7 @@ public:
   PbcArgs pbc;
   MsmArgs msm;
   GistArgs gist;
+  PbeArgs pbe;
   DeArgs de;
   LlpsArgs llps;
   IfpArgs ifp;
@@ -414,6 +509,9 @@ public:
   double network_sparse_cut{30.0};
   int network_sparse_k{24};
   std::string network_cache_precision{"auto"};
+  bool fflib_auto{true};
+  std::string fflib_missing{"warn"};
+  std::string fflib_hydrogens{"reference"};
   std::string sg_mode{"auto"};
   std::string sg_cache{"auto"};
   std::string sg_memory_gb_raw{"auto"};

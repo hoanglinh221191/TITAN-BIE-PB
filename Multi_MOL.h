@@ -221,7 +221,10 @@ public:
                              const amino_acid &amine);
   int add_coms(bool flag, size_t snap_index);
   int take_charge(amino_acid &amine, const para &parameter, size_t end,
-                  size_t begin, std::string_view force_f, int flag);
+                  size_t begin, std::string_view force_f, int flag,
+                  const arguments *Arguments = nullptr,
+                  TitanExecutor *executor = nullptr,
+                  std::string_view molecule_label = {});
 
   // Replaced raw pointer with std::span
   int tran_multi_mol(std::span<double> TranVec);

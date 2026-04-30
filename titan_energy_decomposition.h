@@ -53,6 +53,8 @@ public:
   [[nodiscard]] EnergyPairDecomposition
   lig_pair_energy(const MOL &lig_frame, std::size_t lig_pos_a,
                   std::size_t lig_pos_b) const;
+  [[nodiscard]] const mol_info *rec_info(std::size_t pos) const noexcept;
+  [[nodiscard]] const mol_info *lig_info(std::size_t pos) const noexcept;
 
 private:
   [[nodiscard]] EnergyPairDecomposition

@@ -314,6 +314,59 @@ int arguments::parse_arguments(int argc, char **argv) {
     TitanUI::print_error(msg.str());
     exit(EXIT_FAILURE);
   };
+  auto parse_pbe_test_center = [&](std::string value) {
+    value = lowercase_copy(value);
+    if (value == "auto") {
+      pbe.test_center_user = false;
+      return;
+    }
+    std::replace(value.begin(), value.end(), ',', ' ');
+    std::istringstream iss(value);
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    if (!(iss >> x >> y >> z)) {
+      TitanUI::print_error(
+          "PBE: -pbe-test-center must be auto or x,y,z.");
+      exit(EXIT_FAILURE);
+    }
+    std::string trailing;
+    if (iss >> trailing) {
+      TitanUI::print_error(
+          "PBE: -pbe-test-center must contain exactly three coordinates.");
+      exit(EXIT_FAILURE);
+    }
+    pbe.test_center_user = true;
+    pbe.test_center_x = x;
+    pbe.test_center_y = y;
+    pbe.test_center_z = z;
+  };
+  auto parse_pbe_focus_center = [&](std::string value) {
+    value = lowercase_copy(value);
+    if (value == "auto") {
+      pbe.focus_center_user = false;
+      return;
+    }
+    std::replace(value.begin(), value.end(), ',', ' ');
+    std::istringstream iss(value);
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    if (!(iss >> x >> y >> z)) {
+      TitanUI::print_error("PBE: -pbe-focus-center must be auto or x,y,z.");
+      exit(EXIT_FAILURE);
+    }
+    std::string trailing;
+    if (iss >> trailing) {
+      TitanUI::print_error(
+          "PBE: -pbe-focus-center must contain exactly three coordinates.");
+      exit(EXIT_FAILURE);
+    }
+    pbe.focus_center_user = true;
+    pbe.focus_center_x = x;
+    pbe.focus_center_y = y;
+    pbe.focus_center_z = z;
+  };
   auto parse_memory_budget = [&](std::string value) {
     mem_budget_gb_raw = lowercase_copy(value);
     if (mem_budget_gb_raw == "auto") {
@@ -515,6 +568,566 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (consume_option_value(arg, {"-tda-max-points", "--tda-max-points"},
                              common_value, i)) {
       tda_max_points = static_cast<size_t>(stoull(common_value));
+      continue;
+    }
+    if (arg == "-pbe" || arg == "--pbe") {
+      pbe.flag_pbe = true;
+      continue;
+    }
+    if (arg == "-pbsa" || arg == "--pbsa") {
+      if (i + 1 < argc) {
+        std::string next_value = lowercase_copy(string(argv[i + 1]));
+        if (next_value == "1" || next_value == "true" ||
+            next_value == "yes" || next_value == "on" ||
+            next_value == "0" || next_value == "false" ||
+            next_value == "no" || next_value == "off") {
+          pbe.pbsa = parse_bool_equals(next_value, "-pbsa");
+          if (pbe.pbsa) {
+            pbe.flag_pbe = true;
+            pbe.dgsolv = true;
+          }
+          ++i;
+          continue;
+        }
+      }
+      pbe.pbsa = true;
+      pbe.flag_pbe = true;
+      pbe.dgsolv = true;
+      continue;
+    }
+    if (arg.rfind("-pbsa=", 0) == 0 || arg.rfind("--pbsa=", 0) == 0) {
+      pbe.pbsa = parse_bool_equals(arg.substr(arg.find('=') + 1), "-pbsa");
+      if (pbe.pbsa) {
+        pbe.flag_pbe = true;
+        pbe.dgsolv = true;
+      }
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbsa-components", "--pbsa-components"},
+                             common_value, i)) {
+      pbe.pbsa_components = require_choice(
+          common_value, {"auto", "complex,receptor,ligand"},
+          "-pbsa-components");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbsa-decomp", "--pbsa-decomp"},
+                             common_value, i)) {
+      pbe.pbsa_decomp =
+          require_choice(common_value, {"off", "molecule", "residue"},
+                         "-pbsa-decomp");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbsa-ie", "--pbsa-ie"}, common_value,
+                             i)) {
+      pbe.pbsa_ie = parse_bool_equals(common_value, "-pbsa-ie");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbsa-residue-frames",
+                                   "--pbsa-residue-frames"},
+                             common_value, i)) {
+      pbe.pbsa_residue_frames =
+          require_choice(common_value, {"off", "all"},
+                         "-pbsa-residue-frames");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbsa-ie-block", "--pbsa-ie-block"},
+                             common_value, i)) {
+      pbe.pbsa_ie_block = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbsa-ie-min-samples",
+                                   "--pbsa-ie-min-samples"},
+                             common_value, i)) {
+      pbe.pbsa_ie_min_samples = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbsa-ie-filter-sigma",
+                                   "--pbsa-ie-filter-sigma"},
+                             common_value, i)) {
+      pbe.pbsa_ie_filter_sigma = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbsa-perf", "--pbsa-perf"},
+                             common_value, i)) {
+      pbe.pbsa_perf =
+          require_choice(common_value, {"off", "summary", "detail"},
+                         "-pbsa-perf");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-scale", "--pbe-scale"},
+                             common_value, i)) {
+      pbe.scale = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-margin", "--pbe-margin"},
+                             common_value, i)) {
+      pbe.margin = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-gridbox", "--pbe-gridbox"},
+                             common_value, i)) {
+      pbe.gridbox = require_choice(common_value, {"cuboidal", "cubic"},
+                                   "-pbe-gridbox");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-int-diel", "--pbe-int-diel"},
+                             common_value, i)) {
+      pbe.int_diel = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-ext-diel", "--pbe-ext-diel"},
+                             common_value, i)) {
+      pbe.ext_diel = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-salt", "--pbe-salt"},
+                             common_value, i)) {
+      pbe.salt = stod(common_value);
+      saltcon = pbe.salt;
+      salt_concentration = pbe.salt;
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-temp", "--pbe-temp"},
+                             common_value, i)) {
+      pbe.temp = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-model", "--pbe-model"},
+                             common_value, i)) {
+      pbe.model = require_choice(common_value, {"linear", "nonlinear"},
+                                 "-pbe-model");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-biomodel", "--pbe-biomodel"},
+                             common_value, i)) {
+      pbe.biomodel =
+          require_choice(common_value, {"pbe", "rpbe"}, "-pbe-biomodel");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-dielectric", "--pbe-dielectric"},
+                             common_value, i)) {
+      pbe.dielectric_model = require_choice(
+          common_value, {"two-dielectric", "gaussian"}, "-pbe-dielectric");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-boundary", "--pbe-boundary"},
+                             common_value, i)) {
+      pbe.boundary =
+          require_choice(common_value, {"coulombic", "dipolar", "zero"},
+                         "-pbe-boundary");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-charge-assignment",
+                                   "--pbe-charge-assignment"},
+                             common_value, i)) {
+      pbe.charge_assignment =
+          require_choice(common_value, {"trilinear", "delphi", "gaussian"},
+                         "-pbe-charge-assignment");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-surface", "--pbe-surface"},
+                             common_value, i)) {
+      pbe.surface = require_choice(
+          common_value,
+          {"vdw", "sas", "ses", "delphi-ses", "delphi-vdw", "gaussian",
+           "gaussian-cutoff"},
+          "-pbe-surface");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-radius-convention",
+                                   "--pbe-radius-convention"},
+                             common_value, i)) {
+      pbe.radius_convention =
+          require_choice(common_value, {"auto", "native", "delphi-bondi"},
+                         "-pbe-radius-convention");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-probe", "--pbe-probe"},
+                             common_value, i)) {
+      pbe.probe_radius = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-ion-access", "--pbe-ion-access"},
+                             common_value, i)) {
+      pbe.ion_access = require_choice(common_value, {"dielectric", "stern"},
+                                      "-pbe-ion-access");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-ion-radius", "--pbe-ion-radius"},
+                             common_value, i)) {
+      pbe.ion_radius = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-max-iter", "--pbe-max-iter"},
+                             common_value, i)) {
+      pbe.max_iter = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-rms", "--pbe-rms"},
+                             common_value, i)) {
+      pbe.rms_tol = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-dphi", "--pbe-dphi"},
+                             common_value, i)) {
+      pbe.dphi_tol = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-omega", "--pbe-omega"},
+                             common_value, i)) {
+      pbe.omega = lowercase_copy(common_value);
+      if (pbe.omega != "auto")
+        pbe.omega_value = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-max-grid", "--pbe-max-grid"},
+                             common_value, i)) {
+      pbe.max_grid_points = static_cast<std::size_t>(stoull(common_value));
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-map", "--pbe-map"},
+                             common_value, i)) {
+      pbe.map =
+          require_choice(common_value, {"off", "phi", "epsilon", "ion", "all"},
+                         "-pbe-map");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-map-frames", "--pbe-map-frames"},
+                             common_value, i)) {
+      pbe.map_frames =
+          require_choice(common_value, {"none", "first", "last", "all"},
+                         "-pbe-map-frames");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-kernel", "--pbe-kernel"},
+                             common_value, i)) {
+      pbe.kernel = require_choice(common_value, {"auto", "scalar", "avx2"},
+                                  "-pbe-kernel");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-focus", "--pbe-focus"},
+                             common_value, i)) {
+      pbe.focus =
+          require_choice(common_value, {"off", "auto", "delphi"},
+                         "-pbe-focus");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-multigrid", "--pbe-multigrid"},
+                             common_value, i)) {
+      const std::string multigrid =
+          require_choice(common_value, {"off", "focus", "auto", "vcycle"},
+                         "-pbe-multigrid");
+      pbe.multigrid = multigrid;
+      if (multigrid == "focus" || multigrid == "auto")
+        pbe.focus = "auto";
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-focus-levels",
+                                   "--pbe-focus-levels"},
+                             common_value, i)) {
+      pbe.focus_levels = stoi(common_value);
+      if (pbe.focus_levels > 1 && pbe.focus == "off")
+        pbe.focus = "auto";
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-focus-margin",
+                                   "--pbe-focus-margin"},
+                             common_value, i)) {
+      pbe.focus_margin = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-mg-levels", "--pbe-mg-levels"},
+                             common_value, i)) {
+      pbe.mg_levels = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-mg-pre", "--pbe-mg-pre"},
+                             common_value, i)) {
+      pbe.mg_pre = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-mg-post", "--pbe-mg-post"},
+                             common_value, i)) {
+      pbe.mg_post = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-mg-coarse-iter",
+                                   "--pbe-mg-coarse-iter"},
+                             common_value, i)) {
+      pbe.mg_coarse_iter = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nl-max-iter",
+                                   "--pbe-nl-max-iter"},
+                             common_value, i)) {
+      pbe.nl_max_iter = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nl-inner-iter",
+                                   "--pbe-nl-inner-iter"},
+                             common_value, i)) {
+      pbe.nl_inner_iter = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nl-stagnation",
+                                   "--pbe-nl-stagnation"},
+                             common_value, i)) {
+      pbe.nl_stagnation = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nl-block", "--pbe-nl-block"},
+                             common_value, i)) {
+      pbe.nl_block = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nl-dphi", "--pbe-nl-dphi"},
+                             common_value, i)) {
+      pbe.nl_dphi = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nl-relax", "--pbe-nl-relax"},
+                             common_value, i)) {
+      pbe.nl_relax = lowercase_copy(common_value);
+      if (pbe.nl_relax != "auto")
+        pbe.nl_relax_value = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nl-clip", "--pbe-nl-clip"},
+                             common_value, i)) {
+      pbe.nl_clip = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nl-continuation",
+                                   "--pbe-nl-continuation"},
+                             common_value, i)) {
+      pbe.nl_continuation =
+          require_choice(common_value, {"off", "auto"},
+                         "-pbe-nl-continuation");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nl-line-search",
+                                   "--pbe-nl-line-search"},
+                             common_value, i)) {
+      pbe.nl_line_search =
+          require_choice(common_value, {"off", "auto"},
+                         "-pbe-nl-line-search");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nl-residual",
+                                   "--pbe-nl-residual"},
+                             common_value, i)) {
+      pbe.nl_residual = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nl-solver", "--pbe-nl-solver"},
+                             common_value, i)) {
+      pbe.nl_solver =
+          require_choice(common_value, {"picard", "newton"},
+                         "-pbe-nl-solver");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nl-inner", "--pbe-nl-inner"},
+                             common_value, i)) {
+      pbe.nl_inner =
+          require_choice(common_value, {"auto", "sor", "vcycle"},
+                         "-pbe-nl-inner");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nl-multigrid",
+                                   "--pbe-nl-multigrid"},
+                             common_value, i)) {
+      pbe.nl_multigrid =
+          require_choice(common_value, {"off", "fas"}, "-pbe-nl-multigrid");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-gaussian-exp",
+                                   "--pbe-gaussian-exp"},
+                             common_value, i)) {
+      pbe.gaussian_exp = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-gaussian-sigma",
+                                   "--pbe-gaussian-sigma"},
+                             common_value, i)) {
+      pbe.gaussian_sigma = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-density-cutoff",
+                                   "--pbe-density-cutoff"},
+                             common_value, i)) {
+      pbe.density_cutoff = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-surface-cutoff",
+                                   "--pbe-surface-cutoff"},
+                             common_value, i)) {
+      pbe.surface_cutoff = lowercase_copy(common_value);
+      if (pbe.surface_cutoff != "auto")
+        pbe.surface_cutoff_value = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-gap-diel", "--pbe-gap-diel"},
+                             common_value, i)) {
+      pbe.gap_diel = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-probe-residue",
+                                   "--pbe-probe-residue"},
+                             common_value, i)) {
+      pbe.probe_residue = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-probe-site", "--pbe-probe-site"},
+                             common_value, i)) {
+      pbe.probe_site = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-focus-center",
+                                   "--pbe-focus-center"},
+                             common_value, i)) {
+      parse_pbe_focus_center(common_value);
+      continue;
+    }
+    if (arg == "-pbe-dgsolv" || arg == "--pbe-dgsolv") {
+      if (i + 1 < argc) {
+        std::string next_value = lowercase_copy(string(argv[i + 1]));
+        if (next_value == "1" || next_value == "true" ||
+            next_value == "yes" || next_value == "on" ||
+            next_value == "0" || next_value == "false" ||
+            next_value == "no" || next_value == "off") {
+          pbe.dgsolv = parse_bool_equals(next_value, "-pbe-dgsolv");
+          if (pbe.dgsolv)
+            pbe.flag_pbe = true;
+          ++i;
+          continue;
+        }
+      }
+      pbe.dgsolv = true;
+      pbe.flag_pbe = true;
+      continue;
+    }
+    if (arg.rfind("-pbe-dgsolv=", 0) == 0 ||
+        arg.rfind("--pbe-dgsolv=", 0) == 0) {
+      pbe.dgsolv =
+          parse_bool_equals(arg.substr(arg.find('=') + 1), "-pbe-dgsolv");
+      if (pbe.dgsolv)
+        pbe.flag_pbe = true;
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-pqr", "--pbe-test-pqr"},
+                             common_value, i)) {
+      pbe.flag_pbe = true;
+      pbe.test_pqr = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-grid-size",
+                                   "--pbe-test-grid-size"},
+                             common_value, i)) {
+      pbe.test_grid_size = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-center",
+                                   "--pbe-test-center"},
+                             common_value, i)) {
+      parse_pbe_test_center(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-parity-dump",
+                                   "--pbe-parity-dump"},
+                             common_value, i)) {
+      pbe.parity_dump =
+          require_choice(common_value, {"off", "summary", "points", "all"},
+                         "-pbe-parity-dump");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-parity-map-dump",
+                                   "--pbe-parity-map-dump"},
+                             common_value, i)) {
+      pbe.parity_map_dump =
+          require_choice(common_value, {"off", "samples", "full"},
+                         "-pbe-parity-map-dump");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-charge-grid",
+                                   "--pbe-test-charge-grid"},
+                             common_value, i)) {
+      pbe.test_charge_grid =
+          require_choice(common_value, {"native", "oracle"},
+                         "-pbe-test-charge-grid");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-surface-map",
+                                   "--pbe-test-surface-map"},
+                             common_value, i)) {
+      pbe.test_surface_map =
+          require_choice(common_value, {"native", "oracle"},
+                         "-pbe-test-surface-map");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-midpoint-epsilon",
+                                   "--pbe-test-midpoint-epsilon"},
+                             common_value, i)) {
+      pbe.test_midpoint_epsilon =
+          require_choice(common_value, {"native", "oracle"},
+                         "-pbe-test-midpoint-epsilon");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-vdwms-remap",
+                                   "--pbe-test-vdwms-remap"},
+                             common_value, i)) {
+      pbe.test_vdwms_remap =
+          require_choice(common_value, {"auto", "off"},
+                         "-pbe-test-vdwms-remap");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-boundary-map",
+                                   "--pbe-test-boundary-map"},
+                             common_value, i)) {
+      pbe.test_boundary_map =
+          require_choice(common_value, {"native", "oracle"},
+                         "-pbe-test-boundary-map");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-nl-source",
+                                   "--pbe-test-nl-source"},
+                             common_value, i)) {
+      pbe.test_nl_source =
+          require_choice(common_value, {"titan", "delphi-dimensionless"},
+                         "-pbe-test-nl-source");
+      continue;
+    }
+    if (arg == "-pbe-test-newton-derivative" ||
+        arg == "--pbe-test-newton-derivative") {
+      if (i + 1 < argc) {
+        std::string next_value = lowercase_copy(string(argv[i + 1]));
+        if (next_value == "1" || next_value == "true" ||
+            next_value == "yes" || next_value == "on" ||
+            next_value == "0" || next_value == "false" ||
+            next_value == "no" || next_value == "off") {
+          pbe.test_newton_derivative =
+              parse_bool_equals(next_value, "-pbe-test-newton-derivative");
+          ++i;
+          continue;
+        }
+      }
+      pbe.test_newton_derivative = true;
+      continue;
+    }
+    if (arg.rfind("-pbe-test-newton-derivative=", 0) == 0 ||
+        arg.rfind("--pbe-test-newton-derivative=", 0) == 0) {
+      pbe.test_newton_derivative =
+          parse_bool_equals(arg.substr(arg.find('=') + 1),
+                            "-pbe-test-newton-derivative");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-energy-convention",
+                                   "--pbe-test-energy-convention"},
+                             common_value, i)) {
+      pbe.test_energy_convention =
+          require_choice(common_value,
+                         {"auto", "atom", "grid", "delphi-corrected",
+                          "delphi-iscm"},
+                         "-pbe-test-energy-convention");
       continue;
     }
 
@@ -1595,6 +2208,42 @@ int arguments::parse_arguments(int argc, char **argv) {
           llps.llps_energy_correlation = "true";
       }
     }
+    bool llps_paper_flag = llps.llps_paper;
+    if (consume_bool_option(arg, {"-llps-paper", "--llps-paper"},
+                            llps_paper_flag)) {
+      llps.llps_paper = llps_paper_flag;
+      if (llps_paper_flag) {
+        llps.flag_llps = true;
+        llps.llps_contacts = true;
+        llps.llps_dynamics = true;
+      }
+    }
+    if (consume_option_value(arg,
+                             {"-llps-paper-profile-bin",
+                              "--llps-paper-profile-bin"},
+                             llps_value, i)) {
+      llps.llps_paper_profile_bin_nm =
+          std::max(0.01, stod(llps_value));
+    }
+    if (consume_option_value(arg,
+                             {"-llps-paper-blocks",
+                              "--llps-paper-blocks"},
+                             llps_value, i)) {
+      if (llps_value == "auto" || llps_value == "AUTO" ||
+          llps_value == "Auto") {
+        llps.llps_paper_blocks = 0;
+      } else {
+        llps.llps_paper_blocks = std::max(1, stoi(llps_value));
+      }
+    }
+    if (consume_option_value(arg,
+                             {"-llps-paper-geometry",
+                              "--llps-paper-geometry"},
+                             llps_value, i)) {
+      llps.llps_paper_geometry =
+          require_choice(llps_value, {"auto", "droplet", "slab"},
+                         "-llps-paper-geometry");
+    }
     if (consume_option_value(arg,
                              {"-llps-rna-intra-rcut",
                               "--llps-rna-intra-rcut"},
@@ -1779,6 +2428,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (string(argv[i]) == "-saltcon" && i + 1 < argc) {
       saltcon = stod(argv[i + 1]);
       salt_concentration = saltcon;
+      pbe.salt = saltcon;
       ++i;
     }
     if (string(argv[i]) == "-n_wat" && i + 1 < argc) {
@@ -2197,6 +2847,64 @@ int arguments::parse_arguments(int argc, char **argv) {
       path_nonbonded = argv[i + 1];
       if (path_nonbonded[path_nonbonded.length() - 1] != '/')
         path_nonbonded += '/';
+    }
+    if ((string(argv[i]) == "-fflib-auto" ||
+         string(argv[i]).find("-fflib-auto=") == 0)) {
+      string value;
+      if (string(argv[i]).find("-fflib-auto=") == 0) {
+        value = string(argv[i]).substr(string("-fflib-auto=").size());
+      } else if (i + 1 < argc) {
+        value = string(argv[i + 1]);
+        ++i;
+      }
+      transform(value.begin(), value.end(), value.begin(),
+                [](unsigned char c) {
+                  return static_cast<char>(tolower(c));
+                });
+      if (value == "on" || value == "yes" || value == "true" ||
+          value == "1")
+        fflib_auto = true;
+      else if (value == "off" || value == "no" || value == "false" ||
+               value == "0")
+        fflib_auto = false;
+      else
+        cout << "WARNING!!! -fflib-auto expects on/off.\n";
+    }
+    if ((string(argv[i]) == "-fflib-missing" ||
+         string(argv[i]).find("-fflib-missing=") == 0)) {
+      string value;
+      if (string(argv[i]).find("-fflib-missing=") == 0) {
+        value = string(argv[i]).substr(string("-fflib-missing=").size());
+      } else if (i + 1 < argc) {
+        value = string(argv[i + 1]);
+        ++i;
+      }
+      transform(value.begin(), value.end(), value.begin(),
+                [](unsigned char c) {
+                  return static_cast<char>(tolower(c));
+                });
+      if (value == "warn" || value == "strict")
+        fflib_missing = value;
+      else
+        cout << "WARNING!!! -fflib-missing expects warn/strict.\n";
+    }
+    if ((string(argv[i]) == "-fflib-hydrogens" ||
+         string(argv[i]).find("-fflib-hydrogens=") == 0)) {
+      string value;
+      if (string(argv[i]).find("-fflib-hydrogens=") == 0) {
+        value = string(argv[i]).substr(string("-fflib-hydrogens=").size());
+      } else if (i + 1 < argc) {
+        value = string(argv[i + 1]);
+        ++i;
+      }
+      transform(value.begin(), value.end(), value.begin(),
+                [](unsigned char c) {
+                  return static_cast<char>(tolower(c));
+                });
+      if (value == "reference" || value == "none")
+        fflib_hydrogens = value;
+      else
+        cout << "WARNING!!! -fflib-hydrogens expects reference/none.\n";
     }
     if (string(argv[i]) == "-pattern-input" && i + 1 < argc) {
       flag_pattern_input = true;

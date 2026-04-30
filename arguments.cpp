@@ -891,6 +891,357 @@ int arguments::post_process() {
     }
   }
 
+  if (pbe.flag_pbe) {
+    if (pbe.pbsa) {
+      pbe.dgsolv = true;
+      pbe.flag_pbe = true;
+    }
+    if (flag_nocal) {
+      TitanUI::print_error(
+          "PBE: -pbe requires charge/radius initialization; remove -nocal for "
+          "the v1 frame-based solver.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.scale <= 0.0) {
+      TitanUI::print_error("PBE: -pbe-scale must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.margin < 0.0) {
+      TitanUI::print_error("PBE: -pbe-margin must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.int_diel <= 0.0 || pbe.ext_diel <= 0.0) {
+      TitanUI::print_error(
+          "PBE: -pbe-int-diel and -pbe-ext-diel must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.salt < 0.0) {
+      TitanUI::print_error("PBE: -pbe-salt must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.temp <= 0.0) {
+      TitanUI::print_error("PBE: -pbe-temp must be > 0 K.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.model != "linear" && pbe.model != "nonlinear") {
+      TitanUI::print_error("PBE: -pbe-model must be linear or nonlinear.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.biomodel != "pbe" && pbe.biomodel != "rpbe") {
+      TitanUI::print_error("PBE: -pbe-biomodel must be pbe or rpbe.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.dielectric_model != "two-dielectric" &&
+        pbe.dielectric_model != "gaussian") {
+      TitanUI::print_error(
+          "PBE: -pbe-dielectric must be two-dielectric or gaussian.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.boundary != "coulombic" && pbe.boundary != "dipolar" &&
+        pbe.boundary != "zero") {
+      TitanUI::print_error(
+          "PBE: -pbe-boundary must be coulombic, dipolar, or zero.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.charge_assignment != "trilinear" &&
+        pbe.charge_assignment != "delphi" &&
+        pbe.charge_assignment != "gaussian") {
+      TitanUI::print_error(
+          "PBE: -pbe-charge-assignment must be trilinear, delphi, or gaussian.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.surface != "vdw" && pbe.surface != "sas" &&
+        pbe.surface != "ses" && pbe.surface != "delphi-ses" &&
+        pbe.surface != "delphi-vdw" && pbe.surface != "gaussian" &&
+        pbe.surface != "gaussian-cutoff") {
+      TitanUI::print_error(
+          "PBE: -pbe-surface must be vdw, sas, ses, delphi-ses, delphi-vdw, gaussian, or gaussian-cutoff.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.radius_convention != "auto" &&
+        pbe.radius_convention != "native" &&
+        pbe.radius_convention != "delphi-bondi") {
+      TitanUI::print_error(
+          "PBE: -pbe-radius-convention must be auto, native, or delphi-bondi.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.probe_radius < 0.0) {
+      TitanUI::print_error("PBE: -pbe-probe must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.ion_access != "dielectric" && pbe.ion_access != "stern") {
+      TitanUI::print_error(
+          "PBE: -pbe-ion-access must be dielectric or stern.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.ion_radius < 0.0) {
+      TitanUI::print_error("PBE: -pbe-ion-radius must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nl_max_iter <= 0) {
+      TitanUI::print_error("PBE: -pbe-nl-max-iter must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nl_inner_iter <= 0) {
+      TitanUI::print_error("PBE: -pbe-nl-inner-iter must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nl_stagnation <= 0) {
+      TitanUI::print_error("PBE: -pbe-nl-stagnation must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nl_block <= 0) {
+      TitanUI::print_error("PBE: -pbe-nl-block must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nl_dphi <= 0.0) {
+      TitanUI::print_error("PBE: -pbe-nl-dphi must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nl_relax != "auto") {
+      if (pbe.nl_relax_value < 0.05 || pbe.nl_relax_value > 1.0) {
+        TitanUI::print_error(
+            "PBE: -pbe-nl-relax must be auto or a value in [0.05, 1.0].");
+        exit(EXIT_FAILURE);
+      }
+    }
+    if (pbe.nl_clip <= 0.0) {
+      TitanUI::print_error("PBE: -pbe-nl-clip must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nl_continuation != "off" && pbe.nl_continuation != "auto") {
+      TitanUI::print_error(
+          "PBE: -pbe-nl-continuation must be off or auto.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nl_line_search != "off" && pbe.nl_line_search != "auto") {
+      TitanUI::print_error(
+          "PBE: -pbe-nl-line-search must be off or auto.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nl_residual <= 0.0) {
+      TitanUI::print_error("PBE: -pbe-nl-residual must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nl_solver != "picard" && pbe.nl_solver != "newton") {
+      TitanUI::print_error("PBE: -pbe-nl-solver must be picard or newton.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nl_inner != "auto" && pbe.nl_inner != "sor" &&
+        pbe.nl_inner != "vcycle") {
+      TitanUI::print_error("PBE: -pbe-nl-inner must be auto, sor, or vcycle.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nl_multigrid != "off" && pbe.nl_multigrid != "fas") {
+      TitanUI::print_error("PBE: -pbe-nl-multigrid must be off or fas.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.gaussian_exp <= 0.0 || pbe.gaussian_sigma <= 0.0) {
+      TitanUI::print_error(
+          "PBE: -pbe-gaussian-exp and -pbe-gaussian-sigma must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.density_cutoff < 0.0 || pbe.density_cutoff > 1.0) {
+      TitanUI::print_error("PBE: -pbe-density-cutoff must be in [0, 1].");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.surface_cutoff != "auto" &&
+        (pbe.surface_cutoff_value < 0.0 || pbe.surface_cutoff_value > 1.0)) {
+      TitanUI::print_error(
+          "PBE: -pbe-surface-cutoff must be auto or a value in [0, 1].");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.gap_diel <= 0.0) {
+      TitanUI::print_error("PBE: -pbe-gap-diel must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if ((pbe.test_grid_size > 0 || pbe.test_center_user) &&
+        pbe.test_pqr.empty()) {
+      TitanUI::print_error(
+          "PBE: -pbe-test-grid-size and -pbe-test-center require "
+          "-pbe-test-pqr.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.test_grid_size != 0 && pbe.test_grid_size < 3) {
+      TitanUI::print_error("PBE: -pbe-test-grid-size must be >= 3.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.parity_dump != "off" && pbe.parity_dump != "summary" &&
+        pbe.parity_dump != "points" && pbe.parity_dump != "all") {
+      TitanUI::print_error(
+          "PBE: -pbe-parity-dump must be off, summary, points, or all.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.parity_map_dump != "off" && pbe.parity_map_dump != "samples" &&
+        pbe.parity_map_dump != "full") {
+      TitanUI::print_error(
+          "PBE: -pbe-parity-map-dump must be off, samples, or full.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.test_charge_grid != "native" &&
+        pbe.test_charge_grid != "oracle") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-charge-grid must be native or oracle.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.test_surface_map != "native" &&
+        pbe.test_surface_map != "oracle") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-surface-map must be native or oracle.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.test_midpoint_epsilon != "native" &&
+        pbe.test_midpoint_epsilon != "oracle") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-midpoint-epsilon must be native or oracle.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.test_boundary_map != "native" &&
+        pbe.test_boundary_map != "oracle") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-boundary-map must be native or oracle.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.test_nl_source != "titan" &&
+        pbe.test_nl_source != "delphi-dimensionless") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-nl-source must be titan or delphi-dimensionless.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.test_energy_convention != "auto" &&
+        pbe.test_energy_convention != "atom" &&
+        pbe.test_energy_convention != "grid" &&
+        pbe.test_energy_convention != "delphi-corrected" &&
+        pbe.test_energy_convention != "delphi-iscm") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-energy-convention must be auto, atom, grid, delphi-corrected, or delphi-iscm.");
+      exit(EXIT_FAILURE);
+    }
+    if ((pbe.parity_dump != "off" || pbe.parity_map_dump != "off" ||
+         pbe.test_charge_grid != "native" ||
+         pbe.test_surface_map != "native" ||
+         pbe.test_midpoint_epsilon != "native" ||
+         pbe.test_boundary_map != "native" ||
+         pbe.test_nl_source != "titan" || pbe.test_newton_derivative ||
+         pbe.test_energy_convention != "auto") &&
+        pbe.test_pqr.empty()) {
+      TitanUI::print_error(
+          "PBE: hidden parity diagnostics require -pbe-test-pqr.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.dgsolv && !pbe.test_pqr.empty()) {
+      TitanUI::print_error(
+          "PBE: -pbe-dgsolv is not compatible with the hidden PQR fixture "
+          "adapter; run it on a native two-molecule TITAN input.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.pbsa && !pbe.test_pqr.empty()) {
+      TitanUI::print_error(
+          "PBSA: -pbsa is not compatible with the hidden PQR fixture adapter; "
+          "run it on a native two-molecule TITAN input.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.pbsa_components != "auto" &&
+        pbe.pbsa_components != "complex,receptor,ligand") {
+      TitanUI::print_error(
+          "PBSA: -pbsa-components must be auto or complex,receptor,ligand.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.pbsa_decomp != "off" && pbe.pbsa_decomp != "molecule" &&
+        pbe.pbsa_decomp != "residue") {
+      TitanUI::print_error(
+          "PBSA: -pbsa-decomp must be off, molecule, or residue.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.pbsa_residue_frames != "off" &&
+        pbe.pbsa_residue_frames != "all") {
+      TitanUI::print_error(
+          "PBSA: -pbsa-residue-frames must be off or all.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.pbsa_ie_block != "auto") {
+      try {
+        const int block_size = std::stoi(pbe.pbsa_ie_block);
+        if (block_size <= 0) {
+          TitanUI::print_error(
+              "PBSA: -pbsa-ie-block must be auto or a positive integer.");
+          exit(EXIT_FAILURE);
+        }
+      } catch (...) {
+        TitanUI::print_error(
+            "PBSA: -pbsa-ie-block must be auto or a positive integer.");
+        exit(EXIT_FAILURE);
+      }
+    }
+    if (pbe.pbsa_ie_min_samples <= 0) {
+      TitanUI::print_error("PBSA: -pbsa-ie-min-samples must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.pbsa_ie_filter_sigma < 0.0) {
+      TitanUI::print_error("PBSA: -pbsa-ie-filter-sigma must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.pbsa_perf != "off" && pbe.pbsa_perf != "summary" &&
+        pbe.pbsa_perf != "detail") {
+      TitanUI::print_error("PBSA: -pbsa-perf must be off, summary, or detail.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.max_iter <= 0) {
+      TitanUI::print_error("PBE: -pbe-max-iter must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.rms_tol <= 0.0 || pbe.dphi_tol <= 0.0) {
+      TitanUI::print_error("PBE: convergence tolerances must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.max_grid_points < 27) {
+      TitanUI::print_error("PBE: -pbe-max-grid must allow at least 27 points.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.omega != "auto" &&
+        (pbe.omega_value <= 0.0 || pbe.omega_value >= 2.0)) {
+      TitanUI::print_error("PBE: -pbe-omega must be auto or in (0, 2).");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.focus != "off" && pbe.focus != "auto" &&
+        pbe.focus != "delphi") {
+      TitanUI::print_error("PBE: -pbe-focus must be off, auto, or delphi.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.multigrid != "off" && pbe.multigrid != "focus" &&
+        pbe.multigrid != "auto" && pbe.multigrid != "vcycle") {
+      TitanUI::print_error(
+          "PBE: -pbe-multigrid must be off, focus, auto, or vcycle.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.focus_levels < 1 || pbe.focus_levels > 4) {
+      TitanUI::print_error("PBE: -pbe-focus-levels must be in [1, 4].");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.focus_margin < 0.0) {
+      TitanUI::print_error("PBE: -pbe-focus-margin must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.mg_levels != "auto") {
+      try {
+        const int parsed_mg_levels = std::stoi(pbe.mg_levels);
+        if (parsed_mg_levels < 1 || parsed_mg_levels > 4) {
+          TitanUI::print_error("PBE: -pbe-mg-levels must be auto or in [1, 4].");
+          exit(EXIT_FAILURE);
+        }
+      } catch (...) {
+        TitanUI::print_error("PBE: -pbe-mg-levels must be auto or an integer.");
+        exit(EXIT_FAILURE);
+      }
+    }
+    if (pbe.mg_pre < 0 || pbe.mg_post < 0 || pbe.mg_coarse_iter <= 0) {
+      TitanUI::print_error(
+          "PBE: -pbe-mg-pre/post must be >= 0 and -pbe-mg-coarse-iter "
+          "must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+  }
+
   if (flag_listfile == true) {
     fstream list(list_filename, ios::in);
     if (!list.is_open()) {

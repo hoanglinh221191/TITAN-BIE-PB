@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gc
+import json
 import math
 import re
 import sys
@@ -521,6 +522,15 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         required=True,
         help="Directory where averaged tables, figures, and summary text will be written.",
+    )
+    parser.add_argument(
+        "--ensemble-manifest",
+        default=None,
+        help=(
+            "Read llps_ensemble_manifest.tsv for the LLPS paper bundle aggregator. "
+            "Each row should include condition_id, replica_id, output_dir, temperature, "
+            "salt, protein_conc, rna_conc, rna_length, and label."
+        ),
     )
     parser.add_argument(
         "--fig7-from-averaged-dir",
@@ -7802,6 +7812,306 @@ def determine_panel_status(systems: dict[str, AggregatedSystem], options: Runtim
     return status
 
 
+def _read_llps_phase_partition_summary(path: Path) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    if not path.exists():
+        return metrics
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("Metric "):
+                continue
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            name = parts[0]
+            try:
+                metrics[f"{name}_mean"] = float(parts[1])
+                metrics[f"{name}_sem"] = float(parts[2])
+                if len(parts) > 3:
+                    metrics[f"{name}_blocks"] = float(parts[3])
+            except ValueError:
+                continue
+    return metrics
+
+
+def _read_llps_key_value_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                values[parts[0]] = parts[1]
+    return values
+
+
+def _as_float(value: object, default: float = math.nan) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _sem(values: Sequence[float]) -> float:
+    clean = [v for v in values if math.isfinite(v)]
+    if len(clean) < 2:
+        return 0.0
+    return float(np.std(clean, ddof=1) / math.sqrt(len(clean)))
+
+
+def _read_llps_paper_replicate(row: dict[str, str], manifest_dir: Path) -> dict[str, object]:
+    out_raw = row.get("output_dir", "").strip()
+    output_dir = Path(out_raw)
+    if not output_dir.is_absolute():
+        output_dir = (manifest_dir / output_dir).resolve()
+    result: dict[str, object] = dict(row)
+    result["output_dir"] = str(output_dir)
+    missing: list[str] = []
+
+    phase_path = output_dir / "llps_phase_partition_summary.dat"
+    summary_path = output_dir / "llps_paper_summary.json"
+    convergence_path = output_dir / "llps_convergence_report.dat"
+    composition_path = output_dir / "llps_composition_timeseries.csv"
+    for required in (phase_path, summary_path, convergence_path, composition_path):
+        if not required.exists():
+            missing.append(required.name)
+
+    result.update(_read_llps_phase_partition_summary(phase_path))
+    if summary_path.exists():
+        try:
+            with summary_path.open("r", encoding="utf-8", errors="replace") as fh:
+                for key, value in json.load(fh).items():
+                    result[key] = value
+        except (OSError, json.JSONDecodeError) as exc:
+            missing.append(f"{summary_path.name}:parse_error:{exc}")
+    convergence = _read_llps_key_value_file(convergence_path)
+    for key, value in convergence.items():
+        result[f"convergence_{key}"] = value
+
+    if composition_path.exists():
+        with composition_path.open("r", encoding="utf-8", errors="replace", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        result["composition_frames"] = len(rows)
+        if rows:
+            last = rows[-1]
+            result["last_dense_fraction"] = _as_float(last.get("DenseFraction"))
+            result["last_rna_enrichment"] = _as_float(last.get("RNAEnrichment"))
+    else:
+        result["composition_frames"] = 0
+
+    status = "ok"
+    if missing:
+        status = "missing_output"
+    elif str(result.get("convergence_stable_dense_phase", "yes")).lower() == "no":
+        status = "no_stable_dense_phase"
+    elif (
+        str(result.get("convergence_insufficient_blocks", "no")).lower() == "yes"
+        or str(result.get("convergence_equilibration_drift_warning", "no")).lower() == "yes"
+        or str(result.get("convergence_short_trajectory_warning", "no")).lower() == "yes"
+    ):
+        status = "convergence_warning"
+    result["quality_status"] = status
+    result["missing_files"] = ";".join(missing)
+    return result
+
+
+def run_llps_paper_ensemble(manifest_path: Path, outdir: Path, dpi: int) -> None:
+    if not manifest_path.exists():
+        raise SystemExit(f"Missing LLPS ensemble manifest: {manifest_path}")
+    required = {
+        "condition_id",
+        "replica_id",
+        "output_dir",
+        "temperature",
+        "salt",
+        "protein_conc",
+        "rna_conc",
+        "rna_length",
+        "label",
+    }
+    with manifest_path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        if not reader.fieldnames:
+            raise SystemExit("Manifest is empty or has no header.")
+        missing_columns = required.difference(reader.fieldnames)
+        if missing_columns:
+            raise SystemExit(
+                "Manifest missing required column(s): "
+                + ", ".join(sorted(missing_columns))
+            )
+        replicates = [
+            _read_llps_paper_replicate(row, manifest_path.parent)
+            for row in reader
+            if any((value or "").strip() for value in row.values())
+        ]
+
+    comparison_columns = [
+        "condition_id",
+        "replica_id",
+        "label",
+        "temperature",
+        "salt",
+        "protein_conc",
+        "rna_conc",
+        "rna_length",
+        "output_dir",
+        "quality_status",
+        "missing_files",
+        "frames_used",
+        "geometry",
+        "protein_dense_concentration_mean",
+        "protein_dense_concentration_sem",
+        "rna_dense_concentration_mean",
+        "rna_dense_concentration_sem",
+        "protein_partition_mean",
+        "protein_partition_sem",
+        "rna_partition_mean",
+        "rna_partition_sem",
+        "dense_protein_rna_ratio_mean",
+        "rna_enrichment_mean",
+        "dense_fraction_mean",
+        "dense_fraction_sem",
+        "dense_fraction_drift_slope_per_ns",
+        "convergence_insufficient_blocks",
+        "convergence_equilibration_drift_warning",
+        "convergence_short_trajectory_warning",
+        "convergence_stable_dense_phase",
+        "composition_frames",
+    ]
+    comparison_path = outdir / "llps_condition_comparison.csv"
+    with comparison_path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=comparison_columns, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(replicates)
+
+    by_condition: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in replicates:
+        by_condition[str(row.get("condition_id", ""))].append(row)
+
+    metrics = [
+        "protein_dense_concentration_mean",
+        "rna_dense_concentration_mean",
+        "protein_partition_mean",
+        "rna_partition_mean",
+        "dense_protein_rna_ratio_mean",
+        "rna_enrichment_mean",
+        "dense_fraction_mean",
+    ]
+    phase_columns = [
+        "condition_id",
+        "label",
+        "temperature",
+        "salt",
+        "protein_conc",
+        "rna_conc",
+        "rna_length",
+        "replicates",
+        "ok_replicates",
+    ]
+    for metric in metrics:
+        phase_columns.extend([f"{metric}_mean", f"{metric}_sem"])
+
+    phase_path = outdir / "llps_phase_diagram_summary.csv"
+    phase_rows: list[dict[str, object]] = []
+    for condition_id, rows in sorted(by_condition.items()):
+        first = rows[0]
+        out_row: dict[str, object] = {
+            "condition_id": condition_id,
+            "label": first.get("label", condition_id),
+            "temperature": first.get("temperature", ""),
+            "salt": first.get("salt", ""),
+            "protein_conc": first.get("protein_conc", ""),
+            "rna_conc": first.get("rna_conc", ""),
+            "rna_length": first.get("rna_length", ""),
+            "replicates": len(rows),
+            "ok_replicates": sum(1 for r in rows if r.get("quality_status") == "ok"),
+        }
+        for metric in metrics:
+            vals = [_as_float(r.get(metric)) for r in rows]
+            vals = [v for v in vals if math.isfinite(v)]
+            out_row[f"{metric}_mean"] = float(np.mean(vals)) if vals else math.nan
+            out_row[f"{metric}_sem"] = _sem(vals)
+        phase_rows.append(out_row)
+    with phase_path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=phase_columns)
+        writer.writeheader()
+        writer.writerows(phase_rows)
+
+    report_path = outdir / "llps_replicate_quality_report.md"
+    with report_path.open("w", encoding="utf-8") as fh:
+        fh.write("# LLPS Replicate Quality Report\n\n")
+        fh.write(f"- Manifest: `{manifest_path}`\n")
+        fh.write(f"- Replicates: {len(replicates)}\n")
+        fh.write(f"- Conditions: {len(by_condition)}\n\n")
+        fh.write("| Condition | Replica | Status | Missing files | Drift warning | Blocks |\n")
+        fh.write("| --- | --- | --- | --- | --- | --- |\n")
+        for row in replicates:
+            fh.write(
+                f"| {row.get('condition_id', '')} | {row.get('replica_id', '')} | "
+                f"{row.get('quality_status', '')} | {row.get('missing_files', '')} | "
+                f"{row.get('convergence_equilibration_drift_warning', '')} | "
+                f"{row.get('convergence_blocks', '')} |\n"
+            )
+
+    if phase_rows:
+        labels = [str(row.get("label") or row.get("condition_id")) for row in phase_rows]
+        x = np.arange(len(phase_rows), dtype=float)
+        width = 0.38
+        fig, axes = plt.subplots(1, 2, figsize=(max(7.0, len(labels) * 1.4), 3.6))
+        axes[0].bar(
+            x - width / 2,
+            [float(row.get("protein_dense_concentration_mean", math.nan)) for row in phase_rows],
+            width,
+            yerr=[float(row.get("protein_dense_concentration_sem", 0.0)) for row in phase_rows],
+            label="Protein",
+            color="#2f6f9f",
+        )
+        axes[0].bar(
+            x + width / 2,
+            [float(row.get("rna_dense_concentration_mean", math.nan)) for row in phase_rows],
+            width,
+            yerr=[float(row.get("rna_dense_concentration_sem", 0.0)) for row in phase_rows],
+            label="RNA",
+            color="#b64f6f",
+        )
+        axes[0].set_ylabel("Dense concentration (nodes/nm$^3$)")
+        axes[0].set_xticks(x)
+        axes[0].set_xticklabels(labels, rotation=30, ha="right")
+        axes[0].legend(frameon=False)
+        axes[1].bar(
+            x - width / 2,
+            [float(row.get("protein_partition_mean", math.nan)) for row in phase_rows],
+            width,
+            yerr=[float(row.get("protein_partition_sem", 0.0)) for row in phase_rows],
+            label="Protein",
+            color="#2f6f9f",
+        )
+        axes[1].bar(
+            x + width / 2,
+            [float(row.get("rna_partition_mean", math.nan)) for row in phase_rows],
+            width,
+            yerr=[float(row.get("rna_partition_sem", 0.0)) for row in phase_rows],
+            label="RNA",
+            color="#b64f6f",
+        )
+        axes[1].set_ylabel("Partition coefficient")
+        axes[1].set_xticks(x)
+        axes[1].set_xticklabels(labels, rotation=30, ha="right")
+        axes[1].legend(frameon=False)
+        fig.tight_layout()
+        fig.savefig(outdir / "llps_condition_density_partition.png", dpi=dpi)
+        plt.close(fig)
+
+    print(f"Wrote LLPS paper ensemble outputs to: {outdir}")
+
+
 def main() -> int:
     args = parse_args()
     options = build_runtime_options(args)
@@ -7813,6 +8123,10 @@ def main() -> int:
     outdir = Path(args.output_dir).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
     set_publication_style(args.dpi)
+
+    if args.ensemble_manifest:
+        run_llps_paper_ensemble(Path(args.ensemble_manifest).resolve(), outdir, args.dpi)
+        return 0
 
     if args.contact_dynamics_from_averaged_dir:
         avg_dir = Path(args.contact_dynamics_from_averaged_dir).resolve()
