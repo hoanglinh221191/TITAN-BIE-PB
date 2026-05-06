@@ -1084,6 +1084,13 @@ int arguments::post_process() {
           "PBE: -pbe-test-charge-grid must be native or oracle.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.test_charge_grid_diff != "off" &&
+        pbe.test_charge_grid_diff != "samples" &&
+        pbe.test_charge_grid_diff != "full") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-charge-grid-diff must be off, samples, or full.");
+      exit(EXIT_FAILURE);
+    }
     if (pbe.test_surface_map != "native" &&
         pbe.test_surface_map != "oracle") {
       TitanUI::print_error(
@@ -1096,12 +1103,55 @@ int arguments::post_process() {
           "PBE: -pbe-test-midpoint-epsilon must be native or oracle.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.test_midpoint_diff != "off" &&
+        pbe.test_midpoint_diff != "samples" &&
+        pbe.test_midpoint_diff != "full") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-midpoint-diff must be off, samples, or full.");
+      exit(EXIT_FAILURE);
+    }
     if (pbe.test_boundary_map != "native" &&
         pbe.test_boundary_map != "oracle") {
       TitanUI::print_error(
           "PBE: -pbe-test-boundary-map must be native or oracle.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.test_boundary_convention != "native-real" &&
+        pbe.test_boundary_convention != "delphi-grid" &&
+        pbe.test_boundary_convention != "oracle") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-boundary-convention must be native-real, delphi-grid, or oracle.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.test_field_units != "native" &&
+        pbe.test_field_units != "delphi-dimensionless") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-field-units must be native or delphi-dimensionless.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.test_operator_convention != "native" &&
+        pbe.test_operator_convention != "delphi") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-operator-convention must be native or delphi.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.test_rhs_map != "native" && pbe.test_rhs_map != "oracle") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-rhs-map must be native or oracle.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.test_screen_map != "native" && pbe.test_screen_map != "oracle") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-screen-map must be native or oracle.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.test_denom_map != "native" && pbe.test_denom_map != "oracle") {
+      TitanUI::print_error(
+          "PBE: -pbe-test-denom-map must be native or oracle.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.test_boundary_convention == "oracle")
+      pbe.test_boundary_map = "oracle";
     if (pbe.test_nl_source != "titan" &&
         pbe.test_nl_source != "delphi-dimensionless") {
       TitanUI::print_error(
@@ -1119,9 +1169,16 @@ int arguments::post_process() {
     }
     if ((pbe.parity_dump != "off" || pbe.parity_map_dump != "off" ||
          pbe.test_charge_grid != "native" ||
+         pbe.test_charge_grid_diff != "off" ||
          pbe.test_surface_map != "native" ||
          pbe.test_midpoint_epsilon != "native" ||
+         pbe.test_midpoint_diff != "off" ||
          pbe.test_boundary_map != "native" ||
+         pbe.test_boundary_convention != "native-real" ||
+         pbe.test_field_units != "native" ||
+         pbe.test_operator_convention != "native" ||
+         pbe.test_rhs_map != "native" || pbe.test_screen_map != "native" ||
+         pbe.test_denom_map != "native" ||
          pbe.test_nl_source != "titan" || pbe.test_newton_derivative ||
          pbe.test_energy_convention != "auto") &&
         pbe.test_pqr.empty()) {

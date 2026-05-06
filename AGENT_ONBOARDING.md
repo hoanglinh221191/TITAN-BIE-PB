@@ -137,7 +137,7 @@ Analysis modules:
 - `titan_lj.cpp`
 - `titan_sq.cpp`, `titan_sq_core.cpp`
 - `titan_hbond_kinetics.cpp`
-- `titan_pbe.cpp`, `titan_pbe.h` for frame-based linear PB electrostatics
+- `titan_pbe.h` and `titan_pbe/` for frame-based PBE/PBSA electrostatics
 - `titan_pca.cpp`
 - `titan_kinetics.cpp` for TICA
 - `titan_msm.cpp` for MSM
@@ -374,6 +374,19 @@ If you add a new module:
 - PBE is intentionally a frame analyzer, not a standalone one-shot tool. Keep
   `pbe_energy.csv` long-table output and memory preflight behavior intact when
   extending nonlinear, Gaussian, or focusing variants.
+- PBE public API is now a small PIMPL shim in `titan_pbe.h`; implementation
+  lives under `titan_pbe/`. Keep `impl_engine.cpp` including `titan_pbe.h` and
+  put new PBE internals in the subdirectory. `Makefile` already builds
+  `titan_pbe/*.cpp`; `compile.bat` should not need separate source-list edits.
+  Phase 3 splitting has begun: map/cube I/O is in `audit_io.cpp`, PBSA
+  aggregation/writers are in `pbsa.cpp`, focus/probe helpers are in
+  `focus_probe.cpp`, and Gaussian/RPB audit helpers plus source diagnostics are
+  in `gaussian_rpb.cpp`. Grid/radius/surface setup is now in
+  `grid_surface.cpp`, and charge assignment/operator setup plus oracle replay
+  helpers are now in `charge_operator.cpp`. Linear boundary/SOR/focus routing
+  is now in `linear_solver.cpp`, and linear V-cycle hierarchy is now in
+  `multigrid.cpp`. Continue moving one small subsystem at a time, then run
+  native build plus focused PBE/RPB/PBSA smokes before the next slice.
 - PBE Phase 2 exposes VDW/SAS surface selection with `-pbe-surface`; default
   behavior remains `vdw`, and `-pbe-probe` only changes the SAS radius inflate.
 - PBE Surface Phase adds `-pbe-surface=ses`: it marks probe-excluded voxels
@@ -405,8 +418,9 @@ If you add a new module:
   `linear`). `pbe_energy.csv` appends grid origin/center/spacing, charge
   conservation/moment, boundary RMS/max, linear residual, nonlinear residual,
   continuation steps, and backtracks for DelPhi parity debugging.
-- Hidden DelPhi PQR grids with `-pbe-test-grid-size` use coordinate-extrema
-  auto-centering to match DelPhi `acenter=NA`; public adaptive grids still use
+- Hidden DelPhi PQR grids with `-pbe-test-grid-size` use pyDelPhi
+  `COORDLIMITS` auto-centering, i.e. the radius-expanded boundary-box center,
+  to match DelPhi `acenter=NA`; public adaptive grids still use
   radius-expanded bounds. `delphi-vdw` uses DelPhi-compatible discrete media
   indices at positive x/y/z half-grid faces: each midpoint is classified by VDW
   atom radius, then the PQR parity path applies the deterministic VDW-to-MS
@@ -528,6 +542,26 @@ If you add a new module:
   native `delphi-vdw` still has a `midpoint_epsilon` mismatch on barnase, so
   keep barnase strict parity disabled until the VDW-to-MS remap itself matches
   the oracle face counts.
+  Phase 5q adds hidden `-pbe-test-midpoint-diff=off|samples|full`, which writes
+  `pbe_midpoint_face_diff.csv` from `pbe_oracle_midpoint_epsilon.csv` with only
+  the differing positive faces plus raw/final media owner, signed encoded
+  media/entity state, queue iteration, remap action, nearest atom distance,
+  and exposed-point distance. Phase 5r moves the `delphi-vdw` remap internals
+  to a signed discrete epsilon state, but barnase still needs the exact
+  pyDelPhi exposed/contact remap geometry before strict midpoint parity can
+  pass. Use
+  `test/pbe_midpoint_face_diff_smoke.ps1` report-only first; `-Strict` is for
+  the moment native face diffs are expected to be zero.
+  Phase 5s adds VDWMS state capture on both sides: the pyDelPhi exporter accepts
+  `-FullVdwmsState`, and native full midpoint diff writes
+  `pbe_native_midpoint_state.csv` plus `pbe_vdwms_action_histogram.csv`.
+  `test/pbe_barnase_stage_replay_smoke.ps1` uses those artifacts to report the
+  first failing VDWMS stage as `raw_vdw`, `exposed_sas`, `boundary_queue`,
+  `signed_remap`, or the later field/energy stage.
+  `test/pbe_delphi_reference_smoke.ps1 -StageTsv <file>` now also resolves
+  `test_center=auto` from `grid_center_x/y/z` in the oracle stage row; without
+  that center lock, barnase native midpoint comparisons can report a false
+  `raw_vdw` mismatch even when the remap algorithm is correct.
   `test/pbe_barnase_field_oracle_smoke.ps1 -OracleRoot <dir>` now compares
   normalized surface/epsilon, boundary, water/vacuum/reaction phi, ISCM
   samples, and writes `pbe_barnase_root_cause_report.csv`.
@@ -535,6 +569,105 @@ If you add a new module:
   timing harness for barnase linear salt 0/0.15/2.0. Keep these oracle CSVs
   hidden PQR parity inputs only. Arg files use `-flag=value`; direct CLI
   invocations use `-flag value`.
+- PBE Accuracy Parity Phase 5t focuses on DelPhi boundary condition and field
+  units after midpoint epsilon is locked. Hidden PQR-only flags
+  `-pbe-test-boundary-convention=native-real|delphi-grid|oracle` and
+  `-pbe-test-field-units=native|delphi-dimensionless` isolate boundary
+  sampling from solver units. `delphi-grid` uses DelPhi atom-grid distance,
+  Debye-Huckel scaling, and exdi/indi divided by `epkt`; `oracle` replays
+  `pbe_oracle_boundary_map.csv`. The pyDelPhi exporter accepts
+  `-FullBoundaryOracle`, and the new reports are
+  `test/pbe_boundary_formula_matrix.ps1`,
+  `test/pbe_boundary_replay_smoke.ps1`, `pbe_boundary_diff.csv`, and
+  `pbe_operator_stage.csv`. Do not change PBSA/native defaults from these
+  diagnostics unless boundary and water-phi oracle stages both justify it.
+- PBE Accuracy Parity Phase 5u moves the oracle comparator to water-phi
+  operator setup. The pyDelPhi exporter accepts `-FullOperatorOracle` and writes
+  `pbe_oracle_operator_stage.csv`, `pbe_oracle_sor_trace.csv`, and
+  `pbe_oracle_solver_summary.csv`. Hidden PQR flags
+  `-pbe-test-operator-convention=native|delphi`,
+  `-pbe-test-rhs-map=native|oracle`, `-pbe-test-screen-map=native|oracle`, and
+  `-pbe-test-denom-map=native|oracle` isolate RHS, screening, and denominator
+  mismatches before SOR changes. Use `test/pbe_water_phi_operator_matrix.ps1`
+  and `test/pbe_sor_trace_smoke.ps1` for this stage; keep arg-file syntax as
+  `-flag=value` and direct CLI syntax as `-flag value`.
+- PBE Accuracy Parity Phase 5v isolates charge-grid assignment before SOR
+  update semantics. The pyDelPhi exporter accepts `-FullChargeGrid` and writes
+  `pbe_oracle_charge_grid_full.csv`; TITAN hidden PQR diagnostics add
+  `-pbe-test-charge-grid-diff=off|samples|full`, `pbe_charge_grid_diff.csv`,
+  and `pbe_charge_grid_diff_summary.csv`. `pbe_sor_trace.csv` appends
+  `rhs_delta_vs_oracle` and `charge_grid_source`. Use
+  `test/pbe_charge_grid_full_diff_smoke.ps1`,
+  `test/pbe_charge_grid_replay_smoke.ps1`,
+  `test/pbe_sor_update_lock_smoke.ps1`, `test/pbe_water_phi_lock_smoke.ps1`,
+  and `test/pbe_iscm_transition_smoke.ps1` for this stage. Do not change ISCM
+  energy convention until charge-grid replay and water-phi samples pass.
+- PBE Accuracy Parity Phase 5w locks the water field oracle precision before
+  touching ISCM or final energy. `test/pbe_delphi_export_maps.ps1` accepts
+  `-FullFieldOracle` and writes
+  `pbe_oracle_field_samples_fullprecision.csv` with
+  `field_source=solver_capture|ctx|cube_fallback` and
+  `field_precision_status`. `test/pbe_field_precision_smoke.ps1 -Strict`
+  must pass before using `test/pbe_water_phi_lock_smoke.ps1 -Strict`.
+  Current barnase evidence moves the first failing stage past `water_phi_raw`
+  and `ISCM` samples to `final_energy`, so the next parity work should isolate
+  final reaction-energy selection/convention rather than changing the solver.
+- PBE Accuracy Parity Phase 5x locks the final DelPhi reaction-energy
+  convention for hidden PQR parity. The pyDelPhi extractor accepts
+  `-FullIscmEnergyOracle` and writes `pbe_oracle_energy_components.csv`,
+  `pbe_oracle_iscm_full.csv`, and `pbe_oracle_iscm_energy_terms.csv`.
+  TITAN `delphi-iscm`/`delphi-corrected` now build DelPhi-style scaled
+  surface-charge positions natively; `pbe_oracle_iscm_full.csv` is only a
+  compare/audit oracle (`iscm_position_rms_vs_oracle`, sample diffs), not an
+  input to final ISCM accumulation. Use
+  `test/pbe_final_energy_convention_smoke.ps1 -Strict` with a full oracle root
+  before claiming barnase final-energy parity. Public PBE/PBSA defaults remain
+  on the native atom/grid convention.
+- PBE nonlinear/Gaussian/RPB/focus lock resumes after accepting the small
+  native ISCM position residual as diagnostic-only. `-pbe-model=nonlinear
+  -pbe-nl-solver=newton` now keeps DelPhi PQR parity rows on SOR when
+  `-pbe-nl-inner=auto`, and a rejected Newton correction falls back to a native
+  NWT SOR block using the DelPhi linearization
+  `denom += screen*cosh(phi)` and `rhs += screen*(phi*cosh(phi)-sinh(phi))`
+  instead of the older Picard fallback. Hidden PQR parity dump `all` also writes
+  `pbe_nwt_trace.csv`, and `pbe_energy.csv`/`pbe_parity_stage.csv` append
+  nonlinear electrostatic-stress, osmotic-pressure, and total-correction
+  columns for pyDelPhi NWT energy-component comparison. Gaussian density for
+  `-pbe-dielectric=gaussian`, `-pbe-surface=gaussian|gaussian-cutoff`,
+  `-pbe-charge-assignment=gaussian`, and `-pbe-biomodel=rpbe` uses the
+  multiplicative DelPhi-style union at grid centers and positive midpoint
+  faces. Phase 6b extends the pyDelPhi exporter with
+  `pbe_oracle_nwt_trace.csv` and `pbe_oracle_nwt_solver_summary.csv`; use
+  `test/pbe_nonlinear_nwt_trace_compare.ps1` to fail in fixed order
+  `nwt_units -> nwt_rhs -> nwt_screen -> nwt_denom -> nwt_update` before
+  tuning residuals. Phase 6c makes the DelPhi NWT parity path use pyDelPhi
+  block-stop semantics directly: `-pbe-nl-block` is the RMS/max-dphi block
+  size, `pbe_nwt_solver_progress.csv` records per-block convergence, and
+  `test/pbe_nwt_solver_progress_smoke.ps1` compares that curve against the
+  oracle before nonlinear energy strict checks. Do not reintroduce TITAN
+  line-search/stagnation early stops in `delphi_nwt_parity_active()`. New
+  Phase-6 gates include
+  `test/pbe_nonlinear_nwt_trace_smoke.ps1`,
+  `test/pbe_nwt_solver_progress_smoke.ps1`,
+  `test/pbe_nonlinear_energy_components_smoke.ps1`,
+  `test/pbe_gaussian_density_oracle_smoke.ps1`,
+  `test/pbe_rpbe_source_smoke.ps1`, and
+  `test/pbe_focus_boundary_oracle_smoke.ps1`. Keep RPB and focus/probe strict
+  gates tied to the pyDelPhi oracle smoke scripts until their stage diagnostics
+  pass. Phase 6d adds `-FullGaussianOracle`, `-FullRpbOracle`,
+  `-FullFocusProbeOracle`, and `-Fixture` to
+  `test/pbe_delphi_export_maps.ps1`, plus `test/pbe_timing_compare.ps1` for
+  report-only TITAN vs pyDelPhi timing rows. Gaussian density/charge oracle is
+  strict-capable on the 5tif Gaussian-density fixture. RPB now computes a
+  native analytic Coulomb/grad-Coulomb/source audit instead of using the vacuum
+  field, and `test/pbe_rpbe_source_smoke.ps1 -Strict` passes after locking
+  `test_center=auto` to pyDelPhi's radius-expanded `COORDLIMITS` grid center.
+  With parity dump enabled, `pbe_rpbe_source_top.csv` records the strongest
+  native source cells for native-vs-oracle diagnostics.
+  Focus/probe oracle export now builds a parent phimap and uses pyDelPhi
+  `focusing` boundary syntax; probe energy may still be missing in the oracle
+  and should not be claimed strict without `pbe_oracle_focus_probe.csv`
+  containing finite probe energy.
 - The strict DelPhi scripts are diagnostic gates, not a reason to loosen
   tolerances. `test/pbe_delphi_strict_linear_smoke.ps1` and
   `test/pbe_barnase_nonlinear_smoke.ps1` can run non-strict to emit reports,

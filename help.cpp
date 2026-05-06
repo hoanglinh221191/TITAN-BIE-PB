@@ -200,9 +200,13 @@ IMPORTANT NOTES
     -pbe-mg-levels, -pbe-mg-pre, -pbe-mg-post, -pbe-mg-coarse-iter
     -pbe-map, -pbe-map-frames, -pbe-max-grid, -pbe-kernel
     hidden PQR parity only: -pbe-parity-dump, -pbe-parity-map-dump,
-    -pbe-test-charge-grid, -pbe-test-surface-map,
-    -pbe-test-midpoint-epsilon, -pbe-test-vdwms-remap,
-    -pbe-test-boundary-map,
+    -pbe-test-charge-grid, -pbe-test-charge-grid-diff,
+    -pbe-test-surface-map,
+    -pbe-test-midpoint-epsilon, -pbe-test-midpoint-diff,
+    -pbe-test-vdwms-remap,
+    -pbe-test-boundary-map, -pbe-test-boundary-convention,
+    -pbe-test-field-units, -pbe-test-operator-convention,
+    -pbe-test-rhs-map, -pbe-test-screen-map, -pbe-test-denom-map,
     -pbe-test-nl-source, -pbe-test-newton-derivative,
     -pbe-test-energy-convention
     In arg files use -flag=value; on the CLI use -flag value.
@@ -225,16 +229,35 @@ IMPORTANT NOTES
     barnase PQR forensic mode additionally writes pbe_barnase_forensic_inputs.csv,
     pbe_barnase_surface_audit.csv, pbe_barnase_operator_audit.csv, and
     pbe_atom_phi_audit.csv; ISCM parity with -pbe-parity-dump=all writes
-    pbe_iscm_surface_charge_samples.csv; -pbe-parity-map-dump=samples writes
-    pbe_field_samples.csv, pbe_boundary_samples.csv, and
-    pbe_charge_grid_audit.csv. The hidden DelPhi map extractor script writes
+    pbe_iscm_surface_charge_samples.csv and pbe_iscm_energy_terms.csv;
+    -pbe-parity-map-dump=samples writes
+    pbe_field_samples.csv, pbe_boundary_samples.csv,
+    pbe_operator_stage.csv, pbe_charge_grid_audit.csv,
+    pbe_nwt_trace.csv, and pbe_nwt_solver_progress.csv for DelPhi NWT
+    nonlinear parity rows. The hidden
+    DelPhi map extractor script writes
     oracle-side pbe_oracle_field_samples.csv, pbe_oracle_boundary_samples.csv,
+    pbe_oracle_boundary_map.csv, pbe_oracle_boundary_inputs.csv,
+    pbe_oracle_nwt_trace.csv, pbe_oracle_nwt_solver_summary.csv,
     pbe_oracle_midpoint_epsilon_samples.csv,
     pbe_oracle_atom_radius_audit.csv, a replayable sparse
     pbe_oracle_surface_map.csv with inside semantics, and
     barnase_stage_oracle.tsv under test/tmp for stage comparison. With
     -FullMidpointEpsilon it writes a full replayable midpoint-epsilon oracle
     for one salt only, default 0.15 M, selectable with -FullMidpointSalt.
+    With -FullIscmEnergyOracle it also writes
+    pbe_oracle_energy_components.csv, pbe_oracle_iscm_full.csv, and
+    pbe_oracle_iscm_energy_terms.csv for final DelPhi ISCM convention checks.
+    Phase 6d extends the hidden exporter with -FullGaussianOracle,
+    -FullRpbOracle, -FullFocusProbeOracle, and -Fixture. The Gaussian density
+    oracle path is strict-capable for the 5tif Gaussian-density fixture; RPB
+    source comparison is report-first until the remaining grad-epsilon/source
+    convention is locked. test/pbe_timing_compare.ps1 writes
+    pbe_timing_compare.csv for TITAN vs pyDelPhi wall-clock/profile rows.
+    test/pbe_nonlinear_nwt_trace_compare.ps1 compares TITAN NWT rows against
+    the pyDelPhi oracle in fixed stage order, and
+    test/pbe_nwt_solver_progress_smoke.ps1 compares block RMS/max-dphi progress
+    before Gaussian/RPB/focus strict.
 
 2.3 Hydrogen Bonds
 
@@ -1629,6 +1652,8 @@ IMPORTANT NOTES
   -pbe-nl-stagnation <N>
                         Newton residual stagnation window. Default: 8
   -pbe-nl-block <N>     Nonlinear diagnostic block size. Default: 5
+                        In DelPhi NWT parity rows this is the true block-stop
+                        size used for RMS/max-dphi checks.
   -pbe-nl-dphi <val>    Nonlinear max delta-phi tolerance. Default: 1e-4
   -pbe-nl-relax <val>   auto or Picard damping in [0.05,1.0]. Default: auto
   -pbe-nl-clip <val>    Clip alpha*phi before sinh. Default: 20.0
@@ -1643,13 +1668,23 @@ IMPORTANT NOTES
                         newton solves a stencil Jacobian correction with SOR
                         or geometric V-cycle and appends correction residual,
                         inner levels/cycles, Jacobian, lambda, and stop-reason
-                        diagnostics
+                        diagnostics. In DelPhi PQR parity rows, auto keeps the
+                        strict Newton path on SOR first; if line search rejects
+                        a correction, TITAN falls back to a DelPhi NWT SOR
+                        block with denominator += screen*cosh(phi) and RHS
+                        += screen*(phi*cosh(phi)-sinh(phi)). PQR parity dump
+                        mode writes pbe_nwt_trace.csv and
+                        pbe_nwt_solver_progress.csv; pbe_energy.csv appends
+                        nonlinear stress, osmotic, and total correction columns.
   -pbe-nl-multigrid <m> off or fas. Default: off
   -pbe-gaussian-exp <v> Gaussian density exponent. Default: 2
   -pbe-gaussian-sigma <v>
                         Gaussian density sigma scale. Default: 1.0
   -pbe-density-cutoff <v>
                         Gaussian cutoff density. Default: 0.759
+                        Gaussian dielectric now uses DelPhi-style
+                        multiplicative density union at centers and positive
+                        midpoint faces instead of additive clamp.
   -pbe-surface-cutoff <v>
                         auto or explicit Gaussian surface cutoff. Default: auto
   -pbe-gap-diel <v>     Gaussian-cutoff gap dielectric. Default: 22.0
@@ -1664,8 +1699,9 @@ IMPORTANT NOTES
                         auto runs nested-grid focusing: coarse solve first,
                         then interpolated coarse potential seeds fine-grid
                         boundary/initial values.
-                        delphi uses the same nested parent phimap path and
-                        exposes hidden probe/focus fixture diagnostics.
+                        delphi uses the parent phimap as the child boundary
+                        path and exposes hidden probe/focus fixture
+                        diagnostics.
   -pbe-multigrid <mode> off, focus, auto, or vcycle. Default: off
                         focus/auto keep the nested focusing path; vcycle runs
                         a geometric V-cycle correction before final fine-grid
@@ -1713,7 +1749,14 @@ IMPORTANT NOTES
                         pyDelPhi wall-clock timing on the same barnase rows.
   -pbe-test-charge-grid <m>
                         native or oracle. Requires -pbe-test-pqr. oracle reads
+                        pbe_oracle_charge_grid_full.csv or
                         pbe_oracle_charge_grid.csv from the run directory.
+  -pbe-test-charge-grid-diff <m>
+                        off, samples, or full. Requires -pbe-test-pqr and a
+                        pyDelPhi charge-grid oracle. Writes
+                        pbe_charge_grid_diff.csv and
+                        pbe_charge_grid_diff_summary.csv to isolate local
+                        charge assignment before SOR update debugging.
   -pbe-test-surface-map <m>
                         native or oracle. Requires -pbe-test-pqr. oracle reads
                         pbe_oracle_surface_map.csv with i,j,k,inside columns.
@@ -1722,6 +1765,16 @@ IMPORTANT NOTES
                         pbe_oracle_midpoint_epsilon.csv with
                         i,j,k,eps_x,eps_y,eps_z columns and overrides
                         positive-face epsilon before denominator/solver setup.
+  -pbe-test-midpoint-diff <m>
+                        off, samples, or full. Requires -pbe-test-pqr and
+                        pbe_oracle_midpoint_epsilon.csv. Writes only native
+                        vs oracle positive-face mismatches to
+                        pbe_midpoint_face_diff.csv with remap action, raw face
+                        state, signed encoded media/entity state, owner, and
+                        nearest atom/exposed-point metrics. full also writes
+                        pbe_native_midpoint_state.csv and
+                        pbe_vdwms_action_histogram.csv for VDWMS stage
+                        root-cause analysis.
   -pbe-test-vdwms-remap <m>
                         auto or off. Requires -pbe-test-pqr. auto enables the
                         DelPhi-parity VDW-to-MS midpoint-media remap; off keeps
@@ -1737,6 +1790,27 @@ IMPORTANT NOTES
                         Oracle CSVs are hidden PQR parity inputs only; arg
                         files use -flag=value, while direct CLI usage uses
                         -flag value.
+  -pbe-test-boundary-convention <m>
+                        native-real, delphi-grid, or oracle. Requires
+                        -pbe-test-pqr. delphi-grid samples boundary distances
+                        from DelPhi atom-grid coordinates and uses DelPhi
+                        exdi/indi scaled by epkt; oracle implies boundary-map
+                        replay.
+  -pbe-test-field-units <m>
+                        native or delphi-dimensionless. Requires
+                        -pbe-test-pqr. delphi-dimensionless stores the field
+                        in pyDelPhi raw units, scales RHS by epkt, and writes
+                        raw/native phi columns in field, boundary, and
+                        operator-stage diagnostics.
+  -pbe-test-operator-convention <m>
+                        native or delphi. Requires -pbe-test-pqr. delphi keeps
+                        native field units but uses DelPhi's solvent screening
+                        convention in the linear operator audit path.
+  -pbe-test-rhs-map <m>, -pbe-test-screen-map <m>, -pbe-test-denom-map <m>
+                        native or oracle. Requires -pbe-test-pqr and a full
+                        pbe_oracle_operator_stage.csv. These replay RHS,
+                        screen, or denominator maps to isolate water_phi
+                        mismatch before changing the solver.
   -pbe-test-nl-source <m>
                         titan or delphi-dimensionless. Requires -pbe-test-pqr.
                         delphi-dimensionless solves psi=alpha*phi with alpha-
@@ -1753,6 +1827,12 @@ IMPORTANT NOTES
                         its final corrected RF follows the DelPhi VDW
                         water-phase ISCM convention while keeping vacuum grid
                         RF as an audit field.
+                        TITAN now builds DelPhi-style scaled surface-charge
+                        positions natively for delphi-iscm/delphi-corrected.
+                        When pbe_oracle_iscm_full.csv is present in a hidden
+                        PQR parity run, it is used only for compare/audit
+                        fields such as iscm_position_rms_vs_oracle, not for
+                        final ISCM accumulation.
                         native/PBSA defaults still use the normal atom/grid
                         convention unless this test path is selected.
                         Use the DelPhi stage-oracle smoke scripts, not this

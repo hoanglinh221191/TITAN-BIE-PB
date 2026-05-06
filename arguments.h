@@ -132,6 +132,7 @@ struct PbeArgs {
   std::string surface_cutoff{"auto"};
   double surface_cutoff_value{0.0};
   double gap_diel{22.0};
+  std::string probe_file{};
   std::string probe_residue{};
   std::string probe_site{};
   bool focus_center_user{false};
@@ -157,10 +158,18 @@ struct PbeArgs {
   std::string parity_dump{"off"};
   std::string parity_map_dump{"off"};
   std::string test_charge_grid{"native"};
+  std::string test_charge_grid_diff{"off"};
   std::string test_surface_map{"native"};
   std::string test_midpoint_epsilon{"native"};
+  std::string test_midpoint_diff{"off"};
   std::string test_vdwms_remap{"auto"};
   std::string test_boundary_map{"native"};
+  std::string test_boundary_convention{"native-real"};
+  std::string test_field_units{"native"};
+  std::string test_operator_convention{"native"};
+  std::string test_rhs_map{"native"};
+  std::string test_screen_map{"native"};
+  std::string test_denom_map{"native"};
   std::string test_nl_source{"titan"};
   bool test_newton_derivative{false};
   std::string test_energy_convention{"auto"};

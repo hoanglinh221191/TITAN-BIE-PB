@@ -122,7 +122,9 @@ else
 endif
 
 # ─── Tệp nguồn (Sources) ───
-SRCS  = $(wildcard *.cpp)
+ROOT_SRCS = $(wildcard *.cpp)
+PBE_SRCS  = $(wildcard titan_pbe/*.cpp)
+SRCS  = $(ROOT_SRCS) $(PBE_SRCS)
 OBJS  = $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(SRCS))
 DEPS  = $(OBJS:.o=.d)
 

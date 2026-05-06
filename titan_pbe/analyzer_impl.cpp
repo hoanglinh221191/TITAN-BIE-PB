@@ -1,4 +1,4 @@
-#include "titan_pbe.h"
+#include "analyzer_impl.h"
 
 #include "titan_energy_decomposition.h"
 #include "titan_executor.h"
@@ -20,6 +20,8 @@
 #include <span>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 
@@ -48,14 +50,6 @@ std::size_t effective_workers(const TitanExecutor &executor,
       1, std::min<std::size_t>(executor.capacity(), work_items));
 }
 
-double harmonic_eps(double a, double b) noexcept {
-  if (a <= 0.0 || b <= 0.0)
-    return 0.5 * (a + b);
-  if (std::abs(a - b) <= 1.0e-14)
-    return a;
-  return 2.0 * a * b / (a + b);
-}
-
 double debye_kappa_inv_a(double salt_m, double temp_k) noexcept {
   if (salt_m <= 0.0)
     return 0.0;
@@ -66,12 +60,6 @@ double debye_kappa_inv_a(double salt_m, double temp_k) noexcept {
 std::string format_fixed(double value, int digits = 6) {
   std::ostringstream oss;
   oss << std::fixed << std::setprecision(digits) << value;
-  return oss.str();
-}
-
-std::string format_suffix(std::size_t value, int width) {
-  std::ostringstream oss;
-  oss << std::setw(width) << std::setfill('0') << value;
   return oss.str();
 }
 
@@ -94,6 +82,41 @@ std::string csv_escape(const std::string &value) {
   return out;
 }
 
+enum DelphiFaceAction : std::uint16_t {
+  kDelphiFaceUnchanged = 0,
+  kDelphiFaceRawVdw = 1,
+  kDelphiFaceExposedSolvent = 2,
+  kDelphiFaceContactSolvent = 3,
+  kDelphiFaceCavityMedia = 4,
+  kDelphiFaceSignRemap = 5,
+  kDelphiFaceDelphiContactSign = 6,
+  kDelphiFaceDelphiCavityRemap = 7,
+  kDelphiFaceSignPreserve = 8,
+};
+
+const char *delphi_face_action_name(std::uint16_t action) noexcept {
+  switch (action) {
+  case kDelphiFaceRawVdw:
+    return "raw_vdw";
+  case kDelphiFaceExposedSolvent:
+    return "exposed_solvent";
+  case kDelphiFaceContactSolvent:
+    return "contact_solvent";
+  case kDelphiFaceCavityMedia:
+    return "cavity_media";
+  case kDelphiFaceSignRemap:
+    return "sign_remap";
+  case kDelphiFaceDelphiContactSign:
+    return "delphi_contact_sign";
+  case kDelphiFaceDelphiCavityRemap:
+    return "delphi_cavity_remap";
+  case kDelphiFaceSignPreserve:
+    return "sign_preserve";
+  default:
+    return "unchanged";
+  }
+}
+
 template <typename Shape>
 bool is_boundary(std::size_t i, std::size_t j, std::size_t k,
                  const Shape &shape) noexcept {
@@ -101,12 +124,19 @@ bool is_boundary(std::size_t i, std::size_t j, std::size_t k,
          j + 1 == shape.ny || k + 1 == shape.nz;
 }
 
-double clamp_fraction(double value) noexcept {
-  if (value < 0.0)
-    return 0.0;
-  if (value > 1.0)
-    return 1.0;
-  return value;
+std::pair<double, double> delphi_sinh_cosh_tail(double phi,
+                                                double clip) noexcept {
+  const double effective_clip = std::max(1.0e-12, clip);
+  const double sinh_clip = std::sinh(effective_clip);
+  if (phi > effective_clip) {
+    const double sinh_phi = sinh_clip + sinh_clip * (phi - effective_clip);
+    return {sinh_phi, std::sqrt(1.0 + sinh_phi * sinh_phi)};
+  }
+  if (phi < -effective_clip) {
+    const double sinh_phi = -sinh_clip + sinh_clip * (phi + effective_clip);
+    return {sinh_phi, std::sqrt(1.0 + sinh_phi * sinh_phi)};
+  }
+  return {std::sinh(phi), std::cosh(phi)};
 }
 
 bool parse_double_token(const std::string &token, double &value) {
@@ -194,41 +224,31 @@ bool csv_index(const std::vector<std::string> &fields,
   return true;
 }
 
-bool parse_boolish(const std::string &value, bool &out) {
-  const std::string v = lowercase_copy(trim_copy(value));
-  if (v == "1" || v == "true" || v == "yes" || v == "solute" ||
-      v == "inside") {
-    out = true;
-    return true;
-  }
-  if (v == "0" || v == "false" || v == "no" || v == "solvent" ||
-      v == "outside") {
-    out = false;
-    return true;
-  }
-  double numeric = 0.0;
-  if (parse_double_token(v, numeric)) {
-    out = std::abs(numeric) > 0.5;
-    return true;
-  }
-  return false;
+std::string read_oracle_fixture_filter() {
+  std::ifstream in("pbe_oracle_fixture.txt");
+  if (!in.is_open())
+    return {};
+  std::string line;
+  if (!std::getline(in, line))
+    return {};
+  return trim_copy(line);
 }
 
-bool surface_uses_probe_exclusion(const std::string &surface) noexcept {
-  return surface == "sas" || surface == "ses" || surface == "delphi-ses";
-}
-
-bool surface_uses_ses_flood_fill(const std::string &surface) noexcept {
-  return surface == "ses" || surface == "delphi-ses";
+bool oracle_fixture_matches(
+    const std::vector<std::string> &fields,
+    const std::unordered_map<std::string, std::size_t> &header,
+    const std::string &fixture_filter) {
+  if (fixture_filter.empty())
+    return true;
+  const auto it = header.find("fixture");
+  if (it == header.end() || it->second >= fields.size())
+    return true;
+  return trim_copy(fields[it->second]) == fixture_filter;
 }
 
 bool surface_uses_face_refinement(const std::string &surface) noexcept {
   return surface == "delphi-ses" || surface == "delphi-vdw" ||
          surface == "gaussian" || surface == "gaussian-cutoff";
-}
-
-bool surface_uses_gaussian(const std::string &surface) noexcept {
-  return surface == "gaussian" || surface == "gaussian-cutoff";
 }
 
 std::string uppercase_letters(std::string value) {
@@ -397,14 +417,6 @@ bool point_inside_vdw_half_grid(const AtomSpatialBins &bins,
   return false;
 }
 
-double dielectric_from_inside_fraction(double inside_fraction, double eps_in,
-                                       double eps_out) noexcept {
-  const double f = std::clamp(inside_fraction, 0.0, 1.0);
-  const double denom = f / std::max(1.0e-12, eps_in) +
-                       (1.0 - f) / std::max(1.0e-12, eps_out);
-  return denom > 0.0 ? 1.0 / denom : 0.5 * (eps_in + eps_out);
-}
-
 template <typename AtomRange>
 double segment_inside_fraction(const AtomSpatialBins &bins,
                                const AtomRange &atoms, double x0, double y0,
@@ -505,7 +517,7 @@ double fallback_radius_from_mass(double mass) noexcept {
 
 } // namespace
 
-void Analyzer::configure(const arguments &args) {
+void AnalyzerImpl::configure(const arguments &args) {
   args_ = args.pbe;
   if (args_.pbsa) {
     args_.flag_pbe = true;
@@ -513,7 +525,7 @@ void Analyzer::configure(const arguments &args) {
   }
 }
 
-void Analyzer::begin_trajectory(std::size_t trajectory_id,
+void AnalyzerImpl::begin_trajectory(std::size_t trajectory_id,
                                 const std::string &source_label) {
   if (!enabled())
     return;
@@ -521,7 +533,7 @@ void Analyzer::begin_trajectory(std::size_t trajectory_id,
   current_source_label_ = source_label;
 }
 
-void Analyzer::end_trajectory(std::fstream &log) {
+void AnalyzerImpl::end_trajectory(std::fstream &log) {
   if (!enabled())
     return;
   if (log.is_open()) {
@@ -531,7 +543,7 @@ void Analyzer::end_trajectory(std::fstream &log) {
   }
 }
 
-void Analyzer::collect_atoms(const MOL &mol, const Multi_MOL_parameters &params,
+void AnalyzerImpl::collect_atoms(const MOL &mol, const Multi_MOL_parameters &params,
                              std::vector<Atom> &atoms,
                              const char *label) const {
   const std::size_t n = mol.size();
@@ -565,7 +577,7 @@ void Analyzer::collect_atoms(const MOL &mol, const Multi_MOL_parameters &params,
   }
 }
 
-void Analyzer::collect_test_pqr_atoms(std::vector<Atom> &atoms) const {
+void AnalyzerImpl::collect_test_pqr_atoms(std::vector<Atom> &atoms) const {
   std::ifstream in(args_.test_pqr);
   if (!in.is_open()) {
     throw std::runtime_error("PBE: failed to open test PQR fixture: " +
@@ -653,1015 +665,146 @@ void Analyzer::collect_test_pqr_atoms(std::vector<Atom> &atoms) const {
   }
 }
 
-std::string Analyzer::inferred_element_symbol(const Atom &atom) const {
-  const std::string explicit_element = uppercase_letters(atom.element);
-  if (!explicit_element.empty()) {
-    if (explicit_element.size() == 1 || explicit_element == "CL" ||
-        explicit_element == "BR" || explicit_element == "NA" ||
-        explicit_element == "MG" || explicit_element == "ZN" ||
-        explicit_element == "FE" || explicit_element == "CA")
-      return explicit_element;
-    return std::string(1, explicit_element.front());
-  }
-
-  const std::string name = uppercase_letters(atom.atom_name);
-  if (name.empty())
-    return "UNK";
-  const std::string res = uppercase_letters(atom.resname);
-  if (name == "CL" || name == "BR")
-    return name;
-  if (name == "NA" && (res == "NA" || res == "SOD"))
-    return "NA";
-  if (name == "MG" && res == "MG")
-    return "MG";
-  if (name == "ZN" && res == "ZN")
-    return "ZN";
-  if (name == "FE" && res == "FE")
-    return "FE";
-  if (name == "CA" && (res == "CA" || res == "CAL" || res == "CA2"))
-    return "CA";
-  return std::string(1, name.front());
-}
-
-double Analyzer::effective_surface_radius(const Atom &atom) const {
-  if (effective_radius_convention() != "delphi-bondi")
-    return atom.radius;
-  if (args_.surface == "delphi-vdw" && !args_.test_pqr.empty() &&
-      atom.radius > 0.0) {
-    return atom.radius;
-  }
-  const std::string element = inferred_element_symbol(atom);
-  if (element == "H")
-    return std::max(atom.radius, 1.30);
-  if (element == "C")
-    return std::max(atom.radius, 1.80);
-  if (element == "N")
-    return std::max(atom.radius, 1.60);
-  if (element == "O")
-    return std::max(atom.radius, 1.50);
-  if (element == "S" || element == "P")
-    return std::max(atom.radius, 1.80);
-  if (element == "F")
-    return std::max(atom.radius, 1.47);
-  if (element == "CL")
-    return std::max(atom.radius, 1.75);
-  if (element == "BR")
-    return std::max(atom.radius, 1.85);
-  if (element == "I")
-    return std::max(atom.radius, 1.98);
-  return atom.radius;
-}
-
-std::string Analyzer::radius_media_source(const Atom &atom) const {
-  if (effective_radius_convention() != "delphi-bondi")
-    return "native";
-  if (args_.surface == "delphi-vdw" && !args_.test_pqr.empty() &&
-      atom.radius > 0.0)
-    return "pqr_siz_radius";
-  if (effective_surface_radius(atom) > atom.radius + 1.0e-12)
-    return "bondi_floor";
-  return "input_radius";
-}
-
-std::string Analyzer::effective_radius_convention() const {
-  if (args_.radius_convention != "auto")
-    return args_.radius_convention;
-  if (args_.surface.rfind("delphi-", 0) == 0 || uses_gaussian_model() ||
-      args_.biomodel == "rpbe" || args_.charge_assignment == "delphi" ||
-      args_.charge_assignment == "gaussian")
-    return "delphi-bondi";
-  return "native";
-}
-
-bool Analyzer::uses_gaussian_model() const {
-  return args_.dielectric_model == "gaussian" ||
-         surface_uses_gaussian(args_.surface) ||
-         args_.charge_assignment == "gaussian" || args_.biomodel == "rpbe";
-}
-
-double Analyzer::gaussian_density_at(const std::vector<Atom> &atoms, double x,
-                                     double y, double z) const {
-  const double exponent = std::max(1.0e-12, args_.gaussian_exp);
-  const double sigma = std::max(1.0e-12, args_.gaussian_sigma);
-  double density = 0.0;
-  for (const Atom &atom : atoms) {
-    const double r0 = std::max(1.0e-12, effective_surface_radius(atom));
-    const double cutoff = 3.0 * sigma * r0;
-    const double dx = x - atom.x;
-    const double dy = y - atom.y;
-    const double dz = z - atom.z;
-    const double r2 = dx * dx + dy * dy + dz * dz;
-    if (r2 > cutoff * cutoff)
-      continue;
-    const double scaled = std::sqrt(r2) / (sigma * r0);
-    density += std::exp(-std::pow(scaled, exponent));
-    if (density >= 1.0)
-      return 1.0;
-  }
-  return std::clamp(density, 0.0, 1.0);
-}
-
-double Analyzer::gaussian_dielectric(double density, double eps_in,
-                                     double eps_out) const {
-  const double d = std::clamp(density, 0.0, 1.0);
-  if (args_.surface == "gaussian-cutoff") {
-    const double cutoff =
-        args_.surface_cutoff == "auto" ? args_.density_cutoff
-                                       : args_.surface_cutoff_value;
-    if (d >= cutoff)
-      return eps_in;
-    if (d > 0.0 && args_.gap_diel > eps_in && args_.gap_diel < eps_out)
-      return args_.gap_diel;
-  }
-  return eps_out - (eps_out - eps_in) * d;
-}
-
-std::vector<Analyzer::Atom>
-Analyzer::adjusted_surface_atoms(const std::vector<Atom> &atoms) const {
-  std::vector<Atom> adjusted = atoms;
-  if (effective_radius_convention() != "delphi-bondi")
-    return adjusted;
-  for (Atom &atom : adjusted)
-    atom.radius = effective_surface_radius(atom);
-  return adjusted;
-}
-
-Analyzer::GridShape Analyzer::build_shape(const std::vector<Atom> &atoms) const {
-  return build_shape(atoms, args_.scale, args_.margin);
-}
-
-Analyzer::GridShape Analyzer::build_shape(const std::vector<Atom> &atoms,
-                                          double scale, double margin) const {
-  if (atoms.empty())
-    throw std::runtime_error("PBE: no atoms were available for the frame.");
-
-  double min_x = std::numeric_limits<double>::max();
-  double min_y = std::numeric_limits<double>::max();
-  double min_z = std::numeric_limits<double>::max();
-  double max_x = std::numeric_limits<double>::lowest();
-  double max_y = std::numeric_limits<double>::lowest();
-  double max_z = std::numeric_limits<double>::lowest();
-  double coord_min_x = std::numeric_limits<double>::max();
-  double coord_min_y = std::numeric_limits<double>::max();
-  double coord_min_z = std::numeric_limits<double>::max();
-  double coord_max_x = std::numeric_limits<double>::lowest();
-  double coord_max_y = std::numeric_limits<double>::lowest();
-  double coord_max_z = std::numeric_limits<double>::lowest();
-  const double surface_inflate =
-      surface_uses_probe_exclusion(args_.surface) ? args_.probe_radius : 0.0;
-  for (const Atom &atom : atoms) {
-    coord_min_x = std::min(coord_min_x, atom.x);
-    coord_min_y = std::min(coord_min_y, atom.y);
-    coord_min_z = std::min(coord_min_z, atom.z);
-    coord_max_x = std::max(coord_max_x, atom.x);
-    coord_max_y = std::max(coord_max_y, atom.y);
-    coord_max_z = std::max(coord_max_z, atom.z);
-    const double r = effective_surface_radius(atom) + surface_inflate;
-    min_x = std::min(min_x, atom.x - r);
-    min_y = std::min(min_y, atom.y - r);
-    min_z = std::min(min_z, atom.z - r);
-    max_x = std::max(max_x, atom.x + r);
-    max_y = std::max(max_y, atom.y + r);
-    max_z = std::max(max_z, atom.z + r);
-  }
-
-  min_x -= margin;
-  min_y -= margin;
-  min_z -= margin;
-  max_x += margin;
-  max_y += margin;
-  max_z += margin;
-
-  if (args_.gridbox == "cubic") {
-    const double cx = 0.5 * (min_x + max_x);
-    const double cy = 0.5 * (min_y + max_y);
-    const double cz = 0.5 * (min_z + max_z);
-    const double span =
-        std::max({max_x - min_x, max_y - min_y, max_z - min_z});
-    min_x = cx - 0.5 * span;
-    max_x = cx + 0.5 * span;
-    min_y = cy - 0.5 * span;
-    max_y = cy + 0.5 * span;
-    min_z = cz - 0.5 * span;
-    max_z = cz + 0.5 * span;
-  }
-
-  GridShape shape;
-  shape.h = 1.0 / scale;
-  if (!args_.test_pqr.empty() && args_.test_grid_size > 0) {
-    const std::size_t n =
-        static_cast<std::size_t>(args_.test_grid_size);
-    double cx = 0.5 * (coord_min_x + coord_max_x);
-    double cy = 0.5 * (coord_min_y + coord_max_y);
-    double cz = 0.5 * (coord_min_z + coord_max_z);
-    if (args_.test_center_user) {
-      cx = args_.test_center_x;
-      cy = args_.test_center_y;
-      cz = args_.test_center_z;
-    } else if (args_.focus_center_user) {
-      cx = args_.focus_center_x;
-      cy = args_.focus_center_y;
-      cz = args_.focus_center_z;
-    }
-    shape.nx = n;
-    shape.ny = n;
-    shape.nz = n;
-    shape.ox = cx - 0.5 * static_cast<double>(n - 1) * shape.h;
-    shape.oy = cy - 0.5 * static_cast<double>(n - 1) * shape.h;
-    shape.oz = cz - 0.5 * static_cast<double>(n - 1) * shape.h;
-    if (shape.nx > std::numeric_limits<std::size_t>::max() / shape.ny ||
-        shape.nx * shape.ny >
-            std::numeric_limits<std::size_t>::max() / shape.nz) {
-      throw std::runtime_error("PBE: grid dimensions overflow size_t.");
-    }
-    shape.n = shape.nx * shape.ny * shape.nz;
-    shape.memory_bytes =
-        shape.n * (7 * sizeof(double) + 2 * sizeof(unsigned char));
-    if (shape.n > args_.max_grid_points) {
-      std::ostringstream msg;
-      msg << "PBE: requested grid " << shape.nx << "x" << shape.ny << "x"
-          << shape.nz << " = " << shape.n
-          << " points exceeds -pbe-max-grid " << args_.max_grid_points << ".";
-      throw std::runtime_error(msg.str());
-    }
-    return shape;
-  }
-  shape.ox = min_x;
-  shape.oy = min_y;
-  shape.oz = min_z;
-  auto count_axis = [&](double span) {
-    std::size_t n =
-        static_cast<std::size_t>(std::ceil(std::max(0.0, span) / shape.h)) + 1;
-    n = std::max<std::size_t>(3, n);
-    if ((n & 1ULL) == 0)
-      ++n;
-    return n;
-  };
-  shape.nx = count_axis(max_x - min_x);
-  shape.ny = count_axis(max_y - min_y);
-  shape.nz = count_axis(max_z - min_z);
-  if (args_.focus_center_user && args_.focus == "delphi") {
-    shape.ox =
-        args_.focus_center_x - 0.5 * static_cast<double>(shape.nx - 1) * shape.h;
-    shape.oy =
-        args_.focus_center_y - 0.5 * static_cast<double>(shape.ny - 1) * shape.h;
-    shape.oz =
-        args_.focus_center_z - 0.5 * static_cast<double>(shape.nz - 1) * shape.h;
-  }
-
-  if (shape.nx > std::numeric_limits<std::size_t>::max() / shape.ny ||
-      shape.nx * shape.ny >
-          std::numeric_limits<std::size_t>::max() / shape.nz) {
-    throw std::runtime_error("PBE: grid dimensions overflow size_t.");
-  }
-  shape.n = shape.nx * shape.ny * shape.nz;
-  shape.memory_bytes =
-      shape.n * (7 * sizeof(double) + 2 * sizeof(unsigned char));
-  if (shape.n > args_.max_grid_points) {
-    std::ostringstream msg;
-    msg << "PBE: requested grid " << shape.nx << "x" << shape.ny << "x"
-        << shape.nz << " = " << shape.n << " points exceeds -pbe-max-grid "
-        << args_.max_grid_points << ".";
-    throw std::runtime_error(msg.str());
-  }
-  return shape;
-}
-
-void Analyzer::ensure_workspace(const GridShape &shape) {
-  phi_.assign(shape.n, 0.0);
-  rho_.assign(shape.n, 0.0);
-  eps_x_.assign(shape.n, args_.ext_diel);
-  eps_y_.assign(shape.n, args_.ext_diel);
-  eps_z_.assign(shape.n, args_.ext_diel);
-  denom_.assign(shape.n, 1.0);
-  screen_.assign(shape.n, 0.0);
-  inside_.assign(shape.n, 0);
-  ion_accessible_.assign(shape.n, 1);
-  last_gaussian_density_sum_ = 0.0;
-  last_gaussian_cutoff_points_ = 0;
-  last_gaussian_eps_min_ = 0.0;
-  last_gaussian_eps_max_ = 0.0;
-  last_gaussian_eps_mean_ = 0.0;
-  last_vdwms_audit_ = VdwmsAudit{};
-}
-
-void Analyzer::classify_surface(const GridShape &shape,
-                                const std::vector<Atom> &atoms,
-                                TitanExecutor &executor) {
-  const std::vector<Atom> surface_atoms = adjusted_surface_atoms(atoms);
-  if (uses_gaussian_model()) {
-    double max_base_radius = shape.h;
-    for (const Atom &atom : surface_atoms)
-      max_base_radius = std::max(max_base_radius, atom.radius);
-    const double sigma = std::max(1.0e-12, args_.gaussian_sigma);
-    const double influence = 3.0 * sigma * max_base_radius;
-    const AtomSpatialBins gaussian_bins =
-        build_atom_bins(surface_atoms, std::max(0.0, influence), shape.h);
-    auto density_at = [&](double x, double y, double z) {
-      const double exponent = std::max(1.0e-12, args_.gaussian_exp);
-      const int radius_bins = static_cast<int>(
-          std::ceil(std::max(shape.h, influence) / gaussian_bins.cell)) + 1;
-      const int bx0 = static_cast<int>(std::floor((x - gaussian_bins.min_x) /
-                                                  gaussian_bins.cell));
-      const int by0 = static_cast<int>(std::floor((y - gaussian_bins.min_y) /
-                                                  gaussian_bins.cell));
-      const int bz0 = static_cast<int>(std::floor((z - gaussian_bins.min_z) /
-                                                  gaussian_bins.cell));
-      double density = 0.0;
-      for (int dz = -radius_bins; dz <= radius_bins; ++dz) {
-        const int bz = bz0 + dz;
-        if (bz < 0 || bz >= static_cast<int>(gaussian_bins.bz))
-          continue;
-        for (int dy = -radius_bins; dy <= radius_bins; ++dy) {
-          const int by = by0 + dy;
-          if (by < 0 || by >= static_cast<int>(gaussian_bins.by))
-            continue;
-          for (int dx = -radius_bins; dx <= radius_bins; ++dx) {
-            const int bx = bx0 + dx;
-            if (bx < 0 || bx >= static_cast<int>(gaussian_bins.bx))
-              continue;
-            const auto &bucket = gaussian_bins.bins
-                [(static_cast<std::size_t>(bz) * gaussian_bins.by +
-                  static_cast<std::size_t>(by)) *
-                     gaussian_bins.bx +
-                 static_cast<std::size_t>(bx)];
-            for (std::size_t atom_idx : bucket) {
-              const Atom &atom = surface_atoms[atom_idx];
-              const double r0 = std::max(1.0e-12, atom.radius);
-              const double cutoff = 3.0 * sigma * r0;
-              const double ddx = x - atom.x;
-              const double ddy = y - atom.y;
-              const double ddz = z - atom.z;
-              const double r2 = ddx * ddx + ddy * ddy + ddz * ddz;
-              if (r2 > cutoff * cutoff)
-                continue;
-              const double scaled = std::sqrt(r2) / (sigma * r0);
-              density += std::exp(-std::pow(scaled, exponent));
-              if (density >= 1.0)
-                return 1.0;
-            }
-          }
-        }
-      }
-      return std::clamp(density, 0.0, 1.0);
-    };
-    const double cutoff =
-        args_.surface_cutoff == "auto" ? args_.density_cutoff
-                                       : args_.surface_cutoff_value;
-    const std::size_t workers = effective_workers(executor, shape.nz);
-    std::vector<double> local_density_sum(workers, 0.0);
-    std::vector<std::size_t> local_cutoff_points(workers, 0);
-    executor.parallel_for(shape.nz, workers, 1,
-                          [&](std::size_t worker, std::size_t z_begin,
-                              std::size_t z_end) {
-      double density_sum = 0.0;
-      std::size_t cutoff_points = 0;
-      for (std::size_t k = z_begin; k < z_end; ++k) {
-        const double z = shape.oz + static_cast<double>(k) * shape.h;
-        for (std::size_t j = 0; j < shape.ny; ++j) {
-          const double y = shape.oy + static_cast<double>(j) * shape.h;
-          for (std::size_t i = 0; i < shape.nx; ++i) {
-            const double x = shape.ox + static_cast<double>(i) * shape.h;
-            const double density = density_at(x, y, z);
-            density_sum += density;
-            const bool inside = density >= cutoff;
-            if (inside)
-              ++cutoff_points;
-            inside_[idx3(i, j, k, shape.nx, shape.ny)] = inside ? 1U : 0U;
-          }
-        }
-      }
-      local_density_sum[worker] += density_sum;
-      local_cutoff_points[worker] += cutoff_points;
-    });
-    last_gaussian_density_sum_ =
-        std::accumulate(local_density_sum.begin(), local_density_sum.end(),
-                        0.0);
-    last_gaussian_cutoff_points_ = std::accumulate(
-        local_cutoff_points.begin(), local_cutoff_points.end(),
-        static_cast<std::size_t>(0));
-    return;
-  }
-  double max_radius = 0.0;
-  double min_x = std::numeric_limits<double>::max();
-  double min_y = std::numeric_limits<double>::max();
-  double min_z = std::numeric_limits<double>::max();
-  double max_x = std::numeric_limits<double>::lowest();
-  double max_y = std::numeric_limits<double>::lowest();
-  double max_z = std::numeric_limits<double>::lowest();
-  for (const Atom &atom : surface_atoms) {
-    const double surface_radius =
-        atom.radius +
-        (surface_uses_probe_exclusion(args_.surface) ? args_.probe_radius
-                                                     : 0.0);
-    max_radius = std::max(max_radius, surface_radius);
-    min_x = std::min(min_x, atom.x);
-    min_y = std::min(min_y, atom.y);
-    min_z = std::min(min_z, atom.z);
-    max_x = std::max(max_x, atom.x);
-    max_y = std::max(max_y, atom.y);
-    max_z = std::max(max_z, atom.z);
-  }
-  const double cell = std::max(max_radius, shape.h);
-  const std::size_t bx = std::max<std::size_t>(
-      1, static_cast<std::size_t>(std::floor((max_x - min_x) / cell)) + 1);
-  const std::size_t by = std::max<std::size_t>(
-      1, static_cast<std::size_t>(std::floor((max_y - min_y) / cell)) + 1);
-  const std::size_t bz = std::max<std::size_t>(
-      1, static_cast<std::size_t>(std::floor((max_z - min_z) / cell)) + 1);
-
-  std::vector<std::vector<std::size_t>> bins(bx * by * bz);
-  auto bin_index = [&](double x, double y, double z) {
-    const std::size_t ix = std::min<std::size_t>(
-        bx - 1, static_cast<std::size_t>(std::max(0.0, std::floor((x - min_x) / cell))));
-    const std::size_t iy = std::min<std::size_t>(
-        by - 1, static_cast<std::size_t>(std::max(0.0, std::floor((y - min_y) / cell))));
-    const std::size_t iz = std::min<std::size_t>(
-        bz - 1, static_cast<std::size_t>(std::max(0.0, std::floor((z - min_z) / cell))));
-    return (iz * by + iy) * bx + ix;
-  };
-  for (std::size_t atom_idx = 0; atom_idx < surface_atoms.size();
-       ++atom_idx) {
-    const Atom &atom = surface_atoms[atom_idx];
-    bins[bin_index(atom.x, atom.y, atom.z)].push_back(atom_idx);
-  }
-
-  const std::size_t workers = effective_workers(executor, shape.nz);
-  executor.parallel_for(shape.nz, workers, 1,
-                        [&](std::size_t, std::size_t z_begin,
-                            std::size_t z_end) {
-    for (std::size_t k = z_begin; k < z_end; ++k) {
-      const double z = shape.oz + static_cast<double>(k) * shape.h;
-      for (std::size_t j = 0; j < shape.ny; ++j) {
-        const double y = shape.oy + static_cast<double>(j) * shape.h;
-        for (std::size_t i = 0; i < shape.nx; ++i) {
-          const double x = shape.ox + static_cast<double>(i) * shape.h;
-          const std::size_t bix = std::min<std::size_t>(
-              bx - 1, static_cast<std::size_t>(
-                          std::max(0.0, std::floor((x - min_x) / cell))));
-          const std::size_t biy = std::min<std::size_t>(
-              by - 1, static_cast<std::size_t>(
-                          std::max(0.0, std::floor((y - min_y) / cell))));
-          const std::size_t biz = std::min<std::size_t>(
-              bz - 1, static_cast<std::size_t>(
-                          std::max(0.0, std::floor((z - min_z) / cell))));
-
-          bool hit = false;
-          const std::size_t x0 = (bix == 0) ? 0 : bix - 1;
-          const std::size_t y0 = (biy == 0) ? 0 : biy - 1;
-          const std::size_t z0 = (biz == 0) ? 0 : biz - 1;
-          const std::size_t x1 = std::min(bx - 1, bix + 1);
-          const std::size_t y1 = std::min(by - 1, biy + 1);
-          const std::size_t z1 = std::min(bz - 1, biz + 1);
-          for (std::size_t kk = z0; kk <= z1 && !hit; ++kk) {
-            for (std::size_t jj = y0; jj <= y1 && !hit; ++jj) {
-              for (std::size_t ii = x0; ii <= x1 && !hit; ++ii) {
-                const auto &cell_atoms = bins[(kk * by + jj) * bx + ii];
-                for (std::size_t atom_idx : cell_atoms) {
-                  const Atom &atom = surface_atoms[atom_idx];
-                  const double dx = x - atom.x;
-                  const double dy = y - atom.y;
-                  const double dz = z - atom.z;
-                  const double surface_radius =
-                      atom.radius +
-                      (surface_uses_probe_exclusion(args_.surface)
-                           ? args_.probe_radius
-                           : 0.0);
-                  if (dx * dx + dy * dy + dz * dz <=
-                      surface_radius * surface_radius) {
-                    hit = true;
-                    break;
-                  }
-                }
-              }
-            }
-          }
-          inside_[idx3(i, j, k, shape.nx, shape.ny)] = hit ? 1U : 0U;
-        }
-      }
-    }
-  });
-
-  if (!surface_uses_ses_flood_fill(args_.surface))
-    return;
-
-  if (shape.n > static_cast<std::size_t>(
-                    std::numeric_limits<std::uint32_t>::max())) {
-    throw std::runtime_error(
-        "PBE: SES surface flood fill currently requires <= 2^32 grid points.");
-  }
-
-  std::vector<unsigned char> solvent_accessible(shape.n, 0);
-  std::vector<std::uint32_t> queue;
-  queue.reserve(std::min<std::size_t>(shape.n, 1048576));
-  auto enqueue = [&](std::size_t id) {
-    if (inside_[id] || solvent_accessible[id])
-      return;
-    solvent_accessible[id] = 1U;
-    queue.push_back(static_cast<std::uint32_t>(id));
-  };
-
-  for (std::size_t k = 0; k < shape.nz; ++k) {
-    for (std::size_t j = 0; j < shape.ny; ++j) {
-      enqueue(idx3(0, j, k, shape.nx, shape.ny));
-      enqueue(idx3(shape.nx - 1, j, k, shape.nx, shape.ny));
-    }
-    for (std::size_t i = 0; i < shape.nx; ++i) {
-      enqueue(idx3(i, 0, k, shape.nx, shape.ny));
-      enqueue(idx3(i, shape.ny - 1, k, shape.nx, shape.ny));
-    }
-  }
-  for (std::size_t j = 0; j < shape.ny; ++j) {
-    for (std::size_t i = 0; i < shape.nx; ++i) {
-      enqueue(idx3(i, j, 0, shape.nx, shape.ny));
-      enqueue(idx3(i, j, shape.nz - 1, shape.nx, shape.ny));
-    }
-  }
-
-  for (std::size_t head = 0; head < queue.size(); ++head) {
-    const std::size_t id = static_cast<std::size_t>(queue[head]);
-    const std::size_t i = id % shape.nx;
-    const std::size_t j = (id / shape.nx) % shape.ny;
-    const std::size_t k = id / (shape.nx * shape.ny);
-    if (i > 0)
-      enqueue(id - 1);
-    if (i + 1 < shape.nx)
-      enqueue(id + 1);
-    if (j > 0)
-      enqueue(id - shape.nx);
-    if (j + 1 < shape.ny)
-      enqueue(id + shape.nx);
-    if (k > 0)
-      enqueue(id - shape.nx * shape.ny);
-    if (k + 1 < shape.nz)
-      enqueue(id + shape.nx * shape.ny);
-  }
-
-  for (std::size_t id = 0; id < shape.n; ++id)
-    inside_[id] = solvent_accessible[id] ? 0U : 1U;
-}
-
-void Analyzer::classify_ion_accessibility(const GridShape &shape,
-                                          const std::vector<Atom> &atoms,
-                                          TitanExecutor &executor) {
-  ion_accessible_.assign(shape.n, 0);
-  if (args_.ion_access == "dielectric") {
-    for (std::size_t id = 0; id < shape.n; ++id)
-      ion_accessible_[id] = inside_[id] ? 0U : 1U;
-    return;
-  }
-
-  if (shape.n > static_cast<std::size_t>(
-                    std::numeric_limits<std::uint32_t>::max())) {
-    throw std::runtime_error(
-        "PBE: Stern ion flood fill currently requires <= 2^32 grid points.");
-  }
-
-  const AtomSpatialBins bins =
-      build_atom_bins(atoms, args_.ion_radius, shape.h);
-  std::vector<unsigned char> blocked(shape.n, 0);
-  const std::size_t workers = effective_workers(executor, shape.nz);
-  executor.parallel_for(
-      shape.nz, workers, 1,
-      [&](std::size_t, std::size_t z_begin, std::size_t z_end) {
-        for (std::size_t k = z_begin; k < z_end; ++k) {
-          const double z = shape.oz + static_cast<double>(k) * shape.h;
-          for (std::size_t j = 0; j < shape.ny; ++j) {
-            const double y = shape.oy + static_cast<double>(j) * shape.h;
-            for (std::size_t i = 0; i < shape.nx; ++i) {
-              const double x = shape.ox + static_cast<double>(i) * shape.h;
-              const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-              blocked[id] =
-                  point_inside_inflated_atom(bins, atoms, x, y, z,
-                                             args_.ion_radius)
-                      ? 1U
-                      : 0U;
-            }
-          }
-        }
-      });
-
-  std::vector<std::uint32_t> queue;
-  queue.reserve(std::min<std::size_t>(shape.n, 1048576));
-  auto enqueue = [&](std::size_t id) {
-    if (blocked[id] || ion_accessible_[id])
-      return;
-    ion_accessible_[id] = 1U;
-    queue.push_back(static_cast<std::uint32_t>(id));
-  };
-
-  for (std::size_t k = 0; k < shape.nz; ++k) {
-    for (std::size_t j = 0; j < shape.ny; ++j) {
-      enqueue(idx3(0, j, k, shape.nx, shape.ny));
-      enqueue(idx3(shape.nx - 1, j, k, shape.nx, shape.ny));
-    }
-    for (std::size_t i = 0; i < shape.nx; ++i) {
-      enqueue(idx3(i, 0, k, shape.nx, shape.ny));
-      enqueue(idx3(i, shape.ny - 1, k, shape.nx, shape.ny));
-    }
-  }
-  for (std::size_t j = 0; j < shape.ny; ++j) {
-    for (std::size_t i = 0; i < shape.nx; ++i) {
-      enqueue(idx3(i, j, 0, shape.nx, shape.ny));
-      enqueue(idx3(i, j, shape.nz - 1, shape.nx, shape.ny));
-    }
-  }
-
-  for (std::size_t head = 0; head < queue.size(); ++head) {
-    const std::size_t id = static_cast<std::size_t>(queue[head]);
-    const std::size_t i = id % shape.nx;
-    const std::size_t j = (id / shape.nx) % shape.ny;
-    const std::size_t k = id / (shape.nx * shape.ny);
-    if (i > 0)
-      enqueue(id - 1);
-    if (i + 1 < shape.nx)
-      enqueue(id + 1);
-    if (j > 0)
-      enqueue(id - shape.nx);
-    if (j + 1 < shape.ny)
-      enqueue(id + shape.nx);
-    if (k > 0)
-      enqueue(id - shape.nx * shape.ny);
-    if (k + 1 < shape.nz)
-      enqueue(id + shape.nx * shape.ny);
-  }
-}
-
-Analyzer::ChargeDiagnostics
-Analyzer::assign_charges(const GridShape &shape,
-                         const std::vector<Atom> &atoms) {
-  std::fill(rho_.begin(), rho_.end(), 0.0);
-  ChargeDiagnostics diag;
-  double original_mx = 0.0;
-  double original_my = 0.0;
-  double original_mz = 0.0;
-  double assigned_mx = 0.0;
-  double assigned_my = 0.0;
-  double assigned_mz = 0.0;
-  auto add_charge = [&](std::size_t i, std::size_t j, std::size_t k,
-                        double q) {
-    if (q == 0.0)
-      return;
-    rho_[idx3(i, j, k, shape.nx, shape.ny)] += q;
-    diag.assigned_charge += q;
-    assigned_mx += q * (shape.ox + static_cast<double>(i) * shape.h);
-    assigned_my += q * (shape.oy + static_cast<double>(j) * shape.h);
-    assigned_mz += q * (shape.oz + static_cast<double>(k) * shape.h);
-  };
-  for (const Atom &atom : atoms) {
-    original_mx += atom.q * atom.x;
-    original_my += atom.q * atom.y;
-    original_mz += atom.q * atom.z;
-    if (args_.charge_assignment == "gaussian" || args_.biomodel == "rpbe") {
-      const double r0 = std::max(1.0e-12, effective_surface_radius(atom));
-      const double sigma = std::max(1.0e-12, args_.gaussian_sigma);
-      const double influence = std::max(shape.h, 3.0 * sigma * r0);
-      const int imin = std::max(
-          0, static_cast<int>(std::floor((atom.x - influence - shape.ox) /
-                                         shape.h)));
-      const int imax = std::min(
-          static_cast<int>(shape.nx) - 1,
-          static_cast<int>(std::ceil((atom.x + influence - shape.ox) /
-                                     shape.h)));
-      const int jmin = std::max(
-          0, static_cast<int>(std::floor((atom.y - influence - shape.oy) /
-                                         shape.h)));
-      const int jmax = std::min(
-          static_cast<int>(shape.ny) - 1,
-          static_cast<int>(std::ceil((atom.y + influence - shape.oy) /
-                                     shape.h)));
-      const int kmin = std::max(
-          0, static_cast<int>(std::floor((atom.z - influence - shape.oz) /
-                                         shape.h)));
-      const int kmax = std::min(
-          static_cast<int>(shape.nz) - 1,
-          static_cast<int>(std::ceil((atom.z + influence - shape.oz) /
-                                     shape.h)));
-      double norm = 0.0;
-      for (int kk = kmin; kk <= kmax; ++kk) {
-        const double z = shape.oz + static_cast<double>(kk) * shape.h;
-        for (int jj = jmin; jj <= jmax; ++jj) {
-          const double y = shape.oy + static_cast<double>(jj) * shape.h;
-          for (int ii = imin; ii <= imax; ++ii) {
-            const double x = shape.ox + static_cast<double>(ii) * shape.h;
-            const double dx = x - atom.x;
-            const double dy = y - atom.y;
-            const double dz = z - atom.z;
-            const double scaled =
-                std::sqrt(dx * dx + dy * dy + dz * dz) / (sigma * r0);
-            norm += std::exp(-std::pow(scaled, args_.gaussian_exp));
-          }
-        }
-      }
-      if (norm > 0.0) {
-        for (int kk = kmin; kk <= kmax; ++kk) {
-          const double z = shape.oz + static_cast<double>(kk) * shape.h;
-          for (int jj = jmin; jj <= jmax; ++jj) {
-            const double y = shape.oy + static_cast<double>(jj) * shape.h;
-            for (int ii = imin; ii <= imax; ++ii) {
-              const double x = shape.ox + static_cast<double>(ii) * shape.h;
-              const double dx = x - atom.x;
-              const double dy = y - atom.y;
-              const double dz = z - atom.z;
-              const double scaled =
-                  std::sqrt(dx * dx + dy * dy + dz * dz) / (sigma * r0);
-              const double weight =
-                  std::exp(-std::pow(scaled, args_.gaussian_exp)) / norm;
-              add_charge(static_cast<std::size_t>(ii),
-                         static_cast<std::size_t>(jj),
-                         static_cast<std::size_t>(kk), atom.q * weight);
-            }
-          }
-        }
-        continue;
-      }
-    }
-    double gx = (atom.x - shape.ox) / shape.h;
-    double gy = (atom.y - shape.oy) / shape.h;
-    double gz = (atom.z - shape.oz) / shape.h;
-
-    if (args_.charge_assignment == "trilinear") {
-      gx = std::clamp(gx, 0.0, static_cast<double>(shape.nx - 1));
-      gy = std::clamp(gy, 0.0, static_cast<double>(shape.ny - 1));
-      gz = std::clamp(gz, 0.0, static_cast<double>(shape.nz - 1));
-    }
-    const double fgx = std::floor(gx);
-    const double fgy = std::floor(gy);
-    const double fgz = std::floor(gz);
-    if (args_.charge_assignment == "delphi" &&
-        (fgx < 0.0 || fgy < 0.0 || fgz < 0.0 ||
-         fgx > static_cast<double>(shape.nx - 2) ||
-         fgy > static_cast<double>(shape.ny - 2) ||
-         fgz > static_cast<double>(shape.nz - 2))) {
-      continue;
-    }
-    std::size_t i0 = std::min<std::size_t>(
-        shape.nx - 2, static_cast<std::size_t>(std::max(0.0, fgx)));
-    std::size_t j0 = std::min<std::size_t>(
-        shape.ny - 2, static_cast<std::size_t>(std::max(0.0, fgy)));
-    std::size_t k0 = std::min<std::size_t>(
-        shape.nz - 2, static_cast<std::size_t>(std::max(0.0, fgz)));
-    const double fx = clamp_fraction(gx - static_cast<double>(i0));
-    const double fy = clamp_fraction(gy - static_cast<double>(j0));
-    const double fz = clamp_fraction(gz - static_cast<double>(k0));
-    for (std::size_t dz = 0; dz <= 1; ++dz) {
-      const double wz = dz ? fz : (1.0 - fz);
-      for (std::size_t dy = 0; dy <= 1; ++dy) {
-        const double wy = dy ? fy : (1.0 - fy);
-        for (std::size_t dx = 0; dx <= 1; ++dx) {
-          const double wx = dx ? fx : (1.0 - fx);
-          add_charge(i0 + dx, j0 + dy, k0 + dz, atom.q * wx * wy * wz);
-        }
-      }
-    }
-  }
-  const double dmx = assigned_mx - original_mx;
-  const double dmy = assigned_my - original_my;
-  const double dmz = assigned_mz - original_mz;
-  diag.moment_error = std::sqrt(dmx * dmx + dmy * dmy + dmz * dmz);
-  return diag;
-}
-
-bool Analyzer::oracle_replay_applies(const GridShape &shape) const {
-  if (args_.test_pqr.empty())
-    return false;
-  if (args_.test_grid_size <= 0)
-    return true;
-  const std::size_t n = static_cast<std::size_t>(args_.test_grid_size);
-  return shape.nx == n && shape.ny == n && shape.nz == n;
-}
-
-void Analyzer::apply_oracle_surface_map(const GridShape &shape) {
-  if (args_.test_surface_map != "oracle" || !oracle_replay_applies(shape))
-    return;
-  std::ifstream in("pbe_oracle_surface_map.csv");
-  if (!in.is_open()) {
-    throw std::runtime_error(
-        "PBE: -pbe-test-surface-map=oracle requires "
-        "pbe_oracle_surface_map.csv in the run directory.");
-  }
-  std::string line;
-  if (!std::getline(in, line))
-    throw std::runtime_error("PBE: empty pbe_oracle_surface_map.csv.");
-  const auto header = csv_header_map(split_csv_simple(line));
-  const bool has_inside = header.find("inside") != header.end();
-  if (!has_inside) {
-    throw std::runtime_error(
-        "PBE: pbe_oracle_surface_map.csv must contain i,j,k,inside columns.");
-  }
-  std::fill(inside_.begin(), inside_.end(), 0U);
-  std::size_t rows = 0;
-  while (std::getline(in, line)) {
-    if (trim_copy(line).empty())
-      continue;
-    const auto fields = split_csv_simple(line);
-    std::size_t i = 0, j = 0, k = 0;
-    if (!csv_index(fields, header, "i", i) ||
-        !csv_index(fields, header, "j", j) ||
-        !csv_index(fields, header, "k", k)) {
-      throw std::runtime_error(
-          "PBE: pbe_oracle_surface_map.csv row is missing i,j,k.");
-    }
-    if (i >= shape.nx || j >= shape.ny || k >= shape.nz)
-      throw std::runtime_error(
-          "PBE: pbe_oracle_surface_map.csv index is outside the grid.");
-    bool inside = false;
-    const auto inside_it = header.find("inside");
-    if (inside_it == header.end() || inside_it->second >= fields.size() ||
-        !parse_boolish(fields[inside_it->second], inside)) {
-      throw std::runtime_error(
-          "PBE: pbe_oracle_surface_map.csv inside value is invalid.");
-    }
-    inside_[idx3(i, j, k, shape.nx, shape.ny)] = inside ? 1U : 0U;
-    ++rows;
-  }
-  if (rows == 0)
-    throw std::runtime_error("PBE: pbe_oracle_surface_map.csv has no rows.");
-}
-
-Analyzer::ChargeDiagnostics
-Analyzer::assign_oracle_charge_grid(const GridShape &shape,
-                                    const std::vector<Atom> &atoms) {
-  if (args_.test_charge_grid != "oracle" || !oracle_replay_applies(shape))
-    return assign_charges(shape, atoms);
-  std::ifstream in("pbe_oracle_charge_grid.csv");
-  if (!in.is_open()) {
-    throw std::runtime_error(
-        "PBE: -pbe-test-charge-grid=oracle requires "
-        "pbe_oracle_charge_grid.csv in the run directory.");
-  }
-  std::string line;
-  if (!std::getline(in, line))
-    throw std::runtime_error("PBE: empty pbe_oracle_charge_grid.csv.");
-  const auto header = csv_header_map(split_csv_simple(line));
-  std::fill(rho_.begin(), rho_.end(), 0.0);
-
-  ChargeDiagnostics diag;
-  double original_mx = 0.0;
-  double original_my = 0.0;
-  double original_mz = 0.0;
-  for (const Atom &atom : atoms) {
-    original_mx += atom.q * atom.x;
-    original_my += atom.q * atom.y;
-    original_mz += atom.q * atom.z;
-  }
-
-  double assigned_mx = 0.0;
-  double assigned_my = 0.0;
-  double assigned_mz = 0.0;
-  std::size_t rows = 0;
-  while (std::getline(in, line)) {
-    if (trim_copy(line).empty())
-      continue;
-    const auto fields = split_csv_simple(line);
-    std::size_t i = 0, j = 0, k = 0;
-    double q = 0.0;
-    if (!csv_index(fields, header, "i", i) ||
-        !csv_index(fields, header, "j", j) ||
-        !csv_index(fields, header, "k", k)) {
-      throw std::runtime_error(
-          "PBE: pbe_oracle_charge_grid.csv row is missing i,j,k.");
-    }
-    if (!csv_double(fields, header, {"rho", "q", "charge"}, q)) {
-      throw std::runtime_error(
-          "PBE: pbe_oracle_charge_grid.csv row is missing rho/q/charge.");
-    }
-    if (i >= shape.nx || j >= shape.ny || k >= shape.nz)
-      throw std::runtime_error(
-          "PBE: pbe_oracle_charge_grid.csv index is outside the grid.");
-    const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-    rho_[id] += q;
-    diag.assigned_charge += q;
-    assigned_mx += q * (shape.ox + static_cast<double>(i) * shape.h);
-    assigned_my += q * (shape.oy + static_cast<double>(j) * shape.h);
-    assigned_mz += q * (shape.oz + static_cast<double>(k) * shape.h);
-    ++rows;
-  }
-  if (rows == 0)
-    throw std::runtime_error("PBE: pbe_oracle_charge_grid.csv has no rows.");
-  const double dmx = assigned_mx - original_mx;
-  const double dmy = assigned_my - original_my;
-  const double dmz = assigned_mz - original_mz;
-  diag.moment_error = std::sqrt(dmx * dmx + dmy * dmy + dmz * dmz);
-  return diag;
-}
-
-void Analyzer::apply_oracle_midpoint_epsilon_map(const GridShape &shape) {
-  if (args_.test_midpoint_epsilon != "oracle" ||
-      !oracle_replay_applies(shape))
-    return;
-  std::ifstream in("pbe_oracle_midpoint_epsilon.csv");
-  if (!in.is_open()) {
-    throw std::runtime_error(
-        "PBE: -pbe-test-midpoint-epsilon=oracle requires "
-        "pbe_oracle_midpoint_epsilon.csv in the run directory.");
-  }
-  std::string line;
-  if (!std::getline(in, line))
-    throw std::runtime_error("PBE: empty pbe_oracle_midpoint_epsilon.csv.");
-  const auto header = csv_header_map(split_csv_simple(line));
-  std::vector<unsigned char> seen(shape.n, 0U);
-  std::size_t rows = 0;
-  while (std::getline(in, line)) {
-    if (trim_copy(line).empty())
-      continue;
-    const auto fields = split_csv_simple(line);
-    std::size_t i = 0, j = 0, k = 0;
-    double ex = 0.0, ey = 0.0, ez = 0.0;
-    if (!csv_index(fields, header, "i", i) ||
-        !csv_index(fields, header, "j", j) ||
-        !csv_index(fields, header, "k", k)) {
-      throw std::runtime_error(
-          "PBE: pbe_oracle_midpoint_epsilon.csv row is missing i,j,k.");
-    }
-    if (!csv_double(fields, header, {"eps_x", "epsilon_x", "ex"}, ex) ||
-        !csv_double(fields, header, {"eps_y", "epsilon_y", "ey"}, ey) ||
-        !csv_double(fields, header, {"eps_z", "epsilon_z", "ez"}, ez)) {
-      throw std::runtime_error(
-          "PBE: pbe_oracle_midpoint_epsilon.csv row is missing eps_x/eps_y/eps_z.");
-    }
-    if (i >= shape.nx || j >= shape.ny || k >= shape.nz)
-      throw std::runtime_error(
-          "PBE: pbe_oracle_midpoint_epsilon.csv index is outside the grid.");
-    if (!std::isfinite(ex) || !std::isfinite(ey) || !std::isfinite(ez))
-      throw std::runtime_error(
-          "PBE: pbe_oracle_midpoint_epsilon.csv contains non-finite epsilon.");
-    const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-    eps_x_[id] = ex;
-    eps_y_[id] = ey;
-    eps_z_[id] = ez;
-    seen[id] = 1U;
-    ++rows;
-  }
-  if (rows == 0)
-    throw std::runtime_error(
-        "PBE: pbe_oracle_midpoint_epsilon.csv has no rows.");
-  if (std::any_of(seen.begin(), seen.end(),
-                  [](unsigned char value) { return value == 0U; })) {
-    throw std::runtime_error(
-        "PBE: pbe_oracle_midpoint_epsilon.csv must provide one row for every grid point.");
-  }
-}
-
-Analyzer::DelphiVdwMediaMap Analyzer::build_delphi_vdw_media_map(
+AnalyzerImpl::DelphiVdwMediaMap AnalyzerImpl::build_delphi_vdw_media_map(
     const GridShape &shape, const std::vector<Atom> &surface_atoms,
     TitanExecutor &executor) const {
   DelphiVdwMediaMap out;
+  out.face_encoded.assign(shape.n * 3, 0);
   out.face_media.assign(shape.n * 3, 0);
   out.face_owner.assign(shape.n * 3, 0);
+  out.face_debug.assign(shape.n * 3, {});
   out.audit.enabled = "raw";
   if (shape.n == 0 || surface_atoms.empty())
     return out;
 
-  const double grid_spacing_extension = 0.5 * shape.h * std::sqrt(3.0);
-  const double delphi_voxel_side =
-      max_atom_radius(surface_atoms) + args_.ion_radius + grid_spacing_extension;
-  const AtomSpatialBins raw_bins =
-      build_atom_bins(surface_atoms, 0.0,
-                      std::max(shape.h, delphi_voxel_side));
-
+  const std::int32_t delphi_epsilon_dim =
+      static_cast<std::int32_t>(surface_atoms.size() + 2);
   auto face_index = [](std::size_t id, int axis) {
     return id * 3 + static_cast<std::size_t>(axis);
   };
-  auto find_vdw_face_owner = [&](double x, double y,
-                                 double z) -> std::int32_t {
-    if (raw_bins.empty)
+  auto decode_media_from_value = [&](std::int32_t value) -> std::int32_t {
+    return std::abs(value) / delphi_epsilon_dim;
+  };
+  auto decode_entity_from_value = [&](std::int32_t value) -> std::int32_t {
+    if (value == 0)
       return 0;
-    const std::size_t bix = std::min<std::size_t>(
-        raw_bins.bx - 1,
-        static_cast<std::size_t>(std::max(
-            0.0, std::floor((x - raw_bins.min_x) / raw_bins.cell))));
-    const std::size_t biy = std::min<std::size_t>(
-        raw_bins.by - 1,
-        static_cast<std::size_t>(std::max(
-            0.0, std::floor((y - raw_bins.min_y) / raw_bins.cell))));
-    const std::size_t biz = std::min<std::size_t>(
-        raw_bins.bz - 1,
-        static_cast<std::size_t>(std::max(
-            0.0, std::floor((z - raw_bins.min_z) / raw_bins.cell))));
-    const std::size_t x0 = (bix == 0) ? 0 : bix - 1;
-    const std::size_t y0 = (biy == 0) ? 0 : biy - 1;
-    const std::size_t z0 = (biz == 0) ? 0 : biz - 1;
-    const std::size_t x1 = std::min(raw_bins.bx - 1, bix + 1);
-    const std::size_t y1 = std::min(raw_bins.by - 1, biy + 1);
-    const std::size_t z1 = std::min(raw_bins.bz - 1, biz + 1);
-    for (std::size_t kk = z0; kk <= z1; ++kk) {
-      for (std::size_t jj = y0; jj <= y1; ++jj) {
-        for (std::size_t ii = x0; ii <= x1; ++ii) {
-          const auto &bucket =
-              raw_bins.bins[(kk * raw_bins.by + jj) * raw_bins.bx + ii];
-          for (std::size_t atom_idx : bucket) {
-            const Atom &atom = surface_atoms[atom_idx];
-            const double dx = x - atom.x;
-            const double dy = y - atom.y;
-            const double dz = z - atom.z;
-            if (dx * dx + dy * dy + dz * dz < atom.radius * atom.radius)
-              return static_cast<std::int32_t>(atom_idx + 2);
-          }
-        }
-      }
+    return value % delphi_epsilon_dim;
+  };
+  auto encode_delphi_face = [&](std::int32_t entity,
+                                std::int32_t media) -> std::int32_t {
+    const std::int32_t sign = entity < 0 ? -1 : 1;
+    return sign * (std::abs(entity) + std::abs(media) * delphi_epsilon_dim);
+  };
+  auto sync_face_from_encoded = [&](std::size_t fid) {
+    if (fid >= out.face_encoded.size())
+      return;
+    const std::int32_t value = out.face_encoded[fid];
+    out.face_media[fid] = decode_media_from_value(value);
+    out.face_owner[fid] = decode_entity_from_value(value);
+    if (fid < out.face_debug.size())
+      out.face_debug[fid].final_encoded = value;
+  };
+  auto set_face_encoded = [&](std::size_t fid, std::int32_t value) {
+    if (fid >= out.face_encoded.size())
+      return;
+    out.face_encoded[fid] = value;
+    sync_face_from_encoded(fid);
+  };
+
+  constexpr std::array<std::array<int, 3>, 27> kDelphiNeighborOffsets{{
+      {{0, 0, 0}},   {{-1, 0, 0}},  {{1, 0, 0}},   {{0, -1, 0}},
+      {{0, 1, 0}},   {{0, 0, -1}},  {{0, 0, 1}},   {{1, 0, 1}},
+      {{-1, 0, 1}},  {{0, 1, 1}},   {{0, -1, 1}},  {{-1, -1, 0}},
+      {{1, -1, 0}},  {{1, 1, 0}},   {{-1, 1, 0}},  {{-1, 0, -1}},
+      {{1, 0, -1}},  {{0, 1, -1}},  {{0, -1, -1}}, {{-1, -1, -1}},
+      {{1, -1, -1}}, {{1, 1, -1}},  {{-1, 1, -1}}, {{-1, 1, 1}},
+      {{1, 1, 1}},   {{1, -1, 1}},  {{-1, -1, 1}},
+  }};
+  const double grid_spacing_extension = 0.5 * shape.h * std::sqrt(3.0);
+  const double delphi_voxel_side =
+      max_atom_radius(surface_atoms) + args_.ion_radius + grid_spacing_extension;
+  double atom_min_x = surface_atoms.front().x;
+  double atom_min_y = surface_atoms.front().y;
+  double atom_min_z = surface_atoms.front().z;
+  double atom_max_x = surface_atoms.front().x;
+  double atom_max_y = surface_atoms.front().y;
+  double atom_max_z = surface_atoms.front().z;
+  for (const Atom &atom : surface_atoms) {
+    atom_min_x = std::min(atom_min_x, atom.x);
+    atom_min_y = std::min(atom_min_y, atom.y);
+    atom_min_z = std::min(atom_min_z, atom.z);
+    atom_max_x = std::max(atom_max_x, atom.x);
+    atom_max_y = std::max(atom_max_y, atom.y);
+    atom_max_z = std::max(atom_max_z, atom.z);
+  }
+  const double delphi_voxel_padding = delphi_voxel_side + 0.1;
+  const double raw_voxel_origin_x = atom_min_x - delphi_voxel_padding;
+  const double raw_voxel_origin_y = atom_min_y - delphi_voxel_padding;
+  const double raw_voxel_origin_z = atom_min_z - delphi_voxel_padding;
+  const auto raw_voxel_count = [&](double lo, double hi) -> std::size_t {
+    return static_cast<std::size_t>(
+        std::max<double>(
+            0.0, std::floor((hi + delphi_voxel_padding -
+                             (lo - delphi_voxel_padding)) /
+                            delphi_voxel_side)));
+  };
+  const std::size_t raw_vx = raw_voxel_count(atom_min_x, atom_max_x);
+  const std::size_t raw_vy = raw_voxel_count(atom_min_y, atom_max_y);
+  const std::size_t raw_vz = raw_voxel_count(atom_min_z, atom_max_z);
+  const std::size_t raw_sx = raw_vx + 1;
+  const std::size_t raw_sy = raw_vy + 1;
+  const std::size_t raw_sz = raw_vz + 1;
+  const double raw_voxel_scale = 1.0 / std::max(1.0e-12, delphi_voxel_side);
+  auto raw_voxel_flat = [&](std::size_t vx, std::size_t vy,
+                            std::size_t vz) {
+    return (vz * raw_sy + vy) * raw_sx + vx;
+  };
+  auto raw_atom_central = [&](const Atom &atom, std::size_t &vx,
+                              std::size_t &vy, std::size_t &vz) {
+    auto coord = [&](double value, double origin,
+                     std::size_t high) -> std::size_t {
+      const double scaled = (value - origin) * raw_voxel_scale;
+      if (scaled <= 0.0)
+        return 0;
+      return std::min<std::size_t>(high, static_cast<std::size_t>(scaled));
+    };
+    vx = coord(atom.x, raw_voxel_origin_x, raw_vx);
+    vy = coord(atom.y, raw_voxel_origin_y, raw_vy);
+    vz = coord(atom.z, raw_voxel_origin_z, raw_vz);
+  };
+  std::vector<std::vector<std::size_t>> raw_voxel_atoms(raw_sx * raw_sy * raw_sz);
+  for (const auto &offset : kDelphiNeighborOffsets) {
+    for (std::size_t atom_idx = 0; atom_idx < surface_atoms.size(); ++atom_idx) {
+      const Atom &atom = surface_atoms[atom_idx];
+      if (atom.radius <= 0.0)
+        continue;
+      std::size_t cx = 0, cy = 0, cz = 0;
+      raw_atom_central(atom, cx, cy, cz);
+      const int tx = static_cast<int>(cx) + offset[0];
+      const int ty = static_cast<int>(cy) + offset[1];
+      const int tz = static_cast<int>(cz) + offset[2];
+      if (tx < 0 || ty < 0 || tz < 0 ||
+          tx > static_cast<int>(raw_vx) || ty > static_cast<int>(raw_vy) ||
+          tz > static_cast<int>(raw_vz))
+        continue;
+      raw_voxel_atoms[raw_voxel_flat(static_cast<std::size_t>(tx),
+                                     static_cast<std::size_t>(ty),
+                                     static_cast<std::size_t>(tz))]
+          .push_back(atom_idx);
     }
-    return 0;
+  }
+  auto raw_grid_voxel = [&](double x, double y, double z, std::size_t &vx,
+                            std::size_t &vy, std::size_t &vz) {
+    auto coord = [&](double value, double origin,
+                     std::size_t high) -> std::size_t {
+      const double scaled = (value - origin) * raw_voxel_scale;
+      if (scaled <= 0.0)
+        return 0;
+      return std::min<std::size_t>(high, static_cast<std::size_t>(scaled));
+    };
+    vx = coord(x, raw_voxel_origin_x, raw_vx);
+    vy = coord(y, raw_voxel_origin_y, raw_vy);
+    vz = coord(z, raw_voxel_origin_z, raw_vz);
   };
   const std::size_t workers = effective_workers(executor, shape.nz);
   executor.parallel_for(
@@ -1674,34 +817,79 @@ Analyzer::DelphiVdwMediaMap Analyzer::build_delphi_vdw_media_map(
             for (std::size_t i = 0; i < shape.nx; ++i) {
               const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
               const double x = shape.ox + static_cast<double>(i) * shape.h;
-              if (i + 1 < shape.nx) {
-                const std::int32_t owner =
-                    find_vdw_face_owner(x + 0.5 * shape.h, y, z);
-                if (owner != 0) {
-                  out.face_media[face_index(id, 0)] = 1;
-                  out.face_owner[face_index(id, 0)] = owner;
+              const bool valid_x = i + 1 < shape.nx;
+              const bool valid_y = j + 1 < shape.ny;
+              const bool valid_z = k + 1 < shape.nz;
+              bool done_x = !valid_x;
+              bool done_y = !valid_y;
+              bool done_z = !valid_z;
+              std::size_t gvx = 0, gvy = 0, gvz = 0;
+              raw_grid_voxel(x, y, z, gvx, gvy, gvz);
+              for (const auto &offset : kDelphiNeighborOffsets) {
+                const int tx = static_cast<int>(gvx) + offset[0];
+                const int ty = static_cast<int>(gvy) + offset[1];
+                const int tz = static_cast<int>(gvz) + offset[2];
+                if (tx < 0 || ty < 0 || tz < 0 ||
+                    tx > static_cast<int>(raw_vx) ||
+                    ty > static_cast<int>(raw_vy) ||
+                    tz > static_cast<int>(raw_vz))
+                  continue;
+                const auto &bucket = raw_voxel_atoms[raw_voxel_flat(
+                    static_cast<std::size_t>(tx),
+                    static_cast<std::size_t>(ty),
+                    static_cast<std::size_t>(tz))];
+                for (std::size_t atom_idx : bucket) {
+                  const Atom &atom = surface_atoms[atom_idx];
+                  const double rdx = x - atom.x;
+                  const double rdy = y - atom.y;
+                  const double rdz = z - atom.z;
+                  const double radius2 = atom.radius * atom.radius;
+                  const std::int32_t owner =
+                      static_cast<std::int32_t>(atom_idx + 2);
+                  if (!done_x) {
+                    const double dx = rdx + 0.5 * shape.h;
+                    if (dx * dx + rdy * rdy + rdz * rdz < radius2) {
+                      out.face_encoded[face_index(id, 0)] =
+                          encode_delphi_face(owner, std::int32_t{1});
+                      done_x = true;
+                    }
+                  }
+                  if (!done_y) {
+                    const double dy = rdy + 0.5 * shape.h;
+                    if (rdx * rdx + dy * dy + rdz * rdz < radius2) {
+                      out.face_encoded[face_index(id, 1)] =
+                          encode_delphi_face(owner, std::int32_t{1});
+                      done_y = true;
+                    }
+                  }
+                  if (!done_z) {
+                    const double dz = rdz + 0.5 * shape.h;
+                    if (rdx * rdx + rdy * rdy + dz * dz < radius2) {
+                      out.face_encoded[face_index(id, 2)] =
+                          encode_delphi_face(owner, std::int32_t{1});
+                      done_z = true;
+                    }
+                  }
+                  if (done_x && done_y && done_z)
+                    break;
                 }
-              }
-              if (j + 1 < shape.ny) {
-                const std::int32_t owner =
-                    find_vdw_face_owner(x, y + 0.5 * shape.h, z);
-                if (owner != 0) {
-                  out.face_media[face_index(id, 1)] = 1;
-                  out.face_owner[face_index(id, 1)] = owner;
-                }
-              }
-              if (k + 1 < shape.nz) {
-                const std::int32_t owner =
-                    find_vdw_face_owner(x, y, z + 0.5 * shape.h);
-                if (owner != 0) {
-                  out.face_media[face_index(id, 2)] = 1;
-                  out.face_owner[face_index(id, 2)] = owner;
-                }
+                if (done_x && done_y && done_z)
+                  break;
               }
             }
           }
         }
       });
+
+  for (std::size_t fid = 0; fid < out.face_media.size(); ++fid) {
+    sync_face_from_encoded(fid);
+    DelphiFaceDebug &debug = out.face_debug[fid];
+    debug.raw_media = out.face_media[fid];
+    debug.raw_owner = out.face_owner[fid];
+    debug.raw_encoded = out.face_encoded[fid];
+    debug.action = debug.raw_media != 0 ? kDelphiFaceRawVdw
+                                        : kDelphiFaceUnchanged;
+  }
 
   const std::size_t plane = shape.nx * shape.ny;
   auto positive_face = [&](std::size_t i, std::size_t j, std::size_t k,
@@ -1753,116 +941,9 @@ Analyzer::DelphiVdwMediaMap Analyzer::build_delphi_vdw_media_map(
   }
 
   out.audit.enabled = "auto";
-  const double shell = std::min(args_.probe_radius, 0.5 * shape.h);
-  const double shell_sq_eps = 1.0e-24;
-  const AtomSpatialBins shell_bins =
-      build_atom_bins(surface_atoms, shell, std::max(shape.h, delphi_voxel_side));
   const AtomSpatialBins probe_bins =
       build_atom_bins(surface_atoms, args_.probe_radius,
                       std::max(shape.h, delphi_voxel_side));
-  auto candidate_shell_atom = [&](double x, double y,
-                                  double z) -> std::ptrdiff_t {
-    if (shell_bins.empty)
-      return -1;
-    const int radius_bins = static_cast<int>(
-        std::ceil(std::max(shell_bins.max_radius, shape.h) /
-                  std::max(1.0e-12, shell_bins.cell))) +
-                            1;
-    const int bx0 = static_cast<int>(
-        std::floor((x - shell_bins.min_x) / shell_bins.cell));
-    const int by0 = static_cast<int>(
-        std::floor((y - shell_bins.min_y) / shell_bins.cell));
-    const int bz0 = static_cast<int>(
-        std::floor((z - shell_bins.min_z) / shell_bins.cell));
-    std::ptrdiff_t best_atom = -1;
-    double best_surface_distance = std::numeric_limits<double>::infinity();
-    for (int dz = -radius_bins; dz <= radius_bins; ++dz) {
-      const int bz = bz0 + dz;
-      if (bz < 0 || bz >= static_cast<int>(shell_bins.bz))
-        continue;
-      for (int dy = -radius_bins; dy <= radius_bins; ++dy) {
-        const int by = by0 + dy;
-        if (by < 0 || by >= static_cast<int>(shell_bins.by))
-          continue;
-        for (int dx = -radius_bins; dx <= radius_bins; ++dx) {
-          const int bx = bx0 + dx;
-          if (bx < 0 || bx >= static_cast<int>(shell_bins.bx))
-            continue;
-          const auto &bucket =
-              shell_bins.bins[(static_cast<std::size_t>(bz) * shell_bins.by +
-                               static_cast<std::size_t>(by)) *
-                                  shell_bins.bx +
-                              static_cast<std::size_t>(bx)];
-          for (std::size_t atom_idx : bucket) {
-            const Atom &atom = surface_atoms[atom_idx];
-            const double radius = atom.radius + shell;
-            const double ddx = x - atom.x;
-            const double ddy = y - atom.y;
-            const double ddz = z - atom.z;
-            const double r2 = ddx * ddx + ddy * ddy + ddz * ddz;
-            if (r2 < radius * radius - shell_sq_eps) {
-              const double surface_distance = std::sqrt(r2) - atom.radius;
-              if (surface_distance < best_surface_distance) {
-                best_surface_distance = surface_distance;
-                best_atom = static_cast<std::ptrdiff_t>(atom_idx);
-              }
-            }
-          }
-        }
-      }
-    }
-    return best_atom;
-  };
-  const double core_shell =
-      std::min(args_.probe_radius, 0.25 * std::sqrt(3.0) * shape.h);
-  const AtomSpatialBins core_bins =
-      build_atom_bins(surface_atoms, core_shell,
-                      std::max(shape.h, delphi_voxel_side));
-  auto in_core_shell = [&](double x, double y, double z) {
-    if (core_bins.empty)
-      return false;
-    const int radius_bins = static_cast<int>(
-        std::ceil(std::max(core_bins.max_radius, shape.h) /
-                  std::max(1.0e-12, core_bins.cell))) +
-                            1;
-    const int bx0 = static_cast<int>(
-        std::floor((x - core_bins.min_x) / core_bins.cell));
-    const int by0 = static_cast<int>(
-        std::floor((y - core_bins.min_y) / core_bins.cell));
-    const int bz0 = static_cast<int>(
-        std::floor((z - core_bins.min_z) / core_bins.cell));
-    for (int dz = -radius_bins; dz <= radius_bins; ++dz) {
-      const int bz = bz0 + dz;
-      if (bz < 0 || bz >= static_cast<int>(core_bins.bz))
-        continue;
-      for (int dy = -radius_bins; dy <= radius_bins; ++dy) {
-        const int by = by0 + dy;
-        if (by < 0 || by >= static_cast<int>(core_bins.by))
-          continue;
-        for (int dx = -radius_bins; dx <= radius_bins; ++dx) {
-          const int bx = bx0 + dx;
-          if (bx < 0 || bx >= static_cast<int>(core_bins.bx))
-            continue;
-          const auto &bucket =
-              core_bins.bins[(static_cast<std::size_t>(bz) * core_bins.by +
-                              static_cast<std::size_t>(by)) *
-                                 core_bins.bx +
-                             static_cast<std::size_t>(bx)];
-          for (std::size_t atom_idx : bucket) {
-            const Atom &atom = surface_atoms[atom_idx];
-            const double radius = atom.radius + core_shell;
-            const double ddx = x - atom.x;
-            const double ddy = y - atom.y;
-            const double ddz = z - atom.z;
-            const double r2 = ddx * ddx + ddy * ddy + ddz * ddz;
-            if (r2 < radius * radius - shell_sq_eps)
-              return true;
-          }
-        }
-      }
-    }
-    return false;
-  };
   auto probe_surface_occluded = [&](double x, double y, double z,
                                     std::size_t closest_atom_idx) {
     if (probe_bins.empty || closest_atom_idx >= surface_atoms.size())
@@ -1923,6 +1004,64 @@ Analyzer::DelphiVdwMediaMap Analyzer::build_delphi_vdw_media_map(
     }
     return false;
   };
+  std::vector<unsigned char> vdwms_accessible_atoms(surface_atoms.size(), 1U);
+  struct ClosestSurfaceAtom {
+    std::ptrdiff_t index{-1};
+    double surface_dist{std::numeric_limits<double>::infinity()};
+  };
+  auto closest_surface_atom = [&](double x, double y,
+                                  double z) -> ClosestSurfaceAtom {
+    ClosestSurfaceAtom best;
+    if (probe_bins.empty)
+      return best;
+    const int radius_bins = static_cast<int>(
+        std::ceil(std::max(probe_bins.max_radius, shape.h) /
+                  std::max(1.0e-12, probe_bins.cell))) +
+                            1;
+    const int bx0 = static_cast<int>(
+        std::floor((x - probe_bins.min_x) / probe_bins.cell));
+    const int by0 = static_cast<int>(
+        std::floor((y - probe_bins.min_y) / probe_bins.cell));
+    const int bz0 = static_cast<int>(
+        std::floor((z - probe_bins.min_z) / probe_bins.cell));
+    for (int dz = -radius_bins; dz <= radius_bins; ++dz) {
+      const int bz = bz0 + dz;
+      if (bz < 0 || bz >= static_cast<int>(probe_bins.bz))
+        continue;
+      for (int dy = -radius_bins; dy <= radius_bins; ++dy) {
+        const int by = by0 + dy;
+        if (by < 0 || by >= static_cast<int>(probe_bins.by))
+          continue;
+        for (int dx = -radius_bins; dx <= radius_bins; ++dx) {
+          const int bx = bx0 + dx;
+          if (bx < 0 || bx >= static_cast<int>(probe_bins.bx))
+            continue;
+          const auto &bucket =
+              probe_bins.bins[(static_cast<std::size_t>(bz) *
+                                   probe_bins.by +
+                               static_cast<std::size_t>(by)) *
+                                  probe_bins.bx +
+                              static_cast<std::size_t>(bx)];
+          for (std::size_t atom_idx : bucket) {
+            if (atom_idx < vdwms_accessible_atoms.size() &&
+                vdwms_accessible_atoms[atom_idx] == 0U)
+              continue;
+            const Atom &atom = surface_atoms[atom_idx];
+            const double ddx = x - atom.x;
+            const double ddy = y - atom.y;
+            const double ddz = z - atom.z;
+            const double r2 = ddx * ddx + ddy * ddy + ddz * ddz;
+            const double surface_distance = std::sqrt(r2) - atom.radius;
+            if (surface_distance < best.surface_dist) {
+              best.surface_dist = surface_distance;
+              best.index = static_cast<std::ptrdiff_t>(atom_idx);
+            }
+          }
+        }
+      }
+    }
+    return best;
+  };
   struct ExposedPointBins {
     bool empty{true};
     double min_x{0.0};
@@ -1939,29 +1078,282 @@ Analyzer::DelphiVdwMediaMap Analyzer::build_delphi_vdw_media_map(
     ExposedPointBins bins;
     if (surface_atoms.empty() || args_.probe_radius <= 0.0)
       return bins;
-    constexpr std::size_t kSurfaceSamples = 520;
-    constexpr double kGoldenAngle = 2.3999632297286533222;
-    bins.points.reserve(surface_atoms.size() * 64);
-    for (std::size_t atom_idx = 0; atom_idx < surface_atoms.size(); ++atom_idx) {
-      const Atom &atom = surface_atoms[atom_idx];
-      const double radius = atom.radius + args_.probe_radius;
-      if (radius <= 0.0)
-        continue;
-      for (std::size_t sample = 0; sample < kSurfaceSamples; ++sample) {
-        const double t =
-            (static_cast<double>(sample) + 0.5) /
-            static_cast<double>(kSurfaceSamples);
-        const double z_unit = 1.0 - 2.0 * t;
-        const double radial =
-            std::sqrt(std::max(0.0, 1.0 - z_unit * z_unit));
-        const double theta = kGoldenAngle * static_cast<double>(sample);
-        const double sx = atom.x + radius * radial * std::cos(theta);
-        const double sy = atom.y + radius * radial * std::sin(theta);
-        const double sz = atom.z + radius * z_unit;
-        if (!probe_surface_occluded(sx, sy, sz, atom_idx))
-          bins.points.push_back({sx, sy, sz});
+    constexpr int kInitialVertexCount = 12;
+    constexpr int kRefinementLevel = 5;
+    constexpr int kMaxVertices = 520;
+    constexpr int kMaxEdges = 1040;
+    constexpr double kSasShrink = 0.99999;
+    auto probe_point_occupier = [&](double sx, double sy,
+                                    double sz) -> std::int32_t {
+      for (std::size_t atom_idx = 0; atom_idx < surface_atoms.size();
+           ++atom_idx) {
+        const Atom &atom = surface_atoms[atom_idx];
+        const double radius = atom.radius + args_.probe_radius;
+        const double ddx = sx - atom.x;
+        const double ddy = sy - atom.y;
+        const double ddz = sz - atom.z;
+        const double r2 = ddx * ddx + ddy * ddy + ddz * ddz;
+        if (r2 < radius * radius * kSasShrink)
+          return static_cast<std::int32_t>(atom_idx + 1);
+      }
+      return 0;
+    };
+    struct SasEdge {
+      int first{0};
+      int second{0};
+    };
+    std::vector<std::array<double, 3>> vertex_array(kMaxVertices + 1);
+    std::vector<SasEdge> edge_array(kMaxEdges + 1);
+    std::vector<int> edges(kMaxEdges + 1, 0);
+    const double angle_increment = 2.0 * kPi /
+                                   static_cast<double>(kInitialVertexCount);
+    for (int vertex_index = 1; vertex_index <= kInitialVertexCount;
+         ++vertex_index) {
+      const double angle =
+          static_cast<double>(vertex_index - 1) * angle_increment;
+      vertex_array[static_cast<std::size_t>(vertex_index)] = {
+          std::cos(angle), std::sin(angle), 0.0};
+      edge_array[static_cast<std::size_t>(vertex_index)] = {
+          vertex_index,
+          vertex_index != kInitialVertexCount ? vertex_index + 1 : 1};
+    }
+    int current_vertex_count = kInitialVertexCount;
+    int current_edge_count = kInitialVertexCount;
+    int start_edge_index = 1;
+    int end_edge_index = 0;
+    for (int level = 1; level <= kRefinementLevel; ++level) {
+      start_edge_index = end_edge_index + 1;
+      end_edge_index = current_edge_count;
+      for (int edge_index = start_edge_index; edge_index <= end_edge_index;
+           ++edge_index) {
+        const int v1 = edge_array[static_cast<std::size_t>(edge_index)].first;
+        const int v2 = edge_array[static_cast<std::size_t>(edge_index)].second;
+        std::array<double, 3> midpoint{
+            vertex_array[static_cast<std::size_t>(v1)][0] +
+                vertex_array[static_cast<std::size_t>(v2)][0],
+            vertex_array[static_cast<std::size_t>(v1)][1] +
+                vertex_array[static_cast<std::size_t>(v2)][1],
+            vertex_array[static_cast<std::size_t>(v1)][2] +
+                vertex_array[static_cast<std::size_t>(v2)][2]};
+        const double magnitude =
+            std::sqrt(midpoint[0] * midpoint[0] +
+                      midpoint[1] * midpoint[1] +
+                      midpoint[2] * midpoint[2]);
+        if (magnitude <= 1.0e-30)
+          continue;
+        ++current_vertex_count;
+        vertex_array[static_cast<std::size_t>(current_vertex_count)] = {
+            midpoint[0] / magnitude, midpoint[1] / magnitude,
+            midpoint[2] / magnitude};
+        ++current_edge_count;
+        edges[static_cast<std::size_t>(edge_index)] = current_edge_count;
+        edge_array[static_cast<std::size_t>(current_edge_count)] = {
+            v1, current_vertex_count};
+        ++current_edge_count;
+        edge_array[static_cast<std::size_t>(current_edge_count)] = {
+            current_vertex_count, v2};
       }
     }
+    current_edge_count = end_edge_index;
+    for (int edge_index = start_edge_index; edge_index <= current_edge_count;
+         ++edge_index)
+      edges[static_cast<std::size_t>(edge_index)] = -1;
+
+    bins.points.reserve(surface_atoms.size() * 64);
+    std::vector<unsigned char> has_pair(surface_atoms.size(), 0U);
+    std::vector<unsigned char> accessible(surface_atoms.size(), 0U);
+    for (std::size_t a = 0; a < surface_atoms.size(); ++a) {
+      const Atom &atom_a = surface_atoms[a];
+      const double ra = atom_a.radius + args_.probe_radius;
+      if (atom_a.radius <= 0.0 || ra <= 0.0)
+        continue;
+      for (std::size_t b = a + 1; b < surface_atoms.size(); ++b) {
+        const Atom &atom_b = surface_atoms[b];
+        const double rb = atom_b.radius + args_.probe_radius;
+        if (atom_b.radius <= 0.0 || rb <= 0.0)
+          continue;
+        const double dx = atom_b.x - atom_a.x;
+        const double dy = atom_b.y - atom_a.y;
+        const double dz = atom_b.z - atom_a.z;
+        const double d2 = dx * dx + dy * dy + dz * dz;
+        const double sum_r = ra + rb;
+        const double diff_r = std::abs(ra - rb);
+        if (sum_r * sum_r - d2 <= 0.01 || d2 <= diff_r * diff_r ||
+            d2 <= 1.0e-16)
+          continue;
+        has_pair[a] = 1U;
+        has_pair[b] = 1U;
+        const double d = std::sqrt(d2);
+        const double prefactor = 1.0 + (ra * ra - rb * rb) / d2;
+        const double cx = atom_a.x + 0.5 * prefactor * dx;
+        const double cy = atom_a.y + 0.5 * prefactor * dy;
+        const double cz = atom_a.z + 0.5 * prefactor * dz;
+        const double term1 = std::max(0.0, sum_r * sum_r - d2);
+        const double term2 = std::max(0.0, d2 - diff_r * diff_r);
+        const double circle_r = 0.5 * std::sqrt(term1) * std::sqrt(term2) / d;
+        if (circle_r <= 0.0)
+          continue;
+        std::array<double, 3> circle_x{1.0, 0.0, 0.0};
+        std::array<double, 3> circle_y{0.0, 1.0, 0.0};
+        const double xy_projection = std::sqrt(dx * dx + dy * dy);
+        if (xy_projection > 1.0e-8) {
+          const double tangential_x = -dy / xy_projection;
+          const double tangential_y = dx / xy_projection;
+          const double cosine_theta = dz / d;
+          const double sine_theta =
+              std::sqrt(std::max(0.0, 1.0 - cosine_theta * cosine_theta));
+          const double one_minus_cosine = 1.0 - cosine_theta;
+          const double temp = one_minus_cosine * tangential_x;
+          const double sine_tangential_x = sine_theta * tangential_x;
+          const double sine_tangential_y = sine_theta * tangential_y;
+          circle_x = {temp * tangential_x + cosine_theta,
+                      temp * tangential_y, -sine_tangential_y};
+          circle_y = {
+              temp * tangential_y,
+              one_minus_cosine * tangential_y * tangential_y + cosine_theta,
+              sine_tangential_x};
+        }
+        auto circle_point = [&](const std::array<double, 3> &unit_point) {
+          return std::array<double, 3>{
+              cx + circle_r *
+                       (unit_point[0] * circle_x[0] +
+                        unit_point[1] * circle_y[0] + unit_point[2] * 0.0),
+              cy + circle_r *
+                       (unit_point[0] * circle_x[1] +
+                        unit_point[1] * circle_y[1] + unit_point[2] * 0.0),
+              cz + circle_r *
+                       (unit_point[0] * circle_x[2] +
+                        unit_point[1] * circle_y[2] + unit_point[2] * 1.0)};
+        };
+        std::vector<std::int32_t> vertex_occupation(kMaxVertices + 1, 0);
+        std::vector<int> edge_state(kMaxEdges + 1, 0);
+        int num_visible_vertices = 0;
+        for (int vertex_index = 1; vertex_index <= kInitialVertexCount;
+             ++vertex_index) {
+          const auto point = circle_point(
+              vertex_array[static_cast<std::size_t>(vertex_index)]);
+          const std::int32_t occupation =
+              probe_point_occupier(point[0], point[1], point[2]);
+          vertex_occupation[static_cast<std::size_t>(vertex_index)] =
+              occupation;
+          if (occupation == 0) {
+            ++num_visible_vertices;
+            bins.points.push_back(point);
+            vertex_occupation[static_cast<std::size_t>(vertex_index)] = 0;
+          }
+        }
+
+        int edge_state_count = 0;
+        for (int edge_index = kInitialVertexCount; edge_index >= 1;
+             --edge_index) {
+          const int v1 = edge_array[static_cast<std::size_t>(edge_index)].first;
+          const int v2 = edge_array[static_cast<std::size_t>(edge_index)].second;
+          const std::int32_t occ1 =
+              vertex_occupation[static_cast<std::size_t>(v1)];
+          const std::int32_t occ2 =
+              vertex_occupation[static_cast<std::size_t>(v2)];
+          if (occ1 > 0 && occ1 == occ2)
+            continue;
+          ++edge_state_count;
+          edge_state[static_cast<std::size_t>(edge_state_count)] = edge_index;
+        }
+
+        while (edge_state_count > 0) {
+          const int edge_index =
+              edge_state[static_cast<std::size_t>(edge_state_count)];
+          --edge_state_count;
+          const int endpoint1 =
+              edge_array[static_cast<std::size_t>(edge_index)].first;
+          const int endpoint2 =
+              edge_array[static_cast<std::size_t>(edge_index)].second;
+          const std::int32_t vertex_index1 =
+              vertex_occupation[static_cast<std::size_t>(endpoint1)];
+          const std::int32_t vertex_index2 =
+              vertex_occupation[static_cast<std::size_t>(endpoint2)];
+          const int child_edge =
+              edges[static_cast<std::size_t>(edge_index)];
+          if (vertex_index1 > static_cast<std::int32_t>(surface_atoms.size()) ||
+              vertex_index2 > static_cast<std::int32_t>(surface_atoms.size()))
+            continue;
+          const int refined_vertex_index = edge_index + kInitialVertexCount;
+          if (refined_vertex_index < 1 ||
+              refined_vertex_index > current_vertex_count)
+            continue;
+          const auto point = circle_point(
+              vertex_array[static_cast<std::size_t>(refined_vertex_index)]);
+          const std::int32_t occ_mid =
+              probe_point_occupier(point[0], point[1], point[2]);
+          bool handled = false;
+          if (vertex_index1 != 0 &&
+              occ_mid == vertex_index1) {
+            vertex_occupation[static_cast<std::size_t>(refined_vertex_index)] =
+                vertex_index1;
+            if (child_edge > 0) {
+              ++edge_state_count;
+              edge_state[static_cast<std::size_t>(edge_state_count)] =
+                  child_edge + 1;
+            }
+            handled = true;
+          }
+          if (!handled && vertex_index2 != 0 &&
+              occ_mid == vertex_index2) {
+            vertex_occupation[static_cast<std::size_t>(refined_vertex_index)] =
+                vertex_index2;
+            if (child_edge > 0) {
+              ++edge_state_count;
+              edge_state[static_cast<std::size_t>(edge_state_count)] =
+                  child_edge;
+            }
+            handled = true;
+          }
+          if (!handled && occ_mid != 0) {
+            vertex_occupation[static_cast<std::size_t>(refined_vertex_index)] =
+                occ_mid;
+            if (child_edge > 0) {
+              ++edge_state_count;
+              edge_state[static_cast<std::size_t>(edge_state_count)] =
+                  child_edge + 1;
+              ++edge_state_count;
+              edge_state[static_cast<std::size_t>(edge_state_count)] =
+                  child_edge;
+            }
+            handled = true;
+          }
+          if (handled)
+            continue;
+
+          ++num_visible_vertices;
+          vertex_occupation[static_cast<std::size_t>(refined_vertex_index)] =
+              0;
+          bins.points.push_back(point);
+          if (child_edge > 0) {
+            const int child_a = child_edge;
+            const int child_b = child_edge + 1;
+            if ((edges[static_cast<std::size_t>(child_b)] > 0) ||
+                vertex_index2 > 0) {
+              ++edge_state_count;
+              edge_state[static_cast<std::size_t>(edge_state_count)] =
+                  child_b;
+            }
+            if ((edges[static_cast<std::size_t>(child_a)] > 0) ||
+                vertex_index1 > 0) {
+              ++edge_state_count;
+              edge_state[static_cast<std::size_t>(edge_state_count)] =
+                  child_a;
+            }
+          }
+        }
+        if (num_visible_vertices > 0) {
+          accessible[a] = 1U;
+          accessible[b] = 1U;
+        }
+      }
+    }
+    for (std::size_t atom_idx = 0; atom_idx < surface_atoms.size(); ++atom_idx) {
+      if (has_pair[atom_idx] == 0U)
+        accessible[atom_idx] = 1U;
+    }
+    vdwms_accessible_atoms = std::move(accessible);
     if (bins.points.empty())
       return bins;
     double max_x = bins.points.front()[0];
@@ -2013,10 +1405,9 @@ Analyzer::DelphiVdwMediaMap Analyzer::build_delphi_vdw_media_map(
     return bins;
   };
   const ExposedPointBins exposed_bins = build_exposed_point_bins();
-  auto near_exposed_point = [&](double x, double y, double z) {
+  auto nearest_exposed_distance = [&](double x, double y, double z) {
     if (exposed_bins.empty)
-      return false;
-    const double probe_sq = args_.probe_radius * args_.probe_radius;
+      return std::numeric_limits<double>::infinity();
     const int radius_bins = static_cast<int>(
         std::ceil(args_.probe_radius / std::max(1.0e-12, exposed_bins.cell))) +
                             1;
@@ -2026,6 +1417,7 @@ Analyzer::DelphiVdwMediaMap Analyzer::build_delphi_vdw_media_map(
         std::floor((y - exposed_bins.min_y) / exposed_bins.cell));
     const int bz0 = static_cast<int>(
         std::floor((z - exposed_bins.min_z) / exposed_bins.cell));
+    double best = std::numeric_limits<double>::infinity();
     for (int dz = -radius_bins; dz <= radius_bins; ++dz) {
       const int bz = bz0 + dz;
       if (bz < 0 || bz >= static_cast<int>(exposed_bins.bz))
@@ -2050,635 +1442,798 @@ Analyzer::DelphiVdwMediaMap Analyzer::build_delphi_vdw_media_map(
             const double ddy = y - point[1];
             const double ddz = z - point[2];
             const double r2 = ddx * ddx + ddy * ddy + ddz * ddz;
-            if (r2 < probe_sq)
-              return true;
+            if (r2 < best)
+              best = r2;
           }
         }
       }
     }
-    return false;
+    return std::sqrt(best);
+  };
+  auto nearest_exposed_point = [&](double x, double y, double z,
+                                   std::array<double, 3> &best_point) {
+    if (exposed_bins.empty)
+      return std::numeric_limits<double>::infinity();
+    const int radius_bins = static_cast<int>(
+        std::ceil(args_.probe_radius / std::max(1.0e-12, exposed_bins.cell))) +
+                            1;
+    const int bx0 = static_cast<int>(
+        std::floor((x - exposed_bins.min_x) / exposed_bins.cell));
+    const int by0 = static_cast<int>(
+        std::floor((y - exposed_bins.min_y) / exposed_bins.cell));
+    const int bz0 = static_cast<int>(
+        std::floor((z - exposed_bins.min_z) / exposed_bins.cell));
+    double best = std::numeric_limits<double>::infinity();
+    for (int dz = -radius_bins; dz <= radius_bins; ++dz) {
+      const int bz = bz0 + dz;
+      if (bz < 0 || bz >= static_cast<int>(exposed_bins.bz))
+        continue;
+      for (int dy = -radius_bins; dy <= radius_bins; ++dy) {
+        const int by = by0 + dy;
+        if (by < 0 || by >= static_cast<int>(exposed_bins.by))
+          continue;
+        for (int dx = -radius_bins; dx <= radius_bins; ++dx) {
+          const int bx = bx0 + dx;
+          if (bx < 0 || bx >= static_cast<int>(exposed_bins.bx))
+            continue;
+          const auto &bucket =
+              exposed_bins.bins[(static_cast<std::size_t>(bz) *
+                                     exposed_bins.by +
+                                 static_cast<std::size_t>(by)) *
+                                    exposed_bins.bx +
+                                static_cast<std::size_t>(bx)];
+          for (std::size_t point_idx : bucket) {
+            const auto &point = exposed_bins.points[point_idx];
+            const double ddx = x - point[0];
+            const double ddy = y - point[1];
+            const double ddz = z - point[2];
+            const double r2 = ddx * ddx + ddy * ddy + ddz * ddz;
+            if (r2 < best) {
+              best = r2;
+              best_point = point;
+            }
+          }
+        }
+      }
+    }
+    return std::sqrt(best);
   };
 
-  std::size_t added = 0;
-  std::size_t exposed = 0;
-  std::vector<unsigned char> processed_faces(shape.n * 3, 0U);
-  auto process_face = [&](std::size_t face_id, int axis, double x, double y,
-                          double z) {
-    if (face_id >= shape.n || axis < 0 || axis > 2)
-      return;
-    const std::size_t fid = face_index(face_id, axis);
-    if (processed_faces[fid] != 0U)
-      return;
-    processed_faces[fid] = 1U;
-    if (out.face_media[fid] != 0)
-      return;
-    const std::ptrdiff_t atom_idx = candidate_shell_atom(x, y, z);
-    if (atom_idx >= 0 && (in_core_shell(x, y, z) || !near_exposed_point(x, y, z))) {
-      out.face_media[fid] = 1;
-      out.face_owner[fid] = static_cast<std::int32_t>(atom_idx + 2);
-      ++added;
-    } else {
-      ++exposed;
+  struct DelphiFaceRef {
+    std::size_t id{0};
+    int axis{0};
+    bool valid{false};
+  };
+  auto face_ref_for_neighbor = [&](std::size_t i, std::size_t j,
+                                   std::size_t k,
+                                   int neighbor) -> DelphiFaceRef {
+    const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
+    switch (neighbor) {
+    case 1:
+      return {id, 0, i + 1 < shape.nx};
+    case 2:
+      return {id, 1, j + 1 < shape.ny};
+    case 3:
+      return {id, 2, k + 1 < shape.nz};
+    case 4:
+      return {i > 0 ? id - 1 : id, 0, i > 0};
+    case 5:
+      return {j > 0 ? id - shape.nx : id, 1, j > 0};
+    case 6:
+      return {k > 0 ? id - plane : id, 2, k > 0};
+    default:
+      return {};
     }
   };
-  for (std::size_t center_id : boundary_voxels) {
-    const std::size_t k = center_id / plane;
-    const std::size_t rem = center_id - k * plane;
-    const std::size_t j = rem / shape.nx;
-    const std::size_t i = rem - j * shape.nx;
-    const double x = shape.ox + static_cast<double>(i) * shape.h;
-    const double y = shape.oy + static_cast<double>(j) * shape.h;
-    const double z = shape.oz + static_cast<double>(k) * shape.h;
-    if (i + 1 < shape.nx)
-      process_face(center_id, 0, x + 0.5 * shape.h, y, z);
-    if (j + 1 < shape.ny)
-      process_face(center_id, 1, x, y + 0.5 * shape.h, z);
-    if (k + 1 < shape.nz)
-      process_face(center_id, 2, x, y, z + 0.5 * shape.h);
-    if (i > 0)
-      process_face(center_id - 1, 0, x - 0.5 * shape.h, y, z);
-    if (j > 0)
-      process_face(center_id - shape.nx, 1, x, y - 0.5 * shape.h, z);
-    if (k > 0)
-      process_face(center_id - plane, 2, x, y, z - 0.5 * shape.h);
+  auto face_midpoint = [&](std::size_t i, std::size_t j, std::size_t k,
+                           int neighbor) {
+    std::array<double, 3> point{
+        shape.ox + static_cast<double>(i) * shape.h,
+        shape.oy + static_cast<double>(j) * shape.h,
+        shape.oz + static_cast<double>(k) * shape.h};
+    if (neighbor == 1)
+      point[0] += 0.5 * shape.h;
+    else if (neighbor == 2)
+      point[1] += 0.5 * shape.h;
+    else if (neighbor == 3)
+      point[2] += 0.5 * shape.h;
+    else if (neighbor == 4)
+      point[0] -= 0.5 * shape.h;
+    else if (neighbor == 5)
+      point[1] -= 0.5 * shape.h;
+    else if (neighbor == 6)
+      point[2] -= 0.5 * shape.h;
+    return point;
+  };
+  auto face_flat = [&](const DelphiFaceRef &ref) {
+    return face_index(ref.id, ref.axis);
+  };
+  auto decode_index = [&](std::size_t id, std::size_t &i, std::size_t &j,
+                          std::size_t &k) {
+    k = id / plane;
+    const std::size_t rem = id - k * plane;
+    j = rem / shape.nx;
+    i = rem - j * shape.nx;
+  };
+  struct BoundaryState {
+    bool boundary{false};
+    bool external{false};
+  };
+  auto classify_boundary = [&](std::size_t i, std::size_t j,
+                               std::size_t k) -> BoundaryState {
+    BoundaryState state;
+    if (i == 0 || j == 0 || k == 0 || i + 1 >= shape.nx ||
+        j + 1 >= shape.ny || k + 1 >= shape.nz)
+      return state;
+    std::array<std::int32_t, 6> faces{};
+    face_media6(i, j, k, faces);
+    state.external = std::any_of(faces.begin(), faces.end(),
+                                 [](std::int32_t v) { return v == 0; });
+    state.boundary = faces[0] != faces[5];
+    for (std::size_t n = 1; n < faces.size(); ++n)
+      state.boundary = state.boundary || faces[n] != faces[n - 1];
+    return state;
+  };
+
+  std::vector<std::uint32_t> boundary_rank(shape.n, 0U);
+  std::vector<unsigned char> boundary_external(shape.n, 0U);
+  std::vector<std::size_t> boundary_queue;
+  boundary_queue.reserve(boundary_voxels.size() * 2);
+  std::size_t discovered_boundary = 0;
+  std::size_t external_boundary = 0;
+  if (shape.nx >= 3 && shape.ny >= 3 && shape.nz >= 3) {
+    for (std::size_t k = 1; k + 1 < shape.nz; ++k) {
+      for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
+        for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
+          const BoundaryState state = classify_boundary(i, j, k);
+          if (!state.boundary)
+            continue;
+          const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
+          boundary_rank[id] = static_cast<std::uint32_t>(++discovered_boundary);
+          boundary_external[id] = state.external ? 1U : 0U;
+          if (state.external) {
+            ++external_boundary;
+            boundary_queue.push_back(id);
+          }
+        }
+      }
+    }
   }
+  out.audit.boundary_initial = discovered_boundary;
+
+  std::size_t added = 0;
+  std::size_t removed = 0;
+  std::size_t exposed = 0;
+  std::size_t contact = 0;
+  auto update_boundary_status = [&](std::size_t id, bool enqueue_new) {
+    std::size_t i = 0, j = 0, k = 0;
+    decode_index(id, i, j, k);
+    const BoundaryState state = classify_boundary(i, j, k);
+    if (!state.boundary) {
+      if (boundary_rank[id] != 0U) {
+        if (boundary_external[id] != 0U && external_boundary > 0)
+          --external_boundary;
+        boundary_rank[id] = 0U;
+        boundary_external[id] = 0U;
+        ++removed;
+      }
+      return;
+    }
+    if (boundary_rank[id] == 0U) {
+      boundary_rank[id] = static_cast<std::uint32_t>(++discovered_boundary);
+      boundary_external[id] = state.external ? 1U : 0U;
+      if (state.external)
+        ++external_boundary;
+      if (enqueue_new)
+        boundary_queue.push_back(id);
+      return;
+    }
+    if (boundary_external[id] != (state.external ? 1U : 0U)) {
+      if (state.external)
+        ++external_boundary;
+      else if (external_boundary > 0)
+        --external_boundary;
+      boundary_external[id] = state.external ? 1U : 0U;
+    }
+  };
+  auto update_adjacent_boundary_status = [&](std::size_t i, std::size_t j,
+                                             std::size_t k, int neighbor) {
+    const std::size_t center_id = idx3(i, j, k, shape.nx, shape.ny);
+    update_boundary_status(center_id, false);
+    std::size_t ni = i, nj = j, nk = k;
+    if (neighbor == 1)
+      ++ni;
+    else if (neighbor == 2)
+      ++nj;
+    else if (neighbor == 3)
+      ++nk;
+    else if (neighbor == 4)
+      --ni;
+    else if (neighbor == 5)
+      --nj;
+    else if (neighbor == 6)
+      --nk;
+    if (ni > 0 && nj > 0 && nk > 0 && ni + 1 < shape.nx &&
+        nj + 1 < shape.ny && nk + 1 < shape.nz)
+      update_boundary_status(idx3(ni, nj, nk, shape.nx, shape.ny), true);
+  };
+  auto set_contact_solvent = [&](const DelphiFaceRef &ref,
+                                 std::int32_t entity,
+                                 std::uint16_t action,
+                                 std::uint32_t iteration,
+                                 const ClosestSurfaceAtom &nearest_atom,
+                                 double nearest_exposed_dist) {
+    (void)entity;
+    const std::size_t fid = face_flat(ref);
+    const std::int32_t original = out.face_encoded[fid];
+    std::int32_t original_entity = decode_entity_from_value(original);
+    const std::int32_t original_media = decode_media_from_value(original);
+    if (original_entity >= 0) {
+      if (original_entity == 0)
+        original_entity = 1;
+      set_face_encoded(fid, encode_delphi_face(-original_entity,
+                                               original_media));
+    }
+    if (fid < out.face_debug.size()) {
+      DelphiFaceDebug &debug = out.face_debug[fid];
+      debug.action = action;
+      debug.iteration = iteration;
+      debug.nearest_exposed_dist = nearest_exposed_dist;
+      if (nearest_atom.index >= 0) {
+        debug.nearest_atom =
+            static_cast<std::int32_t>(nearest_atom.index + 1);
+        debug.nearest_atom_surface_dist = nearest_atom.surface_dist;
+      }
+    }
+  };
+  auto set_cavity_media = [&](const DelphiFaceRef &ref,
+                              std::uint32_t iteration,
+                              const ClosestSurfaceAtom &nearest_atom,
+                              double nearest_exposed_dist) {
+    const std::size_t fid = face_flat(ref);
+    if (decode_media_from_value(out.face_encoded[fid]) == 0)
+      ++added;
+    const std::int32_t media =
+        nearest_atom.index >= 0 ? std::int32_t{1} : std::int32_t{1};
+    set_face_encoded(fid, encode_delphi_face(std::int32_t{1}, media));
+    if (fid < out.face_debug.size()) {
+      DelphiFaceDebug &debug = out.face_debug[fid];
+      debug.action = kDelphiFaceDelphiCavityRemap;
+      debug.iteration = iteration;
+      debug.nearest_exposed_dist = nearest_exposed_dist;
+      if (nearest_atom.index >= 0) {
+        debug.nearest_atom =
+            static_cast<std::int32_t>(nearest_atom.index + 1);
+        debug.nearest_atom_surface_dist = nearest_atom.surface_dist;
+      }
+    }
+  };
+
+  const std::size_t max_boundary_iterations =
+      std::max<std::size_t>(32, shape.nx + shape.ny + shape.nz);
+  std::size_t batch_begin = 0;
+  std::size_t iterations = 0;
+  while (batch_begin < boundary_queue.size() &&
+         iterations < max_boundary_iterations) {
+    const std::size_t batch_end = boundary_queue.size();
+    ++iterations;
+    for (std::size_t q = batch_begin; q < batch_end; ++q) {
+      const std::size_t center_id = boundary_queue[q];
+      if (center_id >= shape.n || boundary_rank[center_id] == 0U)
+        continue;
+      std::size_t i = 0, j = 0, k = 0;
+      decode_index(center_id, i, j, k);
+      std::array<std::int32_t, 7> neighbor_entities{};
+      std::array<std::int32_t, 7> neighbor_media{};
+      bool rm_boundary_pt = false;
+      for (int neighbor = 1; neighbor <= 6; ++neighbor) {
+        const DelphiFaceRef ref = face_ref_for_neighbor(i, j, k, neighbor);
+        if (!ref.valid)
+          continue;
+        const std::size_t fid = face_flat(ref);
+        neighbor_entities[static_cast<std::size_t>(neighbor)] =
+            decode_entity_from_value(out.face_encoded[fid]);
+        neighbor_media[static_cast<std::size_t>(neighbor)] =
+            decode_media_from_value(out.face_encoded[fid]);
+        const std::int32_t entity =
+            neighbor_entities[static_cast<std::size_t>(neighbor)];
+        if (entity > 1 &&
+            entity <= static_cast<std::int32_t>(surface_atoms.size() + 1))
+          rm_boundary_pt = true;
+      }
+      for (int neighbor = 1; neighbor <= 6; ++neighbor) {
+        const DelphiFaceRef ref = face_ref_for_neighbor(i, j, k, neighbor);
+        if (!ref.valid)
+          continue;
+        const std::int32_t entity =
+            neighbor_entities[static_cast<std::size_t>(neighbor)];
+        const std::int32_t media =
+            neighbor_media[static_cast<std::size_t>(neighbor)];
+        const bool should_process =
+            entity == 0 ||
+            (rm_boundary_pt &&
+             entity > static_cast<std::int32_t>(surface_atoms.size() + 1)) ||
+            (media == 0 && entity > 0);
+        if (!should_process)
+          continue;
+        const auto midpoint = face_midpoint(i, j, k, neighbor);
+        const double exposed_dist =
+            nearest_exposed_distance(midpoint[0], midpoint[1], midpoint[2]);
+        if (exposed_dist < args_.probe_radius) {
+          set_contact_solvent(ref, 1, kDelphiFaceExposedSolvent,
+                              static_cast<std::uint32_t>(iterations),
+                              ClosestSurfaceAtom{}, exposed_dist);
+          ++exposed;
+          continue;
+        }
+        const ClosestSurfaceAtom contact_atom =
+            closest_surface_atom(midpoint[0], midpoint[1], midpoint[2]);
+        if (contact_atom.index >= 0 &&
+            !probe_surface_occluded(midpoint[0], midpoint[1], midpoint[2],
+                                    static_cast<std::size_t>(
+                                        contact_atom.index))) {
+          set_contact_solvent(ref,
+                              static_cast<std::int32_t>(contact_atom.index + 2),
+                              kDelphiFaceContactSolvent,
+                              static_cast<std::uint32_t>(iterations),
+                              contact_atom, exposed_dist);
+          ++contact;
+        } else {
+          set_cavity_media(ref, static_cast<std::uint32_t>(iterations),
+                           contact_atom, exposed_dist);
+          update_adjacent_boundary_status(i, j, k, neighbor);
+        }
+      }
+      update_boundary_status(center_id, false);
+    }
+    batch_begin = batch_end;
+  }
+
+  for (std::size_t fid = 0; fid < out.face_encoded.size(); ++fid) {
+    const std::int32_t encoded = out.face_encoded[fid];
+    if (encoded < 0) {
+      const std::int32_t signed_entity = encoded % delphi_epsilon_dim;
+      std::int32_t final_value = -encoded;
+      if (signed_entity == -1)
+        final_value -= 1;
+      set_face_encoded(fid, final_value);
+      if (fid < out.face_debug.size() &&
+          out.face_debug[fid].action == kDelphiFaceUnchanged)
+        out.face_debug[fid].action = kDelphiFaceSignPreserve;
+    } else {
+      sync_face_from_encoded(fid);
+    }
+  }
+
   out.audit.added = added;
-  out.audit.removed = 0;
+  out.audit.removed = removed;
   out.audit.exposed_points = exposed_bins.points.empty()
-                                  ? exposed
+                                  ? exposed + contact
                                   : exposed_bins.points.size();
-  boundary_voxels = collect_boundary_voxels();
-  out.audit.boundary_final = boundary_voxels.size();
+  std::size_t final_boundary = 0;
+  for (std::uint32_t rank : boundary_rank) {
+    if (rank != 0U)
+      ++final_boundary;
+  }
+  out.audit.boundary_final = final_boundary;
   const double face_count =
       static_cast<double>(std::max<std::size_t>(1, shape.n * 3));
   out.audit.midpoint_rms =
       (args_.ext_diel - args_.int_diel) *
-      std::sqrt(static_cast<double>(added) / face_count);
+      std::sqrt(static_cast<double>(added + removed) / face_count);
+  out.iscm_surface_valid.assign(shape.n, 0U);
+  out.iscm_surface_positions.assign(shape.n, {0.0, 0.0, 0.0});
+  for (std::size_t id = 0; id < shape.n; ++id) {
+    if (boundary_rank[id] == 0U)
+      continue;
+    std::size_t i = 0, j = 0, k = 0;
+    decode_index(id, i, j, k);
+    const std::array<double, 3> grid_point{
+        shape.ox + static_cast<double>(i) * shape.h,
+        shape.oy + static_cast<double>(j) * shape.h,
+        shape.oz + static_cast<double>(k) * shape.h};
+    std::array<double, 3> surface_point = grid_point;
+    bool scaled = false;
+    if (id < boundary_external.size() && boundary_external[id] == 0U &&
+        surface_atoms.size() >= 2) {
+      std::size_t closest1 = std::numeric_limits<std::size_t>::max();
+      std::size_t closest2 = std::numeric_limits<std::size_t>::max();
+      double min1 = std::numeric_limits<double>::max();
+      double min2 = std::numeric_limits<double>::max();
+      for (std::size_t atom_idx = 0; atom_idx < surface_atoms.size();
+           ++atom_idx) {
+        const Atom &atom = surface_atoms[atom_idx];
+        const double dx = grid_point[0] - atom.x;
+        const double dy = grid_point[1] - atom.y;
+        const double dz = grid_point[2] - atom.z;
+        const double distance_sq =
+            dx * dx + dy * dy + dz * dz - atom.radius * atom.radius;
+        if (distance_sq < min1) {
+          closest2 = closest1;
+          min2 = min1;
+          closest1 = atom_idx;
+          min1 = distance_sq;
+        } else if (distance_sq <= min2) {
+          closest2 = atom_idx;
+          min2 = distance_sq;
+        }
+      }
+      if (closest1 != std::numeric_limits<std::size_t>::max() &&
+          closest2 != std::numeric_limits<std::size_t>::max() &&
+          closest1 != closest2) {
+        const Atom &atom1 = surface_atoms[closest1];
+        const Atom &atom2 = surface_atoms[closest2];
+        const double dx12 = atom2.x - atom1.x;
+        const double dy12 = atom2.y - atom1.y;
+        const double dz12 = atom2.z - atom1.z;
+        const double dist12_sq =
+            dx12 * dx12 + dy12 * dy12 + dz12 * dz12;
+        if (dist12_sq > 1.0e-30) {
+          const double factor = 0.5 * (min2 - min1) / dist12_sq;
+          surface_point = {grid_point[0] + factor * dx12,
+                           grid_point[1] + factor * dy12,
+                           grid_point[2] + factor * dz12};
+          scaled = true;
+        }
+      }
+    }
+    if (scaled) {
+      out.iscm_surface_valid[id] = 1U;
+      out.iscm_surface_positions[id] = surface_point;
+      continue;
+    }
+    const ClosestSurfaceAtom nearest_atom =
+        closest_surface_atom(grid_point[0], grid_point[1], grid_point[2]);
+    if (nearest_atom.index >= 0 &&
+        static_cast<std::size_t>(nearest_atom.index) < surface_atoms.size()) {
+      const Atom &atom = surface_atoms[static_cast<std::size_t>(
+          nearest_atom.index)];
+      const double dx = grid_point[0] - atom.x;
+      const double dy = grid_point[1] - atom.y;
+      const double dz = grid_point[2] - atom.z;
+      const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+      bool solvent_exposed = true;
+      if (args_.probe_radius > 0.0) {
+        solvent_exposed =
+            !probe_surface_occluded(grid_point[0], grid_point[1],
+                                    grid_point[2],
+                                    static_cast<std::size_t>(
+                                        nearest_atom.index));
+      }
+      if (distance > 1.0e-30 && solvent_exposed) {
+        surface_point = {atom.x + dx * (atom.radius / distance),
+                         atom.y + dy * (atom.radius / distance),
+                         atom.z + dz * (atom.radius / distance)};
+        scaled = true;
+      }
+    }
+    if (!scaled && args_.probe_radius > 0.0 && !exposed_bins.empty) {
+      std::array<double, 3> exposed_point{0.0, 0.0, 0.0};
+      const double exposed_distance =
+          nearest_exposed_point(grid_point[0], grid_point[1], grid_point[2],
+                                exposed_point);
+      if (std::isfinite(exposed_distance) && exposed_distance > 1.0e-30) {
+        const double factor = args_.probe_radius / exposed_distance;
+        surface_point = {
+            exposed_point[0] + (grid_point[0] - exposed_point[0]) * factor,
+            exposed_point[1] + (grid_point[1] - exposed_point[1]) * factor,
+            exposed_point[2] + (grid_point[2] - exposed_point[2]) * factor};
+      }
+    }
+    out.iscm_surface_valid[id] = 1U;
+    out.iscm_surface_positions[id] = surface_point;
+  }
   (void)positive_face;
   return out;
 }
 
-void Analyzer::apply_delphi_vdw_media_map(
+void AnalyzerImpl::apply_delphi_vdw_media_map(
     const GridShape &shape, const DelphiVdwMediaMap &media_map, double eps_in,
     double eps_out) {
-  if (media_map.face_media.size() != shape.n * 3)
+  if (media_map.face_media.size() != shape.n * 3 ||
+      media_map.face_encoded.size() != shape.n * 3)
     throw std::runtime_error("PBE: internal DelPhi VDW media map has wrong size.");
   for (std::size_t id = 0; id < shape.n; ++id) {
     eps_x_[id] = media_map.face_media[id * 3] != 0 ? eps_in : eps_out;
     eps_y_[id] = media_map.face_media[id * 3 + 1] != 0 ? eps_in : eps_out;
     eps_z_[id] = media_map.face_media[id * 3 + 2] != 0 ? eps_in : eps_out;
   }
+  maybe_write_midpoint_face_diff(shape, media_map, eps_in, eps_out);
   last_vdwms_audit_ = media_map.audit;
+  last_iscm_surface_valid_ = media_map.iscm_surface_valid;
+  last_iscm_surface_positions_ = media_map.iscm_surface_positions;
 }
 
-Analyzer::BoundaryDiagnostics
-Analyzer::apply_oracle_boundary_map(const GridShape &shape) {
-  BoundaryDiagnostics diag;
-  if (args_.test_boundary_map != "oracle" || !oracle_replay_applies(shape))
-    return diag;
-  std::ifstream in("pbe_oracle_boundary_map.csv");
+void AnalyzerImpl::maybe_write_midpoint_face_diff(
+    const GridShape &shape, const DelphiVdwMediaMap &media_map, double eps_in,
+    double eps_out) const {
+  if (args_.test_midpoint_diff == "off")
+    return;
+  if (args_.test_pqr.empty())
+    throw std::runtime_error(
+        "PBE: -pbe-test-midpoint-diff requires -pbe-test-pqr.");
+  if (!oracle_replay_applies(shape))
+    return;
+  if (media_map.face_media.size() != shape.n * 3)
+    throw std::runtime_error(
+        "PBE: internal DelPhi VDW media map has wrong size for midpoint diff.");
+  if (std::abs(eps_in - args_.int_diel) > 1.0e-10 ||
+      std::abs(eps_out - args_.ext_diel) > 1.0e-10) {
+    return;
+  }
+
+  std::ifstream in("pbe_oracle_midpoint_epsilon.csv");
   if (!in.is_open()) {
     throw std::runtime_error(
-        "PBE: -pbe-test-boundary-map=oracle requires "
-        "pbe_oracle_boundary_map.csv in the run directory.");
+        "PBE: -pbe-test-midpoint-diff requires "
+        "pbe_oracle_midpoint_epsilon.csv in the run directory.");
   }
   std::string line;
   if (!std::getline(in, line))
-    throw std::runtime_error("PBE: empty pbe_oracle_boundary_map.csv.");
+    throw std::runtime_error("PBE: empty pbe_oracle_midpoint_epsilon.csv.");
   const auto header = csv_header_map(split_csv_simple(line));
-  std::vector<unsigned char> seen(shape.n, 0U);
-  std::size_t rows = 0;
+  const auto fixture_it = header.find("fixture");
+  auto fixture_matches = [&](const std::vector<std::string> &fields) {
+    if (fixture_it == header.end() || fixture_it->second >= fields.size())
+      return true;
+    const std::string fixture = fields[fixture_it->second];
+    if (fixture.empty() || current_source_label_.empty())
+      return true;
+    if (fixture == current_source_label_)
+      return true;
+    if (current_source_label_.rfind(fixture + "__", 0) == 0 ||
+        fixture.rfind(current_source_label_ + "__", 0) == 0)
+      return true;
+    // TITAN trajectory labels are often input filenames, while pyDelPhi oracle
+    // rows use fixture names. The oracle file is copied per run, so keep the
+    // rows comparable instead of dropping the entire file on label mismatch.
+    return true;
+  };
+
+  auto face_index = [](std::size_t id, int axis) {
+    return id * 3 + static_cast<std::size_t>(axis);
+  };
+  auto axis_name = [](int axis) -> const char * {
+    if (axis == 0)
+      return "x";
+    if (axis == 1)
+      return "y";
+    return "z";
+  };
+
+  if (args_.test_midpoint_diff == "full") {
+    std::ofstream state_out;
+    if (!native_midpoint_state_header_written_) {
+      state_out.open("pbe_native_midpoint_state.csv",
+                     std::ios::out | std::ios::trunc);
+      if (!state_out.is_open())
+        throw std::runtime_error(
+            "PBE: failed to create pbe_native_midpoint_state.csv.");
+      state_out << "fixture,i,j,k,raw_idx_x,raw_idx_y,raw_idx_z,idx_x,idx_y,"
+                   "idx_z,raw_media_x,raw_media_y,raw_media_z,media_x,"
+                   "media_y,media_z,eps_x,eps_y,eps_z\n";
+      native_midpoint_state_header_written_ = true;
+    } else {
+      state_out.open("pbe_native_midpoint_state.csv",
+                     std::ios::out | std::ios::app);
+      if (!state_out.is_open())
+        throw std::runtime_error(
+            "PBE: failed to append pbe_native_midpoint_state.csv.");
+    }
+    state_out << std::setprecision(17);
+    const std::string fixture =
+        current_source_label_.empty() ? "unknown" : current_source_label_;
+    for (std::size_t i = 0; i < shape.nx; ++i) {
+      for (std::size_t j = 0; j < shape.ny; ++j) {
+        for (std::size_t k = 0; k < shape.nz; ++k) {
+          const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
+          std::int32_t raw_idx[3]{0, 0, 0};
+          std::int32_t final_idx[3]{0, 0, 0};
+          std::int32_t raw_media[3]{0, 0, 0};
+          std::int32_t final_media[3]{0, 0, 0};
+          double eps[3]{eps_out, eps_out, eps_out};
+          for (int axis = 0; axis < 3; ++axis) {
+            const std::size_t fid = face_index(id, axis);
+            if (fid < media_map.face_debug.size()) {
+              raw_idx[axis] = media_map.face_debug[fid].raw_encoded;
+              raw_media[axis] = media_map.face_debug[fid].raw_media;
+            }
+            if (fid < media_map.face_encoded.size())
+              final_idx[axis] = media_map.face_encoded[fid];
+            if (fid < media_map.face_media.size())
+              final_media[axis] = media_map.face_media[fid];
+            eps[axis] = final_media[axis] != 0 ? eps_in : eps_out;
+          }
+          state_out << csv_escape(fixture) << ',' << i << ',' << j << ','
+                    << k << ',' << raw_idx[0] << ',' << raw_idx[1] << ','
+                    << raw_idx[2] << ',' << final_idx[0] << ','
+                    << final_idx[1] << ',' << final_idx[2] << ','
+                    << raw_media[0] << ',' << raw_media[1] << ','
+                    << raw_media[2] << ',' << final_media[0] << ','
+                    << final_media[1] << ',' << final_media[2] << ','
+                    << eps[0] << ',' << eps[1] << ',' << eps[2] << '\n';
+        }
+      }
+    }
+
+    std::map<std::tuple<std::uint16_t, std::int32_t, std::int32_t>,
+             std::size_t>
+        histogram;
+    for (std::size_t fid = 0; fid < media_map.face_debug.size(); ++fid) {
+      const auto &debug = media_map.face_debug[fid];
+      const std::int32_t final_media =
+          fid < media_map.face_media.size() ? media_map.face_media[fid] : 0;
+      ++histogram[std::make_tuple(debug.action, debug.raw_media,
+                                  final_media)];
+    }
+    std::ofstream hist_out;
+    if (!vdwms_action_histogram_header_written_) {
+      hist_out.open("pbe_vdwms_action_histogram.csv",
+                    std::ios::out | std::ios::trunc);
+      if (!hist_out.is_open())
+        throw std::runtime_error(
+            "PBE: failed to create pbe_vdwms_action_histogram.csv.");
+      hist_out << "fixture,action,raw_media,final_media,count\n";
+      vdwms_action_histogram_header_written_ = true;
+    } else {
+      hist_out.open("pbe_vdwms_action_histogram.csv",
+                    std::ios::out | std::ios::app);
+      if (!hist_out.is_open())
+        throw std::runtime_error(
+            "PBE: failed to append pbe_vdwms_action_histogram.csv.");
+    }
+    for (const auto &[key, count] : histogram) {
+      const auto [action, raw_media, final_media] = key;
+      hist_out << csv_escape(fixture) << ','
+               << delphi_face_action_name(action) << ',' << raw_media << ','
+               << final_media << ',' << count << '\n';
+    }
+  }
+
+  std::ofstream out;
+  if (!midpoint_face_diff_header_written_) {
+    out.open("pbe_midpoint_face_diff.csv", std::ios::out | std::ios::trunc);
+    if (!out.is_open())
+      throw std::runtime_error(
+          "PBE: failed to create pbe_midpoint_face_diff.csv.");
+    out << "i,j,k,axis,native_eps,oracle_eps,native_media,oracle_media,"
+           "native_owner,native_encoded,oracle_encoded,face_x_A,face_y_A,"
+           "face_z_A,queue_iteration,"
+           "remap_action,nearest_atom,nearest_atom_surface_dist,"
+           "nearest_exposed_dist,raw_media,raw_owner,raw_encoded,final_encoded\n";
+    midpoint_face_diff_header_written_ = true;
+  } else {
+    out.open("pbe_midpoint_face_diff.csv", std::ios::out | std::ios::app);
+    if (!out.is_open())
+      throw std::runtime_error(
+          "PBE: failed to append pbe_midpoint_face_diff.csv.");
+  }
+  out << std::setprecision(17);
+
+  auto face_coord = [&](std::size_t i, std::size_t j, std::size_t k,
+                        int axis) {
+    std::array<double, 3> point{
+        shape.ox + static_cast<double>(i) * shape.h,
+        shape.oy + static_cast<double>(j) * shape.h,
+        shape.oz + static_cast<double>(k) * shape.h};
+    if (axis == 0)
+      point[0] += 0.5 * shape.h;
+    else if (axis == 1)
+      point[1] += 0.5 * shape.h;
+    else
+      point[2] += 0.5 * shape.h;
+    return point;
+  };
+  auto oracle_media = [&](double eps_value) {
+    if (std::abs(eps_value - eps_in) <= 1.0e-9)
+      return 1;
+    if (std::abs(eps_value - eps_out) <= 1.0e-9)
+      return 0;
+    return -1;
+  };
+  auto write_optional_double = [&](double value) {
+    if (std::isfinite(value) && std::abs(value) < 1.0e299)
+      out << value;
+    else
+      out << "NA";
+  };
+
+  const bool full = args_.test_midpoint_diff == "full";
+  const std::size_t sample_limit = full ? std::numeric_limits<std::size_t>::max()
+                                        : std::size_t{50};
+  std::size_t compared_rows = 0;
+  std::size_t written_rows = 0;
+  std::size_t skipped_fixture_rows = 0;
   while (std::getline(in, line)) {
     if (trim_copy(line).empty())
       continue;
     const auto fields = split_csv_simple(line);
+    if (!fixture_matches(fields)) {
+      ++skipped_fixture_rows;
+      continue;
+    }
     std::size_t i = 0, j = 0, k = 0;
-    double value = 0.0;
+    double oracle_eps[3]{0.0, 0.0, 0.0};
+    double oracle_encoded[3]{std::numeric_limits<double>::quiet_NaN(),
+                             std::numeric_limits<double>::quiet_NaN(),
+                             std::numeric_limits<double>::quiet_NaN()};
     if (!csv_index(fields, header, "i", i) ||
         !csv_index(fields, header, "j", j) ||
         !csv_index(fields, header, "k", k)) {
       throw std::runtime_error(
-          "PBE: pbe_oracle_boundary_map.csv row is missing i,j,k.");
+          "PBE: pbe_oracle_midpoint_epsilon.csv row is missing i,j,k.");
     }
-    if (!csv_double(fields, header, {"phi", "potential", "boundary_phi"},
-                    value)) {
+    if (!csv_double(fields, header, {"eps_x", "epsilon_x", "ex"},
+                    oracle_eps[0]) ||
+        !csv_double(fields, header, {"eps_y", "epsilon_y", "ey"},
+                    oracle_eps[1]) ||
+        !csv_double(fields, header, {"eps_z", "epsilon_z", "ez"},
+                    oracle_eps[2])) {
       throw std::runtime_error(
-          "PBE: pbe_oracle_boundary_map.csv row is missing phi/potential.");
+          "PBE: pbe_oracle_midpoint_epsilon.csv row is missing eps_x/eps_y/eps_z.");
     }
     if (i >= shape.nx || j >= shape.ny || k >= shape.nz)
       throw std::runtime_error(
-          "PBE: pbe_oracle_boundary_map.csv index is outside the grid.");
-    if (!is_boundary(i, j, k, shape))
-      throw std::runtime_error(
-          "PBE: pbe_oracle_boundary_map.csv contains non-boundary indices.");
+          "PBE: pbe_oracle_midpoint_epsilon.csv index is outside the grid.");
+    (void)csv_double(fields, header, {"idx_x", "index_x", "encoded_x"},
+                     oracle_encoded[0]);
+    (void)csv_double(fields, header, {"idx_y", "index_y", "encoded_y"},
+                     oracle_encoded[1]);
+    (void)csv_double(fields, header, {"idx_z", "index_z", "encoded_z"},
+                     oracle_encoded[2]);
     const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-    phi_[id] = value;
-    seen[id] = 1U;
-    ++rows;
-  }
-  std::size_t expected = 0;
-  double sumsq = 0.0;
-  double max_abs = 0.0;
-  for (std::size_t k = 0; k < shape.nz; ++k) {
-    for (std::size_t j = 0; j < shape.ny; ++j) {
-      for (std::size_t i = 0; i < shape.nx; ++i) {
-        if (!is_boundary(i, j, k, shape))
-          continue;
-        ++expected;
-        const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-        if (!seen[id]) {
-          throw std::runtime_error(
-              "PBE: pbe_oracle_boundary_map.csv must provide every "
-              "boundary grid point for replay.");
-        }
-        sumsq += phi_[id] * phi_[id];
-        max_abs = std::max(max_abs, std::abs(phi_[id]));
-      }
+    ++compared_rows;
+    for (int axis = 0; axis < 3; ++axis) {
+      const std::size_t fid = face_index(id, axis);
+      const int native_media = media_map.face_media[fid] != 0 ? 1 : 0;
+      const double native_eps = native_media != 0 ? eps_in : eps_out;
+      if (std::abs(native_eps - oracle_eps[axis]) <= 1.0e-12)
+        continue;
+      if (written_rows >= sample_limit)
+        continue;
+      const auto point = face_coord(i, j, k, axis);
+      const DelphiFaceDebug debug =
+          fid < media_map.face_debug.size() ? media_map.face_debug[fid]
+                                            : DelphiFaceDebug{};
+      out << i << ',' << j << ',' << k << ',' << axis_name(axis) << ','
+          << native_eps << ',' << oracle_eps[axis] << ',' << native_media
+          << ',' << oracle_media(oracle_eps[axis]) << ','
+          << media_map.face_owner[fid] << ','
+          << (fid < media_map.face_encoded.size()
+                  ? media_map.face_encoded[fid]
+                  : std::int32_t{0})
+          << ',';
+      write_optional_double(oracle_encoded[axis]);
+      out << ',' << point[0] << ',' << point[1]
+          << ',' << point[2] << ',' << debug.iteration << ','
+          << delphi_face_action_name(debug.action) << ','
+          << debug.nearest_atom << ',';
+      write_optional_double(debug.nearest_atom_surface_dist);
+      out << ',';
+      write_optional_double(debug.nearest_exposed_dist);
+      out << ',' << debug.raw_media << ',' << debug.raw_owner << ','
+          << debug.raw_encoded << ',' << debug.final_encoded << '\n';
+      ++written_rows;
     }
   }
-  if (rows == 0 || expected == 0)
-    throw std::runtime_error("PBE: pbe_oracle_boundary_map.csv has no rows.");
-  diag.rms = std::sqrt(sumsq / static_cast<double>(expected));
-  diag.max_abs = max_abs;
-  return diag;
-}
-
-void Analyzer::build_coefficients(const GridShape &shape,
-                                  const std::vector<Atom> &atoms,
-                                  double eps_in, double eps_out, double kappa,
-                                  TitanExecutor &executor) {
-  const double kappa2h2 = kappa * kappa * shape.h * shape.h;
-  const std::vector<Atom> surface_atoms = adjusted_surface_atoms(atoms);
-  auto center_eps = [&](std::size_t id) {
-    return inside_[id] ? eps_in : eps_out;
-  };
-  const bool refine_faces = surface_uses_face_refinement(args_.surface);
-  const bool delphi_vdw_faces = args_.surface == "delphi-vdw";
-  const double surface_inflate =
-      surface_uses_probe_exclusion(args_.surface) ? args_.probe_radius : 0.0;
-  const AtomSpatialBins face_bins =
-      refine_faces ? build_atom_bins(surface_atoms, surface_inflate, shape.h)
-                   : AtomSpatialBins{};
-  auto segment_face_eps = [&](double x0, double y0, double z0, double x1,
-                              double y1, double z1) {
-    const double inside_fraction = segment_inside_fraction(
-        face_bins, surface_atoms, x0, y0, z0, x1, y1, z1, surface_inflate);
-    return dielectric_from_inside_fraction(inside_fraction, eps_in, eps_out);
-  };
-  auto sampled_face_eps = [&](double x, double y, double z, int axis) {
-    int inside_samples = 0;
-    const double q = 0.25 * shape.h;
-    for (int a = -1; a <= 1; a += 2) {
-      for (int b = -1; b <= 1; b += 2) {
-        double sx = x;
-        double sy = y;
-        double sz = z;
-        if (axis == 0) {
-          sy += static_cast<double>(a) * q;
-          sz += static_cast<double>(b) * q;
-        } else if (axis == 1) {
-          sx += static_cast<double>(a) * q;
-          sz += static_cast<double>(b) * q;
-        } else {
-          sx += static_cast<double>(a) * q;
-          sy += static_cast<double>(b) * q;
-        }
-        if (point_inside_inflated_atom(face_bins, surface_atoms, sx, sy, sz,
-                                       surface_inflate))
-          ++inside_samples;
-      }
-    }
-    const double frac_inside = static_cast<double>(inside_samples) / 4.0;
-    return frac_inside * eps_in + (1.0 - frac_inside) * eps_out;
-  };
-
-  if (uses_gaussian_model()) {
-    double max_base_radius = shape.h;
-    for (const Atom &atom : surface_atoms)
-      max_base_radius = std::max(max_base_radius, atom.radius);
-    const double sigma = std::max(1.0e-12, args_.gaussian_sigma);
-    const double influence = 3.0 * sigma * max_base_radius;
-    const AtomSpatialBins gaussian_bins =
-        build_atom_bins(surface_atoms, std::max(0.0, influence), shape.h);
-    auto density_at = [&](double x, double y, double z) {
-      const double exponent = std::max(1.0e-12, args_.gaussian_exp);
-      const int radius_bins = static_cast<int>(
-          std::ceil(std::max(shape.h, influence) / gaussian_bins.cell)) + 1;
-      const int bx0 = static_cast<int>(std::floor((x - gaussian_bins.min_x) /
-                                                  gaussian_bins.cell));
-      const int by0 = static_cast<int>(std::floor((y - gaussian_bins.min_y) /
-                                                  gaussian_bins.cell));
-      const int bz0 = static_cast<int>(std::floor((z - gaussian_bins.min_z) /
-                                                  gaussian_bins.cell));
-      double density = 0.0;
-      for (int dz = -radius_bins; dz <= radius_bins; ++dz) {
-        const int bz = bz0 + dz;
-        if (bz < 0 || bz >= static_cast<int>(gaussian_bins.bz))
-          continue;
-        for (int dy = -radius_bins; dy <= radius_bins; ++dy) {
-          const int by = by0 + dy;
-          if (by < 0 || by >= static_cast<int>(gaussian_bins.by))
-            continue;
-          for (int dx = -radius_bins; dx <= radius_bins; ++dx) {
-            const int bx = bx0 + dx;
-            if (bx < 0 || bx >= static_cast<int>(gaussian_bins.bx))
-              continue;
-            const auto &bucket = gaussian_bins.bins
-                [(static_cast<std::size_t>(bz) * gaussian_bins.by +
-                  static_cast<std::size_t>(by)) *
-                     gaussian_bins.bx +
-                 static_cast<std::size_t>(bx)];
-            for (std::size_t atom_idx : bucket) {
-              const Atom &atom = surface_atoms[atom_idx];
-              const double r0 = std::max(1.0e-12, atom.radius);
-              const double cutoff = 3.0 * sigma * r0;
-              const double ddx = x - atom.x;
-              const double ddy = y - atom.y;
-              const double ddz = z - atom.z;
-              const double r2 = ddx * ddx + ddy * ddy + ddz * ddz;
-              if (r2 > cutoff * cutoff)
-                continue;
-              const double scaled = std::sqrt(r2) / (sigma * r0);
-              density += std::exp(-std::pow(scaled, exponent));
-              if (density >= 1.0)
-                return 1.0;
-            }
-          }
-        }
-      }
-      return std::clamp(density, 0.0, 1.0);
-    };
-    for (std::size_t k = 0; k < shape.nz; ++k) {
-      for (std::size_t j = 0; j < shape.ny; ++j) {
-        for (std::size_t i = 0; i < shape.nx; ++i) {
-          const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-          const double x = shape.ox + static_cast<double>(i) * shape.h;
-          const double y = shape.oy + static_cast<double>(j) * shape.h;
-          const double z = shape.oz + static_cast<double>(k) * shape.h;
-          const double e0 =
-              gaussian_dielectric(density_at(x, y, z), eps_in, eps_out);
-          eps_x_[id] = e0;
-          eps_y_[id] = e0;
-          eps_z_[id] = e0;
-          if (i + 1 < shape.nx) {
-            eps_x_[id] = gaussian_dielectric(
-                density_at(x + 0.5 * shape.h, y, z),
-                eps_in, eps_out);
-          }
-          if (j + 1 < shape.ny) {
-            eps_y_[id] = gaussian_dielectric(
-                density_at(x, y + 0.5 * shape.h, z),
-                eps_in, eps_out);
-          }
-          if (k + 1 < shape.nz) {
-            eps_z_[id] = gaussian_dielectric(
-                density_at(x, y, z + 0.5 * shape.h),
-                eps_in, eps_out);
-          }
-        }
-      }
-    }
-    double eps_min = std::numeric_limits<double>::max();
-    double eps_max = std::numeric_limits<double>::lowest();
-    double eps_sum = 0.0;
-    std::size_t eps_count = 0;
-    for (std::size_t id = 0; id < shape.n; ++id) {
-      const double values[3] = {eps_x_[id], eps_y_[id], eps_z_[id]};
-      for (double eps_value : values) {
-        if (!std::isfinite(eps_value))
-          continue;
-        eps_min = std::min(eps_min, eps_value);
-        eps_max = std::max(eps_max, eps_value);
-        eps_sum += eps_value;
-        ++eps_count;
-      }
-    }
-    last_gaussian_eps_min_ = eps_count > 0 ? eps_min : 0.0;
-    last_gaussian_eps_max_ = eps_count > 0 ? eps_max : 0.0;
-    last_gaussian_eps_mean_ =
-        eps_count > 0 ? eps_sum / static_cast<double>(eps_count) : 0.0;
-    for (std::size_t k = 1; k + 1 < shape.nz; ++k) {
-      for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
-        for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
-          const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-          const double screen = ion_accessible_[id] ? kappa2h2 : 0.0;
-          screen_[id] = screen;
-          denom_[id] = eps_x_[id] + eps_x_[id - 1] + eps_y_[id] +
-                       eps_y_[id - shape.nx] + eps_z_[id] +
-                       eps_z_[id - shape.nx * shape.ny] + screen;
-        }
-      }
-    }
-    return;
-  }
-
-  if (delphi_vdw_faces) {
-    const DelphiVdwMediaMap media_map =
-        build_delphi_vdw_media_map(shape, surface_atoms, executor);
-    apply_delphi_vdw_media_map(shape, media_map, eps_in, eps_out);
-
-    apply_oracle_midpoint_epsilon_map(shape);
-    for (std::size_t k = 1; k + 1 < shape.nz; ++k) {
-      for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
-        for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
-          const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-          const double screen = ion_accessible_[id] ? kappa2h2 : 0.0;
-          screen_[id] = screen;
-          denom_[id] = eps_x_[id] + eps_x_[id - 1] + eps_y_[id] +
-                       eps_y_[id - shape.nx] + eps_z_[id] +
-                       eps_z_[id - shape.nx * shape.ny] + screen;
-        }
-      }
-    }
-    return;
-  }
-
-  for (std::size_t k = 0; k < shape.nz; ++k) {
-    for (std::size_t j = 0; j < shape.ny; ++j) {
-      for (std::size_t i = 0; i < shape.nx; ++i) {
-        const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-        const double e0 = center_eps(id);
-        eps_x_[id] = e0;
-        eps_y_[id] = e0;
-        eps_z_[id] = e0;
-        if (i + 1 < shape.nx) {
-          const double e1 = center_eps(id + 1);
-          const double x_face =
-              shape.ox + (static_cast<double>(i) + 0.5) * shape.h;
-          const double y_face = shape.oy + static_cast<double>(j) * shape.h;
-          const double z_face = shape.oz + static_cast<double>(k) * shape.h;
-          eps_x_[id] =
-              (delphi_vdw_faces && inside_[id] != inside_[id + 1])
-                  ? segment_face_eps(shape.ox + static_cast<double>(i) *
-                                                    shape.h,
-                                     y_face, z_face,
-                                     shape.ox + static_cast<double>(i + 1) *
-                                                    shape.h,
-                                     y_face, z_face)
-              : (refine_faces && inside_[id] != inside_[id + 1])
-                  ? sampled_face_eps(x_face, y_face, z_face, 0)
-                  : harmonic_eps(e0, e1);
-        }
-        if (j + 1 < shape.ny) {
-          const double e1 = center_eps(id + shape.nx);
-          const double x_face = shape.ox + static_cast<double>(i) * shape.h;
-          const double y_face =
-              shape.oy + (static_cast<double>(j) + 0.5) * shape.h;
-          const double z_face = shape.oz + static_cast<double>(k) * shape.h;
-          eps_y_[id] =
-              (delphi_vdw_faces && inside_[id] != inside_[id + shape.nx])
-                  ? segment_face_eps(x_face,
-                                     shape.oy + static_cast<double>(j) *
-                                                    shape.h,
-                                     z_face, x_face,
-                                     shape.oy + static_cast<double>(j + 1) *
-                                                    shape.h,
-                                     z_face)
-              : (refine_faces && inside_[id] != inside_[id + shape.nx])
-                  ? sampled_face_eps(x_face, y_face, z_face, 1)
-                  : harmonic_eps(e0, e1);
-        }
-        if (k + 1 < shape.nz) {
-          const std::size_t dz = shape.nx * shape.ny;
-          const double e1 = center_eps(id + dz);
-          const double x_face = shape.ox + static_cast<double>(i) * shape.h;
-          const double y_face = shape.oy + static_cast<double>(j) * shape.h;
-          const double z_face =
-              shape.oz + (static_cast<double>(k) + 0.5) * shape.h;
-          eps_z_[id] =
-              (delphi_vdw_faces && inside_[id] != inside_[id + dz])
-                  ? segment_face_eps(x_face, y_face,
-                                     shape.oz + static_cast<double>(k) *
-                                                    shape.h,
-                                     x_face, y_face,
-                                     shape.oz + static_cast<double>(k + 1) *
-                                                    shape.h)
-              : (refine_faces && inside_[id] != inside_[id + dz])
-                  ? sampled_face_eps(x_face, y_face, z_face, 2)
-                  : harmonic_eps(e0, e1);
-        }
-      }
-    }
-  }
-
-  apply_oracle_midpoint_epsilon_map(shape);
-  for (std::size_t k = 1; k + 1 < shape.nz; ++k) {
-    for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
-      for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
-        const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-        const double screen = ion_accessible_[id] ? kappa2h2 : 0.0;
-        screen_[id] = screen;
-        denom_[id] = eps_x_[id] + eps_x_[id - 1] + eps_y_[id] +
-                     eps_y_[id - shape.nx] + eps_z_[id] +
-                     eps_z_[id - shape.nx * shape.ny] + screen;
-      }
-    }
+  if (compared_rows == 0) {
+    const std::string skipped =
+        skipped_fixture_rows > 0 ? " fixture filter removed all rows." : "";
+    throw std::runtime_error(
+        "PBE: pbe_oracle_midpoint_epsilon.csv has no comparable rows for "
+        "midpoint diff." +
+        skipped);
   }
 }
 
-Analyzer::BoundaryDiagnostics
-Analyzer::set_boundary(const GridShape &shape, const std::vector<Atom> &atoms,
-                       double eps_out, double kappa) {
-  std::fill(phi_.begin(), phi_.end(), 0.0);
-  BoundaryDiagnostics diag;
-  if (args_.boundary == "zero")
-    return diag;
-
-  double total_charge = 0.0;
-  double cx = 0.0;
-  double cy = 0.0;
-  double cz = 0.0;
-  for (const Atom &atom : atoms) {
-    total_charge += atom.q;
-    cx += atom.q * atom.x;
-    cy += atom.q * atom.y;
-    cz += atom.q * atom.z;
-  }
-  const double center_x = shape.ox + 0.5 * static_cast<double>(shape.nx - 1) * shape.h;
-  const double center_y = shape.oy + 0.5 * static_cast<double>(shape.ny - 1) * shape.h;
-  const double center_z = shape.oz + 0.5 * static_cast<double>(shape.nz - 1) * shape.h;
-  if (std::abs(total_charge) > 1.0e-12) {
-    cx /= total_charge;
-    cy /= total_charge;
-    cz /= total_charge;
-  } else {
-    cx = center_x;
-    cy = center_y;
-    cz = center_z;
-  }
-  double px = 0.0;
-  double py = 0.0;
-  double pz = 0.0;
-  for (const Atom &atom : atoms) {
-    px += atom.q * (atom.x - cx);
-    py += atom.q * (atom.y - cy);
-    pz += atom.q * (atom.z - cz);
-  }
-  double sumsq = 0.0;
-  std::size_t count = 0;
-  for (std::size_t k = 0; k < shape.nz; ++k) {
-    const double z = shape.oz + static_cast<double>(k) * shape.h;
-    for (std::size_t j = 0; j < shape.ny; ++j) {
-      const double y = shape.oy + static_cast<double>(j) * shape.h;
-      for (std::size_t i = 0; i < shape.nx; ++i) {
-        if (!is_boundary(i, j, k, shape))
-          continue;
-        const double x = shape.ox + static_cast<double>(i) * shape.h;
-        double potential = 0.0;
-        if (args_.boundary == "dipolar") {
-          const double dx = x - cx;
-          const double dy = y - cy;
-          const double dz = z - cz;
-          const double r2 = dx * dx + dy * dy + dz * dz;
-          const double r = std::sqrt(r2);
-          if (r > 1.0e-10) {
-            const double screened = std::exp(-kappa * r);
-            const double monopole = total_charge / r;
-            const double dipole = (px * dx + py * dy + pz * dz) /
-                                  std::max(1.0e-30, r2 * r);
-            potential = screened * (monopole + dipole) /
-                        std::max(1.0e-12, eps_out);
-          }
-        } else {
-          for (const Atom &atom : atoms) {
-            const double dx = x - atom.x;
-            const double dy = y - atom.y;
-            const double dz = z - atom.z;
-            const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (r > 1.0e-10) {
-              potential += atom.q * std::exp(-kappa * r) /
-                           (std::max(1.0e-12, eps_out) * r);
-            }
-          }
-        }
-        phi_[idx3(i, j, k, shape.nx, shape.ny)] = potential;
-        sumsq += potential * potential;
-        diag.max_abs = std::max(diag.max_abs, std::abs(potential));
-        ++count;
-      }
-    }
-  }
-  diag.rms = count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
-  return diag;
-}
-
-Analyzer::SolveStats Analyzer::solve_sor(const GridShape &shape,
-                                          TitanExecutor &executor) {
-  SolveStats stats;
-  const double omega =
-      args_.omega == "auto"
-          ? std::clamp(2.0 / (1.0 + std::sin(kPi / static_cast<double>(
-                                             std::max({shape.nx, shape.ny,
-                                                       shape.nz})))),
-                       1.0, 1.95)
-          : args_.omega_value;
-  const std::size_t interior_z = shape.nz > 2 ? shape.nz - 2 : 0;
-  const std::size_t workers = effective_workers(executor, interior_z);
-  const double rhs = rhs_scale(shape);
-
-  std::vector<double> local_sumsq(workers, 0.0);
-  std::vector<double> local_max(workers, 0.0);
-  std::vector<std::size_t> local_count(workers, 0);
-
-  for (int iter = 1; iter <= args_.max_iter; ++iter) {
-    std::fill(local_sumsq.begin(), local_sumsq.end(), 0.0);
-    std::fill(local_max.begin(), local_max.end(), 0.0);
-    std::fill(local_count.begin(), local_count.end(), 0);
-
-    for (int color = 0; color < 2; ++color) {
-      executor.parallel_for(
-          interior_z, workers, 1,
-          [&](std::size_t worker, std::size_t begin, std::size_t end) {
-            double sumsq = 0.0;
-            double max_delta = 0.0;
-            std::size_t count = 0;
-            for (std::size_t kk = begin; kk < end; ++kk) {
-              const std::size_t k = kk + 1;
-              for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
-                for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
-                  if (static_cast<int>((i + j + k) & 1ULL) != color)
-                    continue;
-                  const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-                  const double neighbor_sum =
-                      eps_x_[id] * phi_[id + 1] + eps_x_[id - 1] * phi_[id - 1] +
-                      eps_y_[id] * phi_[id + shape.nx] +
-                      eps_y_[id - shape.nx] * phi_[id - shape.nx] +
-                      eps_z_[id] * phi_[id + shape.nx * shape.ny] +
-                      eps_z_[id - shape.nx * shape.ny] *
-                          phi_[id - shape.nx * shape.ny];
-                  const double target =
-                      (neighbor_sum + rhs * rho_[id]) / denom_[id];
-                  const double updated = phi_[id] + omega * (target - phi_[id]);
-                  const double delta = updated - phi_[id];
-                  phi_[id] = updated;
-                  const double abs_delta = std::abs(delta);
-                  sumsq += delta * delta;
-                  max_delta = std::max(max_delta, abs_delta);
-                  ++count;
-                }
-              }
-            }
-            local_sumsq[worker] += sumsq;
-            local_max[worker] = std::max(local_max[worker], max_delta);
-            local_count[worker] += count;
-          });
-    }
-
-    double sumsq = 0.0;
-    double max_delta = 0.0;
-    std::size_t count = 0;
-    for (std::size_t worker = 0; worker < workers; ++worker) {
-      sumsq += local_sumsq[worker];
-      max_delta = std::max(max_delta, local_max[worker]);
-      count += local_count[worker];
-    }
-
-    stats.iterations = iter;
-    stats.rms = count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
-    stats.max_dphi = max_delta;
-    if (stats.rms <= args_.rms_tol || stats.max_dphi <= args_.dphi_tol) {
-      stats.converged = true;
-      break;
-    }
-  }
-  return stats;
-}
-
-double Analyzer::compute_linear_residual(const GridShape &shape) const {
-  if (shape.n == 0 || phi_.size() != shape.n || rho_.size() != shape.n)
-    return 0.0;
-  const double rhs = rhs_scale(shape);
-  double sumsq = 0.0;
-  std::size_t count = 0;
-  for (std::size_t k = 1; k + 1 < shape.nz; ++k) {
-    for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
-      for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
-        const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-        const double neighbor_sum =
-            eps_x_[id] * phi_[id + 1] + eps_x_[id - 1] * phi_[id - 1] +
-            eps_y_[id] * phi_[id + shape.nx] +
-            eps_y_[id - shape.nx] * phi_[id - shape.nx] +
-            eps_z_[id] * phi_[id + shape.nx * shape.ny] +
-            eps_z_[id - shape.nx * shape.ny] *
-                phi_[id - shape.nx * shape.ny];
-        const double residual =
-            rhs * rho_[id] - (denom_[id] * phi_[id] - neighbor_sum);
-        sumsq += residual * residual;
-        ++count;
-      }
-    }
-  }
-  return count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
-}
-
-double Analyzer::compute_nonlinear_residual(
+double AnalyzerImpl::compute_nonlinear_residual(
     const GridShape &shape, const AlignedDoubleVector &source,
     double screen_scale) const {
   return compute_nonlinear_residual_from_phi(shape, phi_, source,
                                              screen_scale);
 }
 
-double Analyzer::compute_nonlinear_residual_from_phi(
+double AnalyzerImpl::compute_nonlinear_residual_from_phi(
     const GridShape &shape, const AlignedDoubleVector &field,
     const AlignedDoubleVector &source, double screen_scale) const {
   if (shape.n == 0 || field.size() != shape.n || rho_.size() != shape.n ||
@@ -2711,7 +2266,7 @@ double Analyzer::compute_nonlinear_residual_from_phi(
   return count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
 }
 
-double Analyzer::compute_nonlinear_residual_vector(
+double AnalyzerImpl::compute_nonlinear_residual_vector(
     const GridShape &shape, const AlignedDoubleVector &field,
     const AlignedDoubleVector &source, double screen_scale,
     AlignedDoubleVector &residual, TitanExecutor &executor) const {
@@ -2769,7 +2324,7 @@ double Analyzer::compute_nonlinear_residual_vector(
   return count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
 }
 
-Analyzer::NewtonCorrectionStats Analyzer::solve_newton_correction_sor(
+AnalyzerImpl::NewtonCorrectionStats AnalyzerImpl::solve_newton_correction_sor(
     const GridShape &shape, const AlignedDoubleVector &residual,
     double residual_rms, double alpha, double clip, double screen_scale,
     AlignedDoubleVector &delta, int max_sweeps,
@@ -2994,7 +2549,7 @@ Analyzer::NewtonCorrectionStats Analyzer::solve_newton_correction_sor(
   return stats;
 }
 
-void Analyzer::prepare_newton_correction_hierarchy(
+void AnalyzerImpl::prepare_newton_correction_hierarchy(
     const GridShape &shape, const AlignedDoubleVector &residual, double alpha,
     double clip, double screen_scale,
     std::vector<NewtonCorrectionLevel> &levels) const {
@@ -3096,7 +2651,7 @@ void Analyzer::prepare_newton_correction_hierarchy(
   }
 }
 
-Analyzer::SolveStats Analyzer::smooth_newton_correction_level(
+AnalyzerImpl::SolveStats AnalyzerImpl::smooth_newton_correction_level(
     NewtonCorrectionLevel &level, int iterations,
     bool stop_on_convergence) const {
   SolveStats stats;
@@ -3159,7 +2714,7 @@ Analyzer::SolveStats Analyzer::smooth_newton_correction_level(
   return stats;
 }
 
-double Analyzer::compute_newton_correction_level_residual(
+double AnalyzerImpl::compute_newton_correction_level_residual(
     const NewtonCorrectionLevel &level, AlignedDoubleVector &residual) const {
   const GridShape &shape = level.shape;
   residual.assign(shape.n, 0.0);
@@ -3188,7 +2743,7 @@ double Analyzer::compute_newton_correction_level_residual(
   return count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
 }
 
-void Analyzer::restrict_newton_correction_residual(
+void AnalyzerImpl::restrict_newton_correction_residual(
     const NewtonCorrectionLevel &fine,
     const AlignedDoubleVector &fine_residual,
     NewtonCorrectionLevel &coarse) const {
@@ -3231,7 +2786,7 @@ void Analyzer::restrict_newton_correction_residual(
   }
 }
 
-void Analyzer::prolongate_add_newton_correction(
+void AnalyzerImpl::prolongate_add_newton_correction(
     const NewtonCorrectionLevel &coarse, NewtonCorrectionLevel &fine) const {
   const double max_correction =
       std::max(1.0e-12, fine.max_correction);
@@ -3255,7 +2810,7 @@ void Analyzer::prolongate_add_newton_correction(
   }
 }
 
-void Analyzer::run_newton_correction_vcycle(
+void AnalyzerImpl::run_newton_correction_vcycle(
     std::vector<NewtonCorrectionLevel> &levels,
     std::size_t level_index) const {
   NewtonCorrectionLevel &level = levels[level_index];
@@ -3274,7 +2829,7 @@ void Analyzer::run_newton_correction_vcycle(
   smooth_newton_correction_level(level, args_.mg_post, false);
 }
 
-Analyzer::NewtonCorrectionStats Analyzer::solve_newton_correction_vcycle(
+AnalyzerImpl::NewtonCorrectionStats AnalyzerImpl::solve_newton_correction_vcycle(
     const GridShape &shape, const AlignedDoubleVector &residual,
     double residual_rms, double alpha, double clip, double screen_scale,
     AlignedDoubleVector &delta, int max_cycles) const {
@@ -3375,7 +2930,7 @@ Analyzer::NewtonCorrectionStats Analyzer::solve_newton_correction_vcycle(
   return stats;
 }
 
-Analyzer::NewtonCorrectionStats Analyzer::solve_newton_correction(
+AnalyzerImpl::NewtonCorrectionStats AnalyzerImpl::solve_newton_correction(
     const GridShape &shape, const AlignedDoubleVector &residual,
     double residual_rms, double alpha, double clip, double screen_scale,
     AlignedDoubleVector &delta, int max_iterations,
@@ -3403,7 +2958,7 @@ Analyzer::NewtonCorrectionStats Analyzer::solve_newton_correction(
                                      max_iterations, executor);
 }
 
-std::size_t Analyzer::update_nonlinear_source(
+std::size_t AnalyzerImpl::update_nonlinear_source(
     const GridShape &shape, AlignedDoubleVector &source, double alpha,
     double clip) const {
   if (source.size() != shape.n)
@@ -3425,7 +2980,7 @@ std::size_t Analyzer::update_nonlinear_source(
   return clipped;
 }
 
-double Analyzer::grid_reaction_energy_kcal(
+double AnalyzerImpl::grid_reaction_energy_kcal(
     const GridShape &shape, const AlignedDoubleVector &solvent_phi,
     const AlignedDoubleVector &vacuum_phi) const {
   if (shape.n == 0 || solvent_phi.size() != shape.n ||
@@ -3434,30 +2989,36 @@ double Analyzer::grid_reaction_energy_kcal(
   double sum = 0.0;
   for (std::size_t id = 0; id < shape.n; ++id)
     sum += rho_[id] * (solvent_phi[id] - vacuum_phi[id]);
-  return 0.5 * kCoulombKcalPerMol * sum;
+  return 0.5 * kCoulombKcalPerMol * field_to_native_factor() * sum;
 }
 
-double Analyzer::grid_phase_energy_kcal(
+double AnalyzerImpl::grid_phase_energy_kcal(
     const GridShape &shape, const AlignedDoubleVector &field) const {
-  if (shape.n == 0 || field.size() != shape.n || rho_.size() != shape.n)
+  return grid_phase_energy_kcal(shape, field, rho_);
+}
+
+double AnalyzerImpl::grid_phase_energy_kcal(
+    const GridShape &shape, const AlignedDoubleVector &field,
+    const AlignedDoubleVector &rho) const {
+  if (shape.n == 0 || field.size() != shape.n || rho.size() != shape.n)
     return 0.0;
   double sum = 0.0;
   for (std::size_t id = 0; id < shape.n; ++id)
-    sum += rho_[id] * field[id];
-  return 0.5 * kCoulombKcalPerMol * sum;
+    sum += rho[id] * field[id];
+  return 0.5 * kCoulombKcalPerMol * field_to_native_factor() * sum;
 }
 
-double Analyzer::atom_phase_energy_kcal(
+double AnalyzerImpl::atom_phase_energy_kcal(
     const std::vector<Atom> &atoms, const std::vector<double> &atom_phi) const {
   if (atoms.size() != atom_phi.size())
     return 0.0;
   double sum = 0.0;
   for (std::size_t i = 0; i < atoms.size(); ++i)
     sum += atoms[i].q * atom_phi[i];
-  return 0.5 * kCoulombKcalPerMol * sum;
+  return 0.5 * kCoulombKcalPerMol * field_to_native_factor() * sum;
 }
 
-double Analyzer::analytic_coulomb_energy_kcal(
+double AnalyzerImpl::analytic_coulomb_energy_kcal(
     const std::vector<Atom> &atoms, double eps) const {
   const double dielectric = std::max(1.0e-12, eps);
   double energy = 0.0;
@@ -3475,74 +3036,91 @@ double Analyzer::analytic_coulomb_energy_kcal(
   return energy;
 }
 
-double Analyzer::effective_nl_relax() const noexcept {
+double AnalyzerImpl::effective_nl_relax() const noexcept {
   if (args_.nl_relax == "auto")
     return 0.5;
   return std::clamp(args_.nl_relax_value, 0.05, 1.0);
 }
 
-double Analyzer::nonlinear_alpha() const noexcept {
+double AnalyzerImpl::nonlinear_alpha() const noexcept {
   return kCoulombKcalPerMol /
          (kKBKcalPerMolK * std::max(1.0, args_.temp));
 }
 
-double Analyzer::rhs_scale(const GridShape &shape) const noexcept {
+double AnalyzerImpl::effective_nonlinear_clip() const noexcept {
+  if (delphi_nwt_parity_active() && delphi_field_units_active())
+    return 50.0;
+  return std::max(1.0e-12, args_.nl_clip);
+}
+
+double AnalyzerImpl::rhs_scale(const GridShape &shape) const noexcept {
   return 4.0 * kPi / std::max(1.0e-12, shape.h);
 }
 
-bool Analyzer::nonlinear_dimensionless_mode() const noexcept {
+bool AnalyzerImpl::nonlinear_dimensionless_mode() const noexcept {
   return args_.test_nl_source == "delphi-dimensionless";
 }
 
-double Analyzer::nonlinear_rhs_scale(const GridShape &shape,
+double AnalyzerImpl::nonlinear_rhs_scale(const GridShape &shape,
                                      double alpha) const noexcept {
-  const double base = rhs_scale(shape);
+  const double base = effective_rhs_scale(shape);
+  if (delphi_field_units_active())
+    return base;
   return nonlinear_dimensionless_mode() ? alpha * base : base;
 }
 
-double Analyzer::nonlinear_argument_value(double field_value,
+double AnalyzerImpl::nonlinear_argument_value(double field_value,
                                           double alpha) const noexcept {
+  if (delphi_field_units_active())
+    return field_value;
   return nonlinear_dimensionless_mode() ? field_value : alpha * field_value;
 }
 
-double Analyzer::nonlinear_source_value(double phi, double alpha,
+double AnalyzerImpl::nonlinear_source_value(double phi, double alpha,
                                         double clip) const noexcept {
   if (alpha <= 0.0)
     return 0.0;
   const double arg =
-      std::clamp(nonlinear_argument_value(phi, alpha), -clip, clip);
-  if (args_.test_nl_source == "delphi-dimensionless")
-    return std::sinh(arg);
-  return std::sinh(arg) / alpha;
+      nonlinear_argument_value(phi, alpha);
+  const auto [sinh_arg, unused_cosh] = delphi_sinh_cosh_tail(arg, clip);
+  (void)unused_cosh;
+  if (delphi_field_units_active() ||
+      args_.test_nl_source == "delphi-dimensionless")
+    return sinh_arg;
+  return sinh_arg / alpha;
 }
 
-double Analyzer::nonlinear_source_derivative(double phi, double alpha,
+double AnalyzerImpl::nonlinear_source_derivative(double phi, double alpha,
                                              double clip) const noexcept {
   if (alpha <= 0.0)
     return 0.0;
   const double arg =
-      std::clamp(nonlinear_argument_value(phi, alpha), -clip, clip);
-  return std::cosh(arg);
+      nonlinear_argument_value(phi, alpha);
+  const auto [unused_sinh, cosh_arg] = delphi_sinh_cosh_tail(arg, clip);
+  (void)unused_sinh;
+  return cosh_arg;
 }
 
-void Analyzer::scale_nonlinear_field_to_solve_units(AlignedDoubleVector &field,
+void AnalyzerImpl::scale_nonlinear_field_to_solve_units(AlignedDoubleVector &field,
                                                     double alpha) const {
-  if (!nonlinear_dimensionless_mode() || alpha <= 0.0)
+  if (!nonlinear_dimensionless_mode() || delphi_field_units_active() ||
+      alpha <= 0.0)
     return;
   for (double &value : field)
     value *= alpha;
 }
 
-void Analyzer::scale_nonlinear_field_to_physical_units(
+void AnalyzerImpl::scale_nonlinear_field_to_physical_units(
     AlignedDoubleVector &field, double alpha) const {
-  if (!nonlinear_dimensionless_mode() || alpha <= 0.0)
+  if (!nonlinear_dimensionless_mode() || delphi_field_units_active() ||
+      alpha <= 0.0)
     return;
   const double inv_alpha = 1.0 / alpha;
   for (double &value : field)
     value *= inv_alpha;
 }
 
-Analyzer::ParityAudit Analyzer::compute_parity_audit(
+AnalyzerImpl::ParityAudit AnalyzerImpl::compute_parity_audit(
     const GridShape &shape, const AlignedDoubleVector *source,
     const AlignedDoubleVector *residual) const {
   ParityAudit audit;
@@ -3638,8 +3216,8 @@ Analyzer::ParityAudit Analyzer::compute_parity_audit(
   return audit;
 }
 
-Analyzer::ForensicAudit
-Analyzer::compute_forensic_audit(const GridShape &shape) const {
+AnalyzerImpl::ForensicAudit
+AnalyzerImpl::compute_forensic_audit(const GridShape &shape) const {
   ForensicAudit audit;
   if (shape.n == 0 || inside_.size() != shape.n || rho_.size() != shape.n)
     return audit;
@@ -3772,7 +3350,7 @@ Analyzer::compute_forensic_audit(const GridShape &shape) const {
   return audit;
 }
 
-Analyzer::IscmAudit Analyzer::compute_iscm_audit(
+AnalyzerImpl::IscmAudit AnalyzerImpl::compute_iscm_audit(
     const GridShape &shape, const std::vector<Atom> &atoms,
     const AlignedDoubleVector &solvent_phi,
     const AlignedDoubleVector &solvent_screen,
@@ -3790,7 +3368,7 @@ Analyzer::IscmAudit Analyzer::compute_iscm_audit(
     audit.status = "unsupported_dielectric_model";
     return audit;
   }
-  if (args_.model != "linear") {
+  if (args_.model != "linear" && !delphi_nwt_parity_active()) {
     audit.status = "linear_only";
     return audit;
   }
@@ -3805,6 +3383,7 @@ Analyzer::IscmAudit Analyzer::compute_iscm_audit(
   const double kt_kcal = kKBKcalPerMolK * std::max(1.0, args_.temp);
   const double epkt = kDelphiEpk / std::max(1.0, args_.temp);
   const double potential_scale = nonlinear_alpha();
+  const double field_native_scale = field_to_native_factor();
   const double grid_scale = 1.0 / std::max(1.0e-12, shape.h);
   const double induced_scale =
       kDelphiReactionFieldEnergyFactor /
@@ -3813,6 +3392,58 @@ Analyzer::IscmAudit Analyzer::compute_iscm_audit(
   const bool delphi_vdw_boundary =
       args_.surface == "delphi-vdw" && solvent_eps_x.size() == shape.n &&
       solvent_eps_y.size() == shape.n && solvent_eps_z.size() == shape.n;
+  const bool native_iscm_positions =
+      args_.surface == "delphi-vdw" &&
+      last_iscm_surface_valid_.size() == shape.n &&
+      last_iscm_surface_positions_.size() == shape.n;
+  std::unordered_map<std::size_t, std::array<double, 3>>
+      oracle_iscm_positions;
+  if (std::filesystem::exists("pbe_oracle_iscm_full.csv")) {
+    std::ifstream oracle("pbe_oracle_iscm_full.csv");
+    std::string line;
+    if (oracle.is_open() && std::getline(oracle, line)) {
+      const auto header = csv_header_map(split_csv_simple(line));
+      while (std::getline(oracle, line)) {
+        if (trim_copy(line).empty())
+          continue;
+        const auto fields = split_csv_simple(line);
+        std::size_t oi = 0, oj = 0, ok = 0;
+        double sx = 0.0, sy = 0.0, sz = 0.0;
+        if (!csv_index(fields, header, "i", oi) ||
+            !csv_index(fields, header, "j", oj) ||
+            !csv_index(fields, header, "k", ok) ||
+            !csv_double(fields, header, {"surface_x", "surface_x_A"}, sx) ||
+            !csv_double(fields, header, {"surface_y", "surface_y_A"}, sy) ||
+            !csv_double(fields, header, {"surface_z", "surface_z_A"}, sz))
+          continue;
+        if (oi >= shape.nx || oj >= shape.ny || ok >= shape.nz)
+          continue;
+        oracle_iscm_positions[idx3(oi, oj, ok, shape.nx, shape.ny)] = {
+            sx, sy, sz};
+      }
+    }
+  }
+  audit.position_source =
+      native_iscm_positions ? "native_delphi_vdw_scaled" : "grid_point";
+  audit.native_independent = true;
+  double position_delta_sq = 0.0;
+  std::size_t position_delta_count = 0;
+  struct IscmPositionDiff {
+    std::size_t id{0};
+    std::size_t i{0};
+    std::size_t j{0};
+    std::size_t k{0};
+    double native_x{0.0};
+    double native_y{0.0};
+    double native_z{0.0};
+    double oracle_x{0.0};
+    double oracle_y{0.0};
+    double oracle_z{0.0};
+    double delta{0.0};
+  };
+  std::vector<IscmPositionDiff> position_diffs;
+  if (args_.parity_dump == "all" && !oracle_iscm_positions.empty())
+    position_diffs.reserve(oracle_iscm_positions.size());
   auto face_is_solute = [&](double value) {
     return std::abs(value - args_.int_diel) <=
            std::abs(value - args_.ext_diel);
@@ -3878,13 +3509,14 @@ Analyzer::IscmAudit Analyzer::compute_iscm_audit(
         if (!dielectric_boundary)
           continue;
 
-        const double phi_center = potential_scale * solvent_phi[id];
+        const double phi_center =
+            potential_scale * solvent_phi[id] * field_native_scale;
         const double phi_neigh =
             potential_scale *
             (solvent_phi[id - 1] + solvent_phi[id + 1] +
              solvent_phi[id - shape.nx] + solvent_phi[id + shape.nx] +
              solvent_phi[id - plane] + solvent_phi[id + plane]) /
-            6.0;
+            6.0 * field_native_scale;
         double charge_adjustment = 0.0;
         if (std::abs(rho_[id]) > 1.0e-14) {
           ++audit.charged_boundary_points;
@@ -3900,9 +3532,37 @@ Analyzer::IscmAudit Analyzer::compute_iscm_audit(
 
         const double phi_effective = phi_center - phi_neigh - charge_adjustment;
         const double induced_charge = phi_effective * induced_scale;
-        const double x = shape.ox + static_cast<double>(i) * shape.h;
-        const double y = shape.oy + static_cast<double>(j) * shape.h;
-        const double z = shape.oz + static_cast<double>(k) * shape.h;
+        double x = shape.ox + static_cast<double>(i) * shape.h;
+        double y = shape.oy + static_cast<double>(j) * shape.h;
+        double z = shape.oz + static_cast<double>(k) * shape.h;
+        if (native_iscm_positions && last_iscm_surface_valid_[id] != 0U) {
+          const auto &native_pos = last_iscm_surface_positions_[id];
+          x = native_pos[0];
+          y = native_pos[1];
+          z = native_pos[2];
+        }
+        const auto oracle_pos_it = oracle_iscm_positions.find(id);
+        if (oracle_pos_it != oracle_iscm_positions.end()) {
+          const double dx = x - oracle_pos_it->second[0];
+          const double dy = y - oracle_pos_it->second[1];
+          const double dz = z - oracle_pos_it->second[2];
+          const double delta_sq = dx * dx + dy * dy + dz * dz;
+          position_delta_sq += delta_sq;
+          ++position_delta_count;
+          if (args_.parity_dump == "all") {
+            position_diffs.push_back({id,
+                                      i,
+                                      j,
+                                      k,
+                                      x,
+                                      y,
+                                      z,
+                                      oracle_pos_it->second[0],
+                                      oracle_pos_it->second[1],
+                                      oracle_pos_it->second[2],
+                                      std::sqrt(delta_sq)});
+          }
+        }
         double atom_potential_sum = 0.0;
         for (const Atom &atom : atoms) {
           const double dx = x - atom.x;
@@ -3941,18 +3601,53 @@ Analyzer::IscmAudit Analyzer::compute_iscm_audit(
   }
 
   audit.induced_charge_l2 = std::sqrt(audit.induced_charge_l2);
+  audit.position_oracle_matches = position_delta_count;
+  audit.position_rms_vs_oracle =
+      position_delta_count > 0
+          ? std::sqrt(position_delta_sq /
+                      static_cast<double>(position_delta_count))
+          : 0.0;
+  if (!position_diffs.empty()) {
+    std::sort(position_diffs.begin(), position_diffs.end(),
+              [](const IscmPositionDiff &a, const IscmPositionDiff &b) {
+                return a.delta > b.delta;
+              });
+    std::ofstream diff_out("pbe_iscm_position_diff.csv",
+                           std::ios::out | std::ios::trunc);
+    if (diff_out.is_open()) {
+      diff_out << "rank,id,i,j,k,native_x,native_y,native_z,oracle_x,"
+                  "oracle_y,oracle_z,delta_A\n";
+      diff_out << std::setprecision(12);
+      std::size_t rank = 0;
+      for (const auto &diff : position_diffs) {
+        if (++rank > 512 && diff.delta <= 1.0e-10)
+          break;
+        diff_out << rank << ',' << diff.id << ',' << diff.i << ','
+                 << diff.j << ',' << diff.k << ',' << diff.native_x << ','
+                 << diff.native_y << ',' << diff.native_z << ','
+                 << diff.oracle_x << ',' << diff.oracle_y << ','
+                 << diff.oracle_z << ',' << diff.delta << '\n';
+      }
+    }
+  }
   audit.water_phase_kj_mol = audit.water_phase_kt * kt_kj;
   audit.water_phase_kcal_mol = audit.water_phase_kt * kt_kcal;
   audit.vacuum_phase_kcal_mol = grid_vacuum_phase_kcal_mol;
   audit.vacuum_phase_kj_mol = grid_vacuum_phase_kcal_mol * kKcalToKJ;
   audit.vacuum_phase_kt =
       kt_kcal > 0.0 ? grid_vacuum_phase_kcal_mol / kt_kcal : 0.0;
+  audit.water_minus_vacuum_kt = audit.water_phase_kt - audit.vacuum_phase_kt;
+  audit.water_minus_vacuum_kj_mol =
+      audit.water_phase_kj_mol - audit.vacuum_phase_kj_mol;
+  audit.water_minus_vacuum_kcal_mol =
+      audit.water_phase_kcal_mol - audit.vacuum_phase_kcal_mol;
   // DelPhi's two-dielectric VDW ISCM path finalizes corrected RF from the
   // water induced-surface-charge phase alone. Keep the vacuum grid phase in
   // the audit so convention differences remain inspectable.
   audit.corrected_kt = audit.water_phase_kt;
   audit.corrected_kj_mol = audit.corrected_kt * kt_kj;
   audit.corrected_kcal_mol = audit.corrected_kt * kt_kcal;
+  audit.finalization_mode = "water_only";
   audit.status = audit.boundary_points > 0 ? "ok" : "no_boundary_points";
 
   audit.samples = deterministic_samples;
@@ -3963,7 +3658,7 @@ Analyzer::IscmAudit Analyzer::compute_iscm_audit(
   return audit;
 }
 
-void Analyzer::copy_iscm_audit_to_solve(const IscmAudit &audit,
+void AnalyzerImpl::copy_iscm_audit_to_solve(const IscmAudit &audit,
                                         ReactionSolve &solve) const {
   solve.iscm_boundary_points = audit.boundary_points;
   solve.iscm_charged_boundary_points = audit.charged_boundary_points;
@@ -3980,6 +3675,14 @@ void Analyzer::copy_iscm_audit_to_solve(const IscmAudit &audit,
   solve.iscm_corrected_kcal_mol = audit.corrected_kcal_mol;
   solve.iscm_corrected_kj_mol = audit.corrected_kj_mol;
   solve.iscm_corrected_kt = audit.corrected_kt;
+  solve.iscm_water_minus_vacuum_kcal_mol = audit.water_minus_vacuum_kcal_mol;
+  solve.iscm_water_minus_vacuum_kj_mol = audit.water_minus_vacuum_kj_mol;
+  solve.iscm_water_minus_vacuum_kt = audit.water_minus_vacuum_kt;
+  solve.iscm_finalization_mode = audit.finalization_mode;
+  solve.iscm_position_source = audit.position_source;
+  solve.iscm_position_rms_vs_oracle = audit.position_rms_vs_oracle;
+  solve.iscm_position_oracle_matches = audit.position_oracle_matches;
+  solve.iscm_native_independent = audit.native_independent;
   solve.iscm_status = audit.status;
   solve.delphi_face_crossings = audit.delphi_face_crossings;
   solve.delphi_eps_face_matches = audit.delphi_eps_face_matches;
@@ -3988,7 +3691,122 @@ void Analyzer::copy_iscm_audit_to_solve(const IscmAudit &audit,
   solve.delphi_iscm_status = audit.status;
 }
 
-void Analyzer::update_newton_derivative_audit(
+AnalyzerImpl::NonlinearEnergyAudit AnalyzerImpl::compute_nonlinear_energy_audit(
+    const GridShape &shape, const AlignedDoubleVector &solvent_phi,
+    const AlignedDoubleVector &solvent_screen) const {
+  NonlinearEnergyAudit audit;
+  if (args_.model != "nonlinear") {
+    audit.status = "linear_model";
+    return audit;
+  }
+  if (args_.salt <= 0.0) {
+    audit.status = "linearized_no_salt";
+    return audit;
+  }
+  if (shape.n == 0 || solvent_phi.size() != shape.n) {
+    audit.status = "missing_field";
+    return audit;
+  }
+
+  const double ion_concentration = std::max(0.0, args_.salt);
+  const double coeffs[5] = {
+      -2.0 * ion_concentration,
+      0.0,
+      -ion_concentration / 3.0,
+      0.0,
+      -ion_concentration / 60.0,
+  };
+  const double d_coeffs[5] = {
+      -coeffs[0] / 2.0,
+      -coeffs[1] / 3.0,
+      -coeffs[2] / 4.0,
+      -coeffs[3] / 5.0,
+      -coeffs[4] / 6.0,
+  };
+  const double alpha = nonlinear_alpha();
+  const double cell_volume = shape.h * shape.h * shape.h;
+  constexpr double kDelphiEnergyUnitConversion = 0.0006023;
+  double rho_phi_accum = 0.0;
+  double osmotic_accum = 0.0;
+
+  for (std::size_t k = 0; k < shape.nz; ++k) {
+    const double cut_x_dummy = 1.0;
+    (void)cut_x_dummy;
+    const double cut_z = (k == 0 || k + 1 == shape.nz) ? 0.5 : 1.0;
+    for (std::size_t j = 0; j < shape.ny; ++j) {
+      const double cut_y = cut_z * ((j == 0 || j + 1 == shape.ny) ? 0.5 : 1.0);
+      for (std::size_t i = 0; i < shape.nx; ++i) {
+        const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
+        const bool ion_accessible =
+            solvent_screen.size() == shape.n
+                ? solvent_screen[id] > 0.0
+                : (id < ion_accessible_.size() && ion_accessible_[id] != 0U);
+        if (!ion_accessible)
+          continue;
+        const double cut_edge =
+            cut_y * ((i == 0 || i + 1 == shape.nx) ? 0.5 : 1.0);
+        const double phi =
+            delphi_field_units_active() ? solvent_phi[id] : alpha * solvent_phi[id];
+        const double charge_density =
+            ((((coeffs[4] * phi + coeffs[3]) * phi + coeffs[2]) * phi +
+              coeffs[1]) *
+                 phi +
+             coeffs[0]);
+        const double osmotic_density =
+            ((((d_coeffs[4] * phi + d_coeffs[3]) * phi + d_coeffs[2]) * phi +
+              d_coeffs[1]) *
+                 phi +
+             d_coeffs[0]);
+        const double ionic_charge =
+            cut_edge * charge_density * phi * cell_volume;
+        rho_phi_accum -= ionic_charge * phi;
+        osmotic_accum += cut_edge * osmotic_density * phi * phi;
+        ++audit.sampled_points;
+      }
+    }
+  }
+
+  double electrostatic_stress =
+      rho_phi_accum * 0.5 * kDelphiEnergyUnitConversion;
+  double osmotic_pressure =
+      osmotic_accum * (-kDelphiEnergyUnitConversion * cell_volume);
+  // pyDelPhi negates both nonlinear terms before adding them to the final
+  // corrected RF energy.
+  electrostatic_stress *= -1.0;
+  osmotic_pressure *= -1.0;
+
+  audit.electrostatic_stress_kt = electrostatic_stress;
+  audit.osmotic_pressure_kt = osmotic_pressure;
+  audit.total_correction_kt = electrostatic_stress + osmotic_pressure;
+  const double kt_kj = kKBKJPerMolK * std::max(1.0, args_.temp);
+  const double kt_kcal = kKBKcalPerMolK * std::max(1.0, args_.temp);
+  audit.electrostatic_stress_kj_mol = audit.electrostatic_stress_kt * kt_kj;
+  audit.electrostatic_stress_kcal_mol =
+      audit.electrostatic_stress_kt * kt_kcal;
+  audit.osmotic_pressure_kj_mol = audit.osmotic_pressure_kt * kt_kj;
+  audit.osmotic_pressure_kcal_mol = audit.osmotic_pressure_kt * kt_kcal;
+  audit.total_correction_kj_mol = audit.total_correction_kt * kt_kj;
+  audit.total_correction_kcal_mol = audit.total_correction_kt * kt_kcal;
+  audit.status = audit.sampled_points > 0 ? "ok" : "no_ion_accessible_points";
+  return audit;
+}
+
+void AnalyzerImpl::copy_nonlinear_energy_audit_to_solve(
+    const NonlinearEnergyAudit &audit, ReactionSolve &solve) const {
+  solve.nonlinear_stress_kt = audit.electrostatic_stress_kt;
+  solve.nonlinear_stress_kj_mol = audit.electrostatic_stress_kj_mol;
+  solve.nonlinear_stress_kcal_mol = audit.electrostatic_stress_kcal_mol;
+  solve.nonlinear_osmotic_kt = audit.osmotic_pressure_kt;
+  solve.nonlinear_osmotic_kj_mol = audit.osmotic_pressure_kj_mol;
+  solve.nonlinear_osmotic_kcal_mol = audit.osmotic_pressure_kcal_mol;
+  solve.nonlinear_energy_correction_kt = audit.total_correction_kt;
+  solve.nonlinear_energy_correction_kj_mol = audit.total_correction_kj_mol;
+  solve.nonlinear_energy_correction_kcal_mol =
+      audit.total_correction_kcal_mol;
+  solve.nonlinear_energy_status = audit.status;
+}
+
+void AnalyzerImpl::update_newton_derivative_audit(
     const GridShape &shape, const AlignedDoubleVector &source,
     const AlignedDoubleVector &delta, double alpha, double clip,
     double screen_scale, ParityAudit &audit) const {
@@ -4069,7 +3887,7 @@ void Analyzer::update_newton_derivative_audit(
   }
 }
 
-Analyzer::SolveStats Analyzer::solve_nonlinear_sor_block(
+AnalyzerImpl::SolveStats AnalyzerImpl::solve_nonlinear_sor_block(
     const GridShape &shape, const AlignedDoubleVector &source, int sweeps,
     double relax, double screen_scale, TitanExecutor &executor,
     std::size_t &clipped_points) {
@@ -4157,258 +3975,243 @@ Analyzer::SolveStats Analyzer::solve_nonlinear_sor_block(
   return stats;
 }
 
-int Analyzer::effective_focus_levels() const noexcept {
-  if (args_.focus != "auto" && args_.focus != "delphi")
-    return 1;
-  return std::clamp(args_.focus_levels <= 1 ? 2 : args_.focus_levels, 2, 4);
-}
+AnalyzerImpl::SolveStats AnalyzerImpl::solve_newton_nwt_sor_block(
+    const GridShape &shape, int sweeps, double screen_scale,
+    TitanExecutor &executor, std::size_t &clipped_points) {
+  SolveStats stats;
+  if (shape.n == 0 || sweeps <= 0)
+    return stats;
 
-std::string Analyzer::effective_solver_mode() const {
-  if (args_.multigrid == "vcycle")
-    return "vcycle";
-  if (args_.multigrid == "focus" || args_.multigrid == "auto" ||
-      args_.focus == "auto")
-    return "nested_focus";
-  if (args_.focus == "delphi")
-    return "delphi_focus";
-  return "sor";
-}
-
-bool Analyzer::interpolate_field_value(const GridShape &shape,
-                                       const AlignedDoubleVector &field,
-                                       double x, double y, double z,
-                                       double &value) const {
-  if (shape.nx < 2 || shape.ny < 2 || shape.nz < 2 ||
-      field.size() != shape.n)
-    return false;
-  const double gx = (x - shape.ox) / shape.h;
-  const double gy = (y - shape.oy) / shape.h;
-  const double gz = (z - shape.oz) / shape.h;
-  if (gx < 0.0 || gy < 0.0 || gz < 0.0 ||
-      gx > static_cast<double>(shape.nx - 1) ||
-      gy > static_cast<double>(shape.ny - 1) ||
-      gz > static_cast<double>(shape.nz - 1))
-    return false;
-
-  const std::size_t i0 = std::min<std::size_t>(
-      shape.nx - 2, static_cast<std::size_t>(std::floor(gx)));
-  const std::size_t j0 = std::min<std::size_t>(
-      shape.ny - 2, static_cast<std::size_t>(std::floor(gy)));
-  const std::size_t k0 = std::min<std::size_t>(
-      shape.nz - 2, static_cast<std::size_t>(std::floor(gz)));
-  const double fx = clamp_fraction(gx - static_cast<double>(i0));
-  const double fy = clamp_fraction(gy - static_cast<double>(j0));
-  const double fz = clamp_fraction(gz - static_cast<double>(k0));
-
-  value = 0.0;
-  for (std::size_t dz = 0; dz <= 1; ++dz) {
-    const double wz = dz ? fz : (1.0 - fz);
-    for (std::size_t dy = 0; dy <= 1; ++dy) {
-      const double wy = dy ? fy : (1.0 - fy);
-      for (std::size_t dx = 0; dx <= 1; ++dx) {
-        const double wx = dx ? fx : (1.0 - fx);
-        value += wx * wy * wz *
-                 field[idx3(i0 + dx, j0 + dy, k0 + dz, shape.nx, shape.ny)];
-      }
-    }
+  double omega =
+      args_.omega == "auto"
+          ? std::clamp(2.0 / (1.0 + std::sin(kPi / static_cast<double>(
+                                             std::max({shape.nx, shape.ny,
+                                                       shape.nz})))), 1.0,
+                       1.95)
+          : args_.omega_value;
+  if (args_.omega == "auto" && args_.test_operator_convention == "delphi" &&
+      !args_.test_pqr.empty()) {
+    omega = delphi_relaxation_omega(shape);
   }
-  return true;
-}
+  if (args_.omega == "auto" && delphi_nwt_parity_active()) {
+    // pyDelPhi NWT defaults to nwt_adaptive_omega=1.0; keep this parity path
+    // separate from the linear DelPhi SOR relaxation convention.
+    omega = 1.0;
+  }
 
-void Analyzer::seed_from_focus_source(const GridShape &shape,
-                                      const GridShape &source_shape,
-                                      const AlignedDoubleVector &source_phi,
-                                      TitanExecutor &executor) {
-  seed_from_focus_source(shape, source_shape, source_phi, executor, false);
-}
+  const std::size_t interior_z = shape.nz > 2 ? shape.nz - 2 : 0;
+  const std::size_t workers = effective_workers(executor, interior_z);
+  const double rhs = nonlinear_rhs_scale(shape, nonlinear_alpha());
+  const double alpha = nonlinear_alpha();
+  const double clip = effective_nonlinear_clip();
+  const std::size_t xy = shape.nx * shape.ny;
+  std::vector<double> local_sumsq(workers, 0.0);
+  std::vector<double> local_max(workers, 0.0);
+  std::vector<std::size_t> local_count(workers, 0);
+  std::vector<std::size_t> local_clipped(workers, 0);
+  clipped_points = 0;
+  const bool delphi_block_stop = delphi_nwt_parity_active();
+  const std::size_t delphi_rms_denominator =
+      delphi_block_stop ? (shape.n + 1) / 2 : 0;
 
-void Analyzer::seed_from_focus_source(const GridShape &shape,
-                                      const GridShape &source_shape,
-                                      const AlignedDoubleVector &source_phi,
-                                      TitanExecutor &executor,
-                                      bool boundary_only) {
-  if (source_phi.empty())
-    return;
-  const std::size_t workers = effective_workers(executor, shape.nz);
-  executor.parallel_for(shape.nz, workers, 1,
-                        [&](std::size_t, std::size_t z_begin,
-                            std::size_t z_end) {
-    for (std::size_t k = z_begin; k < z_end; ++k) {
-      const double z = shape.oz + static_cast<double>(k) * shape.h;
-      for (std::size_t j = 0; j < shape.ny; ++j) {
-        const double y = shape.oy + static_cast<double>(j) * shape.h;
-        for (std::size_t i = 0; i < shape.nx; ++i) {
-          if (boundary_only && !is_boundary(i, j, k, shape))
-            continue;
-          const double x = shape.ox + static_cast<double>(i) * shape.h;
-          double seeded = 0.0;
-          if (interpolate_field_value(source_shape, source_phi, x, y, z,
-                                      seeded)) {
-            phi_[idx3(i, j, k, shape.nx, shape.ny)] = seeded;
-          }
-        }
+  const bool write_trace = !args_.test_pqr.empty() &&
+                           args_.parity_dump == "all" &&
+                           delphi_nwt_parity_active();
+  std::vector<std::size_t> trace_ids;
+  if (write_trace && shape.nx > 2 && shape.ny > 2 && shape.nz > 2) {
+    trace_ids = {
+        idx3(shape.nx / 2, shape.ny / 2, shape.nz / 2, shape.nx, shape.ny),
+        idx3(shape.nx / 2 - 1, shape.ny / 2, shape.nz / 2, shape.nx,
+             shape.ny),
+        idx3(shape.nx / 2, shape.ny / 2 - 1, shape.nz / 2, shape.nx,
+             shape.ny),
+        idx3(shape.nx / 2, shape.ny / 2, shape.nz / 2 - 1, shape.nx,
+             shape.ny),
+        idx3(1, 1, 1, shape.nx, shape.ny),
+        idx3(shape.nx - 2, shape.ny - 2, shape.nz - 2, shape.nx, shape.ny),
+        idx3(1, shape.ny / 2, shape.nz / 2, shape.nx, shape.ny),
+        idx3(shape.nx - 2, shape.ny / 2, shape.nz / 2, shape.nx,
+             shape.ny),
+        idx3(shape.nx / 2, shape.ny / 2, 1, shape.nx, shape.ny),
+        idx3(shape.nx / 2, shape.ny / 2, shape.nz - 2, shape.nx,
+             shape.ny)};
+    for (std::size_t id = 0; id < rho_.size(); ++id) {
+      if (std::abs(rho_[id]) > 0.0) {
+        trace_ids.push_back(id);
       }
     }
-  });
-}
-
-Analyzer::FieldSolve Analyzer::solve_focused_field(
-    const std::vector<Atom> &atoms, double eps_in, double eps_out, double kappa,
-    TitanExecutor &executor, const FrameResult *map_result) {
-  FieldSolve field;
-  const int levels = effective_focus_levels();
-  field.levels = levels;
-  field.solver_mode =
-      levels > 1 ? (args_.focus == "delphi" ? "delphi_focus"
-                                             : "nested_focus")
-                 : "sor";
-  field.mg_levels = levels;
-
-  GridShape previous_shape;
-  AlignedDoubleVector previous_phi;
-  bool has_previous = false;
-  for (int level = 0; level < levels; ++level) {
-    const int remaining = levels - level - 1;
-    double scale = args_.scale;
-    if (remaining > 0) {
-      const double divisor = std::pow(2.0, static_cast<double>(remaining));
-      scale = std::max(0.25, args_.scale / divisor);
-      scale = std::min(scale, args_.scale);
-    }
-    double margin = args_.margin;
-    if (remaining > 0 && levels > 1) {
-      margin += args_.focus_margin *
-                (static_cast<double>(remaining) /
-                 static_cast<double>(std::max(1, levels - 1)));
-    }
-    if (level + 1 == levels) {
-      scale = args_.scale;
-      margin = args_.margin;
-    }
-    if (level == 0) {
-      field.initial_scale = scale;
-      field.initial_margin = margin;
-    }
-
-    const GridShape shape = build_shape(atoms, scale, margin);
-    const std::size_t peak_bytes =
-        shape.memory_bytes + previous_phi.size() * sizeof(double);
-    field.peak_memory_bytes = std::max(field.peak_memory_bytes, peak_bytes);
-    ensure_workspace(shape);
-    classify_surface(shape, atoms, executor);
-    apply_oracle_surface_map(shape);
-    classify_ion_accessibility(shape, atoms, executor);
-    const ChargeDiagnostics charge_diag =
-        args_.test_charge_grid == "oracle"
-            ? assign_oracle_charge_grid(shape, atoms)
-            : assign_charges(shape, atoms);
-    build_coefficients(shape, atoms, eps_in, eps_out, kappa, executor);
-    if (level + 1 == levels && map_result != nullptr)
-      maybe_write_maps(shape, *map_result, false);
-    BoundaryDiagnostics boundary_diag =
-        set_boundary(shape, atoms, eps_out, kappa);
-    if (args_.test_boundary_map == "oracle" && oracle_replay_applies(shape))
-      boundary_diag = apply_oracle_boundary_map(shape);
-    if (has_previous)
-      seed_from_focus_source(shape, previous_shape, previous_phi, executor,
-                             args_.focus == "delphi");
-
-    SolveStats stats = solve_sor(shape, executor);
-    field.total_iterations += stats.iterations;
-    if (level + 1 == levels) {
-      if (map_result != nullptr)
-        maybe_write_maps(shape, *map_result, true);
-      field.shape = shape;
-      field.stats = stats;
-      if (has_previous) {
-        field.focus_parent_grid = std::to_string(previous_shape.nx) + "x" +
-                                  std::to_string(previous_shape.ny) + "x" +
-                                  std::to_string(previous_shape.nz);
-      }
-      field.focus_child_grid = std::to_string(shape.nx) + "x" +
-                               std::to_string(shape.ny) + "x" +
-                               std::to_string(shape.nz);
-      field.rhs_scale = rhs_scale(shape);
-      field.charge_assigned = charge_diag.assigned_charge;
-      field.charge_moment_error = charge_diag.moment_error;
-      field.gaussian_density_sum = last_gaussian_density_sum_;
-      field.gaussian_cutoff_points = last_gaussian_cutoff_points_;
-      field.gaussian_eps_min = last_gaussian_eps_min_;
-      field.gaussian_eps_max = last_gaussian_eps_max_;
-      field.gaussian_eps_mean = last_gaussian_eps_mean_;
-      field.vdwms_enabled = last_vdwms_audit_.enabled;
-      field.vdwms_boundary_initial = last_vdwms_audit_.boundary_initial;
-      field.vdwms_boundary_final = last_vdwms_audit_.boundary_final;
-      field.vdwms_added = last_vdwms_audit_.added;
-      field.vdwms_removed = last_vdwms_audit_.removed;
-      field.vdwms_exposed_points = last_vdwms_audit_.exposed_points;
-      field.vdwms_midpoint_rms = last_vdwms_audit_.midpoint_rms;
-      field.gaussian_charge_norm_error =
-          std::abs(charge_diag.assigned_charge -
-                   std::accumulate(atoms.begin(), atoms.end(), 0.0,
-                                   [](double sum, const Atom &atom) {
-                                     return sum + atom.q;
-                                   }));
-      field.boundary_rms = boundary_diag.rms;
-      field.boundary_max = boundary_diag.max_abs;
-      field.linear_residual = compute_linear_residual(shape);
-      field.parity = compute_parity_audit(shape, nullptr, nullptr);
-      field.mg_pre = 0;
-      field.mg_post = 0;
-      field.mg_coarse_iter = 0;
-      field.solute_points = static_cast<std::size_t>(
-          std::count(inside_.begin(), inside_.end(), 1U));
-      field.solvent_points = shape.n - field.solute_points;
-      field.ion_accessible_points = static_cast<std::size_t>(
-          std::count(ion_accessible_.begin(), ion_accessible_.end(), 1U));
-      field.stern_excluded_points =
-          args_.ion_access == "stern" ? shape.n - field.ion_accessible_points
-                                      : 0;
-      field.atom_phi = interpolate_atoms(shape, atoms);
-      const bool keep_field_grids =
-          parity_map_dump_enabled() ||
-          args_.test_energy_convention == "delphi-iscm" ||
-          args_.test_energy_convention == "delphi-corrected" ||
-          barnase_forensic_enabled();
-      if (args_.charge_assignment == "delphi" ||
-          args_.charge_assignment == "gaussian" || keep_field_grids)
-        field.phi_grid = phi_;
-      if (keep_field_grids) {
-        field.rho_grid = rho_;
-        field.screen_grid = screen_;
-        field.inside_grid = inside_;
-        field.eps_x_grid = eps_x_;
-        field.eps_y_grid = eps_y_;
-        field.eps_z_grid = eps_z_;
-        field.eps_sum_grid.assign(shape.n, 0.0);
-        for (std::size_t id = 0; id < shape.n; ++id) {
-          field.eps_sum_grid[id] =
-              denom_.size() == shape.n && screen_.size() == shape.n
-                  ? std::max(1.0e-12, denom_[id] - screen_[id])
-                  : 0.0;
-        }
-      }
+    std::sort(trace_ids.begin(), trace_ids.end());
+    trace_ids.erase(std::unique(trace_ids.begin(), trace_ids.end()),
+                    trace_ids.end());
+  }
+  std::ofstream trace_out;
+  if (write_trace) {
+    if (!nwt_trace_header_written_) {
+      trace_out.open("pbe_nwt_trace.csv", std::ios::out | std::ios::trunc);
+      if (!trace_out.is_open())
+        throw std::runtime_error("PBE: failed to open pbe_nwt_trace.csv.");
+      trace_out
+          << "iteration,color,i,j,k,omega,old_phi,neighbor_sum,"
+             "charge_density,eps_sum,screen,sinh_phi,cosh_phi,"
+             "linearized_rhs,denom,target_phi,new_phi,dphi,rms,max_dphi,"
+             "field_units,operator_convention,charge_grid_source\n";
+      nwt_trace_header_written_ = true;
     } else {
-      previous_shape = shape;
-      previous_phi = phi_;
-      has_previous = true;
+      trace_out.open("pbe_nwt_trace.csv", std::ios::out | std::ios::app);
+      if (!trace_out.is_open())
+        throw std::runtime_error("PBE: failed to append pbe_nwt_trace.csv.");
     }
+    trace_out << std::setprecision(12);
   }
 
-  return field;
+  for (int iter = 1; iter <= sweeps; ++iter) {
+    std::fill(local_sumsq.begin(), local_sumsq.end(), 0.0);
+    std::fill(local_max.begin(), local_max.end(), 0.0);
+    std::fill(local_count.begin(), local_count.end(), 0);
+    std::fill(local_clipped.begin(), local_clipped.end(), 0);
+
+    for (int color = 0; color < 2; ++color) {
+      std::vector<std::vector<std::string>> trace_lines;
+      if (write_trace && iter <= 4)
+        trace_lines.resize(workers);
+      executor.parallel_for(
+          interior_z, workers, 1,
+          [&](std::size_t worker, std::size_t begin, std::size_t end) {
+            double sumsq = 0.0;
+            double max_delta = 0.0;
+            std::size_t count = 0;
+            std::size_t clipped = 0;
+            for (std::size_t kk = begin; kk < end; ++kk) {
+              const std::size_t k = kk + 1;
+              for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
+                for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
+                  if (static_cast<int>((i + j + k) & 1ULL) != color)
+                    continue;
+                  const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
+                  const double neighbor_sum =
+                      eps_x_[id] * phi_[id + 1] +
+                      eps_x_[id - 1] * phi_[id - 1] +
+                      eps_y_[id] * phi_[id + shape.nx] +
+                      eps_y_[id - shape.nx] * phi_[id - shape.nx] +
+                      eps_z_[id] * phi_[id + xy] +
+                      eps_z_[id - xy] * phi_[id - xy];
+                  const double eps_sum =
+                      std::max(1.0e-12, denom_[id] - screen_[id]);
+                  const double active_screen = screen_[id] * screen_scale;
+                  double diagonal = eps_sum;
+                  double nonlinear_rhs = 0.0;
+                  double sinh_arg = 0.0;
+                  double cosh_arg = 1.0;
+                  if (active_screen > 0.0) {
+                    const double raw_arg =
+                        nonlinear_argument_value(phi_[id], alpha);
+                    if (raw_arg > clip || raw_arg < -clip)
+                      ++clipped;
+                    std::tie(sinh_arg, cosh_arg) =
+                        delphi_sinh_cosh_tail(raw_arg, clip);
+                    const double source =
+                        (delphi_field_units_active() ||
+                         args_.test_nl_source == "delphi-dimensionless")
+                            ? sinh_arg
+                            : sinh_arg / std::max(1.0e-30, alpha);
+                    diagonal += active_screen * cosh_arg;
+                    nonlinear_rhs = active_screen * (cosh_arg * phi_[id] -
+                                                     source);
+                  }
+                  const double target =
+                      (neighbor_sum + rhs * rho_[id] + nonlinear_rhs) /
+                      std::max(1.0e-12, diagonal);
+                  const double old_phi = phi_[id];
+                  const double updated = old_phi + omega * (target - old_phi);
+                  const double delta = updated - old_phi;
+                  phi_[id] = updated;
+                  if (write_trace && iter <= 4 &&
+                      std::binary_search(trace_ids.begin(), trace_ids.end(),
+                                         id)) {
+                    const double charge_density = rhs * rho_[id];
+                    std::ostringstream row;
+                    row << std::setprecision(12) << iter << ',' << color << ','
+                        << i << ',' << j << ',' << k << ',' << omega << ','
+                        << old_phi << ',' << neighbor_sum << ','
+                        << charge_density << ',' << eps_sum << ','
+                        << active_screen << ',' << sinh_arg << ','
+                        << cosh_arg << ',' << nonlinear_rhs << ','
+                        << std::max(1.0e-12, diagonal) << ',' << target << ','
+                        << updated << ',' << delta << ",0,0,"
+                        << csv_escape(delphi_field_units_active()
+                                          ? "delphi-dimensionless"
+                                          : args_.test_field_units)
+                        << ',' << csv_escape("delphi_nwt") << ','
+                        << csv_escape(args_.test_charge_grid) << '\n';
+                    trace_lines[worker].push_back(row.str());
+                  }
+                  if (!delphi_block_stop ||
+                      (iter == sweeps && color == 1)) {
+                    sumsq += delta * delta;
+                    max_delta = std::max(max_delta, std::abs(delta));
+                    ++count;
+                  }
+                }
+              }
+            }
+            local_sumsq[worker] += sumsq;
+            local_max[worker] = std::max(local_max[worker], max_delta);
+            local_count[worker] += count;
+            local_clipped[worker] += clipped;
+          });
+      if (write_trace && iter <= 4) {
+        for (const auto &worker_lines : trace_lines) {
+          for (const std::string &row : worker_lines)
+            trace_out << row;
+        }
+      }
+    }
+
+    double sumsq = 0.0;
+    double max_delta = 0.0;
+    std::size_t count = 0;
+    std::size_t clipped = 0;
+    for (std::size_t worker = 0; worker < workers; ++worker) {
+      sumsq += local_sumsq[worker];
+      max_delta = std::max(max_delta, local_max[worker]);
+      count += local_count[worker];
+      clipped += local_clipped[worker];
+    }
+    clipped_points = std::max(clipped_points, clipped);
+    stats.iterations = iter;
+    if (delphi_block_stop) {
+      stats.rms = delphi_rms_denominator > 0
+                      ? std::sqrt(sumsq /
+                                  static_cast<double>(delphi_rms_denominator))
+                      : 0.0;
+    } else {
+      stats.rms =
+          count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
+    }
+    stats.max_dphi = max_delta;
+    if (write_trace && iter <= 4) {
+      trace_out << iter << ",summary,0,0,0," << omega
+                << ",0,0,0,0,0,0,1,0,0,0,0,0," << stats.rms << ','
+                << stats.max_dphi << ','
+                << csv_escape(delphi_field_units_active()
+                                  ? "delphi-dimensionless"
+                                  : args_.test_field_units)
+                << ',' << csv_escape("delphi_nwt") << ','
+                << csv_escape(args_.test_charge_grid) << '\n';
+    }
+    if (!delphi_block_stop &&
+        (stats.max_dphi <= args_.nl_dphi || stats.rms <= args_.nl_residual)) {
+      stats.converged = true;
+      break;
+    }
+  }
+  if (delphi_block_stop &&
+      (stats.max_dphi < args_.nl_dphi || stats.rms < args_.nl_residual))
+    stats.converged = true;
+  return stats;
 }
 
-Analyzer::FieldSolve Analyzer::solve_linear_field(
-    const std::vector<Atom> &atoms, double eps_in, double eps_out, double kappa,
-    TitanExecutor &executor, const FrameResult *map_result) {
-  if (effective_solver_mode() == "vcycle")
-    return solve_vcycle_field(atoms, eps_in, eps_out, kappa, executor,
-                              map_result);
-  return solve_focused_field(atoms, eps_in, eps_out, kappa, executor,
-                             map_result);
-}
-
-Analyzer::FieldSolve Analyzer::solve_newton_nonlinear_field(
+AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
     const std::vector<Atom> &atoms, double eps_in, double eps_out, double kappa,
     TitanExecutor &executor, const FrameResult *map_result) {
   FieldSolve field =
@@ -4416,10 +4219,17 @@ Analyzer::FieldSolve Analyzer::solve_newton_nonlinear_field(
   field.linear_seed_solver = field.solver_mode;
   field.pbe_model_effective = "nonlinear";
   field.nl_solver = "newton";
-  field.nl_inner_solver =
-      args_.nl_inner == "auto"
-          ? (field.shape.n > 250000 ? std::string("vcycle") : std::string("sor"))
-          : args_.nl_inner;
+  if (args_.nl_inner == "auto") {
+    const bool delphi_nwt_fixture =
+        !args_.test_pqr.empty() && args_.surface == "delphi-vdw";
+    field.nl_inner_solver =
+        delphi_nwt_fixture
+            ? std::string("sor")
+            : (field.shape.n > 250000 ? std::string("vcycle")
+                                       : std::string("sor"));
+  } else {
+    field.nl_inner_solver = args_.nl_inner;
+  }
   field.nl_mg_mode = args_.nl_multigrid;
   field.nl_relax = args_.nl_relax == "auto" ? 1.0 : effective_nl_relax();
 
@@ -4435,9 +4245,19 @@ Analyzer::FieldSolve Analyzer::solve_newton_nonlinear_field(
 
   if (map_result != nullptr)
     maybe_write_maps(field.shape, *map_result, false);
+  if (delphi_nwt_parity_active()) {
+    for (std::size_t k = 1; k + 1 < field.shape.nz; ++k) {
+      for (std::size_t j = 1; j + 1 < field.shape.ny; ++j) {
+        for (std::size_t i = 1; i + 1 < field.shape.nx; ++i) {
+          phi_[idx3(i, j, k, field.shape.nx, field.shape.ny)] = 0.0;
+        }
+      }
+    }
+    field.linear_seed_solver = "delphi_boundary_zero";
+  }
 
   const double alpha = nonlinear_alpha();
-  const double clip = std::max(1.0e-12, args_.nl_clip);
+  const double clip = effective_nonlinear_clip();
   const bool dimensionless_mode = nonlinear_dimensionless_mode();
   scale_nonlinear_field_to_solve_units(phi_, alpha);
   AlignedDoubleVector source(field.shape.n, 0.0);
@@ -4477,12 +4297,26 @@ Analyzer::FieldSolve Analyzer::solve_newton_nonlinear_field(
       args_.nl_multigrid == "fas" ? "fas_sor_correction" : "not_started";
 
   std::vector<double> screen_scales;
-  if (args_.nl_continuation == "auto" && args_.salt > 0.5)
+  if (delphi_nwt_parity_active())
+    screen_scales = {1.0};
+  else if (args_.nl_continuation == "auto" && args_.salt > 0.5)
     screen_scales = {0.1, 0.25, 0.5, 0.75, 1.0};
   else if (args_.nl_continuation == "auto")
     screen_scales = {0.25, 0.5, 0.75, 1.0};
   else
     screen_scales = {1.0};
+
+  std::ofstream nwt_progress;
+  if (delphi_nwt_parity_active()) {
+    nwt_progress.open("pbe_nwt_solver_progress.csv", std::ios::out | std::ios::trunc);
+    if (!nwt_progress.is_open())
+      throw std::runtime_error("PBE: failed to open pbe_nwt_solver_progress.csv.");
+    nwt_progress
+        << "block,total_iterations,screen_scale,sweeps,rms,max_dphi,"
+           "operator_residual,operator_residual_max,clipped_points,"
+           "stop_reason,field_units,operator_convention\n";
+    nwt_progress << std::setprecision(12);
+  }
 
   for (double screen_scale : screen_scales) {
     final_screen_scale = screen_scale;
@@ -4503,6 +4337,77 @@ Analyzer::FieldSolve Analyzer::solve_newton_nonlinear_field(
     bool step_done = false;
     int stagnant_steps = 0;
     double best_stage_residual = residual;
+    if (delphi_nwt_parity_active() && field.nl_inner_solver == "sor") {
+      const int block_size = std::max(1, args_.nl_block);
+      while (total_iterations < args_.nl_max_iter && !step_done) {
+        last_residual_before = residual;
+        std::size_t nwt_clipped = 0;
+        const int sweeps =
+            std::max(1, std::min(block_size, args_.nl_max_iter - total_iterations));
+        SolveStats nwt_stats = solve_newton_nwt_sor_block(
+            field.shape, sweeps, screen_scale, executor, nwt_clipped);
+        const std::size_t nwt_source_clipped =
+            update_nonlinear_source(field.shape, source, alpha, clip);
+        const double operator_residual = compute_nonlinear_residual_vector(
+            field.shape, phi_, source, screen_scale, residual_vec, executor);
+        double operator_residual_max = 0.0;
+        for (double value : residual_vec)
+          operator_residual_max = std::max(operator_residual_max, std::abs(value));
+        finite = std::isfinite(operator_residual) &&
+                 std::isfinite(nwt_stats.rms) &&
+                 std::isfinite(nwt_stats.max_dphi) &&
+                 std::all_of(phi_.begin(), phi_.end(),
+                             [](double v) { return std::isfinite(v); });
+        const int used_inner = std::max(1, nwt_stats.iterations);
+        inner_iterations += used_inner;
+        total_iterations += used_inner;
+        ++blocks;
+        residual = std::isfinite(operator_residual) ? operator_residual : residual;
+        last_residual_after = residual;
+        last_step_norm = nwt_stats.rms;
+        max_step = nwt_stats.max_dphi;
+        max_clipped =
+            std::max(max_clipped, std::max(nwt_clipped, nwt_source_clipped));
+        last_stats = nwt_stats;
+        last_inner_effective = "nwt_sor_block";
+        last_inner_levels = 1;
+        last_inner_cycles = used_inner;
+        last_inner_residual_before = last_residual_before;
+        last_inner_residual_after = residual;
+        last_correction_residual = residual;
+        last_correction_max_residual = operator_residual_max;
+        line_search_status = "nwt_block_stop";
+        last_accepted_lambda = 1.0;
+        if (!finite) {
+          stop_reason = "nonfinite";
+          step_done = true;
+        } else if (nwt_stats.max_dphi < args_.nl_dphi ||
+            nwt_stats.rms < args_.nl_residual) {
+          last_stats.converged = true;
+          converged = true;
+          stop_reason = nwt_stats.max_dphi < args_.nl_dphi ? "dphi_tol"
+                                                           : "rms_tol";
+          step_done = true;
+        }
+        if (nwt_progress.is_open()) {
+          nwt_progress << blocks << ',' << total_iterations << ','
+                       << screen_scale << ',' << used_inner << ','
+                       << nwt_stats.rms << ',' << nwt_stats.max_dphi << ','
+                       << operator_residual << ',' << operator_residual_max
+                       << ',' << max_clipped << ',' << csv_escape(stop_reason)
+                       << ','
+                       << csv_escape(delphi_field_units_active()
+                                         ? "delphi-dimensionless"
+                                         : args_.test_field_units)
+                       << ',' << csv_escape("delphi_nwt") << '\n';
+        }
+        if (step_done)
+          break;
+      }
+      if (!converged && finite && total_iterations >= args_.nl_max_iter)
+        stop_reason = "work_budget";
+      break;
+    }
     while (total_iterations < args_.nl_max_iter && !step_done) {
       const AlignedDoubleVector before = phi_;
       last_residual_before = residual;
@@ -4512,6 +4417,77 @@ Analyzer::FieldSolve Analyzer::solve_newton_nonlinear_field(
         stop_reason = "residual_tol";
         step_done = true;
         break;
+      }
+
+      if (field.nl_inner_solver == "sor") {
+        const AlignedDoubleVector nwt_before = phi_;
+        std::size_t nwt_clipped = 0;
+        SolveStats nwt_stats = solve_newton_nwt_sor_block(
+            field.shape,
+            std::max(1, std::min(args_.nl_inner_iter,
+                                 args_.nl_max_iter - total_iterations)),
+            screen_scale, executor, nwt_clipped);
+        const std::size_t nwt_source_clipped =
+            update_nonlinear_source(field.shape, source, alpha, clip);
+        const double nwt_residual = compute_nonlinear_residual_vector(
+            field.shape, phi_, source, screen_scale, residual_vec, executor);
+        double nwt_residual_max = 0.0;
+        for (double value : residual_vec)
+          nwt_residual_max = std::max(nwt_residual_max, std::abs(value));
+        const bool nwt_finite =
+            std::isfinite(nwt_residual) &&
+            std::all_of(phi_.begin(), phi_.end(),
+                        [](double v) { return std::isfinite(v); });
+        if (nwt_finite &&
+            (nwt_residual < residual ||
+             nwt_residual <= stage_residual_target ||
+             nwt_stats.max_dphi <= args_.nl_dphi)) {
+          const int used_inner = std::max(1, nwt_stats.iterations);
+          inner_iterations += used_inner;
+          total_iterations += used_inner;
+          ++blocks;
+          residual = nwt_residual;
+          last_residual_after = residual;
+          last_step_norm = nwt_stats.rms;
+          max_step = std::max(max_step, nwt_stats.max_dphi);
+          max_clipped =
+              std::max(max_clipped, std::max(nwt_clipped, nwt_source_clipped));
+          last_stats = nwt_stats;
+          last_stats.rms = residual;
+          last_inner_effective = "nwt_sor";
+          last_inner_levels = 1;
+          last_inner_cycles = used_inner;
+          last_inner_residual_before = last_residual_before;
+          last_inner_residual_after = residual;
+          last_correction_residual = residual;
+          last_correction_max_residual = nwt_residual_max;
+          line_search_status = "nwt_sor";
+          last_accepted_lambda = 1.0;
+          if (residual < best_stage_residual * 0.999) {
+            best_stage_residual = residual;
+            stagnant_steps = 0;
+          } else if (++stagnant_steps >= args_.nl_stagnation) {
+            stop_reason = "stagnation";
+            step_done = true;
+          }
+          if (screen_scale >= 1.0 && residual <= args_.nl_residual) {
+            last_stats.converged = true;
+            converged = true;
+            stop_reason = "residual_tol";
+            step_done = true;
+          } else if (screen_scale < 1.0 &&
+                     (residual <= stage_residual_target ||
+                      nwt_stats.max_dphi <= args_.nl_dphi)) {
+            stop_reason = "stage_target";
+            step_done = true;
+          }
+          continue;
+        }
+        phi_ = nwt_before;
+        update_nonlinear_source(field.shape, source, alpha, clip);
+        compute_nonlinear_residual_vector(field.shape, phi_, source,
+                                          screen_scale, residual_vec,
+                                          executor);
       }
 
       const NewtonCorrectionStats correction_stats =
@@ -4611,8 +4587,8 @@ Analyzer::FieldSolve Analyzer::solve_newton_nonlinear_field(
         phi_ = before;
         update_nonlinear_source(field.shape, source, alpha, clip);
         std::size_t fallback_clipped = 0;
-        SolveStats fallback_stats = solve_nonlinear_sor_block(
-            field.shape, source, std::min(args_.nl_block, 4), 0.25,
+        SolveStats fallback_stats = solve_newton_nwt_sor_block(
+            field.shape, std::max(1, std::min(args_.nl_inner_iter, 50)),
             screen_scale, executor, fallback_clipped);
         const std::size_t fallback_source_clipped =
             update_nonlinear_source(field.shape, source, alpha, clip);
@@ -4627,7 +4603,10 @@ Analyzer::FieldSolve Analyzer::solve_newton_nonlinear_field(
           max_clipped =
               std::max(max_clipped,
                        std::max(fallback_clipped, fallback_source_clipped));
-          line_search_status = "fallback_picard";
+          line_search_status = "fallback_nwt_sor";
+          last_inner_effective = "nwt_sor_fallback";
+          last_inner_cycles = fallback_stats.iterations;
+          inner_iterations += fallback_stats.iterations;
           last_stats = fallback_stats;
           last_stats.rms = residual;
           ++total_iterations;
@@ -4713,10 +4692,13 @@ Analyzer::FieldSolve Analyzer::solve_newton_nonlinear_field(
       stop_reason != "stagnation")
     stop_reason = "work_budget";
 
+  const double reported_nl_residual =
+      delphi_nwt_parity_active() ? last_stats.rms : residual;
   field.nl_iterations = total_iterations;
   field.nl_blocks = blocks;
   field.nl_max_dphi = max_step;
-  field.nl_residual = std::isfinite(residual) ? residual : 0.0;
+  field.nl_residual =
+      std::isfinite(reported_nl_residual) ? reported_nl_residual : 0.0;
   field.nl_clipped_points = max_clipped;
   field.nl_continuation_steps = continuation_steps;
   field.nl_backtracks = backtracks;
@@ -4782,7 +4764,7 @@ Analyzer::FieldSolve Analyzer::solve_newton_nonlinear_field(
   return field;
 }
 
-Analyzer::FieldSolve Analyzer::solve_nonlinear_field(
+AnalyzerImpl::FieldSolve AnalyzerImpl::solve_nonlinear_field(
     const std::vector<Atom> &atoms, double eps_in, double eps_out, double kappa,
     TitanExecutor &executor, const FrameResult *map_result) {
   if (args_.nl_solver == "newton" || args_.nl_multigrid == "fas")
@@ -4812,7 +4794,7 @@ Analyzer::FieldSolve Analyzer::solve_nonlinear_field(
     maybe_write_maps(field.shape, *map_result, false);
 
   const double alpha = nonlinear_alpha();
-  const double clip = std::max(1.0e-12, args_.nl_clip);
+  const double clip = effective_nonlinear_clip();
   scale_nonlinear_field_to_solve_units(phi_, alpha);
   AlignedDoubleVector source(field.shape.n, 0.0);
   SolveStats last_stats;
@@ -4908,7 +4890,7 @@ Analyzer::FieldSolve Analyzer::solve_nonlinear_field(
   return field;
 }
 
-Analyzer::FieldSolve Analyzer::solve_physical_field(
+AnalyzerImpl::FieldSolve AnalyzerImpl::solve_physical_field(
     const std::vector<Atom> &atoms, double eps_in, double eps_out, double kappa,
     TitanExecutor &executor, const FrameResult *map_result) {
   if (args_.model == "nonlinear")
@@ -4918,461 +4900,8 @@ Analyzer::FieldSolve Analyzer::solve_physical_field(
                             map_result);
 }
 
-Analyzer::GridShape Analyzer::coarsen_shape(const GridShape &fine) const {
-  GridShape coarse;
-  coarse.ox = fine.ox;
-  coarse.oy = fine.oy;
-  coarse.oz = fine.oz;
-  coarse.h = fine.h * 2.0;
-  coarse.nx = std::max<std::size_t>(3, ((fine.nx - 1) / 2) + 1);
-  coarse.ny = std::max<std::size_t>(3, ((fine.ny - 1) / 2) + 1);
-  coarse.nz = std::max<std::size_t>(3, ((fine.nz - 1) / 2) + 1);
-  if (coarse.nx > std::numeric_limits<std::size_t>::max() / coarse.ny ||
-      coarse.nx * coarse.ny >
-          std::numeric_limits<std::size_t>::max() / coarse.nz) {
-    throw std::runtime_error("PBE: multigrid dimensions overflow size_t.");
-  }
-  coarse.n = coarse.nx * coarse.ny * coarse.nz;
-  coarse.memory_bytes =
-      coarse.n * (7 * sizeof(double) + 2 * sizeof(unsigned char));
-  if (coarse.n > args_.max_grid_points) {
-    throw std::runtime_error(
-        "PBE: multigrid coarse grid exceeds -pbe-max-grid.");
-  }
-  return coarse;
-}
-
-int Analyzer::effective_vcycle_levels(const GridShape &fine_shape) const {
-  int requested = 4;
-  if (args_.mg_levels != "auto") {
-    requested = std::clamp(std::stoi(args_.mg_levels), 1, 4);
-  }
-  int levels = 1;
-  GridShape current = fine_shape;
-  while (levels < requested) {
-    const std::size_t next_nx = ((current.nx - 1) / 2) + 1;
-    const std::size_t next_ny = ((current.ny - 1) / 2) + 1;
-    const std::size_t next_nz = ((current.nz - 1) / 2) + 1;
-    if (next_nx < 3 || next_ny < 3 || next_nz < 3)
-      break;
-    ++levels;
-    current = coarsen_shape(current);
-    if (current.nx == 3 && current.ny == 3 && current.nz == 3)
-      break;
-  }
-  return levels;
-}
-
-void Analyzer::prepare_multigrid_level(
-    MultigridLevel &level, const GridShape &shape,
-    const std::vector<Atom> &atoms, double eps_in, double eps_out, double kappa,
-    bool physical_rhs, bool physical_boundary, TitanExecutor &executor) {
-  ensure_workspace(shape);
-  classify_surface(shape, atoms, executor);
-  apply_oracle_surface_map(shape);
-  classify_ion_accessibility(shape, atoms, executor);
-  const ChargeDiagnostics charge_diag =
-      args_.test_charge_grid == "oracle"
-          ? assign_oracle_charge_grid(shape, atoms)
-          : assign_charges(shape, atoms);
-  build_coefficients(shape, atoms, eps_in, eps_out, kappa, executor);
-  BoundaryDiagnostics boundary_diag;
-  if (physical_boundary) {
-    boundary_diag = set_boundary(shape, atoms, eps_out, kappa);
-    if (args_.test_boundary_map == "oracle" && oracle_replay_applies(shape))
-      boundary_diag = apply_oracle_boundary_map(shape);
-  } else {
-    std::fill(phi_.begin(), phi_.end(), 0.0);
-  }
-
-  level.shape = shape;
-  level.phi = phi_;
-  level.rho = rho_;
-  level.eps_x = eps_x_;
-  level.eps_y = eps_y_;
-  level.eps_z = eps_z_;
-  level.denom = denom_;
-  level.screen = screen_;
-  level.inside = inside_;
-  level.ion_accessible = ion_accessible_;
-  level.charge_diag = charge_diag;
-  level.boundary_diag = boundary_diag;
-  level.rhs.assign(shape.n, 0.0);
-  if (physical_rhs) {
-    const double rhs = rhs_scale(shape);
-    for (std::size_t id = 0; id < shape.n; ++id)
-      level.rhs[id] = rhs * rho_[id];
-  }
-}
-
-void Analyzer::copy_level_to_workspace(const MultigridLevel &level) {
-  phi_ = level.phi;
-  rho_ = level.rho;
-  eps_x_ = level.eps_x;
-  eps_y_ = level.eps_y;
-  eps_z_ = level.eps_z;
-  denom_ = level.denom;
-  screen_ = level.screen;
-  inside_ = level.inside;
-  ion_accessible_ = level.ion_accessible;
-}
-
-Analyzer::SolveStats
-Analyzer::smooth_multigrid_level(MultigridLevel &level, int iterations,
-                                 bool stop_on_convergence) const {
-  SolveStats stats;
-  if (iterations <= 0)
-    return stats;
-  const GridShape &shape = level.shape;
-  const double omega =
-      args_.omega == "auto"
-          ? std::clamp(2.0 / (1.0 + std::sin(kPi / static_cast<double>(
-                                             std::max({shape.nx, shape.ny,
-                                                       shape.nz})))),
-                       1.0, 1.95)
-          : args_.omega_value;
-  for (int iter = 1; iter <= iterations; ++iter) {
-    double sumsq = 0.0;
-    double max_delta = 0.0;
-    std::size_t count = 0;
-    for (int color = 0; color < 2; ++color) {
-      for (std::size_t k = 1; k + 1 < shape.nz; ++k) {
-        for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
-          for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
-            if (static_cast<int>((i + j + k) & 1ULL) != color)
-              continue;
-            const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-            const double neighbor_sum =
-                level.eps_x[id] * level.phi[id + 1] +
-                level.eps_x[id - 1] * level.phi[id - 1] +
-                level.eps_y[id] * level.phi[id + shape.nx] +
-                level.eps_y[id - shape.nx] * level.phi[id - shape.nx] +
-                level.eps_z[id] * level.phi[id + shape.nx * shape.ny] +
-                level.eps_z[id - shape.nx * shape.ny] *
-                    level.phi[id - shape.nx * shape.ny];
-            const double target =
-                (neighbor_sum + level.rhs[id]) / level.denom[id];
-            const double updated =
-                level.phi[id] + omega * (target - level.phi[id]);
-            const double delta = updated - level.phi[id];
-            level.phi[id] = updated;
-            const double abs_delta = std::abs(delta);
-            sumsq += delta * delta;
-            max_delta = std::max(max_delta, abs_delta);
-            ++count;
-          }
-        }
-      }
-    }
-    stats.iterations = iter;
-    stats.rms = count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
-    stats.max_dphi = max_delta;
-    if (stop_on_convergence &&
-        (stats.rms <= args_.rms_tol || stats.max_dphi <= args_.dphi_tol)) {
-      stats.converged = true;
-      break;
-    }
-  }
-  return stats;
-}
-
-double Analyzer::compute_multigrid_residual(
-    const MultigridLevel &level, AlignedDoubleVector &residual) const {
-  const GridShape &shape = level.shape;
-  residual.assign(shape.n, 0.0);
-  double sumsq = 0.0;
-  std::size_t count = 0;
-  for (std::size_t k = 1; k + 1 < shape.nz; ++k) {
-    for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
-      for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
-        const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-        const double neighbor_sum =
-            level.eps_x[id] * level.phi[id + 1] +
-            level.eps_x[id - 1] * level.phi[id - 1] +
-            level.eps_y[id] * level.phi[id + shape.nx] +
-            level.eps_y[id - shape.nx] * level.phi[id - shape.nx] +
-            level.eps_z[id] * level.phi[id + shape.nx * shape.ny] +
-            level.eps_z[id - shape.nx * shape.ny] *
-                level.phi[id - shape.nx * shape.ny];
-        const double a_phi = level.denom[id] * level.phi[id] - neighbor_sum;
-        const double r = level.rhs[id] - a_phi;
-        residual[id] = r;
-        sumsq += r * r;
-        ++count;
-      }
-    }
-  }
-  return count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
-}
-
-void Analyzer::restrict_residual_to_coarse(
-    const MultigridLevel &fine, const AlignedDoubleVector &fine_residual,
-    MultigridLevel &coarse) const {
-  std::fill(coarse.rhs.begin(), coarse.rhs.end(), 0.0);
-  std::fill(coarse.phi.begin(), coarse.phi.end(), 0.0);
-  const int weights[3] = {1, 2, 1};
-  for (std::size_t kc = 1; kc + 1 < coarse.shape.nz; ++kc) {
-    for (std::size_t jc = 1; jc + 1 < coarse.shape.ny; ++jc) {
-      for (std::size_t ic = 1; ic + 1 < coarse.shape.nx; ++ic) {
-        const std::size_t fi = std::min(fine.shape.nx - 2, 2 * ic);
-        const std::size_t fj = std::min(fine.shape.ny - 2, 2 * jc);
-        const std::size_t fk = std::min(fine.shape.nz - 2, 2 * kc);
-        double sum = 0.0;
-        int wsum = 0;
-        for (int dz = -1; dz <= 1; ++dz) {
-          const std::size_t iz = static_cast<std::size_t>(
-              std::clamp<int>(static_cast<int>(fk) + dz, 1,
-                              static_cast<int>(fine.shape.nz - 2)));
-          for (int dy = -1; dy <= 1; ++dy) {
-            const std::size_t iy = static_cast<std::size_t>(
-                std::clamp<int>(static_cast<int>(fj) + dy, 1,
-                                static_cast<int>(fine.shape.ny - 2)));
-            for (int dx = -1; dx <= 1; ++dx) {
-              const std::size_t ix = static_cast<std::size_t>(
-                  std::clamp<int>(static_cast<int>(fi) + dx, 1,
-                                  static_cast<int>(fine.shape.nx - 2)));
-              const int w = weights[dx + 1] * weights[dy + 1] *
-                            weights[dz + 1];
-              sum += static_cast<double>(w) *
-                     fine_residual[idx3(ix, iy, iz, fine.shape.nx,
-                                        fine.shape.ny)];
-              wsum += w;
-            }
-          }
-        }
-        coarse.rhs[idx3(ic, jc, kc, coarse.shape.nx, coarse.shape.ny)] =
-            wsum > 0 ? sum / static_cast<double>(wsum) : 0.0;
-      }
-    }
-  }
-}
-
-void Analyzer::prolongate_add_correction(const MultigridLevel &coarse,
-                                         MultigridLevel &fine) const {
-  for (std::size_t k = 1; k + 1 < fine.shape.nz; ++k) {
-    const double z = fine.shape.oz + static_cast<double>(k) * fine.shape.h;
-    for (std::size_t j = 1; j + 1 < fine.shape.ny; ++j) {
-      const double y = fine.shape.oy + static_cast<double>(j) * fine.shape.h;
-      for (std::size_t i = 1; i + 1 < fine.shape.nx; ++i) {
-        const double x = fine.shape.ox + static_cast<double>(i) * fine.shape.h;
-        double correction = 0.0;
-        if (interpolate_field_value(coarse.shape, coarse.phi, x, y, z,
-                                    correction)) {
-          fine.phi[idx3(i, j, k, fine.shape.nx, fine.shape.ny)] += correction;
-        }
-      }
-    }
-  }
-}
-
-void Analyzer::run_multigrid_vcycle(std::vector<MultigridLevel> &levels,
-                                    std::size_t level_index) {
-  MultigridLevel &level = levels[level_index];
-  if (level_index + 1 >= levels.size()) {
-    smooth_multigrid_level(level, args_.mg_coarse_iter, true);
-    return;
-  }
-
-  smooth_multigrid_level(level, args_.mg_pre, false);
-  AlignedDoubleVector residual;
-  compute_multigrid_residual(level, residual);
-  MultigridLevel &coarse = levels[level_index + 1];
-  restrict_residual_to_coarse(level, residual, coarse);
-  run_multigrid_vcycle(levels, level_index + 1);
-  prolongate_add_correction(coarse, level);
-  smooth_multigrid_level(level, args_.mg_post, false);
-}
-
-std::size_t Analyzer::multigrid_memory_bytes(
-    const std::vector<MultigridLevel> &levels) const {
-  std::size_t bytes = 0;
-  for (const MultigridLevel &level : levels) {
-    bytes += level.phi.size() * sizeof(double);
-    bytes += level.rho.size() * sizeof(double);
-    bytes += level.rhs.size() * sizeof(double);
-    bytes += level.eps_x.size() * sizeof(double);
-    bytes += level.eps_y.size() * sizeof(double);
-    bytes += level.eps_z.size() * sizeof(double);
-    bytes += level.denom.size() * sizeof(double);
-    bytes += level.screen.size() * sizeof(double);
-    bytes += level.inside.size() * sizeof(unsigned char);
-    bytes += level.ion_accessible.size() * sizeof(unsigned char);
-  }
-  return bytes;
-}
-
-Analyzer::FieldSolve Analyzer::solve_vcycle_field(
-    const std::vector<Atom> &atoms, double eps_in, double eps_out, double kappa,
-    TitanExecutor &executor, const FrameResult *map_result) {
-  FieldSolve field;
-  field.solver_mode = "vcycle";
-  field.mg_pre = args_.mg_pre;
-  field.mg_post = args_.mg_post;
-  field.mg_coarse_iter = args_.mg_coarse_iter;
-
-  const GridShape fine_shape = build_shape(atoms);
-  const int levels_count = effective_vcycle_levels(fine_shape);
-  field.levels = levels_count;
-  field.mg_levels = levels_count;
-  field.initial_scale = args_.scale;
-  field.initial_margin = args_.margin;
-
-  std::vector<MultigridLevel> levels(static_cast<std::size_t>(levels_count));
-  GridShape shape = fine_shape;
-  for (int level = 0; level < levels_count; ++level) {
-    prepare_multigrid_level(levels[static_cast<std::size_t>(level)], shape,
-                            atoms, eps_in, eps_out, kappa, level == 0,
-                            level == 0, executor);
-    if (level + 1 < levels_count)
-      shape = coarsen_shape(shape);
-  }
-  field.peak_memory_bytes = multigrid_memory_bytes(levels);
-
-  copy_level_to_workspace(levels.front());
-  if (map_result != nullptr)
-    maybe_write_maps(fine_shape, *map_result, false);
-
-  const int cycle_work =
-      std::max(1, args_.mg_pre + args_.mg_post + args_.mg_coarse_iter);
-  const int max_cycles = std::max(1, args_.max_iter / cycle_work);
-  SolveStats cycle_stats;
-  for (int cycle = 1; cycle <= max_cycles; ++cycle) {
-    const AlignedDoubleVector before = levels.front().phi;
-    run_multigrid_vcycle(levels, 0);
-    double sumsq = 0.0;
-    double max_delta = 0.0;
-    std::size_t count = 0;
-    for (std::size_t k = 1; k + 1 < fine_shape.nz; ++k) {
-      for (std::size_t j = 1; j + 1 < fine_shape.ny; ++j) {
-        for (std::size_t i = 1; i + 1 < fine_shape.nx; ++i) {
-          const std::size_t id = idx3(i, j, k, fine_shape.nx, fine_shape.ny);
-          const double delta = levels.front().phi[id] - before[id];
-          sumsq += delta * delta;
-          max_delta = std::max(max_delta, std::abs(delta));
-          ++count;
-        }
-      }
-    }
-    cycle_stats.iterations = cycle;
-    cycle_stats.rms =
-        count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
-    cycle_stats.max_dphi = max_delta;
-    if (cycle_stats.rms <= args_.rms_tol ||
-        cycle_stats.max_dphi <= args_.dphi_tol) {
-      cycle_stats.converged = true;
-      break;
-    }
-  }
-
-  field.mg_cycles = cycle_stats.iterations;
-  copy_level_to_workspace(levels.front());
-  SolveStats final_stats = solve_sor(fine_shape, executor);
-  field.total_iterations =
-      field.mg_cycles * cycle_work + final_stats.iterations;
-  field.stats = final_stats;
-  field.rhs_scale = rhs_scale(fine_shape);
-  field.charge_assigned = levels.front().charge_diag.assigned_charge;
-  field.charge_moment_error = levels.front().charge_diag.moment_error;
-  field.gaussian_density_sum = last_gaussian_density_sum_;
-  field.gaussian_cutoff_points = last_gaussian_cutoff_points_;
-  field.gaussian_eps_min = last_gaussian_eps_min_;
-  field.gaussian_eps_max = last_gaussian_eps_max_;
-  field.gaussian_eps_mean = last_gaussian_eps_mean_;
-  field.vdwms_enabled = last_vdwms_audit_.enabled;
-  field.vdwms_boundary_initial = last_vdwms_audit_.boundary_initial;
-  field.vdwms_boundary_final = last_vdwms_audit_.boundary_final;
-  field.vdwms_added = last_vdwms_audit_.added;
-  field.vdwms_removed = last_vdwms_audit_.removed;
-  field.vdwms_exposed_points = last_vdwms_audit_.exposed_points;
-  field.vdwms_midpoint_rms = last_vdwms_audit_.midpoint_rms;
-  field.gaussian_charge_norm_error =
-      std::abs(levels.front().charge_diag.assigned_charge -
-               std::accumulate(atoms.begin(), atoms.end(), 0.0,
-                               [](double sum, const Atom &atom) {
-                                 return sum + atom.q;
-                               }));
-  field.boundary_rms = levels.front().boundary_diag.rms;
-  field.boundary_max = levels.front().boundary_diag.max_abs;
-  field.linear_residual = compute_linear_residual(fine_shape);
-  field.parity = compute_parity_audit(fine_shape, nullptr, nullptr);
-  if (map_result != nullptr)
-    maybe_write_maps(fine_shape, *map_result, true);
-  field.shape = fine_shape;
-  field.solute_points = static_cast<std::size_t>(
-      std::count(inside_.begin(), inside_.end(), 1U));
-  field.solvent_points = fine_shape.n - field.solute_points;
-  field.ion_accessible_points = static_cast<std::size_t>(
-      std::count(ion_accessible_.begin(), ion_accessible_.end(), 1U));
-  field.stern_excluded_points =
-      args_.ion_access == "stern" ? fine_shape.n - field.ion_accessible_points
-                                  : 0;
-  field.atom_phi = interpolate_atoms(fine_shape, atoms);
-  const bool keep_field_grids =
-      parity_map_dump_enabled() ||
-      args_.test_energy_convention == "delphi-iscm" ||
-      args_.test_energy_convention == "delphi-corrected" ||
-      barnase_forensic_enabled();
-  if (args_.charge_assignment == "delphi" ||
-      args_.charge_assignment == "gaussian" || keep_field_grids)
-    field.phi_grid = phi_;
-  if (keep_field_grids) {
-    field.rho_grid = rho_;
-    field.screen_grid = screen_;
-    field.inside_grid = inside_;
-    field.eps_x_grid = eps_x_;
-    field.eps_y_grid = eps_y_;
-    field.eps_z_grid = eps_z_;
-    field.eps_sum_grid.assign(fine_shape.n, 0.0);
-    for (std::size_t id = 0; id < fine_shape.n; ++id) {
-      field.eps_sum_grid[id] =
-          denom_.size() == fine_shape.n && screen_.size() == fine_shape.n
-              ? std::max(1.0e-12, denom_[id] - screen_[id])
-              : 0.0;
-    }
-  }
-  return field;
-}
-
 std::vector<double>
-Analyzer::interpolate_atoms(const GridShape &shape,
-                            const std::vector<Atom> &atoms) const {
-  std::vector<double> potentials;
-  potentials.reserve(atoms.size());
-  for (const Atom &atom : atoms) {
-    double gx = (atom.x - shape.ox) / shape.h;
-    double gy = (atom.y - shape.oy) / shape.h;
-    double gz = (atom.z - shape.oz) / shape.h;
-    gx = std::clamp(gx, 0.0, static_cast<double>(shape.nx - 1));
-    gy = std::clamp(gy, 0.0, static_cast<double>(shape.ny - 1));
-    gz = std::clamp(gz, 0.0, static_cast<double>(shape.nz - 1));
-    std::size_t i0 = std::min<std::size_t>(
-        shape.nx - 2, static_cast<std::size_t>(std::floor(gx)));
-    std::size_t j0 = std::min<std::size_t>(
-        shape.ny - 2, static_cast<std::size_t>(std::floor(gy)));
-    std::size_t k0 = std::min<std::size_t>(
-        shape.nz - 2, static_cast<std::size_t>(std::floor(gz)));
-    const double fx = clamp_fraction(gx - static_cast<double>(i0));
-    const double fy = clamp_fraction(gy - static_cast<double>(j0));
-    const double fz = clamp_fraction(gz - static_cast<double>(k0));
-    double value = 0.0;
-    for (std::size_t dz = 0; dz <= 1; ++dz) {
-      const double wz = dz ? fz : (1.0 - fz);
-      for (std::size_t dy = 0; dy <= 1; ++dy) {
-        const double wy = dy ? fy : (1.0 - fy);
-        for (std::size_t dx = 0; dx <= 1; ++dx) {
-          const double wx = dx ? fx : (1.0 - fx);
-          value += wx * wy * wz *
-                   phi_[idx3(i0 + dx, j0 + dy, k0 + dz, shape.nx, shape.ny)];
-        }
-      }
-    }
-    potentials.push_back(value);
-  }
-  return potentials;
-}
-
-std::vector<double>
-Analyzer::compute_sasa_per_atom(const std::vector<Atom> &atoms,
+AnalyzerImpl::compute_sasa_per_atom(const std::vector<Atom> &atoms,
                                 TitanExecutor &executor) const {
   std::vector<TitanSASA::Atom> sasa_atoms;
   sasa_atoms.reserve(atoms.size());
@@ -5388,7 +4917,7 @@ Analyzer::compute_sasa_per_atom(const std::vector<Atom> &atoms,
       options, {}, &executor);
 }
 
-double Analyzer::compute_sasa_total(const std::vector<Atom> &atoms,
+double AnalyzerImpl::compute_sasa_total(const std::vector<Atom> &atoms,
                                     TitanExecutor &executor) const {
   const std::vector<double> area_by_atom =
       compute_sasa_per_atom(atoms, executor);
@@ -5396,243 +4925,7 @@ double Analyzer::compute_sasa_total(const std::vector<Atom> &atoms,
       std::span<const double>(area_by_atom.data(), area_by_atom.size()));
 }
 
-Analyzer::PbsaComponents Analyzer::compute_pbsa_components(
-    const MOL &mol1, const Multi_MOL_parameters &params1, const MOL &mol2,
-    const Multi_MOL_parameters &params2, const std::vector<Atom> &mol1_atoms,
-    const std::vector<Atom> &mol2_atoms,
-    const std::vector<Atom> &complex_atoms, double deltaG_solv_kj_mol,
-    TitanExecutor &executor,
-    const EnergyDecompositionProvider *energy_provider) const {
-  (void)params1;
-  (void)params2;
-  if (energy_provider == nullptr || !energy_provider->ready()) {
-    throw std::runtime_error(
-        "PBSA: -pbsa requires initialized two-molecule force-field "
-        "parameters for elec/vdw interaction energy.");
-  }
-
-  PbsaComponents comp;
-  const std::size_t n1 = mol1.size();
-  const std::size_t n2 = mol2.size();
-  const std::size_t workers = effective_workers(executor, n1);
-  std::vector<double> local_elec(workers, 0.0);
-  std::vector<double> local_vdw(workers, 0.0);
-  executor.parallel_for(
-      n1, workers, 1,
-      [&](std::size_t worker, std::size_t begin, std::size_t end) {
-        double elec = 0.0;
-        double vdw = 0.0;
-        for (std::size_t i = begin; i < end; ++i) {
-          for (std::size_t j = 0; j < n2; ++j) {
-            const EnergyPairDecomposition pair =
-                energy_provider->pair_energy(mol1, mol2, i, j);
-            elec += pair.elec;
-            vdw += pair.vdw;
-          }
-        }
-        local_elec[worker] = elec;
-        local_vdw[worker] = vdw;
-      });
-  for (std::size_t worker = 0; worker < workers; ++worker) {
-    comp.elec_kj_mol += local_elec[worker];
-    comp.vdw_kj_mol += local_vdw[worker];
-  }
-  comp.mm_kj_mol = comp.elec_kj_mol + comp.vdw_kj_mol;
-
-  comp.sasa_mol1_a2 = compute_sasa_total(mol1_atoms, executor);
-  comp.sasa_mol2_a2 = compute_sasa_total(mol2_atoms, executor);
-  comp.sasa_complex_a2 = compute_sasa_total(complex_atoms, executor);
-  comp.delta_sasa_a2 =
-      comp.sasa_complex_a2 - comp.sasa_mol1_a2 - comp.sasa_mol2_a2;
-  comp.nonpolar_kj_mol =
-      TitanSASA::nonpolar_energy_from_delta_sasa_kj(comp.delta_sasa_a2);
-  comp.delta_solv_kj_mol = deltaG_solv_kj_mol;
-  comp.no_entropy_kj_mol =
-      comp.mm_kj_mol + comp.delta_solv_kj_mol + comp.nonpolar_kj_mol;
-  return comp;
-}
-
-std::vector<Analyzer::ResidueFrameRow> Analyzer::compute_pbsa_residue_rows(
-    const MOL &mol1, const MOL &mol2, const std::vector<Atom> &mol1_atoms,
-    const std::vector<Atom> &mol2_atoms,
-    const std::vector<Atom> &complex_atoms,
-    const ReactionSolve &complex_solve, const ReactionSolve &mol1_solve,
-    const ReactionSolve &mol2_solve, const FrameResult &result,
-    TitanExecutor &executor,
-    const EnergyDecompositionProvider *energy_provider) const {
-  std::vector<ResidueFrameRow> rows;
-  if (args_.pbsa_decomp != "residue" || energy_provider == nullptr ||
-      !energy_provider->ready())
-    return rows;
-
-  const std::size_t n1 = mol1_atoms.size();
-  const std::size_t n2 = mol2_atoms.size();
-  if (complex_solve.atom_reaction_kj_mol.size() < n1 + n2 ||
-      mol1_solve.atom_reaction_kj_mol.size() < n1 ||
-      mol2_solve.atom_reaction_kj_mol.size() < n2)
-    return rows;
-
-  auto make_key = [](const char *molecule, const mol_info *info,
-                     std::size_t atom_index) {
-    ResidueKey key;
-    key.molecule = molecule;
-    if (info != nullptr) {
-      key.chainnum = info->get_chainnum();
-      key.chain = info->get_chain();
-      key.resnr = info->get_resnr();
-      key.respos = info->get_respos();
-      key.resname = info->get_res_name();
-    } else {
-      key.resnr = atom_index + 1;
-      key.respos = atom_index + 1;
-      key.resname = "UNK";
-    }
-    return key;
-  };
-  auto key_id = [](const ResidueKey &key) {
-    return key.molecule + "|" + std::to_string(key.chainnum) + "|" +
-           key.chain + "|" + std::to_string(key.resnr) + "|" +
-           std::to_string(key.respos) + "|" + key.resname;
-  };
-  auto add = [&](std::map<std::string, ResidueContribution> &accum,
-                 const ResidueKey &key, double elec, double vdw, double polar,
-                 double nonpolar) {
-    ResidueContribution &entry = accum[key_id(key)];
-    entry.key = key;
-    entry.elec_kj_mol += elec;
-    entry.vdw_kj_mol += vdw;
-    entry.mm_kj_mol += elec + vdw;
-    entry.polar_kj_mol += polar;
-    entry.nonpolar_kj_mol += nonpolar;
-  };
-
-  std::map<std::string, ResidueContribution> accum;
-  for (std::size_t i = 0; i < n1; ++i) {
-    const ResidueKey rec_key =
-        make_key("receptor", energy_provider->rec_info(i), i);
-    for (std::size_t j = 0; j < n2; ++j) {
-      const ResidueKey lig_key =
-          make_key("ligand", energy_provider->lig_info(j), j);
-      const EnergyPairDecomposition pair =
-          energy_provider->pair_energy(mol1, mol2, i, j);
-      add(accum, rec_key, 0.5 * pair.elec, 0.5 * pair.vdw, 0.0, 0.0);
-      add(accum, lig_key, 0.5 * pair.elec, 0.5 * pair.vdw, 0.0, 0.0);
-    }
-  }
-
-  const std::vector<double> sasa_complex =
-      compute_sasa_per_atom(complex_atoms, executor);
-  const std::vector<double> sasa_mol1 =
-      compute_sasa_per_atom(mol1_atoms, executor);
-  const std::vector<double> sasa_mol2 =
-      compute_sasa_per_atom(mol2_atoms, executor);
-
-  for (std::size_t i = 0; i < n1; ++i) {
-    const ResidueKey rec_key =
-        make_key("receptor", energy_provider->rec_info(i), i);
-    const double polar =
-        complex_solve.atom_reaction_kj_mol[i] -
-        mol1_solve.atom_reaction_kj_mol[i];
-    const double delta_sasa =
-        (i < sasa_complex.size() ? sasa_complex[i] : 0.0) -
-        (i < sasa_mol1.size() ? sasa_mol1[i] : 0.0);
-    add(accum, rec_key, 0.0, 0.0, polar,
-        TitanSASA::nonpolar_energy_from_delta_sasa_kj(delta_sasa));
-  }
-  for (std::size_t j = 0; j < n2; ++j) {
-    const ResidueKey lig_key =
-        make_key("ligand", energy_provider->lig_info(j), j);
-    const std::size_t complex_index = n1 + j;
-    const double polar =
-        complex_solve.atom_reaction_kj_mol[complex_index] -
-        mol2_solve.atom_reaction_kj_mol[j];
-    const double delta_sasa =
-        (complex_index < sasa_complex.size() ? sasa_complex[complex_index]
-                                             : 0.0) -
-        (j < sasa_mol2.size() ? sasa_mol2[j] : 0.0);
-    add(accum, lig_key, 0.0, 0.0, polar,
-        TitanSASA::nonpolar_energy_from_delta_sasa_kj(delta_sasa));
-  }
-
-  rows.reserve(accum.size());
-  for (auto &[id, contribution] : accum) {
-    (void)id;
-    contribution.total_kj_mol = contribution.mm_kj_mol +
-                                contribution.polar_kj_mol +
-                                contribution.nonpolar_kj_mol;
-    ResidueFrameRow row;
-    static_cast<ResidueContribution &>(row) = contribution;
-    row.trajectory_id = result.trajectory_id;
-    row.frame_index = result.frame_index;
-    row.global_index = result.global_index;
-    row.time_ps = result.time_ps;
-    rows.push_back(row);
-  }
-  return rows;
-}
-
-void Analyzer::accumulate_pbsa_residue_rows(
-    const FrameResult &result, const std::vector<ResidueFrameRow> &rows) {
-  if (rows.empty())
-    return;
-
-  auto key_id = [](const ResidueKey &key) {
-    return key.molecule + "|" + std::to_string(key.chainnum) + "|" +
-           key.chain + "|" + std::to_string(key.resnr) + "|" +
-           std::to_string(key.respos) + "|" + key.resname;
-  };
-  auto add_stats = [&](ResidueStats &stats, const ResidueFrameRow &row) {
-    stats.key = row.key;
-    ++stats.frames;
-    add_scalar(stats.elec, row.elec_kj_mol);
-    add_scalar(stats.vdw, row.vdw_kj_mol);
-    add_scalar(stats.mm, row.mm_kj_mol);
-    add_scalar(stats.polar, row.polar_kj_mol);
-    add_scalar(stats.nonpolar, row.nonpolar_kj_mol);
-    add_scalar(stats.total, row.total_kj_mol);
-  };
-
-  double elec = 0.0;
-  double vdw = 0.0;
-  double polar = 0.0;
-  double nonpolar = 0.0;
-  double total = 0.0;
-  for (const ResidueFrameRow &row : rows) {
-    const std::string id = key_id(row.key);
-    add_stats(pbsa_residue_stats_[id], row);
-    add_stats(pbsa_residue_traj_stats_[std::to_string(row.trajectory_id) +
-                                       "|" + id],
-              row);
-    elec += row.elec_kj_mol;
-    vdw += row.vdw_kj_mol;
-    polar += row.polar_kj_mol;
-    nonpolar += row.nonpolar_kj_mol;
-    total += row.total_kj_mol;
-  }
-
-  pbsa_residue_closure_elec_max_abs_kj_ =
-      std::max(pbsa_residue_closure_elec_max_abs_kj_,
-               std::abs(elec - result.pbsa_elec_kj_mol));
-  pbsa_residue_closure_vdw_max_abs_kj_ =
-      std::max(pbsa_residue_closure_vdw_max_abs_kj_,
-               std::abs(vdw - result.pbsa_vdw_kj_mol));
-  pbsa_residue_closure_polar_max_abs_kj_ =
-      std::max(pbsa_residue_closure_polar_max_abs_kj_,
-               std::abs(polar - result.pbsa_delta_solv_kj_mol));
-  pbsa_residue_closure_nonpolar_max_abs_kj_ =
-      std::max(pbsa_residue_closure_nonpolar_max_abs_kj_,
-               std::abs(nonpolar - result.pbsa_nonpolar_kj_mol));
-  pbsa_residue_closure_max_abs_kj_ =
-      std::max(pbsa_residue_closure_max_abs_kj_,
-               std::abs(total - result.pbsa_no_entropy_kj_mol));
-
-  if (args_.pbsa_residue_frames == "all") {
-    pbsa_residue_frame_rows_.insert(pbsa_residue_frame_rows_.end(),
-                                    rows.begin(), rows.end());
-  }
-}
-
-void Analyzer::write_energy_header_if_needed() {
+void AnalyzerImpl::write_energy_header_if_needed() {
   if (!energy_out_.is_open()) {
     energy_out_.open("pbe_energy.csv", std::ios::out | std::ios::trunc);
     if (!energy_out_.is_open())
@@ -5656,7 +4949,8 @@ void Analyzer::write_energy_header_if_needed() {
            "ion_radius_A,ion_accessible_points,stern_excluded_points,"
            "face_refine,pbe_model,pbe_model_effective,linear_seed_solver,"
            "nl_iterations,nl_blocks,nl_relax,nl_max_dphi,"
-           "nl_clipped_points,nl_status,boundary_mode,charge_assignment,"
+           "nl_clipped_points,nl_status,boundary_mode,"
+           "test_boundary_convention,test_field_units,charge_assignment,"
            "rhs_scale,charge_assigned,charge_moment_error,boundary_rms,"
            "linear_residual,nl_residual,nl_continuation_steps,nl_backtracks,"
            "grid_origin_x_A,grid_origin_y_A,grid_origin_z_A,grid_center_x_A,"
@@ -5695,12 +4989,25 @@ void Analyzer::write_energy_header_if_needed() {
            "delphi_charged_boundary_points,delphi_iscm_status,"
            "vdwms_enabled,vdwms_boundary_initial,vdwms_boundary_final,"
            "vdwms_added,vdwms_removed,vdwms_exposed_points,"
-           "vdwms_midpoint_rms\n";
+           "vdwms_midpoint_rms,iscm_water_minus_vacuum_kT,"
+           "iscm_water_minus_vacuum_kJmol,"
+           "iscm_water_minus_vacuum_kcalmol,iscm_finalization_mode,"
+           "iscm_position_source,iscm_position_rms_vs_oracle,"
+           "iscm_position_oracle_matches,iscm_native_independent,"
+           "nonlinear_stress_kT,nonlinear_stress_kJmol,"
+           "nonlinear_stress_kcalmol,nonlinear_osmotic_kT,"
+           "nonlinear_osmotic_kJmol,nonlinear_osmotic_kcalmol,"
+           "nonlinear_energy_correction_kT,"
+           "nonlinear_energy_correction_kJmol,"
+           "nonlinear_energy_correction_kcalmol,"
+           "nonlinear_energy_status,rpbe_coulomb_norm,"
+           "rpbe_grad_coulomb_norm,rpbe_grad_epsilon_norm,"
+           "rpbe_source_rms,rpbe_source_max,rpbe_source_status\n";
     energy_header_written_ = true;
   }
 }
 
-void Analyzer::append_energy_row(const FrameResult &result) {
+void AnalyzerImpl::append_energy_row(const FrameResult &result) {
   write_energy_header_if_needed();
   energy_out_ << result.trajectory_id << ',' << result.frame_index << ','
               << result.global_index << ',' << std::setprecision(10)
@@ -5745,7 +5052,9 @@ void Analyzer::append_energy_row(const FrameResult &result) {
               << ',' << result.nl_blocks << ',' << result.nl_relax << ','
               << result.nl_max_dphi << ',' << result.nl_clipped_points << ','
               << result.nl_status << ',' << result.boundary_mode << ','
-              << result.charge_assignment << ',' << result.rhs_scale << ','
+              << result.test_boundary_convention << ','
+              << result.test_field_units << ',' << result.charge_assignment
+              << ',' << result.rhs_scale << ','
               << result.charge_assigned << ',' << result.charge_moment_error
               << ',' << result.boundary_rms << ',' << result.linear_residual
               << ',' << result.nl_residual << ','
@@ -5828,11 +5137,33 @@ void Analyzer::append_energy_row(const FrameResult &result) {
               << result.vdwms_boundary_final << ',' << result.vdwms_added
               << ',' << result.vdwms_removed << ','
               << result.vdwms_exposed_points << ','
-              << result.vdwms_midpoint_rms
-              << '\n';
+              << result.vdwms_midpoint_rms << ','
+              << result.iscm_water_minus_vacuum_kt << ','
+              << result.iscm_water_minus_vacuum_kj_mol << ','
+              << result.iscm_water_minus_vacuum_kcal_mol << ','
+              << csv_escape(result.iscm_finalization_mode) << ','
+              << csv_escape(result.iscm_position_source) << ','
+              << result.iscm_position_rms_vs_oracle << ','
+              << result.iscm_position_oracle_matches << ','
+              << (result.iscm_native_independent ? "true" : "false") << ','
+              << result.nonlinear_stress_kt << ','
+              << result.nonlinear_stress_kj_mol << ','
+              << result.nonlinear_stress_kcal_mol << ','
+              << result.nonlinear_osmotic_kt << ','
+              << result.nonlinear_osmotic_kj_mol << ','
+              << result.nonlinear_osmotic_kcal_mol << ','
+              << result.nonlinear_energy_correction_kt << ','
+              << result.nonlinear_energy_correction_kj_mol << ','
+              << result.nonlinear_energy_correction_kcal_mol << ','
+              << csv_escape(result.nonlinear_energy_status) << ','
+              << result.rpbe_coulomb_norm << ','
+              << result.rpbe_grad_coulomb_norm << ','
+              << result.rpbe_grad_epsilon_norm << ','
+              << result.rpbe_source_rms << ',' << result.rpbe_source_max
+              << ',' << csv_escape(result.rpbe_source_status) << '\n';
 }
 
-void Analyzer::maybe_write_parity_stage(const FrameResult &result,
+void AnalyzerImpl::maybe_write_parity_stage(const FrameResult &result,
                                         const ReactionSolve &solve) const {
   if (args_.test_pqr.empty() || args_.parity_dump == "off")
     return;
@@ -5843,7 +5174,9 @@ void Analyzer::maybe_write_parity_stage(const FrameResult &result,
       throw std::runtime_error("PBE: failed to open pbe_parity_stage.csv.");
     out << "trajectory_id,frame_index,global_index,source_label,pbe_model,"
            "pbe_model_effective,solver_mode,nl_solver,nl_inner_solver,"
-           "nl_inner_effective,nl_status,boundary_mode,charge_assignment,"
+           "nl_inner_effective,nl_status,boundary_mode,"
+           "test_boundary_convention,test_field_units,"
+           "test_operator_convention,charge_assignment,"
            "surface_effective,ion_access,test_nl_source,"
            "test_energy_convention,grid_nx,grid_ny,grid_nz,grid_points,"
            "grid_origin_x_A,grid_origin_y_A,grid_origin_z_A,"
@@ -5874,8 +5207,12 @@ void Analyzer::maybe_write_parity_stage(const FrameResult &result,
            "iscm_induced_charge_sum,iscm_induced_charge_l1,"
            "iscm_induced_charge_l2,iscm_induced_charge_max,"
            "iscm_water_rf_kT,iscm_water_rf_kJmol,iscm_vacuum_rf_kT,"
-           "iscm_vacuum_rf_kJmol,iscm_corrected_rxn_kT,"
-           "iscm_corrected_rxn_kJmol,iscm_status,parity_map_dump,"
+           "iscm_vacuum_rf_kJmol,iscm_water_minus_vacuum_kT,"
+           "iscm_water_minus_vacuum_kJmol,iscm_corrected_rxn_kT,"
+           "iscm_corrected_rxn_kJmol,iscm_finalization_mode,"
+           "iscm_position_source,iscm_position_rms_vs_oracle,"
+           "iscm_position_oracle_matches,iscm_native_independent,iscm_status,"
+           "parity_map_dump,"
            "test_charge_grid,test_surface_map,test_boundary_map,"
            "status,test_midpoint_epsilon,delphi_face_crossings,"
            "delphi_eps_face_matches,delphi_boundary_grid_points,"
@@ -5884,7 +5221,12 @@ void Analyzer::maybe_write_parity_stage(const FrameResult &result,
             "vdwms_boundary_final,vdwms_added,vdwms_removed,"
             "vdwms_exposed_points,vdwms_midpoint_rms,"
             "midpoint_eps_sum_min,midpoint_eps_sum_max,"
-            "midpoint_eps_sum_mean,midpoint_eps_sum_interior_mean\n";
+            "midpoint_eps_sum_mean,midpoint_eps_sum_interior_mean,"
+            "nonlinear_stress_kT,nonlinear_stress_kJmol,"
+            "nonlinear_osmotic_kT,nonlinear_osmotic_kJmol,"
+            "nonlinear_energy_correction_kT,"
+            "nonlinear_energy_correction_kJmol,"
+            "nonlinear_energy_status\n";
     parity_stage_header_written_ = true;
   } else {
     out.open("pbe_parity_stage.csv", std::ios::out | std::ios::app);
@@ -5900,6 +5242,8 @@ void Analyzer::maybe_write_parity_stage(const FrameResult &result,
       << result.solver_mode << ',' << result.nl_solver << ','
       << result.nl_inner_solver << ',' << result.newton_inner_effective << ','
       << result.nl_status << ',' << result.boundary_mode << ','
+      << result.test_boundary_convention << ',' << result.test_field_units
+      << ',' << result.test_operator_convention << ','
       << result.charge_assignment << ',' << result.surface_effective << ','
       << result.ion_access << ',' << args_.test_nl_source << ','
       << args_.test_energy_convention << ',' << result.nx << ','
@@ -5951,8 +5295,15 @@ void Analyzer::maybe_write_parity_stage(const FrameResult &result,
       << ',' << result.iscm_water_phase_kj_mol << ','
       << result.iscm_vacuum_phase_kt << ','
       << result.iscm_vacuum_phase_kj_mol << ','
+      << result.iscm_water_minus_vacuum_kt << ','
+      << result.iscm_water_minus_vacuum_kj_mol << ','
       << result.iscm_corrected_kt << ',' << result.iscm_corrected_kj_mol
-      << ',' << csv_escape(result.iscm_status) << ','
+      << ',' << csv_escape(result.iscm_finalization_mode) << ','
+      << csv_escape(result.iscm_position_source) << ','
+      << result.iscm_position_rms_vs_oracle << ','
+      << result.iscm_position_oracle_matches << ','
+      << (result.iscm_native_independent ? "true" : "false") << ','
+      << csv_escape(result.iscm_status) << ','
       << csv_escape(args_.parity_map_dump) << ','
       << csv_escape(args_.test_charge_grid) << ','
       << csv_escape(args_.test_surface_map) << ','
@@ -5971,11 +5322,18 @@ void Analyzer::maybe_write_parity_stage(const FrameResult &result,
       << ',' << audit.midpoint_eps_sum_min << ','
       << audit.midpoint_eps_sum_max << ','
       << audit.midpoint_eps_sum_mean << ','
-      << audit.midpoint_eps_sum_interior_mean
+      << audit.midpoint_eps_sum_interior_mean << ','
+      << result.nonlinear_stress_kt << ','
+      << result.nonlinear_stress_kj_mol << ','
+      << result.nonlinear_osmotic_kt << ','
+      << result.nonlinear_osmotic_kj_mol << ','
+      << result.nonlinear_energy_correction_kt << ','
+      << result.nonlinear_energy_correction_kj_mol << ','
+      << csv_escape(result.nonlinear_energy_status)
       << '\n';
 }
 
-bool Analyzer::barnase_forensic_enabled() const {
+bool AnalyzerImpl::barnase_forensic_enabled() const {
   if (args_.test_pqr.empty() || args_.parity_dump == "off")
     return false;
   std::string probe = args_.test_pqr;
@@ -5990,7 +5348,7 @@ bool Analyzer::barnase_forensic_enabled() const {
   return probe.find("barnase") != std::string::npos;
 }
 
-void Analyzer::maybe_write_iscm_surface_charge_samples(
+void AnalyzerImpl::maybe_write_iscm_surface_charge_samples(
     const FrameResult &result, const IscmAudit &audit) const {
   if (args_.test_pqr.empty() || args_.parity_dump != "all" ||
       audit.samples.empty())
@@ -6030,9 +5388,41 @@ void Analyzer::maybe_write_iscm_surface_charge_samples(
         << sample.energy_contribution_kt * kt_kj << ','
         << csv_escape(audit.status) << '\n';
   }
+
+  std::ofstream terms;
+  if (!iscm_energy_terms_header_written_) {
+    terms.open("pbe_iscm_energy_terms.csv", std::ios::out | std::ios::trunc);
+    if (!terms.is_open())
+      throw std::runtime_error(
+          "PBE: failed to open pbe_iscm_energy_terms.csv.");
+    terms << "trajectory_id,frame_index,global_index,rank,i,j,k,"
+             "surface_x_A,surface_y_A,surface_z_A,induced_charge,"
+             "atom_potential_sum,energy_contribution_kT,"
+             "energy_contribution_kJmol,iscm_status\n";
+    iscm_energy_terms_header_written_ = true;
+  } else {
+    terms.open("pbe_iscm_energy_terms.csv", std::ios::out | std::ios::app);
+    if (!terms.is_open())
+      throw std::runtime_error(
+          "PBE: failed to append pbe_iscm_energy_terms.csv.");
+  }
+  terms << std::setprecision(12);
+  std::size_t rank = 0;
+  for (const IscmSample &sample : audit.samples) {
+    if (sample.kind != "top_energy")
+      continue;
+    ++rank;
+    terms << result.trajectory_id << ',' << result.frame_index << ','
+          << result.global_index << ',' << rank << ',' << sample.i << ','
+          << sample.j << ',' << sample.k << ',' << sample.x << ','
+          << sample.y << ',' << sample.z << ',' << sample.induced_charge << ','
+          << sample.atom_potential_sum << ',' << sample.energy_contribution_kt
+          << ',' << sample.energy_contribution_kt * kt_kj << ','
+          << csv_escape(audit.status) << '\n';
+  }
 }
 
-void Analyzer::maybe_write_barnase_forensic_audits(
+void AnalyzerImpl::maybe_write_barnase_forensic_audits(
     const FrameResult &result, const std::vector<Atom> &atoms,
     const FieldSolve &solvent, const FieldSolve &vacuum,
     const ReactionSolve &solve, const ForensicAudit &solvent_audit) const {
@@ -6295,7 +5685,10 @@ void Analyzer::maybe_write_barnase_forensic_audits(
           "iscm_induced_charge_sum,iscm_induced_charge_l1,"
           "iscm_induced_charge_l2,iscm_induced_charge_max,"
           "iscm_water_rf_kJmol,iscm_vacuum_rf_kJmol,"
-          "iscm_corrected_rxn_kJmol,iscm_status,"
+          "iscm_water_minus_vacuum_kJmol,iscm_corrected_rxn_kJmol,"
+          "iscm_finalization_mode,iscm_position_source,"
+          "iscm_position_rms_vs_oracle,iscm_position_oracle_matches,"
+          "iscm_native_independent,iscm_status,"
           "vdwms_enabled,vdwms_boundary_initial,vdwms_boundary_final,"
           "vdwms_added,vdwms_removed,vdwms_exposed_points,"
           "vdwms_midpoint_rms,"
@@ -6329,7 +5722,14 @@ void Analyzer::maybe_write_barnase_forensic_audits(
      << ',' << solve.iscm_induced_charge_max << ','
      << solve.iscm_water_phase_kj_mol << ','
      << solve.iscm_vacuum_phase_kj_mol << ','
-     << solve.iscm_corrected_kj_mol << ',' << csv_escape(solve.iscm_status)
+     << solve.iscm_water_minus_vacuum_kj_mol << ','
+     << solve.iscm_corrected_kj_mol << ','
+     << csv_escape(solve.iscm_finalization_mode) << ','
+     << csv_escape(solve.iscm_position_source) << ','
+     << solve.iscm_position_rms_vs_oracle << ','
+     << solve.iscm_position_oracle_matches << ','
+     << (solve.iscm_native_independent ? "true" : "false") << ','
+     << csv_escape(solve.iscm_status)
      << ',' << csv_escape(solve.vdwms_enabled) << ','
      << solve.vdwms_boundary_initial << ',' << solve.vdwms_boundary_final
      << ',' << solve.vdwms_added << ',' << solve.vdwms_removed << ','
@@ -6340,7 +5740,7 @@ void Analyzer::maybe_write_barnase_forensic_audits(
   maybe_write_linear_forensic_points(result, atoms, solvent, vacuum, solve);
 }
 
-void Analyzer::maybe_write_atom_phi_audit(
+void AnalyzerImpl::maybe_write_atom_phi_audit(
     const FrameResult &result, const std::vector<Atom> &atoms,
     const FieldSolve &solvent, const FieldSolve &vacuum,
     const ReactionSolve &solve) const {
@@ -6396,7 +5796,7 @@ void Analyzer::maybe_write_atom_phi_audit(
   }
 }
 
-void Analyzer::maybe_write_linear_forensic_points(
+void AnalyzerImpl::maybe_write_linear_forensic_points(
     const FrameResult &result, const std::vector<Atom> &atoms,
     const FieldSolve &solvent, const FieldSolve &vacuum,
     const ReactionSolve &solve) const {
@@ -6502,7 +5902,7 @@ void Analyzer::maybe_write_linear_forensic_points(
   }
   out << std::setprecision(12);
 
-  const double rhs = rhs_scale(shape);
+  const double rhs = effective_rhs_scale(shape);
   const std::size_t xy = shape.nx * shape.ny;
   std::size_t rank = 0;
   for (const auto &[kind, id] : rows) {
@@ -6532,12 +5932,12 @@ void Analyzer::maybe_write_linear_forensic_points(
   }
 }
 
-bool Analyzer::parity_map_dump_enabled() const noexcept {
+bool AnalyzerImpl::parity_map_dump_enabled() const noexcept {
   return !args_.test_pqr.empty() && args_.parity_map_dump != "off";
 }
 
-std::vector<Analyzer::MapSamplePoint>
-Analyzer::collect_map_sample_points(const GridShape &shape,
+std::vector<AnalyzerImpl::MapSamplePoint>
+AnalyzerImpl::collect_map_sample_points(const GridShape &shape,
                                     const std::vector<Atom> &atoms,
                                     const ReactionSolve &solve) const {
   std::vector<MapSamplePoint> rows;
@@ -6644,7 +6044,7 @@ Analyzer::collect_map_sample_points(const GridShape &shape,
   return rows;
 }
 
-void Analyzer::maybe_write_parity_map_dumps(
+void AnalyzerImpl::maybe_write_parity_map_dumps(
     const FrameResult &result, const std::vector<Atom> &atoms,
     const FieldSolve &solvent, const FieldSolve &vacuum,
     const ReactionSolve &solve) const {
@@ -6709,7 +6109,9 @@ void Analyzer::maybe_write_parity_map_dumps(
         throw std::runtime_error("PBE: failed to open pbe_field_samples.csv.");
       out << "trajectory_id,frame_index,global_index,point_kind,rank,i,j,k,"
              "x_A,y_A,z_A,rho,inside,eps_sum,eps_x,eps_y,eps_z,screen,solvent_phi,"
-             "vacuum_phi,reaction_phi,atom_energy_hint_kJmol,is_boundary\n";
+             "vacuum_phi,reaction_phi,atom_energy_hint_kJmol,is_boundary,"
+             "field_units,solvent_phi_raw,solvent_phi_native,"
+             "vacuum_phi_raw,vacuum_phi_native,reaction_phi_native\n";
       field_samples_header_written_ = true;
     } else {
       out.open("pbe_field_samples.csv", std::ios::out | std::ios::app);
@@ -6723,6 +6125,13 @@ void Analyzer::maybe_write_parity_map_dumps(
         return;
       std::size_t i = 0, j = 0, k = 0;
       coords(id, i, j, k);
+      const double to_native = field_to_native_factor();
+      const double to_raw =
+          delphi_field_units_active() ? 1.0 : delphi_epkt();
+      const double solvent_raw = solvent.phi_grid[id] * to_raw;
+      const double vacuum_raw = vacuum.phi_grid[id] * to_raw;
+      const double solvent_native = solvent.phi_grid[id] * to_native;
+      const double vacuum_native = vacuum.phi_grid[id] * to_native;
       out << result.trajectory_id << ',' << result.frame_index << ','
           << result.global_index << ',' << csv_escape(kind) << ',' << rank
           << ',' << i << ',' << j << ',' << k << ','
@@ -6734,7 +6143,10 @@ void Analyzer::maybe_write_parity_map_dumps(
           << screen_at(id) << ',' << solvent.phi_grid[id] << ','
           << vacuum.phi_grid[id] << ','
           << solvent.phi_grid[id] - vacuum.phi_grid[id] << ',' << hint << ','
-          << (is_boundary(i, j, k, shape) ? 1 : 0) << '\n';
+          << (is_boundary(i, j, k, shape) ? 1 : 0) << ','
+          << csv_escape(args_.test_field_units) << ',' << solvent_raw << ','
+          << solvent_native << ',' << vacuum_raw << ',' << vacuum_native
+          << ',' << (solvent_native - vacuum_native) << '\n';
     };
     if (full) {
       for (std::size_t id = 0; id < shape.n; ++id)
@@ -6754,7 +6166,8 @@ void Analyzer::maybe_write_parity_map_dumps(
             "PBE: failed to open pbe_boundary_samples.csv.");
       out << "trajectory_id,frame_index,global_index,boundary_kind,rank,i,j,k,"
              "x_A,y_A,z_A,solvent_phi,vacuum_phi,rho,inside,eps_sum,"
-             "eps_x,eps_y,eps_z,screen\n";
+             "eps_x,eps_y,eps_z,screen,field_units,solvent_phi_raw,"
+             "solvent_phi_native,vacuum_phi_raw,vacuum_phi_native\n";
       boundary_samples_header_written_ = true;
     } else {
       out.open("pbe_boundary_samples.csv", std::ios::out | std::ios::app);
@@ -6769,6 +6182,9 @@ void Analyzer::maybe_write_parity_map_dumps(
       coords(id, i, j, k);
       if (!is_boundary(i, j, k, shape))
         return;
+      const double to_native = field_to_native_factor();
+      const double to_raw =
+          delphi_field_units_active() ? 1.0 : delphi_epkt();
       out << result.trajectory_id << ',' << result.frame_index << ','
           << result.global_index << ',' << csv_escape(kind) << ',' << rank
           << ',' << i << ',' << j << ',' << k << ','
@@ -6778,7 +6194,12 @@ void Analyzer::maybe_write_parity_map_dumps(
           << solvent.phi_grid[id] << ',' << vacuum.phi_grid[id] << ','
           << rho_at(id) << ',' << inside_at(id) << ',' << eps_sum_at(id)
           << ',' << eps_x_at(id) << ',' << eps_y_at(id) << ','
-          << eps_z_at(id) << ',' << screen_at(id) << '\n';
+          << eps_z_at(id) << ',' << screen_at(id) << ','
+          << csv_escape(args_.test_field_units) << ','
+          << solvent.phi_grid[id] * to_raw << ','
+          << solvent.phi_grid[id] * to_native << ','
+          << vacuum.phi_grid[id] * to_raw << ','
+          << vacuum.phi_grid[id] * to_native << '\n';
     };
     if (full) {
       std::size_t rank = 0;
@@ -6810,6 +6231,149 @@ void Analyzer::maybe_write_parity_map_dumps(
       ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
       for (std::size_t rank = 0; rank < ids.size(); ++rank)
         write_boundary("sample_boundary", rank + 1, ids[rank]);
+    }
+  }
+
+  {
+    std::ofstream out;
+    if (!operator_stage_header_written_) {
+      out.open("pbe_operator_stage.csv", std::ios::out | std::ios::trunc);
+      if (!out.is_open())
+        throw std::runtime_error("PBE: failed to open pbe_operator_stage.csv.");
+      out << "trajectory_id,frame_index,global_index,point_kind,rank,i,j,k,"
+             "rhs_scale_effective,rho,denom,screen,eps_x_plus,eps_x_minus,"
+             "eps_y_plus,eps_y_minus,eps_z_plus,eps_z_minus,neighbor_sum,"
+             "rhs,F,residual_abs,phi,phi_native,field_units,"
+             "rhs_delta_vs_oracle,screen_delta_vs_oracle,"
+             "denom_delta_vs_oracle,fixed_boundary_used,"
+             "operator_convention\n";
+      operator_stage_header_written_ = true;
+    } else {
+      out.open("pbe_operator_stage.csv", std::ios::out | std::ios::app);
+      if (!out.is_open())
+        throw std::runtime_error("PBE: failed to append pbe_operator_stage.csv.");
+    }
+    out << std::setprecision(12);
+    const double rhs = effective_rhs_scale(shape);
+    const double to_native = field_to_native_factor();
+    struct OperatorOracleRow {
+      bool rhs_present{false};
+      bool screen_present{false};
+      bool denom_present{false};
+      double rhs{0.0};
+      double screen{0.0};
+      double denom{0.0};
+    };
+    std::unordered_map<std::size_t, OperatorOracleRow> operator_oracle;
+    {
+      std::ifstream oracle("pbe_oracle_operator_stage.csv");
+      if (oracle.is_open()) {
+        std::string line;
+        if (std::getline(oracle, line)) {
+          const auto header = csv_header_map(split_csv_simple(line));
+          const std::string fixture_filter = read_oracle_fixture_filter();
+          while (std::getline(oracle, line)) {
+            if (trim_copy(line).empty())
+              continue;
+            const auto fields = split_csv_simple(line);
+            if (!oracle_fixture_matches(fields, header, fixture_filter))
+              continue;
+            double vacuum_flag = 0.0;
+            if (csv_double(fields, header, {"vacuum"}, vacuum_flag) &&
+                std::llround(vacuum_flag) != 0)
+              continue;
+            std::size_t i = 0, j = 0, k = 0;
+            if (!csv_index(fields, header, "i", i) ||
+                !csv_index(fields, header, "j", j) ||
+                !csv_index(fields, header, "k", k) || i >= shape.nx ||
+                j >= shape.ny || k >= shape.nz)
+              continue;
+            OperatorOracleRow row;
+            row.rhs_present =
+                csv_double(fields, header,
+                           {"charge_map_scaled", "rhs", "rhs_value",
+                            "charge_density"},
+                           row.rhs);
+            row.screen_present =
+                csv_double(fields, header, {"screen", "screen_term"},
+                           row.screen);
+            row.denom_present =
+                csv_double(fields, header,
+                           {"denom", "eps_sum_plus_screen",
+                            "epsilon_sum_plus_screen"},
+                           row.denom);
+            operator_oracle[idx3(i, j, k, shape.nx, shape.ny)] = row;
+          }
+        }
+      }
+    }
+    auto write_operator = [&](const std::string &kind, std::size_t rank,
+                              std::size_t id) {
+      if (id >= shape.n)
+        return;
+      std::size_t i = 0, j = 0, k = 0;
+      coords(id, i, j, k);
+      if (is_boundary(i, j, k, shape) || i == 0 || j == 0 || k == 0 ||
+          i + 1 >= shape.nx || j + 1 >= shape.ny || k + 1 >= shape.nz)
+        return;
+      const std::size_t xy = shape.nx * shape.ny;
+      const double eps_x_plus = eps_x_at(id);
+      const double eps_x_minus = eps_x_at(id - 1);
+      const double eps_y_plus = eps_y_at(id);
+      const double eps_y_minus = eps_y_at(id - shape.nx);
+      const double eps_z_plus = eps_z_at(id);
+      const double eps_z_minus = eps_z_at(id - xy);
+      const double denom = eps_x_plus + eps_x_minus + eps_y_plus +
+                           eps_y_minus + eps_z_plus + eps_z_minus +
+                           screen_at(id);
+      const double neighbor_sum =
+          eps_x_plus * solvent.phi_grid[id + 1] +
+          eps_x_minus * solvent.phi_grid[id - 1] +
+          eps_y_plus * solvent.phi_grid[id + shape.nx] +
+          eps_y_minus * solvent.phi_grid[id - shape.nx] +
+          eps_z_plus * solvent.phi_grid[id + xy] +
+          eps_z_minus * solvent.phi_grid[id - xy];
+      const double rhs_value = rhs * rho_at(id);
+      const double residual =
+          denom * solvent.phi_grid[id] - neighbor_sum - rhs_value;
+      const auto oracle_it = operator_oracle.find(id);
+      const bool has_oracle = oracle_it != operator_oracle.end();
+      const bool fixed_boundary_used =
+          is_boundary(i + 1, j, k, shape) || is_boundary(i - 1, j, k, shape) ||
+          is_boundary(i, j + 1, k, shape) || is_boundary(i, j - 1, k, shape) ||
+          is_boundary(i, j, k + 1, shape) || is_boundary(i, j, k - 1, shape);
+      out << result.trajectory_id << ',' << result.frame_index << ','
+          << result.global_index << ',' << csv_escape(kind) << ',' << rank
+          << ',' << i << ',' << j << ',' << k << ',' << rhs << ','
+          << rho_at(id) << ',' << denom << ',' << screen_at(id) << ','
+          << eps_x_plus << ',' << eps_x_minus << ',' << eps_y_plus << ','
+          << eps_y_minus << ',' << eps_z_plus << ',' << eps_z_minus << ','
+          << neighbor_sum << ',' << rhs_value << ',' << residual << ','
+          << std::abs(residual) << ',' << solvent.phi_grid[id] << ','
+          << solvent.phi_grid[id] * to_native << ','
+          << csv_escape(args_.test_field_units);
+      if (has_oracle && oracle_it->second.rhs_present)
+        out << ',' << (rhs_value - oracle_it->second.rhs);
+      else
+        out << ",NA";
+      if (has_oracle && oracle_it->second.screen_present)
+        out << ',' << (screen_at(id) - oracle_it->second.screen);
+      else
+        out << ",NA";
+      if (has_oracle && oracle_it->second.denom_present)
+        out << ',' << (denom - oracle_it->second.denom);
+      else
+        out << ",NA";
+      out << ',' << (fixed_boundary_used ? 1 : 0) << ','
+          << csv_escape(args_.test_operator_convention) << '\n';
+    };
+    if (full) {
+      std::size_t rank = 0;
+      for (std::size_t id = 0; id < shape.n; ++id)
+        write_operator("full_operator", ++rank, id);
+    } else {
+      for (const MapSamplePoint &sample : samples)
+        write_operator(sample.kind, sample.rank, sample.id);
     }
   }
 
@@ -6863,7 +6427,7 @@ void Analyzer::maybe_write_parity_map_dumps(
   }
 }
 
-void Analyzer::maybe_write_parity_points(
+void AnalyzerImpl::maybe_write_parity_points(
     const FrameResult &result, const GridShape &shape,
     const AlignedDoubleVector &source, const AlignedDoubleVector &residual,
     const AlignedDoubleVector &delta, double alpha, double clip,
@@ -6971,202 +6535,7 @@ void Analyzer::maybe_write_parity_points(
   }
 }
 
-bool Analyzer::should_write_map() const {
-  return args_.map != "off" && args_.map_frames != "none";
-}
-
-std::string Analyzer::map_suffix(const FrameResult &result) const {
-  if (args_.map_frames == "last")
-    return "_last";
-  return "_traj" + format_suffix(result.trajectory_id, 4) + "_frame" +
-         format_suffix(result.frame_index, 6);
-}
-
-void Analyzer::maybe_write_maps(const GridShape &shape,
-                                const FrameResult &result,
-                                bool write_phi_now) {
-  if (!should_write_map())
-    return;
-  if (args_.map_frames == "first" && wrote_first_map_)
-    return;
-
-  const std::string suffix = map_suffix(result);
-  if (write_phi_now && (args_.map == "phi" || args_.map == "all")) {
-    write_cube("pbe_phi" + suffix + ".cube", shape, "phi", false);
-  }
-  if (!write_phi_now && (args_.map == "epsilon" || args_.map == "all")) {
-    write_cube("pbe_epsilon" + suffix + ".cube", shape, "epsilon", true);
-  }
-  if (!write_phi_now && (args_.map == "ion" || args_.map == "all")) {
-    write_cube("pbe_ion" + suffix + ".cube", shape, "ion_accessible", false,
-               true);
-  }
-  const bool completed_first =
-      (write_phi_now && (args_.map == "phi" || args_.map == "all")) ||
-      (!write_phi_now && (args_.map == "epsilon" || args_.map == "ion"));
-  if (args_.map_frames == "first" && completed_first)
-    wrote_first_map_ = true;
-}
-
-std::string Analyzer::maybe_write_probe_sites(const FrameResult &result,
-                                              const std::vector<Atom> &atoms,
-                                              const ReactionSolve &solve) {
-  if (args_.probe_residue.empty() && args_.probe_site.empty() &&
-      args_.focus != "delphi")
-    return "off";
-  auto uppercase_alnum = [](const std::string &value) {
-    std::string out;
-    out.reserve(value.size());
-    for (char ch : value) {
-      if (std::isalnum(static_cast<unsigned char>(ch)))
-        out.push_back(static_cast<char>(
-            std::toupper(static_cast<unsigned char>(ch))));
-    }
-    return out;
-  };
-  auto digits_only = [](const std::string &value) {
-    std::string out;
-    for (char ch : value) {
-      if (std::isdigit(static_cast<unsigned char>(ch)))
-        out.push_back(ch);
-    }
-    return out;
-  };
-  auto site_tokens = [&]() {
-    std::vector<std::string> tokens;
-    std::string token;
-    std::istringstream input(args_.probe_site);
-    while (std::getline(input, token, ',')) {
-      const std::string cleaned = uppercase_alnum(token);
-      if (!cleaned.empty())
-        tokens.push_back(cleaned);
-    }
-    return tokens;
-  }();
-  const std::string requested_residue = uppercase_alnum(args_.probe_residue);
-  const std::string requested_residue_name = uppercase_letters(args_.probe_residue);
-  const std::string requested_residue_number = digits_only(args_.probe_residue);
-  auto residue_matches = [&](const Atom &atom) {
-    if (requested_residue.empty())
-      return true;
-    const std::string atom_resname = uppercase_letters(atom.resname);
-    const std::string atom_resid = std::to_string(atom.resnr);
-    const std::string atom_key = atom_resname + atom_resid;
-    if (requested_residue == atom_key || requested_residue == atom_resname)
-      return true;
-    if (!requested_residue_name.empty() &&
-        requested_residue_name == atom_resname) {
-      if (requested_residue_number.empty() ||
-          requested_residue_number == atom_resid)
-        return true;
-      // DelPhi probe fixture labels can carry source-PDB numbering after
-      // conversion to compact PQR residue indices; keep a resname fallback but
-      // retain the exact key checks above for native numbering.
-      return true;
-    }
-    return false;
-  };
-  auto site_matches = [&](const Atom &atom) {
-    if (site_tokens.empty())
-      return true;
-    const std::string atom_name = uppercase_alnum(atom.atom_name);
-    const std::string element = uppercase_letters(atom.element);
-    for (const std::string &token : site_tokens) {
-      if (token == "A" || token == "F")
-        return true;
-      if (token == "P") {
-        if (element == "N" || element == "O" || element == "S" ||
-            element == "P")
-          return true;
-      } else if (token == "Q") {
-        if (std::abs(atom.q) >= 0.25)
-          return true;
-      } else if (atom_name == token || atom_name.find(token) != std::string::npos) {
-        return true;
-      }
-    }
-    return false;
-  };
-  double energy_kj_mol = 0.0;
-  std::size_t matched = 0;
-  for (std::size_t i = 0; i < atoms.size(); ++i) {
-    const Atom &atom = atoms[i];
-    if (!residue_matches(atom) || !site_matches(atom))
-      continue;
-    if (i < solve.atom_reaction_kj_mol.size())
-      energy_kj_mol += solve.atom_reaction_kj_mol[i];
-    ++matched;
-  }
-  const std::string status = matched > 0 ? "ok" : "no_matching_atoms";
-  const std::string filename = "pbe_probe_sites.csv";
-  const bool need_header =
-      !std::filesystem::exists(filename) ||
-      std::filesystem::file_size(filename) == 0;
-  std::ofstream out(filename, std::ios::out | std::ios::app);
-  if (!out.is_open())
-    return "write_failed";
-  if (need_header) {
-    out << "trajectory_id,frame_index,global_index,time_ps,probe_residue,"
-           "probe_site,matched_atoms,E_probe_kJmol,E_probe_kcalmol,"
-           "E_probe_kT,status,solver_mode,focus_parent_grid,focus_child_grid\n";
-  }
-  const double kt = kKBKJPerMolK * std::max(1.0, args_.temp);
-  out << result.trajectory_id << ',' << result.frame_index << ','
-      << result.global_index << ',' << std::setprecision(10) << result.time_ps
-      << ',' << csv_escape(args_.probe_residue) << ','
-      << csv_escape(args_.probe_site) << ',' << matched << ','
-      << energy_kj_mol << ',' << energy_kj_mol * kKJToKcal << ','
-      << (kt > 0.0 ? energy_kj_mol / kt : 0.0) << ',' << status << ','
-      << result.solver_mode << ',' << csv_escape(result.focus_parent_grid)
-      << ',' << csv_escape(result.focus_child_grid) << '\n';
-  return status;
-}
-
-void Analyzer::write_cube(const std::string &filename, const GridShape &shape,
-                          const std::string &field_name,
-                          bool epsilon_field, bool ion_field) const {
-  std::ofstream out(filename, std::ios::out | std::ios::trunc);
-  if (!out.is_open()) {
-    TitanUI::print_warning("PBE: failed to write " + filename);
-    return;
-  }
-  out << "TITAN PBE " << field_name << "\n";
-  out << "units Angstrom; values are TITAN internal PBE units\n";
-  out << std::setw(5) << 0 << " " << std::setw(12) << std::fixed
-      << std::setprecision(6) << shape.ox << " " << std::setw(12) << shape.oy
-      << " " << std::setw(12) << shape.oz << "\n";
-  out << std::setw(5) << shape.nx << " " << std::setw(12) << shape.h << " "
-      << std::setw(12) << 0.0 << " " << std::setw(12) << 0.0 << "\n";
-  out << std::setw(5) << shape.ny << " " << std::setw(12) << 0.0 << " "
-      << std::setw(12) << shape.h << " " << std::setw(12) << 0.0 << "\n";
-  out << std::setw(5) << shape.nz << " " << std::setw(12) << 0.0 << " "
-      << std::setw(12) << 0.0 << " " << std::setw(12) << shape.h << "\n";
-
-  out << std::scientific << std::setprecision(6);
-  int per_line = 0;
-  for (std::size_t k = 0; k < shape.nz; ++k) {
-    for (std::size_t j = 0; j < shape.ny; ++j) {
-      for (std::size_t i = 0; i < shape.nx; ++i) {
-        const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-        const double value =
-            ion_field
-                ? (ion_accessible_[id] ? 1.0 : 0.0)
-                : (epsilon_field ? (inside_[id] ? args_.int_diel
-                                                : args_.ext_diel)
-                                 : phi_[id]);
-        out << std::setw(13) << value;
-        if (++per_line == 6) {
-          out << "\n";
-          per_line = 0;
-        }
-      }
-    }
-  }
-  if (per_line != 0)
-    out << "\n";
-}
-
-Analyzer::ReactionSolve Analyzer::solve_reaction_field(
+AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
     const std::vector<Atom> &atoms, TitanExecutor &executor,
     const FrameResult *map_result) {
   ReactionSolve solve;
@@ -7180,6 +6549,7 @@ Analyzer::ReactionSolve Analyzer::solve_reaction_field(
   const bool wants_iscm =
       args_.test_energy_convention == "delphi-iscm" ||
       args_.test_energy_convention == "delphi-corrected" ||
+      delphi_nwt_parity_active() ||
       barnase_forensic_enabled();
   const AlignedDoubleVector solvent_screen_for_iscm =
       wants_iscm ? screen_ : AlignedDoubleVector{};
@@ -7283,11 +6653,27 @@ Analyzer::ReactionSolve Analyzer::solve_reaction_field(
       solvent.phi_grid.size() == solvent.shape.n &&
       vacuum.phi_grid.size() == solvent.shape.n;
   IscmAudit iscm_audit;
+  NonlinearEnergyAudit nonlinear_energy_audit;
+  RpbAudit rpb_audit;
+  AlignedDoubleVector rpb_source_map;
+  AlignedDoubleVector rpb_coulomb_map;
   if (has_grid_energy) {
+    const AlignedDoubleVector *solvent_energy_rho = &solvent.rho_grid;
+    if (solvent.rho_energy_grid.size() == solvent.shape.n)
+      solvent_energy_rho = &solvent.rho_energy_grid;
+    const AlignedDoubleVector *vacuum_energy_rho = &vacuum.rho_grid;
+    if (vacuum.rho_energy_grid.size() == solvent.shape.n)
+      vacuum_energy_rho = &vacuum.rho_energy_grid;
+    if (solvent_energy_rho->size() != solvent.shape.n)
+      solvent_energy_rho = &rho_;
+    if (vacuum_energy_rho->size() != solvent.shape.n)
+      vacuum_energy_rho = solvent_energy_rho;
     const double grid_solvent_phase_kcal =
-        grid_phase_energy_kcal(solvent.shape, solvent.phi_grid);
+        grid_phase_energy_kcal(solvent.shape, solvent.phi_grid,
+                               *solvent_energy_rho);
     const double grid_vacuum_phase_kcal =
-        grid_phase_energy_kcal(solvent.shape, vacuum.phi_grid);
+        grid_phase_energy_kcal(solvent.shape, vacuum.phi_grid,
+                               *vacuum_energy_rho);
     solve.grid_corrected_kcal_mol =
         grid_solvent_phase_kcal - grid_vacuum_phase_kcal;
     if (wants_iscm) {
@@ -7298,6 +6684,31 @@ Analyzer::ReactionSolve Analyzer::solve_reaction_field(
                                       grid_vacuum_phase_kcal);
       copy_iscm_audit_to_solve(iscm_audit, solve);
     }
+    if (args_.model == "nonlinear") {
+      nonlinear_energy_audit = compute_nonlinear_energy_audit(
+          solvent.shape, solvent.phi_grid, solvent_screen_for_iscm);
+      copy_nonlinear_energy_audit_to_solve(nonlinear_energy_audit, solve);
+    }
+    if (args_.biomodel == "rpbe") {
+      const bool wants_rpb_source_top =
+          map_result != nullptr && args_.parity_dump != "off";
+      rpb_audit = compute_rpb_source_audit(solvent.shape, atoms,
+                                           solvent.eps_x_grid,
+                                           solvent.eps_y_grid,
+                                           solvent.eps_z_grid,
+                                           wants_rpb_source_top
+                                               ? &rpb_source_map
+                                               : nullptr,
+                                           wants_rpb_source_top
+                                               ? &rpb_coulomb_map
+                                               : nullptr);
+      solve.rpbe_coulomb_norm = rpb_audit.coulomb_norm;
+      solve.rpbe_grad_coulomb_norm = rpb_audit.grad_coulomb_norm;
+      solve.rpbe_grad_epsilon_norm = rpb_audit.grad_epsilon_norm;
+      solve.rpbe_source_rms = rpb_audit.source_rms;
+      solve.rpbe_source_max = rpb_audit.source_max;
+      solve.rpbe_source_status = rpb_audit.status;
+    }
     const bool legacy_grid =
         args_.test_energy_convention == "auto" &&
         (args_.charge_assignment == "delphi" ||
@@ -7307,15 +6718,24 @@ Analyzer::ReactionSolve Analyzer::solve_reaction_field(
                              (args_.test_energy_convention ==
                                   "delphi-iscm" ||
                               args_.test_energy_convention ==
-                                  "delphi-corrected");
+                                  "delphi-corrected" ||
+                              delphi_nwt_parity_active());
     if (forced_iscm) {
       solve.solvent_phase_kcal_mol = solve.iscm_water_phase_kcal_mol;
       solve.vacuum_phase_kcal_mol = solve.iscm_vacuum_phase_kcal_mol;
       solve.energy_kcal_mol = solve.iscm_corrected_kcal_mol;
       solve.reaction_energy_source =
-          args_.test_energy_convention == "delphi-corrected"
-              ? "delphi-corrected-iscm"
-              : "delphi-iscm";
+          delphi_nwt_parity_active()
+              ? "delphi-nonlinear-iscm"
+              : (args_.test_energy_convention == "delphi-corrected"
+                     ? "delphi-corrected-iscm"
+                     : "delphi-iscm");
+      if (args_.model == "nonlinear" &&
+          nonlinear_energy_audit.status == "ok") {
+        solve.energy_kcal_mol +=
+            nonlinear_energy_audit.total_correction_kcal_mol;
+        solve.reaction_energy_source += "+nonlinear";
+      }
     } else if (legacy_grid || forced_grid ||
                args_.test_energy_convention == "delphi-corrected" ||
                args_.test_energy_convention == "delphi-iscm") {
@@ -7350,9 +6770,148 @@ Analyzer::ReactionSolve Analyzer::solve_reaction_field(
   }
   for (std::size_t i = 0; i < atoms.size(); ++i) {
     const double atom_kcal_mol =
-        0.5 * kCoulombKcalPerMol * atoms[i].q *
+        0.5 * kCoulombKcalPerMol * field_to_native_factor() * atoms[i].q *
         (solvent.atom_phi[i] - vacuum.atom_phi[i]);
     solve.atom_reaction_kj_mol[i] = atom_kcal_mol * kKcalToKJ;
+  }
+  if (!args_.probe_file.empty()) {
+    solve.probe_energy_status = "missing_field";
+    if (solvent.phi_grid.size() == solvent.shape.n) {
+      const std::vector<Atom> probe_atoms = load_probe_atoms(args_.probe_file);
+      auto uppercase_alnum = [](const std::string &value) {
+        std::string out;
+        out.reserve(value.size());
+        for (char ch : value) {
+          if (std::isalnum(static_cast<unsigned char>(ch)))
+            out.push_back(static_cast<char>(
+                std::toupper(static_cast<unsigned char>(ch))));
+        }
+        return out;
+      };
+      double q_phi = 0.0;
+      std::size_t matched = 0;
+      std::string matched_ids;
+      std::string matched_groups;
+      auto cubic_interp = [](const double p[4], double x) {
+        return x * x * (p[3] - 2.0 * p[2] + p[1]) / 2.0 +
+               x * (4.0 * p[2] - 3.0 * p[1] - p[3]) / 2.0 + p[1];
+      };
+      auto interpolate_probe_phi = [&](double x, double y, double z,
+                                       double &phi) {
+        const double gx = (x - solvent.shape.ox) / solvent.shape.h;
+        const double gy = (y - solvent.shape.oy) / solvent.shape.h;
+        const double gz = (z - solvent.shape.oz) / solvent.shape.h;
+        if (gx >= 1.0 && gy >= 1.0 && gz >= 1.0 &&
+            gx < static_cast<double>(solvent.shape.nx - 2) &&
+            gy < static_cast<double>(solvent.shape.ny - 2) &&
+            gz < static_cast<double>(solvent.shape.nz - 2)) {
+          const auto ix = static_cast<std::size_t>(std::floor(gx));
+          const auto iy = static_cast<std::size_t>(std::floor(gy));
+          const auto iz = static_cast<std::size_t>(std::floor(gz));
+          if (std::abs(gx - static_cast<double>(ix)) <= 1.0e-6 &&
+              std::abs(gy - static_cast<double>(iy)) <= 1.0e-6 &&
+              std::abs(gz - static_cast<double>(iz)) <= 1.0e-6) {
+            phi = solvent.phi_grid[idx3(ix, iy, iz, solvent.shape.nx,
+                                        solvent.shape.ny)];
+            return true;
+          }
+          const double fx = gx - static_cast<double>(ix);
+          const double fy = gy - static_cast<double>(iy);
+          const double fz = gz - static_cast<double>(iz);
+          double xvals[4]{};
+          for (int lx = 0; lx < 4; ++lx) {
+            double yvals[4]{};
+            for (int ly = 0; ly < 4; ++ly) {
+              double zvals[4]{};
+              for (int lz = 0; lz < 4; ++lz) {
+                const std::size_t px =
+                    static_cast<std::size_t>(static_cast<int>(ix) + lx - 1);
+                const std::size_t py =
+                    static_cast<std::size_t>(static_cast<int>(iy) + ly - 1);
+                const std::size_t pz =
+                    static_cast<std::size_t>(static_cast<int>(iz) + lz - 1);
+                zvals[lz] =
+                    solvent.phi_grid[idx3(px, py, pz, solvent.shape.nx,
+                                          solvent.shape.ny)];
+              }
+              yvals[ly] = cubic_interp(zvals, fz);
+            }
+            xvals[lx] = cubic_interp(yvals, fy);
+          }
+          phi = cubic_interp(xvals, fx);
+          return true;
+        }
+        return interpolate_field_value(solvent.shape, solvent.phi_grid, x, y,
+                                       z, phi);
+      };
+      for (std::size_t i = 0; i < probe_atoms.size(); ++i) {
+        const Atom &atom = probe_atoms[i];
+        double phi = 0.0;
+        if (!interpolate_probe_phi(atom.x, atom.y, atom.z, phi))
+          continue;
+        q_phi += atom.q * phi;
+        if (!matched_ids.empty())
+          matched_ids += ';';
+        matched_ids += std::to_string(i + 1);
+        if (!matched_groups.empty())
+          matched_groups += ';';
+        matched_groups += uppercase_letters(atom.resname) +
+                          std::to_string(atom.resnr) + ':' +
+                          uppercase_alnum(atom.atom_name);
+        ++matched;
+      }
+      if (map_result != nullptr && args_.parity_dump != "off") {
+        const std::string sample_filename = "pbe_probe_atom_samples.csv";
+        const bool need_header =
+            !std::filesystem::exists(sample_filename) ||
+            std::filesystem::file_size(sample_filename) == 0;
+        std::ofstream probe_out(sample_filename, std::ios::out | std::ios::app);
+        if (probe_out.is_open()) {
+          if (need_header) {
+            probe_out
+                << "trajectory_id,frame_index,global_index,time_ps,atom_index,"
+                   "atom_name,resname,resnr,x_A,y_A,z_A,q,phi_native,"
+                   "phi_kT_per_e,contribution_kT,status\n";
+          }
+          const double kt_kj = kKBKJPerMolK * std::max(1.0, args_.temp);
+          const double native_to_kt_per_e =
+              kt_kj > 0.0 ? (kCoulombKcalPerMol * kKcalToKJ / kt_kj) : 0.0;
+          for (std::size_t i = 0; i < probe_atoms.size(); ++i) {
+            const Atom &atom = probe_atoms[i];
+            double phi = 0.0;
+            const bool ok = interpolate_probe_phi(atom.x, atom.y, atom.z, phi);
+            const double phi_native = ok ? field_to_native_factor() * phi : 0.0;
+            const double phi_kt = phi_native * native_to_kt_per_e;
+            probe_out << map_result->trajectory_id << ','
+                      << map_result->frame_index << ','
+                      << map_result->global_index << ',' << std::setprecision(10)
+                      << map_result->time_ps << ',' << (i + 1) << ','
+                      << csv_escape(atom.atom_name) << ','
+                      << csv_escape(atom.resname) << ',' << atom.resnr << ','
+                      << atom.x << ',' << atom.y << ',' << atom.z << ','
+                      << atom.q << ',' << phi_native << ',' << phi_kt << ','
+                      << (ok ? 0.5 * atom.q * phi_kt : 0.0) << ','
+                      << (ok ? "ok" : "outside_grid") << '\n';
+          }
+        }
+      }
+      solve.probe_matched_atoms = matched;
+      solve.probe_matched_ids = matched_ids;
+      solve.probe_matched_groups = matched_groups;
+      solve.probe_matching_semantics = "delphi_frc_probe_file";
+      if (matched > 0) {
+        solve.probe_energy_kcal_mol =
+            0.5 * kCoulombKcalPerMol * field_to_native_factor() * q_phi;
+        solve.probe_energy_kj_mol =
+            solve.probe_energy_kcal_mol * kKcalToKJ;
+        const double kt_kj = kKBKJPerMolK * std::max(1.0, args_.temp);
+        solve.probe_energy_kt =
+            kt_kj > 0.0 ? solve.probe_energy_kj_mol / kt_kj : 0.0;
+        solve.probe_energy_status = "ok";
+      } else {
+        solve.probe_energy_status = "no_matching_atoms";
+      }
+    }
   }
   solve.energy_kj_mol = solve.energy_kcal_mol * kKcalToKJ;
   solve.energy_kt =
@@ -7373,6 +6932,9 @@ Analyzer::ReactionSolve Analyzer::solve_reaction_field(
   solve.converged = solve.solvent.converged && solve.vacuum.converged;
   if (map_result != nullptr) {
     maybe_write_iscm_surface_charge_samples(*map_result, iscm_audit);
+    maybe_write_rpb_source_audit(*map_result, rpb_audit);
+    maybe_write_rpb_source_top(*map_result, solve.shape, rpb_source_map,
+                               rpb_coulomb_map);
     maybe_write_barnase_forensic_audits(*map_result, atoms, solvent, vacuum,
                                         solve, solvent_forensic);
     maybe_write_parity_map_dumps(*map_result, atoms, solvent, vacuum, solve);
@@ -7380,7 +6942,7 @@ Analyzer::ReactionSolve Analyzer::solve_reaction_field(
   return solve;
 }
 
-FrameResult Analyzer::consume_frame(const MOL &mol1,
+FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
                                     const Multi_MOL_parameters &params1,
                                     const MOL *mol2,
                                     const Multi_MOL_parameters *params2,
@@ -7439,6 +7001,12 @@ FrameResult Analyzer::consume_frame(const MOL &mol1,
   result.gap_diel = args_.gap_diel;
   result.radius_convention = effective_radius_convention();
   result.boundary_mode = args_.boundary;
+  result.test_boundary_convention = effective_boundary_convention();
+  result.test_field_units = args_.test_field_units;
+  result.test_operator_convention =
+      (args_.test_operator_convention == "native" && args_.focus == "delphi")
+          ? std::string("delphi")
+          : args_.test_operator_convention;
   result.charge_assignment = args_.charge_assignment;
   for (const Atom &atom : atoms_)
     result.total_charge += atom.q;
@@ -7511,6 +7079,12 @@ FrameResult Analyzer::consume_frame(const MOL &mol1,
   result.gaussian_eps_max = complex_solve.gaussian_eps_max;
   result.gaussian_eps_mean = complex_solve.gaussian_eps_mean;
   result.gaussian_charge_norm_error = complex_solve.gaussian_charge_norm_error;
+  result.rpbe_coulomb_norm = complex_solve.rpbe_coulomb_norm;
+  result.rpbe_grad_coulomb_norm = complex_solve.rpbe_grad_coulomb_norm;
+  result.rpbe_grad_epsilon_norm = complex_solve.rpbe_grad_epsilon_norm;
+  result.rpbe_source_rms = complex_solve.rpbe_source_rms;
+  result.rpbe_source_max = complex_solve.rpbe_source_max;
+  result.rpbe_source_status = complex_solve.rpbe_source_status;
   result.rhs_scale = complex_solve.rhs_scale;
   result.charge_assigned = complex_solve.charge_assigned;
   result.charge_moment_error = complex_solve.charge_moment_error;
@@ -7582,6 +7156,33 @@ FrameResult Analyzer::consume_frame(const MOL &mol1,
   result.iscm_corrected_kcal_mol = complex_solve.iscm_corrected_kcal_mol;
   result.iscm_corrected_kj_mol = complex_solve.iscm_corrected_kj_mol;
   result.iscm_corrected_kt = complex_solve.iscm_corrected_kt;
+  result.iscm_water_minus_vacuum_kcal_mol =
+      complex_solve.iscm_water_minus_vacuum_kcal_mol;
+  result.iscm_water_minus_vacuum_kj_mol =
+      complex_solve.iscm_water_minus_vacuum_kj_mol;
+  result.iscm_water_minus_vacuum_kt =
+      complex_solve.iscm_water_minus_vacuum_kt;
+  result.nonlinear_stress_kt = complex_solve.nonlinear_stress_kt;
+  result.nonlinear_stress_kj_mol = complex_solve.nonlinear_stress_kj_mol;
+  result.nonlinear_stress_kcal_mol = complex_solve.nonlinear_stress_kcal_mol;
+  result.nonlinear_osmotic_kt = complex_solve.nonlinear_osmotic_kt;
+  result.nonlinear_osmotic_kj_mol = complex_solve.nonlinear_osmotic_kj_mol;
+  result.nonlinear_osmotic_kcal_mol =
+      complex_solve.nonlinear_osmotic_kcal_mol;
+  result.nonlinear_energy_correction_kt =
+      complex_solve.nonlinear_energy_correction_kt;
+  result.nonlinear_energy_correction_kj_mol =
+      complex_solve.nonlinear_energy_correction_kj_mol;
+  result.nonlinear_energy_correction_kcal_mol =
+      complex_solve.nonlinear_energy_correction_kcal_mol;
+  result.nonlinear_energy_status = complex_solve.nonlinear_energy_status;
+  result.iscm_finalization_mode = complex_solve.iscm_finalization_mode;
+  result.iscm_position_source = complex_solve.iscm_position_source;
+  result.iscm_position_rms_vs_oracle =
+      complex_solve.iscm_position_rms_vs_oracle;
+  result.iscm_position_oracle_matches =
+      complex_solve.iscm_position_oracle_matches;
+  result.iscm_native_independent = complex_solve.iscm_native_independent;
   result.iscm_boundary_points = complex_solve.iscm_boundary_points;
   result.iscm_charged_boundary_points =
       complex_solve.iscm_charged_boundary_points;
@@ -7837,699 +7438,7 @@ FrameResult Analyzer::consume_frame(const MOL &mol1,
   return result;
 }
 
-void Analyzer::add_scalar(ScalarStats &stats, double value) {
-  if (!std::isfinite(value))
-    return;
-  ++stats.count;
-  const double n = static_cast<double>(stats.count);
-  const double delta = value - stats.mean;
-  stats.mean += delta / n;
-  stats.m2 += delta * (value - stats.mean);
-  if (stats.count == 1) {
-    stats.min = value;
-    stats.max = value;
-  } else {
-    stats.min = std::min(stats.min, value);
-    stats.max = std::max(stats.max, value);
-  }
-}
-
-double Analyzer::scalar_stddev(const ScalarStats &stats) {
-  if (stats.count <= 1)
-    return 0.0;
-  return std::sqrt(stats.m2 / static_cast<double>(stats.count - 1));
-}
-
-void Analyzer::accumulate_pbsa(const FrameResult &result) {
-  if (!result.pbsa_enabled)
-    return;
-  ++pbsa_frames_;
-  if (result.pbsa_status != "ok")
-    ++pbsa_failed_;
-  add_scalar(pbsa_elec_stats_, result.pbsa_elec_kj_mol);
-  add_scalar(pbsa_vdw_stats_, result.pbsa_vdw_kj_mol);
-  add_scalar(pbsa_mm_stats_, result.pbsa_mm_kj_mol);
-  add_scalar(pbsa_delta_sasa_stats_, result.pbsa_delta_sasa_a2);
-  add_scalar(pbsa_nonpolar_stats_, result.pbsa_nonpolar_kj_mol);
-  add_scalar(pbsa_polar_stats_, result.pbsa_delta_solv_kj_mol);
-  add_scalar(pbsa_no_entropy_stats_, result.pbsa_no_entropy_kj_mol);
-  pbsa_rows_.push_back(result);
-  if (args_.pbsa_ie && result.pbsa_status == "ok")
-    pbsa_ie_mm_energies_kj_.push_back(result.pbsa_mm_kj_mol);
-}
-
-Analyzer::PbsaEntropyResult
-Analyzer::compute_pbsa_entropy_for_values(
-    const std::vector<double> &values) const {
-  PbsaEntropyResult out;
-  out.samples = values.size();
-  if (!args_.pbsa_ie) {
-    out.status = "disabled";
-    return out;
-  }
-
-  std::size_t block_size = 0;
-  if (args_.pbsa_ie_block == "auto") {
-    block_size = std::max<std::size_t>(
-        1, static_cast<std::size_t>(std::floor(std::sqrt(values.size()))));
-  } else {
-    block_size =
-        std::max<std::size_t>(1, static_cast<std::size_t>(
-                                     std::stoi(args_.pbsa_ie_block)));
-  }
-
-  TitanEntropy::InteractionEntropyOptions options;
-  options.rt_energy = kKBKJPerMolK * std::max(1.0, args_.temp);
-  options.filter_sigma = args_.pbsa_ie_filter_sigma;
-  options.min_samples =
-      static_cast<std::size_t>(std::max(1, args_.pbsa_ie_min_samples));
-  options.block_size = block_size;
-  const TitanEntropy::InteractionEntropyResult entropy =
-      TitanEntropy::compute_interaction_entropy(
-          std::span<const double>(values.data(), values.size()), options);
-  out.samples = entropy.samples;
-  out.filtered_samples = entropy.filtered_samples;
-  out.ess = entropy.ess;
-  out.minus_tds_kj_mol = entropy.minus_tds_energy;
-  out.block_size = entropy.block_size;
-  out.block_count = entropy.block_count;
-  out.block_mean_kj_mol = entropy.block_mean_energy;
-  out.block_std_kj_mol = entropy.block_std_energy;
-  out.block_drift_kj_mol = entropy.block_drift_energy;
-  out.status = entropy.status;
-  return out;
-}
-
-Analyzer::PbsaEntropyResult Analyzer::compute_pbsa_entropy() const {
-  return compute_pbsa_entropy_for_values(pbsa_ie_mm_energies_kj_);
-}
-
-void Analyzer::write_pbsa_energy_csv(const PbsaEntropyResult &entropy) const {
-  if (!args_.pbsa)
-    return;
-
-  std::ofstream out("mm_pbsa_energy.csv", std::ios::out | std::ios::trunc);
-  if (!out.is_open()) {
-    TitanUI::print_warning("PBSA: failed to write mm_pbsa_energy.csv.");
-    return;
-  }
-
-  out << "trajectory_id,frame_index,global_index,time_ps,backend,"
-         "atom_count_complex,atom_count_receptor,atom_count_ligand,"
-         "grid_nx,grid_ny,grid_nz,solver_mode,mg_levels,"
-         "mg_cycles_complex,mg_cycles_receptor,mg_cycles_ligand,"
-         "status,complex_status,receptor_status,ligand_status,"
-         "complex_solvent_iter,complex_vacuum_iter,"
-         "receptor_solvent_iter,receptor_vacuum_iter,"
-         "ligand_solvent_iter,ligand_vacuum_iter,"
-         "complex_solvent_rms,complex_vacuum_rms,"
-         "receptor_solvent_rms,receptor_vacuum_rms,"
-         "ligand_solvent_rms,ligand_vacuum_rms,"
-         "complex_solvent_max_dphi,complex_vacuum_max_dphi,"
-         "receptor_solvent_max_dphi,receptor_vacuum_max_dphi,"
-         "ligand_solvent_max_dphi,ligand_vacuum_max_dphi,"
-         "E_elec_kJmol,E_elec_kcalmol,E_vdw_kJmol,E_vdw_kcalmol,"
-         "E_MM_kJmol,E_MM_kcalmol,"
-         "G_solv_complex_kJmol,G_solv_complex_kcalmol,"
-         "G_solv_receptor_kJmol,G_solv_receptor_kcalmol,"
-         "G_solv_ligand_kJmol,G_solv_ligand_kcalmol,"
-         "DeltaDeltaG_solv_kJmol,DeltaDeltaG_solv_kcalmol,"
-         "DeltaG_nonpolar_kJmol,DeltaG_nonpolar_kcalmol,"
-         "deltaSASA_A2,minus_TDeltaS_IE_kJmol,"
-         "minus_TDeltaS_IE_kcalmol,DeltaG_bind_kJmol,"
-         "DeltaG_bind_kcalmol,ie_status\n";
-
-  out << std::setprecision(10);
-  const double minus_tds =
-      (args_.pbsa_ie && entropy.status == "ok") ? entropy.minus_tds_kj_mol
-                                                 : 0.0;
-  for (const FrameResult &row : pbsa_rows_) {
-    const double dg_bind = row.pbsa_no_entropy_kj_mol + minus_tds;
-    out << row.trajectory_id << ',' << row.frame_index << ','
-        << row.global_index << ',' << row.time_ps << ",pbe,"
-        << row.atom_count << ',' << row.pbsa_receptor_atom_count << ','
-        << row.pbsa_ligand_atom_count << ',' << row.nx << ',' << row.ny
-        << ',' << row.nz << ',' << row.solver_mode << ',' << row.mg_levels
-        << ',' << row.mg_cycles << ',' << row.pbsa_receptor_mg_cycles << ','
-        << row.pbsa_ligand_mg_cycles << ',' << row.pbsa_status << ','
-        << row.pbsa_complex_status << ',' << row.pbsa_receptor_status << ','
-        << row.pbsa_ligand_status << ',' << row.solvent_iterations << ','
-        << row.vacuum_iterations << ','
-        << row.pbsa_receptor_solvent_iterations << ','
-        << row.pbsa_receptor_vacuum_iterations << ','
-        << row.pbsa_ligand_solvent_iterations << ','
-        << row.pbsa_ligand_vacuum_iterations << ',' << row.solvent_rms << ','
-        << row.vacuum_rms << ',' << row.pbsa_receptor_solvent_rms << ','
-        << row.pbsa_receptor_vacuum_rms << ','
-        << row.pbsa_ligand_solvent_rms << ','
-        << row.pbsa_ligand_vacuum_rms << ','
-        << row.solvent_max_dphi << ',' << row.vacuum_max_dphi << ','
-        << row.pbsa_receptor_solvent_max_dphi << ','
-        << row.pbsa_receptor_vacuum_max_dphi << ','
-        << row.pbsa_ligand_solvent_max_dphi << ','
-        << row.pbsa_ligand_vacuum_max_dphi << ',' << row.pbsa_elec_kj_mol
-        << ',' << row.pbsa_elec_kj_mol * kKJToKcal << ','
-        << row.pbsa_vdw_kj_mol << ',' << row.pbsa_vdw_kj_mol * kKJToKcal
-        << ',' << row.pbsa_mm_kj_mol << ','
-        << row.pbsa_mm_kj_mol * kKJToKcal << ','
-        << row.complex_energy_kj_mol << ','
-        << row.complex_energy_kcal_mol << ',' << row.mol1_energy_kj_mol
-        << ',' << row.mol1_energy_kcal_mol << ','
-        << row.mol2_energy_kj_mol << ',' << row.mol2_energy_kcal_mol << ','
-        << row.pbsa_delta_solv_kj_mol << ','
-        << row.pbsa_delta_solv_kcal_mol << ','
-        << row.pbsa_nonpolar_kj_mol << ','
-        << row.pbsa_nonpolar_kj_mol * kKJToKcal << ','
-        << row.pbsa_delta_sasa_a2 << ',' << minus_tds << ','
-        << minus_tds * kKJToKcal << ',' << dg_bind << ','
-        << dg_bind * kKJToKcal << ',' << entropy.status << '\n';
-  }
-}
-
-void Analyzer::write_pbsa_decomposition(
-    const PbsaEntropyResult &entropy) const {
-  if (!args_.pbsa || args_.pbsa_decomp == "off")
-    return;
-
-  std::ofstream out("mm_pbsa_decomposition.dat",
-                    std::ios::out | std::ios::trunc);
-  if (!out.is_open()) {
-    TitanUI::print_warning(
-        "PBSA: failed to write mm_pbsa_decomposition.dat.");
-    return;
-  }
-
-  out << "# TITAN MM/PBSA endpoint decomposition\n";
-  out << "requested_decomp " << args_.pbsa_decomp << "\n";
-  out << "effective_decomp "
-      << (args_.pbsa_decomp == "residue" ? "residue" : "molecule") << "\n";
-  out << "residue_summary "
-      << (args_.pbsa_decomp == "residue" ? "mm_pbsa_residue_summary.csv"
-                                          : "off")
-      << "\n";
-  out << "residue_by_trajectory "
-      << (args_.pbsa_decomp == "residue"
-              ? "mm_pbsa_residue_by_trajectory.csv"
-              : "off")
-      << "\n";
-  out << "residue_frame "
-      << (args_.pbsa_decomp == "residue" &&
-                  args_.pbsa_residue_frames == "all"
-              ? "mm_pbsa_residue_frame.csv"
-              : "off")
-      << "\n";
-  out << "residue_closure_total_max_abs_kJmol "
-      << format_fixed(pbsa_residue_closure_max_abs_kj_, 10) << "\n";
-  out << "residue_closure_elec_max_abs_kJmol "
-      << format_fixed(pbsa_residue_closure_elec_max_abs_kj_, 10) << "\n";
-  out << "residue_closure_vdw_max_abs_kJmol "
-      << format_fixed(pbsa_residue_closure_vdw_max_abs_kj_, 10) << "\n";
-  out << "residue_closure_polar_max_abs_kJmol "
-      << format_fixed(pbsa_residue_closure_polar_max_abs_kj_, 10) << "\n";
-  out << "residue_closure_nonpolar_max_abs_kJmol "
-      << format_fixed(pbsa_residue_closure_nonpolar_max_abs_kj_, 10) << "\n";
-  out << "interaction_entropy_status " << entropy.status << "\n";
-  out << "component,mean_kJmol,mean_kcalmol,std_kJmol,std_kcalmol\n";
-  auto write_stat_row = [&](const char *name, const ScalarStats &stats) {
-    const double sd = scalar_stddev(stats);
-    out << name << ',' << format_fixed(stats.mean) << ','
-        << format_fixed(stats.mean * kKJToKcal) << ',' << format_fixed(sd)
-        << ',' << format_fixed(sd * kKJToKcal) << "\n";
-  };
-  write_stat_row("DeltaE_elec", pbsa_elec_stats_);
-  write_stat_row("DeltaE_vdw", pbsa_vdw_stats_);
-  write_stat_row("DeltaE_MM", pbsa_mm_stats_);
-  write_stat_row("DeltaDeltaG_solv_PB", pbsa_polar_stats_);
-  write_stat_row("DeltaG_nonpolar_SASA", pbsa_nonpolar_stats_);
-  write_stat_row("DeltaG_no_entropy", pbsa_no_entropy_stats_);
-}
-
-void Analyzer::write_pbsa_residue_outputs() const {
-  if (!args_.pbsa || args_.pbsa_decomp != "residue")
-    return;
-
-  auto write_key = [](std::ofstream &out, const ResidueKey &key) {
-    out << csv_escape(key.molecule) << ',' << key.chainnum << ','
-        << csv_escape(key.chain) << ',' << key.resnr << ',' << key.respos
-        << ',' << csv_escape(key.resname);
-  };
-  auto write_stats_values = [&](std::ofstream &out, const ScalarStats &stats) {
-    out << ',' << format_fixed(stats.mean, 10) << ','
-        << format_fixed(scalar_stddev(stats), 10) << ','
-        << format_fixed(stats.min, 10) << ',' << format_fixed(stats.max, 10);
-  };
-  auto write_stats_header = [](std::ofstream &out) {
-    const std::array<const char *, 6> names = {
-        "E_elec", "E_vdw", "E_MM", "DeltaDeltaG_solv_PB",
-        "DeltaG_nonpolar_SASA", "DeltaG_residue"};
-    for (const char *name : names) {
-      out << ',' << name << "_kJmol_mean," << name << "_kJmol_std," << name
-          << "_kJmol_min," << name << "_kJmol_max";
-    }
-    out << ",DeltaG_residue_kcalmol_mean\n";
-  };
-  auto write_stats_row = [&](std::ofstream &out, const ResidueStats &stats) {
-    write_key(out, stats.key);
-    out << ',' << stats.frames;
-    write_stats_values(out, stats.elec);
-    write_stats_values(out, stats.vdw);
-    write_stats_values(out, stats.mm);
-    write_stats_values(out, stats.polar);
-    write_stats_values(out, stats.nonpolar);
-    write_stats_values(out, stats.total);
-    out << ',' << format_fixed(stats.total.mean * kKJToKcal, 10) << "\n";
-  };
-
-  std::ofstream summary("mm_pbsa_residue_summary.csv",
-                        std::ios::out | std::ios::trunc);
-  if (summary.is_open()) {
-    summary << "molecule,chainnum,chain,resnr,respos,resname,frames";
-    write_stats_header(summary);
-    for (const auto &[id, stats] : pbsa_residue_stats_) {
-      (void)id;
-      write_stats_row(summary, stats);
-    }
-  } else {
-    TitanUI::print_warning(
-        "PBSA: failed to write mm_pbsa_residue_summary.csv.");
-  }
-
-  std::ofstream by_traj("mm_pbsa_residue_by_trajectory.csv",
-                        std::ios::out | std::ios::trunc);
-  if (by_traj.is_open()) {
-    by_traj << "trajectory_id,molecule,chainnum,chain,resnr,respos,resname,"
-               "frames";
-    write_stats_header(by_traj);
-    for (const auto &[id, stats] : pbsa_residue_traj_stats_) {
-      const std::size_t cut = id.find('|');
-      by_traj << (cut == std::string::npos ? id : id.substr(0, cut)) << ',';
-      write_stats_row(by_traj, stats);
-    }
-  } else {
-    TitanUI::print_warning(
-        "PBSA: failed to write mm_pbsa_residue_by_trajectory.csv.");
-  }
-
-  if (args_.pbsa_residue_frames == "all") {
-    std::ofstream frame("mm_pbsa_residue_frame.csv",
-                        std::ios::out | std::ios::trunc);
-    if (frame.is_open()) {
-      frame << "trajectory_id,frame_index,global_index,time_ps,molecule,"
-               "chainnum,chain,resnr,respos,resname,E_elec_kJmol,"
-               "E_vdw_kJmol,E_MM_kJmol,DeltaDeltaG_solv_PB_kJmol,"
-               "DeltaG_nonpolar_SASA_kJmol,DeltaG_residue_kJmol,"
-               "DeltaG_residue_kcalmol\n";
-      frame << std::setprecision(10);
-      for (const ResidueFrameRow &row : pbsa_residue_frame_rows_) {
-        frame << row.trajectory_id << ',' << row.frame_index << ','
-              << row.global_index << ',' << row.time_ps << ',';
-        write_key(frame, row.key);
-        frame << ',' << row.elec_kj_mol << ',' << row.vdw_kj_mol << ','
-              << row.mm_kj_mol << ',' << row.polar_kj_mol << ','
-              << row.nonpolar_kj_mol << ',' << row.total_kj_mol << ','
-              << row.total_kj_mol * kKJToKcal << "\n";
-      }
-    } else {
-      TitanUI::print_warning(
-          "PBSA: failed to write mm_pbsa_residue_frame.csv.");
-    }
-  }
-}
-
-void Analyzer::write_pbsa_by_trajectory() const {
-  if (!args_.pbsa)
-    return;
-  struct TrajStats {
-    std::size_t frames{0};
-    std::size_t failed{0};
-    ScalarStats elec;
-    ScalarStats vdw;
-    ScalarStats mm;
-    ScalarStats polar;
-    ScalarStats nonpolar;
-    ScalarStats no_entropy;
-    std::vector<double> mm_values;
-  };
-  std::map<std::size_t, TrajStats> stats_by_traj;
-  for (const FrameResult &row : pbsa_rows_) {
-    TrajStats &stats = stats_by_traj[row.trajectory_id];
-    ++stats.frames;
-    if (row.pbsa_status != "ok")
-      ++stats.failed;
-    add_scalar(stats.elec, row.pbsa_elec_kj_mol);
-    add_scalar(stats.vdw, row.pbsa_vdw_kj_mol);
-    add_scalar(stats.mm, row.pbsa_mm_kj_mol);
-    add_scalar(stats.polar, row.pbsa_delta_solv_kj_mol);
-    add_scalar(stats.nonpolar, row.pbsa_nonpolar_kj_mol);
-    add_scalar(stats.no_entropy, row.pbsa_no_entropy_kj_mol);
-    if (args_.pbsa_ie && row.pbsa_status == "ok")
-      stats.mm_values.push_back(row.pbsa_mm_kj_mol);
-  }
-
-  std::ofstream out("mm_pbsa_by_trajectory.csv",
-                    std::ios::out | std::ios::trunc);
-  if (!out.is_open()) {
-    TitanUI::print_warning("PBSA: failed to write mm_pbsa_by_trajectory.csv.");
-    return;
-  }
-  out << "trajectory_id,frames,failed,E_elec_kJmol_mean,E_elec_kJmol_std,"
-         "E_vdw_kJmol_mean,E_vdw_kJmol_std,E_MM_kJmol_mean,"
-         "E_MM_kJmol_std,DeltaDeltaG_solv_PB_kJmol_mean,"
-         "DeltaDeltaG_solv_PB_kJmol_std,DeltaG_nonpolar_SASA_kJmol_mean,"
-         "DeltaG_nonpolar_SASA_kJmol_std,DeltaG_bind_noIE_kJmol,"
-         "DeltaG_bind_noIE_kcalmol,IE_status,IE_samples,IE_ESS,"
-         "minus_TDeltaS_IE_kJmol,minus_TDeltaS_IE_kcalmol,"
-         "DeltaG_bind_IE_kJmol,DeltaG_bind_IE_kcalmol\n";
-  for (const auto &[trajectory_id, stats] : stats_by_traj) {
-    const PbsaEntropyResult entropy =
-        compute_pbsa_entropy_for_values(stats.mm_values);
-    const double minus_tds =
-        entropy.status == "ok" ? entropy.minus_tds_kj_mol : 0.0;
-    const double dg_ie = stats.no_entropy.mean + minus_tds;
-    out << trajectory_id << ',' << stats.frames << ',' << stats.failed << ','
-        << format_fixed(stats.elec.mean, 10) << ','
-        << format_fixed(scalar_stddev(stats.elec), 10) << ','
-        << format_fixed(stats.vdw.mean, 10) << ','
-        << format_fixed(scalar_stddev(stats.vdw), 10) << ','
-        << format_fixed(stats.mm.mean, 10) << ','
-        << format_fixed(scalar_stddev(stats.mm), 10) << ','
-        << format_fixed(stats.polar.mean, 10) << ','
-        << format_fixed(scalar_stddev(stats.polar), 10) << ','
-        << format_fixed(stats.nonpolar.mean, 10) << ','
-        << format_fixed(scalar_stddev(stats.nonpolar), 10) << ','
-        << format_fixed(stats.no_entropy.mean, 10) << ','
-        << format_fixed(stats.no_entropy.mean * kKJToKcal, 10) << ','
-        << entropy.status << ',' << entropy.samples << ','
-        << format_fixed(entropy.ess, 4) << ',' << format_fixed(minus_tds, 10)
-        << ',' << format_fixed(minus_tds * kKJToKcal, 10) << ','
-        << format_fixed(dg_ie, 10) << ','
-        << format_fixed(dg_ie * kKJToKcal, 10) << "\n";
-  }
-}
-
-void Analyzer::write_pbsa_ie_diagnostics(
-    const PbsaEntropyResult &global_entropy) const {
-  if (!args_.pbsa)
-    return;
-  std::ofstream out("mm_pbsa_ie_diagnostics.csv",
-                    std::ios::out | std::ios::trunc);
-  if (!out.is_open()) {
-    TitanUI::print_warning("PBSA: failed to write mm_pbsa_ie_diagnostics.csv.");
-    return;
-  }
-  out << "scope,trajectory_id,block_index,samples,filtered_samples,ess,"
-         "status,block_size,block_count,minus_TDeltaS_IE_kJmol,"
-         "minus_TDeltaS_IE_kcalmol,block_mean_kJmol,block_std_kJmol,"
-         "block_drift_kJmol\n";
-  auto write_entropy = [&](const char *scope, std::size_t traj,
-                           int block_index,
-                           const PbsaEntropyResult &entropy) {
-    out << scope << ',' << traj << ',' << block_index << ','
-        << entropy.samples << ',' << entropy.filtered_samples << ','
-        << format_fixed(entropy.ess, 4) << ',' << entropy.status << ','
-        << entropy.block_size << ',' << entropy.block_count << ','
-        << format_fixed(entropy.minus_tds_kj_mol, 10) << ','
-        << format_fixed(entropy.minus_tds_kj_mol * kKJToKcal, 10) << ','
-        << format_fixed(entropy.block_mean_kj_mol, 10) << ','
-        << format_fixed(entropy.block_std_kj_mol, 10) << ','
-        << format_fixed(entropy.block_drift_kj_mol, 10) << "\n";
-  };
-  write_entropy("global", 0, -1, global_entropy);
-
-  std::map<std::size_t, std::vector<double>> values_by_traj;
-  for (const FrameResult &row : pbsa_rows_) {
-    if (args_.pbsa_ie && row.pbsa_status == "ok")
-      values_by_traj[row.trajectory_id].push_back(row.pbsa_mm_kj_mol);
-  }
-  for (const auto &[trajectory_id, values] : values_by_traj)
-    write_entropy("trajectory", trajectory_id, -1,
-                  compute_pbsa_entropy_for_values(values));
-
-  const std::size_t block_size =
-      global_entropy.block_size > 0 ? global_entropy.block_size : 1;
-  for (std::size_t begin = 0, block_index = 0;
-       begin < pbsa_ie_mm_energies_kj_.size();
-       begin += block_size, ++block_index) {
-    const std::size_t end =
-        std::min(pbsa_ie_mm_energies_kj_.size(), begin + block_size);
-    std::vector<double> block(
-        pbsa_ie_mm_energies_kj_.begin() + static_cast<std::ptrdiff_t>(begin),
-        pbsa_ie_mm_energies_kj_.begin() + static_cast<std::ptrdiff_t>(end));
-    write_entropy("block", 0, static_cast<int>(block_index),
-                  compute_pbsa_entropy_for_values(block));
-  }
-}
-
-void Analyzer::write_pbsa_performance() const {
-  if (!args_.pbsa || args_.pbsa_perf == "off")
-    return;
-  std::ofstream out("mm_pbsa_performance.dat", std::ios::out | std::ios::trunc);
-  if (!out.is_open()) {
-    TitanUI::print_warning("PBSA: failed to write mm_pbsa_performance.dat.");
-    return;
-  }
-  auto add_time = [](ScalarStats &stats, double value) {
-    Analyzer::add_scalar(stats, value);
-  };
-  ScalarStats complex_t;
-  ScalarStats receptor_t;
-  ScalarStats ligand_t;
-  ScalarStats components_t;
-  ScalarStats residue_t;
-  ScalarStats frame_t;
-  double slowest_ms = 0.0;
-  std::size_t slowest_global = 0;
-  for (const FrameResult &row : pbsa_rows_) {
-    add_time(complex_t, row.pbsa_time_complex_ms);
-    add_time(receptor_t, row.pbsa_time_receptor_ms);
-    add_time(ligand_t, row.pbsa_time_ligand_ms);
-    add_time(components_t, row.pbsa_time_components_ms);
-    add_time(residue_t, row.pbsa_time_residue_ms);
-    add_time(frame_t, row.pbsa_time_frame_ms);
-    if (row.pbsa_time_frame_ms > slowest_ms) {
-      slowest_ms = row.pbsa_time_frame_ms;
-      slowest_global = row.global_index;
-    }
-  }
-  auto write_time = [&](const char *name, const ScalarStats &stats) {
-    out << name << "_ms_mean " << format_fixed(stats.mean, 6) << "\n";
-    out << name << "_ms_max " << format_fixed(stats.max, 6) << "\n";
-  };
-  out << "# TITAN MM/PBSA performance summary\n";
-  out << "frames " << pbsa_rows_.size() << "\n";
-  out << "endpoint_solves " << (pbsa_rows_.size() * 6) << "\n";
-  out << "max_grid_points " << max_grid_points_seen_ << "\n";
-  out << "max_memory_bytes " << max_memory_bytes_seen_ << "\n";
-  out << "residue_decomp " << args_.pbsa_decomp << "\n";
-  write_time("complex_solve", complex_t);
-  write_time("receptor_solve", receptor_t);
-  write_time("ligand_solve", ligand_t);
-  write_time("components", components_t);
-  write_time("residue_decomp", residue_t);
-  write_time("frame_total", frame_t);
-  out << "slowest_global_frame " << slowest_global << "\n";
-  out << "slowest_frame_ms " << format_fixed(slowest_ms, 6) << "\n";
-
-  if (args_.pbsa_perf == "detail") {
-    std::ofstream detail("mm_pbsa_performance_frames.csv",
-                         std::ios::out | std::ios::trunc);
-    if (detail.is_open()) {
-      detail << "trajectory_id,frame_index,global_index,time_ps,"
-                "complex_solve_ms,receptor_solve_ms,ligand_solve_ms,"
-                "components_ms,residue_decomp_ms,frame_total_ms,"
-                "grid_points,memory_bytes,status\n";
-      detail << std::setprecision(10);
-      for (const FrameResult &row : pbsa_rows_) {
-        detail << row.trajectory_id << ',' << row.frame_index << ','
-               << row.global_index << ',' << row.time_ps << ','
-               << row.pbsa_time_complex_ms << ','
-               << row.pbsa_time_receptor_ms << ','
-               << row.pbsa_time_ligand_ms << ','
-               << row.pbsa_time_components_ms << ','
-               << row.pbsa_time_residue_ms << ','
-               << row.pbsa_time_frame_ms << ',' << row.grid_points << ','
-               << row.memory_bytes << ',' << row.pbsa_status << "\n";
-      }
-    } else {
-      TitanUI::print_warning(
-          "PBSA: failed to write mm_pbsa_performance_frames.csv.");
-    }
-  }
-}
-
-void Analyzer::write_pbsa_summary(std::fstream &log) {
-  if (!args_.pbsa)
-    return;
-
-  const PbsaEntropyResult entropy = compute_pbsa_entropy();
-  write_pbsa_energy_csv(entropy);
-  write_pbsa_decomposition(entropy);
-  write_pbsa_residue_outputs();
-  write_pbsa_by_trajectory();
-  write_pbsa_ie_diagnostics(entropy);
-  write_pbsa_performance();
-
-  const double dg_no_entropy_kj = pbsa_no_entropy_stats_.mean;
-  const double minus_tds_ie_kj =
-      (args_.pbsa_ie && entropy.status == "ok") ? entropy.minus_tds_kj_mol
-                                                 : 0.0;
-  const double dg_binding_ie_kj = dg_no_entropy_kj + minus_tds_ie_kj;
-
-  std::ofstream out("mm_pbsa_summary.dat", std::ios::out | std::ios::trunc);
-  if (!out.is_open()) {
-    TitanUI::print_warning("PBSA: failed to write mm_pbsa_summary.dat.");
-    return;
-  }
-
-  auto write_energy_stats = [&](const char *name, const ScalarStats &stats) {
-    out << name << "_kJmol_mean " << format_fixed(stats.mean) << "\n";
-    out << name << "_kJmol_std " << format_fixed(scalar_stddev(stats))
-        << "\n";
-    out << name << "_kJmol_min " << format_fixed(stats.min) << "\n";
-    out << name << "_kJmol_max " << format_fixed(stats.max) << "\n";
-    out << name << "_kcalmol_mean " << format_fixed(stats.mean * kKJToKcal)
-        << "\n";
-    out << name << "_kcalmol_std "
-        << format_fixed(scalar_stddev(stats) * kKJToKcal) << "\n";
-    out << name << "_kcalmol_min " << format_fixed(stats.min * kKJToKcal)
-        << "\n";
-    out << name << "_kcalmol_max " << format_fixed(stats.max * kKJToKcal)
-        << "\n";
-  };
-
-  out << "# TITAN MM/PBSA summary\n";
-  out << "model MM/PBSA_PBE_linear\n";
-  out << "pbsa_enabled true\n";
-  out << "pbsa_components_requested " << args_.pbsa_components << "\n";
-  out << "pbsa_decomp_requested " << args_.pbsa_decomp << "\n";
-  out << "frames_total " << pbsa_frames_ << "\n";
-  out << "frames_failed " << pbsa_failed_ << "\n";
-  out << "temperature_K " << format_fixed(args_.temp) << "\n";
-  out << "pbe_salt_M " << format_fixed(args_.salt) << "\n";
-  out << "pbe_surface " << args_.surface << "\n";
-  out << "sasa_probe_A " << format_fixed(args_.probe_radius) << "\n";
-  out << "sasa_points_per_atom " << TitanSASA::kDefaultPointCount << "\n";
-  out << "nonpolar_gamma_kJmol_A2 "
-      << format_fixed(TitanSASA::kNonpolarGammaKJPerMolA2, 8) << "\n";
-  out << "nonpolar_gamma_kcalmol_A2 "
-      << format_fixed(TitanSASA::kNonpolarGammaKcalPerMolA2, 8) << "\n";
-  out << "endpoint_solves_per_frame 6\n";
-  out << "energy_timeseries mm_pbsa_energy.csv\n";
-  if (args_.pbsa_decomp != "off")
-    out << "decomposition mm_pbsa_decomposition.dat\n";
-  out << "interaction_entropy_enabled " << (args_.pbsa_ie ? "true" : "false")
-      << "\n";
-  out << "interaction_entropy_status " << entropy.status << "\n";
-  out << "interaction_entropy_min_samples " << args_.pbsa_ie_min_samples
-      << "\n";
-  out << "interaction_entropy_filter_sigma "
-      << format_fixed(args_.pbsa_ie_filter_sigma) << "\n";
-  out << "interaction_entropy_block_config " << args_.pbsa_ie_block << "\n";
-  out << "interaction_entropy_source MM_elec_plus_vdw\n";
-  out << "interaction_entropy_samples " << entropy.samples
-      << "\n";
-  out << "interaction_entropy_filtered_samples " << entropy.filtered_samples
-      << "\n";
-  out << "interaction_entropy_ESS " << format_fixed(entropy.ess, 4) << "\n";
-  out << "interaction_entropy_block_size " << entropy.block_size << "\n";
-  out << "interaction_entropy_block_count " << entropy.block_count << "\n";
-  out << "interaction_entropy_block_mean_kJmol "
-      << format_fixed(entropy.block_mean_kj_mol) << "\n";
-  out << "interaction_entropy_block_std_kJmol "
-      << format_fixed(entropy.block_std_kj_mol) << "\n";
-  out << "interaction_entropy_block_drift_kJmol "
-      << format_fixed(entropy.block_drift_kj_mol) << "\n";
-  out << "interaction_entropy_diagnostics mm_pbsa_ie_diagnostics.csv\n";
-  out << "per_trajectory_summary mm_pbsa_by_trajectory.csv\n";
-  if (args_.pbsa_perf != "off")
-    out << "performance_summary mm_pbsa_performance.dat\n";
-  if (args_.pbsa_decomp == "residue") {
-    out << "residue_summary mm_pbsa_residue_summary.csv\n";
-    out << "residue_by_trajectory mm_pbsa_residue_by_trajectory.csv\n";
-    out << "residue_closure_total_max_abs_kJmol "
-        << format_fixed(pbsa_residue_closure_max_abs_kj_, 10) << "\n";
-  }
-  write_energy_stats("E_elec", pbsa_elec_stats_);
-  write_energy_stats("E_vdw", pbsa_vdw_stats_);
-  write_energy_stats("E_MM", pbsa_mm_stats_);
-  write_energy_stats("G_polar_PB", pbsa_polar_stats_);
-  write_energy_stats("DeltaDeltaG_solv_PB", pbsa_polar_stats_);
-  write_energy_stats("G_nonpolar_SASA", pbsa_nonpolar_stats_);
-  out << "deltaSASA_A2_mean " << format_fixed(pbsa_delta_sasa_stats_.mean)
-      << "\n";
-  out << "deltaSASA_A2_std "
-      << format_fixed(scalar_stddev(pbsa_delta_sasa_stats_)) << "\n";
-  out << "deltaSASA_A2_min " << format_fixed(pbsa_delta_sasa_stats_.min)
-      << "\n";
-  out << "deltaSASA_A2_max " << format_fixed(pbsa_delta_sasa_stats_.max)
-      << "\n";
-  write_energy_stats("DeltaG_no_entropy", pbsa_no_entropy_stats_);
-  out << "minus_TdS_IE_kJmol " << format_fixed(minus_tds_ie_kj) << "\n";
-  out << "minus_TdS_IE_kcalmol "
-      << format_fixed(minus_tds_ie_kj * kKJToKcal) << "\n";
-  out << "DeltaG_binding_IE_kJmol " << format_fixed(dg_binding_ie_kj)
-      << "\n";
-  out << "DeltaG_binding_IE_kcalmol "
-      << format_fixed(dg_binding_ie_kj * kKJToKcal) << "\n";
-  std::map<std::size_t, std::vector<const FrameResult *>> rows_by_traj;
-  for (const FrameResult &row : pbsa_rows_)
-    rows_by_traj[row.trajectory_id].push_back(&row);
-  ScalarStats traj_equal_noie;
-  ScalarStats traj_equal_ie;
-  for (const auto &[trajectory_id, rows] : rows_by_traj) {
-    (void)trajectory_id;
-    ScalarStats noie;
-    std::vector<double> mm_values;
-    for (const FrameResult *row : rows) {
-      add_scalar(noie, row->pbsa_no_entropy_kj_mol);
-      if (args_.pbsa_ie && row->pbsa_status == "ok")
-        mm_values.push_back(row->pbsa_mm_kj_mol);
-    }
-    const PbsaEntropyResult traj_entropy =
-        compute_pbsa_entropy_for_values(mm_values);
-    const double traj_minus_tds =
-        traj_entropy.status == "ok" ? traj_entropy.minus_tds_kj_mol : 0.0;
-    add_scalar(traj_equal_noie, noie.mean);
-    add_scalar(traj_equal_ie, noie.mean + traj_minus_tds);
-  }
-  out << "trajectory_equal_DeltaG_no_entropy_kJmol_mean "
-      << format_fixed(traj_equal_noie.mean) << "\n";
-  out << "trajectory_equal_DeltaG_no_entropy_kJmol_std "
-      << format_fixed(scalar_stddev(traj_equal_noie)) << "\n";
-  out << "trajectory_equal_DeltaG_binding_IE_kJmol_mean "
-      << format_fixed(traj_equal_ie.mean) << "\n";
-  out << "trajectory_equal_DeltaG_binding_IE_kJmol_std "
-      << format_fixed(scalar_stddev(traj_equal_ie)) << "\n";
-
-  if (log.is_open()) {
-    TitanUI::log_section(log, "MM/PBSA OUTPUT AUDIT");
-    TitanUI::log_kv(log, "Frames", std::to_string(pbsa_frames_));
-    TitanUI::log_kv(log, "Failed", std::to_string(pbsa_failed_));
-    TitanUI::log_kv(log, "Endpoint solves/frame", "6");
-    TitanUI::log_kv(log, "IE Status", entropy.status);
-    TitanUI::log_kv(log, "Interaction Entropy",
-                    format_fixed(minus_tds_ie_kj) + " kJ/mol / " +
-                        format_fixed(minus_tds_ie_kj * kKJToKcal) +
-                        " kcal/mol");
-    TitanUI::log_kv(log, "DeltaG Binding IE",
-                    format_fixed(dg_binding_ie_kj) + " kJ/mol / " +
-                        format_fixed(dg_binding_ie_kj * kKJToKcal) +
-                        " kcal/mol");
-    TitanUI::log_kv(log, "Summary", "mm_pbsa_summary.dat");
-    TitanUI::log_kv(log, "Energy CSV", "mm_pbsa_energy.csv");
-    TitanUI::log_kv(log, "By Trajectory", "mm_pbsa_by_trajectory.csv");
-    TitanUI::log_kv(log, "IE Diagnostics", "mm_pbsa_ie_diagnostics.csv");
-    if (args_.pbsa_perf != "off")
-      TitanUI::log_kv(log, "Performance", "mm_pbsa_performance.dat");
-    if (args_.pbsa_decomp != "off")
-      TitanUI::log_kv(log, "Decomposition", "mm_pbsa_decomposition.dat");
-    if (args_.pbsa_decomp == "residue")
-      TitanUI::log_kv(log, "Residue Summary",
-                      "mm_pbsa_residue_summary.csv");
-  }
-}
-
-void Analyzer::finalize(std::fstream &log) {
+void AnalyzerImpl::finalize(std::fstream &log) {
   if (!enabled())
     return;
   if (energy_out_.is_open())
@@ -8721,6 +7630,25 @@ void Analyzer::finalize(std::fstream &log) {
               << "\n";
       summary << "test_midpoint_epsilon " << args_.test_midpoint_epsilon
               << "\n";
+      summary << "test_boundary_convention "
+              << args_.test_boundary_convention << "\n";
+      summary << "test_field_units " << args_.test_field_units << "\n";
+      summary << "test_operator_convention "
+              << args_.test_operator_convention << "\n";
+      summary << "test_rhs_map " << args_.test_rhs_map << "\n";
+      summary << "test_screen_map " << args_.test_screen_map << "\n";
+      summary << "test_denom_map " << args_.test_denom_map << "\n";
+      if (args_.test_midpoint_diff != "off") {
+        summary << "test_midpoint_diff " << args_.test_midpoint_diff << "\n";
+        summary << "midpoint_face_diff_csv pbe_midpoint_face_diff.csv\n";
+      }
+      if (args_.test_charge_grid_diff != "off") {
+        summary << "test_charge_grid_diff " << args_.test_charge_grid_diff
+                << "\n";
+        summary << "charge_grid_diff_csv pbe_charge_grid_diff.csv\n";
+        summary << "charge_grid_diff_summary_csv "
+                   "pbe_charge_grid_diff_summary.csv\n";
+      }
       summary << "parity_stage_csv pbe_parity_stage.csv\n";
       if (args_.parity_dump == "points" || args_.parity_dump == "all")
         summary << "parity_points_csv pbe_parity_points.csv\n";
@@ -8733,10 +7661,23 @@ void Analyzer::finalize(std::fstream &log) {
     if (!args_.test_pqr.empty() && args_.parity_map_dump != "off") {
       summary << "parity_map_dump " << args_.parity_map_dump << "\n";
       summary << "test_charge_grid " << args_.test_charge_grid << "\n";
+      summary << "test_charge_grid_diff " << args_.test_charge_grid_diff
+              << "\n";
       summary << "test_surface_map " << args_.test_surface_map << "\n";
       summary << "test_boundary_map " << args_.test_boundary_map << "\n";
+      summary << "test_boundary_convention "
+              << args_.test_boundary_convention << "\n";
+      summary << "test_field_units " << args_.test_field_units << "\n";
+      summary << "test_operator_convention "
+              << args_.test_operator_convention << "\n";
+      summary << "test_rhs_map " << args_.test_rhs_map << "\n";
+      summary << "test_screen_map " << args_.test_screen_map << "\n";
+      summary << "test_denom_map " << args_.test_denom_map << "\n";
       summary << "field_samples_csv pbe_field_samples.csv\n";
       summary << "boundary_samples_csv pbe_boundary_samples.csv\n";
+      summary << "operator_stage_csv pbe_operator_stage.csv\n";
+      if (args_.parity_dump == "all")
+        summary << "sor_trace_csv pbe_sor_trace.csv\n";
       summary << "charge_grid_audit_csv pbe_charge_grid_audit.csv\n";
     }
   } else {
@@ -8846,14 +7787,35 @@ void Analyzer::finalize(std::fstream &log) {
       }
       TitanUI::log_kv(log, "Parity Map Dump", args_.parity_map_dump);
       TitanUI::log_kv(log, "Charge Grid Replay", args_.test_charge_grid);
+      TitanUI::log_kv(log, "Charge Grid Diff", args_.test_charge_grid_diff);
       TitanUI::log_kv(log, "Surface Map Replay", args_.test_surface_map);
       TitanUI::log_kv(log, "Midpoint Epsilon Replay",
                       args_.test_midpoint_epsilon);
+      TitanUI::log_kv(log, "Midpoint Face Diff", args_.test_midpoint_diff);
       TitanUI::log_kv(log, "Boundary Map Replay", args_.test_boundary_map);
+      TitanUI::log_kv(log, "Boundary Convention",
+                      args_.test_boundary_convention);
+      TitanUI::log_kv(log, "Field Units", args_.test_field_units);
+      TitanUI::log_kv(log, "Operator Convention",
+                      args_.test_operator_convention);
+      TitanUI::log_kv(log, "RHS Replay", args_.test_rhs_map);
+      TitanUI::log_kv(log, "Screen Replay", args_.test_screen_map);
+      TitanUI::log_kv(log, "Denom Replay", args_.test_denom_map);
+      if (args_.test_midpoint_diff != "off")
+        TitanUI::log_kv(log, "Midpoint Face Diff CSV",
+                        "pbe_midpoint_face_diff.csv");
+      if (args_.test_charge_grid_diff != "off") {
+        TitanUI::log_kv(log, "Charge Grid Diff CSV",
+                        "pbe_charge_grid_diff.csv");
+        TitanUI::log_kv(log, "Charge Grid Diff Summary CSV",
+                        "pbe_charge_grid_diff_summary.csv");
+      }
       if (args_.parity_map_dump != "off") {
         TitanUI::log_kv(log, "Field Samples CSV", "pbe_field_samples.csv");
         TitanUI::log_kv(log, "Boundary Samples CSV",
                         "pbe_boundary_samples.csv");
+        TitanUI::log_kv(log, "Operator Stage CSV",
+                        "pbe_operator_stage.csv");
         TitanUI::log_kv(log, "Charge Grid Audit CSV",
                         "pbe_charge_grid_audit.csv");
       }

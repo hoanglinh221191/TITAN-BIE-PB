@@ -971,6 +971,14 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.gap_diel = stod(common_value);
       continue;
     }
+    if (consume_option_value(arg, {"-pbe-probe-file",
+                                   "--pbe-probe-file",
+                                   "-pbe-test-probe-file",
+                                   "--pbe-test-probe-file"},
+                             common_value, i)) {
+      pbe.probe_file = common_value;
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-probe-residue",
                                    "--pbe-probe-residue"},
                              common_value, i)) {
@@ -1056,6 +1064,14 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-pbe-test-charge-grid");
       continue;
     }
+    if (consume_option_value(arg, {"-pbe-test-charge-grid-diff",
+                                   "--pbe-test-charge-grid-diff"},
+                             common_value, i)) {
+      pbe.test_charge_grid_diff =
+          require_choice(common_value, {"off", "samples", "full"},
+                         "-pbe-test-charge-grid-diff");
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-test-surface-map",
                                    "--pbe-test-surface-map"},
                              common_value, i)) {
@@ -1072,6 +1088,14 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-pbe-test-midpoint-epsilon");
       continue;
     }
+    if (consume_option_value(arg, {"-pbe-test-midpoint-diff",
+                                   "--pbe-test-midpoint-diff"},
+                             common_value, i)) {
+      pbe.test_midpoint_diff =
+          require_choice(common_value, {"off", "samples", "full"},
+                         "-pbe-test-midpoint-diff");
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-test-vdwms-remap",
                                    "--pbe-test-vdwms-remap"},
                              common_value, i)) {
@@ -1086,6 +1110,57 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.test_boundary_map =
           require_choice(common_value, {"native", "oracle"},
                          "-pbe-test-boundary-map");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-boundary-convention",
+                                   "--pbe-test-boundary-convention"},
+                             common_value, i)) {
+      pbe.test_boundary_convention =
+          require_choice(common_value,
+                         {"native-real", "delphi-grid", "oracle"},
+                         "-pbe-test-boundary-convention");
+      if (pbe.test_boundary_convention == "oracle")
+        pbe.test_boundary_map = "oracle";
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-field-units",
+                                   "--pbe-test-field-units"},
+                             common_value, i)) {
+      pbe.test_field_units =
+          require_choice(common_value, {"native", "delphi-dimensionless"},
+                         "-pbe-test-field-units");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-operator-convention",
+                                   "--pbe-test-operator-convention"},
+                             common_value, i)) {
+      pbe.test_operator_convention =
+          require_choice(common_value, {"native", "delphi"},
+                         "-pbe-test-operator-convention");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-rhs-map",
+                                   "--pbe-test-rhs-map"},
+                             common_value, i)) {
+      pbe.test_rhs_map =
+          require_choice(common_value, {"native", "oracle"},
+                         "-pbe-test-rhs-map");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-screen-map",
+                                   "--pbe-test-screen-map"},
+                             common_value, i)) {
+      pbe.test_screen_map =
+          require_choice(common_value, {"native", "oracle"},
+                         "-pbe-test-screen-map");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-test-denom-map",
+                                   "--pbe-test-denom-map"},
+                             common_value, i)) {
+      pbe.test_denom_map =
+          require_choice(common_value, {"native", "oracle"},
+                         "-pbe-test-denom-map");
       continue;
     }
     if (consume_option_value(arg, {"-pbe-test-nl-source",
