@@ -6,11 +6,13 @@
 #include <cmath>
 #include <cctype>
 #include <cstdint>
+#include <iomanip>
 #include <limits>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace TitanPBE {
@@ -35,6 +37,15 @@ bool surface_uses_probe_exclusion(const std::string &surface) noexcept {
 
 bool surface_uses_ses_flood_fill(const std::string &surface) noexcept {
   return surface == "ses" || surface == "delphi-ses";
+}
+
+std::string grid_anchor_key(double scale, double margin, int test_grid_size,
+                            const std::string &gridbox,
+                            const std::string &focus_mode) {
+  std::ostringstream oss;
+  oss << std::setprecision(17) << scale << '|' << margin << '|'
+      << test_grid_size << '|' << gridbox << '|' << focus_mode;
+  return oss.str();
 }
 
 std::string uppercase_letters(std::string value) {
@@ -346,7 +357,7 @@ AnalyzerImpl::GridShape AnalyzerImpl::build_shape(const std::vector<Atom> &atoms
           << " points exceeds -pbe-max-grid " << args_.max_grid_points << ".";
       throw std::runtime_error(msg.str());
     }
-    return shape;
+    return apply_grid_anchor(shape, scale, margin);
   }
   shape.ox = min_x;
   shape.oy = min_y;
@@ -386,10 +397,65 @@ AnalyzerImpl::GridShape AnalyzerImpl::build_shape(const std::vector<Atom> &atoms
         << args_.max_grid_points << ".";
     throw std::runtime_error(msg.str());
   }
+  return apply_grid_anchor(shape, scale, margin);
+}
+
+AnalyzerImpl::GridShape
+AnalyzerImpl::apply_grid_anchor(const GridShape &input, double scale,
+                                double margin) const {
+  GridShape shape = input;
+  const std::string anchor = effective_grid_anchor();
+  if (anchor == "auto" || anchor == "per-frame")
+    return shape;
+
+  if (anchor == "fixed-center") {
+    double cx = 0.0;
+    double cy = 0.0;
+    double cz = 0.0;
+    if (args_.test_center_user) {
+      cx = args_.test_center_x;
+      cy = args_.test_center_y;
+      cz = args_.test_center_z;
+    } else {
+      cx = args_.focus_center_x;
+      cy = args_.focus_center_y;
+      cz = args_.focus_center_z;
+    }
+    shape.ox = cx - 0.5 * static_cast<double>(shape.nx - 1) * shape.h;
+    shape.oy = cy - 0.5 * static_cast<double>(shape.ny - 1) * shape.h;
+    shape.oz = cz - 0.5 * static_cast<double>(shape.nz - 1) * shape.h;
+    return shape;
+  }
+
+  if (anchor == "first-frame") {
+    const std::string key =
+        grid_anchor_key(scale, margin, args_.test_grid_size, args_.gridbox,
+                        args_.focus);
+    auto it = grid_anchor_shapes_.find(key);
+    if (it == grid_anchor_shapes_.end()) {
+      grid_anchor_shapes_.emplace(key, shape);
+      return shape;
+    }
+    return it->second;
+  }
+
   return shape;
 }
 
+std::string AnalyzerImpl::effective_grid_anchor() const {
+  if (args_.grid_anchor == "fixed-center" || args_.grid_anchor == "first-frame")
+    return args_.grid_anchor;
+  if (stability_grid_anchor_enabled())
+    return "first-frame";
+  return args_.grid_anchor;
+}
+
+void AnalyzerImpl::reset_grid_anchor() const noexcept {
+  grid_anchor_shapes_.clear();
+}
+
 void AnalyzerImpl::ensure_workspace(const GridShape &shape) {
+  invalidate_nwt_half_workspace();
   phi_.assign(shape.n, 0.0);
   rho_.assign(shape.n, 0.0);
   eps_x_.assign(shape.n, args_.ext_diel);
@@ -427,10 +493,10 @@ void AnalyzerImpl::classify_surface(const GridShape &shape,
     const double influence2 = influence * influence;
     const AtomSpatialBins gaussian_bins =
         build_atom_bins(surface_atoms, std::max(0.0, influence), shape.h);
+    const double gaussian_exponent = std::max(1.0e-12, args_.gaussian_exp);
+    const int gaussian_radius_bins = static_cast<int>(
+        std::ceil(std::max(shape.h, influence) / gaussian_bins.cell)) + 1;
     auto density_at = [&](double x, double y, double z) {
-      const double exponent = std::max(1.0e-12, args_.gaussian_exp);
-      const int radius_bins = static_cast<int>(
-          std::ceil(std::max(shape.h, influence) / gaussian_bins.cell)) + 1;
       const int bx0 = static_cast<int>(std::floor((x - gaussian_bins.min_x) /
                                                   gaussian_bins.cell));
       const int by0 = static_cast<int>(std::floor((y - gaussian_bins.min_y) /
@@ -438,15 +504,15 @@ void AnalyzerImpl::classify_surface(const GridShape &shape,
       const int bz0 = static_cast<int>(std::floor((z - gaussian_bins.min_z) /
                                                   gaussian_bins.cell));
       double solvent_complement = 1.0;
-      for (int dz = -radius_bins; dz <= radius_bins; ++dz) {
+      for (int dz = -gaussian_radius_bins; dz <= gaussian_radius_bins; ++dz) {
         const int bz = bz0 + dz;
         if (bz < 0 || bz >= static_cast<int>(gaussian_bins.bz))
           continue;
-        for (int dy = -radius_bins; dy <= radius_bins; ++dy) {
+        for (int dy = -gaussian_radius_bins; dy <= gaussian_radius_bins; ++dy) {
           const int by = by0 + dy;
           if (by < 0 || by >= static_cast<int>(gaussian_bins.by))
             continue;
-          for (int dx = -radius_bins; dx <= radius_bins; ++dx) {
+          for (int dx = -gaussian_radius_bins; dx <= gaussian_radius_bins; ++dx) {
             const int bx = bx0 + dx;
             if (bx < 0 || bx >= static_cast<int>(gaussian_bins.bx))
               continue;
@@ -466,7 +532,8 @@ void AnalyzerImpl::classify_surface(const GridShape &shape,
                 continue;
               const double scaled2 = r2 / (sigma * sigma * r0 * r0);
               const double atom_density =
-                  std::clamp(std::exp(-std::pow(scaled2, exponent)), 0.0, 1.0);
+                  std::clamp(std::exp(-std::pow(scaled2, gaussian_exponent)),
+                             0.0, 1.0);
               solvent_complement *= (1.0 - atom_density);
               if (solvent_complement <= 1.0e-15)
                 return 1.0;
@@ -762,6 +829,126 @@ void AnalyzerImpl::classify_ion_accessibility(const GridShape &shape,
     if (k + 1 < shape.nz)
       enqueue(id + shape.nx * shape.ny);
   }
+}
+
+void AnalyzerImpl::apply_stability_hysteresis(
+    const GridShape &shape, const std::vector<Atom> &atoms) {
+  stability_hysteresis_cells_kept_frame_ = 0;
+  stability_hysteresis_cells_released_frame_ = 0;
+  if (!stability_hysteresis_enabled() || !last_stability_medium_state_.valid)
+    return;
+  const StabilityMediumState &prev = last_stability_medium_state_;
+  const bool same_grid =
+      prev.nx == shape.nx && prev.ny == shape.ny && prev.nz == shape.nz &&
+      std::abs(prev.h - shape.h) <= 1.0e-12 &&
+      std::abs(prev.origin_x - shape.ox) <= std::max(1.0e-9, shape.h * 1.0e-9) &&
+      std::abs(prev.origin_y - shape.oy) <= std::max(1.0e-9, shape.h * 1.0e-9) &&
+      std::abs(prev.origin_z - shape.oz) <= std::max(1.0e-9, shape.h * 1.0e-9);
+  if (!same_grid || prev.inside.size() != shape.n ||
+      prev.ion_accessible.size() != shape.n || prev.eps_x.size() != shape.n ||
+      prev.eps_y.size() != shape.n || prev.eps_z.size() != shape.n)
+    return;
+
+  const std::vector<Atom> surface_atoms = adjusted_surface_atoms(atoms);
+  const double surface_inflate =
+      surface_uses_probe_exclusion(args_.surface) ? args_.probe_radius : 0.0;
+  const double release_band_A = std::max(1.0e-6, shape.h * 1.0e-3);
+  auto near_surface = [&](double x, double y, double z, double inflate) {
+    for (const Atom &atom : surface_atoms) {
+      const double radius = std::max(0.0, atom.radius + inflate);
+      const double dx = x - atom.x;
+      const double dy = y - atom.y;
+      const double dz = z - atom.z;
+      const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+      if (std::abs(dist - radius) <= release_band_A)
+        return true;
+    }
+    return false;
+  };
+
+  const std::size_t xy = shape.nx * shape.ny;
+  for (std::size_t k = 0; k < shape.nz; ++k) {
+    const double z = shape.oz + static_cast<double>(k) * shape.h;
+    for (std::size_t j = 0; j < shape.ny; ++j) {
+      const double y = shape.oy + static_cast<double>(j) * shape.h;
+      for (std::size_t i = 0; i < shape.nx; ++i) {
+        const double x = shape.ox + static_cast<double>(i) * shape.h;
+        const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
+        const bool inside_changed = inside_[id] != prev.inside[id];
+        const bool ion_changed = ion_accessible_[id] != prev.ion_accessible[id];
+        const bool eps_changed =
+            eps_x_[id] != prev.eps_x[id] || eps_y_[id] != prev.eps_y[id] ||
+            eps_z_[id] != prev.eps_z[id];
+        if (!inside_changed && !ion_changed && !eps_changed)
+          continue;
+
+        bool keep_previous = false;
+        if (inside_changed)
+          keep_previous =
+              near_surface(x, y, z, surface_inflate);
+        if (!keep_previous && ion_changed)
+          keep_previous =
+              near_surface(x, y, z, std::max(surface_inflate, args_.ion_radius));
+        if (!keep_previous && eps_changed) {
+          keep_previous =
+              (i + 1 < shape.nx &&
+               near_surface(x + 0.5 * shape.h, y, z, surface_inflate)) ||
+              (j + 1 < shape.ny &&
+               near_surface(x, y + 0.5 * shape.h, z, surface_inflate)) ||
+              (k + 1 < shape.nz &&
+               near_surface(x, y, z + 0.5 * shape.h, surface_inflate));
+        }
+
+        if (keep_previous) {
+          inside_[id] = prev.inside[id];
+          ion_accessible_[id] = prev.ion_accessible[id];
+          eps_x_[id] = prev.eps_x[id];
+          eps_y_[id] = prev.eps_y[id];
+          eps_z_[id] = prev.eps_z[id];
+          ++stability_hysteresis_cells_kept_frame_;
+        } else {
+          ++stability_hysteresis_cells_released_frame_;
+        }
+      }
+    }
+  }
+
+  if (denom_.size() == shape.n && screen_.size() == shape.n) {
+    for (std::size_t k = 1; k + 1 < shape.nz; ++k) {
+      for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
+        for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
+          const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
+          denom_[id] = eps_x_[id] + eps_x_[id - 1] + eps_y_[id] +
+                       eps_y_[id - shape.nx] + eps_z_[id] +
+                       eps_z_[id - xy] + screen_[id];
+        }
+      }
+    }
+  }
+}
+
+void AnalyzerImpl::store_stability_medium_state(const GridShape &shape) {
+  if (stability_probe_solve_active_)
+    return;
+  if (shape.n == 0 || inside_.size() != shape.n ||
+      ion_accessible_.size() != shape.n || eps_x_.size() != shape.n ||
+      eps_y_.size() != shape.n || eps_z_.size() != shape.n)
+    return;
+  StabilityMediumState state;
+  state.valid = true;
+  state.nx = shape.nx;
+  state.ny = shape.ny;
+  state.nz = shape.nz;
+  state.h = shape.h;
+  state.origin_x = shape.ox;
+  state.origin_y = shape.oy;
+  state.origin_z = shape.oz;
+  state.inside = inside_;
+  state.ion_accessible = ion_accessible_;
+  state.eps_x = eps_x_;
+  state.eps_y = eps_y_;
+  state.eps_z = eps_z_;
+  last_stability_medium_state_ = std::move(state);
 }
 
 } // namespace TitanPBE

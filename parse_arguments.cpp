@@ -570,7 +570,37 @@ int arguments::parse_arguments(int argc, char **argv) {
       tda_max_points = static_cast<size_t>(stoull(common_value));
       continue;
     }
+    if (arg.rfind("-pbe=", 0) == 0 || arg.rfind("--pbe=", 0) == 0) {
+      std::string backend = lowercase_copy(arg.substr(arg.find('=') + 1));
+      if (backend == "delphi" || backend == "pydelphi" || backend == "fd")
+        backend = "grid";
+      if (backend != "grid" && backend != "tabi") {
+        TitanUI::print_error(
+            "PBE: -pbe backend must be grid or tabi (aliases: delphi, pydelphi, fd).");
+        exit(EXIT_FAILURE);
+      }
+      pbe.backend = backend;
+      pbe.flag_pbe = true;
+      continue;
+    }
     if (arg == "-pbe" || arg == "--pbe") {
+      if (i + 1 < argc) {
+        std::string backend = lowercase_copy(string(argv[i + 1]));
+        if (backend == "delphi" || backend == "pydelphi" ||
+            backend == "fd")
+          backend = "grid";
+        if (backend == "grid" || backend == "tabi") {
+          pbe.backend = backend;
+          pbe.flag_pbe = true;
+          ++i;
+          continue;
+        }
+        if (!backend.empty() && backend.front() != '-') {
+          TitanUI::print_error(
+              "PBE: -pbe backend must be grid or tabi (aliases: delphi, pydelphi, fd).");
+          exit(EXIT_FAILURE);
+        }
+      }
       pbe.flag_pbe = true;
       continue;
     }
@@ -652,6 +682,84 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.pbsa_perf =
           require_choice(common_value, {"off", "summary", "detail"},
                          "-pbsa-perf");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-timing", "--pbe-timing"},
+                             common_value, i)) {
+      pbe.timing =
+          require_choice(common_value, {"off", "summary", "detail"},
+                         "-pbe-timing");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-sum", "--pbe-tabi-sum"},
+                             common_value, i)) {
+      pbe.tabi_sum =
+          require_choice(common_value, {"auto", "direct", "treecode"},
+                         "-pbe-tabi-sum");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-geometry",
+                                   "--pbe-tabi-geometry"},
+                             common_value, i)) {
+      pbe.tabi_geometry =
+          require_choice(common_value, {"triangle", "point-panel"},
+                         "-pbe-tabi-geometry");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-diagonal",
+                                   "--pbe-tabi-diagonal"},
+                             common_value, i)) {
+      pbe.tabi_diagonal =
+          require_choice(common_value, {"solid-angle", "flat", "off"},
+                         "-pbe-tabi-diagonal");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-taylor-order",
+                                   "--pbe-tabi-taylor-order"},
+                             common_value, i)) {
+      pbe.tabi_taylor_order = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-formulation",
+                                   "--pbe-tabi-formulation"},
+                             common_value, i)) {
+      pbe.tabi_formulation = require_choice(
+          common_value, {"titan-v1", "jcp2013", "calibrated-debug"},
+          "-pbe-tabi-formulation");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-energy-projection",
+                                   "--pbe-tabi-energy-projection"},
+                             common_value, i)) {
+      pbe.tabi_energy_projection = require_choice(
+          common_value, {"boundary", "born-check", "charge-potential-debug"},
+          "-pbe-tabi-energy-projection");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-stability-audit",
+                                   "--pbe-stability-audit"},
+                             common_value, i)) {
+      pbe.stability_audit =
+          require_choice(common_value, {"off", "summary", "detail"},
+                         "-pbe-stability-audit");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-stability-mode",
+                                   "--pbe-stability-mode"},
+                             common_value, i)) {
+      pbe.stability_mode =
+          require_choice(common_value,
+                         {"off", "diagnose", "anchor", "hysteresis",
+                          "ensemble"},
+                         "-pbe-stability-mode");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-grid-anchor", "--pbe-grid-anchor"},
+                             common_value, i)) {
+      pbe.grid_anchor =
+          require_choice(common_value,
+                         {"auto", "per-frame", "first-frame", "fixed-center"},
+                         "-pbe-grid-anchor");
       continue;
     }
     if (consume_option_value(arg, {"-pbe-scale", "--pbe-scale"},
@@ -938,6 +1046,40 @@ int arguments::parse_arguments(int argc, char **argv) {
                              common_value, i)) {
       pbe.nl_multigrid =
           require_choice(common_value, {"off", "fas"}, "-pbe-nl-multigrid");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nwt-kernel",
+                                   "--pbe-nwt-kernel"},
+                             common_value, i)) {
+      pbe.nwt_kernel =
+          require_choice(common_value, {"auto", "legacy", "delphi-half"},
+                         "-pbe-nwt-kernel");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nwt-homo-kernel",
+                                   "--pbe-nwt-homo-kernel"},
+                             common_value, i)) {
+      pbe.nwt_homo_kernel =
+          require_choice(common_value,
+                         {"auto", "packed-list", "row-span", "avx2",
+                          "salt-tiled"},
+                         "-pbe-nwt-homo-kernel");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-nwt-progress",
+                                   "--pbe-nwt-progress"},
+                             common_value, i)) {
+      pbe.nwt_progress =
+          require_choice(common_value, {"auto", "off", "strict"},
+                         "-pbe-nwt-progress");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-linear-kernel",
+                                   "--pbe-linear-kernel"},
+                             common_value, i)) {
+      pbe.linear_kernel =
+          require_choice(common_value, {"auto", "legacy", "half-packed"},
+                         "-pbe-linear-kernel");
       continue;
     }
     if (consume_option_value(arg, {"-pbe-gaussian-exp",

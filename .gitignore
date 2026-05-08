@@ -53,4 +53,22 @@ lib_ff/
 
 !/test/
 /test/*
-
+!/test/pbe_snapshot_stability_scan.ps1
+!/test/pbe_grid_boundary_pydelphi_compare.ps1
+!/test/pbe_timing_compare.ps1
+!/test/pbe_nwt_kernel_modes_smoke.ps1
+!/test/pbe_clean_room_audit.ps1
+!/test/pbe_tabi_smoke.ps1
+!/test/pbe_tabi_surface_mesh_smoke.ps1
+!/test/pbe_tabi_solid_angle_smoke.ps1
+!/test/pbe_tabi_treecode_accuracy.ps1
+!/test/pbe_tabi_profile_smoke.ps1
+!/test/pbe_tabi_vs_grid_compare.ps1
+!/test/pbe_tabi_kirkwood_analytic.ps1
+!/test/pbe_tabi_accuracy_matrix.ps1
+!/test/pbe_tabi_pka_experimental_smoke.ps1
+!/test/pbe_tabi_reference_cache.ps1
+!/test/sasa_surface_smoke.ps1
+!/test/sasa_surface_benchmark.ps1
+!/test/pbe_delphi_export_maps.ps1
+!/test/pbe_oracle_manifest.csv

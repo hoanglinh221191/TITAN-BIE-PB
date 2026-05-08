@@ -66,6 +66,7 @@ DENSE_RG_COLORS = {
     ("unphos", "rna"): "#4178b8",
 }
 PANEL_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+KJMOL_TO_KCALMOL = 1.0 / 4.184
 NATURAL_SORT_RE = re.compile(r"(\d+)")
 DISCOVERY_RE = re.compile(r"^10dimer(?P<system>unphos|phos)_conf(?P<conf>\d+)_800$", re.IGNORECASE)
 NODE_LABEL_RE = re.compile(r"(?P<resname>[A-Za-z]+)(?P<resid>-?\d+)(?:_(?P<chain>[^_]+))?$")
@@ -5891,6 +5892,8 @@ def plot_rna_energy_binned_metric(
     std_column: str | None,
     title: str,
     ylabel: str,
+    *,
+    y_scale: float = 1.0,
 ) -> None:
     plotted = False
     for system in SYSTEM_ORDER:
@@ -5898,7 +5901,7 @@ def plot_rna_energy_binned_metric(
         if table is None or mean_column not in table.columns:
             continue
         x = np.asarray(table.columns["BoundProteinChainsBin"], dtype=float)
-        y = np.asarray(table.columns[mean_column], dtype=float)
+        y = np.asarray(table.columns[mean_column], dtype=float) * y_scale
         mask = np.isfinite(x) & np.isfinite(y)
         if not np.any(mask):
             continue
@@ -5914,7 +5917,7 @@ def plot_rna_energy_binned_metric(
             color=system_color(system),
         )
         if std_column and std_column in table.columns:
-            yerr = np.asarray(table.columns[std_column], dtype=float)[mask][order]
+            yerr = np.asarray(table.columns[std_column], dtype=float)[mask][order] * y_scale
             valid_err = np.isfinite(yerr)
             if np.any(valid_err):
                 lower = y_plot - np.where(valid_err, yerr, 0.0)
@@ -5925,7 +5928,7 @@ def plot_rna_energy_binned_metric(
         draw_missing_axis(ax, f"{title}\nNot available")
         return
     ax.set_title(title)
-    ax.set_xlabel("Protein chains bound to one RNA chain")
+    ax.set_xlabel("Bound protein chains per RNA")
     ax.set_ylabel(ylabel)
     ax.set_xlim(left=-0.25)
 
@@ -5975,7 +5978,13 @@ def binding_energy_trace_xy(
     return x, y
 
 
-def binned_trend_line(x: np.ndarray, y: np.ndarray, bins: int = 18) -> tuple[np.ndarray, np.ndarray]:
+def binned_trend_line(
+    x: np.ndarray,
+    y: np.ndarray,
+    bins: int = 18,
+    *,
+    statistic: str = "mean",
+) -> tuple[np.ndarray, np.ndarray]:
     if x.size < 8 or y.size < 8:
         return np.asarray([], dtype=float), np.asarray([], dtype=float)
     xmin = float(np.min(x))
@@ -5984,7 +5993,7 @@ def binned_trend_line(x: np.ndarray, y: np.ndarray, bins: int = 18) -> tuple[np.
         return np.asarray([], dtype=float), np.asarray([], dtype=float)
     edges = np.linspace(xmin, xmax, max(4, int(bins)) + 1)
     centers: list[float] = []
-    medians: list[float] = []
+    values: list[float] = []
     for idx in range(edges.size - 1):
         lo = edges[idx]
         hi = edges[idx + 1]
@@ -5995,8 +6004,11 @@ def binned_trend_line(x: np.ndarray, y: np.ndarray, bins: int = 18) -> tuple[np.
         if np.count_nonzero(mask) < 5:
             continue
         centers.append(0.5 * (lo + hi))
-        medians.append(float(np.median(y[mask])))
-    return np.asarray(centers, dtype=float), np.asarray(medians, dtype=float)
+        if statistic == "median":
+            values.append(float(np.median(y[mask])))
+        else:
+            values.append(float(np.mean(y[mask])))
+    return np.asarray(centers, dtype=float), np.asarray(values, dtype=float)
 
 
 def plot_energy_trace_relationship(
@@ -6010,6 +6022,9 @@ def plot_energy_trace_relationship(
     xlabel: str = r"Protein-RNA attraction strength, $-E_{\mathrm{total}}$ (kJ/mol)",
     inside_dense_only: bool = True,
     contacting_only: bool = True,
+    x_scale: float = 1.0,
+    show_points: bool = True,
+    trend_statistic: str = "mean",
 ) -> None:
     plotted = False
     derived_x_metrics = {"AttractionStrength_kJmol", "AttractionPerBoundChain_kJmol", "AttractionPerBeadContact_kJmol"}
@@ -6031,18 +6046,27 @@ def plot_energy_trace_relationship(
         )
         if x.size == 0:
             continue
-        ax.scatter(
-            x,
-            y,
-            s=5,
-            alpha=0.12,
-            color=system_color(system),
-            edgecolors="none",
-            rasterized=True,
-        )
-        trend_x, trend_y = binned_trend_line(x, y)
+        x = x * x_scale
+        if show_points:
+            ax.scatter(
+                x,
+                y,
+                s=5,
+                alpha=0.12,
+                color=system_color(system),
+                edgecolors="none",
+                rasterized=True,
+            )
+        trend_x, trend_y = binned_trend_line(x, y, statistic=trend_statistic)
         if trend_x.size:
-            ax.plot(trend_x, trend_y, color=system_color(system), linewidth=2.0)
+            ax.plot(
+                trend_x,
+                trend_y,
+                color=system_color(system),
+                linewidth=2.1,
+                marker="o",
+                markersize=3.0,
+            )
         plotted = True
     if not plotted:
         draw_missing_axis(ax, f"{title}\nEnergy-trace data not available")
@@ -6050,49 +6074,65 @@ def plot_energy_trace_relationship(
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    ax.set_xlim(left=0.0 if x_metric == "AttractionStrength_kJmol" else None)
+    if x_metric == "AttractionStrength_kJmol":
+        ax.set_xlim(left=0.0)
 
 
 def make_fig16_rna_energy_compaction(
     systems: dict[str, AggregatedSystem], outdir: Path, dpi: int
 ) -> list[str]:
-    fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.9))
-    fig.subplots_adjust(hspace=0.44, wspace=0.36, top=0.85, bottom=0.12)
+    fig, axes = plt.subplots(2, 2, figsize=(7.2, 6.25))
+    fig.subplots_adjust(hspace=0.54, wspace=0.38, top=0.84, bottom=0.18)
     panels = [
-        ("EelecMean_kJmol", "EelecStd_kJmol", "Protein-RNA electrostatics vs binding", r"$E_{\mathrm{elec}}$ (kJ/mol)"),
         (
-            "AttractionStrengthMean_kJmol",
-            "AttractionStrengthStd_kJmol",
-            "Protein-RNA attraction vs binding",
-            r"Attraction strength, $-E_{\mathrm{total}}$ (kJ/mol)",
+            "EelecMean_kJmol",
+            "EelecStd_kJmol",
+            "Electrostatics vs binding",
+            r"$E_{\mathrm{elec}}$ (kcal/mol)",
+        ),
+        (
+            "EtotalMean_kJmol",
+            "EtotalStd_kJmol",
+            "Total energy vs binding",
+            r"$E_{\mathrm{total}}$ (kcal/mol)",
         ),
     ]
     for idx, (mean_col, std_col, title, ylabel) in enumerate(panels):
         axis = axes.ravel()[idx]
-        plot_rna_energy_binned_metric(axis, systems, mean_col, std_col, title, ylabel)
+        plot_rna_energy_binned_metric(axis, systems, mean_col, std_col, title, ylabel, y_scale=KJMOL_TO_KCALMOL)
         add_panel_label(axis, PANEL_LABELS[idx])
 
     plot_energy_trace_relationship(
         axes[1, 0],
         systems,
         "Rg_nm",
-        "RNA size vs protein-RNA attraction",
+        r"RNA size vs $E_{\mathrm{total}}$",
         "RNA Rg (nm)",
+        x_metric="Etotal_ProteinRNA_kJmol",
+        xlabel=r"$E_{\mathrm{total}}$ (kcal/mol)",
+        x_scale=KJMOL_TO_KCALMOL,
+        show_points=False,
+        trend_statistic="mean",
     )
     add_panel_label(axes[1, 0], PANEL_LABELS[2])
     plot_energy_trace_relationship(
         axes[1, 1],
         systems,
         "LongRangeContactFraction",
-        "RNA tertiary compaction vs protein-RNA attraction",
+        r"Long-range contacts vs $E_{\mathrm{total}}$",
         "Long-range contact fraction",
+        x_metric="Etotal_ProteinRNA_kJmol",
+        xlabel=r"$E_{\mathrm{total}}$ (kcal/mol)",
+        x_scale=KJMOL_TO_KCALMOL,
+        show_points=False,
+        trend_statistic="mean",
     )
     add_panel_label(axes[1, 1], PANEL_LABELS[3])
     add_system_figure_legend(fig, y=0.935)
     fig.text(
         0.5,
-        0.04,
-        "Panels C-D use contacting RNA-chain frames inside the giant condensate; solid lines show binned medians.",
+        0.055,
+        "Panels C-D use contacting RNA-chain frames inside the giant condensate; solid lines show binned means.",
         ha="center",
         va="center",
         fontsize=7.3,

@@ -78,6 +78,7 @@ struct GistArgs {
 
 struct PbeArgs {
   bool flag_pbe{false};
+  std::string backend{"grid"};
   double scale{2.0};
   double margin{15.0};
   std::string gridbox{"cuboidal"};
@@ -126,6 +127,10 @@ struct PbeArgs {
   std::string nl_solver{"picard"};
   std::string nl_inner{"auto"};
   std::string nl_multigrid{"off"};
+  std::string nwt_kernel{"auto"};
+  std::string nwt_homo_kernel{"auto"};
+  std::string nwt_progress{"auto"};
+  std::string linear_kernel{"auto"};
   double gaussian_exp{2.0};
   double gaussian_sigma{1.0};
   double density_cutoff{0.759};
@@ -149,6 +154,16 @@ struct PbeArgs {
   int pbsa_ie_min_samples{10};
   double pbsa_ie_filter_sigma{2.0};
   std::string pbsa_perf{"summary"};
+  std::string timing{"off"};
+  std::string tabi_sum{"auto"};
+  std::string tabi_geometry{"triangle"};
+  std::string tabi_diagonal{"solid-angle"};
+  int tabi_taylor_order{3};
+  std::string tabi_formulation{"jcp2013"};
+  std::string tabi_energy_projection{"boundary"};
+  std::string stability_audit{"off"};
+  std::string stability_mode{"off"};
+  std::string grid_anchor{"auto"};
   std::string test_pqr{};
   int test_grid_size{0};
   bool test_center_user{false};

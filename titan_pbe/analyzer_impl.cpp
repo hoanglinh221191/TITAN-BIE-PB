@@ -4,7 +4,9 @@
 #include "titan_executor.h"
 #include "titan_interaction_entropy.h"
 #include "titan_sasa.h"
+#include "titan_simd_dispatch.h"
 #include "titan_ui.h"
+#include "tabi_types.h"
 
 #include <algorithm>
 #include <array>
@@ -67,6 +69,118 @@ double elapsed_ms(std::chrono::steady_clock::time_point begin,
                   std::chrono::steady_clock::time_point end) {
   return std::chrono::duration<double, std::milli>(end - begin).count();
 }
+
+struct NwtHomoOffsets {
+  std::ptrdiff_t xp{0};
+  std::ptrdiff_t xm{0};
+  std::ptrdiff_t yp{0};
+  std::ptrdiff_t ym{0};
+  std::ptrdiff_t zp{0};
+  std::ptrdiff_t zm{0};
+};
+
+NwtHomoOffsets nwt_homo_offsets(std::size_t nx_value,
+                                std::size_t ny_value,
+                                int color) noexcept {
+  const std::ptrdiff_t nx = static_cast<std::ptrdiff_t>(nx_value);
+  const std::ptrdiff_t xy =
+      static_cast<std::ptrdiff_t>(nx_value * ny_value);
+  if (color == 0) {
+    return {0,
+            -1,
+            nx / 2,
+            -((nx + 1) / 2),
+            xy / 2,
+            -((xy + 1) / 2)};
+  }
+  return {1, 0, (nx + 1) / 2, -(nx / 2), (xy + 1) / 2, -(xy / 2)};
+}
+
+#if TITAN_SIMD_X86
+TITAN_TARGET_AVX2
+void update_nwt_homo_linear_span_avx2(
+    double *write_phi, const double *read_phi, const double *rhs,
+    const double *eps_sum, const double *eps, std::uint32_t begin,
+    std::uint32_t count, const NwtHomoOffsets offsets, double omega,
+    bool accumulate_rms, double &sumsq, double &max_delta,
+    std::size_t &sample_count) noexcept {
+  const __m256d omega_v = _mm256_set1_pd(omega);
+  const __m256d min_diag = _mm256_set1_pd(1.0e-12);
+  const __m256d sign_mask = _mm256_set1_pd(-0.0);
+  __m256d sumsq_v = _mm256_setzero_pd();
+  __m256d max_v = _mm256_setzero_pd();
+
+  std::size_t h = begin;
+  const std::size_t end = static_cast<std::size_t>(begin) + count;
+  for (; h + 4 <= end; h += 4) {
+    const auto base = static_cast<std::ptrdiff_t>(h);
+    const __m256d old_phi = _mm256_loadu_pd(write_phi + h);
+    __m256d phi_sum =
+        _mm256_add_pd(_mm256_loadu_pd(read_phi + base + offsets.xp),
+                      _mm256_loadu_pd(read_phi + base + offsets.xm));
+    phi_sum =
+        _mm256_add_pd(phi_sum,
+                      _mm256_loadu_pd(read_phi + base + offsets.yp));
+    phi_sum =
+        _mm256_add_pd(phi_sum,
+                      _mm256_loadu_pd(read_phi + base + offsets.ym));
+    phi_sum =
+        _mm256_add_pd(phi_sum,
+                      _mm256_loadu_pd(read_phi + base + offsets.zp));
+    phi_sum =
+        _mm256_add_pd(phi_sum,
+                      _mm256_loadu_pd(read_phi + base + offsets.zm));
+    const __m256d numerator =
+        _mm256_add_pd(_mm256_mul_pd(_mm256_loadu_pd(eps + h), phi_sum),
+                      _mm256_loadu_pd(rhs + h));
+    const __m256d diagonal =
+        _mm256_max_pd(_mm256_loadu_pd(eps_sum + h), min_diag);
+    const __m256d target = _mm256_div_pd(numerator, diagonal);
+    const __m256d delta =
+        _mm256_mul_pd(omega_v, _mm256_sub_pd(target, old_phi));
+    const __m256d updated = _mm256_add_pd(old_phi, delta);
+    _mm256_storeu_pd(write_phi + h, updated);
+    if (accumulate_rms) {
+      sumsq_v = _mm256_add_pd(sumsq_v, _mm256_mul_pd(delta, delta));
+      const __m256d abs_delta = _mm256_andnot_pd(sign_mask, delta);
+      max_v = _mm256_max_pd(max_v, abs_delta);
+    }
+  }
+
+  if (accumulate_rms) {
+    alignas(32) double lanes[4];
+    _mm256_store_pd(lanes, sumsq_v);
+    sumsq += lanes[0] + lanes[1] + lanes[2] + lanes[3];
+    _mm256_store_pd(lanes, max_v);
+    max_delta = std::max(
+        max_delta, std::max(std::max(lanes[0], lanes[1]),
+                            std::max(lanes[2], lanes[3])));
+    sample_count += h - static_cast<std::size_t>(begin);
+  }
+
+  for (; h < end; ++h) {
+    const auto base = static_cast<std::ptrdiff_t>(h);
+    const double old_phi = write_phi[h];
+    const double neighbor_sum =
+        eps[h] * (read_phi[base + offsets.xp] +
+                  read_phi[base + offsets.xm] +
+                  read_phi[base + offsets.yp] +
+                  read_phi[base + offsets.ym] +
+                  read_phi[base + offsets.zp] +
+                  read_phi[base + offsets.zm]);
+    const double target =
+        (neighbor_sum + rhs[h]) / std::max(1.0e-12, eps_sum[h]);
+    const double updated = old_phi + omega * (target - old_phi);
+    const double delta = updated - old_phi;
+    write_phi[h] = updated;
+    if (accumulate_rms) {
+      sumsq += delta * delta;
+      max_delta = std::max(max_delta, std::abs(delta));
+      ++sample_count;
+    }
+  }
+}
+#endif
 
 std::string csv_escape(const std::string &value) {
   if (value.find_first_of(",\"\n\r") == std::string::npos)
@@ -137,6 +251,57 @@ std::pair<double, double> delphi_sinh_cosh_tail(double phi,
     return {sinh_phi, std::sqrt(1.0 + sinh_phi * sinh_phi)};
   }
   return {std::sinh(phi), std::cosh(phi)};
+}
+
+std::pair<double, double>
+delphi_sinh_cosh_tail_precomputed(double phi, double effective_clip,
+                                  double sinh_clip) noexcept {
+  if (phi > effective_clip) {
+    const double sinh_phi = sinh_clip + sinh_clip * (phi - effective_clip);
+    return {sinh_phi, std::sqrt(1.0 + sinh_phi * sinh_phi)};
+  }
+  if (phi < -effective_clip) {
+    const double sinh_phi = -sinh_clip + sinh_clip * (phi + effective_clip);
+    return {sinh_phi, std::sqrt(1.0 + sinh_phi * sinh_phi)};
+  }
+  return {std::sinh(phi), std::cosh(phi)};
+}
+
+std::pair<double, double>
+delphi_sinh_cosh_tail_single_sinh(double phi, double effective_clip,
+                                  double sinh_clip) noexcept {
+  if (phi > effective_clip) {
+    const double sinh_phi = sinh_clip + sinh_clip * (phi - effective_clip);
+    return {sinh_phi, std::sqrt(1.0 + sinh_phi * sinh_phi)};
+  }
+  if (phi < -effective_clip) {
+    const double sinh_phi = -sinh_clip + sinh_clip * (phi + effective_clip);
+    return {sinh_phi, std::sqrt(1.0 + sinh_phi * sinh_phi)};
+  }
+  const double abs_phi = std::abs(phi);
+  if (abs_phi <= 1.5) {
+    const double x2 = phi * phi;
+    const double sinh_poly =
+        phi *
+        (1.0 +
+         x2 * (1.0 / 6.0 +
+               x2 * (1.0 / 120.0 +
+                     x2 * (1.0 / 5040.0 +
+                           x2 * (1.0 / 362880.0 +
+                                 x2 * (1.0 / 39916800.0 +
+                                       x2 * (1.0 / 6227020800.0)))))));
+    const double cosh_poly =
+        1.0 +
+        x2 * (0.5 +
+              x2 * (1.0 / 24.0 +
+                    x2 * (1.0 / 720.0 +
+                          x2 * (1.0 / 40320.0 +
+                                x2 * (1.0 / 3628800.0 +
+                                      x2 * (1.0 / 479001600.0))))));
+    return {sinh_poly, cosh_poly};
+  }
+  const double sinh_phi = std::sinh(phi);
+  return {sinh_phi, std::sqrt(1.0 + sinh_phi * sinh_phi)};
 }
 
 bool parse_double_token(const std::string &token, double &value) {
@@ -519,6 +684,13 @@ double fallback_radius_from_mass(double mass) noexcept {
 
 void AnalyzerImpl::configure(const arguments &args) {
   args_ = args.pbe;
+  configured_threads_ = std::max<std::size_t>(1, args.nt);
+  reset_grid_anchor();
+  last_stability_state_ = StabilityFrameState{};
+  last_stability_medium_state_ = StabilityMediumState{};
+  last_stability_ensemble_ = StabilityEnsembleState{};
+  stability_hysteresis_cells_kept_frame_ = 0;
+  stability_hysteresis_cells_released_frame_ = 0;
   if (args_.pbsa) {
     args_.flag_pbe = true;
     args_.dgsolv = true;
@@ -531,6 +703,12 @@ void AnalyzerImpl::begin_trajectory(std::size_t trajectory_id,
     return;
   current_trajectory_id_ = trajectory_id;
   current_source_label_ = source_label;
+  reset_grid_anchor();
+  last_stability_state_ = StabilityFrameState{};
+  last_stability_medium_state_ = StabilityMediumState{};
+  last_stability_ensemble_ = StabilityEnsembleState{};
+  stability_hysteresis_cells_kept_frame_ = 0;
+  stability_hysteresis_cells_released_frame_ = 0;
 }
 
 void AnalyzerImpl::end_trajectory(std::fstream &log) {
@@ -2471,9 +2649,10 @@ AnalyzerImpl::NewtonCorrectionStats AnalyzerImpl::solve_newton_correction_sor(
             for (std::size_t kk = begin; kk < end; ++kk) {
               const std::size_t k = kk + 1;
               for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
-                for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
-                  if (static_cast<int>((i + j + k) & 1ULL) != color)
-                    continue;
+                const std::size_t first_i =
+                    1 + (static_cast<int>((1 + j + k) & 1ULL) == color ? 0U
+                                                                        : 1U);
+                for (std::size_t i = first_i; i + 1 < shape.nx; i += 2) {
                   const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
                   const double eps_sum =
                       std::max(1.0e-12, denom_[id] - screen_[id]);
@@ -2674,9 +2853,9 @@ AnalyzerImpl::SolveStats AnalyzerImpl::smooth_newton_correction_level(
     for (int color = 0; color < 2; ++color) {
       for (std::size_t k = 1; k + 1 < shape.nz; ++k) {
         for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
-          for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
-            if (static_cast<int>((i + j + k) & 1ULL) != color)
-              continue;
+          const std::size_t first_i =
+              1 + (static_cast<int>((1 + j + k) & 1ULL) == color ? 0U : 1U);
+          for (std::size_t i = first_i; i + 1 < shape.nx; i += 2) {
             const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
             const double neighbor_sum =
                 level.eps_x[id] * level.delta[id + 1] +
@@ -3924,9 +4103,10 @@ AnalyzerImpl::SolveStats AnalyzerImpl::solve_nonlinear_sor_block(
             for (std::size_t kk = begin; kk < end; ++kk) {
               const std::size_t k = kk + 1;
               for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
-                for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
-                  if (static_cast<int>((i + j + k) & 1ULL) != color)
-                    continue;
+                const std::size_t first_i =
+                    1 + (static_cast<int>((1 + j + k) & 1ULL) == color ? 0U
+                                                                        : 1U);
+                for (std::size_t i = first_i; i + 1 < shape.nx; i += 2) {
                   const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
                   const double neighbor_sum =
                       eps_x_[id] * phi_[id + 1] +
@@ -3975,9 +4155,253 @@ AnalyzerImpl::SolveStats AnalyzerImpl::solve_nonlinear_sor_block(
   return stats;
 }
 
+bool AnalyzerImpl::nwt_half_shape_matches(const GridShape &shape) const
+    noexcept {
+  const GridShape &cached = nwt_half_workspace_.shape;
+  return nwt_half_workspace_.active && cached.n == shape.n &&
+         cached.nx == shape.nx && cached.ny == shape.ny &&
+         cached.nz == shape.nz;
+}
+
+void AnalyzerImpl::invalidate_nwt_half_workspace() noexcept {
+  nwt_half_workspace_.active = false;
+  nwt_half_workspace_.coeff_ready = false;
+  nwt_half_workspace_.packed_ready = false;
+  nwt_half_workspace_.row_span_ready = false;
+  nwt_half_workspace_.salt_tile_ready = false;
+  nwt_half_workspace_.rhs_scale = 0.0;
+}
+
+void AnalyzerImpl::prepare_nwt_half_workspace(const GridShape &shape,
+                                              double rhs_scale) {
+  const std::size_t even_count = (shape.n + 1) / 2;
+  const std::size_t odd_count = shape.n / 2;
+  const bool shape_match = nwt_half_workspace_.shape.n == shape.n &&
+                           nwt_half_workspace_.shape.nx == shape.nx &&
+                           nwt_half_workspace_.shape.ny == shape.ny &&
+                           nwt_half_workspace_.shape.nz == shape.nz;
+  if (!shape_match ||
+      nwt_half_workspace_.even_phi.size() != even_count ||
+      nwt_half_workspace_.odd_phi.size() != odd_count) {
+    nwt_half_workspace_.shape = shape;
+    nwt_half_workspace_.even_phi.assign(even_count, 0.0);
+    nwt_half_workspace_.odd_phi.assign(odd_count, 0.0);
+    nwt_half_workspace_.rhs_even.assign(even_count, 0.0);
+    nwt_half_workspace_.rhs_odd.assign(odd_count, 0.0);
+    nwt_half_workspace_.eps_sum_even.assign(even_count, 1.0);
+    nwt_half_workspace_.eps_sum_odd.assign(odd_count, 1.0);
+    nwt_half_workspace_.screen_even.assign(even_count, 0.0);
+    nwt_half_workspace_.screen_odd.assign(odd_count, 0.0);
+    nwt_half_workspace_.homo_eps_even.assign(even_count, 0.0);
+    nwt_half_workspace_.homo_eps_odd.assign(odd_count, 0.0);
+    nwt_half_workspace_.coeff_ready = false;
+    nwt_half_workspace_.packed_ready = false;
+    nwt_half_workspace_.row_span_ready = false;
+    nwt_half_workspace_.salt_tile_ready = false;
+  }
+  if (!nwt_half_workspace_.active) {
+    for (std::size_t id = 0; id < shape.n; ++id) {
+      if ((id & 1U) == 0U)
+        nwt_half_workspace_.even_phi[id / 2] = phi_[id];
+      else
+        nwt_half_workspace_.odd_phi[id / 2] = phi_[id];
+    }
+    nwt_half_workspace_.active = true;
+  }
+  if (!nwt_half_workspace_.coeff_ready ||
+      std::abs(nwt_half_workspace_.rhs_scale - rhs_scale) > 1.0e-30) {
+    const auto pack_begin = std::chrono::steady_clock::now();
+    for (std::size_t id = 0; id < shape.n; ++id) {
+      const std::size_t h = id / 2;
+      const double eps_sum = std::max(1.0e-12, denom_[id] - screen_[id]);
+      if ((id & 1U) == 0U) {
+        nwt_half_workspace_.rhs_even[h] = rhs_scale * rho_[id];
+        nwt_half_workspace_.eps_sum_even[h] = eps_sum;
+        nwt_half_workspace_.screen_even[h] = screen_[id];
+      } else {
+        nwt_half_workspace_.rhs_odd[h] = rhs_scale * rho_[id];
+        nwt_half_workspace_.eps_sum_odd[h] = eps_sum;
+        nwt_half_workspace_.screen_odd[h] = screen_[id];
+      }
+    }
+
+    nwt_half_workspace_.even_homo_cells.clear();
+    nwt_half_workspace_.even_hetero_cells.clear();
+    nwt_half_workspace_.odd_homo_cells.clear();
+    nwt_half_workspace_.odd_hetero_cells.clear();
+    nwt_half_workspace_.even_homo_linear_spans.clear();
+    nwt_half_workspace_.even_homo_salt_spans.clear();
+    nwt_half_workspace_.odd_homo_linear_spans.clear();
+    nwt_half_workspace_.odd_homo_salt_spans.clear();
+    nwt_half_workspace_.even_homo_linear_tiles.clear();
+    nwt_half_workspace_.even_homo_salt_tiles.clear();
+    nwt_half_workspace_.odd_homo_linear_tiles.clear();
+    nwt_half_workspace_.odd_homo_salt_tiles.clear();
+    nwt_half_workspace_.homo_cells = 0;
+    nwt_half_workspace_.homo_linear_cells = 0;
+    nwt_half_workspace_.homo_salt_cells = 0;
+    if (shape.n <= static_cast<std::size_t>(
+                       std::numeric_limits<std::uint32_t>::max())) {
+      const std::size_t xy = shape.nx * shape.ny;
+      const std::size_t reserve_each =
+          shape.n > 0 ? std::max<std::size_t>(1, shape.n / 4) : 0;
+      nwt_half_workspace_.even_homo_cells.reserve(reserve_each);
+      nwt_half_workspace_.even_hetero_cells.reserve(reserve_each);
+      nwt_half_workspace_.odd_homo_cells.reserve(reserve_each);
+      nwt_half_workspace_.odd_hetero_cells.reserve(reserve_each);
+      const auto append_span =
+          [](std::vector<NwtHalfWorkspace::HomoSpan> &spans,
+             std::uint32_t h) {
+            if (!spans.empty()) {
+              auto &last = spans.back();
+              if (last.begin + last.count == h) {
+                ++last.count;
+                return;
+              }
+            }
+            spans.push_back({h, 1});
+          };
+      auto add_cell = [&](int color, std::size_t id) {
+        const double ex_p = eps_x_[id];
+        const double ex_m = eps_x_[id - 1];
+        const double ey_p = eps_y_[id];
+        const double ey_m = eps_y_[id - shape.nx];
+        const double ez_p = eps_z_[id];
+        const double ez_m = eps_z_[id - xy];
+        NwtHalfWorkspace::PackedCell cell{};
+        cell.h = static_cast<std::uint32_t>(id / 2);
+        cell.xp = static_cast<std::uint32_t>((id + 1) / 2);
+        cell.xm = static_cast<std::uint32_t>((id - 1) / 2);
+        cell.yp = static_cast<std::uint32_t>((id + shape.nx) / 2);
+        cell.ym = static_cast<std::uint32_t>((id - shape.nx) / 2);
+        cell.zp = static_cast<std::uint32_t>((id + xy) / 2);
+        cell.zm = static_cast<std::uint32_t>((id - xy) / 2);
+        cell.rhs = rhs_scale * rho_[id];
+        cell.eps_sum = std::max(1.0e-12, denom_[id] - screen_[id]);
+        cell.screen = screen_[id];
+        cell.ex_p = ex_p;
+        cell.ex_m = ex_m;
+        cell.ey_p = ey_p;
+        cell.ey_m = ey_m;
+        cell.ez_p = ez_p;
+        cell.ez_m = ez_m;
+        const bool homogeneous = ex_p == ex_m && ex_p == ey_p &&
+                                 ex_p == ey_m && ex_p == ez_p &&
+                                 ex_p == ez_m;
+        if (color == 0) {
+          (homogeneous ? nwt_half_workspace_.even_homo_cells
+                       : nwt_half_workspace_.even_hetero_cells)
+              .push_back(cell);
+          if (homogeneous) {
+            nwt_half_workspace_.homo_eps_even[cell.h] = ex_p;
+            if (cell.screen > 0.0) {
+              append_span(nwt_half_workspace_.even_homo_salt_spans, cell.h);
+              ++nwt_half_workspace_.homo_salt_cells;
+            } else {
+              append_span(nwt_half_workspace_.even_homo_linear_spans, cell.h);
+              ++nwt_half_workspace_.homo_linear_cells;
+            }
+            ++nwt_half_workspace_.homo_cells;
+          }
+        } else {
+          (homogeneous ? nwt_half_workspace_.odd_homo_cells
+                       : nwt_half_workspace_.odd_hetero_cells)
+              .push_back(cell);
+          if (homogeneous) {
+            nwt_half_workspace_.homo_eps_odd[cell.h] = ex_p;
+            if (cell.screen > 0.0) {
+              append_span(nwt_half_workspace_.odd_homo_salt_spans, cell.h);
+              ++nwt_half_workspace_.homo_salt_cells;
+            } else {
+              append_span(nwt_half_workspace_.odd_homo_linear_spans, cell.h);
+              ++nwt_half_workspace_.homo_linear_cells;
+            }
+            ++nwt_half_workspace_.homo_cells;
+          }
+        }
+      };
+      for (std::size_t k = 1; k + 1 < shape.nz; ++k) {
+        for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
+          for (int color = 0; color < 2; ++color) {
+            const std::size_t first_i =
+                1 + (static_cast<int>((1 + j + k) & 1ULL) == color ? 0U
+                                                                    : 1U);
+            for (std::size_t i = first_i; i + 1 < shape.nx; i += 2) {
+              add_cell(color, idx3(i, j, k, shape.nx, shape.ny));
+            }
+          }
+        }
+      }
+      const auto build_tiles =
+          [](const std::vector<NwtHalfWorkspace::HomoSpan> &spans,
+             std::vector<NwtHalfWorkspace::HomoTile> &tiles) {
+            constexpr std::uint32_t kTargetTileCells = 2048;
+            tiles.clear();
+            for (const auto &span : spans) {
+              std::uint32_t begin = span.begin;
+              std::uint32_t remaining = span.count;
+              while (remaining > 0) {
+                const std::uint32_t take =
+                    std::min<std::uint32_t>(remaining, kTargetTileCells);
+                if (!tiles.empty()) {
+                  auto &last = tiles.back();
+                  const bool contiguous = last.begin + last.count == begin;
+                  const bool has_room =
+                      last.count < kTargetTileCells &&
+                      take <= kTargetTileCells - last.count;
+                  if (contiguous && has_room) {
+                    last.count += take;
+                  } else {
+                    tiles.push_back({begin, take});
+                  }
+                } else {
+                  tiles.push_back({begin, take});
+                }
+                begin += take;
+                remaining -= take;
+              }
+            }
+          };
+      build_tiles(nwt_half_workspace_.even_homo_linear_spans,
+                  nwt_half_workspace_.even_homo_linear_tiles);
+      build_tiles(nwt_half_workspace_.even_homo_salt_spans,
+                  nwt_half_workspace_.even_homo_salt_tiles);
+      build_tiles(nwt_half_workspace_.odd_homo_linear_spans,
+                  nwt_half_workspace_.odd_homo_linear_tiles);
+      build_tiles(nwt_half_workspace_.odd_homo_salt_spans,
+                  nwt_half_workspace_.odd_homo_salt_tiles);
+      nwt_half_workspace_.packed_ready = true;
+      nwt_half_workspace_.row_span_ready = true;
+      nwt_half_workspace_.salt_tile_ready = true;
+    } else {
+      nwt_half_workspace_.packed_ready = false;
+      nwt_half_workspace_.row_span_ready = false;
+      nwt_half_workspace_.salt_tile_ready = false;
+    }
+    nwt_half_workspace_.rhs_scale = rhs_scale;
+    nwt_half_workspace_.coeff_ready = true;
+    add_timing_ms(TimingBucket::NwtCoeffPack,
+                  std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - pack_begin)
+                      .count());
+  }
+}
+
+void AnalyzerImpl::flush_nwt_half_workspace(const GridShape &shape) {
+  if (!nwt_half_shape_matches(shape))
+    return;
+  for (std::size_t id = 0; id < shape.n; ++id) {
+    phi_[id] = (id & 1U) == 0U
+                   ? nwt_half_workspace_.even_phi[id / 2]
+                   : nwt_half_workspace_.odd_phi[id / 2];
+  }
+  nwt_half_workspace_.active = false;
+}
+
 AnalyzerImpl::SolveStats AnalyzerImpl::solve_newton_nwt_sor_block(
     const GridShape &shape, int sweeps, double screen_scale,
     TitanExecutor &executor, std::size_t &clipped_points) {
+  const auto update_time_begin = std::chrono::steady_clock::now();
   SolveStats stats;
   if (shape.n == 0 || sweeps <= 0)
     return stats;
@@ -4013,10 +4437,21 @@ AnalyzerImpl::SolveStats AnalyzerImpl::solve_newton_nwt_sor_block(
   const bool delphi_block_stop = delphi_nwt_parity_active();
   const std::size_t delphi_rms_denominator =
       delphi_block_stop ? (shape.n + 1) / 2 : 0;
-
   const bool write_trace = !args_.test_pqr.empty() &&
                            args_.parity_dump == "all" &&
                            delphi_nwt_parity_active();
+  const bool use_auto_half_kernel =
+      args_.nwt_kernel == "auto" && args_.nwt_progress == "off" &&
+      delphi_nwt_parity_active();
+  const bool use_forced_half_kernel = args_.nwt_kernel == "delphi-half";
+  if ((use_auto_half_kernel || use_forced_half_kernel) &&
+      args_.nwt_progress == "off" && delphi_nwt_parity_active() && !write_trace &&
+      (shape.nx & 1U) != 0U && (shape.ny & 1U) != 0U &&
+      (shape.nz & 1U) != 0U) {
+    return solve_newton_nwt_delphi_half_block(shape, sweeps, screen_scale,
+                                              executor, clipped_points);
+  }
+
   std::vector<std::size_t> trace_ids;
   if (write_trace && shape.nx > 2 && shape.ny > 2 && shape.nz > 2) {
     trace_ids = {
@@ -4084,9 +4519,10 @@ AnalyzerImpl::SolveStats AnalyzerImpl::solve_newton_nwt_sor_block(
             for (std::size_t kk = begin; kk < end; ++kk) {
               const std::size_t k = kk + 1;
               for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
-                for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
-                  if (static_cast<int>((i + j + k) & 1ULL) != color)
-                    continue;
+                const std::size_t first_i =
+                    1 + (static_cast<int>((1 + j + k) & 1ULL) == color ? 0U
+                                                                        : 1U);
+                for (std::size_t i = first_i; i + 1 < shape.nx; i += 2) {
                   const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
                   const double neighbor_sum =
                       eps_x_[id] * phi_[id + 1] +
@@ -4167,6 +4603,7 @@ AnalyzerImpl::SolveStats AnalyzerImpl::solve_newton_nwt_sor_block(
       }
     }
 
+    const auto reduce_time_begin = std::chrono::steady_clock::now();
     double sumsq = 0.0;
     double max_delta = 0.0;
     std::size_t count = 0;
@@ -4199,6 +4636,10 @@ AnalyzerImpl::SolveStats AnalyzerImpl::solve_newton_nwt_sor_block(
                 << ',' << csv_escape("delphi_nwt") << ','
                 << csv_escape(args_.test_charge_grid) << '\n';
     }
+    add_timing_ms(TimingBucket::NwtRmsReduce,
+                  std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - reduce_time_begin)
+                      .count());
     if (!delphi_block_stop &&
         (stats.max_dphi <= args_.nl_dphi || stats.rms <= args_.nl_residual)) {
       stats.converged = true;
@@ -4208,6 +4649,933 @@ AnalyzerImpl::SolveStats AnalyzerImpl::solve_newton_nwt_sor_block(
   if (delphi_block_stop &&
       (stats.max_dphi < args_.nl_dphi || stats.rms < args_.nl_residual))
     stats.converged = true;
+  add_timing_ms(TimingBucket::NwtHalfUpdate,
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - update_time_begin)
+                    .count());
+  return stats;
+}
+
+AnalyzerImpl::SolveStats AnalyzerImpl::solve_newton_nwt_delphi_half_block(
+    const GridShape &shape, int sweeps, double screen_scale,
+    TitanExecutor &executor, std::size_t &clipped_points) {
+  const auto update_time_begin = std::chrono::steady_clock::now();
+  SolveStats stats;
+  if (shape.n == 0 || sweeps <= 0)
+    return stats;
+
+  double omega =
+      args_.omega == "auto"
+          ? std::clamp(2.0 / (1.0 + std::sin(kPi / static_cast<double>(
+                                             std::max({shape.nx, shape.ny,
+                                                       shape.nz})))), 1.0,
+                       1.95)
+          : args_.omega_value;
+  if (args_.omega == "auto" && args_.test_operator_convention == "delphi" &&
+      !args_.test_pqr.empty()) {
+    omega = delphi_relaxation_omega(shape);
+  }
+  if (args_.omega == "auto" && delphi_nwt_parity_active())
+    omega = 1.0;
+
+  const std::size_t interior_z = shape.nz > 2 ? shape.nz - 2 : 0;
+  const std::size_t workers = effective_workers(executor, interior_z);
+  const double rhs = nonlinear_rhs_scale(shape, nonlinear_alpha());
+  prepare_nwt_half_workspace(shape, rhs);
+  const double alpha = nonlinear_alpha();
+  const double clip = effective_nonlinear_clip();
+  const std::size_t xy = shape.nx * shape.ny;
+  const bool delphi_block_stop = delphi_nwt_parity_active();
+  const std::size_t delphi_rms_denominator =
+      delphi_block_stop ? (shape.n + 1) / 2 : 0;
+  if (nwt_half_workspace_.local_sumsq.size() != workers) {
+    nwt_half_workspace_.local_sumsq.assign(workers, 0.0);
+    nwt_half_workspace_.local_max.assign(workers, 0.0);
+    nwt_half_workspace_.local_count.assign(workers, 0);
+    nwt_half_workspace_.local_clipped.assign(workers, 0);
+  }
+  auto &local_sumsq = nwt_half_workspace_.local_sumsq;
+  auto &local_max = nwt_half_workspace_.local_max;
+  auto &local_count = nwt_half_workspace_.local_count;
+  auto &local_clipped = nwt_half_workspace_.local_clipped;
+  auto &even_phi = nwt_half_workspace_.even_phi;
+  auto &odd_phi = nwt_half_workspace_.odd_phi;
+  const auto &rhs_even = nwt_half_workspace_.rhs_even;
+  const auto &rhs_odd = nwt_half_workspace_.rhs_odd;
+  const auto &eps_sum_even = nwt_half_workspace_.eps_sum_even;
+  const auto &eps_sum_odd = nwt_half_workspace_.eps_sum_odd;
+  const auto &screen_even = nwt_half_workspace_.screen_even;
+  const auto &screen_odd = nwt_half_workspace_.screen_odd;
+  const auto &homo_eps_even = nwt_half_workspace_.homo_eps_even;
+  const auto &homo_eps_odd = nwt_half_workspace_.homo_eps_odd;
+  clipped_points = 0;
+  if (active_timing_) {
+    active_timing_->nwt_homo_cells = nwt_half_workspace_.homo_cells;
+    active_timing_->nwt_homo_linear_cells =
+        nwt_half_workspace_.homo_linear_cells;
+    active_timing_->nwt_homo_salt_cells =
+        nwt_half_workspace_.homo_salt_cells;
+  }
+  const bool argument_is_dimensionless =
+      delphi_field_units_active() || nonlinear_dimensionless_mode();
+  const double argument_scale = argument_is_dimensionless ? 1.0 : alpha;
+  const bool use_delphi_source_units =
+      delphi_field_units_active() ||
+      args_.test_nl_source == "delphi-dimensionless";
+  const double source_scale =
+      use_delphi_source_units ? 1.0 : 1.0 / std::max(1.0e-30, alpha);
+  const double effective_clip = std::max(1.0e-12, clip);
+  const double sinh_clip = std::sinh(effective_clip);
+
+  if (nwt_half_workspace_.packed_ready) {
+    const auto update_cells =
+        [&](const std::vector<NwtHalfWorkspace::PackedCell> &cells,
+            AlignedDoubleVector &write_phi, const AlignedDoubleVector &read_phi,
+            bool homogeneous, bool accumulate_rms) {
+          if (cells.empty())
+            return;
+          executor.parallel_for(
+              cells.size(), workers, 256,
+              [&](std::size_t worker, std::size_t begin, std::size_t end) {
+                double sumsq = 0.0;
+                double max_delta = 0.0;
+                std::size_t count = 0;
+                std::size_t clipped = 0;
+                for (std::size_t cell_index = begin; cell_index < end;
+                     ++cell_index) {
+                  const auto &cell = cells[cell_index];
+                  const double old_phi = write_phi[cell.h];
+                  double neighbor_sum = 0.0;
+                  if (homogeneous) {
+                    neighbor_sum =
+                        cell.ex_p *
+                        (read_phi[cell.xp] + read_phi[cell.xm] +
+                         read_phi[cell.yp] + read_phi[cell.ym] +
+                         read_phi[cell.zp] + read_phi[cell.zm]);
+                  } else {
+                    neighbor_sum =
+                        cell.ex_p * read_phi[cell.xp] +
+                        cell.ex_m * read_phi[cell.xm] +
+                        cell.ey_p * read_phi[cell.yp] +
+                        cell.ey_m * read_phi[cell.ym] +
+                        cell.ez_p * read_phi[cell.zp] +
+                        cell.ez_m * read_phi[cell.zm];
+                  }
+                  const double active_screen = cell.screen * screen_scale;
+                  double diagonal = cell.eps_sum;
+                  double nonlinear_rhs = 0.0;
+                  if (active_screen > 0.0) {
+                    const double raw_arg = old_phi * argument_scale;
+                    if (raw_arg > effective_clip || raw_arg < -effective_clip)
+                      ++clipped;
+                    const auto sinh_cosh =
+                        delphi_sinh_cosh_tail_precomputed(
+                            raw_arg, effective_clip, sinh_clip);
+                    const double source = sinh_cosh.first * source_scale;
+                    diagonal += active_screen * sinh_cosh.second;
+                    nonlinear_rhs =
+                        active_screen *
+                        (sinh_cosh.second * old_phi - source);
+                  }
+                  const double target =
+                      (neighbor_sum + cell.rhs + nonlinear_rhs) /
+                      std::max(1.0e-12, diagonal);
+                  const double updated = old_phi + omega * (target - old_phi);
+                  const double delta = updated - old_phi;
+                  write_phi[cell.h] = updated;
+                  if (accumulate_rms) {
+                    sumsq += delta * delta;
+                    max_delta = std::max(max_delta, std::abs(delta));
+                    ++count;
+                  }
+                }
+                local_sumsq[worker] += sumsq;
+                local_max[worker] = std::max(local_max[worker], max_delta);
+                local_count[worker] += count;
+                local_clipped[worker] += clipped;
+              });
+        };
+
+    auto run_timed_cells =
+        [&](const std::vector<NwtHalfWorkspace::PackedCell> &cells,
+            AlignedDoubleVector &write_phi, const AlignedDoubleVector &read_phi,
+            bool homogeneous, bool accumulate_rms, TimingBucket bucket) {
+          const auto begin = std::chrono::steady_clock::now();
+          if (!cells.empty() && active_timing_) {
+            ++active_timing_->nwt_dispatch_calls;
+            if (bucket == TimingBucket::NwtHomoUpdate)
+              active_timing_->nwt_homo_updates += cells.size();
+          }
+          update_cells(cells, write_phi, read_phi, homogeneous, accumulate_rms);
+          add_timing_ms(bucket,
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - begin)
+                            .count());
+        };
+
+    const bool row_span_requested =
+        args_.nwt_homo_kernel == "row-span" ||
+        args_.nwt_homo_kernel == "avx2" ||
+        args_.nwt_homo_kernel == "auto";
+#if TITAN_SIMD_X86
+    const bool row_span_avx2 =
+        row_span_requested && args_.nwt_homo_kernel != "row-span" &&
+        titan_simd_dispatch::runtime_has_avx2();
+#else
+    const bool row_span_avx2 = false;
+#endif
+    const bool salt_tiled_requested =
+        args_.nwt_homo_kernel == "salt-tiled" ||
+        args_.nwt_homo_kernel == "auto";
+#if TITAN_SIMD_X86
+    const bool salt_tiled_avx2 =
+        salt_tiled_requested && titan_simd_dispatch::runtime_has_avx2();
+#else
+    const bool salt_tiled_avx2 = false;
+#endif
+    if (salt_tiled_requested && nwt_half_workspace_.salt_tile_ready) {
+      const auto tile_cell_count =
+          [](const std::vector<NwtHalfWorkspace::HomoTile> &tiles) {
+            std::uint64_t total = 0;
+            for (const auto &tile : tiles)
+              total += tile.count;
+            return total;
+          };
+      const std::uint64_t even_homo_updates =
+          tile_cell_count(nwt_half_workspace_.even_homo_linear_tiles) +
+          tile_cell_count(nwt_half_workspace_.even_homo_salt_tiles);
+      const std::uint64_t odd_homo_updates =
+          tile_cell_count(nwt_half_workspace_.odd_homo_linear_tiles) +
+          tile_cell_count(nwt_half_workspace_.odd_homo_salt_tiles);
+      const bool collect_nwt_detail = args_.timing == "detail";
+      std::vector<double> local_stencil_ms(workers, 0.0);
+      std::vector<double> local_salt_ms(workers, 0.0);
+      std::vector<double> local_write_ms(workers, 0.0);
+      std::vector<double> local_worker_ms(workers, 0.0);
+
+      const auto update_homo_tiles =
+          [&](const std::vector<NwtHalfWorkspace::HomoTile> &linear_tiles,
+              const std::vector<NwtHalfWorkspace::HomoTile> &salt_tiles,
+              AlignedDoubleVector &write_phi,
+              const AlignedDoubleVector &read_phi,
+              const AlignedDoubleVector &rhs_vec,
+              const AlignedDoubleVector &eps_sum_vec,
+              const AlignedDoubleVector &screen_vec,
+              const AlignedDoubleVector &eps_vec, int color,
+              bool accumulate_rms, std::uint64_t update_count) {
+            if (linear_tiles.empty() && salt_tiles.empty())
+              return;
+            if (collect_nwt_detail) {
+              std::fill(local_stencil_ms.begin(), local_stencil_ms.end(), 0.0);
+              std::fill(local_salt_ms.begin(), local_salt_ms.end(), 0.0);
+              std::fill(local_write_ms.begin(), local_write_ms.end(), 0.0);
+              std::fill(local_worker_ms.begin(), local_worker_ms.end(), 0.0);
+            }
+            const auto begin_time = std::chrono::steady_clock::now();
+            const NwtHomoOffsets offsets =
+                nwt_homo_offsets(shape.nx, shape.ny, color);
+            if (active_timing_) {
+              active_timing_->nwt_homo_updates += update_count;
+              ++active_timing_->nwt_dispatch_calls;
+            }
+            executor.parallel_do(workers, [&](std::size_t worker) {
+              const auto worker_begin = collect_nwt_detail
+                                            ? std::chrono::steady_clock::now()
+                                            : std::chrono::steady_clock::time_point{};
+              double sumsq = 0.0;
+              double max_delta = 0.0;
+              std::size_t count = 0;
+              std::size_t clipped = 0;
+
+              const auto process_linear_tile =
+                  [&](const NwtHalfWorkspace::HomoTile &tile) {
+                    const std::size_t end =
+                        static_cast<std::size_t>(tile.begin) + tile.count;
+                    for (std::size_t h = tile.begin; h < end; ++h) {
+                      const auto base = static_cast<std::ptrdiff_t>(h);
+                      const double old_phi = write_phi[h];
+                      const double neighbor_sum =
+                          eps_vec[h] *
+                          (read_phi[base + offsets.xp] +
+                           read_phi[base + offsets.xm] +
+                           read_phi[base + offsets.yp] +
+                           read_phi[base + offsets.ym] +
+                           read_phi[base + offsets.zp] +
+                           read_phi[base + offsets.zm]);
+                      const double target =
+                          (neighbor_sum + rhs_vec[h]) /
+                          std::max(1.0e-12, eps_sum_vec[h]);
+                      const double updated =
+                          old_phi + omega * (target - old_phi);
+                      const double delta = updated - old_phi;
+                      write_phi[h] = updated;
+                      if (accumulate_rms) {
+                        sumsq += delta * delta;
+                        max_delta = std::max(max_delta, std::abs(delta));
+                        ++count;
+                      }
+                    }
+                  };
+
+              const auto process_salt_tile =
+                  [&](const NwtHalfWorkspace::HomoTile &tile) {
+                    const std::size_t end =
+                        static_cast<std::size_t>(tile.begin) + tile.count;
+                    if (screen_scale == 0.0) {
+                      for (std::size_t h = tile.begin; h < end; ++h) {
+                        const auto base = static_cast<std::ptrdiff_t>(h);
+                        const double old_phi = write_phi[h];
+                        const double neighbor_sum =
+                            eps_vec[h] *
+                            (read_phi[base + offsets.xp] +
+                             read_phi[base + offsets.xm] +
+                             read_phi[base + offsets.yp] +
+                             read_phi[base + offsets.ym] +
+                             read_phi[base + offsets.zp] +
+                             read_phi[base + offsets.zm]);
+                        const double target =
+                            (neighbor_sum + rhs_vec[h]) /
+                            std::max(1.0e-12, eps_sum_vec[h]);
+                        const double updated =
+                            old_phi + omega * (target - old_phi);
+                        const double delta = updated - old_phi;
+                        write_phi[h] = updated;
+                        if (accumulate_rms) {
+                          sumsq += delta * delta;
+                          max_delta = std::max(max_delta, std::abs(delta));
+                          ++count;
+                        }
+                      }
+                      return;
+                    }
+                    for (std::size_t h = tile.begin; h < end; ++h) {
+                      const auto base = static_cast<std::ptrdiff_t>(h);
+                      const double old_phi = write_phi[h];
+                      const double neighbor_sum =
+                          eps_vec[h] *
+                          (read_phi[base + offsets.xp] +
+                           read_phi[base + offsets.xm] +
+                           read_phi[base + offsets.yp] +
+                           read_phi[base + offsets.ym] +
+                           read_phi[base + offsets.zp] +
+                           read_phi[base + offsets.zm]);
+                      const double active_screen =
+                          screen_vec[h] * screen_scale;
+                      const double raw_arg = old_phi * argument_scale;
+                      if (raw_arg > effective_clip ||
+                          raw_arg < -effective_clip)
+                        ++clipped;
+                      const auto sinh_cosh =
+                          delphi_sinh_cosh_tail_single_sinh(
+                              raw_arg, effective_clip, sinh_clip);
+                      const double source = sinh_cosh.first * source_scale;
+                      const double diagonal =
+                          eps_sum_vec[h] + active_screen * sinh_cosh.second;
+                      const double nonlinear_rhs =
+                          active_screen *
+                          (sinh_cosh.second * old_phi - source);
+                      const double target =
+                          (neighbor_sum + rhs_vec[h] + nonlinear_rhs) /
+                          std::max(1.0e-12, diagonal);
+                      const double updated =
+                          old_phi + omega * (target - old_phi);
+                      const double delta = updated - old_phi;
+                      write_phi[h] = updated;
+                      if (accumulate_rms) {
+                        sumsq += delta * delta;
+                        max_delta = std::max(max_delta, std::abs(delta));
+                        ++count;
+                      }
+                    }
+                  };
+
+              const std::size_t linear_begin =
+                  linear_tiles.size() * worker / workers;
+              const std::size_t linear_end =
+                  linear_tiles.size() * (worker + 1) / workers;
+              const auto linear_begin_time =
+                  collect_nwt_detail
+                      ? std::chrono::steady_clock::now()
+                      : std::chrono::steady_clock::time_point{};
+              for (std::size_t tile_index = linear_begin;
+                   tile_index < linear_end; ++tile_index) {
+#if TITAN_SIMD_X86
+                if (salt_tiled_avx2) {
+                  update_nwt_homo_linear_span_avx2(
+                      write_phi.data(), read_phi.data(), rhs_vec.data(),
+                      eps_sum_vec.data(), eps_vec.data(),
+                      linear_tiles[tile_index].begin,
+                      linear_tiles[tile_index].count, offsets, omega,
+                      accumulate_rms, sumsq, max_delta, count);
+                } else
+#endif
+                {
+                  process_linear_tile(linear_tiles[tile_index]);
+                }
+              }
+              if (collect_nwt_detail) {
+                local_stencil_ms[worker] =
+                    elapsed_ms(linear_begin_time,
+                               std::chrono::steady_clock::now());
+              }
+
+              const std::size_t salt_begin =
+                  salt_tiles.size() * worker / workers;
+              const std::size_t salt_end =
+                  salt_tiles.size() * (worker + 1) / workers;
+              const auto salt_begin_time =
+                  collect_nwt_detail
+                      ? std::chrono::steady_clock::now()
+                      : std::chrono::steady_clock::time_point{};
+              for (std::size_t tile_index = salt_begin; tile_index < salt_end;
+                   ++tile_index) {
+                process_salt_tile(salt_tiles[tile_index]);
+              }
+              if (collect_nwt_detail) {
+                local_salt_ms[worker] =
+                    elapsed_ms(salt_begin_time,
+                               std::chrono::steady_clock::now());
+                local_worker_ms[worker] =
+                    elapsed_ms(worker_begin, std::chrono::steady_clock::now());
+              }
+
+              local_sumsq[worker] += sumsq;
+              local_max[worker] = std::max(local_max[worker], max_delta);
+              local_count[worker] += count;
+              local_clipped[worker] += clipped;
+            });
+            const double wall_ms =
+                elapsed_ms(begin_time, std::chrono::steady_clock::now());
+            add_timing_ms(TimingBucket::NwtHomoUpdate, wall_ms);
+            if (collect_nwt_detail) {
+              double max_worker_ms = 0.0;
+              double max_stencil_ms = 0.0;
+              double max_salt_ms = 0.0;
+              double max_write_ms = 0.0;
+              for (std::size_t worker = 0; worker < workers; ++worker) {
+                max_worker_ms =
+                    std::max(max_worker_ms, local_worker_ms[worker]);
+                max_stencil_ms =
+                    std::max(max_stencil_ms, local_stencil_ms[worker]);
+                max_salt_ms = std::max(max_salt_ms, local_salt_ms[worker]);
+                max_write_ms = std::max(max_write_ms, local_write_ms[worker]);
+              }
+              add_timing_ms(TimingBucket::NwtHomoStencil, max_stencil_ms);
+              add_timing_ms(TimingBucket::NwtHomoSaltMath, max_salt_ms);
+              add_timing_ms(TimingBucket::NwtHomoWrite, max_write_ms);
+              add_timing_ms(TimingBucket::NwtThreadWait,
+                            std::max(0.0, wall_ms - max_worker_ms));
+            }
+          };
+
+      for (int iter = 1; iter <= sweeps; ++iter) {
+        std::fill(local_sumsq.begin(), local_sumsq.end(), 0.0);
+        std::fill(local_max.begin(), local_max.end(), 0.0);
+        std::fill(local_count.begin(), local_count.end(), 0);
+        std::fill(local_clipped.begin(), local_clipped.end(), 0);
+
+        update_homo_tiles(nwt_half_workspace_.even_homo_linear_tiles,
+                          nwt_half_workspace_.even_homo_salt_tiles, even_phi,
+                          odd_phi, rhs_even, eps_sum_even, screen_even,
+                          homo_eps_even, 0, false, even_homo_updates);
+        run_timed_cells(nwt_half_workspace_.even_hetero_cells, even_phi,
+                        odd_phi, false, false,
+                        TimingBucket::NwtHeteroUpdate);
+        const bool accumulate_odd =
+            !delphi_block_stop || (iter == sweeps);
+        update_homo_tiles(nwt_half_workspace_.odd_homo_linear_tiles,
+                          nwt_half_workspace_.odd_homo_salt_tiles, odd_phi,
+                          even_phi, rhs_odd, eps_sum_odd, screen_odd,
+                          homo_eps_odd, 1, accumulate_odd, odd_homo_updates);
+        run_timed_cells(nwt_half_workspace_.odd_hetero_cells, odd_phi,
+                        even_phi, false, accumulate_odd,
+                        TimingBucket::NwtHeteroUpdate);
+
+        const auto reduce_time_begin = std::chrono::steady_clock::now();
+        double sumsq = 0.0;
+        double max_delta = 0.0;
+        std::size_t count = 0;
+        std::size_t clipped = 0;
+        for (std::size_t worker = 0; worker < workers; ++worker) {
+          sumsq += local_sumsq[worker];
+          max_delta = std::max(max_delta, local_max[worker]);
+          count += local_count[worker];
+          clipped += local_clipped[worker];
+        }
+        clipped_points = std::max(clipped_points, clipped);
+        stats.iterations = iter;
+        if (delphi_block_stop) {
+          stats.rms =
+              delphi_rms_denominator > 0
+                  ? std::sqrt(sumsq /
+                              static_cast<double>(delphi_rms_denominator))
+                  : 0.0;
+        } else {
+          stats.rms =
+              count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
+        }
+        stats.max_dphi = max_delta;
+        const double reduce_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - reduce_time_begin)
+                .count();
+        add_timing_ms(TimingBucket::NwtRmsReduce, reduce_ms);
+        add_timing_ms(TimingBucket::NwtReduce, reduce_ms);
+        add_timing_ms(TimingBucket::NwtBlockOverhead, reduce_ms);
+        if (!delphi_block_stop &&
+            (stats.max_dphi <= args_.nl_dphi ||
+             stats.rms <= args_.nl_residual)) {
+          stats.converged = true;
+          break;
+        }
+      }
+
+      if (delphi_block_stop &&
+          (stats.max_dphi < args_.nl_dphi || stats.rms < args_.nl_residual))
+        stats.converged = true;
+      add_timing_ms(TimingBucket::NwtHalfUpdate,
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - update_time_begin)
+                        .count());
+      return stats;
+    }
+    if (row_span_requested && nwt_half_workspace_.row_span_ready) {
+      const auto span_cell_count =
+          [](const std::vector<NwtHalfWorkspace::HomoSpan> &spans) {
+            std::uint64_t total = 0;
+            for (const auto &span : spans)
+              total += span.count;
+            return total;
+          };
+      const std::uint64_t even_homo_updates =
+          span_cell_count(nwt_half_workspace_.even_homo_linear_spans) +
+          span_cell_count(nwt_half_workspace_.even_homo_salt_spans);
+      const std::uint64_t odd_homo_updates =
+          span_cell_count(nwt_half_workspace_.odd_homo_linear_spans) +
+          span_cell_count(nwt_half_workspace_.odd_homo_salt_spans);
+
+      const auto update_homo_spans =
+          [&](const std::vector<NwtHalfWorkspace::HomoSpan> &linear_spans,
+              const std::vector<NwtHalfWorkspace::HomoSpan> &salt_spans,
+              AlignedDoubleVector &write_phi,
+              const AlignedDoubleVector &read_phi,
+              const AlignedDoubleVector &rhs_vec,
+              const AlignedDoubleVector &eps_sum_vec,
+              const AlignedDoubleVector &screen_vec,
+              const AlignedDoubleVector &eps_vec, int color,
+              bool accumulate_rms, std::uint64_t update_count) {
+            if (linear_spans.empty() && salt_spans.empty())
+              return;
+            const auto begin_time = std::chrono::steady_clock::now();
+            const NwtHomoOffsets offsets =
+                nwt_homo_offsets(shape.nx, shape.ny, color);
+            if (active_timing_) {
+              active_timing_->nwt_homo_updates += update_count;
+              ++active_timing_->nwt_dispatch_calls;
+            }
+            executor.parallel_do(workers, [&](std::size_t worker) {
+              double sumsq = 0.0;
+              double max_delta = 0.0;
+              std::size_t count = 0;
+              std::size_t clipped = 0;
+
+              const auto process_linear_span_scalar =
+                  [&](const NwtHalfWorkspace::HomoSpan &span) {
+                    const std::size_t end =
+                        static_cast<std::size_t>(span.begin) + span.count;
+                    for (std::size_t h = span.begin; h < end; ++h) {
+                      const auto base = static_cast<std::ptrdiff_t>(h);
+                      const double old_phi = write_phi[h];
+                      const double neighbor_sum =
+                          eps_vec[h] *
+                          (read_phi[base + offsets.xp] +
+                           read_phi[base + offsets.xm] +
+                           read_phi[base + offsets.yp] +
+                           read_phi[base + offsets.ym] +
+                           read_phi[base + offsets.zp] +
+                           read_phi[base + offsets.zm]);
+                      const double target =
+                          (neighbor_sum + rhs_vec[h]) /
+                          std::max(1.0e-12, eps_sum_vec[h]);
+                      const double updated =
+                          old_phi + omega * (target - old_phi);
+                      const double delta = updated - old_phi;
+                      write_phi[h] = updated;
+                      if (accumulate_rms) {
+                        sumsq += delta * delta;
+                        max_delta = std::max(max_delta, std::abs(delta));
+                        ++count;
+                      }
+                    }
+                  };
+
+              const auto process_salt_span =
+                  [&](const NwtHalfWorkspace::HomoSpan &span) {
+                    const std::size_t end =
+                        static_cast<std::size_t>(span.begin) + span.count;
+                    for (std::size_t h = span.begin; h < end; ++h) {
+                      const auto base = static_cast<std::ptrdiff_t>(h);
+                      const double old_phi = write_phi[h];
+                      const double neighbor_sum =
+                          eps_vec[h] *
+                          (read_phi[base + offsets.xp] +
+                           read_phi[base + offsets.xm] +
+                           read_phi[base + offsets.yp] +
+                           read_phi[base + offsets.ym] +
+                           read_phi[base + offsets.zp] +
+                           read_phi[base + offsets.zm]);
+                      const double active_screen =
+                          screen_vec[h] * screen_scale;
+                      double diagonal = eps_sum_vec[h];
+                      double nonlinear_rhs = 0.0;
+                      if (active_screen > 0.0) {
+                        const double raw_arg = old_phi * argument_scale;
+                        if (raw_arg > effective_clip ||
+                            raw_arg < -effective_clip)
+                          ++clipped;
+                        const auto sinh_cosh =
+                            delphi_sinh_cosh_tail_precomputed(
+                                raw_arg, effective_clip, sinh_clip);
+                        const double source = sinh_cosh.first * source_scale;
+                        diagonal += active_screen * sinh_cosh.second;
+                        nonlinear_rhs =
+                            active_screen *
+                            (sinh_cosh.second * old_phi - source);
+                      }
+                      const double target =
+                          (neighbor_sum + rhs_vec[h] + nonlinear_rhs) /
+                          std::max(1.0e-12, diagonal);
+                      const double updated =
+                          old_phi + omega * (target - old_phi);
+                      const double delta = updated - old_phi;
+                      write_phi[h] = updated;
+                      if (accumulate_rms) {
+                        sumsq += delta * delta;
+                        max_delta = std::max(max_delta, std::abs(delta));
+                        ++count;
+                      }
+                    }
+                  };
+
+              const auto process_linear_range =
+                  [&](std::size_t begin, std::size_t end) {
+                    for (std::size_t span_index = begin; span_index < end;
+                         ++span_index) {
+#if TITAN_SIMD_X86
+                      if (row_span_avx2) {
+                        update_nwt_homo_linear_span_avx2(
+                            write_phi.data(), read_phi.data(), rhs_vec.data(),
+                            eps_sum_vec.data(), eps_vec.data(),
+                            linear_spans[span_index].begin,
+                            linear_spans[span_index].count, offsets, omega,
+                            accumulate_rms, sumsq, max_delta, count);
+                      } else
+#endif
+                      {
+                        process_linear_span_scalar(linear_spans[span_index]);
+                      }
+                    }
+                  };
+
+              const std::size_t linear_begin =
+                  linear_spans.size() * worker / workers;
+              const std::size_t linear_end =
+                  linear_spans.size() * (worker + 1) / workers;
+              process_linear_range(linear_begin, linear_end);
+
+              const std::size_t salt_begin =
+                  salt_spans.size() * worker / workers;
+              const std::size_t salt_end =
+                  salt_spans.size() * (worker + 1) / workers;
+              for (std::size_t span_index = salt_begin;
+                   span_index < salt_end; ++span_index) {
+                process_salt_span(salt_spans[span_index]);
+              }
+
+              local_sumsq[worker] += sumsq;
+              local_max[worker] = std::max(local_max[worker], max_delta);
+              local_count[worker] += count;
+              local_clipped[worker] += clipped;
+            });
+            add_timing_ms(TimingBucket::NwtHomoUpdate,
+                          std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - begin_time)
+                              .count());
+          };
+
+      for (int iter = 1; iter <= sweeps; ++iter) {
+        std::fill(local_sumsq.begin(), local_sumsq.end(), 0.0);
+        std::fill(local_max.begin(), local_max.end(), 0.0);
+        std::fill(local_count.begin(), local_count.end(), 0);
+        std::fill(local_clipped.begin(), local_clipped.end(), 0);
+
+        update_homo_spans(nwt_half_workspace_.even_homo_linear_spans,
+                          nwt_half_workspace_.even_homo_salt_spans, even_phi,
+                          odd_phi, rhs_even, eps_sum_even, screen_even,
+                          homo_eps_even, 0, false, even_homo_updates);
+        run_timed_cells(nwt_half_workspace_.even_hetero_cells, even_phi,
+                        odd_phi, false, false,
+                        TimingBucket::NwtHeteroUpdate);
+        const bool accumulate_odd =
+            !delphi_block_stop || (iter == sweeps);
+        update_homo_spans(nwt_half_workspace_.odd_homo_linear_spans,
+                          nwt_half_workspace_.odd_homo_salt_spans, odd_phi,
+                          even_phi, rhs_odd, eps_sum_odd, screen_odd,
+                          homo_eps_odd, 1, accumulate_odd, odd_homo_updates);
+        run_timed_cells(nwt_half_workspace_.odd_hetero_cells, odd_phi,
+                        even_phi, false, accumulate_odd,
+                        TimingBucket::NwtHeteroUpdate);
+
+        const auto reduce_time_begin = std::chrono::steady_clock::now();
+        double sumsq = 0.0;
+        double max_delta = 0.0;
+        std::size_t count = 0;
+        std::size_t clipped = 0;
+        for (std::size_t worker = 0; worker < workers; ++worker) {
+          sumsq += local_sumsq[worker];
+          max_delta = std::max(max_delta, local_max[worker]);
+          count += local_count[worker];
+          clipped += local_clipped[worker];
+        }
+        clipped_points = std::max(clipped_points, clipped);
+        stats.iterations = iter;
+        if (delphi_block_stop) {
+          stats.rms =
+              delphi_rms_denominator > 0
+                  ? std::sqrt(sumsq /
+                              static_cast<double>(delphi_rms_denominator))
+                  : 0.0;
+        } else {
+          stats.rms =
+              count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
+        }
+        stats.max_dphi = max_delta;
+        const double reduce_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - reduce_time_begin)
+                .count();
+        add_timing_ms(TimingBucket::NwtRmsReduce, reduce_ms);
+        add_timing_ms(TimingBucket::NwtReduce, reduce_ms);
+        if (!delphi_block_stop &&
+            (stats.max_dphi <= args_.nl_dphi ||
+             stats.rms <= args_.nl_residual)) {
+          stats.converged = true;
+          break;
+        }
+      }
+
+      if (delphi_block_stop &&
+          (stats.max_dphi < args_.nl_dphi || stats.rms < args_.nl_residual))
+        stats.converged = true;
+      add_timing_ms(TimingBucket::NwtHalfUpdate,
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - update_time_begin)
+                        .count());
+      return stats;
+    }
+
+    for (int iter = 1; iter <= sweeps; ++iter) {
+      std::fill(local_sumsq.begin(), local_sumsq.end(), 0.0);
+      std::fill(local_max.begin(), local_max.end(), 0.0);
+      std::fill(local_count.begin(), local_count.end(), 0);
+      std::fill(local_clipped.begin(), local_clipped.end(), 0);
+
+      run_timed_cells(nwt_half_workspace_.even_homo_cells, even_phi, odd_phi,
+                      true, false, TimingBucket::NwtHomoUpdate);
+      run_timed_cells(nwt_half_workspace_.even_hetero_cells, even_phi, odd_phi,
+                      false, false, TimingBucket::NwtHeteroUpdate);
+      const bool accumulate_odd =
+          !delphi_block_stop || (iter == sweeps);
+      run_timed_cells(nwt_half_workspace_.odd_homo_cells, odd_phi, even_phi,
+                      true, accumulate_odd, TimingBucket::NwtHomoUpdate);
+      run_timed_cells(nwt_half_workspace_.odd_hetero_cells, odd_phi, even_phi,
+                      false, accumulate_odd, TimingBucket::NwtHeteroUpdate);
+
+      const auto reduce_time_begin = std::chrono::steady_clock::now();
+      double sumsq = 0.0;
+      double max_delta = 0.0;
+      std::size_t count = 0;
+      std::size_t clipped = 0;
+      for (std::size_t worker = 0; worker < workers; ++worker) {
+        sumsq += local_sumsq[worker];
+        max_delta = std::max(max_delta, local_max[worker]);
+        count += local_count[worker];
+        clipped += local_clipped[worker];
+      }
+      clipped_points = std::max(clipped_points, clipped);
+      stats.iterations = iter;
+      if (delphi_block_stop) {
+        stats.rms =
+            delphi_rms_denominator > 0
+                ? std::sqrt(sumsq /
+                            static_cast<double>(delphi_rms_denominator))
+                : 0.0;
+      } else {
+        stats.rms =
+            count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
+      }
+      stats.max_dphi = max_delta;
+      const double reduce_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - reduce_time_begin)
+              .count();
+      add_timing_ms(TimingBucket::NwtRmsReduce, reduce_ms);
+      add_timing_ms(TimingBucket::NwtReduce, reduce_ms);
+      if (!delphi_block_stop &&
+          (stats.max_dphi <= args_.nl_dphi || stats.rms <= args_.nl_residual)) {
+        stats.converged = true;
+        break;
+      }
+    }
+
+    if (delphi_block_stop &&
+        (stats.max_dphi < args_.nl_dphi || stats.rms < args_.nl_residual))
+      stats.converged = true;
+    add_timing_ms(TimingBucket::NwtHalfUpdate,
+                  std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - update_time_begin)
+                      .count());
+    return stats;
+  }
+
+  for (int iter = 1; iter <= sweeps; ++iter) {
+    std::fill(local_sumsq.begin(), local_sumsq.end(), 0.0);
+    std::fill(local_max.begin(), local_max.end(), 0.0);
+    std::fill(local_count.begin(), local_count.end(), 0);
+    std::fill(local_clipped.begin(), local_clipped.end(), 0);
+
+    for (int color = 0; color < 2; ++color) {
+      executor.parallel_for(
+          interior_z, workers, 1,
+          [&](std::size_t worker, std::size_t begin, std::size_t end) {
+            double sumsq = 0.0;
+            double max_delta = 0.0;
+            std::size_t count = 0;
+            std::size_t clipped = 0;
+            for (std::size_t kk = begin; kk < end; ++kk) {
+              const std::size_t k = kk + 1;
+              for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
+                const std::size_t first_i =
+                    1 + (static_cast<int>((1 + j + k) & 1ULL) == color ? 0U
+                                                                        : 1U);
+                for (std::size_t i = first_i; i + 1 < shape.nx; i += 2) {
+                  const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
+                  const std::size_t h = id / 2;
+                  double old_phi = 0.0;
+                  double neighbor_sum = 0.0;
+                  double eps_sum = 1.0;
+                  double active_screen = 0.0;
+                  double rhs_rho = 0.0;
+                  if (color == 0) {
+                    old_phi = even_phi[h];
+                    neighbor_sum =
+                        eps_x_[id] * odd_phi[(id + 1) / 2] +
+                        eps_x_[id - 1] * odd_phi[(id - 1) / 2] +
+                        eps_y_[id] * odd_phi[(id + shape.nx) / 2] +
+                        eps_y_[id - shape.nx] *
+                            odd_phi[(id - shape.nx) / 2] +
+                        eps_z_[id] * odd_phi[(id + xy) / 2] +
+                        eps_z_[id - xy] * odd_phi[(id - xy) / 2];
+                    eps_sum = eps_sum_even[h];
+                    active_screen = screen_even[h] * screen_scale;
+                    rhs_rho = rhs_even[h];
+                  } else {
+                    old_phi = odd_phi[h];
+                    neighbor_sum =
+                        eps_x_[id] * even_phi[(id + 1) / 2] +
+                        eps_x_[id - 1] * even_phi[(id - 1) / 2] +
+                        eps_y_[id] * even_phi[(id + shape.nx) / 2] +
+                        eps_y_[id - shape.nx] *
+                            even_phi[(id - shape.nx) / 2] +
+                        eps_z_[id] * even_phi[(id + xy) / 2] +
+                        eps_z_[id - xy] * even_phi[(id - xy) / 2];
+                    eps_sum = eps_sum_odd[h];
+                    active_screen = screen_odd[h] * screen_scale;
+                    rhs_rho = rhs_odd[h];
+                  }
+                  double diagonal = eps_sum;
+                  double nonlinear_rhs = 0.0;
+                  if (active_screen > 0.0) {
+                    const double raw_arg = nonlinear_argument_value(old_phi,
+                                                                    alpha);
+                    if (raw_arg > clip || raw_arg < -clip)
+                      ++clipped;
+                    const auto sinh_cosh = delphi_sinh_cosh_tail(raw_arg, clip);
+                    const double source =
+                        (delphi_field_units_active() ||
+                         args_.test_nl_source == "delphi-dimensionless")
+                            ? sinh_cosh.first
+                            : sinh_cosh.first / std::max(1.0e-30, alpha);
+                    diagonal += active_screen * sinh_cosh.second;
+                    nonlinear_rhs =
+                        active_screen *
+                        (sinh_cosh.second * old_phi - source);
+                  }
+                  const double target =
+                      (neighbor_sum + rhs_rho + nonlinear_rhs) /
+                      std::max(1.0e-12, diagonal);
+                  const double updated = old_phi + omega * (target - old_phi);
+                  const double delta = updated - old_phi;
+                  if (color == 0)
+                    even_phi[h] = updated;
+                  else
+                    odd_phi[h] = updated;
+                  if (!delphi_block_stop || (iter == sweeps && color == 1)) {
+                    sumsq += delta * delta;
+                    max_delta = std::max(max_delta, std::abs(delta));
+                    ++count;
+                  }
+                }
+              }
+            }
+            local_sumsq[worker] += sumsq;
+            local_max[worker] = std::max(local_max[worker], max_delta);
+            local_count[worker] += count;
+            local_clipped[worker] += clipped;
+          });
+    }
+
+    const auto reduce_time_begin = std::chrono::steady_clock::now();
+    double sumsq = 0.0;
+    double max_delta = 0.0;
+    std::size_t count = 0;
+    std::size_t clipped = 0;
+    for (std::size_t worker = 0; worker < workers; ++worker) {
+      sumsq += local_sumsq[worker];
+      max_delta = std::max(max_delta, local_max[worker]);
+      count += local_count[worker];
+      clipped += local_clipped[worker];
+    }
+    clipped_points = std::max(clipped_points, clipped);
+    stats.iterations = iter;
+    if (delphi_block_stop) {
+      stats.rms = delphi_rms_denominator > 0
+                      ? std::sqrt(sumsq /
+                                  static_cast<double>(delphi_rms_denominator))
+                      : 0.0;
+    } else {
+      stats.rms =
+          count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
+    }
+    stats.max_dphi = max_delta;
+    add_timing_ms(TimingBucket::NwtRmsReduce,
+                  std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - reduce_time_begin)
+                      .count());
+    if (!delphi_block_stop &&
+        (stats.max_dphi <= args_.nl_dphi || stats.rms <= args_.nl_residual)) {
+      stats.converged = true;
+      break;
+    }
+  }
+
+  if (delphi_block_stop &&
+      (stats.max_dphi < args_.nl_dphi || stats.rms < args_.nl_residual))
+    stats.converged = true;
+  add_timing_ms(TimingBucket::NwtHalfUpdate,
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - update_time_begin)
+                    .count());
   return stats;
 }
 
@@ -4245,6 +5613,7 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
 
   if (map_result != nullptr)
     maybe_write_maps(field.shape, *map_result, false);
+  const auto nonlinear_time_begin = std::chrono::steady_clock::now();
   if (delphi_nwt_parity_active()) {
     for (std::size_t k = 1; k + 1 < field.shape.nz; ++k) {
       for (std::size_t j = 1; j + 1 < field.shape.ny; ++j) {
@@ -4306,8 +5675,14 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
   else
     screen_scales = {1.0};
 
+  AlignedDoubleVector nonlinear_before;
+  AlignedDoubleVector nwt_before;
   std::ofstream nwt_progress;
-  if (delphi_nwt_parity_active()) {
+  const bool nwt_progress_strict =
+      delphi_nwt_parity_active() &&
+      (args_.nwt_progress == "strict" ||
+       (args_.nwt_progress == "auto" && args_.parity_dump != "off"));
+  if (nwt_progress_strict) {
     nwt_progress.open("pbe_nwt_solver_progress.csv", std::ios::out | std::ios::trunc);
     if (!nwt_progress.is_open())
       throw std::runtime_error("PBE: failed to open pbe_nwt_solver_progress.csv.");
@@ -4321,12 +5696,30 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
   for (double screen_scale : screen_scales) {
     final_screen_scale = screen_scale;
     ++continuation_steps;
-    std::size_t clipped = update_nonlinear_source(field.shape, source, alpha,
-                                                  clip);
-    max_clipped = std::max(max_clipped, clipped);
-    residual = compute_nonlinear_residual_vector(
-        field.shape, phi_, source, screen_scale, residual_vec, executor);
-    last_residual_after = residual;
+    std::size_t clipped = 0;
+    const bool fast_delphi_nwt =
+        delphi_nwt_parity_active() && field.nl_inner_solver == "sor" &&
+        !nwt_progress_strict;
+    if (fast_delphi_nwt) {
+      residual = std::numeric_limits<double>::infinity();
+      last_residual_after = residual;
+    } else {
+      const auto source_time_begin = std::chrono::steady_clock::now();
+      clipped = update_nonlinear_source(field.shape, source, alpha, clip);
+      add_timing_ms(TimingBucket::NwtSourceUpdate,
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - source_time_begin)
+                        .count());
+      max_clipped = std::max(max_clipped, clipped);
+      const auto residual_time_begin = std::chrono::steady_clock::now();
+      residual = compute_nonlinear_residual_vector(
+          field.shape, phi_, source, screen_scale, residual_vec, executor);
+      add_timing_ms(TimingBucket::NwtOperatorResidual,
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - residual_time_begin)
+                        .count());
+      last_residual_after = residual;
+    }
     const double stage_initial_residual =
         std::isfinite(residual) ? residual : std::numeric_limits<double>::max();
     const double stage_residual_target =
@@ -4346,13 +5739,34 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
             std::max(1, std::min(block_size, args_.nl_max_iter - total_iterations));
         SolveStats nwt_stats = solve_newton_nwt_sor_block(
             field.shape, sweeps, screen_scale, executor, nwt_clipped);
-        const std::size_t nwt_source_clipped =
-            update_nonlinear_source(field.shape, source, alpha, clip);
-        const double operator_residual = compute_nonlinear_residual_vector(
-            field.shape, phi_, source, screen_scale, residual_vec, executor);
+        std::size_t nwt_source_clipped = 0;
+        double operator_residual = nwt_stats.rms;
+        if (nwt_progress_strict) {
+          const auto source_time_begin = std::chrono::steady_clock::now();
+          nwt_source_clipped =
+              update_nonlinear_source(field.shape, source, alpha, clip);
+          add_timing_ms(TimingBucket::NwtSourceUpdate,
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() -
+                            source_time_begin)
+                            .count());
+          const auto residual_time_begin = std::chrono::steady_clock::now();
+          operator_residual = compute_nonlinear_residual_vector(
+              field.shape, phi_, source, screen_scale, residual_vec, executor);
+          add_timing_ms(TimingBucket::NwtOperatorResidual,
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() -
+                            residual_time_begin)
+                            .count());
+        }
         double operator_residual_max = 0.0;
-        for (double value : residual_vec)
-          operator_residual_max = std::max(operator_residual_max, std::abs(value));
+        if (nwt_progress_strict) {
+          for (double value : residual_vec)
+            operator_residual_max =
+                std::max(operator_residual_max, std::abs(value));
+        } else {
+          operator_residual_max = nwt_stats.max_dphi;
+        }
         finite = std::isfinite(operator_residual) &&
                  std::isfinite(nwt_stats.rms) &&
                  std::isfinite(nwt_stats.max_dphi) &&
@@ -4390,6 +5804,7 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
           step_done = true;
         }
         if (nwt_progress.is_open()) {
+          const auto progress_io_begin = std::chrono::steady_clock::now();
           nwt_progress << blocks << ',' << total_iterations << ','
                        << screen_scale << ',' << used_inner << ','
                        << nwt_stats.rms << ',' << nwt_stats.max_dphi << ','
@@ -4400,6 +5815,11 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
                                          ? "delphi-dimensionless"
                                          : args_.test_field_units)
                        << ',' << csv_escape("delphi_nwt") << '\n';
+          add_timing_ms(TimingBucket::NwtProgressIo,
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() -
+                            progress_io_begin)
+                            .count());
         }
         if (step_done)
           break;
@@ -4409,7 +5829,7 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
       break;
     }
     while (total_iterations < args_.nl_max_iter && !step_done) {
-      const AlignedDoubleVector before = phi_;
+      nonlinear_before = phi_;
       last_residual_before = residual;
       if (screen_scale >= 1.0 && residual <= args_.nl_residual) {
         converged = true;
@@ -4420,7 +5840,7 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
       }
 
       if (field.nl_inner_solver == "sor") {
-        const AlignedDoubleVector nwt_before = phi_;
+        nwt_before = phi_;
         std::size_t nwt_clipped = 0;
         SolveStats nwt_stats = solve_newton_nwt_sor_block(
             field.shape,
@@ -4520,7 +5940,7 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
       std::size_t accepted_clipped = clipped;
       double trial_lambda = field.nl_relax;
       while (trial_lambda >= 1.0e-4) {
-        phi_ = before;
+        phi_ = nonlinear_before;
         double sumsq = 0.0;
         double local_max_step = 0.0;
         std::size_t count = 0;
@@ -4537,7 +5957,7 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
               const double raw_step = trial_lambda * delta[id];
               const double step =
                   std::clamp(raw_step, -max_field_step, max_field_step);
-              phi_[id] = before[id] + step;
+              phi_[id] = nonlinear_before[id] + step;
               sumsq += step * step;
               local_max_step = std::max(local_max_step, std::abs(step));
               ++count;
@@ -4584,7 +6004,7 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
       }
       if (!accepted) {
         trust_psi = std::max(0.05, trust_psi * 0.5);
-        phi_ = before;
+        phi_ = nonlinear_before;
         update_nonlinear_source(field.shape, source, alpha, clip);
         std::size_t fallback_clipped = 0;
         SolveStats fallback_stats = solve_newton_nwt_sor_block(
@@ -4630,7 +6050,7 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
           }
           continue;
         }
-        phi_ = before;
+        phi_ = nonlinear_before;
         update_nonlinear_source(field.shape, source, alpha, clip);
         compute_nonlinear_residual_vector(field.shape, phi_, source,
                                           screen_scale, residual_vec,
@@ -4692,6 +6112,26 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
       stop_reason != "stagnation")
     stop_reason = "work_budget";
 
+  if (nwt_half_shape_matches(field.shape)) {
+    flush_nwt_half_workspace(field.shape);
+    const auto source_time_begin = std::chrono::steady_clock::now();
+    const std::size_t final_source_clipped =
+        update_nonlinear_source(field.shape, source, alpha, clip);
+    add_timing_ms(TimingBucket::NwtSourceUpdate,
+                  std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - source_time_begin)
+                      .count());
+    max_clipped = std::max(max_clipped, final_source_clipped);
+    const auto residual_time_begin = std::chrono::steady_clock::now();
+    residual = compute_nonlinear_residual_vector(
+        field.shape, phi_, source, final_screen_scale, residual_vec, executor);
+    add_timing_ms(TimingBucket::NwtOperatorResidual,
+                  std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - residual_time_begin)
+                      .count());
+    last_residual_after = residual;
+  }
+
   const double reported_nl_residual =
       delphi_nwt_parity_active() ? last_stats.rms : residual;
   field.nl_iterations = total_iterations;
@@ -4746,6 +6186,9 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_newton_nonlinear_field(
   field.stats.converged = finite && converged;
   field.total_iterations += total_iterations;
   field.parity = compute_parity_audit(field.shape, &source, &residual_vec);
+  add_timing_ms(TimingBucket::Solver,
+                elapsed_ms(nonlinear_time_begin,
+                           std::chrono::steady_clock::now()));
   update_newton_derivative_audit(field.shape, source, delta, alpha, clip,
                                  final_screen_scale, field.parity);
   if (map_result != nullptr &&
@@ -4793,6 +6236,7 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_nonlinear_field(
   if (map_result != nullptr)
     maybe_write_maps(field.shape, *map_result, false);
 
+  const auto nonlinear_time_begin = std::chrono::steady_clock::now();
   const double alpha = nonlinear_alpha();
   const double clip = effective_nonlinear_clip();
   scale_nonlinear_field_to_solve_units(phi_, alpha);
@@ -4814,6 +6258,7 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_nonlinear_field(
   else
     screen_scales = {1.0};
 
+  AlignedDoubleVector picard_before;
   for (double screen_scale : screen_scales) {
     ++continuation_steps;
     double previous_residual = std::numeric_limits<double>::infinity();
@@ -4825,8 +6270,10 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_nonlinear_field(
 
       const int sweeps =
           std::min(args_.nl_block, args_.nl_max_iter - total_iterations);
-      const AlignedDoubleVector before =
-          args_.nl_line_search == "auto" ? phi_ : AlignedDoubleVector{};
+      if (args_.nl_line_search == "auto")
+        picard_before = phi_;
+      else
+        picard_before.clear();
       std::size_t unused_clipped = 0;
       last_stats = solve_nonlinear_sor_block(
           field.shape, source, sweeps, field.nl_relax, screen_scale, executor,
@@ -4844,8 +6291,8 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_nonlinear_field(
       residual = compute_nonlinear_residual(field.shape, source, screen_scale);
       if (args_.nl_line_search == "auto" && std::isfinite(previous_residual) &&
           residual > previous_residual * 1.05 && field.nl_relax > 0.051 &&
-          before.size() == phi_.size()) {
-        phi_ = before;
+          picard_before.size() == phi_.size()) {
+        phi_ = picard_before;
         field.nl_relax = std::max(0.05, 0.5 * field.nl_relax);
         ++backtracks;
         residual = previous_residual;
@@ -4884,6 +6331,9 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_nonlinear_field(
   if (args_.charge_assignment == "delphi" ||
       args_.charge_assignment == "gaussian")
     field.phi_grid = phi_;
+  add_timing_ms(TimingBucket::Solver,
+                elapsed_ms(nonlinear_time_begin,
+                           std::chrono::steady_clock::now()));
 
   if (map_result != nullptr)
     maybe_write_maps(field.shape, *map_result, true);
@@ -4947,7 +6397,7 @@ void AnalyzerImpl::write_energy_header_if_needed() {
            "iterations_vacuum_final,solver_mode,mg_levels,mg_cycles,mg_pre,"
            "mg_post,mg_coarse_iter,surface_effective,ion_access,"
            "ion_radius_A,ion_accessible_points,stern_excluded_points,"
-           "face_refine,pbe_model,pbe_model_effective,linear_seed_solver,"
+           "face_refine,pbe_backend,pbe_model,pbe_model_effective,linear_seed_solver,"
            "nl_iterations,nl_blocks,nl_relax,nl_max_dphi,"
            "nl_clipped_points,nl_status,boundary_mode,"
            "test_boundary_convention,test_field_units,charge_assignment,"
@@ -5047,8 +6497,9 @@ void AnalyzerImpl::append_energy_row(const FrameResult &result) {
               << result.ion_accessible_points << ','
               << result.stern_excluded_points << ','
               << (result.face_refine ? "true" : "false") << ','
-              << result.pbe_model << ',' << result.pbe_model_effective << ','
-              << result.linear_seed_solver << ',' << result.nl_iterations
+              << result.pbe_backend << ',' << result.pbe_model << ','
+              << result.pbe_model_effective << ',' << result.linear_seed_solver
+              << ',' << result.nl_iterations
               << ',' << result.nl_blocks << ',' << result.nl_relax << ','
               << result.nl_max_dphi << ',' << result.nl_clipped_points << ','
               << result.nl_status << ',' << result.boundary_mode << ','
@@ -5161,6 +6612,492 @@ void AnalyzerImpl::append_energy_row(const FrameResult &result) {
               << result.rpbe_grad_epsilon_norm << ','
               << result.rpbe_source_rms << ',' << result.rpbe_source_max
               << ',' << csv_escape(result.rpbe_source_status) << '\n';
+}
+
+bool AnalyzerImpl::pbe_timing_enabled() const noexcept {
+  return args_.timing == "summary" || args_.timing == "detail";
+}
+
+void AnalyzerImpl::add_timing_ms(TimingBucket bucket, double ms) const noexcept {
+  if (active_timing_ == nullptr || ms <= 0.0 || !std::isfinite(ms))
+    return;
+  switch (bucket) {
+  case TimingBucket::Setup:
+    active_timing_->setup_ms += ms;
+    break;
+  case TimingBucket::Surface:
+    active_timing_->surface_ms += ms;
+    break;
+  case TimingBucket::Epsilon:
+    active_timing_->epsilon_ms += ms;
+    break;
+  case TimingBucket::Boundary:
+    active_timing_->boundary_ms += ms;
+    break;
+  case TimingBucket::Solver:
+    active_timing_->solver_ms += ms;
+    break;
+  case TimingBucket::Energy:
+    active_timing_->energy_ms += ms;
+    break;
+  case TimingBucket::MapIo:
+    active_timing_->map_io_ms += ms;
+    break;
+  case TimingBucket::RpbSource:
+    active_timing_->rpb_source_ms += ms;
+    break;
+  case TimingBucket::FocusSetup:
+    active_timing_->focus_setup_ms += ms;
+    break;
+  case TimingBucket::Probe:
+    active_timing_->probe_ms += ms;
+    break;
+  case TimingBucket::FocusParentSolve:
+    active_timing_->focus_parent_solve_ms += ms;
+    break;
+  case TimingBucket::FocusChildSetup:
+    active_timing_->focus_child_setup_ms += ms;
+    break;
+  case TimingBucket::FocusBoundaryInterp:
+    active_timing_->focus_boundary_interp_ms += ms;
+    break;
+  case TimingBucket::FocusChildSurface:
+    active_timing_->focus_child_surface_ms += ms;
+    break;
+  case TimingBucket::FocusChildEpsilon:
+    active_timing_->focus_child_epsilon_ms += ms;
+    break;
+  case TimingBucket::FocusChildSolver:
+    active_timing_->focus_child_solver_ms += ms;
+    break;
+  case TimingBucket::ProbeEnergy:
+    active_timing_->probe_energy_ms += ms;
+    break;
+  case TimingBucket::AuditOutput:
+    active_timing_->audit_output_ms += ms;
+    break;
+  case TimingBucket::NwtHalfUpdate:
+    active_timing_->nwt_half_update_ms += ms;
+    break;
+  case TimingBucket::NwtRmsReduce:
+    active_timing_->nwt_rms_reduce_ms += ms;
+    break;
+  case TimingBucket::NwtOperatorResidual:
+    active_timing_->nwt_operator_residual_ms += ms;
+    break;
+  case TimingBucket::NwtSourceUpdate:
+    active_timing_->nwt_source_update_ms += ms;
+    break;
+  case TimingBucket::NwtProgressIo:
+    active_timing_->nwt_progress_io_ms += ms;
+    break;
+  case TimingBucket::NwtCoeffPack:
+    active_timing_->nwt_coeff_pack_ms += ms;
+    break;
+  case TimingBucket::NwtHomoUpdate:
+    active_timing_->nwt_homo_update_ms += ms;
+    break;
+  case TimingBucket::NwtHeteroUpdate:
+    active_timing_->nwt_hetero_update_ms += ms;
+    break;
+  case TimingBucket::NwtNonlinTerm:
+    active_timing_->nwt_nonlin_term_ms += ms;
+    break;
+  case TimingBucket::NwtReduce:
+    active_timing_->nwt_reduce_ms += ms;
+    break;
+  case TimingBucket::NwtHomoStencil:
+    active_timing_->nwt_homo_stencil_ms += ms;
+    break;
+  case TimingBucket::NwtHomoSaltMath:
+    active_timing_->nwt_homo_salt_math_ms += ms;
+    break;
+  case TimingBucket::NwtHomoWrite:
+    active_timing_->nwt_homo_write_ms += ms;
+    break;
+  case TimingBucket::NwtThreadWait:
+    active_timing_->nwt_thread_wait_ms += ms;
+    break;
+  case TimingBucket::NwtBlockOverhead:
+    active_timing_->nwt_block_overhead_ms += ms;
+    break;
+  case TimingBucket::LinearHalfUpdate:
+    active_timing_->linear_half_update_ms += ms;
+    break;
+  case TimingBucket::EpsilonCenterDensity:
+    active_timing_->epsilon_center_density_ms += ms;
+    break;
+  case TimingBucket::EpsilonMidpointDensity:
+    active_timing_->epsilon_midpoint_density_ms += ms;
+    break;
+  case TimingBucket::EpsilonIonExclusion:
+    active_timing_->epsilon_ion_exclusion_ms += ms;
+    break;
+  case TimingBucket::EpsilonFinalize:
+    active_timing_->epsilon_finalize_ms += ms;
+    break;
+  }
+}
+
+void AnalyzerImpl::write_timing_header_if_needed() {
+  if (!pbe_timing_enabled())
+    return;
+  if (!timing_out_.is_open()) {
+    timing_out_.open("pbe_timing.csv", std::ios::out | std::ios::trunc);
+    if (!timing_out_.is_open())
+      throw std::runtime_error("PBE: failed to open pbe_timing.csv.");
+  }
+  if (!timing_header_written_) {
+    timing_out_
+        << "trajectory_id,frame_index,global_index,time_ps,fixture,mode,"
+           "pbe_backend,atom_count,focus_child_atom_count,num_threads,scope,"
+           "tabi_surface_build_seconds,tabi_surface_panels,"
+           "tabi_surface_exposed_points,tabi_surface_buried_points,"
+           "tabi_tree_build_seconds,tabi_tree_nodes,tabi_tree_leaf_count,"
+           "tabi_near_interactions,tabi_far_interactions,tabi_matvec_mode,"
+           "tabi_status,tabi_convergence_reason,tabi_reaction_energy_source,"
+           "tabi_rhs_seconds,tabi_gmres_seconds,"
+           "tabi_matvec_seconds_total,tabi_matvec_seconds_avg,"
+           "tabi_matvec_calls,tabi_orthogonalization_seconds,"
+           "tabi_preconditioner_seconds,tabi_surface_neighbor_seconds,"
+           "tabi_surface_mesh_seconds,tabi_solid_angle_seconds,"
+           "tabi_tree_moment_seconds,tabi_tree_traversal_seconds,"
+           "tabi_near_eval_seconds,tabi_far_eval_seconds,"
+           "tabi_surface_geometry,tabi_mesh_vertices,tabi_mesh_triangles,"
+           "tabi_boundary_nodes,tabi_avg_valence,tabi_nonmanifold_edges,"
+           "tabi_solid_angle_fallbacks,tabi_diag_min,tabi_diag_max,"
+           "tabi_taylor_order,tabi_interaction_build_seconds,"
+           "tabi_tree_eval_seconds,"
+           "tabi_formulation,tabi_energy_projection,tabi_fallback_used,"
+           "tabi_rhs_scale,tabi_dielectric_contrast,tabi_operator_contrast,"
+           "tabi_unknown_count,tabi_bie_system,tabi_lhs_diag_phi,"
+           "tabi_lhs_diag_phin,tabi_energy_equation,"
+           "tabi_kernel_convention,tabi_source_norm_s1,"
+           "tabi_source_norm_s2,tabi_phi_norm,tabi_phin_norm,"
+           "tabi_kappa_inv_A,tabi_coulomb_factor_kcal_mol,"
+           "tabi_boundary_energy_kJmol,tabi_reference_energy_kJmol,"
+           "tabi_selected_energy_scale,"
+           "setup_seconds,surface_seconds,epsilon_seconds,boundary_seconds,"
+           "solver_seconds,energy_seconds,map_io_seconds,rpb_source_seconds,"
+           "focus_setup_seconds,probe_seconds,focus_parent_solve_seconds,"
+           "focus_child_setup_seconds,focus_boundary_interp_seconds,"
+           "focus_child_surface_seconds,focus_child_epsilon_seconds,"
+           "focus_child_solver_seconds,probe_energy_seconds,"
+           "audit_output_seconds,nwt_half_update_seconds,"
+           "nwt_rms_reduce_seconds,nwt_operator_residual_seconds,"
+           "nwt_source_update_seconds,nwt_progress_io_seconds,"
+           "nwt_coeff_pack_seconds,nwt_homo_update_seconds,"
+           "nwt_hetero_update_seconds,nwt_nonlin_term_seconds,"
+           "nwt_reduce_seconds,nwt_homo_stencil_seconds,"
+           "nwt_homo_salt_math_seconds,nwt_homo_write_seconds,"
+           "nwt_thread_wait_seconds,nwt_block_overhead_seconds,"
+           "linear_half_update_seconds,"
+           "nwt_homo_cells,nwt_homo_linear_cells,nwt_homo_salt_cells,"
+           "nwt_homo_updates,nwt_dispatch_calls,nwt_homo_ns_per_update,"
+           "epsilon_center_density_seconds,epsilon_midpoint_density_seconds,"
+           "epsilon_ion_exclusion_seconds,epsilon_finalize_seconds,"
+           "total_seconds,iterations,blocks,"
+           "status\n";
+    timing_header_written_ = true;
+  }
+}
+
+void AnalyzerImpl::append_timing_row(const FrameResult &result,
+                                     const TimingBuckets &timing) {
+  if (!pbe_timing_enabled())
+    return;
+  write_timing_header_if_needed();
+  auto seconds = [](double ms) { return ms / 1000.0; };
+  const std::size_t iterations =
+      result.solvent_iterations + result.vacuum_iterations;
+  const std::string mode =
+      result.pbe_model_effective.empty()
+          ? result.solver_mode
+          : (result.pbe_model_effective + ":" + result.solver_mode);
+  std::string scope = "single_grid";
+  if (result.focus_enabled && result.focus_levels > 1)
+    scope = result.probe_status == "off" ? "focus_full_workflow"
+                                         : "focus_full_workflow_probe";
+  else if (result.focus_enabled)
+    scope = result.probe_status == "off" ? "focus_single_grid"
+                                         : "focus_single_grid_probe";
+  else if (result.pbe_biomodel == "rpbe")
+    scope = "rpbe_full_workflow";
+  else if (result.pbe_backend == "tabi")
+    scope = "tabi_boundary_integral";
+  timing_out_ << result.trajectory_id << ',' << result.frame_index << ','
+              << result.global_index << ',' << std::setprecision(10)
+              << result.time_ps << ',' << csv_escape(current_source_label_)
+              << ',' << csv_escape(mode) << ','
+              << csv_escape(result.pbe_backend) << ',' << result.atom_count
+              << ',' << timing.focus_child_atom_count << ',' << configured_threads_
+              << ',' << csv_escape(scope) << ','
+              << seconds(result.tabi_surface_build_ms) << ','
+              << result.tabi_surface_panels << ','
+              << result.tabi_surface_exposed_points << ','
+              << result.tabi_surface_buried_points << ','
+              << seconds(result.tabi_tree_build_ms) << ','
+              << result.tabi_tree_nodes << ','
+              << result.tabi_tree_leaf_count << ','
+              << result.tabi_near_interactions << ','
+              << result.tabi_far_interactions << ','
+              << csv_escape(result.tabi_matvec_mode) << ','
+              << csv_escape(result.tabi_status) << ','
+              << csv_escape(result.tabi_convergence_reason) << ','
+              << csv_escape(result.tabi_reaction_energy_source) << ','
+              << seconds(result.tabi_rhs_ms) << ','
+              << seconds(result.tabi_gmres_ms) << ','
+              << seconds(result.tabi_matvec_ms_total) << ','
+              << seconds(result.tabi_matvec_ms_avg) << ','
+              << result.tabi_matvec_calls << ','
+              << seconds(result.tabi_orthogonalization_ms) << ','
+              << seconds(result.tabi_preconditioner_ms) << ','
+              << seconds(result.tabi_surface_neighbor_ms) << ','
+              << seconds(result.tabi_surface_mesh_ms) << ','
+              << seconds(result.tabi_solid_angle_ms) << ','
+              << seconds(result.tabi_tree_moment_ms) << ','
+              << seconds(result.tabi_tree_traversal_ms) << ','
+              << seconds(result.tabi_near_eval_ms) << ','
+              << seconds(result.tabi_far_eval_ms) << ','
+              << csv_escape(result.tabi_surface_geometry) << ','
+              << result.tabi_mesh_vertices << ','
+              << result.tabi_mesh_triangles << ','
+              << result.tabi_boundary_nodes << ','
+              << result.tabi_avg_valence << ','
+              << result.tabi_nonmanifold_edges << ','
+              << result.tabi_solid_angle_fallbacks << ','
+              << result.tabi_diag_min << ','
+              << result.tabi_diag_max << ','
+              << result.tabi_taylor_order << ','
+              << seconds(result.tabi_interaction_build_ms) << ','
+              << seconds(result.tabi_tree_eval_ms) << ','
+              << csv_escape(result.tabi_formulation) << ','
+              << csv_escape(result.tabi_energy_projection) << ','
+              << (result.tabi_fallback_used ? "true" : "false") << ','
+              << result.tabi_rhs_scale << ','
+              << result.tabi_dielectric_contrast << ','
+              << result.tabi_operator_contrast << ','
+              << result.tabi_unknown_count << ','
+              << csv_escape(result.tabi_bie_system) << ','
+              << result.tabi_lhs_diag_phi << ','
+              << result.tabi_lhs_diag_phin << ','
+              << csv_escape(result.tabi_energy_equation) << ','
+              << csv_escape(result.tabi_kernel_convention) << ','
+              << result.tabi_source_norm_s1 << ','
+              << result.tabi_source_norm_s2 << ','
+              << result.tabi_phi_norm << ','
+              << result.tabi_phin_norm << ','
+              << result.tabi_kappa_inv_a << ','
+              << result.tabi_coulomb_factor_kcal_mol << ','
+              << result.tabi_boundary_energy_kj_mol << ','
+              << result.tabi_reference_energy_kj_mol << ','
+              << result.tabi_selected_energy_scale << ','
+              << seconds(timing.setup_ms)
+              << ',' << seconds(timing.surface_ms) << ','
+              << seconds(timing.epsilon_ms) << ','
+              << seconds(timing.boundary_ms) << ','
+              << seconds(timing.solver_ms) << ','
+              << seconds(timing.energy_ms) << ','
+              << seconds(timing.map_io_ms) << ','
+              << seconds(timing.rpb_source_ms) << ','
+              << seconds(timing.focus_setup_ms) << ','
+              << seconds(timing.probe_ms) << ','
+              << seconds(timing.focus_parent_solve_ms) << ','
+              << seconds(timing.focus_child_setup_ms) << ','
+              << seconds(timing.focus_boundary_interp_ms) << ','
+              << seconds(timing.focus_child_surface_ms) << ','
+              << seconds(timing.focus_child_epsilon_ms) << ','
+              << seconds(timing.focus_child_solver_ms) << ','
+              << seconds(timing.probe_energy_ms) << ','
+              << seconds(timing.audit_output_ms) << ','
+              << seconds(timing.nwt_half_update_ms) << ','
+              << seconds(timing.nwt_rms_reduce_ms) << ','
+              << seconds(timing.nwt_operator_residual_ms) << ','
+              << seconds(timing.nwt_source_update_ms) << ','
+              << seconds(timing.nwt_progress_io_ms) << ','
+              << seconds(timing.nwt_coeff_pack_ms) << ','
+              << seconds(timing.nwt_homo_update_ms) << ','
+              << seconds(timing.nwt_hetero_update_ms) << ','
+              << seconds(timing.nwt_nonlin_term_ms) << ','
+              << seconds(timing.nwt_reduce_ms) << ','
+              << seconds(timing.nwt_homo_stencil_ms) << ','
+              << seconds(timing.nwt_homo_salt_math_ms) << ','
+              << seconds(timing.nwt_homo_write_ms) << ','
+              << seconds(timing.nwt_thread_wait_ms) << ','
+              << seconds(timing.nwt_block_overhead_ms) << ','
+              << seconds(timing.linear_half_update_ms) << ','
+              << timing.nwt_homo_cells << ','
+              << timing.nwt_homo_linear_cells << ','
+              << timing.nwt_homo_salt_cells << ','
+              << timing.nwt_homo_updates << ','
+              << timing.nwt_dispatch_calls << ','
+              << (timing.nwt_homo_updates > 0
+                      ? (timing.nwt_homo_update_ms * 1.0e6) /
+                            static_cast<double>(timing.nwt_homo_updates)
+                      : 0.0)
+              << ','
+              << seconds(timing.epsilon_center_density_ms) << ','
+              << seconds(timing.epsilon_midpoint_density_ms) << ','
+              << seconds(timing.epsilon_ion_exclusion_ms) << ','
+              << seconds(timing.epsilon_finalize_ms) << ','
+              << seconds(timing.total_ms) << ',' << iterations << ','
+              << result.nl_blocks << ',' << csv_escape(result.status) << '\n';
+}
+
+void AnalyzerImpl::write_tabi_profile_header_if_needed() {
+  if (args_.timing != "detail")
+    return;
+  if (!tabi_profile_out_.is_open()) {
+    tabi_profile_out_.open("pbe_tabi_profile.csv",
+                           std::ios::out | std::ios::trunc);
+    if (!tabi_profile_out_.is_open())
+      throw std::runtime_error("PBE: failed to open pbe_tabi_profile.csv.");
+  }
+  if (!tabi_profile_header_written_) {
+    tabi_profile_out_
+        << "trajectory_id,frame_index,global_index,fixture,atom_count,"
+           "surface_geometry,panels,mesh_vertices,mesh_triangles,"
+           "matvec_mode,status,convergence_reason,reaction_energy_source,"
+           "iterations,residual,residual_history,total_seconds,"
+           "surface_build_seconds,surface_neighbor_seconds,"
+           "surface_mesh_seconds,solid_angle_seconds,rhs_seconds,"
+           "gmres_seconds,matvec_seconds_total,matvec_seconds_avg,"
+           "matvec_calls,orthogonalization_seconds,preconditioner_seconds,"
+           "tree_build_seconds,tree_moment_seconds,tree_traversal_seconds,"
+           "tree_eval_seconds,near_eval_seconds,far_eval_seconds,"
+           "near_interactions,far_interactions,tree_nodes,tree_leaf_count,"
+           "taylor_order,diag_min,diag_max,solid_angle_fallbacks,"
+           "nonmanifold_edges,formulation,energy_projection,fallback_used,"
+           "rhs_scale,dielectric_contrast,operator_contrast,unknown_count,"
+           "bie_system,lhs_diag_phi,lhs_diag_phin,energy_equation,"
+           "kernel_convention,source_norm_s1,source_norm_s2,phi_norm,"
+           "phin_norm,kappa_inv_A,"
+           "boundary_energy_kJmol,reference_energy_kJmol,"
+           "selected_energy_scale,memory_bytes,energy_kJmol\n";
+    tabi_profile_header_written_ = true;
+  }
+}
+
+void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
+                                           const TimingBuckets &timing) {
+  if (args_.timing != "detail" || result.pbe_backend != "tabi")
+    return;
+  write_tabi_profile_header_if_needed();
+  auto seconds = [](double ms) { return ms / 1000.0; };
+  tabi_profile_out_
+      << result.trajectory_id << ',' << result.frame_index << ','
+      << result.global_index << ',' << csv_escape(current_source_label_) << ','
+      << result.atom_count << ',' << csv_escape(result.tabi_surface_geometry)
+      << ',' << result.tabi_surface_panels << ',' << result.tabi_mesh_vertices
+      << ',' << result.tabi_mesh_triangles << ','
+      << csv_escape(result.tabi_matvec_mode) << ','
+      << csv_escape(result.tabi_status) << ','
+      << csv_escape(result.tabi_convergence_reason) << ','
+      << csv_escape(result.tabi_reaction_energy_source) << ','
+      << result.solvent_iterations << ',' << result.linear_residual << ','
+      << csv_escape(result.tabi_residual_history) << ','
+      << seconds(timing.total_ms) << ','
+      << seconds(result.tabi_surface_build_ms) << ','
+      << seconds(result.tabi_surface_neighbor_ms) << ','
+      << seconds(result.tabi_surface_mesh_ms) << ','
+      << seconds(result.tabi_solid_angle_ms) << ','
+      << seconds(result.tabi_rhs_ms) << ','
+      << seconds(result.tabi_gmres_ms) << ','
+      << seconds(result.tabi_matvec_ms_total) << ','
+      << seconds(result.tabi_matvec_ms_avg) << ','
+      << result.tabi_matvec_calls << ','
+      << seconds(result.tabi_orthogonalization_ms) << ','
+      << seconds(result.tabi_preconditioner_ms) << ','
+      << seconds(result.tabi_tree_build_ms) << ','
+      << seconds(result.tabi_tree_moment_ms) << ','
+      << seconds(result.tabi_tree_traversal_ms) << ','
+      << seconds(result.tabi_tree_eval_ms) << ','
+      << seconds(result.tabi_near_eval_ms) << ','
+      << seconds(result.tabi_far_eval_ms) << ','
+      << result.tabi_near_interactions << ','
+      << result.tabi_far_interactions << ',' << result.tabi_tree_nodes << ','
+      << result.tabi_tree_leaf_count << ',' << result.tabi_taylor_order << ','
+      << result.tabi_diag_min << ',' << result.tabi_diag_max << ','
+      << result.tabi_solid_angle_fallbacks << ','
+      << result.tabi_nonmanifold_edges << ','
+      << csv_escape(result.tabi_formulation) << ','
+      << csv_escape(result.tabi_energy_projection) << ','
+      << (result.tabi_fallback_used ? "true" : "false") << ','
+      << result.tabi_rhs_scale << ',' << result.tabi_dielectric_contrast << ','
+      << result.tabi_operator_contrast << ',' << result.tabi_unknown_count
+      << ',' << csv_escape(result.tabi_bie_system) << ','
+      << result.tabi_lhs_diag_phi << ',' << result.tabi_lhs_diag_phin << ','
+      << csv_escape(result.tabi_energy_equation) << ','
+      << csv_escape(result.tabi_kernel_convention) << ','
+      << result.tabi_source_norm_s1 << ',' << result.tabi_source_norm_s2
+      << ',' << result.tabi_phi_norm << ',' << result.tabi_phin_norm << ','
+      << result.tabi_kappa_inv_a << ','
+      << result.tabi_boundary_energy_kj_mol << ','
+      << result.tabi_reference_energy_kj_mol << ','
+      << result.tabi_selected_energy_scale << ',' << result.memory_bytes << ','
+      << result.energy_kj_mol << '\n';
+}
+
+void AnalyzerImpl::write_tabi_formulation_audit_header_if_needed() const {
+  if (!tabi_formulation_audit_out_.is_open()) {
+    tabi_formulation_audit_out_.open("pbe_tabi_formulation_audit.csv",
+                                     std::ios::out | std::ios::trunc);
+    if (!tabi_formulation_audit_out_.is_open())
+      throw std::runtime_error(
+          "PBE: failed to open pbe_tabi_formulation_audit.csv.");
+  }
+  if (!tabi_formulation_audit_header_written_) {
+    tabi_formulation_audit_out_
+        << "trajectory_id,frame_index,global_index,fixture,pbe_backend,"
+           "status,tabi_status,convergence_reason,reaction_energy_source,"
+           "formulation,energy_projection,fallback_used,rhs_scale,"
+           "dielectric_contrast,operator_contrast,unknown_count,bie_system,"
+           "lhs_diag_phi,lhs_diag_phin,energy_equation,kernel_convention,"
+           "source_norm_s1,source_norm_s2,phi_norm,phin_norm,"
+           "diagonal_mode,diag_min,"
+           "diag_max,kappa_inv_A,coulomb_factor_kcal_mol,"
+           "boundary_energy_kJmol,reference_energy_kJmol,"
+           "selected_energy_scale,selected_energy_kJmol,residual,iterations,"
+           "surface_geometry,panels,solid_angle_fallbacks,matvec_mode\n";
+    tabi_formulation_audit_header_written_ = true;
+  }
+}
+
+void AnalyzerImpl::append_tabi_formulation_audit_row(
+    const FrameResult &result) const {
+  if (result.pbe_backend != "tabi")
+    return;
+  write_tabi_formulation_audit_header_if_needed();
+  tabi_formulation_audit_out_
+      << result.trajectory_id << ',' << result.frame_index << ','
+      << result.global_index << ',' << csv_escape(current_source_label_)
+      << ',' << csv_escape(result.pbe_backend) << ','
+      << csv_escape(result.status) << ',' << csv_escape(result.tabi_status)
+      << ',' << csv_escape(result.tabi_convergence_reason) << ','
+      << csv_escape(result.tabi_reaction_energy_source) << ','
+      << csv_escape(result.tabi_formulation) << ','
+      << csv_escape(result.tabi_energy_projection) << ','
+      << (result.tabi_fallback_used ? "true" : "false") << ','
+      << result.tabi_rhs_scale << ',' << result.tabi_dielectric_contrast
+      << ',' << result.tabi_operator_contrast << ','
+      << result.tabi_unknown_count << ',' << csv_escape(result.tabi_bie_system)
+      << ',' << result.tabi_lhs_diag_phi << ','
+      << result.tabi_lhs_diag_phin << ','
+      << csv_escape(result.tabi_energy_equation) << ','
+      << csv_escape(result.tabi_kernel_convention) << ','
+      << result.tabi_source_norm_s1 << ',' << result.tabi_source_norm_s2
+      << ',' << result.tabi_phi_norm << ',' << result.tabi_phin_norm << ','
+      << csv_escape(args_.tabi_diagonal) << ',' << result.tabi_diag_min << ','
+      << result.tabi_diag_max << ',' << result.tabi_kappa_inv_a << ','
+      << result.tabi_coulomb_factor_kcal_mol << ','
+      << result.tabi_boundary_energy_kj_mol << ','
+      << result.tabi_reference_energy_kj_mol << ','
+      << result.tabi_selected_energy_scale << ',' << result.energy_kj_mol
+      << ',' << result.linear_residual << ',' << result.solvent_iterations
+      << ',' << csv_escape(result.tabi_surface_geometry) << ','
+      << result.tabi_surface_panels << ','
+      << result.tabi_solid_angle_fallbacks << ','
+      << csv_escape(result.tabi_matvec_mode) << '\n';
 }
 
 void AnalyzerImpl::maybe_write_parity_stage(const FrameResult &result,
@@ -6636,6 +8573,9 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
   solve.vdwms_exposed_points = solvent.vdwms_exposed_points;
   solve.vdwms_midpoint_rms = solvent.vdwms_midpoint_rms;
 
+  const auto energy_time_begin = std::chrono::steady_clock::now();
+  double rpb_source_time_ms = 0.0;
+  double probe_time_ms = 0.0;
   solve.atom_reaction_kj_mol.assign(atoms.size(), 0.0);
   const double kt_kcal =
       kKBKcalPerMolK * std::max(1.0, args_.temp);
@@ -6657,6 +8597,8 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
   RpbAudit rpb_audit;
   AlignedDoubleVector rpb_source_map;
   AlignedDoubleVector rpb_coulomb_map;
+  const AlignedDoubleVector *rpb_source_top_map = &rpb_source_map;
+  const AlignedDoubleVector *rpb_coulomb_top_map = &rpb_coulomb_map;
   if (has_grid_energy) {
     const AlignedDoubleVector *solvent_energy_rho = &solvent.rho_grid;
     if (solvent.rho_energy_grid.size() == solvent.shape.n)
@@ -6692,16 +8634,50 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
     if (args_.biomodel == "rpbe") {
       const bool wants_rpb_source_top =
           map_result != nullptr && args_.parity_dump != "off";
-      rpb_audit = compute_rpb_source_audit(solvent.shape, atoms,
-                                           solvent.eps_x_grid,
-                                           solvent.eps_y_grid,
-                                           solvent.eps_z_grid,
-                                           wants_rpb_source_top
-                                               ? &rpb_source_map
-                                               : nullptr,
-                                           wants_rpb_source_top
-                                               ? &rpb_coulomb_map
-                                               : nullptr);
+      const bool has_solvent_rpb_audit =
+          solvent.rpbe_source_status != "off" &&
+          solvent.rpbe_source_status != "missing_maps" &&
+          solvent.rpbe_source_status != "empty_interior";
+      const bool has_solvent_rpb_top =
+          solvent.rpbe_source_grid.size() == solvent.shape.n &&
+          solvent.rpbe_coulomb_grid.size() == solvent.shape.n;
+      if (has_solvent_rpb_audit &&
+          (!wants_rpb_source_top || has_solvent_rpb_top)) {
+        rpb_audit.coulomb_norm = solvent.rpbe_coulomb_norm;
+        rpb_audit.grad_coulomb_norm = solvent.rpbe_grad_coulomb_norm;
+        rpb_audit.grad_epsilon_norm = solvent.rpbe_grad_epsilon_norm;
+        rpb_audit.source_rms = solvent.rpbe_source_rms;
+        rpb_audit.source_max = solvent.rpbe_source_max;
+        rpb_audit.sampled_points =
+            solvent.shape.n > 0
+                ? (solvent.shape.nx > 2 && solvent.shape.ny > 2 &&
+                           solvent.shape.nz > 2
+                       ? (solvent.shape.nx - 2) * (solvent.shape.ny - 2) *
+                             (solvent.shape.nz - 2)
+                       : 0)
+                : 0;
+        rpb_audit.status = solvent.rpbe_source_status;
+        if (has_solvent_rpb_top) {
+          rpb_source_top_map = &solvent.rpbe_source_grid;
+          rpb_coulomb_top_map = &solvent.rpbe_coulomb_grid;
+        }
+      } else {
+        const auto rpb_time_begin = std::chrono::steady_clock::now();
+        rpb_audit = compute_rpb_source_audit(solvent.shape, atoms, executor,
+                                             solvent.eps_x_grid,
+                                             solvent.eps_y_grid,
+                                             solvent.eps_z_grid,
+                                             wants_rpb_source_top
+                                                 ? &rpb_source_map
+                                                 : nullptr,
+                                             wants_rpb_source_top
+                                                 ? &rpb_coulomb_map
+                                                 : nullptr);
+        const double rpb_ms =
+            elapsed_ms(rpb_time_begin, std::chrono::steady_clock::now());
+        rpb_source_time_ms += rpb_ms;
+        add_timing_ms(TimingBucket::RpbSource, rpb_ms);
+      }
       solve.rpbe_coulomb_norm = rpb_audit.coulomb_norm;
       solve.rpbe_grad_coulomb_norm = rpb_audit.grad_coulomb_norm;
       solve.rpbe_grad_epsilon_norm = rpb_audit.grad_epsilon_norm;
@@ -6775,6 +8751,7 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
     solve.atom_reaction_kj_mol[i] = atom_kcal_mol * kKcalToKJ;
   }
   if (!args_.probe_file.empty()) {
+    const auto probe_time_begin = std::chrono::steady_clock::now();
     solve.probe_energy_status = "missing_field";
     if (solvent.phi_grid.size() == solvent.shape.n) {
       const std::vector<Atom> probe_atoms = load_probe_atoms(args_.probe_file);
@@ -6912,6 +8889,11 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
         solve.probe_energy_status = "no_matching_atoms";
       }
     }
+    const double probe_ms =
+        elapsed_ms(probe_time_begin, std::chrono::steady_clock::now());
+    probe_time_ms += probe_ms;
+    add_timing_ms(TimingBucket::Probe, probe_ms);
+    add_timing_ms(TimingBucket::ProbeEnergy, probe_ms);
   }
   solve.energy_kj_mol = solve.energy_kcal_mol * kKcalToKJ;
   solve.energy_kt =
@@ -6930,16 +8912,256 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
   solve.coulomb_energy_kt =
       kt_kcal > 0.0 ? solve.coulomb_energy_kcal_mol / kt_kcal : 0.0;
   solve.converged = solve.solvent.converged && solve.vacuum.converged;
+  const double energy_ms =
+      elapsed_ms(energy_time_begin, std::chrono::steady_clock::now()) -
+      rpb_source_time_ms - probe_time_ms;
+  add_timing_ms(TimingBucket::Energy, std::max(0.0, energy_ms));
   if (map_result != nullptr) {
+    const auto audit_output_begin = std::chrono::steady_clock::now();
     maybe_write_iscm_surface_charge_samples(*map_result, iscm_audit);
     maybe_write_rpb_source_audit(*map_result, rpb_audit);
-    maybe_write_rpb_source_top(*map_result, solve.shape, rpb_source_map,
-                               rpb_coulomb_map);
+    maybe_write_rpb_source_top(*map_result, solve.shape, *rpb_source_top_map,
+                               *rpb_coulomb_top_map);
     maybe_write_barnase_forensic_audits(*map_result, atoms, solvent, vacuum,
                                         solve, solvent_forensic);
     maybe_write_parity_map_dumps(*map_result, atoms, solvent, vacuum, solve);
+    add_timing_ms(TimingBucket::AuditOutput,
+                  elapsed_ms(audit_output_begin,
+                             std::chrono::steady_clock::now()));
   }
   return solve;
+}
+
+AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
+    const std::vector<Atom> &atoms, TitanExecutor &executor) const {
+  ReactionSolve solve;
+  std::vector<Tabi::Atom> tabi_atoms;
+  tabi_atoms.reserve(atoms.size());
+  double min_x = std::numeric_limits<double>::infinity();
+  double min_y = std::numeric_limits<double>::infinity();
+  double min_z = std::numeric_limits<double>::infinity();
+  double max_x = -std::numeric_limits<double>::infinity();
+  double max_y = -std::numeric_limits<double>::infinity();
+  double max_z = -std::numeric_limits<double>::infinity();
+  for (const Atom &atom : atoms) {
+    Tabi::Atom tabi_atom;
+    tabi_atom.x = atom.x;
+    tabi_atom.y = atom.y;
+    tabi_atom.z = atom.z;
+    tabi_atom.q = atom.q;
+    tabi_atom.radius = effective_surface_radius(atom);
+    tabi_atoms.push_back(tabi_atom);
+    const double surface_radius =
+        tabi_atom.radius + (args_.surface == "sas" ? args_.probe_radius : 0.0);
+    min_x = std::min(min_x, atom.x - surface_radius);
+    min_y = std::min(min_y, atom.y - surface_radius);
+    min_z = std::min(min_z, atom.z - surface_radius);
+    max_x = std::max(max_x, atom.x + surface_radius);
+    max_y = std::max(max_y, atom.y + surface_radius);
+    max_z = std::max(max_z, atom.z + surface_radius);
+  }
+
+  Tabi::Options options;
+  options.eps_in = args_.int_diel;
+  options.eps_out = args_.ext_diel;
+  options.salt_m = args_.salt;
+  options.temperature_k = args_.temp;
+  options.max_iter = args_.max_iter;
+  options.residual_tol = args_.rms_tol;
+  options.sum_mode = args_.tabi_sum;
+  options.probe_radius = args_.probe_radius;
+  options.surface_mode = args_.surface;
+  options.surface_geometry = args_.tabi_geometry;
+  options.diagonal_mode = args_.tabi_diagonal;
+  options.taylor_order = args_.tabi_taylor_order;
+  options.formulation = args_.tabi_formulation;
+  options.energy_projection = args_.tabi_energy_projection;
+  const Tabi::Result tabi = Tabi::solve_linear_pb(tabi_atoms, options, executor);
+
+  solve.pbe_backend = "tabi";
+  solve.tabi_surface_build_ms = tabi.surface_build_ms;
+  solve.tabi_surface_panels = tabi.panel_count;
+  solve.tabi_surface_exposed_points = tabi.exposed_points;
+  solve.tabi_surface_buried_points = tabi.buried_points;
+  solve.tabi_tree_build_ms = tabi.tree_build_ms;
+  solve.tabi_tree_nodes = tabi.tree_nodes;
+  solve.tabi_tree_leaf_count = tabi.tree_leaf_count;
+  solve.tabi_near_interactions = tabi.near_interactions;
+  solve.tabi_far_interactions = tabi.far_interactions;
+  solve.tabi_matvec_mode = tabi.matvec_mode;
+  solve.tabi_status = tabi.status;
+  solve.tabi_convergence_reason = tabi.convergence_reason;
+  solve.tabi_residual_history = tabi.residual_history;
+  solve.tabi_reaction_energy_source = tabi.reaction_energy_source;
+  solve.tabi_rhs_ms = tabi.rhs_ms;
+  solve.tabi_gmres_ms = tabi.gmres_ms;
+  solve.tabi_matvec_ms_total = tabi.matvec_ms_total;
+  solve.tabi_matvec_ms_avg = tabi.matvec_ms_avg;
+  solve.tabi_matvec_calls = tabi.matvec_calls;
+  solve.tabi_orthogonalization_ms = tabi.orthogonalization_ms;
+  solve.tabi_preconditioner_ms = tabi.preconditioner_ms;
+  solve.tabi_surface_neighbor_ms = tabi.surface_neighbor_ms;
+  solve.tabi_surface_mesh_ms = tabi.surface_mesh_ms;
+  solve.tabi_solid_angle_ms = tabi.solid_angle_ms;
+  solve.tabi_tree_moment_ms = tabi.tree_moment_ms;
+  solve.tabi_tree_traversal_ms = tabi.tree_traversal_ms;
+  solve.tabi_near_eval_ms = tabi.near_eval_ms;
+  solve.tabi_far_eval_ms = tabi.far_eval_ms;
+  solve.tabi_surface_geometry = tabi.surface_geometry;
+  solve.tabi_mesh_vertices = tabi.mesh_vertices;
+  solve.tabi_mesh_triangles = tabi.mesh_triangles;
+  solve.tabi_boundary_nodes = tabi.boundary_nodes;
+  solve.tabi_avg_valence = tabi.avg_valence;
+  solve.tabi_nonmanifold_edges = tabi.nonmanifold_edges;
+  solve.tabi_solid_angle_fallbacks = tabi.solid_angle_fallbacks;
+  solve.tabi_diag_min = tabi.diag_min;
+  solve.tabi_diag_max = tabi.diag_max;
+  solve.tabi_taylor_order = tabi.taylor_order;
+  solve.tabi_interaction_build_ms = tabi.interaction_build_ms;
+  solve.tabi_tree_eval_ms = tabi.tree_eval_ms;
+  solve.tabi_formulation = tabi.formulation;
+  solve.tabi_energy_projection = tabi.energy_projection;
+  solve.tabi_rhs_scale = tabi.rhs_scale;
+  solve.tabi_dielectric_contrast = tabi.dielectric_contrast;
+  solve.tabi_operator_contrast = tabi.operator_contrast;
+  solve.tabi_unknown_count = tabi.unknown_count;
+  solve.tabi_bie_system = tabi.bie_system;
+  solve.tabi_lhs_diag_phi = tabi.lhs_diag_phi;
+  solve.tabi_lhs_diag_phin = tabi.lhs_diag_phin;
+  solve.tabi_energy_equation = tabi.energy_equation;
+  solve.tabi_kernel_convention = tabi.kernel_convention;
+  solve.tabi_source_norm_s1 = tabi.source_norm_s1;
+  solve.tabi_source_norm_s2 = tabi.source_norm_s2;
+  solve.tabi_phi_norm = tabi.phi_norm;
+  solve.tabi_phin_norm = tabi.phin_norm;
+  solve.tabi_kappa_inv_a = tabi.kappa_inv_a;
+  solve.tabi_coulomb_factor_kcal_mol = tabi.coulomb_factor_kcal_mol;
+  solve.tabi_boundary_energy_kj_mol = tabi.boundary_energy_kcal_mol * kKcalToKJ;
+  solve.tabi_reference_energy_kj_mol =
+      tabi.reference_energy_kcal_mol * kKcalToKJ;
+  solve.tabi_selected_energy_scale = tabi.selected_energy_scale;
+  solve.tabi_fallback_used = tabi.fallback_used;
+  solve.shape.n = tabi.panel_count;
+  solve.shape.nx = std::max<std::size_t>(1, tabi.panel_count);
+  solve.shape.ny = 1;
+  solve.shape.nz = 1;
+  solve.shape.h = 0.0;
+  if (!atoms.empty()) {
+    solve.shape.ox = min_x;
+    solve.shape.oy = min_y;
+    solve.shape.oz = min_z;
+    solve.focus_parent_grid =
+        format_fixed(0.5 * (min_x + max_x), 6) + "," +
+        format_fixed(0.5 * (min_y + max_y), 6) + "," +
+        format_fixed(0.5 * (min_z + max_z), 6);
+  }
+  solve.shape.memory_bytes =
+      tabi.peak_memory_bytes > 0 ? tabi.peak_memory_bytes : tabi.memory_bytes;
+  solve.peak_memory_bytes = solve.shape.memory_bytes;
+  solve.solute_points = tabi.panel_count;
+  solve.solvent_points = 0;
+  solve.solvent_total_iterations = tabi.iterations;
+  solve.vacuum_total_iterations = 0;
+  solve.solvent.iterations = tabi.iterations;
+  solve.solvent.rms = tabi.residual;
+  solve.solvent.max_dphi = tabi.residual;
+  solve.solvent.converged = tabi.converged;
+  solve.vacuum.converged = true;
+  solve.pbe_model_effective = "linear";
+  solve.linear_seed_solver = "none";
+  solve.solver_mode = "tabi_" + tabi.sum_mode_effective;
+  solve.mg_levels = 1;
+  solve.focus_levels = 1;
+  solve.boundary_rms = tabi.residual;
+  solve.boundary_max = tabi.residual;
+  solve.linear_residual = tabi.residual;
+  solve.charge_assigned = tabi.total_charge;
+  solve.energy_kcal_mol = tabi.energy_kcal_mol;
+  solve.energy_kj_mol = tabi.energy_kj_mol;
+  solve.energy_kt = tabi.energy_kt;
+  solve.atom_corrected_kcal_mol = tabi.energy_kcal_mol;
+  solve.atom_corrected_kj_mol = tabi.energy_kj_mol;
+  solve.atom_corrected_kt = tabi.energy_kt;
+  solve.grid_corrected_kcal_mol = tabi.energy_kcal_mol;
+  solve.grid_corrected_kj_mol = tabi.energy_kj_mol;
+  solve.grid_corrected_kt = tabi.energy_kt;
+  solve.solvent_phase_kcal_mol = tabi.energy_kcal_mol;
+  solve.solvent_phase_kj_mol = tabi.energy_kj_mol;
+  solve.solvent_phase_kt = tabi.energy_kt;
+  solve.coulomb_energy_kcal_mol =
+      analytic_coulomb_energy_kcal(atoms, args_.int_diel);
+  solve.coulomb_energy_kj_mol = solve.coulomb_energy_kcal_mol * kKcalToKJ;
+  const double kt_kcal = kKBKcalPerMolK * std::max(1.0, args_.temp);
+  solve.coulomb_energy_kt =
+      kt_kcal > 0.0 ? solve.coulomb_energy_kcal_mol / kt_kcal : 0.0;
+  solve.reaction_energy_source = tabi.reaction_energy_source;
+  solve.converged = tabi.status == "ok";
+  return solve;
+}
+
+void AnalyzerImpl::compute_stability_ensemble(const std::vector<Atom> &atoms,
+                                              TitanExecutor &executor,
+                                              const FrameResult &result) {
+  last_stability_ensemble_ = StabilityEnsembleState{};
+  if (args_.stability_mode != "ensemble" || atoms.empty() ||
+      stability_probe_solve_active_)
+    return;
+
+  struct ProbeSolveScope {
+    AnalyzerImpl &self;
+    bool previous;
+    explicit ProbeSolveScope(AnalyzerImpl &impl)
+        : self(impl), previous(impl.stability_probe_solve_active_) {
+      self.stability_probe_solve_active_ = true;
+    }
+    ~ProbeSolveScope() { self.stability_probe_solve_active_ = previous; }
+  } probe_scope(*this);
+
+  std::vector<double> energies;
+  energies.reserve(7);
+  energies.push_back(result.energy_kj_mol);
+  constexpr double kJitterA = 1.0e-7;
+  const std::array<std::array<double, 3>, 6> offsets{{
+      {{kJitterA, 0.0, 0.0}},
+      {{-kJitterA, 0.0, 0.0}},
+      {{0.0, kJitterA, 0.0}},
+      {{0.0, -kJitterA, 0.0}},
+      {{0.0, 0.0, kJitterA}},
+      {{0.0, 0.0, -kJitterA}},
+  }};
+  for (const auto &offset : offsets) {
+    std::vector<Atom> shifted = atoms;
+    for (Atom &atom : shifted) {
+      atom.x += offset[0];
+      atom.y += offset[1];
+      atom.z += offset[2];
+    }
+    const ReactionSolve probe = solve_reaction_field(shifted, executor, nullptr);
+    if (probe.converged && std::isfinite(probe.energy_kj_mol))
+      energies.push_back(probe.energy_kj_mol);
+  }
+  if (energies.empty())
+    return;
+  const double sum =
+      std::accumulate(energies.begin(), energies.end(), 0.0);
+  const double mean = sum / static_cast<double>(energies.size());
+  double m2 = 0.0;
+  for (double value : energies) {
+    const double delta = value - mean;
+    m2 += delta * delta;
+  }
+  StabilityEnsembleState state;
+  state.valid = true;
+  state.samples = energies.size();
+  state.mean_kj_mol = mean;
+  state.stddev_kj_mol =
+      energies.size() > 1
+          ? std::sqrt(m2 / static_cast<double>(energies.size() - 1))
+          : 0.0;
+  const auto mm = std::minmax_element(energies.begin(), energies.end());
+  state.min_kj_mol = *mm.first;
+  state.max_kj_mol = *mm.second;
+  last_stability_ensemble_ = state;
 }
 
 FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
@@ -6957,6 +9179,16 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
     return {};
 
   const auto frame_time_begin = std::chrono::steady_clock::now();
+  TimingBuckets frame_timing;
+  struct ActiveTimingScope {
+    AnalyzerImpl &self;
+    TimingBuckets *previous;
+    ActiveTimingScope(AnalyzerImpl &impl, TimingBuckets *next)
+        : self(impl), previous(impl.active_timing_) {
+      self.active_timing_ = next;
+    }
+    ~ActiveTimingScope() { self.active_timing_ = previous; }
+  } timing_scope(*this, pbe_timing_enabled() ? &frame_timing : nullptr);
   atoms_.clear();
   std::vector<Atom> mol1_atoms;
   std::vector<Atom> mol2_atoms;
@@ -6985,6 +9217,7 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
   result.ion_access = args_.ion_access;
   result.ion_radius_A = args_.ion_radius;
   result.face_refine = surface_uses_face_refinement(args_.surface);
+  result.pbe_backend = args_.backend;
   result.pbe_model = args_.model;
   result.pbe_biomodel = args_.biomodel;
   result.dielectric_model =
@@ -7010,6 +9243,242 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
   result.charge_assignment = args_.charge_assignment;
   for (const Atom &atom : atoms_)
     result.total_charge += atom.q;
+  last_stability_ensemble_ = StabilityEnsembleState{};
+  stability_hysteresis_cells_kept_frame_ = 0;
+  stability_hysteresis_cells_released_frame_ = 0;
+  add_timing_ms(TimingBucket::Setup,
+                elapsed_ms(frame_time_begin,
+                           std::chrono::steady_clock::now()));
+
+  if (args_.backend == "tabi") {
+    const auto tabi_time_begin = std::chrono::steady_clock::now();
+    const ReactionSolve tabi_solve =
+        solve_tabi_reaction_field(atoms_, executor);
+    const auto tabi_time_end = std::chrono::steady_clock::now();
+    const double tabi_total_ms = elapsed_ms(tabi_time_begin, tabi_time_end);
+    add_timing_ms(TimingBucket::Surface, tabi_solve.tabi_surface_build_ms);
+    add_timing_ms(TimingBucket::Solver,
+                  std::max(0.0,
+                           tabi_total_ms - tabi_solve.tabi_surface_build_ms));
+
+    result.nx = tabi_solve.shape.nx;
+    result.ny = tabi_solve.shape.ny;
+    result.nz = tabi_solve.shape.nz;
+    result.grid_points = tabi_solve.shape.n;
+    result.memory_bytes =
+        std::max(tabi_solve.shape.memory_bytes, tabi_solve.peak_memory_bytes);
+    result.grid_origin_x_A = tabi_solve.shape.ox;
+    result.grid_origin_y_A = tabi_solve.shape.oy;
+    result.grid_origin_z_A = tabi_solve.shape.oz;
+    result.grid_spacing_A = tabi_solve.shape.h;
+    result.grid_center_x_A = tabi_solve.shape.ox;
+    result.grid_center_y_A = tabi_solve.shape.oy;
+    result.grid_center_z_A = tabi_solve.shape.oz;
+    result.solute_points = tabi_solve.solute_points;
+    result.solvent_points = tabi_solve.solvent_points;
+    result.ion_accessible_points = tabi_solve.ion_accessible_points;
+    result.stern_excluded_points = tabi_solve.stern_excluded_points;
+    result.tabi_surface_build_ms = tabi_solve.tabi_surface_build_ms;
+    result.tabi_surface_panels = tabi_solve.tabi_surface_panels;
+    result.tabi_surface_exposed_points =
+        tabi_solve.tabi_surface_exposed_points;
+    result.tabi_surface_buried_points =
+        tabi_solve.tabi_surface_buried_points;
+    result.tabi_tree_build_ms = tabi_solve.tabi_tree_build_ms;
+    result.tabi_tree_nodes = tabi_solve.tabi_tree_nodes;
+    result.tabi_tree_leaf_count = tabi_solve.tabi_tree_leaf_count;
+    result.tabi_near_interactions = tabi_solve.tabi_near_interactions;
+    result.tabi_far_interactions = tabi_solve.tabi_far_interactions;
+    result.tabi_matvec_mode = tabi_solve.tabi_matvec_mode;
+    result.tabi_status = tabi_solve.tabi_status;
+    result.tabi_convergence_reason = tabi_solve.tabi_convergence_reason;
+    result.tabi_residual_history = tabi_solve.tabi_residual_history;
+    result.tabi_reaction_energy_source =
+        tabi_solve.tabi_reaction_energy_source;
+    result.tabi_rhs_ms = tabi_solve.tabi_rhs_ms;
+    result.tabi_gmres_ms = tabi_solve.tabi_gmres_ms;
+    result.tabi_matvec_ms_total = tabi_solve.tabi_matvec_ms_total;
+    result.tabi_matvec_ms_avg = tabi_solve.tabi_matvec_ms_avg;
+    result.tabi_matvec_calls = tabi_solve.tabi_matvec_calls;
+    result.tabi_orthogonalization_ms =
+        tabi_solve.tabi_orthogonalization_ms;
+    result.tabi_preconditioner_ms = tabi_solve.tabi_preconditioner_ms;
+    result.tabi_surface_neighbor_ms = tabi_solve.tabi_surface_neighbor_ms;
+    result.tabi_surface_mesh_ms = tabi_solve.tabi_surface_mesh_ms;
+    result.tabi_solid_angle_ms = tabi_solve.tabi_solid_angle_ms;
+    result.tabi_tree_moment_ms = tabi_solve.tabi_tree_moment_ms;
+    result.tabi_tree_traversal_ms = tabi_solve.tabi_tree_traversal_ms;
+    result.tabi_near_eval_ms = tabi_solve.tabi_near_eval_ms;
+    result.tabi_far_eval_ms = tabi_solve.tabi_far_eval_ms;
+    result.tabi_surface_geometry = tabi_solve.tabi_surface_geometry;
+    result.tabi_mesh_vertices = tabi_solve.tabi_mesh_vertices;
+    result.tabi_mesh_triangles = tabi_solve.tabi_mesh_triangles;
+    result.tabi_boundary_nodes = tabi_solve.tabi_boundary_nodes;
+    result.tabi_avg_valence = tabi_solve.tabi_avg_valence;
+    result.tabi_nonmanifold_edges = tabi_solve.tabi_nonmanifold_edges;
+    result.tabi_solid_angle_fallbacks =
+        tabi_solve.tabi_solid_angle_fallbacks;
+    result.tabi_diag_min = tabi_solve.tabi_diag_min;
+    result.tabi_diag_max = tabi_solve.tabi_diag_max;
+    result.tabi_taylor_order = tabi_solve.tabi_taylor_order;
+    result.tabi_interaction_build_ms = tabi_solve.tabi_interaction_build_ms;
+    result.tabi_tree_eval_ms = tabi_solve.tabi_tree_eval_ms;
+    result.tabi_formulation = tabi_solve.tabi_formulation;
+    result.tabi_energy_projection = tabi_solve.tabi_energy_projection;
+    result.tabi_rhs_scale = tabi_solve.tabi_rhs_scale;
+    result.tabi_dielectric_contrast = tabi_solve.tabi_dielectric_contrast;
+    result.tabi_operator_contrast = tabi_solve.tabi_operator_contrast;
+    result.tabi_unknown_count = tabi_solve.tabi_unknown_count;
+    result.tabi_bie_system = tabi_solve.tabi_bie_system;
+    result.tabi_lhs_diag_phi = tabi_solve.tabi_lhs_diag_phi;
+    result.tabi_lhs_diag_phin = tabi_solve.tabi_lhs_diag_phin;
+    result.tabi_energy_equation = tabi_solve.tabi_energy_equation;
+    result.tabi_kernel_convention = tabi_solve.tabi_kernel_convention;
+    result.tabi_source_norm_s1 = tabi_solve.tabi_source_norm_s1;
+    result.tabi_source_norm_s2 = tabi_solve.tabi_source_norm_s2;
+    result.tabi_phi_norm = tabi_solve.tabi_phi_norm;
+    result.tabi_phin_norm = tabi_solve.tabi_phin_norm;
+    result.tabi_kappa_inv_a = tabi_solve.tabi_kappa_inv_a;
+    result.tabi_coulomb_factor_kcal_mol =
+        tabi_solve.tabi_coulomb_factor_kcal_mol;
+    result.tabi_boundary_energy_kj_mol =
+        tabi_solve.tabi_boundary_energy_kj_mol;
+    result.tabi_reference_energy_kj_mol =
+        tabi_solve.tabi_reference_energy_kj_mol;
+    result.tabi_selected_energy_scale =
+        tabi_solve.tabi_selected_energy_scale;
+    result.tabi_fallback_used = tabi_solve.tabi_fallback_used;
+    result.pbe_model_effective = tabi_solve.pbe_model_effective;
+    result.linear_seed_solver = tabi_solve.linear_seed_solver;
+    result.focus_parent_grid = tabi_solve.focus_parent_grid;
+    result.probe_status = "off";
+    result.rhs_scale = tabi_solve.rhs_scale;
+    result.charge_assigned = tabi_solve.charge_assigned;
+    result.charge_moment_error = tabi_solve.charge_moment_error;
+    result.boundary_rms = tabi_solve.boundary_rms;
+    result.boundary_max = tabi_solve.boundary_max;
+    result.linear_residual = tabi_solve.linear_residual;
+    result.nl_status = "linear";
+    result.focus_enabled = false;
+    result.focus_levels = 1;
+    result.solver_mode = tabi_solve.solver_mode;
+    result.mg_levels = 1;
+    result.solvent_iterations = tabi_solve.solvent_total_iterations;
+    result.vacuum_iterations = tabi_solve.vacuum_total_iterations;
+    result.solvent_iterations_final = tabi_solve.solvent.iterations;
+    result.vacuum_iterations_final = tabi_solve.vacuum.iterations;
+    result.solvent_rms = tabi_solve.solvent.rms;
+    result.vacuum_rms = tabi_solve.vacuum.rms;
+    result.solvent_max_dphi = tabi_solve.solvent.max_dphi;
+    result.vacuum_max_dphi = tabi_solve.vacuum.max_dphi;
+    result.solvent_converged = tabi_solve.solvent.converged;
+    result.vacuum_converged = tabi_solve.vacuum.converged;
+    result.energy_kcal_mol = tabi_solve.energy_kcal_mol;
+    result.energy_kj_mol = tabi_solve.energy_kj_mol;
+    result.energy_kt = tabi_solve.energy_kt;
+    result.solvent_phase_kcal_mol = tabi_solve.solvent_phase_kcal_mol;
+    result.solvent_phase_kj_mol = tabi_solve.solvent_phase_kj_mol;
+    result.solvent_phase_kt = tabi_solve.solvent_phase_kt;
+    result.atom_corrected_kcal_mol = tabi_solve.atom_corrected_kcal_mol;
+    result.atom_corrected_kj_mol = tabi_solve.atom_corrected_kj_mol;
+    result.atom_corrected_kt = tabi_solve.atom_corrected_kt;
+    result.grid_corrected_kcal_mol = tabi_solve.grid_corrected_kcal_mol;
+    result.grid_corrected_kj_mol = tabi_solve.grid_corrected_kj_mol;
+    result.grid_corrected_kt = tabi_solve.grid_corrected_kt;
+    result.coulomb_energy_kcal_mol = tabi_solve.coulomb_energy_kcal_mol;
+    result.coulomb_energy_kj_mol = tabi_solve.coulomb_energy_kj_mol;
+    result.coulomb_energy_kt = tabi_solve.coulomb_energy_kt;
+    result.reaction_energy_source = tabi_solve.reaction_energy_source;
+    result.complex_energy_kcal_mol = tabi_solve.energy_kcal_mol;
+    result.complex_energy_kj_mol = tabi_solve.energy_kj_mol;
+    result.status = result.tabi_status == "off" || result.tabi_status.empty()
+                        ? ((result.solvent_converged &&
+                            result.vacuum_converged)
+                               ? "ok"
+                               : "failed")
+                        : result.tabi_status;
+    result.pbsa_time_frame_ms =
+        elapsed_ms(frame_time_begin, std::chrono::steady_clock::now());
+    append_energy_row(result);
+    frame_timing.total_ms =
+        elapsed_ms(frame_time_begin, std::chrono::steady_clock::now());
+    append_timing_row(result, frame_timing);
+    append_tabi_profile_row(result, frame_timing);
+    append_tabi_formulation_audit_row(result);
+
+    ++frames_total_;
+    if (result.status == "ok")
+      ++frames_converged_;
+    else
+      ++frames_failed_;
+    max_grid_points_seen_ = std::max(max_grid_points_seen_, result.grid_points);
+    max_memory_bytes_seen_ =
+        std::max(max_memory_bytes_seen_, result.memory_bytes);
+    max_tabi_surface_panels_seen_ =
+        std::max(max_tabi_surface_panels_seen_, result.tabi_surface_panels);
+    max_tabi_tree_nodes_seen_ =
+        std::max(max_tabi_tree_nodes_seen_, result.tabi_tree_nodes);
+    max_tabi_tree_leaf_count_seen_ = std::max(
+        max_tabi_tree_leaf_count_seen_, result.tabi_tree_leaf_count);
+    max_tabi_near_interactions_seen_ = std::max(
+        max_tabi_near_interactions_seen_, result.tabi_near_interactions);
+    max_tabi_far_interactions_seen_ = std::max(
+        max_tabi_far_interactions_seen_, result.tabi_far_interactions);
+    max_tabi_mesh_vertices_seen_ =
+        std::max(max_tabi_mesh_vertices_seen_, result.tabi_mesh_vertices);
+    max_tabi_mesh_triangles_seen_ =
+        std::max(max_tabi_mesh_triangles_seen_, result.tabi_mesh_triangles);
+    max_tabi_boundary_nodes_seen_ =
+        std::max(max_tabi_boundary_nodes_seen_, result.tabi_boundary_nodes);
+    max_tabi_nonmanifold_edges_seen_ = std::max(
+        max_tabi_nonmanifold_edges_seen_, result.tabi_nonmanifold_edges);
+    max_tabi_solid_angle_fallbacks_seen_ =
+        std::max(max_tabi_solid_angle_fallbacks_seen_,
+                 result.tabi_solid_angle_fallbacks);
+    min_tabi_diag_seen_ = std::min(min_tabi_diag_seen_, result.tabi_diag_min);
+    max_tabi_diag_seen_ = std::max(max_tabi_diag_seen_, result.tabi_diag_max);
+    max_solute_points_seen_ =
+        std::max(max_solute_points_seen_, result.solute_points);
+    max_solvent_points_seen_ =
+        std::max(max_solvent_points_seen_, result.solvent_points);
+    max_ion_accessible_points_seen_ = std::max(
+        max_ion_accessible_points_seen_, result.ion_accessible_points);
+    max_stern_excluded_points_seen_ = std::max(
+        max_stern_excluded_points_seen_, result.stern_excluded_points);
+    max_focus_levels_seen_ =
+        std::max(max_focus_levels_seen_, result.focus_levels);
+    max_mg_levels_seen_ = std::max(max_mg_levels_seen_, result.mg_levels);
+    max_mg_cycles_seen_ = std::max(max_mg_cycles_seen_, result.mg_cycles);
+    max_linear_residual_seen_ =
+        std::max(max_linear_residual_seen_, result.linear_residual);
+    max_boundary_rms_seen_ =
+        std::max(max_boundary_rms_seen_, result.boundary_rms);
+    max_boundary_max_seen_ =
+        std::max(max_boundary_max_seen_, result.boundary_max);
+
+    const double frame_n = static_cast<double>(frames_total_);
+    const double delta = result.energy_kj_mol - energy_mean_;
+    energy_mean_ += delta / frame_n;
+    energy_m2_ += delta * (result.energy_kj_mol - energy_mean_);
+    if (frames_total_ == 1) {
+      energy_min_ = result.energy_kj_mol;
+      energy_max_ = result.energy_kj_mol;
+    } else {
+      energy_min_ = std::min(energy_min_, result.energy_kj_mol);
+      energy_max_ = std::max(energy_max_, result.energy_kj_mol);
+    }
+    iter_mean_ +=
+        (static_cast<double>(result.solvent_iterations) - iter_mean_) /
+        frame_n;
+    mg_cycle_mean_ +=
+        (static_cast<double>(result.mg_cycles) - mg_cycle_mean_) / frame_n;
+    if (log.is_open() && result.status != "ok") {
+      TitanUI::log_kv(log, "PBE Warning",
+                      "frame " + std::to_string(result.global_index) +
+                          " did not meet convergence thresholds");
+    }
+    return result;
+  }
 
   const auto complex_time_begin = std::chrono::steady_clock::now();
   const ReactionSolve complex_solve =
@@ -7211,6 +9680,7 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
   result.reaction_energy_source = complex_solve.reaction_energy_source;
   result.complex_energy_kcal_mol = complex_solve.energy_kcal_mol;
   result.complex_energy_kj_mol = complex_solve.energy_kj_mol;
+  compute_stability_ensemble(atoms_, executor, result);
 
   ReactionSolve mol1_solve;
   ReactionSolve mol2_solve;
@@ -7329,10 +9799,18 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
     result.status = "not_converged";
   result.pbsa_time_frame_ms =
       elapsed_ms(frame_time_begin, std::chrono::steady_clock::now());
+  const auto probe_time_begin = std::chrono::steady_clock::now();
   result.probe_status = maybe_write_probe_sites(result, atoms_, complex_solve);
+  add_timing_ms(TimingBucket::Probe,
+                elapsed_ms(probe_time_begin,
+                           std::chrono::steady_clock::now()));
 
   maybe_write_parity_stage(result, complex_solve);
+  maybe_write_stability_audit(result, atoms_, complex_solve);
   append_energy_row(result);
+  frame_timing.total_ms =
+      elapsed_ms(frame_time_begin, std::chrono::steady_clock::now());
+  append_timing_row(result, frame_timing);
 
   ++frames_total_;
   if (result.status == "ok")
@@ -7443,6 +9921,16 @@ void AnalyzerImpl::finalize(std::fstream &log) {
     return;
   if (energy_out_.is_open())
     energy_out_.flush();
+  if (timing_out_.is_open())
+    timing_out_.flush();
+  if (tabi_profile_out_.is_open())
+    tabi_profile_out_.flush();
+  if (tabi_formulation_audit_out_.is_open())
+    tabi_formulation_audit_out_.flush();
+  if (stability_audit_out_.is_open())
+    stability_audit_out_.flush();
+  if (stability_samples_out_.is_open())
+    stability_samples_out_.flush();
 
   std::ofstream summary("pbe_summary.dat", std::ios::out | std::ios::trunc);
   if (summary.is_open()) {
@@ -7455,6 +9943,7 @@ void AnalyzerImpl::finalize(std::fstream &log) {
     summary << "model " << (args_.model == "nonlinear" ? "nonlinear_pb"
                                                         : "linear_pb")
             << "\n";
+    summary << "pbe_backend " << args_.backend << "\n";
     summary << "pbe_model " << args_.model << "\n";
     summary << "pbe_model_effective "
             << (args_.model == "nonlinear" ? "nonlinear_or_linearized"
@@ -7492,6 +9981,41 @@ void AnalyzerImpl::finalize(std::fstream &log) {
     summary << "ext_diel " << format_fixed(args_.ext_diel) << "\n";
     summary << "salt_M " << format_fixed(args_.salt) << "\n";
     summary << "temperature_K " << format_fixed(args_.temp) << "\n";
+    summary << "tabi_sum " << args_.tabi_sum << "\n";
+    summary << "tabi_surface_geometry " << args_.tabi_geometry << "\n";
+    summary << "tabi_diagonal " << args_.tabi_diagonal << "\n";
+    summary << "tabi_taylor_order " << args_.tabi_taylor_order << "\n";
+    summary << "tabi_formulation " << args_.tabi_formulation << "\n";
+    summary << "tabi_energy_projection " << args_.tabi_energy_projection
+            << "\n";
+    summary << "tabi_formulation_audit_csv "
+            << "pbe_tabi_formulation_audit.csv\n";
+    summary << "tabi_profile_csv "
+            << (args_.timing == "detail" ? "pbe_tabi_profile.csv" : "off")
+            << "\n";
+    summary << "tabi_surface_panels_max " << max_tabi_surface_panels_seen_
+            << "\n";
+    summary << "tabi_mesh_vertices_max " << max_tabi_mesh_vertices_seen_
+            << "\n";
+    summary << "tabi_mesh_triangles_max " << max_tabi_mesh_triangles_seen_
+            << "\n";
+    summary << "tabi_boundary_nodes_max " << max_tabi_boundary_nodes_seen_
+            << "\n";
+    summary << "tabi_diag_min " << format_fixed(min_tabi_diag_seen_, 6)
+            << "\n";
+    summary << "tabi_diag_max " << format_fixed(max_tabi_diag_seen_, 6)
+            << "\n";
+    summary << "tabi_nonmanifold_edges_max "
+            << max_tabi_nonmanifold_edges_seen_ << "\n";
+    summary << "tabi_solid_angle_fallbacks_max "
+            << max_tabi_solid_angle_fallbacks_seen_ << "\n";
+    summary << "tabi_tree_nodes_max " << max_tabi_tree_nodes_seen_ << "\n";
+    summary << "tabi_tree_leaf_count_max " << max_tabi_tree_leaf_count_seen_
+            << "\n";
+    summary << "tabi_near_interactions_max "
+            << max_tabi_near_interactions_seen_ << "\n";
+    summary << "tabi_far_interactions_max "
+            << max_tabi_far_interactions_seen_ << "\n";
     summary << "kernel_requested " << args_.kernel << "\n";
     summary << "kernel_effective scalar_threaded\n";
     summary << "focus_mode " << args_.focus << "\n";
@@ -7691,6 +10215,20 @@ void AnalyzerImpl::finalize(std::fstream &log) {
     TitanUI::log_kv(log, "Frames", std::to_string(frames_total_));
     TitanUI::log_kv(log, "Converged", std::to_string(frames_converged_));
     TitanUI::log_kv(log, "Failed/Not Converged", std::to_string(frames_failed_));
+    TitanUI::log_kv(log, "PBE Backend", args_.backend);
+    if (args_.backend == "tabi") {
+      TitanUI::log_kv(log, "TABI Geometry", args_.tabi_geometry);
+      TitanUI::log_kv(log, "TABI Diagonal", args_.tabi_diagonal);
+      TitanUI::log_kv(log, "TABI Sum", args_.tabi_sum);
+      TitanUI::log_kv(log, "TABI Formulation", args_.tabi_formulation);
+      TitanUI::log_kv(log, "TABI Energy Projection",
+                      args_.tabi_energy_projection);
+      TitanUI::log_kv(log, "TABI Formulation Audit",
+                      "pbe_tabi_formulation_audit.csv");
+      TitanUI::log_kv(log, "TABI Profile CSV",
+                      args_.timing == "detail" ? "pbe_tabi_profile.csv"
+                                                : "off");
+    }
     TitanUI::log_kv(log, "PBE Model", args_.model);
     TitanUI::log_kv(log, "Bio Model", args_.biomodel);
     TitanUI::log_kv(log, "Dielectric Model", args_.dielectric_model);

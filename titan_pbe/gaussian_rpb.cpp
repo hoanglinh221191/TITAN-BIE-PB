@@ -7,7 +7,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <thread>
 #include <string>
 #include <cstddef>
 #include <utility>
@@ -24,6 +23,25 @@ std::size_t idx3(std::size_t i, std::size_t j, std::size_t k,
 
 bool surface_uses_gaussian(const std::string &surface) noexcept {
   return surface == "gaussian" || surface == "gaussian-cutoff";
+}
+
+std::size_t effective_workers(const TitanExecutor &executor,
+                              std::size_t work_items) noexcept {
+  if (work_items == 0)
+    return 1;
+  return std::max<std::size_t>(
+      1, std::min<std::size_t>(executor.capacity(), work_items));
+}
+
+double pow_nonnegative(double value, double exponent) {
+  const double x = std::max(0.0, value);
+  if (std::abs(exponent - 1.0) <= 1.0e-12)
+    return x;
+  if (std::abs(exponent - 2.0) <= 1.0e-12)
+    return x * x;
+  if (std::abs(exponent - 0.5) <= 1.0e-12)
+    return std::sqrt(x);
+  return std::pow(x, exponent);
 }
 
 std::string rpb_csv_escape(const std::string &value) {
@@ -138,6 +156,7 @@ AnalyzerImpl::adjusted_surface_atoms(const std::vector<Atom> &atoms) const {
 
 AnalyzerImpl::RpbAudit AnalyzerImpl::compute_rpb_source_audit(
     const GridShape &shape, const std::vector<Atom> &atoms,
+    TitanExecutor &executor,
     const AlignedDoubleVector &eps_x, const AlignedDoubleVector &eps_y,
     const AlignedDoubleVector &eps_z, AlignedDoubleVector *source_out,
     AlignedDoubleVector *coulomb_out, double phase_eps_out) const {
@@ -156,7 +175,21 @@ AnalyzerImpl::RpbAudit AnalyzerImpl::compute_rpb_source_audit(
   const double inv_2h = 0.5 / std::max(1.0e-12, shape.h);
   const double indi_scaled =
       std::max(1.0e-30, args_.int_diel / std::max(1.0e-30, delphi_epkt()));
-  const std::vector<Atom> source_atoms = adjusted_surface_atoms(atoms);
+  struct RpbSourceAtom {
+    double x{0.0};
+    double y{0.0};
+    double z{0.0};
+    double q{0.0};
+    double radius{1.0};
+    double inv_sigma_radius2{0.0};
+    double gaussian_factor{0.0};
+    double gaussian_cutoff2{0.0};
+    bool charged{false};
+    bool gaussian_ready{false};
+  };
+  const std::vector<Atom> adjusted_atoms = adjusted_surface_atoms(atoms);
+  std::vector<RpbSourceAtom> source_atoms;
+  source_atoms.reserve(adjusted_atoms.size());
   const bool analytic_gaussian =
       args_.surface == "gaussian" &&
       last_gaussian_density_center_.size() == shape.n &&
@@ -164,14 +197,35 @@ AnalyzerImpl::RpbAudit AnalyzerImpl::compute_rpb_source_audit(
       last_gaussian_eps_center_.size() == shape.n;
   const double gaussian_exponent = std::max(1.0e-12, args_.gaussian_exp);
   const double gaussian_sigma = std::max(1.0e-12, args_.gaussian_sigma);
-  const double surface_exponent = 4.0 / gaussian_exponent;
   const double approx = 1.0e-12;
+  const double density_cutoff_arg = -std::log(approx);
+  const double density_cutoff_norm =
+      pow_nonnegative(density_cutoff_arg, 1.0 / gaussian_exponent);
+  for (const Atom &atom : adjusted_atoms) {
+    RpbSourceAtom prepared;
+    prepared.x = atom.x;
+    prepared.y = atom.y;
+    prepared.z = atom.z;
+    prepared.q = atom.q;
+    prepared.radius = std::max(1.0e-12, atom.radius);
+    prepared.charged = std::abs(atom.q) > 0.0;
+    const double sigma_radius = gaussian_sigma * prepared.radius;
+    const double sigma_radius2 = sigma_radius * sigma_radius;
+    if (sigma_radius2 > 1.0e-12) {
+      prepared.inv_sigma_radius2 = 1.0 / sigma_radius2;
+      prepared.gaussian_factor =
+          (2.0 * gaussian_exponent) /
+          pow_nonnegative(sigma_radius2, gaussian_exponent);
+      prepared.gaussian_cutoff2 = sigma_radius2 * density_cutoff_norm;
+      prepared.gaussian_ready = true;
+    }
+    source_atoms.push_back(prepared);
+  }
+  const double surface_exponent = 4.0 / gaussian_exponent;
   const double diff_gap_indi = args_.gap_diel - args_.int_diel;
   const double epsout = std::isfinite(phase_eps_out) ? phase_eps_out
                                                      : args_.ext_diel;
-  const std::size_t workers =
-      std::max<std::size_t>(1, std::min<std::size_t>(
-                                   4, std::thread::hardware_concurrency()));
+  const std::size_t workers = effective_workers(executor, shape.nz);
   std::vector<double> local_coulomb_sq(workers, 0.0);
   std::vector<double> local_grad_coulomb_sq(workers, 0.0);
   std::vector<double> local_grad_epsilon_sq(workers, 0.0);
@@ -187,7 +241,6 @@ AnalyzerImpl::RpbAudit AnalyzerImpl::compute_rpb_source_audit(
     return (eps_x[id] + eps_y[id] + eps_z[id]) / 3.0;
   };
 
-  TitanExecutor executor(workers);
   executor.parallel_for(shape.nz, workers, 1,
                         [&](std::size_t worker, std::size_t z_begin,
                             std::size_t z_end) {
@@ -230,16 +283,16 @@ AnalyzerImpl::RpbAudit AnalyzerImpl::compute_rpb_source_audit(
                     1.0e-12) {
               surface_derivative_factor =
                   surface_exponent *
-                  std::pow(std::max(0.0, term), surface_exponent - 1.0) *
+                  pow_nonnegative(term, surface_exponent - 1.0) *
                   surface * surface / (total_density * total_density);
             }
           }
-          for (const Atom &atom : source_atoms) {
+          for (const RpbSourceAtom &atom : source_atoms) {
             const double dx = x - atom.x;
             const double dy = y - atom.y;
             const double dz = z - atom.z;
             const double r2 = dx * dx + dy * dy + dz * dz;
-            if (std::abs(atom.q) > 0.0 && r2 > 1.0e-24) {
+            if (atom.charged && r2 > 1.0e-24) {
               const double r = std::sqrt(r2);
               const double inv = 1.0 / (r * indi_scaled);
               coulomb += atom.q * inv;
@@ -252,13 +305,12 @@ AnalyzerImpl::RpbAudit AnalyzerImpl::compute_rpb_source_audit(
               continue;
             if (r2 <= approx)
               continue;
-            const double atom_radius = std::max(1.0e-12, atom.radius);
-            const double sigma_radius = gaussian_sigma * atom_radius;
-            const double sigma_radius2 = sigma_radius * sigma_radius;
-            if (sigma_radius2 <= approx)
+            if (!atom.gaussian_ready)
               continue;
-            const double normalized = r2 / sigma_radius2;
-            const double g_arg = std::pow(normalized, gaussian_exponent);
+            if (r2 >= atom.gaussian_cutoff2)
+              continue;
+            const double normalized = r2 * atom.inv_sigma_radius2;
+            const double g_arg = pow_nonnegative(normalized, gaussian_exponent);
             if (g_arg >= 700.0)
               continue;
             const double density = std::exp(-g_arg);
@@ -266,11 +318,10 @@ AnalyzerImpl::RpbAudit AnalyzerImpl::compute_rpb_source_audit(
               continue;
             const double density_factor =
                 density * (1.0 - total_density) / (1.0 - density);
-            const double dist_factor = std::pow(r2, gaussian_exponent - 1.0);
-            const double atom_factor =
-                (2.0 * gaussian_exponent) /
-                std::pow(sigma_radius2, gaussian_exponent);
-            const double base = atom_factor * density_factor * dist_factor;
+            const double dist_factor =
+                pow_nonnegative(r2, gaussian_exponent - 1.0);
+            const double base =
+                atom.gaussian_factor * density_factor * dist_factor;
             const double eps_factor = diff_gap_indi * base;
             grad_epsin_x += dx * eps_factor;
             grad_epsin_y += dy * eps_factor;

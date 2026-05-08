@@ -161,6 +161,10 @@ IMPORTANT NOTES
     gbsa_total_energy_maptype.tsv
     out_entropy.dat   (auto-enabled by -gbsa for free-energy completeness)
 
+  Notes:
+    - GBSA/ALPB are energy modules and are ignored in -nocal mode; remove
+      -nocal to compute implicit-solvent free energies.
+
 2.2b PBE
 
   Purpose:
@@ -173,11 +177,25 @@ IMPORTANT NOTES
     `-pbsa` wraps this path for production two-molecule MM/PBSA: it enables
     PBE deltaG_solv endpoint solves, force-field elec/vdw interaction energy,
     SASA nonpolar energy, optional interaction entropy, and per-frame binding
-    energy CSV output. The SASA/SA nonpolar core is shared with GBSA, while
-    each workflow keeps its own residue grouping and output files.
+    energy CSV output. The `TitanSurface` workspace is shared by GBSA/PBSA
+    SASA and TABI exposed-panel construction; `TitanSASA` remains the
+    compatibility wrapper for per-atom SASA/SA nonpolar energy. Each workflow
+    keeps its own residue grouping and output files.
+    Backend selection is explicit: bare -pbe, -pbe=grid, and compatibility
+    aliases -pbe=delphi, -pbe=pydelphi, and -pbe=fd use the established
+    finite-difference grid implementation; -pbe=tabi uses the separate
+    clean-room boundary-integral TABI v1 backend for linear PB only. TABI
+    defaults to the JCP 2013 coupled boundary-integral formulation with a
+    clean-room triangle surface; the legacy scalar `titan-v1` formulation is
+    retained only as a hidden debug path. `-pbe-tabi-sum=auto|direct` uses the
+    direct JCP 2013 operator; `treecode` is rejected for JCP 2013 until the
+    coupled 16-kernel treecode is ported, but remains available when explicitly
+    pinning `-pbe-tabi-formulation=titan-v1`. `pbe_timing.csv` reports TABI
+    mesh, diagonal, RHS, GMRES, matvec, BIE-formulation, and tree counters;
+    `-pbe-timing=detail` also writes `pbe_tabi_profile.csv`.
 
   Main inputs:
-    -pbe
+    -pbe[=grid|tabi]
     -pbe-scale, -pbe-margin, -pbe-gridbox
     -pbe-model, -pbe-biomodel, -pbe-dielectric
     -pbe-int-diel, -pbe-ext-diel, -pbe-salt, -pbe-temp
@@ -199,6 +217,12 @@ IMPORTANT NOTES
     -pbe-focus, -pbe-multigrid, -pbe-focus-levels, -pbe-focus-margin
     -pbe-mg-levels, -pbe-mg-pre, -pbe-mg-post, -pbe-mg-coarse-iter
     -pbe-map, -pbe-map-frames, -pbe-max-grid, -pbe-kernel
+    hidden TABI debug only: -pbe-tabi-sum=auto|direct|treecode,
+      -pbe-tabi-geometry=triangle|point-panel,
+      -pbe-tabi-diagonal=solid-angle|flat|off,
+      -pbe-tabi-taylor-order=3|4,
+      -pbe-tabi-formulation=titan-v1|jcp2013|calibrated-debug,
+      -pbe-tabi-energy-projection=boundary|born-check|charge-potential-debug
     hidden PQR parity only: -pbe-parity-dump, -pbe-parity-map-dump,
     -pbe-test-charge-grid, -pbe-test-charge-grid-diff,
     -pbe-test-surface-map,
@@ -213,6 +237,12 @@ IMPORTANT NOTES
     v1 requires normal charge/radius initialization; do not combine with -nocal
     Zero-radius polar hydrogens from supported force fields use a small
     Bondi-style PBE surface fallback radius while charges remain mandatory.
+    TABI v1 uses an explicit linear-BIE convention with Angstrom kernels,
+    outward normals, solid-angle diagonal terms, and final Coulomb conversion.
+    TABI writes `pbe_tabi_formulation_audit.csv` for sign/scale, kappa,
+    dielectric contrast, energy projection, and fallback diagnostics.
+    It rejects nonlinear, RPB, Gaussian dielectric/surface, focus, multigrid,
+    PBSA, decomposition, and grid-map modes until later phases.
 
   Typical outputs:
     pbe_energy.csv
@@ -254,6 +284,9 @@ IMPORTANT NOTES
     source comparison is report-first until the remaining grad-epsilon/source
     convention is locked. test/pbe_timing_compare.ps1 writes
     pbe_timing_compare.csv for TITAN vs pyDelPhi wall-clock/profile rows.
+    Oracle CSVs, pyDelPhi/DelPhi runtimes, and the oracle provenance manifest
+    are test-only artifacts; production PBE does not read or call them.
+    DelPhi-named modes are compatibility labels, not imported implementation.
     test/pbe_nonlinear_nwt_trace_compare.ps1 compares TITAN NWT rows against
     the pyDelPhi oracle in fixed stage order, and
     test/pbe_nwt_solver_progress_smoke.ps1 compares block RMS/max-dphi progress
@@ -1567,7 +1600,9 @@ IMPORTANT NOTES
   -saltcon <val>        Salt concentration (M). Default: 0.15
   -epsilon_in <val>     Internal epsilon for solvation models
 
-  -pbe                  Enable frame-based PB electrostatics
+  -pbe[=backend]        Enable frame-based PB electrostatics. backend is grid
+                        or tabi. Bare -pbe defaults to grid; delphi,
+                        pydelphi, and fd are grid compatibility aliases.
   -pbe-model <mode>     linear or nonlinear. Default: linear
                         nonlinear uses the current linear off/focus/vcycle
                         solve as a seed, then runs Picard/SOR or damped Newton
@@ -2231,6 +2266,7 @@ IMPORTANT NOTES
                         DSSP in this mode analyzes molecule 1 only
                         LJ in this mode analyzes molecule 1 only
                         RMSD/RMSF in this mode analyzes molecule 1 only
+                        GBSA/ALPB are ignored in this mode
   -cscd                 Side-chain contact distances
   -pqr                  Write PQR-style output
   -cal-force            Calculate atomic forces

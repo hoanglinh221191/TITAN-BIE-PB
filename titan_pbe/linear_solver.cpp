@@ -3,8 +3,10 @@
 #include "../titan_executor.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -14,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace TitanPBE {
@@ -620,7 +623,7 @@ void AnalyzerImpl::maybe_write_boundary_diff(const GridShape &shape,
 
 AnalyzerImpl::BoundaryDiagnostics
 AnalyzerImpl::set_boundary(const GridShape &shape, const std::vector<Atom> &atoms,
-                       double eps_out, double kappa) {
+                           double eps_out, double kappa) {
   std::fill(phi_.begin(), phi_.end(), 0.0);
   BoundaryDiagnostics diag;
   if (args_.boundary == "zero")
@@ -745,6 +748,206 @@ AnalyzerImpl::set_boundary(const GridShape &shape, const std::vector<Atom> &atom
   return diag;
 }
 
+AnalyzerImpl::SolveStats
+AnalyzerImpl::solve_sor_half_packed(const GridShape &shape,
+                                    TitanExecutor &executor) {
+  const auto update_begin = std::chrono::steady_clock::now();
+  SolveStats stats;
+  if (shape.n == 0)
+    return stats;
+
+  double omega =
+      args_.omega == "auto"
+          ? std::clamp(2.0 / (1.0 + std::sin(kPi / static_cast<double>(
+                                             std::max({shape.nx, shape.ny,
+                                                       shape.nz})))),
+                       1.0, 1.95)
+          : args_.omega_value;
+  if (args_.omega == "auto" &&
+      ((args_.test_operator_convention == "delphi" &&
+        !args_.test_pqr.empty()) ||
+       args_.focus == "delphi")) {
+    omega = delphi_relaxation_omega(shape);
+  }
+
+  struct PackedCell {
+    std::uint32_t h{0};
+    std::uint32_t xp{0};
+    std::uint32_t xm{0};
+    std::uint32_t yp{0};
+    std::uint32_t ym{0};
+    std::uint32_t zp{0};
+    std::uint32_t zm{0};
+    double rhs{0.0};
+    double denom{1.0};
+    double ex_p{0.0};
+    double ex_m{0.0};
+    double ey_p{0.0};
+    double ey_m{0.0};
+    double ez_p{0.0};
+    double ez_m{0.0};
+  };
+
+  const std::size_t even_count = (shape.n + 1) / 2;
+  const std::size_t odd_count = shape.n / 2;
+  AlignedDoubleVector even_phi(even_count, 0.0);
+  AlignedDoubleVector odd_phi(odd_count, 0.0);
+  for (std::size_t id = 0; id < shape.n; ++id) {
+    if ((id & 1U) == 0U)
+      even_phi[id / 2] = phi_[id];
+    else
+      odd_phi[id / 2] = phi_[id];
+  }
+
+  std::vector<PackedCell> even_homo;
+  std::vector<PackedCell> even_hetero;
+  std::vector<PackedCell> odd_homo;
+  std::vector<PackedCell> odd_hetero;
+  const std::size_t reserve_each =
+      shape.n > 0 ? std::max<std::size_t>(1, shape.n / 4) : 0;
+  even_homo.reserve(reserve_each);
+  even_hetero.reserve(reserve_each);
+  odd_homo.reserve(reserve_each);
+  odd_hetero.reserve(reserve_each);
+  const double rhs_scale = effective_rhs_scale(shape);
+  const std::size_t xy = shape.nx * shape.ny;
+  auto add_cell = [&](int color, std::size_t id) {
+    const double ex_p = eps_x_[id];
+    const double ex_m = eps_x_[id - 1];
+    const double ey_p = eps_y_[id];
+    const double ey_m = eps_y_[id - shape.nx];
+    const double ez_p = eps_z_[id];
+    const double ez_m = eps_z_[id - xy];
+    PackedCell cell{};
+    cell.h = static_cast<std::uint32_t>(id / 2);
+    cell.xp = static_cast<std::uint32_t>((id + 1) / 2);
+    cell.xm = static_cast<std::uint32_t>((id - 1) / 2);
+    cell.yp = static_cast<std::uint32_t>((id + shape.nx) / 2);
+    cell.ym = static_cast<std::uint32_t>((id - shape.nx) / 2);
+    cell.zp = static_cast<std::uint32_t>((id + xy) / 2);
+    cell.zm = static_cast<std::uint32_t>((id - xy) / 2);
+    cell.rhs = rhs_scale * rho_[id];
+    cell.denom = denom_[id];
+    cell.ex_p = ex_p;
+    cell.ex_m = ex_m;
+    cell.ey_p = ey_p;
+    cell.ey_m = ey_m;
+    cell.ez_p = ez_p;
+    cell.ez_m = ez_m;
+    const bool homogeneous = ex_p == ex_m && ex_p == ey_p && ex_p == ey_m &&
+                             ex_p == ez_p && ex_p == ez_m;
+    if (color == 0) {
+      (homogeneous ? even_homo : even_hetero).push_back(cell);
+    } else {
+      (homogeneous ? odd_homo : odd_hetero).push_back(cell);
+    }
+  };
+  for (std::size_t k = 1; k + 1 < shape.nz; ++k) {
+    for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
+      for (int color = 0; color < 2; ++color) {
+        const std::size_t first_i =
+            1 + (static_cast<int>((1 + j + k) & 1ULL) == color ? 0U : 1U);
+        for (std::size_t i = first_i; i + 1 < shape.nx; i += 2)
+          add_cell(color, idx3(i, j, k, shape.nx, shape.ny));
+      }
+    }
+  }
+
+  const std::size_t interior_z = shape.nz > 2 ? shape.nz - 2 : 0;
+  const std::size_t workers = effective_workers(executor, interior_z);
+  std::vector<double> local_sumsq(workers, 0.0);
+  std::vector<double> local_max(workers, 0.0);
+  std::vector<std::size_t> local_count(workers, 0);
+  const bool delphi_block_stop =
+      (!args_.test_pqr.empty() && args_.test_operator_convention == "delphi") ||
+      args_.focus == "delphi";
+
+  auto update_cells = [&](const std::vector<PackedCell> &cells,
+                          AlignedDoubleVector &write_phi,
+                          const AlignedDoubleVector &read_phi,
+                          bool homogeneous) {
+    if (cells.empty())
+      return;
+    executor.parallel_for(
+        cells.size(), workers, 256,
+        [&](std::size_t worker, std::size_t begin, std::size_t end) {
+          double sumsq = 0.0;
+          double max_delta = 0.0;
+          std::size_t count = 0;
+          for (std::size_t cell_index = begin; cell_index < end;
+               ++cell_index) {
+            const PackedCell &cell = cells[cell_index];
+            const double old_phi = write_phi[cell.h];
+            double neighbor_sum = 0.0;
+            if (homogeneous) {
+              neighbor_sum = cell.ex_p *
+                             (read_phi[cell.xp] + read_phi[cell.xm] +
+                              read_phi[cell.yp] + read_phi[cell.ym] +
+                              read_phi[cell.zp] + read_phi[cell.zm]);
+            } else {
+              neighbor_sum =
+                  cell.ex_p * read_phi[cell.xp] +
+                  cell.ex_m * read_phi[cell.xm] +
+                  cell.ey_p * read_phi[cell.yp] +
+                  cell.ey_m * read_phi[cell.ym] +
+                  cell.ez_p * read_phi[cell.zp] +
+                  cell.ez_m * read_phi[cell.zm];
+            }
+            const double target =
+                (neighbor_sum + cell.rhs) / std::max(1.0e-12, cell.denom);
+            const double updated = old_phi + omega * (target - old_phi);
+            const double delta = updated - old_phi;
+            write_phi[cell.h] = updated;
+            sumsq += delta * delta;
+            max_delta = std::max(max_delta, std::abs(delta));
+            ++count;
+          }
+          local_sumsq[worker] += sumsq;
+          local_max[worker] = std::max(local_max[worker], max_delta);
+          local_count[worker] += count;
+        });
+  };
+
+  for (int iter = 1; iter <= args_.max_iter; ++iter) {
+    std::fill(local_sumsq.begin(), local_sumsq.end(), 0.0);
+    std::fill(local_max.begin(), local_max.end(), 0.0);
+    std::fill(local_count.begin(), local_count.end(), 0);
+
+    update_cells(even_homo, even_phi, odd_phi, true);
+    update_cells(even_hetero, even_phi, odd_phi, false);
+    update_cells(odd_homo, odd_phi, even_phi, true);
+    update_cells(odd_hetero, odd_phi, even_phi, false);
+
+    double sumsq = 0.0;
+    double max_delta = 0.0;
+    std::size_t count = 0;
+    for (std::size_t worker = 0; worker < workers; ++worker) {
+      sumsq += local_sumsq[worker];
+      max_delta = std::max(max_delta, local_max[worker]);
+      count += local_count[worker];
+    }
+    stats.iterations = iter;
+    stats.rms = count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
+    stats.max_dphi = max_delta;
+    const bool can_stop_this_iter =
+        !delphi_block_stop || (iter % 50 == 0) || iter == args_.max_iter;
+    if (can_stop_this_iter &&
+        (stats.rms <= args_.rms_tol || stats.max_dphi <= args_.dphi_tol)) {
+      stats.converged = true;
+      break;
+    }
+  }
+
+  for (std::size_t id = 0; id < shape.n; ++id) {
+    phi_[id] = (id & 1U) == 0U ? even_phi[id / 2] : odd_phi[id / 2];
+  }
+  add_timing_ms(TimingBucket::LinearHalfUpdate,
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - update_begin)
+                    .count());
+  return stats;
+}
+
 AnalyzerImpl::SolveStats AnalyzerImpl::solve_sor(const GridShape &shape,
                                           TitanExecutor &executor) {
   SolveStats stats;
@@ -772,6 +975,17 @@ AnalyzerImpl::SolveStats AnalyzerImpl::solve_sor(const GridShape &shape,
   const bool delphi_block_stop =
       (!args_.test_pqr.empty() && args_.test_operator_convention == "delphi") ||
       args_.focus == "delphi";
+  // The packed linear path is kept as a forced bisect knob. On the current
+  // focus workload it is slower than legacy full-grid SOR, so auto stays legacy.
+  const bool linear_half_auto = false;
+  const bool linear_half_forced = args_.linear_kernel == "half-packed";
+  if ((linear_half_auto || linear_half_forced) && !write_trace &&
+      (shape.nx & 1U) != 0U && (shape.ny & 1U) != 0U &&
+      (shape.nz & 1U) != 0U &&
+      shape.n <=
+          static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    return solve_sor_half_packed(shape, executor);
+  }
   std::vector<std::size_t> trace_ids;
   std::unordered_map<std::string, double> oracle_trace_charge_density;
   auto trace_key = [](int color, std::size_t i, std::size_t j,
@@ -857,7 +1071,9 @@ AnalyzerImpl::SolveStats AnalyzerImpl::solve_sor(const GridShape &shape,
     std::fill(local_count.begin(), local_count.end(), 0);
 
     for (int color = 0; color < 2; ++color) {
-      std::vector<std::vector<std::string>> trace_lines(workers);
+      std::vector<std::vector<std::string>> trace_lines;
+      if (write_trace)
+        trace_lines.resize(workers);
       executor.parallel_for(
           interior_z, workers, 1,
           [&](std::size_t worker, std::size_t begin, std::size_t end) {
@@ -867,9 +1083,10 @@ AnalyzerImpl::SolveStats AnalyzerImpl::solve_sor(const GridShape &shape,
             for (std::size_t kk = begin; kk < end; ++kk) {
               const std::size_t k = kk + 1;
               for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
-                for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
-                  if (static_cast<int>((i + j + k) & 1ULL) != color)
-                    continue;
+                const std::size_t first_i =
+                    1 + (static_cast<int>((1 + j + k) & 1ULL) == color ? 0U
+                                                                        : 1U);
+                for (std::size_t i = first_i; i + 1 < shape.nx; i += 2) {
                   const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
                   const double neighbor_sum =
                       eps_x_[id] * phi_[id + 1] + eps_x_[id - 1] * phi_[id - 1] +
@@ -1030,6 +1247,7 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_focused_field(
   AlignedDoubleVector previous_phi;
   bool has_previous = false;
   for (int level = 0; level < levels; ++level) {
+    const auto focus_setup_begin = std::chrono::steady_clock::now();
     const int remaining = levels - level - 1;
     double scale = args_.scale;
     if (remaining > 0) {
@@ -1149,16 +1367,35 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_focused_field(
           focus_atoms.push_back(atom);
         }
       }
-      if (!focus_atoms.empty())
-        level_atoms = &focus_atoms;
-    }
+    if (!focus_atoms.empty())
+      level_atoms = &focus_atoms;
+    if (has_previous && active_timing_)
+      active_timing_->focus_child_atom_count = level_atoms->size();
+  }
     const std::size_t peak_bytes =
         shape.memory_bytes + previous_phi.size() * sizeof(double);
     field.peak_memory_bytes = std::max(field.peak_memory_bytes, peak_bytes);
     ensure_workspace(shape);
+    const double focus_setup_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - focus_setup_begin)
+            .count();
+    add_timing_ms(TimingBucket::FocusSetup, focus_setup_ms);
+    if (has_previous)
+      add_timing_ms(TimingBucket::FocusChildSetup, focus_setup_ms);
+    const auto surface_begin = std::chrono::steady_clock::now();
     classify_surface(shape, *level_atoms, executor);
     apply_oracle_surface_map(shape);
     classify_ion_accessibility(shape, *level_atoms, executor);
+    const double surface_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - surface_begin)
+            .count();
+    add_timing_ms(TimingBucket::Surface, surface_ms);
+    if (has_previous)
+      add_timing_ms(TimingBucket::FocusChildSurface, surface_ms);
+    const auto epsilon_begin = std::chrono::steady_clock::now();
+    double rpb_source_ms = 0.0;
     auto assign_focus_clipped_charges = [&]() {
       std::fill(rho_.begin(), rho_.end(), 0.0);
       ChargeDiagnostics diag;
@@ -1229,12 +1466,20 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_focused_field(
     maybe_write_charge_grid_diff(shape, *level_atoms);
     AlignedDoubleVector energy_rho;
     build_coefficients(shape, *level_atoms, eps_in, eps_out, kappa, executor);
+    if (map_result != nullptr && (kappa > 0.0 || eps_out > eps_in + 1.0e-9))
+      apply_stability_hysteresis(shape, *level_atoms);
     if (args_.biomodel == "rpbe") {
       energy_rho = rho_;
       AlignedDoubleVector rpb_source;
       AlignedDoubleVector rpb_coulomb;
-      (void)compute_rpb_source_audit(shape, *level_atoms, eps_x_, eps_y_, eps_z_,
-                                     &rpb_source, &rpb_coulomb, eps_out);
+      const auto rpb_begin = std::chrono::steady_clock::now();
+      RpbAudit rpb_audit = compute_rpb_source_audit(
+          shape, *level_atoms, executor, eps_x_, eps_y_, eps_z_, &rpb_source,
+          &rpb_coulomb, eps_out);
+      rpb_source_ms += std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - rpb_begin)
+                           .count();
+      add_timing_ms(TimingBucket::RpbSource, rpb_source_ms);
       if (rpb_source.size() == shape.n) {
         const double source_to_native_rho =
             (shape.h * shape.h) /
@@ -1259,20 +1504,66 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_focused_field(
             rho_[id] = source_value * source_to_native_rho;
           }
       }
+      if (level + 1 == levels) {
+        field.rpbe_coulomb_norm = rpb_audit.coulomb_norm;
+        field.rpbe_grad_coulomb_norm = rpb_audit.grad_coulomb_norm;
+        field.rpbe_grad_epsilon_norm = rpb_audit.grad_epsilon_norm;
+        field.rpbe_source_rms = rpb_audit.source_rms;
+        field.rpbe_source_max = rpb_audit.source_max;
+        field.rpbe_source_status = rpb_audit.status;
+        if (args_.parity_dump != "off") {
+          field.rpbe_source_grid = std::move(rpb_source);
+          field.rpbe_coulomb_grid = std::move(rpb_coulomb);
+        }
+      }
     }
+    const double epsilon_ms =
+        std::max(0.0,
+                 std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - epsilon_begin)
+                         .count() -
+                     rpb_source_ms);
+    add_timing_ms(TimingBucket::Epsilon, epsilon_ms);
+    if (has_previous)
+      add_timing_ms(TimingBucket::FocusChildEpsilon, epsilon_ms);
     if (level + 1 == levels && map_result != nullptr)
       maybe_write_maps(shape, *map_result, false);
+    const auto boundary_begin = std::chrono::steady_clock::now();
     BoundaryDiagnostics boundary_diag =
         set_boundary(shape, *level_atoms, eps_out, kappa);
     if (args_.test_boundary_map == "oracle" && oracle_replay_applies(shape))
       boundary_diag = apply_oracle_boundary_map(shape, eps_out, kappa);
     if (level + 1 == levels)
       maybe_write_boundary_diff(shape, *level_atoms, eps_out, kappa);
-    if (has_previous)
+    double focus_interp_ms = 0.0;
+    if (has_previous) {
+      const auto focus_interp_begin = std::chrono::steady_clock::now();
       seed_from_focus_source(shape, previous_shape, previous_phi, executor,
                              args_.focus == "delphi");
+      focus_interp_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - focus_interp_begin)
+              .count();
+      add_timing_ms(TimingBucket::FocusBoundaryInterp, focus_interp_ms);
+    }
+    add_timing_ms(
+        TimingBucket::Boundary,
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - boundary_begin)
+            .count());
 
+    const auto solver_begin = std::chrono::steady_clock::now();
     SolveStats stats = solve_sor(shape, executor);
+    const double solver_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - solver_begin)
+            .count();
+    add_timing_ms(TimingBucket::Solver, solver_ms);
+    if (levels > 1) {
+      add_timing_ms(has_previous ? TimingBucket::FocusChildSolver
+                                 : TimingBucket::FocusParentSolve,
+                    solver_ms);
+    }
     field.total_iterations += stats.iterations;
     if (level + 1 == levels) {
       if (map_result != nullptr)
@@ -1382,7 +1673,7 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_focused_field(
       if (args_.charge_assignment == "delphi" ||
           args_.charge_assignment == "gaussian" || keep_field_grids)
         field.phi_grid = phi_;
-    if (keep_field_grids) {
+      if (keep_field_grids) {
       field.rho_grid = rho_;
       field.rho_energy_grid =
           (!energy_rho.empty() && energy_rho.size() == shape.n) ? energy_rho
@@ -1400,6 +1691,9 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_focused_field(
                   : 0.0;
         }
       }
+      if (map_result != nullptr &&
+          (kappa > 0.0 || eps_out > eps_in + 1.0e-9))
+        store_stability_medium_state(shape);
     } else {
       previous_shape = shape;
       previous_phi = phi_;

@@ -33,6 +33,8 @@ public:
   TitanDSSPAnalyzer() = default;
 
   static bool supports_moltype(const std::string &mol_type);
+  static std::size_t
+  compatible_backbone_residue_count(const std::vector<mol_info> &info);
   static bool
   has_protein_backbone_signature(const std::vector<mol_info> &info);
   static char state_to_char(State state);

@@ -642,6 +642,77 @@ inline unsigned point_vs_gathered4_cutoff_mask(
                 inclusive_cutoff);
 }
 
+inline unsigned point_vs_gathered4_variable_cutoff_mask_scalar(
+    double px, double py, double pz, const double *xs, const double *ys,
+    const double *zs, const std::int64_t *indices, const double *cutoff_sq,
+    double min_sq, bool inclusive_cutoff) noexcept {
+  unsigned mask = 0u;
+  for (unsigned lane = 0; lane < 4; ++lane) {
+    const std::size_t idx = static_cast<std::size_t>(indices[lane]);
+    const double dx = px - xs[idx];
+    const double dy = py - ys[idx];
+    const double dz = pz - zs[idx];
+    const double dist_sq = dx * dx + dy * dy + dz * dz;
+    const bool cutoff_ok = inclusive_cutoff ? (dist_sq <= cutoff_sq[lane])
+                                            : (dist_sq < cutoff_sq[lane]);
+    if (dist_sq > min_sq && cutoff_ok)
+      mask |= (1u << lane);
+  }
+  return mask;
+}
+
+#if TITAN_SIMD_X86
+TITAN_TARGET_AVX2
+inline unsigned point_vs_gathered4_variable_cutoff_mask_avx2(
+    double px, double py, double pz, const double *xs, const double *ys,
+    const double *zs, const std::int64_t *indices, const double *cutoff_sq,
+    double min_sq, bool inclusive_cutoff) noexcept {
+  const __m256i idx = _mm256_loadu_si256(
+      reinterpret_cast<const __m256i *>(indices));
+  const __m256d vpx = _mm256_set1_pd(px);
+  const __m256d vpy = _mm256_set1_pd(py);
+  const __m256d vpz = _mm256_set1_pd(pz);
+  const __m256d vx = _mm256_i64gather_pd(xs, idx, 8);
+  const __m256d vy = _mm256_i64gather_pd(ys, idx, 8);
+  const __m256d vz = _mm256_i64gather_pd(zs, idx, 8);
+  const __m256d dx = _mm256_sub_pd(vpx, vx);
+  const __m256d dy = _mm256_sub_pd(vpy, vy);
+  const __m256d dz = _mm256_sub_pd(vpz, vz);
+  const __m256d dist_sq =
+      _mm256_add_pd(_mm256_mul_pd(dx, dx),
+                    _mm256_add_pd(_mm256_mul_pd(dy, dy), _mm256_mul_pd(dz, dz)));
+  const __m256d cutoff_vec = _mm256_loadu_pd(cutoff_sq);
+  const __m256d min_vec = _mm256_set1_pd(min_sq);
+  const __m256d cutoff_mask =
+      inclusive_cutoff ? _mm256_cmp_pd(dist_sq, cutoff_vec, _CMP_LE_OQ)
+                       : _mm256_cmp_pd(dist_sq, cutoff_vec, _CMP_LT_OQ);
+  const __m256d min_mask = _mm256_cmp_pd(dist_sq, min_vec, _CMP_GT_OQ);
+  return static_cast<unsigned>(
+      _mm256_movemask_pd(_mm256_and_pd(cutoff_mask, min_mask)));
+}
+#endif
+
+inline unsigned point_vs_gathered4_variable_cutoff_mask(
+    double px, double py, double pz, const double *xs, const double *ys,
+    const double *zs, const std::int64_t *indices, const double *cutoff_sq,
+    double min_sq = 0.0, bool inclusive_cutoff = false) noexcept {
+  using Kernel =
+      unsigned (*)(double, double, double, const double *, const double *,
+                   const double *, const std::int64_t *, const double *,
+                   double, bool) noexcept;
+  static const Kernel kernel = []() noexcept -> Kernel {
+#if TITAN_SIMD_X86 && TITAN_RUNTIME_TARGET_ATTRS
+    return runtime_has_avx2()
+               ? &point_vs_gathered4_variable_cutoff_mask_avx2
+               : &point_vs_gathered4_variable_cutoff_mask_scalar;
+#else
+    return &point_vs_gathered4_variable_cutoff_mask_scalar;
+#endif
+  }();
+  return kernel(px, py, pz, xs, ys, zs, indices, cutoff_sq, min_sq,
+                inclusive_cutoff);
+}
+
 inline double gbsa_inverse_r4_volume_sum_scalar(
     const double *x, const double *y, const double *z, const double *rho,
     std::size_t n, double cx, double cy, double cz, double min_sq = 1e-6,

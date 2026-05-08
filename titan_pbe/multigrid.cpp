@@ -3,6 +3,7 @@
 #include "../titan_executor.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -71,20 +72,44 @@ void AnalyzerImpl::prepare_multigrid_level(
     MultigridLevel &level, const GridShape &shape,
     const std::vector<Atom> &atoms, double eps_in, double eps_out, double kappa,
     bool physical_rhs, bool physical_boundary, TitanExecutor &executor) {
+  const auto setup_begin = std::chrono::steady_clock::now();
   ensure_workspace(shape);
+  add_timing_ms(
+      TimingBucket::Setup,
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - setup_begin)
+          .count());
+  const auto surface_begin = std::chrono::steady_clock::now();
   classify_surface(shape, atoms, executor);
   apply_oracle_surface_map(shape);
   classify_ion_accessibility(shape, atoms, executor);
+  add_timing_ms(
+      TimingBucket::Surface,
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - surface_begin)
+          .count());
+  const auto epsilon_begin = std::chrono::steady_clock::now();
   const ChargeDiagnostics charge_diag =
       args_.test_charge_grid == "oracle"
           ? assign_oracle_charge_grid(shape, atoms)
           : assign_charges(shape, atoms);
   build_coefficients(shape, atoms, eps_in, eps_out, kappa, executor);
+  add_timing_ms(
+      TimingBucket::Epsilon,
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - epsilon_begin)
+          .count());
   BoundaryDiagnostics boundary_diag;
   if (physical_boundary) {
+    const auto boundary_begin = std::chrono::steady_clock::now();
     boundary_diag = set_boundary(shape, atoms, eps_out, kappa);
     if (args_.test_boundary_map == "oracle" && oracle_replay_applies(shape))
       boundary_diag = apply_oracle_boundary_map(shape, eps_out, kappa);
+    add_timing_ms(
+        TimingBucket::Boundary,
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - boundary_begin)
+            .count());
   } else {
     std::fill(phi_.begin(), phi_.end(), 0.0);
   }
@@ -142,9 +167,9 @@ AnalyzerImpl::smooth_multigrid_level(MultigridLevel &level, int iterations,
     for (int color = 0; color < 2; ++color) {
       for (std::size_t k = 1; k + 1 < shape.nz; ++k) {
         for (std::size_t j = 1; j + 1 < shape.ny; ++j) {
-          for (std::size_t i = 1; i + 1 < shape.nx; ++i) {
-            if (static_cast<int>((i + j + k) & 1ULL) != color)
-              continue;
+          const std::size_t first_i =
+              1 + (static_cast<int>((1 + j + k) & 1ULL) == color ? 0U : 1U);
+          for (std::size_t i = first_i; i + 1 < shape.nx; i += 2) {
             const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
             const double neighbor_sum =
                 level.eps_x[id] * level.phi[id + 1] +
@@ -341,6 +366,7 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_vcycle_field(
       std::max(1, args_.mg_pre + args_.mg_post + args_.mg_coarse_iter);
   const int max_cycles = std::max(1, args_.max_iter / cycle_work);
   SolveStats cycle_stats;
+  const auto solver_begin = std::chrono::steady_clock::now();
   for (int cycle = 1; cycle <= max_cycles; ++cycle) {
     const AlignedDoubleVector before = levels.front().phi;
     run_multigrid_vcycle(levels, 0);
@@ -372,6 +398,11 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_vcycle_field(
   field.mg_cycles = cycle_stats.iterations;
   copy_level_to_workspace(levels.front());
   SolveStats final_stats = solve_sor(fine_shape, executor);
+  add_timing_ms(
+      TimingBucket::Solver,
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - solver_begin)
+          .count());
   field.total_iterations =
       field.mg_cycles * cycle_work + final_stats.iterations;
   field.stats = final_stats;
@@ -438,6 +469,8 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_vcycle_field(
               : 0.0;
     }
   }
+  if (map_result != nullptr && (kappa > 0.0 || eps_out > eps_in + 1.0e-9))
+    store_stability_medium_state(fine_shape);
   return field;
 }
 

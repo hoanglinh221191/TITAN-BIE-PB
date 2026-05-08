@@ -868,6 +868,14 @@ int arguments::post_process() {
          << " threads!\n";
   }
 
+  if (flag_nocal && flag_gbsa) {
+    TitanUI::print_warning(
+        "Nocal mode is structural-only; ignoring -gbsa/-alpb. Remove -nocal "
+        "to compute implicit-solvent free energies.");
+    flag_gbsa = false;
+    flag_alpb = false;
+  }
+
   if (flag_gbsa) {
     if (entropy == false) {
       TitanUI::print_info(
@@ -895,6 +903,51 @@ int arguments::post_process() {
     if (pbe.pbsa) {
       pbe.dgsolv = true;
       pbe.flag_pbe = true;
+    }
+    if (pbe.backend == "delphi" || pbe.backend == "pydelphi" ||
+        pbe.backend == "fd") {
+      pbe.backend = "grid";
+    }
+    if (pbe.backend != "grid" && pbe.backend != "tabi") {
+      TitanUI::print_error(
+          "PBE: -pbe backend must be grid or tabi (aliases: delphi, pydelphi, fd).");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_sum != "auto" && pbe.tabi_sum != "direct" &&
+        pbe.tabi_sum != "treecode") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-sum must be auto, direct, or treecode.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_geometry != "triangle" &&
+        pbe.tabi_geometry != "point-panel") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-geometry must be triangle or point-panel.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_diagonal != "solid-angle" && pbe.tabi_diagonal != "flat" &&
+        pbe.tabi_diagonal != "off") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-diagonal must be solid-angle, flat, or off.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_taylor_order != 3 && pbe.tabi_taylor_order != 4) {
+      TitanUI::print_error("PBE: -pbe-tabi-taylor-order must be 3 or 4.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_formulation != "titan-v1" &&
+        pbe.tabi_formulation != "jcp2013" &&
+        pbe.tabi_formulation != "calibrated-debug") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-formulation must be titan-v1, jcp2013, or calibrated-debug.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_energy_projection != "boundary" &&
+        pbe.tabi_energy_projection != "born-check" &&
+        pbe.tabi_energy_projection != "charge-potential-debug") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-energy-projection must be boundary, born-check, or charge-potential-debug.");
+      exit(EXIT_FAILURE);
     }
     if (flag_nocal) {
       TitanUI::print_error(
@@ -1034,6 +1087,60 @@ int arguments::post_process() {
     }
     if (pbe.nl_multigrid != "off" && pbe.nl_multigrid != "fas") {
       TitanUI::print_error("PBE: -pbe-nl-multigrid must be off or fas.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nwt_kernel != "auto" && pbe.nwt_kernel != "legacy" &&
+        pbe.nwt_kernel != "delphi-half") {
+      TitanUI::print_error(
+          "PBE: -pbe-nwt-kernel must be auto, legacy, or delphi-half.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nwt_homo_kernel != "auto" &&
+        pbe.nwt_homo_kernel != "packed-list" &&
+        pbe.nwt_homo_kernel != "row-span" &&
+        pbe.nwt_homo_kernel != "avx2" &&
+        pbe.nwt_homo_kernel != "salt-tiled") {
+      TitanUI::print_error("PBE: -pbe-nwt-homo-kernel must be auto, "
+                           "packed-list, row-span, avx2, or salt-tiled.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.nwt_progress != "auto" && pbe.nwt_progress != "off" &&
+        pbe.nwt_progress != "strict") {
+      TitanUI::print_error(
+          "PBE: -pbe-nwt-progress must be auto, off, or strict.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.linear_kernel != "auto" && pbe.linear_kernel != "legacy" &&
+        pbe.linear_kernel != "half-packed") {
+      TitanUI::print_error(
+          "PBE: -pbe-linear-kernel must be auto, legacy, or half-packed.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.stability_audit != "off" && pbe.stability_audit != "summary" &&
+        pbe.stability_audit != "detail") {
+      TitanUI::print_error(
+          "PBE: -pbe-stability-audit must be off, summary, or detail.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.stability_mode != "off" && pbe.stability_mode != "diagnose" &&
+        pbe.stability_mode != "anchor" &&
+        pbe.stability_mode != "hysteresis" &&
+        pbe.stability_mode != "ensemble") {
+      TitanUI::print_error("PBE: -pbe-stability-mode must be off, diagnose, "
+                           "anchor, hysteresis, or ensemble.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.grid_anchor != "auto" && pbe.grid_anchor != "per-frame" &&
+        pbe.grid_anchor != "first-frame" &&
+        pbe.grid_anchor != "fixed-center") {
+      TitanUI::print_error(
+          "PBE: -pbe-grid-anchor must be auto, per-frame, first-frame, or fixed-center.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.grid_anchor == "fixed-center" && !pbe.test_center_user &&
+        !pbe.focus_center_user) {
+      TitanUI::print_error(
+          "PBE: -pbe-grid-anchor=fixed-center requires -pbe-test-center or -pbe-focus-center.");
       exit(EXIT_FAILURE);
     }
     if (pbe.gaussian_exp <= 0.0 || pbe.gaussian_sigma <= 0.0) {
@@ -1179,6 +1286,8 @@ int arguments::post_process() {
          pbe.test_operator_convention != "native" ||
          pbe.test_rhs_map != "native" || pbe.test_screen_map != "native" ||
          pbe.test_denom_map != "native" ||
+         pbe.nwt_kernel != "auto" || pbe.nwt_homo_kernel != "auto" ||
+         pbe.nwt_progress != "auto" || pbe.linear_kernel != "auto" ||
          pbe.test_nl_source != "titan" || pbe.test_newton_derivative ||
          pbe.test_energy_convention != "auto") &&
         pbe.test_pqr.empty()) {
@@ -1243,6 +1352,12 @@ int arguments::post_process() {
       TitanUI::print_error("PBSA: -pbsa-perf must be off, summary, or detail.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.timing != "off" && pbe.timing != "summary" &&
+        pbe.timing != "detail") {
+      TitanUI::print_error(
+          "PBE: -pbe-timing must be off, summary, or detail.");
+      exit(EXIT_FAILURE);
+    }
     if (pbe.max_iter <= 0) {
       TitanUI::print_error("PBE: -pbe-max-iter must be > 0.");
       exit(EXIT_FAILURE);
@@ -1296,6 +1411,65 @@ int arguments::post_process() {
           "PBE: -pbe-mg-pre/post must be >= 0 and -pbe-mg-coarse-iter "
           "must be > 0.");
       exit(EXIT_FAILURE);
+    }
+    if (pbe.backend == "tabi") {
+      if (pbe.model != "linear") {
+        TitanUI::print_error(
+            "PBE: -pbe=tabi v1 supports only -pbe-model=linear.");
+        exit(EXIT_FAILURE);
+      }
+      if (pbe.biomodel != "pbe") {
+        TitanUI::print_error(
+            "PBE: -pbe=tabi v1 supports only -pbe-biomodel=pbe.");
+        exit(EXIT_FAILURE);
+      }
+      if (pbe.dielectric_model != "two-dielectric") {
+        TitanUI::print_error(
+            "PBE: -pbe=tabi v1 supports only -pbe-dielectric=two-dielectric.");
+        exit(EXIT_FAILURE);
+      }
+      if (pbe.surface != "vdw" && pbe.surface != "sas") {
+        TitanUI::print_error(
+            "PBE: -pbe=tabi v1 supports only -pbe-surface=vdw or sas.");
+        exit(EXIT_FAILURE);
+      }
+      if (pbe.charge_assignment == "gaussian") {
+        TitanUI::print_error(
+            "PBE: -pbe=tabi v1 does not support Gaussian charge assignment.");
+        exit(EXIT_FAILURE);
+      }
+      if (pbe.focus != "off" || pbe.multigrid != "off") {
+        TitanUI::print_error(
+            "PBE: -pbe=tabi v1 does not support focus or multigrid options.");
+        exit(EXIT_FAILURE);
+      }
+      if (pbe.dgsolv || pbe.pbsa || pbe.pbsa_decomp != "off") {
+        TitanUI::print_error(
+            "PBE: -pbe=tabi v1 does not support PBSA, decomposition, or deltaG_solv.");
+        exit(EXIT_FAILURE);
+      }
+      if (pbe.map != "off") {
+        TitanUI::print_error(
+            "PBE: -pbe=tabi v1 does not emit grid maps; use -pbe-map=off.");
+        exit(EXIT_FAILURE);
+      }
+      if (pbe.parity_dump != "off" || pbe.parity_map_dump != "off" ||
+          pbe.test_charge_grid != "native" ||
+          pbe.test_charge_grid_diff != "off" ||
+          pbe.test_surface_map != "native" ||
+          pbe.test_midpoint_epsilon != "native" ||
+          pbe.test_midpoint_diff != "off" ||
+          pbe.test_boundary_map != "native" ||
+          pbe.test_boundary_convention != "native-real" ||
+          pbe.test_field_units != "native" ||
+          pbe.test_operator_convention != "native" ||
+          pbe.test_rhs_map != "native" ||
+          pbe.test_screen_map != "native" ||
+          pbe.test_denom_map != "native") {
+        TitanUI::print_error(
+            "PBE: -pbe=tabi v1 does not support grid parity diagnostics.");
+        exit(EXIT_FAILURE);
+      }
     }
   }
 

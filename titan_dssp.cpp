@@ -33,8 +33,20 @@ std::string uppercase_copy(std::string value) {
   return value;
 }
 
+std::string trim_copy(std::string value) {
+  const auto first = value.find_first_not_of(" \t");
+  if (first == std::string::npos)
+    return {};
+  const auto last = value.find_last_not_of(" \t");
+  return value.substr(first, last - first + 1);
+}
+
+std::string normalized_name(std::string value) {
+  return uppercase_copy(trim_copy(std::move(value)));
+}
+
 bool is_proline_like(const std::string &resname) {
-  const std::string upper = uppercase_copy(resname);
+  const std::string upper = normalized_name(resname);
   return upper.starts_with("PRO") || upper == "HYP";
 }
 
@@ -73,10 +85,10 @@ bool TitanDSSPAnalyzer::supports_moltype(const std::string &mol_type) {
   return mol_type == "protein" || mol_type == "protein-user";
 }
 
-bool TitanDSSPAnalyzer::has_protein_backbone_signature(
+std::size_t TitanDSSPAnalyzer::compatible_backbone_residue_count(
     const std::vector<mol_info> &info) {
   if (info.empty())
-    return false;
+    return 0;
 
   std::size_t prev_chain = std::numeric_limits<std::size_t>::max();
   std::size_t prev_resnr = std::numeric_limits<std::size_t>::max();
@@ -84,7 +96,7 @@ bool TitanDSSPAnalyzer::has_protein_backbone_signature(
   bool has_ca = false;
   bool has_c = false;
   bool has_o = false;
-  int compatible_residues = 0;
+  std::size_t compatible_residues = 0;
 
   auto flush_residue = [&]() {
     if (has_n && has_ca && has_c && has_o)
@@ -101,14 +113,12 @@ bool TitanDSSPAnalyzer::has_protein_backbone_signature(
     if (chainnum != prev_chain || resnr != prev_resnr) {
       if (prev_chain != std::numeric_limits<std::size_t>::max()) {
         flush_residue();
-        if (compatible_residues >= 3)
-          return true;
       }
       prev_chain = chainnum;
       prev_resnr = resnr;
     }
 
-    const std::string atom_name = uppercase_copy(atom_info.get_atom());
+    const std::string atom_name = normalized_name(atom_info.get_atom());
     if (atom_name == "N") {
       has_n = true;
     } else if (atom_name == "CA") {
@@ -121,6 +131,13 @@ bool TitanDSSPAnalyzer::has_protein_backbone_signature(
   }
 
   flush_residue();
+  return compatible_residues;
+}
+
+bool TitanDSSPAnalyzer::has_protein_backbone_signature(
+    const std::vector<mol_info> &info) {
+  const std::size_t compatible_residues =
+      TitanDSSPAnalyzer::compatible_backbone_residue_count(info);
   return compatible_residues >= 3;
 }
 
@@ -220,7 +237,7 @@ void TitanDSSPAnalyzer::build_residue_map(const std::vector<mol_info> &info) {
     }
 
     ResidueBackbone &residue = residues_.back();
-    const std::string atom_name = uppercase_copy(atom_info.get_atom());
+    const std::string atom_name = normalized_name(atom_info.get_atom());
 
     if (atom_name == "N" && residue.atom_n < 0) {
       residue.atom_n = static_cast<int>(atom_idx);

@@ -123,6 +123,280 @@ private:
     double hint{0.0};
   };
 
+  enum class TimingBucket {
+    Setup,
+    Surface,
+    Epsilon,
+    Boundary,
+    Solver,
+    Energy,
+    MapIo,
+    RpbSource,
+    FocusSetup,
+    Probe,
+    FocusParentSolve,
+    FocusChildSetup,
+    FocusBoundaryInterp,
+    FocusChildSurface,
+    FocusChildEpsilon,
+    FocusChildSolver,
+    ProbeEnergy,
+    AuditOutput,
+    NwtHalfUpdate,
+    NwtRmsReduce,
+    NwtOperatorResidual,
+    NwtSourceUpdate,
+    NwtProgressIo,
+    NwtCoeffPack,
+    NwtHomoUpdate,
+    NwtHeteroUpdate,
+    NwtNonlinTerm,
+    NwtReduce,
+    NwtHomoStencil,
+    NwtHomoSaltMath,
+    NwtHomoWrite,
+    NwtThreadWait,
+    NwtBlockOverhead,
+    LinearHalfUpdate,
+    EpsilonCenterDensity,
+    EpsilonMidpointDensity,
+    EpsilonIonExclusion,
+    EpsilonFinalize,
+  };
+
+  struct TimingBuckets {
+    double setup_ms{0.0};
+    double surface_ms{0.0};
+    double epsilon_ms{0.0};
+    double boundary_ms{0.0};
+    double solver_ms{0.0};
+    double energy_ms{0.0};
+    double map_io_ms{0.0};
+    double rpb_source_ms{0.0};
+    double focus_setup_ms{0.0};
+    double probe_ms{0.0};
+    double focus_parent_solve_ms{0.0};
+    double focus_child_setup_ms{0.0};
+    double focus_boundary_interp_ms{0.0};
+    double focus_child_surface_ms{0.0};
+    double focus_child_epsilon_ms{0.0};
+    double focus_child_solver_ms{0.0};
+    double probe_energy_ms{0.0};
+    double audit_output_ms{0.0};
+    std::size_t focus_child_atom_count{0};
+    double nwt_half_update_ms{0.0};
+    double nwt_rms_reduce_ms{0.0};
+    double nwt_operator_residual_ms{0.0};
+    double nwt_source_update_ms{0.0};
+    double nwt_progress_io_ms{0.0};
+    double nwt_coeff_pack_ms{0.0};
+    double nwt_homo_update_ms{0.0};
+    double nwt_hetero_update_ms{0.0};
+    double nwt_nonlin_term_ms{0.0};
+    double nwt_reduce_ms{0.0};
+    double nwt_homo_stencil_ms{0.0};
+    double nwt_homo_salt_math_ms{0.0};
+    double nwt_homo_write_ms{0.0};
+    double nwt_thread_wait_ms{0.0};
+    double nwt_block_overhead_ms{0.0};
+    double linear_half_update_ms{0.0};
+    std::uint64_t nwt_homo_cells{0};
+    std::uint64_t nwt_homo_linear_cells{0};
+    std::uint64_t nwt_homo_salt_cells{0};
+    std::uint64_t nwt_homo_updates{0};
+    std::uint64_t nwt_dispatch_calls{0};
+    double epsilon_center_density_ms{0.0};
+    double epsilon_midpoint_density_ms{0.0};
+    double epsilon_ion_exclusion_ms{0.0};
+    double epsilon_finalize_ms{0.0};
+    double total_ms{0.0};
+  };
+
+  struct StabilityAtomSample {
+    std::size_t atom_index{0};
+    double x{0.0};
+    double y{0.0};
+    double z{0.0};
+    double q{0.0};
+    double radius{0.0};
+    double grid_x{0.0};
+    double grid_y{0.0};
+    double grid_z{0.0};
+    double min_integer_grid_units{0.0};
+    double min_half_grid_units{0.0};
+    double min_grid_plane_A{0.0};
+    std::string atom_name;
+    std::string resname;
+    int resnr{0};
+    std::string chain;
+    std::string stage_hint{"off"};
+  };
+
+  struct StabilityFrameState {
+    bool valid{false};
+    std::size_t nx{0};
+    std::size_t ny{0};
+    std::size_t nz{0};
+    double h{0.0};
+    double origin_x{0.0};
+    double origin_y{0.0};
+    double origin_z{0.0};
+    double center_x{0.0};
+    double center_y{0.0};
+    double center_z{0.0};
+    double energy_kj_mol{0.0};
+    std::size_t solute_points{0};
+    std::size_t solvent_points{0};
+    std::size_t ion_accessible_points{0};
+    std::size_t stern_excluded_points{0};
+    std::size_t iscm_boundary_points{0};
+    std::size_t iscm_charged_boundary_points{0};
+    std::size_t vdwms_added{0};
+    std::size_t vdwms_removed{0};
+    double charge_assigned{0.0};
+    double charge_moment_error{0.0};
+    double boundary_rms{0.0};
+    double boundary_max{0.0};
+  };
+
+  struct StabilityMediumState {
+    bool valid{false};
+    std::size_t nx{0};
+    std::size_t ny{0};
+    std::size_t nz{0};
+    double h{0.0};
+    double origin_x{0.0};
+    double origin_y{0.0};
+    double origin_z{0.0};
+    std::vector<unsigned char> inside;
+    std::vector<unsigned char> ion_accessible;
+    AlignedDoubleVector eps_x;
+    AlignedDoubleVector eps_y;
+    AlignedDoubleVector eps_z;
+  };
+
+  struct StabilityEnsembleState {
+    bool valid{false};
+    std::size_t samples{0};
+    double mean_kj_mol{0.0};
+    double stddev_kj_mol{0.0};
+    double min_kj_mol{0.0};
+    double max_kj_mol{0.0};
+  };
+
+  struct StabilityAudit {
+    std::string stability_mode{"off"};
+    std::string grid_anchor_effective{"per-frame"};
+    std::string anchor_status{"off"};
+    double anchor_margin_min_A{0.0};
+    std::size_t hysteresis_cells_kept{0};
+    std::size_t hysteresis_cells_released{0};
+    double native_energy_kj_mol{0.0};
+    double stable_energy_kj_mol{0.0};
+    double energy_delta_vs_native_kj_mol{0.0};
+    std::size_t ensemble_samples{0};
+    double ensemble_mean_kj_mol{0.0};
+    double ensemble_stddev_kj_mol{0.0};
+    double ensemble_min_kj_mol{0.0};
+    double ensemble_max_kj_mol{0.0};
+    double grid_center_delta_A{0.0};
+    double grid_origin_delta_A{0.0};
+    double energy_delta_kj_mol{0.0};
+    double min_integer_grid_units{0.0};
+    double min_half_grid_units{0.0};
+    double min_grid_plane_A{0.0};
+    std::size_t near_integer_atoms_1e6{0};
+    std::size_t near_integer_atoms_1e4{0};
+    std::size_t near_integer_atoms_1e3{0};
+    std::size_t near_half_atoms_1e6{0};
+    std::size_t near_half_atoms_1e4{0};
+    std::size_t near_half_atoms_1e3{0};
+    std::size_t charge_cell_flip_candidates{0};
+    std::size_t surface_flip_candidates{0};
+    std::size_t midpoint_flip_candidates{0};
+    std::size_t ion_access_flip_candidates{0};
+    std::int64_t solute_delta{0};
+    std::int64_t solvent_delta{0};
+    std::int64_t ion_accessible_delta{0};
+    std::int64_t stern_excluded_delta{0};
+    std::int64_t iscm_boundary_delta{0};
+    std::int64_t iscm_charged_boundary_delta{0};
+    std::int64_t vdwms_added_delta{0};
+    std::int64_t vdwms_removed_delta{0};
+    double charge_assigned_delta{0.0};
+    double charge_moment_delta{0.0};
+    double boundary_rms_delta{0.0};
+    double boundary_max_delta{0.0};
+    std::string suspect_stage{"first_frame"};
+    std::vector<StabilityAtomSample> samples;
+  };
+
+  struct NwtHalfWorkspace {
+    struct PackedCell {
+      std::uint32_t h{0};
+      std::uint32_t xp{0};
+      std::uint32_t xm{0};
+      std::uint32_t yp{0};
+      std::uint32_t ym{0};
+      std::uint32_t zp{0};
+      std::uint32_t zm{0};
+      double rhs{0.0};
+      double eps_sum{1.0};
+      double screen{0.0};
+      double ex_p{0.0};
+      double ex_m{0.0};
+      double ey_p{0.0};
+      double ey_m{0.0};
+      double ez_p{0.0};
+      double ez_m{0.0};
+    };
+    struct HomoSpan {
+      std::uint32_t begin{0};
+      std::uint32_t count{0};
+    };
+    struct HomoTile {
+      std::uint32_t begin{0};
+      std::uint32_t count{0};
+    };
+
+    GridShape shape{};
+    bool active{false};
+    bool coeff_ready{false};
+    bool packed_ready{false};
+    bool row_span_ready{false};
+    bool salt_tile_ready{false};
+    double rhs_scale{0.0};
+    std::uint64_t homo_cells{0};
+    std::uint64_t homo_linear_cells{0};
+    std::uint64_t homo_salt_cells{0};
+    AlignedDoubleVector even_phi;
+    AlignedDoubleVector odd_phi;
+    AlignedDoubleVector rhs_even;
+    AlignedDoubleVector rhs_odd;
+    AlignedDoubleVector eps_sum_even;
+    AlignedDoubleVector eps_sum_odd;
+    AlignedDoubleVector screen_even;
+    AlignedDoubleVector screen_odd;
+    AlignedDoubleVector homo_eps_even;
+    AlignedDoubleVector homo_eps_odd;
+    std::vector<PackedCell> even_homo_cells;
+    std::vector<PackedCell> even_hetero_cells;
+    std::vector<PackedCell> odd_homo_cells;
+    std::vector<PackedCell> odd_hetero_cells;
+    std::vector<HomoSpan> even_homo_linear_spans;
+    std::vector<HomoSpan> even_homo_salt_spans;
+    std::vector<HomoSpan> odd_homo_linear_spans;
+    std::vector<HomoSpan> odd_homo_salt_spans;
+    std::vector<HomoTile> even_homo_linear_tiles;
+    std::vector<HomoTile> even_homo_salt_tiles;
+    std::vector<HomoTile> odd_homo_linear_tiles;
+    std::vector<HomoTile> odd_homo_salt_tiles;
+    std::vector<double> local_sumsq;
+    std::vector<double> local_max;
+    std::vector<std::size_t> local_count;
+    std::vector<std::size_t> local_clipped;
+  };
+
   struct ParityAudit {
     double eps_sum_min{0.0};
     double eps_sum_max{0.0};
@@ -164,6 +438,68 @@ private:
     std::size_t ion_accessible_points{0};
     std::size_t stern_excluded_points{0};
     std::size_t peak_memory_bytes{0};
+    std::string pbe_backend{"grid"};
+    double tabi_surface_build_ms{0.0};
+    std::size_t tabi_surface_panels{0};
+    std::size_t tabi_surface_exposed_points{0};
+    std::size_t tabi_surface_buried_points{0};
+    double tabi_tree_build_ms{0.0};
+    std::size_t tabi_tree_nodes{0};
+    std::size_t tabi_tree_leaf_count{0};
+    std::size_t tabi_near_interactions{0};
+    std::size_t tabi_far_interactions{0};
+    std::string tabi_matvec_mode{"off"};
+    std::string tabi_status{"off"};
+    std::string tabi_convergence_reason{"off"};
+    std::string tabi_residual_history{};
+    std::string tabi_reaction_energy_source{"off"};
+    double tabi_rhs_ms{0.0};
+    double tabi_gmres_ms{0.0};
+    double tabi_matvec_ms_total{0.0};
+    double tabi_matvec_ms_avg{0.0};
+    std::size_t tabi_matvec_calls{0};
+    double tabi_orthogonalization_ms{0.0};
+    double tabi_preconditioner_ms{0.0};
+    double tabi_surface_neighbor_ms{0.0};
+    double tabi_surface_mesh_ms{0.0};
+    double tabi_solid_angle_ms{0.0};
+    double tabi_tree_moment_ms{0.0};
+    double tabi_tree_traversal_ms{0.0};
+    double tabi_near_eval_ms{0.0};
+    double tabi_far_eval_ms{0.0};
+    std::string tabi_surface_geometry{"off"};
+    std::size_t tabi_mesh_vertices{0};
+    std::size_t tabi_mesh_triangles{0};
+    std::size_t tabi_boundary_nodes{0};
+    double tabi_avg_valence{0.0};
+    std::size_t tabi_nonmanifold_edges{0};
+    std::size_t tabi_solid_angle_fallbacks{0};
+    double tabi_diag_min{1.0};
+    double tabi_diag_max{1.0};
+    int tabi_taylor_order{0};
+    double tabi_interaction_build_ms{0.0};
+    double tabi_tree_eval_ms{0.0};
+    std::string tabi_formulation{"off"};
+    std::string tabi_energy_projection{"off"};
+    double tabi_rhs_scale{1.0};
+    double tabi_dielectric_contrast{0.0};
+    double tabi_operator_contrast{0.0};
+    std::size_t tabi_unknown_count{0};
+    std::string tabi_bie_system{"off"};
+    double tabi_lhs_diag_phi{0.0};
+    double tabi_lhs_diag_phin{0.0};
+    std::string tabi_energy_equation{"off"};
+    std::string tabi_kernel_convention{"off"};
+    double tabi_source_norm_s1{0.0};
+    double tabi_source_norm_s2{0.0};
+    double tabi_phi_norm{0.0};
+    double tabi_phin_norm{0.0};
+    double tabi_kappa_inv_a{0.0};
+    double tabi_coulomb_factor_kcal_mol{0.0};
+    double tabi_boundary_energy_kj_mol{0.0};
+    double tabi_reference_energy_kj_mol{0.0};
+    double tabi_selected_energy_scale{1.0};
+    bool tabi_fallback_used{false};
     std::string pbe_model_effective{"linear"};
     std::string linear_seed_solver{"none"};
     std::string nl_solver{"picard"};
@@ -388,6 +724,8 @@ private:
     double rpbe_source_rms{0.0};
     double rpbe_source_max{0.0};
     std::string rpbe_source_status{"off"};
+    AlignedDoubleVector rpbe_source_grid;
+    AlignedDoubleVector rpbe_coulomb_grid;
   };
 
   struct NonlinearEnergyAudit {
@@ -698,6 +1036,8 @@ private:
                                    const std::vector<Atom> &atoms,
                                    double eps_out, double kappa);
   SolveStats solve_sor(const GridShape &shape, TitanExecutor &executor);
+  SolveStats solve_sor_half_packed(const GridShape &shape,
+                                   TitanExecutor &executor);
   SolveStats solve_nonlinear_sor_block(const GridShape &shape,
                                        const AlignedDoubleVector &source,
                                        int sweeps, double relax,
@@ -708,6 +1048,16 @@ private:
                                         double screen_scale,
                                         TitanExecutor &executor,
                                         std::size_t &clipped_points);
+  SolveStats solve_newton_nwt_delphi_half_block(const GridShape &shape,
+                                                int sweeps,
+                                                double screen_scale,
+                                                TitanExecutor &executor,
+                                                std::size_t &clipped_points);
+  [[nodiscard]] bool nwt_half_shape_matches(const GridShape &shape) const
+      noexcept;
+  void invalidate_nwt_half_workspace() noexcept;
+  void prepare_nwt_half_workspace(const GridShape &shape, double rhs_scale);
+  void flush_nwt_half_workspace(const GridShape &shape);
   double compute_linear_residual(const GridShape &shape) const;
   double compute_nonlinear_residual(const GridShape &shape,
                                     const AlignedDoubleVector &source,
@@ -820,6 +1170,8 @@ private:
   ReactionSolve solve_reaction_field(const std::vector<Atom> &atoms,
                                      TitanExecutor &executor,
                                      const FrameResult *map_result);
+  ReactionSolve solve_tabi_reaction_field(const std::vector<Atom> &atoms,
+                                          TitanExecutor &executor) const;
   PbsaComponents
   compute_pbsa_components(const MOL &mol1, const Multi_MOL_parameters &params1,
                           const MOL &mol2,
@@ -902,6 +1254,7 @@ private:
       const AlignedDoubleVector &solvent_screen) const;
   [[nodiscard]] RpbAudit compute_rpb_source_audit(
       const GridShape &shape, const std::vector<Atom> &atoms,
+      TitanExecutor &executor,
       const AlignedDoubleVector &eps_x, const AlignedDoubleVector &eps_y,
       const AlignedDoubleVector &eps_z,
       AlignedDoubleVector *source_out = nullptr,
@@ -923,6 +1276,37 @@ private:
                                       ParityAudit &audit) const;
   void write_energy_header_if_needed();
   void append_energy_row(const FrameResult &result);
+  [[nodiscard]] bool pbe_timing_enabled() const noexcept;
+  void add_timing_ms(TimingBucket bucket, double ms) const noexcept;
+  void write_timing_header_if_needed();
+  void append_timing_row(const FrameResult &result,
+                         const TimingBuckets &timing);
+  void write_tabi_profile_header_if_needed();
+  void append_tabi_profile_row(const FrameResult &result,
+                               const TimingBuckets &timing);
+  void write_tabi_formulation_audit_header_if_needed() const;
+  void append_tabi_formulation_audit_row(const FrameResult &result) const;
+  [[nodiscard]] bool stability_audit_enabled() const noexcept;
+  [[nodiscard]] bool stability_detail_enabled() const noexcept;
+  [[nodiscard]] std::string effective_grid_anchor() const;
+  [[nodiscard]] bool stability_grid_anchor_enabled() const noexcept;
+  [[nodiscard]] bool stability_hysteresis_enabled() const noexcept;
+  [[nodiscard]] StabilityAudit
+  compute_stability_audit(const FrameResult &result,
+                          const std::vector<Atom> &atoms,
+                          const ReactionSolve &solve) const;
+  void maybe_write_stability_audit(const FrameResult &result,
+                                   const std::vector<Atom> &atoms,
+                                   const ReactionSolve &solve);
+  [[nodiscard]] double
+  compute_anchor_margin_min_A(const GridShape &shape,
+                              const std::vector<Atom> &atoms) const;
+  void apply_stability_hysteresis(const GridShape &shape,
+                                  const std::vector<Atom> &atoms);
+  void store_stability_medium_state(const GridShape &shape);
+  void compute_stability_ensemble(const std::vector<Atom> &atoms,
+                                  TitanExecutor &executor,
+                                  const FrameResult &result);
   void maybe_write_parity_stage(const FrameResult &result,
                                 const ReactionSolve &solve) const;
   [[nodiscard]] bool barnase_forensic_enabled() const;
@@ -981,12 +1365,22 @@ private:
                   bool ion_field = false) const;
   [[nodiscard]] bool should_write_map() const;
   [[nodiscard]] std::string map_suffix(const FrameResult &result) const;
+  [[nodiscard]] GridShape apply_grid_anchor(const GridShape &shape,
+                                            double scale,
+                                            double margin) const;
+  void reset_grid_anchor() const noexcept;
 
   PbeArgs args_{};
+  std::size_t configured_threads_{1};
   std::string current_source_label_{};
   std::size_t current_trajectory_id_{0};
 
   std::ofstream energy_out_;
+  std::ofstream timing_out_;
+  std::ofstream tabi_profile_out_;
+  mutable std::ofstream tabi_formulation_audit_out_;
+  std::ofstream stability_audit_out_;
+  std::ofstream stability_samples_out_;
   bool energy_header_written_{false};
   mutable bool parity_stage_header_written_{false};
   mutable bool parity_points_header_written_{false};
@@ -1008,7 +1402,20 @@ private:
   mutable bool operator_stage_header_written_{false};
   mutable bool sor_trace_header_written_{false};
   mutable bool nwt_trace_header_written_{false};
+  bool timing_header_written_{false};
+  bool tabi_profile_header_written_{false};
+  mutable bool tabi_formulation_audit_header_written_{false};
+  bool stability_audit_header_written_{false};
+  bool stability_samples_header_written_{false};
   bool wrote_first_map_{false};
+  mutable TimingBuckets *active_timing_{nullptr};
+  mutable std::map<std::string, GridShape> grid_anchor_shapes_;
+  StabilityFrameState last_stability_state_{};
+  StabilityMediumState last_stability_medium_state_{};
+  StabilityEnsembleState last_stability_ensemble_{};
+  std::size_t stability_hysteresis_cells_kept_frame_{0};
+  std::size_t stability_hysteresis_cells_released_frame_{0};
+  bool stability_probe_solve_active_{false};
 
   std::vector<Atom> atoms_;
   AlignedDoubleVector phi_;
@@ -1018,6 +1425,7 @@ private:
   AlignedDoubleVector eps_z_;
   AlignedDoubleVector denom_;
   AlignedDoubleVector screen_;
+  NwtHalfWorkspace nwt_half_workspace_;
   AlignedDoubleVector last_gaussian_density_center_;
   AlignedDoubleVector last_gaussian_density_midpoints_;
   AlignedDoubleVector last_gaussian_eps_center_;
@@ -1039,6 +1447,18 @@ private:
   std::size_t frames_failed_{0};
   std::size_t max_grid_points_seen_{0};
   std::size_t max_memory_bytes_seen_{0};
+  std::size_t max_tabi_surface_panels_seen_{0};
+  std::size_t max_tabi_tree_nodes_seen_{0};
+  std::size_t max_tabi_tree_leaf_count_seen_{0};
+  std::size_t max_tabi_near_interactions_seen_{0};
+  std::size_t max_tabi_far_interactions_seen_{0};
+  std::size_t max_tabi_mesh_vertices_seen_{0};
+  std::size_t max_tabi_mesh_triangles_seen_{0};
+  std::size_t max_tabi_boundary_nodes_seen_{0};
+  std::size_t max_tabi_nonmanifold_edges_seen_{0};
+  std::size_t max_tabi_solid_angle_fallbacks_seen_{0};
+  double min_tabi_diag_seen_{1.0};
+  double max_tabi_diag_seen_{1.0};
   std::size_t max_solute_points_seen_{0};
   std::size_t max_solvent_points_seen_{0};
   std::size_t max_ion_accessible_points_seen_{0};

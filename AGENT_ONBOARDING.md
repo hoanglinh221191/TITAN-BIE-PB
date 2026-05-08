@@ -668,6 +668,112 @@ If you add a new module:
   `focusing` boundary syntax; probe energy may still be missing in the oracle
   and should not be claimed strict without `pbe_oracle_focus_probe.csv`
   containing finite probe energy.
+  Phase 6e adds default-off hidden timing diagnostics:
+  `-pbe-timing=off|summary|detail` writes `pbe_timing.csv` with setup,
+  surface, epsilon, boundary, solver, energy, map I/O, RPB source, focus setup,
+  probe, total, atom count, thread count, workflow scope, iteration, block, and
+  status buckets. Detail mode also records focus/probe sub-buckets for parent
+  solve, child setup, boundary interpolation, child surface, child epsilon,
+  child solver, probe energy, and audit output. Public/default PBE and PBSA
+  outputs are unchanged. `test/pbe_timing_compare.ps1` now consumes that file,
+  reports `speed_ratio_titan_vs_pydelphi`, records `titan_threads`,
+  `pydelphi_threads`, and records the `bottleneck_bucket` per fixture. The
+  local golden CSV has harness-only
+  `surface_cutoff`, `pbe_timing`, and `parity_gate` columns; new Gaussian,
+  RPB, and focus/probe matrix rows start as `report-only` until their
+  source/operator/final-energy oracle data is finite. Use
+  `test/pbe_parity_difference_matrix.ps1 -Fixtures <a,b>` or `-MaxRows` for
+  targeted expansion checks. When passing multiple fixtures to the exporter,
+  prefer current-shell array syntax such as
+  `& .\test\pbe_delphi_export_maps.ps1 ... -Fixture barnase_nwt,barnase_nwt_salt2`;
+  nested `powershell -File` can pass the comma list as one string. A full
+  all-oracle refresh can exceed 15 minutes locally, so regenerate targeted
+  oracle groups when only one strict file is missing.
+  Phase 6f closes the timing harness linear row by using
+  `test_energy_convention=delphi-iscm` and `temp_K=297.15` for
+  `barnase_linear_salt015`; the row is now `pass` instead of
+  `mismatch_report_only`. `test/pbe_parity_difference_matrix.ps1 -Fixtures`
+  now honors explicitly requested strict rows, not only report-only matrix
+  rows. `test/pbe_timing_compare.ps1 -RepeatCount N` runs repeat subfolders and
+  writes `pbe_timing_compare_repeats.csv` plus a median
+  `pbe_timing_compare.csv`. The first optimization pass keeps formulas intact:
+  red/black SOR/NWT sweeps step through same-color cells directly, Gaussian
+  operator setup reuses the center density computed during surface
+  classification, and RPB source audit precomputes per-atom Gaussian factors.
+  The refreshed timing snapshot is: linear `19.50s` and pass, NWT `276.03s`,
+  Gaussian-cutoff `30.85s`, RPB `216.25s`, focus/probe `45.27s`.
+  Phase 6g records fair thread/scope metadata and closes the locked RPB source
+  bottleneck. The pyDelPhi exporter writes `pydelphi_threads=2`; RPB source
+  audit now uses the caller executor/thread count, pre-skips Gaussian-gradient
+  contributions outside the locked density cutoff, and reuses solvent RPB
+  audit/source/Coulomb maps for energy/top diagnostics. The refreshed timing
+  snapshot is: linear `19.20s` vs pyDelPhi `21.87s`, NWT `295.45s` vs
+  `142.22s`, Gaussian-cutoff `42.71s` vs `48.95s`, RPB `42.96s` vs `82.96s`,
+  and focus/probe full workflow `27.14s` vs pyDelPhi child oracle `4.45s`.
+  The focus/probe row remains scope-mismatched: TITAN times 1697 atoms and the
+  full parent/child/probe workflow, while pyDelPhi times a 599-atom child oracle;
+  TITAN detail reports parent solve `14.35s` and child solver `0.65s`.
+  Phase 6h/6i adds hidden NWT/timing controls:
+  `-pbe-nwt-progress=auto|off|strict`,
+  `-pbe-nwt-kernel=auto|legacy|delphi-half`, and
+  `-pbe-nwt-homo-kernel=auto|packed-list|row-span|avx2|salt-tiled`. Strict gates keep
+  progress output by default; timing rows can use `pbe_nwt_progress=off` to
+  avoid charging per-block source/residual/progress diagnostics to TITAN. The
+  `delphi-half` NWT kernel now has a persistent workspace across blocks: split
+  RHS/epsilon/screen caches, half-neighbor interior-cell packs, separate
+  homogeneous/heterogeneous update loops, row-span/fixed-offset homogeneous
+  streaming, and a final flush back to `phi_`. `auto` selects this path for
+  pyDelPhi/NWT fair timing and now promotes `salt-tiled` after strict/kernel
+  smokes pass. That path tiles homogeneous salt spans, hoists color-specific
+  offsets/pointers, and uses a double-precision polynomial `sinh`/`cosh` fast
+  branch for small clipped potentials; `packed-list`, `row-span`, and `avx2`
+  remain forced bisect modes. Strict progress rows keep the full-grid trace
+  path. The latest full median snapshot has barnase NWT at `106.64s` total /
+  `89.09s` solver versus pyDelPhi `124.09s` / `94.54s`, with
+  `nwt_half_update=57.45s`, `nwt_homo_update=41.93s`, and
+  `nwt_homo_ns_per_update=4.24`.
+  `pbe_timing.csv` records NWT detail buckets (`nwt_half_update`,
+  `nwt_coeff_pack`, `nwt_homo_update`, `nwt_hetero_update`, `nwt_reduce`,
+  residual/source/progress I/O, `nwt_homo_stencil`, `nwt_homo_salt_math`,
+  `nwt_homo_write`, `nwt_thread_wait`, `nwt_block_overhead`), homogeneous counters (`nwt_homo_cells`,
+  `nwt_homo_linear_cells`, `nwt_homo_salt_cells`, `nwt_homo_updates`,
+  `nwt_dispatch_calls`, `nwt_homo_ns_per_update`), and Gaussian epsilon detail buckets
+  (`epsilon_center_density`, `epsilon_midpoint_density`,
+  `epsilon_ion_exclusion`, `epsilon_finalize`). The current 5tif
+  gaussian-cutoff full row is `23.62s` total / `8.10s` epsilon versus
+  pyDelPhi `57.50s`; Gaussian epsilon is no longer the row bottleneck after
+  atom-SoA plus parallel center/midpoint/ion/finalize passes.
+  `test/pbe_timing_compare.ps1` also emits a report-only
+  `titan_child_scope` row for focus/probe, now using the true child atom count.
+  The current full workflow is `32.85s` with parent solve `16.31s`, while the
+  child-scope estimate is `2.31s` for 599 child atoms versus pyDelPhi child
+  oracle `8.66s`; use this only for scope-aware diagnostics, not as a
+  replacement for production full-workflow timing. The timing harness default
+  is now `RepeatCount=2` median with a comparable-row speed gate of 1.05.
+  Oracle exporter/timing scripts append black-box provenance to
+  `test/pbe_oracle_manifest.csv`; production TITAN must never read that file.
+  `-pbe-linear-kernel=half-packed` exists as a forced hidden bisect knob, but
+  `auto` intentionally remains legacy because the packed linear focus path was
+  slower on this workload.
+- PBE snapshot stability diagnostics are default-off and separate from parity
+  oracle inputs. `-pbe-stability-audit=off|summary|detail` writes
+  `pbe_stability_audit.csv`; detail mode also writes
+  `pbe_stability_atom_samples.csv` with nearest atom-to-integer/half-grid-plane
+  samples. `-pbe-grid-anchor=auto|per-frame|first-frame|fixed-center` is a
+  hidden trajectory-stability bisect knob, not a public output change.
+  `-pbe-stability-mode=off|diagnose|anchor|hysteresis|ensemble` is also hidden:
+  `diagnose` forces summary audit only, `anchor` uses first-frame anchoring,
+  `hysteresis` applies opt-in solvent-medium hysteresis near atom-surface
+  thresholds, and `ensemble` writes deterministic jitter mean/std diagnostics
+  without replacing `pbe_energy.csv`.
+  `test/pbe_snapshot_stability_scan.ps1` generates a synthetic grid-boundary
+  smoke when no snapshots are supplied and can scan user PQR snapshots with
+  `-PqrPaths`. Use its `suspect_stage`/`scan_label` columns to distinguish
+  atom-on-grid-plane candidates from grid recentering, surface/midpoint,
+  ion-access, or ISCM-boundary jumps.
+  `test/pbe_grid_boundary_pydelphi_compare.ps1` adds a report-only pyDelPhi
+  synthetic compare when the local pyDelPhi environment is present; keep
+  pyDelPhi out of production TITAN paths.
 - The strict DelPhi scripts are diagnostic gates, not a reason to loosen
   tolerances. `test/pbe_delphi_strict_linear_smoke.ps1` and
   `test/pbe_barnase_nonlinear_smoke.ps1` can run non-strict to emit reports,
@@ -697,7 +803,10 @@ If you add a new module:
   `test/pbe_delphi_reference_smoke.ps1`. It reads the external local checkout
   under `.codex_tmp/pyDelPhi` or a DelPhi TSV and writes TITAN golden CSV only
   when called with `-UpdateReference`; do not vendor or copy pyDelPhi source
-  into TITAN. Hidden parity-only knobs `-pbe-test-grid-size` and
+  into TITAN. `PBE_CLEAN_ROOM_POLICY.md` is the forward-looking source of truth:
+  production PBE is self-contained and may only be validated against black-box
+  oracle outputs, timing rows, hashes, and stage CSVs. Hidden parity-only knobs
+  `-pbe-test-grid-size` and
   `-pbe-test-center` are valid only with `-pbe-test-pqr` for reproducing
   DelPhi scale/grid/center settings. Barnase root-cause reports now include
   `test/pbe_barnase_linear_stage_smoke.ps1`,
@@ -710,6 +819,32 @@ If you add a new module:
   `test/pbe_nonlinear_source_convention_smoke.ps1`, and
   `test/pbe_nonlinear_units_matrix_smoke.ps1`, and
   `test/pbe_newton_derivative_smoke.ps1`.
+- PBE backend routing is explicit. Bare `-pbe`, `-pbe=grid`, and aliases
+  `-pbe=delphi|pydelphi|fd` use the established finite-difference grid solver.
+  `-pbe=tabi` is a separate clean-room C++23 TABI v1 backend under
+  `titan_pbe/`; it is linear PB only and rejects nonlinear/RPB, Gaussian,
+  focus/multigrid, PBSA/decomposition, and grid-map modes. Keep TABI validation
+  black-box-only against papers/oracle outputs; do not vendor or call external
+  TABI-PB/NanoShaper at runtime. TABI now defaults to the JCP 2013 coupled
+  boundary-integral formulation with a clean-room triangle surface
+  (`-pbe-tabi-geometry=triangle`); the old scalar `titan-v1` formulation and
+  the shared `TitanSurface` point-panel path remain hidden debug paths.
+  `-pbe-tabi-sum=auto|direct` uses the direct JCP 2013 operator. `treecode` is
+  rejected for JCP 2013 until the coupled 16-kernel treecode is ported, but it
+  remains available when explicitly pinning `-pbe-tabi-formulation=titan-v1`.
+  TABI timing now separates surface-neighbor, mesh, solid-angle, RHS, GMRES,
+  matvec, preconditioner, BIE formulation, and tree moment/traversal buckets in
+  `pbe_timing.csv`; `-pbe-timing=detail` also writes `pbe_tabi_profile.csv`
+  with one aggregate row per solve. Every TABI solve writes
+  `pbe_tabi_formulation_audit.csv` with formulation, energy projection,
+  unknown count, BIE system, diagonal constants, kernel convention, source and
+  solution norms, dielectric contrast, kappa, boundary energy, and Born
+  reference columns. Hidden accuracy-bisect knobs are
+  `-pbe-tabi-formulation=titan-v1|jcp2013|calibrated-debug` and
+  `-pbe-tabi-energy-projection=boundary|born-check|charge-potential-debug`.
+  The TABI energy source must be explicit (`tabi_boundary_integral`,
+  `tabi_born_check`, `tabi_charge_potential_debug`, `tabi_calibrated_debug`, or
+  `tabi_born_fallback`); do not reintroduce silent Born fallback behavior.
 - PBE `-pbe-dgsolv` is opt-in because it runs six solves per frame for
   two-molecule systems: complex, mol1, and mol2 each get solvent and vacuum
   solves. Keep `deltaG_solv` and component energies in both kJ/mol and
@@ -725,11 +860,20 @@ If you add a new module:
   PBSA also writes `mm_pbsa_by_trajectory.csv`,
   `mm_pbsa_ie_diagnostics.csv`, and `mm_pbsa_performance.dat` unless disabled
   with `-pbsa-perf=off`.
-- GBSA and PBSA share the `titan_sasa.*` Shrake-Rupley SASA/SA nonpolar core
-  so the same probe, 96-point sphere, and gamma conversion drive both
-  workflows. Keep residue decomposition in the caller: GBSA injects per-atom
-  nonpolar deltas into its existing residue aggregator, while PBSA groups the
-  shared per-atom SASA deltas by residue alongside PB reaction-field terms.
+- GBSA, PBSA, and TABI share `titan_surface.*` for Shrake-Rupley exposed
+  surface workspaces. `titan_sasa.*` remains the compatibility wrapper for
+  per-atom SASA/SA nonpolar callers, so the same probe, 96-point sphere, and
+  gamma conversion still drive GBSA/PBSA workflows. TABI consumes the exposed
+  panel list `{position, normal, area, atom_index}` only when the hidden
+  point-panel debug path is selected; the default TABI path owns triangle mesh
+  reconstruction so it can compute local solid-angle/diagonal diagnostics.
+  `TitanSurface::Options`
+  has an internal `acceleration` selector (`auto|legacy|reordered_padded`);
+  `auto` uses the Morton-reordered padded-neighbor backend for larger target
+  sets while keeping legacy as a parity oracle. Keep residue decomposition in
+  the caller: GBSA injects per-atom nonpolar deltas into its existing residue
+  aggregator, while PBSA groups the shared per-atom SASA deltas by residue
+  alongside PB reaction-field terms.
 - PBE still requires charges. Zero-radius polar hydrogens from supported force
   fields get a small Bondi-style surface radius fallback so AMBER-style
   zero-LJ hydrogens do not block PBSA.

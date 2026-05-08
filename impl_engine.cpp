@@ -1400,10 +1400,14 @@ int engine(arguments &Arguments) {
     const bool dssp_mol2_requested =
         Arguments.dssp.flag_dssp && dssp_allow_mol2 &&
         TitanDSSPAnalyzer::supports_moltype(Arguments.mol_2_type);
+    const std::size_t dssp_mol1_compatible_residues =
+        TitanDSSPAnalyzer::compatible_backbone_residue_count(pro_in.info);
+    const std::size_t dssp_mol2_compatible_residues =
+        TitanDSSPAnalyzer::compatible_backbone_residue_count(lig.info);
     const bool dssp_mol1_has_backbone =
-        TitanDSSPAnalyzer::has_protein_backbone_signature(pro_in.info);
+        dssp_mol1_compatible_residues >= 3;
     const bool dssp_mol2_has_backbone =
-        TitanDSSPAnalyzer::has_protein_backbone_signature(lig.info);
+        dssp_mol2_compatible_residues >= 3;
 
     if (dssp_mol1_requested && !dssp_mol1_has_backbone) {
       const std::string message =
@@ -1415,7 +1419,10 @@ int engine(arguments &Arguments) {
       TitanUI::print_info(message);
       TitanUI::log_message(log, message);
       TitanUI::log_kv(log, "DSSP mol1",
-                      "auto-skipped (no compatible protein backbone)");
+                      "auto-skipped (compatible backbone residues=" +
+                          std::to_string(dssp_mol1_compatible_residues) +
+                          ", selected atoms=" +
+                          std::to_string(pro_in.info.size()) + ")");
     }
     if (dssp_mol1_requested && dssp_mol1_has_backbone) {
       dssp_mol1_analyzer.init(pro_in, "mol1");
@@ -1429,7 +1436,10 @@ int engine(arguments &Arguments) {
       TitanUI::print_info(message);
       TitanUI::log_message(log, message);
       TitanUI::log_kv(log, "DSSP mol2",
-                      "auto-skipped (no compatible protein backbone)");
+                      "auto-skipped (compatible backbone residues=" +
+                          std::to_string(dssp_mol2_compatible_residues) +
+                          ", selected atoms=" +
+                          std::to_string(lig.info.size()) + ")");
     }
     if (dssp_mol2_requested && dssp_mol2_has_backbone) {
       dssp_mol2_analyzer.init(lig, "mol2");
@@ -3644,6 +3654,37 @@ int engine(arguments &Arguments) {
 
     } // End of outer chunk while loop
 
+    bool consumed_reference_structural_frame = false;
+    if (global_frame_counter == 0 && !Arguments.flag_xdr &&
+        !saved_pro_frame0.empty()) {
+      pro_in.m_mol = saved_pro_frame0;
+      lig.m_mol = saved_lig_frame0;
+
+      if (dssp_mol1_analyzer.enabled() ||
+          (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled())) {
+        auto start_dssp = std::chrono::steady_clock::now();
+        if (dssp_mol1_analyzer.enabled())
+          dssp_mol1_analyzer.process_frame(pro_in, 0, executor);
+        if (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled() &&
+            !lig.m_mol.empty())
+          dssp_mol2_analyzer.process_frame(lig, 0, executor);
+        time_dssp += std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_dssp);
+        consumed_reference_structural_frame = true;
+      }
+
+      const bool rms_reference_ready =
+          Arguments.flag_nocal || rms_analyzer.mol2_trace_count() == 0 ||
+          !lig.m_mol.empty();
+      if (rms_analyzer.enabled() && rms_reference_ready) {
+        auto start_rms = std::chrono::steady_clock::now();
+        rms_analyzer.process_frame(pro_in, lig, 0, executor);
+        time_rms += std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_rms);
+        consumed_reference_structural_frame = true;
+      }
+    }
+
     if (pbe_analyzer.enabled() && global_frame_counter == 0 &&
         !Arguments.flag_xdr && !saved_pro_frame0.empty()) {
       auto start_pbe = std::chrono::steady_clock::now();
@@ -3659,6 +3700,12 @@ int engine(arguments &Arguments) {
           Arguments.pbe.pbsa ? &pbe_energy_provider : nullptr);
       time_pbe += std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now() - start_pbe);
+    }
+
+    if (consumed_reference_structural_frame) {
+      global_frame_counter = 1;
+      TitanUI::log_kv(log, "Reference Frame Analysis",
+                      "Processed frame 0 for single-frame structural modules");
     }
 
     tot_snap_allfiles += global_frame_counter;

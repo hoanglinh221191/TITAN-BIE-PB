@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cctype>
 #include <filesystem>
@@ -24,6 +25,14 @@ namespace {
 std::size_t idx3(std::size_t i, std::size_t j, std::size_t k,
                  std::size_t nx, std::size_t ny) noexcept {
   return (k * ny + j) * nx + i;
+}
+
+std::size_t effective_workers(const TitanExecutor &executor,
+                              std::size_t work_items) noexcept {
+  if (work_items == 0)
+    return 1;
+  return std::max<std::size_t>(
+      1, std::min<std::size_t>(executor.capacity(), work_items));
 }
 
 template <typename Shape>
@@ -1111,10 +1120,31 @@ void AnalyzerImpl::build_coefficients(const GridShape &shape,
     const double influence2 = influence * influence;
     const AtomSpatialBins gaussian_bins =
         build_atom_bins(surface_atoms, std::max(0.0, influence), shape.h);
+    const double gaussian_exponent = std::max(1.0e-12, args_.gaussian_exp);
+    const bool gaussian_exp_two =
+        std::abs(gaussian_exponent - 2.0) <= 1.0e-12;
+    const int gaussian_radius_bins = static_cast<int>(
+        std::ceil(std::max(shape.h, influence) / gaussian_bins.cell)) + 1;
+    struct GaussianAtomCoeff {
+      double x{0.0};
+      double y{0.0};
+      double z{0.0};
+      double inv_sigma_radius2{1.0};
+      double ion_radius2{0.0};
+    };
+    std::vector<GaussianAtomCoeff> gaussian_coeffs(surface_atoms.size());
+    const double sigma2 = sigma * sigma;
+    for (std::size_t atom_idx = 0; atom_idx < surface_atoms.size();
+         ++atom_idx) {
+      const Atom &atom = surface_atoms[atom_idx];
+      const double r0 = std::max(1.0e-12, atom.radius);
+      const double ion_radius =
+          r0 + std::max(0.0, args_.ion_radius);
+      gaussian_coeffs[atom_idx] = {atom.x, atom.y, atom.z,
+                                   1.0 / (sigma2 * r0 * r0),
+                                   ion_radius * ion_radius};
+    }
     auto density_at = [&](double x, double y, double z) {
-      const double exponent = std::max(1.0e-12, args_.gaussian_exp);
-      const int radius_bins = static_cast<int>(
-          std::ceil(std::max(shape.h, influence) / gaussian_bins.cell)) + 1;
       const int bx0 = static_cast<int>(std::floor((x - gaussian_bins.min_x) /
                                                   gaussian_bins.cell));
       const int by0 = static_cast<int>(std::floor((y - gaussian_bins.min_y) /
@@ -1122,15 +1152,15 @@ void AnalyzerImpl::build_coefficients(const GridShape &shape,
       const int bz0 = static_cast<int>(std::floor((z - gaussian_bins.min_z) /
                                                   gaussian_bins.cell));
       double solvent_complement = 1.0;
-      for (int dz = -radius_bins; dz <= radius_bins; ++dz) {
+      for (int dz = -gaussian_radius_bins; dz <= gaussian_radius_bins; ++dz) {
         const int bz = bz0 + dz;
         if (bz < 0 || bz >= static_cast<int>(gaussian_bins.bz))
           continue;
-        for (int dy = -radius_bins; dy <= radius_bins; ++dy) {
+        for (int dy = -gaussian_radius_bins; dy <= gaussian_radius_bins; ++dy) {
           const int by = by0 + dy;
           if (by < 0 || by >= static_cast<int>(gaussian_bins.by))
             continue;
-          for (int dx = -radius_bins; dx <= radius_bins; ++dx) {
+          for (int dx = -gaussian_radius_bins; dx <= gaussian_radius_bins; ++dx) {
             const int bx = bx0 + dx;
             if (bx < 0 || bx >= static_cast<int>(gaussian_bins.bx))
               continue;
@@ -1140,17 +1170,19 @@ void AnalyzerImpl::build_coefficients(const GridShape &shape,
                      gaussian_bins.bx +
                  static_cast<std::size_t>(bx)];
             for (std::size_t atom_idx : bucket) {
-              const Atom &atom = surface_atoms[atom_idx];
-              const double r0 = std::max(1.0e-12, atom.radius);
+              const GaussianAtomCoeff &atom = gaussian_coeffs[atom_idx];
               const double ddx = x - atom.x;
               const double ddy = y - atom.y;
               const double ddz = z - atom.z;
               const double r2 = ddx * ddx + ddy * ddy + ddz * ddz;
               if (r2 > influence2)
                 continue;
-              const double scaled2 = r2 / (sigma * sigma * r0 * r0);
+              const double scaled2 = r2 * atom.inv_sigma_radius2;
+              const double exponent_value =
+                  gaussian_exp_two ? scaled2 * scaled2
+                                   : std::pow(scaled2, gaussian_exponent);
               const double atom_density =
-                  std::clamp(std::exp(-std::pow(scaled2, exponent)), 0.0, 1.0);
+                  std::clamp(std::exp(-exponent_value), 0.0, 1.0);
               solvent_complement *= (1.0 - atom_density);
               if (solvent_complement <= 1.0e-15)
                 return 1.0;
@@ -1163,23 +1195,21 @@ void AnalyzerImpl::build_coefficients(const GridShape &shape,
     auto ion_excluded_at = [&](double x, double y, double z) {
       if (args_.surface != "gaussian-cutoff")
         return false;
-      const int radius_bins = static_cast<int>(
-          std::ceil(std::max(shape.h, influence) / gaussian_bins.cell)) + 1;
       const int bx0 = static_cast<int>(std::floor((x - gaussian_bins.min_x) /
                                                   gaussian_bins.cell));
       const int by0 = static_cast<int>(std::floor((y - gaussian_bins.min_y) /
                                                   gaussian_bins.cell));
       const int bz0 = static_cast<int>(std::floor((z - gaussian_bins.min_z) /
                                                   gaussian_bins.cell));
-      for (int dz = -radius_bins; dz <= radius_bins; ++dz) {
+      for (int dz = -gaussian_radius_bins; dz <= gaussian_radius_bins; ++dz) {
         const int bz = bz0 + dz;
         if (bz < 0 || bz >= static_cast<int>(gaussian_bins.bz))
           continue;
-        for (int dy = -radius_bins; dy <= radius_bins; ++dy) {
+        for (int dy = -gaussian_radius_bins; dy <= gaussian_radius_bins; ++dy) {
           const int by = by0 + dy;
           if (by < 0 || by >= static_cast<int>(gaussian_bins.by))
             continue;
-          for (int dx = -radius_bins; dx <= radius_bins; ++dx) {
+          for (int dx = -gaussian_radius_bins; dx <= gaussian_radius_bins; ++dx) {
             const int bx = bx0 + dx;
             if (bx < 0 || bx >= static_cast<int>(gaussian_bins.bx))
               continue;
@@ -1189,14 +1219,11 @@ void AnalyzerImpl::build_coefficients(const GridShape &shape,
                      gaussian_bins.bx +
                  static_cast<std::size_t>(bx)];
             for (std::size_t atom_idx : bucket) {
-              const Atom &atom = surface_atoms[atom_idx];
+              const GaussianAtomCoeff &atom = gaussian_coeffs[atom_idx];
               const double dxp = x - atom.x;
               const double dyp = y - atom.y;
               const double dzp = z - atom.z;
-              const double radius =
-                  std::max(1.0e-12, atom.radius) +
-                  std::max(0.0, args_.ion_radius);
-              if (dxp * dxp + dyp * dyp + dzp * dzp < radius * radius)
+              if (dxp * dxp + dyp * dyp + dzp * dzp < atom.ion_radius2)
                 return true;
             }
           }
@@ -1204,34 +1231,94 @@ void AnalyzerImpl::build_coefficients(const GridShape &shape,
       }
       return false;
     };
-    last_gaussian_density_center_.assign(shape.n, 0.0);
+    const bool have_gaussian_center_density =
+        last_gaussian_density_center_.size() == shape.n;
+    if (!have_gaussian_center_density)
+      last_gaussian_density_center_.assign(shape.n, 0.0);
     last_gaussian_density_midpoints_.assign(shape.n * 3, 0.0);
     last_gaussian_eps_center_.assign(
         shape.n, gaussian_cutoff ? gaussian_cutoff_epsout : eps_out);
     std::vector<unsigned char> gaussian_ion_excluded_initial(shape.n, 0);
-    for (std::size_t k = 0; k < shape.nz; ++k) {
-      const double z = shape.oz + static_cast<double>(k) * shape.h;
-      for (std::size_t j = 0; j < shape.ny; ++j) {
-        const double y = shape.oy + static_cast<double>(j) * shape.h;
-        for (std::size_t i = 0; i < shape.nx; ++i) {
-          const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-          const double x = shape.ox + static_cast<double>(i) * shape.h;
-          last_gaussian_density_center_[id] = density_at(x, y, z);
-          gaussian_ion_excluded_initial[id] =
-              ion_excluded_at(x, y, z) ? 1U : 0U;
-          const std::size_t base = id * 3;
-          if (i + 1 < shape.nx)
-            last_gaussian_density_midpoints_[base] =
-                density_at(x + 0.5 * shape.h, y, z);
-          if (j + 1 < shape.ny)
-            last_gaussian_density_midpoints_[base + 1] =
-                density_at(x, y + 0.5 * shape.h, z);
-          if (k + 1 < shape.nz)
-            last_gaussian_density_midpoints_[base + 2] =
-                density_at(x, y, z + 0.5 * shape.h);
-        }
-      }
+    const std::size_t workers = effective_workers(executor, shape.nz);
+    if (!have_gaussian_center_density) {
+      const auto center_density_begin = std::chrono::steady_clock::now();
+      executor.parallel_for(
+          shape.nz, workers, 1,
+          [&](std::size_t, std::size_t z_begin, std::size_t z_end) {
+            for (std::size_t k = z_begin; k < z_end; ++k) {
+              const double z = shape.oz + static_cast<double>(k) * shape.h;
+              for (std::size_t j = 0; j < shape.ny; ++j) {
+                const double y = shape.oy + static_cast<double>(j) * shape.h;
+                for (std::size_t i = 0; i < shape.nx; ++i) {
+                  const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
+                  const double x =
+                      shape.ox + static_cast<double>(i) * shape.h;
+                  last_gaussian_density_center_[id] = density_at(x, y, z);
+                }
+              }
+            }
+          });
+      add_timing_ms(TimingBucket::EpsilonCenterDensity,
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() -
+                        center_density_begin)
+                        .count());
     }
+    if (gaussian_cutoff) {
+      const auto ion_exclusion_begin = std::chrono::steady_clock::now();
+      executor.parallel_for(
+          shape.nz, workers, 1,
+          [&](std::size_t, std::size_t z_begin, std::size_t z_end) {
+            for (std::size_t k = z_begin; k < z_end; ++k) {
+              const double z = shape.oz + static_cast<double>(k) * shape.h;
+              for (std::size_t j = 0; j < shape.ny; ++j) {
+                const double y = shape.oy + static_cast<double>(j) * shape.h;
+                for (std::size_t i = 0; i < shape.nx; ++i) {
+                  const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
+                  const double x =
+                      shape.ox + static_cast<double>(i) * shape.h;
+                  gaussian_ion_excluded_initial[id] =
+                      ion_excluded_at(x, y, z) ? 1U : 0U;
+                }
+              }
+            }
+          });
+      add_timing_ms(TimingBucket::EpsilonIonExclusion,
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() -
+                        ion_exclusion_begin)
+                        .count());
+    }
+    const auto midpoint_density_begin = std::chrono::steady_clock::now();
+    executor.parallel_for(
+        shape.nz, workers, 1,
+        [&](std::size_t, std::size_t z_begin, std::size_t z_end) {
+          for (std::size_t k = z_begin; k < z_end; ++k) {
+            const double z = shape.oz + static_cast<double>(k) * shape.h;
+            for (std::size_t j = 0; j < shape.ny; ++j) {
+              const double y = shape.oy + static_cast<double>(j) * shape.h;
+              for (std::size_t i = 0; i < shape.nx; ++i) {
+                const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
+                const double x = shape.ox + static_cast<double>(i) * shape.h;
+                const std::size_t base = id * 3;
+                if (i + 1 < shape.nx)
+                  last_gaussian_density_midpoints_[base] =
+                      density_at(x + 0.5 * shape.h, y, z);
+                if (j + 1 < shape.ny)
+                  last_gaussian_density_midpoints_[base + 1] =
+                      density_at(x, y + 0.5 * shape.h, z);
+                if (k + 1 < shape.nz)
+                  last_gaussian_density_midpoints_[base + 2] =
+                      density_at(x, y, z + 0.5 * shape.h);
+              }
+            }
+          }
+        });
+    add_timing_ms(TimingBucket::EpsilonMidpointDensity,
+                  std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() -
+                      midpoint_density_begin)
+                      .count());
     auto gaussian_eps_for_cell = [&](double density, std::size_t id) {
       if (args_.surface == "gaussian-cutoff") {
         constexpr double kDelphiGaussianSoluteDensityThreshold = 0.02;
@@ -1255,36 +1342,41 @@ void AnalyzerImpl::build_coefficients(const GridShape &shape,
       }
       return gaussian_dielectric(density, eps_in, eps_out);
     };
-    for (std::size_t k = 0; k < shape.nz; ++k) {
-      for (std::size_t j = 0; j < shape.ny; ++j) {
-        for (std::size_t i = 0; i < shape.nx; ++i) {
-          const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
-          const double e0 =
-              args_.surface == "gaussian-cutoff"
-                  ? eps_in +
-                        (gaussian_regional_outer_eps - eps_in) *
-                            (1.0 - std::clamp(
-                                       last_gaussian_density_center_[id], 0.0,
-                                       1.0))
-                  : gaussian_eps_for_cell(last_gaussian_density_center_[id],
-                                          id);
-          last_gaussian_eps_center_[id] = e0;
-          eps_x_[id] = e0;
-          eps_y_[id] = e0;
-          eps_z_[id] = e0;
-          const std::size_t base = id * 3;
-          if (i + 1 < shape.nx)
-            eps_x_[id] = gaussian_eps_for_cell(
-                last_gaussian_density_midpoints_[base], id);
-          if (j + 1 < shape.ny)
-            eps_y_[id] = gaussian_eps_for_cell(
-                last_gaussian_density_midpoints_[base + 1], id);
-          if (k + 1 < shape.nz)
-            eps_z_[id] = gaussian_eps_for_cell(
-                last_gaussian_density_midpoints_[base + 2], id);
-        }
-      }
-    }
+    const auto epsilon_finalize_begin = std::chrono::steady_clock::now();
+    executor.parallel_for(
+        shape.nz, workers, 1,
+        [&](std::size_t, std::size_t z_begin, std::size_t z_end) {
+          for (std::size_t k = z_begin; k < z_end; ++k) {
+            for (std::size_t j = 0; j < shape.ny; ++j) {
+              for (std::size_t i = 0; i < shape.nx; ++i) {
+                const std::size_t id = idx3(i, j, k, shape.nx, shape.ny);
+                const double e0 =
+                    args_.surface == "gaussian-cutoff"
+                        ? eps_in +
+                              (gaussian_regional_outer_eps - eps_in) *
+                                  (1.0 - std::clamp(
+                                             last_gaussian_density_center_[id],
+                                             0.0, 1.0))
+                        : gaussian_eps_for_cell(
+                              last_gaussian_density_center_[id], id);
+                last_gaussian_eps_center_[id] = e0;
+                eps_x_[id] = e0;
+                eps_y_[id] = e0;
+                eps_z_[id] = e0;
+                const std::size_t base = id * 3;
+                if (i + 1 < shape.nx)
+                  eps_x_[id] = gaussian_eps_for_cell(
+                      last_gaussian_density_midpoints_[base], id);
+                if (j + 1 < shape.ny)
+                  eps_y_[id] = gaussian_eps_for_cell(
+                      last_gaussian_density_midpoints_[base + 1], id);
+                if (k + 1 < shape.nz)
+                  eps_z_[id] = gaussian_eps_for_cell(
+                      last_gaussian_density_midpoints_[base + 2], id);
+              }
+            }
+          }
+        });
     if (args_.surface == "gaussian-cutoff") {
       constexpr double kDelphiGaussianSoluteDensityThreshold = 0.02;
       constexpr double kDelphiGaussianEpsMaxMinRatio = 1.02;
@@ -1341,6 +1433,11 @@ void AnalyzerImpl::build_coefficients(const GridShape &shape,
         }
       }
     }
+    add_timing_ms(TimingBucket::EpsilonFinalize,
+                  std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() -
+                      epsilon_finalize_begin)
+                      .count());
     last_gaussian_surface_.assign(shape.n, 0.0);
     last_gaussian_grad_surface_.assign(shape.n * 3, 0.0);
     if (args_.surface == "gaussian") {
