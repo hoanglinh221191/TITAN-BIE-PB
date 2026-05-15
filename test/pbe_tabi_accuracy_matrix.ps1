@@ -1,6 +1,7 @@
 param(
     [string]$TitanExe = (Join-Path (Split-Path -Parent $PSScriptRoot) 'titan.exe'),
-    [string]$WorkRoot = (Join-Path $PSScriptRoot 'tmp\pbe_tabi_accuracy_matrix')
+    [string]$WorkRoot = (Join-Path $PSScriptRoot 'tmp\pbe_tabi_accuracy_matrix'),
+    [string[]]$SphereMeshModes = @('latlong')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,6 +49,61 @@ $rows += Invoke-Step 'kirkwood_analytic' {
         -WorkRoot (Join-Path $WorkRoot 'kirkwood')
     if ($LASTEXITCODE -ne 0) { throw 'kirkwood analytic failed' }
 }
+$rows += Invoke-Step 'near_integration_smoke' {
+    & (Join-Path $PSScriptRoot 'pbe_tabi_near_integration_smoke.ps1') -TitanExe $TitanExe `
+        -WorkRoot (Join-Path $WorkRoot 'near_integration')
+    if ($LASTEXITCODE -ne 0) { throw 'near integration smoke failed' }
+}
+$rows += Invoke-Step 'near_kernel_blocks' {
+    & (Join-Path $PSScriptRoot 'pbe_tabi_near_kernel_blocks_smoke.ps1') `
+        -WorkRoot (Join-Path $WorkRoot 'near_kernel_blocks')
+    if ($LASTEXITCODE -ne 0) { throw 'near kernel block smoke failed' }
+}
+$rows += Invoke-Step 'near_block_rank' {
+    & (Join-Path $PSScriptRoot 'pbe_tabi_near_block_rank.ps1') -TitanExe $TitanExe `
+        -WorkRoot (Join-Path $WorkRoot 'near_block_rank')
+    if ($LASTEXITCODE -ne 0) { throw 'near block rank failed' }
+}
+$rows += Invoke-Step 'asi_self_one_ring' {
+    & (Join-Path $PSScriptRoot 'pbe_tabi_asi_self_one_ring_smoke.ps1') -TitanExe $TitanExe `
+        -WorkRoot (Join-Path $WorkRoot 'asi_self_one_ring')
+    if ($LASTEXITCODE -ne 0) { throw 'ASI self/one-ring smoke failed' }
+}
+$rows += Invoke-Step 'born_ion_matrix' {
+    & (Join-Path $PSScriptRoot 'pbe_born_ion_matrix.ps1') -TitanExe $TitanExe `
+        -WorkRoot (Join-Path $WorkRoot 'born_ion') -RadiiA @(3.0) `
+        -Charges @(1.0,-1.0) -SaltM @(0.0,0.15) `
+        -SurfacePointCounts @(96,192) -SphereMeshModes $SphereMeshModes `
+        -GridScales @(0.60) -SkipGrid
+    if ($LASTEXITCODE -ne 0) { throw 'Born ion matrix failed' }
+}
+$rows += Invoke-Step 'kirkwood_oracle_selfcheck' {
+    & (Join-Path $PSScriptRoot 'pbe_kirkwood_oracle_selfcheck.ps1') `
+        -WorkRoot (Join-Path $WorkRoot 'kirkwood_oracle_selfcheck')
+    if ($LASTEXITCODE -ne 0) { throw 'Kirkwood oracle selfcheck failed' }
+}
+$rows += Invoke-Step 'kirkwood_offcenter_matrix' {
+    & (Join-Path $PSScriptRoot 'pbe_kirkwood_offcenter_matrix.ps1') -TitanExe $TitanExe `
+        -WorkRoot (Join-Path $WorkRoot 'kirkwood_offcenter') -RadiiA @(5.0) `
+        -Charges @(1.0,-1.0) -OffsetFractions @(0.0,0.35) `
+        -SaltM @(0.0,0.15) -SurfacePointCounts @(96,384) `
+        -SphereMeshModes $SphereMeshModes
+    if ($LASTEXITCODE -ne 0) { throw 'Kirkwood off-center matrix failed' }
+}
+$rows += Invoke-Step 'kirkwood_multicharge_matrix' {
+    & (Join-Path $PSScriptRoot 'pbe_kirkwood_multicharge_matrix.ps1') -TitanExe $TitanExe `
+        -WorkRoot (Join-Path $WorkRoot 'kirkwood_multicharge') `
+        -SaltM @(0.0,0.15) -SurfacePointCounts @(96,384) `
+        -SphereMeshModes $SphereMeshModes
+    if ($LASTEXITCODE -ne 0) { throw 'Kirkwood multi-charge matrix failed' }
+}
+$rows += Invoke-Step 'grid_born_convergence_diagnostic' {
+    & (Join-Path $PSScriptRoot 'pbe_grid_born_convergence.ps1') -TitanExe $TitanExe `
+        -WorkRoot (Join-Path $WorkRoot 'grid_born') -RadiiA @(3.0) `
+        -Charges @(1.0) -SaltM @(0.0,0.15) -GridScales @(0.60,1.0) `
+        -FocusModes @('off') -GridAnchors @('auto')
+    if ($LASTEXITCODE -ne 0) { throw 'grid Born convergence diagnostic failed' }
+}
 $rows += Invoke-Step 'tabi_vs_grid_accuracy_subset' {
     & (Join-Path $PSScriptRoot 'pbe_tabi_vs_grid_compare.ps1') -TitanExe $TitanExe `
         -WorkRoot (Join-Path $WorkRoot 'vs_grid') -Mode accuracy -RepeatCount 1 `
@@ -58,6 +114,16 @@ $rows += Invoke-Step 'direct_vs_treecode' {
     & (Join-Path $PSScriptRoot 'pbe_tabi_treecode_accuracy.ps1') `
         -WorkRoot (Join-Path $WorkRoot 'treecode')
     if ($LASTEXITCODE -ne 0) { throw 'direct vs treecode failed' }
+}
+$rows += Invoke-Step 'treecode_interaction_list' {
+    & (Join-Path $PSScriptRoot 'pbe_tabi_treecode_interaction_list_smoke.ps1') `
+        -WorkRoot (Join-Path $WorkRoot 'treecode_interaction_list')
+    if ($LASTEXITCODE -ne 0) { throw 'treecode interaction-list smoke failed' }
+}
+$rows += Invoke-Step 'jcp2013_treecode_vs_direct' {
+    & (Join-Path $PSScriptRoot 'pbe_tabi_jcp2013_treecode_full_smoke.ps1') `
+        -TitanExe $TitanExe -WorkRoot (Join-Path $WorkRoot 'jcp2013_treecode')
+    if ($LASTEXITCODE -ne 0) { throw 'JCP2013 treecode vs direct failed' }
 }
 $rows += Invoke-Step 'pka_report_only' {
     & (Join-Path $PSScriptRoot 'pbe_tabi_pka_experimental_smoke.ps1') `

@@ -186,13 +186,22 @@ IMPORTANT NOTES
     finite-difference grid implementation; -pbe=tabi uses the separate
     clean-room boundary-integral TABI v1 backend for linear PB only. TABI
     defaults to the JCP 2013 coupled boundary-integral formulation with a
-    clean-room triangle surface; the legacy scalar `titan-v1` formulation is
-    retained only as a hidden debug path. `-pbe-tabi-sum=auto|direct` uses the
-    direct JCP 2013 operator; `treecode` is rejected for JCP 2013 until the
-    coupled 16-kernel treecode is ported, but remains available when explicitly
-    pinning `-pbe-tabi-formulation=titan-v1`. `pbe_timing.csv` reports TABI
-    mesh, diagonal, RHS, GMRES, matvec, BIE-formulation, and tree counters;
-    `-pbe-timing=detail` also writes `pbe_tabi_profile.csv`.
+    clean-room triangle surface. Self-panel analytic singular integration is
+    available as a hidden validation path; one-ring Duffy remains
+    experimental/report-only, and `auto` remains centroid until analytic gates
+    pass. The legacy scalar `titan-v1`
+    formulation is retained only as a hidden debug path. `jcp2013-centroid` is the paper-style
+    direct centroid-collocation path; `jcp2013-treecode` and
+    `tabi2-nodepatch` are hidden experimental/report paths until their
+    accuracy gates pass. `-pbe-tabi-sum=auto|direct` uses the direct JCP 2013
+    operator. Forced `-pbe-tabi-formulation=jcp2013-treecode` now runs the
+    coupled JCP 2013 treecode operator and reports `jcp2013_treecode`; the
+    legacy scalar treecode remains available only when explicitly pinning
+    `-pbe-tabi-formulation=titan-v1`.
+    `pbe_timing.csv` reports TABI mesh, diagonal, RHS, GMRES, matvec,
+    BIE-formulation, and tree counters; `-pbe-timing=summary|detail` also
+    writes `pbe_memory_profile.csv`, while `detail` writes
+    `pbe_tabi_profile.csv`.
 
   Main inputs:
     -pbe[=grid|tabi]
@@ -220,9 +229,29 @@ IMPORTANT NOTES
     hidden TABI debug only: -pbe-tabi-sum=auto|direct|treecode,
       -pbe-tabi-geometry=triangle|point-panel,
       -pbe-tabi-diagonal=solid-angle|flat|off,
+      -pbe-tabi-surface-points=<8..4096>,
       -pbe-tabi-taylor-order=3|4,
-      -pbe-tabi-formulation=titan-v1|jcp2013|calibrated-debug,
-      -pbe-tabi-energy-projection=boundary|born-check|charge-potential-debug
+      -pbe-tabi-derivatives=analytic|finite-diff-debug,
+      -pbe-tabi-formulation=titan-v1|jcp2013|jcp2013-centroid|
+        jcp2013-treecode|tabi2-nodepatch|calibrated-debug,
+      -pbe-tabi-energy-projection=boundary|born-check|charge-potential-debug,
+      -pbe-tabi-precond=auto|none|diagonal|block,
+      -pbe-tabi-near-integration=auto|centroid|analytic_singular|
+        duffy_adaptive,
+      -pbe-tabi-quad-buffer=auto|off|gauss7|adaptive,
+      -pbe-tabi-leaf-near-policy=auto|exact|smooth-node|large-protein,
+      -pbe-tabi-leaf-panel-kernel=auto|scalar|avx2-gather|tile,
+      -pbe-tabi-interaction-mode=auto|cached|onthefly,
+      -pbe-tabi-mac-safety=off|audit|physical-gap,
+      -pbe-tabi-mac-gap-factor=<0.5..4.0>,
+      -pbe-tabi-moment-audit=off|sampled|full-small,
+      -pbe-tabi-matvec-audit=off|sampled|full-small,
+      -pbe-tabi-matvec-audit-sample-count=<128..4096>,
+      -pbe-tabi-progress=off|auto|detail,
+      -pbe-tabi-progress-interval=<1..300>,
+      -pbe-tabi-gmres-restart=<8..128>,
+      -pbe-tabi-true-residual-probe=restart|interval|off,
+      -pbe-tabi-true-residual-probe-interval=<1..128>
     hidden PQR parity only: -pbe-parity-dump, -pbe-parity-map-dump,
     -pbe-test-charge-grid, -pbe-test-charge-grid-diff,
     -pbe-test-surface-map,
@@ -241,6 +270,10 @@ IMPORTANT NOTES
     outward normals, solid-angle diagonal terms, and final Coulomb conversion.
     TABI writes `pbe_tabi_formulation_audit.csv` for sign/scale, kappa,
     dielectric contrast, energy projection, and fallback diagnostics.
+    TABI audit/profile rows also report surface_generator, discretization,
+    requested/effective preconditioner, near_integration/self/one-ring ASI
+    counters, and paper-mode guard status when an
+    experimental path is pinned.
     It rejects nonlinear, RPB, Gaussian dielectric/surface, focus, multigrid,
     PBSA, decomposition, and grid-map modes until later phases.
 
@@ -255,6 +288,9 @@ IMPORTANT NOTES
     energies are reported in kJ/mol and kcal/mol; kT is retained for continuity
     optional: pbe_phi_*.cube, pbe_epsilon_*.cube, and pbe_ion_*.cube
     optional: pbe_probe_sites.csv when DelPhi focus/probe fixture knobs are used
+    optional: pbe_timing.csv and pbe_memory_profile.csv with
+    -pbe-timing=summary|detail; memory rows include both nonnegative and
+    signed RSS deltas. pbe_tabi_profile.csv is written with detail mode.
     hidden PQR parity only: pbe_parity_stage.csv and pbe_parity_points.csv
     barnase PQR forensic mode additionally writes pbe_barnase_forensic_inputs.csv,
     pbe_barnase_surface_audit.csv, pbe_barnase_operator_audit.csv, and

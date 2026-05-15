@@ -2,9 +2,15 @@ param(
     [string]$TitanExe = (Join-Path (Split-Path -Parent $PSScriptRoot) 'titan.exe'),
     [string]$WorkRoot = (Join-Path $PSScriptRoot 'tmp\pbe_tabi_vs_grid_compare'),
     [string[]]$Fixtures = @('sphere','two-atoms','arg','mini-protein','charged-peptide','compact-mini-protein'),
+    [ValidateSet('default','barnase','paper2013','all')]
+    [string]$FixtureSet = 'default',
+    [string]$GoldenCsv = (Join-Path $PSScriptRoot 'pbe_inputs_local\pbe_delphi_golden.csv'),
+    [string]$PyDelPhiRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) '.codex_tmp\pyDelPhi'),
     [int]$RepeatCount = 1,
     [ValidateSet('accuracy','perf')]
-    [string]$Mode = 'accuracy'
+    [string]$Mode = 'accuracy',
+    [switch]$ProfileMemory,
+    [int]$BarnaseTabiSurfacePoints = 24
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,7 +28,13 @@ $FixtureMap = @{
     'charged-peptide' = 'charged-peptide.pqr'
     'compact-mini-protein' = 'compact-mini-protein.pqr'
     '1a63' = '1a63.pqr'
+    'barnase_linear_salt0' = 'barnase.pqr'
+    'barnase_linear_salt015' = 'barnase.pqr'
+    'barnase_linear_salt2' = 'barnase.pqr'
 }
+
+$BarnaseFixtures = @('barnase_linear_salt0','barnase_linear_salt015','barnase_linear_salt2')
+$PaperFixtures = @('sphere')
 
 function Convert-ToTitanPath([string]$Path) {
     return ($Path -replace '\\', '/')
@@ -44,6 +56,71 @@ function Get-RowValue([object]$Row, [string]$Name, [string]$Default = 'NA') {
         }
     }
     return $Default
+}
+
+function Get-GoldenRow([string]$Fixture) {
+    if (-not (Test-Path -LiteralPath $GoldenCsv)) { return $null }
+    $rows = @(Import-Csv -LiteralPath $GoldenCsv | Where-Object { $_.fixture -eq $Fixture } | Select-Object -First 1)
+    if ($rows.Count -eq 0) { return $null }
+    return $rows[0]
+}
+
+function Read-DelPhiValueTable([string]$Path) {
+    $values = @{}
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        $trim = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trim) -or $trim.StartsWith('!') -or $trim.StartsWith('#')) { continue }
+        $parts = @($trim -split '\s+' | Where-Object { $_ })
+        if ($parts.Count -lt 2) { continue }
+        $key = $parts[0].ToUpperInvariant()
+        $number = 0.0
+        for ($i = $parts.Count - 1; $i -ge 1; --$i) {
+            if ([double]::TryParse($parts[$i], [System.Globalization.NumberStyles]::Float, $InvariantCulture, [ref]$number)) {
+                $values[$key] = $number
+                break
+            }
+        }
+    }
+    return $values
+}
+
+function Convert-DelPhiPdbToPqr([string]$PdbPath, [string]$CrgPath, [string]$SizPath, [string]$OutPath) {
+    $charges = Read-DelPhiValueTable $CrgPath
+    $radii = Read-DelPhiValueTable $SizPath
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($line in Get-Content -LiteralPath $PdbPath) {
+        if (-not ($line.StartsWith('ATOM') -or $line.StartsWith('HETATM'))) { continue }
+        $atomName = $line.Substring(12, [Math]::Min(4, $line.Length - 12)).Trim().ToUpperInvariant()
+        $charge = if ($charges.ContainsKey($atomName)) { $charges[$atomName] } else { 0.0 }
+        $radius = if ($radii.ContainsKey($atomName)) { $radii[$atomName] } else { 1.5 }
+        $prefix = if ($line.Length -ge 54) { $line.Substring(0, 54) } else { $line.PadRight(54) }
+        $element = if ($line.Length -ge 78) { $line.Substring(76, 2).Trim() } else { $atomName.Substring(0, 1) }
+        $out.Add(("{0}{1,9:F4}{2,8:F4}       {3}" -f $prefix, $charge, $radius, $element))
+    }
+    $out.Add('END')
+    Set-Content -LiteralPath $OutPath -Value $out -Encoding ASCII
+}
+
+function Resolve-ComparePqr([string]$Fixture, [string]$RunDir) {
+    $pqrName = $FixtureMap[$Fixture]
+    if ([string]::IsNullOrWhiteSpace($pqrName)) { throw "Unknown fixture: $Fixture" }
+    $localPqr = Join-Path $InputRoot $pqrName
+    if (Test-Path -LiteralPath $localPqr) { return $localPqr }
+    if ($Fixture -notlike 'barnase*') { return $localPqr }
+    $fixtureDir = Join-Path $PyDelPhiRoot 'pydelphi\data\test_examples\barnase'
+    $directPqr = Join-Path $fixtureDir $pqrName
+    if (Test-Path -LiteralPath $directPqr) { return $directPqr }
+    $pdbPath = Join-Path $fixtureDir 'barnase.pdb'
+    $crgPath = Join-Path $fixtureDir 'amber.crg'
+    $sizPath = Join-Path $fixtureDir 'amber.siz'
+    if ((Test-Path -LiteralPath $pdbPath) -and
+        (Test-Path -LiteralPath $crgPath) -and
+        (Test-Path -LiteralPath $sizPath)) {
+        $generated = Join-Path $RunDir $pqrName
+        Convert-DelPhiPdbToPqr -PdbPath $pdbPath -CrgPath $crgPath -SizPath $sizPath -OutPath $generated
+        return $generated
+    }
+    return $localPqr
 }
 
 function Assert-UnderPath([string]$Path, [string]$Root) {
@@ -74,10 +151,19 @@ function Write-DummyPdb([string]$Path) {
     Set-Content -LiteralPath $Path -Value $lines -Encoding ASCII
 }
 
-function New-ArgFile([string]$RunDir, [string]$Backend, [string]$PqrPath, [string]$RunMode) {
+function New-ArgFile([string]$RunDir, [string]$Backend, [string]$PqrPath, [string]$RunMode, [string]$Fixture) {
     $pdbPath = Join-Path $RunDir 'driver.pdb'
     Write-DummyPdb $pdbPath
     $libPath = Convert-ToTitanPath ((Resolve-Path -LiteralPath (Join-Path $RepoRoot 'lib_ff')).Path.TrimEnd('\') + '\')
+    $gold = Get-GoldenRow $Fixture
+    $salt = Get-RowValue $gold 'salt_M' '0.15'
+    $scale = if ($Fixture -like 'barnase*') { Get-RowValue $gold 'scale' '2.0' } else { '0.35' }
+    $gridSize = if ($Fixture -like 'barnase*') { Get-RowValue $gold 'grid_size' '' } else { '' }
+    $surface = if ($Fixture -like 'barnase*') { 'vdw' } else { 'vdw' }
+    $margin = if ($Fixture -like 'barnase*') { '0.0' } else { '2.0' }
+    $maxGrid = if ($Fixture -like 'barnase*') { '4000000' } else { '300000' }
+    $maxIter = if ($Fixture -like 'barnase*') { '1200' } else { '800' }
+    $rms = if ($Fixture -like 'barnase*') { '5e-4' } else { '1e-4' }
     $argLines = @(
         "-f=$(Convert-ToTitanPath $pdbPath)",
         '-1pdb',
@@ -87,26 +173,36 @@ function New-ArgFile([string]$RunDir, [string]$Backend, [string]$PqrPath, [strin
         "-path-n=$libPath",
         "-pbe=$Backend",
         "-pbe-test-pqr=$(Convert-ToTitanPath $PqrPath)",
-        '-pbe-surface=vdw',
+        "-pbe-surface=$surface",
         '-pbe-probe=1.4',
-        '-pbe-scale=0.35',
-        '-pbe-margin=2.0',
-        '-pbe-max-grid=300000',
+        "-pbe-scale=$scale",
+        "-pbe-margin=$margin",
+        "-pbe-max-grid=$maxGrid",
         '-pbe-map=off',
-        '-pbe-max-iter=800',
-        '-pbe-rms=1e-4',
+        "-pbe-max-iter=$maxIter",
+        "-pbe-rms=$rms",
         '-pbe-dphi=1e-4',
         '-pbe-timing=summary',
+        "-pbe-salt=$salt",
         '-nt=1'
     )
+    if (-not [string]::IsNullOrWhiteSpace($gridSize)) {
+        $argLines += "-pbe-test-grid-size=$gridSize"
+    }
     if ($Backend -eq 'tabi') {
-        if ($RunMode -eq 'accuracy') {
+        $argLines += '-pbe-tabi-derivatives=analytic'
+        if ($Fixture -like 'barnase*') {
+            $argLines += '-pbe-tabi-sum=treecode'
+            $argLines += '-pbe-tabi-formulation=jcp2013-treecode'
+            $argLines += "-pbe-tabi-surface-points=$BarnaseTabiSurfacePoints"
+            $argLines += '-pbe-tabi-energy-projection=boundary'
+        } elseif ($RunMode -eq 'accuracy') {
             $argLines += '-pbe-tabi-sum=direct'
             $argLines += '-pbe-tabi-formulation=jcp2013'
             $argLines += '-pbe-tabi-energy-projection=boundary'
         } else {
-            $argLines += '-pbe-tabi-sum=auto'
-            $argLines += '-pbe-tabi-formulation=titan-v1'
+            $argLines += '-pbe-tabi-sum=treecode'
+            $argLines += '-pbe-tabi-formulation=jcp2013-treecode'
             $argLines += '-pbe-tabi-energy-projection=boundary'
         }
     }
@@ -116,18 +212,13 @@ function New-ArgFile([string]$RunDir, [string]$Backend, [string]$PqrPath, [strin
 }
 
 function Invoke-PbeCase([int]$Repeat, [string]$Fixture, [string]$Backend) {
-    $pqrName = $FixtureMap[$Fixture]
-    if ([string]::IsNullOrWhiteSpace($pqrName)) {
-        throw "Unknown fixture: $Fixture"
-    }
-    $pqrPath = Join-Path $InputRoot $pqrName
+    $runDir = Join-Path $WorkRoot ("repeat_{0}\{1}_{2}" -f $Repeat, $Fixture, $Backend)
+    New-CleanDir $runDir
+    $pqrPath = Resolve-ComparePqr -Fixture $Fixture -RunDir $runDir
     if (-not (Test-Path -LiteralPath $pqrPath)) {
         throw "Missing PQR fixture: $pqrPath"
     }
-
-    $runDir = Join-Path $WorkRoot ("repeat_{0}\{1}_{2}" -f $Repeat, $Fixture, $Backend)
-    New-CleanDir $runDir
-    $argPath = New-ArgFile -RunDir $runDir -Backend $Backend -PqrPath $pqrPath -RunMode $Mode
+    $argPath = New-ArgFile -RunDir $runDir -Backend $Backend -PqrPath $pqrPath -RunMode $Mode -Fixture $Fixture
     $measure = Measure-Command {
         Push-Location $runDir
         try {
@@ -149,6 +240,14 @@ function Invoke-PbeCase([int]$Repeat, [string]$Fixture, [string]$Backend) {
     }
     $energy = @(Import-Csv -LiteralPath $energyPath)[0]
     $timing = @(Import-Csv -LiteralPath $timingPath)[0]
+    $memory = $null
+    $memoryPath = Join-Path $runDir 'pbe_memory_profile.csv'
+    if ($ProfileMemory) {
+        if (-not (Test-Path -LiteralPath $memoryPath)) {
+            throw "Missing PBE memory profile for ${Fixture}/${Backend}: $memoryPath"
+        }
+        $memory = @(Import-Csv -LiteralPath $memoryPath)[0]
+    }
     $audit = $null
     $auditPath = Join-Path $runDir 'pbe_tabi_formulation_audit.csv'
     if ($Backend -eq 'tabi') {
@@ -183,6 +282,13 @@ function Invoke-PbeCase([int]$Repeat, [string]$Fixture, [string]$Backend) {
         oracle_status = 'not_requested'
         formulation = if ($Backend -eq 'tabi') { Get-RowValue $audit 'formulation' 'NA' } else { 'grid' }
         energy_projection = if ($Backend -eq 'tabi') { Get-RowValue $audit 'energy_projection' 'NA' } else { 'grid' }
+        derivative_mode = if ($Backend -eq 'tabi') { Get-RowValue $audit 'derivative_mode' (Get-RowValue $timing 'tabi_derivative_mode' 'NA') } else { 'finite_difference' }
+        near_integration = if ($Backend -eq 'tabi') { Get-RowValue $audit 'near_integration' (Get-RowValue $timing 'tabi_near_integration' 'NA') } else { 'grid' }
+        near_kernel_policy = if ($Backend -eq 'tabi') { Get-RowValue $audit 'near_kernel_policy' (Get-RowValue $timing 'tabi_near_kernel_policy' 'NA') } else { 'grid' }
+        near_k1_policy = if ($Backend -eq 'tabi') { Get-RowValue $audit 'near_k1_policy' (Get-RowValue $timing 'tabi_near_k1_policy' 'NA') } else { 'grid' }
+        near_k2_policy = if ($Backend -eq 'tabi') { Get-RowValue $audit 'near_k2_policy' (Get-RowValue $timing 'tabi_near_k2_policy' 'NA') } else { 'grid' }
+        near_k3_policy = if ($Backend -eq 'tabi') { Get-RowValue $audit 'near_k3_policy' (Get-RowValue $timing 'tabi_near_k3_policy' 'NA') } else { 'grid' }
+        near_k4_policy = if ($Backend -eq 'tabi') { Get-RowValue $audit 'near_k4_policy' (Get-RowValue $timing 'tabi_near_k4_policy' 'NA') } else { 'grid' }
         fallback_used = if ($Backend -eq 'tabi') { Get-RowValue $audit 'fallback_used' 'NA' } else { 'false' }
         total_seconds = Get-RowValue $timing 'total_seconds' ([math]::Round($measure.TotalSeconds, 6).ToString($InvariantCulture))
         setup_seconds = Get-RowValue $timing 'setup_seconds' 'NA'
@@ -203,10 +309,61 @@ function Invoke-PbeCase([int]$Repeat, [string]$Fixture, [string]$Backend) {
         tabi_tree_nodes = Get-RowValue $timing 'tabi_tree_nodes' 'NA'
         tabi_tree_leaf_count = Get-RowValue $timing 'tabi_tree_leaf_count' 'NA'
         tabi_near_interactions = Get-RowValue $timing 'tabi_near_interactions' 'NA'
+        tabi_singular_near_interactions = Get-RowValue $timing 'tabi_singular_near_interactions' 'NA'
+        tabi_leaf_near_interactions = Get-RowValue $timing 'tabi_leaf_near_interactions' 'NA'
+        tabi_far_node_interactions = Get-RowValue $timing 'tabi_far_node_interactions' 'NA'
+        tabi_leaf_panel_interactions = Get-RowValue $timing 'tabi_leaf_panel_interactions' 'NA'
+        tabi_leaf_tile_interactions = Get-RowValue $timing 'tabi_leaf_tile_interactions' 'NA'
+        tabi_leaf_tile_panel_interactions = Get-RowValue $timing 'tabi_leaf_tile_panel_interactions' 'NA'
+        tabi_leaf_residual_panel_interactions = Get-RowValue $timing 'tabi_leaf_residual_panel_interactions' 'NA'
+        tabi_smooth_leaf_node_interactions = Get-RowValue $timing 'tabi_smooth_leaf_node_interactions' 'NA'
+        tabi_leaf_pruned_interactions = Get-RowValue $timing 'tabi_leaf_pruned_interactions' 'NA'
+        tabi_leaf_near_policy = Get-RowValue $timing 'tabi_leaf_near_policy' 'NA'
+        tabi_leaf_panel_kernel = Get-RowValue $timing 'tabi_leaf_panel_kernel' 'NA'
+        tabi_leaf_tile_status = Get-RowValue $timing 'tabi_leaf_tile_status' 'NA'
+        tabi_leaf_panel_eval_seconds = Get-RowValue $timing 'tabi_leaf_panel_eval_seconds' 'NA'
+        tabi_leaf_tile_eval_seconds = Get-RowValue $timing 'tabi_leaf_tile_eval_seconds' 'NA'
+        tabi_leaf_residual_eval_seconds = Get-RowValue $timing 'tabi_leaf_residual_eval_seconds' 'NA'
+        tabi_smooth_leaf_node_eval_seconds = Get-RowValue $timing 'tabi_smooth_leaf_node_eval_seconds' 'NA'
+        tabi_leaf_panel_pairs_per_second = Get-RowValue $timing 'tabi_leaf_panel_pairs_per_second' 'NA'
+        tabi_singular_near_eval_seconds = Get-RowValue $timing 'tabi_singular_near_eval_seconds' 'NA'
+        tabi_leaf_near_eval_seconds = Get-RowValue $timing 'tabi_leaf_near_eval_seconds' 'NA'
+        tabi_near_self_pairs = Get-RowValue $timing 'tabi_near_self_pairs' 'NA'
+        tabi_near_one_ring_pairs = Get-RowValue $timing 'tabi_near_one_ring_pairs' 'NA'
+        tabi_near_duffy_pairs = Get-RowValue $timing 'tabi_near_duffy_pairs' 'NA'
+        tabi_near_centroid_pairs = Get-RowValue $timing 'tabi_near_centroid_pairs' 'NA'
+        tabi_near_fallbacks = Get-RowValue $timing 'tabi_near_fallbacks' 'NA'
+        tabi_near_k1_accepted = Get-RowValue $timing 'tabi_near_k1_accepted' 'NA'
+        tabi_near_k1_rejected = Get-RowValue $timing 'tabi_near_k1_rejected' 'NA'
+        tabi_near_k2_accepted = Get-RowValue $timing 'tabi_near_k2_accepted' 'NA'
+        tabi_near_k2_rejected = Get-RowValue $timing 'tabi_near_k2_rejected' 'NA'
+        tabi_near_k3_accepted = Get-RowValue $timing 'tabi_near_k3_accepted' 'NA'
+        tabi_near_k3_rejected = Get-RowValue $timing 'tabi_near_k3_rejected' 'NA'
+        tabi_near_k4_accepted = Get-RowValue $timing 'tabi_near_k4_accepted' 'NA'
+        tabi_near_k4_rejected = Get-RowValue $timing 'tabi_near_k4_rejected' 'NA'
+        tabi_near_one_ring_k1_accepted = Get-RowValue $timing 'tabi_near_one_ring_k1_accepted' 'NA'
+        tabi_near_one_ring_k1_rejected = Get-RowValue $timing 'tabi_near_one_ring_k1_rejected' 'NA'
+        tabi_near_one_ring_k2_accepted = Get-RowValue $timing 'tabi_near_one_ring_k2_accepted' 'NA'
+        tabi_near_one_ring_k2_rejected = Get-RowValue $timing 'tabi_near_one_ring_k2_rejected' 'NA'
+        tabi_near_one_ring_k3_accepted = Get-RowValue $timing 'tabi_near_one_ring_k3_accepted' 'NA'
+        tabi_near_one_ring_k3_rejected = Get-RowValue $timing 'tabi_near_one_ring_k3_rejected' 'NA'
+        tabi_near_one_ring_k4_accepted = Get-RowValue $timing 'tabi_near_one_ring_k4_accepted' 'NA'
+        tabi_near_one_ring_k4_rejected = Get-RowValue $timing 'tabi_near_one_ring_k4_rejected' 'NA'
+        tabi_near_integration_seconds = Get-RowValue $timing 'tabi_near_integration_seconds' 'NA'
         tabi_far_interactions = Get-RowValue $timing 'tabi_far_interactions' 'NA'
         tabi_status = Get-RowValue $timing 'tabi_status' 'NA'
         tabi_convergence_reason = Get-RowValue $timing 'tabi_convergence_reason' 'NA'
         reaction_energy_source = $energy.reaction_energy_source
+        memory_estimated_bytes_total = Get-RowValue $memory 'estimated_bytes_total' 'NA'
+        memory_estimated_bytes_surface = Get-RowValue $memory 'estimated_bytes_surface' 'NA'
+        memory_estimated_bytes_solver = Get-RowValue $memory 'estimated_bytes_solver' 'NA'
+        memory_estimated_bytes_operator = Get-RowValue $memory 'estimated_bytes_operator' 'NA'
+        memory_estimated_bytes_tree = Get-RowValue $memory 'estimated_bytes_tree' 'NA'
+        memory_rss_before_bytes = Get-RowValue $memory 'rss_before_bytes' 'NA'
+        memory_rss_after_bytes = Get-RowValue $memory 'rss_after_bytes' 'NA'
+        memory_rss_delta_bytes = Get-RowValue $memory 'rss_delta_bytes' 'NA'
+        memory_rss_delta_signed_bytes = Get-RowValue $memory 'rss_delta_signed_bytes' 'NA'
+        memory_peak_working_set_bytes = Get-RowValue $memory 'peak_working_set_bytes' 'NA'
         status = $energy.status
     }
 }
@@ -245,7 +402,38 @@ function New-MedianRows([object[]]$Rows) {
         'tabi_matvec_calls','tabi_tree_build_seconds',
         'tabi_tree_moment_seconds','tabi_tree_traversal_seconds',
         'tabi_tree_nodes','tabi_tree_leaf_count','tabi_near_interactions',
-        'tabi_far_interactions')) {
+        'tabi_singular_near_interactions','tabi_leaf_near_interactions',
+        'tabi_far_node_interactions','tabi_leaf_panel_interactions',
+        'tabi_leaf_tile_interactions','tabi_leaf_tile_panel_interactions',
+        'tabi_leaf_residual_panel_interactions',
+        'tabi_smooth_leaf_node_interactions','tabi_leaf_pruned_interactions',
+        'tabi_leaf_panel_eval_seconds',
+        'tabi_leaf_tile_eval_seconds','tabi_leaf_residual_eval_seconds',
+        'tabi_smooth_leaf_node_eval_seconds',
+        'tabi_leaf_panel_pairs_per_second',
+        'tabi_singular_near_eval_seconds',
+        'tabi_leaf_near_eval_seconds',
+        'tabi_near_self_pairs','tabi_near_one_ring_pairs',
+        'tabi_near_duffy_pairs','tabi_near_centroid_pairs',
+        'tabi_near_fallbacks','tabi_near_k1_accepted',
+        'tabi_near_k1_rejected','tabi_near_k2_accepted',
+        'tabi_near_k2_rejected','tabi_near_k3_accepted',
+        'tabi_near_k3_rejected','tabi_near_k4_accepted',
+        'tabi_near_k4_rejected','tabi_near_one_ring_k1_accepted',
+        'tabi_near_one_ring_k1_rejected',
+        'tabi_near_one_ring_k2_accepted',
+        'tabi_near_one_ring_k2_rejected',
+        'tabi_near_one_ring_k3_accepted',
+        'tabi_near_one_ring_k3_rejected',
+        'tabi_near_one_ring_k4_accepted',
+        'tabi_near_one_ring_k4_rejected',
+        'tabi_near_integration_seconds',
+        'tabi_far_interactions','memory_estimated_bytes_total',
+        'memory_estimated_bytes_surface','memory_estimated_bytes_solver',
+        'memory_estimated_bytes_operator','memory_estimated_bytes_tree',
+        'memory_rss_before_bytes','memory_rss_after_bytes',
+        'memory_rss_delta_bytes','memory_rss_delta_signed_bytes',
+        'memory_peak_working_set_bytes')) {
         [void]$numericColumns.Add($name)
     }
     $out = New-Object System.Collections.Generic.List[object]
@@ -276,9 +464,27 @@ if (-not (Test-Path -LiteralPath $InputRoot)) {
     throw "Missing PBE fixture directory: $InputRoot"
 }
 
+if ($FixtureSet -eq 'barnase') {
+    $Fixtures = $BarnaseFixtures
+} elseif ($FixtureSet -eq 'paper2013') {
+    $Fixtures = $PaperFixtures
+    if (Test-Path -LiteralPath (Join-Path $InputRoot '1a63.pqr')) {
+        $Fixtures += '1a63'
+    } else {
+        Write-Warning "Skipping paper2013 1A63 fixture: missing test\pbe_inputs_local\1a63.pqr"
+    }
+} elseif ($FixtureSet -eq 'all') {
+    $Fixtures = @('sphere','two-atoms','arg','mini-protein','charged-peptide','compact-mini-protein') + $BarnaseFixtures + $PaperFixtures
+    if (Test-Path -LiteralPath (Join-Path $InputRoot '1a63.pqr')) {
+        $Fixtures += '1a63'
+    }
+} elseif (($FixtureSet -eq 'default') -and (-not $PSBoundParameters.ContainsKey('Fixtures')) -and
+          (Test-Path -LiteralPath (Join-Path $InputRoot '1a63.pqr'))) {
+    $Fixtures += '1a63'
+}
 $Fixtures = @($Fixtures | ForEach-Object {
     ([string]$_ -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-})
+} | Select-Object -Unique)
 if ($Fixtures.Count -eq 0) {
     throw 'No fixtures selected.'
 }

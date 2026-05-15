@@ -1,12 +1,30 @@
 #include "tabi_types.h"
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <psapi.h>
+#else
+#include <cstdio>
+#endif
+
+#include "tabi_near.h"
 
 #include "../titan_executor.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <functional>
+#include <iomanip>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <sstream>
@@ -19,6 +37,7 @@ constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr double kCoulombKcalPerMol = 332.063713299;
 constexpr double kKcalToKJ = 4.184;
 constexpr double kKBKJPerMolK = 0.00831446261815324;
+constexpr std::size_t kParallelVectorThreshold = 32768;
 
 struct FormulationConfig {
   std::string formulation{"jcp2013"};
@@ -52,10 +71,225 @@ double rms_norm(const std::vector<double> &values) {
   return l2_norm(values) / std::sqrt(static_cast<double>(values.size()));
 }
 
+std::size_t solver_workers(const TitanExecutor &executor,
+                           std::size_t work_items) noexcept {
+  if (work_items == 0)
+    return 1;
+  return std::max<std::size_t>(
+      1, std::min<std::size_t>(executor.capacity(), work_items));
+}
+
+double dot_parallel(const std::vector<double> &a, const std::vector<double> &b,
+                    TitanExecutor &executor) {
+  const std::size_t n = a.size();
+  if (n < kParallelVectorThreshold || executor.capacity() <= 1)
+    return dot(a, b);
+  const std::size_t workers = solver_workers(executor, n);
+  std::vector<double> partial(workers, 0.0);
+  executor.parallel_for(
+      n, workers, kParallelVectorThreshold,
+      [&](std::size_t worker, std::size_t begin, std::size_t end) {
+        double value = 0.0;
+        for (std::size_t i = begin; i < end; ++i)
+          value += a[i] * b[i];
+        partial[worker] = value;
+      });
+  return std::accumulate(partial.begin(), partial.end(), 0.0);
+}
+
+double l2_norm_parallel(const std::vector<double> &values,
+                        TitanExecutor &executor) {
+  return std::sqrt(std::max(0.0, dot_parallel(values, values, executor)));
+}
+
+double rms_norm_parallel(const std::vector<double> &values,
+                         TitanExecutor &executor) {
+  if (values.empty())
+    return 0.0;
+  return l2_norm_parallel(values, executor) /
+         std::sqrt(static_cast<double>(values.size()));
+}
+
+void parallel_for_each_index(std::size_t n, TitanExecutor &executor,
+                             const std::function<void(std::size_t)> &fn) {
+  if (n < kParallelVectorThreshold || executor.capacity() <= 1) {
+    for (std::size_t i = 0; i < n; ++i)
+      fn(i);
+    return;
+  }
+  const std::size_t workers = solver_workers(executor, n);
+  executor.parallel_for(
+      n, workers, kParallelVectorThreshold,
+      [&](std::size_t, std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i)
+          fn(i);
+      });
+}
+
 double elapsed_ms(std::chrono::steady_clock::time_point begin,
                   std::chrono::steady_clock::time_point end) noexcept {
   return std::chrono::duration<double, std::milli>(end - begin).count();
 }
+
+std::size_t current_working_set_bytes() noexcept {
+#if defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS counters{};
+  counters.cb = sizeof(counters);
+  if (K32GetProcessMemoryInfo(GetCurrentProcess(), &counters,
+                              sizeof(counters)))
+    return static_cast<std::size_t>(counters.WorkingSetSize);
+#else
+  FILE *file = std::fopen("/proc/self/status", "r");
+  if (file != nullptr) {
+    char line[256];
+    char label[64];
+    long value_kb = 0;
+    while (std::fgets(line, sizeof(line), file) != nullptr) {
+      if (std::sscanf(line, "%63s %ld", label, &value_kb) == 2 &&
+          std::string(label) == "VmRSS:") {
+        std::fclose(file);
+        return static_cast<std::size_t>(std::max<long>(0, value_kb)) * 1024u;
+      }
+    }
+    std::fclose(file);
+  }
+#endif
+  return 0;
+}
+
+std::string csv_escape_progress(const std::string &value) {
+  bool needs_quotes = false;
+  for (char c : value) {
+    if (c == ',' || c == '"' || c == '\n' || c == '\r') {
+      needs_quotes = true;
+      break;
+    }
+  }
+  if (!needs_quotes)
+    return value;
+  std::string escaped;
+  escaped.reserve(value.size() + 2);
+  escaped.push_back('"');
+  for (char c : value) {
+    if (c == '"')
+      escaped.push_back('"');
+    escaped.push_back(c);
+  }
+  escaped.push_back('"');
+  return escaped;
+}
+
+class LongRunProgressWriter {
+public:
+  LongRunProgressWriter(const Options &options, std::size_t threads)
+      : enabled_(options.progress != "off"),
+        interval_(std::chrono::seconds(
+            std::clamp(options.progress_interval_seconds, 1, 300))),
+        start_(std::chrono::steady_clock::now()),
+        last_write_(start_ - interval_),
+        threads_(threads) {
+    if (!enabled_)
+      return;
+    out_.open("pbe_tabi_longrun_progress.csv",
+              std::ios::out | std::ios::trunc);
+    if (!out_.is_open()) {
+      enabled_ = false;
+      return;
+    }
+    out_ << "elapsed_seconds,phase,gmres_iter,restart_iter,matvec_calls,"
+            "residual,gmres_restart_requested,gmres_restart_effective,"
+            "best_residual,best_residual_iter,final_residual,"
+            "best_preconditioned_residual,final_preconditioned_residual,"
+            "true_residual_abs,true_residual_rel,"
+            "true_residual_probe_mode,true_residual_probe_interval,"
+            "true_residual_probe_calls,true_residual_probe_seconds,"
+            "true_residual_probe_scope,true_residual_sample_count,"
+            "sampled_true_residual_rel,sampled_true_residual_rows,"
+            "sampled_probe_calls,sampled_probe_seconds,"
+            "full_true_residual_confirm_calls,full_probe_seconds,"
+            "panels,unknown_count,tree_nodes,"
+            "leaf_panel_interactions,leaf_tile_panel_interactions,"
+            "leaf_residual_panel_interactions,far_node_interactions,"
+            "singular_near_interactions,preconditioner_effective,threads,"
+            "rss_bytes,status\n";
+    out_.flush();
+  }
+
+  [[nodiscard]] bool enabled() const noexcept { return enabled_; }
+
+  void write(const std::string &phase, const Result &result,
+             const TreecodeStats *stats, std::size_t matvec_calls,
+             int gmres_iter, int restart_iter, double residual,
+             const std::string &status, bool force) {
+    if (!enabled_)
+      return;
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now - last_write_ < interval_)
+      return;
+    last_write_ = now;
+
+    const std::size_t tree_nodes =
+        stats != nullptr && stats->tree_nodes > 0 ? stats->tree_nodes
+                                                  : result.tree_nodes;
+    const std::size_t leaf_panel =
+        stats != nullptr ? stats->leaf_panel_interactions
+                         : result.leaf_panel_interactions;
+    const std::size_t leaf_tile_panel =
+        stats != nullptr ? stats->leaf_tile_panel_interactions
+                         : result.leaf_tile_panel_interactions;
+    const std::size_t leaf_residual =
+        stats != nullptr ? stats->leaf_residual_panel_interactions
+                         : result.leaf_residual_panel_interactions;
+    const std::size_t far_nodes =
+        stats != nullptr ? stats->far_node_interactions
+                         : result.far_node_interactions;
+    const std::size_t singular =
+        stats != nullptr ? stats->singular_near_interactions
+                         : result.singular_near_interactions;
+
+    out_ << std::fixed << std::setprecision(6)
+         << std::chrono::duration<double>(now - start_).count() << ','
+         << csv_escape_progress(phase) << ',' << gmres_iter << ','
+         << restart_iter << ',' << matvec_calls << ',' << std::scientific
+         << std::setprecision(12) << residual << ','
+         << result.gmres_restart_requested << ','
+         << result.gmres_restart_effective << ','
+         << result.best_residual << ',' << result.best_residual_iter << ','
+         << result.final_residual << ','
+         << result.best_preconditioned_residual << ','
+         << result.final_preconditioned_residual << ','
+         << result.true_residual_abs << ',' << result.true_residual_rel
+         << ',' << csv_escape_progress(result.true_residual_probe_mode)
+         << ',' << result.true_residual_probe_interval << ','
+         << result.true_residual_probe_calls << ',' << std::fixed
+         << std::setprecision(6) << result.true_residual_probe_ms / 1000.0
+         << ',' << csv_escape_progress(result.true_residual_probe_scope)
+         << ',' << result.true_residual_sample_count << ','
+         << result.sampled_true_residual_rel << ','
+         << result.sampled_true_residual_rows << ','
+         << result.sampled_probe_calls << ',' << std::fixed
+         << std::setprecision(6) << result.sampled_probe_ms / 1000.0 << ','
+         << result.full_true_residual_confirm_calls << ',' << std::fixed
+         << std::setprecision(6)
+         << result.full_true_residual_confirm_ms / 1000.0 << std::fixed
+         << std::setprecision(6) << ',' << result.panel_count << ','
+         << result.unknown_count << ',' << tree_nodes << ',' << leaf_panel
+         << ',' << leaf_tile_panel << ',' << leaf_residual << ','
+         << far_nodes << ',' << singular << ','
+         << csv_escape_progress(result.preconditioner_effective) << ','
+         << threads_ << ',' << current_working_set_bytes() << ','
+         << csv_escape_progress(status) << '\n';
+    out_.flush();
+  }
+
+private:
+  bool enabled_{false};
+  std::chrono::seconds interval_{5};
+  std::chrono::steady_clock::time_point start_{};
+  std::chrono::steady_clock::time_point last_write_{};
+  std::size_t threads_{1};
+  std::ofstream out_;
+};
 
 std::string residual_history_string(const std::vector<double> &history) {
   std::ostringstream oss;
@@ -74,10 +308,14 @@ FormulationConfig make_formulation_config(const Options &options) {
   config.formulation = options.formulation;
   config.energy_projection = options.energy_projection;
   if (config.formulation.empty())
-    config.formulation = "jcp2013";
+    config.formulation = "jcp2013-centroid";
+  if (config.formulation == "jcp2013")
+    config.formulation = "jcp2013-centroid";
   if (config.energy_projection.empty())
     config.energy_projection = "boundary";
-  if (config.formulation == "jcp2013") {
+  if (config.formulation == "jcp2013-centroid" ||
+      config.formulation == "jcp2013-treecode" ||
+      config.formulation == "tabi2-nodepatch") {
     // The jcp2013 path is intentionally explicit even while it shares the
     // current scale factors. Accuracy gates use the audit CSV to keep future
     // sign/scale changes visible instead of silently drifting the formulation.
@@ -94,8 +332,30 @@ FormulationConfig make_formulation_config(const Options &options) {
 
 struct LinearSolveResult {
   std::vector<double> x;
+  std::vector<double> best_x;
   int iterations{0};
   double residual{0.0};
+  int restart_requested{32};
+  int restart_effective{32};
+  double best_residual{0.0};
+  int best_residual_iter{0};
+  double final_residual{0.0};
+  double best_preconditioned_residual{0.0};
+  double final_preconditioned_residual{0.0};
+  double true_residual_abs{0.0};
+  double true_residual_rel{0.0};
+  std::string true_residual_probe_mode{"restart"};
+  std::string true_residual_probe_scope{"full"};
+  int true_residual_probe_interval{8};
+  int true_residual_sample_count{1024};
+  std::size_t true_residual_probe_calls{0};
+  double true_residual_probe_ms{0.0};
+  double sampled_true_residual_rel{0.0};
+  std::size_t sampled_true_residual_rows{0};
+  std::size_t sampled_probe_calls{0};
+  double sampled_probe_ms{0.0};
+  std::size_t full_true_residual_confirm_calls{0};
+  double full_true_residual_confirm_ms{0.0};
   bool converged{false};
   std::string convergence_reason{"not_started"};
   std::vector<double> residual_history;
@@ -103,43 +363,111 @@ struct LinearSolveResult {
   double preconditioner_ms{0.0};
 };
 
+using GmresProgressCallback =
+    std::function<void(int gmres_iter, int restart_iter,
+                       double true_residual_rel,
+                       double preconditioned_residual_rel, bool force,
+                       const std::string &phase,
+                       const LinearSolveResult &state)>;
+
+struct SampledResidualResult {
+  double abs{0.0};
+  double rel{std::numeric_limits<double>::infinity()};
+  std::size_t rows{0};
+  bool finite{false};
+};
+
+using SampledTrueResidualCallback =
+    std::function<SampledResidualResult(const std::vector<double> &,
+                                        const std::vector<std::size_t> &)>;
+
 LinearSolveResult gmres_solve(
     const std::function<void(const std::vector<double> &,
                              std::vector<double> &)> &matvec,
     const std::vector<double> &b, const std::vector<double> &diagonal,
-    int max_iter, double tol) {
+    int max_iter, double tol, int restart_requested, TitanExecutor &executor,
+    const std::function<void(const std::vector<double> &,
+                             std::vector<double> &)> &custom_preconditioner =
+        {},
+    const GmresProgressCallback &progress_callback = {},
+    const std::string &true_residual_probe_mode = "restart",
+    int true_residual_probe_interval = 8,
+    const std::string &true_residual_probe_scope = "full",
+    int true_residual_sample_count = 1024,
+    const SampledTrueResidualCallback &sampled_true_residual = {}) {
   LinearSolveResult result;
   const std::size_t n = b.size();
   result.x.assign(n, 0.0);
+  result.restart_requested = std::clamp(restart_requested, 8, 128);
+  result.restart_effective = result.restart_requested;
+  result.true_residual_probe_mode =
+      true_residual_probe_mode == "interval"
+          ? std::string("interval")
+          : (true_residual_probe_mode == "off" ? std::string("off")
+                                                : std::string("restart"));
+  result.true_residual_probe_scope =
+      true_residual_probe_scope == "sampled"
+          ? std::string("sampled")
+          : (true_residual_probe_scope == "adaptive" ? std::string("adaptive")
+                                                     : std::string("full"));
+  result.true_residual_probe_interval =
+      std::clamp(true_residual_probe_interval, 1, 128);
+  result.true_residual_sample_count =
+      std::clamp(true_residual_sample_count, 128, 4096);
   if (n == 0) {
     result.converged = true;
     result.convergence_reason = "converged";
+    result.best_residual = 0.0;
+    result.best_residual_iter = 0;
+    result.final_residual = 0.0;
+    result.best_preconditioned_residual = 0.0;
+    result.final_preconditioned_residual = 0.0;
+    result.true_residual_abs = 0.0;
+    result.true_residual_rel = 0.0;
+    result.true_residual_probe_calls = 0;
+    result.true_residual_probe_ms = 0.0;
+    result.sampled_true_residual_rel = 0.0;
+    result.sampled_true_residual_rows = 0;
+    result.sampled_probe_calls = 0;
+    result.sampled_probe_ms = 0.0;
+    result.full_true_residual_confirm_calls = 0;
+    result.full_true_residual_confirm_ms = 0.0;
     return result;
   }
 
   std::vector<double> inv_precond(n, 1.0);
   const auto precond_begin = std::chrono::steady_clock::now();
-  bool preconditioner_ok = true;
-  for (std::size_t i = 0; i < n; ++i) {
+  std::atomic_bool preconditioner_ok{true};
+  parallel_for_each_index(n, executor, [&](std::size_t i) {
     const double diag = i < diagonal.size() ? std::abs(diagonal[i]) : 1.0;
     if (!std::isfinite(diag) || diag <= 1.0e-12) {
       inv_precond[i] = 1.0;
-      preconditioner_ok = false;
+      preconditioner_ok.store(false, std::memory_order_relaxed);
     } else {
       inv_precond[i] = 1.0 / diag;
     }
-  }
+  });
   result.preconditioner_ms +=
       elapsed_ms(precond_begin, std::chrono::steady_clock::now());
-  if (!preconditioner_ok)
+  if (!preconditioner_ok.load(std::memory_order_relaxed))
     result.convergence_reason = "preconditioner_breakdown";
 
   auto apply_preconditioner = [&](const std::vector<double> &in,
                                   std::vector<double> &out) {
     const auto begin = std::chrono::steady_clock::now();
-    out.resize(n);
-    for (std::size_t i = 0; i < n; ++i)
-      out[i] = in[i] * inv_precond[i];
+    if (custom_preconditioner) {
+      custom_preconditioner(in, out);
+      if (out.size() != n) {
+        out.resize(n);
+        for (std::size_t i = 0; i < n; ++i)
+          out[i] = in[i] * inv_precond[i];
+      }
+    } else {
+      out.resize(n);
+      parallel_for_each_index(n, executor, [&](std::size_t i) {
+        out[i] = in[i] * inv_precond[i];
+      });
+    }
     result.preconditioner_ms +=
         elapsed_ms(begin, std::chrono::steady_clock::now());
   };
@@ -152,38 +480,124 @@ LinearSolveResult gmres_solve(
     return true;
   };
 
-  const int restart =
-      std::max(4, std::min<int>(32, static_cast<int>(std::min<std::size_t>(
-                                     n, static_cast<std::size_t>(32)))));
+  const int restart = result.restart_effective;
   std::vector<double> ax(n, 0.0);
   std::vector<double> residual = b;
   std::vector<double> precond_residual(n, 0.0);
   apply_preconditioner(residual, precond_residual);
-  result.residual = rms_norm(residual);
-  double precond_rms = rms_norm(precond_residual);
-  result.residual_history.push_back(result.residual);
+  if (!finite_vector(precond_residual)) {
+    result.convergence_reason = "preconditioner_breakdown";
+    return result;
+  }
+  const double b_norm_raw = l2_norm_parallel(b, executor);
+  const double b_norm = std::max(1.0e-300, b_norm_raw);
+  const double precond_norm_raw = l2_norm_parallel(precond_residual, executor);
+  const double precond_norm = std::max(1.0e-300, precond_norm_raw);
+  auto relative_true_residual = [&](const std::vector<double> &r) {
+    const double abs_value = l2_norm_parallel(r, executor);
+    return std::pair<double, double>{abs_value, abs_value / b_norm};
+  };
+  auto preconditioned_relative = [&](const std::vector<double> &r) {
+    return l2_norm_parallel(r, executor) / precond_norm;
+  };
+  auto build_sample_rows = [](std::size_t row_count, int requested) {
+    std::vector<std::size_t> rows;
+    if (row_count == 0 || requested <= 0)
+      return rows;
+    const std::size_t m =
+        std::min<std::size_t>(row_count, static_cast<std::size_t>(requested));
+    rows.reserve(m);
+    std::size_t previous = std::numeric_limits<std::size_t>::max();
+    for (std::size_t k = 0; k < m; ++k) {
+      std::size_t row =
+          ((2u * k + 1u) * row_count) / std::max<std::size_t>(1, 2u * m);
+      row = std::min(row, row_count - 1u);
+      if (row != previous) {
+        rows.push_back(row);
+        previous = row;
+      }
+    }
+    if (rows.empty())
+      rows.push_back(0);
+    return rows;
+  };
+  const std::vector<std::size_t> sampled_rows =
+      build_sample_rows(n, result.true_residual_sample_count);
+  auto sampled_relative_from_full_ax = [&](const std::vector<double> &ax_values) {
+    double residual_sq = 0.0;
+    double b_sq = 0.0;
+    for (std::size_t row : sampled_rows) {
+      const double r = b[row] - ax_values[row];
+      residual_sq += r * r;
+      b_sq += b[row] * b[row];
+    }
+    const double abs_value = std::sqrt(std::max(0.0, residual_sq));
+    const double denom = std::max(1.0e-300, std::sqrt(std::max(0.0, b_sq)));
+    SampledResidualResult sample;
+    sample.abs = abs_value;
+    sample.rel = abs_value / denom;
+    sample.rows = sampled_rows.size();
+    sample.finite = std::isfinite(sample.rel);
+    return sample;
+  };
+
+  auto [initial_abs, initial_rel] = relative_true_residual(residual);
+  result.residual = initial_rel;
+  result.best_residual = initial_rel;
+  result.best_residual_iter = 0;
+  result.final_residual = initial_rel;
+  result.true_residual_abs = initial_abs;
+  result.true_residual_rel = initial_rel;
+  result.best_x = result.x;
+  double precond_rel = preconditioned_relative(precond_residual);
+  result.best_preconditioned_residual = precond_rel;
+  result.final_preconditioned_residual = precond_rel;
+  result.residual_history.push_back(initial_rel);
   if (result.residual <= tol) {
     result.converged = true;
-    result.convergence_reason = "converged";
+    result.convergence_reason = "converged_true_residual";
     return result;
   }
 
   const int iter_cap = std::max(1, max_iter);
-  double best_physical_rms = result.residual;
+  double best_true_abs = initial_abs;
+  int non_improving_restarts = 0;
+  bool saw_phantom_preconditioned = false;
   while (result.iterations < iter_cap) {
-    const double beta = l2_norm(precond_residual);
-    if (beta <= tol * std::sqrt(static_cast<double>(n))) {
-      result.converged = true;
-      result.residual = rms_norm(residual);
-      result.convergence_reason = "converged";
-      break;
+    const double beta = l2_norm_parallel(precond_residual, executor);
+    if (!std::isfinite(beta) || beta <= 1.0e-300) {
+      result.convergence_reason = "preconditioner_breakdown";
+      return result;
     }
+    if (beta <= tol * precond_norm) {
+      saw_phantom_preconditioned = true;
+      auto [true_abs, true_rel] = relative_true_residual(residual);
+      result.final_residual = true_rel;
+      result.true_residual_abs = true_abs;
+      result.true_residual_rel = true_rel;
+      result.final_preconditioned_residual = beta / precond_norm;
+      if (std::isfinite(result.final_preconditioned_residual) &&
+          result.final_preconditioned_residual <
+              result.best_preconditioned_residual) {
+        result.best_preconditioned_residual =
+            result.final_preconditioned_residual;
+      }
+      if (true_rel <= tol) {
+        result.converged = true;
+        result.residual = true_rel;
+        result.convergence_reason = "converged_true_residual";
+        break;
+      }
+    }
+    if (result.converged)
+      break;
 
     const int window = std::min(restart, iter_cap - result.iterations);
     std::vector<std::vector<double>> v(
         static_cast<std::size_t>(window) + 1, std::vector<double>(n, 0.0));
-    for (std::size_t i = 0; i < n; ++i)
+    parallel_for_each_index(n, executor, [&](std::size_t i) {
       v[0][i] = precond_residual[i] / beta;
+    });
     std::vector<double> h((static_cast<std::size_t>(window) + 1) *
                               static_cast<std::size_t>(window),
                           0.0);
@@ -192,8 +606,43 @@ LinearSolveResult gmres_solve(
     std::vector<double> g(static_cast<std::size_t>(window) + 1, 0.0);
     g[0] = beta;
 
+    auto solve_window_y = [&](int cols) {
+      std::vector<double> y(static_cast<std::size_t>(cols), 0.0);
+      for (int rev = 0; rev < cols; ++rev) {
+        const int row = cols - 1 - rev;
+        double value = g[static_cast<std::size_t>(row)];
+        for (int col = row + 1; col < cols; ++col) {
+          value -= h[static_cast<std::size_t>(row) *
+                         static_cast<std::size_t>(window) +
+                     static_cast<std::size_t>(col)] *
+                   y[static_cast<std::size_t>(col)];
+        }
+        const double diag =
+            h[static_cast<std::size_t>(row) * static_cast<std::size_t>(window) +
+              static_cast<std::size_t>(row)];
+        y[static_cast<std::size_t>(row)] =
+            std::abs(diag) > 1.0e-30 ? value / diag : 0.0;
+      }
+      return y;
+    };
+
+    auto build_candidate_x = [&](const std::vector<double> &base,
+                                 const std::vector<double> &y, int cols,
+                                 std::vector<double> &candidate) {
+      candidate = base;
+      parallel_for_each_index(n, executor, [&](std::size_t k) {
+        double update = 0.0;
+        for (int basis = 0; basis < cols; ++basis)
+          update += y[static_cast<std::size_t>(basis)] *
+                    v[static_cast<std::size_t>(basis)][k];
+        candidate[k] += update;
+      });
+    };
+
     int used_cols = 0;
     bool happy_breakdown = false;
+    bool preconditioned_requested_check = false;
+    bool probe_converged = false;
     for (int j = 0; j < window; ++j) {
       std::vector<double> w(n, 0.0);
       matvec(v[static_cast<std::size_t>(j)], w);
@@ -203,23 +652,30 @@ LinearSolveResult gmres_solve(
       }
       std::vector<double> precond_w(n, 0.0);
       apply_preconditioner(w, precond_w);
+      if (!finite_vector(precond_w)) {
+        result.convergence_reason = "preconditioner_breakdown";
+        return result;
+      }
       w.swap(precond_w);
 
       const auto ortho_begin = std::chrono::steady_clock::now();
       for (int i = 0; i <= j; ++i) {
-        const double hij = dot(w, v[static_cast<std::size_t>(i)]);
+        const double hij =
+            dot_parallel(w, v[static_cast<std::size_t>(i)], executor);
         h[static_cast<std::size_t>(i) * static_cast<std::size_t>(window) +
           static_cast<std::size_t>(j)] = hij;
-        for (std::size_t k = 0; k < n; ++k)
+        parallel_for_each_index(n, executor, [&](std::size_t k) {
           w[k] -= hij * v[static_cast<std::size_t>(i)][k];
+        });
       }
-      const double h_next = l2_norm(w);
+      const double h_next = l2_norm_parallel(w, executor);
       h[(static_cast<std::size_t>(j) + 1) *
             static_cast<std::size_t>(window) +
         static_cast<std::size_t>(j)] = h_next;
       if (h_next > 1.0e-20 && j + 1 < window + 1) {
-        for (std::size_t k = 0; k < n; ++k)
+        parallel_for_each_index(n, executor, [&](std::size_t k) {
           v[static_cast<std::size_t>(j) + 1][k] = w[k] / h_next;
+        });
       } else {
         happy_breakdown = true;
       }
@@ -280,14 +736,109 @@ LinearSolveResult gmres_solve(
 
       ++result.iterations;
       used_cols = j + 1;
-      precond_rms =
-          std::abs(g[static_cast<std::size_t>(j) + 1]) /
-          std::sqrt(static_cast<double>(n));
-      result.residual_history.push_back(precond_rms);
-      if (precond_rms <= tol) {
-        result.converged = true;
-        result.convergence_reason = "converged";
-        break;
+      precond_rel = std::abs(g[static_cast<std::size_t>(j) + 1]) /
+                    precond_norm;
+      result.final_preconditioned_residual = precond_rel;
+      if (std::isfinite(precond_rel) &&
+          precond_rel < result.best_preconditioned_residual) {
+        result.best_preconditioned_residual = precond_rel;
+      }
+      if (progress_callback)
+        progress_callback(result.iterations, j + 1, result.final_residual,
+                          precond_rel, false,
+                          "gmres_iter", result);
+      if (result.true_residual_probe_mode == "interval" &&
+          result.true_residual_probe_interval > 0 &&
+          (result.iterations % result.true_residual_probe_interval) == 0) {
+        std::vector<double> y_probe = solve_window_y(used_cols);
+        std::vector<double> probe_x;
+        build_candidate_x(result.x, y_probe, used_cols, probe_x);
+        std::vector<double> probe_ax;
+        bool probe_ax_ready = false;
+        bool run_full_probe = result.true_residual_probe_scope == "full";
+        if (result.true_residual_probe_scope == "sampled" ||
+            result.true_residual_probe_scope == "adaptive") {
+          const auto sample_begin = std::chrono::steady_clock::now();
+          SampledResidualResult sample;
+          if (sampled_true_residual) {
+            sample = sampled_true_residual(probe_x, sampled_rows);
+          } else {
+            probe_ax.assign(n, 0.0);
+            matvec(probe_x, probe_ax);
+            probe_ax_ready = true;
+            if (!finite_vector(probe_ax)) {
+              result.convergence_reason = "nan_guard";
+              return result;
+            }
+            sample = sampled_relative_from_full_ax(probe_ax);
+          }
+          ++result.sampled_probe_calls;
+          result.sampled_probe_ms +=
+              elapsed_ms(sample_begin, std::chrono::steady_clock::now());
+          result.sampled_true_residual_rel = sample.rel;
+          result.sampled_true_residual_rows = sample.rows;
+          if (!sample.finite) {
+            result.convergence_reason = "nan_guard";
+            return result;
+          }
+          if (progress_callback)
+            progress_callback(result.iterations, j + 1, sample.rel,
+                              precond_rel, true,
+                              "gmres_sampled_true_probe", result);
+          if (result.true_residual_probe_scope == "adaptive" &&
+              sample.rel <= std::max(5.0 * tol, 1.0e-3)) {
+            run_full_probe = true;
+          }
+        }
+        if (run_full_probe) {
+          const auto probe_begin = std::chrono::steady_clock::now();
+          if (!probe_ax_ready) {
+            probe_ax.assign(n, 0.0);
+            matvec(probe_x, probe_ax);
+            probe_ax_ready = true;
+            if (!finite_vector(probe_ax)) {
+              result.convergence_reason = "nan_guard";
+              return result;
+            }
+          }
+          std::vector<double> probe_residual(n, 0.0);
+          parallel_for_each_index(n, executor, [&](std::size_t k) {
+            probe_residual[k] = b[k] - probe_ax[k];
+          });
+          auto [probe_abs, probe_rel] =
+              relative_true_residual(probe_residual);
+          ++result.true_residual_probe_calls;
+          ++result.full_true_residual_confirm_calls;
+          const double probe_ms =
+              elapsed_ms(probe_begin, std::chrono::steady_clock::now());
+          result.true_residual_probe_ms += probe_ms;
+          result.full_true_residual_confirm_ms += probe_ms;
+          result.final_residual = probe_rel;
+          result.true_residual_abs = probe_abs;
+          result.true_residual_rel = probe_rel;
+          if (std::isfinite(probe_rel) && probe_rel < result.best_residual) {
+            result.best_residual = probe_rel;
+            result.best_residual_iter = result.iterations;
+            best_true_abs = probe_abs;
+            result.best_x = probe_x;
+          }
+          result.residual_history.push_back(probe_rel);
+          if (progress_callback)
+            progress_callback(result.iterations, j + 1, probe_rel, precond_rel,
+                              true, "gmres_true_probe", result);
+          if (probe_rel <= tol) {
+            result.x = std::move(probe_x);
+            result.residual = probe_rel;
+            result.converged = true;
+            result.convergence_reason = "converged_true_residual_probe";
+            probe_converged = true;
+            break;
+          }
+        }
+      }
+      if (precond_rel <= tol) {
+        preconditioned_requested_check = true;
+        saw_phantom_preconditioned = true;
       }
       if (result.iterations >= iter_cap)
         break;
@@ -295,57 +846,90 @@ LinearSolveResult gmres_solve(
         break;
     }
 
+    if (probe_converged)
+      break;
     if (used_cols == 0)
       break;
 
-    std::vector<double> y(static_cast<std::size_t>(used_cols), 0.0);
-    for (int rev = 0; rev < used_cols; ++rev) {
-      const int row = used_cols - 1 - rev;
-      double value = g[static_cast<std::size_t>(row)];
-      for (int col = row + 1; col < used_cols; ++col) {
-        value -= h[static_cast<std::size_t>(row) *
-                       static_cast<std::size_t>(window) +
-                   static_cast<std::size_t>(col)] *
-                 y[static_cast<std::size_t>(col)];
-      }
-      const double diag =
-          h[static_cast<std::size_t>(row) * static_cast<std::size_t>(window) +
-            static_cast<std::size_t>(row)];
-      y[static_cast<std::size_t>(row)] =
-          std::abs(diag) > 1.0e-30 ? value / diag : 0.0;
-    }
-    for (int basis = 0; basis < used_cols; ++basis) {
-      for (std::size_t k = 0; k < n; ++k)
-        result.x[k] += y[static_cast<std::size_t>(basis)] *
-                       v[static_cast<std::size_t>(basis)][k];
-    }
+    std::vector<double> y = solve_window_y(used_cols);
+    build_candidate_x(result.x, y, used_cols, result.x);
 
     matvec(result.x, ax);
     if (!finite_vector(ax)) {
       result.convergence_reason = "nan_guard";
       return result;
     }
-    for (std::size_t k = 0; k < n; ++k)
+    parallel_for_each_index(n, executor, [&](std::size_t k) {
       residual[k] = b[k] - ax[k];
-    result.residual = rms_norm(residual);
-    result.residual_history.push_back(result.residual);
+    });
+    auto [true_abs, true_rel] = relative_true_residual(residual);
+    result.final_residual = true_rel;
+    result.true_residual_abs = true_abs;
+    result.true_residual_rel = true_rel;
+    result.residual = true_rel;
+    bool improved_true = false;
+    if (std::isfinite(true_rel) && true_rel < result.best_residual) {
+      result.best_residual = true_rel;
+      result.best_residual_iter = result.iterations;
+      best_true_abs = true_abs;
+      result.best_x = result.x;
+      improved_true = true;
+    }
+    result.residual_history.push_back(true_rel);
     apply_preconditioner(residual, precond_residual);
-    precond_rms = rms_norm(precond_residual);
-    if (result.residual <= tol) {
+    if (!finite_vector(precond_residual)) {
+      result.convergence_reason = "preconditioner_breakdown";
+      return result;
+    }
+    precond_rel = preconditioned_relative(precond_residual);
+    result.final_preconditioned_residual = precond_rel;
+    if (std::isfinite(precond_rel) &&
+        precond_rel < result.best_preconditioned_residual) {
+      result.best_preconditioned_residual = precond_rel;
+    }
+    if (progress_callback)
+      progress_callback(result.iterations, 0, true_rel, precond_rel, true,
+                        "gmres_restart", result);
+    if (true_rel <= tol) {
       result.converged = true;
-      result.convergence_reason = "converged";
+      result.convergence_reason =
+          preconditioned_requested_check
+              ? "converged_true_residual_after_preconditioned_check"
+              : "converged_true_residual";
       break;
     }
-    if (result.residual >= best_physical_rms * 0.999999) {
+    if (preconditioned_requested_check && true_rel > tol) {
+      saw_phantom_preconditioned = true;
+      non_improving_restarts = 0;
+    } else if (!improved_true) {
+      ++non_improving_restarts;
+    } else {
+      non_improving_restarts = 0;
+    }
+    if (non_improving_restarts >= 2) {
       result.convergence_reason =
           result.iterations >= iter_cap ? "max_iter" : "stagnated";
       break;
     }
-    best_physical_rms = result.residual;
+  }
+  if (!result.best_x.empty()) {
+    result.x = result.best_x;
+    result.residual = result.best_residual;
+    result.true_residual_abs = best_true_abs;
+    result.true_residual_rel = result.best_residual;
+  }
+  if (!result.converged && result.best_residual <= tol) {
+    result.converged = true;
+    result.convergence_reason = result.final_residual <= tol
+                                    ? "converged_true_residual"
+                                    : "converged_true_residual_best";
   }
   if (!result.converged && result.convergence_reason == "not_started")
-    result.convergence_reason =
-        result.iterations >= iter_cap ? "max_iter" : "stagnated";
+    result.convergence_reason = saw_phantom_preconditioned
+                                    ? "phantom_preconditioned"
+                                    : (result.iterations >= iter_cap
+                                           ? "max_iter"
+                                           : "stagnated");
   return result;
 }
 
@@ -517,6 +1101,313 @@ JcpKernels jcp_surface_kernels(const Panel &target, const Panel &source,
           d0_tgt - inv_eps_ratio * dk_tgt, d2_k - d2_0};
 }
 
+int solver_shared_vertex_count(const Panel &a, const Panel &b) noexcept {
+  if (!a.has_triangle_geometry || !b.has_triangle_geometry)
+    return 0;
+  auto has_vertex = [](const Panel &panel, std::size_t vertex) noexcept {
+    return vertex != static_cast<std::size_t>(-1) &&
+           (panel.v0_index == vertex || panel.v1_index == vertex ||
+            panel.v2_index == vertex);
+  };
+  int count = 0;
+  if (has_vertex(b, a.v0_index))
+    ++count;
+  if (a.v1_index != a.v0_index && has_vertex(b, a.v1_index))
+    ++count;
+  if (a.v2_index != a.v0_index && a.v2_index != a.v1_index &&
+      has_vertex(b, a.v2_index))
+    ++count;
+  return count;
+}
+
+bool solver_is_singular_near_pair(const Panel &target,
+                                  std::size_t target_index,
+                                  const Panel &source,
+                                  std::size_t source_index) noexcept {
+  if (source_index == target_index)
+    return true;
+  return solver_shared_vertex_count(target, source) > 0;
+}
+
+bool factor_dense_lu(std::vector<double> &matrix, std::vector<int> &pivots,
+                     std::size_t dim, double *pivot_ratio = nullptr) {
+  pivots.assign(dim, 0);
+  double min_pivot = std::numeric_limits<double>::infinity();
+  double max_pivot = 0.0;
+  for (std::size_t k = 0; k < dim; ++k) {
+    std::size_t pivot = k;
+    double best = std::abs(matrix[k * dim + k]);
+    for (std::size_t row = k + 1; row < dim; ++row) {
+      const double value = std::abs(matrix[row * dim + k]);
+      if (value > best) {
+        best = value;
+        pivot = row;
+      }
+    }
+    if (!std::isfinite(best) || best <= 1.0e-14)
+      return false;
+    min_pivot = std::min(min_pivot, best);
+    max_pivot = std::max(max_pivot, best);
+    pivots[k] = static_cast<int>(pivot);
+    if (pivot != k) {
+      for (std::size_t col = 0; col < dim; ++col)
+        std::swap(matrix[k * dim + col], matrix[pivot * dim + col]);
+    }
+    const double diag = matrix[k * dim + k];
+    for (std::size_t row = k + 1; row < dim; ++row) {
+      matrix[row * dim + k] /= diag;
+      const double multiplier = matrix[row * dim + k];
+      for (std::size_t col = k + 1; col < dim; ++col)
+        matrix[row * dim + col] -= multiplier * matrix[k * dim + col];
+    }
+  }
+  if (pivot_ratio != nullptr)
+    *pivot_ratio = max_pivot > 0.0 && std::isfinite(min_pivot)
+                       ? min_pivot / max_pivot
+                       : 0.0;
+  return true;
+}
+
+void solve_dense_lu(const std::vector<double> &lu,
+                    const std::vector<int> &pivots, std::size_t dim,
+                    std::vector<double> &rhs) {
+  for (std::size_t k = 0; k < dim; ++k) {
+    const std::size_t pivot = static_cast<std::size_t>(pivots[k]);
+    if (pivot != k)
+      std::swap(rhs[k], rhs[pivot]);
+  }
+  for (std::size_t row = 0; row < dim; ++row) {
+    for (std::size_t col = 0; col < row; ++col)
+      rhs[row] -= lu[row * dim + col] * rhs[col];
+  }
+  for (std::size_t rev = 0; rev < dim; ++rev) {
+    const std::size_t row = dim - 1 - rev;
+    for (std::size_t col = row + 1; col < dim; ++col)
+      rhs[row] -= lu[row * dim + col] * rhs[col];
+    const double diag = lu[row * dim + row];
+    rhs[row] = std::abs(diag) > 1.0e-14 ? rhs[row] / diag : 0.0;
+  }
+}
+
+struct JcpBlockPreconditioner {
+  struct Block {
+    std::vector<std::size_t> panels;
+    std::vector<double> lu;
+    std::vector<int> pivots;
+    double pivot_ratio{1.0};
+    bool ill_conditioned{false};
+    bool valid{false};
+  };
+
+  std::size_t panel_count{0};
+  bool coupled{false};
+  std::vector<double> inv_diag;
+  std::vector<Block> blocks;
+  std::size_t valid_blocks{0};
+  std::size_t valid_panel_count{0};
+  std::size_t ill_conditioned_blocks{0};
+
+  void apply_block(const Block &block, const std::vector<double> &in,
+                   std::vector<double> &out) const {
+    const std::size_t n = panel_count;
+    const std::size_t m = block.panels.size();
+    const std::size_t dim = coupled ? 2 * m : m;
+    if (block.valid && block.lu.size() == dim * dim) {
+      std::vector<double> local(dim, 0.0);
+      for (std::size_t r = 0; r < m; ++r) {
+        const std::size_t panel = block.panels[r];
+        local[r] = panel < in.size() ? in[panel] : 0.0;
+        if (coupled && n + panel < in.size())
+          local[m + r] = in[n + panel];
+      }
+      solve_dense_lu(block.lu, block.pivots, dim, local);
+      for (std::size_t r = 0; r < m; ++r) {
+        const std::size_t panel = block.panels[r];
+        if (panel < out.size())
+          out[panel] = local[r];
+        if (coupled && n + panel < out.size())
+          out[n + panel] = local[m + r];
+      }
+    } else {
+      for (const std::size_t panel : block.panels) {
+        if (panel < out.size())
+          out[panel] =
+              in[panel] * (panel < inv_diag.size() ? inv_diag[panel] : 1.0);
+        if (coupled && n + panel < out.size())
+          out[n + panel] =
+              in[n + panel] *
+              (n + panel < inv_diag.size() ? inv_diag[n + panel] : 1.0);
+      }
+    }
+  }
+
+  void apply(const std::vector<double> &in, std::vector<double> &out) const {
+    out.assign(in.size(), 0.0);
+    for (const Block &block : blocks)
+      apply_block(block, in, out);
+  }
+
+  void apply_parallel(const std::vector<double> &in, std::vector<double> &out,
+                      TitanExecutor &executor) const {
+    out.assign(in.size(), 0.0);
+    if (blocks.size() < 4 || executor.capacity() <= 1) {
+      apply(in, out);
+      return;
+    }
+    const std::size_t workers = solver_workers(executor, blocks.size());
+    executor.parallel_for(
+        blocks.size(), workers, 1,
+        [&](std::size_t, std::size_t begin, std::size_t end) {
+          for (std::size_t i = begin; i < end; ++i)
+            apply_block(blocks[i], in, out);
+        });
+  }
+
+  [[nodiscard]] std::size_t estimated_bytes() const noexcept {
+    std::size_t bytes = inv_diag.size() * sizeof(double);
+    for (const Block &block : blocks) {
+      bytes += block.panels.size() * sizeof(std::size_t);
+      bytes += block.lu.size() * sizeof(double);
+      bytes += block.pivots.size() * sizeof(int);
+    }
+    return bytes;
+  }
+};
+
+std::shared_ptr<JcpBlockPreconditioner> build_jcp_block_preconditioner(
+    const std::vector<Panel> &panels, const TreeWorkspace &tree, bool coupled,
+    double eps_ratio, double kappa, double lhs_phi, double lhs_phin,
+    const std::vector<double> &diagonal, const std::string &near_integration,
+    const std::string &quad_buffer, const std::string &block_near_mode,
+    TitanExecutor &executor) {
+  const std::size_t n = panels.size();
+  if (n == 0 || tree.order.size() != n)
+    return {};
+  auto precond = std::make_shared<JcpBlockPreconditioner>();
+  precond->panel_count = n;
+  precond->coupled = coupled;
+  precond->inv_diag.assign(diagonal.size(), 1.0);
+  for (std::size_t i = 0; i < diagonal.size(); ++i) {
+    const double diag = std::abs(diagonal[i]);
+    precond->inv_diag[i] =
+        std::isfinite(diag) && diag > 1.0e-12 ? 1.0 / diag : 1.0;
+  }
+
+  std::vector<std::pair<std::size_t, std::size_t>> ranges;
+  auto append_range = [&](std::size_t begin, std::size_t end) {
+    if (begin < end && end <= tree.order.size())
+      ranges.push_back({begin, end});
+  };
+
+  const bool buffer_aware = block_near_mode == "buffer-aware";
+  auto build_block = [&](std::size_t begin, std::size_t end) {
+    JcpBlockPreconditioner::Block block;
+    const std::size_t count = end - begin;
+    block.panels.reserve(count);
+    for (std::size_t pos = begin; pos < end; ++pos)
+      block.panels.push_back(tree.order[pos]);
+    const std::size_t m = block.panels.size();
+    const std::size_t dim = coupled ? 2 * m : m;
+    block.lu.assign(dim * dim, 0.0);
+    for (std::size_t r = 0; r < m; ++r) {
+      const std::size_t target_index = block.panels[r];
+      block.lu[r * dim + r] += lhs_phi;
+      if (coupled)
+        block.lu[(m + r) * dim + (m + r)] += lhs_phin;
+      for (std::size_t c = 0; c < m; ++c) {
+        const std::size_t source_index = block.panels[c];
+        const bool singular = solver_is_singular_near_pair(
+            panels[target_index], target_index, panels[source_index],
+            source_index);
+        if (!singular && !buffer_aware)
+          continue;
+        if (!singular) {
+          const GeometricNearDecision geometric =
+              classify_geometric_near_buffer_pair(
+                  panels[target_index], panels[source_index], quad_buffer);
+          if (!geometric.active)
+            continue;
+        }
+        double k1 = 0.0;
+        double k2 = 0.0;
+        double k3 = 0.0;
+        double k4 = 0.0;
+        if (buffer_aware) {
+          const JcpNearPairKernel kernel = evaluate_jcp_near_pair_kernel(
+              panels[target_index], target_index, panels[source_index],
+              source_index, eps_ratio, kappa, coupled, near_integration,
+              quad_buffer, nullptr);
+          if (!kernel.valid)
+            continue;
+          k1 = kernel.k1;
+          k2 = kernel.k2;
+          k3 = kernel.k3;
+          k4 = kernel.k4;
+        } else {
+          const JcpKernels kernels = jcp_surface_kernels(
+              panels[target_index], panels[source_index], eps_ratio, kappa);
+          k1 = kernels.k1;
+          k2 = kernels.k2;
+          k3 = kernels.k3;
+          k4 = kernels.k4;
+        }
+        const double area = panels[source_index].area;
+        if (coupled) {
+          block.lu[r * dim + c] -= area * k2;
+          block.lu[r * dim + (m + c)] -= area * k1;
+          block.lu[(m + r) * dim + c] -= area * k4;
+          block.lu[(m + r) * dim + (m + c)] -= area * k3;
+        } else {
+          block.lu[r * dim + c] -= area * k2;
+        }
+      }
+    }
+    constexpr double kMinBlockPivotRatio = 1.0e-10;
+    block.valid = factor_dense_lu(block.lu, block.pivots, dim,
+                                  &block.pivot_ratio);
+    block.ill_conditioned =
+        !std::isfinite(block.pivot_ratio) ||
+        block.pivot_ratio < kMinBlockPivotRatio;
+    if (block.ill_conditioned)
+      block.valid = false;
+    return block;
+  };
+
+  constexpr std::size_t kBlockPanelCap = 32;
+  bool emitted_leaf_block = false;
+  for (const TreeNode &node : tree.nodes) {
+    if (node.child_count != 0 || node.panel_count == 0)
+      continue;
+    emitted_leaf_block = true;
+    const std::size_t leaf_end = node.first_panel + node.panel_count;
+    for (std::size_t begin = node.first_panel; begin < leaf_end;
+         begin += kBlockPanelCap) {
+      append_range(begin, std::min(leaf_end, begin + kBlockPanelCap));
+    }
+  }
+  if (!emitted_leaf_block) {
+    for (std::size_t begin = 0; begin < n; begin += kBlockPanelCap)
+      append_range(begin, std::min(n, begin + kBlockPanelCap));
+  }
+  precond->blocks.resize(ranges.size());
+  const std::size_t workers = solver_workers(executor, ranges.size());
+  executor.parallel_for(
+      ranges.size(), workers, 1,
+      [&](std::size_t, std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i)
+          precond->blocks[i] = build_block(ranges[i].first, ranges[i].second);
+      });
+  for (const auto &block : precond->blocks) {
+    if (block.ill_conditioned)
+      ++precond->ill_conditioned_blocks;
+    if (block.valid) {
+      ++precond->valid_blocks;
+      precond->valid_panel_count += block.panels.size();
+    }
+  }
+  return precond;
+}
+
 std::vector<double> build_jcp_rhs(const std::vector<Atom> &atoms,
                                   const std::vector<Panel> &panels,
                                   double eps_in, bool coupled,
@@ -558,63 +1449,148 @@ void apply_jcp_linear_pb_operator(const std::vector<Panel> &panels,
                                   const std::vector<double> &x,
                                   double eps_ratio, double kappa,
                                   double lhs_phi, double lhs_phin,
+                                  const std::string &near_integration,
+                                  const std::string &quad_buffer,
                                   TitanExecutor &executor,
-                                  std::vector<double> &out) {
+                                  std::vector<double> &out,
+                                  TreecodeStats *stats) {
   const std::size_t n = panels.size();
   out.assign(2 * n, 0.0);
+  std::vector<std::size_t> order(n, 0);
+  std::iota(order.begin(), order.end(), std::size_t{0});
   const std::size_t workers = std::max<std::size_t>(
       1, std::min<std::size_t>(executor.capacity(), n));
+  std::vector<TreecodeStats> local_stats(workers);
+  const auto near_begin = std::chrono::steady_clock::now();
   executor.parallel_for(
       n, workers, 4,
-      [&](std::size_t, std::size_t begin, std::size_t end) {
+      [&](std::size_t worker, std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end; ++i) {
-          const Panel &target = panels[i];
+          TreecodeStats &worker_stats = local_stats[worker];
+          const JcpNearAccum sum = accumulate_jcp_near_ordered(
+              panels[i], i, panels, x, eps_ratio, kappa, true, order, 0, n,
+              near_integration, quad_buffer, &worker_stats);
           double phi_row = lhs_phi * x[i];
           double phin_row = lhs_phin * x[n + i];
-          for (std::size_t j = 0; j < n; ++j) {
-            if (j == i)
-              continue;
-            const Panel &source = panels[j];
-            const JcpKernels kernel =
-                jcp_surface_kernels(target, source, eps_ratio, kappa);
-            const double area = source.area;
-            phi_row -= area * (kernel.k1 * x[n + j] + kernel.k2 * x[j]);
-            phin_row -= area * (kernel.k3 * x[n + j] + kernel.k4 * x[j]);
-          }
+          phi_row -= sum.phi;
+          phin_row -= sum.phin;
           out[i] = phi_row;
           out[n + i] = phin_row;
         }
       });
+  if (stats != nullptr) {
+    stats->near_integration = near_integration;
+    stats->quad_buffer = quad_buffer;
+    const double near_ms =
+        elapsed_ms(near_begin, std::chrono::steady_clock::now());
+    stats->near_integration_ms += near_ms;
+    stats->near_eval_ms += near_ms;
+    std::size_t local_centroid = 0;
+    std::size_t local_duffy = 0;
+    std::size_t local_geometric = 0;
+    for (const TreecodeStats &worker_stats : local_stats) {
+      const std::size_t previous_duffy = stats->near_duffy_pairs;
+      stats->near_kernel_policy = worker_stats.near_kernel_policy;
+      stats->near_self_pairs += worker_stats.near_self_pairs;
+      stats->near_one_ring_pairs += worker_stats.near_one_ring_pairs;
+      stats->near_duffy_pairs += worker_stats.near_duffy_pairs;
+      stats->near_centroid_pairs += worker_stats.near_centroid_pairs;
+      stats->near_fallbacks += worker_stats.near_fallbacks;
+      merge_near_kernel_block_stats(*stats, worker_stats);
+      local_centroid += worker_stats.near_centroid_pairs;
+      local_duffy += worker_stats.near_duffy_pairs;
+      local_geometric += worker_stats.near_geometric_buffer_pairs;
+      stats->duffy_subdivisions_max =
+          std::max(stats->duffy_subdivisions_max,
+                   worker_stats.duffy_subdivisions_max);
+      if (worker_stats.near_duffy_pairs > 0) {
+        const double old_count =
+            static_cast<double>(previous_duffy);
+        const double new_count =
+            static_cast<double>(stats->near_duffy_pairs);
+        stats->duffy_subdivisions_mean =
+            new_count <= 0.0
+                ? 0.0
+                : (stats->duffy_subdivisions_mean * old_count +
+                   worker_stats.duffy_subdivisions_mean *
+                       static_cast<double>(worker_stats.near_duffy_pairs)) /
+                      new_count;
+      }
+    }
+    stats->near_interactions += local_centroid + local_duffy + local_geometric;
+  }
 }
 
 void apply_jcp_poisson_operator(const std::vector<Panel> &panels,
                                 const std::vector<double> &x,
                                 double eps_ratio, double lhs_phi,
+                                const std::string &near_integration,
+                                const std::string &quad_buffer,
                                 TitanExecutor &executor,
-                                std::vector<double> &out) {
+                                std::vector<double> &out,
+                                TreecodeStats *stats) {
   const std::size_t n = panels.size();
   out.assign(n, 0.0);
-  const double k2_scale = eps_ratio - 1.0;
+  std::vector<std::size_t> order(n, 0);
+  std::iota(order.begin(), order.end(), std::size_t{0});
   const std::size_t workers = std::max<std::size_t>(
       1, std::min<std::size_t>(executor.capacity(), n));
+  std::vector<TreecodeStats> local_stats(workers);
+  const auto near_begin = std::chrono::steady_clock::now();
   executor.parallel_for(
       n, workers, 4,
-      [&](std::size_t, std::size_t begin, std::size_t end) {
+      [&](std::size_t worker, std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end; ++i) {
-          const Panel &target = panels[i];
+          TreecodeStats &worker_stats = local_stats[worker];
+          const JcpNearAccum sum = accumulate_jcp_near_ordered(
+              panels[i], i, panels, x, eps_ratio, 0.0, false, order, 0, n,
+              near_integration, quad_buffer, &worker_stats);
           double row = lhs_phi * x[i];
-          for (std::size_t j = 0; j < n; ++j) {
-            if (j == i)
-              continue;
-            const Panel &source = panels[j];
-            const double k2 =
-                k2_scale * source_normal_derivative_green(
-                               target.x, target.y, target.z, source, 0.0);
-            row -= source.area * k2 * x[j];
-          }
+          row -= sum.phi;
           out[i] = row;
         }
       });
+  if (stats != nullptr) {
+    stats->near_integration = near_integration;
+    stats->quad_buffer = quad_buffer;
+    const double near_ms =
+        elapsed_ms(near_begin, std::chrono::steady_clock::now());
+    stats->near_integration_ms += near_ms;
+    stats->near_eval_ms += near_ms;
+    std::size_t local_centroid = 0;
+    std::size_t local_duffy = 0;
+    std::size_t local_geometric = 0;
+    for (const TreecodeStats &worker_stats : local_stats) {
+      const std::size_t previous_duffy = stats->near_duffy_pairs;
+      stats->near_kernel_policy = worker_stats.near_kernel_policy;
+      stats->near_self_pairs += worker_stats.near_self_pairs;
+      stats->near_one_ring_pairs += worker_stats.near_one_ring_pairs;
+      stats->near_duffy_pairs += worker_stats.near_duffy_pairs;
+      stats->near_centroid_pairs += worker_stats.near_centroid_pairs;
+      stats->near_fallbacks += worker_stats.near_fallbacks;
+      merge_near_kernel_block_stats(*stats, worker_stats);
+      local_centroid += worker_stats.near_centroid_pairs;
+      local_duffy += worker_stats.near_duffy_pairs;
+      local_geometric += worker_stats.near_geometric_buffer_pairs;
+      stats->duffy_subdivisions_max =
+          std::max(stats->duffy_subdivisions_max,
+                   worker_stats.duffy_subdivisions_max);
+      if (worker_stats.near_duffy_pairs > 0) {
+        const double old_count =
+            static_cast<double>(previous_duffy);
+        const double new_count =
+            static_cast<double>(stats->near_duffy_pairs);
+        stats->duffy_subdivisions_mean =
+            new_count <= 0.0
+                ? 0.0
+                : (stats->duffy_subdivisions_mean * old_count +
+                   worker_stats.duffy_subdivisions_mean *
+                       static_cast<double>(worker_stats.near_duffy_pairs)) /
+                      new_count;
+      }
+    }
+    stats->near_interactions += local_centroid + local_duffy + local_geometric;
+  }
 }
 
 double jcp_linear_pb_energy_kcal(const std::vector<Atom> &atoms,
@@ -674,17 +1650,121 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   const FormulationConfig formulation = make_formulation_config(options);
   result.formulation = formulation.formulation;
   result.energy_projection = formulation.energy_projection;
+  result.preconditioner_requested =
+      options.preconditioner.empty() ? std::string("auto")
+                                     : options.preconditioner;
+  result.preconditioner_block_near =
+      options.preconditioner_block_near == "buffer-aware"
+          ? std::string("buffer-aware")
+          : std::string("singular");
+  result.preconditioner_effective = "diagonal";
+  result.gmres_restart_requested = std::clamp(options.gmres_restart, 8, 128);
+  result.gmres_restart_effective = result.gmres_restart_requested;
+  result.best_residual = 0.0;
+  result.best_residual_iter = 0;
+  result.final_residual = 0.0;
+  result.best_preconditioned_residual = 0.0;
+  result.final_preconditioned_residual = 0.0;
+  result.true_residual_abs = 0.0;
+  result.true_residual_rel = 0.0;
+  result.true_residual_probe_mode =
+      options.true_residual_probe == "interval"
+          ? std::string("interval")
+          : (options.true_residual_probe == "off" ? std::string("off")
+                                                   : std::string("restart"));
+  result.true_residual_probe_scope =
+      options.true_residual_probe_scope == "sampled"
+          ? std::string("sampled")
+          : (options.true_residual_probe_scope == "adaptive"
+                 ? std::string("adaptive")
+                 : std::string("full"));
+  result.true_residual_probe_interval =
+      std::clamp(options.true_residual_probe_interval, 1, 128);
+  result.true_residual_sample_count =
+      std::clamp(options.true_residual_sample_count, 128, 4096);
+  result.true_residual_probe_calls = 0;
+  result.true_residual_probe_ms = 0.0;
+  result.sampled_true_residual_rel = 0.0;
+  result.sampled_true_residual_rows = 0;
+  result.sampled_probe_calls = 0;
+  result.sampled_probe_ms = 0.0;
+  result.full_true_residual_confirm_calls = 0;
+  result.full_true_residual_confirm_ms = 0.0;
+  result.adaptive_level =
+      options.adaptive_level.empty() ? std::string("strict")
+                                     : options.adaptive_level;
+  result.interaction_mode =
+      options.interaction_mode == "onthefly" ? "onthefly" : "cached";
+  result.node_bounds_mode =
+      options.node_bounds == "tight-aabb" ? std::string("tight-aabb")
+                                          : std::string("moment");
+  result.tree_builder = options.tree_builder == "topdown-aabb"
+                            ? std::string("topdown-aabb")
+                            : std::string("grouped-morton");
+  result.mac_safety =
+      (options.mac_safety == "audit" || options.mac_safety == "physical-gap")
+          ? options.mac_safety
+          : std::string("off");
+  result.mac_gap_factor =
+      std::clamp(std::isfinite(options.mac_gap_factor)
+                     ? options.mac_gap_factor
+                     : 1.5,
+                 0.5, 4.0);
+  result.moment_audit =
+      (options.moment_audit == "sampled" ||
+       options.moment_audit == "full-small")
+          ? options.moment_audit
+          : std::string("off");
+  result.quad_buffer_auto_candidate =
+      (options.quad_buffer == "gauss7" || options.quad_buffer == "adaptive")
+          ? std::string("explicit")
+          : std::string("off");
+  result.derivative_mode =
+      options.derivative_mode.empty() ? std::string("analytic")
+                                      : options.derivative_mode;
+  result.surface_generator = options.surface_geometry == "point-panel"
+                                 ? std::string("titan_surface_point_panel")
+                                 : std::string("titan_sphere_patch");
+  result.discretization =
+      formulation.formulation == "tabi2-nodepatch" ? std::string("node_patch")
+                                                    : std::string("centroid");
   result.rhs_scale = formulation.rhs_scale;
   result.coulomb_factor_kcal_mol = kCoulombKcalPerMol;
   result.total_charge = std::accumulate(
       atoms.begin(), atoms.end(), 0.0,
       [](double sum, const Atom &atom) { return sum + atom.q; });
 
+  LongRunProgressWriter progress(options, executor.capacity());
+  progress.write("surface_start", result, nullptr, 0, 0, 0, 0.0, "running",
+                 true);
   const std::vector<Panel> panels =
       build_surface(atoms, options, &result, &executor);
   result.panel_count = panels.size();
   result.boundary_nodes = panels.size();
+  result.surface_point_count_requested =
+      std::clamp(options.surface_point_count, 8, 4096);
+  result.panel_density_per_a2 =
+      result.surface_area_a2 > 1.0e-12
+          ? static_cast<double>(result.panel_count) / result.surface_area_a2
+          : 0.0;
+  if (result.panel_count == 0) {
+    result.panel_budget_status = "empty";
+  } else if (result.panel_density_per_a2 < 1.5) {
+    result.panel_budget_status = "coarse";
+  } else if (result.panel_density_per_a2 <= 3.0) {
+    result.panel_budget_status = "target_density";
+  } else {
+    result.panel_budget_status = "dense";
+  }
+  progress.write("surface_end", result, nullptr, 0, 0, 0, 0.0, "running",
+                 true);
   result.taylor_order = std::clamp(options.taylor_order, 3, 4);
+  result.near_integration =
+      resolve_near_integration_mode(options.near_integration, panels);
+  result.quad_buffer = resolve_quad_buffer_mode(
+      options.quad_buffer, result.near_integration, panels);
+  if (options.quad_buffer == "auto")
+    result.quad_buffer_auto_candidate = "off";
   result.memory_bytes =
       panels.size() * sizeof(Panel) + panels.size() * sizeof(double) * 8;
 
@@ -694,6 +1774,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.reaction_energy_source = "tabi_boundary_integral";
     result.convergence_reason = "converged";
     result.sum_mode_effective = "direct";
+    progress.write("solve_done", result, nullptr, 0, 0, 0, 0.0, result.status,
+                   true);
     return result;
   }
 
@@ -707,8 +1789,12 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.dielectric_contrast = contrast;
   result.operator_contrast = operator_contrast;
   std::string mode = options.sum_mode;
+  const bool paper_bie_formulation =
+      formulation.formulation == "jcp2013-centroid" ||
+      formulation.formulation == "jcp2013-treecode" ||
+      formulation.formulation == "tabi2-nodepatch";
   if (mode == "auto") {
-    mode = formulation.formulation == "jcp2013"
+    mode = paper_bie_formulation
                ? "direct"
                : (result.surface_geometry == "triangle"
                ? "direct"
@@ -717,16 +1803,27 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.sum_mode_effective = mode;
   result.matvec_mode = mode;
 
-  if (formulation.formulation == "jcp2013") {
-    if (mode == "treecode") {
+  if (paper_bie_formulation) {
+    if (mode == "treecode" && formulation.formulation != "jcp2013-treecode") {
       throw std::runtime_error(
-          "PBE: -pbe=tabi -pbe-tabi-formulation=jcp2013 does not support "
-          "-pbe-tabi-sum=treecode yet; use auto/direct, or pin "
-          "-pbe-tabi-formulation=titan-v1 for the legacy scalar treecode.");
+          "PBE: -pbe=tabi JCP/TABI2 direct formulations do not support "
+          "-pbe-tabi-sum=treecode yet; use auto/direct, pin "
+          "-pbe-tabi-formulation=jcp2013-treecode for the experimental "
+          "paper-treecode validation path, or pin titan-v1 for the legacy "
+          "scalar treecode.");
     }
-    result.matvec_mode = "direct";
-    result.sum_mode_effective = "direct";
-    result.taylor_order = 0;
+    const bool experimental_treecode =
+        formulation.formulation == "jcp2013-treecode" && mode == "treecode";
+    result.matvec_mode = experimental_treecode ? "jcp2013_treecode" : "direct";
+    result.sum_mode_effective = experimental_treecode ? "treecode" : "direct";
+    result.taylor_order =
+        experimental_treecode ? std::clamp(options.taylor_order, 3, 4) : 0;
+    if (result.preconditioner_requested == "none")
+      result.preconditioner_effective = "none";
+    else if (result.preconditioner_requested == "block")
+      result.preconditioner_effective = "diagonal_block_pending";
+    else
+      result.preconditioner_effective = "diagonal";
     const double eps_ratio =
         std::max(1.0e-12, options.eps_out) /
         std::max(1.0e-12, options.eps_in);
@@ -740,7 +1837,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.lhs_diag_phin = coupled ? lhs_phin : 0.0;
     result.energy_equation = coupled ? "jcp2013_eq14" : "jcp2013_eq22";
     result.kernel_convention =
-        "G0_Gk_source_normal_target_normal_outward_centroid_collocation";
+        "G0_Gk_source_normal_target_normal_outward_" +
+        result.near_integration + "_near";
 
     const auto rhs_begin = std::chrono::steady_clock::now();
     double s1_norm = 0.0;
@@ -756,32 +1854,344 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         std::min(std::max(1, options.max_iter),
                  std::max(64, static_cast<int>(panels.size()) * size_factor));
     const double tol = std::max(1.0e-12, options.residual_tol);
-    std::vector<double> diagonal(result.unknown_count, lhs_phi);
-    if (coupled) {
-      for (std::size_t i = panels.size(); i < diagonal.size(); ++i)
-        diagonal[i] = lhs_phin;
+    std::vector<double> diagonal(result.unknown_count, 1.0);
+    if (result.preconditioner_effective != "none") {
+      std::fill(diagonal.begin(), diagonal.end(), lhs_phi);
+      if (coupled) {
+        for (std::size_t i = panels.size(); i < diagonal.size(); ++i)
+          diagonal[i] = lhs_phin;
+      }
     }
 
     double matvec_ms_total = 0.0;
     std::size_t matvec_calls = 0;
+    TreeWorkspace jcp_tree;
+    TreecodeStats jcp_tree_stats;
+    jcp_tree_stats.near_integration = result.near_integration;
+    jcp_tree_stats.quad_buffer = result.quad_buffer;
+    jcp_tree_stats.interaction_mode = result.interaction_mode;
+    const bool needs_jcp_tree =
+        experimental_treecode || result.preconditioner_requested == "block";
+    if (needs_jcp_tree) {
+      progress.write("tree_build_start", result, &jcp_tree_stats,
+                     matvec_calls, 0, 0, 0.0, "running", true);
+      const std::string jcp_tree_interaction_mode =
+          experimental_treecode ? options.interaction_mode
+                                : std::string("onthefly");
+      jcp_tree = build_tree_workspace(
+          panels, executor, static_cast<std::size_t>(
+                                std::max(8, options.tree_leaf_size)),
+          options.tree_opening_theta, options.leaf_near_policy,
+          options.leaf_panel_kernel, options.adaptive_level,
+          result.quad_buffer, jcp_tree_interaction_mode,
+          result.node_bounds_mode, result.tree_builder, options.mac_safety,
+          options.mac_gap_factor, options.moment_audit);
+      jcp_tree.taylor_order = result.taylor_order;
+      jcp_tree.derivative_mode = result.derivative_mode;
+      result.interaction_mode = jcp_tree.interaction_mode;
+      result.node_bounds_mode = jcp_tree.node_bounds_mode;
+      result.tree_builder = jcp_tree.tree_builder;
+      result.mac_safety = jcp_tree.mac_safety;
+      result.mac_gap_factor = jcp_tree.mac_gap_factor;
+      result.moment_audit = jcp_tree.moment_audit;
+      jcp_tree_stats.interaction_mode = jcp_tree.interaction_mode;
+      jcp_tree_stats.node_bounds_mode = jcp_tree.node_bounds_mode;
+      jcp_tree_stats.tree_builder = jcp_tree.tree_builder;
+      jcp_tree_stats.mac_safety = jcp_tree.mac_safety;
+      jcp_tree_stats.mac_gap_factor = jcp_tree.mac_gap_factor;
+      jcp_tree_stats.moment_audit = jcp_tree.moment_audit;
+      jcp_tree_stats.tree_depth_max = jcp_tree.depth_max;
+      result.tree_build_ms = jcp_tree.build_ms;
+      result.tree_nodes = jcp_tree.nodes.size();
+      result.tree_leaf_count = jcp_tree.leaf_count;
+      result.tree_depth_max = jcp_tree.depth_max;
+      result.memory_bytes += jcp_tree.nodes.size() * sizeof(TreeNode) +
+                             jcp_tree.child_indices.size() *
+                                 sizeof(std::size_t) +
+                             jcp_tree.order.size() * sizeof(std::size_t) +
+                             jcp_tree.morton.size() * sizeof(std::uint64_t) +
+                             panels.size() * 14u * sizeof(double) +
+                             panels.size() * sizeof(std::size_t);
+      jcp_tree_stats.tree_build_ms = result.tree_build_ms;
+      jcp_tree_stats.tree_nodes = result.tree_nodes;
+      jcp_tree_stats.tree_leaf_count = result.tree_leaf_count;
+      progress.write("tree_build_end", result, &jcp_tree_stats, matvec_calls,
+                     0, 0, 0.0, "running", true);
+    }
     auto matvec = [&](const std::vector<double> &x, std::vector<double> &out) {
       const auto begin = std::chrono::steady_clock::now();
-      if (coupled) {
+      if (experimental_treecode) {
+        apply_jcp_treecode_operator(panels, x, eps_ratio, kappa, lhs_phi,
+                                    lhs_phin, coupled, jcp_tree,
+                                    result.near_integration,
+                                    result.quad_buffer, executor, out,
+                                    &jcp_tree_stats);
+      } else if (coupled) {
         apply_jcp_linear_pb_operator(panels, x, eps_ratio, kappa, lhs_phi,
-                                     lhs_phin, executor, out);
+                                     lhs_phin, result.near_integration,
+                                     result.quad_buffer, executor, out,
+                                     &jcp_tree_stats);
       } else {
-        apply_jcp_poisson_operator(panels, x, eps_ratio, lhs_phi, executor,
-                                   out);
+        apply_jcp_poisson_operator(panels, x, eps_ratio, lhs_phi,
+                                   result.near_integration,
+                                   result.quad_buffer, executor, out,
+                                   &jcp_tree_stats);
       }
       matvec_ms_total += elapsed_ms(begin, std::chrono::steady_clock::now());
       ++matvec_calls;
     };
+    std::vector<std::size_t> direct_order(panels.size(), 0);
+    std::iota(direct_order.begin(), direct_order.end(), std::size_t{0});
+    auto build_audit_rows = [](std::size_t row_count, std::string mode,
+                               int requested) {
+      std::vector<std::size_t> rows;
+      if (row_count == 0)
+        return rows;
+      const bool full = mode == "full-small" && row_count <= 4096u;
+      const std::size_t m =
+          full ? row_count
+               : std::min<std::size_t>(
+                     row_count,
+                     static_cast<std::size_t>(
+                         std::clamp(requested, 128, 4096)));
+      rows.reserve(m);
+      if (full) {
+        for (std::size_t row = 0; row < row_count; ++row)
+          rows.push_back(row);
+        return rows;
+      }
+      std::size_t previous = std::numeric_limits<std::size_t>::max();
+      for (std::size_t k = 0; k < m; ++k) {
+        std::size_t row =
+            ((2u * k + 1u) * row_count) / std::max<std::size_t>(1, 2u * m);
+        row = std::min(row, row_count - 1u);
+        if (row != previous) {
+          rows.push_back(row);
+          previous = row;
+        }
+      }
+      if (rows.empty())
+        rows.push_back(0);
+      return rows;
+    };
+    SampledTrueResidualCallback sampled_true_residual;
+    if (!experimental_treecode) {
+      sampled_true_residual =
+          [&](const std::vector<double> &x,
+              const std::vector<std::size_t> &rows) -> SampledResidualResult {
+        SampledResidualResult sample;
+        sample.rows = rows.size();
+        if (rows.empty())
+          return sample;
+        const std::size_t unknown_count = rhs.size();
+        const std::size_t panel_count = panels.size();
+        const std::size_t workers = solver_workers(executor, rows.size());
+        std::vector<double> partial_residual_sq(workers, 0.0);
+        std::vector<double> partial_b_sq(workers, 0.0);
+        std::atomic_bool finite{true};
+        executor.parallel_for(
+            rows.size(), workers, 1,
+            [&](std::size_t worker, std::size_t begin, std::size_t end) {
+              double local_residual_sq = 0.0;
+              double local_b_sq = 0.0;
+              for (std::size_t pos = begin; pos < end; ++pos) {
+                const std::size_t row = rows[pos];
+                if (row >= unknown_count)
+                  continue;
+                const std::size_t target =
+                    coupled && row >= panel_count ? row - panel_count : row;
+                if (target >= panel_count)
+                  continue;
+                const JcpNearAccum sum = accumulate_jcp_near_ordered(
+                    panels[target], target, panels, x, eps_ratio, kappa,
+                    coupled, direct_order, 0, panel_count,
+                    result.near_integration, result.quad_buffer, nullptr);
+                double ax_row = 0.0;
+                if (coupled) {
+                  if (row < panel_count) {
+                    ax_row = lhs_phi * x[target] - sum.phi;
+                  } else {
+                    ax_row = lhs_phin * x[panel_count + target] - sum.phin;
+                  }
+                } else {
+                  ax_row = lhs_phi * x[target] - sum.phi;
+                }
+                if (!std::isfinite(ax_row)) {
+                  finite.store(false, std::memory_order_relaxed);
+                  continue;
+                }
+                const double residual_value = rhs[row] - ax_row;
+                local_residual_sq += residual_value * residual_value;
+                local_b_sq += rhs[row] * rhs[row];
+              }
+              partial_residual_sq[worker] = local_residual_sq;
+              partial_b_sq[worker] = local_b_sq;
+            });
+        const double residual_sq = std::accumulate(
+            partial_residual_sq.begin(), partial_residual_sq.end(), 0.0);
+        const double b_sq =
+            std::accumulate(partial_b_sq.begin(), partial_b_sq.end(), 0.0);
+        sample.abs = std::sqrt(std::max(0.0, residual_sq));
+        const double denom = std::max(1.0e-300,
+                                      std::sqrt(std::max(0.0, b_sq)));
+        sample.rel = sample.abs / denom;
+        sample.finite = finite.load(std::memory_order_relaxed) &&
+                        std::isfinite(sample.rel);
+        return sample;
+      };
+    }
+
+    std::function<void(const std::vector<double> &, std::vector<double> &)>
+        custom_preconditioner;
+    std::shared_ptr<JcpBlockPreconditioner> block_preconditioner;
+    double preconditioner_setup_ms = 0.0;
+    constexpr std::size_t kBlockPanelPrebuildCap = 12000;
+    if (result.preconditioner_requested == "block" &&
+        !jcp_tree.nodes.empty() &&
+        panels.size() <= kBlockPanelPrebuildCap) {
+      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls,
+                     0, 0, 0.0, "running", true);
+      const auto precond_begin = std::chrono::steady_clock::now();
+      block_preconditioner = build_jcp_block_preconditioner(
+          panels, jcp_tree, coupled, eps_ratio, kappa, lhs_phi, lhs_phin,
+          diagonal, result.near_integration, result.quad_buffer,
+          result.preconditioner_block_near, executor);
+      preconditioner_setup_ms =
+          elapsed_ms(precond_begin, std::chrono::steady_clock::now());
+      constexpr std::size_t kBlockMemorySoftCapBytes =
+          static_cast<std::size_t>(384) * 1024u * 1024u;
+      constexpr std::size_t kBlockWorkingSetSoftCapBytes =
+          static_cast<std::size_t>(1024) * 1024u * 1024u;
+      const std::size_t block_estimated_bytes =
+          block_preconditioner != nullptr
+              ? block_preconditioner->estimated_bytes()
+              : 0;
+      const bool block_memory_cap =
+          block_estimated_bytes > kBlockMemorySoftCapBytes ||
+          current_working_set_bytes() > kBlockWorkingSetSoftCapBytes;
+      const bool block_ill_conditioned =
+          block_preconditioner != nullptr &&
+          block_preconditioner->ill_conditioned_blocks > 0;
+      const std::size_t block_panel_threshold =
+          static_cast<std::size_t>(std::ceil(0.70 * static_cast<double>(
+                                               std::max<std::size_t>(
+                                                   1, panels.size()))));
+      if (block_preconditioner != nullptr &&
+          block_preconditioner->valid_blocks > 0 &&
+          block_preconditioner->valid_panel_count >= block_panel_threshold &&
+          !block_memory_cap && !block_ill_conditioned) {
+        result.preconditioner_effective =
+            result.preconditioner_block_near == "buffer-aware"
+                ? "block_buffer_aware"
+                : "block";
+        result.memory_bytes += block_estimated_bytes;
+        custom_preconditioner =
+            [block_preconditioner, &executor](const std::vector<double> &in,
+                                              std::vector<double> &out) {
+              block_preconditioner->apply_parallel(in, out, executor);
+            };
+      } else if (block_memory_cap) {
+        block_preconditioner.reset();
+        result.preconditioner_effective = "diagonal_block_memory_cap";
+      } else if (block_ill_conditioned) {
+        block_preconditioner.reset();
+        result.preconditioner_effective = "diagonal_block_ill_conditioned";
+      } else {
+        result.preconditioner_effective = "diagonal_block_fallback";
+      }
+      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0,
+                     0, 0.0, "running", true);
+    } else if (result.preconditioner_requested == "block") {
+      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls,
+                     0, 0, 0.0, "running", true);
+      result.preconditioner_effective =
+          panels.size() > kBlockPanelPrebuildCap
+              ? "diagonal_block_memory_cap"
+              : "diagonal_block_fallback";
+      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0,
+                     0, 0.0, "running", true);
+    }
 
     const auto gmres_begin = std::chrono::steady_clock::now();
-    LinearSolveResult linear = gmres_solve(matvec, rhs, diagonal, max_iter, tol);
+    progress.write("gmres_start", result, &jcp_tree_stats, matvec_calls, 0, 0,
+                   0.0, "running", true);
+    auto gmres_progress = [&](int gmres_iter, int restart_iter,
+                              double true_residual_rel,
+                              double preconditioned_residual_rel, bool force,
+                              const std::string &phase,
+                              const LinearSolveResult &state) {
+      result.true_residual_probe_scope = state.true_residual_probe_scope;
+      result.true_residual_sample_count = state.true_residual_sample_count;
+      result.true_residual_probe_calls = state.true_residual_probe_calls;
+      result.true_residual_probe_ms = state.true_residual_probe_ms;
+      result.sampled_true_residual_rel = state.sampled_true_residual_rel;
+      result.sampled_true_residual_rows = state.sampled_true_residual_rows;
+      result.sampled_probe_calls = state.sampled_probe_calls;
+      result.sampled_probe_ms = state.sampled_probe_ms;
+      result.full_true_residual_confirm_calls =
+          state.full_true_residual_confirm_calls;
+      result.full_true_residual_confirm_ms =
+          state.full_true_residual_confirm_ms;
+      if (phase != "gmres_sampled_true_probe" &&
+          std::isfinite(true_residual_rel)) {
+        result.final_residual = true_residual_rel;
+        result.true_residual_rel = true_residual_rel;
+        if (result.best_residual <= 0.0 ||
+            true_residual_rel < result.best_residual) {
+          result.best_residual = true_residual_rel;
+          result.best_residual_iter = gmres_iter;
+        }
+      }
+      if (std::isfinite(preconditioned_residual_rel)) {
+        result.final_preconditioned_residual =
+            preconditioned_residual_rel;
+        if (result.best_preconditioned_residual <= 0.0 ||
+            preconditioned_residual_rel <
+                result.best_preconditioned_residual) {
+          result.best_preconditioned_residual =
+              preconditioned_residual_rel;
+        }
+      }
+      progress.write(phase, result, &jcp_tree_stats, matvec_calls, gmres_iter,
+                     restart_iter, true_residual_rel, "running", force);
+    };
+    LinearSolveResult linear =
+        gmres_solve(matvec, rhs, diagonal, max_iter, tol,
+                    options.gmres_restart, executor,
+                    custom_preconditioner, gmres_progress,
+                    result.true_residual_probe_mode,
+                    result.true_residual_probe_interval,
+                    result.true_residual_probe_scope,
+                    result.true_residual_sample_count,
+                    sampled_true_residual);
     result.gmres_ms = elapsed_ms(gmres_begin, std::chrono::steady_clock::now());
     result.iterations = linear.iterations;
     result.residual = linear.residual;
+    result.gmres_restart_requested = linear.restart_requested;
+    result.gmres_restart_effective = linear.restart_effective;
+    result.best_residual = linear.best_residual;
+    result.best_residual_iter = linear.best_residual_iter;
+    result.final_residual = linear.final_residual;
+    result.best_preconditioned_residual =
+        linear.best_preconditioned_residual;
+    result.final_preconditioned_residual =
+        linear.final_preconditioned_residual;
+    result.true_residual_abs = linear.true_residual_abs;
+    result.true_residual_rel = linear.true_residual_rel;
+    result.true_residual_probe_mode = linear.true_residual_probe_mode;
+    result.true_residual_probe_scope = linear.true_residual_probe_scope;
+    result.true_residual_probe_interval = linear.true_residual_probe_interval;
+    result.true_residual_sample_count = linear.true_residual_sample_count;
+    result.true_residual_probe_calls = linear.true_residual_probe_calls;
+    result.true_residual_probe_ms = linear.true_residual_probe_ms;
+    result.sampled_true_residual_rel = linear.sampled_true_residual_rel;
+    result.sampled_true_residual_rows = linear.sampled_true_residual_rows;
+    result.sampled_probe_calls = linear.sampled_probe_calls;
+    result.sampled_probe_ms = linear.sampled_probe_ms;
+    result.full_true_residual_confirm_calls =
+        linear.full_true_residual_confirm_calls;
+    result.full_true_residual_confirm_ms =
+        linear.full_true_residual_confirm_ms;
     result.converged = linear.converged;
     result.convergence_reason = linear.convergence_reason;
     result.residual_history = residual_history_string(linear.residual_history);
@@ -790,8 +2200,297 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.matvec_ms_avg =
         matvec_calls > 0 ? matvec_ms_total / static_cast<double>(matvec_calls)
                          : 0.0;
+    if (experimental_treecode && options.matvec_audit != "off") {
+      const auto audit_begin = std::chrono::steady_clock::now();
+      const std::vector<double> &audit_x =
+          !linear.best_x.empty() ? linear.best_x : linear.x;
+      const std::vector<std::size_t> audit_rows = build_audit_rows(
+          audit_x.size(), options.matvec_audit,
+          options.matvec_audit_sample_count);
+      if (!audit_x.empty() && !audit_rows.empty()) {
+        std::vector<double> tree_ax;
+        apply_jcp_treecode_operator(panels, audit_x, eps_ratio, kappa, lhs_phi,
+                                    lhs_phin, coupled, jcp_tree,
+                                    result.near_integration,
+                                    result.quad_buffer, executor, tree_ax,
+                                    nullptr);
+        const bool full =
+            options.matvec_audit == "full-small" &&
+            audit_rows.size() == audit_x.size();
+        double diff_sq = 0.0;
+        double direct_sq = 0.0;
+        if (full) {
+          std::vector<double> direct_ax;
+          if (coupled) {
+            apply_jcp_linear_pb_operator(
+                panels, audit_x, eps_ratio, kappa, lhs_phi, lhs_phin,
+                result.near_integration, result.quad_buffer, executor,
+                direct_ax, nullptr);
+          } else {
+            apply_jcp_poisson_operator(
+                panels, audit_x, eps_ratio, lhs_phi, result.near_integration,
+                result.quad_buffer, executor, direct_ax, nullptr);
+          }
+          for (std::size_t row : audit_rows) {
+            if (row >= direct_ax.size() || row >= tree_ax.size())
+              continue;
+            const double delta = tree_ax[row] - direct_ax[row];
+            diff_sq += delta * delta;
+            direct_sq += direct_ax[row] * direct_ax[row];
+          }
+        } else {
+          const std::size_t unknown_count = audit_x.size();
+          const std::size_t panel_count = panels.size();
+          const std::size_t workers = solver_workers(executor, audit_rows.size());
+          std::vector<double> partial_diff_sq(workers, 0.0);
+          std::vector<double> partial_direct_sq(workers, 0.0);
+          executor.parallel_for(
+              audit_rows.size(), workers, 1,
+              [&](std::size_t worker, std::size_t begin, std::size_t end) {
+                double local_diff_sq = 0.0;
+                double local_direct_sq = 0.0;
+                for (std::size_t pos = begin; pos < end; ++pos) {
+                  const std::size_t row = audit_rows[pos];
+                  if (row >= unknown_count || row >= tree_ax.size())
+                    continue;
+                  const std::size_t target =
+                      coupled && row >= panel_count ? row - panel_count : row;
+                  if (target >= panel_count)
+                    continue;
+                  const JcpNearAccum sum = accumulate_jcp_near_ordered(
+                      panels[target], target, panels, audit_x, eps_ratio, kappa,
+                      coupled, direct_order, 0, panel_count,
+                      result.near_integration, result.quad_buffer, nullptr);
+                  double direct_row = 0.0;
+                  if (coupled) {
+                    direct_row = row < panel_count
+                                     ? lhs_phi * audit_x[target] - sum.phi
+                                     : lhs_phin * audit_x[panel_count + target] -
+                                           sum.phin;
+                  } else {
+                    direct_row = lhs_phi * audit_x[target] - sum.phi;
+                  }
+                  const double delta = tree_ax[row] - direct_row;
+                  local_diff_sq += delta * delta;
+                  local_direct_sq += direct_row * direct_row;
+                }
+                partial_diff_sq[worker] = local_diff_sq;
+                partial_direct_sq[worker] = local_direct_sq;
+              });
+          diff_sq = std::accumulate(partial_diff_sq.begin(),
+                                    partial_diff_sq.end(), 0.0);
+          direct_sq = std::accumulate(partial_direct_sq.begin(),
+                                      partial_direct_sq.end(), 0.0);
+        }
+        result.tree_vs_direct_matvec_rel =
+            std::sqrt(std::max(0.0, diff_sq)) /
+            std::max(1.0e-300, std::sqrt(std::max(0.0, direct_sq)));
+        result.matvec_audit_rows = audit_rows.size();
+      }
+      result.matvec_audit_ms =
+          elapsed_ms(audit_begin, std::chrono::steady_clock::now());
+    }
+    if (experimental_treecode) {
+      result.matvec_mode = jcp_tree_stats.matvec_mode;
+      result.taylor_order = jcp_tree_stats.taylor_order;
+      result.derivative_mode = jcp_tree_stats.derivative_mode;
+      result.interaction_build_ms = jcp_tree_stats.interaction_build_ms;
+      result.tree_eval_ms = jcp_tree_stats.tree_eval_ms;
+      result.tree_moment_ms = jcp_tree_stats.tree_moment_ms;
+      result.tree_traversal_ms = jcp_tree_stats.tree_traversal_ms;
+      result.near_eval_ms = jcp_tree_stats.near_eval_ms;
+      result.far_eval_ms = jcp_tree_stats.far_eval_ms;
+      result.singular_near_eval_ms = jcp_tree_stats.singular_near_eval_ms;
+      result.leaf_near_eval_ms = jcp_tree_stats.leaf_near_eval_ms;
+      result.leaf_panel_eval_ms = jcp_tree_stats.leaf_panel_eval_ms;
+      result.leaf_tile_eval_ms = jcp_tree_stats.leaf_tile_eval_ms;
+      result.leaf_residual_eval_ms = jcp_tree_stats.leaf_residual_eval_ms;
+      result.smooth_leaf_node_eval_ms =
+          jcp_tree_stats.smooth_leaf_node_eval_ms;
+      result.near_interactions = jcp_tree_stats.near_interactions;
+      result.far_interactions = jcp_tree_stats.far_interactions;
+      result.singular_near_interactions =
+          jcp_tree_stats.singular_near_interactions;
+      result.leaf_near_interactions = jcp_tree_stats.leaf_near_interactions;
+      result.far_node_interactions = jcp_tree_stats.far_node_interactions;
+      result.leaf_panel_interactions =
+          jcp_tree_stats.leaf_panel_interactions;
+      result.leaf_tile_interactions =
+          jcp_tree_stats.leaf_tile_interactions;
+      result.leaf_tile_panel_interactions =
+          jcp_tree_stats.leaf_tile_panel_interactions;
+      result.leaf_residual_panel_interactions =
+          jcp_tree_stats.leaf_residual_panel_interactions;
+      result.smooth_leaf_node_interactions =
+          jcp_tree_stats.smooth_leaf_node_interactions;
+      result.leaf_pruned_interactions =
+          jcp_tree_stats.leaf_pruned_interactions;
+      result.adaptive_smooth_leaf_accepted =
+          jcp_tree_stats.adaptive_smooth_leaf_accepted;
+      result.adaptive_smooth_leaf_rejected =
+          jcp_tree_stats.adaptive_smooth_leaf_rejected;
+      result.adaptive_span_tile_accepted =
+          jcp_tree_stats.adaptive_span_tile_accepted;
+      result.adaptive_span_tile_rejected =
+          jcp_tree_stats.adaptive_span_tile_rejected;
+      result.adaptive_exact_leaf_fallbacks =
+          jcp_tree_stats.adaptive_exact_leaf_fallbacks;
+      result.adaptive_reject_one_ring_overlap =
+          jcp_tree_stats.adaptive_reject_one_ring_overlap;
+      result.adaptive_reject_error_bound_failed =
+          jcp_tree_stats.adaptive_reject_error_bound_failed;
+      result.adaptive_reject_p4_check_failed =
+          jcp_tree_stats.adaptive_reject_p4_check_failed;
+      result.adaptive_reject_too_close =
+          jcp_tree_stats.adaptive_reject_too_close;
+      result.leaf_work_reduction_ratio =
+          jcp_tree_stats.leaf_work_reduction_ratio;
+      result.target_cluster_interactions =
+          jcp_tree_stats.target_cluster_interactions;
+      result.target_cluster_targets = jcp_tree_stats.target_cluster_targets;
+      result.target_cluster_panels_pruned =
+          jcp_tree_stats.target_cluster_panels_pruned;
+      result.target_cluster_rejected =
+          jcp_tree_stats.target_cluster_rejected;
+      result.target_cluster_eval_ms = jcp_tree_stats.target_cluster_eval_ms;
+      result.adaptive_level = jcp_tree_stats.adaptive_level;
+      result.leaf_near_policy = jcp_tree_stats.leaf_near_policy;
+      result.leaf_panel_kernel = jcp_tree_stats.leaf_panel_kernel;
+      result.interaction_mode = jcp_tree_stats.interaction_mode;
+      result.node_bounds_mode = jcp_tree_stats.node_bounds_mode;
+      result.tree_builder = jcp_tree_stats.tree_builder;
+      result.mac_safety = jcp_tree_stats.mac_safety;
+      result.mac_gap_factor = jcp_tree_stats.mac_gap_factor;
+      result.tree_depth_max = jcp_tree_stats.tree_depth_max;
+      result.mac_reject_radius_limited =
+          jcp_tree_stats.mac_reject_radius_limited;
+      result.mac_accept_rate = jcp_tree_stats.mac_accept_rate;
+      result.node_radius_max = jcp_tree_stats.node_radius_max;
+      result.node_radius_mean = jcp_tree_stats.node_radius_mean;
+      result.leaf_panel_work_per_matvec =
+          jcp_tree_stats.leaf_panel_work_per_matvec;
+      result.far_node_work_per_matvec =
+          jcp_tree_stats.far_node_work_per_matvec;
+      result.far_geometric_unsafe_count =
+          jcp_tree_stats.far_geometric_unsafe_count;
+      result.far_geometric_unsafe_panels =
+          jcp_tree_stats.far_geometric_unsafe_panels;
+      result.far_geometric_min_gap = jcp_tree_stats.far_geometric_min_gap;
+      result.far_geometric_gap_ratio_min =
+          jcp_tree_stats.far_geometric_gap_ratio_min;
+      result.far_geometric_gap_ratio_mean =
+          jcp_tree_stats.far_geometric_gap_ratio_mean;
+      result.far_geometric_audit_samples =
+          jcp_tree_stats.far_geometric_audit_samples;
+      result.mac_physical_gap_rejects =
+          jcp_tree_stats.mac_physical_gap_rejects;
+      result.moment_audit = jcp_tree_stats.moment_audit;
+      result.moment_audit_nodes = jcp_tree_stats.moment_audit_nodes;
+      result.moment_translation_rel_error_max =
+          jcp_tree_stats.moment_translation_rel_error_max;
+      result.moment_translation_rel_error_mean =
+          jcp_tree_stats.moment_translation_rel_error_mean;
+      result.leaf_tile_status = jcp_tree_stats.leaf_tile_status;
+      result.leaf_panel_pairs_per_second =
+          jcp_tree_stats.leaf_panel_pairs_per_second;
+    } else {
+      result.near_eval_ms = jcp_tree_stats.near_eval_ms;
+      result.near_interactions = jcp_tree_stats.near_interactions;
+      result.leaf_near_policy = jcp_tree_stats.leaf_near_policy;
+      result.leaf_panel_kernel = jcp_tree_stats.leaf_panel_kernel;
+      result.interaction_mode = jcp_tree_stats.interaction_mode;
+      result.node_bounds_mode = jcp_tree_stats.node_bounds_mode;
+      result.tree_builder = jcp_tree_stats.tree_builder;
+      result.mac_safety = jcp_tree_stats.mac_safety;
+      result.mac_gap_factor = jcp_tree_stats.mac_gap_factor;
+      result.tree_depth_max = jcp_tree_stats.tree_depth_max;
+      result.mac_reject_radius_limited =
+          jcp_tree_stats.mac_reject_radius_limited;
+      result.mac_accept_rate = jcp_tree_stats.mac_accept_rate;
+      result.node_radius_max = jcp_tree_stats.node_radius_max;
+      result.node_radius_mean = jcp_tree_stats.node_radius_mean;
+      result.leaf_panel_work_per_matvec =
+          jcp_tree_stats.leaf_panel_work_per_matvec;
+      result.far_node_work_per_matvec =
+          jcp_tree_stats.far_node_work_per_matvec;
+      result.far_geometric_unsafe_count =
+          jcp_tree_stats.far_geometric_unsafe_count;
+      result.far_geometric_unsafe_panels =
+          jcp_tree_stats.far_geometric_unsafe_panels;
+      result.far_geometric_min_gap = jcp_tree_stats.far_geometric_min_gap;
+      result.far_geometric_gap_ratio_min =
+          jcp_tree_stats.far_geometric_gap_ratio_min;
+      result.far_geometric_gap_ratio_mean =
+          jcp_tree_stats.far_geometric_gap_ratio_mean;
+      result.far_geometric_audit_samples =
+          jcp_tree_stats.far_geometric_audit_samples;
+      result.mac_physical_gap_rejects =
+          jcp_tree_stats.mac_physical_gap_rejects;
+      result.moment_audit = jcp_tree_stats.moment_audit;
+      result.moment_audit_nodes = jcp_tree_stats.moment_audit_nodes;
+      result.moment_translation_rel_error_max =
+          jcp_tree_stats.moment_translation_rel_error_max;
+      result.moment_translation_rel_error_mean =
+          jcp_tree_stats.moment_translation_rel_error_mean;
+    }
+    result.near_integration = jcp_tree_stats.near_integration;
+    result.quad_buffer = jcp_tree_stats.quad_buffer;
+    result.near_kernel_policy = jcp_tree_stats.near_kernel_policy;
+    result.near_self_pairs = jcp_tree_stats.near_self_pairs;
+    result.near_one_ring_pairs = jcp_tree_stats.near_one_ring_pairs;
+    result.near_duffy_pairs = jcp_tree_stats.near_duffy_pairs;
+    result.near_centroid_pairs = jcp_tree_stats.near_centroid_pairs;
+    result.near_fallbacks = jcp_tree_stats.near_fallbacks;
+    result.near_geometric_buffer_pairs =
+        jcp_tree_stats.near_geometric_buffer_pairs;
+    result.near_geometric_buffer_gauss_pairs =
+        jcp_tree_stats.near_geometric_buffer_gauss_pairs;
+    result.near_geometric_buffer_adaptive_pairs =
+        jcp_tree_stats.near_geometric_buffer_adaptive_pairs;
+    result.near_geometric_buffer_centroid_pairs =
+        jcp_tree_stats.near_geometric_buffer_centroid_pairs;
+    result.near_geometric_buffer_min_gap =
+        jcp_tree_stats.near_geometric_buffer_min_gap;
+    result.near_geometric_buffer_mean_gap_ratio =
+        jcp_tree_stats.near_geometric_buffer_mean_gap_ratio;
+    result.near_geometric_buffer_max_edge_mean =
+        jcp_tree_stats.near_geometric_buffer_max_edge_mean;
+    result.near_integration_ms = jcp_tree_stats.near_integration_ms;
+    result.duffy_subdivisions_max = jcp_tree_stats.duffy_subdivisions_max;
+    result.duffy_subdivisions_mean = jcp_tree_stats.duffy_subdivisions_mean;
+    result.near_k1_accepted = jcp_tree_stats.near_k1_accepted;
+    result.near_k1_rejected = jcp_tree_stats.near_k1_rejected;
+    result.near_k2_accepted = jcp_tree_stats.near_k2_accepted;
+    result.near_k2_rejected = jcp_tree_stats.near_k2_rejected;
+    result.near_k3_accepted = jcp_tree_stats.near_k3_accepted;
+    result.near_k3_rejected = jcp_tree_stats.near_k3_rejected;
+    result.near_k4_accepted = jcp_tree_stats.near_k4_accepted;
+    result.near_k4_rejected = jcp_tree_stats.near_k4_rejected;
+    result.near_one_ring_k1_accepted =
+        jcp_tree_stats.near_one_ring_k1_accepted;
+    result.near_one_ring_k1_rejected =
+        jcp_tree_stats.near_one_ring_k1_rejected;
+    result.near_one_ring_k2_accepted =
+        jcp_tree_stats.near_one_ring_k2_accepted;
+    result.near_one_ring_k2_rejected =
+        jcp_tree_stats.near_one_ring_k2_rejected;
+    result.near_one_ring_k3_accepted =
+        jcp_tree_stats.near_one_ring_k3_accepted;
+    result.near_one_ring_k3_rejected =
+        jcp_tree_stats.near_one_ring_k3_rejected;
+    result.near_one_ring_k4_accepted =
+        jcp_tree_stats.near_one_ring_k4_accepted;
+    result.near_one_ring_k4_rejected =
+        jcp_tree_stats.near_one_ring_k4_rejected;
+    result.near_k1_policy = jcp_tree_stats.near_k1_policy;
+    result.near_k2_policy = jcp_tree_stats.near_k2_policy;
+    result.near_k3_policy = jcp_tree_stats.near_k3_policy;
+    result.near_k4_policy = jcp_tree_stats.near_k4_policy;
+    result.near_block_audit = jcp_tree_stats.near_block_audit;
+    result.geometric_near_audit = jcp_tree_stats.geometric_near_audit;
     result.orthogonalization_ms = linear.orthogonalization_ms;
-    result.preconditioner_ms = linear.preconditioner_ms;
+    result.preconditioner_ms =
+        linear.preconditioner_ms + preconditioner_setup_ms;
     if (coupled) {
       result.phi_norm = rms_norm(std::vector<double>(
           linear.x.begin(), linear.x.begin() + panels.size()));
@@ -839,6 +2538,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         result.energy_kj_mol /
         (kKBKJPerMolK * std::max(1.0, options.temperature_k));
     result.peak_memory_bytes = result.memory_bytes;
+    progress.write("solve_done", result, &jcp_tree_stats, result.matvec_calls,
+                   result.iterations, 0, result.residual, result.status, true);
     return result;
   }
 
@@ -846,18 +2547,49 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   TreecodeStats matvec_stats;
   matvec_stats.matvec_mode = mode;
   matvec_stats.taylor_order = mode == "treecode" ? result.taylor_order : 0;
+  matvec_stats.derivative_mode = result.derivative_mode;
+  matvec_stats.interaction_mode = result.interaction_mode;
   if (mode == "treecode") {
-    tree = build_tree_workspace(panels, executor);
+    progress.write("tree_build_start", result, &matvec_stats, 0, 0, 0, 0.0,
+                   "running", true);
+    tree = build_tree_workspace(
+        panels, executor,
+        static_cast<std::size_t>(std::max(8, options.tree_leaf_size)),
+        options.tree_opening_theta, options.leaf_near_policy,
+        options.leaf_panel_kernel, options.adaptive_level, "off",
+        options.interaction_mode, result.node_bounds_mode,
+        result.tree_builder, options.mac_safety, options.mac_gap_factor,
+        options.moment_audit);
     tree.taylor_order = result.taylor_order;
+    tree.derivative_mode = result.derivative_mode;
+    result.interaction_mode = tree.interaction_mode;
+    result.node_bounds_mode = tree.node_bounds_mode;
+    result.tree_builder = tree.tree_builder;
+    result.mac_safety = tree.mac_safety;
+    result.mac_gap_factor = tree.mac_gap_factor;
+    result.moment_audit = tree.moment_audit;
+    matvec_stats.node_bounds_mode = tree.node_bounds_mode;
+    matvec_stats.interaction_mode = tree.interaction_mode;
+    matvec_stats.tree_builder = tree.tree_builder;
+    matvec_stats.mac_safety = tree.mac_safety;
+    matvec_stats.mac_gap_factor = tree.mac_gap_factor;
+    matvec_stats.moment_audit = tree.moment_audit;
+    matvec_stats.tree_depth_max = tree.depth_max;
     matvec_stats.tree_build_ms = tree.build_ms;
     matvec_stats.tree_nodes = tree.nodes.size();
     matvec_stats.tree_leaf_count = tree.leaf_count;
     result.tree_build_ms = tree.build_ms;
     result.tree_nodes = tree.nodes.size();
     result.tree_leaf_count = tree.leaf_count;
+    result.tree_depth_max = tree.depth_max;
     result.memory_bytes += tree.nodes.size() * sizeof(TreeNode) +
+                           tree.child_indices.size() * sizeof(std::size_t) +
                            tree.order.size() * sizeof(std::size_t) +
-                           tree.morton.size() * sizeof(std::uint64_t);
+                           tree.morton.size() * sizeof(std::uint64_t) +
+                           panels.size() * 14u * sizeof(double) +
+                           panels.size() * sizeof(std::size_t);
+    progress.write("tree_build_end", result, &matvec_stats, 0, 0, 0, 0.0,
+                   "running", true);
   }
 
   const auto rhs_begin = std::chrono::steady_clock::now();
@@ -882,14 +2614,83 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     ++matvec_calls;
   };
   const auto gmres_begin = std::chrono::steady_clock::now();
+  progress.write("gmres_start", result, &matvec_stats, matvec_calls, 0, 0,
+                 0.0, "running", true);
+  auto legacy_progress = [&](int gmres_iter, int restart_iter,
+                             double true_residual_rel,
+                             double preconditioned_residual_rel, bool force,
+                             const std::string &phase,
+                             const LinearSolveResult &state) {
+    result.true_residual_probe_scope = state.true_residual_probe_scope;
+    result.true_residual_sample_count = state.true_residual_sample_count;
+    result.true_residual_probe_calls = state.true_residual_probe_calls;
+    result.true_residual_probe_ms = state.true_residual_probe_ms;
+    result.sampled_true_residual_rel = state.sampled_true_residual_rel;
+    result.sampled_true_residual_rows = state.sampled_true_residual_rows;
+    result.sampled_probe_calls = state.sampled_probe_calls;
+    result.sampled_probe_ms = state.sampled_probe_ms;
+    result.full_true_residual_confirm_calls =
+        state.full_true_residual_confirm_calls;
+    result.full_true_residual_confirm_ms =
+        state.full_true_residual_confirm_ms;
+    if (phase != "gmres_sampled_true_probe" &&
+        std::isfinite(true_residual_rel)) {
+      result.final_residual = true_residual_rel;
+      result.true_residual_rel = true_residual_rel;
+      if (result.best_residual <= 0.0 ||
+          true_residual_rel < result.best_residual) {
+        result.best_residual = true_residual_rel;
+        result.best_residual_iter = gmres_iter;
+      }
+    }
+    if (std::isfinite(preconditioned_residual_rel)) {
+      result.final_preconditioned_residual = preconditioned_residual_rel;
+      if (result.best_preconditioned_residual <= 0.0 ||
+          preconditioned_residual_rel <
+              result.best_preconditioned_residual) {
+        result.best_preconditioned_residual = preconditioned_residual_rel;
+      }
+    }
+    progress.write(phase, result, &matvec_stats, matvec_calls, gmres_iter,
+                   restart_iter, true_residual_rel, "running", force);
+  };
   std::vector<double> legacy_diagonal(panels.size(), 1.0);
   for (std::size_t i = 0; i < panels.size(); ++i)
     legacy_diagonal[i] = panels[i].diagonal;
   LinearSolveResult linear =
-      gmres_solve(matvec, rhs, legacy_diagonal, max_iter, tol);
+      gmres_solve(matvec, rhs, legacy_diagonal, max_iter, tol,
+                  options.gmres_restart, executor, {}, legacy_progress,
+                  result.true_residual_probe_mode,
+                  result.true_residual_probe_interval,
+                  result.true_residual_probe_scope,
+                  result.true_residual_sample_count);
   result.gmres_ms = elapsed_ms(gmres_begin, std::chrono::steady_clock::now());
   result.iterations = linear.iterations;
   result.residual = linear.residual;
+  result.gmres_restart_requested = linear.restart_requested;
+  result.gmres_restart_effective = linear.restart_effective;
+  result.best_residual = linear.best_residual;
+  result.best_residual_iter = linear.best_residual_iter;
+  result.final_residual = linear.final_residual;
+  result.best_preconditioned_residual = linear.best_preconditioned_residual;
+  result.final_preconditioned_residual =
+      linear.final_preconditioned_residual;
+  result.true_residual_abs = linear.true_residual_abs;
+  result.true_residual_rel = linear.true_residual_rel;
+  result.true_residual_probe_mode = linear.true_residual_probe_mode;
+  result.true_residual_probe_scope = linear.true_residual_probe_scope;
+  result.true_residual_probe_interval = linear.true_residual_probe_interval;
+  result.true_residual_sample_count = linear.true_residual_sample_count;
+  result.true_residual_probe_calls = linear.true_residual_probe_calls;
+  result.true_residual_probe_ms = linear.true_residual_probe_ms;
+  result.sampled_true_residual_rel = linear.sampled_true_residual_rel;
+  result.sampled_true_residual_rows = linear.sampled_true_residual_rows;
+  result.sampled_probe_calls = linear.sampled_probe_calls;
+  result.sampled_probe_ms = linear.sampled_probe_ms;
+  result.full_true_residual_confirm_calls =
+      linear.full_true_residual_confirm_calls;
+  result.full_true_residual_confirm_ms =
+      linear.full_true_residual_confirm_ms;
   result.converged = linear.converged;
   result.convergence_reason = linear.convergence_reason;
   result.residual_history = residual_history_string(linear.residual_history);
@@ -905,16 +2706,95 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.tree_leaf_count = matvec_stats.tree_leaf_count;
   result.near_interactions = matvec_stats.near_interactions;
   result.far_interactions = matvec_stats.far_interactions;
+  result.singular_near_interactions = matvec_stats.singular_near_interactions;
+  result.leaf_near_interactions = matvec_stats.leaf_near_interactions;
+  result.far_node_interactions = matvec_stats.far_node_interactions;
+  result.leaf_panel_interactions = matvec_stats.leaf_panel_interactions;
+  result.leaf_tile_interactions = matvec_stats.leaf_tile_interactions;
+  result.leaf_tile_panel_interactions =
+      matvec_stats.leaf_tile_panel_interactions;
+  result.leaf_residual_panel_interactions =
+      matvec_stats.leaf_residual_panel_interactions;
+  result.smooth_leaf_node_interactions =
+      matvec_stats.smooth_leaf_node_interactions;
+  result.leaf_pruned_interactions = matvec_stats.leaf_pruned_interactions;
+  result.adaptive_smooth_leaf_accepted =
+      matvec_stats.adaptive_smooth_leaf_accepted;
+  result.adaptive_smooth_leaf_rejected =
+      matvec_stats.adaptive_smooth_leaf_rejected;
+  result.adaptive_span_tile_accepted = matvec_stats.adaptive_span_tile_accepted;
+  result.adaptive_span_tile_rejected = matvec_stats.adaptive_span_tile_rejected;
+  result.adaptive_exact_leaf_fallbacks =
+      matvec_stats.adaptive_exact_leaf_fallbacks;
+  result.adaptive_reject_one_ring_overlap =
+      matvec_stats.adaptive_reject_one_ring_overlap;
+  result.adaptive_reject_error_bound_failed =
+      matvec_stats.adaptive_reject_error_bound_failed;
+  result.adaptive_reject_p4_check_failed =
+      matvec_stats.adaptive_reject_p4_check_failed;
+  result.adaptive_reject_too_close = matvec_stats.adaptive_reject_too_close;
+  result.leaf_work_reduction_ratio = matvec_stats.leaf_work_reduction_ratio;
+  result.target_cluster_interactions = matvec_stats.target_cluster_interactions;
+  result.target_cluster_targets = matvec_stats.target_cluster_targets;
+  result.target_cluster_panels_pruned =
+      matvec_stats.target_cluster_panels_pruned;
+  result.target_cluster_rejected = matvec_stats.target_cluster_rejected;
+  result.target_cluster_eval_ms = matvec_stats.target_cluster_eval_ms;
+  result.adaptive_level = matvec_stats.adaptive_level;
+  result.leaf_near_policy = matvec_stats.leaf_near_policy;
+  result.leaf_panel_kernel = matvec_stats.leaf_panel_kernel;
+  result.interaction_mode = matvec_stats.interaction_mode;
+  result.node_bounds_mode = matvec_stats.node_bounds_mode;
+  result.tree_builder = matvec_stats.tree_builder;
+  result.mac_safety = matvec_stats.mac_safety;
+  result.mac_gap_factor = matvec_stats.mac_gap_factor;
+  result.tree_depth_max = matvec_stats.tree_depth_max;
+  result.mac_reject_radius_limited = matvec_stats.mac_reject_radius_limited;
+  result.mac_accept_rate = matvec_stats.mac_accept_rate;
+  result.node_radius_max = matvec_stats.node_radius_max;
+  result.node_radius_mean = matvec_stats.node_radius_mean;
+  result.leaf_panel_work_per_matvec =
+      matvec_stats.leaf_panel_work_per_matvec;
+  result.far_node_work_per_matvec =
+      matvec_stats.far_node_work_per_matvec;
+  result.far_geometric_unsafe_count =
+      matvec_stats.far_geometric_unsafe_count;
+  result.far_geometric_unsafe_panels =
+      matvec_stats.far_geometric_unsafe_panels;
+  result.far_geometric_min_gap = matvec_stats.far_geometric_min_gap;
+  result.far_geometric_gap_ratio_min =
+      matvec_stats.far_geometric_gap_ratio_min;
+  result.far_geometric_gap_ratio_mean =
+      matvec_stats.far_geometric_gap_ratio_mean;
+  result.far_geometric_audit_samples =
+      matvec_stats.far_geometric_audit_samples;
+  result.mac_physical_gap_rejects =
+      matvec_stats.mac_physical_gap_rejects;
+  result.moment_audit = matvec_stats.moment_audit;
+  result.moment_audit_nodes = matvec_stats.moment_audit_nodes;
+  result.moment_translation_rel_error_max =
+      matvec_stats.moment_translation_rel_error_max;
+  result.moment_translation_rel_error_mean =
+      matvec_stats.moment_translation_rel_error_mean;
+  result.leaf_tile_status = matvec_stats.leaf_tile_status;
+  result.leaf_panel_pairs_per_second =
+      matvec_stats.leaf_panel_pairs_per_second;
   result.matvec_mode = matvec_stats.matvec_mode;
   result.taylor_order =
       mode == "treecode" ? matvec_stats.taylor_order
                          : std::clamp(options.taylor_order, 3, 4);
+  result.derivative_mode = mode == "treecode" ? matvec_stats.derivative_mode
+                                              : std::string("none");
   result.interaction_build_ms = matvec_stats.interaction_build_ms;
   result.tree_eval_ms = matvec_stats.tree_eval_ms;
   result.tree_moment_ms = matvec_stats.tree_moment_ms;
   result.tree_traversal_ms = matvec_stats.tree_traversal_ms;
   result.near_eval_ms = matvec_stats.near_eval_ms;
   result.far_eval_ms = matvec_stats.far_eval_ms;
+  result.leaf_panel_eval_ms = matvec_stats.leaf_panel_eval_ms;
+  result.leaf_tile_eval_ms = matvec_stats.leaf_tile_eval_ms;
+  result.leaf_residual_eval_ms = matvec_stats.leaf_residual_eval_ms;
+  result.smooth_leaf_node_eval_ms = matvec_stats.smooth_leaf_node_eval_ms;
 
   const double boundary_energy =
       boundary_energy_kcal(atoms, panels, linear.x, kappa) *
@@ -966,6 +2846,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.energy_kj_mol /
       (kKBKJPerMolK * std::max(1.0, options.temperature_k));
   result.peak_memory_bytes = result.memory_bytes;
+  progress.write("solve_done", result, &matvec_stats, result.matvec_calls,
+                 result.iterations, 0, result.residual, result.status, true);
   return result;
 }
 

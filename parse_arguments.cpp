@@ -720,12 +720,226 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.tabi_taylor_order = stoi(common_value);
       continue;
     }
+    if (consume_option_value(arg, {"-pbe-tabi-derivatives",
+                                   "--pbe-tabi-derivatives"},
+                             common_value, i)) {
+      pbe.tabi_derivatives =
+          require_choice(common_value, {"analytic", "finite-diff-debug"},
+                         "-pbe-tabi-derivatives");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-surface-points",
+                                   "--pbe-tabi-surface-points"},
+                             common_value, i)) {
+      pbe.tabi_surface_points = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-sphere-mesh",
+                                   "--pbe-tabi-sphere-mesh"},
+                             common_value, i)) {
+      pbe.tabi_sphere_mesh =
+          require_choice(common_value, {"auto", "latlong", "icosphere"},
+                         "-pbe-tabi-sphere-mesh");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-tree-leaf-size",
+                                   "--pbe-tabi-tree-leaf-size"},
+                             common_value, i)) {
+      pbe.tabi_tree_leaf_size = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-opening-theta",
+                                   "--pbe-tabi-opening-theta"},
+                             common_value, i)) {
+      pbe.tabi_tree_opening_theta = stod(common_value);
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-tabi-formulation",
                                    "--pbe-tabi-formulation"},
                              common_value, i)) {
       pbe.tabi_formulation = require_choice(
-          common_value, {"titan-v1", "jcp2013", "calibrated-debug"},
+          common_value,
+          {"titan-v1", "jcp2013", "jcp2013-centroid", "jcp2013-treecode",
+           "tabi2-nodepatch", "calibrated-debug"},
           "-pbe-tabi-formulation");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-precond",
+                                   "--pbe-tabi-precond"},
+                             common_value, i)) {
+      pbe.tabi_precond =
+          require_choice(common_value, {"auto", "none", "diagonal", "block"},
+                         "-pbe-tabi-precond");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-precond-block-near",
+                                   "--pbe-tabi-precond-block-near"},
+                             common_value, i)) {
+      pbe.tabi_precond_block_near =
+          require_choice(common_value, {"singular", "buffer-aware"},
+                         "-pbe-tabi-precond-block-near");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-near-integration",
+                                   "--pbe-tabi-near-integration"},
+                             common_value, i)) {
+      pbe.tabi_near_integration = require_choice(
+          common_value,
+          {"auto", "centroid", "analytic_singular", "duffy_adaptive"},
+          "-pbe-tabi-near-integration");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-quad-buffer",
+                                   "--pbe-tabi-quad-buffer"},
+                             common_value, i)) {
+      pbe.tabi_quad_buffer =
+          require_choice(common_value, {"auto", "off", "gauss7", "adaptive"},
+                         "-pbe-tabi-quad-buffer");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-leaf-near-policy",
+                                   "--pbe-tabi-leaf-near-policy"},
+                             common_value, i)) {
+      pbe.tabi_leaf_near_policy =
+          require_choice(common_value,
+                         {"auto", "exact", "smooth-node", "large-protein",
+                          "adaptive-large"},
+                         "-pbe-tabi-leaf-near-policy");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-leaf-panel-kernel",
+                                   "--pbe-tabi-leaf-panel-kernel"},
+                             common_value, i)) {
+      pbe.tabi_leaf_panel_kernel =
+          require_choice(common_value,
+                         {"auto", "scalar", "avx2-gather", "tile",
+                          "tile-scalar", "tile-avx2"},
+                         "-pbe-tabi-leaf-panel-kernel");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-adaptive-level",
+                                   "--pbe-tabi-adaptive-level"},
+                             common_value, i)) {
+      pbe.tabi_adaptive_level =
+          require_choice(common_value, {"strict", "balanced", "aggressive"},
+                         "-pbe-tabi-adaptive-level");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-cluster-policy",
+                                   "--pbe-tabi-cluster-policy"},
+                             common_value, i)) {
+      pbe.tabi_cluster_policy =
+          require_choice(common_value,
+                         {"off", "leaf-pair-strict", "leaf-pair-balanced"},
+                         "-pbe-tabi-cluster-policy");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",
+                                   "--pbe-tabi-interaction-mode"},
+                             common_value, i)) {
+      pbe.tabi_interaction_mode =
+          require_choice(common_value, {"auto", "cached", "onthefly"},
+                         "-pbe-tabi-interaction-mode");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-node-bounds",
+                                   "--pbe-tabi-node-bounds"},
+                             common_value, i)) {
+      pbe.tabi_node_bounds =
+          require_choice(common_value, {"moment", "tight-aabb"},
+                         "-pbe-tabi-node-bounds");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-tree-builder",
+                                   "--pbe-tabi-tree-builder"},
+                             common_value, i)) {
+      pbe.tabi_tree_builder =
+          require_choice(common_value, {"grouped-morton", "topdown-aabb"},
+                         "-pbe-tabi-tree-builder");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-mac-safety",
+                                   "--pbe-tabi-mac-safety"},
+                             common_value, i)) {
+      pbe.tabi_mac_safety =
+          require_choice(common_value, {"off", "audit", "physical-gap"},
+                         "-pbe-tabi-mac-safety");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-mac-gap-factor",
+                                   "--pbe-tabi-mac-gap-factor"},
+                             common_value, i)) {
+      pbe.tabi_mac_gap_factor = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-moment-audit",
+                                   "--pbe-tabi-moment-audit"},
+                             common_value, i)) {
+      pbe.tabi_moment_audit =
+          require_choice(common_value, {"off", "sampled", "full-small"},
+                         "-pbe-tabi-moment-audit");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-matvec-audit",
+                                   "--pbe-tabi-matvec-audit"},
+                             common_value, i)) {
+      pbe.tabi_matvec_audit =
+          require_choice(common_value, {"off", "sampled", "full-small"},
+                         "-pbe-tabi-matvec-audit");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-matvec-audit-sample-count",
+                                   "--pbe-tabi-matvec-audit-sample-count"},
+                             common_value, i)) {
+      pbe.tabi_matvec_audit_sample_count = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-progress",
+                                   "--pbe-tabi-progress"},
+                             common_value, i)) {
+      pbe.tabi_progress =
+          require_choice(common_value, {"off", "auto", "detail"},
+                         "-pbe-tabi-progress");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-progress-interval",
+                                   "--pbe-tabi-progress-interval"},
+                             common_value, i)) {
+      pbe.tabi_progress_interval = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-gmres-restart",
+                                   "--pbe-tabi-gmres-restart"},
+                             common_value, i)) {
+      pbe.tabi_gmres_restart = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-true-residual-probe",
+                                   "--pbe-tabi-true-residual-probe"},
+                             common_value, i)) {
+      pbe.tabi_true_residual_probe =
+          require_choice(common_value, {"restart", "interval", "off"},
+                         "-pbe-tabi-true-residual-probe");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-true-residual-probe-scope",
+                                   "--pbe-tabi-true-residual-probe-scope"},
+                             common_value, i)) {
+      pbe.tabi_true_residual_probe_scope =
+          require_choice(common_value, {"full", "sampled", "adaptive"},
+                         "-pbe-tabi-true-residual-probe-scope");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-true-residual-probe-interval",
+                                   "--pbe-tabi-true-residual-probe-interval"},
+                             common_value, i)) {
+      pbe.tabi_true_residual_probe_interval = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-true-residual-sample-count",
+                                   "--pbe-tabi-true-residual-sample-count"},
+                             common_value, i)) {
+      pbe.tabi_true_residual_sample_count = stoi(common_value);
       continue;
     }
     if (consume_option_value(arg, {"-pbe-tabi-energy-projection",

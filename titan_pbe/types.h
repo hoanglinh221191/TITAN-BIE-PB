@@ -1,10 +1,55 @@
 #ifndef TITAN_PBE_TYPES_H
 #define TITAN_PBE_TYPES_H
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace TitanPBE {
+
+inline constexpr std::size_t kNearBlockCount = 4;
+inline constexpr std::size_t kNearPairTypeCount = 4;
+inline constexpr std::size_t kNearOrientationCount = 3;
+inline constexpr std::size_t kNearBlockAuditBucketCount =
+    kNearBlockCount * kNearPairTypeCount * kNearOrientationCount;
+
+struct NearBlockAuditBucket {
+  std::size_t accepted{0};
+  std::size_t rejected{0};
+  std::size_t candidate_worse_than_centroid{0};
+  std::size_t reference_nonconverged{0};
+  std::size_t orientation_sign_mismatch{0};
+  std::size_t strict_ref_reject{0};
+  double max_candidate_ref_rel{0.0};
+  double sum_candidate_ref_rel{0.0};
+  double max_centroid_ref_rel{0.0};
+  std::size_t k2_laplace_sign_ok{0};
+  double max_k2_yukawa_smooth_ref_rel{0.0};
+  double max_k2_orientation_pair_ref_rel{0.0};
+  std::size_t sample_count{0};
+};
+
+using NearBlockAuditBuckets =
+    std::array<NearBlockAuditBucket, kNearBlockAuditBucketCount>;
+
+inline constexpr std::size_t kGeometricGapBucketCount = 4;
+inline constexpr std::size_t kGeometricCenterBucketCount = 3;
+inline constexpr std::size_t kGeometricKernelCount = 3;
+inline constexpr std::size_t kGeometricNearAuditBucketCount =
+    kGeometricGapBucketCount * kGeometricCenterBucketCount *
+    kGeometricKernelCount;
+
+struct GeometricNearAuditBucket {
+  std::size_t pairs{0};
+  double min_gap{0.0};
+  double max_gap_ratio{0.0};
+  double sum_gap_ratio{0.0};
+  double sum_center_ratio{0.0};
+};
+
+using GeometricNearAuditBuckets =
+    std::array<GeometricNearAuditBucket, kGeometricNearAuditBucketCount>;
 
 struct FrameResult {
   std::size_t trajectory_id{0};
@@ -18,6 +63,15 @@ struct FrameResult {
   std::size_t nz{0};
   std::size_t grid_points{0};
   std::size_t memory_bytes{0};
+  std::size_t memory_estimated_surface_bytes{0};
+  std::size_t memory_estimated_solver_bytes{0};
+  std::size_t memory_estimated_operator_bytes{0};
+  std::size_t memory_estimated_tree_bytes{0};
+  std::size_t memory_rss_before_bytes{0};
+  std::size_t memory_rss_after_bytes{0};
+  std::size_t memory_rss_delta_bytes{0};
+  std::int64_t memory_rss_delta_signed_bytes{0};
+  std::size_t memory_peak_working_set_bytes{0};
   double grid_origin_x_A{0.0};
   double grid_origin_y_A{0.0};
   double grid_origin_z_A{0.0};
@@ -56,6 +110,9 @@ struct FrameResult {
   std::string pbe_backend{"grid"};
   double tabi_surface_build_ms{0.0};
   std::size_t tabi_surface_panels{0};
+  int tabi_surface_point_count_requested{0};
+  double tabi_panel_density_per_a2{0.0};
+  std::string tabi_panel_budget_status{"off"};
   std::size_t tabi_surface_exposed_points{0};
   std::size_t tabi_surface_buried_points{0};
   double tabi_tree_build_ms{0.0};
@@ -67,12 +124,36 @@ struct FrameResult {
   std::string tabi_status{"off"};
   std::string tabi_convergence_reason{"off"};
   std::string tabi_residual_history{};
+  int tabi_gmres_restart_requested{32};
+  int tabi_gmres_restart_effective{32};
+  double tabi_best_residual{0.0};
+  int tabi_best_residual_iter{0};
+  double tabi_final_residual{0.0};
+  double tabi_best_preconditioned_residual{0.0};
+  double tabi_final_preconditioned_residual{0.0};
+  double tabi_true_residual_abs{0.0};
+  double tabi_true_residual_rel{0.0};
+  std::string tabi_true_residual_probe_mode{"off"};
+  std::string tabi_true_residual_probe_scope{"full"};
+  int tabi_true_residual_probe_interval{0};
+  int tabi_true_residual_sample_count{0};
+  std::size_t tabi_true_residual_probe_calls{0};
+  double tabi_true_residual_probe_ms{0.0};
+  double tabi_sampled_true_residual_rel{0.0};
+  std::size_t tabi_sampled_true_residual_rows{0};
+  std::size_t tabi_sampled_probe_calls{0};
+  double tabi_sampled_probe_ms{0.0};
+  std::size_t tabi_full_true_residual_confirm_calls{0};
+  double tabi_full_probe_ms{0.0};
   std::string tabi_reaction_energy_source{"off"};
   double tabi_rhs_ms{0.0};
   double tabi_gmres_ms{0.0};
   double tabi_matvec_ms_total{0.0};
   double tabi_matvec_ms_avg{0.0};
   std::size_t tabi_matvec_calls{0};
+  double tabi_tree_vs_direct_matvec_rel{0.0};
+  std::size_t tabi_matvec_audit_rows{0};
+  double tabi_matvec_audit_ms{0.0};
   double tabi_orthogonalization_ms{0.0};
   double tabi_preconditioner_ms{0.0};
   double tabi_surface_neighbor_ms{0.0};
@@ -82,7 +163,116 @@ struct FrameResult {
   double tabi_tree_traversal_ms{0.0};
   double tabi_near_eval_ms{0.0};
   double tabi_far_eval_ms{0.0};
+  double tabi_singular_near_eval_ms{0.0};
+  double tabi_leaf_near_eval_ms{0.0};
+  double tabi_leaf_panel_eval_ms{0.0};
+  double tabi_leaf_tile_eval_ms{0.0};
+  double tabi_leaf_residual_eval_ms{0.0};
+  double tabi_smooth_leaf_node_eval_ms{0.0};
+  std::size_t tabi_singular_near_interactions{0};
+  std::size_t tabi_leaf_near_interactions{0};
+  std::size_t tabi_far_node_interactions{0};
+  std::size_t tabi_leaf_panel_interactions{0};
+  std::size_t tabi_leaf_tile_interactions{0};
+  std::size_t tabi_leaf_tile_panel_interactions{0};
+  std::size_t tabi_leaf_residual_panel_interactions{0};
+  std::size_t tabi_smooth_leaf_node_interactions{0};
+  std::size_t tabi_leaf_pruned_interactions{0};
+  std::size_t tabi_adaptive_smooth_leaf_accepted{0};
+  std::size_t tabi_adaptive_smooth_leaf_rejected{0};
+  std::size_t tabi_adaptive_span_tile_accepted{0};
+  std::size_t tabi_adaptive_span_tile_rejected{0};
+  std::size_t tabi_adaptive_exact_leaf_fallbacks{0};
+  std::size_t tabi_adaptive_reject_one_ring_overlap{0};
+  std::size_t tabi_adaptive_reject_error_bound_failed{0};
+  std::size_t tabi_adaptive_reject_p4_check_failed{0};
+  std::size_t tabi_adaptive_reject_too_close{0};
+  double tabi_leaf_work_reduction_ratio{0.0};
+  std::size_t tabi_target_cluster_interactions{0};
+  std::size_t tabi_target_cluster_targets{0};
+  std::size_t tabi_target_cluster_panels_pruned{0};
+  std::size_t tabi_target_cluster_rejected{0};
+  double tabi_target_cluster_eval_ms{0.0};
+  std::string tabi_adaptive_level{"off"};
+  std::string tabi_leaf_near_policy{"off"};
+  std::string tabi_leaf_panel_kernel{"off"};
+  std::string tabi_interaction_mode{"off"};
+  std::string tabi_node_bounds_mode{"off"};
+  std::string tabi_tree_builder{"off"};
+  std::string tabi_mac_safety{"off"};
+  double tabi_mac_gap_factor{1.5};
+  std::size_t tabi_tree_depth_max{0};
+  std::size_t tabi_mac_reject_radius_limited{0};
+  double tabi_mac_accept_rate{0.0};
+  double tabi_node_radius_max{0.0};
+  double tabi_node_radius_mean{0.0};
+  double tabi_leaf_panel_work_per_matvec{0.0};
+  double tabi_far_node_work_per_matvec{0.0};
+  std::size_t tabi_far_geometric_unsafe_count{0};
+  std::size_t tabi_far_geometric_unsafe_panels{0};
+  double tabi_far_geometric_min_gap{0.0};
+  double tabi_far_geometric_gap_ratio_min{0.0};
+  double tabi_far_geometric_gap_ratio_mean{0.0};
+  std::size_t tabi_far_geometric_audit_samples{0};
+  std::size_t tabi_mac_physical_gap_rejects{0};
+  std::string tabi_moment_audit{"off"};
+  std::size_t tabi_moment_audit_nodes{0};
+  double tabi_moment_translation_rel_error_max{0.0};
+  double tabi_moment_translation_rel_error_mean{0.0};
+  std::string tabi_quad_buffer_auto_candidate{"off"};
+  std::string tabi_leaf_tile_status{"off"};
+  double tabi_leaf_panel_pairs_per_second{0.0};
+  std::string tabi_near_integration{"off"};
+  std::string tabi_quad_buffer{"off"};
+  std::size_t tabi_near_self_pairs{0};
+  std::size_t tabi_near_one_ring_pairs{0};
+  std::size_t tabi_near_duffy_pairs{0};
+  std::size_t tabi_near_centroid_pairs{0};
+  std::size_t tabi_near_fallbacks{0};
+  std::size_t tabi_near_geometric_buffer_pairs{0};
+  std::size_t tabi_near_geometric_buffer_gauss_pairs{0};
+  std::size_t tabi_near_geometric_buffer_adaptive_pairs{0};
+  std::size_t tabi_near_geometric_buffer_centroid_pairs{0};
+  double tabi_near_geometric_buffer_min_gap{0.0};
+  double tabi_near_geometric_buffer_mean_gap_ratio{0.0};
+  double tabi_near_geometric_buffer_max_edge_mean{0.0};
+  double tabi_near_integration_ms{0.0};
+  std::size_t tabi_duffy_subdivisions_max{0};
+  double tabi_duffy_subdivisions_mean{0.0};
+  std::string tabi_near_kernel_policy{"off"};
+  std::size_t tabi_near_k1_accepted{0};
+  std::size_t tabi_near_k1_rejected{0};
+  std::size_t tabi_near_k2_accepted{0};
+  std::size_t tabi_near_k2_rejected{0};
+  std::size_t tabi_near_k3_accepted{0};
+  std::size_t tabi_near_k3_rejected{0};
+  std::size_t tabi_near_k4_accepted{0};
+  std::size_t tabi_near_k4_rejected{0};
+  std::size_t tabi_near_one_ring_k1_accepted{0};
+  std::size_t tabi_near_one_ring_k1_rejected{0};
+  std::size_t tabi_near_one_ring_k2_accepted{0};
+  std::size_t tabi_near_one_ring_k2_rejected{0};
+  std::size_t tabi_near_one_ring_k3_accepted{0};
+  std::size_t tabi_near_one_ring_k3_rejected{0};
+  std::size_t tabi_near_one_ring_k4_accepted{0};
+  std::size_t tabi_near_one_ring_k4_rejected{0};
+  std::string tabi_near_k1_policy{"off"};
+  std::string tabi_near_k2_policy{"off"};
+  std::string tabi_near_k3_policy{"off"};
+  std::string tabi_near_k4_policy{"off"};
+  NearBlockAuditBuckets tabi_near_block_audit{};
+  GeometricNearAuditBuckets tabi_geometric_near_audit{};
   std::string tabi_surface_geometry{"off"};
+  std::string tabi_sphere_mesh_mode{"off"};
+  double tabi_surface_quality_total_area_a2{0.0};
+  double tabi_surface_quality_area_rel_error_vs_4piR2{0.0};
+  double tabi_surface_quality_triangle_area_min{0.0};
+  double tabi_surface_quality_triangle_area_mean{0.0};
+  double tabi_surface_quality_triangle_area_max{0.0};
+  double tabi_surface_quality_triangle_aspect_max{0.0};
+  double tabi_surface_quality_normal_radial_dot_min{0.0};
+  double tabi_surface_quality_normal_radial_dot_mean{0.0};
+  double tabi_surface_quality_centroid_radial_error_max{0.0};
   std::size_t tabi_mesh_vertices{0};
   std::size_t tabi_mesh_triangles{0};
   std::size_t tabi_boundary_nodes{0};
@@ -92,10 +282,16 @@ struct FrameResult {
   double tabi_diag_min{1.0};
   double tabi_diag_max{1.0};
   int tabi_taylor_order{0};
+  std::string tabi_derivative_mode{"off"};
   double tabi_interaction_build_ms{0.0};
   double tabi_tree_eval_ms{0.0};
   std::string tabi_formulation{"off"};
   std::string tabi_energy_projection{"off"};
+  std::string tabi_preconditioner_requested{"off"};
+  std::string tabi_preconditioner_effective{"off"};
+  std::string tabi_preconditioner_block_near{"off"};
+  std::string tabi_surface_generator{"off"};
+  std::string tabi_discretization{"off"};
   double tabi_rhs_scale{1.0};
   double tabi_dielectric_contrast{0.0};
   double tabi_operator_contrast{0.0};

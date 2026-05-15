@@ -3,6 +3,7 @@
 #include "../titan_surface.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -127,17 +128,24 @@ QuantizedKey quantized_key(double x, double y, double z) noexcept {
 }
 
 int mesh_rings_for_point_count(int point_count) noexcept {
-  const int safe_points = std::max(24, point_count);
+  const int safe_points = std::max(8, point_count);
   const int rings =
       static_cast<int>(std::lround(std::sqrt(static_cast<double>(safe_points) *
-                                             0.75))) +
+                                             1.0))) +
       1;
-  return std::clamp(rings, 6, 18);
+  return std::clamp(rings, 4, 64);
 }
 
-UnitSphereMesh make_unit_sphere_mesh(int point_count) {
+UnitVertex normalized_vertex(double x, double y, double z) noexcept {
+  const double len = norm3(x, y, z);
+  if (len <= 1.0e-14)
+    return {0.0, 0.0, 1.0};
+  return {x / len, y / len, z / len};
+}
+
+UnitSphereMesh make_latlong_unit_sphere_mesh(int point_count) {
   const int rings = mesh_rings_for_point_count(point_count);
-  const int segments = std::max(12, rings * 2);
+  const int segments = std::max(8, rings * 2);
   UnitSphereMesh mesh;
   mesh.vertices.reserve(2 + static_cast<std::size_t>(rings - 1) *
                                 static_cast<std::size_t>(segments));
@@ -184,18 +192,105 @@ UnitSphereMesh make_unit_sphere_mesh(int point_count) {
   return mesh;
 }
 
-const UnitSphereMesh &cached_unit_sphere_mesh(int point_count) {
-  static const UnitSphereMesh default_mesh =
-      make_unit_sphere_mesh(TitanSurface::kDefaultPointCount);
-  if (point_count == TitanSurface::kDefaultPointCount)
-    return default_mesh;
-  static thread_local UnitSphereMesh local_mesh;
-  static thread_local int local_points = 0;
-  if (local_points != point_count) {
-    local_mesh = make_unit_sphere_mesh(point_count);
-    local_points = point_count;
+UnitSphereMesh make_icosphere_unit_sphere_mesh(int point_count) {
+  UnitSphereMesh mesh;
+  const double phi = (1.0 + std::sqrt(5.0)) * 0.5;
+  const std::array<UnitVertex, 12> base_vertices = {
+      normalized_vertex(-1.0, phi, 0.0), normalized_vertex(1.0, phi, 0.0),
+      normalized_vertex(-1.0, -phi, 0.0), normalized_vertex(1.0, -phi, 0.0),
+      normalized_vertex(0.0, -1.0, phi), normalized_vertex(0.0, 1.0, phi),
+      normalized_vertex(0.0, -1.0, -phi), normalized_vertex(0.0, 1.0, -phi),
+      normalized_vertex(phi, 0.0, -1.0), normalized_vertex(phi, 0.0, 1.0),
+      normalized_vertex(-phi, 0.0, -1.0), normalized_vertex(-phi, 0.0, 1.0)};
+  mesh.vertices.assign(base_vertices.begin(), base_vertices.end());
+  const std::array<UnitTriangle, 20> base_triangles = {
+      UnitTriangle{0, 11, 5}, UnitTriangle{0, 5, 1},
+      UnitTriangle{0, 1, 7},  UnitTriangle{0, 7, 10},
+      UnitTriangle{0, 10, 11}, UnitTriangle{1, 5, 9},
+      UnitTriangle{5, 11, 4}, UnitTriangle{11, 10, 2},
+      UnitTriangle{10, 7, 6}, UnitTriangle{7, 1, 8},
+      UnitTriangle{3, 9, 4},  UnitTriangle{3, 4, 2},
+      UnitTriangle{3, 2, 6},  UnitTriangle{3, 6, 8},
+      UnitTriangle{3, 8, 9},  UnitTriangle{4, 9, 5},
+      UnitTriangle{2, 4, 11}, UnitTriangle{6, 2, 10},
+      UnitTriangle{8, 6, 7},  UnitTriangle{9, 8, 1}};
+  mesh.triangles.assign(base_triangles.begin(), base_triangles.end());
+
+  int subdivisions = 0;
+  std::size_t target_triangles = 20;
+  const std::size_t safe_target =
+      static_cast<std::size_t>(std::max(8, point_count));
+  while (target_triangles < safe_target && subdivisions < 6) {
+    target_triangles *= 4;
+    ++subdivisions;
   }
-  return local_mesh;
+
+  auto midpoint = [&](std::size_t a, std::size_t b,
+                      std::unordered_map<EdgeKey, std::size_t, EdgeKeyHash>
+                          &cache) -> std::size_t {
+    EdgeKey key{std::min(a, b), std::max(a, b)};
+    const auto found = cache.find(key);
+    if (found != cache.end())
+      return found->second;
+    const UnitVertex &va = mesh.vertices[a];
+    const UnitVertex &vb = mesh.vertices[b];
+    const UnitVertex mid =
+        normalized_vertex(0.5 * (va.x + vb.x), 0.5 * (va.y + vb.y),
+                          0.5 * (va.z + vb.z));
+    const std::size_t index = mesh.vertices.size();
+    mesh.vertices.push_back(mid);
+    cache.emplace(key, index);
+    return index;
+  };
+
+  for (int level = 0; level < subdivisions; ++level) {
+    std::unordered_map<EdgeKey, std::size_t, EdgeKeyHash> midpoint_cache;
+    midpoint_cache.reserve(mesh.triangles.size() * 3);
+    std::vector<UnitTriangle> refined;
+    refined.reserve(mesh.triangles.size() * 4);
+    for (const UnitTriangle &tri : mesh.triangles) {
+      const std::size_t ab = midpoint(tri.a, tri.b, midpoint_cache);
+      const std::size_t bc = midpoint(tri.b, tri.c, midpoint_cache);
+      const std::size_t ca = midpoint(tri.c, tri.a, midpoint_cache);
+      refined.push_back({tri.a, ab, ca});
+      refined.push_back({tri.b, bc, ab});
+      refined.push_back({tri.c, ca, bc});
+      refined.push_back({ab, bc, ca});
+    }
+    mesh.triangles = std::move(refined);
+  }
+  return mesh;
+}
+
+std::string resolve_sphere_mesh_mode(const std::string &requested) {
+  if (requested == "icosphere")
+    return "icosphere";
+  return "latlong";
+}
+
+const UnitSphereMesh &cached_unit_sphere_mesh(int point_count,
+                                             const std::string &mesh_mode) {
+  const std::string mode = resolve_sphere_mesh_mode(mesh_mode);
+  static const UnitSphereMesh default_mesh =
+      make_latlong_unit_sphere_mesh(TitanSurface::kDefaultPointCount);
+  if (mode == "latlong" && point_count == TitanSurface::kDefaultPointCount)
+    return default_mesh;
+  static thread_local UnitSphereMesh local_latlong_mesh;
+  static thread_local UnitSphereMesh local_icosphere_mesh;
+  static thread_local int local_latlong_points = 0;
+  static thread_local int local_icosphere_points = 0;
+  if (mode == "icosphere") {
+    if (local_icosphere_points != point_count) {
+      local_icosphere_mesh = make_icosphere_unit_sphere_mesh(point_count);
+      local_icosphere_points = point_count;
+    }
+    return local_icosphere_mesh;
+  }
+  if (local_latlong_points != point_count) {
+    local_latlong_mesh = make_latlong_unit_sphere_mesh(point_count);
+    local_latlong_points = point_count;
+  }
+  return local_latlong_mesh;
 }
 
 AtomCellGrid make_atom_cell_grid(const std::vector<Atom> &atoms,
@@ -510,14 +605,18 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
                                 const Options &options) {
   const double probe =
       options.surface_mode == "sas" ? std::max(0.0, options.probe_radius) : 0.0;
-  const int point_count = std::max(24, TitanSurface::kDefaultPointCount);
-  const UnitSphereMesh &unit_mesh = cached_unit_sphere_mesh(point_count);
+  const int point_count = std::clamp(options.surface_point_count, 8, 4096);
+  const std::string sphere_mesh_mode =
+      resolve_sphere_mesh_mode(options.sphere_mesh_mode);
+  const UnitSphereMesh &unit_mesh =
+      cached_unit_sphere_mesh(point_count, sphere_mesh_mode);
 
   std::vector<double> surface_radii(atoms.size(), 0.0);
   for (std::size_t i = 0; i < atoms.size(); ++i)
     surface_radii[i] = std::max(0.0, atoms[i].radius) + probe;
 
   SurfaceMesh mesh;
+  mesh.sphere_mesh_mode = sphere_mesh_mode;
   const std::vector<std::vector<std::size_t>> neighbors =
       build_atom_neighbor_lists(atoms, surface_radii, mesh);
   const auto mesh_begin = std::chrono::steady_clock::now();
@@ -526,6 +625,16 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
   mesh.panels.reserve(atoms.size() * unit_mesh.triangles.size());
   std::unordered_map<QuantizedKey, std::size_t, QuantizedKeyHash> vertex_lookup;
   vertex_lookup.reserve(atoms.size() * unit_mesh.vertices.size());
+  std::unordered_map<std::size_t, double> area_by_atom;
+  std::unordered_map<std::size_t, double> radius_by_atom;
+  double quality_area_min = std::numeric_limits<double>::infinity();
+  double quality_area_max = 0.0;
+  double quality_area_sum = 0.0;
+  double quality_aspect_max = 0.0;
+  double quality_radial_dot_min = std::numeric_limits<double>::infinity();
+  double quality_radial_dot_sum = 0.0;
+  double quality_centroid_radial_error_max = 0.0;
+  std::size_t quality_count = 0;
 
   for (std::size_t atom_index = 0; atom_index < atoms.size(); ++atom_index) {
     const Atom &atom = atoms[atom_index];
@@ -601,6 +710,11 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
       double area = spherical_triangle_area_unit(ua, ub, uc) * radius * radius;
       if (!std::isfinite(area) || area <= 1.0e-14)
         area = 0.5 * normal_len;
+      const double edge_ab = norm3(vb.x - va.x, vb.y - va.y, vb.z - va.z);
+      const double edge_bc = norm3(vc.x - vb.x, vc.y - vb.y, vc.z - vb.z);
+      const double edge_ca = norm3(va.x - vc.x, va.y - vc.y, va.z - vc.z);
+      const double edge_min = std::min({edge_ab, edge_bc, edge_ca});
+      const double edge_max = std::max({edge_ab, edge_bc, edge_ca});
       nx /= normal_len;
       ny /= normal_len;
       nz /= normal_len;
@@ -616,6 +730,23 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
       nx = panel_ux;
       ny = panel_uy;
       nz = panel_uz;
+      const double radial_len = norm3(radial_x, radial_y, radial_z);
+      const double radial_dot =
+          radial_len > 1.0e-14
+              ? (nx * radial_x + ny * radial_y + nz * radial_z) / radial_len
+              : 1.0;
+      quality_area_min = std::min(quality_area_min, area);
+      quality_area_max = std::max(quality_area_max, area);
+      quality_area_sum += area;
+      if (edge_min > 1.0e-14)
+        quality_aspect_max = std::max(quality_aspect_max, edge_max / edge_min);
+      quality_radial_dot_min = std::min(quality_radial_dot_min, radial_dot);
+      quality_radial_dot_sum += radial_dot;
+      quality_centroid_radial_error_max = std::max(
+          quality_centroid_radial_error_max, std::abs(radial_len - radius));
+      ++quality_count;
+      area_by_atom[original_indices[atom_index]] += area;
+      radius_by_atom[original_indices[atom_index]] = radius;
 
       Triangle tri;
       tri.v0 = ia;
@@ -630,12 +761,61 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
       tri.nz = nz;
       tri.area = area;
       mesh.triangles.push_back(tri);
-      mesh.panels.push_back(
-          Panel{px, py, pz, nx, ny, nz, area, 1.0, kTwoPi, tri.atom_index});
+      Panel panel;
+      panel.x = px;
+      panel.y = py;
+      panel.z = pz;
+      panel.nx = nx;
+      panel.ny = ny;
+      panel.nz = nz;
+      panel.area = area;
+      panel.diagonal = 1.0;
+      panel.solid_angle = kTwoPi;
+      panel.atom_index = tri.atom_index;
+      panel.v0x = va.x;
+      panel.v0y = va.y;
+      panel.v0z = va.z;
+      panel.v1x = vb.x;
+      panel.v1y = vb.y;
+      panel.v1z = vb.z;
+      panel.v2x = vc.x;
+      panel.v2y = vc.y;
+      panel.v2z = vc.z;
+      panel.v0_index = ia;
+      panel.v1_index = ib;
+      panel.v2_index = ic;
+      panel.has_triangle_geometry = true;
+      mesh.panels.push_back(panel);
     }
   }
 
   mesh.mesh_build_ms = elapsed_ms(mesh_begin, std::chrono::steady_clock::now());
+  mesh.quality_total_area_a2 = quality_area_sum;
+  if (quality_count > 0) {
+    mesh.quality_triangle_area_min =
+        std::isfinite(quality_area_min) ? quality_area_min : 0.0;
+    mesh.quality_triangle_area_mean =
+        quality_area_sum / static_cast<double>(quality_count);
+    mesh.quality_triangle_area_max = quality_area_max;
+    mesh.quality_triangle_aspect_max = quality_aspect_max;
+    mesh.quality_normal_radial_dot_min =
+        std::isfinite(quality_radial_dot_min) ? quality_radial_dot_min : 0.0;
+    mesh.quality_normal_radial_dot_mean =
+        quality_radial_dot_sum / static_cast<double>(quality_count);
+    mesh.quality_centroid_radial_error_max =
+        quality_centroid_radial_error_max;
+  }
+  if (area_by_atom.size() == 1) {
+    const std::size_t atom_index = area_by_atom.begin()->first;
+    const auto radius_it = radius_by_atom.find(atom_index);
+    const double radius =
+        radius_it != radius_by_atom.end() ? radius_it->second : 0.0;
+    const double exact_area = 4.0 * kPi * radius * radius;
+    if (exact_area > 1.0e-14) {
+      mesh.quality_area_rel_error_vs_4piR2 =
+          std::abs(quality_area_sum - exact_area) / exact_area;
+    }
+  }
   finalize_solid_angle_diagonal(mesh, options.diagonal_mode);
   return mesh;
 }
@@ -660,7 +840,8 @@ std::vector<Panel> build_point_panel_surface(const std::vector<Atom> &atoms,
   TitanSurface::Options surface_options;
   surface_options.probe_radius = options.probe_radius;
   surface_options.min_cell_size = 1.0;
-  surface_options.point_count = TitanSurface::kDefaultPointCount;
+  surface_options.point_count =
+      std::clamp(options.surface_point_count, 8, 4096);
   surface_options.surface_mode =
       options.surface_mode == "sas" ? std::string("sas") : std::string("vdw");
   surface_options.emit_panels = true;
@@ -691,6 +872,7 @@ std::vector<Panel> build_point_panel_surface(const std::vector<Atom> &atoms,
 
   if (result != nullptr) {
     result->surface_geometry = "point-panel";
+    result->sphere_mesh_mode = "off";
     result->panel_count = panels.size();
     result->surface_area_a2 = workspace.total_area;
     result->surface_build_ms = elapsed_surface_ms + workspace.diagnostics.build_ms;
@@ -735,6 +917,24 @@ std::vector<Panel> build_surface(const std::vector<Atom> &atoms,
     result->surface_area_a2 = std::accumulate(
         mesh.panels.begin(), mesh.panels.end(), 0.0,
         [](double sum, const Panel &panel) { return sum + panel.area; });
+    result->sphere_mesh_mode = mesh.sphere_mesh_mode;
+    result->surface_quality_total_area_a2 = mesh.quality_total_area_a2;
+    result->surface_quality_area_rel_error_vs_4piR2 =
+        mesh.quality_area_rel_error_vs_4piR2;
+    result->surface_quality_triangle_area_min =
+        mesh.quality_triangle_area_min;
+    result->surface_quality_triangle_area_mean =
+        mesh.quality_triangle_area_mean;
+    result->surface_quality_triangle_area_max =
+        mesh.quality_triangle_area_max;
+    result->surface_quality_triangle_aspect_max =
+        mesh.quality_triangle_aspect_max;
+    result->surface_quality_normal_radial_dot_min =
+        mesh.quality_normal_radial_dot_min;
+    result->surface_quality_normal_radial_dot_mean =
+        mesh.quality_normal_radial_dot_mean;
+    result->surface_quality_centroid_radial_error_max =
+        mesh.quality_centroid_radial_error_max;
     result->surface_build_ms =
         elapsed_ms(surface_begin, std::chrono::steady_clock::now());
     result->surface_neighbor_ms = mesh.neighbor_build_ms;

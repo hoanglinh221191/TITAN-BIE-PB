@@ -827,21 +827,45 @@ If you add a new module:
   black-box-only against papers/oracle outputs; do not vendor or call external
   TABI-PB/NanoShaper at runtime. TABI now defaults to the JCP 2013 coupled
   boundary-integral formulation with a clean-room triangle surface
-  (`-pbe-tabi-geometry=triangle`); the old scalar `titan-v1` formulation and
-  the shared `TitanSurface` point-panel path remain hidden debug paths.
-  `-pbe-tabi-sum=auto|direct` uses the direct JCP 2013 operator. `treecode` is
-  rejected for JCP 2013 until the coupled 16-kernel treecode is ported, but it
-  remains available when explicitly pinning `-pbe-tabi-formulation=titan-v1`.
+  (`-pbe-tabi-geometry=triangle`). Self-panel analytic singular integration is
+  available through the hidden `-pbe-tabi-near-integration` validation knob;
+  one-ring Duffy/CPV is now a guarded validation path that must not worsen the
+  Born matrix, and `auto` remains centroid until broader analytic gates pass.
+  The old scalar `titan-v1` formulation and the
+  shared `TitanSurface` point-panel path remain hidden debug paths.
+  `jcp2013-centroid` is the direct paper-style path. `jcp2013-treecode` runs
+  the coupled JCP 2013 treecode operator and should remain gated by
+  direct-vs-treecode accuracy tests before becoming the default auto path.
+  `tabi2-nodepatch` is still an experimental/report mode. The legacy scalar
+  treecode remains available when explicitly pinning
+  `-pbe-tabi-formulation=titan-v1`.
   TABI timing now separates surface-neighbor, mesh, solid-angle, RHS, GMRES,
   matvec, preconditioner, BIE formulation, and tree moment/traversal buckets in
-  `pbe_timing.csv`; `-pbe-timing=detail` also writes `pbe_tabi_profile.csv`
-  with one aggregate row per solve. Every TABI solve writes
+  `pbe_timing.csv`; `-pbe-timing=summary|detail` also writes
+  `pbe_memory_profile.csv` for grid-vs-TABI RAM estimates/RSS samples, including
+  both clamped and signed RSS deltas, and
+  `detail` writes `pbe_tabi_profile.csv` with one aggregate row per solve.
+  `test/pbe_born_ion_matrix.ps1` is the primary TABI analytic gate; it records
+  Born status, max error by surface density, convergence slope, and fallback
+  use across charge/radius/salt/density cases. `test/pbe_grid_born_convergence.ps1`
+  is the separate grid diagnostic for Born convergence, vacuum-reference
+  reporting, grid center anchoring, time, and RAM.
+  `test/pbe_tabi_vs_grid_compare.ps1 -ProfileMemory` compares energy/time/RAM
+  for grid versus TABI; use `-FixtureSet barnase` or
+  `test/pbe_tabi_vs_grid_barnase_compare.ps1` for the report-only barnase
+  rows built from the local pyDelPhi fixture cache.
+  Every TABI solve writes
   `pbe_tabi_formulation_audit.csv` with formulation, energy projection,
   unknown count, BIE system, diagonal constants, kernel convention, source and
-  solution norms, dielectric contrast, kappa, boundary energy, and Born
-  reference columns. Hidden accuracy-bisect knobs are
-  `-pbe-tabi-formulation=titan-v1|jcp2013|calibrated-debug` and
-  `-pbe-tabi-energy-projection=boundary|born-check|charge-potential-debug`.
+  solution norms, dielectric contrast, kappa, boundary energy, Born reference,
+  surface_generator, discretization, near_integration/self/one-ring ASI
+  counters, near_kernel_policy, and preconditioner columns. Hidden
+  accuracy-bisect knobs are
+  `-pbe-tabi-formulation=titan-v1|jcp2013|jcp2013-centroid|jcp2013-treecode|tabi2-nodepatch|calibrated-debug`,
+  `-pbe-tabi-energy-projection=boundary|born-check|charge-potential-debug`,
+  `-pbe-tabi-near-integration=auto|centroid|analytic_singular|duffy_adaptive`,
+  `-pbe-tabi-precond=auto|none|diagonal|block`, and
+  `-pbe-tabi-surface-points=<24..4096>`.
   The TABI energy source must be explicit (`tabi_boundary_integral`,
   `tabi_born_check`, `tabi_charge_potential_debug`, `tabi_calibrated_debug`, or
   `tabi_born_fallback`); do not reintroduce silent Born fallback behavior.

@@ -1,3 +1,16 @@
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <psapi.h>
+#else
+#include <cstdio>
+#endif
+
 #include "analyzer_impl.h"
 
 #include "titan_energy_decomposition.h"
@@ -38,6 +51,45 @@ constexpr double kKBKJPerMolK = 0.00831446261815324;
 constexpr double kKBKcalPerMolK = kKBKJPerMolK * kKJToKcal;
 constexpr double kDelphiEpk = 167100.9162872952;
 constexpr double kDelphiReactionFieldEnergyFactor = 0.9549296586;
+
+struct ProcessMemorySample {
+  std::size_t working_set_bytes{0};
+  std::size_t peak_working_set_bytes{0};
+};
+
+ProcessMemorySample sample_process_memory() noexcept {
+  ProcessMemorySample sample;
+#if defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS counters{};
+  counters.cb = sizeof(counters);
+  if (K32GetProcessMemoryInfo(GetCurrentProcess(), &counters,
+                              sizeof(counters))) {
+    sample.working_set_bytes =
+        static_cast<std::size_t>(counters.WorkingSetSize);
+    sample.peak_working_set_bytes =
+        static_cast<std::size_t>(counters.PeakWorkingSetSize);
+  }
+#else
+  FILE *file = std::fopen("/proc/self/status", "r");
+  if (file != nullptr) {
+    char line[256];
+    char label[64];
+    long value_kb = 0;
+    while (std::fgets(line, sizeof(line), file) != nullptr) {
+      if (std::sscanf(line, "%63s %ld", label, &value_kb) != 2)
+        continue;
+      if (std::string(label) == "VmRSS:")
+        sample.working_set_bytes =
+            static_cast<std::size_t>(std::max<long>(0, value_kb)) * 1024u;
+      else if (std::string(label) == "VmHWM:")
+        sample.peak_working_set_bytes =
+            static_cast<std::size_t>(std::max<long>(0, value_kb)) * 1024u;
+    }
+    std::fclose(file);
+  }
+#endif
+  return sample;
+}
 
 std::size_t idx3(std::size_t i, std::size_t j, std::size_t k,
                  std::size_t nx, std::size_t ny) noexcept {
@@ -6752,10 +6804,29 @@ void AnalyzerImpl::write_timing_header_if_needed() {
         << "trajectory_id,frame_index,global_index,time_ps,fixture,mode,"
            "pbe_backend,atom_count,focus_child_atom_count,num_threads,scope,"
            "tabi_surface_build_seconds,tabi_surface_panels,"
+           "tabi_surface_point_count_requested,"
+           "tabi_panel_density_per_A2,tabi_panel_budget_status,"
            "tabi_surface_exposed_points,tabi_surface_buried_points,"
            "tabi_tree_build_seconds,tabi_tree_nodes,tabi_tree_leaf_count,"
            "tabi_near_interactions,tabi_far_interactions,tabi_matvec_mode,"
            "tabi_status,tabi_convergence_reason,tabi_reaction_energy_source,"
+           "tabi_gmres_restart_requested,tabi_gmres_restart_effective,"
+           "tabi_best_residual,tabi_best_residual_iter,tabi_final_residual,"
+           "tabi_best_preconditioned_residual,"
+           "tabi_final_preconditioned_residual,"
+           "tabi_true_residual_abs,tabi_true_residual_rel,"
+           "tabi_true_residual_probe_mode,"
+           "tabi_true_residual_probe_scope,"
+           "tabi_true_residual_probe_interval,"
+           "tabi_true_residual_sample_count,"
+           "tabi_true_residual_probe_calls,"
+           "tabi_true_residual_probe_seconds,"
+           "tabi_sampled_true_residual_rel,"
+           "tabi_sampled_true_residual_rows,"
+           "tabi_sampled_probe_calls,"
+           "tabi_sampled_probe_seconds,"
+           "tabi_full_true_residual_confirm_calls,"
+           "tabi_full_probe_seconds,"
            "tabi_rhs_seconds,tabi_gmres_seconds,"
            "tabi_matvec_seconds_total,tabi_matvec_seconds_avg,"
            "tabi_matvec_calls,tabi_orthogonalization_seconds,"
@@ -6763,16 +6834,95 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_surface_mesh_seconds,tabi_solid_angle_seconds,"
            "tabi_tree_moment_seconds,tabi_tree_traversal_seconds,"
            "tabi_near_eval_seconds,tabi_far_eval_seconds,"
+           "tabi_singular_near_eval_seconds,tabi_leaf_near_eval_seconds,"
+           "tabi_leaf_panel_eval_seconds,"
+           "tabi_leaf_tile_eval_seconds,tabi_leaf_residual_eval_seconds,"
+           "tabi_smooth_leaf_node_eval_seconds,"
+           "tabi_leaf_panel_kernel,tabi_leaf_tile_status,"
+           "tabi_leaf_panel_pairs_per_second,"
+           "tabi_singular_near_interactions,tabi_leaf_near_interactions,"
+           "tabi_far_node_interactions,"
+           "tabi_leaf_panel_interactions,tabi_leaf_tile_interactions,"
+           "tabi_leaf_tile_panel_interactions,"
+           "tabi_leaf_residual_panel_interactions,"
+           "tabi_smooth_leaf_node_interactions,"
+           "tabi_leaf_pruned_interactions,"
+           "tabi_adaptive_smooth_leaf_accepted,"
+           "tabi_adaptive_smooth_leaf_rejected,"
+           "tabi_adaptive_span_tile_accepted,"
+           "tabi_adaptive_span_tile_rejected,"
+           "tabi_adaptive_exact_leaf_fallbacks,"
+           "tabi_adaptive_reject_one_ring_overlap,"
+           "tabi_adaptive_reject_error_bound_failed,"
+           "tabi_adaptive_reject_p4_check_failed,"
+           "tabi_adaptive_reject_too_close,"
+           "tabi_leaf_work_reduction_ratio,"
+           "tabi_target_cluster_interactions,"
+           "tabi_target_cluster_targets,"
+           "tabi_target_cluster_panels_pruned,"
+           "tabi_target_cluster_rejected,"
+           "tabi_target_cluster_eval_seconds,"
+           "tabi_adaptive_level,tabi_leaf_near_policy,"
+           "tabi_interaction_mode,tabi_node_bounds_mode,"
+           "tabi_tree_builder,tabi_mac_safety,tabi_mac_gap_factor,"
+           "tabi_tree_depth_max,"
+           "tabi_mac_reject_radius_limited,"
+           "tabi_mac_accept_rate,tabi_node_radius_max,"
+           "tabi_node_radius_mean,tabi_leaf_panel_work_per_matvec,"
+           "tabi_far_node_work_per_matvec,"
+           "tabi_far_geometric_unsafe_count,"
+           "tabi_far_geometric_unsafe_panels,"
+           "tabi_far_geometric_min_gap,"
+           "tabi_far_geometric_gap_ratio_min,"
+           "tabi_far_geometric_gap_ratio_mean,"
+           "tabi_far_geometric_audit_samples,"
+           "tabi_mac_physical_gap_rejects,"
+           "tabi_moment_audit,tabi_moment_audit_nodes,"
+           "tabi_moment_translation_rel_error_max,"
+           "tabi_moment_translation_rel_error_mean,"
+           "tabi_quad_buffer_auto_candidate,"
+           "tabi_near_integration,tabi_quad_buffer,"
+           "tabi_near_self_pairs,"
+           "tabi_near_one_ring_pairs,tabi_near_duffy_pairs,"
+           "tabi_near_centroid_pairs,tabi_near_fallbacks,"
+           "tabi_near_geometric_buffer_pairs,"
+           "tabi_near_geometric_buffer_gauss_pairs,"
+           "tabi_near_geometric_buffer_adaptive_pairs,"
+           "tabi_near_geometric_buffer_centroid_pairs,"
+           "tabi_near_geometric_buffer_min_gap,"
+           "tabi_near_geometric_buffer_mean_gap_ratio,"
+           "tabi_near_geometric_buffer_max_edge_mean,"
+           "tabi_near_integration_seconds,tabi_duffy_subdivisions_max,"
+           "tabi_duffy_subdivisions_mean,tabi_near_kernel_policy,"
+           "tabi_near_k1_accepted,tabi_near_k1_rejected,"
+           "tabi_near_k2_accepted,tabi_near_k2_rejected,"
+           "tabi_near_k3_accepted,tabi_near_k3_rejected,"
+           "tabi_near_k4_accepted,tabi_near_k4_rejected,"
+           "tabi_near_one_ring_k1_accepted,"
+           "tabi_near_one_ring_k1_rejected,"
+           "tabi_near_one_ring_k2_accepted,"
+           "tabi_near_one_ring_k2_rejected,"
+           "tabi_near_one_ring_k3_accepted,"
+           "tabi_near_one_ring_k3_rejected,"
+           "tabi_near_one_ring_k4_accepted,"
+           "tabi_near_one_ring_k4_rejected,"
+           "tabi_near_k1_policy,tabi_near_k2_policy,"
+           "tabi_near_k3_policy,tabi_near_k4_policy,"
            "tabi_surface_geometry,tabi_mesh_vertices,tabi_mesh_triangles,"
            "tabi_boundary_nodes,tabi_avg_valence,tabi_nonmanifold_edges,"
            "tabi_solid_angle_fallbacks,tabi_diag_min,tabi_diag_max,"
-           "tabi_taylor_order,tabi_interaction_build_seconds,"
+            "tabi_taylor_order,tabi_derivative_mode,"
+            "tabi_interaction_build_seconds,"
            "tabi_tree_eval_seconds,"
-           "tabi_formulation,tabi_energy_projection,tabi_fallback_used,"
+           "tabi_formulation,tabi_energy_projection,"
+           "tabi_preconditioner_requested,tabi_preconditioner_effective,"
+           "tabi_preconditioner_block_near,"
+           "tabi_surface_generator,tabi_discretization,"
+           "tabi_fallback_used,"
            "tabi_rhs_scale,tabi_dielectric_contrast,tabi_operator_contrast,"
            "tabi_unknown_count,tabi_bie_system,tabi_lhs_diag_phi,"
            "tabi_lhs_diag_phin,tabi_energy_equation,"
-           "tabi_kernel_convention,tabi_source_norm_s1,"
+            "tabi_kernel_convention,tabi_source_norm_s1,"
            "tabi_source_norm_s2,tabi_phi_norm,tabi_phin_norm,"
            "tabi_kappa_inv_A,tabi_coulomb_factor_kcal_mol,"
            "tabi_boundary_energy_kJmol,tabi_reference_energy_kJmol,"
@@ -6834,6 +6984,9 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << ',' << csv_escape(scope) << ','
               << seconds(result.tabi_surface_build_ms) << ','
               << result.tabi_surface_panels << ','
+              << result.tabi_surface_point_count_requested << ','
+              << result.tabi_panel_density_per_a2 << ','
+              << csv_escape(result.tabi_panel_budget_status) << ','
               << result.tabi_surface_exposed_points << ','
               << result.tabi_surface_buried_points << ','
               << seconds(result.tabi_tree_build_ms) << ','
@@ -6845,6 +6998,27 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << csv_escape(result.tabi_status) << ','
               << csv_escape(result.tabi_convergence_reason) << ','
               << csv_escape(result.tabi_reaction_energy_source) << ','
+              << result.tabi_gmres_restart_requested << ','
+              << result.tabi_gmres_restart_effective << ','
+              << result.tabi_best_residual << ','
+              << result.tabi_best_residual_iter << ','
+              << result.tabi_final_residual << ','
+              << result.tabi_best_preconditioned_residual << ','
+              << result.tabi_final_preconditioned_residual << ','
+              << result.tabi_true_residual_abs << ','
+              << result.tabi_true_residual_rel << ','
+              << csv_escape(result.tabi_true_residual_probe_mode) << ','
+              << csv_escape(result.tabi_true_residual_probe_scope) << ','
+              << result.tabi_true_residual_probe_interval << ','
+              << result.tabi_true_residual_sample_count << ','
+              << result.tabi_true_residual_probe_calls << ','
+              << seconds(result.tabi_true_residual_probe_ms) << ','
+              << result.tabi_sampled_true_residual_rel << ','
+              << result.tabi_sampled_true_residual_rows << ','
+              << result.tabi_sampled_probe_calls << ','
+              << seconds(result.tabi_sampled_probe_ms) << ','
+              << result.tabi_full_true_residual_confirm_calls << ','
+              << seconds(result.tabi_full_probe_ms) << ','
               << seconds(result.tabi_rhs_ms) << ','
               << seconds(result.tabi_gmres_ms) << ','
               << seconds(result.tabi_matvec_ms_total) << ','
@@ -6859,6 +7033,103 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << seconds(result.tabi_tree_traversal_ms) << ','
               << seconds(result.tabi_near_eval_ms) << ','
               << seconds(result.tabi_far_eval_ms) << ','
+              << seconds(result.tabi_singular_near_eval_ms) << ','
+              << seconds(result.tabi_leaf_near_eval_ms) << ','
+              << seconds(result.tabi_leaf_panel_eval_ms) << ','
+              << seconds(result.tabi_leaf_tile_eval_ms) << ','
+              << seconds(result.tabi_leaf_residual_eval_ms) << ','
+              << seconds(result.tabi_smooth_leaf_node_eval_ms) << ','
+              << csv_escape(result.tabi_leaf_panel_kernel) << ','
+              << csv_escape(result.tabi_leaf_tile_status) << ','
+              << result.tabi_leaf_panel_pairs_per_second << ','
+              << result.tabi_singular_near_interactions << ','
+              << result.tabi_leaf_near_interactions << ','
+              << result.tabi_far_node_interactions << ','
+              << result.tabi_leaf_panel_interactions << ','
+              << result.tabi_leaf_tile_interactions << ','
+              << result.tabi_leaf_tile_panel_interactions << ','
+              << result.tabi_leaf_residual_panel_interactions << ','
+              << result.tabi_smooth_leaf_node_interactions << ','
+              << result.tabi_leaf_pruned_interactions << ','
+              << result.tabi_adaptive_smooth_leaf_accepted << ','
+              << result.tabi_adaptive_smooth_leaf_rejected << ','
+              << result.tabi_adaptive_span_tile_accepted << ','
+              << result.tabi_adaptive_span_tile_rejected << ','
+              << result.tabi_adaptive_exact_leaf_fallbacks << ','
+              << result.tabi_adaptive_reject_one_ring_overlap << ','
+              << result.tabi_adaptive_reject_error_bound_failed << ','
+              << result.tabi_adaptive_reject_p4_check_failed << ','
+              << result.tabi_adaptive_reject_too_close << ','
+              << result.tabi_leaf_work_reduction_ratio << ','
+              << result.tabi_target_cluster_interactions << ','
+              << result.tabi_target_cluster_targets << ','
+              << result.tabi_target_cluster_panels_pruned << ','
+              << result.tabi_target_cluster_rejected << ','
+              << seconds(result.tabi_target_cluster_eval_ms) << ','
+              << csv_escape(result.tabi_adaptive_level) << ','
+              << csv_escape(result.tabi_leaf_near_policy) << ','
+              << csv_escape(result.tabi_interaction_mode) << ','
+              << csv_escape(result.tabi_node_bounds_mode) << ','
+              << csv_escape(result.tabi_tree_builder) << ','
+              << csv_escape(result.tabi_mac_safety) << ','
+              << result.tabi_mac_gap_factor << ','
+              << result.tabi_tree_depth_max << ','
+              << result.tabi_mac_reject_radius_limited << ','
+              << result.tabi_mac_accept_rate << ','
+              << result.tabi_node_radius_max << ','
+              << result.tabi_node_radius_mean << ','
+              << result.tabi_leaf_panel_work_per_matvec << ','
+              << result.tabi_far_node_work_per_matvec << ','
+              << result.tabi_far_geometric_unsafe_count << ','
+              << result.tabi_far_geometric_unsafe_panels << ','
+              << result.tabi_far_geometric_min_gap << ','
+              << result.tabi_far_geometric_gap_ratio_min << ','
+              << result.tabi_far_geometric_gap_ratio_mean << ','
+              << result.tabi_far_geometric_audit_samples << ','
+              << result.tabi_mac_physical_gap_rejects << ','
+              << csv_escape(result.tabi_moment_audit) << ','
+              << result.tabi_moment_audit_nodes << ','
+              << result.tabi_moment_translation_rel_error_max << ','
+              << result.tabi_moment_translation_rel_error_mean << ','
+              << csv_escape(result.tabi_quad_buffer_auto_candidate) << ','
+              << csv_escape(result.tabi_near_integration) << ','
+              << csv_escape(result.tabi_quad_buffer) << ','
+              << result.tabi_near_self_pairs << ','
+              << result.tabi_near_one_ring_pairs << ','
+              << result.tabi_near_duffy_pairs << ','
+              << result.tabi_near_centroid_pairs << ','
+              << result.tabi_near_fallbacks << ','
+              << result.tabi_near_geometric_buffer_pairs << ','
+              << result.tabi_near_geometric_buffer_gauss_pairs << ','
+              << result.tabi_near_geometric_buffer_adaptive_pairs << ','
+              << result.tabi_near_geometric_buffer_centroid_pairs << ','
+              << result.tabi_near_geometric_buffer_min_gap << ','
+              << result.tabi_near_geometric_buffer_mean_gap_ratio << ','
+              << result.tabi_near_geometric_buffer_max_edge_mean << ','
+              << seconds(result.tabi_near_integration_ms) << ','
+              << result.tabi_duffy_subdivisions_max << ','
+              << result.tabi_duffy_subdivisions_mean << ','
+              << csv_escape(result.tabi_near_kernel_policy) << ','
+              << result.tabi_near_k1_accepted << ','
+              << result.tabi_near_k1_rejected << ','
+              << result.tabi_near_k2_accepted << ','
+              << result.tabi_near_k2_rejected << ','
+              << result.tabi_near_k3_accepted << ','
+              << result.tabi_near_k3_rejected << ','
+              << result.tabi_near_k4_accepted << ','
+              << result.tabi_near_k4_rejected << ','
+              << result.tabi_near_one_ring_k1_accepted << ','
+              << result.tabi_near_one_ring_k1_rejected << ','
+              << result.tabi_near_one_ring_k2_accepted << ','
+              << result.tabi_near_one_ring_k2_rejected << ','
+              << result.tabi_near_one_ring_k3_accepted << ','
+              << result.tabi_near_one_ring_k3_rejected << ','
+              << result.tabi_near_one_ring_k4_accepted << ','
+              << result.tabi_near_one_ring_k4_rejected << ','
+              << csv_escape(result.tabi_near_k1_policy) << ','
+              << csv_escape(result.tabi_near_k2_policy) << ','
+              << csv_escape(result.tabi_near_k3_policy) << ','
+              << csv_escape(result.tabi_near_k4_policy) << ','
               << csv_escape(result.tabi_surface_geometry) << ','
               << result.tabi_mesh_vertices << ','
               << result.tabi_mesh_triangles << ','
@@ -6869,10 +7140,16 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << result.tabi_diag_min << ','
               << result.tabi_diag_max << ','
               << result.tabi_taylor_order << ','
+              << csv_escape(result.tabi_derivative_mode) << ','
               << seconds(result.tabi_interaction_build_ms) << ','
               << seconds(result.tabi_tree_eval_ms) << ','
               << csv_escape(result.tabi_formulation) << ','
               << csv_escape(result.tabi_energy_projection) << ','
+              << csv_escape(result.tabi_preconditioner_requested) << ','
+              << csv_escape(result.tabi_preconditioner_effective) << ','
+              << csv_escape(result.tabi_preconditioner_block_near) << ','
+              << csv_escape(result.tabi_surface_generator) << ','
+              << csv_escape(result.tabi_discretization) << ','
               << (result.tabi_fallback_used ? "true" : "false") << ','
               << result.tabi_rhs_scale << ','
               << result.tabi_dielectric_contrast << ','
@@ -6957,20 +7234,85 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
     tabi_profile_out_
         << "trajectory_id,frame_index,global_index,fixture,atom_count,"
            "surface_geometry,panels,mesh_vertices,mesh_triangles,"
+           "surface_point_count_requested,panel_density_per_A2,"
+           "panel_budget_status,"
            "matvec_mode,status,convergence_reason,reaction_energy_source,"
-           "iterations,residual,residual_history,total_seconds,"
+           "iterations,residual,residual_history,gmres_restart_requested,"
+           "gmres_restart_effective,best_residual,best_residual_iter,"
+           "final_residual,best_preconditioned_residual,"
+           "final_preconditioned_residual,true_residual_abs,"
+           "true_residual_rel,true_residual_probe_mode,"
+           "true_residual_probe_scope,true_residual_probe_interval,"
+           "true_residual_sample_count,true_residual_probe_calls,"
+           "true_residual_probe_seconds,sampled_true_residual_rel,"
+           "sampled_true_residual_rows,sampled_probe_calls,"
+           "sampled_probe_seconds,full_true_residual_confirm_calls,"
+           "full_probe_seconds,total_seconds,"
            "surface_build_seconds,surface_neighbor_seconds,"
            "surface_mesh_seconds,solid_angle_seconds,rhs_seconds,"
            "gmres_seconds,matvec_seconds_total,matvec_seconds_avg,"
            "matvec_calls,orthogonalization_seconds,preconditioner_seconds,"
            "tree_build_seconds,tree_moment_seconds,tree_traversal_seconds,"
            "tree_eval_seconds,near_eval_seconds,far_eval_seconds,"
-           "near_interactions,far_interactions,tree_nodes,tree_leaf_count,"
-           "taylor_order,diag_min,diag_max,solid_angle_fallbacks,"
+           "singular_near_eval_seconds,leaf_near_eval_seconds,"
+           "leaf_panel_eval_seconds,leaf_tile_eval_seconds,"
+           "leaf_residual_eval_seconds,smooth_leaf_node_eval_seconds,"
+           "leaf_panel_kernel,leaf_tile_status,leaf_panel_pairs_per_second,"
+           "leaf_near_policy,interaction_mode,node_bounds_mode,"
+           "tree_builder,mac_safety,mac_gap_factor,tree_depth_max,"
+           "mac_reject_radius_limited,"
+           "mac_accept_rate,node_radius_max,node_radius_mean,"
+           "leaf_panel_work_per_matvec,far_node_work_per_matvec,"
+           "far_geometric_unsafe_count,far_geometric_unsafe_panels,"
+           "far_geometric_min_gap,far_geometric_gap_ratio_min,"
+           "far_geometric_gap_ratio_mean,far_geometric_audit_samples,"
+           "mac_physical_gap_rejects,moment_audit,moment_audit_nodes,"
+           "moment_translation_rel_error_max,"
+           "moment_translation_rel_error_mean,"
+           "quad_buffer_auto_candidate,"
+           "near_integration,quad_buffer,near_self_pairs,near_one_ring_pairs,"
+           "near_duffy_pairs,near_centroid_pairs,near_fallbacks,"
+           "near_geometric_buffer_pairs,near_geometric_buffer_gauss_pairs,"
+           "near_geometric_buffer_adaptive_pairs,"
+           "near_geometric_buffer_centroid_pairs,"
+           "near_geometric_buffer_min_gap,"
+           "near_geometric_buffer_mean_gap_ratio,"
+           "near_geometric_buffer_max_edge_mean,"
+           "near_integration_seconds,duffy_subdivisions_max,"
+           "duffy_subdivisions_mean,near_kernel_policy,"
+           "near_k1_accepted,near_k1_rejected,near_k2_accepted,"
+           "near_k2_rejected,near_k3_accepted,near_k3_rejected,"
+           "near_k4_accepted,near_k4_rejected,"
+           "near_one_ring_k1_accepted,near_one_ring_k1_rejected,"
+           "near_one_ring_k2_accepted,near_one_ring_k2_rejected,"
+           "near_one_ring_k3_accepted,near_one_ring_k3_rejected,"
+           "near_one_ring_k4_accepted,near_one_ring_k4_rejected,"
+           "near_k1_policy,"
+           "near_k2_policy,near_k3_policy,near_k4_policy,"
+           "near_interactions,far_interactions,singular_near_interactions,"
+           "leaf_near_interactions,far_node_interactions,"
+           "leaf_panel_interactions,leaf_tile_interactions,"
+           "leaf_tile_panel_interactions,leaf_residual_panel_interactions,"
+           "smooth_leaf_node_interactions,"
+           "leaf_pruned_interactions,adaptive_smooth_leaf_accepted,"
+           "adaptive_smooth_leaf_rejected,adaptive_span_tile_accepted,"
+           "adaptive_span_tile_rejected,adaptive_exact_leaf_fallbacks,"
+           "adaptive_reject_one_ring_overlap,"
+           "adaptive_reject_error_bound_failed,"
+           "adaptive_reject_p4_check_failed,adaptive_reject_too_close,"
+           "leaf_work_reduction_ratio,target_cluster_interactions,"
+           "target_cluster_targets,target_cluster_panels_pruned,"
+           "target_cluster_rejected,target_cluster_eval_seconds,"
+           "adaptive_level,"
+           "tree_nodes,tree_leaf_count,"
+            "taylor_order,derivative_mode,diag_min,diag_max,solid_angle_fallbacks,"
            "nonmanifold_edges,formulation,energy_projection,fallback_used,"
+           "preconditioner_requested,preconditioner_effective,"
+           "preconditioner_block_near,"
+           "surface_generator,discretization,"
            "rhs_scale,dielectric_contrast,operator_contrast,unknown_count,"
            "bie_system,lhs_diag_phi,lhs_diag_phin,energy_equation,"
-           "kernel_convention,source_norm_s1,source_norm_s2,phi_norm,"
+            "kernel_convention,source_norm_s1,source_norm_s2,phi_norm,"
            "phin_norm,kappa_inv_A,"
            "boundary_energy_kJmol,reference_energy_kJmol,"
            "selected_energy_scale,memory_bytes,energy_kJmol\n";
@@ -6990,12 +7332,36 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << result.atom_count << ',' << csv_escape(result.tabi_surface_geometry)
       << ',' << result.tabi_surface_panels << ',' << result.tabi_mesh_vertices
       << ',' << result.tabi_mesh_triangles << ','
+      << result.tabi_surface_point_count_requested << ','
+      << result.tabi_panel_density_per_a2 << ','
+      << csv_escape(result.tabi_panel_budget_status) << ','
       << csv_escape(result.tabi_matvec_mode) << ','
       << csv_escape(result.tabi_status) << ','
       << csv_escape(result.tabi_convergence_reason) << ','
       << csv_escape(result.tabi_reaction_energy_source) << ','
       << result.solvent_iterations << ',' << result.linear_residual << ','
       << csv_escape(result.tabi_residual_history) << ','
+      << result.tabi_gmres_restart_requested << ','
+      << result.tabi_gmres_restart_effective << ','
+      << result.tabi_best_residual << ','
+      << result.tabi_best_residual_iter << ','
+      << result.tabi_final_residual << ','
+      << result.tabi_best_preconditioned_residual << ','
+      << result.tabi_final_preconditioned_residual << ','
+      << result.tabi_true_residual_abs << ','
+      << result.tabi_true_residual_rel << ','
+      << csv_escape(result.tabi_true_residual_probe_mode) << ','
+      << csv_escape(result.tabi_true_residual_probe_scope) << ','
+      << result.tabi_true_residual_probe_interval << ','
+      << result.tabi_true_residual_sample_count << ','
+      << result.tabi_true_residual_probe_calls << ','
+      << seconds(result.tabi_true_residual_probe_ms) << ','
+      << result.tabi_sampled_true_residual_rel << ','
+      << result.tabi_sampled_true_residual_rows << ','
+      << result.tabi_sampled_probe_calls << ','
+      << seconds(result.tabi_sampled_probe_ms) << ','
+      << result.tabi_full_true_residual_confirm_calls << ','
+      << seconds(result.tabi_full_probe_ms) << ','
       << seconds(timing.total_ms) << ','
       << seconds(result.tabi_surface_build_ms) << ','
       << seconds(result.tabi_surface_neighbor_ms) << ','
@@ -7014,15 +7380,119 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << seconds(result.tabi_tree_eval_ms) << ','
       << seconds(result.tabi_near_eval_ms) << ','
       << seconds(result.tabi_far_eval_ms) << ','
+      << seconds(result.tabi_singular_near_eval_ms) << ','
+      << seconds(result.tabi_leaf_near_eval_ms) << ','
+      << seconds(result.tabi_leaf_panel_eval_ms) << ','
+      << seconds(result.tabi_leaf_tile_eval_ms) << ','
+      << seconds(result.tabi_leaf_residual_eval_ms) << ','
+      << seconds(result.tabi_smooth_leaf_node_eval_ms) << ','
+      << csv_escape(result.tabi_leaf_panel_kernel) << ','
+      << csv_escape(result.tabi_leaf_tile_status) << ','
+      << result.tabi_leaf_panel_pairs_per_second << ','
+      << csv_escape(result.tabi_leaf_near_policy) << ','
+      << csv_escape(result.tabi_interaction_mode) << ','
+      << csv_escape(result.tabi_node_bounds_mode) << ','
+      << csv_escape(result.tabi_tree_builder) << ','
+      << csv_escape(result.tabi_mac_safety) << ','
+      << result.tabi_mac_gap_factor << ','
+      << result.tabi_tree_depth_max << ','
+      << result.tabi_mac_reject_radius_limited << ','
+      << result.tabi_mac_accept_rate << ','
+      << result.tabi_node_radius_max << ','
+      << result.tabi_node_radius_mean << ','
+      << result.tabi_leaf_panel_work_per_matvec << ','
+      << result.tabi_far_node_work_per_matvec << ','
+      << result.tabi_far_geometric_unsafe_count << ','
+      << result.tabi_far_geometric_unsafe_panels << ','
+      << result.tabi_far_geometric_min_gap << ','
+      << result.tabi_far_geometric_gap_ratio_min << ','
+      << result.tabi_far_geometric_gap_ratio_mean << ','
+      << result.tabi_far_geometric_audit_samples << ','
+      << result.tabi_mac_physical_gap_rejects << ','
+      << csv_escape(result.tabi_moment_audit) << ','
+      << result.tabi_moment_audit_nodes << ','
+      << result.tabi_moment_translation_rel_error_max << ','
+      << result.tabi_moment_translation_rel_error_mean << ','
+      << csv_escape(result.tabi_quad_buffer_auto_candidate) << ','
+      << csv_escape(result.tabi_near_integration) << ','
+      << csv_escape(result.tabi_quad_buffer) << ','
+      << result.tabi_near_self_pairs << ','
+      << result.tabi_near_one_ring_pairs << ','
+      << result.tabi_near_duffy_pairs << ','
+      << result.tabi_near_centroid_pairs << ','
+      << result.tabi_near_fallbacks << ','
+      << result.tabi_near_geometric_buffer_pairs << ','
+      << result.tabi_near_geometric_buffer_gauss_pairs << ','
+      << result.tabi_near_geometric_buffer_adaptive_pairs << ','
+      << result.tabi_near_geometric_buffer_centroid_pairs << ','
+      << result.tabi_near_geometric_buffer_min_gap << ','
+      << result.tabi_near_geometric_buffer_mean_gap_ratio << ','
+      << result.tabi_near_geometric_buffer_max_edge_mean << ','
+      << seconds(result.tabi_near_integration_ms) << ','
+      << result.tabi_duffy_subdivisions_max << ','
+      << result.tabi_duffy_subdivisions_mean << ','
+      << csv_escape(result.tabi_near_kernel_policy) << ','
+      << result.tabi_near_k1_accepted << ','
+      << result.tabi_near_k1_rejected << ','
+      << result.tabi_near_k2_accepted << ','
+      << result.tabi_near_k2_rejected << ','
+      << result.tabi_near_k3_accepted << ','
+      << result.tabi_near_k3_rejected << ','
+      << result.tabi_near_k4_accepted << ','
+      << result.tabi_near_k4_rejected << ','
+      << result.tabi_near_one_ring_k1_accepted << ','
+      << result.tabi_near_one_ring_k1_rejected << ','
+      << result.tabi_near_one_ring_k2_accepted << ','
+      << result.tabi_near_one_ring_k2_rejected << ','
+      << result.tabi_near_one_ring_k3_accepted << ','
+      << result.tabi_near_one_ring_k3_rejected << ','
+      << result.tabi_near_one_ring_k4_accepted << ','
+      << result.tabi_near_one_ring_k4_rejected << ','
+      << csv_escape(result.tabi_near_k1_policy) << ','
+      << csv_escape(result.tabi_near_k2_policy) << ','
+      << csv_escape(result.tabi_near_k3_policy) << ','
+      << csv_escape(result.tabi_near_k4_policy) << ','
       << result.tabi_near_interactions << ','
-      << result.tabi_far_interactions << ',' << result.tabi_tree_nodes << ','
+      << result.tabi_far_interactions << ','
+      << result.tabi_singular_near_interactions << ','
+      << result.tabi_leaf_near_interactions << ','
+      << result.tabi_far_node_interactions << ','
+      << result.tabi_leaf_panel_interactions << ','
+      << result.tabi_leaf_tile_interactions << ','
+      << result.tabi_leaf_tile_panel_interactions << ','
+      << result.tabi_leaf_residual_panel_interactions << ','
+      << result.tabi_smooth_leaf_node_interactions << ','
+      << result.tabi_leaf_pruned_interactions << ','
+      << result.tabi_adaptive_smooth_leaf_accepted << ','
+      << result.tabi_adaptive_smooth_leaf_rejected << ','
+      << result.tabi_adaptive_span_tile_accepted << ','
+      << result.tabi_adaptive_span_tile_rejected << ','
+      << result.tabi_adaptive_exact_leaf_fallbacks << ','
+      << result.tabi_adaptive_reject_one_ring_overlap << ','
+      << result.tabi_adaptive_reject_error_bound_failed << ','
+      << result.tabi_adaptive_reject_p4_check_failed << ','
+      << result.tabi_adaptive_reject_too_close << ','
+      << result.tabi_leaf_work_reduction_ratio << ','
+      << result.tabi_target_cluster_interactions << ','
+      << result.tabi_target_cluster_targets << ','
+      << result.tabi_target_cluster_panels_pruned << ','
+      << result.tabi_target_cluster_rejected << ','
+      << seconds(result.tabi_target_cluster_eval_ms) << ','
+      << csv_escape(result.tabi_adaptive_level) << ','
+      << result.tabi_tree_nodes << ','
       << result.tabi_tree_leaf_count << ',' << result.tabi_taylor_order << ','
+      << csv_escape(result.tabi_derivative_mode) << ','
       << result.tabi_diag_min << ',' << result.tabi_diag_max << ','
       << result.tabi_solid_angle_fallbacks << ','
       << result.tabi_nonmanifold_edges << ','
       << csv_escape(result.tabi_formulation) << ','
       << csv_escape(result.tabi_energy_projection) << ','
       << (result.tabi_fallback_used ? "true" : "false") << ','
+      << csv_escape(result.tabi_preconditioner_requested) << ','
+      << csv_escape(result.tabi_preconditioner_effective) << ','
+      << csv_escape(result.tabi_preconditioner_block_near) << ','
+      << csv_escape(result.tabi_surface_generator) << ','
+      << csv_escape(result.tabi_discretization) << ','
       << result.tabi_rhs_scale << ',' << result.tabi_dielectric_contrast << ','
       << result.tabi_operator_contrast << ',' << result.tabi_unknown_count
       << ',' << csv_escape(result.tabi_bie_system) << ','
@@ -7038,6 +7508,371 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << result.energy_kj_mol << '\n';
 }
 
+void AnalyzerImpl::write_tabi_near_block_audit_header_if_needed() {
+  if (args_.timing != "detail")
+    return;
+  if (!tabi_near_block_audit_out_.is_open()) {
+    tabi_near_block_audit_out_.open("pbe_tabi_near_block_audit.csv",
+                                    std::ios::out | std::ios::trunc);
+    if (!tabi_near_block_audit_out_.is_open()) {
+      throw std::runtime_error(
+          "PBE: failed to open pbe_tabi_near_block_audit.csv.");
+    }
+  }
+  if (!tabi_near_block_audit_header_written_) {
+    tabi_near_block_audit_out_
+        << "trajectory_id,frame_index,global_index,fixture,block,pair_type,"
+           "orientation,accepted,rejected,candidate_worse_than_centroid,"
+           "reference_nonconverged,orientation_sign_mismatch,"
+           "strict_ref_reject,"
+           "max_candidate_ref_rel,mean_candidate_ref_rel,"
+           "max_centroid_ref_rel,k2_laplace_sign_ok,"
+           "k2_yukawa_smooth_ref_rel,k2_orientation_pair_ref_rel\n";
+    tabi_near_block_audit_header_written_ = true;
+  }
+}
+
+void AnalyzerImpl::append_tabi_near_block_audit_rows(
+    const FrameResult &result) {
+  if (args_.timing != "detail" || result.pbe_backend != "tabi")
+    return;
+  write_tabi_near_block_audit_header_if_needed();
+  static constexpr std::array<const char *, kNearBlockCount> kBlockLabels = {
+      "K1", "K2", "K3", "K4"};
+  static constexpr std::array<const char *, kNearPairTypeCount>
+      kPairTypeLabels = {"self", "edge", "vertex", "smooth_near"};
+  static constexpr std::array<const char *, kNearOrientationCount>
+      kOrientationLabels = {"same", "flipped", "mixed"};
+  for (std::size_t block = 0; block < kNearBlockCount; ++block) {
+    for (std::size_t pair_type = 0; pair_type < kNearPairTypeCount;
+         ++pair_type) {
+      for (std::size_t orientation = 0; orientation < kNearOrientationCount;
+           ++orientation) {
+        const std::size_t index =
+            (block * kNearPairTypeCount + pair_type) * kNearOrientationCount +
+            orientation;
+        if (index >= result.tabi_near_block_audit.size())
+          continue;
+        const auto &bucket = result.tabi_near_block_audit[index];
+        const double mean_candidate_ref_rel =
+            bucket.sample_count > 0
+                ? bucket.sum_candidate_ref_rel /
+                      static_cast<double>(bucket.sample_count)
+                : 0.0;
+        tabi_near_block_audit_out_
+            << result.trajectory_id << ',' << result.frame_index << ','
+            << result.global_index << ',' << csv_escape(current_source_label_)
+            << ',' << kBlockLabels[block] << ','
+            << kPairTypeLabels[pair_type] << ','
+            << kOrientationLabels[orientation] << ',' << bucket.accepted
+            << ',' << bucket.rejected << ','
+            << bucket.candidate_worse_than_centroid << ','
+            << bucket.reference_nonconverged << ','
+            << bucket.orientation_sign_mismatch << ','
+            << bucket.strict_ref_reject << ','
+            << bucket.max_candidate_ref_rel << ',' << mean_candidate_ref_rel
+            << ',' << bucket.max_centroid_ref_rel << ','
+            << bucket.k2_laplace_sign_ok << ','
+            << bucket.max_k2_yukawa_smooth_ref_rel << ','
+            << bucket.max_k2_orientation_pair_ref_rel << '\n';
+      }
+    }
+  }
+}
+
+void AnalyzerImpl::write_tabi_geometric_near_audit_header_if_needed() {
+  if (args_.timing != "detail")
+    return;
+  if (!tabi_geometric_near_audit_out_.is_open()) {
+    tabi_geometric_near_audit_out_.open("pbe_tabi_geometric_near_audit.csv",
+                                        std::ios::out | std::ios::trunc);
+    if (!tabi_geometric_near_audit_out_.is_open()) {
+      throw std::runtime_error(
+          "PBE: failed to open pbe_tabi_geometric_near_audit.csv.");
+    }
+  }
+  if (!tabi_geometric_near_audit_header_written_) {
+    tabi_geometric_near_audit_out_
+        << "trajectory_id,frame_index,global_index,fixture,gap_bucket,"
+           "center_bucket,block,kernel,pairs,min_gap,max_gap_ratio,"
+           "mean_gap_ratio,mean_center_ratio\n";
+    tabi_geometric_near_audit_header_written_ = true;
+  }
+}
+
+void AnalyzerImpl::append_tabi_geometric_near_audit_rows(
+    const FrameResult &result) {
+  if (args_.timing != "detail" || result.pbe_backend != "tabi")
+    return;
+  write_tabi_geometric_near_audit_header_if_needed();
+  static constexpr std::array<const char *, kGeometricGapBucketCount>
+      kGapLabels = {"lt_0p25", "0p25_0p50", "0p50_0p75", "gt_0p75"};
+  static constexpr std::array<const char *, kGeometricCenterBucketCount>
+      kCenterLabels = {"lt_1p0", "1p0_2p0", "ge_2p0"};
+  static constexpr std::array<const char *, kGeometricKernelCount>
+      kKernelLabels = {"centroid", "gauss7", "subdivided"};
+  static constexpr std::array<const char *, kNearBlockCount> kBlockLabels = {
+      "K1", "K2", "K3", "K4"};
+  for (std::size_t gap = 0; gap < kGeometricGapBucketCount; ++gap) {
+    for (std::size_t center = 0; center < kGeometricCenterBucketCount;
+         ++center) {
+      for (std::size_t kernel = 0; kernel < kGeometricKernelCount; ++kernel) {
+        const std::size_t index =
+            (gap * kGeometricCenterBucketCount + center) *
+                kGeometricKernelCount +
+            kernel;
+        if (index >= result.tabi_geometric_near_audit.size())
+          continue;
+        const auto &bucket = result.tabi_geometric_near_audit[index];
+        if (bucket.pairs == 0)
+          continue;
+        const double denom = static_cast<double>(bucket.pairs);
+        const double mean_gap_ratio = bucket.sum_gap_ratio / denom;
+        const double mean_center_ratio = bucket.sum_center_ratio / denom;
+        for (const char *block_label : kBlockLabels) {
+          tabi_geometric_near_audit_out_
+              << result.trajectory_id << ',' << result.frame_index << ','
+              << result.global_index << ','
+              << csv_escape(current_source_label_) << ','
+              << kGapLabels[gap] << ',' << kCenterLabels[center] << ','
+              << block_label << ',' << kKernelLabels[kernel] << ','
+              << bucket.pairs << ',' << bucket.min_gap << ','
+              << bucket.max_gap_ratio << ',' << mean_gap_ratio << ','
+              << mean_center_ratio << '\n';
+        }
+      }
+    }
+  }
+}
+
+void AnalyzerImpl::write_tabi_far_geometric_audit_header_if_needed() {
+  if (args_.timing != "detail")
+    return;
+  if (!tabi_far_geometric_audit_out_.is_open()) {
+    tabi_far_geometric_audit_out_.open("pbe_tabi_far_geometric_audit.csv",
+                                       std::ios::out | std::ios::trunc);
+    if (!tabi_far_geometric_audit_out_.is_open()) {
+      throw std::runtime_error(
+          "PBE: failed to open pbe_tabi_far_geometric_audit.csv.");
+    }
+  }
+  if (!tabi_far_geometric_audit_header_written_) {
+    tabi_far_geometric_audit_out_
+        << "trajectory_id,frame_index,global_index,fixture,tree_builder,"
+           "node_bounds,theta,leaf,node_depth,gap_ratio,node_panel_count,"
+           "mac_safety,mac_gap_factor,unsafe_count,unsafe_panels,min_gap,"
+           "min_gap_ratio,mean_gap_ratio,audit_samples,"
+           "physical_gap_rejects\n";
+    tabi_far_geometric_audit_header_written_ = true;
+  }
+}
+
+void AnalyzerImpl::append_tabi_far_geometric_audit_row(
+    const FrameResult &result) {
+  if (args_.timing != "detail" || result.pbe_backend != "tabi")
+    return;
+  write_tabi_far_geometric_audit_header_if_needed();
+  tabi_far_geometric_audit_out_
+      << result.trajectory_id << ',' << result.frame_index << ','
+      << result.global_index << ',' << csv_escape(current_source_label_) << ','
+      << csv_escape(result.tabi_tree_builder) << ','
+      << csv_escape(result.tabi_node_bounds_mode) << ','
+      << args_.tabi_tree_opening_theta << ','
+      << args_.tabi_tree_leaf_size << ','
+      << "all,all,all," << csv_escape(result.tabi_mac_safety) << ','
+      << result.tabi_mac_gap_factor << ','
+      << result.tabi_far_geometric_unsafe_count << ','
+      << result.tabi_far_geometric_unsafe_panels << ','
+      << result.tabi_far_geometric_min_gap << ','
+      << result.tabi_far_geometric_gap_ratio_min << ','
+      << result.tabi_far_geometric_gap_ratio_mean << ','
+      << result.tabi_far_geometric_audit_samples << ','
+      << result.tabi_mac_physical_gap_rejects << '\n';
+}
+
+void AnalyzerImpl::write_tabi_moment_audit_header_if_needed() {
+  if (args_.timing != "detail")
+    return;
+  if (!tabi_moment_audit_out_.is_open()) {
+    tabi_moment_audit_out_.open("pbe_tabi_moment_audit.csv",
+                                std::ios::out | std::ios::trunc);
+    if (!tabi_moment_audit_out_.is_open()) {
+      throw std::runtime_error(
+          "PBE: failed to open pbe_tabi_moment_audit.csv.");
+    }
+  }
+  if (!tabi_moment_audit_header_written_) {
+    tabi_moment_audit_out_
+        << "trajectory_id,frame_index,global_index,fixture,tree_builder,"
+           "node_bounds,moment_audit,nodes,translation_rel_error_max,"
+           "translation_rel_error_mean,status\n";
+    tabi_moment_audit_header_written_ = true;
+  }
+}
+
+void AnalyzerImpl::append_tabi_moment_audit_row(const FrameResult &result) {
+  if (args_.timing != "detail" || result.pbe_backend != "tabi" ||
+      result.tabi_moment_audit == "off")
+    return;
+  write_tabi_moment_audit_header_if_needed();
+  tabi_moment_audit_out_
+      << result.trajectory_id << ',' << result.frame_index << ','
+      << result.global_index << ',' << csv_escape(current_source_label_) << ','
+      << csv_escape(result.tabi_tree_builder) << ','
+      << csv_escape(result.tabi_node_bounds_mode) << ','
+      << csv_escape(result.tabi_moment_audit) << ','
+      << result.tabi_moment_audit_nodes << ','
+      << result.tabi_moment_translation_rel_error_max << ','
+      << result.tabi_moment_translation_rel_error_mean << ','
+      << csv_escape(result.status) << '\n';
+}
+
+void AnalyzerImpl::write_tabi_surface_quality_header_if_needed() {
+  if (args_.timing != "detail")
+    return;
+  if (!tabi_surface_quality_out_.is_open()) {
+    tabi_surface_quality_out_.open("pbe_tabi_surface_quality.csv",
+                                   std::ios::out | std::ios::trunc);
+    if (!tabi_surface_quality_out_.is_open()) {
+      throw std::runtime_error(
+          "PBE: failed to open pbe_tabi_surface_quality.csv.");
+    }
+  }
+  if (!tabi_surface_quality_header_written_) {
+    tabi_surface_quality_out_
+        << "trajectory_id,frame_index,global_index,fixture,pbe_backend,"
+           "status,sphere_mesh_mode,panel_count,total_area,"
+           "area_rel_error_vs_4piR2,triangle_area_min,triangle_area_mean,"
+           "triangle_area_max,triangle_aspect_max,normal_radial_dot_min,"
+           "normal_radial_dot_mean,centroid_radial_error_max\n";
+    tabi_surface_quality_header_written_ = true;
+  }
+}
+
+void AnalyzerImpl::append_tabi_surface_quality_row(const FrameResult &result) {
+  if (args_.timing != "detail" || result.pbe_backend != "tabi")
+    return;
+  write_tabi_surface_quality_header_if_needed();
+  tabi_surface_quality_out_
+      << result.trajectory_id << ',' << result.frame_index << ','
+      << result.global_index << ',' << csv_escape(current_source_label_) << ','
+      << csv_escape(result.pbe_backend) << ',' << csv_escape(result.status)
+      << ',' << csv_escape(result.tabi_sphere_mesh_mode) << ','
+      << result.tabi_surface_panels << ','
+      << result.tabi_surface_quality_total_area_a2 << ','
+      << result.tabi_surface_quality_area_rel_error_vs_4piR2 << ','
+      << result.tabi_surface_quality_triangle_area_min << ','
+      << result.tabi_surface_quality_triangle_area_mean << ','
+      << result.tabi_surface_quality_triangle_area_max << ','
+      << result.tabi_surface_quality_triangle_aspect_max << ','
+      << result.tabi_surface_quality_normal_radial_dot_min << ','
+      << result.tabi_surface_quality_normal_radial_dot_mean << ','
+      << result.tabi_surface_quality_centroid_radial_error_max << '\n';
+}
+
+void AnalyzerImpl::write_memory_profile_header_if_needed() {
+  if (!pbe_timing_enabled())
+    return;
+  if (!memory_profile_out_.is_open()) {
+    memory_profile_out_.open("pbe_memory_profile.csv",
+                             std::ios::out | std::ios::trunc);
+    if (!memory_profile_out_.is_open())
+      throw std::runtime_error("PBE: failed to open pbe_memory_profile.csv.");
+  }
+  if (!memory_profile_header_written_) {
+    memory_profile_out_
+        << "trajectory_id,frame_index,global_index,fixture,backend,"
+           "atom_count,grid_points,panels,unknown_count,formulation,"
+           "matvec_mode,preconditioner_effective,surface_generator,"
+           "discretization,estimated_bytes_total,estimated_bytes_surface,"
+           "estimated_bytes_solver,estimated_bytes_operator,"
+           "estimated_bytes_tree,rss_before_bytes,rss_after_bytes,"
+           "rss_delta_bytes,rss_delta_signed_bytes,peak_working_set_bytes,total_seconds,"
+           "solver_seconds,status\n";
+    memory_profile_header_written_ = true;
+  }
+}
+
+void AnalyzerImpl::append_memory_profile_row(const FrameResult &result,
+                                             const TimingBuckets &timing) {
+  if (!pbe_timing_enabled())
+    return;
+  write_memory_profile_header_if_needed();
+  auto seconds = [](double ms) { return ms / 1000.0; };
+  const bool is_tabi = result.pbe_backend == "tabi";
+  const std::size_t panels = is_tabi ? result.tabi_surface_panels : 0;
+  const std::size_t unknowns = is_tabi ? result.tabi_unknown_count : 0;
+  std::size_t surface_bytes = result.memory_estimated_surface_bytes;
+  std::size_t solver_bytes = result.memory_estimated_solver_bytes;
+  std::size_t operator_bytes = result.memory_estimated_operator_bytes;
+  std::size_t tree_bytes = result.memory_estimated_tree_bytes;
+  if (surface_bytes == 0 || solver_bytes == 0 || operator_bytes == 0) {
+    if (is_tabi) {
+      surface_bytes = panels * 96u + result.tabi_mesh_vertices * 56u +
+                      result.tabi_mesh_triangles * 80u;
+      const std::size_t basis_count = 40u;
+      solver_bytes = std::max<std::size_t>(1, unknowns) * sizeof(double) *
+                     basis_count;
+      operator_bytes =
+          std::max<std::size_t>(1, unknowns) * sizeof(double) * 8u;
+      tree_bytes = result.tabi_tree_nodes * 96u +
+                   result.tabi_tree_leaf_count * 64u;
+      tree_bytes += panels * 14u * sizeof(double) +
+                    panels * sizeof(std::size_t);
+      operator_bytes += panels * 2u * sizeof(double);
+      const std::size_t matvec_calls =
+          std::max<std::size_t>(1, result.tabi_matvec_calls);
+      const std::size_t interaction_entries =
+          (result.tabi_singular_near_interactions +
+           result.tabi_leaf_residual_panel_interactions +
+           result.tabi_leaf_tile_interactions +
+           result.tabi_far_node_interactions +
+           result.tabi_smooth_leaf_node_interactions) /
+          matvec_calls;
+      tree_bytes += interaction_entries * sizeof(std::size_t) +
+                    (panels + 1u) * 5u * sizeof(std::size_t);
+    } else {
+      const std::size_t n = std::max<std::size_t>(1, result.grid_points);
+      surface_bytes =
+          (result.solute_points + result.solvent_points +
+           result.ion_accessible_points + result.stern_excluded_points) *
+          sizeof(std::uint32_t);
+      solver_bytes = n * sizeof(double) * 8u;
+      operator_bytes = n * sizeof(double) * 6u;
+      tree_bytes = 0;
+    }
+  }
+  const std::size_t estimated_total =
+      std::max(result.memory_bytes,
+               surface_bytes + solver_bytes + operator_bytes + tree_bytes);
+  memory_profile_out_
+      << result.trajectory_id << ',' << result.frame_index << ','
+      << result.global_index << ',' << csv_escape(current_source_label_) << ','
+      << csv_escape(result.pbe_backend) << ',' << result.atom_count << ','
+      << result.grid_points << ',' << panels << ',' << unknowns << ','
+      << csv_escape(is_tabi ? result.tabi_formulation : std::string("grid"))
+      << ','
+      << csv_escape(is_tabi ? result.tabi_matvec_mode : result.solver_mode)
+      << ','
+      << csv_escape(is_tabi ? result.tabi_preconditioner_effective
+                            : std::string("grid"))
+      << ','
+      << csv_escape(is_tabi ? result.tabi_surface_generator
+                            : std::string("grid"))
+      << ','
+      << csv_escape(is_tabi ? result.tabi_discretization
+                            : std::string("finite_difference"))
+      << ',' << estimated_total << ',' << surface_bytes << ','
+      << solver_bytes << ',' << operator_bytes << ',' << tree_bytes << ','
+      << result.memory_rss_before_bytes << ','
+      << result.memory_rss_after_bytes << ','
+      << result.memory_rss_delta_bytes << ','
+      << result.memory_rss_delta_signed_bytes << ','
+      << result.memory_peak_working_set_bytes << ','
+      << seconds(timing.total_ms) << ',' << seconds(timing.solver_ms) << ','
+      << csv_escape(result.status) << '\n';
+}
+
 void AnalyzerImpl::write_tabi_formulation_audit_header_if_needed() const {
   if (!tabi_formulation_audit_out_.is_open()) {
     tabi_formulation_audit_out_.open("pbe_tabi_formulation_audit.csv",
@@ -7050,15 +7885,30 @@ void AnalyzerImpl::write_tabi_formulation_audit_header_if_needed() const {
     tabi_formulation_audit_out_
         << "trajectory_id,frame_index,global_index,fixture,pbe_backend,"
            "status,tabi_status,convergence_reason,reaction_energy_source,"
-           "formulation,energy_projection,fallback_used,rhs_scale,"
+           "formulation,energy_projection,preconditioner_requested,"
+           "preconditioner_effective,surface_generator,discretization,"
+           "fallback_used,rhs_scale,"
            "dielectric_contrast,operator_contrast,unknown_count,bie_system,"
-           "lhs_diag_phi,lhs_diag_phin,energy_equation,kernel_convention,"
-           "source_norm_s1,source_norm_s2,phi_norm,phin_norm,"
+            "lhs_diag_phi,lhs_diag_phin,energy_equation,kernel_convention,"
+            "derivative_mode,source_norm_s1,source_norm_s2,phi_norm,phin_norm,"
            "diagonal_mode,diag_min,"
            "diag_max,kappa_inv_A,coulomb_factor_kcal_mol,"
            "boundary_energy_kJmol,reference_energy_kJmol,"
            "selected_energy_scale,selected_energy_kJmol,residual,iterations,"
-           "surface_geometry,panels,solid_angle_fallbacks,matvec_mode\n";
+           "surface_geometry,panels,solid_angle_fallbacks,matvec_mode,"
+           "near_integration,near_self_pairs,near_one_ring_pairs,"
+           "near_duffy_pairs,near_centroid_pairs,near_fallbacks,"
+           "near_integration_seconds,duffy_subdivisions_max,"
+           "duffy_subdivisions_mean,near_kernel_policy,"
+           "near_k1_accepted,near_k1_rejected,near_k2_accepted,"
+           "near_k2_rejected,near_k3_accepted,near_k3_rejected,"
+           "near_k4_accepted,near_k4_rejected,"
+           "near_one_ring_k1_accepted,near_one_ring_k1_rejected,"
+           "near_one_ring_k2_accepted,near_one_ring_k2_rejected,"
+           "near_one_ring_k3_accepted,near_one_ring_k3_rejected,"
+           "near_one_ring_k4_accepted,near_one_ring_k4_rejected,"
+           "near_k1_policy,"
+           "near_k2_policy,near_k3_policy,near_k4_policy\n";
     tabi_formulation_audit_header_written_ = true;
   }
 }
@@ -7068,6 +7918,7 @@ void AnalyzerImpl::append_tabi_formulation_audit_row(
   if (result.pbe_backend != "tabi")
     return;
   write_tabi_formulation_audit_header_if_needed();
+  auto seconds = [](double ms) { return ms / 1000.0; };
   tabi_formulation_audit_out_
       << result.trajectory_id << ',' << result.frame_index << ','
       << result.global_index << ',' << csv_escape(current_source_label_)
@@ -7077,6 +7928,10 @@ void AnalyzerImpl::append_tabi_formulation_audit_row(
       << csv_escape(result.tabi_reaction_energy_source) << ','
       << csv_escape(result.tabi_formulation) << ','
       << csv_escape(result.tabi_energy_projection) << ','
+      << csv_escape(result.tabi_preconditioner_requested) << ','
+      << csv_escape(result.tabi_preconditioner_effective) << ','
+      << csv_escape(result.tabi_surface_generator) << ','
+      << csv_escape(result.tabi_discretization) << ','
       << (result.tabi_fallback_used ? "true" : "false") << ','
       << result.tabi_rhs_scale << ',' << result.tabi_dielectric_contrast
       << ',' << result.tabi_operator_contrast << ','
@@ -7085,6 +7940,7 @@ void AnalyzerImpl::append_tabi_formulation_audit_row(
       << result.tabi_lhs_diag_phin << ','
       << csv_escape(result.tabi_energy_equation) << ','
       << csv_escape(result.tabi_kernel_convention) << ','
+      << csv_escape(result.tabi_derivative_mode) << ','
       << result.tabi_source_norm_s1 << ',' << result.tabi_source_norm_s2
       << ',' << result.tabi_phi_norm << ',' << result.tabi_phin_norm << ','
       << csv_escape(args_.tabi_diagonal) << ',' << result.tabi_diag_min << ','
@@ -7097,7 +7953,37 @@ void AnalyzerImpl::append_tabi_formulation_audit_row(
       << ',' << csv_escape(result.tabi_surface_geometry) << ','
       << result.tabi_surface_panels << ','
       << result.tabi_solid_angle_fallbacks << ','
-      << csv_escape(result.tabi_matvec_mode) << '\n';
+      << csv_escape(result.tabi_matvec_mode) << ','
+      << csv_escape(result.tabi_near_integration) << ','
+      << result.tabi_near_self_pairs << ','
+      << result.tabi_near_one_ring_pairs << ','
+      << result.tabi_near_duffy_pairs << ','
+      << result.tabi_near_centroid_pairs << ','
+      << result.tabi_near_fallbacks << ','
+      << seconds(result.tabi_near_integration_ms) << ','
+      << result.tabi_duffy_subdivisions_max << ','
+      << result.tabi_duffy_subdivisions_mean << ','
+      << csv_escape(result.tabi_near_kernel_policy) << ','
+      << result.tabi_near_k1_accepted << ','
+      << result.tabi_near_k1_rejected << ','
+      << result.tabi_near_k2_accepted << ','
+      << result.tabi_near_k2_rejected << ','
+      << result.tabi_near_k3_accepted << ','
+      << result.tabi_near_k3_rejected << ','
+      << result.tabi_near_k4_accepted << ','
+      << result.tabi_near_k4_rejected << ','
+      << result.tabi_near_one_ring_k1_accepted << ','
+      << result.tabi_near_one_ring_k1_rejected << ','
+      << result.tabi_near_one_ring_k2_accepted << ','
+      << result.tabi_near_one_ring_k2_rejected << ','
+      << result.tabi_near_one_ring_k3_accepted << ','
+      << result.tabi_near_one_ring_k3_rejected << ','
+      << result.tabi_near_one_ring_k4_accepted << ','
+      << result.tabi_near_one_ring_k4_rejected << ','
+      << csv_escape(result.tabi_near_k1_policy) << ','
+      << csv_escape(result.tabi_near_k2_policy) << ','
+      << csv_escape(result.tabi_near_k3_policy) << ','
+      << csv_escape(result.tabi_near_k4_policy) << '\n';
 }
 
 void AnalyzerImpl::maybe_write_parity_stage(const FrameResult &result,
@@ -8968,19 +9854,52 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   options.temperature_k = args_.temp;
   options.max_iter = args_.max_iter;
   options.residual_tol = args_.rms_tol;
+  options.gmres_restart = args_.tabi_gmres_restart;
   options.sum_mode = args_.tabi_sum;
   options.probe_radius = args_.probe_radius;
   options.surface_mode = args_.surface;
   options.surface_geometry = args_.tabi_geometry;
   options.diagonal_mode = args_.tabi_diagonal;
+  options.surface_point_count = args_.tabi_surface_points;
+  options.sphere_mesh_mode = args_.tabi_sphere_mesh;
+  options.tree_leaf_size = args_.tabi_tree_leaf_size;
+  options.tree_opening_theta = args_.tabi_tree_opening_theta;
   options.taylor_order = args_.tabi_taylor_order;
+  options.derivative_mode = args_.tabi_derivatives;
   options.formulation = args_.tabi_formulation;
   options.energy_projection = args_.tabi_energy_projection;
+  options.preconditioner = args_.tabi_precond;
+  options.preconditioner_block_near = args_.tabi_precond_block_near;
+  options.near_integration = args_.tabi_near_integration;
+  options.quad_buffer = args_.tabi_quad_buffer;
+  options.leaf_near_policy = args_.tabi_leaf_near_policy;
+  options.leaf_panel_kernel = args_.tabi_leaf_panel_kernel;
+  options.adaptive_level = args_.tabi_adaptive_level;
+  options.cluster_policy = args_.tabi_cluster_policy;
+  options.interaction_mode = args_.tabi_interaction_mode;
+  options.node_bounds = args_.tabi_node_bounds;
+  options.tree_builder = args_.tabi_tree_builder;
+  options.mac_safety = args_.tabi_mac_safety;
+  options.mac_gap_factor = args_.tabi_mac_gap_factor;
+  options.moment_audit = args_.tabi_moment_audit;
+  options.true_residual_probe = args_.tabi_true_residual_probe;
+  options.true_residual_probe_scope = args_.tabi_true_residual_probe_scope;
+  options.true_residual_probe_interval =
+      args_.tabi_true_residual_probe_interval;
+  options.true_residual_sample_count = args_.tabi_true_residual_sample_count;
+  options.progress = args_.tabi_progress;
+  if (options.progress == "auto" && args_.timing != "detail")
+    options.progress = "off";
+  options.progress_interval_seconds = args_.tabi_progress_interval;
   const Tabi::Result tabi = Tabi::solve_linear_pb(tabi_atoms, options, executor);
 
   solve.pbe_backend = "tabi";
   solve.tabi_surface_build_ms = tabi.surface_build_ms;
   solve.tabi_surface_panels = tabi.panel_count;
+  solve.tabi_surface_point_count_requested =
+      tabi.surface_point_count_requested;
+  solve.tabi_panel_density_per_a2 = tabi.panel_density_per_a2;
+  solve.tabi_panel_budget_status = tabi.panel_budget_status;
   solve.tabi_surface_exposed_points = tabi.exposed_points;
   solve.tabi_surface_buried_points = tabi.buried_points;
   solve.tabi_tree_build_ms = tabi.tree_build_ms;
@@ -8992,6 +9911,31 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_status = tabi.status;
   solve.tabi_convergence_reason = tabi.convergence_reason;
   solve.tabi_residual_history = tabi.residual_history;
+  solve.tabi_gmres_restart_requested = tabi.gmres_restart_requested;
+  solve.tabi_gmres_restart_effective = tabi.gmres_restart_effective;
+  solve.tabi_best_residual = tabi.best_residual;
+  solve.tabi_best_residual_iter = tabi.best_residual_iter;
+  solve.tabi_final_residual = tabi.final_residual;
+  solve.tabi_best_preconditioned_residual =
+      tabi.best_preconditioned_residual;
+  solve.tabi_final_preconditioned_residual =
+      tabi.final_preconditioned_residual;
+  solve.tabi_true_residual_abs = tabi.true_residual_abs;
+  solve.tabi_true_residual_rel = tabi.true_residual_rel;
+  solve.tabi_true_residual_probe_mode = tabi.true_residual_probe_mode;
+  solve.tabi_true_residual_probe_scope = tabi.true_residual_probe_scope;
+  solve.tabi_true_residual_probe_interval =
+      tabi.true_residual_probe_interval;
+  solve.tabi_true_residual_sample_count = tabi.true_residual_sample_count;
+  solve.tabi_true_residual_probe_calls = tabi.true_residual_probe_calls;
+  solve.tabi_true_residual_probe_ms = tabi.true_residual_probe_ms;
+  solve.tabi_sampled_true_residual_rel = tabi.sampled_true_residual_rel;
+  solve.tabi_sampled_true_residual_rows = tabi.sampled_true_residual_rows;
+  solve.tabi_sampled_probe_calls = tabi.sampled_probe_calls;
+  solve.tabi_sampled_probe_ms = tabi.sampled_probe_ms;
+  solve.tabi_full_true_residual_confirm_calls =
+      tabi.full_true_residual_confirm_calls;
+  solve.tabi_full_probe_ms = tabi.full_true_residual_confirm_ms;
   solve.tabi_reaction_energy_source = tabi.reaction_energy_source;
   solve.tabi_rhs_ms = tabi.rhs_ms;
   solve.tabi_gmres_ms = tabi.gmres_ms;
@@ -9007,7 +9951,192 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_tree_traversal_ms = tabi.tree_traversal_ms;
   solve.tabi_near_eval_ms = tabi.near_eval_ms;
   solve.tabi_far_eval_ms = tabi.far_eval_ms;
+  solve.tabi_singular_near_eval_ms = tabi.singular_near_eval_ms;
+  solve.tabi_leaf_near_eval_ms = tabi.leaf_near_eval_ms;
+  solve.tabi_leaf_panel_eval_ms = tabi.leaf_panel_eval_ms;
+  solve.tabi_leaf_tile_eval_ms = tabi.leaf_tile_eval_ms;
+  solve.tabi_leaf_residual_eval_ms = tabi.leaf_residual_eval_ms;
+  solve.tabi_smooth_leaf_node_eval_ms = tabi.smooth_leaf_node_eval_ms;
+  solve.tabi_singular_near_interactions = tabi.singular_near_interactions;
+  solve.tabi_leaf_near_interactions = tabi.leaf_near_interactions;
+  solve.tabi_far_node_interactions = tabi.far_node_interactions;
+  solve.tabi_leaf_panel_interactions = tabi.leaf_panel_interactions;
+  solve.tabi_leaf_tile_interactions = tabi.leaf_tile_interactions;
+  solve.tabi_leaf_tile_panel_interactions =
+      tabi.leaf_tile_panel_interactions;
+  solve.tabi_leaf_residual_panel_interactions =
+      tabi.leaf_residual_panel_interactions;
+  solve.tabi_smooth_leaf_node_interactions =
+      tabi.smooth_leaf_node_interactions;
+  solve.tabi_leaf_pruned_interactions = tabi.leaf_pruned_interactions;
+  solve.tabi_adaptive_smooth_leaf_accepted =
+      tabi.adaptive_smooth_leaf_accepted;
+  solve.tabi_adaptive_smooth_leaf_rejected =
+      tabi.adaptive_smooth_leaf_rejected;
+  solve.tabi_adaptive_span_tile_accepted =
+      tabi.adaptive_span_tile_accepted;
+  solve.tabi_adaptive_span_tile_rejected =
+      tabi.adaptive_span_tile_rejected;
+  solve.tabi_adaptive_exact_leaf_fallbacks =
+      tabi.adaptive_exact_leaf_fallbacks;
+  solve.tabi_adaptive_reject_one_ring_overlap =
+      tabi.adaptive_reject_one_ring_overlap;
+  solve.tabi_adaptive_reject_error_bound_failed =
+      tabi.adaptive_reject_error_bound_failed;
+  solve.tabi_adaptive_reject_p4_check_failed =
+      tabi.adaptive_reject_p4_check_failed;
+  solve.tabi_adaptive_reject_too_close =
+      tabi.adaptive_reject_too_close;
+  solve.tabi_leaf_work_reduction_ratio =
+      tabi.leaf_work_reduction_ratio;
+  solve.tabi_target_cluster_interactions =
+      tabi.target_cluster_interactions;
+  solve.tabi_target_cluster_targets = tabi.target_cluster_targets;
+  solve.tabi_target_cluster_panels_pruned =
+      tabi.target_cluster_panels_pruned;
+  solve.tabi_target_cluster_rejected = tabi.target_cluster_rejected;
+  solve.tabi_target_cluster_eval_ms = tabi.target_cluster_eval_ms;
+  solve.tabi_adaptive_level = tabi.adaptive_level;
+  solve.tabi_leaf_near_policy = tabi.leaf_near_policy;
+  solve.tabi_leaf_panel_kernel = tabi.leaf_panel_kernel;
+  solve.tabi_interaction_mode = tabi.interaction_mode;
+  solve.tabi_node_bounds_mode = tabi.node_bounds_mode;
+  solve.tabi_tree_builder = tabi.tree_builder;
+  solve.tabi_mac_safety = tabi.mac_safety;
+  solve.tabi_mac_gap_factor = tabi.mac_gap_factor;
+  solve.tabi_tree_depth_max = tabi.tree_depth_max;
+  solve.tabi_mac_reject_radius_limited = tabi.mac_reject_radius_limited;
+  solve.tabi_mac_accept_rate = tabi.mac_accept_rate;
+  solve.tabi_node_radius_max = tabi.node_radius_max;
+  solve.tabi_node_radius_mean = tabi.node_radius_mean;
+  solve.tabi_leaf_panel_work_per_matvec =
+      tabi.leaf_panel_work_per_matvec;
+  solve.tabi_far_node_work_per_matvec =
+      tabi.far_node_work_per_matvec;
+  solve.tabi_far_geometric_unsafe_count =
+      tabi.far_geometric_unsafe_count;
+  solve.tabi_far_geometric_unsafe_panels =
+      tabi.far_geometric_unsafe_panels;
+  solve.tabi_far_geometric_min_gap = tabi.far_geometric_min_gap;
+  solve.tabi_far_geometric_gap_ratio_min =
+      tabi.far_geometric_gap_ratio_min;
+  solve.tabi_far_geometric_gap_ratio_mean =
+      tabi.far_geometric_gap_ratio_mean;
+  solve.tabi_far_geometric_audit_samples =
+      tabi.far_geometric_audit_samples;
+  solve.tabi_mac_physical_gap_rejects =
+      tabi.mac_physical_gap_rejects;
+  solve.tabi_moment_audit = tabi.moment_audit;
+  solve.tabi_moment_audit_nodes = tabi.moment_audit_nodes;
+  solve.tabi_moment_translation_rel_error_max =
+      tabi.moment_translation_rel_error_max;
+  solve.tabi_moment_translation_rel_error_mean =
+      tabi.moment_translation_rel_error_mean;
+  solve.tabi_quad_buffer_auto_candidate = tabi.quad_buffer_auto_candidate;
+  solve.tabi_leaf_tile_status = tabi.leaf_tile_status;
+  solve.tabi_leaf_panel_pairs_per_second =
+      tabi.leaf_panel_pairs_per_second;
+  solve.tabi_near_integration = tabi.near_integration;
+  solve.tabi_quad_buffer = tabi.quad_buffer;
+  solve.tabi_near_self_pairs = tabi.near_self_pairs;
+  solve.tabi_near_one_ring_pairs = tabi.near_one_ring_pairs;
+  solve.tabi_near_duffy_pairs = tabi.near_duffy_pairs;
+  solve.tabi_near_centroid_pairs = tabi.near_centroid_pairs;
+  solve.tabi_near_fallbacks = tabi.near_fallbacks;
+  solve.tabi_near_geometric_buffer_pairs =
+      tabi.near_geometric_buffer_pairs;
+  solve.tabi_near_geometric_buffer_gauss_pairs =
+      tabi.near_geometric_buffer_gauss_pairs;
+  solve.tabi_near_geometric_buffer_adaptive_pairs =
+      tabi.near_geometric_buffer_adaptive_pairs;
+  solve.tabi_near_geometric_buffer_centroid_pairs =
+      tabi.near_geometric_buffer_centroid_pairs;
+  solve.tabi_near_geometric_buffer_min_gap =
+      tabi.near_geometric_buffer_min_gap;
+  solve.tabi_near_geometric_buffer_mean_gap_ratio =
+      tabi.near_geometric_buffer_mean_gap_ratio;
+  solve.tabi_near_geometric_buffer_max_edge_mean =
+      tabi.near_geometric_buffer_max_edge_mean;
+  solve.tabi_near_integration_ms = tabi.near_integration_ms;
+  solve.tabi_duffy_subdivisions_max = tabi.duffy_subdivisions_max;
+  solve.tabi_duffy_subdivisions_mean = tabi.duffy_subdivisions_mean;
+  solve.tabi_near_kernel_policy = tabi.near_kernel_policy;
+  solve.tabi_near_k1_accepted = tabi.near_k1_accepted;
+  solve.tabi_near_k1_rejected = tabi.near_k1_rejected;
+  solve.tabi_near_k2_accepted = tabi.near_k2_accepted;
+  solve.tabi_near_k2_rejected = tabi.near_k2_rejected;
+  solve.tabi_near_k3_accepted = tabi.near_k3_accepted;
+  solve.tabi_near_k3_rejected = tabi.near_k3_rejected;
+  solve.tabi_near_k4_accepted = tabi.near_k4_accepted;
+  solve.tabi_near_k4_rejected = tabi.near_k4_rejected;
+  solve.tabi_near_one_ring_k1_accepted =
+      tabi.near_one_ring_k1_accepted;
+  solve.tabi_near_one_ring_k1_rejected =
+      tabi.near_one_ring_k1_rejected;
+  solve.tabi_near_one_ring_k2_accepted =
+      tabi.near_one_ring_k2_accepted;
+  solve.tabi_near_one_ring_k2_rejected =
+      tabi.near_one_ring_k2_rejected;
+  solve.tabi_near_one_ring_k3_accepted =
+      tabi.near_one_ring_k3_accepted;
+  solve.tabi_near_one_ring_k3_rejected =
+      tabi.near_one_ring_k3_rejected;
+  solve.tabi_near_one_ring_k4_accepted =
+      tabi.near_one_ring_k4_accepted;
+  solve.tabi_near_one_ring_k4_rejected =
+      tabi.near_one_ring_k4_rejected;
+  solve.tabi_near_k1_policy = tabi.near_k1_policy;
+  solve.tabi_near_k2_policy = tabi.near_k2_policy;
+  solve.tabi_near_k3_policy = tabi.near_k3_policy;
+  solve.tabi_near_k4_policy = tabi.near_k4_policy;
+  for (std::size_t i = 0; i < solve.tabi_near_block_audit.size(); ++i) {
+    const auto &src = tabi.near_block_audit[i];
+    auto &dst = solve.tabi_near_block_audit[i];
+    dst.accepted = src.accepted;
+    dst.rejected = src.rejected;
+    dst.candidate_worse_than_centroid = src.candidate_worse_than_centroid;
+    dst.reference_nonconverged = src.reference_nonconverged;
+    dst.orientation_sign_mismatch = src.orientation_sign_mismatch;
+    dst.strict_ref_reject = src.strict_ref_reject;
+    dst.max_candidate_ref_rel = src.max_candidate_ref_rel;
+    dst.sum_candidate_ref_rel = src.sum_candidate_ref_rel;
+    dst.max_centroid_ref_rel = src.max_centroid_ref_rel;
+    dst.k2_laplace_sign_ok = src.k2_laplace_sign_ok;
+    dst.max_k2_yukawa_smooth_ref_rel =
+        src.max_k2_yukawa_smooth_ref_rel;
+    dst.max_k2_orientation_pair_ref_rel =
+        src.max_k2_orientation_pair_ref_rel;
+    dst.sample_count = src.sample_count;
+  }
+  for (std::size_t i = 0; i < solve.tabi_geometric_near_audit.size(); ++i) {
+    const auto &src = tabi.geometric_near_audit[i];
+    auto &dst = solve.tabi_geometric_near_audit[i];
+    dst.pairs = src.pairs;
+    dst.min_gap = src.min_gap;
+    dst.max_gap_ratio = src.max_gap_ratio;
+    dst.sum_gap_ratio = src.sum_gap_ratio;
+    dst.sum_center_ratio = src.sum_center_ratio;
+  }
   solve.tabi_surface_geometry = tabi.surface_geometry;
+  solve.tabi_sphere_mesh_mode = tabi.sphere_mesh_mode;
+  solve.tabi_surface_quality_total_area_a2 =
+      tabi.surface_quality_total_area_a2;
+  solve.tabi_surface_quality_area_rel_error_vs_4piR2 =
+      tabi.surface_quality_area_rel_error_vs_4piR2;
+  solve.tabi_surface_quality_triangle_area_min =
+      tabi.surface_quality_triangle_area_min;
+  solve.tabi_surface_quality_triangle_area_mean =
+      tabi.surface_quality_triangle_area_mean;
+  solve.tabi_surface_quality_triangle_area_max =
+      tabi.surface_quality_triangle_area_max;
+  solve.tabi_surface_quality_triangle_aspect_max =
+      tabi.surface_quality_triangle_aspect_max;
+  solve.tabi_surface_quality_normal_radial_dot_min =
+      tabi.surface_quality_normal_radial_dot_min;
+  solve.tabi_surface_quality_normal_radial_dot_mean =
+      tabi.surface_quality_normal_radial_dot_mean;
+  solve.tabi_surface_quality_centroid_radial_error_max =
+      tabi.surface_quality_centroid_radial_error_max;
   solve.tabi_mesh_vertices = tabi.mesh_vertices;
   solve.tabi_mesh_triangles = tabi.mesh_triangles;
   solve.tabi_boundary_nodes = tabi.boundary_nodes;
@@ -9017,10 +10146,16 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_diag_min = tabi.diag_min;
   solve.tabi_diag_max = tabi.diag_max;
   solve.tabi_taylor_order = tabi.taylor_order;
+  solve.tabi_derivative_mode = tabi.derivative_mode;
   solve.tabi_interaction_build_ms = tabi.interaction_build_ms;
   solve.tabi_tree_eval_ms = tabi.tree_eval_ms;
   solve.tabi_formulation = tabi.formulation;
   solve.tabi_energy_projection = tabi.energy_projection;
+  solve.tabi_preconditioner_requested = tabi.preconditioner_requested;
+  solve.tabi_preconditioner_effective = tabi.preconditioner_effective;
+  solve.tabi_preconditioner_block_near = tabi.preconditioner_block_near;
+  solve.tabi_surface_generator = tabi.surface_generator;
+  solve.tabi_discretization = tabi.discretization;
   solve.tabi_rhs_scale = tabi.rhs_scale;
   solve.tabi_dielectric_contrast = tabi.dielectric_contrast;
   solve.tabi_operator_contrast = tabi.operator_contrast;
@@ -9179,6 +10314,7 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
     return {};
 
   const auto frame_time_begin = std::chrono::steady_clock::now();
+  const ProcessMemorySample frame_memory_before = sample_process_memory();
   TimingBuckets frame_timing;
   struct ActiveTimingScope {
     AnalyzerImpl &self;
@@ -9280,6 +10416,12 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
     result.stern_excluded_points = tabi_solve.stern_excluded_points;
     result.tabi_surface_build_ms = tabi_solve.tabi_surface_build_ms;
     result.tabi_surface_panels = tabi_solve.tabi_surface_panels;
+    result.tabi_surface_point_count_requested =
+        tabi_solve.tabi_surface_point_count_requested;
+    result.tabi_panel_density_per_a2 =
+        tabi_solve.tabi_panel_density_per_a2;
+    result.tabi_panel_budget_status =
+        tabi_solve.tabi_panel_budget_status;
     result.tabi_surface_exposed_points =
         tabi_solve.tabi_surface_exposed_points;
     result.tabi_surface_buried_points =
@@ -9293,6 +10435,40 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
     result.tabi_status = tabi_solve.tabi_status;
     result.tabi_convergence_reason = tabi_solve.tabi_convergence_reason;
     result.tabi_residual_history = tabi_solve.tabi_residual_history;
+    result.tabi_gmres_restart_requested =
+        tabi_solve.tabi_gmres_restart_requested;
+    result.tabi_gmres_restart_effective =
+        tabi_solve.tabi_gmres_restart_effective;
+    result.tabi_best_residual = tabi_solve.tabi_best_residual;
+    result.tabi_best_residual_iter = tabi_solve.tabi_best_residual_iter;
+    result.tabi_final_residual = tabi_solve.tabi_final_residual;
+    result.tabi_best_preconditioned_residual =
+        tabi_solve.tabi_best_preconditioned_residual;
+    result.tabi_final_preconditioned_residual =
+        tabi_solve.tabi_final_preconditioned_residual;
+    result.tabi_true_residual_abs = tabi_solve.tabi_true_residual_abs;
+    result.tabi_true_residual_rel = tabi_solve.tabi_true_residual_rel;
+    result.tabi_true_residual_probe_mode =
+        tabi_solve.tabi_true_residual_probe_mode;
+    result.tabi_true_residual_probe_scope =
+        tabi_solve.tabi_true_residual_probe_scope;
+    result.tabi_true_residual_probe_interval =
+        tabi_solve.tabi_true_residual_probe_interval;
+    result.tabi_true_residual_sample_count =
+        tabi_solve.tabi_true_residual_sample_count;
+    result.tabi_true_residual_probe_calls =
+        tabi_solve.tabi_true_residual_probe_calls;
+    result.tabi_true_residual_probe_ms =
+        tabi_solve.tabi_true_residual_probe_ms;
+    result.tabi_sampled_true_residual_rel =
+        tabi_solve.tabi_sampled_true_residual_rel;
+    result.tabi_sampled_true_residual_rows =
+        tabi_solve.tabi_sampled_true_residual_rows;
+    result.tabi_sampled_probe_calls = tabi_solve.tabi_sampled_probe_calls;
+    result.tabi_sampled_probe_ms = tabi_solve.tabi_sampled_probe_ms;
+    result.tabi_full_true_residual_confirm_calls =
+        tabi_solve.tabi_full_true_residual_confirm_calls;
+    result.tabi_full_probe_ms = tabi_solve.tabi_full_probe_ms;
     result.tabi_reaction_energy_source =
         tabi_solve.tabi_reaction_energy_source;
     result.tabi_rhs_ms = tabi_solve.tabi_rhs_ms;
@@ -9310,7 +10486,184 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
     result.tabi_tree_traversal_ms = tabi_solve.tabi_tree_traversal_ms;
     result.tabi_near_eval_ms = tabi_solve.tabi_near_eval_ms;
     result.tabi_far_eval_ms = tabi_solve.tabi_far_eval_ms;
+    result.tabi_singular_near_eval_ms =
+        tabi_solve.tabi_singular_near_eval_ms;
+    result.tabi_leaf_near_eval_ms = tabi_solve.tabi_leaf_near_eval_ms;
+    result.tabi_leaf_panel_eval_ms = tabi_solve.tabi_leaf_panel_eval_ms;
+    result.tabi_leaf_tile_eval_ms = tabi_solve.tabi_leaf_tile_eval_ms;
+    result.tabi_leaf_residual_eval_ms =
+        tabi_solve.tabi_leaf_residual_eval_ms;
+    result.tabi_smooth_leaf_node_eval_ms =
+        tabi_solve.tabi_smooth_leaf_node_eval_ms;
+    result.tabi_singular_near_interactions =
+        tabi_solve.tabi_singular_near_interactions;
+    result.tabi_leaf_near_interactions =
+        tabi_solve.tabi_leaf_near_interactions;
+    result.tabi_far_node_interactions =
+        tabi_solve.tabi_far_node_interactions;
+    result.tabi_leaf_panel_interactions =
+        tabi_solve.tabi_leaf_panel_interactions;
+    result.tabi_leaf_tile_interactions =
+        tabi_solve.tabi_leaf_tile_interactions;
+    result.tabi_leaf_tile_panel_interactions =
+        tabi_solve.tabi_leaf_tile_panel_interactions;
+    result.tabi_leaf_residual_panel_interactions =
+        tabi_solve.tabi_leaf_residual_panel_interactions;
+    result.tabi_smooth_leaf_node_interactions =
+        tabi_solve.tabi_smooth_leaf_node_interactions;
+    result.tabi_leaf_pruned_interactions =
+        tabi_solve.tabi_leaf_pruned_interactions;
+    result.tabi_adaptive_smooth_leaf_accepted =
+        tabi_solve.tabi_adaptive_smooth_leaf_accepted;
+    result.tabi_adaptive_smooth_leaf_rejected =
+        tabi_solve.tabi_adaptive_smooth_leaf_rejected;
+    result.tabi_adaptive_span_tile_accepted =
+        tabi_solve.tabi_adaptive_span_tile_accepted;
+    result.tabi_adaptive_span_tile_rejected =
+        tabi_solve.tabi_adaptive_span_tile_rejected;
+    result.tabi_adaptive_exact_leaf_fallbacks =
+        tabi_solve.tabi_adaptive_exact_leaf_fallbacks;
+    result.tabi_adaptive_reject_one_ring_overlap =
+        tabi_solve.tabi_adaptive_reject_one_ring_overlap;
+    result.tabi_adaptive_reject_error_bound_failed =
+        tabi_solve.tabi_adaptive_reject_error_bound_failed;
+    result.tabi_adaptive_reject_p4_check_failed =
+        tabi_solve.tabi_adaptive_reject_p4_check_failed;
+    result.tabi_adaptive_reject_too_close =
+        tabi_solve.tabi_adaptive_reject_too_close;
+    result.tabi_leaf_work_reduction_ratio =
+        tabi_solve.tabi_leaf_work_reduction_ratio;
+    result.tabi_target_cluster_interactions =
+        tabi_solve.tabi_target_cluster_interactions;
+    result.tabi_target_cluster_targets =
+        tabi_solve.tabi_target_cluster_targets;
+    result.tabi_target_cluster_panels_pruned =
+        tabi_solve.tabi_target_cluster_panels_pruned;
+    result.tabi_target_cluster_rejected =
+        tabi_solve.tabi_target_cluster_rejected;
+    result.tabi_target_cluster_eval_ms =
+        tabi_solve.tabi_target_cluster_eval_ms;
+    result.tabi_adaptive_level = tabi_solve.tabi_adaptive_level;
+    result.tabi_leaf_near_policy = tabi_solve.tabi_leaf_near_policy;
+    result.tabi_leaf_panel_kernel = tabi_solve.tabi_leaf_panel_kernel;
+    result.tabi_interaction_mode = tabi_solve.tabi_interaction_mode;
+    result.tabi_node_bounds_mode = tabi_solve.tabi_node_bounds_mode;
+    result.tabi_tree_builder = tabi_solve.tabi_tree_builder;
+    result.tabi_mac_safety = tabi_solve.tabi_mac_safety;
+    result.tabi_mac_gap_factor = tabi_solve.tabi_mac_gap_factor;
+    result.tabi_tree_depth_max = tabi_solve.tabi_tree_depth_max;
+    result.tabi_mac_reject_radius_limited =
+        tabi_solve.tabi_mac_reject_radius_limited;
+    result.tabi_mac_accept_rate = tabi_solve.tabi_mac_accept_rate;
+    result.tabi_node_radius_max = tabi_solve.tabi_node_radius_max;
+    result.tabi_node_radius_mean = tabi_solve.tabi_node_radius_mean;
+    result.tabi_leaf_panel_work_per_matvec =
+        tabi_solve.tabi_leaf_panel_work_per_matvec;
+    result.tabi_far_node_work_per_matvec =
+        tabi_solve.tabi_far_node_work_per_matvec;
+    result.tabi_far_geometric_unsafe_count =
+        tabi_solve.tabi_far_geometric_unsafe_count;
+    result.tabi_far_geometric_unsafe_panels =
+        tabi_solve.tabi_far_geometric_unsafe_panels;
+    result.tabi_far_geometric_min_gap =
+        tabi_solve.tabi_far_geometric_min_gap;
+    result.tabi_far_geometric_gap_ratio_min =
+        tabi_solve.tabi_far_geometric_gap_ratio_min;
+    result.tabi_far_geometric_gap_ratio_mean =
+        tabi_solve.tabi_far_geometric_gap_ratio_mean;
+    result.tabi_far_geometric_audit_samples =
+        tabi_solve.tabi_far_geometric_audit_samples;
+    result.tabi_mac_physical_gap_rejects =
+        tabi_solve.tabi_mac_physical_gap_rejects;
+    result.tabi_moment_audit = tabi_solve.tabi_moment_audit;
+    result.tabi_moment_audit_nodes = tabi_solve.tabi_moment_audit_nodes;
+    result.tabi_moment_translation_rel_error_max =
+        tabi_solve.tabi_moment_translation_rel_error_max;
+    result.tabi_moment_translation_rel_error_mean =
+        tabi_solve.tabi_moment_translation_rel_error_mean;
+    result.tabi_quad_buffer_auto_candidate =
+        tabi_solve.tabi_quad_buffer_auto_candidate;
+    result.tabi_leaf_tile_status = tabi_solve.tabi_leaf_tile_status;
+    result.tabi_leaf_panel_pairs_per_second =
+        tabi_solve.tabi_leaf_panel_pairs_per_second;
+    result.tabi_near_integration = tabi_solve.tabi_near_integration;
+    result.tabi_quad_buffer = tabi_solve.tabi_quad_buffer;
+    result.tabi_near_self_pairs = tabi_solve.tabi_near_self_pairs;
+    result.tabi_near_one_ring_pairs = tabi_solve.tabi_near_one_ring_pairs;
+    result.tabi_near_duffy_pairs = tabi_solve.tabi_near_duffy_pairs;
+    result.tabi_near_centroid_pairs = tabi_solve.tabi_near_centroid_pairs;
+    result.tabi_near_fallbacks = tabi_solve.tabi_near_fallbacks;
+    result.tabi_near_geometric_buffer_pairs =
+        tabi_solve.tabi_near_geometric_buffer_pairs;
+    result.tabi_near_geometric_buffer_gauss_pairs =
+        tabi_solve.tabi_near_geometric_buffer_gauss_pairs;
+    result.tabi_near_geometric_buffer_adaptive_pairs =
+        tabi_solve.tabi_near_geometric_buffer_adaptive_pairs;
+    result.tabi_near_geometric_buffer_centroid_pairs =
+        tabi_solve.tabi_near_geometric_buffer_centroid_pairs;
+    result.tabi_near_geometric_buffer_min_gap =
+        tabi_solve.tabi_near_geometric_buffer_min_gap;
+    result.tabi_near_geometric_buffer_mean_gap_ratio =
+        tabi_solve.tabi_near_geometric_buffer_mean_gap_ratio;
+    result.tabi_near_geometric_buffer_max_edge_mean =
+        tabi_solve.tabi_near_geometric_buffer_max_edge_mean;
+    result.tabi_near_integration_ms = tabi_solve.tabi_near_integration_ms;
+    result.tabi_duffy_subdivisions_max =
+        tabi_solve.tabi_duffy_subdivisions_max;
+    result.tabi_duffy_subdivisions_mean =
+        tabi_solve.tabi_duffy_subdivisions_mean;
+    result.tabi_near_kernel_policy = tabi_solve.tabi_near_kernel_policy;
+    result.tabi_near_k1_accepted = tabi_solve.tabi_near_k1_accepted;
+    result.tabi_near_k1_rejected = tabi_solve.tabi_near_k1_rejected;
+    result.tabi_near_k2_accepted = tabi_solve.tabi_near_k2_accepted;
+    result.tabi_near_k2_rejected = tabi_solve.tabi_near_k2_rejected;
+    result.tabi_near_k3_accepted = tabi_solve.tabi_near_k3_accepted;
+    result.tabi_near_k3_rejected = tabi_solve.tabi_near_k3_rejected;
+    result.tabi_near_k4_accepted = tabi_solve.tabi_near_k4_accepted;
+    result.tabi_near_k4_rejected = tabi_solve.tabi_near_k4_rejected;
+    result.tabi_near_one_ring_k1_accepted =
+        tabi_solve.tabi_near_one_ring_k1_accepted;
+    result.tabi_near_one_ring_k1_rejected =
+        tabi_solve.tabi_near_one_ring_k1_rejected;
+    result.tabi_near_one_ring_k2_accepted =
+        tabi_solve.tabi_near_one_ring_k2_accepted;
+    result.tabi_near_one_ring_k2_rejected =
+        tabi_solve.tabi_near_one_ring_k2_rejected;
+    result.tabi_near_one_ring_k3_accepted =
+        tabi_solve.tabi_near_one_ring_k3_accepted;
+    result.tabi_near_one_ring_k3_rejected =
+        tabi_solve.tabi_near_one_ring_k3_rejected;
+    result.tabi_near_one_ring_k4_accepted =
+        tabi_solve.tabi_near_one_ring_k4_accepted;
+    result.tabi_near_one_ring_k4_rejected =
+        tabi_solve.tabi_near_one_ring_k4_rejected;
+    result.tabi_near_k1_policy = tabi_solve.tabi_near_k1_policy;
+    result.tabi_near_k2_policy = tabi_solve.tabi_near_k2_policy;
+    result.tabi_near_k3_policy = tabi_solve.tabi_near_k3_policy;
+    result.tabi_near_k4_policy = tabi_solve.tabi_near_k4_policy;
+    result.tabi_near_block_audit = tabi_solve.tabi_near_block_audit;
+    result.tabi_geometric_near_audit =
+        tabi_solve.tabi_geometric_near_audit;
     result.tabi_surface_geometry = tabi_solve.tabi_surface_geometry;
+    result.tabi_sphere_mesh_mode = tabi_solve.tabi_sphere_mesh_mode;
+    result.tabi_surface_quality_total_area_a2 =
+        tabi_solve.tabi_surface_quality_total_area_a2;
+    result.tabi_surface_quality_area_rel_error_vs_4piR2 =
+        tabi_solve.tabi_surface_quality_area_rel_error_vs_4piR2;
+    result.tabi_surface_quality_triangle_area_min =
+        tabi_solve.tabi_surface_quality_triangle_area_min;
+    result.tabi_surface_quality_triangle_area_mean =
+        tabi_solve.tabi_surface_quality_triangle_area_mean;
+    result.tabi_surface_quality_triangle_area_max =
+        tabi_solve.tabi_surface_quality_triangle_area_max;
+    result.tabi_surface_quality_triangle_aspect_max =
+        tabi_solve.tabi_surface_quality_triangle_aspect_max;
+    result.tabi_surface_quality_normal_radial_dot_min =
+        tabi_solve.tabi_surface_quality_normal_radial_dot_min;
+    result.tabi_surface_quality_normal_radial_dot_mean =
+        tabi_solve.tabi_surface_quality_normal_radial_dot_mean;
+    result.tabi_surface_quality_centroid_radial_error_max =
+        tabi_solve.tabi_surface_quality_centroid_radial_error_max;
     result.tabi_mesh_vertices = tabi_solve.tabi_mesh_vertices;
     result.tabi_mesh_triangles = tabi_solve.tabi_mesh_triangles;
     result.tabi_boundary_nodes = tabi_solve.tabi_boundary_nodes;
@@ -9321,10 +10674,19 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
     result.tabi_diag_min = tabi_solve.tabi_diag_min;
     result.tabi_diag_max = tabi_solve.tabi_diag_max;
     result.tabi_taylor_order = tabi_solve.tabi_taylor_order;
+    result.tabi_derivative_mode = tabi_solve.tabi_derivative_mode;
     result.tabi_interaction_build_ms = tabi_solve.tabi_interaction_build_ms;
     result.tabi_tree_eval_ms = tabi_solve.tabi_tree_eval_ms;
     result.tabi_formulation = tabi_solve.tabi_formulation;
     result.tabi_energy_projection = tabi_solve.tabi_energy_projection;
+    result.tabi_preconditioner_requested =
+        tabi_solve.tabi_preconditioner_requested;
+    result.tabi_preconditioner_effective =
+        tabi_solve.tabi_preconditioner_effective;
+    result.tabi_preconditioner_block_near =
+        tabi_solve.tabi_preconditioner_block_near;
+    result.tabi_surface_generator = tabi_solve.tabi_surface_generator;
+    result.tabi_discretization = tabi_solve.tabi_discretization;
     result.tabi_rhs_scale = tabi_solve.tabi_rhs_scale;
     result.tabi_dielectric_contrast = tabi_solve.tabi_dielectric_contrast;
     result.tabi_operator_contrast = tabi_solve.tabi_operator_contrast;
@@ -9399,12 +10761,31 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
                         : result.tabi_status;
     result.pbsa_time_frame_ms =
         elapsed_ms(frame_time_begin, std::chrono::steady_clock::now());
+    const ProcessMemorySample frame_memory_after = sample_process_memory();
+    result.memory_rss_before_bytes = frame_memory_before.working_set_bytes;
+    result.memory_rss_after_bytes = frame_memory_after.working_set_bytes;
+    result.memory_rss_delta_bytes =
+        frame_memory_after.working_set_bytes >= frame_memory_before.working_set_bytes
+            ? frame_memory_after.working_set_bytes -
+                  frame_memory_before.working_set_bytes
+            : 0;
+    result.memory_rss_delta_signed_bytes =
+        static_cast<std::int64_t>(frame_memory_after.working_set_bytes) -
+        static_cast<std::int64_t>(frame_memory_before.working_set_bytes);
+    result.memory_peak_working_set_bytes =
+        frame_memory_after.peak_working_set_bytes;
     append_energy_row(result);
     frame_timing.total_ms =
         elapsed_ms(frame_time_begin, std::chrono::steady_clock::now());
     append_timing_row(result, frame_timing);
+    append_memory_profile_row(result, frame_timing);
     append_tabi_profile_row(result, frame_timing);
     append_tabi_formulation_audit_row(result);
+    append_tabi_near_block_audit_rows(result);
+    append_tabi_geometric_near_audit_rows(result);
+    append_tabi_far_geometric_audit_row(result);
+    append_tabi_moment_audit_row(result);
+    append_tabi_surface_quality_row(result);
 
     ++frames_total_;
     if (result.status == "ok")
@@ -9807,10 +11188,24 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
 
   maybe_write_parity_stage(result, complex_solve);
   maybe_write_stability_audit(result, atoms_, complex_solve);
+  const ProcessMemorySample frame_memory_after = sample_process_memory();
+  result.memory_rss_before_bytes = frame_memory_before.working_set_bytes;
+  result.memory_rss_after_bytes = frame_memory_after.working_set_bytes;
+  result.memory_rss_delta_bytes =
+      frame_memory_after.working_set_bytes >= frame_memory_before.working_set_bytes
+          ? frame_memory_after.working_set_bytes -
+                frame_memory_before.working_set_bytes
+          : 0;
+  result.memory_rss_delta_signed_bytes =
+      static_cast<std::int64_t>(frame_memory_after.working_set_bytes) -
+      static_cast<std::int64_t>(frame_memory_before.working_set_bytes);
+  result.memory_peak_working_set_bytes =
+      frame_memory_after.peak_working_set_bytes;
   append_energy_row(result);
   frame_timing.total_ms =
       elapsed_ms(frame_time_begin, std::chrono::steady_clock::now());
   append_timing_row(result, frame_timing);
+  append_memory_profile_row(result, frame_timing);
 
   ++frames_total_;
   if (result.status == "ok")
@@ -9925,8 +11320,16 @@ void AnalyzerImpl::finalize(std::fstream &log) {
     timing_out_.flush();
   if (tabi_profile_out_.is_open())
     tabi_profile_out_.flush();
+  if (memory_profile_out_.is_open())
+    memory_profile_out_.flush();
   if (tabi_formulation_audit_out_.is_open())
     tabi_formulation_audit_out_.flush();
+  if (tabi_near_block_audit_out_.is_open())
+    tabi_near_block_audit_out_.flush();
+  if (tabi_geometric_near_audit_out_.is_open())
+    tabi_geometric_near_audit_out_.flush();
+  if (tabi_surface_quality_out_.is_open())
+    tabi_surface_quality_out_.flush();
   if (stability_audit_out_.is_open())
     stability_audit_out_.flush();
   if (stability_samples_out_.is_open())
@@ -9983,15 +11386,61 @@ void AnalyzerImpl::finalize(std::fstream &log) {
     summary << "temperature_K " << format_fixed(args_.temp) << "\n";
     summary << "tabi_sum " << args_.tabi_sum << "\n";
     summary << "tabi_surface_geometry " << args_.tabi_geometry << "\n";
+    summary << "tabi_sphere_mesh " << args_.tabi_sphere_mesh << "\n";
     summary << "tabi_diagonal " << args_.tabi_diagonal << "\n";
     summary << "tabi_taylor_order " << args_.tabi_taylor_order << "\n";
     summary << "tabi_formulation " << args_.tabi_formulation << "\n";
     summary << "tabi_energy_projection " << args_.tabi_energy_projection
             << "\n";
+    summary << "tabi_near_integration " << args_.tabi_near_integration << "\n";
+    summary << "tabi_quad_buffer " << args_.tabi_quad_buffer << "\n";
+    summary << "tabi_interaction_mode " << args_.tabi_interaction_mode << "\n";
+    summary << "tabi_precond_block_near " << args_.tabi_precond_block_near
+            << "\n";
+    summary << "tabi_node_bounds " << args_.tabi_node_bounds << "\n";
+    summary << "tabi_tree_builder " << args_.tabi_tree_builder << "\n";
+    summary << "tabi_mac_safety " << args_.tabi_mac_safety << "\n";
+    summary << "tabi_mac_gap_factor "
+            << format_fixed(args_.tabi_mac_gap_factor, 6) << "\n";
+    summary << "tabi_moment_audit " << args_.tabi_moment_audit << "\n";
+    summary << "tabi_true_residual_probe "
+            << args_.tabi_true_residual_probe << "\n";
+    summary << "tabi_true_residual_probe_scope "
+            << args_.tabi_true_residual_probe_scope << "\n";
+    summary << "tabi_true_residual_probe_interval "
+            << args_.tabi_true_residual_probe_interval << "\n";
+    summary << "tabi_true_residual_sample_count "
+            << args_.tabi_true_residual_sample_count << "\n";
     summary << "tabi_formulation_audit_csv "
             << "pbe_tabi_formulation_audit.csv\n";
     summary << "tabi_profile_csv "
             << (args_.timing == "detail" ? "pbe_tabi_profile.csv" : "off")
+            << "\n";
+    summary << "tabi_near_block_audit_csv "
+            << (args_.timing == "detail" ? "pbe_tabi_near_block_audit.csv"
+                                          : "off")
+            << "\n";
+    summary << "tabi_geometric_near_audit_csv "
+            << (args_.timing == "detail"
+                    ? "pbe_tabi_geometric_near_audit.csv"
+                    : "off")
+            << "\n";
+    summary << "tabi_far_geometric_audit_csv "
+            << (args_.timing == "detail"
+                    ? "pbe_tabi_far_geometric_audit.csv"
+                    : "off")
+            << "\n";
+    summary << "tabi_moment_audit_csv "
+            << (args_.timing == "detail"
+                    ? "pbe_tabi_moment_audit.csv"
+                    : "off")
+            << "\n";
+    summary << "tabi_surface_quality_csv "
+            << (args_.timing == "detail" ? "pbe_tabi_surface_quality.csv"
+                                          : "off")
+            << "\n";
+    summary << "memory_profile_csv "
+            << (pbe_timing_enabled() ? "pbe_memory_profile.csv" : "off")
             << "\n";
     summary << "tabi_surface_panels_max " << max_tabi_surface_panels_seen_
             << "\n";
@@ -10223,12 +11672,55 @@ void AnalyzerImpl::finalize(std::fstream &log) {
       TitanUI::log_kv(log, "TABI Formulation", args_.tabi_formulation);
       TitanUI::log_kv(log, "TABI Energy Projection",
                       args_.tabi_energy_projection);
+      TitanUI::log_kv(log, "TABI Near Integration",
+                      args_.tabi_near_integration);
+      TitanUI::log_kv(log, "TABI Quad Buffer", args_.tabi_quad_buffer);
+      TitanUI::log_kv(log, "TABI Interaction Mode",
+                      args_.tabi_interaction_mode);
+      TitanUI::log_kv(log, "TABI Preconditioner Block Near",
+                      args_.tabi_precond_block_near);
+      TitanUI::log_kv(log, "TABI Node Bounds", args_.tabi_node_bounds);
+      TitanUI::log_kv(log, "TABI Tree Builder", args_.tabi_tree_builder);
+      TitanUI::log_kv(log, "TABI MAC Safety", args_.tabi_mac_safety);
+      TitanUI::log_kv(log, "TABI MAC Gap Factor",
+                      format_fixed(args_.tabi_mac_gap_factor, 6));
+      TitanUI::log_kv(log, "TABI Moment Audit", args_.tabi_moment_audit);
+      TitanUI::log_kv(log, "TABI True Residual Probe",
+                      args_.tabi_true_residual_probe);
+      TitanUI::log_kv(log, "TABI True Residual Probe Scope",
+                      args_.tabi_true_residual_probe_scope);
+      TitanUI::log_kv(log, "TABI True Residual Probe Interval",
+                      std::to_string(args_.tabi_true_residual_probe_interval));
+      TitanUI::log_kv(log, "TABI True Residual Sample Count",
+                      std::to_string(args_.tabi_true_residual_sample_count));
       TitanUI::log_kv(log, "TABI Formulation Audit",
                       "pbe_tabi_formulation_audit.csv");
       TitanUI::log_kv(log, "TABI Profile CSV",
                       args_.timing == "detail" ? "pbe_tabi_profile.csv"
                                                 : "off");
+      TitanUI::log_kv(log, "TABI Near Block Audit",
+                      args_.timing == "detail"
+                          ? "pbe_tabi_near_block_audit.csv"
+                          : "off");
+      TitanUI::log_kv(log, "TABI Geometric Near Audit",
+                      args_.timing == "detail"
+                          ? "pbe_tabi_geometric_near_audit.csv"
+                          : "off");
+      TitanUI::log_kv(log, "TABI Far Geometric Audit",
+                      args_.timing == "detail"
+                          ? "pbe_tabi_far_geometric_audit.csv"
+                          : "off");
+      TitanUI::log_kv(log, "TABI Moment Audit",
+                      args_.timing == "detail"
+                          ? "pbe_tabi_moment_audit.csv"
+                          : "off");
+      TitanUI::log_kv(log, "TABI Surface Quality",
+                      args_.timing == "detail"
+                          ? "pbe_tabi_surface_quality.csv"
+                          : "off");
     }
+    TitanUI::log_kv(log, "PBE Memory Profile",
+                    pbe_timing_enabled() ? "pbe_memory_profile.csv" : "off");
     TitanUI::log_kv(log, "PBE Model", args_.model);
     TitanUI::log_kv(log, "Bio Model", args_.biomodel);
     TitanUI::log_kv(log, "Dielectric Model", args_.dielectric_model);
