@@ -5,6 +5,7 @@
 #include "../titan_simd_dispatch.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -26,6 +27,7 @@ constexpr std::uint32_t kMortonMax = (1u << 21) - 1u;
 constexpr int kTaylorOrderDefault = 3;
 constexpr int kTaylorOrderMax = 4;
 constexpr std::size_t kTaylorMomentMax = 35;
+constexpr double kFragmentationGapRatioThreshold = 0.75;
 
 struct MomentIndex {
   int ax{0};
@@ -118,6 +120,17 @@ double panel_node_aabb_gap(const Panel &target,
                   node.min_y, node.min_z, node.max_x, node.max_y, node.max_z);
 }
 
+double node_aspect_ratio(const TreeNode &node) noexcept {
+  const double ex = std::max(0.0, node.max_x - node.min_x);
+  const double ey = std::max(0.0, node.max_y - node.min_y);
+  const double ez = std::max(0.0, node.max_z - node.min_z);
+  const double hi = std::max({ex, ey, ez});
+  const double lo = std::max(1.0e-12, std::min({ex > 0.0 ? ex : hi,
+                                                 ey > 0.0 ? ey : hi,
+                                                 ez > 0.0 ? ez : hi}));
+  return hi > 0.0 ? hi / lo : 1.0;
+}
+
 struct MacAuditTally {
   std::size_t unsafe_count{0};
   std::size_t unsafe_panels{0};
@@ -126,6 +139,61 @@ struct MacAuditTally {
   double sum_gap_ratio{0.0};
   std::size_t samples{0};
   std::size_t physical_gap_rejects{0};
+};
+
+struct FragmentationTally {
+  std::size_t far_count{0};
+  std::size_t far_panels{0};
+  std::size_t split_rejects{0};
+  double gap_ratio_sum{0.0};
+  double gap_ratio_max{0.0};
+};
+
+struct ExpansionAuditTally {
+  std::size_t pairs{0};
+  std::size_t panels{0};
+  double direct_ms{0.0};
+  double rel_error_sum{0.0};
+  double rel_error_max{0.0};
+  std::size_t estimator_high_error_caught{0};
+  std::size_t estimator_high_error_missed{0};
+};
+
+struct ConvergenceAuditTally {
+  std::size_t pairs{0};
+  double rho_sum{0.0};
+  double rho_max{0.0};
+  double aspect_sum{0.0};
+  double aspect_max{0.0};
+};
+
+struct ConvergenceEstimatorDecision {
+  bool active{false};
+  bool unstable{false};
+  bool split_reject{false};
+  double tail_norm_p{0.0};
+  double tail_norm_pm1{0.0};
+  double tail_ratio{0.0};
+  double estimated_error{0.0};
+  double effective_jcp_amp{1.0};
+};
+
+struct ConvergenceEstimatorTally {
+  std::size_t samples{0};
+  std::size_t unstable_count{0};
+  std::size_t unstable_panels{0};
+  std::size_t split_rejects{0};
+  std::size_t split_reject_panels{0};
+  double tail_ratio_sum{0.0};
+  double tail_ratio_max{0.0};
+  double estimated_error_sum{0.0};
+  double estimated_error_max{0.0};
+  double tail_norm_p_sum{0.0};
+  double tail_norm_p_max{0.0};
+  double tail_norm_pm1_sum{0.0};
+  double tail_norm_pm1_max{0.0};
+  double effective_jcp_amp_sum{0.0};
+  double effective_jcp_amp_max{0.0};
 };
 
 void record_far_geometric_audit(MacAuditTally &tally, const TreeNode &node,
@@ -182,10 +250,273 @@ void copy_far_geometric_audit_to_stats(TreecodeStats &stats,
       new_count > 0.0 ? (old_sum + tally.sum_gap_ratio) / new_count : 0.0;
 }
 
+void record_fragmentation_audit(FragmentationTally &tally,
+                                const TreeNode &node,
+                                bool split_reject) noexcept {
+  ++tally.far_count;
+  tally.far_panels += node.panel_count;
+  if (split_reject)
+    ++tally.split_rejects;
+  tally.gap_ratio_sum += node.fragmentation_center_gap_ratio;
+  tally.gap_ratio_max =
+      std::max(tally.gap_ratio_max, node.fragmentation_center_gap_ratio);
+}
+
+void merge_fragmentation_audit(FragmentationTally &dst,
+                               const FragmentationTally &src) noexcept {
+  if (src.far_count == 0)
+    return;
+  dst.far_count += src.far_count;
+  dst.far_panels += src.far_panels;
+  dst.split_rejects += src.split_rejects;
+  dst.gap_ratio_sum += src.gap_ratio_sum;
+  dst.gap_ratio_max = std::max(dst.gap_ratio_max, src.gap_ratio_max);
+}
+
+void copy_fragmentation_audit_to_stats(
+    TreecodeStats &stats, const FragmentationTally &tally) noexcept {
+  if (tally.far_count == 0)
+    return;
+  const double old_count = static_cast<double>(stats.fragmented_far_count);
+  const double new_count = old_count + static_cast<double>(tally.far_count);
+  const double old_sum =
+      stats.fragmentation_center_gap_ratio_mean * old_count;
+  stats.fragmented_far_count += tally.far_count;
+  stats.fragmented_far_panels += tally.far_panels;
+  stats.fragmented_split_rejects += tally.split_rejects;
+  stats.fragmentation_center_gap_ratio_max =
+      std::max(stats.fragmentation_center_gap_ratio_max,
+               tally.gap_ratio_max);
+  stats.fragmentation_center_gap_ratio_mean =
+      new_count > 0.0 ? (old_sum + tally.gap_ratio_sum) / new_count : 0.0;
+}
+
+bool should_audit_far_expansion(
+    const TreeWorkspace &tree, std::size_t panel_count, const TreeNode &node,
+    std::atomic_size_t &sampled_candidates) noexcept {
+  if (tree.expansion_audit == "off" || node.panel_count == 0)
+    return false;
+  if (node.panel_count > tree.expansion_audit_max_panels)
+    return false;
+  if (tree.expansion_audit == "full-small" &&
+      panel_count <= tree.expansion_audit_max_panels)
+    return true;
+  const std::size_t slot =
+      sampled_candidates.fetch_add(1, std::memory_order_relaxed);
+  return slot < tree.expansion_audit_sample_count;
+}
+
+void merge_far_expansion_audit(ExpansionAuditTally &dst,
+                               const ExpansionAuditTally &src) noexcept {
+  if (src.pairs == 0)
+    return;
+  dst.pairs += src.pairs;
+  dst.panels += src.panels;
+  dst.direct_ms += src.direct_ms;
+  dst.rel_error_sum += src.rel_error_sum;
+  dst.rel_error_max = std::max(dst.rel_error_max, src.rel_error_max);
+  dst.estimator_high_error_caught += src.estimator_high_error_caught;
+  dst.estimator_high_error_missed += src.estimator_high_error_missed;
+}
+
+void copy_far_expansion_audit_to_stats(
+    TreecodeStats &stats, const ExpansionAuditTally &tally) noexcept {
+  if (tally.pairs == 0)
+    return;
+  const double old_count =
+      static_cast<double>(stats.far_expansion_audit_pairs);
+  const double new_count = old_count + static_cast<double>(tally.pairs);
+  const double old_sum =
+      stats.far_expansion_rel_error_mean * old_count;
+  stats.far_expansion_audit_pairs += tally.pairs;
+  stats.far_expansion_audit_panels += tally.panels;
+  stats.far_expansion_direct_ms += tally.direct_ms;
+  stats.far_expansion_rel_error_max =
+      std::max(stats.far_expansion_rel_error_max, tally.rel_error_max);
+  stats.far_expansion_rel_error_mean =
+      new_count > 0.0 ? (old_sum + tally.rel_error_sum) / new_count : 0.0;
+  stats.convergence_estimator_high_error_caught +=
+      tally.estimator_high_error_caught;
+  stats.convergence_estimator_high_error_missed +=
+      tally.estimator_high_error_missed;
+  stats.far_expansion_mean_gate_pass =
+      stats.far_expansion_audit_pairs > 0 &&
+      stats.far_expansion_rel_error_mean < 5.0e-4 &&
+      stats.convergence_estimator_high_error_missed == 0;
+}
+
+void record_convergence_estimator(ConvergenceEstimatorTally &tally,
+                                  const TreeNode &node,
+                                  const ConvergenceEstimatorDecision &decision)
+    noexcept {
+  if (!decision.active)
+    return;
+  ++tally.samples;
+  tally.tail_norm_p_sum += decision.tail_norm_p;
+  tally.tail_norm_p_max =
+      std::max(tally.tail_norm_p_max, decision.tail_norm_p);
+  tally.tail_norm_pm1_sum += decision.tail_norm_pm1;
+  tally.tail_norm_pm1_max =
+      std::max(tally.tail_norm_pm1_max, decision.tail_norm_pm1);
+  tally.tail_ratio_sum += decision.tail_ratio;
+  tally.tail_ratio_max = std::max(tally.tail_ratio_max, decision.tail_ratio);
+  tally.estimated_error_sum += decision.estimated_error;
+  tally.estimated_error_max =
+      std::max(tally.estimated_error_max, decision.estimated_error);
+  tally.effective_jcp_amp_sum += decision.effective_jcp_amp;
+  tally.effective_jcp_amp_max =
+      std::max(tally.effective_jcp_amp_max, decision.effective_jcp_amp);
+  if (decision.unstable) {
+    ++tally.unstable_count;
+    tally.unstable_panels += node.panel_count;
+  }
+  if (decision.split_reject) {
+    ++tally.split_rejects;
+    tally.split_reject_panels += node.panel_count;
+  }
+}
+
+void merge_convergence_estimator(ConvergenceEstimatorTally &dst,
+                                 const ConvergenceEstimatorTally &src)
+    noexcept {
+  if (src.samples == 0)
+    return;
+  dst.samples += src.samples;
+  dst.unstable_count += src.unstable_count;
+  dst.unstable_panels += src.unstable_panels;
+  dst.split_rejects += src.split_rejects;
+  dst.split_reject_panels += src.split_reject_panels;
+  dst.tail_norm_p_sum += src.tail_norm_p_sum;
+  dst.tail_norm_p_max = std::max(dst.tail_norm_p_max, src.tail_norm_p_max);
+  dst.tail_norm_pm1_sum += src.tail_norm_pm1_sum;
+  dst.tail_norm_pm1_max =
+      std::max(dst.tail_norm_pm1_max, src.tail_norm_pm1_max);
+  dst.tail_ratio_sum += src.tail_ratio_sum;
+  dst.tail_ratio_max = std::max(dst.tail_ratio_max, src.tail_ratio_max);
+  dst.estimated_error_sum += src.estimated_error_sum;
+  dst.estimated_error_max =
+      std::max(dst.estimated_error_max, src.estimated_error_max);
+  dst.effective_jcp_amp_sum += src.effective_jcp_amp_sum;
+  dst.effective_jcp_amp_max =
+      std::max(dst.effective_jcp_amp_max, src.effective_jcp_amp_max);
+}
+
+void copy_convergence_estimator_to_stats(
+    TreecodeStats &stats, const ConvergenceEstimatorTally &tally) noexcept {
+  if (tally.samples == 0)
+    return;
+  const double old_count =
+      static_cast<double>(stats.convergence_estimator_samples);
+  const double new_count = old_count + static_cast<double>(tally.samples);
+  const double old_tail_sum =
+      stats.convergence_estimator_tail_ratio_mean * old_count;
+  const double old_error_sum =
+      stats.convergence_estimator_error_mean * old_count;
+  const double old_tail_p_sum =
+      stats.convergence_tail_norm_p_mean * old_count;
+  const double old_tail_pm1_sum =
+      stats.convergence_tail_norm_pm1_mean * old_count;
+  const double old_amp_sum =
+      stats.convergence_effective_jcp_amp_mean * old_count;
+  stats.convergence_estimator_samples += tally.samples;
+  stats.convergence_estimator_unstable_far_count += tally.unstable_count;
+  stats.convergence_estimator_unstable_far_panels += tally.unstable_panels;
+  stats.convergence_estimator_split_rejects += tally.split_rejects;
+  stats.convergence_estimator_split_reject_panels +=
+      tally.split_reject_panels;
+  stats.convergence_estimator_tail_ratio_max =
+      std::max(stats.convergence_estimator_tail_ratio_max,
+               tally.tail_ratio_max);
+  stats.convergence_estimator_error_max =
+      std::max(stats.convergence_estimator_error_max,
+               tally.estimated_error_max);
+  stats.convergence_tail_norm_p_max =
+      std::max(stats.convergence_tail_norm_p_max, tally.tail_norm_p_max);
+  stats.convergence_tail_norm_pm1_max =
+      std::max(stats.convergence_tail_norm_pm1_max, tally.tail_norm_pm1_max);
+  stats.convergence_effective_jcp_amp_max =
+      std::max(stats.convergence_effective_jcp_amp_max,
+               tally.effective_jcp_amp_max);
+  stats.convergence_estimator_tail_ratio_mean =
+      new_count > 0.0 ? (old_tail_sum + tally.tail_ratio_sum) / new_count
+                      : 0.0;
+  stats.convergence_estimator_error_mean =
+      new_count > 0.0 ? (old_error_sum + tally.estimated_error_sum) / new_count
+                      : 0.0;
+  stats.convergence_tail_norm_p_mean =
+      new_count > 0.0 ? (old_tail_p_sum + tally.tail_norm_p_sum) / new_count
+                      : 0.0;
+  stats.convergence_tail_norm_pm1_mean =
+      new_count > 0.0
+          ? (old_tail_pm1_sum + tally.tail_norm_pm1_sum) / new_count
+          : 0.0;
+  stats.convergence_effective_jcp_amp_mean =
+      new_count > 0.0 ? (old_amp_sum + tally.effective_jcp_amp_sum) / new_count
+                      : 0.0;
+}
+
+void record_far_convergence_audit(ConvergenceAuditTally &tally,
+                                  const TreeNode &node,
+                                  double distance) noexcept {
+  if (distance <= 0.0 || !std::isfinite(distance))
+    return;
+  const double rho = node.radius / distance;
+  const double aspect = node_aspect_ratio(node);
+  ++tally.pairs;
+  tally.rho_sum += rho;
+  tally.rho_max = std::max(tally.rho_max, rho);
+  tally.aspect_sum += aspect;
+  tally.aspect_max = std::max(tally.aspect_max, aspect);
+}
+
+void merge_far_convergence_audit(ConvergenceAuditTally &dst,
+                                 const ConvergenceAuditTally &src) noexcept {
+  if (src.pairs == 0)
+    return;
+  dst.pairs += src.pairs;
+  dst.rho_sum += src.rho_sum;
+  dst.rho_max = std::max(dst.rho_max, src.rho_max);
+  dst.aspect_sum += src.aspect_sum;
+  dst.aspect_max = std::max(dst.aspect_max, src.aspect_max);
+}
+
+void copy_far_convergence_audit_to_stats(
+    TreecodeStats &stats, const ConvergenceAuditTally &tally) noexcept {
+  if (tally.pairs == 0)
+    return;
+  const std::size_t previous_pairs =
+      stats.far_node_interactions >= tally.pairs
+          ? stats.far_node_interactions - tally.pairs
+          : std::size_t{0};
+  const double old_count = static_cast<double>(previous_pairs);
+  const double add_count = static_cast<double>(tally.pairs);
+  const double new_count = old_count + add_count;
+  stats.far_convergence_rho_max =
+      std::max(stats.far_convergence_rho_max, tally.rho_max);
+  stats.accepted_far_aspect_ratio_max =
+      std::max(stats.accepted_far_aspect_ratio_max, tally.aspect_max);
+  stats.far_convergence_rho_mean =
+      new_count > 0.0
+          ? (stats.far_convergence_rho_mean * old_count + tally.rho_sum) /
+                new_count
+          : 0.0;
+  stats.accepted_far_aspect_ratio_mean =
+      new_count > 0.0
+          ? (stats.accepted_far_aspect_ratio_mean * old_count +
+             tally.aspect_sum) /
+                new_count
+          : 0.0;
+}
+
 struct MacDecision {
   bool ratio_accept{false};
   bool accepted{false};
   bool unsafe{false};
+  bool physical_gap_limited{false};
+  bool convergence_rho_limited{false};
+  bool convergence_aspect_limited{false};
+  double rho{0.0};
+  double aspect{0.0};
   double gap{0.0};
   double gap_ratio{0.0};
 };
@@ -194,17 +525,36 @@ MacDecision evaluate_mac(const Panel &target, const TreeNode &node,
                          const TreeWorkspace &tree,
                          double distance) noexcept {
   MacDecision decision;
-  decision.ratio_accept = node.radius / distance < tree.opening_theta;
+  decision.rho =
+      distance > 0.0 && std::isfinite(distance)
+          ? node.radius / distance
+          : std::numeric_limits<double>::infinity();
+  decision.aspect = node_aspect_ratio(node);
+  decision.ratio_accept = decision.rho < tree.opening_theta;
   decision.accepted = decision.ratio_accept;
-  if (!decision.ratio_accept || tree.mac_safety == "off")
+  if (!decision.ratio_accept)
     return decision;
-  const double target_edge = tree_panel_max_edge_length(target);
-  const double guard_edge =
-      std::max({target_edge, node.max_edge_length, 1.0e-12});
-  decision.gap = panel_node_aabb_gap(target, node);
-  decision.gap_ratio = decision.gap / guard_edge;
-  decision.unsafe = decision.gap <= tree.mac_gap_factor * guard_edge;
-  if (tree.mac_safety == "physical-gap" && decision.unsafe)
+  if (tree.mac_safety != "off") {
+    const double target_edge = tree_panel_max_edge_length(target);
+    const double guard_edge =
+        std::max({target_edge, node.max_edge_length, 1.0e-12});
+    decision.gap = panel_node_aabb_gap(target, node);
+    decision.gap_ratio = decision.gap / guard_edge;
+    decision.unsafe = decision.gap <= tree.mac_gap_factor * guard_edge;
+    if (tree.mac_safety == "physical-gap" && decision.unsafe) {
+      decision.physical_gap_limited = true;
+      decision.accepted = false;
+    }
+  }
+  if (!decision.accepted || tree.convergence_safety == "off")
+    return decision;
+  decision.convergence_rho_limited =
+      tree.convergence_rho_cap > 0.0 && decision.rho > tree.convergence_rho_cap;
+  decision.convergence_aspect_limited =
+      tree.mac_aspect_cap > 0.0 && decision.aspect > tree.mac_aspect_cap;
+  if (tree.convergence_safety == "split" &&
+      (decision.convergence_rho_limited ||
+       decision.convergence_aspect_limited))
     decision.accepted = false;
   return decision;
 }
@@ -938,6 +1288,34 @@ struct JcpAccum {
   double phi{0.0};
   double phin{0.0};
 };
+
+void record_far_expansion_audit(ExpansionAuditTally &tally,
+                                const JcpAccum &taylor,
+                                const JcpAccum &direct, bool coupled,
+                                std::size_t panel_count,
+                                double direct_ms,
+                                bool estimator_active = false,
+                                bool estimator_unstable = false,
+                                double estimator_error_cap = 0.0) noexcept {
+  const double dphi = taylor.phi - direct.phi;
+  const double dphin = coupled ? (taylor.phin - direct.phin) : 0.0;
+  const double diff_norm = std::sqrt(dphi * dphi + dphin * dphin);
+  const double ref_norm = std::sqrt(
+      direct.phi * direct.phi + (coupled ? direct.phin * direct.phin : 0.0));
+  const double rel = diff_norm / std::max(1.0e-300, ref_norm);
+  ++tally.pairs;
+  tally.panels += panel_count;
+  tally.direct_ms += direct_ms;
+  tally.rel_error_sum += rel;
+  tally.rel_error_max = std::max(tally.rel_error_max, rel);
+  if (estimator_active && estimator_error_cap > 0.0 &&
+      rel > estimator_error_cap) {
+    if (estimator_unstable)
+      ++tally.estimator_high_error_caught;
+    else
+      ++tally.estimator_high_error_missed;
+  }
+}
 
 struct TreeUnknownCache {
   std::vector<double> phi;
@@ -1686,19 +2064,41 @@ void include_panel_bounds(TreeNode &node, const Panel &panel,
   include_bound_point(node, panel.x, panel.y, panel.z, initialized);
 }
 
-void finalize_tight_bounds(TreeNode &node, bool initialized) noexcept {
+double aabb_radius_from_center(const TreeNode &node) noexcept {
+  double radius = 0.0;
+  for (int xi = 0; xi < 2; ++xi) {
+    const double x = xi == 0 ? node.min_x : node.max_x;
+    for (int yi = 0; yi < 2; ++yi) {
+      const double y = yi == 0 ? node.min_y : node.max_y;
+      for (int zi = 0; zi < 2; ++zi) {
+        const double z = zi == 0 ? node.min_z : node.max_z;
+        const double dx = x - node.cx;
+        const double dy = y - node.cy;
+        const double dz = z - node.cz;
+        radius = std::max(radius, std::sqrt(dx * dx + dy * dy + dz * dz));
+      }
+    }
+  }
+  return radius;
+}
+
+void finalize_tight_bounds(TreeNode &node, bool initialized,
+                           bool use_aabb_center) noexcept {
   if (!initialized) {
     node.min_x = node.max_x = node.cx;
     node.min_y = node.max_y = node.cy;
     node.min_z = node.max_z = node.cz;
   }
-  node.cx = 0.5 * (node.min_x + node.max_x);
-  node.cy = 0.5 * (node.min_y + node.max_y);
-  node.cz = 0.5 * (node.min_z + node.max_z);
-  const double hx = 0.5 * (node.max_x - node.min_x);
-  const double hy = 0.5 * (node.max_y - node.min_y);
-  const double hz = 0.5 * (node.max_z - node.min_z);
-  node.radius = std::sqrt(std::max(0.0, hx * hx + hy * hy + hz * hz));
+  const double aabb_cx = 0.5 * (node.min_x + node.max_x);
+  const double aabb_cy = 0.5 * (node.min_y + node.max_y);
+  const double aabb_cz = 0.5 * (node.min_z + node.max_z);
+  if (use_aabb_center || !std::isfinite(node.cx) ||
+      !std::isfinite(node.cy) || !std::isfinite(node.cz)) {
+    node.cx = aabb_cx;
+    node.cy = aabb_cy;
+    node.cz = aabb_cz;
+  }
+  node.radius = aabb_radius_from_center(node);
 }
 
 void set_moment_bounds_from_radius(TreeNode &node) noexcept {
@@ -1713,7 +2113,8 @@ void set_moment_bounds_from_radius(TreeNode &node) noexcept {
 TreeNode make_leaf_node(const std::vector<Panel> &panels,
                         const std::vector<std::size_t> &order,
                         std::size_t first_panel, std::size_t panel_count,
-                        bool tight_bounds) noexcept {
+                        bool tight_bounds,
+                        const std::string &expansion_center) noexcept {
   TreeNode node;
   node.first_panel = first_panel;
   node.panel_count = panel_count;
@@ -1755,7 +2156,8 @@ TreeNode make_leaf_node(const std::vector<Panel> &panels,
     node.radius = std::max(node.radius, std::sqrt(dx * dx + dy * dy + dz * dz));
   }
   if (tight_bounds)
-    finalize_tight_bounds(node, bounds_initialized);
+    finalize_tight_bounds(node, bounds_initialized,
+                          expansion_center != "area-centroid");
   else
     set_moment_bounds_from_radius(node);
   return node;
@@ -1763,7 +2165,8 @@ TreeNode make_leaf_node(const std::vector<Panel> &panels,
 
 TreeNode make_parent_node(const std::vector<TreeNode> &nodes,
                           const std::vector<std::size_t> &children,
-                          bool tight_bounds) noexcept {
+                          bool tight_bounds,
+                          const std::string &expansion_center) noexcept {
   TreeNode node;
   node.child_count = children.size();
   if (!children.empty())
@@ -1816,10 +2219,49 @@ TreeNode make_parent_node(const std::vector<TreeNode> &nodes,
                  std::sqrt(dx * dx + dy * dy + dz * dz) + child_node.radius);
   }
   if (tight_bounds)
-    finalize_tight_bounds(node, bounds_initialized);
+    finalize_tight_bounds(node, bounds_initialized,
+                          expansion_center != "area-centroid");
   else
     set_moment_bounds_from_radius(node);
   return node;
+}
+
+double point_aabb_gap(double x, double y, double z,
+                      const TreeNode &node) noexcept {
+  const double dx = std::max({node.min_x - x, x - node.max_x, 0.0});
+  const double dy = std::max({node.min_y - y, y - node.max_y, 0.0});
+  const double dz = std::max({node.min_z - z, z - node.max_z, 0.0});
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+void annotate_fragmented_nodes(TreeWorkspace &tree) noexcept {
+  for (TreeNode &node : tree.nodes) {
+    node.fragmented = false;
+    node.fragmentation_center_gap_ratio = 0.0;
+    if (node.child_count < 2)
+      continue;
+    double min_child_gap = std::numeric_limits<double>::infinity();
+    for (std::size_t child = 0; child < node.child_count; ++child) {
+      const std::size_t child_pos = node.first_child + child;
+      const std::size_t child_index =
+          child_pos < tree.child_indices.size()
+              ? tree.child_indices[child_pos]
+              : static_cast<std::size_t>(-1);
+      if (child_index >= tree.nodes.size())
+        continue;
+      min_child_gap =
+          std::min(min_child_gap,
+                   point_aabb_gap(node.cx, node.cy, node.cz,
+                                  tree.nodes[child_index]));
+    }
+    if (!std::isfinite(min_child_gap))
+      continue;
+    const double scale = std::max(node.max_edge_length, 1.0e-12);
+    node.fragmentation_center_gap_ratio = min_child_gap / scale;
+    node.fragmented =
+        node.fragmentation_center_gap_ratio >=
+        kFragmentationGapRatioThreshold;
+  }
 }
 
 std::size_t child_node_index(const TreeWorkspace &tree, const TreeNode &node,
@@ -1828,6 +2270,15 @@ std::size_t child_node_index(const TreeWorkspace &tree, const TreeNode &node,
   if (pos < tree.child_indices.size())
     return tree.child_indices[pos];
   return static_cast<std::size_t>(-1);
+}
+
+void push_child_nodes(const TreeWorkspace &tree, const TreeNode &node,
+                      std::vector<std::size_t> &stack) {
+  for (std::size_t child = 0; child < node.child_count; ++child) {
+    const std::size_t child_index = child_node_index(tree, node, child);
+    if (child_index < tree.nodes.size())
+      stack.push_back(child_index);
+  }
 }
 
 void attach_children(TreeWorkspace &tree, TreeNode &node,
@@ -1940,7 +2391,8 @@ std::size_t build_topdown_temp_node(
 void flatten_topdown_tree(const std::vector<Panel> &panels,
                           TreeWorkspace &tree,
                           const std::vector<TopDownTempNode> &temp_nodes,
-                          std::size_t temp_root, bool tight_bounds) {
+                          std::size_t temp_root, bool tight_bounds,
+                          const std::string &expansion_center) {
   std::vector<std::size_t> temp_to_final(temp_nodes.size(),
                                          static_cast<std::size_t>(-1));
   std::size_t max_depth = 0;
@@ -1957,7 +2409,8 @@ void flatten_topdown_tree(const std::vector<Panel> &panels,
       continue;
     temp_to_final[temp] = tree.nodes.size();
     tree.nodes.push_back(make_leaf_node(panels, tree.order, node.first_panel,
-                                        node.panel_count, tight_bounds));
+                                        node.panel_count, tight_bounds,
+                                        expansion_center));
   }
   tree.leaf_count = tree.nodes.size();
   tree.moment_levels.push_back({0, tree.leaf_count});
@@ -1982,7 +2435,8 @@ void flatten_topdown_tree(const std::vector<Panel> &panels,
       }
       if (!mapped || children.empty())
         continue;
-      TreeNode parent = make_parent_node(tree.nodes, children, tight_bounds);
+      TreeNode parent = make_parent_node(tree.nodes, children, tight_bounds,
+                                         expansion_center);
       parent.first_panel = node.first_panel;
       parent.panel_count = node.panel_count;
       attach_children(tree, parent, children);
@@ -2158,7 +2612,12 @@ TreeInteractionLists build_tree_interactions(const std::vector<Panel> &panels,
   std::vector<std::size_t> target_cluster_panels_by_target(n, 0);
   std::vector<std::size_t> target_cluster_rejected_by_target(n, 0);
   std::vector<std::size_t> mac_reject_by_target(n, 0);
+  std::vector<std::size_t> mac_convergence_rho_reject_by_target(n, 0);
+  std::vector<std::size_t> mac_convergence_aspect_reject_by_target(n, 0);
+  std::vector<std::size_t> mac_convergence_rho_panel_by_target(n, 0);
+  std::vector<std::size_t> mac_convergence_aspect_panel_by_target(n, 0);
   std::vector<MacAuditTally> mac_audit_by_target(n);
+  std::vector<FragmentationTally> fragmentation_by_target(n);
   const AdaptivePruneParams adaptive_params =
       adaptive_prune_params(tree.adaptive_level);
   const std::size_t workers = effective_workers(executor, n);
@@ -2199,10 +2658,30 @@ TreeInteractionLists build_tree_interactions(const std::vector<Panel> &panels,
                 record_far_geometric_audit(mac_audit_by_target[i], node,
                                            mac.gap, mac.gap_ratio,
                                            mac.unsafe);
-                if (!mac.accepted)
+                if (mac.physical_gap_limited)
                   ++mac_audit_by_target[i].physical_gap_rejects;
               }
+              if (mac.convergence_rho_limited) {
+                ++mac_convergence_rho_reject_by_target[i];
+                mac_convergence_rho_panel_by_target[i] += node.panel_count;
+              }
+              if (mac.convergence_aspect_limited) {
+                ++mac_convergence_aspect_reject_by_target[i];
+                mac_convergence_aspect_panel_by_target[i] += node.panel_count;
+              }
               if (mac.accepted) {
+                const bool fragmented_far =
+                    tree.fragmentation_safety != "off" && node.fragmented;
+                if (fragmented_far) {
+                  const bool split =
+                      tree.fragmentation_safety == "split";
+                  record_fragmentation_audit(fragmentation_by_target[i], node,
+                                             split);
+                  if (split) {
+                    push_child_nodes(tree, node, stack);
+                    continue;
+                  }
+                }
                 far.push_back(node_index);
                 continue;
               }
@@ -2375,6 +2854,14 @@ TreeInteractionLists build_tree_interactions(const std::vector<Panel> &panels,
     lists.target_cluster_panels_pruned += target_cluster_panels_by_target[i];
     lists.target_cluster_rejected += target_cluster_rejected_by_target[i];
     lists.mac_reject_radius_limited += mac_reject_by_target[i];
+    lists.mac_convergence_rho_rejects +=
+        mac_convergence_rho_reject_by_target[i];
+    lists.mac_convergence_aspect_rejects +=
+        mac_convergence_aspect_reject_by_target[i];
+    lists.mac_convergence_rho_reject_panels +=
+        mac_convergence_rho_panel_by_target[i];
+    lists.mac_convergence_aspect_reject_panels +=
+        mac_convergence_aspect_panel_by_target[i];
     MacAuditTally tally;
     tally.unsafe_count = lists.far_geometric_unsafe_count;
     tally.unsafe_panels = lists.far_geometric_unsafe_panels;
@@ -2391,6 +2878,20 @@ TreeInteractionLists build_tree_interactions(const std::vector<Panel> &panels,
     lists.far_geometric_gap_ratio_sum = tally.sum_gap_ratio;
     lists.far_geometric_audit_samples = tally.samples;
     lists.mac_physical_gap_rejects = tally.physical_gap_rejects;
+    FragmentationTally fragmentation;
+    fragmentation.far_count = lists.fragmented_far_count;
+    fragmentation.far_panels = lists.fragmented_far_panels;
+    fragmentation.split_rejects = lists.fragmented_split_rejects;
+    fragmentation.gap_ratio_sum =
+        lists.fragmentation_center_gap_ratio_sum;
+    fragmentation.gap_ratio_max =
+        lists.fragmentation_center_gap_ratio_max;
+    merge_fragmentation_audit(fragmentation, fragmentation_by_target[i]);
+    lists.fragmented_far_count = fragmentation.far_count;
+    lists.fragmented_far_panels = fragmentation.far_panels;
+    lists.fragmented_split_rejects = fragmentation.split_rejects;
+    lists.fragmentation_center_gap_ratio_sum = fragmentation.gap_ratio_sum;
+    lists.fragmentation_center_gap_ratio_max = fragmentation.gap_ratio_max;
   }
   lists.singular_indices.reserve(lists.singular_offsets.back());
   lists.leaf_indices.reserve(lists.leaf_offsets.back());
@@ -2478,16 +2979,28 @@ TreeInteractionLists build_tree_interactions(const std::vector<Panel> &panels,
   return lists;
 }
 
-void accumulate_leaf_moment(NodeMoments &moment, const Panel &panel,
-                            const TreeNode &node, double weight,
-                            const std::vector<MomentIndex> &indices) {
+void kahan_add(double &sum, double &compensation, double value) noexcept {
+  const double y = value - compensation;
+  const double t = sum + y;
+  compensation = (t - sum) - y;
+  sum = t;
+}
+
+void accumulate_leaf_moment(
+    NodeMoments &moment, const Panel &panel, const TreeNode &node,
+    double weight, const std::vector<MomentIndex> &indices,
+    std::array<double, kTaylorMomentMax> *compensation = nullptr) {
   const double dx = panel.x - node.cx;
   const double dy = panel.y - node.cy;
   const double dz = panel.z - node.cz;
   for (std::size_t m = 0; m < indices.size(); ++m) {
     const MomentIndex &index = indices[m];
-    moment.values[m] += weight * pow_int(dx, index.ax) *
-                        pow_int(dy, index.ay) * pow_int(dz, index.az);
+    const double value = weight * pow_int(dx, index.ax) *
+                         pow_int(dy, index.ay) * pow_int(dz, index.az);
+    if (compensation != nullptr)
+      kahan_add(moment.values[m], (*compensation)[m], value);
+    else
+      moment.values[m] += value;
   }
 }
 
@@ -2495,7 +3008,9 @@ void translate_child_moment(NodeMoments &parent, const NodeMoments &child,
                             const TreeNode &parent_node,
                             const TreeNode &child_node,
                             const std::vector<MomentIndex> &indices,
-                            const std::array<int, kSeriesSize> &lookup) {
+                            const std::array<int, kSeriesSize> &lookup,
+                            std::array<double, kTaylorMomentMax>
+                                *compensation = nullptr) {
   const double ox = child_node.cx - parent_node.cx;
   const double oy = child_node.cy - parent_node.cy;
   const double oz = child_node.cz - parent_node.cz;
@@ -2519,7 +3034,11 @@ void translate_child_moment(NodeMoments &parent, const NodeMoments &child,
         }
       }
     }
-    parent.values[alpha_index] += translated;
+    if (compensation != nullptr)
+      kahan_add(parent.values[alpha_index], (*compensation)[alpha_index],
+                translated);
+    else
+      parent.values[alpha_index] += translated;
   }
 }
 
@@ -2531,26 +3050,31 @@ compute_node_moments(const std::vector<Panel> &panels,
   std::vector<NodeMoments> moments(tree.nodes.size());
   const auto &indices = moment_indices(taylor_order);
   const auto &lookup = moment_lookup();
+  const bool use_kahan = tree.moment_sum == "kahan";
   if (tree.moment_levels.empty()) {
     for (std::size_t node_index = 0; node_index < tree.nodes.size();
          ++node_index) {
       const TreeNode &node = tree.nodes[node_index];
       if (node.child_count == 0) {
+        std::array<double, kTaylorMomentMax> compensation{};
         for (std::size_t pos = node.first_panel;
              pos < node.first_panel + node.panel_count; ++pos) {
           const std::size_t panel_index = tree.order[pos];
           const Panel &panel = panels[panel_index];
           accumulate_leaf_moment(moments[node_index], panel, node,
-                                 panel.area * density[panel_index], indices);
+                                 panel.area * density[panel_index], indices,
+                                 use_kahan ? &compensation : nullptr);
         }
       } else {
+        std::array<double, kTaylorMomentMax> compensation{};
         for (std::size_t child = 0; child < node.child_count; ++child) {
           const std::size_t child_index = child_node_index(tree, node, child);
           if (child_index >= tree.nodes.size())
             continue;
           translate_child_moment(moments[node_index], moments[child_index],
                                  node, tree.nodes[child_index], indices,
-                                 lookup);
+                                 lookup,
+                                 use_kahan ? &compensation : nullptr);
         }
       }
     }
@@ -2566,12 +3090,14 @@ compute_node_moments(const std::vector<Panel> &panels,
         for (std::size_t offset = begin; offset < end; ++offset) {
           const std::size_t node_index = leaf_level.first + offset;
           const TreeNode &node = tree.nodes[node_index];
+          std::array<double, kTaylorMomentMax> compensation{};
           for (std::size_t pos = node.first_panel;
                pos < node.first_panel + node.panel_count; ++pos) {
             const std::size_t panel_index = tree.order[pos];
             const Panel &panel = panels[panel_index];
             accumulate_leaf_moment(moments[node_index], panel, node,
-                                   panel.area * density[panel_index], indices);
+                                   panel.area * density[panel_index], indices,
+                                   use_kahan ? &compensation : nullptr);
           }
         }
       });
@@ -2586,6 +3112,7 @@ compute_node_moments(const std::vector<Panel> &panels,
           for (std::size_t offset = begin; offset < end; ++offset) {
             const std::size_t node_index = range.first + offset;
             const TreeNode &node = tree.nodes[node_index];
+            std::array<double, kTaylorMomentMax> compensation{};
             for (std::size_t child = 0; child < node.child_count; ++child) {
               const std::size_t child_index =
                   child_node_index(tree, node, child);
@@ -2593,7 +3120,8 @@ compute_node_moments(const std::vector<Panel> &panels,
                 continue;
               translate_child_moment(moments[node_index],
                                      moments[child_index], node,
-                                     tree.nodes[child_index], indices, lookup);
+                                     tree.nodes[child_index], indices, lookup,
+                                     use_kahan ? &compensation : nullptr);
             }
           }
         });
@@ -2605,6 +3133,32 @@ struct PackedJcpMoments {
   std::vector<NodeMoments> phin;
   std::array<std::vector<NodeMoments>, 3> phi_normal;
 };
+
+void accumulate_jcp_panel_moments(
+    PackedJcpMoments &packed, std::size_t node_index, const Panel &panel,
+    std::size_t panel_index, std::size_t panel_count,
+    const std::vector<double> &unknowns, bool coupled, const TreeNode &node,
+    const std::vector<MomentIndex> &indices,
+    std::array<double, kTaylorMomentMax> *phin_comp,
+    std::array<std::array<double, kTaylorMomentMax>, 3> *normal_comp) {
+  const double phi =
+      panel_index < unknowns.size() ? unknowns[panel_index] : 0.0;
+  const double area_phi = panel.area * phi;
+  accumulate_leaf_moment(
+      packed.phi_normal[0][node_index], panel, node, area_phi * panel.nx,
+      indices, normal_comp != nullptr ? &(*normal_comp)[0] : nullptr);
+  accumulate_leaf_moment(
+      packed.phi_normal[1][node_index], panel, node, area_phi * panel.ny,
+      indices, normal_comp != nullptr ? &(*normal_comp)[1] : nullptr);
+  accumulate_leaf_moment(
+      packed.phi_normal[2][node_index], panel, node, area_phi * panel.nz,
+      indices, normal_comp != nullptr ? &(*normal_comp)[2] : nullptr);
+  if (coupled && panel_count + panel_index < unknowns.size()) {
+    accumulate_leaf_moment(packed.phin[node_index], panel, node,
+                           panel.area * unknowns[panel_count + panel_index],
+                           indices, phin_comp);
+  }
+}
 
 PackedJcpMoments compute_jcp_node_moments_packed(
     const std::vector<Panel> &panels, const std::vector<double> &unknowns,
@@ -2618,6 +3172,34 @@ PackedJcpMoments compute_jcp_node_moments_packed(
   const auto &lookup = moment_lookup();
   if (tree.moment_levels.empty())
     return packed;
+  const bool use_kahan = tree.moment_sum == "kahan";
+  if (tree.moment_construction == "direct-node") {
+    const std::size_t node_count = tree.nodes.size();
+    const std::size_t workers = effective_workers(executor, node_count);
+    const std::size_t n = panels.size();
+    executor.parallel_for(
+        node_count, workers, 8,
+        [&](std::size_t, std::size_t begin, std::size_t end) {
+          for (std::size_t node_index = begin; node_index < end; ++node_index) {
+            const TreeNode &node = tree.nodes[node_index];
+            std::array<double, kTaylorMomentMax> phin_comp{};
+            std::array<std::array<double, kTaylorMomentMax>, 3> normal_comp{};
+            const std::size_t last =
+                std::min(tree.order.size(), node.first_panel + node.panel_count);
+            for (std::size_t pos = node.first_panel; pos < last; ++pos) {
+              const std::size_t panel_index = tree.order[pos];
+              if (panel_index >= panels.size())
+                continue;
+              accumulate_jcp_panel_moments(
+                  packed, node_index, panels[panel_index], panel_index, n,
+                  unknowns, coupled, node, indices,
+                  use_kahan ? &phin_comp : nullptr,
+                  use_kahan ? &normal_comp : nullptr);
+            }
+          }
+        });
+    return packed;
+  }
 
   const auto leaf_level = tree.moment_levels.front();
   const std::size_t n = panels.size();
@@ -2629,25 +3211,16 @@ PackedJcpMoments compute_jcp_node_moments_packed(
         for (std::size_t offset = begin; offset < end; ++offset) {
           const std::size_t node_index = leaf_level.first + offset;
           const TreeNode &node = tree.nodes[node_index];
+          std::array<double, kTaylorMomentMax> phin_comp{};
+          std::array<std::array<double, kTaylorMomentMax>, 3> normal_comp{};
           for (std::size_t pos = node.first_panel;
                pos < node.first_panel + node.panel_count; ++pos) {
             const std::size_t panel_index = tree.order[pos];
             const Panel &panel = panels[panel_index];
-            const double phi = panel_index < unknowns.size()
-                                   ? unknowns[panel_index]
-                                   : 0.0;
-            const double area_phi = panel.area * phi;
-            accumulate_leaf_moment(packed.phi_normal[0][node_index], panel,
-                                   node, area_phi * panel.nx, indices);
-            accumulate_leaf_moment(packed.phi_normal[1][node_index], panel,
-                                   node, area_phi * panel.ny, indices);
-            accumulate_leaf_moment(packed.phi_normal[2][node_index], panel,
-                                   node, area_phi * panel.nz, indices);
-            if (coupled && n + panel_index < unknowns.size()) {
-              accumulate_leaf_moment(packed.phin[node_index], panel, node,
-                                     panel.area * unknowns[n + panel_index],
-                                     indices);
-            }
+            accumulate_jcp_panel_moments(
+                packed, node_index, panel, panel_index, n, unknowns, coupled,
+                node, indices, use_kahan ? &phin_comp : nullptr,
+                use_kahan ? &normal_comp : nullptr);
           }
         }
       });
@@ -2662,6 +3235,8 @@ PackedJcpMoments compute_jcp_node_moments_packed(
           for (std::size_t offset = begin; offset < end; ++offset) {
             const std::size_t node_index = range.first + offset;
             const TreeNode &node = tree.nodes[node_index];
+            std::array<double, kTaylorMomentMax> phin_comp{};
+            std::array<std::array<double, kTaylorMomentMax>, 3> normal_comp{};
             for (std::size_t child = 0; child < node.child_count; ++child) {
               const std::size_t child_index =
                   child_node_index(tree, node, child);
@@ -2670,14 +3245,17 @@ PackedJcpMoments compute_jcp_node_moments_packed(
               const TreeNode &child_node = tree.nodes[child_index];
               translate_child_moment(packed.phin[node_index],
                                      packed.phin[child_index], node,
-                                     child_node, indices, lookup);
+                                     child_node, indices, lookup,
+                                     use_kahan ? &phin_comp : nullptr);
               for (int c = 0; c < 3; ++c) {
                 translate_child_moment(
                     packed.phi_normal[static_cast<std::size_t>(c)]
                                       [node_index],
                     packed.phi_normal[static_cast<std::size_t>(c)]
                                       [child_index],
-                    node, child_node, indices, lookup);
+                    node, child_node, indices, lookup,
+                    use_kahan ? &normal_comp[static_cast<std::size_t>(c)]
+                              : nullptr);
               }
             }
           }
@@ -2686,10 +3264,99 @@ PackedJcpMoments compute_jcp_node_moments_packed(
   return packed;
 }
 
+double channel_moment_norm_by_degree(const NodeMoments &moments,
+                                     const std::vector<MomentIndex> &indices,
+                                     int degree, double radius) noexcept {
+  double out = 0.0;
+  const double safe_radius = std::max(1.0e-12, radius);
+  const double scale = pow_int(safe_radius, degree);
+  for (std::size_t m = 0; m < indices.size(); ++m) {
+    const MomentIndex &index = indices[m];
+    if (index.ax + index.ay + index.az != degree)
+      continue;
+    out = std::max(out, std::abs(moments.values[m]) /
+                            std::max(1.0e-300, scale));
+  }
+  return out;
+}
+
+ConvergenceEstimatorDecision evaluate_convergence_estimator(
+    const TreeWorkspace &tree, const TreeNode &node,
+    const PackedJcpMoments &packed, std::size_t node_index, int taylor_order,
+    bool coupled, double rho) noexcept {
+  ConvergenceEstimatorDecision decision;
+  if (tree.convergence_estimator == "off" || node_index >= packed.phin.size() ||
+      taylor_order <= 0 || rho <= 0.0 || !std::isfinite(rho))
+    return decision;
+  decision.active = true;
+  const auto &indices = moment_indices(taylor_order);
+  double source_norm = 0.0;
+  double tail_norm_p = 0.0;
+  double tail_norm_pm1 = 0.0;
+  auto observe = [&](const NodeMoments &moments) {
+    source_norm =
+        std::max(source_norm,
+                 channel_moment_norm_by_degree(moments, indices, 0,
+                                               node.radius));
+    source_norm =
+        std::max(source_norm,
+                 channel_moment_norm_by_degree(moments, indices, 1,
+                                               node.radius));
+    tail_norm_p =
+        std::max(tail_norm_p,
+                 channel_moment_norm_by_degree(moments, indices, taylor_order,
+                                               node.radius));
+    tail_norm_pm1 =
+        std::max(tail_norm_pm1,
+                 channel_moment_norm_by_degree(moments, indices,
+                                               taylor_order - 1,
+                                               node.radius));
+  };
+  if (coupled)
+    observe(packed.phin[node_index]);
+  if (node_index < packed.phi_normal[0].size()) {
+    observe(packed.phi_normal[0][node_index]);
+    observe(packed.phi_normal[1][node_index]);
+    observe(packed.phi_normal[2][node_index]);
+  }
+  decision.tail_norm_p = tail_norm_p;
+  decision.tail_norm_pm1 = tail_norm_pm1;
+  const bool use_consecutive =
+      tree.convergence_calibration == "consecutive" ||
+      tree.convergence_calibration == "consecutive-aspect";
+  const bool use_aspect = tree.convergence_calibration == "aspect" ||
+                          tree.convergence_calibration == "consecutive-aspect";
+  const double tail_norm =
+      use_consecutive ? std::max(tail_norm_p, tail_norm_pm1 * rho)
+                      : tail_norm_p;
+  decision.tail_ratio = tail_norm / std::max(source_norm, 1.0e-300);
+  double jcp_amp = coupled ? 30.0 : 1.0;
+  if (use_aspect && coupled)
+    jcp_amp *= std::max(1.0, node_aspect_ratio(node));
+  decision.effective_jcp_amp = jcp_amp;
+  decision.estimated_error =
+      decision.tail_ratio * pow_int(rho, taylor_order + 1) * jcp_amp;
+  const bool tail_limited =
+      decision.tail_ratio > tree.convergence_tail_threshold;
+  const bool error_limited =
+      tree.convergence_estimator == "hybrid" &&
+      decision.estimated_error > tree.convergence_estimator_error_cap;
+  decision.unstable = tail_limited || error_limited;
+  decision.split_reject =
+      decision.unstable && tree.convergence_safety == "split" &&
+      rho > tree.convergence_unstable_rho_cap;
+  return decision;
+}
+
 struct MomentAuditSummary {
   std::size_t nodes{0};
   double max_rel_error{0.0};
   double mean_rel_error{0.0};
+  double translation_offset_max{0.0};
+  double translation_offset_mean{0.0};
+  double cancellation_ratio_max{0.0};
+  double cancellation_ratio_mean{0.0};
+  double dynamic_range_max{0.0};
 };
 
 double moment_channel_rel_error(const NodeMoments &direct,
@@ -2704,6 +3371,48 @@ double moment_channel_rel_error(const NodeMoments &direct,
   return diff / std::max(denom, 1.0e-30);
 }
 
+void accumulate_leaf_moment_audit(
+    NodeMoments &moment, std::array<double, kTaylorMomentMax> &abs_sum,
+    std::array<double, kTaylorMomentMax> &max_abs,
+    std::array<double, kTaylorMomentMax> &min_abs, const Panel &panel,
+    const TreeNode &node, double weight,
+    const std::vector<MomentIndex> &indices) {
+  const double dx = panel.x - node.cx;
+  const double dy = panel.y - node.cy;
+  const double dz = panel.z - node.cz;
+  for (std::size_t m = 0; m < indices.size(); ++m) {
+    const MomentIndex &index = indices[m];
+    const double value = weight * pow_int(dx, index.ax) *
+                         pow_int(dy, index.ay) * pow_int(dz, index.az);
+    moment.values[m] += value;
+    const double av = std::abs(value);
+    abs_sum[m] += av;
+    max_abs[m] = std::max(max_abs[m], av);
+    if (av > 0.0 && (min_abs[m] == 0.0 || av < min_abs[m]))
+      min_abs[m] = av;
+  }
+}
+
+void observe_moment_cancellation(
+    const NodeMoments &moment, const std::array<double, kTaylorMomentMax> &abs_sum,
+    const std::array<double, kTaylorMomentMax> &max_abs,
+    const std::array<double, kTaylorMomentMax> &min_abs,
+    std::size_t moment_count, double &ratio_sum, std::size_t &ratio_count,
+    double &ratio_max, double &dynamic_range_max) noexcept {
+  for (std::size_t m = 0; m < moment_count; ++m) {
+    if (abs_sum[m] <= 0.0)
+      continue;
+    const double ratio =
+        abs_sum[m] / std::max(std::abs(moment.values[m]), 1.0e-300);
+    ratio_sum += ratio;
+    ++ratio_count;
+    ratio_max = std::max(ratio_max, ratio);
+    if (min_abs[m] > 0.0)
+      dynamic_range_max =
+          std::max(dynamic_range_max, max_abs[m] / min_abs[m]);
+  }
+}
+
 MomentAuditSummary audit_jcp_moment_translation(
     const std::vector<Panel> &panels, const std::vector<double> &unknowns,
     bool coupled, const TreeWorkspace &tree, int taylor_order,
@@ -2716,12 +3425,34 @@ MomentAuditSummary audit_jcp_moment_translation(
     return summary;
   const std::size_t moment_count = indices.size();
   const std::size_t n = panels.size();
+  double offset_sum = 0.0;
+  std::size_t offset_count = 0;
+  for (const TreeNode &node : tree.nodes) {
+    for (std::size_t child = 0; child < node.child_count; ++child) {
+      const std::size_t child_index = child_node_index(tree, node, child);
+      if (child_index >= tree.nodes.size())
+        continue;
+      const TreeNode &child_node = tree.nodes[child_index];
+      const double offset =
+          point_distance(child_node.cx, child_node.cy, child_node.cz, node.cx,
+                         node.cy, node.cz);
+      summary.translation_offset_max =
+          std::max(summary.translation_offset_max, offset);
+      offset_sum += offset;
+      ++offset_count;
+    }
+  }
+  if (offset_count > 0)
+    summary.translation_offset_mean =
+        offset_sum / static_cast<double>(offset_count);
   const bool full =
       tree.moment_audit == "full-small" && tree.nodes.size() <= 4096;
   const std::size_t sample_cap = full ? tree.nodes.size() : 64;
   const std::size_t stride =
       full ? 1 : std::max<std::size_t>(1, tree.nodes.size() / sample_cap);
   double rel_sum = 0.0;
+  double cancellation_sum = 0.0;
+  std::size_t cancellation_count = 0;
   for (std::size_t node_index = 0; node_index < tree.nodes.size();
        node_index += stride) {
     if (!full && summary.nodes >= sample_cap)
@@ -2731,6 +3462,12 @@ MomentAuditSummary audit_jcp_moment_translation(
       continue;
     NodeMoments direct_phin;
     std::array<NodeMoments, 3> direct_phi_normal{};
+    std::array<double, kTaylorMomentMax> phin_abs{};
+    std::array<double, kTaylorMomentMax> phin_max{};
+    std::array<double, kTaylorMomentMax> phin_min{};
+    std::array<std::array<double, kTaylorMomentMax>, 3> normal_abs{};
+    std::array<std::array<double, kTaylorMomentMax>, 3> normal_max{};
+    std::array<std::array<double, kTaylorMomentMax>, 3> normal_min{};
     const std::size_t end =
         std::min(tree.order.size(), node.first_panel + node.panel_count);
     for (std::size_t pos = node.first_panel; pos < end; ++pos) {
@@ -2741,17 +3478,33 @@ MomentAuditSummary audit_jcp_moment_translation(
       const double phi = panel_index < unknowns.size() ? unknowns[panel_index]
                                                        : 0.0;
       const double area_phi = panel.area * phi;
-      accumulate_leaf_moment(direct_phi_normal[0], panel, node,
-                             area_phi * panel.nx, indices);
-      accumulate_leaf_moment(direct_phi_normal[1], panel, node,
-                             area_phi * panel.ny, indices);
-      accumulate_leaf_moment(direct_phi_normal[2], panel, node,
-                             area_phi * panel.nz, indices);
+      accumulate_leaf_moment_audit(direct_phi_normal[0], normal_abs[0],
+                                   normal_max[0], normal_min[0], panel, node,
+                                   area_phi * panel.nx, indices);
+      accumulate_leaf_moment_audit(direct_phi_normal[1], normal_abs[1],
+                                   normal_max[1], normal_min[1], panel, node,
+                                   area_phi * panel.ny, indices);
+      accumulate_leaf_moment_audit(direct_phi_normal[2], normal_abs[2],
+                                   normal_max[2], normal_min[2], panel, node,
+                                   area_phi * panel.nz, indices);
       if (coupled && n + panel_index < unknowns.size()) {
-        accumulate_leaf_moment(direct_phin, panel, node,
-                               panel.area * unknowns[n + panel_index],
-                               indices);
+        accumulate_leaf_moment_audit(
+            direct_phin, phin_abs, phin_max, phin_min, panel, node,
+            panel.area * unknowns[n + panel_index], indices);
       }
+    }
+    observe_moment_cancellation(
+        direct_phin, phin_abs, phin_max, phin_min, moment_count,
+        cancellation_sum, cancellation_count, summary.cancellation_ratio_max,
+        summary.dynamic_range_max);
+    for (int c = 0; c < 3; ++c) {
+      observe_moment_cancellation(
+          direct_phi_normal[static_cast<std::size_t>(c)],
+          normal_abs[static_cast<std::size_t>(c)],
+          normal_max[static_cast<std::size_t>(c)],
+          normal_min[static_cast<std::size_t>(c)], moment_count,
+          cancellation_sum, cancellation_count, summary.cancellation_ratio_max,
+          summary.dynamic_range_max);
     }
     double rel = 0.0;
     if (node_index < packed.phin.size())
@@ -2773,6 +3526,9 @@ MomentAuditSummary audit_jcp_moment_translation(
   }
   if (summary.nodes > 0)
     summary.mean_rel_error = rel_sum / static_cast<double>(summary.nodes);
+  if (cancellation_count > 0)
+    summary.cancellation_ratio_mean =
+        cancellation_sum / static_cast<double>(cancellation_count);
   return summary;
 }
 
@@ -2791,7 +3547,24 @@ TreeWorkspace build_tree_workspace(const std::vector<Panel> &panels,
                                    const std::string &tree_builder,
                                    const std::string &mac_safety,
                                    double mac_gap_factor,
-                                   const std::string &moment_audit) {
+                                   const std::string &moment_audit,
+                                   const std::string &expansion_center,
+                                   const std::string &fragmentation_safety,
+                                   const std::string &expansion_audit,
+                                   int expansion_audit_sample_count,
+                                   int expansion_audit_max_panels,
+                                   const std::string &moment_construction,
+                                   const std::string &moment_sum,
+                                   const std::string &convergence_audit,
+                                   const std::string &convergence_safety,
+                                   double convergence_rho_cap,
+                                   double mac_aspect_cap,
+                                   const std::string &convergence_estimator,
+                                   double convergence_tail_threshold,
+                                   double convergence_estimator_error_cap,
+                                   double convergence_unstable_rho_cap,
+                                   const std::string
+                                       &convergence_calibration) {
   const auto build_begin = std::chrono::steady_clock::now();
   TreeWorkspace tree;
   tree.taylor_order = kTaylorOrderDefault;
@@ -2830,6 +3603,69 @@ TreeWorkspace build_tree_workspace(const std::vector<Panel> &panels,
       (moment_audit == "sampled" || moment_audit == "full-small")
           ? moment_audit
           : std::string("off");
+  tree.moment_construction =
+      moment_construction == "direct-node" ? std::string("direct-node")
+                                           : std::string("translated");
+  tree.moment_sum =
+      moment_sum == "kahan" ? std::string("kahan") : std::string("naive");
+  tree.convergence_audit =
+      (convergence_audit == "sampled" || convergence_audit == "full-small")
+          ? convergence_audit
+          : std::string("off");
+  tree.convergence_safety =
+      (convergence_safety == "audit" || convergence_safety == "split")
+          ? convergence_safety
+          : std::string("off");
+  tree.convergence_rho_cap =
+      std::clamp(std::isfinite(convergence_rho_cap) ? convergence_rho_cap
+                                                    : 0.0,
+                 0.0, 2.0);
+  tree.mac_aspect_cap =
+      std::clamp(std::isfinite(mac_aspect_cap) ? mac_aspect_cap : 0.0, 0.0,
+                 50.0);
+  tree.convergence_estimator =
+      (convergence_estimator == "moment-tail" ||
+       convergence_estimator == "hybrid")
+          ? convergence_estimator
+          : std::string("off");
+  tree.convergence_tail_threshold =
+      std::clamp(std::isfinite(convergence_tail_threshold)
+                     ? convergence_tail_threshold
+                     : 1.0e4,
+                 1.0, 1.0e12);
+  tree.convergence_estimator_error_cap =
+      std::clamp(std::isfinite(convergence_estimator_error_cap)
+                     ? convergence_estimator_error_cap
+                     : 1.0e-3,
+                 1.0e-8, 1.0);
+  tree.convergence_unstable_rho_cap =
+      std::clamp(std::isfinite(convergence_unstable_rho_cap)
+                     ? convergence_unstable_rho_cap
+                     : 0.25,
+                 0.05, 2.0);
+  tree.convergence_calibration =
+      (convergence_calibration == "consecutive" ||
+       convergence_calibration == "aspect" ||
+       convergence_calibration == "consecutive-aspect")
+          ? convergence_calibration
+          : std::string("stage3j");
+  tree.expansion_center =
+      (expansion_center == "area-centroid" ||
+       expansion_center == "aabb-center")
+          ? expansion_center
+          : std::string("legacy");
+  tree.fragmentation_safety =
+      (fragmentation_safety == "audit" || fragmentation_safety == "split")
+          ? fragmentation_safety
+          : std::string("off");
+  tree.expansion_audit =
+      (expansion_audit == "sampled" || expansion_audit == "full-small")
+          ? expansion_audit
+          : std::string("off");
+  tree.expansion_audit_sample_count = static_cast<std::size_t>(
+      std::clamp(expansion_audit_sample_count, 64, 2048));
+  tree.expansion_audit_max_panels = static_cast<std::size_t>(
+      std::clamp(expansion_audit_max_panels, 128, 8192));
   tree.quad_buffer =
       (quad_buffer == "gauss7" || quad_buffer == "adaptive") ? quad_buffer
                                                              : "off";
@@ -2894,7 +3730,8 @@ TreeWorkspace build_tree_workspace(const std::vector<Panel> &panels,
     const std::size_t temp_root = build_topdown_temp_node(
         panels, tree.order, 0, panels.size(), effective_leaf_size, 0,
         temp_nodes);
-    flatten_topdown_tree(panels, tree, temp_nodes, temp_root, tight_bounds);
+    flatten_topdown_tree(panels, tree, temp_nodes, temp_root, tight_bounds,
+                         tree.expansion_center);
   } else {
     std::vector<std::size_t> level_indices;
     const std::size_t leaf_count =
@@ -2906,8 +3743,9 @@ TreeWorkspace build_tree_workspace(const std::vector<Panel> &panels,
       const std::size_t count =
           std::min(effective_leaf_size, panels.size() - first_panel);
       level_indices.push_back(tree.nodes.size());
-      tree.nodes.push_back(
-          make_leaf_node(panels, tree.order, first_panel, count, tight_bounds));
+      tree.nodes.push_back(make_leaf_node(panels, tree.order, first_panel,
+                                          count, tight_bounds,
+                                          tree.expansion_center));
     }
     tree.leaf_count = tree.nodes.size();
     tree.moment_levels.clear();
@@ -2926,7 +3764,8 @@ TreeWorkspace build_tree_workspace(const std::vector<Panel> &panels,
         children.reserve(child_count);
         for (std::size_t child = 0; child < child_count; ++child)
           children.push_back(level_indices[begin + child]);
-        TreeNode parent = make_parent_node(tree.nodes, children, tight_bounds);
+        TreeNode parent = make_parent_node(tree.nodes, children, tight_bounds,
+                                           tree.expansion_center);
         attach_children(tree, parent, children);
         next_level.push_back(tree.nodes.size());
         tree.nodes.push_back(parent);
@@ -2947,12 +3786,20 @@ TreeWorkspace build_tree_workspace(const std::vector<Panel> &panels,
 
   if (!tree.nodes.empty()) {
     double radius_sum = 0.0;
+    double aspect_sum = 0.0;
     for (const TreeNode &node : tree.nodes) {
       tree.node_radius_max = std::max(tree.node_radius_max, node.radius);
       radius_sum += node.radius;
+      const double aspect = node_aspect_ratio(node);
+      tree.node_aspect_ratio_max =
+          std::max(tree.node_aspect_ratio_max, aspect);
+      aspect_sum += aspect;
     }
     tree.node_radius_mean = radius_sum / static_cast<double>(tree.nodes.size());
+    tree.node_aspect_ratio_mean =
+        aspect_sum / static_cast<double>(tree.nodes.size());
   }
+  annotate_fragmented_nodes(tree);
   tree.build_ms = elapsed_ms(build_begin, std::chrono::steady_clock::now());
   tree.panel_cache = build_tree_panel_cache(panels, tree.order);
   if (tree.interaction_mode != "onthefly")
@@ -3031,7 +3878,12 @@ void apply_treecode_operator(const std::vector<Panel> &panels,
   std::vector<std::size_t> local_near(workers, 0);
   std::vector<std::size_t> local_far(workers, 0);
   std::vector<std::size_t> local_mac_reject(workers, 0);
+  std::vector<std::size_t> local_mac_convergence_rho_reject(workers, 0);
+  std::vector<std::size_t> local_mac_convergence_aspect_reject(workers, 0);
+  std::vector<std::size_t> local_mac_convergence_rho_panel(workers, 0);
+  std::vector<std::size_t> local_mac_convergence_aspect_panel(workers, 0);
   std::vector<MacAuditTally> local_mac_audit(workers);
+  std::vector<FragmentationTally> local_fragmentation_audit(workers);
   executor.parallel_for(
       n, workers, 16,
       [&](std::size_t worker, std::size_t begin, std::size_t end) {
@@ -3064,10 +3916,30 @@ void apply_treecode_operator(const std::vector<Panel> &panels,
                 record_far_geometric_audit(local_mac_audit[worker], node,
                                            mac.gap, mac.gap_ratio,
                                            mac.unsafe);
-                if (!mac.accepted)
+                if (mac.physical_gap_limited)
                   ++local_mac_audit[worker].physical_gap_rejects;
               }
+              if (mac.convergence_rho_limited) {
+                ++local_mac_convergence_rho_reject[worker];
+                local_mac_convergence_rho_panel[worker] += node.panel_count;
+              }
+              if (mac.convergence_aspect_limited) {
+                ++local_mac_convergence_aspect_reject[worker];
+                local_mac_convergence_aspect_panel[worker] += node.panel_count;
+              }
               if (mac.accepted) {
+                const bool fragmented_far =
+                    tree.fragmentation_safety != "off" && node.fragmented;
+                if (fragmented_far) {
+                  const bool split =
+                      tree.fragmentation_safety == "split";
+                  record_fragmentation_audit(local_fragmentation_audit[worker],
+                                             node, split);
+                  if (split) {
+                    push_child_nodes(tree, node, stack);
+                    continue;
+                  }
+                }
                 coupled += node_kernel_taylor(target, node,
                                                moments[node_index], taylor_order,
                                                kappa, tree.derivative_mode);
@@ -3107,6 +3979,9 @@ void apply_treecode_operator(const std::vector<Panel> &panels,
     MacAuditTally mac_audit_total;
     for (const MacAuditTally &worker_audit : local_mac_audit)
       merge_far_geometric_audit(mac_audit_total, worker_audit);
+    FragmentationTally fragmentation_total;
+    for (const FragmentationTally &worker_audit : local_fragmentation_audit)
+      merge_fragmentation_audit(fragmentation_total, worker_audit);
     stats->matvec_mode = "treecode";
     stats->taylor_order = taylor_order;
     stats->derivative_mode = tree.derivative_mode;
@@ -3127,12 +4002,44 @@ void apply_treecode_operator(const std::vector<Panel> &panels,
     stats->far_interactions += far_total;
     stats->mac_reject_radius_limited += std::accumulate(
         local_mac_reject.begin(), local_mac_reject.end(), std::size_t{0});
+    stats->mac_convergence_rho_rejects += std::accumulate(
+        local_mac_convergence_rho_reject.begin(),
+        local_mac_convergence_rho_reject.end(), std::size_t{0});
+    stats->mac_convergence_aspect_rejects += std::accumulate(
+        local_mac_convergence_aspect_reject.begin(),
+        local_mac_convergence_aspect_reject.end(), std::size_t{0});
+    stats->mac_convergence_rho_reject_panels += std::accumulate(
+        local_mac_convergence_rho_panel.begin(),
+        local_mac_convergence_rho_panel.end(), std::size_t{0});
+    stats->mac_convergence_aspect_reject_panels += std::accumulate(
+        local_mac_convergence_aspect_panel.begin(),
+        local_mac_convergence_aspect_panel.end(), std::size_t{0});
     stats->tree_builder = tree.tree_builder;
+    stats->expansion_center = tree.expansion_center;
+    stats->fragmentation_safety = tree.fragmentation_safety;
     stats->mac_safety = tree.mac_safety;
     stats->mac_gap_factor = tree.mac_gap_factor;
     stats->moment_audit = tree.moment_audit;
+    stats->moment_construction = tree.moment_construction;
+    stats->moment_sum = tree.moment_sum;
+    stats->convergence_audit = tree.convergence_audit;
+    stats->convergence_safety = tree.convergence_safety;
+    stats->convergence_rho_cap = tree.convergence_rho_cap;
+    stats->mac_aspect_cap = tree.mac_aspect_cap;
+    stats->convergence_estimator = tree.convergence_estimator;
+    stats->convergence_tail_threshold = tree.convergence_tail_threshold;
+    stats->convergence_estimator_error_cap =
+        tree.convergence_estimator_error_cap;
+    stats->convergence_unstable_rho_cap =
+        tree.convergence_unstable_rho_cap;
+    stats->expansion_audit = tree.expansion_audit;
     copy_far_geometric_audit_to_stats(*stats, mac_audit_total);
+    copy_fragmentation_audit_to_stats(*stats, fragmentation_total);
     stats->tree_depth_max = tree.depth_max;
+    stats->node_radius_max = tree.node_radius_max;
+    stats->node_radius_mean = tree.node_radius_mean;
+    stats->node_aspect_ratio_max = tree.node_aspect_ratio_max;
+    stats->node_aspect_ratio_mean = tree.node_aspect_ratio_mean;
   }
 }
 
@@ -3258,8 +4165,17 @@ void apply_jcp_treecode_operator(const std::vector<Panel> &panels,
     std::vector<std::size_t> local_leaf_residual(workers, 0);
     std::vector<std::size_t> local_far(workers, 0);
     std::vector<std::size_t> local_mac_reject(workers, 0);
+    std::vector<std::size_t> local_mac_convergence_rho_reject(workers, 0);
+    std::vector<std::size_t> local_mac_convergence_aspect_reject(workers, 0);
+    std::vector<std::size_t> local_mac_convergence_rho_panel(workers, 0);
+    std::vector<std::size_t> local_mac_convergence_aspect_panel(workers, 0);
     std::vector<MacAuditTally> local_mac_audit(workers);
+    std::vector<FragmentationTally> local_fragmentation_audit(workers);
+    std::vector<ExpansionAuditTally> local_expansion_audit(workers);
+    std::vector<ConvergenceAuditTally> local_convergence_audit(workers);
+    std::vector<ConvergenceEstimatorTally> local_convergence_estimator(workers);
     std::vector<TreecodeStats> local_near_stats(workers);
+    std::atomic_size_t expansion_audit_candidates{0};
     const auto traversal_begin = std::chrono::steady_clock::now();
     executor.parallel_for(
         n, workers, 8,
@@ -3302,10 +4218,45 @@ void apply_jcp_treecode_operator(const std::vector<Panel> &panels,
                   record_far_geometric_audit(local_mac_audit[worker], node,
                                              mac.gap, mac.gap_ratio,
                                              mac.unsafe);
-                  if (!mac.accepted)
+                  if (mac.physical_gap_limited)
                     ++local_mac_audit[worker].physical_gap_rejects;
                 }
+                if (mac.convergence_rho_limited) {
+                  ++local_mac_convergence_rho_reject[worker];
+                  local_mac_convergence_rho_panel[worker] += node.panel_count;
+                }
+                if (mac.convergence_aspect_limited) {
+                  ++local_mac_convergence_aspect_reject[worker];
+                  local_mac_convergence_aspect_panel[worker] +=
+                      node.panel_count;
+                }
                 if (mac.accepted) {
+                  const bool fragmented_far =
+                      tree.fragmentation_safety != "off" && node.fragmented;
+                  if (fragmented_far) {
+                    const bool split =
+                        tree.fragmentation_safety == "split";
+                    record_fragmentation_audit(
+                        local_fragmentation_audit[worker], node, split);
+                    if (split) {
+                      push_child_nodes(tree, node, stack);
+                      continue;
+                    }
+                  }
+                  if (tree.convergence_audit != "off") {
+                    record_far_convergence_audit(
+                        local_convergence_audit[worker], node, distance);
+                  }
+                  const ConvergenceEstimatorDecision estimator =
+                      evaluate_convergence_estimator(
+                          tree, node, jcp_moments, node_index, taylor_order,
+                          coupled, mac.rho);
+                  record_convergence_estimator(
+                      local_convergence_estimator[worker], node, estimator);
+                  if (estimator.split_reject) {
+                    push_child_nodes(tree, node, stack);
+                    continue;
+                  }
                   const std::array<NodeMoments, 3> normal_moments = {
                       jcp_moments.phi_normal[0][node_index],
                       jcp_moments.phi_normal[1][node_index],
@@ -3314,6 +4265,24 @@ void apply_jcp_treecode_operator(const std::vector<Panel> &panels,
                       target, node, jcp_moments.phin[node_index],
                       normal_moments, eps_ratio, kappa, coupled,
                       taylor_order, tree.derivative_mode);
+                  if (should_audit_far_expansion(
+                          tree, n, node, expansion_audit_candidates)) {
+                    std::size_t direct_panel_count = 0;
+                    const auto direct_begin =
+                        std::chrono::steady_clock::now();
+                    const JcpAccum direct = direct_jcp_ordered_sum(
+                        target, i, *panel_cache, unknown_cache, eps_ratio,
+                        kappa, coupled, tree.order, node.first_panel,
+                        node.panel_count, leaf_panel_kernel,
+                        direct_panel_count);
+                    const double direct_ms = elapsed_ms(
+                        direct_begin, std::chrono::steady_clock::now());
+                    record_far_expansion_audit(
+                        local_expansion_audit[worker], far, direct, coupled,
+                        node.panel_count, direct_ms, estimator.active,
+                        estimator.unstable,
+                        tree.convergence_estimator_error_cap);
+                  }
                   sum_phi_i += far.phi;
                   if (coupled)
                     sum_phin_i += far.phin;
@@ -3389,6 +4358,20 @@ void apply_jcp_treecode_operator(const std::vector<Panel> &panels,
       MacAuditTally mac_audit_total;
       for (const MacAuditTally &worker_audit : local_mac_audit)
         merge_far_geometric_audit(mac_audit_total, worker_audit);
+      FragmentationTally fragmentation_total;
+      for (const FragmentationTally &worker_audit : local_fragmentation_audit)
+        merge_fragmentation_audit(fragmentation_total, worker_audit);
+      ExpansionAuditTally expansion_total;
+      for (const ExpansionAuditTally &worker_audit : local_expansion_audit)
+        merge_far_expansion_audit(expansion_total, worker_audit);
+      ConvergenceAuditTally convergence_total;
+      for (const ConvergenceAuditTally &worker_audit :
+           local_convergence_audit)
+        merge_far_convergence_audit(convergence_total, worker_audit);
+      ConvergenceEstimatorTally estimator_total;
+      for (const ConvergenceEstimatorTally &worker_audit :
+           local_convergence_estimator)
+        merge_convergence_estimator(estimator_total, worker_audit);
       stats->matvec_mode = "jcp2013_treecode";
       stats->interaction_mode = "onthefly";
       stats->taylor_order = taylor_order;
@@ -3441,6 +4424,18 @@ void apply_jcp_treecode_operator(const std::vector<Panel> &panels,
       stats->far_node_interactions += far_total;
       stats->mac_reject_radius_limited += std::accumulate(
           local_mac_reject.begin(), local_mac_reject.end(), std::size_t{0});
+      stats->mac_convergence_rho_rejects += std::accumulate(
+          local_mac_convergence_rho_reject.begin(),
+          local_mac_convergence_rho_reject.end(), std::size_t{0});
+      stats->mac_convergence_aspect_rejects += std::accumulate(
+          local_mac_convergence_aspect_reject.begin(),
+          local_mac_convergence_aspect_reject.end(), std::size_t{0});
+      stats->mac_convergence_rho_reject_panels += std::accumulate(
+          local_mac_convergence_rho_panel.begin(),
+          local_mac_convergence_rho_panel.end(), std::size_t{0});
+      stats->mac_convergence_aspect_reject_panels += std::accumulate(
+          local_mac_convergence_aspect_panel.begin(),
+          local_mac_convergence_aspect_panel.end(), std::size_t{0});
       stats->near_interactions += singular_evaluated + leaf_total;
       stats->far_interactions += far_total;
       stats->leaf_panel_pairs_per_second =
@@ -3450,9 +4445,25 @@ void apply_jcp_treecode_operator(const std::vector<Panel> &panels,
               : 0.0;
       stats->node_bounds_mode = tree.node_bounds_mode;
       stats->tree_builder = tree.tree_builder;
+      stats->expansion_center = tree.expansion_center;
+      stats->fragmentation_safety = tree.fragmentation_safety;
       stats->mac_safety = tree.mac_safety;
       stats->mac_gap_factor = tree.mac_gap_factor;
       stats->moment_audit = tree.moment_audit;
+      stats->moment_construction = tree.moment_construction;
+      stats->moment_sum = tree.moment_sum;
+      stats->convergence_audit = tree.convergence_audit;
+      stats->convergence_safety = tree.convergence_safety;
+      stats->convergence_rho_cap = tree.convergence_rho_cap;
+      stats->mac_aspect_cap = tree.mac_aspect_cap;
+      stats->convergence_estimator = tree.convergence_estimator;
+      stats->convergence_tail_threshold = tree.convergence_tail_threshold;
+      stats->convergence_estimator_error_cap =
+          tree.convergence_estimator_error_cap;
+      stats->convergence_unstable_rho_cap =
+          tree.convergence_unstable_rho_cap;
+      stats->convergence_calibration = tree.convergence_calibration;
+      stats->expansion_audit = tree.expansion_audit;
       stats->moment_audit_nodes += moment_audit_summary.nodes;
       stats->moment_translation_rel_error_max =
           std::max(stats->moment_translation_rel_error_max,
@@ -3470,10 +4481,32 @@ void apply_jcp_treecode_operator(const std::vector<Panel> &panels,
                       new_count
                 : 0.0;
       }
+      stats->moment_translation_offset_max =
+          std::max(stats->moment_translation_offset_max,
+                   moment_audit_summary.translation_offset_max);
+      if (moment_audit_summary.translation_offset_mean > 0.0) {
+        stats->moment_translation_offset_mean =
+            moment_audit_summary.translation_offset_mean;
+      }
+      stats->moment_cancellation_ratio_max =
+          std::max(stats->moment_cancellation_ratio_max,
+                   moment_audit_summary.cancellation_ratio_max);
+      if (moment_audit_summary.cancellation_ratio_mean > 0.0)
+        stats->moment_cancellation_ratio_mean =
+            moment_audit_summary.cancellation_ratio_mean;
+      stats->moment_dynamic_range_max =
+          std::max(stats->moment_dynamic_range_max,
+                   moment_audit_summary.dynamic_range_max);
       copy_far_geometric_audit_to_stats(*stats, mac_audit_total);
+      copy_fragmentation_audit_to_stats(*stats, fragmentation_total);
+      copy_far_expansion_audit_to_stats(*stats, expansion_total);
+      copy_far_convergence_audit_to_stats(*stats, convergence_total);
+      copy_convergence_estimator_to_stats(*stats, estimator_total);
       stats->tree_depth_max = tree.depth_max;
       stats->node_radius_max = tree.node_radius_max;
       stats->node_radius_mean = tree.node_radius_mean;
+      stats->node_aspect_ratio_max = tree.node_aspect_ratio_max;
+      stats->node_aspect_ratio_mean = tree.node_aspect_ratio_mean;
       const double calls_after = static_cast<double>(stats->matvec_calls + 1);
       stats->leaf_panel_work_per_matvec =
           static_cast<double>(stats->leaf_panel_interactions) / calls_after;
@@ -3815,6 +4848,20 @@ void apply_jcp_treecode_operator(const std::vector<Panel> &panels,
     stats->far_node_interactions += far_total;
     stats->mac_reject_radius_limited +=
         interactions.valid_for(n) ? interactions.mac_reject_radius_limited : 0;
+    stats->mac_convergence_rho_rejects +=
+        interactions.valid_for(n) ? interactions.mac_convergence_rho_rejects
+                                  : 0;
+    stats->mac_convergence_aspect_rejects +=
+        interactions.valid_for(n) ? interactions.mac_convergence_aspect_rejects
+                                  : 0;
+    stats->mac_convergence_rho_reject_panels +=
+        interactions.valid_for(n)
+            ? interactions.mac_convergence_rho_reject_panels
+            : 0;
+    stats->mac_convergence_aspect_reject_panels +=
+        interactions.valid_for(n)
+            ? interactions.mac_convergence_aspect_reject_panels
+            : 0;
     stats->near_interactions += near_total;
     stats->far_interactions += far_total;
     stats->leaf_panel_pairs_per_second =
@@ -3824,9 +4871,24 @@ void apply_jcp_treecode_operator(const std::vector<Panel> &panels,
             : 0.0;
     stats->node_bounds_mode = tree.node_bounds_mode;
     stats->tree_builder = tree.tree_builder;
+    stats->expansion_center = tree.expansion_center;
+    stats->fragmentation_safety = tree.fragmentation_safety;
     stats->mac_safety = tree.mac_safety;
     stats->mac_gap_factor = tree.mac_gap_factor;
     stats->moment_audit = tree.moment_audit;
+    stats->moment_construction = tree.moment_construction;
+    stats->moment_sum = tree.moment_sum;
+    stats->convergence_audit = tree.convergence_audit;
+    stats->convergence_safety = tree.convergence_safety;
+    stats->convergence_rho_cap = tree.convergence_rho_cap;
+    stats->mac_aspect_cap = tree.mac_aspect_cap;
+    stats->convergence_estimator = tree.convergence_estimator;
+    stats->convergence_tail_threshold = tree.convergence_tail_threshold;
+    stats->convergence_estimator_error_cap =
+        tree.convergence_estimator_error_cap;
+    stats->convergence_unstable_rho_cap =
+        tree.convergence_unstable_rho_cap;
+    stats->expansion_audit = tree.expansion_audit;
     stats->moment_audit_nodes += moment_audit_summary.nodes;
     stats->moment_translation_rel_error_max =
         std::max(stats->moment_translation_rel_error_max,
@@ -3844,6 +4906,21 @@ void apply_jcp_treecode_operator(const std::vector<Panel> &panels,
                     new_count
               : 0.0;
     }
+    stats->moment_translation_offset_max =
+        std::max(stats->moment_translation_offset_max,
+                 moment_audit_summary.translation_offset_max);
+    if (moment_audit_summary.translation_offset_mean > 0.0)
+      stats->moment_translation_offset_mean =
+          moment_audit_summary.translation_offset_mean;
+    stats->moment_cancellation_ratio_max =
+        std::max(stats->moment_cancellation_ratio_max,
+                 moment_audit_summary.cancellation_ratio_max);
+    if (moment_audit_summary.cancellation_ratio_mean > 0.0)
+      stats->moment_cancellation_ratio_mean =
+          moment_audit_summary.cancellation_ratio_mean;
+    stats->moment_dynamic_range_max =
+        std::max(stats->moment_dynamic_range_max,
+                 moment_audit_summary.dynamic_range_max);
     if (interactions.valid_for(n)) {
       MacAuditTally cached_audit;
       cached_audit.unsafe_count = interactions.far_geometric_unsafe_count;
@@ -3855,10 +4932,22 @@ void apply_jcp_treecode_operator(const std::vector<Panel> &panels,
       cached_audit.physical_gap_rejects =
           interactions.mac_physical_gap_rejects;
       copy_far_geometric_audit_to_stats(*stats, cached_audit);
+      FragmentationTally cached_fragmentation;
+      cached_fragmentation.far_count = interactions.fragmented_far_count;
+      cached_fragmentation.far_panels = interactions.fragmented_far_panels;
+      cached_fragmentation.split_rejects =
+          interactions.fragmented_split_rejects;
+      cached_fragmentation.gap_ratio_sum =
+          interactions.fragmentation_center_gap_ratio_sum;
+      cached_fragmentation.gap_ratio_max =
+          interactions.fragmentation_center_gap_ratio_max;
+      copy_fragmentation_audit_to_stats(*stats, cached_fragmentation);
     }
     stats->tree_depth_max = tree.depth_max;
     stats->node_radius_max = tree.node_radius_max;
     stats->node_radius_mean = tree.node_radius_mean;
+    stats->node_aspect_ratio_max = tree.node_aspect_ratio_max;
+    stats->node_aspect_ratio_mean = tree.node_aspect_ratio_mean;
     const double calls_after = static_cast<double>(stats->matvec_calls + 1);
     stats->leaf_panel_work_per_matvec =
         static_cast<double>(stats->leaf_panel_interactions) / calls_after;

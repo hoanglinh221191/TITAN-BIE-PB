@@ -177,9 +177,25 @@ struct Options {
   std::string interaction_mode{"auto"};
   std::string node_bounds{"moment"};
   std::string tree_builder{"grouped-morton"};
+  std::string expansion_center{"legacy"};
+  std::string fragmentation_safety{"off"};
   std::string mac_safety{"off"};
   double mac_gap_factor{1.5};
   std::string moment_audit{"off"};
+  std::string moment_construction{"translated"};
+  std::string moment_sum{"naive"};
+  std::string convergence_audit{"off"};
+  std::string convergence_safety{"off"};
+  double convergence_rho_cap{0.0};
+  double mac_aspect_cap{0.0};
+  std::string convergence_estimator{"off"};
+  double convergence_tail_threshold{1.0e4};
+  double convergence_estimator_error_cap{1.0e-3};
+  double convergence_unstable_rho_cap{0.25};
+  std::string convergence_calibration{"stage3j"};
+  std::string expansion_audit{"off"};
+  int expansion_audit_sample_count{512};
+  int expansion_audit_max_panels{2048};
   std::string matvec_audit{"off"};
   int matvec_audit_sample_count{1024};
   std::string progress{"off"};
@@ -313,6 +329,8 @@ struct Result {
   std::string interaction_mode{"cached"};
   std::string node_bounds_mode{"moment"};
   std::string tree_builder{"grouped-morton"};
+  std::string expansion_center{"legacy"};
+  std::string fragmentation_safety{"off"};
   std::string mac_safety{"off"};
   double mac_gap_factor{1.5};
   std::size_t tree_depth_max{0};
@@ -320,6 +338,8 @@ struct Result {
   double mac_accept_rate{0.0};
   double node_radius_max{0.0};
   double node_radius_mean{0.0};
+  double node_aspect_ratio_max{0.0};
+  double node_aspect_ratio_mean{0.0};
   double leaf_panel_work_per_matvec{0.0};
   double far_node_work_per_matvec{0.0};
   std::size_t far_geometric_unsafe_count{0};
@@ -329,10 +349,63 @@ struct Result {
   double far_geometric_gap_ratio_mean{0.0};
   std::size_t far_geometric_audit_samples{0};
   std::size_t mac_physical_gap_rejects{0};
+  std::size_t mac_convergence_rho_rejects{0};
+  std::size_t mac_convergence_aspect_rejects{0};
+  std::size_t mac_convergence_rho_reject_panels{0};
+  std::size_t mac_convergence_aspect_reject_panels{0};
+  std::size_t fragmented_far_count{0};
+  std::size_t fragmented_far_panels{0};
+  std::size_t fragmented_split_rejects{0};
+  double fragmentation_center_gap_ratio_max{0.0};
+  double fragmentation_center_gap_ratio_mean{0.0};
   std::string moment_audit{"off"};
+  std::string moment_construction{"translated"};
+  std::string moment_sum{"naive"};
+  std::string convergence_audit{"off"};
+  std::string convergence_safety{"off"};
+  double convergence_rho_cap{0.0};
+  double mac_aspect_cap{0.0};
+  std::string convergence_estimator{"off"};
+  double convergence_tail_threshold{1.0e4};
+  double convergence_estimator_error_cap{1.0e-3};
+  double convergence_unstable_rho_cap{0.25};
+  std::string convergence_calibration{"stage3j"};
+  std::size_t convergence_estimator_samples{0};
+  std::size_t convergence_estimator_unstable_far_count{0};
+  std::size_t convergence_estimator_unstable_far_panels{0};
+  std::size_t convergence_estimator_split_rejects{0};
+  std::size_t convergence_estimator_split_reject_panels{0};
+  double convergence_estimator_tail_ratio_max{0.0};
+  double convergence_estimator_tail_ratio_mean{0.0};
+  double convergence_estimator_error_max{0.0};
+  double convergence_estimator_error_mean{0.0};
+  double convergence_tail_norm_p_max{0.0};
+  double convergence_tail_norm_p_mean{0.0};
+  double convergence_tail_norm_pm1_max{0.0};
+  double convergence_tail_norm_pm1_mean{0.0};
+  double convergence_effective_jcp_amp_max{0.0};
+  double convergence_effective_jcp_amp_mean{0.0};
+  std::size_t convergence_estimator_high_error_caught{0};
+  std::size_t convergence_estimator_high_error_missed{0};
   std::size_t moment_audit_nodes{0};
   double moment_translation_rel_error_max{0.0};
   double moment_translation_rel_error_mean{0.0};
+  double moment_translation_offset_max{0.0};
+  double moment_translation_offset_mean{0.0};
+  double moment_cancellation_ratio_max{0.0};
+  double moment_cancellation_ratio_mean{0.0};
+  double moment_dynamic_range_max{0.0};
+  std::string expansion_audit{"off"};
+  std::size_t far_expansion_audit_pairs{0};
+  std::size_t far_expansion_audit_panels{0};
+  double far_expansion_direct_ms{0.0};
+  double far_expansion_rel_error_max{0.0};
+  double far_expansion_rel_error_mean{0.0};
+  bool far_expansion_mean_gate_pass{false};
+  double far_convergence_rho_max{0.0};
+  double far_convergence_rho_mean{0.0};
+  double accepted_far_aspect_ratio_max{0.0};
+  double accepted_far_aspect_ratio_mean{0.0};
   std::string quad_buffer_auto_candidate{"off"};
   std::string leaf_tile_status{"off"};
   double leaf_panel_pairs_per_second{0.0};
@@ -458,6 +531,8 @@ struct TreecodeStats {
   std::string interaction_mode{"cached"};
   std::string node_bounds_mode{"moment"};
   std::string tree_builder{"grouped-morton"};
+  std::string expansion_center{"legacy"};
+  std::string fragmentation_safety{"off"};
   std::string mac_safety{"off"};
   double mac_gap_factor{1.5};
   std::size_t tree_depth_max{0};
@@ -465,6 +540,8 @@ struct TreecodeStats {
   double mac_accept_rate{0.0};
   double node_radius_max{0.0};
   double node_radius_mean{0.0};
+  double node_aspect_ratio_max{0.0};
+  double node_aspect_ratio_mean{0.0};
   double leaf_panel_work_per_matvec{0.0};
   double far_node_work_per_matvec{0.0};
   std::size_t far_geometric_unsafe_count{0};
@@ -474,10 +551,63 @@ struct TreecodeStats {
   double far_geometric_gap_ratio_mean{0.0};
   std::size_t far_geometric_audit_samples{0};
   std::size_t mac_physical_gap_rejects{0};
+  std::size_t mac_convergence_rho_rejects{0};
+  std::size_t mac_convergence_aspect_rejects{0};
+  std::size_t mac_convergence_rho_reject_panels{0};
+  std::size_t mac_convergence_aspect_reject_panels{0};
+  std::size_t fragmented_far_count{0};
+  std::size_t fragmented_far_panels{0};
+  std::size_t fragmented_split_rejects{0};
+  double fragmentation_center_gap_ratio_max{0.0};
+  double fragmentation_center_gap_ratio_mean{0.0};
   std::string moment_audit{"off"};
+  std::string moment_construction{"translated"};
+  std::string moment_sum{"naive"};
+  std::string convergence_audit{"off"};
+  std::string convergence_safety{"off"};
+  double convergence_rho_cap{0.0};
+  double mac_aspect_cap{0.0};
+  std::string convergence_estimator{"off"};
+  double convergence_tail_threshold{1.0e4};
+  double convergence_estimator_error_cap{1.0e-3};
+  double convergence_unstable_rho_cap{0.25};
+  std::string convergence_calibration{"stage3j"};
+  std::size_t convergence_estimator_samples{0};
+  std::size_t convergence_estimator_unstable_far_count{0};
+  std::size_t convergence_estimator_unstable_far_panels{0};
+  std::size_t convergence_estimator_split_rejects{0};
+  std::size_t convergence_estimator_split_reject_panels{0};
+  double convergence_estimator_tail_ratio_max{0.0};
+  double convergence_estimator_tail_ratio_mean{0.0};
+  double convergence_estimator_error_max{0.0};
+  double convergence_estimator_error_mean{0.0};
+  double convergence_tail_norm_p_max{0.0};
+  double convergence_tail_norm_p_mean{0.0};
+  double convergence_tail_norm_pm1_max{0.0};
+  double convergence_tail_norm_pm1_mean{0.0};
+  double convergence_effective_jcp_amp_max{0.0};
+  double convergence_effective_jcp_amp_mean{0.0};
+  std::size_t convergence_estimator_high_error_caught{0};
+  std::size_t convergence_estimator_high_error_missed{0};
   std::size_t moment_audit_nodes{0};
   double moment_translation_rel_error_max{0.0};
   double moment_translation_rel_error_mean{0.0};
+  double moment_translation_offset_max{0.0};
+  double moment_translation_offset_mean{0.0};
+  double moment_cancellation_ratio_max{0.0};
+  double moment_cancellation_ratio_mean{0.0};
+  double moment_dynamic_range_max{0.0};
+  std::string expansion_audit{"off"};
+  std::size_t far_expansion_audit_pairs{0};
+  std::size_t far_expansion_audit_panels{0};
+  double far_expansion_direct_ms{0.0};
+  double far_expansion_rel_error_max{0.0};
+  double far_expansion_rel_error_mean{0.0};
+  bool far_expansion_mean_gate_pass{false};
+  double far_convergence_rho_max{0.0};
+  double far_convergence_rho_mean{0.0};
+  double accepted_far_aspect_ratio_max{0.0};
+  double accepted_far_aspect_ratio_mean{0.0};
   std::string leaf_tile_status{"off"};
   double leaf_panel_pairs_per_second{0.0};
   std::size_t matvec_calls{0};
@@ -659,6 +789,8 @@ struct TreeNode {
   std::size_t first_panel{0};
   std::size_t panel_count{0};
   std::size_t depth{0};
+  bool fragmented{false};
+  double fragmentation_center_gap_ratio{0.0};
 };
 
 struct TreeInteractionLists {
@@ -705,6 +837,15 @@ struct TreeInteractionLists {
   double far_geometric_gap_ratio_sum{0.0};
   std::size_t far_geometric_audit_samples{0};
   std::size_t mac_physical_gap_rejects{0};
+  std::size_t mac_convergence_rho_rejects{0};
+  std::size_t mac_convergence_aspect_rejects{0};
+  std::size_t mac_convergence_rho_reject_panels{0};
+  std::size_t mac_convergence_aspect_reject_panels{0};
+  std::size_t fragmented_far_count{0};
+  std::size_t fragmented_far_panels{0};
+  std::size_t fragmented_split_rejects{0};
+  double fragmentation_center_gap_ratio_sum{0.0};
+  double fragmentation_center_gap_ratio_max{0.0};
   double build_ms{0.0};
 
   [[nodiscard]] bool valid_for(std::size_t panel_count) const noexcept {
@@ -764,6 +905,8 @@ struct TreeWorkspace {
   double build_ms{0.0};
   double node_radius_max{0.0};
   double node_radius_mean{0.0};
+  double node_aspect_ratio_max{0.0};
+  double node_aspect_ratio_mean{0.0};
   std::size_t leaf_size{32};
   double opening_theta{0.45};
   int taylor_order{3};
@@ -779,6 +922,22 @@ struct TreeWorkspace {
   std::string mac_safety{"off"};
   double mac_gap_factor{1.5};
   std::string moment_audit{"off"};
+  std::string moment_construction{"translated"};
+  std::string moment_sum{"naive"};
+  std::string convergence_audit{"off"};
+  std::string convergence_safety{"off"};
+  double convergence_rho_cap{0.0};
+  double mac_aspect_cap{0.0};
+  std::string convergence_estimator{"off"};
+  double convergence_tail_threshold{1.0e4};
+  double convergence_estimator_error_cap{1.0e-3};
+  double convergence_unstable_rho_cap{0.25};
+  std::string convergence_calibration{"stage3j"};
+  std::string expansion_center{"legacy"};
+  std::string fragmentation_safety{"off"};
+  std::string expansion_audit{"off"};
+  std::size_t expansion_audit_sample_count{512};
+  std::size_t expansion_audit_max_panels{2048};
   TreePanelCache panel_cache;
   TreeInteractionLists interactions;
   std::vector<std::pair<std::size_t, std::size_t>> moment_levels;
@@ -815,7 +974,31 @@ TreeWorkspace build_tree_workspace(const std::vector<Panel> &panels,
                                        "grouped-morton",
                                    const std::string &mac_safety = "off",
                                    double mac_gap_factor = 1.5,
-                                   const std::string &moment_audit = "off");
+                                   const std::string &moment_audit = "off",
+                                   const std::string &expansion_center =
+                                       "legacy",
+                                   const std::string &fragmentation_safety =
+                                       "off",
+                                   const std::string &expansion_audit = "off",
+                                   int expansion_audit_sample_count = 512,
+                                   int expansion_audit_max_panels = 2048,
+                                   const std::string &moment_construction =
+                                       "translated",
+                                   const std::string &moment_sum = "naive",
+                                   const std::string &convergence_audit =
+                                       "off",
+                                   const std::string &convergence_safety =
+                                       "off",
+                                   double convergence_rho_cap = 0.0,
+                                   double mac_aspect_cap = 0.0,
+                                   const std::string &convergence_estimator =
+                                       "off",
+                                   double convergence_tail_threshold = 1.0e4,
+                                   double convergence_estimator_error_cap =
+                                       1.0e-3,
+                                   double convergence_unstable_rho_cap = 0.25,
+                                   const std::string &convergence_calibration =
+                                       "stage3j");
 
 void apply_treecode_operator(const std::vector<Panel> &panels,
                              const std::vector<double> &density,

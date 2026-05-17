@@ -4,7 +4,7 @@ This roadmap tracks the remaining work needed to move the clean-room TABI
 backend from the current validated core toward paper-level TABI 2013 and
 TABI-PB 2.0 coverage.
 
-Last updated: 2026-05-14
+Last updated: 2026-05-16
 
 ## Current Status
 
@@ -1923,3 +1923,805 @@ Next recommended Stage 3E:
 4. If residual remains bad while unsafe far counts drop, turn on
    `-pbe-tabi-moment-audit=sampled` and fix moment translation/direct moment
    construction before more tree tuning.
+
+## Stage 3E/8X - TABI Topdown Physical-Gap Validation
+
+Implemented:
+
+- Added hidden direct-vs-treecode matvec audit controls:
+  - `-pbe-tabi-matvec-audit=off|sampled|full-small`, default `off`;
+  - `-pbe-tabi-matvec-audit-sample-count=<128..4096>`, default `1024`.
+- Added timing/profile fields:
+  - `tabi_tree_vs_direct_matvec_rel`;
+  - `tabi_matvec_audit_rows`;
+  - `tabi_matvec_audit_seconds`.
+- The audit computes the treecode matvec on the selected GMRES solution and
+  compares sampled rows, or the full operator when `full-small` is requested and
+  the unknown count is small enough. The production default remains unchanged.
+- Added `test/pbe_tabi_topdown_physical_gap_matrix.ps1`, a Stage 3E matrix
+  harness for `mini-protein`, `charged-peptide`, and `compact-mini-protein`.
+  The harness pins:
+  `surface_points=48`, `leaf=128`, `theta=0.7`,
+  `node_bounds=tight-aabb`, `interaction-mode=onthefly`,
+  `near=duffy_adaptive`, `quad_buffer=adaptive`, `precond=diagonal`,
+  and `nt=8`.
+- The matrix writes direct baseline rows plus:
+  `grouped-morton/off`, `topdown-aabb/off`, `topdown-aabb/audit`, and
+  `topdown-aabb/physical-gap`. The CSV includes energy drift vs direct,
+  direct-vs-treecode matvec error, sampled/full true-residual fields, unsafe
+  far counts, physical-gap rejects, leaf/far work per matvec, RSS, and runtime.
+
+Measured Stage 3E medium results:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Full matrix:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1`: PASS and wrote
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+- `physical-gap` rows:
+
+| fixture | matvec rel | energy drift rel | sampled residual | grouped sampled residual | unsafe/rejects | leaf/far work per matvec | runtime | RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mini-protein` | `5.684e-4` | `8.221e-5` | `9.757e-5` | `9.752e-5` | `2310/2310` | `3.86M / 9.61k` | `7.07s` | `12.6MB` |
+| `charged-peptide` | `1.832e-4` | `1.112e-4` | `1.772e-5` | `1.770e-5` | `580/580` | `3.13M / 5.90k` | `7.69s` | `12.1MB` |
+| `compact-mini-protein` | `1.339e-3` | `5.579e-5` | `5.302e-5` | `5.309e-5` | `10260/10260` | `8.48M / 28.4k` | `34.21s` | `14.2MB` |
+
+- All three `physical-gap` rows are under the Stage 3E medium gate:
+  `matvec rel < 2.5e-3`, `energy drift rel < 5e-3`, and sampled residual within
+  `2x` the grouped-morton row.
+- `physical-gap` correctly rejects every unsafe far candidate observed in the
+  audit rows on the medium fixtures, while preserving the true-residual trend.
+
+Barnase follow-up probe:
+
+- Command:
+  `test/pbe_tabi_barnase_tree_mac_probe.ps1 -CaseTimeoutSeconds 120 -ProfileMemory -TreeLeafSizes 128 -TreeOpeningThetas 0.7 -NodeBoundsModes tight-aabb -TreeBuilders topdown-aabb -MacSafety physical-gap`.
+- Grid reference completed in `1.08s`.
+- Topdown physical-gap tree row timed out at `120.05s`, GMRES iteration `12`,
+  `14` matvec calls, sampled residual `5.8385e-2`, RSS about `33.9MB`.
+- The timeout row is useful as a lower-bound probe but remains inconclusive:
+  final timing/MAC work counters were not emitted before termination.
+
+Verification after Stage 3E:
+
+- `test/pbe_tabi_topdown_mac_audit.ps1`: PASS
+  (`unsafe=392`, `rejects=392`, far-node interactions `392 -> 0`).
+- `test/pbe_tabi_tree_builder_smoke.ps1`: PASS
+  (`panels=512`, `grouped_nodes=73`, `topdown_nodes=73`).
+- `test/pbe_tabi_treecode_accuracy.ps1`: PASS
+  (`rel3=9.38761e-07`, `rel4=1.35948e-07`,
+  `topdown_rel3=4.61951e-05`).
+- `test/pbe_tabi_gmres_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_sampled_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_profile_smoke.ps1`: PASS
+  (`panels=120`, `matvec_calls=9`).
+- `test/pbe_memory_profile_smoke.ps1`: PASS.
+- `test/pbe_clean_room_audit.ps1`: PASS.
+- `test/pbe_regression.ps1`: PASS.
+- `test/pbsa_smoke.ps1`: PASS.
+- `test/sasa_surface_smoke.ps1`: PASS.
+
+Stage 3E decision:
+
+- Medium physical-gap validation passes. This confirms the Stage 3D regression
+  fix on the medium fixtures and justifies longer Barnase probing.
+- Do not promote `topdown-aabb` or `physical-gap` to production defaults yet.
+  Barnase still shows a high sampled residual in the 120s lower-bound probe, and
+  the timeout path currently lacks final MAC/work counters.
+- Next branch:
+  1. Run a 300s Barnase physical-gap probe with the same settings and preserve
+     timeout-safe progress counters for leaf/far work and MAC rejects.
+  2. If Barnase sampled residual remains near `5e-2`, enable
+     `-pbe-tabi-moment-audit=sampled` for the Barnase/topdown path and inspect
+     moment translation/direct moment construction before more performance work.
+  3. If Barnase residual improves but leaf work regresses under physical-gap,
+     optimize leaf-pair batching without loosening the MAC safety rule.
+
+## Stage 3F/8Y - TABI Topdown Fragmented-Node Moment Validation
+
+Implemented:
+
+- Added hidden center/safety controls:
+  - `-pbe-tabi-expansion-center=legacy|area-centroid|aabb-center`, default
+    `legacy`;
+  - `-pbe-tabi-fragmentation-safety=off|audit|split`, default `off`.
+- Separated tight AABB bounds from the Taylor expansion center:
+  - `tight-aabb` still keeps true min/max bounds for physical-gap checks;
+  - `legacy` preserves the old tight-AABB center behavior;
+  - `area-centroid` keeps the panel/area center for Taylor moments and
+    recomputes radius from that center to the farthest AABB corner, so the MAC
+    remains conservative.
+- Added fragmented-node diagnostics to timing/profile rows:
+  - `tabi_expansion_center`, `tabi_fragmentation_safety`;
+  - `tabi_fragmented_far_count`, `tabi_fragmented_far_panels`;
+  - `tabi_fragmented_split_rejects`;
+  - `tabi_fragmentation_center_gap_ratio_max/mean`.
+- `fragmentation-safety=split` now descends child nodes instead of using a
+  Taylor far-node sum when a MAC/physical-gap-passing internal node is marked
+  fragmented. The leaf/direct path is unchanged.
+- Added `test/pbe_tabi_fragmented_node_mac_smoke.ps1`, a synthetic three-patch
+  fixture where `audit` sees a fragmented far node and `split` reduces the
+  direct-vs-tree matvec error.
+- Extended `test/pbe_tabi_topdown_physical_gap_matrix.ps1` with Stage 3F rows:
+  - `topdown-aabb/physical-gap/legacy/off`;
+  - `topdown-aabb/physical-gap/area-centroid/audit`;
+  - `topdown-aabb/physical-gap/area-centroid/split`.
+- Extended Barnase tree MAC harnesses to forward `ExpansionCenters`,
+  `FragmentationSafety`, and an explicit `SurfacePoints` knob.
+
+Measured Stage 3F medium rows:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Synthetic fragmented-node smoke:
+  `test/pbe_tabi_fragmented_node_mac_smoke.ps1`: PASS.
+  - panels `48`;
+  - audit fragmented far candidates `16`;
+  - split rejects `16`;
+  - direct-vs-tree matvec rel improved from `2.084e-8` to `2.512e-13`.
+- Full medium matrix:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -CaseTimeoutSeconds 180`:
+  PASS and wrote
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+| fixture | row | matvec rel | energy drift rel | sampled residual | grouped sampled residual | unsafe/rejects | fragmented far/split | leaf/far work per matvec |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mini-protein` | `legacy/off` | `5.684e-4` | `8.221e-5` | `9.757e-5` | `9.752e-5` | `2310/2310` | `0/0` | `3.86M / 9.61k` |
+| `mini-protein` | `area-centroid/audit` | `4.463e-4` | `6.757e-5` | `9.762e-5` | `9.752e-5` | `885/885` | `0/0` | `4.29M / 8.32k` |
+| `mini-protein` | `area-centroid/split` | `4.463e-4` | `6.757e-5` | `9.762e-5` | `9.752e-5` | `885/885` | `0/0` | `4.29M / 8.32k` |
+| `charged-peptide` | `legacy/off` | `1.832e-4` | `1.112e-4` | `1.772e-5` | `1.770e-5` | `580/580` | `0/0` | `3.13M / 5.90k` |
+| `charged-peptide` | `area-centroid/audit` | `1.974e-4` | `1.224e-4` | `1.772e-5` | `1.770e-5` | `0/0` | `0/0` | `3.27M / 5.25k` |
+| `charged-peptide` | `area-centroid/split` | `1.974e-4` | `1.224e-4` | `1.772e-5` | `1.770e-5` | `0/0` | `0/0` | `3.27M / 5.25k` |
+| `compact-mini-protein` | `legacy/off` | `1.339e-3` | `5.579e-5` | `5.302e-5` | `5.309e-5` | `10260/10260` | `0/0` | `8.48M / 28.4k` |
+| `compact-mini-protein` | `area-centroid/audit` | `8.891e-4` | `7.254e-5` | `5.314e-5` | `5.309e-5` | `3300/3300` | `0/0` | `10.0M / 24.5k` |
+| `compact-mini-protein` | `area-centroid/split` | `8.891e-4` | `7.254e-5` | `5.314e-5` | `5.309e-5` | `3300/3300` | `0/0` | `10.0M / 24.5k` |
+
+- All three `area-centroid/split` medium rows pass the Stage 3E/3F gate:
+  `matvec rel < 2.5e-3`, `energy drift rel < 5e-3`, and sampled residual within
+  `2x` grouped-morton.
+- The medium fixtures did not naturally trigger fragmented far candidates.
+  The synthetic smoke is therefore the current proof that the diagnostic and
+  split path work; the medium matrix proves the hidden controls do not regress
+  the accepted physical-gap rows.
+
+Barnase Stage 3F branch:
+
+- `surface_points=48` Barnase, `leaf=128`, `theta=0.7`, `topdown-aabb`,
+  `tight-aabb`, `physical-gap`, `area-centroid`, `fragmentation-safety=split`,
+  `onthefly`, `duffy_adaptive`, `quad_buffer=adaptive`, `precond=diagonal`,
+  timeout `120s`:
+  - reached `gmres_start` only;
+  - panels `73967`, unknowns `147934`;
+  - no residual/MAC timing row was emitted before timeout.
+- Repeated the same branch with the Barnase harness coarse budget
+  `surface_points=8`, timeout `120s`:
+  - panels `15129`, unknowns `30258`;
+  - timeout at GMRES iteration `10`, `12` matvecs;
+  - sampled true residual `5.8313e-2`;
+  - leaf-panel interactions `842.3M`, far-node interactions `5.11M`;
+  - RSS from progress about `33.9MB`.
+- Repeated the coarse Barnase row with `-pbe-tabi-moment-audit=sampled`:
+  - timeout at the same iteration/matvec count;
+  - sampled true residual remained `5.8313e-2`;
+  - no final `pbe_tabi_moment_audit.csv`/timing row was emitted before the
+    forced timeout.
+
+Verification after Stage 3F:
+
+- `test/pbe_tabi_fragmented_node_mac_smoke.ps1`: PASS.
+- `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -CaseTimeoutSeconds 180`:
+  PASS.
+- `test/pbe_tabi_topdown_mac_audit.ps1`: PASS
+  (`unsafe=392`, `rejects=392`, far-node interactions `392 -> 0`).
+- `test/pbe_tabi_treecode_accuracy.ps1`: PASS
+  (`rel3=9.38761e-07`, `rel4=1.35948e-07`,
+  `topdown_rel3=4.61951e-05`).
+- `test/pbe_tabi_tree_builder_smoke.ps1`: PASS.
+- `test/pbe_tabi_gmres_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_sampled_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_profile_smoke.ps1`: PASS
+  (`panels=120`, `matvec_calls=9`).
+- `test/pbe_memory_profile_smoke.ps1`: PASS.
+- `test/pbe_clean_room_audit.ps1`: PASS.
+- `test/pbe_regression.ps1`: PASS.
+- `test/pbsa_smoke.ps1`: PASS.
+- `test/sasa_surface_smoke.ps1`: PASS.
+
+Stage 3F decision:
+
+- Keep all new controls hidden/report-only. Do not promote `topdown-aabb`,
+  `physical-gap`, `area-centroid`, or `fragmentation-safety=split`.
+- Medium validation passes, and `area-centroid` reduces matvec error on two of
+  the three medium physical-gap rows. However, Barnase remains in the old
+  `~5.8e-2` sampled residual basin at the 120s coarse probe.
+- The fragmented-node hypothesis is implemented and validated synthetically,
+  but it is not sufficient to explain the Barnase residual plateau under the
+  current 120s evidence.
+- Next branch is moment/Taylor construction, not performance tuning:
+  1. make moment/expansion audit emit timeout-safe progress rows, not only final
+     timing/profile rows;
+  2. add a far-expansion truncation audit that compares accepted Taylor node
+     sums against direct sums on sampled target-node pairs;
+  3. inspect JCP moment construction for `area-centroid` topdown nodes before
+     optimizing leaf batching or loosening MAC safety.
+
+## Stage 3G/8Z - TABI Timeout-Safe Far-Expansion Audit
+
+Implemented:
+
+- Added hidden far-expansion audit controls:
+  - `-pbe-tabi-expansion-audit=off|sampled|full-small`, default `off`;
+  - `-pbe-tabi-expansion-audit-sample-count=<64..2048>`, default `512`;
+  - `-pbe-tabi-expansion-audit-max-panels=<128..8192>`, default `2048`.
+- Implemented JCP on-the-fly far-expansion audit. When an accepted internal far
+  node passes MAC, physical-gap, and fragmentation split routing, the audit
+  compares `taylor_jcp_node_sum` against a direct JCP sum over the same node
+  panels for sampled target-node pairs.
+- Added timing/profile fields:
+  - `tabi_expansion_audit`;
+  - `tabi_far_expansion_audit_pairs`;
+  - `tabi_far_expansion_audit_panels`;
+  - `tabi_far_expansion_direct_seconds`;
+  - `tabi_far_expansion_rel_error_max`;
+  - `tabi_far_expansion_rel_error_mean`.
+- Extended `pbe_tabi_longrun_progress.csv` with timeout-safe tree/MAC/moment
+  and far-expansion fields, including tree builder, node bounds, MAC safety,
+  expansion center, fragmentation safety, unsafe/reject counts, moment audit
+  counters, and expansion audit counters/errors.
+- Updated Barnase harnesses to forward the expansion-audit controls and to read
+  fallback tree/MAC/moment/expansion counters from long-run progress rows when
+  timing/profile rows are unavailable after a timeout.
+- Added `test/pbe_tabi_far_expansion_audit_smoke.ps1`, a synthetic hollow-node
+  smoke where the audit observes Taylor-vs-direct node error and split reduces
+  the direct-vs-tree vector error.
+- Extended `test/pbe_tabi_topdown_physical_gap_matrix.ps1` with optional
+  `-IncludeExpansionAuditRows`, adding an `area-centroid/split` sampled
+  expansion-audit row without changing default production behavior.
+
+Measured Stage 3G evidence:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Synthetic far-expansion audit smoke:
+  `test/pbe_tabi_far_expansion_audit_smoke.ps1`: PASS.
+  - panels `64`;
+  - sampled far expansion pairs `128`;
+  - audited panels `2560`;
+  - max/mean Taylor-vs-direct node error `1.650e-4 / 2.049e-5`;
+  - split rejects `16`;
+  - direct-vs-tree vector rel improved from `5.766e-9` to `3.877e-10`.
+- Fragmented-node smoke:
+  `test/pbe_tabi_fragmented_node_mac_smoke.ps1`: PASS.
+  - panels `48`;
+  - fragmented far candidates `16`;
+  - split rejects `16`;
+  - vector rel improved from `2.084e-8` to `2.512e-13`.
+- Medium matrix with expansion-audit rows:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -CaseTimeoutSeconds 180 -IncludeExpansionAuditRows`:
+  PASS and wrote
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+| fixture | grouped sampled residual | split matvec rel | split energy drift rel | split sampled residual | expansion audit pairs | expansion rel max | classification |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `mini-protein` | `9.752e-5` | `4.463e-4` | `6.757e-5` | `9.762e-5` | `7680` | `1.037e1` | `fragmentation_split_medium_gate_pass` |
+| `charged-peptide` | `1.770e-5` | `1.974e-4` | `1.224e-4` | `1.772e-5` | `10240` | `4.041e0` | `fragmentation_split_medium_gate_pass` |
+| `compact-mini-protein` | `5.309e-5` | `8.891e-4` | `7.254e-5` | `5.314e-5` | `15360` | `1.498e1` | `fragmentation_split_medium_gate_pass` |
+
+- The medium `area-centroid/split` rows remain under the success gates:
+  `matvec rel < 2.5e-3`, `energy drift rel < 5e-3`, and sampled residual within
+  `2x` grouped-morton.
+- Expansion audit can see large local Taylor node errors even when the medium
+  global matvec/residual gate passes. This makes the audit useful as a branch
+  diagnostic, not a promotion gate by itself.
+
+Barnase Stage 3G timeout-safe probe:
+
+- Command shape:
+  `test/pbe_tabi_barnase_tree_mac_probe.ps1 -CaseTimeoutSeconds 120 -SurfacePoints 8 -TreeLeafSizes 128 -TreeOpeningThetas 0.7 -NodeBoundsModes tight-aabb -TreeBuilders topdown-aabb -MacSafety physical-gap -ExpansionCenters area-centroid -FragmentationSafety split -ExpansionAudit sampled -ExpansionAuditSampleCount 512 -ExpansionAuditMaxPanels 2048 -TrueResidualProbeScope adaptive`.
+- Tree row timed out at `120.04s`, but progress emitted the needed counters:
+  - panels `15129`, unknowns `30258`;
+  - GMRES iteration `10`, matvec calls `12`;
+  - sampled true residual `5.8313e-2`;
+  - tree builder `topdown-aabb`, node bounds `tight-aabb`;
+  - MAC safety `physical-gap`, expansion center `area-centroid`;
+  - fragmentation safety `split`, expansion audit `sampled`;
+  - unsafe/rejects `228/228`;
+  - fragmented far/split rejects `0/0`;
+  - far-expansion audit pairs `6144`, panels `2310494`;
+  - direct audit time `0.085869s`;
+  - far-expansion rel max/mean `4.8596 / 1.278e-2`;
+  - RSS from progress `34.1MB`;
+  - last progress phase `gmres_iter`.
+
+Verification after Stage 3G:
+
+- `test/pbe_tabi_far_expansion_audit_smoke.ps1`: PASS.
+- `test/pbe_tabi_fragmented_node_mac_smoke.ps1`: PASS.
+- `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -CaseTimeoutSeconds 180 -IncludeExpansionAuditRows`: PASS.
+- `test/pbe_tabi_topdown_mac_audit.ps1`: PASS
+  (`unsafe=392`, `rejects=392`, far-node interactions `392 -> 0`).
+- `test/pbe_tabi_treecode_accuracy.ps1`: PASS
+  (`rel3=9.38761e-07`, `rel4=1.35948e-07`,
+  `topdown_rel3=4.61951e-05`).
+- `test/pbe_tabi_tree_builder_smoke.ps1`: PASS.
+- `test/pbe_tabi_gmres_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_sampled_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_profile_smoke.ps1`: PASS
+  (`panels=120`, `matvec_calls=9`).
+- `test/pbe_memory_profile_smoke.ps1`: PASS.
+- `test/pbe_clean_room_audit.ps1`: PASS.
+- `test/pbe_regression.ps1`: PASS.
+- `test/pbsa_smoke.ps1`: PASS.
+- `test/sasa_surface_smoke.ps1`: PASS.
+
+Stage 3G decision:
+
+- Keep all Stage 3E/3F/3G controls hidden/report-only. Production defaults are
+  unchanged.
+- Barnase still sits in the `~5.8e-2` sampled residual basin, while the 120s
+  timeout-safe row now shows high far-expansion Taylor-vs-direct error
+  (`max 4.8596`, mean `1.278e-2`) and no fragmented-node split activity.
+- Next branch is Taylor/JCP moment construction:
+  1. inspect the JCP Taylor series signs/scales for `phi` and `phin` moments;
+  2. validate direct moment construction at `area-centroid` centers against
+     accepted far-node direct sums, not only translated moment equality;
+  3. add a targeted fix before any leaf batching or MAC-loosening work;
+  4. rerun the Barnase 120s Stage 3G probe before considering a 300s run.
+
+## Stage 3H/9A - TABI JCP Moment Translation and Convergence Audit
+
+Implemented:
+
+- Added hidden moment/convergence controls:
+  - `-pbe-tabi-moment-construction=translated|direct-node`, default
+    `translated`;
+  - `-pbe-tabi-moment-sum=naive|kahan`, default `naive`;
+  - `-pbe-tabi-convergence-audit=off|sampled|full-small`, default `off`.
+- Added the `direct-node` probe path for JCP tree moments. Internal nodes can
+  now build moments by scanning the panels owned by that node at the node's own
+  Taylor center, instead of only translating child moments upward through M2M.
+- Added optional Kahan accumulation for panel moment construction and M2M
+  accumulation.
+- Extended timing/profile/progress diagnostics:
+  - `tabi_moment_translation_offset_max/mean`;
+  - `tabi_moment_cancellation_ratio_max/mean`;
+  - `tabi_moment_dynamic_range_max`;
+  - `tabi_far_convergence_rho_max/mean`;
+  - `tabi_node_aspect_ratio_max/mean`;
+  - `tabi_accepted_far_aspect_ratio_max/mean`.
+- Kept `tight-aabb` bounds for MAC/physical-gap while `area-centroid` remains
+  a hidden Taylor-center policy; radius is still recomputed from the Taylor
+  center to the farthest AABB corner so MAC is not relaxed implicitly.
+- Added `test/pbe_tabi_jcp_moment_construction_smoke.ps1` for translated vs
+  direct-node moment construction on a synthetic hollow case.
+- Added `test/pbe_tabi_jcp_mixed_derivative_smoke.ps1` comparing the analytic
+  JCP Taylor/mixed derivative path against a finite-difference debug oracle for
+  both Poisson (`kappa=0`) and Yukawa (`kappa>0`) cases.
+- Extended `test/pbe_tabi_topdown_physical_gap_matrix.ps1` with
+  `-IncludeStage3HRows`, adding:
+  - `topdown-aabb/physical-gap/area-centroid/split/translated/naive`;
+  - `topdown-aabb/physical-gap/area-centroid/split/translated/kahan`;
+  - `topdown-aabb/physical-gap/area-centroid/split/direct-node/kahan`.
+- Extended the Barnase truth/tree harness path to pass through
+  `MomentConstruction`, `MomentSum`, and `ConvergenceAudit`, and to report the
+  new timeout-safe progress counters.
+
+Measured Stage 3H smoke evidence:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Moment construction smoke:
+  `test/pbe_tabi_jcp_moment_construction_smoke.ps1`: PASS.
+  - panels `64`;
+  - translated/direct-node direct-vs-tree rel both `5.889e-10`;
+  - max translation offset `83.505`;
+  - cancellation ratio max `1.414e5`;
+  - dynamic range max `1.197e6`;
+  - convergence `rho_max=0.231941`.
+- Mixed derivative smoke:
+  `test/pbe_tabi_jcp_mixed_derivative_smoke.ps1`: PASS.
+  - panels `48`;
+  - Poisson finite-difference rel `2.856e-10`;
+  - Yukawa finite-difference rel `1.331e-10`;
+  - Yukawa far interactions `96`.
+
+Measured Stage 3H medium rows:
+
+- Full Stage 3H medium matrix:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3HRows -CaseTimeoutSeconds 180`:
+  PASS and wrote
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+| fixture | Stage 3H row | matvec rel | energy drift rel | sampled residual | translation rel max | cancellation max | dynamic range max | expansion rel max | rho max | node aspect max | accepted far aspect max |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mini-protein` | `translated/naive` | `4.463e-4` | `6.757e-5` | `9.762e-5` | `1.087e-15` | `1.147e5` | `2.551e16` | `1.037e1` | `0.699943` | `10.055` | `1.930` |
+| `mini-protein` | `translated/kahan` | `4.463e-4` | `6.757e-5` | `9.762e-5` | `1.148e-15` | `1.147e5` | `2.551e16` | `1.037e1` | `0.699943` | `10.055` | `1.930` |
+| `mini-protein` | `direct-node/kahan` | `4.463e-4` | `6.757e-5` | `9.762e-5` | `1.170e-15` | `1.147e5` | `2.551e16` | `1.037e1` | `0.699943` | `10.055` | `1.930` |
+| `charged-peptide` | `translated/naive` | `1.974e-4` | `1.224e-4` | `1.772e-5` | `7.124e-15` | `5.070e5` | `5.840e16` | `1.277e1` | `0.699861` | `9.289` | `2.240` |
+| `charged-peptide` | `translated/kahan` | `1.974e-4` | `1.224e-4` | `1.772e-5` | `5.058e-15` | `5.070e5` | `5.840e16` | `1.277e1` | `0.699861` | `9.289` | `2.240` |
+| `charged-peptide` | `direct-node/kahan` | `1.974e-4` | `1.224e-4` | `1.772e-5` | `7.211e-15` | `5.070e5` | `5.840e16` | `4.041e0` | `0.699861` | `9.289` | `2.240` |
+| `compact-mini-protein` | `translated/naive` | `8.891e-4` | `7.254e-5` | `5.314e-5` | `0.000e0` | `6.568e4` | `2.261e15` | `1.498e1` | `0.699997` | `4.999` | `2.321` |
+| `compact-mini-protein` | `translated/kahan` | `8.891e-4` | `7.254e-5` | `5.314e-5` | `1.192e-15` | `6.568e4` | `2.261e15` | `1.498e1` | `0.699997` | `4.999` | `2.321` |
+| `compact-mini-protein` | `direct-node/kahan` | `8.891e-4` | `7.254e-5` | `5.314e-5` | `1.453e-15` | `6.568e4` | `2.261e15` | `1.498e1` | `0.699997` | `4.999` | `2.321` |
+
+- All Stage 3H medium rows remain under the Stage 3E/3F success gates:
+  `matvec rel < 2.5e-3`, `energy drift rel < 5e-3`, and sampled residual within
+  `2x` grouped-morton.
+- Medium translation audit errors are at numerical noise level. Direct-node
+  only reduced the local far-expansion max on `charged-peptide`; it did not
+  change the global medium matvec/residual rows.
+
+Barnase Stage 3H timeout-safe probes:
+
+| Barnase row | status | time | panels | unknowns | matvecs | sampled residual | translation rel max | offset max | cancellation max | dynamic range max | expansion rel max | rho max | node aspect max | accepted far aspect max | phase |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `translated/naive` | `timeout` | `120.05s` | `15129` | `30258` | `15` | `4.4313e-2` | `0.000e0` | `13.890` | `2.546e6` | `2.981e14` | `4.8596` | `0.699998` | `5.830` | `1.909` | `gmres_sampled_true_probe` |
+| `direct-node/kahan` | `timeout` | `120.13s` | `15129` | `30258` | `13` | `5.8313e-2` | `0.000e0` | `13.890` | `2.546e6` | `2.981e14` | `4.8596` | `0.699998` | `5.830` | `1.909` | `gmres_iter` |
+
+- Both Barnase probes used `surface_points=8`, `topdown-aabb`,
+  `physical-gap`, `area-centroid`, `fragmentation-safety=split`, `leaf=128`,
+  `theta=0.7`, `tight-aabb`, `onthefly`, `duffy_adaptive`,
+  `quad_buffer=adaptive`, `precond=diagonal`, `moment-audit=sampled`,
+  `expansion-audit=sampled`, and `convergence-audit=sampled`.
+- `direct-node/kahan` did not reduce the Barnase far-expansion rel max
+  (`4.8596` in both rows). It was also slower at the same 120s timeout, so it
+  completed fewer matvecs.
+
+Verification after Stage 3H:
+
+- `test/pbe_tabi_jcp_moment_construction_smoke.ps1`: PASS.
+- `test/pbe_tabi_jcp_mixed_derivative_smoke.ps1`: PASS.
+- `test/pbe_tabi_far_expansion_audit_smoke.ps1`: PASS.
+- `test/pbe_tabi_fragmented_node_mac_smoke.ps1`: PASS.
+- `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3HRows -CaseTimeoutSeconds 180`: PASS.
+- `test/pbe_tabi_topdown_mac_audit.ps1`: PASS.
+- `test/pbe_tabi_treecode_accuracy.ps1`: PASS.
+- `test/pbe_tabi_tree_builder_smoke.ps1`: PASS.
+- `test/pbe_tabi_gmres_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_sampled_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_profile_smoke.ps1`: PASS.
+- `test/pbe_memory_profile_smoke.ps1`: PASS.
+- `test/pbe_clean_room_audit.ps1`: PASS.
+- `test/pbe_regression.ps1`: PASS.
+- `test/pbsa_smoke.ps1`: PASS.
+- `test/sasa_surface_smoke.ps1`: PASS.
+
+Stage 3H decision:
+
+- Keep all Stage 3H controls hidden/report-only. Production defaults are
+  unchanged.
+- The comment's M2M concern is now tested by evidence. `translate_child_moment`
+  does not look like the primary Barnase failure source under this probe:
+  translation audit is near zero on medium rows and zero in the timeout-safe
+  Barnase progress rows, and `direct-node/kahan` does not reduce the Barnase
+  far-expansion error.
+- Kahan accumulation is useful as a diagnostic but did not change the measured
+  medium or Barnase rows enough to justify promotion.
+- The mixed derivative smoke passes against a finite-difference oracle in safe
+  synthetic cases, so there is no immediate controlled-case sign/scale bug in
+  the JCP mixed derivative path.
+- Current evidence points to accepted far-node Taylor truncation/convergence
+  safety, not physical-gap, fragmentation split, or M2M translation:
+  Barnase still shows `rho_max` almost exactly at `theta=0.7` and
+  far-expansion rel max `4.8596`.
+- Next branch: add a convergence-safety split/audit policy for high-rho and/or
+  high-aspect accepted far nodes before any performance tuning. Do not run a
+  300s Barnase probe until the 120s row shows either sampled residual moving
+  clearly below the `~5e-2` basin or far-expansion rel max falling sharply.
+
+## Stage 3I/9B - TABI Convergence-Safe MAC and Taylor Sweep
+
+Implemented:
+
+- Added hidden convergence/MAC safety controls:
+  - `-pbe-tabi-convergence-safety=off|audit|split`, default `off`;
+  - `-pbe-tabi-convergence-rho-cap=<0.0..2.0>`, default `0.0` meaning off;
+  - `-pbe-tabi-mac-aspect-cap=<0.0..50.0>`, default `0.0` meaning off.
+- Extended `evaluate_mac` after ratio MAC and physical-gap:
+  - `audit` records accepted far candidates with `rho > rho_cap` or
+    `aspect > aspect_cap`;
+  - `split` rejects those candidates and descends to child/leaf paths;
+  - leaf direct handling is unchanged.
+- Extended timing/profile/progress output with:
+  - `tabi_convergence_safety`, `tabi_convergence_rho_cap`,
+    `tabi_mac_aspect_cap`;
+  - `tabi_mac_convergence_rho_rejects`,
+    `tabi_mac_convergence_aspect_rejects`;
+  - `tabi_mac_convergence_rho_reject_panels`,
+    `tabi_mac_convergence_aspect_reject_panels`.
+- Extended Stage 3I harness coverage:
+  - `test/pbe_tabi_barnase_truth_matrix.ps1` now accepts
+    `-TreeTaylorOrders @(...)` and can run tree-only probes with
+    `-SkipGridReference`;
+  - `test/pbe_tabi_barnase_tree_mac_probe.ps1` forwards Taylor order and
+    convergence guard controls;
+  - `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3IRows`
+    adds theta/order/guard rows while preserving the Stage 3E/3F/3H rows.
+- Added `test/pbe_tabi_convergence_mac_safety_smoke.ps1`, a synthetic
+  high-aspect/high-rho accepted-far case that proves `audit` sees candidates
+  and `split` trades far work for direct leaf work.
+
+Measured Stage 3I smoke evidence:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Convergence MAC safety smoke:
+  `test/pbe_tabi_convergence_mac_safety_smoke.ps1`: PASS.
+  - panels `72`;
+  - audit rho/aspect would-rejects `38 / 135`;
+  - split rho/aspect rejects `38 / 135`;
+  - far work `135 -> 0`;
+  - leaf work `2362 -> 5112`;
+  - far-expansion rel max `0.730137 -> 0`;
+  - direct-vs-tree vector rel `3.449e-5 -> 2.741e-16`.
+
+Measured Stage 3I medium sweep:
+
+- Full Stage 3I medium matrix:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3IRows -CaseTimeoutSeconds 180`:
+  PASS and wrote
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+| fixture | Stage 3I row | order | theta | guard | matvec rel | energy drift rel | sampled residual | expansion rel max | rho max | rho rejects | leaf work/matvec |
+| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mini-protein` | baseline | 3 | 0.7 | off | `4.463e-4` | `6.757e-5` | `9.762e-5` | `1.037e1` | `0.699943` | `0` | `4.293e6` |
+| `mini-protein` | theta scan | 3 | 0.5 | off | `5.429e-5` | `1.816e-5` | `9.764e-5` | `8.379e-1` | `0.499998` | `0` | `6.118e6` |
+| `mini-protein` | theta scan | 3 | 0.4 | off | `9.229e-6` | `3.224e-6` | `9.759e-5` | `7.055e-2` | `0.399993` | `0` | `6.783e6` |
+| `mini-protein` | order scan | 4 | 0.5 | off | `1.479e-5` | `1.842e-6` | `9.760e-5` | `4.158e-1` | `0.499998` | `0` | `6.118e6` |
+| `mini-protein` | rho cap | 3 | 0.7 | `rho<=0.5` | `5.429e-5` | `1.816e-5` | `9.764e-5` | `8.379e-1` | `0.499998` | `83175` | `6.118e6` |
+| `charged-peptide` | baseline | 3 | 0.7 | off | `1.974e-4` | `1.224e-4` | `1.772e-5` | `1.277e1` | `0.699861` | `0` | `3.274e6` |
+| `charged-peptide` | theta scan | 3 | 0.5 | off | `2.775e-5` | `1.205e-5` | `1.770e-5` | `4.435e0` | `0.499980` | `0` | `4.507e6` |
+| `charged-peptide` | theta scan | 3 | 0.4 | off | `5.288e-16` | `0` | `1.770e-5` | `0` | `0` | `0` | `5.021e6` |
+| `charged-peptide` | order scan | 4 | 0.5 | off | `7.974e-6` | `2.764e-6` | `1.770e-5` | `7.233e-1` | `0.499980` | `0` | `4.507e6` |
+| `charged-peptide` | rho cap | 3 | 0.7 | `rho<=0.5` | `2.775e-5` | `1.205e-5` | `1.770e-5` | `4.435e0` | `0.499980` | `77260` | `4.507e6` |
+| `compact-mini-protein` | baseline | 3 | 0.7 | off | `8.891e-4` | `7.254e-5` | `5.314e-5` | `1.498e1` | `0.699997` | `0` | `1.004e7` |
+| `compact-mini-protein` | theta scan | 3 | 0.5 | off | `9.158e-5` | `8.093e-6` | `5.306e-5` | `1.674e0` | `0.499991` | `0` | `1.459e7` |
+| `compact-mini-protein` | theta scan | 3 | 0.4 | off | `2.205e-5` | `2.348e-7` | `5.307e-5` | `1.295e0` | `0.399987` | `0` | `1.568e7` |
+| `compact-mini-protein` | order scan | 4 | 0.5 | off | `3.235e-5` | `6.387e-6` | `5.306e-5` | `5.432e-1` | `0.499991` | `0` | `1.459e7` |
+| `compact-mini-protein` | rho cap | 3 | 0.7 | `rho<=0.5` | `9.158e-5` | `8.093e-6` | `5.306e-5` | `1.222e0` | `0.499991` | `482550` | `1.459e7` |
+
+- All listed Stage 3I medium rows stay inside the Stage 3E/3F global gates:
+  `matvec rel < 2.5e-3`, `energy drift rel < 5e-3`, and sampled residual
+  within `2x` grouped-morton.
+- The local expansion audit is the discriminating signal. Lowering theta or
+  imposing `rho_cap=0.5` reduces the worst local Taylor error substantially,
+  but does not yet reach the Barnase target of `<1e-3`.
+- `mac_aspect_cap=3.0` did not trigger on these medium fixtures because
+  accepted far aspect ratios were below the cap; aspect guard remains useful
+  for synthetic/high-aspect cases but is not the active medium/Barnase lever
+  at this threshold.
+
+Barnase Stage 3I 120s probes:
+
+- Theta/order sweep command shape:
+  `test/pbe_tabi_barnase_truth_matrix.ps1 -TreeProbeOnly -SkipGridReference -CaseTimeoutSeconds 120 -SurfacePoints 8 -TreeLeafSizes 128 -TreeOpeningThetas @(0.7,0.5,0.4,0.6) -TreeTaylorOrders @(3,4) -NodeBoundsModes tight-aabb -TreeBuilders topdown-aabb -MacSafety physical-gap -ExpansionCenters area-centroid -FragmentationSafety split -MomentAudit sampled -ExpansionAudit sampled -ConvergenceAudit sampled -NearIntegration duffy_adaptive -QuadBuffer adaptive`.
+- Guard row command shape:
+  same settings, plus `-ConvergenceSafety split -ConvergenceRhoCap 0.5 -MacAspectCap 3.0`.
+
+| Barnase row | status | matvecs | sampled residual | expansion rel max | expansion rel mean | rho max | rho rejects | leaf work/matvec | phase |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| order 3 theta 0.7 | `timeout` | `12` | `5.8313e-2` | `4.859629` | `1.1699e-2` | `0.699998` | `0` | `7.019e7` | `gmres_iter` |
+| order 3 theta 0.6 | `timeout` | `12` | `5.8329e-2` | `2.015257` | `7.516e-3` | `0.599999` | `0` | `9.442e7` | `gmres_iter` |
+| order 3 theta 0.5 | `timeout` | `14` | `5.8330e-2` | `1.653837` | `4.207e-3` | `0.500000` | `0` | `1.275e8` | `gmres_iter` |
+| order 3 theta 0.4 | `timeout` | `16` | `4.4371e-2` | `0.570735` | `1.785e-3` | `0.400000` | `0` | `1.706e8` | `gmres_iter` |
+| order 4 theta 0.7 | `timeout` | `7` | `1.57275e-1` | `0.685814` | `3.855e-3` | `0.699998` | `0` | `7.019e7` | `gmres_iter` |
+| order 4 theta 0.6 | `timeout` | `7` | `1.57269e-1` | `0.356780` | `1.837e-3` | `0.599999` | `0` | `9.442e7` | `gmres_iter` |
+| order 4 theta 0.5 | `timeout` | `8` | `1.57273e-1` | `0.074761` | `8.26e-4` | `0.500000` | `0` | `1.275e8` | `gmres_iter` |
+| order 4 theta 0.4 | `timeout` | `11` | `5.8331e-2` | `0.126600` | `4.35e-4` | `0.400000` | `0` | `1.706e8` | `gmres_iter` |
+| order 3 theta 0.7 + `rho<=0.5/aspect<=3` | `timeout` | `14` | `5.8330e-2` | `1.653837` | `4.422e-3` | `0.500000` | `2213232` | `1.275e8` | `gmres_iter` |
+
+- The Stage 3H baseline residual basin is reproduced:
+  order 3 theta 0.7 gives sampled residual `5.8313e-2` and far-expansion rel
+  max `4.859629`.
+- The convergence hypothesis is supported:
+  reducing effective `rho` lowers far-expansion max monotonically for order 3
+  (`4.86 -> 2.02 -> 1.65 -> 0.571`) and `rho_cap=0.5` reproduces the theta
+  `0.5` expansion/work shape while recording `2,213,232` rho rejects.
+- Taylor order 4 lowers the expansion audit error further, especially at
+  theta `0.5` (`0.074761`), but it is much slower in this 120s budget and did
+  not improve sampled residual yet.
+- No Stage 3I 120s Barnase row reaches the promotion target
+  `far-expansion rel max < 1e-3`; therefore no Barnase 300s probe was run.
+
+Verification after Stage 3I:
+
+- `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- `test/pbe_tabi_convergence_mac_safety_smoke.ps1`: PASS.
+- `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3IRows -CaseTimeoutSeconds 180`: PASS.
+- Barnase 120s theta/order sweep: PASS as timeout-safe evidence, all rows
+  emitted progress counters.
+- Barnase 120s guard row: PASS as timeout-safe evidence, progress recorded
+  `rho_cap` rejects.
+- `test/pbe_tabi_jcp_moment_construction_smoke.ps1`: PASS.
+- `test/pbe_tabi_jcp_mixed_derivative_smoke.ps1`: PASS.
+- `test/pbe_tabi_far_expansion_audit_smoke.ps1`: PASS.
+- `test/pbe_tabi_fragmented_node_mac_smoke.ps1`: PASS.
+- `test/pbe_tabi_topdown_mac_audit.ps1`: PASS.
+- `test/pbe_tabi_treecode_accuracy.ps1`: PASS.
+- `test/pbe_tabi_tree_builder_smoke.ps1`: PASS.
+- `test/pbe_tabi_gmres_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_sampled_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_profile_smoke.ps1`: PASS.
+- `test/pbe_memory_profile_smoke.ps1`: PASS.
+- `test/pbe_clean_room_audit.ps1`: PASS.
+- `test/pbe_regression.ps1`: PASS.
+- `test/pbsa_smoke.ps1`: PASS.
+- `test/sasa_surface_smoke.ps1`: PASS.
+
+Stage 3I decision:
+
+- Keep `topdown-aabb`, `physical-gap`, `area-centroid`,
+  `fragmentation-safety`, Taylor order 4, and convergence-safety controls
+  hidden/experimental. Production defaults are unchanged.
+- The comment is directionally correct: `rho ~= theta=0.7` is too loose for
+  JCP BIE order 3 on Barnase. Stage 3I reduces the far-expansion error by
+  tightening effective `rho` and/or increasing Taylor order, so the branch is
+  convergence/truncation dominated rather than M2M, mixed derivative, or
+  physical-gap dominated.
+- The current fix is not sufficient. Even the strongest 120s Stage 3I rows
+  still sit at expansion rel max `7.476e-2` or worse, far above `<1e-3`.
+- Do not run Barnase 300s or optimize leaf batching yet. The next branch should
+  add a stricter convergence model before performance tuning, for example:
+  1. test smaller `rho_cap` values (`0.35`, `0.30`) and/or a direct
+     convergence-error estimator for accepted JCP far nodes;
+  2. evaluate Taylor order beyond 4 only as a hidden probe if derivative series
+     cost is acceptable;
+  3. only after far-expansion rel max falls near `<1e-3`, revisit leaf-pair
+     batching to recover the `1.7e8` leaf-work/matvec cost of strict rho rows.
+
+## Stage 3J/9C - TABI Adaptive JCP Convergence Estimator
+
+Implemented:
+
+- Added hidden adaptive convergence-estimator controls:
+  - `-pbe-tabi-convergence-estimator=off|moment-tail|hybrid`, default `off`;
+  - `-pbe-tabi-convergence-tail-threshold=<1..1e12>`, default `1e4`;
+  - `-pbe-tabi-convergence-estimator-error-cap=<1e-8..1.0>`, default `1e-3`;
+  - `-pbe-tabi-convergence-unstable-rho-cap=<0.05..2.0>`, default `0.25`.
+- Estimator is active only on JCP treecode `interaction-mode=onthefly`.
+  Cached/non-JCP paths keep counters zero and do not change behavior.
+- After ratio MAC, physical-gap, and fragmentation split, accepted JCP far
+  candidates can now be scored from current per-matvec `PackedJcpMoments`:
+  `tail_ratio = max(degree-p moment/radius^p) /
+  max(degree 0..1 moment/radius^degree)`, and hybrid estimated error is
+  `tail_ratio * rho^(p+1) * 30`.
+- With `convergence-safety=audit`, unstable far candidates are only counted.
+  With `convergence-safety=split`, unstable far candidates descend unless
+  `rho <= convergence-unstable-rho-cap`.
+- Extended timing/profile/progress output with estimator mode, thresholds,
+  unstable/split counts and panels, tail-ratio/error max/mean, and
+  expansion-audit calibration counters:
+  `tabi_convergence_estimator_high_error_caught/missed`.
+- Extended harness coverage:
+  - `test/pbe_tabi_convergence_estimator_smoke.ps1`;
+  - `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3JRows`;
+  - `test/pbe_tabi_barnase_truth_matrix.ps1` and
+    `test/pbe_tabi_barnase_tree_mac_probe.ps1` now pass through and report the
+    estimator controls/counters.
+
+Measured Stage 3J smoke evidence:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Convergence estimator smoke:
+  `test/pbe_tabi_convergence_estimator_smoke.ps1`: PASS.
+  - panels `96`;
+  - audit estimator samples `240`;
+  - audit unstable far candidates `240`;
+  - hybrid split rejects `128`;
+  - loose `moment-tail` benign row rejects `0`;
+  - direct-vs-tree vector rel `5.166e-5 -> 1.962e-6`;
+  - far work `240 -> 112`;
+  - leaf work `5856 -> 7780`;
+  - max `tail_ratio=1.272`, max `estimated_error=2.552`.
+
+Measured Stage 3J medium quick matrix:
+
+- Command:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -Quick -IncludeStage3JRows -CaseTimeoutSeconds 180 -AllowFailedStatus`.
+- Output:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+| mini-protein Stage 3J row | order | theta | guard/estimator | matvec rel | energy drift rel | sampled residual | expansion rel max | estimator split rejects | leaf work/matvec | far work/matvec |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `center_area_o3_theta0p6` | 3 | 0.6 | off | `2.188e-4` | `1.432e-5` | `9.761e-5` | `6.558` | `0` | `5.106e6` | `7060` |
+| `center_aabb_o3_theta0p6` | 3 | 0.6 | off | `2.716e-4` | `3.529e-5` | `9.752e-5` | `5.551` | `0` | `4.647e6` | `8329` |
+| `rho_cap0p35` | 3 | 0.6 | `rho<=0.35` | `4.561e-6` | `8.178e-7` | `9.759e-5` | `6.099e-2` | `0` | `6.940e6` | `3089` |
+| `rho_cap0p30` | 3 | 0.6 | `rho<=0.30` | `1.847e-6` | `1.327e-7` | `9.759e-5` | `1.847e-2` | `0` | `7.106e6` | `1853` |
+| `rho_cap0p25` | 3 | 0.6 | `rho<=0.25` | `5.318e-7` | `3.839e-8` | `9.759e-5` | `6.575e-3` | `0` | `7.291e6` | `498` |
+| `hybrid_t1e3` | 3 | 0.6 | hybrid split | `6.012e-7` | `3.505e-8` | `9.759e-5` | `6.575e-3` | `130801` | `7.289e6` | `515` |
+| `hybrid_t1e4` | 3 | 0.6 | hybrid split | `6.012e-7` | `3.505e-8` | `9.759e-5` | `6.575e-3` | `130801` | `7.289e6` | `515` |
+| `order4_hybrid_t1e4` | 4 | 0.6 | hybrid split | `1.768e-7` | `3.922e-8` | `9.758e-5` | `1.410e-3` | `123943` | `7.227e6` | `972` |
+
+- Medium quick rows remain inside Stage 3E/3F gates:
+  `matvec rel < 2.5e-3`, `energy drift rel < 5e-3`, and sampled residual
+  remains near the grouped/direct medium baseline.
+- On mini-protein, the hybrid estimator is currently about as aggressive as
+  strict `rho_cap=0.25`; it improves expansion error but is not yet selective.
+- `aabb-center` lowered the local max spike on this mini row, but it worsened
+  energy/matvec drift slightly and did not become a promotion candidate.
+
+Barnase Stage 3J 120s probes:
+
+All rows used `surface_points=8`, `leaf=128`, `theta=0.6`,
+`topdown-aabb`, `tight-aabb`, `physical-gap`, `area-centroid` unless noted,
+`fragmentation-safety=split`, `moment-construction=translated`,
+`moment-sum=naive`, `moment-audit=sampled`, `expansion-audit=sampled`,
+`convergence-audit=sampled`, `near=duffy_adaptive`,
+`quad_buffer=adaptive`, and `precond=diagonal`.
+
+| Barnase Stage 3J row | status | matvecs | sampled residual | true residual | expansion rel max | expansion rel mean | rho max | rho rejects | estimator unstable | estimator split rejects | caught/missed | leaf work/matvec |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| center `area-centroid` | `timeout` | `14` | `5.8329e-2` | `NA` | `2.015257` | `7.564e-3` | `0.599999` | `0` | `0` | `0` | `0/0` | `9.442e7` |
+| center `aabb-center` | `timeout` | `13` | `5.8337e-2` | `NA` | `2.548277` | `9.722e-3` | `0.600000` | `0` | `0` | `0` | `0/0` | `7.895e7` |
+| strict `rho_cap=0.35` | `timeout` | `20` | `6.389e-3` | `NA` | `0.626529` | `1.149e-3` | `0.349999` | `5,716,100` | `0` | `0` | `0/0` | `1.933e8` |
+| strict `rho_cap=0.30` | `timeout` | `29` | `2.320e-3` | `NA` | `0.651508` | `4.52e-4` | `0.300000` | `10,253,675` | `0` | `0` | `0/0` | `2.128e8` |
+| hybrid order 3 threshold `1e3` | `timeout` | `39` | `4.53e-4` | `NA` | `5.199e-2` | `2.88e-4` | `0.599999` | `0` | `16,414,508` | `15,593,331` | `974/0` | `2.241e8` |
+| hybrid order 3 threshold `1e4` | `ok` | `45` | `3.2e-5` | `5.449e-5` | `5.199e-2` | `2.822e-4` | `0.599999` | `0` | `18,940,620` | `17,992,305` | `1074/0` | `2.241e8` |
+| hybrid order 4 threshold `1e4` | `timeout` | `29` | `2.320e-3` | `NA` | `4.294e-3` | `3.3e-5` | `0.599999` | `0` | `11,375,877` | `11,182,936` | `40/15` | `2.207e8` |
+
+- Center-policy check: on Barnase, `area-centroid` is better than
+  `aabb-center` for this 120s probe (`2.015` vs `2.548` expansion rel max).
+  Keep `aabb-center` hidden as a comparison row only.
+- Strict rho lower-bound confirms the comment's accuracy/performance warning:
+  sampled residual leaves the `~5.8e-2` basin (`6.389e-3` and `2.320e-3`),
+  but leaf work rises to roughly `1.9e8-2.1e8` per matvec.
+- Hybrid order 3 threshold `1e4` is the first Barnase 120s row in this branch
+  to finish successfully with true residual `5.449e-5` and sampled residual
+  `3.2e-5`.
+- The hybrid estimator does not yet satisfy the strict promotion target
+  `far_expansion_rel_error_max < 1e-3`: the max spike remains about
+  `5.2e-2`. However, expansion mean is `2.82e-4` and sampled expansion-audit
+  high-error calibration caught all high-error pairs (`1074/0` caught/missed)
+  in the converged order 3 row.
+- Order 4 reduces the worst expansion spike much further (`4.294e-3`) but
+  is slower in the 120s budget and still missed some high-error sampled pairs
+  (`40/15`), so order 4 is not the next default candidate.
+
+Verification after Stage 3J:
+
+- `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- `test/pbe_tabi_convergence_estimator_smoke.ps1`: PASS.
+- `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -Quick -IncludeStage3JRows -CaseTimeoutSeconds 180 -AllowFailedStatus`: PASS.
+- Barnase 120s center, strict-rho, hybrid estimator, and order-4 fallback
+  probes: PASS as timeout-safe/converged evidence, all emitted progress rows.
+- `test/pbe_tabi_convergence_mac_safety_smoke.ps1`: PASS.
+- `test/pbe_tabi_jcp_moment_construction_smoke.ps1`: PASS.
+- `test/pbe_tabi_jcp_mixed_derivative_smoke.ps1`: PASS.
+- `test/pbe_tabi_far_expansion_audit_smoke.ps1`: PASS.
+- `test/pbe_tabi_fragmented_node_mac_smoke.ps1`: PASS.
+- `test/pbe_tabi_topdown_mac_audit.ps1`: PASS.
+- `test/pbe_tabi_treecode_accuracy.ps1`: PASS.
+- `test/pbe_tabi_tree_builder_smoke.ps1`: PASS.
+- `test/pbe_tabi_gmres_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_sampled_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_profile_smoke.ps1`: PASS.
+- `test/pbe_memory_profile_smoke.ps1`: PASS.
+- `test/pbe_clean_room_audit.ps1`: PASS.
+- `test/pbe_regression.ps1`: PASS.
+- `test/pbsa_smoke.ps1`: PASS.
+- `test/sasa_surface_smoke.ps1`: PASS.
+
+Stage 3J decision:
+
+- Keep `topdown-aabb`, `physical-gap`, `area-centroid`,
+  `fragmentation-safety`, convergence-safety, and convergence-estimator
+  controls hidden/experimental. Production defaults are unchanged.
+- The adaptive estimator hypothesis is strongly supported for solver progress:
+  the Barnase order 3 hybrid threshold `1e4` row breaks out of the
+  `~5.8e-2` residual basin and reaches true residual `5.449e-5` within the
+  120s budget.
+- Do not promote yet. The hard far-expansion max target `<1e-3` is not met;
+  order 3 has a remaining local spike around `5.2e-2`, and order 4 still sits
+  at `4.294e-3` while costing more and missing some high-error sampled pairs.
+- Next branch should tune estimator selectivity and calibration before leaf
+  batching:
+  1. add per-channel or percentile/mean-sensitive estimator calibration so
+     the order 3 hybrid row keeps its convergence but avoids behaving like
+     strict `rho_cap=0.25` on medium rows;
+  2. investigate the remaining expansion max outliers caught by audit in the
+     converged Barnase row, including whether they are harmless isolated pairs
+     or need a stricter local split rule;
+  3. only after the max outliers are bounded near `<1e-3` or proven harmless
+     by residual/energy gates should a 300s Barnase run or leaf-pair batching
+     become the priority.

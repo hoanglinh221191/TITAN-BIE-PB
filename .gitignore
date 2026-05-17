@@ -82,6 +82,14 @@ lib_ff/
 !/test/pbe_tabi_block_precond_buffer_smoke.ps1
 !/test/pbe_tabi_sampled_true_residual_smoke.ps1
 !/test/pbe_tabi_tree_builder_smoke.ps1
+!/test/pbe_tabi_fragmented_node_mac_smoke.ps1
+!/test/pbe_tabi_far_expansion_audit_smoke.ps1
+!/test/pbe_tabi_jcp_moment_construction_smoke.ps1
+!/test/pbe_tabi_jcp_mixed_derivative_smoke.ps1
+!/test/pbe_tabi_convergence_mac_safety_smoke.ps1
+!/test/pbe_tabi_convergence_estimator_smoke.ps1
+!/test/pbe_tabi_convergence_calibration_smoke.ps1
+!/test/pbe_tabi_topdown_physical_gap_matrix.ps1
 !/test/pbe_tabi_kirkwood_analytic.ps1
 !/test/pbe_born_ion_matrix.ps1
 !/test/pbe_kirkwood_oracle_selfcheck.ps1

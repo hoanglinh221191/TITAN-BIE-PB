@@ -858,6 +858,23 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-pbe-tabi-tree-builder");
       continue;
     }
+    if (consume_option_value(arg, {"-pbe-tabi-expansion-center",
+                                   "--pbe-tabi-expansion-center"},
+                             common_value, i)) {
+      pbe.tabi_expansion_center =
+          require_choice(common_value,
+                         {"legacy", "area-centroid", "aabb-center"},
+                         "-pbe-tabi-expansion-center");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-fragmentation-safety",
+                                   "--pbe-tabi-fragmentation-safety"},
+                             common_value, i)) {
+      pbe.tabi_fragmentation_safety =
+          require_choice(common_value, {"off", "audit", "split"},
+                         "-pbe-tabi-fragmentation-safety");
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-tabi-mac-safety",
                                    "--pbe-tabi-mac-safety"},
                              common_value, i)) {
@@ -878,6 +895,107 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.tabi_moment_audit =
           require_choice(common_value, {"off", "sampled", "full-small"},
                          "-pbe-tabi-moment-audit");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-moment-construction",
+                                   "--pbe-tabi-moment-construction"},
+                             common_value, i)) {
+      pbe.tabi_moment_construction =
+          require_choice(common_value, {"translated", "direct-node"},
+                         "-pbe-tabi-moment-construction");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-moment-sum",
+                                   "--pbe-tabi-moment-sum"},
+                             common_value, i)) {
+      pbe.tabi_moment_sum =
+          require_choice(common_value, {"naive", "kahan"},
+                         "-pbe-tabi-moment-sum");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-convergence-audit",
+                                   "--pbe-tabi-convergence-audit"},
+                             common_value, i)) {
+      pbe.tabi_convergence_audit =
+          require_choice(common_value, {"off", "sampled", "full-small"},
+                         "-pbe-tabi-convergence-audit");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-convergence-safety",
+                                   "--pbe-tabi-convergence-safety"},
+                             common_value, i)) {
+      pbe.tabi_convergence_safety =
+          require_choice(common_value, {"off", "audit", "split"},
+                         "-pbe-tabi-convergence-safety");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-convergence-rho-cap",
+                                   "--pbe-tabi-convergence-rho-cap"},
+                             common_value, i)) {
+      pbe.tabi_convergence_rho_cap = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-mac-aspect-cap",
+                                   "--pbe-tabi-mac-aspect-cap"},
+                             common_value, i)) {
+      pbe.tabi_mac_aspect_cap = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-convergence-estimator",
+                                   "--pbe-tabi-convergence-estimator"},
+                             common_value, i)) {
+      pbe.tabi_convergence_estimator =
+          require_choice(common_value, {"off", "moment-tail", "hybrid"},
+                         "-pbe-tabi-convergence-estimator");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-convergence-tail-threshold",
+                                   "--pbe-tabi-convergence-tail-threshold"},
+                             common_value, i)) {
+      pbe.tabi_convergence_tail_threshold = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-pbe-tabi-convergence-estimator-error-cap",
+                  "--pbe-tabi-convergence-estimator-error-cap"},
+            common_value, i)) {
+      pbe.tabi_convergence_estimator_error_cap = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-convergence-unstable-rho-cap",
+                                   "--pbe-tabi-convergence-unstable-rho-cap"},
+                             common_value, i)) {
+      pbe.tabi_convergence_unstable_rho_cap = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-convergence-calibration",
+                                   "--pbe-tabi-convergence-calibration"},
+                             common_value, i)) {
+      pbe.tabi_convergence_calibration = require_choice(
+          common_value,
+          {"stage3j", "consecutive", "aspect", "consecutive-aspect"},
+          "-pbe-tabi-convergence-calibration");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-expansion-audit",
+                                   "--pbe-tabi-expansion-audit"},
+                             common_value, i)) {
+      pbe.tabi_expansion_audit =
+          require_choice(common_value, {"off", "sampled", "full-small"},
+                         "-pbe-tabi-expansion-audit");
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-pbe-tabi-expansion-audit-sample-count",
+                  "--pbe-tabi-expansion-audit-sample-count"},
+            common_value, i)) {
+      pbe.tabi_expansion_audit_sample_count = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-expansion-audit-max-panels",
+                                   "--pbe-tabi-expansion-audit-max-panels"},
+                             common_value, i)) {
+      pbe.tabi_expansion_audit_max_panels = stoi(common_value);
       continue;
     }
     if (consume_option_value(arg, {"-pbe-tabi-matvec-audit",
