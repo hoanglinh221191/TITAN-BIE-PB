@@ -547,6 +547,33 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (consume_bool_option(arg, {"-graph", "--graph"}, graph.flag_graph)) {
       continue;
     }
+    if (consume_bool_option(arg, {"-cmap", "--cmap"}, cmap.flag_cmap)) {
+      continue;
+    }
+    if (consume_option_value(arg, {"-cmap-mode", "--cmap-mode"},
+                             common_value, i)) {
+      cmap.flag_cmap = true;
+      cmap.mode = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-cmap-cut", "--cmap-cut"},
+                             common_value, i)) {
+      cmap.flag_cmap = true;
+      cmap.cutoff_ang = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-cmap-domain", "--cmap-domain"},
+                             common_value, i)) {
+      cmap.flag_cmap = true;
+      cmap.domain = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-cmap-min-seqsep", "--cmap-min-seqsep"},
+                             common_value, i)) {
+      cmap.flag_cmap = true;
+      cmap.min_seqsep = stoi(common_value);
+      continue;
+    }
     if (consume_option_value(arg, {"-graph-source", "--graph-source"},
                              common_value, i)) {
       graph.flag_graph = true;

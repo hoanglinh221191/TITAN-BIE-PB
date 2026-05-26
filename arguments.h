@@ -434,6 +434,14 @@ struct GraphArgs {
   std::string filter_component{"all"};
 };
 
+struct CMapArgs {
+  bool flag_cmap{false};
+  std::string mode{"sidechain-heavy"};
+  double cutoff_ang{4.5};
+  std::string domain{"both"};
+  int min_seqsep{3};
+};
+
 struct UmapArgs {
   bool flag_umap{false};
   int umap_neighbors{15};
@@ -559,6 +567,7 @@ public:
   TptArgs tpt;
   CommunityArgs community;
   GraphArgs graph;
+  CMapArgs cmap;
   UmapArgs umap;
   DsspArgs dssp;
   RmsArgs rms;

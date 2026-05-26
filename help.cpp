@@ -650,6 +650,31 @@ IMPORTANT NOTES
       arg.in uses `-graph-source=dccm`
       CLI uses `-graph-source dccm`
 
+2.4c CMap Side-chain Contact Map
+
+  Purpose:
+    Export residue contact-probability matrices and sparse edge summaries from
+    trajectory contact occupancies.
+
+  Main inputs:
+    -cmap
+    -cmap-mode <sidechain-heavy|cb|ca|bb>
+    -cmap-cut <A>
+    -cmap-domain <intra|inter|both>
+    -cmap-min-seqsep <N>
+
+  Typical outputs:
+    contact_probability_matrix.csv
+    contact_probability_edges.csv
+    contact_probability_summary.dat
+
+  Notes:
+    - sidechain is accepted as an alias for sidechain-heavy.
+    - backbone is accepted as an alias for bb.
+    - Canonical syntax:
+      arg.in uses `-cmap-mode=sidechain-heavy`
+      CLI uses `-cmap-mode sidechain-heavy`
+
 2.5 PCA / FES / Basin Extraction
 
   Purpose:
@@ -2013,6 +2038,12 @@ IMPORTANT NOTES
                         construction. Default: 0
   -graph-filter-component <m>
                         all | largest. Default: all
+
+  -cmap                 Side-chain contact probability map analysis
+  -cmap-mode <mode>     sidechain-heavy | cb | ca | bb. Default: sidechain-heavy
+  -cmap-cut <A>         Contact cutoff in Angstrom. Default: 4.5
+  -cmap-domain <mode>   intra | inter | both. Default: both
+  -cmap-min-seqsep <N>  Minimum intra-chain sequence separation. Default: 3
 
   -corr-knn             Raw continuous kNN MI / GC / TE export
   -corr-knn-k=<N>       Exact kNN estimator neighborhood size. Default: 4

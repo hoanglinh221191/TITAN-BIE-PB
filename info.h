@@ -187,6 +187,51 @@ public:
   string get_corr_knn_te_pairs_filename() const {
     return "corr_knn_te_pairs.csv";
   }
+  string get_cmap_matrix_filename(const arguments &Arguments,
+                                  const std::vector<string> &input_line,
+                                  int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "contact_probability_matrix.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "contact_probability_matrix_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "contact_probability_matrix.csv";
+  }
+  string get_cmap_edges_filename(const arguments &Arguments,
+                                 const std::vector<string> &input_line,
+                                 int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "contact_probability_edges.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "contact_probability_edges_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "contact_probability_edges.csv";
+  }
+  string get_cmap_summary_filename(const arguments &Arguments,
+                                   const std::vector<string> &input_line,
+                                   int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "contact_probability_summary.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "contact_probability_summary_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "contact_probability_summary.dat";
+  }
   string get_network_community_summary_filename() const {
     return "network_community_summary.csv";
   }

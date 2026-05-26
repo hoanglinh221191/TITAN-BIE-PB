@@ -537,6 +537,41 @@ int arguments::post_process() {
       exit(EXIT_FAILURE);
     }
   }
+  if (cmap.flag_cmap) {
+    std::transform(cmap.mode.begin(), cmap.mode.end(), cmap.mode.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::replace(cmap.mode.begin(), cmap.mode.end(), '_', '-');
+    if (cmap.mode == "sidechain")
+      cmap.mode = "sidechain-heavy";
+    if (cmap.mode == "backbone")
+      cmap.mode = "bb";
+    if (cmap.mode != "sidechain-heavy" && cmap.mode != "cb" &&
+        cmap.mode != "ca" && cmap.mode != "bb") {
+      TitanUI::print_error(
+          "CMap: -cmap-mode must be one of sidechain-heavy, cb, ca, bb.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(cmap.cutoff_ang) || cmap.cutoff_ang <= 0.0) {
+      TitanUI::print_error("CMap: -cmap-cut must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    std::transform(cmap.domain.begin(), cmap.domain.end(), cmap.domain.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (cmap.domain != "intra" && cmap.domain != "inter" &&
+        cmap.domain != "both") {
+      TitanUI::print_error(
+          "CMap: -cmap-domain must be one of intra, inter, both.");
+      exit(EXIT_FAILURE);
+    }
+    if (cmap.min_seqsep < 0) {
+      TitanUI::print_error("CMap: -cmap-min-seqsep must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+  }
   if (msm.flag_msm || dham.flag_dham) {
     if (msm.msm_nts <= 0) {
       TitanUI::print_error("MSM: -msm-nts must be > 0.");
