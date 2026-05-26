@@ -19,6 +19,7 @@
 #include "engine_postproc.h"
 #include "titan_alignment.h"
 #include "titan_build_info.h"
+#include "titan_contact_map.h"
 #include "titan_gist.h"
 #include "titan_kinetics.h"
 #include "titan_llps.h"
@@ -827,6 +828,7 @@ int engine(arguments &Arguments) {
   TitanHBondKineticsAnalyzer hbk_analyzer;
   TitanLJAnalyzer lj_analyzer;
   TitanSqAnalyzer sq_analyzer;
+  TitanContactMapAnalyzer cmap_analyzer;
   TitanRgAnalyzer rg_analyzer;
   TitanRMSAnalyzer rms_analyzer;
   std::vector<std::string> lj_feature_files;
@@ -837,7 +839,7 @@ int engine(arguments &Arguments) {
   // Network Analysis (DCCM) Variables
   DCCMNetwork dccm_analyzer;
   std::chrono::milliseconds time_gbsa{0}, time_cas{0}, time_dssp{0},
-      time_hbk{0}, time_lj{0}, time_sq{0}, time_rg{0}, time_rms{0},
+      time_hbk{0}, time_lj{0}, time_sq{0}, time_cmap{0}, time_rg{0}, time_rms{0},
       time_network{0}, time_tda{0}, time_llps{0}, time_tica{0};
   std::unique_ptr<TitanLLPSCluster> dbscan_llps;
   EnergyDecompositionProvider llps_energy_provider;
@@ -858,6 +860,7 @@ int engine(arguments &Arguments) {
   hbk_analyzer.configure(Arguments.hbk);
   lj_analyzer.configure(Arguments.lj);
   sq_analyzer.configure(Arguments.sq);
+  cmap_analyzer.configure(Arguments.cmap);
   rg_analyzer.configure(Arguments.rg);
   rms_analyzer.configure(Arguments.rms);
   pbe_analyzer.configure(Arguments);
@@ -910,6 +913,7 @@ int engine(arguments &Arguments) {
     const auto time_hbk_base = time_hbk;
     const auto time_lj_base = time_lj;
     const auto time_sq_base = time_sq;
+    const auto time_cmap_base = time_cmap;
     const auto time_rg_base = time_rg;
     const auto time_rms_base = time_rms;
     const auto time_network_base = time_network;
@@ -1457,6 +1461,9 @@ int engine(arguments &Arguments) {
     }
     if (Arguments.sq.flag_sq) {
       sq_analyzer.init(pro_in, Arguments, log);
+    }
+    if (Arguments.cmap.flag_cmap) {
+      cmap_analyzer.init(pro_in, Arguments, log);
     }
     if (Arguments.rg.flag_rg2) {
       rg_analyzer.init(pro_in, lig, Arguments, log);
@@ -2043,6 +2050,8 @@ int engine(arguments &Arguments) {
   }
   if (lj_analyzer.enabled())
     append_module_label(resolved_modules, "LJ");
+  if (cmap_analyzer.enabled())
+    append_module_label(resolved_modules, "CMap");
   if (rg_analyzer.enabled())
     append_module_label(resolved_modules, "Rg2");
   if (rms_analyzer.enabled())
@@ -2103,6 +2112,8 @@ int engine(arguments &Arguments) {
       append_module_label(streaming_modules, "LJ");
     if (sq_analyzer.enabled())
       append_module_label(streaming_modules, "SQ");
+    if (cmap_analyzer.enabled())
+      append_module_label(streaming_modules, "CMap");
     if (rg_analyzer.enabled())
       append_module_label(streaming_modules, "Rg2");
     if (rms_analyzer.enabled())
@@ -2347,6 +2358,13 @@ int engine(arguments &Arguments) {
             sq_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
             time_sq += std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start_sq);
+          }
+
+          if (cmap_analyzer.enabled()) {
+            auto start_cmap = std::chrono::steady_clock::now();
+            cmap_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
+            time_cmap += std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_cmap);
           }
 
           if (rg_analyzer.enabled()) {
@@ -3236,6 +3254,13 @@ int engine(arguments &Arguments) {
               std::chrono::steady_clock::now() - start_sq);
         }
 
+        if (cmap_analyzer.enabled()) {
+          auto start_cmap = std::chrono::steady_clock::now();
+          cmap_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
+          time_cmap += std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - start_cmap);
+        }
+
         if (hbk_analyzer.enabled()) {
           auto start_hbk = std::chrono::steady_clock::now();
           size_t lig_snap_hbk = (lig.m_mol.size() > 1) ? chunk_snap_idx : 0;
@@ -3683,6 +3708,14 @@ int engine(arguments &Arguments) {
             std::chrono::steady_clock::now() - start_rms);
         consumed_reference_structural_frame = true;
       }
+
+      if (cmap_analyzer.enabled()) {
+        auto start_cmap = std::chrono::steady_clock::now();
+        cmap_analyzer.process_frame(pro_in, 0, executor);
+        time_cmap += std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_cmap);
+        consumed_reference_structural_frame = true;
+      }
     }
 
     if (pbe_analyzer.enabled() && global_frame_counter == 0 &&
@@ -3774,6 +3807,17 @@ int engine(arguments &Arguments) {
       const std::string base_dir = paths.get_path(path_index);
       sq_analyzer.finalize_trajectory(base_dir, info_output, Arguments, input_line,
                                       input_name, log);
+    }
+    if (cmap_analyzer.enabled()) {
+      const std::size_t traj_index =
+          input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
+      const std::size_t path_index =
+          (Arguments.flag_separation_results && traj_index < paths.get_size())
+              ? traj_index
+              : 0;
+      const std::string base_dir = paths.get_path(path_index);
+      cmap_analyzer.finalize_trajectory(base_dir, info_output, Arguments,
+                                        input_line, input_name, log);
     }
     if (hbk_analyzer.enabled()) {
       const std::size_t traj_index =
@@ -3970,6 +4014,8 @@ int engine(arguments &Arguments) {
                       (time_lj - time_lj_base).count() / 1000.0);
     TitanUI::log_time(log, "SQ Analysis",
                       (time_sq - time_sq_base).count() / 1000.0);
+    TitanUI::log_time(log, "CMap Analysis",
+                      (time_cmap - time_cmap_base).count() / 1000.0);
     TitanUI::log_time(log, "RG2 Analysis",
                       (time_rg - time_rg_base).count() / 1000.0);
     TitanUI::log_time(log, "RMSD/RMSF Analysis",
@@ -4015,6 +4061,7 @@ int engine(arguments &Arguments) {
         (time_hbk - time_hbk_base).count() / 1000.0 +
         (time_lj - time_lj_base).count() / 1000.0 +
         (time_sq - time_sq_base).count() / 1000.0 +
+        (time_cmap - time_cmap_base).count() / 1000.0 +
         (time_rg - time_rg_base).count() / 1000.0 +
         (time_rms - time_rms_base).count() / 1000.0 +
         (time_network - time_network_base).count() / 1000.0 +
