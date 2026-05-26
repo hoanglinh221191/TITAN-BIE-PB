@@ -248,6 +248,95 @@ std::string csv_escape(const std::string &value) {
   return out;
 }
 
+class TabiPrepareProgressWriter {
+public:
+  TabiPrepareProgressWriter(const PbeArgs &args, std::size_t atom_count,
+                            std::size_t threads)
+      : enabled_(args.tabi_pre_solver_progress == "on"),
+        start_(std::chrono::steady_clock::now()), atom_count_(atom_count),
+        surface_points_(args.tabi_surface_points), threads_(threads),
+        pqr_path_(args.test_pqr), tabi_sum_(args.tabi_sum),
+        formulation_(args.tabi_formulation),
+        tree_builder_(args.tabi_tree_builder),
+        node_bounds_(args.tabi_node_bounds),
+        mac_safety_(args.tabi_mac_safety),
+        expansion_center_(args.tabi_expansion_center),
+        fragmentation_safety_(args.tabi_fragmentation_safety),
+        convergence_estimator_(args.tabi_convergence_estimator),
+        convergence_estimator_model_(args.tabi_convergence_estimator_model),
+        convergence_channel_calibration_(
+            args.tabi_convergence_channel_calibration),
+        convergence_split_policy_(args.tabi_convergence_split_policy),
+        channel_missed_semantics_(args.tabi_channel_missed_semantics),
+        progress_mode_(args.tabi_progress) {
+    if (!enabled_)
+      return;
+    out_.open("pbe_tabi_prepare_progress.csv",
+              std::ios::out | std::ios::trunc);
+    if (!out_.is_open()) {
+      enabled_ = false;
+      return;
+    }
+    out_ << "elapsed_seconds,phase,atom_count,pqr_path,pqr_status,"
+            "surface_points_requested,tabi_sum,tabi_formulation,"
+            "tabi_tree_builder,tabi_node_bounds,tabi_mac_safety,"
+            "tabi_expansion_center,tabi_fragmentation_safety,"
+            "tabi_convergence_estimator,tabi_convergence_estimator_model,"
+            "tabi_convergence_channel_calibration,"
+            "tabi_convergence_split_policy,"
+            "tabi_channel_missed_semantics,tabi_progress,threads,"
+            "rss_bytes,status\n";
+    out_.flush();
+  }
+
+  void write(const std::string &phase, const std::string &status) {
+    if (!enabled_)
+      return;
+    const auto now = std::chrono::steady_clock::now();
+    const ProcessMemorySample memory = sample_process_memory();
+    const std::string pqr_status = pqr_path_.empty() ? "none" : "configured";
+    out_ << std::fixed << std::setprecision(6)
+         << std::chrono::duration<double>(now - start_).count() << ','
+         << csv_escape(phase) << ',' << atom_count_ << ','
+         << csv_escape(pqr_path_) << ',' << csv_escape(pqr_status) << ','
+         << surface_points_ << ',' << csv_escape(tabi_sum_) << ','
+         << csv_escape(formulation_) << ',' << csv_escape(tree_builder_)
+         << ',' << csv_escape(node_bounds_) << ',' << csv_escape(mac_safety_)
+         << ',' << csv_escape(expansion_center_) << ','
+         << csv_escape(fragmentation_safety_) << ','
+         << csv_escape(convergence_estimator_) << ','
+         << csv_escape(convergence_estimator_model_) << ','
+         << csv_escape(convergence_channel_calibration_) << ','
+         << csv_escape(convergence_split_policy_) << ','
+         << csv_escape(channel_missed_semantics_) << ','
+         << csv_escape(progress_mode_) << ',' << threads_ << ','
+         << memory.working_set_bytes << ',' << csv_escape(status) << '\n';
+    out_.flush();
+  }
+
+private:
+  bool enabled_{false};
+  std::chrono::steady_clock::time_point start_{};
+  std::size_t atom_count_{0};
+  int surface_points_{96};
+  std::size_t threads_{1};
+  std::string pqr_path_;
+  std::string tabi_sum_;
+  std::string formulation_;
+  std::string tree_builder_;
+  std::string node_bounds_;
+  std::string mac_safety_;
+  std::string expansion_center_;
+  std::string fragmentation_safety_;
+  std::string convergence_estimator_;
+  std::string convergence_estimator_model_;
+  std::string convergence_channel_calibration_;
+  std::string convergence_split_policy_;
+  std::string channel_missed_semantics_;
+  std::string progress_mode_;
+  std::ofstream out_;
+};
+
 enum DelphiFaceAction : std::uint16_t {
   kDelphiFaceUnchanged = 0,
   kDelphiFaceRawVdw = 1,
@@ -6835,6 +6924,8 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_preconditioner_seconds,tabi_surface_neighbor_seconds,"
            "tabi_surface_mesh_seconds,tabi_solid_angle_seconds,"
            "tabi_tree_moment_seconds,tabi_tree_traversal_seconds,"
+           "tabi_matvec_cost_profile,tabi_leaf_panels_per_second,"
+           "tabi_clean_leaf_panels_per_second,tabi_tree_traversal_fraction,"
            "tabi_near_eval_seconds,tabi_far_eval_seconds,"
            "tabi_singular_near_eval_seconds,tabi_leaf_near_eval_seconds,"
            "tabi_leaf_panel_eval_seconds,"
@@ -6847,6 +6938,25 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_leaf_panel_interactions,tabi_leaf_tile_interactions,"
            "tabi_leaf_tile_panel_interactions,"
            "tabi_leaf_residual_panel_interactions,"
+           "tabi_leaf_work_profile,tabi_leaf_work_mac_terminal_panels,"
+           "tabi_leaf_work_physical_gap_panels,"
+           "tabi_leaf_work_fragmentation_panels,"
+           "tabi_leaf_work_convergence_panels,"
+           "tabi_leaf_work_convergence_estimator_panels,"
+           "tabi_leaf_work_convergence_rho_panels,"
+           "tabi_leaf_work_convergence_aspect_panels,"
+           "tabi_leaf_work_surface_margin_panels,"
+           "tabi_leaf_work_surface_margin_hard_panels,"
+           "tabi_leaf_work_surface_margin_soft_panels,"
+           "tabi_leaf_work_k3_rho_cap_panels,"
+           "tabi_leaf_work_singular_fallback_panels,"
+           "tabi_leaf_work_scalar_tail_panels,"
+           "tabi_leaf_work_profile_accounted_panels,"
+           "tabi_leaf_work_mac_terminal_frac,"
+           "tabi_leaf_work_convergence_frac,"
+           "tabi_leaf_work_surface_margin_frac,"
+           "tabi_leaf_work_singular_fallback_frac,"
+           "tabi_leaf_work_scalar_tail_frac,"
            "tabi_smooth_leaf_node_interactions,"
            "tabi_leaf_pruned_interactions,"
            "tabi_adaptive_smooth_leaf_accepted,"
@@ -6864,7 +6974,80 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_target_cluster_panels_pruned,"
            "tabi_target_cluster_rejected,"
            "tabi_target_cluster_eval_seconds,"
-           "tabi_adaptive_level,tabi_leaf_near_policy,"
+           "tabi_leaf_pair_batch_interactions,"
+           "tabi_leaf_pair_batch_targets,"
+           "tabi_leaf_pair_batch_source_panels,"
+           "tabi_leaf_pair_batch_residual_panels,"
+           "tabi_leaf_pair_batch_fallbacks,"
+           "tabi_leaf_pair_batch_seconds,"
+           "tabi_leaf_pair_batch_kernel,"
+           "tabi_leaf_pair_batch_vectorized_sources,"
+           "tabi_leaf_pair_batch_vector_lanes,"
+           "tabi_leaf_pair_batch_pairs_per_second,"
+           "tabi_leaf_kernel_profile,"
+           "tabi_jcp_direct_kernel,"
+           "tabi_leaf_kernel_scalar_tasks,"
+           "tabi_leaf_kernel_batch_tasks,"
+           "tabi_leaf_kernel_source_panel_evals,"
+           "tabi_leaf_kernel_scalar_seconds,"
+           "tabi_leaf_kernel_target_avx2_seconds,"
+           "tabi_leaf_kernel_tail_seconds,"
+           "tabi_leaf_pair_batch_soa_sources,"
+           "tabi_leaf_pair_batch_soa_seconds,"
+           "tabi_leaf_pair_batch_scalar_tail_seconds,"
+           "tabi_leaf_pair_batch_clean_source_panels_per_second,"
+           "tabi_leaf_pair_selection_profile,"
+           "tabi_leaf_pair_probe_cache,"
+           "tabi_leaf_pair_target_group,"
+           "tabi_leaf_pair_max_lookahead,"
+           "tabi_leaf_pair_selection_candidate_scans,"
+           "tabi_leaf_pair_selection_clean_rejects,"
+           "tabi_leaf_pair_selection_probe_calls,"
+           "tabi_leaf_pair_selection_probe_node_visits,"
+           "tabi_leaf_pair_selection_probe_seconds,"
+           "tabi_leaf_pair_selection_seconds,"
+           "tabi_leaf_pair_selection_probe_cache_hits,"
+           "tabi_leaf_pair_selection_probe_cache_misses,"
+           "tabi_leaf_pair_selection_insufficient_targets,"
+           "tabi_leaf_pair_selection_same_target_leaf_rejects,"
+           "tabi_leaf_pair_directness_probe,"
+           "tabi_leaf_pair_directness_cache,"
+           "tabi_leaf_pair_directness_verify,"
+           "tabi_leaf_pair_directness_ancestor_probe_calls,"
+           "tabi_leaf_pair_directness_ancestor_probe_node_visits,"
+           "tabi_leaf_pair_directness_ancestor_probe_seconds,"
+           "tabi_leaf_pair_directness_pair_cache_hits,"
+           "tabi_leaf_pair_directness_pair_cache_misses,"
+           "tabi_leaf_pair_directness_all_direct_proofs,"
+           "tabi_leaf_pair_directness_mixed_fallbacks,"
+           "tabi_leaf_pair_directness_verify_checks,"
+           "tabi_leaf_pair_directness_verify_mismatches,"
+           "tabi_leaf_pair_scheduler,"
+           "tabi_leaf_pair_worklist_max_active,"
+           "tabi_leaf_pair_worklist_verify,"
+           "tabi_leaf_pair_worklist_tasks,"
+           "tabi_leaf_pair_worklist_groups,"
+           "tabi_leaf_pair_worklist_batched_groups,"
+           "tabi_leaf_pair_worklist_scalar_flush_tasks,"
+           "tabi_leaf_pair_worklist_forced_flushes,"
+           "tabi_leaf_pair_worklist_active_groups_max,"
+           "tabi_leaf_pair_worklist_seconds,"
+           "tabi_leaf_pair_worklist_verify_checks,"
+           "tabi_leaf_pair_worklist_verify_mismatches,"
+           "tabi_leaf_block_verify,"
+           "tabi_leaf_block_target_leaves,"
+           "tabi_leaf_block_targets,"
+           "tabi_leaf_block_source_groups,"
+           "tabi_leaf_block_batched_groups,"
+           "tabi_leaf_block_scalar_tail_tasks,"
+           "tabi_leaf_block_group_seconds,"
+           "tabi_leaf_block_flush_seconds,"
+           "tabi_leaf_block_writeback_seconds,"
+           "tabi_leaf_block_verify_checks,"
+           "tabi_leaf_block_verify_mismatches,"
+           "tabi_tree_preset,tabi_adaptive_level,tabi_cluster_policy,"
+           "tabi_target_batch_size,tabi_leaf_pair_min_source_panels,"
+           "tabi_leaf_pair_min_targets,tabi_leaf_near_policy,"
            "tabi_interaction_mode,tabi_node_bounds_mode,"
            "tabi_tree_builder,tabi_expansion_center,"
            "tabi_fragmentation_safety,tabi_mac_safety,"
@@ -6886,6 +7069,19 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_mac_convergence_aspect_rejects,"
            "tabi_mac_convergence_rho_reject_panels,"
            "tabi_mac_convergence_aspect_reject_panels,"
+           "tabi_mac_surface_margin_rejects,"
+           "tabi_mac_surface_margin_reject_panels,"
+           "tabi_mac_surface_margin_applied,"
+           "tabi_mac_surface_margin_skipped,"
+           "tabi_mac_surface_margin_adaptive_rejects,"
+           "tabi_mac_surface_margin_adaptive_reject_panels,"
+           "tabi_mac_surface_margin_skipped_accepted_far,"
+           "tabi_mac_surface_margin_hard_applied,"
+           "tabi_mac_surface_margin_soft_applied,"
+           "tabi_mac_surface_margin_hard_rejects,"
+           "tabi_mac_surface_margin_hard_reject_panels,"
+           "tabi_mac_surface_margin_soft_rejects,"
+           "tabi_mac_surface_margin_soft_reject_panels,"
            "tabi_fragmented_far_count,"
            "tabi_fragmented_far_panels,"
            "tabi_fragmented_split_rejects,"
@@ -6899,23 +7095,181 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_convergence_estimator_error_cap,"
            "tabi_convergence_unstable_rho_cap,"
            "tabi_convergence_calibration,"
+           "tabi_convergence_dielectric_amp,"
+           "tabi_convergence_estimator_model,"
+           "tabi_convergence_channel_calibration,"
+           "tabi_convergence_split_policy,"
+           "tabi_convergence_split_selectivity,"
+           "tabi_convergence_split_absolute_floor,"
+           "tabi_convergence_overreject_audit,"
+           "tabi_convergence_overreject_detail,"
+           "tabi_convergence_shape_audit,"
+           "tabi_convergence_kernel_response_audit,"
+           "tabi_channel_missed_semantics,"
+           "tabi_accepted_miss_diagnostics,"
+           "tabi_accepted_miss_absolute_floor,"
+           "tabi_convergence_k3_accepted_rho_cap,"
+           "tabi_mac_distance_policy,tabi_mac_surface_margin_factor,"
+           "tabi_mac_surface_margin_policy,"
+           "tabi_mac_surface_margin_aspect_threshold,"
+           "tabi_mac_surface_margin_rho_trigger,"
+           "tabi_mac_surface_margin_soft_aspect_threshold,"
+           "tabi_mac_surface_margin_soft_rho_trigger,"
+           "tabi_mac_surface_margin_soft_factor,"
            "tabi_convergence_estimator_samples,"
            "tabi_convergence_estimator_unstable_far_count,"
            "tabi_convergence_estimator_unstable_far_panels,"
            "tabi_convergence_estimator_split_rejects,"
            "tabi_convergence_estimator_split_reject_panels,"
+           "tabi_convergence_low_abs_reaccepted_far_count,"
+           "tabi_convergence_low_abs_reaccepted_far_panels,"
            "tabi_convergence_estimator_tail_ratio_max,"
            "tabi_convergence_estimator_tail_ratio_mean,"
            "tabi_convergence_estimator_error_max,"
            "tabi_convergence_estimator_error_mean,"
+           "tabi_convergence_estimator_abs_error_max,"
+           "tabi_convergence_estimator_abs_error_mean,"
            "tabi_convergence_tail_norm_p_max,"
            "tabi_convergence_tail_norm_p_mean,"
            "tabi_convergence_tail_norm_pm1_max,"
            "tabi_convergence_tail_norm_pm1_mean,"
            "tabi_convergence_effective_jcp_amp_max,"
            "tabi_convergence_effective_jcp_amp_mean,"
+           "tabi_convergence_dielectric_amp_max,"
+           "tabi_convergence_dielectric_amp_mean,"
+           "tabi_convergence_k1_effective_jcp_amp_max,"
+           "tabi_convergence_k2_effective_jcp_amp_max,"
+           "tabi_convergence_k3_effective_jcp_amp_max,"
+           "tabi_convergence_k4_effective_jcp_amp_max,"
+           "tabi_convergence_k1_effective_jcp_amp_mean,"
+           "tabi_convergence_k2_effective_jcp_amp_mean,"
+           "tabi_convergence_k3_effective_jcp_amp_mean,"
+           "tabi_convergence_k4_effective_jcp_amp_mean,"
+           "tabi_convergence_k1_estimated_error_max,"
+           "tabi_convergence_k2_estimated_error_max,"
+           "tabi_convergence_k3_estimated_error_max,"
+           "tabi_convergence_k4_estimated_error_max,"
+           "tabi_convergence_k1_unstable_far_count,"
+           "tabi_convergence_k2_unstable_far_count,"
+           "tabi_convergence_k3_unstable_far_count,"
+           "tabi_convergence_k4_unstable_far_count,"
+           "tabi_convergence_k1_unstable_far_panels,"
+           "tabi_convergence_k2_unstable_far_panels,"
+           "tabi_convergence_k3_unstable_far_panels,"
+           "tabi_convergence_k4_unstable_far_panels,"
+           "tabi_convergence_k1_split_rejects,"
+           "tabi_convergence_k2_split_rejects,"
+           "tabi_convergence_k3_split_rejects,"
+           "tabi_convergence_k4_split_rejects,"
+           "tabi_convergence_k1_split_reject_panels,"
+           "tabi_convergence_k2_split_reject_panels,"
+           "tabi_convergence_k3_split_reject_panels,"
+           "tabi_convergence_k4_split_reject_panels,"
+           "tabi_convergence_k1_low_abs_reaccepted,"
+           "tabi_convergence_k2_low_abs_reaccepted,"
+           "tabi_convergence_k3_low_abs_reaccepted,"
+           "tabi_convergence_k4_low_abs_reaccepted,"
+           "tabi_convergence_k1_low_abs_reaccepted_panels,"
+           "tabi_convergence_k2_low_abs_reaccepted_panels,"
+           "tabi_convergence_k3_low_abs_reaccepted_panels,"
+           "tabi_convergence_k4_low_abs_reaccepted_panels,"
+           "tabi_convergence_k1_high_error_caught,"
+           "tabi_convergence_k2_high_error_caught,"
+           "tabi_convergence_k3_high_error_caught,"
+           "tabi_convergence_k4_high_error_caught,"
+           "tabi_convergence_k1_high_error_missed,"
+           "tabi_convergence_k2_high_error_missed,"
+           "tabi_convergence_k3_high_error_missed,"
+           "tabi_convergence_k4_high_error_missed,"
+           "tabi_convergence_k1_high_error_caught_by_split,"
+           "tabi_convergence_k2_high_error_caught_by_split,"
+           "tabi_convergence_k3_high_error_caught_by_split,"
+           "tabi_convergence_k4_high_error_caught_by_split,"
            "tabi_convergence_estimator_high_error_caught,"
            "tabi_convergence_estimator_high_error_missed,"
+           "tabi_convergence_estimator_high_error_caught_by_split,"
+           "tabi_convergence_estimator_phantom_high_error_count,"
+           "tabi_convergence_estimator_phantom_high_error_abs_max,"
+           "tabi_convergence_overreject_count,"
+           "tabi_convergence_overreject_panels,"
+           "tabi_convergence_overreject_caught_count,"
+           "tabi_convergence_overreject_caught_panels,"
+           "tabi_convergence_overreject_abs_error_max,"
+           "tabi_convergence_overreject_abs_error_mean,"
+           "tabi_convergence_overreject_abs_error_p95,"
+           "tabi_convergence_overreject_abs_error_p99,"
+           "tabi_convergence_overreject_estimated_abs_error_max,"
+           "tabi_convergence_overreject_estimated_abs_error_mean,"
+           "tabi_convergence_overreject_required_scale_max,"
+           "tabi_convergence_overreject_required_scale_p95,"
+           "tabi_convergence_overreject_required_scale_p99,"
+           "tabi_convergence_k1_overreject_count,"
+           "tabi_convergence_k2_overreject_count,"
+           "tabi_convergence_k3_overreject_count,"
+           "tabi_convergence_k4_overreject_count,"
+           "tabi_convergence_k1_overreject_caught_count,"
+           "tabi_convergence_k2_overreject_caught_count,"
+           "tabi_convergence_k3_overreject_caught_count,"
+           "tabi_convergence_k4_overreject_caught_count,"
+           "tabi_convergence_k1_overreject_panels,"
+           "tabi_convergence_k2_overreject_panels,"
+           "tabi_convergence_k3_overreject_panels,"
+           "tabi_convergence_k4_overreject_panels,"
+           "tabi_convergence_k1_overreject_abs_error_max,"
+           "tabi_convergence_k2_overreject_abs_error_max,"
+           "tabi_convergence_k3_overreject_abs_error_max,"
+           "tabi_convergence_k4_overreject_abs_error_max,"
+           "tabi_convergence_k1_overreject_abs_error_mean,"
+           "tabi_convergence_k2_overreject_abs_error_mean,"
+           "tabi_convergence_k3_overreject_abs_error_mean,"
+           "tabi_convergence_k4_overreject_abs_error_mean,"
+           "tabi_convergence_k1_overreject_required_scale_max,"
+           "tabi_convergence_k2_overreject_required_scale_max,"
+           "tabi_convergence_k3_overreject_required_scale_max,"
+           "tabi_convergence_k4_overreject_required_scale_max,"
+           "tabi_convergence_k1_overreject_required_scale_p99,"
+           "tabi_convergence_k2_overreject_required_scale_p99,"
+           "tabi_convergence_k3_overreject_required_scale_p99,"
+           "tabi_convergence_k4_overreject_required_scale_p99,"
+           "tabi_phantom_high_error_k1_count,"
+           "tabi_phantom_high_error_k2_count,"
+           "tabi_phantom_high_error_k3_count,"
+           "tabi_phantom_high_error_k4_count,"
+           "tabi_phantom_high_error_k1_abs_max,"
+           "tabi_phantom_high_error_k2_abs_max,"
+           "tabi_phantom_high_error_k3_abs_max,"
+           "tabi_phantom_high_error_k4_abs_max,"
+           "tabi_accepted_miss_worst_channel,"
+           "tabi_accepted_miss_k1_count,tabi_accepted_miss_k2_count,"
+           "tabi_accepted_miss_k3_count,tabi_accepted_miss_k4_count,"
+           "tabi_accepted_miss_k1_panels,tabi_accepted_miss_k2_panels,"
+           "tabi_accepted_miss_k3_panels,tabi_accepted_miss_k4_panels,"
+           "tabi_accepted_miss_k1_rho_min,tabi_accepted_miss_k2_rho_min,"
+           "tabi_accepted_miss_k3_rho_min,tabi_accepted_miss_k4_rho_min,"
+           "tabi_accepted_miss_k1_rho_mean,"
+           "tabi_accepted_miss_k2_rho_mean,"
+           "tabi_accepted_miss_k3_rho_mean,"
+           "tabi_accepted_miss_k4_rho_mean,"
+           "tabi_accepted_miss_k1_rho_max,tabi_accepted_miss_k2_rho_max,"
+           "tabi_accepted_miss_k3_rho_max,tabi_accepted_miss_k4_rho_max,"
+           "tabi_accepted_miss_k1_tail_ratio_mean,"
+           "tabi_accepted_miss_k2_tail_ratio_mean,"
+           "tabi_accepted_miss_k3_tail_ratio_mean,"
+           "tabi_accepted_miss_k4_tail_ratio_mean,"
+           "tabi_accepted_miss_k1_tail_ratio_max,"
+           "tabi_accepted_miss_k2_tail_ratio_max,"
+           "tabi_accepted_miss_k3_tail_ratio_max,"
+           "tabi_accepted_miss_k4_tail_ratio_max,"
+           "tabi_accepted_miss_k1_estimated_error_mean,"
+           "tabi_accepted_miss_k2_estimated_error_mean,"
+           "tabi_accepted_miss_k3_estimated_error_mean,"
+           "tabi_accepted_miss_k4_estimated_error_mean,"
+           "tabi_accepted_miss_k1_estimated_error_max,"
+           "tabi_accepted_miss_k2_estimated_error_max,"
+           "tabi_accepted_miss_k3_estimated_error_max,"
+           "tabi_accepted_miss_k4_estimated_error_max,"
+           "tabi_convergence_k3_rho_cap_rejects,"
+           "tabi_convergence_k3_rho_cap_reject_panels,"
            "tabi_moment_audit_nodes,"
            "tabi_moment_translation_rel_error_max,"
            "tabi_moment_translation_rel_error_mean,"
@@ -6924,11 +7278,27 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_moment_cancellation_ratio_max,"
            "tabi_moment_cancellation_ratio_mean,"
            "tabi_moment_dynamic_range_max,"
-           "tabi_expansion_audit,tabi_far_expansion_audit_pairs,"
+           "tabi_expansion_audit,tabi_expansion_audit_channel,"
+           "tabi_far_expansion_audit_pairs,"
            "tabi_far_expansion_audit_panels,"
            "tabi_far_expansion_direct_seconds,"
            "tabi_far_expansion_rel_error_max,"
            "tabi_far_expansion_rel_error_mean,"
+           "tabi_far_expansion_rel_error_p95,"
+           "tabi_far_expansion_rel_error_p99,"
+           "tabi_far_expansion_worst_channel,"
+           "tabi_far_expansion_k1_rel_error_max,"
+           "tabi_far_expansion_k2_rel_error_max,"
+           "tabi_far_expansion_k3_rel_error_max,"
+           "tabi_far_expansion_k4_rel_error_max,"
+           "tabi_far_expansion_k1_rel_error_mean,"
+           "tabi_far_expansion_k2_rel_error_mean,"
+           "tabi_far_expansion_k3_rel_error_mean,"
+           "tabi_far_expansion_k4_rel_error_mean,"
+           "tabi_far_expansion_k1_rel_error_p99,"
+           "tabi_far_expansion_k2_rel_error_p99,"
+           "tabi_far_expansion_k3_rel_error_p99,"
+           "tabi_far_expansion_k4_rel_error_p99,"
            "tabi_far_expansion_mean_gate_pass,"
            "tabi_far_convergence_rho_max,"
            "tabi_far_convergence_rho_mean,"
@@ -6971,6 +7341,28 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_formulation,tabi_energy_projection,"
            "tabi_preconditioner_requested,tabi_preconditioner_effective,"
            "tabi_preconditioner_block_near,"
+           "tabi_preconditioner_block_panel_cap,"
+           "tabi_preconditioner_memory_budget_bytes,"
+           "tabi_preconditioner_estimated_bytes,"
+           "tabi_preconditioner_valid_blocks,"
+           "tabi_preconditioner_valid_panels,"
+           "tabi_preconditioner_ill_conditioned_blocks,"
+           "tabi_preconditioner_setup_seconds,"
+           "tabi_preconditioner_apply_seconds,"
+           "tabi_preconditioner_apply_calls,"
+           "tabi_preconditioner_coarse_aggregate_cap,"
+           "tabi_preconditioner_coarse_aggregates,"
+           "tabi_preconditioner_coarse_dimension,"
+           "tabi_preconditioner_coarse_base,"
+           "tabi_preconditioner_coarse_matrix_bytes,"
+           "tabi_preconditioner_coarse_pivot_ratio,"
+           "tabi_preconditioner_coarse_status,"
+           "tabi_preconditioner_coarse_setup_matvec_calls,"
+           "tabi_preconditioner_coarse_setup_seconds,"
+           "tabi_preconditioner_coarse_apply_seconds,"
+           "tabi_preconditioner_coarse_apply_calls,"
+           "tabi_preconditioner_coarse_rp_identity_error_max,"
+           "tabi_preconditioner_coarse_verify_rel_error_max,"
            "tabi_surface_generator,tabi_discretization,"
            "tabi_fallback_used,"
            "tabi_rhs_scale,tabi_dielectric_contrast,tabi_operator_contrast,"
@@ -7088,6 +7480,10 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << seconds(result.tabi_solid_angle_ms) << ','
               << seconds(result.tabi_tree_moment_ms) << ','
               << seconds(result.tabi_tree_traversal_ms) << ','
+              << csv_escape(result.tabi_matvec_cost_profile) << ','
+              << result.tabi_leaf_panels_per_second << ','
+              << result.tabi_clean_leaf_panels_per_second << ','
+              << result.tabi_tree_traversal_fraction << ','
               << seconds(result.tabi_near_eval_ms) << ','
               << seconds(result.tabi_far_eval_ms) << ','
               << seconds(result.tabi_singular_near_eval_ms) << ','
@@ -7106,6 +7502,26 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << result.tabi_leaf_tile_interactions << ','
               << result.tabi_leaf_tile_panel_interactions << ','
               << result.tabi_leaf_residual_panel_interactions << ','
+              << csv_escape(result.tabi_leaf_work_profile) << ','
+              << result.tabi_leaf_work_mac_terminal_panels << ','
+              << result.tabi_leaf_work_physical_gap_panels << ','
+              << result.tabi_leaf_work_fragmentation_panels << ','
+              << result.tabi_leaf_work_convergence_panels << ','
+              << result.tabi_leaf_work_convergence_estimator_panels << ','
+              << result.tabi_leaf_work_convergence_rho_panels << ','
+              << result.tabi_leaf_work_convergence_aspect_panels << ','
+              << result.tabi_leaf_work_surface_margin_panels << ','
+              << result.tabi_leaf_work_surface_margin_hard_panels << ','
+              << result.tabi_leaf_work_surface_margin_soft_panels << ','
+              << result.tabi_leaf_work_k3_rho_cap_panels << ','
+              << result.tabi_leaf_work_singular_fallback_panels << ','
+              << result.tabi_leaf_work_scalar_tail_panels << ','
+              << result.tabi_leaf_work_profile_accounted_panels << ','
+              << result.tabi_leaf_work_mac_terminal_frac << ','
+              << result.tabi_leaf_work_convergence_frac << ','
+              << result.tabi_leaf_work_surface_margin_frac << ','
+              << result.tabi_leaf_work_singular_fallback_frac << ','
+              << result.tabi_leaf_work_scalar_tail_frac << ','
               << result.tabi_smooth_leaf_node_interactions << ','
               << result.tabi_leaf_pruned_interactions << ','
               << result.tabi_adaptive_smooth_leaf_accepted << ','
@@ -7123,7 +7539,87 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << result.tabi_target_cluster_panels_pruned << ','
               << result.tabi_target_cluster_rejected << ','
               << seconds(result.tabi_target_cluster_eval_ms) << ','
+              << result.tabi_leaf_pair_batch_interactions << ','
+              << result.tabi_leaf_pair_batch_targets << ','
+              << result.tabi_leaf_pair_batch_source_panels << ','
+              << result.tabi_leaf_pair_batch_residual_panels << ','
+              << result.tabi_leaf_pair_batch_fallbacks << ','
+              << seconds(result.tabi_leaf_pair_batch_ms) << ','
+              << csv_escape(result.tabi_leaf_pair_batch_kernel) << ','
+              << result.tabi_leaf_pair_batch_vectorized_sources << ','
+              << result.tabi_leaf_pair_batch_vector_lanes << ','
+              << result.tabi_leaf_pair_batch_pairs_per_second << ','
+              << csv_escape(result.tabi_leaf_kernel_profile) << ','
+              << csv_escape(result.tabi_jcp_direct_kernel) << ','
+              << result.tabi_leaf_kernel_scalar_tasks << ','
+              << result.tabi_leaf_kernel_batch_tasks << ','
+              << result.tabi_leaf_kernel_source_panel_evals << ','
+              << seconds(result.tabi_leaf_kernel_scalar_ms) << ','
+              << seconds(result.tabi_leaf_kernel_target_avx2_ms) << ','
+              << seconds(result.tabi_leaf_kernel_tail_ms) << ','
+              << result.tabi_leaf_pair_batch_soa_sources << ','
+              << seconds(result.tabi_leaf_pair_batch_soa_ms) << ','
+              << seconds(result.tabi_leaf_pair_batch_scalar_tail_ms) << ','
+              << result.tabi_leaf_pair_batch_clean_source_panels_per_second
+              << ','
+              << csv_escape(result.tabi_leaf_pair_selection_profile) << ','
+              << csv_escape(result.tabi_leaf_pair_probe_cache) << ','
+              << csv_escape(result.tabi_leaf_pair_target_group) << ','
+              << result.tabi_leaf_pair_max_lookahead << ','
+              << result.tabi_leaf_pair_selection_candidate_scans << ','
+              << result.tabi_leaf_pair_selection_clean_rejects << ','
+              << result.tabi_leaf_pair_selection_probe_calls << ','
+              << result.tabi_leaf_pair_selection_probe_node_visits << ','
+              << seconds(result.tabi_leaf_pair_selection_probe_ms) << ','
+              << seconds(result.tabi_leaf_pair_selection_ms) << ','
+              << result.tabi_leaf_pair_selection_probe_cache_hits << ','
+              << result.tabi_leaf_pair_selection_probe_cache_misses << ','
+              << result.tabi_leaf_pair_selection_insufficient_targets << ','
+              << result.tabi_leaf_pair_selection_same_target_leaf_rejects
+              << ',' << csv_escape(result.tabi_leaf_pair_directness_probe)
+              << ',' << csv_escape(result.tabi_leaf_pair_directness_cache)
+              << ',' << csv_escape(result.tabi_leaf_pair_directness_verify)
+              << ','
+              << result.tabi_leaf_pair_directness_ancestor_probe_calls << ','
+              << result.tabi_leaf_pair_directness_ancestor_probe_node_visits
+              << ','
+              << seconds(result.tabi_leaf_pair_directness_ancestor_probe_ms)
+              << ',' << result.tabi_leaf_pair_directness_pair_cache_hits
+              << ',' << result.tabi_leaf_pair_directness_pair_cache_misses
+              << ',' << result.tabi_leaf_pair_directness_all_direct_proofs
+              << ',' << result.tabi_leaf_pair_directness_mixed_fallbacks
+              << ',' << result.tabi_leaf_pair_directness_verify_checks
+              << ',' << result.tabi_leaf_pair_directness_verify_mismatches
+              << ',' << csv_escape(result.tabi_leaf_pair_scheduler)
+              << ',' << result.tabi_leaf_pair_worklist_max_active
+              << ',' << csv_escape(result.tabi_leaf_pair_worklist_verify)
+              << ',' << result.tabi_leaf_pair_worklist_tasks
+              << ',' << result.tabi_leaf_pair_worklist_groups
+              << ',' << result.tabi_leaf_pair_worklist_batched_groups
+              << ',' << result.tabi_leaf_pair_worklist_scalar_flush_tasks
+              << ',' << result.tabi_leaf_pair_worklist_forced_flushes
+              << ',' << result.tabi_leaf_pair_worklist_active_groups_max
+              << ',' << seconds(result.tabi_leaf_pair_worklist_ms)
+              << ',' << result.tabi_leaf_pair_worklist_verify_checks
+              << ',' << result.tabi_leaf_pair_worklist_verify_mismatches
+              << ',' << csv_escape(result.tabi_leaf_block_verify)
+              << ',' << result.tabi_leaf_block_target_leaves
+              << ',' << result.tabi_leaf_block_targets
+              << ',' << result.tabi_leaf_block_source_groups
+              << ',' << result.tabi_leaf_block_batched_groups
+              << ',' << result.tabi_leaf_block_scalar_tail_tasks
+              << ',' << seconds(result.tabi_leaf_block_group_ms)
+              << ',' << seconds(result.tabi_leaf_block_flush_ms)
+              << ',' << seconds(result.tabi_leaf_block_writeback_ms)
+              << ',' << result.tabi_leaf_block_verify_checks
+              << ',' << result.tabi_leaf_block_verify_mismatches
+              << ','
+              << csv_escape(result.tabi_tree_preset) << ','
               << csv_escape(result.tabi_adaptive_level) << ','
+              << csv_escape(result.tabi_cluster_policy) << ','
+              << result.tabi_target_batch_size << ','
+              << result.tabi_leaf_pair_min_source_panels << ','
+              << result.tabi_leaf_pair_min_targets << ','
               << csv_escape(result.tabi_leaf_near_policy) << ','
               << csv_escape(result.tabi_interaction_mode) << ','
               << csv_escape(result.tabi_node_bounds_mode) << ','
@@ -7152,6 +7648,19 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << result.tabi_mac_convergence_aspect_rejects << ','
               << result.tabi_mac_convergence_rho_reject_panels << ','
               << result.tabi_mac_convergence_aspect_reject_panels << ','
+              << result.tabi_mac_surface_margin_rejects << ','
+              << result.tabi_mac_surface_margin_reject_panels << ','
+              << result.tabi_mac_surface_margin_applied << ','
+              << result.tabi_mac_surface_margin_skipped << ','
+              << result.tabi_mac_surface_margin_adaptive_rejects << ','
+              << result.tabi_mac_surface_margin_adaptive_reject_panels << ','
+              << result.tabi_mac_surface_margin_skipped_accepted_far << ','
+              << result.tabi_mac_surface_margin_hard_applied << ','
+              << result.tabi_mac_surface_margin_soft_applied << ','
+              << result.tabi_mac_surface_margin_hard_rejects << ','
+              << result.tabi_mac_surface_margin_hard_reject_panels << ','
+              << result.tabi_mac_surface_margin_soft_rejects << ','
+              << result.tabi_mac_surface_margin_soft_reject_panels << ','
               << result.tabi_fragmented_far_count << ','
               << result.tabi_fragmented_far_panels << ','
               << result.tabi_fragmented_split_rejects << ','
@@ -7169,23 +7678,242 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << result.tabi_convergence_estimator_error_cap << ','
               << result.tabi_convergence_unstable_rho_cap << ','
               << csv_escape(result.tabi_convergence_calibration) << ','
+              << csv_escape(result.tabi_convergence_dielectric_amp) << ','
+              << csv_escape(result.tabi_convergence_estimator_model) << ','
+              << csv_escape(result.tabi_convergence_channel_calibration)
+              << ','
+              << csv_escape(result.tabi_convergence_split_policy) << ','
+              << csv_escape(result.tabi_convergence_split_selectivity) << ','
+               << result.tabi_convergence_split_absolute_floor << ','
+               << csv_escape(result.tabi_convergence_overreject_audit) << ','
+               << csv_escape(result.tabi_convergence_overreject_detail) << ','
+               << csv_escape(result.tabi_convergence_shape_audit) << ','
+               << csv_escape(result.tabi_convergence_kernel_response_audit) << ','
+               << csv_escape(result.tabi_channel_missed_semantics) << ','
+              << csv_escape(result.tabi_accepted_miss_diagnostics) << ','
+              << result.tabi_accepted_miss_absolute_floor << ','
+              << result.tabi_convergence_k3_accepted_rho_cap << ','
+              << csv_escape(result.tabi_mac_distance_policy) << ','
+              << result.tabi_mac_surface_margin_factor << ','
+              << csv_escape(result.tabi_mac_surface_margin_policy) << ','
+              << result.tabi_mac_surface_margin_aspect_threshold << ','
+              << result.tabi_mac_surface_margin_rho_trigger << ','
+              << result.tabi_mac_surface_margin_soft_aspect_threshold << ','
+              << result.tabi_mac_surface_margin_soft_rho_trigger << ','
+              << result.tabi_mac_surface_margin_soft_factor << ','
               << result.tabi_convergence_estimator_samples << ','
               << result.tabi_convergence_estimator_unstable_far_count << ','
               << result.tabi_convergence_estimator_unstable_far_panels << ','
               << result.tabi_convergence_estimator_split_rejects << ','
               << result.tabi_convergence_estimator_split_reject_panels << ','
+              << result.tabi_convergence_low_abs_reaccepted_far_count << ','
+              << result.tabi_convergence_low_abs_reaccepted_far_panels << ','
               << result.tabi_convergence_estimator_tail_ratio_max << ','
               << result.tabi_convergence_estimator_tail_ratio_mean << ','
               << result.tabi_convergence_estimator_error_max << ','
               << result.tabi_convergence_estimator_error_mean << ','
+              << result.tabi_convergence_estimator_abs_error_max << ','
+              << result.tabi_convergence_estimator_abs_error_mean << ','
               << result.tabi_convergence_tail_norm_p_max << ','
               << result.tabi_convergence_tail_norm_p_mean << ','
               << result.tabi_convergence_tail_norm_pm1_max << ','
               << result.tabi_convergence_tail_norm_pm1_mean << ','
               << result.tabi_convergence_effective_jcp_amp_max << ','
               << result.tabi_convergence_effective_jcp_amp_mean << ','
+              << result.tabi_convergence_dielectric_amp_max << ','
+              << result.tabi_convergence_dielectric_amp_mean << ','
+              << result.tabi_convergence_channel_effective_jcp_amp_max[0]
+              << ','
+              << result.tabi_convergence_channel_effective_jcp_amp_max[1]
+              << ','
+              << result.tabi_convergence_channel_effective_jcp_amp_max[2]
+              << ','
+              << result.tabi_convergence_channel_effective_jcp_amp_max[3]
+              << ','
+              << result.tabi_convergence_channel_effective_jcp_amp_mean[0]
+              << ','
+              << result.tabi_convergence_channel_effective_jcp_amp_mean[1]
+              << ','
+              << result.tabi_convergence_channel_effective_jcp_amp_mean[2]
+              << ','
+              << result.tabi_convergence_channel_effective_jcp_amp_mean[3]
+              << ','
+              << result.tabi_convergence_channel_estimated_error_max[0]
+              << ','
+              << result.tabi_convergence_channel_estimated_error_max[1]
+              << ','
+              << result.tabi_convergence_channel_estimated_error_max[2]
+              << ','
+              << result.tabi_convergence_channel_estimated_error_max[3]
+              << ','
+              << result.tabi_convergence_channel_unstable_far_count[0]
+              << ','
+              << result.tabi_convergence_channel_unstable_far_count[1]
+              << ','
+              << result.tabi_convergence_channel_unstable_far_count[2]
+              << ','
+              << result.tabi_convergence_channel_unstable_far_count[3]
+              << ','
+              << result.tabi_convergence_channel_unstable_far_panels[0]
+              << ','
+              << result.tabi_convergence_channel_unstable_far_panels[1]
+              << ','
+              << result.tabi_convergence_channel_unstable_far_panels[2]
+              << ','
+              << result.tabi_convergence_channel_unstable_far_panels[3]
+              << ','
+              << result.tabi_convergence_channel_split_rejects[0] << ','
+              << result.tabi_convergence_channel_split_rejects[1] << ','
+              << result.tabi_convergence_channel_split_rejects[2] << ','
+              << result.tabi_convergence_channel_split_rejects[3] << ','
+              << result.tabi_convergence_channel_split_reject_panels[0]
+              << ','
+              << result.tabi_convergence_channel_split_reject_panels[1]
+              << ','
+              << result.tabi_convergence_channel_split_reject_panels[2]
+              << ','
+              << result.tabi_convergence_channel_split_reject_panels[3]
+              << ','
+              << result.tabi_convergence_channel_low_abs_reaccepted_count[0]
+              << ','
+              << result.tabi_convergence_channel_low_abs_reaccepted_count[1]
+              << ','
+              << result.tabi_convergence_channel_low_abs_reaccepted_count[2]
+              << ','
+              << result.tabi_convergence_channel_low_abs_reaccepted_count[3]
+              << ','
+              << result.tabi_convergence_channel_low_abs_reaccepted_panels[0]
+              << ','
+              << result.tabi_convergence_channel_low_abs_reaccepted_panels[1]
+              << ','
+              << result.tabi_convergence_channel_low_abs_reaccepted_panels[2]
+              << ','
+              << result.tabi_convergence_channel_low_abs_reaccepted_panels[3]
+              << ','
+              << result.tabi_convergence_channel_high_error_caught[0] << ','
+              << result.tabi_convergence_channel_high_error_caught[1] << ','
+              << result.tabi_convergence_channel_high_error_caught[2] << ','
+              << result.tabi_convergence_channel_high_error_caught[3] << ','
+              << result.tabi_convergence_channel_high_error_missed[0] << ','
+              << result.tabi_convergence_channel_high_error_missed[1] << ','
+              << result.tabi_convergence_channel_high_error_missed[2] << ','
+              << result.tabi_convergence_channel_high_error_missed[3] << ','
+              << result.tabi_convergence_channel_high_error_caught_by_split[0]
+              << ','
+              << result.tabi_convergence_channel_high_error_caught_by_split[1]
+              << ','
+              << result.tabi_convergence_channel_high_error_caught_by_split[2]
+              << ','
+              << result.tabi_convergence_channel_high_error_caught_by_split[3]
+              << ','
               << result.tabi_convergence_estimator_high_error_caught << ','
               << result.tabi_convergence_estimator_high_error_missed << ','
+              << result.tabi_convergence_estimator_high_error_caught_by_split
+              << ','
+              << result.tabi_convergence_estimator_phantom_high_error_count
+              << ','
+              << result.tabi_convergence_estimator_phantom_high_error_abs_max
+              << ','
+              << result.tabi_convergence_overreject_count << ','
+              << result.tabi_convergence_overreject_panels << ','
+              << result.tabi_convergence_overreject_caught_count << ','
+              << result.tabi_convergence_overreject_caught_panels << ','
+               << result.tabi_convergence_overreject_abs_error_max << ','
+               << result.tabi_convergence_overreject_abs_error_mean << ','
+               << result.tabi_convergence_overreject_abs_error_p95 << ','
+               << result.tabi_convergence_overreject_abs_error_p99 << ','
+               << result.tabi_convergence_overreject_estimated_abs_error_max << ','
+               << result.tabi_convergence_overreject_estimated_abs_error_mean << ','
+               << result.tabi_convergence_overreject_required_scale_max << ','
+               << result.tabi_convergence_overreject_required_scale_p95 << ','
+               << result.tabi_convergence_overreject_required_scale_p99 << ','
+               << result.tabi_convergence_channel_overreject_count[0] << ','
+              << result.tabi_convergence_channel_overreject_count[1] << ','
+              << result.tabi_convergence_channel_overreject_count[2] << ','
+              << result.tabi_convergence_channel_overreject_count[3] << ','
+              << result.tabi_convergence_channel_overreject_caught_count[0]
+              << ','
+              << result.tabi_convergence_channel_overreject_caught_count[1]
+              << ','
+               << result.tabi_convergence_channel_overreject_caught_count[2]
+               << ','
+               << result.tabi_convergence_channel_overreject_caught_count[3]
+               << ','
+               << result.tabi_convergence_channel_overreject_panels[0] << ','
+               << result.tabi_convergence_channel_overreject_panels[1] << ','
+               << result.tabi_convergence_channel_overreject_panels[2] << ','
+               << result.tabi_convergence_channel_overreject_panels[3] << ','
+               << result.tabi_convergence_channel_overreject_abs_error_max[0] << ','
+               << result.tabi_convergence_channel_overreject_abs_error_max[1] << ','
+               << result.tabi_convergence_channel_overreject_abs_error_max[2] << ','
+               << result.tabi_convergence_channel_overreject_abs_error_max[3] << ','
+               << result.tabi_convergence_channel_overreject_abs_error_mean[0] << ','
+               << result.tabi_convergence_channel_overreject_abs_error_mean[1] << ','
+               << result.tabi_convergence_channel_overreject_abs_error_mean[2] << ','
+               << result.tabi_convergence_channel_overreject_abs_error_mean[3] << ','
+               << result.tabi_convergence_channel_overreject_required_scale_max[0] << ','
+               << result.tabi_convergence_channel_overreject_required_scale_max[1] << ','
+               << result.tabi_convergence_channel_overreject_required_scale_max[2] << ','
+               << result.tabi_convergence_channel_overreject_required_scale_max[3] << ','
+               << result.tabi_convergence_channel_overreject_required_scale_p99[0] << ','
+               << result.tabi_convergence_channel_overreject_required_scale_p99[1] << ','
+               << result.tabi_convergence_channel_overreject_required_scale_p99[2] << ','
+               << result.tabi_convergence_channel_overreject_required_scale_p99[3] << ','
+              << result.tabi_phantom_high_error_channel_count[0] << ','
+              << result.tabi_phantom_high_error_channel_count[1] << ','
+              << result.tabi_phantom_high_error_channel_count[2] << ','
+              << result.tabi_phantom_high_error_channel_count[3] << ','
+              << result.tabi_phantom_high_error_channel_abs_max[0] << ','
+              << result.tabi_phantom_high_error_channel_abs_max[1] << ','
+              << result.tabi_phantom_high_error_channel_abs_max[2] << ','
+              << result.tabi_phantom_high_error_channel_abs_max[3] << ','
+              << csv_escape(result.tabi_accepted_miss_worst_channel) << ','
+              << result.tabi_accepted_miss_channel_count[0] << ','
+              << result.tabi_accepted_miss_channel_count[1] << ','
+              << result.tabi_accepted_miss_channel_count[2] << ','
+              << result.tabi_accepted_miss_channel_count[3] << ','
+              << result.tabi_accepted_miss_channel_panels[0] << ','
+              << result.tabi_accepted_miss_channel_panels[1] << ','
+              << result.tabi_accepted_miss_channel_panels[2] << ','
+              << result.tabi_accepted_miss_channel_panels[3] << ','
+              << result.tabi_accepted_miss_channel_rho_min[0] << ','
+              << result.tabi_accepted_miss_channel_rho_min[1] << ','
+              << result.tabi_accepted_miss_channel_rho_min[2] << ','
+              << result.tabi_accepted_miss_channel_rho_min[3] << ','
+              << result.tabi_accepted_miss_channel_rho_mean[0] << ','
+              << result.tabi_accepted_miss_channel_rho_mean[1] << ','
+              << result.tabi_accepted_miss_channel_rho_mean[2] << ','
+              << result.tabi_accepted_miss_channel_rho_mean[3] << ','
+              << result.tabi_accepted_miss_channel_rho_max[0] << ','
+              << result.tabi_accepted_miss_channel_rho_max[1] << ','
+              << result.tabi_accepted_miss_channel_rho_max[2] << ','
+              << result.tabi_accepted_miss_channel_rho_max[3] << ','
+              << result.tabi_accepted_miss_channel_tail_ratio_mean[0] << ','
+              << result.tabi_accepted_miss_channel_tail_ratio_mean[1] << ','
+              << result.tabi_accepted_miss_channel_tail_ratio_mean[2] << ','
+              << result.tabi_accepted_miss_channel_tail_ratio_mean[3] << ','
+              << result.tabi_accepted_miss_channel_tail_ratio_max[0] << ','
+              << result.tabi_accepted_miss_channel_tail_ratio_max[1] << ','
+              << result.tabi_accepted_miss_channel_tail_ratio_max[2] << ','
+              << result.tabi_accepted_miss_channel_tail_ratio_max[3] << ','
+              << result.tabi_accepted_miss_channel_estimated_error_mean[0]
+              << ','
+              << result.tabi_accepted_miss_channel_estimated_error_mean[1]
+              << ','
+              << result.tabi_accepted_miss_channel_estimated_error_mean[2]
+              << ','
+              << result.tabi_accepted_miss_channel_estimated_error_mean[3]
+              << ','
+              << result.tabi_accepted_miss_channel_estimated_error_max[0]
+              << ','
+              << result.tabi_accepted_miss_channel_estimated_error_max[1]
+              << ','
+              << result.tabi_accepted_miss_channel_estimated_error_max[2]
+              << ','
+              << result.tabi_accepted_miss_channel_estimated_error_max[3]
+              << ','
+              << result.tabi_convergence_k3_rho_cap_rejects << ','
+              << result.tabi_convergence_k3_rho_cap_reject_panels << ','
               << result.tabi_moment_audit_nodes << ','
               << result.tabi_moment_translation_rel_error_max << ','
               << result.tabi_moment_translation_rel_error_mean << ','
@@ -7195,11 +7923,27 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << result.tabi_moment_cancellation_ratio_mean << ','
               << result.tabi_moment_dynamic_range_max << ','
               << csv_escape(result.tabi_expansion_audit) << ','
+              << csv_escape(result.tabi_expansion_audit_channel) << ','
               << result.tabi_far_expansion_audit_pairs << ','
               << result.tabi_far_expansion_audit_panels << ','
               << seconds(result.tabi_far_expansion_direct_ms) << ','
               << result.tabi_far_expansion_rel_error_max << ','
               << result.tabi_far_expansion_rel_error_mean << ','
+              << result.tabi_far_expansion_rel_error_p95 << ','
+              << result.tabi_far_expansion_rel_error_p99 << ','
+              << csv_escape(result.tabi_far_expansion_worst_channel) << ','
+              << result.tabi_far_expansion_channel_rel_error_max[0] << ','
+              << result.tabi_far_expansion_channel_rel_error_max[1] << ','
+              << result.tabi_far_expansion_channel_rel_error_max[2] << ','
+              << result.tabi_far_expansion_channel_rel_error_max[3] << ','
+              << result.tabi_far_expansion_channel_rel_error_mean[0] << ','
+              << result.tabi_far_expansion_channel_rel_error_mean[1] << ','
+              << result.tabi_far_expansion_channel_rel_error_mean[2] << ','
+              << result.tabi_far_expansion_channel_rel_error_mean[3] << ','
+              << result.tabi_far_expansion_channel_rel_error_p99[0] << ','
+              << result.tabi_far_expansion_channel_rel_error_p99[1] << ','
+              << result.tabi_far_expansion_channel_rel_error_p99[2] << ','
+              << result.tabi_far_expansion_channel_rel_error_p99[3] << ','
               << (result.tabi_far_expansion_mean_gate_pass ? 1 : 0) << ','
               << result.tabi_far_convergence_rho_max << ','
               << result.tabi_far_convergence_rho_mean << ','
@@ -7262,6 +8006,28 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << csv_escape(result.tabi_preconditioner_requested) << ','
               << csv_escape(result.tabi_preconditioner_effective) << ','
               << csv_escape(result.tabi_preconditioner_block_near) << ','
+              << result.tabi_preconditioner_block_panel_cap << ','
+              << result.tabi_preconditioner_memory_budget_bytes << ','
+              << result.tabi_preconditioner_estimated_bytes << ','
+              << result.tabi_preconditioner_valid_blocks << ','
+              << result.tabi_preconditioner_valid_panels << ','
+              << result.tabi_preconditioner_ill_conditioned_blocks << ','
+              << seconds(result.tabi_preconditioner_setup_ms) << ','
+              << seconds(result.tabi_preconditioner_apply_ms) << ','
+              << result.tabi_preconditioner_apply_calls << ','
+              << result.tabi_preconditioner_coarse_aggregate_cap << ','
+              << result.tabi_preconditioner_coarse_aggregates << ','
+              << result.tabi_preconditioner_coarse_dimension << ','
+              << csv_escape(result.tabi_preconditioner_coarse_base) << ','
+              << result.tabi_preconditioner_coarse_matrix_bytes << ','
+              << result.tabi_preconditioner_coarse_pivot_ratio << ','
+              << csv_escape(result.tabi_preconditioner_coarse_status) << ','
+              << result.tabi_preconditioner_coarse_setup_matvec_calls << ','
+              << seconds(result.tabi_preconditioner_coarse_setup_ms) << ','
+              << seconds(result.tabi_preconditioner_coarse_apply_ms) << ','
+              << result.tabi_preconditioner_coarse_apply_calls << ','
+              << result.tabi_preconditioner_coarse_rp_identity_error_max << ','
+              << result.tabi_preconditioner_coarse_verify_rel_error_max << ','
               << csv_escape(result.tabi_surface_generator) << ','
               << csv_escape(result.tabi_discretization) << ','
               << (result.tabi_fallback_used ? "true" : "false") << ','
@@ -7369,12 +8135,22 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "matvec_audit_seconds,orthogonalization_seconds,"
            "preconditioner_seconds,"
            "tree_build_seconds,tree_moment_seconds,tree_traversal_seconds,"
+           "matvec_cost_profile,leaf_panels_per_second,"
+           "clean_leaf_panels_per_second,tree_traversal_fraction,"
            "tree_eval_seconds,near_eval_seconds,far_eval_seconds,"
            "singular_near_eval_seconds,leaf_near_eval_seconds,"
            "leaf_panel_eval_seconds,leaf_tile_eval_seconds,"
            "leaf_residual_eval_seconds,smooth_leaf_node_eval_seconds,"
            "leaf_panel_kernel,leaf_tile_status,leaf_panel_pairs_per_second,"
-           "leaf_near_policy,interaction_mode,node_bounds_mode,"
+           "leaf_near_policy,cluster_policy,target_batch_size,"
+           "leaf_pair_min_source_panels,leaf_pair_min_targets,"
+           "leaf_pair_selection_profile,leaf_pair_probe_cache,"
+           "leaf_pair_target_group,leaf_pair_max_lookahead,"
+           "leaf_pair_directness_probe,leaf_pair_directness_cache,"
+           "leaf_pair_directness_verify,"
+           "leaf_pair_scheduler,leaf_pair_worklist_max_active,"
+           "leaf_pair_worklist_verify,leaf_block_verify,"
+           "tree_preset,interaction_mode,node_bounds_mode,"
            "tree_builder,expansion_center,fragmentation_safety,"
            "mac_safety,mac_gap_factor,tree_depth_max,"
            "mac_reject_radius_limited,"
@@ -7387,7 +8163,21 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "mac_physical_gap_rejects,mac_convergence_rho_rejects,"
            "mac_convergence_aspect_rejects,"
            "mac_convergence_rho_reject_panels,"
-           "mac_convergence_aspect_reject_panels,fragmented_far_count,"
+           "mac_convergence_aspect_reject_panels,"
+           "mac_surface_margin_rejects,"
+           "mac_surface_margin_reject_panels,"
+           "mac_surface_margin_applied,"
+           "mac_surface_margin_skipped,"
+           "mac_surface_margin_adaptive_rejects,"
+           "mac_surface_margin_adaptive_reject_panels,"
+           "mac_surface_margin_skipped_accepted_far,"
+           "mac_surface_margin_hard_applied,"
+           "mac_surface_margin_soft_applied,"
+           "mac_surface_margin_hard_rejects,"
+           "mac_surface_margin_hard_reject_panels,"
+           "mac_surface_margin_soft_rejects,"
+           "mac_surface_margin_soft_reject_panels,"
+           "fragmented_far_count,"
            "fragmented_far_panels,fragmented_split_rejects,"
            "fragmentation_center_gap_ratio_max,"
            "fragmentation_center_gap_ratio_mean,"
@@ -7396,30 +8186,197 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "mac_aspect_cap,convergence_estimator,"
            "convergence_tail_threshold,convergence_estimator_error_cap,"
            "convergence_unstable_rho_cap,convergence_calibration,"
+           "convergence_dielectric_amp,"
+           "convergence_estimator_model,"
+           "convergence_channel_calibration,"
+           "convergence_split_policy,"
+           "convergence_split_selectivity,"
+           "convergence_split_absolute_floor,"
+           "convergence_overreject_audit,"
+           "convergence_overreject_detail,"
+           "convergence_shape_audit,"
+           "convergence_kernel_response_audit,"
+           "channel_missed_semantics,"
+           "accepted_miss_diagnostics,"
+           "accepted_miss_absolute_floor,"
+           "convergence_k3_accepted_rho_cap,"
+           "mac_distance_policy,mac_surface_margin_factor,"
+           "mac_surface_margin_policy,"
+           "mac_surface_margin_aspect_threshold,"
+           "mac_surface_margin_rho_trigger,"
+           "mac_surface_margin_soft_aspect_threshold,"
+           "mac_surface_margin_soft_rho_trigger,"
+           "mac_surface_margin_soft_factor,"
            "convergence_estimator_samples,"
            "convergence_estimator_unstable_far_count,"
            "convergence_estimator_unstable_far_panels,"
            "convergence_estimator_split_rejects,"
            "convergence_estimator_split_reject_panels,"
+           "convergence_low_abs_reaccepted_far_count,"
+           "convergence_low_abs_reaccepted_far_panels,"
            "convergence_estimator_tail_ratio_max,"
            "convergence_estimator_tail_ratio_mean,"
            "convergence_estimator_error_max,"
            "convergence_estimator_error_mean,"
+           "convergence_estimator_abs_error_max,"
+           "convergence_estimator_abs_error_mean,"
            "convergence_tail_norm_p_max,convergence_tail_norm_p_mean,"
            "convergence_tail_norm_pm1_max,convergence_tail_norm_pm1_mean,"
            "convergence_effective_jcp_amp_max,"
            "convergence_effective_jcp_amp_mean,"
+           "convergence_dielectric_amp_max,"
+           "convergence_dielectric_amp_mean,"
+           "convergence_k1_effective_jcp_amp_max,"
+           "convergence_k2_effective_jcp_amp_max,"
+           "convergence_k3_effective_jcp_amp_max,"
+           "convergence_k4_effective_jcp_amp_max,"
+           "convergence_k1_effective_jcp_amp_mean,"
+           "convergence_k2_effective_jcp_amp_mean,"
+           "convergence_k3_effective_jcp_amp_mean,"
+           "convergence_k4_effective_jcp_amp_mean,"
+           "convergence_k1_estimated_error_max,"
+           "convergence_k2_estimated_error_max,"
+           "convergence_k3_estimated_error_max,"
+           "convergence_k4_estimated_error_max,"
+           "convergence_k1_unstable_far_count,"
+           "convergence_k2_unstable_far_count,"
+           "convergence_k3_unstable_far_count,"
+           "convergence_k4_unstable_far_count,"
+           "convergence_k1_unstable_far_panels,"
+           "convergence_k2_unstable_far_panels,"
+           "convergence_k3_unstable_far_panels,"
+           "convergence_k4_unstable_far_panels,"
+           "convergence_k1_split_rejects,"
+           "convergence_k2_split_rejects,"
+           "convergence_k3_split_rejects,"
+           "convergence_k4_split_rejects,"
+           "convergence_k1_split_reject_panels,"
+           "convergence_k2_split_reject_panels,"
+           "convergence_k3_split_reject_panels,"
+           "convergence_k4_split_reject_panels,"
+           "convergence_k1_low_abs_reaccepted,"
+           "convergence_k2_low_abs_reaccepted,"
+           "convergence_k3_low_abs_reaccepted,"
+           "convergence_k4_low_abs_reaccepted,"
+           "convergence_k1_low_abs_reaccepted_panels,"
+           "convergence_k2_low_abs_reaccepted_panels,"
+           "convergence_k3_low_abs_reaccepted_panels,"
+           "convergence_k4_low_abs_reaccepted_panels,"
+           "convergence_k1_high_error_caught,"
+           "convergence_k2_high_error_caught,"
+           "convergence_k3_high_error_caught,"
+           "convergence_k4_high_error_caught,"
+           "convergence_k1_high_error_missed,"
+           "convergence_k2_high_error_missed,"
+           "convergence_k3_high_error_missed,"
+           "convergence_k4_high_error_missed,"
+           "convergence_k1_high_error_caught_by_split,"
+           "convergence_k2_high_error_caught_by_split,"
+           "convergence_k3_high_error_caught_by_split,"
+           "convergence_k4_high_error_caught_by_split,"
            "convergence_estimator_high_error_caught,"
            "convergence_estimator_high_error_missed,"
+           "convergence_estimator_high_error_caught_by_split,"
+           "convergence_estimator_phantom_high_error_count,"
+           "convergence_estimator_phantom_high_error_abs_max,"
+           "convergence_overreject_count,"
+           "convergence_overreject_panels,"
+           "convergence_overreject_caught_count,"
+           "convergence_overreject_caught_panels,"
+           "convergence_overreject_abs_error_max,"
+           "convergence_overreject_abs_error_mean,"
+           "convergence_overreject_abs_error_p95,"
+           "convergence_overreject_abs_error_p99,"
+           "convergence_overreject_estimated_abs_error_max,"
+           "convergence_overreject_estimated_abs_error_mean,"
+           "convergence_overreject_required_scale_max,"
+           "convergence_overreject_required_scale_p95,"
+           "convergence_overreject_required_scale_p99,"
+           "convergence_k1_overreject_count,"
+           "convergence_k2_overreject_count,"
+           "convergence_k3_overreject_count,"
+           "convergence_k4_overreject_count,"
+           "convergence_k1_overreject_caught_count,"
+           "convergence_k2_overreject_caught_count,"
+           "convergence_k3_overreject_caught_count,"
+           "convergence_k4_overreject_caught_count,"
+           "convergence_k1_overreject_panels,convergence_k2_overreject_panels,"
+           "convergence_k3_overreject_panels,convergence_k4_overreject_panels,"
+           "convergence_k1_overreject_abs_error_max,"
+           "convergence_k2_overreject_abs_error_max,"
+           "convergence_k3_overreject_abs_error_max,"
+           "convergence_k4_overreject_abs_error_max,"
+           "convergence_k1_overreject_abs_error_mean,"
+           "convergence_k2_overreject_abs_error_mean,"
+           "convergence_k3_overreject_abs_error_mean,"
+           "convergence_k4_overreject_abs_error_mean,"
+           "convergence_k1_overreject_required_scale_max,"
+           "convergence_k2_overreject_required_scale_max,"
+           "convergence_k3_overreject_required_scale_max,"
+           "convergence_k4_overreject_required_scale_max,"
+           "convergence_k1_overreject_required_scale_p99,"
+           "convergence_k2_overreject_required_scale_p99,"
+           "convergence_k3_overreject_required_scale_p99,"
+           "convergence_k4_overreject_required_scale_p99,"
+           "phantom_high_error_k1_count,phantom_high_error_k2_count,"
+           "phantom_high_error_k3_count,phantom_high_error_k4_count,"
+           "phantom_high_error_k1_abs_max,"
+           "phantom_high_error_k2_abs_max,"
+           "phantom_high_error_k3_abs_max,"
+           "phantom_high_error_k4_abs_max,"
+           "accepted_miss_worst_channel,"
+           "accepted_miss_k1_count,accepted_miss_k2_count,"
+           "accepted_miss_k3_count,accepted_miss_k4_count,"
+           "accepted_miss_k1_panels,accepted_miss_k2_panels,"
+           "accepted_miss_k3_panels,accepted_miss_k4_panels,"
+           "accepted_miss_k1_rho_min,accepted_miss_k2_rho_min,"
+           "accepted_miss_k3_rho_min,accepted_miss_k4_rho_min,"
+           "accepted_miss_k1_rho_mean,accepted_miss_k2_rho_mean,"
+           "accepted_miss_k3_rho_mean,accepted_miss_k4_rho_mean,"
+           "accepted_miss_k1_rho_max,accepted_miss_k2_rho_max,"
+           "accepted_miss_k3_rho_max,accepted_miss_k4_rho_max,"
+           "accepted_miss_k1_tail_ratio_mean,"
+           "accepted_miss_k2_tail_ratio_mean,"
+           "accepted_miss_k3_tail_ratio_mean,"
+           "accepted_miss_k4_tail_ratio_mean,"
+           "accepted_miss_k1_tail_ratio_max,"
+           "accepted_miss_k2_tail_ratio_max,"
+           "accepted_miss_k3_tail_ratio_max,"
+           "accepted_miss_k4_tail_ratio_max,"
+           "accepted_miss_k1_estimated_error_mean,"
+           "accepted_miss_k2_estimated_error_mean,"
+           "accepted_miss_k3_estimated_error_mean,"
+           "accepted_miss_k4_estimated_error_mean,"
+           "accepted_miss_k1_estimated_error_max,"
+           "accepted_miss_k2_estimated_error_max,"
+           "accepted_miss_k3_estimated_error_max,"
+           "accepted_miss_k4_estimated_error_max,"
+           "convergence_k3_rho_cap_rejects,"
+           "convergence_k3_rho_cap_reject_panels,"
            "moment_audit_nodes,"
            "moment_translation_rel_error_max,"
            "moment_translation_rel_error_mean,"
            "moment_translation_offset_max,moment_translation_offset_mean,"
            "moment_cancellation_ratio_max,moment_cancellation_ratio_mean,"
            "moment_dynamic_range_max,"
-           "expansion_audit,far_expansion_audit_pairs,"
+           "expansion_audit,expansion_audit_channel,"
+           "far_expansion_audit_pairs,"
            "far_expansion_audit_panels,far_expansion_direct_seconds,"
            "far_expansion_rel_error_max,far_expansion_rel_error_mean,"
+           "far_expansion_rel_error_p95,far_expansion_rel_error_p99,"
+           "far_expansion_worst_channel,"
+           "far_expansion_k1_rel_error_max,"
+           "far_expansion_k2_rel_error_max,"
+           "far_expansion_k3_rel_error_max,"
+           "far_expansion_k4_rel_error_max,"
+           "far_expansion_k1_rel_error_mean,"
+           "far_expansion_k2_rel_error_mean,"
+           "far_expansion_k3_rel_error_mean,"
+           "far_expansion_k4_rel_error_mean,"
+           "far_expansion_k1_rel_error_p99,"
+           "far_expansion_k2_rel_error_p99,"
+           "far_expansion_k3_rel_error_p99,"
+           "far_expansion_k4_rel_error_p99,"
            "far_expansion_mean_gate_pass,"
            "far_convergence_rho_max,far_convergence_rho_mean,"
            "accepted_far_aspect_ratio_max,accepted_far_aspect_ratio_mean,"
@@ -7447,6 +8404,25 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "leaf_near_interactions,far_node_interactions,"
            "leaf_panel_interactions,leaf_tile_interactions,"
            "leaf_tile_panel_interactions,leaf_residual_panel_interactions,"
+           "leaf_work_profile,leaf_work_mac_terminal_panels,"
+           "leaf_work_physical_gap_panels,"
+           "leaf_work_fragmentation_panels,"
+           "leaf_work_convergence_panels,"
+           "leaf_work_convergence_estimator_panels,"
+           "leaf_work_convergence_rho_panels,"
+           "leaf_work_convergence_aspect_panels,"
+           "leaf_work_surface_margin_panels,"
+           "leaf_work_surface_margin_hard_panels,"
+           "leaf_work_surface_margin_soft_panels,"
+           "leaf_work_k3_rho_cap_panels,"
+           "leaf_work_singular_fallback_panels,"
+           "leaf_work_scalar_tail_panels,"
+           "leaf_work_profile_accounted_panels,"
+           "leaf_work_mac_terminal_frac,"
+           "leaf_work_convergence_frac,"
+           "leaf_work_surface_margin_frac,"
+           "leaf_work_singular_fallback_frac,"
+           "leaf_work_scalar_tail_frac,"
            "smooth_leaf_node_interactions,"
            "leaf_pruned_interactions,adaptive_smooth_leaf_accepted,"
            "adaptive_smooth_leaf_rejected,adaptive_span_tile_accepted,"
@@ -7457,12 +8433,74 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "leaf_work_reduction_ratio,target_cluster_interactions,"
            "target_cluster_targets,target_cluster_panels_pruned,"
            "target_cluster_rejected,target_cluster_eval_seconds,"
+           "leaf_pair_batch_interactions,leaf_pair_batch_targets,"
+           "leaf_pair_batch_source_panels,"
+           "leaf_pair_batch_residual_panels,"
+           "leaf_pair_batch_fallbacks,leaf_pair_batch_seconds,"
+           "leaf_pair_batch_kernel,leaf_pair_batch_vectorized_sources,"
+           "leaf_pair_batch_vector_lanes,"
+           "leaf_pair_batch_pairs_per_second,"
+           "leaf_kernel_profile,jcp_direct_kernel,"
+           "leaf_kernel_scalar_tasks,leaf_kernel_batch_tasks,"
+           "leaf_kernel_source_panel_evals,"
+           "leaf_kernel_scalar_seconds,"
+           "leaf_kernel_target_avx2_seconds,"
+           "leaf_kernel_tail_seconds,"
+           "leaf_pair_batch_soa_sources,"
+           "leaf_pair_batch_soa_seconds,"
+           "leaf_pair_batch_scalar_tail_seconds,"
+           "leaf_pair_batch_clean_source_panels_per_second,"
+           "leaf_pair_selection_candidate_scans,"
+           "leaf_pair_selection_clean_rejects,"
+           "leaf_pair_selection_probe_calls,"
+           "leaf_pair_selection_probe_node_visits,"
+           "leaf_pair_selection_probe_seconds,"
+           "leaf_pair_selection_seconds,"
+           "leaf_pair_selection_probe_cache_hits,"
+           "leaf_pair_selection_probe_cache_misses,"
+           "leaf_pair_selection_insufficient_targets,"
+           "leaf_pair_selection_same_target_leaf_rejects,"
+           "leaf_pair_directness_ancestor_probe_calls,"
+           "leaf_pair_directness_ancestor_probe_node_visits,"
+           "leaf_pair_directness_ancestor_probe_seconds,"
+           "leaf_pair_directness_pair_cache_hits,"
+           "leaf_pair_directness_pair_cache_misses,"
+           "leaf_pair_directness_all_direct_proofs,"
+           "leaf_pair_directness_mixed_fallbacks,"
+           "leaf_pair_directness_verify_checks,"
+           "leaf_pair_directness_verify_mismatches,"
+           "leaf_pair_worklist_tasks,leaf_pair_worklist_groups,"
+           "leaf_pair_worklist_batched_groups,"
+           "leaf_pair_worklist_scalar_flush_tasks,"
+           "leaf_pair_worklist_forced_flushes,"
+           "leaf_pair_worklist_active_groups_max,"
+           "leaf_pair_worklist_seconds,"
+           "leaf_pair_worklist_verify_checks,"
+           "leaf_pair_worklist_verify_mismatches,"
+           "leaf_block_target_leaves,leaf_block_targets,"
+           "leaf_block_source_groups,leaf_block_batched_groups,"
+           "leaf_block_scalar_tail_tasks,leaf_block_group_seconds,"
+           "leaf_block_flush_seconds,leaf_block_writeback_seconds,"
+           "leaf_block_verify_checks,leaf_block_verify_mismatches,"
            "adaptive_level,"
            "tree_nodes,tree_leaf_count,"
             "taylor_order,derivative_mode,diag_min,diag_max,solid_angle_fallbacks,"
            "nonmanifold_edges,formulation,energy_projection,fallback_used,"
            "preconditioner_requested,preconditioner_effective,"
            "preconditioner_block_near,"
+           "preconditioner_block_panel_cap,preconditioner_memory_budget_bytes,"
+           "preconditioner_estimated_bytes,preconditioner_valid_blocks,"
+           "preconditioner_valid_panels,preconditioner_ill_conditioned_blocks,"
+           "preconditioner_setup_seconds,preconditioner_apply_seconds,"
+           "preconditioner_apply_calls,"
+           "preconditioner_coarse_aggregate_cap,preconditioner_coarse_aggregates,"
+           "preconditioner_coarse_dimension,preconditioner_coarse_base,"
+           "preconditioner_coarse_matrix_bytes,preconditioner_coarse_pivot_ratio,"
+           "preconditioner_coarse_status,preconditioner_coarse_setup_matvec_calls,"
+           "preconditioner_coarse_setup_seconds,preconditioner_coarse_apply_seconds,"
+           "preconditioner_coarse_apply_calls,"
+           "preconditioner_coarse_rp_identity_error_max,"
+           "preconditioner_coarse_verify_rel_error_max,"
            "surface_generator,discretization,"
            "rhs_scale,dielectric_contrast,operator_contrast,unknown_count,"
            "bie_system,lhs_diag_phi,lhs_diag_phin,energy_equation,"
@@ -7534,6 +8572,10 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << seconds(result.tabi_tree_build_ms) << ','
       << seconds(result.tabi_tree_moment_ms) << ','
       << seconds(result.tabi_tree_traversal_ms) << ','
+      << csv_escape(result.tabi_matvec_cost_profile) << ','
+      << result.tabi_leaf_panels_per_second << ','
+      << result.tabi_clean_leaf_panels_per_second << ','
+      << result.tabi_tree_traversal_fraction << ','
       << seconds(result.tabi_tree_eval_ms) << ','
       << seconds(result.tabi_near_eval_ms) << ','
       << seconds(result.tabi_far_eval_ms) << ','
@@ -7547,6 +8589,22 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << csv_escape(result.tabi_leaf_tile_status) << ','
       << result.tabi_leaf_panel_pairs_per_second << ','
       << csv_escape(result.tabi_leaf_near_policy) << ','
+      << csv_escape(result.tabi_cluster_policy) << ','
+      << result.tabi_target_batch_size << ','
+      << result.tabi_leaf_pair_min_source_panels << ','
+      << result.tabi_leaf_pair_min_targets << ','
+      << csv_escape(result.tabi_leaf_pair_selection_profile) << ','
+      << csv_escape(result.tabi_leaf_pair_probe_cache) << ','
+      << csv_escape(result.tabi_leaf_pair_target_group) << ','
+      << result.tabi_leaf_pair_max_lookahead << ','
+      << csv_escape(result.tabi_leaf_pair_directness_probe) << ','
+      << csv_escape(result.tabi_leaf_pair_directness_cache) << ','
+      << csv_escape(result.tabi_leaf_pair_directness_verify) << ','
+      << csv_escape(result.tabi_leaf_pair_scheduler) << ','
+      << result.tabi_leaf_pair_worklist_max_active << ','
+      << csv_escape(result.tabi_leaf_pair_worklist_verify) << ','
+      << csv_escape(result.tabi_leaf_block_verify) << ','
+      << csv_escape(result.tabi_tree_preset) << ','
       << csv_escape(result.tabi_interaction_mode) << ','
       << csv_escape(result.tabi_node_bounds_mode) << ','
       << csv_escape(result.tabi_tree_builder) << ','
@@ -7574,6 +8632,19 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << result.tabi_mac_convergence_aspect_rejects << ','
       << result.tabi_mac_convergence_rho_reject_panels << ','
       << result.tabi_mac_convergence_aspect_reject_panels << ','
+      << result.tabi_mac_surface_margin_rejects << ','
+      << result.tabi_mac_surface_margin_reject_panels << ','
+      << result.tabi_mac_surface_margin_applied << ','
+      << result.tabi_mac_surface_margin_skipped << ','
+      << result.tabi_mac_surface_margin_adaptive_rejects << ','
+      << result.tabi_mac_surface_margin_adaptive_reject_panels << ','
+      << result.tabi_mac_surface_margin_skipped_accepted_far << ','
+      << result.tabi_mac_surface_margin_hard_applied << ','
+      << result.tabi_mac_surface_margin_soft_applied << ','
+      << result.tabi_mac_surface_margin_hard_rejects << ','
+      << result.tabi_mac_surface_margin_hard_reject_panels << ','
+      << result.tabi_mac_surface_margin_soft_rejects << ','
+      << result.tabi_mac_surface_margin_soft_reject_panels << ','
       << result.tabi_fragmented_far_count << ','
       << result.tabi_fragmented_far_panels << ','
       << result.tabi_fragmented_split_rejects << ','
@@ -7591,23 +8662,190 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << result.tabi_convergence_estimator_error_cap << ','
       << result.tabi_convergence_unstable_rho_cap << ','
       << csv_escape(result.tabi_convergence_calibration) << ','
+      << csv_escape(result.tabi_convergence_dielectric_amp) << ','
+      << csv_escape(result.tabi_convergence_estimator_model) << ','
+      << csv_escape(result.tabi_convergence_channel_calibration) << ','
+      << csv_escape(result.tabi_convergence_split_policy) << ','
+      << csv_escape(result.tabi_convergence_split_selectivity) << ','
+      << result.tabi_convergence_split_absolute_floor << ','
+      << csv_escape(result.tabi_convergence_overreject_audit) << ','
+      << csv_escape(result.tabi_convergence_overreject_detail) << ','
+      << csv_escape(result.tabi_convergence_shape_audit) << ','
+      << csv_escape(result.tabi_convergence_kernel_response_audit) << ','
+      << csv_escape(result.tabi_channel_missed_semantics) << ','
+      << csv_escape(result.tabi_accepted_miss_diagnostics) << ','
+      << result.tabi_accepted_miss_absolute_floor << ','
+      << result.tabi_convergence_k3_accepted_rho_cap << ','
+      << csv_escape(result.tabi_mac_distance_policy) << ','
+      << result.tabi_mac_surface_margin_factor << ','
+      << csv_escape(result.tabi_mac_surface_margin_policy) << ','
+      << result.tabi_mac_surface_margin_aspect_threshold << ','
+      << result.tabi_mac_surface_margin_rho_trigger << ','
+      << result.tabi_mac_surface_margin_soft_aspect_threshold << ','
+      << result.tabi_mac_surface_margin_soft_rho_trigger << ','
+      << result.tabi_mac_surface_margin_soft_factor << ','
       << result.tabi_convergence_estimator_samples << ','
       << result.tabi_convergence_estimator_unstable_far_count << ','
       << result.tabi_convergence_estimator_unstable_far_panels << ','
       << result.tabi_convergence_estimator_split_rejects << ','
       << result.tabi_convergence_estimator_split_reject_panels << ','
+      << result.tabi_convergence_low_abs_reaccepted_far_count << ','
+      << result.tabi_convergence_low_abs_reaccepted_far_panels << ','
       << result.tabi_convergence_estimator_tail_ratio_max << ','
       << result.tabi_convergence_estimator_tail_ratio_mean << ','
       << result.tabi_convergence_estimator_error_max << ','
       << result.tabi_convergence_estimator_error_mean << ','
+      << result.tabi_convergence_estimator_abs_error_max << ','
+      << result.tabi_convergence_estimator_abs_error_mean << ','
       << result.tabi_convergence_tail_norm_p_max << ','
       << result.tabi_convergence_tail_norm_p_mean << ','
       << result.tabi_convergence_tail_norm_pm1_max << ','
       << result.tabi_convergence_tail_norm_pm1_mean << ','
       << result.tabi_convergence_effective_jcp_amp_max << ','
       << result.tabi_convergence_effective_jcp_amp_mean << ','
+      << result.tabi_convergence_dielectric_amp_max << ','
+      << result.tabi_convergence_dielectric_amp_mean << ','
+      << result.tabi_convergence_channel_effective_jcp_amp_max[0] << ','
+      << result.tabi_convergence_channel_effective_jcp_amp_max[1] << ','
+      << result.tabi_convergence_channel_effective_jcp_amp_max[2] << ','
+      << result.tabi_convergence_channel_effective_jcp_amp_max[3] << ','
+      << result.tabi_convergence_channel_effective_jcp_amp_mean[0] << ','
+      << result.tabi_convergence_channel_effective_jcp_amp_mean[1] << ','
+      << result.tabi_convergence_channel_effective_jcp_amp_mean[2] << ','
+      << result.tabi_convergence_channel_effective_jcp_amp_mean[3] << ','
+      << result.tabi_convergence_channel_estimated_error_max[0] << ','
+      << result.tabi_convergence_channel_estimated_error_max[1] << ','
+      << result.tabi_convergence_channel_estimated_error_max[2] << ','
+      << result.tabi_convergence_channel_estimated_error_max[3] << ','
+      << result.tabi_convergence_channel_unstable_far_count[0] << ','
+      << result.tabi_convergence_channel_unstable_far_count[1] << ','
+      << result.tabi_convergence_channel_unstable_far_count[2] << ','
+      << result.tabi_convergence_channel_unstable_far_count[3] << ','
+      << result.tabi_convergence_channel_unstable_far_panels[0] << ','
+      << result.tabi_convergence_channel_unstable_far_panels[1] << ','
+      << result.tabi_convergence_channel_unstable_far_panels[2] << ','
+      << result.tabi_convergence_channel_unstable_far_panels[3] << ','
+      << result.tabi_convergence_channel_split_rejects[0] << ','
+      << result.tabi_convergence_channel_split_rejects[1] << ','
+      << result.tabi_convergence_channel_split_rejects[2] << ','
+      << result.tabi_convergence_channel_split_rejects[3] << ','
+      << result.tabi_convergence_channel_split_reject_panels[0] << ','
+      << result.tabi_convergence_channel_split_reject_panels[1] << ','
+      << result.tabi_convergence_channel_split_reject_panels[2] << ','
+      << result.tabi_convergence_channel_split_reject_panels[3] << ','
+      << result.tabi_convergence_channel_low_abs_reaccepted_count[0] << ','
+      << result.tabi_convergence_channel_low_abs_reaccepted_count[1] << ','
+      << result.tabi_convergence_channel_low_abs_reaccepted_count[2] << ','
+      << result.tabi_convergence_channel_low_abs_reaccepted_count[3] << ','
+      << result.tabi_convergence_channel_low_abs_reaccepted_panels[0] << ','
+      << result.tabi_convergence_channel_low_abs_reaccepted_panels[1] << ','
+      << result.tabi_convergence_channel_low_abs_reaccepted_panels[2] << ','
+      << result.tabi_convergence_channel_low_abs_reaccepted_panels[3] << ','
+      << result.tabi_convergence_channel_high_error_caught[0] << ','
+      << result.tabi_convergence_channel_high_error_caught[1] << ','
+      << result.tabi_convergence_channel_high_error_caught[2] << ','
+      << result.tabi_convergence_channel_high_error_caught[3] << ','
+      << result.tabi_convergence_channel_high_error_missed[0] << ','
+      << result.tabi_convergence_channel_high_error_missed[1] << ','
+      << result.tabi_convergence_channel_high_error_missed[2] << ','
+      << result.tabi_convergence_channel_high_error_missed[3] << ','
+      << result.tabi_convergence_channel_high_error_caught_by_split[0] << ','
+      << result.tabi_convergence_channel_high_error_caught_by_split[1] << ','
+      << result.tabi_convergence_channel_high_error_caught_by_split[2] << ','
+      << result.tabi_convergence_channel_high_error_caught_by_split[3] << ','
       << result.tabi_convergence_estimator_high_error_caught << ','
       << result.tabi_convergence_estimator_high_error_missed << ','
+      << result.tabi_convergence_estimator_high_error_caught_by_split << ','
+      << result.tabi_convergence_estimator_phantom_high_error_count << ','
+      << result.tabi_convergence_estimator_phantom_high_error_abs_max << ','
+      << result.tabi_convergence_overreject_count << ','
+      << result.tabi_convergence_overreject_panels << ','
+      << result.tabi_convergence_overreject_caught_count << ','
+      << result.tabi_convergence_overreject_caught_panels << ','
+      << result.tabi_convergence_overreject_abs_error_max << ','
+      << result.tabi_convergence_overreject_abs_error_mean << ','
+      << result.tabi_convergence_overreject_abs_error_p95 << ','
+      << result.tabi_convergence_overreject_abs_error_p99 << ','
+      << result.tabi_convergence_overreject_estimated_abs_error_max << ','
+      << result.tabi_convergence_overreject_estimated_abs_error_mean << ','
+      << result.tabi_convergence_overreject_required_scale_max << ','
+      << result.tabi_convergence_overreject_required_scale_p95 << ','
+      << result.tabi_convergence_overreject_required_scale_p99 << ','
+      << result.tabi_convergence_channel_overreject_count[0] << ','
+      << result.tabi_convergence_channel_overreject_count[1] << ','
+      << result.tabi_convergence_channel_overreject_count[2] << ','
+      << result.tabi_convergence_channel_overreject_count[3] << ','
+      << result.tabi_convergence_channel_overreject_caught_count[0] << ','
+      << result.tabi_convergence_channel_overreject_caught_count[1] << ','
+      << result.tabi_convergence_channel_overreject_caught_count[2] << ','
+      << result.tabi_convergence_channel_overreject_caught_count[3] << ','
+      << result.tabi_convergence_channel_overreject_panels[0] << ','
+      << result.tabi_convergence_channel_overreject_panels[1] << ','
+      << result.tabi_convergence_channel_overreject_panels[2] << ','
+      << result.tabi_convergence_channel_overreject_panels[3] << ','
+      << result.tabi_convergence_channel_overreject_abs_error_max[0] << ','
+      << result.tabi_convergence_channel_overreject_abs_error_max[1] << ','
+      << result.tabi_convergence_channel_overreject_abs_error_max[2] << ','
+      << result.tabi_convergence_channel_overreject_abs_error_max[3] << ','
+      << result.tabi_convergence_channel_overreject_abs_error_mean[0] << ','
+      << result.tabi_convergence_channel_overreject_abs_error_mean[1] << ','
+      << result.tabi_convergence_channel_overreject_abs_error_mean[2] << ','
+      << result.tabi_convergence_channel_overreject_abs_error_mean[3] << ','
+      << result.tabi_convergence_channel_overreject_required_scale_max[0] << ','
+      << result.tabi_convergence_channel_overreject_required_scale_max[1] << ','
+      << result.tabi_convergence_channel_overreject_required_scale_max[2] << ','
+      << result.tabi_convergence_channel_overreject_required_scale_max[3] << ','
+      << result.tabi_convergence_channel_overreject_required_scale_p99[0] << ','
+      << result.tabi_convergence_channel_overreject_required_scale_p99[1] << ','
+      << result.tabi_convergence_channel_overreject_required_scale_p99[2] << ','
+      << result.tabi_convergence_channel_overreject_required_scale_p99[3] << ','
+      << result.tabi_phantom_high_error_channel_count[0] << ','
+      << result.tabi_phantom_high_error_channel_count[1] << ','
+      << result.tabi_phantom_high_error_channel_count[2] << ','
+      << result.tabi_phantom_high_error_channel_count[3] << ','
+      << result.tabi_phantom_high_error_channel_abs_max[0] << ','
+      << result.tabi_phantom_high_error_channel_abs_max[1] << ','
+      << result.tabi_phantom_high_error_channel_abs_max[2] << ','
+      << result.tabi_phantom_high_error_channel_abs_max[3] << ','
+      << csv_escape(result.tabi_accepted_miss_worst_channel) << ','
+      << result.tabi_accepted_miss_channel_count[0] << ','
+      << result.tabi_accepted_miss_channel_count[1] << ','
+      << result.tabi_accepted_miss_channel_count[2] << ','
+      << result.tabi_accepted_miss_channel_count[3] << ','
+      << result.tabi_accepted_miss_channel_panels[0] << ','
+      << result.tabi_accepted_miss_channel_panels[1] << ','
+      << result.tabi_accepted_miss_channel_panels[2] << ','
+      << result.tabi_accepted_miss_channel_panels[3] << ','
+      << result.tabi_accepted_miss_channel_rho_min[0] << ','
+      << result.tabi_accepted_miss_channel_rho_min[1] << ','
+      << result.tabi_accepted_miss_channel_rho_min[2] << ','
+      << result.tabi_accepted_miss_channel_rho_min[3] << ','
+      << result.tabi_accepted_miss_channel_rho_mean[0] << ','
+      << result.tabi_accepted_miss_channel_rho_mean[1] << ','
+      << result.tabi_accepted_miss_channel_rho_mean[2] << ','
+      << result.tabi_accepted_miss_channel_rho_mean[3] << ','
+      << result.tabi_accepted_miss_channel_rho_max[0] << ','
+      << result.tabi_accepted_miss_channel_rho_max[1] << ','
+      << result.tabi_accepted_miss_channel_rho_max[2] << ','
+      << result.tabi_accepted_miss_channel_rho_max[3] << ','
+      << result.tabi_accepted_miss_channel_tail_ratio_mean[0] << ','
+      << result.tabi_accepted_miss_channel_tail_ratio_mean[1] << ','
+      << result.tabi_accepted_miss_channel_tail_ratio_mean[2] << ','
+      << result.tabi_accepted_miss_channel_tail_ratio_mean[3] << ','
+      << result.tabi_accepted_miss_channel_tail_ratio_max[0] << ','
+      << result.tabi_accepted_miss_channel_tail_ratio_max[1] << ','
+      << result.tabi_accepted_miss_channel_tail_ratio_max[2] << ','
+      << result.tabi_accepted_miss_channel_tail_ratio_max[3] << ','
+      << result.tabi_accepted_miss_channel_estimated_error_mean[0] << ','
+      << result.tabi_accepted_miss_channel_estimated_error_mean[1] << ','
+      << result.tabi_accepted_miss_channel_estimated_error_mean[2] << ','
+      << result.tabi_accepted_miss_channel_estimated_error_mean[3] << ','
+      << result.tabi_accepted_miss_channel_estimated_error_max[0] << ','
+      << result.tabi_accepted_miss_channel_estimated_error_max[1] << ','
+      << result.tabi_accepted_miss_channel_estimated_error_max[2] << ','
+      << result.tabi_accepted_miss_channel_estimated_error_max[3] << ','
+      << result.tabi_convergence_k3_rho_cap_rejects << ','
+      << result.tabi_convergence_k3_rho_cap_reject_panels << ','
       << result.tabi_moment_audit_nodes << ','
       << result.tabi_moment_translation_rel_error_max << ','
       << result.tabi_moment_translation_rel_error_mean << ','
@@ -7617,11 +8855,27 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << result.tabi_moment_cancellation_ratio_mean << ','
       << result.tabi_moment_dynamic_range_max << ','
       << csv_escape(result.tabi_expansion_audit) << ','
+      << csv_escape(result.tabi_expansion_audit_channel) << ','
       << result.tabi_far_expansion_audit_pairs << ','
       << result.tabi_far_expansion_audit_panels << ','
       << seconds(result.tabi_far_expansion_direct_ms) << ','
       << result.tabi_far_expansion_rel_error_max << ','
       << result.tabi_far_expansion_rel_error_mean << ','
+      << result.tabi_far_expansion_rel_error_p95 << ','
+      << result.tabi_far_expansion_rel_error_p99 << ','
+      << csv_escape(result.tabi_far_expansion_worst_channel) << ','
+      << result.tabi_far_expansion_channel_rel_error_max[0] << ','
+      << result.tabi_far_expansion_channel_rel_error_max[1] << ','
+      << result.tabi_far_expansion_channel_rel_error_max[2] << ','
+      << result.tabi_far_expansion_channel_rel_error_max[3] << ','
+      << result.tabi_far_expansion_channel_rel_error_mean[0] << ','
+      << result.tabi_far_expansion_channel_rel_error_mean[1] << ','
+      << result.tabi_far_expansion_channel_rel_error_mean[2] << ','
+      << result.tabi_far_expansion_channel_rel_error_mean[3] << ','
+      << result.tabi_far_expansion_channel_rel_error_p99[0] << ','
+      << result.tabi_far_expansion_channel_rel_error_p99[1] << ','
+      << result.tabi_far_expansion_channel_rel_error_p99[2] << ','
+      << result.tabi_far_expansion_channel_rel_error_p99[3] << ','
       << (result.tabi_far_expansion_mean_gate_pass ? 1 : 0) << ','
       << result.tabi_far_convergence_rho_max << ','
       << result.tabi_far_convergence_rho_mean << ','
@@ -7675,6 +8929,26 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << result.tabi_leaf_tile_interactions << ','
       << result.tabi_leaf_tile_panel_interactions << ','
       << result.tabi_leaf_residual_panel_interactions << ','
+      << csv_escape(result.tabi_leaf_work_profile) << ','
+      << result.tabi_leaf_work_mac_terminal_panels << ','
+      << result.tabi_leaf_work_physical_gap_panels << ','
+      << result.tabi_leaf_work_fragmentation_panels << ','
+      << result.tabi_leaf_work_convergence_panels << ','
+      << result.tabi_leaf_work_convergence_estimator_panels << ','
+      << result.tabi_leaf_work_convergence_rho_panels << ','
+      << result.tabi_leaf_work_convergence_aspect_panels << ','
+      << result.tabi_leaf_work_surface_margin_panels << ','
+      << result.tabi_leaf_work_surface_margin_hard_panels << ','
+      << result.tabi_leaf_work_surface_margin_soft_panels << ','
+      << result.tabi_leaf_work_k3_rho_cap_panels << ','
+      << result.tabi_leaf_work_singular_fallback_panels << ','
+      << result.tabi_leaf_work_scalar_tail_panels << ','
+      << result.tabi_leaf_work_profile_accounted_panels << ','
+      << result.tabi_leaf_work_mac_terminal_frac << ','
+      << result.tabi_leaf_work_convergence_frac << ','
+      << result.tabi_leaf_work_surface_margin_frac << ','
+      << result.tabi_leaf_work_singular_fallback_frac << ','
+      << result.tabi_leaf_work_scalar_tail_frac << ','
       << result.tabi_smooth_leaf_node_interactions << ','
       << result.tabi_leaf_pruned_interactions << ','
       << result.tabi_adaptive_smooth_leaf_accepted << ','
@@ -7692,6 +8966,66 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << result.tabi_target_cluster_panels_pruned << ','
       << result.tabi_target_cluster_rejected << ','
       << seconds(result.tabi_target_cluster_eval_ms) << ','
+      << result.tabi_leaf_pair_batch_interactions << ','
+      << result.tabi_leaf_pair_batch_targets << ','
+      << result.tabi_leaf_pair_batch_source_panels << ','
+      << result.tabi_leaf_pair_batch_residual_panels << ','
+      << result.tabi_leaf_pair_batch_fallbacks << ','
+      << seconds(result.tabi_leaf_pair_batch_ms) << ','
+      << csv_escape(result.tabi_leaf_pair_batch_kernel) << ','
+      << result.tabi_leaf_pair_batch_vectorized_sources << ','
+      << result.tabi_leaf_pair_batch_vector_lanes << ','
+      << result.tabi_leaf_pair_batch_pairs_per_second << ','
+      << csv_escape(result.tabi_leaf_kernel_profile) << ','
+      << csv_escape(result.tabi_jcp_direct_kernel) << ','
+      << result.tabi_leaf_kernel_scalar_tasks << ','
+      << result.tabi_leaf_kernel_batch_tasks << ','
+      << result.tabi_leaf_kernel_source_panel_evals << ','
+      << seconds(result.tabi_leaf_kernel_scalar_ms) << ','
+      << seconds(result.tabi_leaf_kernel_target_avx2_ms) << ','
+      << seconds(result.tabi_leaf_kernel_tail_ms) << ','
+      << result.tabi_leaf_pair_batch_soa_sources << ','
+      << seconds(result.tabi_leaf_pair_batch_soa_ms) << ','
+      << seconds(result.tabi_leaf_pair_batch_scalar_tail_ms) << ','
+      << result.tabi_leaf_pair_batch_clean_source_panels_per_second << ','
+      << result.tabi_leaf_pair_selection_candidate_scans << ','
+      << result.tabi_leaf_pair_selection_clean_rejects << ','
+      << result.tabi_leaf_pair_selection_probe_calls << ','
+      << result.tabi_leaf_pair_selection_probe_node_visits << ','
+      << seconds(result.tabi_leaf_pair_selection_probe_ms) << ','
+      << seconds(result.tabi_leaf_pair_selection_ms) << ','
+      << result.tabi_leaf_pair_selection_probe_cache_hits << ','
+      << result.tabi_leaf_pair_selection_probe_cache_misses << ','
+      << result.tabi_leaf_pair_selection_insufficient_targets << ','
+      << result.tabi_leaf_pair_selection_same_target_leaf_rejects << ','
+      << result.tabi_leaf_pair_directness_ancestor_probe_calls << ','
+      << result.tabi_leaf_pair_directness_ancestor_probe_node_visits << ','
+      << seconds(result.tabi_leaf_pair_directness_ancestor_probe_ms) << ','
+      << result.tabi_leaf_pair_directness_pair_cache_hits << ','
+      << result.tabi_leaf_pair_directness_pair_cache_misses << ','
+      << result.tabi_leaf_pair_directness_all_direct_proofs << ','
+      << result.tabi_leaf_pair_directness_mixed_fallbacks << ','
+      << result.tabi_leaf_pair_directness_verify_checks << ','
+      << result.tabi_leaf_pair_directness_verify_mismatches << ','
+      << result.tabi_leaf_pair_worklist_tasks << ','
+      << result.tabi_leaf_pair_worklist_groups << ','
+      << result.tabi_leaf_pair_worklist_batched_groups << ','
+      << result.tabi_leaf_pair_worklist_scalar_flush_tasks << ','
+      << result.tabi_leaf_pair_worklist_forced_flushes << ','
+      << result.tabi_leaf_pair_worklist_active_groups_max << ','
+      << seconds(result.tabi_leaf_pair_worklist_ms) << ','
+      << result.tabi_leaf_pair_worklist_verify_checks << ','
+      << result.tabi_leaf_pair_worklist_verify_mismatches << ','
+      << result.tabi_leaf_block_target_leaves << ','
+      << result.tabi_leaf_block_targets << ','
+      << result.tabi_leaf_block_source_groups << ','
+      << result.tabi_leaf_block_batched_groups << ','
+      << result.tabi_leaf_block_scalar_tail_tasks << ','
+      << seconds(result.tabi_leaf_block_group_ms) << ','
+      << seconds(result.tabi_leaf_block_flush_ms) << ','
+      << seconds(result.tabi_leaf_block_writeback_ms) << ','
+      << result.tabi_leaf_block_verify_checks << ','
+      << result.tabi_leaf_block_verify_mismatches << ','
       << csv_escape(result.tabi_adaptive_level) << ','
       << result.tabi_tree_nodes << ','
       << result.tabi_tree_leaf_count << ',' << result.tabi_taylor_order << ','
@@ -7705,6 +9039,28 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << csv_escape(result.tabi_preconditioner_requested) << ','
       << csv_escape(result.tabi_preconditioner_effective) << ','
       << csv_escape(result.tabi_preconditioner_block_near) << ','
+      << result.tabi_preconditioner_block_panel_cap << ','
+      << result.tabi_preconditioner_memory_budget_bytes << ','
+      << result.tabi_preconditioner_estimated_bytes << ','
+      << result.tabi_preconditioner_valid_blocks << ','
+      << result.tabi_preconditioner_valid_panels << ','
+      << result.tabi_preconditioner_ill_conditioned_blocks << ','
+      << seconds(result.tabi_preconditioner_setup_ms) << ','
+      << seconds(result.tabi_preconditioner_apply_ms) << ','
+      << result.tabi_preconditioner_apply_calls << ','
+      << result.tabi_preconditioner_coarse_aggregate_cap << ','
+      << result.tabi_preconditioner_coarse_aggregates << ','
+      << result.tabi_preconditioner_coarse_dimension << ','
+      << csv_escape(result.tabi_preconditioner_coarse_base) << ','
+      << result.tabi_preconditioner_coarse_matrix_bytes << ','
+      << result.tabi_preconditioner_coarse_pivot_ratio << ','
+      << csv_escape(result.tabi_preconditioner_coarse_status) << ','
+      << result.tabi_preconditioner_coarse_setup_matvec_calls << ','
+      << seconds(result.tabi_preconditioner_coarse_setup_ms) << ','
+      << seconds(result.tabi_preconditioner_coarse_apply_ms) << ','
+      << result.tabi_preconditioner_coarse_apply_calls << ','
+      << result.tabi_preconditioner_coarse_rp_identity_error_max << ','
+      << result.tabi_preconditioner_coarse_verify_rel_error_max << ','
       << csv_escape(result.tabi_surface_generator) << ','
       << csv_escape(result.tabi_discretization) << ','
       << result.tabi_rhs_scale << ',' << result.tabi_dielectric_contrast << ','
@@ -10079,6 +11435,9 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
 AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
     const std::vector<Atom> &atoms, TitanExecutor &executor) const {
   ReactionSolve solve;
+  TabiPrepareProgressWriter prepare_progress(args_, atoms.size(),
+                                             configured_threads_);
+  prepare_progress.write("tabi_prepare_start", "running");
   std::vector<Tabi::Atom> tabi_atoms;
   tabi_atoms.reserve(atoms.size());
   double min_x = std::numeric_limits<double>::infinity();
@@ -10104,6 +11463,7 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
     max_y = std::max(max_y, atom.y + surface_radius);
     max_z = std::max(max_z, atom.z + surface_radius);
   }
+  prepare_progress.write("pqr_loaded", "running");
 
   Tabi::Options options;
   options.eps_in = args_.int_diel;
@@ -10113,6 +11473,7 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   options.max_iter = args_.max_iter;
   options.residual_tol = args_.rms_tol;
   options.gmres_restart = args_.tabi_gmres_restart;
+  options.tree_preset = args_.tabi_tree_preset;
   options.sum_mode = args_.tabi_sum;
   options.probe_radius = args_.probe_radius;
   options.surface_mode = args_.surface;
@@ -10128,12 +11489,45 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   options.energy_projection = args_.tabi_energy_projection;
   options.preconditioner = args_.tabi_precond;
   options.preconditioner_block_near = args_.tabi_precond_block_near;
+  options.preconditioner_block_panel_cap = args_.tabi_precond_block_panel_cap;
+  options.preconditioner_memory_budget_mb = args_.tabi_precond_memory_budget_mb;
+  options.preconditioner_coarse_aggregate_cap =
+      args_.tabi_precond_coarse_aggregate_cap;
+  options.preconditioner_coarse_base = args_.tabi_precond_coarse_base;
+  options.preconditioner_coarse_verify = args_.tabi_precond_coarse_verify;
   options.near_integration = args_.tabi_near_integration;
   options.quad_buffer = args_.tabi_quad_buffer;
   options.leaf_near_policy = args_.tabi_leaf_near_policy;
   options.leaf_panel_kernel = args_.tabi_leaf_panel_kernel;
   options.adaptive_level = args_.tabi_adaptive_level;
   options.cluster_policy = args_.tabi_cluster_policy;
+  options.leaf_pair_kernel = args_.tabi_leaf_pair_kernel;
+  options.leaf_kernel_profile = args_.tabi_leaf_kernel_profile;
+  options.leaf_work_profile = args_.tabi_leaf_work_profile;
+  options.matvec_cost_profile = args_.tabi_matvec_cost_profile;
+  options.jcp_direct_kernel = args_.tabi_jcp_direct_kernel;
+  options.leaf_pair_selection_profile =
+      args_.tabi_leaf_pair_selection_profile;
+  options.leaf_pair_probe_cache = args_.tabi_leaf_pair_probe_cache;
+  options.leaf_pair_target_group = args_.tabi_leaf_pair_target_group;
+  options.leaf_pair_directness_probe =
+      args_.tabi_leaf_pair_directness_probe;
+  options.leaf_pair_directness_cache =
+      args_.tabi_leaf_pair_directness_cache;
+  options.leaf_pair_directness_verify =
+      args_.tabi_leaf_pair_directness_verify;
+  options.leaf_pair_scheduler = args_.tabi_leaf_pair_scheduler;
+  options.leaf_pair_worklist_max_active =
+      args_.tabi_leaf_pair_worklist_max_active;
+  options.leaf_pair_worklist_verify =
+      args_.tabi_leaf_pair_worklist_verify;
+  options.leaf_block_verify = args_.tabi_leaf_block_verify;
+  options.target_batch_size = args_.tabi_target_batch_size;
+  options.leaf_pair_min_source_panels =
+      args_.tabi_leaf_pair_min_source_panels;
+  options.leaf_pair_min_targets = args_.tabi_leaf_pair_min_targets;
+  options.leaf_pair_max_lookahead =
+      args_.tabi_leaf_pair_max_lookahead;
   options.interaction_mode = args_.tabi_interaction_mode;
   options.node_bounds = args_.tabi_node_bounds;
   options.tree_builder = args_.tabi_tree_builder;
@@ -10156,7 +11550,48 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   options.convergence_unstable_rho_cap =
       args_.tabi_convergence_unstable_rho_cap;
   options.convergence_calibration = args_.tabi_convergence_calibration;
+  options.convergence_dielectric_amp =
+      args_.tabi_convergence_dielectric_amp;
+  options.convergence_estimator_model =
+      args_.tabi_convergence_estimator_model;
+  options.convergence_channel_calibration =
+      args_.tabi_convergence_channel_calibration;
+  options.convergence_split_policy = args_.tabi_convergence_split_policy;
+  options.convergence_split_selectivity =
+      args_.tabi_convergence_split_selectivity;
+  options.convergence_split_absolute_floor =
+      args_.tabi_convergence_split_absolute_floor;
+  options.convergence_overreject_audit =
+      args_.tabi_convergence_overreject_audit;
+  options.convergence_overreject_detail =
+      args_.tabi_convergence_overreject_detail;
+  options.convergence_shape_audit = args_.tabi_convergence_shape_audit;
+  options.convergence_kernel_response_audit =
+      args_.tabi_convergence_kernel_response_audit;
+  options.channel_missed_semantics = args_.tabi_channel_missed_semantics;
+  options.accepted_miss_diagnostics =
+      args_.tabi_accepted_miss_diagnostics;
+  options.accepted_miss_absolute_floor =
+      args_.tabi_accepted_miss_absolute_floor;
+  options.convergence_k3_accepted_rho_cap =
+      args_.tabi_convergence_k3_accepted_rho_cap;
+  options.mac_distance_policy = args_.tabi_mac_distance_policy;
+  options.mac_surface_margin_factor =
+      args_.tabi_mac_surface_margin_factor;
+  options.mac_surface_margin_policy =
+      args_.tabi_mac_surface_margin_policy;
+  options.mac_surface_margin_aspect_threshold =
+      args_.tabi_mac_surface_margin_aspect_threshold;
+  options.mac_surface_margin_rho_trigger =
+      args_.tabi_mac_surface_margin_rho_trigger;
+  options.mac_surface_margin_soft_aspect_threshold =
+      args_.tabi_mac_surface_margin_soft_aspect_threshold;
+  options.mac_surface_margin_soft_rho_trigger =
+      args_.tabi_mac_surface_margin_soft_rho_trigger;
+  options.mac_surface_margin_soft_factor =
+      args_.tabi_mac_surface_margin_soft_factor;
   options.expansion_audit = args_.tabi_expansion_audit;
+  options.expansion_audit_channel = args_.tabi_expansion_audit_channel;
   options.expansion_audit_sample_count =
       args_.tabi_expansion_audit_sample_count;
   options.expansion_audit_max_panels =
@@ -10173,6 +11608,8 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   if (options.progress == "auto" && args_.timing != "detail")
     options.progress = "off";
   options.progress_interval_seconds = args_.tabi_progress_interval;
+  prepare_progress.write("tabi_options_built", "running");
+  prepare_progress.write("solver_enter", "running");
   const Tabi::Result tabi = Tabi::solve_linear_pb(tabi_atoms, options, executor);
 
   solve.pbe_backend = "tabi";
@@ -10235,6 +11672,11 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_solid_angle_ms = tabi.solid_angle_ms;
   solve.tabi_tree_moment_ms = tabi.tree_moment_ms;
   solve.tabi_tree_traversal_ms = tabi.tree_traversal_ms;
+  solve.tabi_matvec_cost_profile = tabi.matvec_cost_profile;
+  solve.tabi_leaf_panels_per_second = tabi.leaf_panels_per_second;
+  solve.tabi_clean_leaf_panels_per_second =
+      tabi.clean_leaf_panels_per_second;
+  solve.tabi_tree_traversal_fraction = tabi.tree_traversal_fraction;
   solve.tabi_near_eval_ms = tabi.near_eval_ms;
   solve.tabi_far_eval_ms = tabi.far_eval_ms;
   solve.tabi_singular_near_eval_ms = tabi.singular_near_eval_ms;
@@ -10255,6 +11697,45 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_smooth_leaf_node_interactions =
       tabi.smooth_leaf_node_interactions;
   solve.tabi_leaf_pruned_interactions = tabi.leaf_pruned_interactions;
+  solve.tabi_leaf_work_profile = tabi.leaf_work_profile;
+  solve.tabi_leaf_work_mac_terminal_panels =
+      tabi.leaf_work_mac_terminal_panels;
+  solve.tabi_leaf_work_physical_gap_panels =
+      tabi.leaf_work_physical_gap_panels;
+  solve.tabi_leaf_work_fragmentation_panels =
+      tabi.leaf_work_fragmentation_panels;
+  solve.tabi_leaf_work_convergence_panels =
+      tabi.leaf_work_convergence_panels;
+  solve.tabi_leaf_work_convergence_estimator_panels =
+      tabi.leaf_work_convergence_estimator_panels;
+  solve.tabi_leaf_work_convergence_rho_panels =
+      tabi.leaf_work_convergence_rho_panels;
+  solve.tabi_leaf_work_convergence_aspect_panels =
+      tabi.leaf_work_convergence_aspect_panels;
+  solve.tabi_leaf_work_surface_margin_panels =
+      tabi.leaf_work_surface_margin_panels;
+  solve.tabi_leaf_work_surface_margin_hard_panels =
+      tabi.leaf_work_surface_margin_hard_panels;
+  solve.tabi_leaf_work_surface_margin_soft_panels =
+      tabi.leaf_work_surface_margin_soft_panels;
+  solve.tabi_leaf_work_k3_rho_cap_panels =
+      tabi.leaf_work_k3_rho_cap_panels;
+  solve.tabi_leaf_work_singular_fallback_panels =
+      tabi.leaf_work_singular_fallback_panels;
+  solve.tabi_leaf_work_scalar_tail_panels =
+      tabi.leaf_work_scalar_tail_panels;
+  solve.tabi_leaf_work_profile_accounted_panels =
+      tabi.leaf_work_profile_accounted_panels;
+  solve.tabi_leaf_work_mac_terminal_frac =
+      tabi.leaf_work_mac_terminal_frac;
+  solve.tabi_leaf_work_convergence_frac =
+      tabi.leaf_work_convergence_frac;
+  solve.tabi_leaf_work_surface_margin_frac =
+      tabi.leaf_work_surface_margin_frac;
+  solve.tabi_leaf_work_singular_fallback_frac =
+      tabi.leaf_work_singular_fallback_frac;
+  solve.tabi_leaf_work_scalar_tail_frac =
+      tabi.leaf_work_scalar_tail_frac;
   solve.tabi_adaptive_smooth_leaf_accepted =
       tabi.adaptive_smooth_leaf_accepted;
   solve.tabi_adaptive_smooth_leaf_rejected =
@@ -10282,7 +11763,124 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
       tabi.target_cluster_panels_pruned;
   solve.tabi_target_cluster_rejected = tabi.target_cluster_rejected;
   solve.tabi_target_cluster_eval_ms = tabi.target_cluster_eval_ms;
+  solve.tabi_leaf_pair_batch_interactions =
+      tabi.leaf_pair_batch_interactions;
+  solve.tabi_leaf_pair_batch_targets = tabi.leaf_pair_batch_targets;
+  solve.tabi_leaf_pair_batch_source_panels =
+      tabi.leaf_pair_batch_source_panels;
+  solve.tabi_leaf_pair_batch_residual_panels =
+      tabi.leaf_pair_batch_residual_panels;
+  solve.tabi_leaf_pair_batch_fallbacks = tabi.leaf_pair_batch_fallbacks;
+  solve.tabi_leaf_pair_batch_ms = tabi.leaf_pair_batch_ms;
+  solve.tabi_leaf_pair_batch_kernel = tabi.leaf_pair_batch_kernel;
+  solve.tabi_leaf_pair_batch_vectorized_sources =
+      tabi.leaf_pair_batch_vectorized_sources;
+  solve.tabi_leaf_pair_batch_vector_lanes =
+      tabi.leaf_pair_batch_vector_lanes;
+  solve.tabi_leaf_pair_batch_pairs_per_second =
+      tabi.leaf_pair_batch_pairs_per_second;
+  solve.tabi_leaf_kernel_profile = tabi.leaf_kernel_profile;
+  solve.tabi_leaf_work_profile = tabi.leaf_work_profile;
+  solve.tabi_jcp_direct_kernel = tabi.jcp_direct_kernel;
+  solve.tabi_leaf_kernel_scalar_tasks = tabi.leaf_kernel_scalar_tasks;
+  solve.tabi_leaf_kernel_batch_tasks = tabi.leaf_kernel_batch_tasks;
+  solve.tabi_leaf_kernel_source_panel_evals =
+      tabi.leaf_kernel_source_panel_evals;
+  solve.tabi_leaf_kernel_scalar_ms = tabi.leaf_kernel_scalar_ms;
+  solve.tabi_leaf_kernel_target_avx2_ms =
+      tabi.leaf_kernel_target_avx2_ms;
+  solve.tabi_leaf_kernel_tail_ms = tabi.leaf_kernel_tail_ms;
+  solve.tabi_leaf_pair_batch_soa_sources =
+      tabi.leaf_pair_batch_soa_sources;
+  solve.tabi_leaf_pair_batch_soa_ms = tabi.leaf_pair_batch_soa_ms;
+  solve.tabi_leaf_pair_batch_scalar_tail_ms =
+      tabi.leaf_pair_batch_scalar_tail_ms;
+  solve.tabi_leaf_pair_batch_clean_source_panels_per_second =
+      tabi.leaf_pair_batch_clean_source_panels_per_second;
+  solve.tabi_leaf_pair_selection_profile =
+      tabi.leaf_pair_selection_profile;
+  solve.tabi_leaf_pair_probe_cache = tabi.leaf_pair_probe_cache;
+  solve.tabi_leaf_pair_target_group = tabi.leaf_pair_target_group;
+  solve.tabi_leaf_pair_directness_probe = tabi.leaf_pair_directness_probe;
+  solve.tabi_leaf_pair_directness_cache = tabi.leaf_pair_directness_cache;
+  solve.tabi_leaf_pair_directness_verify = tabi.leaf_pair_directness_verify;
+  solve.tabi_leaf_pair_max_lookahead = tabi.leaf_pair_max_lookahead;
+  solve.tabi_leaf_pair_selection_candidate_scans =
+      tabi.leaf_pair_selection_candidate_scans;
+  solve.tabi_leaf_pair_selection_clean_rejects =
+      tabi.leaf_pair_selection_clean_rejects;
+  solve.tabi_leaf_pair_selection_probe_calls =
+      tabi.leaf_pair_selection_probe_calls;
+  solve.tabi_leaf_pair_selection_probe_node_visits =
+      tabi.leaf_pair_selection_probe_node_visits;
+  solve.tabi_leaf_pair_selection_probe_ms =
+      tabi.leaf_pair_selection_probe_ms;
+  solve.tabi_leaf_pair_selection_ms = tabi.leaf_pair_selection_ms;
+  solve.tabi_leaf_pair_selection_probe_cache_hits =
+      tabi.leaf_pair_selection_probe_cache_hits;
+  solve.tabi_leaf_pair_selection_probe_cache_misses =
+      tabi.leaf_pair_selection_probe_cache_misses;
+  solve.tabi_leaf_pair_selection_insufficient_targets =
+      tabi.leaf_pair_selection_insufficient_targets;
+  solve.tabi_leaf_pair_selection_same_target_leaf_rejects =
+      tabi.leaf_pair_selection_same_target_leaf_rejects;
+  solve.tabi_leaf_pair_directness_ancestor_probe_calls =
+      tabi.leaf_pair_directness_ancestor_probe_calls;
+  solve.tabi_leaf_pair_directness_ancestor_probe_node_visits =
+      tabi.leaf_pair_directness_ancestor_probe_node_visits;
+  solve.tabi_leaf_pair_directness_ancestor_probe_ms =
+      tabi.leaf_pair_directness_ancestor_probe_ms;
+  solve.tabi_leaf_pair_directness_pair_cache_hits =
+      tabi.leaf_pair_directness_pair_cache_hits;
+  solve.tabi_leaf_pair_directness_pair_cache_misses =
+      tabi.leaf_pair_directness_pair_cache_misses;
+  solve.tabi_leaf_pair_directness_all_direct_proofs =
+      tabi.leaf_pair_directness_all_direct_proofs;
+  solve.tabi_leaf_pair_directness_mixed_fallbacks =
+      tabi.leaf_pair_directness_mixed_fallbacks;
+  solve.tabi_leaf_pair_directness_verify_checks =
+      tabi.leaf_pair_directness_verify_checks;
+  solve.tabi_leaf_pair_directness_verify_mismatches =
+      tabi.leaf_pair_directness_verify_mismatches;
+  solve.tabi_leaf_pair_scheduler = tabi.leaf_pair_scheduler;
+  solve.tabi_leaf_pair_worklist_max_active =
+      tabi.leaf_pair_worklist_max_active;
+  solve.tabi_leaf_pair_worklist_verify = tabi.leaf_pair_worklist_verify;
+  solve.tabi_leaf_pair_worklist_tasks = tabi.leaf_pair_worklist_tasks;
+  solve.tabi_leaf_pair_worklist_groups = tabi.leaf_pair_worklist_groups;
+  solve.tabi_leaf_pair_worklist_batched_groups =
+      tabi.leaf_pair_worklist_batched_groups;
+  solve.tabi_leaf_pair_worklist_scalar_flush_tasks =
+      tabi.leaf_pair_worklist_scalar_flush_tasks;
+  solve.tabi_leaf_pair_worklist_forced_flushes =
+      tabi.leaf_pair_worklist_forced_flushes;
+  solve.tabi_leaf_pair_worklist_active_groups_max =
+      tabi.leaf_pair_worklist_active_groups_max;
+  solve.tabi_leaf_pair_worklist_ms = tabi.leaf_pair_worklist_ms;
+  solve.tabi_leaf_pair_worklist_verify_checks =
+      tabi.leaf_pair_worklist_verify_checks;
+  solve.tabi_leaf_pair_worklist_verify_mismatches =
+      tabi.leaf_pair_worklist_verify_mismatches;
+  solve.tabi_leaf_block_verify = tabi.leaf_block_verify;
+  solve.tabi_leaf_block_target_leaves = tabi.leaf_block_target_leaves;
+  solve.tabi_leaf_block_targets = tabi.leaf_block_targets;
+  solve.tabi_leaf_block_source_groups = tabi.leaf_block_source_groups;
+  solve.tabi_leaf_block_batched_groups = tabi.leaf_block_batched_groups;
+  solve.tabi_leaf_block_scalar_tail_tasks =
+      tabi.leaf_block_scalar_tail_tasks;
+  solve.tabi_leaf_block_group_ms = tabi.leaf_block_group_ms;
+  solve.tabi_leaf_block_flush_ms = tabi.leaf_block_flush_ms;
+  solve.tabi_leaf_block_writeback_ms = tabi.leaf_block_writeback_ms;
+  solve.tabi_leaf_block_verify_checks = tabi.leaf_block_verify_checks;
+  solve.tabi_leaf_block_verify_mismatches =
+      tabi.leaf_block_verify_mismatches;
+  solve.tabi_tree_preset = tabi.tree_preset;
   solve.tabi_adaptive_level = tabi.adaptive_level;
+  solve.tabi_cluster_policy = tabi.cluster_policy;
+  solve.tabi_target_batch_size = tabi.target_batch_size;
+  solve.tabi_leaf_pair_min_source_panels =
+      tabi.leaf_pair_min_source_panels;
+  solve.tabi_leaf_pair_min_targets = tabi.leaf_pair_min_targets;
   solve.tabi_leaf_near_policy = tabi.leaf_near_policy;
   solve.tabi_leaf_panel_kernel = tabi.leaf_panel_kernel;
   solve.tabi_interaction_mode = tabi.interaction_mode;
@@ -10324,6 +11922,32 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
       tabi.mac_convergence_rho_reject_panels;
   solve.tabi_mac_convergence_aspect_reject_panels =
       tabi.mac_convergence_aspect_reject_panels;
+  solve.tabi_mac_surface_margin_rejects =
+      tabi.mac_surface_margin_rejects;
+  solve.tabi_mac_surface_margin_reject_panels =
+      tabi.mac_surface_margin_reject_panels;
+  solve.tabi_mac_surface_margin_applied =
+      tabi.mac_surface_margin_applied;
+  solve.tabi_mac_surface_margin_skipped =
+      tabi.mac_surface_margin_skipped;
+  solve.tabi_mac_surface_margin_adaptive_rejects =
+      tabi.mac_surface_margin_adaptive_rejects;
+  solve.tabi_mac_surface_margin_adaptive_reject_panels =
+      tabi.mac_surface_margin_adaptive_reject_panels;
+  solve.tabi_mac_surface_margin_skipped_accepted_far =
+      tabi.mac_surface_margin_skipped_accepted_far;
+  solve.tabi_mac_surface_margin_hard_applied =
+      tabi.mac_surface_margin_hard_applied;
+  solve.tabi_mac_surface_margin_soft_applied =
+      tabi.mac_surface_margin_soft_applied;
+  solve.tabi_mac_surface_margin_hard_rejects =
+      tabi.mac_surface_margin_hard_rejects;
+  solve.tabi_mac_surface_margin_hard_reject_panels =
+      tabi.mac_surface_margin_hard_reject_panels;
+  solve.tabi_mac_surface_margin_soft_rejects =
+      tabi.mac_surface_margin_soft_rejects;
+  solve.tabi_mac_surface_margin_soft_reject_panels =
+      tabi.mac_surface_margin_soft_reject_panels;
   solve.tabi_fragmented_far_count = tabi.fragmented_far_count;
   solve.tabi_fragmented_far_panels = tabi.fragmented_far_panels;
   solve.tabi_fragmented_split_rejects = tabi.fragmented_split_rejects;
@@ -10346,6 +11970,46 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_convergence_unstable_rho_cap =
       tabi.convergence_unstable_rho_cap;
   solve.tabi_convergence_calibration = tabi.convergence_calibration;
+  solve.tabi_convergence_dielectric_amp =
+      tabi.convergence_dielectric_amp;
+  solve.tabi_convergence_estimator_model =
+      tabi.convergence_estimator_model;
+  solve.tabi_convergence_channel_calibration =
+      tabi.convergence_channel_calibration;
+  solve.tabi_convergence_split_policy = tabi.convergence_split_policy;
+  solve.tabi_convergence_split_selectivity =
+      tabi.convergence_split_selectivity;
+  solve.tabi_convergence_split_absolute_floor =
+      tabi.convergence_split_absolute_floor;
+  solve.tabi_convergence_overreject_audit =
+      tabi.convergence_overreject_audit;
+  solve.tabi_convergence_overreject_detail =
+      tabi.convergence_overreject_detail;
+  solve.tabi_convergence_shape_audit = tabi.convergence_shape_audit;
+  solve.tabi_convergence_kernel_response_audit =
+      tabi.convergence_kernel_response_audit;
+  solve.tabi_channel_missed_semantics = tabi.channel_missed_semantics;
+  solve.tabi_accepted_miss_diagnostics =
+      tabi.accepted_miss_diagnostics;
+  solve.tabi_accepted_miss_absolute_floor =
+      tabi.accepted_miss_absolute_floor;
+  solve.tabi_convergence_k3_accepted_rho_cap =
+      tabi.convergence_k3_accepted_rho_cap;
+  solve.tabi_mac_distance_policy = tabi.mac_distance_policy;
+  solve.tabi_mac_surface_margin_factor =
+      tabi.mac_surface_margin_factor;
+  solve.tabi_mac_surface_margin_policy =
+      tabi.mac_surface_margin_policy;
+  solve.tabi_mac_surface_margin_aspect_threshold =
+      tabi.mac_surface_margin_aspect_threshold;
+  solve.tabi_mac_surface_margin_rho_trigger =
+      tabi.mac_surface_margin_rho_trigger;
+  solve.tabi_mac_surface_margin_soft_aspect_threshold =
+      tabi.mac_surface_margin_soft_aspect_threshold;
+  solve.tabi_mac_surface_margin_soft_rho_trigger =
+      tabi.mac_surface_margin_soft_rho_trigger;
+  solve.tabi_mac_surface_margin_soft_factor =
+      tabi.mac_surface_margin_soft_factor;
   solve.tabi_convergence_estimator_samples =
       tabi.convergence_estimator_samples;
   solve.tabi_convergence_estimator_unstable_far_count =
@@ -10356,6 +12020,10 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
       tabi.convergence_estimator_split_rejects;
   solve.tabi_convergence_estimator_split_reject_panels =
       tabi.convergence_estimator_split_reject_panels;
+  solve.tabi_convergence_low_abs_reaccepted_far_count =
+      tabi.convergence_low_abs_reaccepted_far_count;
+  solve.tabi_convergence_low_abs_reaccepted_far_panels =
+      tabi.convergence_low_abs_reaccepted_far_panels;
   solve.tabi_convergence_estimator_tail_ratio_max =
       tabi.convergence_estimator_tail_ratio_max;
   solve.tabi_convergence_estimator_tail_ratio_mean =
@@ -10364,6 +12032,10 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
       tabi.convergence_estimator_error_max;
   solve.tabi_convergence_estimator_error_mean =
       tabi.convergence_estimator_error_mean;
+  solve.tabi_convergence_estimator_abs_error_max =
+      tabi.convergence_estimator_abs_error_max;
+  solve.tabi_convergence_estimator_abs_error_mean =
+      tabi.convergence_estimator_abs_error_mean;
   solve.tabi_convergence_tail_norm_p_max =
       tabi.convergence_tail_norm_p_max;
   solve.tabi_convergence_tail_norm_p_mean =
@@ -10376,10 +12048,118 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
       tabi.convergence_effective_jcp_amp_max;
   solve.tabi_convergence_effective_jcp_amp_mean =
       tabi.convergence_effective_jcp_amp_mean;
+  solve.tabi_convergence_dielectric_amp_max =
+      tabi.convergence_dielectric_amp_max;
+  solve.tabi_convergence_dielectric_amp_mean =
+      tabi.convergence_dielectric_amp_mean;
+  solve.tabi_convergence_channel_estimated_error_max =
+      tabi.convergence_channel_estimated_error_max;
+  solve.tabi_convergence_channel_estimated_error_mean =
+      tabi.convergence_channel_estimated_error_mean;
+  solve.tabi_convergence_channel_effective_jcp_amp_max =
+      tabi.convergence_channel_effective_jcp_amp_max;
+  solve.tabi_convergence_channel_effective_jcp_amp_mean =
+      tabi.convergence_channel_effective_jcp_amp_mean;
+  solve.tabi_convergence_channel_unstable_far_count =
+      tabi.convergence_channel_unstable_far_count;
+  solve.tabi_convergence_channel_unstable_far_panels =
+      tabi.convergence_channel_unstable_far_panels;
+  solve.tabi_convergence_channel_split_rejects =
+      tabi.convergence_channel_split_rejects;
+  solve.tabi_convergence_channel_split_reject_panels =
+      tabi.convergence_channel_split_reject_panels;
+  solve.tabi_convergence_channel_low_abs_reaccepted_count =
+      tabi.convergence_channel_low_abs_reaccepted_count;
+  solve.tabi_convergence_channel_low_abs_reaccepted_panels =
+      tabi.convergence_channel_low_abs_reaccepted_panels;
+  solve.tabi_convergence_channel_high_error_caught =
+      tabi.convergence_channel_high_error_caught;
+  solve.tabi_convergence_channel_high_error_missed =
+      tabi.convergence_channel_high_error_missed;
+  solve.tabi_convergence_channel_high_error_caught_by_split =
+      tabi.convergence_channel_high_error_caught_by_split;
   solve.tabi_convergence_estimator_high_error_caught =
       tabi.convergence_estimator_high_error_caught;
   solve.tabi_convergence_estimator_high_error_missed =
       tabi.convergence_estimator_high_error_missed;
+  solve.tabi_convergence_estimator_high_error_caught_by_split =
+      tabi.convergence_estimator_high_error_caught_by_split;
+  solve.tabi_convergence_estimator_phantom_high_error_count =
+      tabi.convergence_estimator_phantom_high_error_count;
+  solve.tabi_convergence_estimator_phantom_high_error_abs_max =
+      tabi.convergence_estimator_phantom_high_error_abs_max;
+  solve.tabi_convergence_overreject_count =
+      tabi.convergence_overreject_count;
+  solve.tabi_convergence_overreject_panels =
+      tabi.convergence_overreject_panels;
+  solve.tabi_convergence_overreject_caught_count =
+      tabi.convergence_overreject_caught_count;
+  solve.tabi_convergence_overreject_caught_panels =
+      tabi.convergence_overreject_caught_panels;
+  solve.tabi_convergence_overreject_abs_error_max =
+      tabi.convergence_overreject_abs_error_max;
+  solve.tabi_convergence_overreject_abs_error_mean =
+      tabi.convergence_overreject_abs_error_mean;
+  solve.tabi_convergence_overreject_abs_error_p95 =
+      tabi.convergence_overreject_abs_error_p95;
+  solve.tabi_convergence_overreject_abs_error_p99 =
+      tabi.convergence_overreject_abs_error_p99;
+  solve.tabi_convergence_overreject_estimated_abs_error_max =
+      tabi.convergence_overreject_estimated_abs_error_max;
+  solve.tabi_convergence_overreject_estimated_abs_error_mean =
+      tabi.convergence_overreject_estimated_abs_error_mean;
+  solve.tabi_convergence_overreject_required_scale_max =
+      tabi.convergence_overreject_required_scale_max;
+  solve.tabi_convergence_overreject_required_scale_p95 =
+      tabi.convergence_overreject_required_scale_p95;
+  solve.tabi_convergence_overreject_required_scale_p99 =
+      tabi.convergence_overreject_required_scale_p99;
+  solve.tabi_convergence_channel_overreject_count =
+      tabi.convergence_channel_overreject_count;
+  solve.tabi_convergence_channel_overreject_caught_count =
+      tabi.convergence_channel_overreject_caught_count;
+  solve.tabi_convergence_channel_overreject_panels =
+      tabi.convergence_channel_overreject_panels;
+  solve.tabi_convergence_channel_overreject_abs_error_max =
+      tabi.convergence_channel_overreject_abs_error_max;
+  solve.tabi_convergence_channel_overreject_abs_error_mean =
+      tabi.convergence_channel_overreject_abs_error_mean;
+  solve.tabi_convergence_channel_overreject_required_scale_max =
+      tabi.convergence_channel_overreject_required_scale_max;
+  solve.tabi_convergence_channel_overreject_required_scale_p99 =
+      tabi.convergence_channel_overreject_required_scale_p99;
+  solve.tabi_phantom_high_error_channel_count =
+      tabi.phantom_high_error_channel_count;
+  solve.tabi_phantom_high_error_channel_abs_max =
+      tabi.phantom_high_error_channel_abs_max;
+  solve.tabi_accepted_miss_channel_count =
+      tabi.accepted_miss_channel_count;
+  solve.tabi_accepted_miss_channel_panels =
+      tabi.accepted_miss_channel_panels;
+  solve.tabi_accepted_miss_channel_rho_min =
+      tabi.accepted_miss_channel_rho_min;
+  solve.tabi_accepted_miss_channel_rho_mean =
+      tabi.accepted_miss_channel_rho_mean;
+  solve.tabi_accepted_miss_channel_rho_max =
+      tabi.accepted_miss_channel_rho_max;
+  solve.tabi_accepted_miss_channel_tail_ratio_mean =
+      tabi.accepted_miss_channel_tail_ratio_mean;
+  solve.tabi_accepted_miss_channel_tail_ratio_max =
+      tabi.accepted_miss_channel_tail_ratio_max;
+  solve.tabi_accepted_miss_channel_estimated_error_mean =
+      tabi.accepted_miss_channel_estimated_error_mean;
+  solve.tabi_accepted_miss_channel_estimated_error_max =
+      tabi.accepted_miss_channel_estimated_error_max;
+  solve.tabi_accepted_miss_worst_channel =
+      tabi.accepted_miss_worst_channel;
+  solve.tabi_convergence_k3_rho_cap_rejects =
+      tabi.convergence_k3_rho_cap_rejects;
+  solve.tabi_convergence_k3_rho_cap_reject_panels =
+      tabi.convergence_k3_rho_cap_reject_panels;
+  solve.tabi_mac_surface_margin_rejects =
+      tabi.mac_surface_margin_rejects;
+  solve.tabi_mac_surface_margin_reject_panels =
+      tabi.mac_surface_margin_reject_panels;
   solve.tabi_moment_audit_nodes = tabi.moment_audit_nodes;
   solve.tabi_moment_translation_rel_error_max =
       tabi.moment_translation_rel_error_max;
@@ -10396,6 +12176,7 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_moment_dynamic_range_max =
       tabi.moment_dynamic_range_max;
   solve.tabi_expansion_audit = tabi.expansion_audit;
+  solve.tabi_expansion_audit_channel = tabi.expansion_audit_channel;
   solve.tabi_far_expansion_audit_pairs =
       tabi.far_expansion_audit_pairs;
   solve.tabi_far_expansion_audit_panels =
@@ -10406,6 +12187,18 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
       tabi.far_expansion_rel_error_max;
   solve.tabi_far_expansion_rel_error_mean =
       tabi.far_expansion_rel_error_mean;
+  solve.tabi_far_expansion_rel_error_p95 =
+      tabi.far_expansion_rel_error_p95;
+  solve.tabi_far_expansion_rel_error_p99 =
+      tabi.far_expansion_rel_error_p99;
+  solve.tabi_far_expansion_channel_rel_error_max =
+      tabi.far_expansion_channel_rel_error_max;
+  solve.tabi_far_expansion_channel_rel_error_mean =
+      tabi.far_expansion_channel_rel_error_mean;
+  solve.tabi_far_expansion_channel_rel_error_p99 =
+      tabi.far_expansion_channel_rel_error_p99;
+  solve.tabi_far_expansion_worst_channel =
+      tabi.far_expansion_worst_channel;
   solve.tabi_far_expansion_mean_gate_pass =
       tabi.far_expansion_mean_gate_pass;
   solve.tabi_far_convergence_rho_max =
@@ -10538,6 +12331,43 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_preconditioner_requested = tabi.preconditioner_requested;
   solve.tabi_preconditioner_effective = tabi.preconditioner_effective;
   solve.tabi_preconditioner_block_near = tabi.preconditioner_block_near;
+  solve.tabi_preconditioner_block_panel_cap =
+      tabi.preconditioner_block_panel_cap;
+  solve.tabi_preconditioner_memory_budget_bytes =
+      tabi.preconditioner_memory_budget_bytes;
+  solve.tabi_preconditioner_estimated_bytes =
+      tabi.preconditioner_estimated_bytes;
+  solve.tabi_preconditioner_valid_blocks = tabi.preconditioner_valid_blocks;
+  solve.tabi_preconditioner_valid_panels = tabi.preconditioner_valid_panels;
+  solve.tabi_preconditioner_ill_conditioned_blocks =
+      tabi.preconditioner_ill_conditioned_blocks;
+  solve.tabi_preconditioner_setup_ms = tabi.preconditioner_setup_ms;
+  solve.tabi_preconditioner_apply_ms = tabi.preconditioner_apply_ms;
+  solve.tabi_preconditioner_apply_calls = tabi.preconditioner_apply_calls;
+  solve.tabi_preconditioner_coarse_aggregate_cap =
+      tabi.preconditioner_coarse_aggregate_cap;
+  solve.tabi_preconditioner_coarse_aggregates =
+      tabi.preconditioner_coarse_aggregates;
+  solve.tabi_preconditioner_coarse_dimension =
+      tabi.preconditioner_coarse_dimension;
+  solve.tabi_preconditioner_coarse_base = tabi.preconditioner_coarse_base;
+  solve.tabi_preconditioner_coarse_matrix_bytes =
+      tabi.preconditioner_coarse_matrix_bytes;
+  solve.tabi_preconditioner_coarse_pivot_ratio =
+      tabi.preconditioner_coarse_pivot_ratio;
+  solve.tabi_preconditioner_coarse_status = tabi.preconditioner_coarse_status;
+  solve.tabi_preconditioner_coarse_setup_matvec_calls =
+      tabi.preconditioner_coarse_setup_matvec_calls;
+  solve.tabi_preconditioner_coarse_setup_ms =
+      tabi.preconditioner_coarse_setup_ms;
+  solve.tabi_preconditioner_coarse_apply_ms =
+      tabi.preconditioner_coarse_apply_ms;
+  solve.tabi_preconditioner_coarse_apply_calls =
+      tabi.preconditioner_coarse_apply_calls;
+  solve.tabi_preconditioner_coarse_rp_identity_error_max =
+      tabi.preconditioner_coarse_rp_identity_error_max;
+  solve.tabi_preconditioner_coarse_verify_rel_error_max =
+      tabi.preconditioner_coarse_verify_rel_error_max;
   solve.tabi_surface_generator = tabi.surface_generator;
   solve.tabi_discretization = tabi.discretization;
   solve.tabi_rhs_scale = tabi.rhs_scale;
@@ -10872,6 +12702,14 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
     result.tabi_solid_angle_ms = tabi_solve.tabi_solid_angle_ms;
     result.tabi_tree_moment_ms = tabi_solve.tabi_tree_moment_ms;
     result.tabi_tree_traversal_ms = tabi_solve.tabi_tree_traversal_ms;
+    result.tabi_matvec_cost_profile =
+        tabi_solve.tabi_matvec_cost_profile;
+    result.tabi_leaf_panels_per_second =
+        tabi_solve.tabi_leaf_panels_per_second;
+    result.tabi_clean_leaf_panels_per_second =
+        tabi_solve.tabi_clean_leaf_panels_per_second;
+    result.tabi_tree_traversal_fraction =
+        tabi_solve.tabi_tree_traversal_fraction;
     result.tabi_near_eval_ms = tabi_solve.tabi_near_eval_ms;
     result.tabi_far_eval_ms = tabi_solve.tabi_far_eval_ms;
     result.tabi_singular_near_eval_ms =
@@ -10901,6 +12739,45 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_smooth_leaf_node_interactions;
     result.tabi_leaf_pruned_interactions =
         tabi_solve.tabi_leaf_pruned_interactions;
+    result.tabi_leaf_work_profile = tabi_solve.tabi_leaf_work_profile;
+    result.tabi_leaf_work_mac_terminal_panels =
+        tabi_solve.tabi_leaf_work_mac_terminal_panels;
+    result.tabi_leaf_work_physical_gap_panels =
+        tabi_solve.tabi_leaf_work_physical_gap_panels;
+    result.tabi_leaf_work_fragmentation_panels =
+        tabi_solve.tabi_leaf_work_fragmentation_panels;
+    result.tabi_leaf_work_convergence_panels =
+        tabi_solve.tabi_leaf_work_convergence_panels;
+    result.tabi_leaf_work_convergence_estimator_panels =
+        tabi_solve.tabi_leaf_work_convergence_estimator_panels;
+    result.tabi_leaf_work_convergence_rho_panels =
+        tabi_solve.tabi_leaf_work_convergence_rho_panels;
+    result.tabi_leaf_work_convergence_aspect_panels =
+        tabi_solve.tabi_leaf_work_convergence_aspect_panels;
+    result.tabi_leaf_work_surface_margin_panels =
+        tabi_solve.tabi_leaf_work_surface_margin_panels;
+    result.tabi_leaf_work_surface_margin_hard_panels =
+        tabi_solve.tabi_leaf_work_surface_margin_hard_panels;
+    result.tabi_leaf_work_surface_margin_soft_panels =
+        tabi_solve.tabi_leaf_work_surface_margin_soft_panels;
+    result.tabi_leaf_work_k3_rho_cap_panels =
+        tabi_solve.tabi_leaf_work_k3_rho_cap_panels;
+    result.tabi_leaf_work_singular_fallback_panels =
+        tabi_solve.tabi_leaf_work_singular_fallback_panels;
+    result.tabi_leaf_work_scalar_tail_panels =
+        tabi_solve.tabi_leaf_work_scalar_tail_panels;
+    result.tabi_leaf_work_profile_accounted_panels =
+        tabi_solve.tabi_leaf_work_profile_accounted_panels;
+    result.tabi_leaf_work_mac_terminal_frac =
+        tabi_solve.tabi_leaf_work_mac_terminal_frac;
+    result.tabi_leaf_work_convergence_frac =
+        tabi_solve.tabi_leaf_work_convergence_frac;
+    result.tabi_leaf_work_surface_margin_frac =
+        tabi_solve.tabi_leaf_work_surface_margin_frac;
+    result.tabi_leaf_work_singular_fallback_frac =
+        tabi_solve.tabi_leaf_work_singular_fallback_frac;
+    result.tabi_leaf_work_scalar_tail_frac =
+        tabi_solve.tabi_leaf_work_scalar_tail_frac;
     result.tabi_adaptive_smooth_leaf_accepted =
         tabi_solve.tabi_adaptive_smooth_leaf_accepted;
     result.tabi_adaptive_smooth_leaf_rejected =
@@ -10931,7 +12808,151 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_target_cluster_rejected;
     result.tabi_target_cluster_eval_ms =
         tabi_solve.tabi_target_cluster_eval_ms;
+    result.tabi_leaf_pair_batch_interactions =
+        tabi_solve.tabi_leaf_pair_batch_interactions;
+    result.tabi_leaf_pair_batch_targets =
+        tabi_solve.tabi_leaf_pair_batch_targets;
+    result.tabi_leaf_pair_batch_source_panels =
+        tabi_solve.tabi_leaf_pair_batch_source_panels;
+    result.tabi_leaf_pair_batch_residual_panels =
+        tabi_solve.tabi_leaf_pair_batch_residual_panels;
+    result.tabi_leaf_pair_batch_fallbacks =
+        tabi_solve.tabi_leaf_pair_batch_fallbacks;
+    result.tabi_leaf_pair_batch_ms =
+        tabi_solve.tabi_leaf_pair_batch_ms;
+    result.tabi_leaf_pair_batch_kernel =
+        tabi_solve.tabi_leaf_pair_batch_kernel;
+    result.tabi_leaf_pair_batch_vectorized_sources =
+        tabi_solve.tabi_leaf_pair_batch_vectorized_sources;
+    result.tabi_leaf_pair_batch_vector_lanes =
+        tabi_solve.tabi_leaf_pair_batch_vector_lanes;
+    result.tabi_leaf_pair_batch_pairs_per_second =
+        tabi_solve.tabi_leaf_pair_batch_pairs_per_second;
+    result.tabi_leaf_kernel_profile = tabi_solve.tabi_leaf_kernel_profile;
+    result.tabi_leaf_work_profile = tabi_solve.tabi_leaf_work_profile;
+    result.tabi_jcp_direct_kernel = tabi_solve.tabi_jcp_direct_kernel;
+    result.tabi_leaf_kernel_scalar_tasks =
+        tabi_solve.tabi_leaf_kernel_scalar_tasks;
+    result.tabi_leaf_kernel_batch_tasks =
+        tabi_solve.tabi_leaf_kernel_batch_tasks;
+    result.tabi_leaf_kernel_source_panel_evals =
+        tabi_solve.tabi_leaf_kernel_source_panel_evals;
+    result.tabi_leaf_kernel_scalar_ms =
+        tabi_solve.tabi_leaf_kernel_scalar_ms;
+    result.tabi_leaf_kernel_target_avx2_ms =
+        tabi_solve.tabi_leaf_kernel_target_avx2_ms;
+    result.tabi_leaf_kernel_tail_ms =
+        tabi_solve.tabi_leaf_kernel_tail_ms;
+    result.tabi_leaf_pair_batch_soa_sources =
+        tabi_solve.tabi_leaf_pair_batch_soa_sources;
+    result.tabi_leaf_pair_batch_soa_ms =
+        tabi_solve.tabi_leaf_pair_batch_soa_ms;
+    result.tabi_leaf_pair_batch_scalar_tail_ms =
+        tabi_solve.tabi_leaf_pair_batch_scalar_tail_ms;
+    result.tabi_leaf_pair_batch_clean_source_panels_per_second =
+        tabi_solve.tabi_leaf_pair_batch_clean_source_panels_per_second;
+    result.tabi_leaf_pair_selection_profile =
+        tabi_solve.tabi_leaf_pair_selection_profile;
+    result.tabi_leaf_pair_probe_cache =
+        tabi_solve.tabi_leaf_pair_probe_cache;
+    result.tabi_leaf_pair_target_group =
+        tabi_solve.tabi_leaf_pair_target_group;
+    result.tabi_leaf_pair_directness_probe =
+        tabi_solve.tabi_leaf_pair_directness_probe;
+    result.tabi_leaf_pair_directness_cache =
+        tabi_solve.tabi_leaf_pair_directness_cache;
+    result.tabi_leaf_pair_directness_verify =
+        tabi_solve.tabi_leaf_pair_directness_verify;
+    result.tabi_leaf_pair_max_lookahead =
+        tabi_solve.tabi_leaf_pair_max_lookahead;
+    result.tabi_leaf_pair_selection_candidate_scans =
+        tabi_solve.tabi_leaf_pair_selection_candidate_scans;
+    result.tabi_leaf_pair_selection_clean_rejects =
+        tabi_solve.tabi_leaf_pair_selection_clean_rejects;
+    result.tabi_leaf_pair_selection_probe_calls =
+        tabi_solve.tabi_leaf_pair_selection_probe_calls;
+    result.tabi_leaf_pair_selection_probe_node_visits =
+        tabi_solve.tabi_leaf_pair_selection_probe_node_visits;
+    result.tabi_leaf_pair_selection_probe_ms =
+        tabi_solve.tabi_leaf_pair_selection_probe_ms;
+    result.tabi_leaf_pair_selection_ms =
+        tabi_solve.tabi_leaf_pair_selection_ms;
+    result.tabi_leaf_pair_selection_probe_cache_hits =
+        tabi_solve.tabi_leaf_pair_selection_probe_cache_hits;
+    result.tabi_leaf_pair_selection_probe_cache_misses =
+        tabi_solve.tabi_leaf_pair_selection_probe_cache_misses;
+    result.tabi_leaf_pair_selection_insufficient_targets =
+        tabi_solve.tabi_leaf_pair_selection_insufficient_targets;
+    result.tabi_leaf_pair_selection_same_target_leaf_rejects =
+        tabi_solve.tabi_leaf_pair_selection_same_target_leaf_rejects;
+    result.tabi_leaf_pair_directness_ancestor_probe_calls =
+        tabi_solve.tabi_leaf_pair_directness_ancestor_probe_calls;
+    result.tabi_leaf_pair_directness_ancestor_probe_node_visits =
+        tabi_solve.tabi_leaf_pair_directness_ancestor_probe_node_visits;
+    result.tabi_leaf_pair_directness_ancestor_probe_ms =
+        tabi_solve.tabi_leaf_pair_directness_ancestor_probe_ms;
+    result.tabi_leaf_pair_directness_pair_cache_hits =
+        tabi_solve.tabi_leaf_pair_directness_pair_cache_hits;
+    result.tabi_leaf_pair_directness_pair_cache_misses =
+        tabi_solve.tabi_leaf_pair_directness_pair_cache_misses;
+    result.tabi_leaf_pair_directness_all_direct_proofs =
+        tabi_solve.tabi_leaf_pair_directness_all_direct_proofs;
+    result.tabi_leaf_pair_directness_mixed_fallbacks =
+        tabi_solve.tabi_leaf_pair_directness_mixed_fallbacks;
+    result.tabi_leaf_pair_directness_verify_checks =
+        tabi_solve.tabi_leaf_pair_directness_verify_checks;
+    result.tabi_leaf_pair_directness_verify_mismatches =
+        tabi_solve.tabi_leaf_pair_directness_verify_mismatches;
+    result.tabi_leaf_pair_scheduler =
+        tabi_solve.tabi_leaf_pair_scheduler;
+    result.tabi_leaf_pair_worklist_max_active =
+        tabi_solve.tabi_leaf_pair_worklist_max_active;
+    result.tabi_leaf_pair_worklist_verify =
+        tabi_solve.tabi_leaf_pair_worklist_verify;
+    result.tabi_leaf_pair_worklist_tasks =
+        tabi_solve.tabi_leaf_pair_worklist_tasks;
+    result.tabi_leaf_pair_worklist_groups =
+        tabi_solve.tabi_leaf_pair_worklist_groups;
+    result.tabi_leaf_pair_worklist_batched_groups =
+        tabi_solve.tabi_leaf_pair_worklist_batched_groups;
+    result.tabi_leaf_pair_worklist_scalar_flush_tasks =
+        tabi_solve.tabi_leaf_pair_worklist_scalar_flush_tasks;
+    result.tabi_leaf_pair_worklist_forced_flushes =
+        tabi_solve.tabi_leaf_pair_worklist_forced_flushes;
+    result.tabi_leaf_pair_worklist_active_groups_max =
+        tabi_solve.tabi_leaf_pair_worklist_active_groups_max;
+    result.tabi_leaf_pair_worklist_ms =
+        tabi_solve.tabi_leaf_pair_worklist_ms;
+    result.tabi_leaf_pair_worklist_verify_checks =
+        tabi_solve.tabi_leaf_pair_worklist_verify_checks;
+    result.tabi_leaf_pair_worklist_verify_mismatches =
+        tabi_solve.tabi_leaf_pair_worklist_verify_mismatches;
+    result.tabi_leaf_block_verify = tabi_solve.tabi_leaf_block_verify;
+    result.tabi_leaf_block_target_leaves =
+        tabi_solve.tabi_leaf_block_target_leaves;
+    result.tabi_leaf_block_targets = tabi_solve.tabi_leaf_block_targets;
+    result.tabi_leaf_block_source_groups =
+        tabi_solve.tabi_leaf_block_source_groups;
+    result.tabi_leaf_block_batched_groups =
+        tabi_solve.tabi_leaf_block_batched_groups;
+    result.tabi_leaf_block_scalar_tail_tasks =
+        tabi_solve.tabi_leaf_block_scalar_tail_tasks;
+    result.tabi_leaf_block_group_ms = tabi_solve.tabi_leaf_block_group_ms;
+    result.tabi_leaf_block_flush_ms = tabi_solve.tabi_leaf_block_flush_ms;
+    result.tabi_leaf_block_writeback_ms =
+        tabi_solve.tabi_leaf_block_writeback_ms;
+    result.tabi_leaf_block_verify_checks =
+        tabi_solve.tabi_leaf_block_verify_checks;
+    result.tabi_leaf_block_verify_mismatches =
+        tabi_solve.tabi_leaf_block_verify_mismatches;
+    result.tabi_tree_preset = tabi_solve.tabi_tree_preset;
     result.tabi_adaptive_level = tabi_solve.tabi_adaptive_level;
+    result.tabi_cluster_policy = tabi_solve.tabi_cluster_policy;
+    result.tabi_target_batch_size = tabi_solve.tabi_target_batch_size;
+    result.tabi_leaf_pair_min_source_panels =
+        tabi_solve.tabi_leaf_pair_min_source_panels;
+    result.tabi_leaf_pair_min_targets =
+        tabi_solve.tabi_leaf_pair_min_targets;
     result.tabi_leaf_near_policy = tabi_solve.tabi_leaf_near_policy;
     result.tabi_leaf_panel_kernel = tabi_solve.tabi_leaf_panel_kernel;
     result.tabi_interaction_mode = tabi_solve.tabi_interaction_mode;
@@ -10977,6 +12998,32 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_mac_convergence_rho_reject_panels;
     result.tabi_mac_convergence_aspect_reject_panels =
         tabi_solve.tabi_mac_convergence_aspect_reject_panels;
+    result.tabi_mac_surface_margin_rejects =
+        tabi_solve.tabi_mac_surface_margin_rejects;
+    result.tabi_mac_surface_margin_reject_panels =
+        tabi_solve.tabi_mac_surface_margin_reject_panels;
+    result.tabi_mac_surface_margin_applied =
+        tabi_solve.tabi_mac_surface_margin_applied;
+    result.tabi_mac_surface_margin_skipped =
+        tabi_solve.tabi_mac_surface_margin_skipped;
+    result.tabi_mac_surface_margin_adaptive_rejects =
+        tabi_solve.tabi_mac_surface_margin_adaptive_rejects;
+    result.tabi_mac_surface_margin_adaptive_reject_panels =
+        tabi_solve.tabi_mac_surface_margin_adaptive_reject_panels;
+    result.tabi_mac_surface_margin_skipped_accepted_far =
+        tabi_solve.tabi_mac_surface_margin_skipped_accepted_far;
+    result.tabi_mac_surface_margin_hard_applied =
+        tabi_solve.tabi_mac_surface_margin_hard_applied;
+    result.tabi_mac_surface_margin_soft_applied =
+        tabi_solve.tabi_mac_surface_margin_soft_applied;
+    result.tabi_mac_surface_margin_hard_rejects =
+        tabi_solve.tabi_mac_surface_margin_hard_rejects;
+    result.tabi_mac_surface_margin_hard_reject_panels =
+        tabi_solve.tabi_mac_surface_margin_hard_reject_panels;
+    result.tabi_mac_surface_margin_soft_rejects =
+        tabi_solve.tabi_mac_surface_margin_soft_rejects;
+    result.tabi_mac_surface_margin_soft_reject_panels =
+        tabi_solve.tabi_mac_surface_margin_soft_reject_panels;
     result.tabi_fragmented_far_count =
         tabi_solve.tabi_fragmented_far_count;
     result.tabi_fragmented_far_panels =
@@ -11005,6 +13052,50 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_convergence_unstable_rho_cap;
     result.tabi_convergence_calibration =
         tabi_solve.tabi_convergence_calibration;
+    result.tabi_convergence_dielectric_amp =
+        tabi_solve.tabi_convergence_dielectric_amp;
+    result.tabi_convergence_estimator_model =
+        tabi_solve.tabi_convergence_estimator_model;
+    result.tabi_convergence_channel_calibration =
+        tabi_solve.tabi_convergence_channel_calibration;
+    result.tabi_convergence_split_policy =
+        tabi_solve.tabi_convergence_split_policy;
+    result.tabi_convergence_split_selectivity =
+        tabi_solve.tabi_convergence_split_selectivity;
+    result.tabi_convergence_split_absolute_floor =
+        tabi_solve.tabi_convergence_split_absolute_floor;
+    result.tabi_convergence_overreject_audit =
+        tabi_solve.tabi_convergence_overreject_audit;
+    result.tabi_convergence_overreject_detail =
+        tabi_solve.tabi_convergence_overreject_detail;
+    result.tabi_convergence_shape_audit =
+        tabi_solve.tabi_convergence_shape_audit;
+    result.tabi_convergence_kernel_response_audit =
+        tabi_solve.tabi_convergence_kernel_response_audit;
+    result.tabi_channel_missed_semantics =
+        tabi_solve.tabi_channel_missed_semantics;
+    result.tabi_accepted_miss_diagnostics =
+        tabi_solve.tabi_accepted_miss_diagnostics;
+    result.tabi_accepted_miss_absolute_floor =
+        tabi_solve.tabi_accepted_miss_absolute_floor;
+    result.tabi_convergence_k3_accepted_rho_cap =
+        tabi_solve.tabi_convergence_k3_accepted_rho_cap;
+    result.tabi_mac_distance_policy =
+        tabi_solve.tabi_mac_distance_policy;
+    result.tabi_mac_surface_margin_factor =
+        tabi_solve.tabi_mac_surface_margin_factor;
+    result.tabi_mac_surface_margin_policy =
+        tabi_solve.tabi_mac_surface_margin_policy;
+    result.tabi_mac_surface_margin_aspect_threshold =
+        tabi_solve.tabi_mac_surface_margin_aspect_threshold;
+    result.tabi_mac_surface_margin_rho_trigger =
+        tabi_solve.tabi_mac_surface_margin_rho_trigger;
+    result.tabi_mac_surface_margin_soft_aspect_threshold =
+        tabi_solve.tabi_mac_surface_margin_soft_aspect_threshold;
+    result.tabi_mac_surface_margin_soft_rho_trigger =
+        tabi_solve.tabi_mac_surface_margin_soft_rho_trigger;
+    result.tabi_mac_surface_margin_soft_factor =
+        tabi_solve.tabi_mac_surface_margin_soft_factor;
     result.tabi_convergence_estimator_samples =
         tabi_solve.tabi_convergence_estimator_samples;
     result.tabi_convergence_estimator_unstable_far_count =
@@ -11015,6 +13106,10 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_convergence_estimator_split_rejects;
     result.tabi_convergence_estimator_split_reject_panels =
         tabi_solve.tabi_convergence_estimator_split_reject_panels;
+    result.tabi_convergence_low_abs_reaccepted_far_count =
+        tabi_solve.tabi_convergence_low_abs_reaccepted_far_count;
+    result.tabi_convergence_low_abs_reaccepted_far_panels =
+        tabi_solve.tabi_convergence_low_abs_reaccepted_far_panels;
     result.tabi_convergence_estimator_tail_ratio_max =
         tabi_solve.tabi_convergence_estimator_tail_ratio_max;
     result.tabi_convergence_estimator_tail_ratio_mean =
@@ -11023,6 +13118,10 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_convergence_estimator_error_max;
     result.tabi_convergence_estimator_error_mean =
         tabi_solve.tabi_convergence_estimator_error_mean;
+    result.tabi_convergence_estimator_abs_error_max =
+        tabi_solve.tabi_convergence_estimator_abs_error_max;
+    result.tabi_convergence_estimator_abs_error_mean =
+        tabi_solve.tabi_convergence_estimator_abs_error_mean;
     result.tabi_convergence_tail_norm_p_max =
         tabi_solve.tabi_convergence_tail_norm_p_max;
     result.tabi_convergence_tail_norm_p_mean =
@@ -11035,10 +13134,140 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_convergence_effective_jcp_amp_max;
     result.tabi_convergence_effective_jcp_amp_mean =
         tabi_solve.tabi_convergence_effective_jcp_amp_mean;
+    result.tabi_convergence_dielectric_amp_max =
+        tabi_solve.tabi_convergence_dielectric_amp_max;
+    result.tabi_convergence_dielectric_amp_mean =
+        tabi_solve.tabi_convergence_dielectric_amp_mean;
+    result.tabi_convergence_channel_estimated_error_max =
+        tabi_solve.tabi_convergence_channel_estimated_error_max;
+    result.tabi_convergence_channel_estimated_error_mean =
+        tabi_solve.tabi_convergence_channel_estimated_error_mean;
+    result.tabi_convergence_channel_effective_jcp_amp_max =
+        tabi_solve.tabi_convergence_channel_effective_jcp_amp_max;
+    result.tabi_convergence_channel_effective_jcp_amp_mean =
+        tabi_solve.tabi_convergence_channel_effective_jcp_amp_mean;
+    result.tabi_convergence_channel_unstable_far_count =
+        tabi_solve.tabi_convergence_channel_unstable_far_count;
+    result.tabi_convergence_channel_unstable_far_panels =
+        tabi_solve.tabi_convergence_channel_unstable_far_panels;
+    result.tabi_convergence_channel_split_rejects =
+        tabi_solve.tabi_convergence_channel_split_rejects;
+    result.tabi_convergence_channel_split_reject_panels =
+        tabi_solve.tabi_convergence_channel_split_reject_panels;
+    result.tabi_convergence_channel_low_abs_reaccepted_count =
+        tabi_solve.tabi_convergence_channel_low_abs_reaccepted_count;
+    result.tabi_convergence_channel_low_abs_reaccepted_panels =
+        tabi_solve.tabi_convergence_channel_low_abs_reaccepted_panels;
+    result.tabi_convergence_channel_high_error_caught =
+        tabi_solve.tabi_convergence_channel_high_error_caught;
+    result.tabi_convergence_channel_high_error_missed =
+        tabi_solve.tabi_convergence_channel_high_error_missed;
+    result.tabi_convergence_channel_high_error_caught_by_split =
+        tabi_solve.tabi_convergence_channel_high_error_caught_by_split;
     result.tabi_convergence_estimator_high_error_caught =
         tabi_solve.tabi_convergence_estimator_high_error_caught;
     result.tabi_convergence_estimator_high_error_missed =
         tabi_solve.tabi_convergence_estimator_high_error_missed;
+    result.tabi_convergence_estimator_high_error_caught_by_split =
+        tabi_solve.tabi_convergence_estimator_high_error_caught_by_split;
+    result.tabi_convergence_estimator_phantom_high_error_count =
+        tabi_solve.tabi_convergence_estimator_phantom_high_error_count;
+    result.tabi_convergence_estimator_phantom_high_error_abs_max =
+        tabi_solve.tabi_convergence_estimator_phantom_high_error_abs_max;
+    result.tabi_convergence_overreject_count =
+        tabi_solve.tabi_convergence_overreject_count;
+    result.tabi_convergence_overreject_panels =
+        tabi_solve.tabi_convergence_overreject_panels;
+    result.tabi_convergence_overreject_caught_count =
+        tabi_solve.tabi_convergence_overreject_caught_count;
+    result.tabi_convergence_overreject_caught_panels =
+        tabi_solve.tabi_convergence_overreject_caught_panels;
+    result.tabi_convergence_overreject_abs_error_max =
+        tabi_solve.tabi_convergence_overreject_abs_error_max;
+    result.tabi_convergence_overreject_abs_error_mean =
+        tabi_solve.tabi_convergence_overreject_abs_error_mean;
+    result.tabi_convergence_overreject_abs_error_p95 =
+        tabi_solve.tabi_convergence_overreject_abs_error_p95;
+    result.tabi_convergence_overreject_abs_error_p99 =
+        tabi_solve.tabi_convergence_overreject_abs_error_p99;
+    result.tabi_convergence_overreject_estimated_abs_error_max =
+        tabi_solve.tabi_convergence_overreject_estimated_abs_error_max;
+    result.tabi_convergence_overreject_estimated_abs_error_mean =
+        tabi_solve.tabi_convergence_overreject_estimated_abs_error_mean;
+    result.tabi_convergence_overreject_required_scale_max =
+        tabi_solve.tabi_convergence_overreject_required_scale_max;
+    result.tabi_convergence_overreject_required_scale_p95 =
+        tabi_solve.tabi_convergence_overreject_required_scale_p95;
+    result.tabi_convergence_overreject_required_scale_p99 =
+        tabi_solve.tabi_convergence_overreject_required_scale_p99;
+    result.tabi_convergence_channel_overreject_count =
+        tabi_solve.tabi_convergence_channel_overreject_count;
+    result.tabi_convergence_channel_overreject_caught_count =
+        tabi_solve.tabi_convergence_channel_overreject_caught_count;
+    result.tabi_convergence_channel_overreject_panels =
+        tabi_solve.tabi_convergence_channel_overreject_panels;
+    result.tabi_convergence_channel_overreject_abs_error_max =
+        tabi_solve.tabi_convergence_channel_overreject_abs_error_max;
+    result.tabi_convergence_channel_overreject_abs_error_mean =
+        tabi_solve.tabi_convergence_channel_overreject_abs_error_mean;
+    result.tabi_convergence_channel_overreject_required_scale_max =
+        tabi_solve.tabi_convergence_channel_overreject_required_scale_max;
+    result.tabi_convergence_channel_overreject_required_scale_p99 =
+        tabi_solve.tabi_convergence_channel_overreject_required_scale_p99;
+    result.tabi_phantom_high_error_channel_count =
+        tabi_solve.tabi_phantom_high_error_channel_count;
+    result.tabi_phantom_high_error_channel_abs_max =
+        tabi_solve.tabi_phantom_high_error_channel_abs_max;
+    result.tabi_accepted_miss_channel_count =
+        tabi_solve.tabi_accepted_miss_channel_count;
+    result.tabi_accepted_miss_channel_panels =
+        tabi_solve.tabi_accepted_miss_channel_panels;
+    result.tabi_accepted_miss_channel_rho_min =
+        tabi_solve.tabi_accepted_miss_channel_rho_min;
+    result.tabi_accepted_miss_channel_rho_mean =
+        tabi_solve.tabi_accepted_miss_channel_rho_mean;
+    result.tabi_accepted_miss_channel_rho_max =
+        tabi_solve.tabi_accepted_miss_channel_rho_max;
+    result.tabi_accepted_miss_channel_tail_ratio_mean =
+        tabi_solve.tabi_accepted_miss_channel_tail_ratio_mean;
+    result.tabi_accepted_miss_channel_tail_ratio_max =
+        tabi_solve.tabi_accepted_miss_channel_tail_ratio_max;
+    result.tabi_accepted_miss_channel_estimated_error_mean =
+        tabi_solve.tabi_accepted_miss_channel_estimated_error_mean;
+    result.tabi_accepted_miss_channel_estimated_error_max =
+        tabi_solve.tabi_accepted_miss_channel_estimated_error_max;
+    result.tabi_accepted_miss_worst_channel =
+        tabi_solve.tabi_accepted_miss_worst_channel;
+    result.tabi_convergence_k3_rho_cap_rejects =
+        tabi_solve.tabi_convergence_k3_rho_cap_rejects;
+    result.tabi_convergence_k3_rho_cap_reject_panels =
+        tabi_solve.tabi_convergence_k3_rho_cap_reject_panels;
+    result.tabi_mac_surface_margin_rejects =
+        tabi_solve.tabi_mac_surface_margin_rejects;
+    result.tabi_mac_surface_margin_reject_panels =
+        tabi_solve.tabi_mac_surface_margin_reject_panels;
+    result.tabi_mac_surface_margin_applied =
+        tabi_solve.tabi_mac_surface_margin_applied;
+    result.tabi_mac_surface_margin_skipped =
+        tabi_solve.tabi_mac_surface_margin_skipped;
+    result.tabi_mac_surface_margin_adaptive_rejects =
+        tabi_solve.tabi_mac_surface_margin_adaptive_rejects;
+    result.tabi_mac_surface_margin_adaptive_reject_panels =
+        tabi_solve.tabi_mac_surface_margin_adaptive_reject_panels;
+    result.tabi_mac_surface_margin_skipped_accepted_far =
+        tabi_solve.tabi_mac_surface_margin_skipped_accepted_far;
+    result.tabi_mac_surface_margin_hard_applied =
+        tabi_solve.tabi_mac_surface_margin_hard_applied;
+    result.tabi_mac_surface_margin_soft_applied =
+        tabi_solve.tabi_mac_surface_margin_soft_applied;
+    result.tabi_mac_surface_margin_hard_rejects =
+        tabi_solve.tabi_mac_surface_margin_hard_rejects;
+    result.tabi_mac_surface_margin_hard_reject_panels =
+        tabi_solve.tabi_mac_surface_margin_hard_reject_panels;
+    result.tabi_mac_surface_margin_soft_rejects =
+        tabi_solve.tabi_mac_surface_margin_soft_rejects;
+    result.tabi_mac_surface_margin_soft_reject_panels =
+        tabi_solve.tabi_mac_surface_margin_soft_reject_panels;
     result.tabi_moment_audit_nodes = tabi_solve.tabi_moment_audit_nodes;
     result.tabi_moment_translation_rel_error_max =
         tabi_solve.tabi_moment_translation_rel_error_max;
@@ -11055,6 +13284,8 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
     result.tabi_moment_dynamic_range_max =
         tabi_solve.tabi_moment_dynamic_range_max;
     result.tabi_expansion_audit = tabi_solve.tabi_expansion_audit;
+    result.tabi_expansion_audit_channel =
+        tabi_solve.tabi_expansion_audit_channel;
     result.tabi_far_expansion_audit_pairs =
         tabi_solve.tabi_far_expansion_audit_pairs;
     result.tabi_far_expansion_audit_panels =
@@ -11065,6 +13296,18 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_far_expansion_rel_error_max;
     result.tabi_far_expansion_rel_error_mean =
         tabi_solve.tabi_far_expansion_rel_error_mean;
+    result.tabi_far_expansion_rel_error_p95 =
+        tabi_solve.tabi_far_expansion_rel_error_p95;
+    result.tabi_far_expansion_rel_error_p99 =
+        tabi_solve.tabi_far_expansion_rel_error_p99;
+    result.tabi_far_expansion_channel_rel_error_max =
+        tabi_solve.tabi_far_expansion_channel_rel_error_max;
+    result.tabi_far_expansion_channel_rel_error_mean =
+        tabi_solve.tabi_far_expansion_channel_rel_error_mean;
+    result.tabi_far_expansion_channel_rel_error_p99 =
+        tabi_solve.tabi_far_expansion_channel_rel_error_p99;
+    result.tabi_far_expansion_worst_channel =
+        tabi_solve.tabi_far_expansion_worst_channel;
     result.tabi_far_expansion_mean_gate_pass =
         tabi_solve.tabi_far_expansion_mean_gate_pass;
     result.tabi_far_convergence_rho_max =
@@ -11179,6 +13422,50 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_preconditioner_effective;
     result.tabi_preconditioner_block_near =
         tabi_solve.tabi_preconditioner_block_near;
+    result.tabi_preconditioner_block_panel_cap =
+        tabi_solve.tabi_preconditioner_block_panel_cap;
+    result.tabi_preconditioner_memory_budget_bytes =
+        tabi_solve.tabi_preconditioner_memory_budget_bytes;
+    result.tabi_preconditioner_estimated_bytes =
+        tabi_solve.tabi_preconditioner_estimated_bytes;
+    result.tabi_preconditioner_valid_blocks =
+        tabi_solve.tabi_preconditioner_valid_blocks;
+    result.tabi_preconditioner_valid_panels =
+        tabi_solve.tabi_preconditioner_valid_panels;
+    result.tabi_preconditioner_ill_conditioned_blocks =
+        tabi_solve.tabi_preconditioner_ill_conditioned_blocks;
+    result.tabi_preconditioner_setup_ms =
+        tabi_solve.tabi_preconditioner_setup_ms;
+    result.tabi_preconditioner_apply_ms =
+        tabi_solve.tabi_preconditioner_apply_ms;
+    result.tabi_preconditioner_apply_calls =
+        tabi_solve.tabi_preconditioner_apply_calls;
+    result.tabi_preconditioner_coarse_aggregate_cap =
+        tabi_solve.tabi_preconditioner_coarse_aggregate_cap;
+    result.tabi_preconditioner_coarse_aggregates =
+        tabi_solve.tabi_preconditioner_coarse_aggregates;
+    result.tabi_preconditioner_coarse_dimension =
+        tabi_solve.tabi_preconditioner_coarse_dimension;
+    result.tabi_preconditioner_coarse_base =
+        tabi_solve.tabi_preconditioner_coarse_base;
+    result.tabi_preconditioner_coarse_matrix_bytes =
+        tabi_solve.tabi_preconditioner_coarse_matrix_bytes;
+    result.tabi_preconditioner_coarse_pivot_ratio =
+        tabi_solve.tabi_preconditioner_coarse_pivot_ratio;
+    result.tabi_preconditioner_coarse_status =
+        tabi_solve.tabi_preconditioner_coarse_status;
+    result.tabi_preconditioner_coarse_setup_matvec_calls =
+        tabi_solve.tabi_preconditioner_coarse_setup_matvec_calls;
+    result.tabi_preconditioner_coarse_setup_ms =
+        tabi_solve.tabi_preconditioner_coarse_setup_ms;
+    result.tabi_preconditioner_coarse_apply_ms =
+        tabi_solve.tabi_preconditioner_coarse_apply_ms;
+    result.tabi_preconditioner_coarse_apply_calls =
+        tabi_solve.tabi_preconditioner_coarse_apply_calls;
+    result.tabi_preconditioner_coarse_rp_identity_error_max =
+        tabi_solve.tabi_preconditioner_coarse_rp_identity_error_max;
+    result.tabi_preconditioner_coarse_verify_rel_error_max =
+        tabi_solve.tabi_preconditioner_coarse_verify_rel_error_max;
     result.tabi_surface_generator = tabi_solve.tabi_surface_generator;
     result.tabi_discretization = tabi_solve.tabi_discretization;
     result.tabi_rhs_scale = tabi_solve.tabi_rhs_scale;
@@ -11879,6 +14166,7 @@ void AnalyzerImpl::finalize(std::fstream &log) {
     summary << "salt_M " << format_fixed(args_.salt) << "\n";
     summary << "temperature_K " << format_fixed(args_.temp) << "\n";
     summary << "tabi_sum " << args_.tabi_sum << "\n";
+    summary << "tabi_tree_preset " << args_.tabi_tree_preset << "\n";
     summary << "tabi_surface_geometry " << args_.tabi_geometry << "\n";
     summary << "tabi_sphere_mesh " << args_.tabi_sphere_mesh << "\n";
     summary << "tabi_diagonal " << args_.tabi_diagonal << "\n";
@@ -12200,6 +14488,7 @@ void AnalyzerImpl::finalize(std::fstream &log) {
       TitanUI::log_kv(log, "TABI Geometry", args_.tabi_geometry);
       TitanUI::log_kv(log, "TABI Diagonal", args_.tabi_diagonal);
       TitanUI::log_kv(log, "TABI Sum", args_.tabi_sum);
+      TitanUI::log_kv(log, "TABI Tree Preset", args_.tabi_tree_preset);
       TitanUI::log_kv(log, "TABI Formulation", args_.tabi_formulation);
       TitanUI::log_kv(log, "TABI Energy Projection",
                       args_.tabi_energy_projection);

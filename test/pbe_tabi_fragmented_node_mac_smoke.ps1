@@ -6,6 +6,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'pbe_tabi_treecode_sources.ps1')
 $Compiler = 'C:\msys64\ucrt64\bin\clang++.exe'
 $SourcePath = Join-Path $WorkRoot 'pbe_tabi_fragmented_node_mac_smoke.cpp'
 $ExePath = Join-Path $WorkRoot 'pbe_tabi_fragmented_node_mac_smoke.exe'
@@ -203,7 +204,7 @@ $compileArgs = @(
     '-DTITAN_RUNTIME_DISPATCH_HOTSPOTS=1',
     "-I$RepoRoot",
     (Join-Path $RepoRoot 'titan_pbe\tabi_near.cpp'),
-    (Join-Path $RepoRoot 'titan_pbe\tabi_treecode.cpp'),
+    (Get-PbeTabiTreecodeSources -RepoRoot $RepoRoot),
     (Join-Path $RepoRoot 'titan_executor.cpp'),
     $SourcePath,
     '-o',

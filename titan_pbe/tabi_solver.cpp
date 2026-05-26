@@ -131,6 +131,27 @@ double elapsed_ms(std::chrono::steady_clock::time_point begin,
   return std::chrono::duration<double, std::milli>(end - begin).count();
 }
 
+std::string normalize_jcp_direct_kernel_name(const std::string &value) {
+  if (value == "soa-avx2" || value == "fused-soa-avx2")
+    return value;
+  return "baseline";
+}
+
+void refresh_matvec_cost_summary(Result &result) noexcept {
+  const double traversal_seconds = result.tree_traversal_ms / 1000.0;
+  result.leaf_panels_per_second =
+      traversal_seconds > 0.0
+          ? static_cast<double>(result.leaf_panel_interactions) /
+                traversal_seconds
+          : 0.0;
+  result.clean_leaf_panels_per_second =
+      result.leaf_pair_batch_clean_source_panels_per_second;
+  result.tree_traversal_fraction =
+      result.matvec_ms_total > 0.0
+          ? result.tree_traversal_ms / result.matvec_ms_total
+          : 0.0;
+}
+
 std::size_t current_working_set_bytes() noexcept {
 #if defined(_WIN32)
   PROCESS_MEMORY_COUNTERS counters{};
@@ -217,30 +238,195 @@ public:
             "convergence_estimator_error_cap,"
             "convergence_unstable_rho_cap,"
             "convergence_calibration,"
+            "convergence_dielectric_amp,"
+            "convergence_estimator_model,"
+            "convergence_channel_calibration,"
+            "convergence_split_policy,"
+            "convergence_split_selectivity,"
+            "convergence_split_absolute_floor,"
+            "convergence_overreject_audit,"
+            "convergence_overreject_detail,"
+            "convergence_shape_audit,"
+            "convergence_kernel_response_audit,"
+            "channel_missed_semantics,"
+            "accepted_miss_diagnostics,"
+            "accepted_miss_absolute_floor,"
+            "convergence_k3_accepted_rho_cap,"
+            "mac_distance_policy,mac_surface_margin_factor,"
+            "mac_surface_margin_policy,"
+            "mac_surface_margin_aspect_threshold,"
+            "mac_surface_margin_rho_trigger,"
+            "mac_surface_margin_soft_aspect_threshold,"
+            "mac_surface_margin_soft_rho_trigger,"
+            "mac_surface_margin_soft_factor,"
             "convergence_estimator_samples,"
             "convergence_estimator_unstable_far_count,"
             "convergence_estimator_unstable_far_panels,"
             "convergence_estimator_split_rejects,"
             "convergence_estimator_split_reject_panels,"
+            "convergence_low_abs_reaccepted_far_count,"
+            "convergence_low_abs_reaccepted_far_panels,"
             "convergence_estimator_tail_ratio_max,"
             "convergence_estimator_tail_ratio_mean,"
             "convergence_estimator_error_max,"
             "convergence_estimator_error_mean,"
+            "convergence_estimator_abs_error_max,"
+            "convergence_estimator_abs_error_mean,"
             "convergence_tail_norm_p_max,"
             "convergence_tail_norm_p_mean,"
             "convergence_tail_norm_pm1_max,"
             "convergence_tail_norm_pm1_mean,"
             "convergence_effective_jcp_amp_max,"
             "convergence_effective_jcp_amp_mean,"
+            "convergence_dielectric_amp_max,"
+            "convergence_dielectric_amp_mean,"
+            "convergence_k1_effective_jcp_amp_max,"
+            "convergence_k2_effective_jcp_amp_max,"
+            "convergence_k3_effective_jcp_amp_max,"
+            "convergence_k4_effective_jcp_amp_max,"
+            "convergence_k1_effective_jcp_amp_mean,"
+            "convergence_k2_effective_jcp_amp_mean,"
+            "convergence_k3_effective_jcp_amp_mean,"
+            "convergence_k4_effective_jcp_amp_mean,"
+            "convergence_k1_estimated_error_max,"
+            "convergence_k2_estimated_error_max,"
+            "convergence_k3_estimated_error_max,"
+            "convergence_k4_estimated_error_max,"
+            "convergence_k1_unstable_far_count,"
+            "convergence_k2_unstable_far_count,"
+            "convergence_k3_unstable_far_count,"
+            "convergence_k4_unstable_far_count,"
+            "convergence_k1_unstable_far_panels,"
+            "convergence_k2_unstable_far_panels,"
+            "convergence_k3_unstable_far_panels,"
+            "convergence_k4_unstable_far_panels,"
+            "convergence_k1_split_rejects,"
+            "convergence_k2_split_rejects,"
+            "convergence_k3_split_rejects,"
+            "convergence_k4_split_rejects,"
+            "convergence_k1_split_reject_panels,"
+            "convergence_k2_split_reject_panels,"
+            "convergence_k3_split_reject_panels,"
+            "convergence_k4_split_reject_panels,"
+            "convergence_k1_low_abs_reaccepted,"
+            "convergence_k2_low_abs_reaccepted,"
+            "convergence_k3_low_abs_reaccepted,"
+            "convergence_k4_low_abs_reaccepted,"
+            "convergence_k1_low_abs_reaccepted_panels,"
+            "convergence_k2_low_abs_reaccepted_panels,"
+            "convergence_k3_low_abs_reaccepted_panels,"
+            "convergence_k4_low_abs_reaccepted_panels,"
+            "convergence_k1_high_error_caught,"
+            "convergence_k2_high_error_caught,"
+            "convergence_k3_high_error_caught,"
+            "convergence_k4_high_error_caught,"
+            "convergence_k1_high_error_missed,"
+            "convergence_k2_high_error_missed,"
+            "convergence_k3_high_error_missed,"
+            "convergence_k4_high_error_missed,"
+            "convergence_k1_high_error_caught_by_split,"
+            "convergence_k2_high_error_caught_by_split,"
+            "convergence_k3_high_error_caught_by_split,"
+            "convergence_k4_high_error_caught_by_split,"
             "convergence_estimator_high_error_caught,"
             "convergence_estimator_high_error_missed,"
-            "expansion_audit,"
+            "convergence_estimator_high_error_caught_by_split,"
+            "convergence_estimator_phantom_high_error_count,"
+            "convergence_estimator_phantom_high_error_abs_max,"
+            "convergence_overreject_count,"
+            "convergence_overreject_panels,"
+            "convergence_overreject_caught_count,"
+            "convergence_overreject_caught_panels,"
+            "convergence_overreject_abs_error_max,"
+            "convergence_overreject_abs_error_mean,"
+            "convergence_overreject_abs_error_p95,"
+            "convergence_overreject_abs_error_p99,"
+            "convergence_overreject_estimated_abs_error_max,"
+            "convergence_overreject_estimated_abs_error_mean,"
+            "convergence_overreject_required_scale_max,"
+            "convergence_overreject_required_scale_p95,"
+            "convergence_overreject_required_scale_p99,"
+            "convergence_k1_overreject_count,"
+            "convergence_k2_overreject_count,"
+            "convergence_k3_overreject_count,"
+            "convergence_k4_overreject_count,"
+            "convergence_k1_overreject_caught_count,"
+            "convergence_k2_overreject_caught_count,"
+            "convergence_k3_overreject_caught_count,"
+            "convergence_k4_overreject_caught_count,"
+            "convergence_k1_overreject_panels,convergence_k2_overreject_panels,"
+            "convergence_k3_overreject_panels,convergence_k4_overreject_panels,"
+            "convergence_k1_overreject_abs_error_max,"
+            "convergence_k2_overreject_abs_error_max,"
+            "convergence_k3_overreject_abs_error_max,"
+            "convergence_k4_overreject_abs_error_max,"
+            "convergence_k1_overreject_abs_error_mean,"
+            "convergence_k2_overreject_abs_error_mean,"
+            "convergence_k3_overreject_abs_error_mean,"
+            "convergence_k4_overreject_abs_error_mean,"
+            "convergence_k1_overreject_required_scale_max,"
+            "convergence_k2_overreject_required_scale_max,"
+            "convergence_k3_overreject_required_scale_max,"
+            "convergence_k4_overreject_required_scale_max,"
+            "convergence_k1_overreject_required_scale_p99,"
+            "convergence_k2_overreject_required_scale_p99,"
+            "convergence_k3_overreject_required_scale_p99,"
+            "convergence_k4_overreject_required_scale_p99,"
+            "phantom_high_error_k1_count,phantom_high_error_k2_count,"
+            "phantom_high_error_k3_count,phantom_high_error_k4_count,"
+            "phantom_high_error_k1_abs_max,"
+            "phantom_high_error_k2_abs_max,"
+            "phantom_high_error_k3_abs_max,"
+            "phantom_high_error_k4_abs_max,"
+            "accepted_miss_worst_channel,"
+            "accepted_miss_k1_count,accepted_miss_k2_count,"
+            "accepted_miss_k3_count,accepted_miss_k4_count,"
+            "accepted_miss_k1_panels,accepted_miss_k2_panels,"
+            "accepted_miss_k3_panels,accepted_miss_k4_panels,"
+            "accepted_miss_k1_rho_min,accepted_miss_k2_rho_min,"
+            "accepted_miss_k3_rho_min,accepted_miss_k4_rho_min,"
+            "accepted_miss_k1_rho_mean,accepted_miss_k2_rho_mean,"
+            "accepted_miss_k3_rho_mean,accepted_miss_k4_rho_mean,"
+            "accepted_miss_k1_rho_max,accepted_miss_k2_rho_max,"
+            "accepted_miss_k3_rho_max,accepted_miss_k4_rho_max,"
+            "accepted_miss_k1_tail_ratio_mean,"
+            "accepted_miss_k2_tail_ratio_mean,"
+            "accepted_miss_k3_tail_ratio_mean,"
+            "accepted_miss_k4_tail_ratio_mean,"
+            "accepted_miss_k1_tail_ratio_max,"
+            "accepted_miss_k2_tail_ratio_max,"
+            "accepted_miss_k3_tail_ratio_max,"
+            "accepted_miss_k4_tail_ratio_max,"
+            "accepted_miss_k1_estimated_error_mean,"
+            "accepted_miss_k2_estimated_error_mean,"
+            "accepted_miss_k3_estimated_error_mean,"
+            "accepted_miss_k4_estimated_error_mean,"
+            "accepted_miss_k1_estimated_error_max,"
+            "accepted_miss_k2_estimated_error_max,"
+            "accepted_miss_k3_estimated_error_max,"
+            "accepted_miss_k4_estimated_error_max,"
+            "convergence_k3_rho_cap_rejects,"
+            "convergence_k3_rho_cap_reject_panels,"
+            "expansion_audit,expansion_audit_channel,"
             "far_geometric_unsafe_count,far_geometric_unsafe_panels,"
             "far_geometric_audit_samples,mac_physical_gap_rejects,"
             "mac_convergence_rho_rejects,"
             "mac_convergence_aspect_rejects,"
             "mac_convergence_rho_reject_panels,"
             "mac_convergence_aspect_reject_panels,"
+            "mac_surface_margin_rejects,"
+            "mac_surface_margin_reject_panels,"
+            "mac_surface_margin_applied,"
+            "mac_surface_margin_skipped,"
+            "mac_surface_margin_adaptive_rejects,"
+            "mac_surface_margin_adaptive_reject_panels,"
+            "mac_surface_margin_skipped_accepted_far,"
+            "mac_surface_margin_hard_applied,"
+            "mac_surface_margin_soft_applied,"
+            "mac_surface_margin_hard_rejects,"
+            "mac_surface_margin_hard_reject_panels,"
+            "mac_surface_margin_soft_rejects,"
+            "mac_surface_margin_soft_reject_panels,"
             "fragmented_far_count,fragmented_far_panels,"
             "fragmented_split_rejects,"
             "fragmentation_center_gap_ratio_max,"
@@ -256,6 +442,20 @@ public:
             "far_expansion_audit_pairs,far_expansion_audit_panels,"
             "far_expansion_direct_seconds,"
             "far_expansion_rel_error_max,far_expansion_rel_error_mean,"
+            "far_expansion_rel_error_p95,far_expansion_rel_error_p99,"
+            "far_expansion_worst_channel,"
+            "far_expansion_k1_rel_error_max,"
+            "far_expansion_k2_rel_error_max,"
+            "far_expansion_k3_rel_error_max,"
+            "far_expansion_k4_rel_error_max,"
+            "far_expansion_k1_rel_error_mean,"
+            "far_expansion_k2_rel_error_mean,"
+            "far_expansion_k3_rel_error_mean,"
+            "far_expansion_k4_rel_error_mean,"
+            "far_expansion_k1_rel_error_p99,"
+            "far_expansion_k2_rel_error_p99,"
+            "far_expansion_k3_rel_error_p99,"
+            "far_expansion_k4_rel_error_p99,"
             "far_expansion_mean_gate_pass,"
             "far_convergence_rho_max,far_convergence_rho_mean,"
             "node_aspect_ratio_max,node_aspect_ratio_mean,"
@@ -263,7 +463,107 @@ public:
             "accepted_far_aspect_ratio_mean,"
             "leaf_panel_interactions,leaf_tile_panel_interactions,"
             "leaf_residual_panel_interactions,far_node_interactions,"
-            "singular_near_interactions,preconditioner_effective,threads,"
+            "matvec_cost_profile,leaf_panels_per_second,"
+            "clean_leaf_panels_per_second,tree_traversal_fraction,"
+            "leaf_work_profile,leaf_work_mac_terminal_panels,"
+            "leaf_work_physical_gap_panels,"
+            "leaf_work_fragmentation_panels,"
+            "leaf_work_convergence_panels,"
+            "leaf_work_convergence_estimator_panels,"
+            "leaf_work_convergence_rho_panels,"
+            "leaf_work_convergence_aspect_panels,"
+            "leaf_work_surface_margin_panels,"
+            "leaf_work_surface_margin_hard_panels,"
+            "leaf_work_surface_margin_soft_panels,"
+            "leaf_work_k3_rho_cap_panels,"
+            "leaf_work_singular_fallback_panels,"
+            "leaf_work_scalar_tail_panels,"
+            "leaf_work_profile_accounted_panels,"
+            "leaf_work_mac_terminal_frac,"
+            "leaf_work_convergence_frac,"
+            "leaf_work_surface_margin_frac,"
+            "leaf_work_singular_fallback_frac,"
+            "leaf_work_scalar_tail_frac,"
+            "cluster_policy,target_batch_size,"
+            "leaf_pair_min_source_panels,leaf_pair_min_targets,"
+            "leaf_pair_batch_interactions,leaf_pair_batch_targets,"
+            "leaf_pair_batch_source_panels,"
+            "leaf_pair_batch_residual_panels,"
+            "leaf_pair_batch_fallbacks,leaf_pair_batch_seconds,"
+            "leaf_pair_batch_kernel,leaf_pair_batch_vectorized_sources,"
+            "leaf_pair_batch_vector_lanes,"
+            "leaf_pair_batch_pairs_per_second,"
+            "leaf_kernel_profile,jcp_direct_kernel,"
+            "leaf_kernel_scalar_tasks,leaf_kernel_batch_tasks,"
+            "leaf_kernel_source_panel_evals,"
+            "leaf_kernel_scalar_seconds,"
+            "leaf_kernel_target_avx2_seconds,"
+            "leaf_kernel_tail_seconds,"
+            "leaf_pair_batch_soa_sources,"
+            "leaf_pair_batch_soa_seconds,"
+            "leaf_pair_batch_scalar_tail_seconds,"
+            "leaf_pair_batch_clean_source_panels_per_second,"
+            "leaf_pair_selection_profile,leaf_pair_probe_cache,"
+            "leaf_pair_target_group,leaf_pair_max_lookahead,"
+            "leaf_pair_directness_probe,leaf_pair_directness_cache,"
+            "leaf_pair_directness_verify,"
+            "leaf_pair_selection_candidate_scans,"
+            "leaf_pair_selection_clean_rejects,"
+            "leaf_pair_selection_probe_calls,"
+            "leaf_pair_selection_probe_node_visits,"
+            "leaf_pair_selection_probe_seconds,"
+            "leaf_pair_selection_seconds,"
+            "leaf_pair_selection_probe_cache_hits,"
+            "leaf_pair_selection_probe_cache_misses,"
+            "leaf_pair_selection_insufficient_targets,"
+            "leaf_pair_selection_same_target_leaf_rejects,"
+            "leaf_pair_directness_ancestor_probe_calls,"
+            "leaf_pair_directness_ancestor_probe_node_visits,"
+            "leaf_pair_directness_ancestor_probe_seconds,"
+            "leaf_pair_directness_pair_cache_hits,"
+            "leaf_pair_directness_pair_cache_misses,"
+            "leaf_pair_directness_all_direct_proofs,"
+            "leaf_pair_directness_mixed_fallbacks,"
+            "leaf_pair_directness_verify_checks,"
+            "leaf_pair_directness_verify_mismatches,"
+            "leaf_pair_scheduler,leaf_pair_worklist_max_active,"
+            "leaf_pair_worklist_verify,"
+            "leaf_pair_worklist_tasks,leaf_pair_worklist_groups,"
+            "leaf_pair_worklist_batched_groups,"
+            "leaf_pair_worklist_scalar_flush_tasks,"
+            "leaf_pair_worklist_forced_flushes,"
+            "leaf_pair_worklist_active_groups_max,"
+            "leaf_pair_worklist_seconds,"
+            "leaf_pair_worklist_verify_checks,"
+            "leaf_pair_worklist_verify_mismatches,"
+            "leaf_block_verify,leaf_block_target_leaves,"
+            "leaf_block_targets,leaf_block_source_groups,"
+            "leaf_block_batched_groups,leaf_block_scalar_tail_tasks,"
+            "leaf_block_group_seconds,leaf_block_flush_seconds,"
+            "leaf_block_writeback_seconds,leaf_block_verify_checks,"
+            "leaf_block_verify_mismatches,"
+            "singular_near_interactions,preconditioner_effective,"
+            "preconditioner_block_panel_cap,"
+            "preconditioner_memory_budget_bytes,"
+            "preconditioner_estimated_bytes,"
+            "preconditioner_valid_blocks,preconditioner_valid_panels,"
+            "preconditioner_ill_conditioned_blocks,"
+            "preconditioner_setup_seconds,preconditioner_apply_seconds,"
+            "preconditioner_apply_calls,"
+            "preconditioner_coarse_aggregate_cap,"
+            "preconditioner_coarse_aggregates,"
+            "preconditioner_coarse_dimension,"
+            "preconditioner_coarse_base,"
+            "preconditioner_coarse_matrix_bytes,"
+            "preconditioner_coarse_pivot_ratio,"
+            "preconditioner_coarse_status,"
+            "preconditioner_coarse_setup_matvec_calls,"
+            "preconditioner_coarse_setup_seconds,"
+            "preconditioner_coarse_apply_seconds,"
+            "preconditioner_coarse_apply_calls,"
+            "preconditioner_coarse_rp_identity_error_max,"
+            "preconditioner_coarse_verify_rel_error_max,"
+            "threads,"
             "rss_bytes,status\n";
     out_.flush();
   }
@@ -296,6 +596,16 @@ public:
     const std::size_t far_nodes =
         stats != nullptr ? stats->far_node_interactions
                          : result.far_node_interactions;
+    const double traversal_ms =
+        stats != nullptr ? stats->tree_traversal_ms : result.tree_traversal_ms;
+    const double leaf_panels_per_second =
+        traversal_ms > 0.0
+            ? static_cast<double>(leaf_panel) / (traversal_ms / 1000.0)
+            : result.leaf_panels_per_second;
+    const std::string matvec_cost_profile = result.matvec_cost_profile;
+    const double tree_traversal_fraction =
+        result.matvec_ms_total > 0.0 ? traversal_ms / result.matvec_ms_total
+                                     : result.tree_traversal_fraction;
     const std::size_t singular =
         stats != nullptr ? stats->singular_near_interactions
                          : result.singular_near_interactions;
@@ -376,6 +686,72 @@ public:
     const std::string convergence_calibration =
         stats != nullptr ? stats->convergence_calibration
                          : result.convergence_calibration;
+    const std::string convergence_dielectric_amp =
+        stats != nullptr ? stats->convergence_dielectric_amp
+                         : result.convergence_dielectric_amp;
+    const std::string convergence_estimator_model =
+        stats != nullptr ? stats->convergence_estimator_model
+                         : result.convergence_estimator_model;
+    const std::string convergence_channel_calibration =
+        stats != nullptr ? stats->convergence_channel_calibration
+                         : result.convergence_channel_calibration;
+    const std::string convergence_split_policy =
+        stats != nullptr ? stats->convergence_split_policy
+                         : result.convergence_split_policy;
+    const std::string convergence_split_selectivity =
+        stats != nullptr ? stats->convergence_split_selectivity
+                         : result.convergence_split_selectivity;
+    const double convergence_split_absolute_floor =
+        stats != nullptr ? stats->convergence_split_absolute_floor
+                         : result.convergence_split_absolute_floor;
+    const std::string convergence_overreject_audit =
+        stats != nullptr ? stats->convergence_overreject_audit
+                         : result.convergence_overreject_audit;
+    const std::string convergence_overreject_detail =
+        stats != nullptr ? stats->convergence_overreject_detail
+                         : result.convergence_overreject_detail;
+    const std::string convergence_shape_audit =
+        stats != nullptr ? stats->convergence_shape_audit
+                         : result.convergence_shape_audit;
+    const std::string convergence_kernel_response_audit =
+        stats != nullptr ? stats->convergence_kernel_response_audit
+                         : result.convergence_kernel_response_audit;
+    const std::string channel_missed_semantics =
+        stats != nullptr ? stats->channel_missed_semantics
+                         : result.channel_missed_semantics;
+    const std::string accepted_miss_diagnostics =
+        stats != nullptr ? stats->accepted_miss_diagnostics
+                         : result.accepted_miss_diagnostics;
+    const double accepted_miss_absolute_floor =
+        stats != nullptr ? stats->accepted_miss_absolute_floor
+                         : result.accepted_miss_absolute_floor;
+    const double convergence_k3_accepted_rho_cap =
+        stats != nullptr ? stats->convergence_k3_accepted_rho_cap
+                         : result.convergence_k3_accepted_rho_cap;
+    const std::string mac_distance_policy =
+        stats != nullptr ? stats->mac_distance_policy
+                         : result.mac_distance_policy;
+    const double mac_surface_margin_factor =
+        stats != nullptr ? stats->mac_surface_margin_factor
+                         : result.mac_surface_margin_factor;
+    const std::string mac_surface_margin_policy =
+        stats != nullptr ? stats->mac_surface_margin_policy
+                         : result.mac_surface_margin_policy;
+    const double mac_surface_margin_aspect_threshold =
+        stats != nullptr ? stats->mac_surface_margin_aspect_threshold
+                         : result.mac_surface_margin_aspect_threshold;
+    const double mac_surface_margin_rho_trigger =
+        stats != nullptr ? stats->mac_surface_margin_rho_trigger
+                         : result.mac_surface_margin_rho_trigger;
+    const double mac_surface_margin_soft_aspect_threshold =
+        stats != nullptr ? stats->mac_surface_margin_soft_aspect_threshold
+                         : result.mac_surface_margin_soft_aspect_threshold;
+    const double mac_surface_margin_soft_rho_trigger =
+        stats != nullptr ? stats->mac_surface_margin_soft_rho_trigger
+                         : result.mac_surface_margin_soft_rho_trigger;
+    const double mac_surface_margin_soft_factor =
+        stats != nullptr ? stats->mac_surface_margin_soft_factor
+                         : result.mac_surface_margin_soft_factor;
     const std::size_t convergence_estimator_samples =
         stats != nullptr ? stats->convergence_estimator_samples
                          : result.convergence_estimator_samples;
@@ -391,6 +767,12 @@ public:
     const std::size_t convergence_estimator_split_reject_panels =
         stats != nullptr ? stats->convergence_estimator_split_reject_panels
                          : result.convergence_estimator_split_reject_panels;
+    const std::size_t convergence_low_abs_reaccepted_count =
+        stats != nullptr ? stats->convergence_low_abs_reaccepted_far_count
+                         : result.convergence_low_abs_reaccepted_far_count;
+    const std::size_t convergence_low_abs_reaccepted_panels =
+        stats != nullptr ? stats->convergence_low_abs_reaccepted_far_panels
+                         : result.convergence_low_abs_reaccepted_far_panels;
     const double convergence_estimator_tail_ratio_max =
         stats != nullptr ? stats->convergence_estimator_tail_ratio_max
                          : result.convergence_estimator_tail_ratio_max;
@@ -403,6 +785,12 @@ public:
     const double convergence_estimator_error_mean =
         stats != nullptr ? stats->convergence_estimator_error_mean
                          : result.convergence_estimator_error_mean;
+    const double convergence_estimator_abs_error_max =
+        stats != nullptr ? stats->convergence_estimator_abs_error_max
+                         : result.convergence_estimator_abs_error_max;
+    const double convergence_estimator_abs_error_mean =
+        stats != nullptr ? stats->convergence_estimator_abs_error_mean
+                         : result.convergence_estimator_abs_error_mean;
     const double convergence_tail_norm_p_max =
         stats != nullptr ? stats->convergence_tail_norm_p_max
                          : result.convergence_tail_norm_p_max;
@@ -421,12 +809,171 @@ public:
     const double convergence_effective_jcp_amp_mean =
         stats != nullptr ? stats->convergence_effective_jcp_amp_mean
                          : result.convergence_effective_jcp_amp_mean;
+    const double convergence_dielectric_amp_max =
+        stats != nullptr ? stats->convergence_dielectric_amp_max
+                         : result.convergence_dielectric_amp_max;
+    const double convergence_dielectric_amp_mean =
+        stats != nullptr ? stats->convergence_dielectric_amp_mean
+                         : result.convergence_dielectric_amp_mean;
+    const auto convergence_channel_estimated_error_max =
+        stats != nullptr ? stats->convergence_channel_estimated_error_max
+                         : result.convergence_channel_estimated_error_max;
+    const auto convergence_channel_effective_jcp_amp_max =
+        stats != nullptr ? stats->convergence_channel_effective_jcp_amp_max
+                         : result.convergence_channel_effective_jcp_amp_max;
+    const auto convergence_channel_effective_jcp_amp_mean =
+        stats != nullptr ? stats->convergence_channel_effective_jcp_amp_mean
+                         : result.convergence_channel_effective_jcp_amp_mean;
+    const auto convergence_channel_unstable_count =
+        stats != nullptr ? stats->convergence_channel_unstable_far_count
+                         : result.convergence_channel_unstable_far_count;
+    const auto convergence_channel_unstable_panels =
+        stats != nullptr ? stats->convergence_channel_unstable_far_panels
+                         : result.convergence_channel_unstable_far_panels;
+    const auto convergence_channel_split_rejects =
+        stats != nullptr ? stats->convergence_channel_split_rejects
+                         : result.convergence_channel_split_rejects;
+    const auto convergence_channel_split_reject_panels =
+        stats != nullptr ? stats->convergence_channel_split_reject_panels
+                         : result.convergence_channel_split_reject_panels;
+    const auto convergence_channel_low_abs_reaccepted_count =
+        stats != nullptr ? stats->convergence_channel_low_abs_reaccepted_count
+                         : result.convergence_channel_low_abs_reaccepted_count;
+    const auto convergence_channel_low_abs_reaccepted_panels =
+        stats != nullptr ? stats->convergence_channel_low_abs_reaccepted_panels
+                         : result.convergence_channel_low_abs_reaccepted_panels;
+    const auto convergence_channel_high_error_caught =
+        stats != nullptr ? stats->convergence_channel_high_error_caught
+                         : result.convergence_channel_high_error_caught;
+    const auto convergence_channel_high_error_missed =
+        stats != nullptr ? stats->convergence_channel_high_error_missed
+                         : result.convergence_channel_high_error_missed;
+    const auto convergence_channel_high_error_caught_by_split =
+        stats != nullptr
+            ? stats->convergence_channel_high_error_caught_by_split
+            : result.convergence_channel_high_error_caught_by_split;
     const std::size_t convergence_estimator_high_error_caught =
         stats != nullptr ? stats->convergence_estimator_high_error_caught
                          : result.convergence_estimator_high_error_caught;
     const std::size_t convergence_estimator_high_error_missed =
         stats != nullptr ? stats->convergence_estimator_high_error_missed
                          : result.convergence_estimator_high_error_missed;
+    const std::size_t convergence_estimator_high_error_caught_by_split =
+        stats != nullptr
+            ? stats->convergence_estimator_high_error_caught_by_split
+            : result.convergence_estimator_high_error_caught_by_split;
+    const std::size_t convergence_estimator_phantom_high_error_count =
+        stats != nullptr
+            ? stats->convergence_estimator_phantom_high_error_count
+            : result.convergence_estimator_phantom_high_error_count;
+    const double convergence_estimator_phantom_high_error_abs_max =
+        stats != nullptr
+            ? stats->convergence_estimator_phantom_high_error_abs_max
+            : result.convergence_estimator_phantom_high_error_abs_max;
+    const std::size_t convergence_overreject_count =
+        stats != nullptr ? stats->convergence_overreject_count
+                         : result.convergence_overreject_count;
+    const std::size_t convergence_overreject_panels =
+        stats != nullptr ? stats->convergence_overreject_panels
+                         : result.convergence_overreject_panels;
+    const std::size_t convergence_overreject_caught_count =
+        stats != nullptr ? stats->convergence_overreject_caught_count
+                         : result.convergence_overreject_caught_count;
+    const std::size_t convergence_overreject_caught_panels =
+        stats != nullptr ? stats->convergence_overreject_caught_panels
+                         : result.convergence_overreject_caught_panels;
+    const double convergence_overreject_abs_error_max =
+        stats != nullptr ? stats->convergence_overreject_abs_error_max
+                         : result.convergence_overreject_abs_error_max;
+    const double convergence_overreject_abs_error_mean =
+        stats != nullptr ? stats->convergence_overreject_abs_error_mean
+                         : result.convergence_overreject_abs_error_mean;
+    const double convergence_overreject_abs_error_p95 =
+        stats != nullptr ? stats->convergence_overreject_abs_error_p95
+                         : result.convergence_overreject_abs_error_p95;
+    const double convergence_overreject_abs_error_p99 =
+        stats != nullptr ? stats->convergence_overreject_abs_error_p99
+                         : result.convergence_overreject_abs_error_p99;
+    const double convergence_overreject_estimated_abs_error_max =
+        stats != nullptr ? stats->convergence_overreject_estimated_abs_error_max
+                         : result.convergence_overreject_estimated_abs_error_max;
+    const double convergence_overreject_estimated_abs_error_mean =
+        stats != nullptr ? stats->convergence_overreject_estimated_abs_error_mean
+                         : result.convergence_overreject_estimated_abs_error_mean;
+    const double convergence_overreject_required_scale_max =
+        stats != nullptr ? stats->convergence_overreject_required_scale_max
+                         : result.convergence_overreject_required_scale_max;
+    const double convergence_overreject_required_scale_p95 =
+        stats != nullptr ? stats->convergence_overreject_required_scale_p95
+                         : result.convergence_overreject_required_scale_p95;
+    const double convergence_overreject_required_scale_p99 =
+        stats != nullptr ? stats->convergence_overreject_required_scale_p99
+                         : result.convergence_overreject_required_scale_p99;
+    const auto convergence_channel_overreject_count =
+        stats != nullptr ? stats->convergence_channel_overreject_count
+                         : result.convergence_channel_overreject_count;
+    const auto convergence_channel_overreject_caught_count =
+        stats != nullptr ? stats->convergence_channel_overreject_caught_count
+                         : result.convergence_channel_overreject_caught_count;
+    const auto convergence_channel_overreject_panels =
+        stats != nullptr ? stats->convergence_channel_overreject_panels
+                         : result.convergence_channel_overreject_panels;
+    const auto convergence_channel_overreject_abs_error_max =
+        stats != nullptr ? stats->convergence_channel_overreject_abs_error_max
+                         : result.convergence_channel_overreject_abs_error_max;
+    const auto convergence_channel_overreject_abs_error_mean =
+        stats != nullptr ? stats->convergence_channel_overreject_abs_error_mean
+                         : result.convergence_channel_overreject_abs_error_mean;
+    const auto convergence_channel_overreject_required_scale_max =
+        stats != nullptr ? stats->convergence_channel_overreject_required_scale_max
+                         : result.convergence_channel_overreject_required_scale_max;
+    const auto convergence_channel_overreject_required_scale_p99 =
+        stats != nullptr ? stats->convergence_channel_overreject_required_scale_p99
+                         : result.convergence_channel_overreject_required_scale_p99;
+    const auto phantom_high_error_count =
+        stats != nullptr ? stats->phantom_high_error_channel_count
+                         : result.phantom_high_error_channel_count;
+    const auto phantom_high_error_abs_max =
+        stats != nullptr ? stats->phantom_high_error_channel_abs_max
+                         : result.phantom_high_error_channel_abs_max;
+    const auto accepted_miss_count =
+        stats != nullptr ? stats->accepted_miss_channel_count
+                         : result.accepted_miss_channel_count;
+    const auto accepted_miss_panels =
+        stats != nullptr ? stats->accepted_miss_channel_panels
+                         : result.accepted_miss_channel_panels;
+    const auto accepted_miss_rho_min =
+        stats != nullptr ? stats->accepted_miss_channel_rho_min
+                         : result.accepted_miss_channel_rho_min;
+    const auto accepted_miss_rho_mean =
+        stats != nullptr ? stats->accepted_miss_channel_rho_mean
+                         : result.accepted_miss_channel_rho_mean;
+    const auto accepted_miss_rho_max =
+        stats != nullptr ? stats->accepted_miss_channel_rho_max
+                         : result.accepted_miss_channel_rho_max;
+    const auto accepted_miss_tail_ratio_mean =
+        stats != nullptr ? stats->accepted_miss_channel_tail_ratio_mean
+                         : result.accepted_miss_channel_tail_ratio_mean;
+    const auto accepted_miss_tail_ratio_max =
+        stats != nullptr ? stats->accepted_miss_channel_tail_ratio_max
+                         : result.accepted_miss_channel_tail_ratio_max;
+    const auto accepted_miss_estimated_error_mean =
+        stats != nullptr
+            ? stats->accepted_miss_channel_estimated_error_mean
+            : result.accepted_miss_channel_estimated_error_mean;
+    const auto accepted_miss_estimated_error_max =
+        stats != nullptr
+            ? stats->accepted_miss_channel_estimated_error_max
+            : result.accepted_miss_channel_estimated_error_max;
+    const std::string accepted_miss_worst_channel =
+        stats != nullptr ? stats->accepted_miss_worst_channel
+                         : result.accepted_miss_worst_channel;
+    const std::size_t convergence_k3_rho_cap_rejects =
+        stats != nullptr ? stats->convergence_k3_rho_cap_rejects
+                         : result.convergence_k3_rho_cap_rejects;
+    const std::size_t convergence_k3_rho_cap_reject_panels =
+        stats != nullptr ? stats->convergence_k3_rho_cap_reject_panels
+                         : result.convergence_k3_rho_cap_reject_panels;
     const std::size_t moment_nodes =
         stats != nullptr ? stats->moment_audit_nodes
                          : result.moment_audit_nodes;
@@ -457,6 +1004,9 @@ public:
     const std::size_t expansion_panels =
         stats != nullptr ? stats->far_expansion_audit_panels
                          : result.far_expansion_audit_panels;
+    const std::string expansion_audit_channel =
+        stats != nullptr ? stats->expansion_audit_channel
+                         : result.expansion_audit_channel;
     const double expansion_direct_ms =
         stats != nullptr ? stats->far_expansion_direct_ms
                          : result.far_expansion_direct_ms;
@@ -466,6 +1016,24 @@ public:
     const double expansion_rel_mean =
         stats != nullptr ? stats->far_expansion_rel_error_mean
                          : result.far_expansion_rel_error_mean;
+    const double expansion_rel_p95 =
+        stats != nullptr ? stats->far_expansion_rel_error_p95
+                         : result.far_expansion_rel_error_p95;
+    const double expansion_rel_p99 =
+        stats != nullptr ? stats->far_expansion_rel_error_p99
+                         : result.far_expansion_rel_error_p99;
+    const std::string expansion_worst_channel =
+        stats != nullptr ? stats->far_expansion_worst_channel
+                         : result.far_expansion_worst_channel;
+    const auto expansion_channel_rel_max =
+        stats != nullptr ? stats->far_expansion_channel_rel_error_max
+                         : result.far_expansion_channel_rel_error_max;
+    const auto expansion_channel_rel_mean =
+        stats != nullptr ? stats->far_expansion_channel_rel_error_mean
+                         : result.far_expansion_channel_rel_error_mean;
+    const auto expansion_channel_rel_p99 =
+        stats != nullptr ? stats->far_expansion_channel_rel_error_p99
+                         : result.far_expansion_channel_rel_error_p99;
     const bool expansion_mean_gate_pass =
         stats != nullptr ? stats->far_expansion_mean_gate_pass
                          : result.far_expansion_mean_gate_pass;
@@ -499,6 +1067,330 @@ public:
     const std::size_t mac_convergence_aspect_reject_panels =
         stats != nullptr ? stats->mac_convergence_aspect_reject_panels
                          : result.mac_convergence_aspect_reject_panels;
+    const std::size_t mac_surface_margin_rejects =
+        stats != nullptr ? stats->mac_surface_margin_rejects
+                         : result.mac_surface_margin_rejects;
+    const std::size_t mac_surface_margin_reject_panels =
+        stats != nullptr ? stats->mac_surface_margin_reject_panels
+                         : result.mac_surface_margin_reject_panels;
+    const std::size_t mac_surface_margin_applied =
+        stats != nullptr ? stats->mac_surface_margin_applied
+                         : result.mac_surface_margin_applied;
+    const std::size_t mac_surface_margin_skipped =
+        stats != nullptr ? stats->mac_surface_margin_skipped
+                         : result.mac_surface_margin_skipped;
+    const std::size_t mac_surface_margin_adaptive_rejects =
+        stats != nullptr ? stats->mac_surface_margin_adaptive_rejects
+                         : result.mac_surface_margin_adaptive_rejects;
+    const std::size_t mac_surface_margin_adaptive_reject_panels =
+        stats != nullptr ? stats->mac_surface_margin_adaptive_reject_panels
+                         : result.mac_surface_margin_adaptive_reject_panels;
+    const std::size_t mac_surface_margin_skipped_accepted_far =
+        stats != nullptr ? stats->mac_surface_margin_skipped_accepted_far
+                         : result.mac_surface_margin_skipped_accepted_far;
+    const std::size_t mac_surface_margin_hard_applied =
+        stats != nullptr ? stats->mac_surface_margin_hard_applied
+                         : result.mac_surface_margin_hard_applied;
+    const std::size_t mac_surface_margin_soft_applied =
+        stats != nullptr ? stats->mac_surface_margin_soft_applied
+                         : result.mac_surface_margin_soft_applied;
+    const std::size_t mac_surface_margin_hard_rejects =
+        stats != nullptr ? stats->mac_surface_margin_hard_rejects
+                         : result.mac_surface_margin_hard_rejects;
+    const std::size_t mac_surface_margin_hard_reject_panels =
+        stats != nullptr ? stats->mac_surface_margin_hard_reject_panels
+                         : result.mac_surface_margin_hard_reject_panels;
+    const std::size_t mac_surface_margin_soft_rejects =
+        stats != nullptr ? stats->mac_surface_margin_soft_rejects
+                         : result.mac_surface_margin_soft_rejects;
+    const std::size_t mac_surface_margin_soft_reject_panels =
+        stats != nullptr ? stats->mac_surface_margin_soft_reject_panels
+                         : result.mac_surface_margin_soft_reject_panels;
+    const std::string leaf_work_profile =
+        stats != nullptr ? stats->leaf_work_profile : result.leaf_work_profile;
+    const std::size_t leaf_work_mac_terminal_panels =
+        stats != nullptr ? stats->leaf_work_mac_terminal_panels
+                         : result.leaf_work_mac_terminal_panels;
+    const std::size_t leaf_work_physical_gap_panels =
+        stats != nullptr ? stats->leaf_work_physical_gap_panels
+                         : result.leaf_work_physical_gap_panels;
+    const std::size_t leaf_work_fragmentation_panels =
+        stats != nullptr ? stats->leaf_work_fragmentation_panels
+                         : result.leaf_work_fragmentation_panels;
+    const std::size_t leaf_work_convergence_panels =
+        stats != nullptr ? stats->leaf_work_convergence_panels
+                         : result.leaf_work_convergence_panels;
+    const std::size_t leaf_work_convergence_estimator_panels =
+        stats != nullptr ? stats->leaf_work_convergence_estimator_panels
+                         : result.leaf_work_convergence_estimator_panels;
+    const std::size_t leaf_work_convergence_rho_panels =
+        stats != nullptr ? stats->leaf_work_convergence_rho_panels
+                         : result.leaf_work_convergence_rho_panels;
+    const std::size_t leaf_work_convergence_aspect_panels =
+        stats != nullptr ? stats->leaf_work_convergence_aspect_panels
+                         : result.leaf_work_convergence_aspect_panels;
+    const std::size_t leaf_work_surface_margin_panels =
+        stats != nullptr ? stats->leaf_work_surface_margin_panels
+                         : result.leaf_work_surface_margin_panels;
+    const std::size_t leaf_work_surface_margin_hard_panels =
+        stats != nullptr ? stats->leaf_work_surface_margin_hard_panels
+                         : result.leaf_work_surface_margin_hard_panels;
+    const std::size_t leaf_work_surface_margin_soft_panels =
+        stats != nullptr ? stats->leaf_work_surface_margin_soft_panels
+                         : result.leaf_work_surface_margin_soft_panels;
+    const std::size_t leaf_work_k3_rho_cap_panels =
+        stats != nullptr ? stats->leaf_work_k3_rho_cap_panels
+                         : result.leaf_work_k3_rho_cap_panels;
+    const std::size_t leaf_work_singular_fallback_panels =
+        stats != nullptr ? stats->leaf_work_singular_fallback_panels
+                         : result.leaf_work_singular_fallback_panels;
+    const std::size_t leaf_work_scalar_tail_panels =
+        stats != nullptr ? stats->leaf_work_scalar_tail_panels
+                         : result.leaf_work_scalar_tail_panels;
+    const std::size_t leaf_work_profile_accounted_panels =
+        stats != nullptr ? stats->leaf_work_profile_accounted_panels
+                         : result.leaf_work_profile_accounted_panels;
+    const double leaf_work_mac_terminal_frac =
+        stats != nullptr ? stats->leaf_work_mac_terminal_frac
+                         : result.leaf_work_mac_terminal_frac;
+    const double leaf_work_convergence_frac =
+        stats != nullptr ? stats->leaf_work_convergence_frac
+                         : result.leaf_work_convergence_frac;
+    const double leaf_work_surface_margin_frac =
+        stats != nullptr ? stats->leaf_work_surface_margin_frac
+                         : result.leaf_work_surface_margin_frac;
+    const double leaf_work_singular_fallback_frac =
+        stats != nullptr ? stats->leaf_work_singular_fallback_frac
+                         : result.leaf_work_singular_fallback_frac;
+    const double leaf_work_scalar_tail_frac =
+        stats != nullptr ? stats->leaf_work_scalar_tail_frac
+                         : result.leaf_work_scalar_tail_frac;
+    const std::string cluster_policy =
+        stats != nullptr ? stats->cluster_policy : result.cluster_policy;
+    const int target_batch_size =
+        stats != nullptr ? stats->target_batch_size : result.target_batch_size;
+    const int leaf_pair_min_source_panels =
+        stats != nullptr ? stats->leaf_pair_min_source_panels
+                         : result.leaf_pair_min_source_panels;
+    const int leaf_pair_min_targets =
+        stats != nullptr ? stats->leaf_pair_min_targets
+                         : result.leaf_pair_min_targets;
+    const std::size_t leaf_pair_batch_interactions =
+        stats != nullptr ? stats->leaf_pair_batch_interactions
+                         : result.leaf_pair_batch_interactions;
+    const std::size_t leaf_pair_batch_targets =
+        stats != nullptr ? stats->leaf_pair_batch_targets
+                         : result.leaf_pair_batch_targets;
+    const std::size_t leaf_pair_batch_source_panels =
+        stats != nullptr ? stats->leaf_pair_batch_source_panels
+                         : result.leaf_pair_batch_source_panels;
+    const std::size_t leaf_pair_batch_residual_panels =
+        stats != nullptr ? stats->leaf_pair_batch_residual_panels
+                         : result.leaf_pair_batch_residual_panels;
+    const std::size_t leaf_pair_batch_fallbacks =
+        stats != nullptr ? stats->leaf_pair_batch_fallbacks
+                         : result.leaf_pair_batch_fallbacks;
+    const double leaf_pair_batch_ms =
+        stats != nullptr ? stats->leaf_pair_batch_ms
+                         : result.leaf_pair_batch_ms;
+    const std::string leaf_pair_batch_kernel =
+        stats != nullptr ? stats->leaf_pair_batch_kernel
+                         : result.leaf_pair_batch_kernel;
+    const std::size_t leaf_pair_batch_vectorized_sources =
+        stats != nullptr ? stats->leaf_pair_batch_vectorized_sources
+                         : result.leaf_pair_batch_vectorized_sources;
+    const std::size_t leaf_pair_batch_vector_lanes =
+        stats != nullptr ? stats->leaf_pair_batch_vector_lanes
+                         : result.leaf_pair_batch_vector_lanes;
+    const double leaf_pair_batch_pairs_per_second =
+        stats != nullptr ? stats->leaf_pair_batch_pairs_per_second
+                         : result.leaf_pair_batch_pairs_per_second;
+    const std::string leaf_kernel_profile =
+        stats != nullptr ? stats->leaf_kernel_profile
+                         : result.leaf_kernel_profile;
+    const std::string jcp_direct_kernel =
+        stats != nullptr ? stats->jcp_direct_kernel
+                         : result.jcp_direct_kernel;
+    const std::size_t leaf_kernel_scalar_tasks =
+        stats != nullptr ? stats->leaf_kernel_scalar_tasks
+                         : result.leaf_kernel_scalar_tasks;
+    const std::size_t leaf_kernel_batch_tasks =
+        stats != nullptr ? stats->leaf_kernel_batch_tasks
+                         : result.leaf_kernel_batch_tasks;
+    const std::size_t leaf_kernel_source_panel_evals =
+        stats != nullptr ? stats->leaf_kernel_source_panel_evals
+                         : result.leaf_kernel_source_panel_evals;
+    const double leaf_kernel_scalar_ms =
+        stats != nullptr ? stats->leaf_kernel_scalar_ms
+                         : result.leaf_kernel_scalar_ms;
+    const double leaf_kernel_target_avx2_ms =
+        stats != nullptr ? stats->leaf_kernel_target_avx2_ms
+                         : result.leaf_kernel_target_avx2_ms;
+    const double leaf_kernel_tail_ms =
+        stats != nullptr ? stats->leaf_kernel_tail_ms
+                         : result.leaf_kernel_tail_ms;
+    const std::size_t leaf_pair_batch_soa_sources =
+        stats != nullptr ? stats->leaf_pair_batch_soa_sources
+                         : result.leaf_pair_batch_soa_sources;
+    const double leaf_pair_batch_soa_ms =
+        stats != nullptr ? stats->leaf_pair_batch_soa_ms
+                         : result.leaf_pair_batch_soa_ms;
+    const double leaf_pair_batch_scalar_tail_ms =
+        stats != nullptr ? stats->leaf_pair_batch_scalar_tail_ms
+                         : result.leaf_pair_batch_scalar_tail_ms;
+    const double leaf_pair_batch_clean_source_panels_per_second =
+        stats != nullptr
+            ? stats->leaf_pair_batch_clean_source_panels_per_second
+            : result.leaf_pair_batch_clean_source_panels_per_second;
+    const std::string leaf_pair_selection_profile =
+        stats != nullptr ? stats->leaf_pair_selection_profile
+                         : result.leaf_pair_selection_profile;
+    const std::string leaf_pair_probe_cache =
+        stats != nullptr ? stats->leaf_pair_probe_cache
+                         : result.leaf_pair_probe_cache;
+    const std::string leaf_pair_target_group =
+        stats != nullptr ? stats->leaf_pair_target_group
+                         : result.leaf_pair_target_group;
+    const std::string leaf_pair_directness_probe =
+        stats != nullptr ? stats->leaf_pair_directness_probe
+                         : result.leaf_pair_directness_probe;
+    const std::string leaf_pair_directness_cache =
+        stats != nullptr ? stats->leaf_pair_directness_cache
+                         : result.leaf_pair_directness_cache;
+    const std::string leaf_pair_directness_verify =
+        stats != nullptr ? stats->leaf_pair_directness_verify
+                         : result.leaf_pair_directness_verify;
+    const int leaf_pair_max_lookahead =
+        stats != nullptr ? stats->leaf_pair_max_lookahead
+                         : result.leaf_pair_max_lookahead;
+    const std::size_t leaf_pair_selection_candidate_scans =
+        stats != nullptr ? stats->leaf_pair_selection_candidate_scans
+                         : result.leaf_pair_selection_candidate_scans;
+    const std::size_t leaf_pair_selection_clean_rejects =
+        stats != nullptr ? stats->leaf_pair_selection_clean_rejects
+                         : result.leaf_pair_selection_clean_rejects;
+    const std::size_t leaf_pair_selection_probe_calls =
+        stats != nullptr ? stats->leaf_pair_selection_probe_calls
+                         : result.leaf_pair_selection_probe_calls;
+    const std::size_t leaf_pair_selection_probe_node_visits =
+        stats != nullptr ? stats->leaf_pair_selection_probe_node_visits
+                         : result.leaf_pair_selection_probe_node_visits;
+    const double leaf_pair_selection_probe_ms =
+        stats != nullptr ? stats->leaf_pair_selection_probe_ms
+                         : result.leaf_pair_selection_probe_ms;
+    const double leaf_pair_selection_ms =
+        stats != nullptr ? stats->leaf_pair_selection_ms
+                         : result.leaf_pair_selection_ms;
+    const std::size_t leaf_pair_selection_probe_cache_hits =
+        stats != nullptr ? stats->leaf_pair_selection_probe_cache_hits
+                         : result.leaf_pair_selection_probe_cache_hits;
+    const std::size_t leaf_pair_selection_probe_cache_misses =
+        stats != nullptr ? stats->leaf_pair_selection_probe_cache_misses
+                         : result.leaf_pair_selection_probe_cache_misses;
+    const std::size_t leaf_pair_selection_insufficient_targets =
+        stats != nullptr ? stats->leaf_pair_selection_insufficient_targets
+                         : result.leaf_pair_selection_insufficient_targets;
+    const std::size_t leaf_pair_selection_same_target_leaf_rejects =
+        stats != nullptr ? stats->leaf_pair_selection_same_target_leaf_rejects
+                         : result.leaf_pair_selection_same_target_leaf_rejects;
+    const std::size_t leaf_pair_directness_ancestor_probe_calls =
+        stats != nullptr
+            ? stats->leaf_pair_directness_ancestor_probe_calls
+            : result.leaf_pair_directness_ancestor_probe_calls;
+    const std::size_t leaf_pair_directness_ancestor_probe_node_visits =
+        stats != nullptr
+            ? stats->leaf_pair_directness_ancestor_probe_node_visits
+            : result.leaf_pair_directness_ancestor_probe_node_visits;
+    const double leaf_pair_directness_ancestor_probe_ms =
+        stats != nullptr ? stats->leaf_pair_directness_ancestor_probe_ms
+                         : result.leaf_pair_directness_ancestor_probe_ms;
+    const std::size_t leaf_pair_directness_pair_cache_hits =
+        stats != nullptr ? stats->leaf_pair_directness_pair_cache_hits
+                         : result.leaf_pair_directness_pair_cache_hits;
+    const std::size_t leaf_pair_directness_pair_cache_misses =
+        stats != nullptr ? stats->leaf_pair_directness_pair_cache_misses
+                         : result.leaf_pair_directness_pair_cache_misses;
+    const std::size_t leaf_pair_directness_all_direct_proofs =
+        stats != nullptr ? stats->leaf_pair_directness_all_direct_proofs
+                         : result.leaf_pair_directness_all_direct_proofs;
+    const std::size_t leaf_pair_directness_mixed_fallbacks =
+        stats != nullptr ? stats->leaf_pair_directness_mixed_fallbacks
+                         : result.leaf_pair_directness_mixed_fallbacks;
+    const std::size_t leaf_pair_directness_verify_checks =
+        stats != nullptr ? stats->leaf_pair_directness_verify_checks
+                         : result.leaf_pair_directness_verify_checks;
+    const std::size_t leaf_pair_directness_verify_mismatches =
+        stats != nullptr ? stats->leaf_pair_directness_verify_mismatches
+                         : result.leaf_pair_directness_verify_mismatches;
+    const std::string leaf_pair_scheduler =
+        stats != nullptr ? stats->leaf_pair_scheduler
+                         : result.leaf_pair_scheduler;
+    const int leaf_pair_worklist_max_active =
+        stats != nullptr ? stats->leaf_pair_worklist_max_active
+                         : result.leaf_pair_worklist_max_active;
+    const std::string leaf_pair_worklist_verify =
+        stats != nullptr ? stats->leaf_pair_worklist_verify
+                         : result.leaf_pair_worklist_verify;
+    const std::size_t leaf_pair_worklist_tasks =
+        stats != nullptr ? stats->leaf_pair_worklist_tasks
+                         : result.leaf_pair_worklist_tasks;
+    const std::size_t leaf_pair_worklist_groups =
+        stats != nullptr ? stats->leaf_pair_worklist_groups
+                         : result.leaf_pair_worklist_groups;
+    const std::size_t leaf_pair_worklist_batched_groups =
+        stats != nullptr ? stats->leaf_pair_worklist_batched_groups
+                         : result.leaf_pair_worklist_batched_groups;
+    const std::size_t leaf_pair_worklist_scalar_flush_tasks =
+        stats != nullptr ? stats->leaf_pair_worklist_scalar_flush_tasks
+                         : result.leaf_pair_worklist_scalar_flush_tasks;
+    const std::size_t leaf_pair_worklist_forced_flushes =
+        stats != nullptr ? stats->leaf_pair_worklist_forced_flushes
+                         : result.leaf_pair_worklist_forced_flushes;
+    const std::size_t leaf_pair_worklist_active_groups_max =
+        stats != nullptr ? stats->leaf_pair_worklist_active_groups_max
+                         : result.leaf_pair_worklist_active_groups_max;
+    const double leaf_pair_worklist_ms =
+        stats != nullptr ? stats->leaf_pair_worklist_ms
+                         : result.leaf_pair_worklist_ms;
+    const std::size_t leaf_pair_worklist_verify_checks =
+        stats != nullptr ? stats->leaf_pair_worklist_verify_checks
+                         : result.leaf_pair_worklist_verify_checks;
+    const std::size_t leaf_pair_worklist_verify_mismatches =
+        stats != nullptr ? stats->leaf_pair_worklist_verify_mismatches
+                         : result.leaf_pair_worklist_verify_mismatches;
+    const std::string leaf_block_verify =
+        stats != nullptr ? stats->leaf_block_verify
+                         : result.leaf_block_verify;
+    const std::size_t leaf_block_target_leaves =
+        stats != nullptr ? stats->leaf_block_target_leaves
+                         : result.leaf_block_target_leaves;
+    const std::size_t leaf_block_targets =
+        stats != nullptr ? stats->leaf_block_targets
+                         : result.leaf_block_targets;
+    const std::size_t leaf_block_source_groups =
+        stats != nullptr ? stats->leaf_block_source_groups
+                         : result.leaf_block_source_groups;
+    const std::size_t leaf_block_batched_groups =
+        stats != nullptr ? stats->leaf_block_batched_groups
+                         : result.leaf_block_batched_groups;
+    const std::size_t leaf_block_scalar_tail_tasks =
+        stats != nullptr ? stats->leaf_block_scalar_tail_tasks
+                         : result.leaf_block_scalar_tail_tasks;
+    const double leaf_block_group_ms =
+        stats != nullptr ? stats->leaf_block_group_ms
+                         : result.leaf_block_group_ms;
+    const double leaf_block_flush_ms =
+        stats != nullptr ? stats->leaf_block_flush_ms
+                         : result.leaf_block_flush_ms;
+    const double leaf_block_writeback_ms =
+        stats != nullptr ? stats->leaf_block_writeback_ms
+                         : result.leaf_block_writeback_ms;
+    const std::size_t leaf_block_verify_checks =
+        stats != nullptr ? stats->leaf_block_verify_checks
+                         : result.leaf_block_verify_checks;
+    const std::size_t leaf_block_verify_mismatches =
+        stats != nullptr ? stats->leaf_block_verify_mismatches
+                         : result.leaf_block_verify_mismatches;
 
     out_ << std::fixed << std::setprecision(6)
          << std::chrono::duration<double>(now - start_).count() << ','
@@ -545,29 +1437,203 @@ public:
          << convergence_estimator_error_cap << ','
          << convergence_unstable_rho_cap << ','
          << csv_escape_progress(convergence_calibration) << ','
+         << csv_escape_progress(convergence_dielectric_amp) << ','
+         << csv_escape_progress(convergence_estimator_model) << ','
+         << csv_escape_progress(convergence_channel_calibration) << ','
+         << csv_escape_progress(convergence_split_policy) << ','
+         << csv_escape_progress(convergence_split_selectivity) << ','
+         << convergence_split_absolute_floor << ','
+         << csv_escape_progress(convergence_overreject_audit) << ','
+         << csv_escape_progress(convergence_overreject_detail) << ','
+         << csv_escape_progress(convergence_shape_audit) << ','
+         << csv_escape_progress(convergence_kernel_response_audit) << ','
+         << csv_escape_progress(channel_missed_semantics) << ','
+         << csv_escape_progress(accepted_miss_diagnostics) << ','
+         << accepted_miss_absolute_floor << ','
+         << convergence_k3_accepted_rho_cap << ','
+         << csv_escape_progress(mac_distance_policy) << ','
+         << mac_surface_margin_factor << ','
+         << csv_escape_progress(mac_surface_margin_policy) << ','
+         << mac_surface_margin_aspect_threshold << ','
+         << mac_surface_margin_rho_trigger << ','
+         << mac_surface_margin_soft_aspect_threshold << ','
+         << mac_surface_margin_soft_rho_trigger << ','
+         << mac_surface_margin_soft_factor << ','
          << convergence_estimator_samples << ','
          << convergence_estimator_unstable_count << ','
          << convergence_estimator_unstable_panels << ','
          << convergence_estimator_split_rejects << ','
          << convergence_estimator_split_reject_panels << ','
+         << convergence_low_abs_reaccepted_count << ','
+         << convergence_low_abs_reaccepted_panels << ','
          << convergence_estimator_tail_ratio_max << ','
          << convergence_estimator_tail_ratio_mean << ','
          << convergence_estimator_error_max << ','
          << convergence_estimator_error_mean << ','
+         << convergence_estimator_abs_error_max << ','
+         << convergence_estimator_abs_error_mean << ','
          << convergence_tail_norm_p_max << ','
          << convergence_tail_norm_p_mean << ','
          << convergence_tail_norm_pm1_max << ','
          << convergence_tail_norm_pm1_mean << ','
          << convergence_effective_jcp_amp_max << ','
          << convergence_effective_jcp_amp_mean << ','
+         << convergence_dielectric_amp_max << ','
+         << convergence_dielectric_amp_mean << ','
+         << convergence_channel_effective_jcp_amp_max[0] << ','
+         << convergence_channel_effective_jcp_amp_max[1] << ','
+         << convergence_channel_effective_jcp_amp_max[2] << ','
+         << convergence_channel_effective_jcp_amp_max[3] << ','
+         << convergence_channel_effective_jcp_amp_mean[0] << ','
+         << convergence_channel_effective_jcp_amp_mean[1] << ','
+         << convergence_channel_effective_jcp_amp_mean[2] << ','
+         << convergence_channel_effective_jcp_amp_mean[3] << ','
+         << convergence_channel_estimated_error_max[0] << ','
+         << convergence_channel_estimated_error_max[1] << ','
+         << convergence_channel_estimated_error_max[2] << ','
+         << convergence_channel_estimated_error_max[3] << ','
+         << convergence_channel_unstable_count[0] << ','
+         << convergence_channel_unstable_count[1] << ','
+         << convergence_channel_unstable_count[2] << ','
+         << convergence_channel_unstable_count[3] << ','
+         << convergence_channel_unstable_panels[0] << ','
+         << convergence_channel_unstable_panels[1] << ','
+         << convergence_channel_unstable_panels[2] << ','
+         << convergence_channel_unstable_panels[3] << ','
+         << convergence_channel_split_rejects[0] << ','
+         << convergence_channel_split_rejects[1] << ','
+         << convergence_channel_split_rejects[2] << ','
+         << convergence_channel_split_rejects[3] << ','
+         << convergence_channel_split_reject_panels[0] << ','
+         << convergence_channel_split_reject_panels[1] << ','
+         << convergence_channel_split_reject_panels[2] << ','
+         << convergence_channel_split_reject_panels[3] << ','
+         << convergence_channel_low_abs_reaccepted_count[0] << ','
+         << convergence_channel_low_abs_reaccepted_count[1] << ','
+         << convergence_channel_low_abs_reaccepted_count[2] << ','
+         << convergence_channel_low_abs_reaccepted_count[3] << ','
+         << convergence_channel_low_abs_reaccepted_panels[0] << ','
+         << convergence_channel_low_abs_reaccepted_panels[1] << ','
+         << convergence_channel_low_abs_reaccepted_panels[2] << ','
+         << convergence_channel_low_abs_reaccepted_panels[3] << ','
+         << convergence_channel_high_error_caught[0] << ','
+         << convergence_channel_high_error_caught[1] << ','
+         << convergence_channel_high_error_caught[2] << ','
+         << convergence_channel_high_error_caught[3] << ','
+         << convergence_channel_high_error_missed[0] << ','
+         << convergence_channel_high_error_missed[1] << ','
+         << convergence_channel_high_error_missed[2] << ','
+         << convergence_channel_high_error_missed[3] << ','
+         << convergence_channel_high_error_caught_by_split[0] << ','
+         << convergence_channel_high_error_caught_by_split[1] << ','
+         << convergence_channel_high_error_caught_by_split[2] << ','
+         << convergence_channel_high_error_caught_by_split[3] << ','
          << convergence_estimator_high_error_caught << ','
          << convergence_estimator_high_error_missed << ','
-         << csv_escape_progress(expansion_audit) << ',' << unsafe_count << ','
+         << convergence_estimator_high_error_caught_by_split << ','
+         << convergence_estimator_phantom_high_error_count << ','
+         << convergence_estimator_phantom_high_error_abs_max << ','
+         << convergence_overreject_count << ','
+         << convergence_overreject_panels << ','
+         << convergence_overreject_caught_count << ','
+         << convergence_overreject_caught_panels << ','
+         << convergence_overreject_abs_error_max << ','
+         << convergence_overreject_abs_error_mean << ','
+         << convergence_overreject_abs_error_p95 << ','
+         << convergence_overreject_abs_error_p99 << ','
+         << convergence_overreject_estimated_abs_error_max << ','
+         << convergence_overreject_estimated_abs_error_mean << ','
+         << convergence_overreject_required_scale_max << ','
+         << convergence_overreject_required_scale_p95 << ','
+         << convergence_overreject_required_scale_p99 << ','
+         << convergence_channel_overreject_count[0] << ','
+         << convergence_channel_overreject_count[1] << ','
+         << convergence_channel_overreject_count[2] << ','
+         << convergence_channel_overreject_count[3] << ','
+         << convergence_channel_overreject_caught_count[0] << ','
+         << convergence_channel_overreject_caught_count[1] << ','
+         << convergence_channel_overreject_caught_count[2] << ','
+         << convergence_channel_overreject_caught_count[3] << ','
+         << convergence_channel_overreject_panels[0] << ','
+         << convergence_channel_overreject_panels[1] << ','
+         << convergence_channel_overreject_panels[2] << ','
+         << convergence_channel_overreject_panels[3] << ','
+         << convergence_channel_overreject_abs_error_max[0] << ','
+         << convergence_channel_overreject_abs_error_max[1] << ','
+         << convergence_channel_overreject_abs_error_max[2] << ','
+         << convergence_channel_overreject_abs_error_max[3] << ','
+         << convergence_channel_overreject_abs_error_mean[0] << ','
+         << convergence_channel_overreject_abs_error_mean[1] << ','
+         << convergence_channel_overreject_abs_error_mean[2] << ','
+         << convergence_channel_overreject_abs_error_mean[3] << ','
+         << convergence_channel_overreject_required_scale_max[0] << ','
+         << convergence_channel_overreject_required_scale_max[1] << ','
+         << convergence_channel_overreject_required_scale_max[2] << ','
+         << convergence_channel_overreject_required_scale_max[3] << ','
+         << convergence_channel_overreject_required_scale_p99[0] << ','
+         << convergence_channel_overreject_required_scale_p99[1] << ','
+         << convergence_channel_overreject_required_scale_p99[2] << ','
+         << convergence_channel_overreject_required_scale_p99[3] << ','
+         << phantom_high_error_count[0] << ','
+         << phantom_high_error_count[1] << ','
+         << phantom_high_error_count[2] << ','
+         << phantom_high_error_count[3] << ','
+         << phantom_high_error_abs_max[0] << ','
+         << phantom_high_error_abs_max[1] << ','
+         << phantom_high_error_abs_max[2] << ','
+         << phantom_high_error_abs_max[3] << ','
+         << csv_escape_progress(accepted_miss_worst_channel) << ','
+         << accepted_miss_count[0] << ',' << accepted_miss_count[1] << ','
+         << accepted_miss_count[2] << ',' << accepted_miss_count[3] << ','
+         << accepted_miss_panels[0] << ',' << accepted_miss_panels[1] << ','
+         << accepted_miss_panels[2] << ',' << accepted_miss_panels[3] << ','
+         << accepted_miss_rho_min[0] << ',' << accepted_miss_rho_min[1]
+         << ',' << accepted_miss_rho_min[2] << ','
+         << accepted_miss_rho_min[3] << ',' << accepted_miss_rho_mean[0]
+         << ',' << accepted_miss_rho_mean[1] << ','
+         << accepted_miss_rho_mean[2] << ','
+         << accepted_miss_rho_mean[3] << ',' << accepted_miss_rho_max[0]
+         << ',' << accepted_miss_rho_max[1] << ','
+         << accepted_miss_rho_max[2] << ',' << accepted_miss_rho_max[3]
+         << ',' << accepted_miss_tail_ratio_mean[0] << ','
+         << accepted_miss_tail_ratio_mean[1] << ','
+         << accepted_miss_tail_ratio_mean[2] << ','
+         << accepted_miss_tail_ratio_mean[3] << ','
+         << accepted_miss_tail_ratio_max[0] << ','
+         << accepted_miss_tail_ratio_max[1] << ','
+         << accepted_miss_tail_ratio_max[2] << ','
+         << accepted_miss_tail_ratio_max[3] << ','
+         << accepted_miss_estimated_error_mean[0] << ','
+         << accepted_miss_estimated_error_mean[1] << ','
+         << accepted_miss_estimated_error_mean[2] << ','
+         << accepted_miss_estimated_error_mean[3] << ','
+         << accepted_miss_estimated_error_max[0] << ','
+         << accepted_miss_estimated_error_max[1] << ','
+         << accepted_miss_estimated_error_max[2] << ','
+         << accepted_miss_estimated_error_max[3] << ','
+         << convergence_k3_rho_cap_rejects << ','
+         << convergence_k3_rho_cap_reject_panels << ','
+         << csv_escape_progress(expansion_audit) << ','
+         << csv_escape_progress(expansion_audit_channel) << ','
+         << unsafe_count << ','
          << unsafe_panels << ',' << gap_samples << ',' << gap_rejects << ','
          << mac_convergence_rho_rejects << ','
          << mac_convergence_aspect_rejects << ','
          << mac_convergence_rho_reject_panels << ','
          << mac_convergence_aspect_reject_panels << ','
+         << mac_surface_margin_rejects << ','
+         << mac_surface_margin_reject_panels << ','
+         << mac_surface_margin_applied << ','
+         << mac_surface_margin_skipped << ','
+         << mac_surface_margin_adaptive_rejects << ','
+         << mac_surface_margin_adaptive_reject_panels << ','
+         << mac_surface_margin_skipped_accepted_far << ','
+         << mac_surface_margin_hard_applied << ','
+         << mac_surface_margin_soft_applied << ','
+         << mac_surface_margin_hard_rejects << ','
+         << mac_surface_margin_hard_reject_panels << ','
+         << mac_surface_margin_soft_rejects << ','
+         << mac_surface_margin_soft_reject_panels << ','
          << fragmented_count << ',' << fragmented_panels << ','
          << fragmented_rejects << ',' << fragmentation_gap_max << ','
          << fragmentation_gap_mean << ','
@@ -578,14 +1644,144 @@ public:
          << moment_dynamic_range << ','
          << expansion_pairs << ',' << expansion_panels << ','
          << expansion_direct_ms / 1000.0 << ',' << expansion_rel_max << ','
-         << expansion_rel_mean << ',' << (expansion_mean_gate_pass ? 1 : 0)
+         << expansion_rel_mean << ',' << expansion_rel_p95 << ','
+         << expansion_rel_p99 << ','
+         << csv_escape_progress(expansion_worst_channel) << ','
+         << expansion_channel_rel_max[0] << ','
+         << expansion_channel_rel_max[1] << ','
+         << expansion_channel_rel_max[2] << ','
+         << expansion_channel_rel_max[3] << ','
+         << expansion_channel_rel_mean[0] << ','
+         << expansion_channel_rel_mean[1] << ','
+         << expansion_channel_rel_mean[2] << ','
+         << expansion_channel_rel_mean[3] << ','
+         << expansion_channel_rel_p99[0] << ','
+         << expansion_channel_rel_p99[1] << ','
+         << expansion_channel_rel_p99[2] << ','
+         << expansion_channel_rel_p99[3] << ','
+         << (expansion_mean_gate_pass ? 1 : 0)
          << ',' << convergence_rho_max << ','
          << convergence_rho_mean << ',' << node_aspect_max << ','
          << node_aspect_mean << ',' << accepted_aspect_max << ','
          << accepted_aspect_mean << ',' << leaf_panel << ','
          << leaf_tile_panel << ',' << leaf_residual << ',' << far_nodes << ','
+         << csv_escape_progress(matvec_cost_profile) << ','
+         << leaf_panels_per_second << ','
+         << leaf_pair_batch_clean_source_panels_per_second << ','
+         << tree_traversal_fraction << ','
+         << csv_escape_progress(leaf_work_profile) << ','
+         << leaf_work_mac_terminal_panels << ','
+         << leaf_work_physical_gap_panels << ','
+         << leaf_work_fragmentation_panels << ','
+         << leaf_work_convergence_panels << ','
+         << leaf_work_convergence_estimator_panels << ','
+         << leaf_work_convergence_rho_panels << ','
+         << leaf_work_convergence_aspect_panels << ','
+         << leaf_work_surface_margin_panels << ','
+         << leaf_work_surface_margin_hard_panels << ','
+         << leaf_work_surface_margin_soft_panels << ','
+         << leaf_work_k3_rho_cap_panels << ','
+         << leaf_work_singular_fallback_panels << ','
+         << leaf_work_scalar_tail_panels << ','
+         << leaf_work_profile_accounted_panels << ','
+         << leaf_work_mac_terminal_frac << ','
+         << leaf_work_convergence_frac << ','
+         << leaf_work_surface_margin_frac << ','
+         << leaf_work_singular_fallback_frac << ','
+         << leaf_work_scalar_tail_frac << ','
+         << csv_escape_progress(cluster_policy) << ','
+         << target_batch_size << ',' << leaf_pair_min_source_panels << ','
+         << leaf_pair_min_targets << ',' << leaf_pair_batch_interactions << ','
+         << leaf_pair_batch_targets << ',' << leaf_pair_batch_source_panels
+         << ',' << leaf_pair_batch_residual_panels << ','
+         << leaf_pair_batch_fallbacks << ',' << leaf_pair_batch_ms / 1000.0
+         << ',' << csv_escape_progress(leaf_pair_batch_kernel) << ','
+         << leaf_pair_batch_vectorized_sources << ','
+         << leaf_pair_batch_vector_lanes << ','
+         << leaf_pair_batch_pairs_per_second
+         << ',' << csv_escape_progress(leaf_kernel_profile)
+         << ',' << csv_escape_progress(jcp_direct_kernel)
+         << ',' << leaf_kernel_scalar_tasks
+         << ',' << leaf_kernel_batch_tasks
+         << ',' << leaf_kernel_source_panel_evals
+         << ',' << leaf_kernel_scalar_ms / 1000.0
+         << ',' << leaf_kernel_target_avx2_ms / 1000.0
+         << ',' << leaf_kernel_tail_ms / 1000.0
+         << ',' << leaf_pair_batch_soa_sources
+         << ',' << leaf_pair_batch_soa_ms / 1000.0
+         << ',' << leaf_pair_batch_scalar_tail_ms / 1000.0
+         << ',' << leaf_pair_batch_clean_source_panels_per_second
+         << ',' << csv_escape_progress(leaf_pair_selection_profile) << ','
+         << csv_escape_progress(leaf_pair_probe_cache) << ','
+         << csv_escape_progress(leaf_pair_target_group) << ','
+         << leaf_pair_max_lookahead << ','
+         << csv_escape_progress(leaf_pair_directness_probe) << ','
+         << csv_escape_progress(leaf_pair_directness_cache) << ','
+         << csv_escape_progress(leaf_pair_directness_verify) << ','
+         << leaf_pair_selection_candidate_scans << ','
+         << leaf_pair_selection_clean_rejects << ','
+         << leaf_pair_selection_probe_calls << ','
+         << leaf_pair_selection_probe_node_visits << ','
+         << leaf_pair_selection_probe_ms / 1000.0 << ','
+         << leaf_pair_selection_ms / 1000.0 << ','
+         << leaf_pair_selection_probe_cache_hits << ','
+         << leaf_pair_selection_probe_cache_misses << ','
+         << leaf_pair_selection_insufficient_targets << ','
+         << leaf_pair_selection_same_target_leaf_rejects
+         << ',' << leaf_pair_directness_ancestor_probe_calls << ','
+         << leaf_pair_directness_ancestor_probe_node_visits << ','
+         << leaf_pair_directness_ancestor_probe_ms / 1000.0 << ','
+         << leaf_pair_directness_pair_cache_hits << ','
+         << leaf_pair_directness_pair_cache_misses << ','
+         << leaf_pair_directness_all_direct_proofs << ','
+         << leaf_pair_directness_mixed_fallbacks << ','
+         << leaf_pair_directness_verify_checks << ','
+         << leaf_pair_directness_verify_mismatches
+         << ',' << csv_escape_progress(leaf_pair_scheduler) << ','
+         << leaf_pair_worklist_max_active << ','
+         << csv_escape_progress(leaf_pair_worklist_verify) << ','
+         << leaf_pair_worklist_tasks << ',' << leaf_pair_worklist_groups
+         << ',' << leaf_pair_worklist_batched_groups << ','
+         << leaf_pair_worklist_scalar_flush_tasks << ','
+         << leaf_pair_worklist_forced_flushes << ','
+         << leaf_pair_worklist_active_groups_max << ','
+         << leaf_pair_worklist_ms / 1000.0 << ','
+         << leaf_pair_worklist_verify_checks << ','
+         << leaf_pair_worklist_verify_mismatches
+         << ',' << csv_escape_progress(leaf_block_verify) << ','
+         << leaf_block_target_leaves << ',' << leaf_block_targets << ','
+         << leaf_block_source_groups << ',' << leaf_block_batched_groups
+         << ',' << leaf_block_scalar_tail_tasks << ','
+         << leaf_block_group_ms / 1000.0 << ','
+         << leaf_block_flush_ms / 1000.0 << ','
+         << leaf_block_writeback_ms / 1000.0 << ','
+         << leaf_block_verify_checks << ','
+         << leaf_block_verify_mismatches
+         << ','
          << singular << ','
          << csv_escape_progress(result.preconditioner_effective) << ','
+         << result.preconditioner_block_panel_cap << ','
+         << result.preconditioner_memory_budget_bytes << ','
+         << result.preconditioner_estimated_bytes << ','
+         << result.preconditioner_valid_blocks << ','
+         << result.preconditioner_valid_panels << ','
+         << result.preconditioner_ill_conditioned_blocks << ','
+         << result.preconditioner_setup_ms / 1000.0 << ','
+         << result.preconditioner_apply_ms / 1000.0 << ','
+         << result.preconditioner_apply_calls << ','
+         << result.preconditioner_coarse_aggregate_cap << ','
+         << result.preconditioner_coarse_aggregates << ','
+         << result.preconditioner_coarse_dimension << ','
+         << csv_escape_progress(result.preconditioner_coarse_base) << ','
+         << result.preconditioner_coarse_matrix_bytes << ','
+         << result.preconditioner_coarse_pivot_ratio << ','
+         << csv_escape_progress(result.preconditioner_coarse_status) << ','
+         << result.preconditioner_coarse_setup_matvec_calls << ','
+         << result.preconditioner_coarse_setup_ms / 1000.0 << ','
+         << result.preconditioner_coarse_apply_ms / 1000.0 << ','
+         << result.preconditioner_coarse_apply_calls << ','
+         << result.preconditioner_coarse_rp_identity_error_max << ','
+         << result.preconditioner_coarse_verify_rel_error_max << ','
          << threads_ << ',' << current_working_set_bytes() << ','
          << csv_escape_progress(status) << '\n';
     out_.flush();
@@ -670,6 +1866,8 @@ struct LinearSolveResult {
   std::vector<double> residual_history;
   double orthogonalization_ms{0.0};
   double preconditioner_ms{0.0};
+  double preconditioner_apply_ms{0.0};
+  std::size_t preconditioner_apply_calls{0};
 };
 
 using GmresProgressCallback =
@@ -777,8 +1975,10 @@ LinearSolveResult gmres_solve(
         out[i] = in[i] * inv_precond[i];
       });
     }
-    result.preconditioner_ms +=
-        elapsed_ms(begin, std::chrono::steady_clock::now());
+    const double apply_ms = elapsed_ms(begin, std::chrono::steady_clock::now());
+    result.preconditioner_ms += apply_ms;
+    result.preconditioner_apply_ms += apply_ms;
+    ++result.preconditioner_apply_calls;
   };
 
   auto finite_vector = [](const std::vector<double> &values) noexcept {
@@ -1583,12 +2783,298 @@ struct JcpBlockPreconditioner {
   }
 };
 
+using JcpBlockRange = std::pair<std::size_t, std::size_t>;
+
+struct JcpCoarseGalerkinPreconditioner {
+  struct Aggregate {
+    std::vector<std::size_t> panels;
+    double area_sum{0.0};
+  };
+
+  std::size_t panel_count{0};
+  bool coupled{false};
+  std::vector<Aggregate> aggregates;
+  std::vector<double> inv_diag;
+  std::vector<double> lu;
+  std::vector<int> pivots;
+  std::shared_ptr<JcpBlockPreconditioner> block_base;
+  double pivot_ratio{0.0};
+  bool valid{false};
+  std::size_t setup_matvec_calls{0};
+  double rp_identity_error_max{0.0};
+  double verify_rel_error_max{0.0};
+
+  [[nodiscard]] std::size_t dimension() const noexcept {
+    return coupled ? 2 * aggregates.size() : aggregates.size();
+  }
+
+  void restrict_area_weighted(const std::vector<Panel> &panels,
+                              const std::vector<double> &fine,
+                              std::vector<double> &coarse) const {
+    const std::size_t q = aggregates.size();
+    coarse.assign(dimension(), 0.0);
+    for (std::size_t a = 0; a < q; ++a) {
+      const Aggregate &aggregate = aggregates[a];
+      const double denom = std::max(1.0e-300, aggregate.area_sum);
+      double phi = 0.0;
+      double phin = 0.0;
+      for (const std::size_t panel : aggregate.panels) {
+        const double weight = panel < panels.size() ? panels[panel].area : 0.0;
+        phi += weight * (panel < fine.size() ? fine[panel] : 0.0);
+        if (coupled && panel_count + panel < fine.size())
+          phin += weight * fine[panel_count + panel];
+      }
+      coarse[a] = phi / denom;
+      if (coupled)
+        coarse[q + a] = phin / denom;
+    }
+  }
+
+  void prolongate(const std::vector<double> &coarse,
+                  std::vector<double> &fine) const {
+    const std::size_t q = aggregates.size();
+    fine.assign(coupled ? 2 * panel_count : panel_count, 0.0);
+    for (std::size_t a = 0; a < q; ++a) {
+      for (const std::size_t panel : aggregates[a].panels) {
+        if (panel < fine.size())
+          fine[panel] = a < coarse.size() ? coarse[a] : 0.0;
+        if (coupled && panel_count + panel < fine.size())
+          fine[panel_count + panel] =
+              q + a < coarse.size() ? coarse[q + a] : 0.0;
+      }
+    }
+  }
+
+  [[nodiscard]] std::size_t estimated_bytes() const noexcept {
+    const std::size_t dim = dimension();
+    std::size_t bytes = inv_diag.size() * sizeof(double) +
+                        aggregates.size() * sizeof(Aggregate) +
+                        dim * dim * sizeof(double) +
+                        dim * sizeof(int);
+    for (const Aggregate &aggregate : aggregates)
+      bytes += aggregate.panels.size() * sizeof(std::size_t);
+    return bytes;
+  }
+
+  void apply(const std::vector<Panel> &panels, const std::vector<double> &in,
+             std::vector<double> &out, TitanExecutor &executor) const {
+    std::vector<double> coarse_rhs;
+    restrict_area_weighted(panels, in, coarse_rhs);
+    std::vector<double> projected;
+    prolongate(coarse_rhs, projected);
+    std::vector<double> complement(in.size(), 0.0);
+    for (std::size_t i = 0; i < in.size(); ++i)
+      complement[i] = in[i] - (i < projected.size() ? projected[i] : 0.0);
+    if (block_base != nullptr) {
+      block_base->apply_parallel(complement, out, executor);
+    } else {
+      out.resize(in.size());
+      for (std::size_t i = 0; i < in.size(); ++i)
+        out[i] = complement[i] *
+                 (i < inv_diag.size() ? inv_diag[i] : 1.0);
+    }
+    if (valid && lu.size() == dimension() * dimension()) {
+      solve_dense_lu(lu, pivots, dimension(), coarse_rhs);
+      prolongate(coarse_rhs, projected);
+      for (std::size_t i = 0; i < out.size(); ++i)
+        out[i] += i < projected.size() ? projected[i] : 0.0;
+    }
+  }
+};
+
+std::vector<JcpCoarseGalerkinPreconditioner::Aggregate>
+make_jcp_coarse_aggregates(const std::vector<Panel> &panels,
+                           const TreeWorkspace &tree,
+                           std::size_t aggregate_cap) {
+  std::vector<std::size_t> selected;
+  if (tree.root_index < tree.nodes.size())
+    selected.push_back(tree.root_index);
+  if (selected.empty() || tree.order.size() != panels.size()) {
+    JcpCoarseGalerkinPreconditioner::Aggregate aggregate;
+    aggregate.panels.resize(panels.size());
+    std::iota(aggregate.panels.begin(), aggregate.panels.end(), 0);
+    for (const Panel &panel : panels)
+      aggregate.area_sum += panel.area;
+    return {std::move(aggregate)};
+  }
+  const std::size_t cap = std::clamp<std::size_t>(aggregate_cap, 4, 64);
+  while (selected.size() < cap) {
+    std::size_t split_pos = selected.size();
+    std::size_t split_panels = 0;
+    for (std::size_t pos = 0; pos < selected.size(); ++pos) {
+      const TreeNode &node = tree.nodes[selected[pos]];
+      if (node.child_count < 2 ||
+          selected.size() - 1 + node.child_count > cap)
+        continue;
+      if (node.panel_count > split_panels) {
+        split_panels = node.panel_count;
+        split_pos = pos;
+      }
+    }
+    if (split_pos >= selected.size())
+      break;
+    const TreeNode node = tree.nodes[selected[split_pos]];
+    selected.erase(selected.begin() + static_cast<std::ptrdiff_t>(split_pos));
+    for (std::size_t child = 0; child < node.child_count; ++child) {
+      const std::size_t child_pos = node.first_child + child;
+      if (child_pos < tree.child_indices.size() &&
+          tree.child_indices[child_pos] < tree.nodes.size()) {
+        selected.insert(selected.begin() + static_cast<std::ptrdiff_t>(split_pos),
+                        tree.child_indices[child_pos]);
+        ++split_pos;
+      }
+    }
+  }
+  std::vector<JcpCoarseGalerkinPreconditioner::Aggregate> aggregates;
+  aggregates.reserve(selected.size());
+  for (const std::size_t node_index : selected) {
+    const TreeNode &node = tree.nodes[node_index];
+    JcpCoarseGalerkinPreconditioner::Aggregate aggregate;
+    aggregate.panels.reserve(node.panel_count);
+    const std::size_t end =
+        std::min(tree.order.size(), node.first_panel + node.panel_count);
+    for (std::size_t pos = node.first_panel; pos < end; ++pos) {
+      const std::size_t panel = tree.order[pos];
+      if (panel < panels.size()) {
+        aggregate.panels.push_back(panel);
+        aggregate.area_sum += panels[panel].area;
+      }
+    }
+    if (!aggregate.panels.empty())
+      aggregates.push_back(std::move(aggregate));
+  }
+  return aggregates;
+}
+
+std::shared_ptr<JcpCoarseGalerkinPreconditioner>
+make_jcp_coarse_structure(const std::vector<Panel> &panels,
+                          const TreeWorkspace &tree, bool coupled,
+                          const std::vector<double> &diagonal,
+                          std::size_t aggregate_cap) {
+  auto coarse = std::make_shared<JcpCoarseGalerkinPreconditioner>();
+  coarse->panel_count = panels.size();
+  coarse->coupled = coupled;
+  coarse->aggregates =
+      make_jcp_coarse_aggregates(panels, tree, aggregate_cap);
+  coarse->inv_diag.assign(diagonal.size(), 1.0);
+  for (std::size_t i = 0; i < diagonal.size(); ++i) {
+    const double diag = std::abs(diagonal[i]);
+    coarse->inv_diag[i] =
+        std::isfinite(diag) && diag > 1.0e-12 ? 1.0 / diag : 1.0;
+  }
+  return coarse;
+}
+
+bool build_jcp_exact_galerkin(
+    const std::vector<Panel> &panels, JcpCoarseGalerkinPreconditioner &coarse,
+    const std::function<void(const std::vector<double> &,
+                             std::vector<double> &)> &setup_matvec,
+    bool verify) {
+  const std::size_t dim = coarse.dimension();
+  if (dim == 0 || !setup_matvec)
+    return false;
+  std::vector<double> matrix(dim * dim, 0.0);
+  std::vector<double> basis(dim, 0.0);
+  std::vector<double> fine;
+  std::vector<double> applied;
+  std::vector<double> restricted;
+  for (std::size_t col = 0; col < dim; ++col) {
+    std::fill(basis.begin(), basis.end(), 0.0);
+    basis[col] = 1.0;
+    coarse.prolongate(basis, fine);
+    setup_matvec(fine, applied);
+    ++coarse.setup_matvec_calls;
+    coarse.restrict_area_weighted(panels, applied, restricted);
+    for (std::size_t row = 0; row < dim; ++row)
+      matrix[row * dim + col] = restricted[row];
+  }
+  for (std::size_t col = 0; col < dim; ++col) {
+    std::fill(basis.begin(), basis.end(), 0.0);
+    basis[col] = 1.0;
+    coarse.prolongate(basis, fine);
+    coarse.restrict_area_weighted(panels, fine, restricted);
+    for (std::size_t row = 0; row < dim; ++row) {
+      const double target = row == col ? 1.0 : 0.0;
+      coarse.rp_identity_error_max =
+          std::max(coarse.rp_identity_error_max,
+                   std::abs(restricted[row] - target));
+    }
+  }
+  if (verify) {
+    double diff_sq = 0.0;
+    double ref_sq = 0.0;
+    for (std::size_t col = 0; col < dim; ++col) {
+      std::fill(basis.begin(), basis.end(), 0.0);
+      basis[col] = 1.0;
+      coarse.prolongate(basis, fine);
+      setup_matvec(fine, applied);
+      ++coarse.setup_matvec_calls;
+      coarse.restrict_area_weighted(panels, applied, restricted);
+      for (std::size_t row = 0; row < dim; ++row) {
+        const double expected = matrix[row * dim + col];
+        const double delta = restricted[row] - expected;
+        diff_sq += delta * delta;
+        ref_sq += expected * expected;
+      }
+    }
+    coarse.verify_rel_error_max =
+        std::sqrt(diff_sq) / std::max(1.0e-300, std::sqrt(ref_sq));
+  }
+  coarse.lu = std::move(matrix);
+  coarse.valid =
+      factor_dense_lu(coarse.lu, coarse.pivots, dim, &coarse.pivot_ratio);
+  constexpr double kMinCoarsePivotRatio = 1.0e-12;
+  if (!std::isfinite(coarse.pivot_ratio) ||
+      coarse.pivot_ratio < kMinCoarsePivotRatio)
+    coarse.valid = false;
+  return coarse.valid;
+}
+
+std::vector<JcpBlockRange>
+make_jcp_block_ranges(const TreeWorkspace &tree, std::size_t panel_count,
+                      std::size_t block_panel_cap) {
+  std::vector<JcpBlockRange> ranges;
+  const std::size_t cap = std::clamp<std::size_t>(block_panel_cap, 8, 32);
+  auto append_range = [&](std::size_t begin, std::size_t end) {
+    if (begin < end && end <= tree.order.size())
+      ranges.push_back({begin, end});
+  };
+  bool emitted_leaf_block = false;
+  for (const TreeNode &node : tree.nodes) {
+    if (node.child_count != 0 || node.panel_count == 0)
+      continue;
+    emitted_leaf_block = true;
+    const std::size_t leaf_end = node.first_panel + node.panel_count;
+    for (std::size_t begin = node.first_panel; begin < leaf_end; begin += cap)
+      append_range(begin, std::min(leaf_end, begin + cap));
+  }
+  if (!emitted_leaf_block) {
+    for (std::size_t begin = 0; begin < panel_count; begin += cap)
+      append_range(begin, std::min(panel_count, begin + cap));
+  }
+  return ranges;
+}
+
+std::size_t estimate_jcp_block_preconditioner_bytes(
+    const std::vector<JcpBlockRange> &ranges, std::size_t diagonal_size,
+    bool coupled) noexcept {
+  std::size_t bytes = diagonal_size * sizeof(double);
+  for (const JcpBlockRange &range : ranges) {
+    const std::size_t m = range.second - range.first;
+    const std::size_t dim = coupled ? 2 * m : m;
+    bytes += m * sizeof(std::size_t);
+    bytes += dim * dim * sizeof(double);
+    bytes += dim * sizeof(int);
+  }
+  return bytes;
+}
+
 std::shared_ptr<JcpBlockPreconditioner> build_jcp_block_preconditioner(
     const std::vector<Panel> &panels, const TreeWorkspace &tree, bool coupled,
     double eps_ratio, double kappa, double lhs_phi, double lhs_phin,
     const std::vector<double> &diagonal, const std::string &near_integration,
     const std::string &quad_buffer, const std::string &block_near_mode,
-    TitanExecutor &executor) {
+    const std::vector<JcpBlockRange> &ranges, TitanExecutor &executor) {
   const std::size_t n = panels.size();
   if (n == 0 || tree.order.size() != n)
     return {};
@@ -1601,12 +3087,6 @@ std::shared_ptr<JcpBlockPreconditioner> build_jcp_block_preconditioner(
     precond->inv_diag[i] =
         std::isfinite(diag) && diag > 1.0e-12 ? 1.0 / diag : 1.0;
   }
-
-  std::vector<std::pair<std::size_t, std::size_t>> ranges;
-  auto append_range = [&](std::size_t begin, std::size_t end) {
-    if (begin < end && end <= tree.order.size())
-      ranges.push_back({begin, end});
-  };
 
   const bool buffer_aware = block_near_mode == "buffer-aware";
   auto build_block = [&](std::size_t begin, std::size_t end) {
@@ -1682,22 +3162,6 @@ std::shared_ptr<JcpBlockPreconditioner> build_jcp_block_preconditioner(
     return block;
   };
 
-  constexpr std::size_t kBlockPanelCap = 32;
-  bool emitted_leaf_block = false;
-  for (const TreeNode &node : tree.nodes) {
-    if (node.child_count != 0 || node.panel_count == 0)
-      continue;
-    emitted_leaf_block = true;
-    const std::size_t leaf_end = node.first_panel + node.panel_count;
-    for (std::size_t begin = node.first_panel; begin < leaf_end;
-         begin += kBlockPanelCap) {
-      append_range(begin, std::min(leaf_end, begin + kBlockPanelCap));
-    }
-  }
-  if (!emitted_leaf_block) {
-    for (std::size_t begin = 0; begin < n; begin += kBlockPanelCap)
-      append_range(begin, std::min(n, begin + kBlockPanelCap));
-  }
   precond->blocks.resize(ranges.size());
   const std::size_t workers = solver_workers(executor, ranges.size());
   executor.parallel_for(
@@ -1956,6 +3420,12 @@ double jcp_poisson_energy_kcal(const std::vector<Atom> &atoms,
 Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                        TitanExecutor &executor) {
   Result result;
+  result.tree_preset =
+      (options.tree_preset == "stage3u-safe" ||
+       options.tree_preset == "stage3u-perf" ||
+       options.tree_preset == "stage3u-perf2")
+          ? options.tree_preset
+          : std::string("off");
   const FormulationConfig formulation = make_formulation_config(options);
   result.formulation = formulation.formulation;
   result.energy_projection = formulation.energy_projection;
@@ -1966,6 +3436,18 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       options.preconditioner_block_near == "buffer-aware"
           ? std::string("buffer-aware")
           : std::string("singular");
+  result.preconditioner_block_panel_cap =
+      std::clamp(options.preconditioner_block_panel_cap, 8, 32);
+  result.preconditioner_memory_budget_bytes =
+      static_cast<std::size_t>(
+          std::clamp(options.preconditioner_memory_budget_mb, 16, 512)) *
+      1024u * 1024u;
+  result.preconditioner_coarse_aggregate_cap =
+      std::clamp(options.preconditioner_coarse_aggregate_cap, 4, 64);
+  result.preconditioner_coarse_base =
+      options.preconditioner_coarse_base == "block-budgeted"
+          ? std::string("block-budgeted")
+          : std::string("diagonal");
   result.preconditioner_effective = "diagonal";
   result.gmres_restart_requested = std::clamp(options.gmres_restart, 8, 128);
   result.gmres_restart_effective = result.gmres_restart_requested;
@@ -2002,6 +3484,67 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.adaptive_level =
       options.adaptive_level.empty() ? std::string("strict")
                                      : options.adaptive_level;
+  result.cluster_policy =
+      (options.cluster_policy == "leaf-pair-strict" ||
+       options.cluster_policy == "leaf-pair-balanced")
+          ? options.cluster_policy
+          : std::string("off");
+  result.target_batch_size =
+      std::clamp(options.target_batch_size, 1, 8);
+  if (result.target_batch_size != 4 && result.target_batch_size != 8)
+    result.target_batch_size = 1;
+  result.leaf_pair_min_source_panels =
+      std::clamp(options.leaf_pair_min_source_panels, 16, 512);
+  result.leaf_pair_min_targets =
+      std::clamp(options.leaf_pair_min_targets, 2, 16);
+  result.leaf_kernel_profile =
+      options.leaf_kernel_profile == "summary" ? "summary" : "off";
+  result.leaf_work_profile =
+      options.leaf_work_profile == "summary" ? "summary" : "off";
+  result.matvec_cost_profile =
+      options.matvec_cost_profile == "summary" ? "summary" : "off";
+  result.jcp_direct_kernel =
+      normalize_jcp_direct_kernel_name(options.jcp_direct_kernel);
+  result.leaf_pair_selection_profile =
+      options.leaf_pair_selection_profile == "summary" ? "summary" : "off";
+  result.leaf_pair_probe_cache =
+      options.leaf_pair_probe_cache == "per-matvec" ? "per-matvec" : "off";
+  result.leaf_pair_target_group =
+      options.leaf_pair_target_group == "same-target-leaf"
+          ? "same-target-leaf"
+          : "scan";
+  result.leaf_pair_directness_probe =
+      options.leaf_pair_directness_probe == "ancestor-path"
+          ? "ancestor-path"
+          : "full-traversal";
+  result.leaf_pair_directness_cache =
+      options.leaf_pair_directness_cache == "target-leaf-source-leaf"
+          ? "target-leaf-source-leaf"
+          : "off";
+  result.leaf_pair_directness_verify =
+      (options.leaf_pair_directness_verify == "sampled" ||
+       options.leaf_pair_directness_verify == "full-small")
+          ? options.leaf_pair_directness_verify
+          : "off";
+  result.leaf_pair_scheduler =
+      (options.leaf_pair_scheduler == "deferred-worklist" ||
+       options.leaf_pair_scheduler == "target-leaf-block")
+          ? options.leaf_pair_scheduler
+          : "inline-select";
+  result.leaf_pair_worklist_max_active =
+      std::clamp(options.leaf_pair_worklist_max_active, 64, 8192);
+  result.leaf_pair_worklist_verify =
+      (options.leaf_pair_worklist_verify == "sampled" ||
+       options.leaf_pair_worklist_verify == "full-small")
+          ? options.leaf_pair_worklist_verify
+          : "off";
+  result.leaf_block_verify =
+      (options.leaf_block_verify == "sampled" ||
+       options.leaf_block_verify == "full-small")
+          ? options.leaf_block_verify
+          : "off";
+  result.leaf_pair_max_lookahead =
+      std::clamp(options.leaf_pair_max_lookahead, 4, 128);
   result.interaction_mode =
       options.interaction_mode == "onthefly" ? "onthefly" : "cached";
   result.node_bounds_mode =
@@ -2087,10 +3630,124 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
        options.convergence_calibration == "consecutive-aspect")
           ? options.convergence_calibration
           : std::string("stage3j");
+  result.convergence_dielectric_amp =
+      options.convergence_dielectric_amp == "on" ? std::string("on")
+                                                 : std::string("off");
+  result.convergence_estimator_model =
+      (options.convergence_estimator_model == "channel-tail" ||
+       options.convergence_estimator_model == "channel-tail-eps")
+          ? options.convergence_estimator_model
+          : std::string("stage3l");
+  result.convergence_channel_calibration =
+      (options.convergence_channel_calibration == "k3-sqrt-eps" ||
+       options.convergence_channel_calibration == "k3-eps" ||
+       options.convergence_channel_calibration == "k4-sqrt-eps" ||
+       options.convergence_channel_calibration == "k4-eps" ||
+       options.convergence_channel_calibration ==
+           "all-derivative-sqrt-eps" ||
+       options.convergence_channel_calibration == "polynomial-eps")
+          ? options.convergence_channel_calibration
+          : std::string("stage3m");
+  result.convergence_split_policy =
+      options.convergence_split_policy == "k3-hot" ? std::string("k3-hot")
+                                                   : std::string("global");
+  result.convergence_split_selectivity =
+      (options.convergence_split_selectivity == "absolute-aware" ||
+       options.convergence_split_selectivity == "channel-absolute-aware")
+          ? options.convergence_split_selectivity
+          : std::string("legacy");
+  result.convergence_split_absolute_floor = std::clamp(
+      std::isfinite(options.convergence_split_absolute_floor)
+          ? options.convergence_split_absolute_floor
+          : 0.0,
+      0.0, 1.0e-4);
+  result.convergence_overreject_audit =
+      (options.convergence_overreject_audit == "sampled" ||
+       options.convergence_overreject_audit == "full-small")
+          ? options.convergence_overreject_audit
+          : std::string("off");
+  result.convergence_overreject_detail =
+      (options.convergence_overreject_detail == "summary" ||
+       options.convergence_overreject_detail == "sampled-detail")
+          ? options.convergence_overreject_detail
+          : std::string("off");
+  result.convergence_shape_audit =
+      (options.convergence_shape_audit == "summary" ||
+       options.convergence_shape_audit == "sampled-detail")
+          ? options.convergence_shape_audit
+          : std::string("off");
+  result.convergence_kernel_response_audit =
+      (options.convergence_kernel_response_audit == "summary" ||
+       options.convergence_kernel_response_audit == "sampled-detail")
+          ? options.convergence_kernel_response_audit
+          : std::string("off");
+  result.channel_missed_semantics =
+      options.channel_missed_semantics == "accepted-only"
+          ? std::string("accepted-only")
+          : std::string("legacy");
+  result.accepted_miss_diagnostics =
+      (options.accepted_miss_diagnostics == "summary" ||
+       options.accepted_miss_diagnostics == "sampled-detail")
+          ? options.accepted_miss_diagnostics
+          : std::string("off");
+  result.accepted_miss_absolute_floor = std::clamp(
+      std::isfinite(options.accepted_miss_absolute_floor)
+          ? options.accepted_miss_absolute_floor
+          : 1.0e-7,
+      0.0, 1.0e-4);
+  result.convergence_k3_accepted_rho_cap = std::clamp(
+      std::isfinite(options.convergence_k3_accepted_rho_cap)
+          ? options.convergence_k3_accepted_rho_cap
+          : 0.0,
+      0.0, 2.0);
+  result.mac_distance_policy =
+      options.mac_distance_policy == "surface-margin"
+          ? std::string("surface-margin")
+          : std::string("center");
+  result.mac_surface_margin_factor = std::clamp(
+      std::isfinite(options.mac_surface_margin_factor)
+          ? options.mac_surface_margin_factor
+          : 0.25,
+      0.0, 0.75);
+  result.mac_surface_margin_policy =
+      (options.mac_surface_margin_policy == "adaptive" ||
+       options.mac_surface_margin_policy == "risk-scaled")
+          ? options.mac_surface_margin_policy
+          : "all";
+  result.mac_surface_margin_aspect_threshold = std::clamp(
+      std::isfinite(options.mac_surface_margin_aspect_threshold)
+          ? options.mac_surface_margin_aspect_threshold
+          : 3.0,
+      1.0, 50.0);
+  result.mac_surface_margin_rho_trigger = std::clamp(
+      std::isfinite(options.mac_surface_margin_rho_trigger)
+          ? options.mac_surface_margin_rho_trigger
+          : 0.55,
+      0.0, 2.0);
+  result.mac_surface_margin_soft_aspect_threshold = std::clamp(
+      std::isfinite(options.mac_surface_margin_soft_aspect_threshold)
+          ? options.mac_surface_margin_soft_aspect_threshold
+          : 0.0,
+      0.0, 50.0);
+  result.mac_surface_margin_soft_rho_trigger = std::clamp(
+      std::isfinite(options.mac_surface_margin_soft_rho_trigger)
+          ? options.mac_surface_margin_soft_rho_trigger
+          : 0.0,
+      0.0, 2.0);
+  result.mac_surface_margin_soft_factor = std::clamp(
+      std::isfinite(options.mac_surface_margin_soft_factor)
+          ? options.mac_surface_margin_soft_factor
+          : 0.10,
+      0.0, 0.75);
   result.expansion_audit =
       (options.expansion_audit == "sampled" ||
        options.expansion_audit == "full-small")
           ? options.expansion_audit
+          : std::string("off");
+  result.expansion_audit_channel =
+      (options.expansion_audit_channel == "summary" ||
+       options.expansion_audit_channel == "sampled-detail")
+          ? options.expansion_audit_channel
           : std::string("off");
   result.quad_buffer_auto_candidate =
       (options.quad_buffer == "gauss7" || options.quad_buffer == "adaptive")
@@ -2197,8 +3854,11 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         experimental_treecode ? std::clamp(options.taylor_order, 3, 4) : 0;
     if (result.preconditioner_requested == "none")
       result.preconditioner_effective = "none";
-    else if (result.preconditioner_requested == "block")
+    else if (result.preconditioner_requested == "block" ||
+             result.preconditioner_requested == "block-budgeted")
       result.preconditioner_effective = "diagonal_block_pending";
+    else if (result.preconditioner_requested == "coarse-galerkin-probe")
+      result.preconditioner_effective = "diagonal_coarse_pending";
     else
       result.preconditioner_effective = "diagonal";
     const double eps_ratio =
@@ -2269,9 +3929,82 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         result.convergence_unstable_rho_cap;
     jcp_tree_stats.convergence_calibration =
         result.convergence_calibration;
+    jcp_tree_stats.convergence_dielectric_amp =
+        result.convergence_dielectric_amp;
+    jcp_tree_stats.convergence_estimator_model =
+        result.convergence_estimator_model;
+    jcp_tree_stats.convergence_channel_calibration =
+        result.convergence_channel_calibration;
+    jcp_tree_stats.convergence_split_policy =
+        result.convergence_split_policy;
+    jcp_tree_stats.convergence_split_selectivity =
+        result.convergence_split_selectivity;
+    jcp_tree_stats.convergence_split_absolute_floor =
+        result.convergence_split_absolute_floor;
+    jcp_tree_stats.convergence_overreject_audit =
+        result.convergence_overreject_audit;
+    jcp_tree_stats.convergence_overreject_detail =
+        result.convergence_overreject_detail;
+    jcp_tree_stats.convergence_shape_audit =
+        result.convergence_shape_audit;
+    jcp_tree_stats.convergence_kernel_response_audit =
+        result.convergence_kernel_response_audit;
+    jcp_tree_stats.channel_missed_semantics =
+        result.channel_missed_semantics;
+    jcp_tree_stats.accepted_miss_diagnostics =
+        result.accepted_miss_diagnostics;
+    jcp_tree_stats.accepted_miss_absolute_floor =
+        result.accepted_miss_absolute_floor;
+    jcp_tree_stats.convergence_k3_accepted_rho_cap =
+        result.convergence_k3_accepted_rho_cap;
+    jcp_tree_stats.mac_distance_policy = result.mac_distance_policy;
+    jcp_tree_stats.mac_surface_margin_factor =
+        result.mac_surface_margin_factor;
+    jcp_tree_stats.mac_surface_margin_policy =
+        result.mac_surface_margin_policy;
+    jcp_tree_stats.mac_surface_margin_aspect_threshold =
+        result.mac_surface_margin_aspect_threshold;
+    jcp_tree_stats.mac_surface_margin_rho_trigger =
+        result.mac_surface_margin_rho_trigger;
+    jcp_tree_stats.mac_surface_margin_soft_aspect_threshold =
+        result.mac_surface_margin_soft_aspect_threshold;
+    jcp_tree_stats.mac_surface_margin_soft_rho_trigger =
+        result.mac_surface_margin_soft_rho_trigger;
+    jcp_tree_stats.mac_surface_margin_soft_factor =
+        result.mac_surface_margin_soft_factor;
+    jcp_tree_stats.cluster_policy = result.cluster_policy;
+    jcp_tree_stats.target_batch_size = result.target_batch_size;
+    jcp_tree_stats.leaf_pair_min_source_panels =
+        result.leaf_pair_min_source_panels;
+    jcp_tree_stats.leaf_pair_min_targets = result.leaf_pair_min_targets;
+    jcp_tree_stats.leaf_kernel_profile = result.leaf_kernel_profile;
+    jcp_tree_stats.leaf_work_profile = result.leaf_work_profile;
+    jcp_tree_stats.matvec_cost_profile = result.matvec_cost_profile;
+    jcp_tree_stats.jcp_direct_kernel = result.jcp_direct_kernel;
+    jcp_tree_stats.leaf_pair_selection_profile =
+        result.leaf_pair_selection_profile;
+    jcp_tree_stats.leaf_pair_probe_cache = result.leaf_pair_probe_cache;
+    jcp_tree_stats.leaf_pair_target_group = result.leaf_pair_target_group;
+    jcp_tree_stats.leaf_pair_directness_probe =
+        result.leaf_pair_directness_probe;
+    jcp_tree_stats.leaf_pair_directness_cache =
+        result.leaf_pair_directness_cache;
+    jcp_tree_stats.leaf_pair_directness_verify =
+        result.leaf_pair_directness_verify;
+    jcp_tree_stats.leaf_pair_scheduler = result.leaf_pair_scheduler;
+    jcp_tree_stats.leaf_pair_worklist_max_active =
+        result.leaf_pair_worklist_max_active;
+    jcp_tree_stats.leaf_pair_worklist_verify =
+        result.leaf_pair_worklist_verify;
+    jcp_tree_stats.leaf_block_verify = result.leaf_block_verify;
+    jcp_tree_stats.leaf_pair_max_lookahead =
+        result.leaf_pair_max_lookahead;
     jcp_tree_stats.expansion_audit = result.expansion_audit;
+    jcp_tree_stats.expansion_audit_channel = result.expansion_audit_channel;
     const bool needs_jcp_tree =
-        experimental_treecode || result.preconditioner_requested == "block";
+        experimental_treecode || result.preconditioner_requested == "block" ||
+        result.preconditioner_requested == "block-budgeted" ||
+        result.preconditioner_requested == "coarse-galerkin-probe";
     if (needs_jcp_tree) {
       progress.write("tree_build_start", result, &jcp_tree_stats,
                      matvec_calls, 0, 0, 0.0, "running", true);
@@ -2296,7 +4029,45 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           options.convergence_tail_threshold,
           options.convergence_estimator_error_cap,
           options.convergence_unstable_rho_cap,
-          options.convergence_calibration);
+          options.convergence_calibration,
+          options.cluster_policy,
+          options.convergence_dielectric_amp, options.target_batch_size,
+          options.leaf_pair_min_source_panels,
+          options.leaf_pair_min_targets,
+          options.convergence_estimator_model,
+          options.expansion_audit_channel,
+          options.convergence_channel_calibration,
+          options.channel_missed_semantics,
+          options.convergence_split_policy,
+          options.accepted_miss_diagnostics,
+          options.convergence_k3_accepted_rho_cap,
+          options.mac_distance_policy,
+          options.mac_surface_margin_factor,
+          options.mac_surface_margin_policy,
+          options.mac_surface_margin_aspect_threshold,
+          options.mac_surface_margin_rho_trigger,
+          options.accepted_miss_absolute_floor, options.leaf_pair_kernel,
+          options.leaf_kernel_profile, options.leaf_work_profile,
+          options.jcp_direct_kernel,
+          options.leaf_pair_selection_profile,
+          options.leaf_pair_probe_cache,
+          options.leaf_pair_target_group,
+          options.leaf_pair_max_lookahead,
+          options.leaf_pair_directness_probe,
+            options.leaf_pair_directness_cache,
+            options.leaf_pair_directness_verify,
+            options.leaf_pair_scheduler,
+            options.leaf_pair_worklist_max_active,
+            options.leaf_pair_worklist_verify, options.leaf_block_verify,
+            options.mac_surface_margin_soft_aspect_threshold,
+            options.mac_surface_margin_soft_rho_trigger,
+            options.mac_surface_margin_soft_factor,
+            options.convergence_split_selectivity,
+            options.convergence_split_absolute_floor,
+            options.convergence_overreject_audit,
+            options.convergence_overreject_detail,
+            options.convergence_shape_audit,
+            options.convergence_kernel_response_audit);
       jcp_tree.taylor_order = result.taylor_order;
       jcp_tree.derivative_mode = result.derivative_mode;
       result.interaction_mode = jcp_tree.interaction_mode;
@@ -2321,7 +4092,75 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.convergence_unstable_rho_cap =
           jcp_tree.convergence_unstable_rho_cap;
       result.convergence_calibration = jcp_tree.convergence_calibration;
+      result.convergence_dielectric_amp =
+          jcp_tree.convergence_dielectric_amp;
+      result.convergence_estimator_model =
+          jcp_tree.convergence_estimator_model;
+      result.convergence_channel_calibration =
+          jcp_tree.convergence_channel_calibration;
+      result.convergence_split_policy = jcp_tree.convergence_split_policy;
+      result.convergence_split_selectivity =
+          jcp_tree.convergence_split_selectivity;
+      result.convergence_split_absolute_floor =
+          jcp_tree.convergence_split_absolute_floor;
+      result.convergence_overreject_audit =
+          jcp_tree.convergence_overreject_audit;
+      result.convergence_overreject_detail =
+          jcp_tree.convergence_overreject_detail;
+      result.convergence_shape_audit = jcp_tree.convergence_shape_audit;
+      result.convergence_kernel_response_audit =
+          jcp_tree.convergence_kernel_response_audit;
+      result.channel_missed_semantics = jcp_tree.channel_missed_semantics;
+      result.accepted_miss_diagnostics =
+          jcp_tree.accepted_miss_diagnostics;
+      result.accepted_miss_absolute_floor =
+          jcp_tree.accepted_miss_absolute_floor;
+      result.convergence_k3_accepted_rho_cap =
+          jcp_tree.convergence_k3_accepted_rho_cap;
+      result.mac_distance_policy = jcp_tree.mac_distance_policy;
+      result.mac_surface_margin_factor =
+          jcp_tree.mac_surface_margin_factor;
+      result.mac_surface_margin_policy =
+          jcp_tree.mac_surface_margin_policy;
+      result.mac_surface_margin_aspect_threshold =
+          jcp_tree.mac_surface_margin_aspect_threshold;
+    result.mac_surface_margin_rho_trigger =
+        jcp_tree.mac_surface_margin_rho_trigger;
+    result.mac_surface_margin_soft_aspect_threshold =
+        jcp_tree.mac_surface_margin_soft_aspect_threshold;
+    result.mac_surface_margin_soft_rho_trigger =
+        jcp_tree.mac_surface_margin_soft_rho_trigger;
+    result.mac_surface_margin_soft_factor =
+        jcp_tree.mac_surface_margin_soft_factor;
+      result.cluster_policy = jcp_tree.cluster_policy;
+      result.target_batch_size =
+          static_cast<int>(jcp_tree.target_batch_size);
+      result.leaf_pair_min_source_panels =
+          static_cast<int>(jcp_tree.leaf_pair_min_source_panels);
+      result.leaf_pair_min_targets =
+          static_cast<int>(jcp_tree.leaf_pair_min_targets);
+      result.leaf_kernel_profile = jcp_tree.leaf_kernel_profile;
+      result.leaf_work_profile = jcp_tree.leaf_work_profile;
+      result.jcp_direct_kernel = jcp_tree.jcp_direct_kernel;
+      result.leaf_pair_selection_profile =
+          jcp_tree.leaf_pair_selection_profile;
+      result.leaf_pair_probe_cache = jcp_tree.leaf_pair_probe_cache;
+      result.leaf_pair_target_group = jcp_tree.leaf_pair_target_group;
+      result.leaf_pair_directness_probe =
+          jcp_tree.leaf_pair_directness_probe;
+      result.leaf_pair_directness_cache =
+          jcp_tree.leaf_pair_directness_cache;
+      result.leaf_pair_directness_verify =
+          jcp_tree.leaf_pair_directness_verify;
+      result.leaf_pair_scheduler = jcp_tree.leaf_pair_scheduler;
+      result.leaf_pair_worklist_max_active =
+          static_cast<int>(jcp_tree.leaf_pair_worklist_max_active);
+      result.leaf_pair_worklist_verify = jcp_tree.leaf_pair_worklist_verify;
+      result.leaf_block_verify = jcp_tree.leaf_block_verify;
+      result.leaf_pair_max_lookahead =
+          static_cast<int>(jcp_tree.leaf_pair_max_lookahead);
       result.expansion_audit = jcp_tree.expansion_audit;
+      result.expansion_audit_channel = jcp_tree.expansion_audit_channel;
       jcp_tree_stats.interaction_mode = jcp_tree.interaction_mode;
       jcp_tree_stats.node_bounds_mode = jcp_tree.node_bounds_mode;
       jcp_tree_stats.tree_builder = jcp_tree.tree_builder;
@@ -2346,7 +4185,81 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree.convergence_unstable_rho_cap;
       jcp_tree_stats.convergence_calibration =
           jcp_tree.convergence_calibration;
+      jcp_tree_stats.convergence_dielectric_amp =
+          jcp_tree.convergence_dielectric_amp;
+      jcp_tree_stats.convergence_estimator_model =
+          jcp_tree.convergence_estimator_model;
+      jcp_tree_stats.convergence_channel_calibration =
+          jcp_tree.convergence_channel_calibration;
+      jcp_tree_stats.convergence_split_policy =
+          jcp_tree.convergence_split_policy;
+      jcp_tree_stats.convergence_split_selectivity =
+          jcp_tree.convergence_split_selectivity;
+      jcp_tree_stats.convergence_split_absolute_floor =
+          jcp_tree.convergence_split_absolute_floor;
+      jcp_tree_stats.convergence_overreject_audit =
+          jcp_tree.convergence_overreject_audit;
+      jcp_tree_stats.convergence_overreject_detail =
+          jcp_tree.convergence_overreject_detail;
+      jcp_tree_stats.convergence_shape_audit =
+          jcp_tree.convergence_shape_audit;
+      jcp_tree_stats.convergence_kernel_response_audit =
+          jcp_tree.convergence_kernel_response_audit;
+      jcp_tree_stats.channel_missed_semantics =
+          jcp_tree.channel_missed_semantics;
+      jcp_tree_stats.accepted_miss_diagnostics =
+          jcp_tree.accepted_miss_diagnostics;
+      jcp_tree_stats.accepted_miss_absolute_floor =
+          jcp_tree.accepted_miss_absolute_floor;
+      jcp_tree_stats.convergence_k3_accepted_rho_cap =
+          jcp_tree.convergence_k3_accepted_rho_cap;
+      jcp_tree_stats.mac_distance_policy = jcp_tree.mac_distance_policy;
+      jcp_tree_stats.mac_surface_margin_factor =
+          jcp_tree.mac_surface_margin_factor;
+      jcp_tree_stats.mac_surface_margin_policy =
+          jcp_tree.mac_surface_margin_policy;
+      jcp_tree_stats.mac_surface_margin_aspect_threshold =
+          jcp_tree.mac_surface_margin_aspect_threshold;
+      jcp_tree_stats.mac_surface_margin_rho_trigger =
+          jcp_tree.mac_surface_margin_rho_trigger;
+      jcp_tree_stats.mac_surface_margin_soft_aspect_threshold =
+          jcp_tree.mac_surface_margin_soft_aspect_threshold;
+      jcp_tree_stats.mac_surface_margin_soft_rho_trigger =
+          jcp_tree.mac_surface_margin_soft_rho_trigger;
+      jcp_tree_stats.mac_surface_margin_soft_factor =
+          jcp_tree.mac_surface_margin_soft_factor;
+      jcp_tree_stats.cluster_policy = jcp_tree.cluster_policy;
+      jcp_tree_stats.target_batch_size =
+          static_cast<int>(jcp_tree.target_batch_size);
+      jcp_tree_stats.leaf_pair_min_source_panels =
+          static_cast<int>(jcp_tree.leaf_pair_min_source_panels);
+      jcp_tree_stats.leaf_pair_min_targets =
+          static_cast<int>(jcp_tree.leaf_pair_min_targets);
+      jcp_tree_stats.leaf_kernel_profile = jcp_tree.leaf_kernel_profile;
+      jcp_tree_stats.leaf_work_profile = jcp_tree.leaf_work_profile;
+      jcp_tree_stats.matvec_cost_profile = result.matvec_cost_profile;
+      jcp_tree_stats.jcp_direct_kernel = jcp_tree.jcp_direct_kernel;
+      jcp_tree_stats.leaf_pair_selection_profile =
+          jcp_tree.leaf_pair_selection_profile;
+      jcp_tree_stats.leaf_pair_probe_cache = jcp_tree.leaf_pair_probe_cache;
+      jcp_tree_stats.leaf_pair_target_group = jcp_tree.leaf_pair_target_group;
+      jcp_tree_stats.leaf_pair_directness_probe =
+          jcp_tree.leaf_pair_directness_probe;
+      jcp_tree_stats.leaf_pair_directness_cache =
+          jcp_tree.leaf_pair_directness_cache;
+      jcp_tree_stats.leaf_pair_directness_verify =
+          jcp_tree.leaf_pair_directness_verify;
+      jcp_tree_stats.leaf_pair_scheduler = jcp_tree.leaf_pair_scheduler;
+      jcp_tree_stats.leaf_pair_worklist_max_active =
+          static_cast<int>(jcp_tree.leaf_pair_worklist_max_active);
+      jcp_tree_stats.leaf_pair_worklist_verify =
+          jcp_tree.leaf_pair_worklist_verify;
+      jcp_tree_stats.leaf_block_verify = jcp_tree.leaf_block_verify;
+      jcp_tree_stats.leaf_pair_max_lookahead =
+          static_cast<int>(jcp_tree.leaf_pair_max_lookahead);
       jcp_tree_stats.expansion_audit = jcp_tree.expansion_audit;
+      jcp_tree_stats.expansion_audit_channel =
+          jcp_tree.expansion_audit_channel;
       jcp_tree_stats.tree_depth_max = jcp_tree.depth_max;
       jcp_tree_stats.node_radius_max = jcp_tree.node_radius_max;
       jcp_tree_stats.node_radius_mean = jcp_tree.node_radius_mean;
@@ -2495,30 +4408,63 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     std::function<void(const std::vector<double> &, std::vector<double> &)>
         custom_preconditioner;
     std::shared_ptr<JcpBlockPreconditioner> block_preconditioner;
+    std::shared_ptr<JcpCoarseGalerkinPreconditioner> coarse_preconditioner;
     double preconditioner_setup_ms = 0.0;
     constexpr std::size_t kBlockPanelPrebuildCap = 12000;
-    if (result.preconditioner_requested == "block" &&
+    const bool legacy_block = result.preconditioner_requested == "block";
+    const bool budgeted_block =
+        result.preconditioner_requested == "block-budgeted";
+    const bool coarse_probe =
+        result.preconditioner_requested == "coarse-galerkin-probe";
+    if ((legacy_block || budgeted_block) &&
         !jcp_tree.nodes.empty() &&
-        panels.size() <= kBlockPanelPrebuildCap) {
+        (!legacy_block || panels.size() <= kBlockPanelPrebuildCap)) {
       progress.write("precond_start", result, &jcp_tree_stats, matvec_calls,
                      0, 0, 0.0, "running", true);
       const auto precond_begin = std::chrono::steady_clock::now();
-      block_preconditioner = build_jcp_block_preconditioner(
-          panels, jcp_tree, coupled, eps_ratio, kappa, lhs_phi, lhs_phin,
-          diagonal, result.near_integration, result.quad_buffer,
-          result.preconditioner_block_near, executor);
-      preconditioner_setup_ms =
-          elapsed_ms(precond_begin, std::chrono::steady_clock::now());
       constexpr std::size_t kBlockMemorySoftCapBytes =
           static_cast<std::size_t>(384) * 1024u * 1024u;
       constexpr std::size_t kBlockWorkingSetSoftCapBytes =
           static_cast<std::size_t>(1024) * 1024u * 1024u;
-      const std::size_t block_estimated_bytes =
+      const std::size_t block_panel_cap =
+          budgeted_block
+              ? static_cast<std::size_t>(result.preconditioner_block_panel_cap)
+              : static_cast<std::size_t>(32);
+      const std::vector<JcpBlockRange> block_ranges =
+          make_jcp_block_ranges(jcp_tree, panels.size(), block_panel_cap);
+      result.preconditioner_estimated_bytes =
+          estimate_jcp_block_preconditioner_bytes(block_ranges, diagonal.size(),
+                                                  coupled);
+      const bool block_budget_cap =
+          budgeted_block &&
+          result.preconditioner_estimated_bytes >
+              result.preconditioner_memory_budget_bytes;
+      const bool block_prebuild_working_set_cap =
+          current_working_set_bytes() > kBlockWorkingSetSoftCapBytes;
+      if (!block_budget_cap && !block_prebuild_working_set_cap) {
+        block_preconditioner = build_jcp_block_preconditioner(
+            panels, jcp_tree, coupled, eps_ratio, kappa, lhs_phi, lhs_phin,
+            diagonal, result.near_integration, result.quad_buffer,
+            result.preconditioner_block_near, block_ranges, executor);
+      }
+      preconditioner_setup_ms =
+          elapsed_ms(precond_begin, std::chrono::steady_clock::now());
+      result.preconditioner_setup_ms = preconditioner_setup_ms;
+      result.preconditioner_valid_blocks =
+          block_preconditioner != nullptr ? block_preconditioner->valid_blocks
+                                          : 0;
+      result.preconditioner_valid_panels =
           block_preconditioner != nullptr
-              ? block_preconditioner->estimated_bytes()
+              ? block_preconditioner->valid_panel_count
+              : 0;
+      result.preconditioner_ill_conditioned_blocks =
+          block_preconditioner != nullptr
+              ? block_preconditioner->ill_conditioned_blocks
               : 0;
       const bool block_memory_cap =
-          block_estimated_bytes > kBlockMemorySoftCapBytes ||
+          (!budgeted_block &&
+           result.preconditioner_estimated_bytes > kBlockMemorySoftCapBytes) ||
+          block_prebuild_working_set_cap ||
           current_working_set_bytes() > kBlockWorkingSetSoftCapBytes;
       const bool block_ill_conditioned =
           block_preconditioner != nullptr &&
@@ -2530,17 +4476,24 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       if (block_preconditioner != nullptr &&
           block_preconditioner->valid_blocks > 0 &&
           block_preconditioner->valid_panel_count >= block_panel_threshold &&
-          !block_memory_cap && !block_ill_conditioned) {
+          !block_budget_cap && !block_memory_cap && !block_ill_conditioned) {
         result.preconditioner_effective =
-            result.preconditioner_block_near == "buffer-aware"
-                ? "block_buffer_aware"
-                : "block";
-        result.memory_bytes += block_estimated_bytes;
+            budgeted_block
+                ? (result.preconditioner_block_near == "buffer-aware"
+                       ? "block_budgeted_buffer_aware"
+                       : "block_budgeted")
+                : (result.preconditioner_block_near == "buffer-aware"
+                       ? "block_buffer_aware"
+                       : "block");
+        result.memory_bytes += result.preconditioner_estimated_bytes;
         custom_preconditioner =
             [block_preconditioner, &executor](const std::vector<double> &in,
                                               std::vector<double> &out) {
               block_preconditioner->apply_parallel(in, out, executor);
             };
+      } else if (block_budget_cap) {
+        block_preconditioner.reset();
+        result.preconditioner_effective = "diagonal_block_budget_cap";
       } else if (block_memory_cap) {
         block_preconditioner.reset();
         result.preconditioner_effective = "diagonal_block_memory_cap";
@@ -2552,13 +4505,133 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       }
       progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0,
                      0, 0.0, "running", true);
-    } else if (result.preconditioner_requested == "block") {
+    } else if (legacy_block || budgeted_block) {
       progress.write("precond_start", result, &jcp_tree_stats, matvec_calls,
                      0, 0, 0.0, "running", true);
       result.preconditioner_effective =
-          panels.size() > kBlockPanelPrebuildCap
+          legacy_block && panels.size() > kBlockPanelPrebuildCap
               ? "diagonal_block_memory_cap"
               : "diagonal_block_fallback";
+      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0,
+                     0, 0.0, "running", true);
+    } else if (coarse_probe && experimental_treecode &&
+               !jcp_tree.nodes.empty()) {
+      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls,
+                     0, 0, 0.0, "running", true);
+      const auto precond_begin = std::chrono::steady_clock::now();
+      coarse_preconditioner = make_jcp_coarse_structure(
+          panels, jcp_tree, coupled, diagonal,
+          static_cast<std::size_t>(result.preconditioner_coarse_aggregate_cap));
+      result.preconditioner_coarse_aggregates =
+          coarse_preconditioner->aggregates.size();
+      result.preconditioner_coarse_dimension = coarse_preconditioner->dimension();
+      result.preconditioner_coarse_matrix_bytes =
+          coarse_preconditioner->dimension() *
+              coarse_preconditioner->dimension() * sizeof(double) +
+          coarse_preconditioner->dimension() * sizeof(int);
+
+      std::vector<JcpBlockRange> coarse_base_ranges;
+      std::size_t coarse_base_estimated_bytes = 0;
+      const bool coarse_block_base =
+          result.preconditioner_coarse_base == "block-budgeted";
+      if (coarse_block_base) {
+        coarse_base_ranges = make_jcp_block_ranges(
+            jcp_tree, panels.size(),
+            static_cast<std::size_t>(result.preconditioner_block_panel_cap));
+        coarse_base_estimated_bytes = estimate_jcp_block_preconditioner_bytes(
+            coarse_base_ranges, diagonal.size(), coupled);
+      }
+      result.preconditioner_estimated_bytes =
+          coarse_preconditioner->estimated_bytes() +
+          coarse_base_estimated_bytes;
+      const bool coarse_budget_cap =
+          result.preconditioner_estimated_bytes >
+          result.preconditioner_memory_budget_bytes;
+      if (coarse_budget_cap) {
+        coarse_preconditioner.reset();
+        result.preconditioner_coarse_status = "budget_fallback";
+        result.preconditioner_effective = "diagonal_coarse_budget_cap";
+      } else {
+        bool block_base_active = false;
+        if (coarse_block_base) {
+          block_preconditioner = build_jcp_block_preconditioner(
+              panels, jcp_tree, coupled, eps_ratio, kappa, lhs_phi, lhs_phin,
+              diagonal, result.near_integration, result.quad_buffer,
+              result.preconditioner_block_near, coarse_base_ranges, executor);
+          const std::size_t threshold = static_cast<std::size_t>(std::ceil(
+              0.70 * static_cast<double>(std::max<std::size_t>(1, panels.size()))));
+          block_base_active =
+              block_preconditioner != nullptr &&
+              block_preconditioner->valid_blocks > 0 &&
+              block_preconditioner->valid_panel_count >= threshold &&
+              block_preconditioner->ill_conditioned_blocks == 0;
+          if (block_base_active)
+            coarse_preconditioner->block_base = block_preconditioner;
+        }
+        TreeWorkspace setup_tree = jcp_tree;
+        setup_tree.moment_audit = "off";
+        setup_tree.convergence_audit = "off";
+        setup_tree.expansion_audit = "off";
+        setup_tree.expansion_audit_channel = "off";
+        setup_tree.accepted_miss_diagnostics = "off";
+        setup_tree.convergence_overreject_audit = "off";
+        setup_tree.convergence_overreject_detail = "off";
+        setup_tree.convergence_shape_audit = "off";
+        setup_tree.convergence_kernel_response_audit = "off";
+        TreecodeStats setup_stats;
+        auto setup_matvec = [&](const std::vector<double> &x,
+                                std::vector<double> &out) {
+          apply_jcp_treecode_operator(
+              panels, x, eps_ratio, kappa, lhs_phi, lhs_phin, coupled,
+              setup_tree, result.near_integration, result.quad_buffer, executor,
+              out, &setup_stats);
+        };
+        const bool verified =
+            options.preconditioner_coarse_verify == "full-small";
+        const bool coarse_valid = build_jcp_exact_galerkin(
+            panels, *coarse_preconditioner, setup_matvec, verified);
+        result.preconditioner_coarse_pivot_ratio =
+            coarse_preconditioner->pivot_ratio;
+        result.preconditioner_coarse_setup_matvec_calls =
+            coarse_preconditioner->setup_matvec_calls;
+        result.preconditioner_coarse_rp_identity_error_max =
+            coarse_preconditioner->rp_identity_error_max;
+        result.preconditioner_coarse_verify_rel_error_max =
+            coarse_preconditioner->verify_rel_error_max;
+        if (coarse_valid) {
+          result.preconditioner_coarse_status = "active";
+          result.preconditioner_effective =
+              block_base_active
+                  ? "coarse_galerkin_probe_block_budgeted"
+                  : "coarse_galerkin_probe_diagonal";
+          result.memory_bytes += result.preconditioner_estimated_bytes;
+          custom_preconditioner =
+              [coarse_preconditioner, &panels, &executor,
+               &result](const std::vector<double> &in,
+                        std::vector<double> &out) {
+                const auto begin = std::chrono::steady_clock::now();
+                coarse_preconditioner->apply(panels, in, out, executor);
+                result.preconditioner_coarse_apply_ms +=
+                    elapsed_ms(begin, std::chrono::steady_clock::now());
+                ++result.preconditioner_coarse_apply_calls;
+              };
+        } else {
+          coarse_preconditioner.reset();
+          result.preconditioner_coarse_status = "factor_fallback";
+          result.preconditioner_effective = "diagonal_coarse_factor_fallback";
+        }
+      }
+      preconditioner_setup_ms =
+          elapsed_ms(precond_begin, std::chrono::steady_clock::now());
+      result.preconditioner_setup_ms = preconditioner_setup_ms;
+      result.preconditioner_coarse_setup_ms = preconditioner_setup_ms;
+      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0,
+                     0, 0.0, "running", true);
+    } else if (coarse_probe) {
+      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls,
+                     0, 0, 0.0, "running", true);
+      result.preconditioner_coarse_status = "operator_unsupported";
+      result.preconditioner_effective = "diagonal_coarse_unsupported";
       progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0,
                      0, 0.0, "running", true);
     }
@@ -2571,6 +4644,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                               double preconditioned_residual_rel, bool force,
                               const std::string &phase,
                               const LinearSolveResult &state) {
+      result.preconditioner_apply_ms = state.preconditioner_apply_ms;
+      result.preconditioner_apply_calls = state.preconditioner_apply_calls;
       result.true_residual_probe_scope = state.true_residual_probe_scope;
       result.true_residual_sample_count = state.true_residual_sample_count;
       result.true_residual_probe_calls = state.true_residual_probe_calls;
@@ -2776,6 +4851,45 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.smooth_leaf_node_interactions;
       result.leaf_pruned_interactions =
           jcp_tree_stats.leaf_pruned_interactions;
+      result.leaf_work_profile = jcp_tree_stats.leaf_work_profile;
+      result.leaf_work_mac_terminal_panels =
+          jcp_tree_stats.leaf_work_mac_terminal_panels;
+      result.leaf_work_physical_gap_panels =
+          jcp_tree_stats.leaf_work_physical_gap_panels;
+      result.leaf_work_fragmentation_panels =
+          jcp_tree_stats.leaf_work_fragmentation_panels;
+      result.leaf_work_convergence_panels =
+          jcp_tree_stats.leaf_work_convergence_panels;
+      result.leaf_work_convergence_estimator_panels =
+          jcp_tree_stats.leaf_work_convergence_estimator_panels;
+      result.leaf_work_convergence_rho_panels =
+          jcp_tree_stats.leaf_work_convergence_rho_panels;
+      result.leaf_work_convergence_aspect_panels =
+          jcp_tree_stats.leaf_work_convergence_aspect_panels;
+      result.leaf_work_surface_margin_panels =
+          jcp_tree_stats.leaf_work_surface_margin_panels;
+      result.leaf_work_surface_margin_hard_panels =
+          jcp_tree_stats.leaf_work_surface_margin_hard_panels;
+      result.leaf_work_surface_margin_soft_panels =
+          jcp_tree_stats.leaf_work_surface_margin_soft_panels;
+      result.leaf_work_k3_rho_cap_panels =
+          jcp_tree_stats.leaf_work_k3_rho_cap_panels;
+      result.leaf_work_singular_fallback_panels =
+          jcp_tree_stats.leaf_work_singular_fallback_panels;
+      result.leaf_work_scalar_tail_panels =
+          jcp_tree_stats.leaf_work_scalar_tail_panels;
+      result.leaf_work_profile_accounted_panels =
+          jcp_tree_stats.leaf_work_profile_accounted_panels;
+      result.leaf_work_mac_terminal_frac =
+          jcp_tree_stats.leaf_work_mac_terminal_frac;
+      result.leaf_work_convergence_frac =
+          jcp_tree_stats.leaf_work_convergence_frac;
+      result.leaf_work_surface_margin_frac =
+          jcp_tree_stats.leaf_work_surface_margin_frac;
+      result.leaf_work_singular_fallback_frac =
+          jcp_tree_stats.leaf_work_singular_fallback_frac;
+      result.leaf_work_scalar_tail_frac =
+          jcp_tree_stats.leaf_work_scalar_tail_frac;
       result.adaptive_smooth_leaf_accepted =
           jcp_tree_stats.adaptive_smooth_leaf_accepted;
       result.adaptive_smooth_leaf_rejected =
@@ -2804,7 +4918,141 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.target_cluster_rejected =
           jcp_tree_stats.target_cluster_rejected;
       result.target_cluster_eval_ms = jcp_tree_stats.target_cluster_eval_ms;
+      result.leaf_pair_batch_interactions =
+          jcp_tree_stats.leaf_pair_batch_interactions;
+      result.leaf_pair_batch_targets =
+          jcp_tree_stats.leaf_pair_batch_targets;
+      result.leaf_pair_batch_source_panels =
+          jcp_tree_stats.leaf_pair_batch_source_panels;
+      result.leaf_pair_batch_residual_panels =
+          jcp_tree_stats.leaf_pair_batch_residual_panels;
+      result.leaf_pair_batch_fallbacks =
+          jcp_tree_stats.leaf_pair_batch_fallbacks;
+      result.leaf_pair_batch_ms = jcp_tree_stats.leaf_pair_batch_ms;
+      result.leaf_pair_batch_kernel = jcp_tree_stats.leaf_pair_batch_kernel;
+      result.leaf_pair_batch_vectorized_sources =
+          jcp_tree_stats.leaf_pair_batch_vectorized_sources;
+      result.leaf_pair_batch_vector_lanes =
+          jcp_tree_stats.leaf_pair_batch_vector_lanes;
+      result.leaf_pair_batch_pairs_per_second =
+          jcp_tree_stats.leaf_pair_batch_pairs_per_second;
+      result.leaf_kernel_profile = jcp_tree_stats.leaf_kernel_profile;
+      result.leaf_work_profile = jcp_tree_stats.leaf_work_profile;
+      result.jcp_direct_kernel = jcp_tree_stats.jcp_direct_kernel;
+      result.leaf_kernel_scalar_tasks =
+          jcp_tree_stats.leaf_kernel_scalar_tasks;
+      result.leaf_kernel_batch_tasks =
+          jcp_tree_stats.leaf_kernel_batch_tasks;
+      result.leaf_kernel_source_panel_evals =
+          jcp_tree_stats.leaf_kernel_source_panel_evals;
+      result.leaf_kernel_scalar_ms = jcp_tree_stats.leaf_kernel_scalar_ms;
+      result.leaf_kernel_target_avx2_ms =
+          jcp_tree_stats.leaf_kernel_target_avx2_ms;
+      result.leaf_kernel_tail_ms = jcp_tree_stats.leaf_kernel_tail_ms;
+      result.leaf_pair_batch_soa_sources =
+          jcp_tree_stats.leaf_pair_batch_soa_sources;
+      result.leaf_pair_batch_soa_ms =
+          jcp_tree_stats.leaf_pair_batch_soa_ms;
+      result.leaf_pair_batch_scalar_tail_ms =
+          jcp_tree_stats.leaf_pair_batch_scalar_tail_ms;
+      result.leaf_pair_batch_clean_source_panels_per_second =
+          jcp_tree_stats.leaf_pair_batch_clean_source_panels_per_second;
+      result.leaf_pair_selection_profile =
+          jcp_tree_stats.leaf_pair_selection_profile;
+      result.leaf_pair_probe_cache = jcp_tree_stats.leaf_pair_probe_cache;
+      result.leaf_pair_target_group = jcp_tree_stats.leaf_pair_target_group;
+      result.leaf_pair_directness_probe =
+          jcp_tree_stats.leaf_pair_directness_probe;
+      result.leaf_pair_directness_cache =
+          jcp_tree_stats.leaf_pair_directness_cache;
+      result.leaf_pair_directness_verify =
+          jcp_tree_stats.leaf_pair_directness_verify;
+      result.leaf_pair_max_lookahead =
+          jcp_tree_stats.leaf_pair_max_lookahead;
+      result.leaf_pair_selection_candidate_scans =
+          jcp_tree_stats.leaf_pair_selection_candidate_scans;
+      result.leaf_pair_selection_clean_rejects =
+          jcp_tree_stats.leaf_pair_selection_clean_rejects;
+      result.leaf_pair_selection_probe_calls =
+          jcp_tree_stats.leaf_pair_selection_probe_calls;
+      result.leaf_pair_selection_probe_node_visits =
+          jcp_tree_stats.leaf_pair_selection_probe_node_visits;
+      result.leaf_pair_selection_probe_ms =
+          jcp_tree_stats.leaf_pair_selection_probe_ms;
+      result.leaf_pair_selection_ms =
+          jcp_tree_stats.leaf_pair_selection_ms;
+      result.leaf_pair_selection_probe_cache_hits =
+          jcp_tree_stats.leaf_pair_selection_probe_cache_hits;
+      result.leaf_pair_selection_probe_cache_misses =
+          jcp_tree_stats.leaf_pair_selection_probe_cache_misses;
+      result.leaf_pair_selection_insufficient_targets =
+          jcp_tree_stats.leaf_pair_selection_insufficient_targets;
+      result.leaf_pair_selection_same_target_leaf_rejects =
+          jcp_tree_stats.leaf_pair_selection_same_target_leaf_rejects;
+      result.leaf_pair_directness_ancestor_probe_calls =
+          jcp_tree_stats.leaf_pair_directness_ancestor_probe_calls;
+      result.leaf_pair_directness_ancestor_probe_node_visits =
+          jcp_tree_stats.leaf_pair_directness_ancestor_probe_node_visits;
+      result.leaf_pair_directness_ancestor_probe_ms =
+          jcp_tree_stats.leaf_pair_directness_ancestor_probe_ms;
+      result.leaf_pair_directness_pair_cache_hits =
+          jcp_tree_stats.leaf_pair_directness_pair_cache_hits;
+      result.leaf_pair_directness_pair_cache_misses =
+          jcp_tree_stats.leaf_pair_directness_pair_cache_misses;
+      result.leaf_pair_directness_all_direct_proofs =
+          jcp_tree_stats.leaf_pair_directness_all_direct_proofs;
+      result.leaf_pair_directness_mixed_fallbacks =
+          jcp_tree_stats.leaf_pair_directness_mixed_fallbacks;
+      result.leaf_pair_directness_verify_checks =
+          jcp_tree_stats.leaf_pair_directness_verify_checks;
+      result.leaf_pair_directness_verify_mismatches =
+          jcp_tree_stats.leaf_pair_directness_verify_mismatches;
+      result.leaf_pair_scheduler = jcp_tree_stats.leaf_pair_scheduler;
+      result.leaf_pair_worklist_max_active =
+          jcp_tree_stats.leaf_pair_worklist_max_active;
+      result.leaf_pair_worklist_verify =
+          jcp_tree_stats.leaf_pair_worklist_verify;
+      result.leaf_pair_worklist_tasks =
+          jcp_tree_stats.leaf_pair_worklist_tasks;
+      result.leaf_pair_worklist_groups =
+          jcp_tree_stats.leaf_pair_worklist_groups;
+      result.leaf_pair_worklist_batched_groups =
+          jcp_tree_stats.leaf_pair_worklist_batched_groups;
+      result.leaf_pair_worklist_scalar_flush_tasks =
+          jcp_tree_stats.leaf_pair_worklist_scalar_flush_tasks;
+      result.leaf_pair_worklist_forced_flushes =
+          jcp_tree_stats.leaf_pair_worklist_forced_flushes;
+      result.leaf_pair_worklist_active_groups_max =
+          jcp_tree_stats.leaf_pair_worklist_active_groups_max;
+      result.leaf_pair_worklist_ms = jcp_tree_stats.leaf_pair_worklist_ms;
+      result.leaf_pair_worklist_verify_checks =
+          jcp_tree_stats.leaf_pair_worklist_verify_checks;
+      result.leaf_pair_worklist_verify_mismatches =
+          jcp_tree_stats.leaf_pair_worklist_verify_mismatches;
+      result.leaf_block_verify = jcp_tree_stats.leaf_block_verify;
+      result.leaf_block_target_leaves =
+          jcp_tree_stats.leaf_block_target_leaves;
+      result.leaf_block_targets = jcp_tree_stats.leaf_block_targets;
+      result.leaf_block_source_groups =
+          jcp_tree_stats.leaf_block_source_groups;
+      result.leaf_block_batched_groups =
+          jcp_tree_stats.leaf_block_batched_groups;
+      result.leaf_block_scalar_tail_tasks =
+          jcp_tree_stats.leaf_block_scalar_tail_tasks;
+      result.leaf_block_group_ms = jcp_tree_stats.leaf_block_group_ms;
+      result.leaf_block_flush_ms = jcp_tree_stats.leaf_block_flush_ms;
+      result.leaf_block_writeback_ms =
+          jcp_tree_stats.leaf_block_writeback_ms;
+      result.leaf_block_verify_checks =
+          jcp_tree_stats.leaf_block_verify_checks;
+      result.leaf_block_verify_mismatches =
+          jcp_tree_stats.leaf_block_verify_mismatches;
       result.adaptive_level = jcp_tree_stats.adaptive_level;
+      result.cluster_policy = jcp_tree_stats.cluster_policy;
+      result.target_batch_size = jcp_tree_stats.target_batch_size;
+      result.leaf_pair_min_source_panels =
+          jcp_tree_stats.leaf_pair_min_source_panels;
+      result.leaf_pair_min_targets = jcp_tree_stats.leaf_pair_min_targets;
       result.leaf_near_policy = jcp_tree_stats.leaf_near_policy;
       result.leaf_panel_kernel = jcp_tree_stats.leaf_panel_kernel;
       result.interaction_mode = jcp_tree_stats.interaction_mode;
@@ -2871,6 +5119,49 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.convergence_unstable_rho_cap;
       result.convergence_calibration =
           jcp_tree_stats.convergence_calibration;
+      result.convergence_dielectric_amp =
+          jcp_tree_stats.convergence_dielectric_amp;
+      result.convergence_estimator_model =
+          jcp_tree_stats.convergence_estimator_model;
+      result.convergence_channel_calibration =
+          jcp_tree_stats.convergence_channel_calibration;
+      result.convergence_split_policy =
+          jcp_tree_stats.convergence_split_policy;
+      result.convergence_split_selectivity =
+          jcp_tree_stats.convergence_split_selectivity;
+      result.convergence_split_absolute_floor =
+          jcp_tree_stats.convergence_split_absolute_floor;
+      result.convergence_overreject_audit =
+          jcp_tree_stats.convergence_overreject_audit;
+      result.convergence_overreject_detail =
+          jcp_tree_stats.convergence_overreject_detail;
+      result.convergence_shape_audit =
+          jcp_tree_stats.convergence_shape_audit;
+      result.convergence_kernel_response_audit =
+          jcp_tree_stats.convergence_kernel_response_audit;
+      result.channel_missed_semantics =
+          jcp_tree_stats.channel_missed_semantics;
+      result.accepted_miss_diagnostics =
+          jcp_tree_stats.accepted_miss_diagnostics;
+      result.accepted_miss_absolute_floor =
+          jcp_tree_stats.accepted_miss_absolute_floor;
+      result.convergence_k3_accepted_rho_cap =
+          jcp_tree_stats.convergence_k3_accepted_rho_cap;
+      result.mac_distance_policy = jcp_tree_stats.mac_distance_policy;
+      result.mac_surface_margin_factor =
+          jcp_tree_stats.mac_surface_margin_factor;
+      result.mac_surface_margin_policy =
+          jcp_tree_stats.mac_surface_margin_policy;
+      result.mac_surface_margin_aspect_threshold =
+          jcp_tree_stats.mac_surface_margin_aspect_threshold;
+      result.mac_surface_margin_rho_trigger =
+          jcp_tree_stats.mac_surface_margin_rho_trigger;
+      result.mac_surface_margin_soft_aspect_threshold =
+          jcp_tree_stats.mac_surface_margin_soft_aspect_threshold;
+      result.mac_surface_margin_soft_rho_trigger =
+          jcp_tree_stats.mac_surface_margin_soft_rho_trigger;
+      result.mac_surface_margin_soft_factor =
+          jcp_tree_stats.mac_surface_margin_soft_factor;
       result.convergence_estimator_samples =
           jcp_tree_stats.convergence_estimator_samples;
       result.convergence_estimator_unstable_far_count =
@@ -2881,6 +5172,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.convergence_estimator_split_rejects;
       result.convergence_estimator_split_reject_panels =
           jcp_tree_stats.convergence_estimator_split_reject_panels;
+      result.convergence_low_abs_reaccepted_far_count =
+          jcp_tree_stats.convergence_low_abs_reaccepted_far_count;
+      result.convergence_low_abs_reaccepted_far_panels =
+          jcp_tree_stats.convergence_low_abs_reaccepted_far_panels;
+      result.convergence_low_abs_reaccepted_far_count =
+          jcp_tree_stats.convergence_low_abs_reaccepted_far_count;
+      result.convergence_low_abs_reaccepted_far_panels =
+          jcp_tree_stats.convergence_low_abs_reaccepted_far_panels;
       result.convergence_estimator_tail_ratio_max =
           jcp_tree_stats.convergence_estimator_tail_ratio_max;
       result.convergence_estimator_tail_ratio_mean =
@@ -2889,6 +5188,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.convergence_estimator_error_max;
       result.convergence_estimator_error_mean =
           jcp_tree_stats.convergence_estimator_error_mean;
+      result.convergence_estimator_abs_error_max =
+          jcp_tree_stats.convergence_estimator_abs_error_max;
+      result.convergence_estimator_abs_error_mean =
+          jcp_tree_stats.convergence_estimator_abs_error_mean;
+      result.convergence_estimator_abs_error_max =
+          jcp_tree_stats.convergence_estimator_abs_error_max;
+      result.convergence_estimator_abs_error_mean =
+          jcp_tree_stats.convergence_estimator_abs_error_mean;
       result.convergence_tail_norm_p_max =
           jcp_tree_stats.convergence_tail_norm_p_max;
       result.convergence_tail_norm_p_mean =
@@ -2901,10 +5208,140 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.convergence_effective_jcp_amp_max;
       result.convergence_effective_jcp_amp_mean =
           jcp_tree_stats.convergence_effective_jcp_amp_mean;
+      result.convergence_dielectric_amp_max =
+          jcp_tree_stats.convergence_dielectric_amp_max;
+      result.convergence_dielectric_amp_mean =
+          jcp_tree_stats.convergence_dielectric_amp_mean;
+      result.convergence_channel_estimated_error_max =
+          jcp_tree_stats.convergence_channel_estimated_error_max;
+      result.convergence_channel_estimated_error_mean =
+          jcp_tree_stats.convergence_channel_estimated_error_mean;
+      result.convergence_channel_effective_jcp_amp_max =
+          jcp_tree_stats.convergence_channel_effective_jcp_amp_max;
+      result.convergence_channel_effective_jcp_amp_mean =
+          jcp_tree_stats.convergence_channel_effective_jcp_amp_mean;
+      result.convergence_channel_unstable_far_count =
+          jcp_tree_stats.convergence_channel_unstable_far_count;
+      result.convergence_channel_unstable_far_panels =
+          jcp_tree_stats.convergence_channel_unstable_far_panels;
+      result.convergence_channel_split_rejects =
+          jcp_tree_stats.convergence_channel_split_rejects;
+      result.convergence_channel_split_reject_panels =
+          jcp_tree_stats.convergence_channel_split_reject_panels;
+      result.convergence_channel_low_abs_reaccepted_count =
+          jcp_tree_stats.convergence_channel_low_abs_reaccepted_count;
+      result.convergence_channel_low_abs_reaccepted_panels =
+          jcp_tree_stats.convergence_channel_low_abs_reaccepted_panels;
+      result.convergence_channel_high_error_caught =
+          jcp_tree_stats.convergence_channel_high_error_caught;
+      result.convergence_channel_high_error_missed =
+          jcp_tree_stats.convergence_channel_high_error_missed;
+      result.convergence_channel_high_error_caught_by_split =
+          jcp_tree_stats.convergence_channel_high_error_caught_by_split;
       result.convergence_estimator_high_error_caught =
           jcp_tree_stats.convergence_estimator_high_error_caught;
       result.convergence_estimator_high_error_missed =
           jcp_tree_stats.convergence_estimator_high_error_missed;
+      result.convergence_estimator_high_error_caught_by_split =
+          jcp_tree_stats.convergence_estimator_high_error_caught_by_split;
+      result.convergence_estimator_phantom_high_error_count =
+          jcp_tree_stats.convergence_estimator_phantom_high_error_count;
+      result.convergence_estimator_phantom_high_error_abs_max =
+          jcp_tree_stats.convergence_estimator_phantom_high_error_abs_max;
+      result.convergence_overreject_count =
+          jcp_tree_stats.convergence_overreject_count;
+      result.convergence_overreject_panels =
+          jcp_tree_stats.convergence_overreject_panels;
+      result.convergence_overreject_caught_count =
+          jcp_tree_stats.convergence_overreject_caught_count;
+      result.convergence_overreject_caught_panels =
+          jcp_tree_stats.convergence_overreject_caught_panels;
+      result.convergence_overreject_abs_error_max =
+          jcp_tree_stats.convergence_overreject_abs_error_max;
+      result.convergence_overreject_abs_error_mean =
+          jcp_tree_stats.convergence_overreject_abs_error_mean;
+      result.convergence_overreject_abs_error_p95 =
+          jcp_tree_stats.convergence_overreject_abs_error_p95;
+      result.convergence_overreject_abs_error_p99 =
+          jcp_tree_stats.convergence_overreject_abs_error_p99;
+      result.convergence_overreject_estimated_abs_error_max =
+          jcp_tree_stats.convergence_overreject_estimated_abs_error_max;
+      result.convergence_overreject_estimated_abs_error_mean =
+          jcp_tree_stats.convergence_overreject_estimated_abs_error_mean;
+      result.convergence_overreject_required_scale_max =
+          jcp_tree_stats.convergence_overreject_required_scale_max;
+      result.convergence_overreject_required_scale_p95 =
+          jcp_tree_stats.convergence_overreject_required_scale_p95;
+      result.convergence_overreject_required_scale_p99 =
+          jcp_tree_stats.convergence_overreject_required_scale_p99;
+      result.convergence_channel_overreject_count =
+          jcp_tree_stats.convergence_channel_overreject_count;
+      result.convergence_channel_overreject_caught_count =
+          jcp_tree_stats.convergence_channel_overreject_caught_count;
+      result.convergence_channel_overreject_panels =
+          jcp_tree_stats.convergence_channel_overreject_panels;
+      result.convergence_channel_overreject_abs_error_max =
+          jcp_tree_stats.convergence_channel_overreject_abs_error_max;
+      result.convergence_channel_overreject_abs_error_mean =
+          jcp_tree_stats.convergence_channel_overreject_abs_error_mean;
+      result.convergence_channel_overreject_required_scale_max =
+          jcp_tree_stats.convergence_channel_overreject_required_scale_max;
+      result.convergence_channel_overreject_required_scale_p99 =
+          jcp_tree_stats.convergence_channel_overreject_required_scale_p99;
+      result.phantom_high_error_channel_count =
+          jcp_tree_stats.phantom_high_error_channel_count;
+      result.phantom_high_error_channel_abs_max =
+          jcp_tree_stats.phantom_high_error_channel_abs_max;
+      result.accepted_miss_channel_count =
+          jcp_tree_stats.accepted_miss_channel_count;
+      result.accepted_miss_channel_panels =
+          jcp_tree_stats.accepted_miss_channel_panels;
+      result.accepted_miss_channel_rho_min =
+          jcp_tree_stats.accepted_miss_channel_rho_min;
+      result.accepted_miss_channel_rho_mean =
+          jcp_tree_stats.accepted_miss_channel_rho_mean;
+      result.accepted_miss_channel_rho_max =
+          jcp_tree_stats.accepted_miss_channel_rho_max;
+      result.accepted_miss_channel_tail_ratio_mean =
+          jcp_tree_stats.accepted_miss_channel_tail_ratio_mean;
+      result.accepted_miss_channel_tail_ratio_max =
+          jcp_tree_stats.accepted_miss_channel_tail_ratio_max;
+      result.accepted_miss_channel_estimated_error_mean =
+          jcp_tree_stats.accepted_miss_channel_estimated_error_mean;
+      result.accepted_miss_channel_estimated_error_max =
+          jcp_tree_stats.accepted_miss_channel_estimated_error_max;
+      result.accepted_miss_worst_channel =
+          jcp_tree_stats.accepted_miss_worst_channel;
+      result.convergence_k3_rho_cap_rejects =
+          jcp_tree_stats.convergence_k3_rho_cap_rejects;
+      result.convergence_k3_rho_cap_reject_panels =
+          jcp_tree_stats.convergence_k3_rho_cap_reject_panels;
+      result.mac_surface_margin_rejects =
+          jcp_tree_stats.mac_surface_margin_rejects;
+      result.mac_surface_margin_reject_panels =
+          jcp_tree_stats.mac_surface_margin_reject_panels;
+      result.mac_surface_margin_applied =
+          jcp_tree_stats.mac_surface_margin_applied;
+      result.mac_surface_margin_skipped =
+          jcp_tree_stats.mac_surface_margin_skipped;
+      result.mac_surface_margin_adaptive_rejects =
+          jcp_tree_stats.mac_surface_margin_adaptive_rejects;
+      result.mac_surface_margin_adaptive_reject_panels =
+          jcp_tree_stats.mac_surface_margin_adaptive_reject_panels;
+      result.mac_surface_margin_skipped_accepted_far =
+          jcp_tree_stats.mac_surface_margin_skipped_accepted_far;
+      result.mac_surface_margin_hard_applied =
+          jcp_tree_stats.mac_surface_margin_hard_applied;
+      result.mac_surface_margin_soft_applied =
+          jcp_tree_stats.mac_surface_margin_soft_applied;
+      result.mac_surface_margin_hard_rejects =
+          jcp_tree_stats.mac_surface_margin_hard_rejects;
+      result.mac_surface_margin_hard_reject_panels =
+          jcp_tree_stats.mac_surface_margin_hard_reject_panels;
+      result.mac_surface_margin_soft_rejects =
+          jcp_tree_stats.mac_surface_margin_soft_rejects;
+      result.mac_surface_margin_soft_reject_panels =
+          jcp_tree_stats.mac_surface_margin_soft_reject_panels;
       result.moment_audit_nodes = jcp_tree_stats.moment_audit_nodes;
       result.moment_translation_rel_error_max =
           jcp_tree_stats.moment_translation_rel_error_max;
@@ -2921,6 +5358,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.moment_dynamic_range_max =
           jcp_tree_stats.moment_dynamic_range_max;
       result.expansion_audit = jcp_tree_stats.expansion_audit;
+      result.expansion_audit_channel =
+          jcp_tree_stats.expansion_audit_channel;
       result.far_expansion_audit_pairs =
           jcp_tree_stats.far_expansion_audit_pairs;
       result.far_expansion_audit_panels =
@@ -2931,6 +5370,18 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.far_expansion_rel_error_max;
       result.far_expansion_rel_error_mean =
           jcp_tree_stats.far_expansion_rel_error_mean;
+      result.far_expansion_rel_error_p95 =
+          jcp_tree_stats.far_expansion_rel_error_p95;
+      result.far_expansion_rel_error_p99 =
+          jcp_tree_stats.far_expansion_rel_error_p99;
+      result.far_expansion_channel_rel_error_max =
+          jcp_tree_stats.far_expansion_channel_rel_error_max;
+      result.far_expansion_channel_rel_error_mean =
+          jcp_tree_stats.far_expansion_channel_rel_error_mean;
+      result.far_expansion_channel_rel_error_p99 =
+          jcp_tree_stats.far_expansion_channel_rel_error_p99;
+      result.far_expansion_worst_channel =
+          jcp_tree_stats.far_expansion_worst_channel;
       result.far_expansion_mean_gate_pass =
           jcp_tree_stats.far_expansion_mean_gate_pass;
       result.far_convergence_rho_max =
@@ -3047,6 +5498,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.convergence_estimator_high_error_caught;
       result.convergence_estimator_high_error_missed =
           jcp_tree_stats.convergence_estimator_high_error_missed;
+      result.convergence_estimator_high_error_caught_by_split =
+          jcp_tree_stats.convergence_estimator_high_error_caught_by_split;
       result.moment_audit_nodes = jcp_tree_stats.moment_audit_nodes;
       result.moment_translation_rel_error_max =
           jcp_tree_stats.moment_translation_rel_error_max;
@@ -3142,6 +5595,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.orthogonalization_ms = linear.orthogonalization_ms;
     result.preconditioner_ms =
         linear.preconditioner_ms + preconditioner_setup_ms;
+    result.preconditioner_apply_ms = linear.preconditioner_apply_ms;
+    result.preconditioner_apply_calls = linear.preconditioner_apply_calls;
     if (coupled) {
       result.phi_norm = rms_norm(std::vector<double>(
           linear.x.begin(), linear.x.begin() + panels.size()));
@@ -3189,6 +5644,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         result.energy_kj_mol /
         (kKBKJPerMolK * std::max(1.0, options.temperature_k));
     result.peak_memory_bytes = result.memory_bytes;
+    refresh_matvec_cost_summary(result);
     progress.write("solve_done", result, &jcp_tree_stats, result.matvec_calls,
                    result.iterations, 0, result.residual, result.status, true);
     return result;
@@ -3221,7 +5677,75 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   matvec_stats.convergence_unstable_rho_cap =
       result.convergence_unstable_rho_cap;
   matvec_stats.convergence_calibration = result.convergence_calibration;
+  matvec_stats.convergence_dielectric_amp =
+      result.convergence_dielectric_amp;
+  matvec_stats.convergence_estimator_model =
+      result.convergence_estimator_model;
+  matvec_stats.convergence_channel_calibration =
+      result.convergence_channel_calibration;
+  matvec_stats.convergence_split_policy = result.convergence_split_policy;
+  matvec_stats.convergence_split_selectivity =
+      result.convergence_split_selectivity;
+  matvec_stats.convergence_split_absolute_floor =
+      result.convergence_split_absolute_floor;
+  matvec_stats.convergence_overreject_audit =
+      result.convergence_overreject_audit;
+  matvec_stats.convergence_overreject_detail =
+      result.convergence_overreject_detail;
+  matvec_stats.convergence_shape_audit = result.convergence_shape_audit;
+  matvec_stats.convergence_kernel_response_audit =
+      result.convergence_kernel_response_audit;
+  matvec_stats.channel_missed_semantics =
+      result.channel_missed_semantics;
+  matvec_stats.accepted_miss_diagnostics =
+      result.accepted_miss_diagnostics;
+  matvec_stats.accepted_miss_absolute_floor =
+      result.accepted_miss_absolute_floor;
+  matvec_stats.convergence_k3_accepted_rho_cap =
+      result.convergence_k3_accepted_rho_cap;
+  matvec_stats.mac_distance_policy = result.mac_distance_policy;
+  matvec_stats.mac_surface_margin_factor =
+      result.mac_surface_margin_factor;
+  matvec_stats.mac_surface_margin_policy =
+      result.mac_surface_margin_policy;
+  matvec_stats.mac_surface_margin_aspect_threshold =
+      result.mac_surface_margin_aspect_threshold;
+  matvec_stats.mac_surface_margin_rho_trigger =
+      result.mac_surface_margin_rho_trigger;
+  matvec_stats.mac_surface_margin_soft_aspect_threshold =
+      result.mac_surface_margin_soft_aspect_threshold;
+  matvec_stats.mac_surface_margin_soft_rho_trigger =
+      result.mac_surface_margin_soft_rho_trigger;
+  matvec_stats.mac_surface_margin_soft_factor =
+      result.mac_surface_margin_soft_factor;
+  matvec_stats.cluster_policy = result.cluster_policy;
+  matvec_stats.target_batch_size = result.target_batch_size;
+  matvec_stats.leaf_pair_min_source_panels =
+      result.leaf_pair_min_source_panels;
+  matvec_stats.leaf_pair_min_targets = result.leaf_pair_min_targets;
+  matvec_stats.leaf_kernel_profile = result.leaf_kernel_profile;
+  matvec_stats.leaf_work_profile = result.leaf_work_profile;
+  matvec_stats.matvec_cost_profile = result.matvec_cost_profile;
+  matvec_stats.jcp_direct_kernel = result.jcp_direct_kernel;
+  matvec_stats.leaf_pair_selection_profile =
+      result.leaf_pair_selection_profile;
+  matvec_stats.leaf_pair_probe_cache = result.leaf_pair_probe_cache;
+  matvec_stats.leaf_pair_target_group = result.leaf_pair_target_group;
+  matvec_stats.leaf_pair_directness_probe =
+      result.leaf_pair_directness_probe;
+  matvec_stats.leaf_pair_directness_cache =
+      result.leaf_pair_directness_cache;
+  matvec_stats.leaf_pair_directness_verify =
+      result.leaf_pair_directness_verify;
+  matvec_stats.leaf_pair_scheduler = result.leaf_pair_scheduler;
+  matvec_stats.leaf_pair_worklist_max_active =
+      result.leaf_pair_worklist_max_active;
+  matvec_stats.leaf_pair_worklist_verify =
+      result.leaf_pair_worklist_verify;
+  matvec_stats.leaf_block_verify = result.leaf_block_verify;
+  matvec_stats.leaf_pair_max_lookahead = result.leaf_pair_max_lookahead;
   matvec_stats.expansion_audit = result.expansion_audit;
+  matvec_stats.expansion_audit_channel = result.expansion_audit_channel;
   if (mode == "treecode") {
     progress.write("tree_build_start", result, &matvec_stats, 0, 0, 0, 0.0,
                    "running", true);
@@ -3242,7 +5766,43 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         options.convergence_estimator,
         options.convergence_tail_threshold,
         options.convergence_estimator_error_cap,
-        options.convergence_unstable_rho_cap);
+        options.convergence_unstable_rho_cap,
+        options.convergence_calibration,
+        options.cluster_policy,
+        options.convergence_dielectric_amp, options.target_batch_size,
+        options.leaf_pair_min_source_panels,
+        options.leaf_pair_min_targets,
+          options.convergence_estimator_model,
+          options.expansion_audit_channel,
+          options.convergence_channel_calibration,
+          options.channel_missed_semantics,
+        options.convergence_split_policy,
+        options.accepted_miss_diagnostics,
+        options.convergence_k3_accepted_rho_cap,
+        options.mac_distance_policy,
+        options.mac_surface_margin_factor,
+        options.mac_surface_margin_policy,
+        options.mac_surface_margin_aspect_threshold,
+        options.mac_surface_margin_rho_trigger,
+        options.accepted_miss_absolute_floor, options.leaf_pair_kernel,
+        options.leaf_kernel_profile, options.leaf_work_profile,
+        options.jcp_direct_kernel,
+        options.leaf_pair_selection_profile,
+        options.leaf_pair_probe_cache,
+        options.leaf_pair_target_group,
+        options.leaf_pair_max_lookahead,
+        options.leaf_pair_directness_probe,
+        options.leaf_pair_directness_cache,
+        options.leaf_pair_directness_verify,
+        options.leaf_pair_scheduler,
+        options.leaf_pair_worklist_max_active,
+        options.leaf_pair_worklist_verify, options.leaf_block_verify,
+        options.mac_surface_margin_soft_aspect_threshold,
+        options.mac_surface_margin_soft_rho_trigger,
+        options.mac_surface_margin_soft_factor,
+        options.convergence_split_selectivity,
+        options.convergence_split_absolute_floor,
+        options.convergence_overreject_audit);
     tree.taylor_order = result.taylor_order;
     tree.derivative_mode = result.derivative_mode;
     result.interaction_mode = tree.interaction_mode;
@@ -3266,7 +5826,62 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.convergence_unstable_rho_cap =
         tree.convergence_unstable_rho_cap;
     result.convergence_calibration = tree.convergence_calibration;
+    result.convergence_dielectric_amp = tree.convergence_dielectric_amp;
+    result.convergence_estimator_model = tree.convergence_estimator_model;
+    result.convergence_channel_calibration =
+        tree.convergence_channel_calibration;
+    result.convergence_split_policy = tree.convergence_split_policy;
+    result.convergence_split_selectivity =
+        tree.convergence_split_selectivity;
+    result.convergence_split_absolute_floor =
+        tree.convergence_split_absolute_floor;
+    result.convergence_overreject_audit = tree.convergence_overreject_audit;
+    result.convergence_overreject_detail = tree.convergence_overreject_detail;
+    result.convergence_shape_audit = tree.convergence_shape_audit;
+    result.convergence_kernel_response_audit =
+        tree.convergence_kernel_response_audit;
+    result.channel_missed_semantics = tree.channel_missed_semantics;
+    result.accepted_miss_diagnostics = tree.accepted_miss_diagnostics;
+    result.accepted_miss_absolute_floor = tree.accepted_miss_absolute_floor;
+    result.convergence_k3_accepted_rho_cap =
+        tree.convergence_k3_accepted_rho_cap;
+    result.mac_distance_policy = tree.mac_distance_policy;
+    result.mac_surface_margin_factor = tree.mac_surface_margin_factor;
+    result.mac_surface_margin_policy = tree.mac_surface_margin_policy;
+    result.mac_surface_margin_aspect_threshold =
+        tree.mac_surface_margin_aspect_threshold;
+    result.mac_surface_margin_rho_trigger =
+        tree.mac_surface_margin_rho_trigger;
+    result.mac_surface_margin_soft_aspect_threshold =
+        tree.mac_surface_margin_soft_aspect_threshold;
+    result.mac_surface_margin_soft_rho_trigger =
+        tree.mac_surface_margin_soft_rho_trigger;
+    result.mac_surface_margin_soft_factor =
+        tree.mac_surface_margin_soft_factor;
+    result.cluster_policy = tree.cluster_policy;
+    result.target_batch_size = static_cast<int>(tree.target_batch_size);
+    result.leaf_pair_min_source_panels =
+        static_cast<int>(tree.leaf_pair_min_source_panels);
+    result.leaf_pair_min_targets =
+        static_cast<int>(tree.leaf_pair_min_targets);
+    result.leaf_kernel_profile = tree.leaf_kernel_profile;
+    result.leaf_work_profile = tree.leaf_work_profile;
+    result.jcp_direct_kernel = tree.jcp_direct_kernel;
+    result.leaf_pair_selection_profile = tree.leaf_pair_selection_profile;
+    result.leaf_pair_probe_cache = tree.leaf_pair_probe_cache;
+    result.leaf_pair_target_group = tree.leaf_pair_target_group;
+    result.leaf_pair_directness_probe = tree.leaf_pair_directness_probe;
+    result.leaf_pair_directness_cache = tree.leaf_pair_directness_cache;
+    result.leaf_pair_directness_verify = tree.leaf_pair_directness_verify;
+    result.leaf_pair_scheduler = tree.leaf_pair_scheduler;
+    result.leaf_pair_worklist_max_active =
+        static_cast<int>(tree.leaf_pair_worklist_max_active);
+    result.leaf_pair_worklist_verify = tree.leaf_pair_worklist_verify;
+    result.leaf_block_verify = tree.leaf_block_verify;
+    result.leaf_pair_max_lookahead =
+        static_cast<int>(tree.leaf_pair_max_lookahead);
     result.expansion_audit = tree.expansion_audit;
+    result.expansion_audit_channel = tree.expansion_audit_channel;
     matvec_stats.node_bounds_mode = tree.node_bounds_mode;
     matvec_stats.interaction_mode = tree.interaction_mode;
     matvec_stats.tree_builder = tree.tree_builder;
@@ -3289,7 +5904,75 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     matvec_stats.convergence_unstable_rho_cap =
         tree.convergence_unstable_rho_cap;
     matvec_stats.convergence_calibration = tree.convergence_calibration;
+    matvec_stats.convergence_dielectric_amp =
+        tree.convergence_dielectric_amp;
+    matvec_stats.convergence_estimator_model =
+        tree.convergence_estimator_model;
+    matvec_stats.convergence_channel_calibration =
+        tree.convergence_channel_calibration;
+    matvec_stats.convergence_split_policy = tree.convergence_split_policy;
+    matvec_stats.convergence_split_selectivity =
+        tree.convergence_split_selectivity;
+    matvec_stats.convergence_split_absolute_floor =
+        tree.convergence_split_absolute_floor;
+    matvec_stats.convergence_overreject_audit =
+        tree.convergence_overreject_audit;
+    matvec_stats.convergence_overreject_detail =
+        tree.convergence_overreject_detail;
+    matvec_stats.convergence_shape_audit = tree.convergence_shape_audit;
+    matvec_stats.convergence_kernel_response_audit =
+        tree.convergence_kernel_response_audit;
+    matvec_stats.channel_missed_semantics = tree.channel_missed_semantics;
+    matvec_stats.accepted_miss_diagnostics =
+        tree.accepted_miss_diagnostics;
+    matvec_stats.accepted_miss_absolute_floor =
+        tree.accepted_miss_absolute_floor;
+    matvec_stats.convergence_k3_accepted_rho_cap =
+        tree.convergence_k3_accepted_rho_cap;
+    matvec_stats.mac_distance_policy = tree.mac_distance_policy;
+    matvec_stats.mac_surface_margin_factor =
+        tree.mac_surface_margin_factor;
+    matvec_stats.mac_surface_margin_policy =
+        tree.mac_surface_margin_policy;
+    matvec_stats.mac_surface_margin_aspect_threshold =
+        tree.mac_surface_margin_aspect_threshold;
+    matvec_stats.mac_surface_margin_rho_trigger =
+        tree.mac_surface_margin_rho_trigger;
+    matvec_stats.mac_surface_margin_soft_aspect_threshold =
+        tree.mac_surface_margin_soft_aspect_threshold;
+    matvec_stats.mac_surface_margin_soft_rho_trigger =
+        tree.mac_surface_margin_soft_rho_trigger;
+    matvec_stats.mac_surface_margin_soft_factor =
+        tree.mac_surface_margin_soft_factor;
+    matvec_stats.cluster_policy = tree.cluster_policy;
+    matvec_stats.target_batch_size = static_cast<int>(tree.target_batch_size);
+    matvec_stats.leaf_pair_min_source_panels =
+        static_cast<int>(tree.leaf_pair_min_source_panels);
+    matvec_stats.leaf_pair_min_targets =
+        static_cast<int>(tree.leaf_pair_min_targets);
+    matvec_stats.leaf_kernel_profile = tree.leaf_kernel_profile;
+    matvec_stats.leaf_work_profile = tree.leaf_work_profile;
+    matvec_stats.matvec_cost_profile = result.matvec_cost_profile;
+    matvec_stats.jcp_direct_kernel = tree.jcp_direct_kernel;
+    matvec_stats.leaf_pair_selection_profile =
+        tree.leaf_pair_selection_profile;
+    matvec_stats.leaf_pair_probe_cache = tree.leaf_pair_probe_cache;
+    matvec_stats.leaf_pair_target_group = tree.leaf_pair_target_group;
+    matvec_stats.leaf_pair_directness_probe =
+        tree.leaf_pair_directness_probe;
+    matvec_stats.leaf_pair_directness_cache =
+        tree.leaf_pair_directness_cache;
+    matvec_stats.leaf_pair_directness_verify =
+        tree.leaf_pair_directness_verify;
+    matvec_stats.leaf_pair_scheduler = tree.leaf_pair_scheduler;
+    matvec_stats.leaf_pair_worklist_max_active =
+        static_cast<int>(tree.leaf_pair_worklist_max_active);
+    matvec_stats.leaf_pair_worklist_verify = tree.leaf_pair_worklist_verify;
+    matvec_stats.leaf_block_verify = tree.leaf_block_verify;
+    matvec_stats.leaf_pair_max_lookahead =
+        static_cast<int>(tree.leaf_pair_max_lookahead);
     matvec_stats.expansion_audit = tree.expansion_audit;
+    matvec_stats.expansion_audit_channel = tree.expansion_audit_channel;
     matvec_stats.tree_depth_max = tree.depth_max;
     matvec_stats.node_radius_max = tree.node_radius_max;
     matvec_stats.node_radius_mean = tree.node_radius_mean;
@@ -3438,6 +6121,45 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.smooth_leaf_node_interactions =
       matvec_stats.smooth_leaf_node_interactions;
   result.leaf_pruned_interactions = matvec_stats.leaf_pruned_interactions;
+  result.leaf_work_profile = matvec_stats.leaf_work_profile;
+  result.leaf_work_mac_terminal_panels =
+      matvec_stats.leaf_work_mac_terminal_panels;
+  result.leaf_work_physical_gap_panels =
+      matvec_stats.leaf_work_physical_gap_panels;
+  result.leaf_work_fragmentation_panels =
+      matvec_stats.leaf_work_fragmentation_panels;
+  result.leaf_work_convergence_panels =
+      matvec_stats.leaf_work_convergence_panels;
+  result.leaf_work_convergence_estimator_panels =
+      matvec_stats.leaf_work_convergence_estimator_panels;
+  result.leaf_work_convergence_rho_panels =
+      matvec_stats.leaf_work_convergence_rho_panels;
+  result.leaf_work_convergence_aspect_panels =
+      matvec_stats.leaf_work_convergence_aspect_panels;
+  result.leaf_work_surface_margin_panels =
+      matvec_stats.leaf_work_surface_margin_panels;
+  result.leaf_work_surface_margin_hard_panels =
+      matvec_stats.leaf_work_surface_margin_hard_panels;
+  result.leaf_work_surface_margin_soft_panels =
+      matvec_stats.leaf_work_surface_margin_soft_panels;
+  result.leaf_work_k3_rho_cap_panels =
+      matvec_stats.leaf_work_k3_rho_cap_panels;
+  result.leaf_work_singular_fallback_panels =
+      matvec_stats.leaf_work_singular_fallback_panels;
+  result.leaf_work_scalar_tail_panels =
+      matvec_stats.leaf_work_scalar_tail_panels;
+  result.leaf_work_profile_accounted_panels =
+      matvec_stats.leaf_work_profile_accounted_panels;
+  result.leaf_work_mac_terminal_frac =
+      matvec_stats.leaf_work_mac_terminal_frac;
+  result.leaf_work_convergence_frac =
+      matvec_stats.leaf_work_convergence_frac;
+  result.leaf_work_surface_margin_frac =
+      matvec_stats.leaf_work_surface_margin_frac;
+  result.leaf_work_singular_fallback_frac =
+      matvec_stats.leaf_work_singular_fallback_frac;
+  result.leaf_work_scalar_tail_frac =
+      matvec_stats.leaf_work_scalar_tail_frac;
   result.adaptive_smooth_leaf_accepted =
       matvec_stats.adaptive_smooth_leaf_accepted;
   result.adaptive_smooth_leaf_rejected =
@@ -3460,7 +6182,126 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       matvec_stats.target_cluster_panels_pruned;
   result.target_cluster_rejected = matvec_stats.target_cluster_rejected;
   result.target_cluster_eval_ms = matvec_stats.target_cluster_eval_ms;
+  result.leaf_pair_batch_interactions =
+      matvec_stats.leaf_pair_batch_interactions;
+  result.leaf_pair_batch_targets = matvec_stats.leaf_pair_batch_targets;
+  result.leaf_pair_batch_source_panels =
+      matvec_stats.leaf_pair_batch_source_panels;
+  result.leaf_pair_batch_residual_panels =
+      matvec_stats.leaf_pair_batch_residual_panels;
+  result.leaf_pair_batch_fallbacks = matvec_stats.leaf_pair_batch_fallbacks;
+  result.leaf_pair_batch_ms = matvec_stats.leaf_pair_batch_ms;
+  result.leaf_pair_batch_kernel = matvec_stats.leaf_pair_batch_kernel;
+  result.leaf_pair_batch_vectorized_sources =
+      matvec_stats.leaf_pair_batch_vectorized_sources;
+  result.leaf_pair_batch_vector_lanes =
+      matvec_stats.leaf_pair_batch_vector_lanes;
+  result.leaf_pair_batch_pairs_per_second =
+      matvec_stats.leaf_pair_batch_pairs_per_second;
+  result.leaf_kernel_profile = matvec_stats.leaf_kernel_profile;
+  result.leaf_work_profile = matvec_stats.leaf_work_profile;
+  result.jcp_direct_kernel = matvec_stats.jcp_direct_kernel;
+  result.leaf_kernel_scalar_tasks = matvec_stats.leaf_kernel_scalar_tasks;
+  result.leaf_kernel_batch_tasks = matvec_stats.leaf_kernel_batch_tasks;
+  result.leaf_kernel_source_panel_evals =
+      matvec_stats.leaf_kernel_source_panel_evals;
+  result.leaf_kernel_scalar_ms = matvec_stats.leaf_kernel_scalar_ms;
+  result.leaf_kernel_target_avx2_ms =
+      matvec_stats.leaf_kernel_target_avx2_ms;
+  result.leaf_kernel_tail_ms = matvec_stats.leaf_kernel_tail_ms;
+  result.leaf_pair_batch_soa_sources =
+      matvec_stats.leaf_pair_batch_soa_sources;
+  result.leaf_pair_batch_soa_ms = matvec_stats.leaf_pair_batch_soa_ms;
+  result.leaf_pair_batch_scalar_tail_ms =
+      matvec_stats.leaf_pair_batch_scalar_tail_ms;
+  result.leaf_pair_batch_clean_source_panels_per_second =
+      matvec_stats.leaf_pair_batch_clean_source_panels_per_second;
+  result.leaf_pair_selection_profile =
+      matvec_stats.leaf_pair_selection_profile;
+  result.leaf_pair_probe_cache = matvec_stats.leaf_pair_probe_cache;
+  result.leaf_pair_target_group = matvec_stats.leaf_pair_target_group;
+  result.leaf_pair_directness_probe =
+      matvec_stats.leaf_pair_directness_probe;
+  result.leaf_pair_directness_cache =
+      matvec_stats.leaf_pair_directness_cache;
+  result.leaf_pair_directness_verify =
+      matvec_stats.leaf_pair_directness_verify;
+  result.leaf_pair_max_lookahead = matvec_stats.leaf_pair_max_lookahead;
+  result.leaf_pair_selection_candidate_scans =
+      matvec_stats.leaf_pair_selection_candidate_scans;
+  result.leaf_pair_selection_clean_rejects =
+      matvec_stats.leaf_pair_selection_clean_rejects;
+  result.leaf_pair_selection_probe_calls =
+      matvec_stats.leaf_pair_selection_probe_calls;
+  result.leaf_pair_selection_probe_node_visits =
+      matvec_stats.leaf_pair_selection_probe_node_visits;
+  result.leaf_pair_selection_probe_ms =
+      matvec_stats.leaf_pair_selection_probe_ms;
+  result.leaf_pair_selection_ms = matvec_stats.leaf_pair_selection_ms;
+  result.leaf_pair_selection_probe_cache_hits =
+      matvec_stats.leaf_pair_selection_probe_cache_hits;
+  result.leaf_pair_selection_probe_cache_misses =
+      matvec_stats.leaf_pair_selection_probe_cache_misses;
+  result.leaf_pair_selection_insufficient_targets =
+      matvec_stats.leaf_pair_selection_insufficient_targets;
+  result.leaf_pair_selection_same_target_leaf_rejects =
+      matvec_stats.leaf_pair_selection_same_target_leaf_rejects;
+  result.leaf_pair_directness_ancestor_probe_calls =
+      matvec_stats.leaf_pair_directness_ancestor_probe_calls;
+  result.leaf_pair_directness_ancestor_probe_node_visits =
+      matvec_stats.leaf_pair_directness_ancestor_probe_node_visits;
+  result.leaf_pair_directness_ancestor_probe_ms =
+      matvec_stats.leaf_pair_directness_ancestor_probe_ms;
+  result.leaf_pair_directness_pair_cache_hits =
+      matvec_stats.leaf_pair_directness_pair_cache_hits;
+  result.leaf_pair_directness_pair_cache_misses =
+      matvec_stats.leaf_pair_directness_pair_cache_misses;
+  result.leaf_pair_directness_all_direct_proofs =
+      matvec_stats.leaf_pair_directness_all_direct_proofs;
+  result.leaf_pair_directness_mixed_fallbacks =
+      matvec_stats.leaf_pair_directness_mixed_fallbacks;
+  result.leaf_pair_directness_verify_checks =
+      matvec_stats.leaf_pair_directness_verify_checks;
+  result.leaf_pair_directness_verify_mismatches =
+      matvec_stats.leaf_pair_directness_verify_mismatches;
+  result.leaf_pair_scheduler = matvec_stats.leaf_pair_scheduler;
+  result.leaf_pair_worklist_max_active =
+      matvec_stats.leaf_pair_worklist_max_active;
+  result.leaf_pair_worklist_verify = matvec_stats.leaf_pair_worklist_verify;
+  result.leaf_pair_worklist_tasks = matvec_stats.leaf_pair_worklist_tasks;
+  result.leaf_pair_worklist_groups = matvec_stats.leaf_pair_worklist_groups;
+  result.leaf_pair_worklist_batched_groups =
+      matvec_stats.leaf_pair_worklist_batched_groups;
+  result.leaf_pair_worklist_scalar_flush_tasks =
+      matvec_stats.leaf_pair_worklist_scalar_flush_tasks;
+  result.leaf_pair_worklist_forced_flushes =
+      matvec_stats.leaf_pair_worklist_forced_flushes;
+  result.leaf_pair_worklist_active_groups_max =
+      matvec_stats.leaf_pair_worklist_active_groups_max;
+  result.leaf_pair_worklist_ms = matvec_stats.leaf_pair_worklist_ms;
+  result.leaf_pair_worklist_verify_checks =
+      matvec_stats.leaf_pair_worklist_verify_checks;
+  result.leaf_pair_worklist_verify_mismatches =
+      matvec_stats.leaf_pair_worklist_verify_mismatches;
+  result.leaf_block_verify = matvec_stats.leaf_block_verify;
+  result.leaf_block_target_leaves = matvec_stats.leaf_block_target_leaves;
+  result.leaf_block_targets = matvec_stats.leaf_block_targets;
+  result.leaf_block_source_groups = matvec_stats.leaf_block_source_groups;
+  result.leaf_block_batched_groups = matvec_stats.leaf_block_batched_groups;
+  result.leaf_block_scalar_tail_tasks =
+      matvec_stats.leaf_block_scalar_tail_tasks;
+  result.leaf_block_group_ms = matvec_stats.leaf_block_group_ms;
+  result.leaf_block_flush_ms = matvec_stats.leaf_block_flush_ms;
+  result.leaf_block_writeback_ms = matvec_stats.leaf_block_writeback_ms;
+  result.leaf_block_verify_checks = matvec_stats.leaf_block_verify_checks;
+  result.leaf_block_verify_mismatches =
+      matvec_stats.leaf_block_verify_mismatches;
   result.adaptive_level = matvec_stats.adaptive_level;
+  result.cluster_policy = matvec_stats.cluster_policy;
+  result.target_batch_size = matvec_stats.target_batch_size;
+  result.leaf_pair_min_source_panels =
+      matvec_stats.leaf_pair_min_source_panels;
+  result.leaf_pair_min_targets = matvec_stats.leaf_pair_min_targets;
   result.leaf_near_policy = matvec_stats.leaf_near_policy;
   result.leaf_panel_kernel = matvec_stats.leaf_panel_kernel;
   result.interaction_mode = matvec_stats.interaction_mode;
@@ -3524,6 +6365,46 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.convergence_unstable_rho_cap =
       matvec_stats.convergence_unstable_rho_cap;
   result.convergence_calibration = matvec_stats.convergence_calibration;
+  result.convergence_dielectric_amp =
+      matvec_stats.convergence_dielectric_amp;
+  result.convergence_estimator_model =
+      matvec_stats.convergence_estimator_model;
+  result.convergence_channel_calibration =
+      matvec_stats.convergence_channel_calibration;
+  result.convergence_split_policy = matvec_stats.convergence_split_policy;
+  result.convergence_split_selectivity =
+      matvec_stats.convergence_split_selectivity;
+  result.convergence_split_absolute_floor =
+      matvec_stats.convergence_split_absolute_floor;
+  result.convergence_overreject_audit =
+      matvec_stats.convergence_overreject_audit;
+  result.convergence_overreject_detail =
+      matvec_stats.convergence_overreject_detail;
+  result.convergence_shape_audit = matvec_stats.convergence_shape_audit;
+  result.convergence_kernel_response_audit =
+      matvec_stats.convergence_kernel_response_audit;
+  result.channel_missed_semantics = matvec_stats.channel_missed_semantics;
+  result.accepted_miss_diagnostics =
+      matvec_stats.accepted_miss_diagnostics;
+  result.accepted_miss_absolute_floor =
+      matvec_stats.accepted_miss_absolute_floor;
+  result.convergence_k3_accepted_rho_cap =
+      matvec_stats.convergence_k3_accepted_rho_cap;
+  result.mac_distance_policy = matvec_stats.mac_distance_policy;
+  result.mac_surface_margin_factor =
+      matvec_stats.mac_surface_margin_factor;
+  result.mac_surface_margin_policy =
+      matvec_stats.mac_surface_margin_policy;
+  result.mac_surface_margin_aspect_threshold =
+      matvec_stats.mac_surface_margin_aspect_threshold;
+  result.mac_surface_margin_rho_trigger =
+      matvec_stats.mac_surface_margin_rho_trigger;
+  result.mac_surface_margin_soft_aspect_threshold =
+      matvec_stats.mac_surface_margin_soft_aspect_threshold;
+  result.mac_surface_margin_soft_rho_trigger =
+      matvec_stats.mac_surface_margin_soft_rho_trigger;
+  result.mac_surface_margin_soft_factor =
+      matvec_stats.mac_surface_margin_soft_factor;
   result.convergence_estimator_samples =
       matvec_stats.convergence_estimator_samples;
   result.convergence_estimator_unstable_far_count =
@@ -3534,6 +6415,10 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       matvec_stats.convergence_estimator_split_rejects;
   result.convergence_estimator_split_reject_panels =
       matvec_stats.convergence_estimator_split_reject_panels;
+  result.convergence_low_abs_reaccepted_far_count =
+      matvec_stats.convergence_low_abs_reaccepted_far_count;
+  result.convergence_low_abs_reaccepted_far_panels =
+      matvec_stats.convergence_low_abs_reaccepted_far_panels;
   result.convergence_estimator_tail_ratio_max =
       matvec_stats.convergence_estimator_tail_ratio_max;
   result.convergence_estimator_tail_ratio_mean =
@@ -3542,6 +6427,10 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       matvec_stats.convergence_estimator_error_max;
   result.convergence_estimator_error_mean =
       matvec_stats.convergence_estimator_error_mean;
+  result.convergence_estimator_abs_error_max =
+      matvec_stats.convergence_estimator_abs_error_max;
+  result.convergence_estimator_abs_error_mean =
+      matvec_stats.convergence_estimator_abs_error_mean;
   result.convergence_tail_norm_p_max =
       matvec_stats.convergence_tail_norm_p_max;
   result.convergence_tail_norm_p_mean =
@@ -3554,10 +6443,140 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       matvec_stats.convergence_effective_jcp_amp_max;
   result.convergence_effective_jcp_amp_mean =
       matvec_stats.convergence_effective_jcp_amp_mean;
+  result.convergence_dielectric_amp_max =
+      matvec_stats.convergence_dielectric_amp_max;
+  result.convergence_dielectric_amp_mean =
+      matvec_stats.convergence_dielectric_amp_mean;
+  result.convergence_channel_estimated_error_max =
+      matvec_stats.convergence_channel_estimated_error_max;
+  result.convergence_channel_estimated_error_mean =
+      matvec_stats.convergence_channel_estimated_error_mean;
+  result.convergence_channel_effective_jcp_amp_max =
+      matvec_stats.convergence_channel_effective_jcp_amp_max;
+  result.convergence_channel_effective_jcp_amp_mean =
+      matvec_stats.convergence_channel_effective_jcp_amp_mean;
+  result.convergence_channel_unstable_far_count =
+      matvec_stats.convergence_channel_unstable_far_count;
+  result.convergence_channel_unstable_far_panels =
+      matvec_stats.convergence_channel_unstable_far_panels;
+  result.convergence_channel_split_rejects =
+      matvec_stats.convergence_channel_split_rejects;
+  result.convergence_channel_split_reject_panels =
+      matvec_stats.convergence_channel_split_reject_panels;
+  result.convergence_channel_low_abs_reaccepted_count =
+      matvec_stats.convergence_channel_low_abs_reaccepted_count;
+  result.convergence_channel_low_abs_reaccepted_panels =
+      matvec_stats.convergence_channel_low_abs_reaccepted_panels;
+  result.convergence_channel_high_error_caught =
+      matvec_stats.convergence_channel_high_error_caught;
+  result.convergence_channel_high_error_missed =
+      matvec_stats.convergence_channel_high_error_missed;
+  result.convergence_channel_high_error_caught_by_split =
+      matvec_stats.convergence_channel_high_error_caught_by_split;
   result.convergence_estimator_high_error_caught =
       matvec_stats.convergence_estimator_high_error_caught;
   result.convergence_estimator_high_error_missed =
       matvec_stats.convergence_estimator_high_error_missed;
+  result.convergence_estimator_high_error_caught_by_split =
+      matvec_stats.convergence_estimator_high_error_caught_by_split;
+  result.convergence_estimator_phantom_high_error_count =
+      matvec_stats.convergence_estimator_phantom_high_error_count;
+  result.convergence_estimator_phantom_high_error_abs_max =
+      matvec_stats.convergence_estimator_phantom_high_error_abs_max;
+  result.convergence_overreject_count =
+      matvec_stats.convergence_overreject_count;
+  result.convergence_overreject_panels =
+      matvec_stats.convergence_overreject_panels;
+  result.convergence_overreject_caught_count =
+      matvec_stats.convergence_overreject_caught_count;
+  result.convergence_overreject_caught_panels =
+      matvec_stats.convergence_overreject_caught_panels;
+  result.convergence_overreject_abs_error_max =
+      matvec_stats.convergence_overreject_abs_error_max;
+  result.convergence_overreject_abs_error_mean =
+      matvec_stats.convergence_overreject_abs_error_mean;
+  result.convergence_overreject_abs_error_p95 =
+      matvec_stats.convergence_overreject_abs_error_p95;
+  result.convergence_overreject_abs_error_p99 =
+      matvec_stats.convergence_overreject_abs_error_p99;
+  result.convergence_overreject_estimated_abs_error_max =
+      matvec_stats.convergence_overreject_estimated_abs_error_max;
+  result.convergence_overreject_estimated_abs_error_mean =
+      matvec_stats.convergence_overreject_estimated_abs_error_mean;
+  result.convergence_overreject_required_scale_max =
+      matvec_stats.convergence_overreject_required_scale_max;
+  result.convergence_overreject_required_scale_p95 =
+      matvec_stats.convergence_overreject_required_scale_p95;
+  result.convergence_overreject_required_scale_p99 =
+      matvec_stats.convergence_overreject_required_scale_p99;
+  result.convergence_channel_overreject_count =
+      matvec_stats.convergence_channel_overreject_count;
+  result.convergence_channel_overreject_caught_count =
+      matvec_stats.convergence_channel_overreject_caught_count;
+  result.convergence_channel_overreject_panels =
+      matvec_stats.convergence_channel_overreject_panels;
+  result.convergence_channel_overreject_abs_error_max =
+      matvec_stats.convergence_channel_overreject_abs_error_max;
+  result.convergence_channel_overreject_abs_error_mean =
+      matvec_stats.convergence_channel_overreject_abs_error_mean;
+  result.convergence_channel_overreject_required_scale_max =
+      matvec_stats.convergence_channel_overreject_required_scale_max;
+  result.convergence_channel_overreject_required_scale_p99 =
+      matvec_stats.convergence_channel_overreject_required_scale_p99;
+  result.phantom_high_error_channel_count =
+      matvec_stats.phantom_high_error_channel_count;
+  result.phantom_high_error_channel_abs_max =
+      matvec_stats.phantom_high_error_channel_abs_max;
+  result.accepted_miss_channel_count =
+      matvec_stats.accepted_miss_channel_count;
+  result.accepted_miss_channel_panels =
+      matvec_stats.accepted_miss_channel_panels;
+  result.accepted_miss_channel_rho_min =
+      matvec_stats.accepted_miss_channel_rho_min;
+  result.accepted_miss_channel_rho_mean =
+      matvec_stats.accepted_miss_channel_rho_mean;
+  result.accepted_miss_channel_rho_max =
+      matvec_stats.accepted_miss_channel_rho_max;
+  result.accepted_miss_channel_tail_ratio_mean =
+      matvec_stats.accepted_miss_channel_tail_ratio_mean;
+  result.accepted_miss_channel_tail_ratio_max =
+      matvec_stats.accepted_miss_channel_tail_ratio_max;
+  result.accepted_miss_channel_estimated_error_mean =
+      matvec_stats.accepted_miss_channel_estimated_error_mean;
+  result.accepted_miss_channel_estimated_error_max =
+      matvec_stats.accepted_miss_channel_estimated_error_max;
+  result.accepted_miss_worst_channel =
+      matvec_stats.accepted_miss_worst_channel;
+  result.convergence_k3_rho_cap_rejects =
+      matvec_stats.convergence_k3_rho_cap_rejects;
+  result.convergence_k3_rho_cap_reject_panels =
+      matvec_stats.convergence_k3_rho_cap_reject_panels;
+  result.mac_surface_margin_rejects =
+      matvec_stats.mac_surface_margin_rejects;
+  result.mac_surface_margin_reject_panels =
+      matvec_stats.mac_surface_margin_reject_panels;
+  result.mac_surface_margin_applied =
+      matvec_stats.mac_surface_margin_applied;
+  result.mac_surface_margin_skipped =
+      matvec_stats.mac_surface_margin_skipped;
+  result.mac_surface_margin_adaptive_rejects =
+      matvec_stats.mac_surface_margin_adaptive_rejects;
+  result.mac_surface_margin_adaptive_reject_panels =
+      matvec_stats.mac_surface_margin_adaptive_reject_panels;
+  result.mac_surface_margin_skipped_accepted_far =
+      matvec_stats.mac_surface_margin_skipped_accepted_far;
+  result.mac_surface_margin_hard_applied =
+      matvec_stats.mac_surface_margin_hard_applied;
+  result.mac_surface_margin_soft_applied =
+      matvec_stats.mac_surface_margin_soft_applied;
+  result.mac_surface_margin_hard_rejects =
+      matvec_stats.mac_surface_margin_hard_rejects;
+  result.mac_surface_margin_hard_reject_panels =
+      matvec_stats.mac_surface_margin_hard_reject_panels;
+  result.mac_surface_margin_soft_rejects =
+      matvec_stats.mac_surface_margin_soft_rejects;
+  result.mac_surface_margin_soft_reject_panels =
+      matvec_stats.mac_surface_margin_soft_reject_panels;
   result.moment_audit_nodes = matvec_stats.moment_audit_nodes;
   result.moment_translation_rel_error_max =
       matvec_stats.moment_translation_rel_error_max;
@@ -3573,6 +6592,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       matvec_stats.moment_cancellation_ratio_mean;
   result.moment_dynamic_range_max = matvec_stats.moment_dynamic_range_max;
   result.expansion_audit = matvec_stats.expansion_audit;
+  result.expansion_audit_channel = matvec_stats.expansion_audit_channel;
   result.far_expansion_audit_pairs =
       matvec_stats.far_expansion_audit_pairs;
   result.far_expansion_audit_panels =
@@ -3583,6 +6603,18 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       matvec_stats.far_expansion_rel_error_max;
   result.far_expansion_rel_error_mean =
       matvec_stats.far_expansion_rel_error_mean;
+  result.far_expansion_rel_error_p95 =
+      matvec_stats.far_expansion_rel_error_p95;
+  result.far_expansion_rel_error_p99 =
+      matvec_stats.far_expansion_rel_error_p99;
+  result.far_expansion_channel_rel_error_max =
+      matvec_stats.far_expansion_channel_rel_error_max;
+  result.far_expansion_channel_rel_error_mean =
+      matvec_stats.far_expansion_channel_rel_error_mean;
+  result.far_expansion_channel_rel_error_p99 =
+      matvec_stats.far_expansion_channel_rel_error_p99;
+  result.far_expansion_worst_channel =
+      matvec_stats.far_expansion_worst_channel;
   result.far_expansion_mean_gate_pass =
       matvec_stats.far_expansion_mean_gate_pass;
   result.far_convergence_rho_max = matvec_stats.far_convergence_rho_max;
@@ -3661,6 +6693,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.energy_kj_mol /
       (kKBKJPerMolK * std::max(1.0, options.temperature_k));
   result.peak_memory_bytes = result.memory_bytes;
+  refresh_matvec_cost_summary(result);
   progress.write("solve_done", result, &matvec_stats, result.matvec_calls,
                  result.iterations, 0, result.residual, result.status, true);
   return result;

@@ -492,6 +492,10 @@ private:
     double tabi_solid_angle_ms{0.0};
     double tabi_tree_moment_ms{0.0};
     double tabi_tree_traversal_ms{0.0};
+    std::string tabi_matvec_cost_profile{"off"};
+    double tabi_leaf_panels_per_second{0.0};
+    double tabi_clean_leaf_panels_per_second{0.0};
+    double tabi_tree_traversal_fraction{0.0};
     double tabi_near_eval_ms{0.0};
     double tabi_far_eval_ms{0.0};
     double tabi_singular_near_eval_ms{0.0};
@@ -509,6 +513,26 @@ private:
     std::size_t tabi_leaf_residual_panel_interactions{0};
     std::size_t tabi_smooth_leaf_node_interactions{0};
     std::size_t tabi_leaf_pruned_interactions{0};
+    std::string tabi_leaf_work_profile{"off"};
+    std::size_t tabi_leaf_work_mac_terminal_panels{0};
+    std::size_t tabi_leaf_work_physical_gap_panels{0};
+    std::size_t tabi_leaf_work_fragmentation_panels{0};
+    std::size_t tabi_leaf_work_convergence_panels{0};
+    std::size_t tabi_leaf_work_convergence_estimator_panels{0};
+    std::size_t tabi_leaf_work_convergence_rho_panels{0};
+    std::size_t tabi_leaf_work_convergence_aspect_panels{0};
+    std::size_t tabi_leaf_work_surface_margin_panels{0};
+    std::size_t tabi_leaf_work_surface_margin_hard_panels{0};
+    std::size_t tabi_leaf_work_surface_margin_soft_panels{0};
+    std::size_t tabi_leaf_work_k3_rho_cap_panels{0};
+    std::size_t tabi_leaf_work_singular_fallback_panels{0};
+    std::size_t tabi_leaf_work_scalar_tail_panels{0};
+    std::size_t tabi_leaf_work_profile_accounted_panels{0};
+    double tabi_leaf_work_mac_terminal_frac{0.0};
+    double tabi_leaf_work_convergence_frac{0.0};
+    double tabi_leaf_work_surface_margin_frac{0.0};
+    double tabi_leaf_work_singular_fallback_frac{0.0};
+    double tabi_leaf_work_scalar_tail_frac{0.0};
     std::size_t tabi_adaptive_smooth_leaf_accepted{0};
     std::size_t tabi_adaptive_smooth_leaf_rejected{0};
     std::size_t tabi_adaptive_span_tile_accepted{0};
@@ -524,7 +548,83 @@ private:
     std::size_t tabi_target_cluster_panels_pruned{0};
     std::size_t tabi_target_cluster_rejected{0};
     double tabi_target_cluster_eval_ms{0.0};
+    std::size_t tabi_leaf_pair_batch_interactions{0};
+    std::size_t tabi_leaf_pair_batch_targets{0};
+    std::size_t tabi_leaf_pair_batch_source_panels{0};
+    std::size_t tabi_leaf_pair_batch_residual_panels{0};
+    std::size_t tabi_leaf_pair_batch_fallbacks{0};
+    double tabi_leaf_pair_batch_ms{0.0};
+    std::string tabi_leaf_pair_batch_kernel{"off"};
+    std::size_t tabi_leaf_pair_batch_vectorized_sources{0};
+    std::size_t tabi_leaf_pair_batch_vector_lanes{0};
+    double tabi_leaf_pair_batch_pairs_per_second{0.0};
+    std::string tabi_leaf_kernel_profile{"off"};
+    std::string tabi_jcp_direct_kernel{"baseline"};
+    std::size_t tabi_leaf_kernel_scalar_tasks{0};
+    std::size_t tabi_leaf_kernel_batch_tasks{0};
+    std::size_t tabi_leaf_kernel_source_panel_evals{0};
+    double tabi_leaf_kernel_scalar_ms{0.0};
+    double tabi_leaf_kernel_target_avx2_ms{0.0};
+    double tabi_leaf_kernel_tail_ms{0.0};
+    std::size_t tabi_leaf_pair_batch_soa_sources{0};
+    double tabi_leaf_pair_batch_soa_ms{0.0};
+    double tabi_leaf_pair_batch_scalar_tail_ms{0.0};
+    double tabi_leaf_pair_batch_clean_source_panels_per_second{0.0};
+    std::string tabi_leaf_pair_selection_profile{"off"};
+    std::string tabi_leaf_pair_probe_cache{"off"};
+    std::string tabi_leaf_pair_target_group{"scan"};
+    int tabi_leaf_pair_max_lookahead{32};
+    std::size_t tabi_leaf_pair_selection_candidate_scans{0};
+    std::size_t tabi_leaf_pair_selection_clean_rejects{0};
+    std::size_t tabi_leaf_pair_selection_probe_calls{0};
+    std::size_t tabi_leaf_pair_selection_probe_node_visits{0};
+    double tabi_leaf_pair_selection_probe_ms{0.0};
+    double tabi_leaf_pair_selection_ms{0.0};
+    std::size_t tabi_leaf_pair_selection_probe_cache_hits{0};
+    std::size_t tabi_leaf_pair_selection_probe_cache_misses{0};
+    std::size_t tabi_leaf_pair_selection_insufficient_targets{0};
+    std::size_t tabi_leaf_pair_selection_same_target_leaf_rejects{0};
+    std::string tabi_leaf_pair_directness_probe{"full-traversal"};
+    std::string tabi_leaf_pair_directness_cache{"off"};
+    std::string tabi_leaf_pair_directness_verify{"off"};
+    std::size_t tabi_leaf_pair_directness_ancestor_probe_calls{0};
+    std::size_t tabi_leaf_pair_directness_ancestor_probe_node_visits{0};
+    double tabi_leaf_pair_directness_ancestor_probe_ms{0.0};
+    std::size_t tabi_leaf_pair_directness_pair_cache_hits{0};
+    std::size_t tabi_leaf_pair_directness_pair_cache_misses{0};
+    std::size_t tabi_leaf_pair_directness_all_direct_proofs{0};
+    std::size_t tabi_leaf_pair_directness_mixed_fallbacks{0};
+    std::size_t tabi_leaf_pair_directness_verify_checks{0};
+    std::size_t tabi_leaf_pair_directness_verify_mismatches{0};
+    std::string tabi_leaf_pair_scheduler{"inline-select"};
+    int tabi_leaf_pair_worklist_max_active{2048};
+    std::string tabi_leaf_pair_worklist_verify{"off"};
+    std::size_t tabi_leaf_pair_worklist_tasks{0};
+    std::size_t tabi_leaf_pair_worklist_groups{0};
+    std::size_t tabi_leaf_pair_worklist_batched_groups{0};
+    std::size_t tabi_leaf_pair_worklist_scalar_flush_tasks{0};
+    std::size_t tabi_leaf_pair_worklist_forced_flushes{0};
+    std::size_t tabi_leaf_pair_worklist_active_groups_max{0};
+    double tabi_leaf_pair_worklist_ms{0.0};
+    std::size_t tabi_leaf_pair_worklist_verify_checks{0};
+    std::size_t tabi_leaf_pair_worklist_verify_mismatches{0};
+    std::string tabi_leaf_block_verify{"off"};
+    std::size_t tabi_leaf_block_target_leaves{0};
+    std::size_t tabi_leaf_block_targets{0};
+    std::size_t tabi_leaf_block_source_groups{0};
+    std::size_t tabi_leaf_block_batched_groups{0};
+    std::size_t tabi_leaf_block_scalar_tail_tasks{0};
+    double tabi_leaf_block_group_ms{0.0};
+    double tabi_leaf_block_flush_ms{0.0};
+    double tabi_leaf_block_writeback_ms{0.0};
+    std::size_t tabi_leaf_block_verify_checks{0};
+    std::size_t tabi_leaf_block_verify_mismatches{0};
+    std::string tabi_tree_preset{"off"};
     std::string tabi_adaptive_level{"off"};
+    std::string tabi_cluster_policy{"off"};
+    int tabi_target_batch_size{1};
+    int tabi_leaf_pair_min_source_panels{64};
+    int tabi_leaf_pair_min_targets{4};
     std::string tabi_leaf_near_policy{"off"};
     std::string tabi_leaf_panel_kernel{"off"};
     std::string tabi_interaction_mode{"off"};
@@ -554,6 +654,19 @@ private:
     std::size_t tabi_mac_convergence_aspect_rejects{0};
     std::size_t tabi_mac_convergence_rho_reject_panels{0};
     std::size_t tabi_mac_convergence_aspect_reject_panels{0};
+    std::size_t tabi_mac_surface_margin_rejects{0};
+    std::size_t tabi_mac_surface_margin_reject_panels{0};
+    std::size_t tabi_mac_surface_margin_applied{0};
+    std::size_t tabi_mac_surface_margin_skipped{0};
+    std::size_t tabi_mac_surface_margin_adaptive_rejects{0};
+    std::size_t tabi_mac_surface_margin_adaptive_reject_panels{0};
+    std::size_t tabi_mac_surface_margin_skipped_accepted_far{0};
+    std::size_t tabi_mac_surface_margin_hard_applied{0};
+    std::size_t tabi_mac_surface_margin_soft_applied{0};
+    std::size_t tabi_mac_surface_margin_hard_rejects{0};
+    std::size_t tabi_mac_surface_margin_hard_reject_panels{0};
+    std::size_t tabi_mac_surface_margin_soft_rejects{0};
+    std::size_t tabi_mac_surface_margin_soft_reject_panels{0};
     std::size_t tabi_fragmented_far_count{0};
     std::size_t tabi_fragmented_far_panels{0};
     std::size_t tabi_fragmented_split_rejects{0};
@@ -576,18 +689,127 @@ private:
     std::size_t tabi_convergence_estimator_unstable_far_panels{0};
     std::size_t tabi_convergence_estimator_split_rejects{0};
     std::size_t tabi_convergence_estimator_split_reject_panels{0};
+    std::size_t tabi_convergence_low_abs_reaccepted_far_count{0};
+    std::size_t tabi_convergence_low_abs_reaccepted_far_panels{0};
     double tabi_convergence_estimator_tail_ratio_max{0.0};
     double tabi_convergence_estimator_tail_ratio_mean{0.0};
     double tabi_convergence_estimator_error_max{0.0};
     double tabi_convergence_estimator_error_mean{0.0};
+    double tabi_convergence_estimator_abs_error_max{0.0};
+    double tabi_convergence_estimator_abs_error_mean{0.0};
     double tabi_convergence_tail_norm_p_max{0.0};
     double tabi_convergence_tail_norm_p_mean{0.0};
     double tabi_convergence_tail_norm_pm1_max{0.0};
     double tabi_convergence_tail_norm_pm1_mean{0.0};
     double tabi_convergence_effective_jcp_amp_max{0.0};
     double tabi_convergence_effective_jcp_amp_mean{0.0};
+    std::string tabi_convergence_dielectric_amp{"off"};
+    std::string tabi_convergence_estimator_model{"stage3l"};
+    std::string tabi_convergence_channel_calibration{"stage3m"};
+    std::string tabi_convergence_split_policy{"global"};
+    std::string tabi_convergence_split_selectivity{"legacy"};
+    double tabi_convergence_split_absolute_floor{0.0};
+    std::string tabi_convergence_overreject_audit{"off"};
+    std::string tabi_convergence_overreject_detail{"off"};
+    std::string tabi_convergence_shape_audit{"off"};
+    std::string tabi_convergence_kernel_response_audit{"off"};
+    std::string tabi_channel_missed_semantics{"legacy"};
+    std::string tabi_accepted_miss_diagnostics{"off"};
+    double tabi_accepted_miss_absolute_floor{1.0e-7};
+    double tabi_convergence_k3_accepted_rho_cap{0.0};
+    std::string tabi_mac_distance_policy{"center"};
+    double tabi_mac_surface_margin_factor{0.25};
+    std::string tabi_mac_surface_margin_policy{"all"};
+    double tabi_mac_surface_margin_aspect_threshold{3.0};
+    double tabi_mac_surface_margin_rho_trigger{0.55};
+    double tabi_mac_surface_margin_soft_aspect_threshold{0.0};
+    double tabi_mac_surface_margin_soft_rho_trigger{0.0};
+    double tabi_mac_surface_margin_soft_factor{0.10};
+    double tabi_convergence_dielectric_amp_max{0.0};
+    double tabi_convergence_dielectric_amp_mean{0.0};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_convergence_channel_estimated_error_max{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_convergence_channel_estimated_error_mean{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_convergence_channel_effective_jcp_amp_max{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_convergence_channel_effective_jcp_amp_mean{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_convergence_channel_unstable_far_count{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_convergence_channel_unstable_far_panels{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_convergence_channel_split_rejects{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_convergence_channel_split_reject_panels{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_convergence_channel_low_abs_reaccepted_count{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_convergence_channel_low_abs_reaccepted_panels{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_convergence_channel_high_error_caught{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_convergence_channel_high_error_missed{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_convergence_channel_high_error_caught_by_split{};
     std::size_t tabi_convergence_estimator_high_error_caught{0};
     std::size_t tabi_convergence_estimator_high_error_missed{0};
+    std::size_t tabi_convergence_estimator_high_error_caught_by_split{0};
+    std::size_t tabi_convergence_estimator_phantom_high_error_count{0};
+    double tabi_convergence_estimator_phantom_high_error_abs_max{0.0};
+    std::size_t tabi_convergence_overreject_count{0};
+    std::size_t tabi_convergence_overreject_panels{0};
+    std::size_t tabi_convergence_overreject_caught_count{0};
+    std::size_t tabi_convergence_overreject_caught_panels{0};
+    double tabi_convergence_overreject_abs_error_max{0.0};
+    double tabi_convergence_overreject_abs_error_mean{0.0};
+    double tabi_convergence_overreject_abs_error_p95{0.0};
+    double tabi_convergence_overreject_abs_error_p99{0.0};
+    double tabi_convergence_overreject_estimated_abs_error_max{0.0};
+    double tabi_convergence_overreject_estimated_abs_error_mean{0.0};
+    double tabi_convergence_overreject_required_scale_max{0.0};
+    double tabi_convergence_overreject_required_scale_p95{0.0};
+    double tabi_convergence_overreject_required_scale_p99{0.0};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_convergence_channel_overreject_count{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_convergence_channel_overreject_caught_count{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_convergence_channel_overreject_panels{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_convergence_channel_overreject_abs_error_max{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_convergence_channel_overreject_abs_error_mean{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_convergence_channel_overreject_required_scale_max{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_convergence_channel_overreject_required_scale_p99{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_phantom_high_error_channel_count{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_phantom_high_error_channel_abs_max{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_accepted_miss_channel_count{};
+    std::array<std::size_t, kJcpExpansionChannelCount>
+        tabi_accepted_miss_channel_panels{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_accepted_miss_channel_rho_min{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_accepted_miss_channel_rho_mean{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_accepted_miss_channel_rho_max{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_accepted_miss_channel_tail_ratio_mean{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_accepted_miss_channel_tail_ratio_max{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_accepted_miss_channel_estimated_error_mean{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_accepted_miss_channel_estimated_error_max{};
+    std::string tabi_accepted_miss_worst_channel{"none"};
+    std::size_t tabi_convergence_k3_rho_cap_rejects{0};
+    std::size_t tabi_convergence_k3_rho_cap_reject_panels{0};
     std::size_t tabi_moment_audit_nodes{0};
     double tabi_moment_translation_rel_error_max{0.0};
     double tabi_moment_translation_rel_error_mean{0.0};
@@ -597,11 +819,21 @@ private:
     double tabi_moment_cancellation_ratio_mean{0.0};
     double tabi_moment_dynamic_range_max{0.0};
     std::string tabi_expansion_audit{"off"};
+    std::string tabi_expansion_audit_channel{"off"};
     std::size_t tabi_far_expansion_audit_pairs{0};
     std::size_t tabi_far_expansion_audit_panels{0};
     double tabi_far_expansion_direct_ms{0.0};
     double tabi_far_expansion_rel_error_max{0.0};
     double tabi_far_expansion_rel_error_mean{0.0};
+    double tabi_far_expansion_rel_error_p95{0.0};
+    double tabi_far_expansion_rel_error_p99{0.0};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_far_expansion_channel_rel_error_max{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_far_expansion_channel_rel_error_mean{};
+    std::array<double, kJcpExpansionChannelCount>
+        tabi_far_expansion_channel_rel_error_p99{};
+    std::string tabi_far_expansion_worst_channel{"none"};
     bool tabi_far_expansion_mean_gate_pass{false};
     double tabi_far_convergence_rho_max{0.0};
     double tabi_far_convergence_rho_mean{0.0};
@@ -678,6 +910,28 @@ private:
     std::string tabi_preconditioner_requested{"off"};
     std::string tabi_preconditioner_effective{"off"};
     std::string tabi_preconditioner_block_near{"off"};
+    int tabi_preconditioner_block_panel_cap{32};
+    std::size_t tabi_preconditioner_memory_budget_bytes{0};
+    std::size_t tabi_preconditioner_estimated_bytes{0};
+    std::size_t tabi_preconditioner_valid_blocks{0};
+    std::size_t tabi_preconditioner_valid_panels{0};
+    std::size_t tabi_preconditioner_ill_conditioned_blocks{0};
+    double tabi_preconditioner_setup_ms{0.0};
+    double tabi_preconditioner_apply_ms{0.0};
+    std::size_t tabi_preconditioner_apply_calls{0};
+    int tabi_preconditioner_coarse_aggregate_cap{16};
+    std::size_t tabi_preconditioner_coarse_aggregates{0};
+    std::size_t tabi_preconditioner_coarse_dimension{0};
+    std::string tabi_preconditioner_coarse_base{"diagonal"};
+    std::size_t tabi_preconditioner_coarse_matrix_bytes{0};
+    double tabi_preconditioner_coarse_pivot_ratio{0.0};
+    std::string tabi_preconditioner_coarse_status{"off"};
+    std::size_t tabi_preconditioner_coarse_setup_matvec_calls{0};
+    double tabi_preconditioner_coarse_setup_ms{0.0};
+    double tabi_preconditioner_coarse_apply_ms{0.0};
+    std::size_t tabi_preconditioner_coarse_apply_calls{0};
+    double tabi_preconditioner_coarse_rp_identity_error_max{0.0};
+    double tabi_preconditioner_coarse_verify_rel_error_max{0.0};
     std::string tabi_surface_generator{"off"};
     std::string tabi_discretization{"off"};
     double tabi_rhs_scale{1.0};

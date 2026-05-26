@@ -11,6 +11,9 @@ param(
     [string[]]$DirectPreconditioners = @('none','diagonal','block'),
     [int[]]$DirectRestarts = @(32,64,100),
     [switch]$IncludeBufferAwareBlock,
+    [switch]$IncludeBudgetedBlock,
+    [int]$BudgetedBlockPanelCap = 32,
+    [int]$BudgetedBlockMemoryMb = 256,
     [string[]]$TreeInteractionModes = @('cached','onthefly'),
     [int[]]$TreeLeafSizes = @(32,64),
     [double[]]$TreeOpeningThetas = @(0.5),
@@ -33,6 +36,21 @@ param(
     [double]$ConvergenceEstimatorErrorCap = 1.0e-3,
     [double]$ConvergenceUnstableRhoCap = 0.25,
     [string]$ConvergenceCalibration = 'stage3j',
+    [string[]]$ConvergenceDielectricAmp = @('off'),
+    [string[]]$ConvergenceEstimatorModels = @('stage3l'),
+    [string[]]$ConvergenceChannelCalibrations = @('stage3m'),
+    [string[]]$ConvergenceSplitPolicies = @('global'),
+    [string[]]$ChannelMissedSemantics = @('legacy'),
+    [string]$AcceptedMissDiagnostics = 'off',
+    [double]$AcceptedMissAbsoluteFloor = 1.0e-7,
+    [double]$K3AcceptedRhoCap = 0.0,
+    [string]$MacDistancePolicy = 'center',
+    [double]$MacSurfaceMarginFactor = 0.25,
+    [string[]]$ExpansionAuditChannels = @('off'),
+    [string[]]$ClusterPolicies = @('off'),
+    [int[]]$TargetBatchSizes = @(1),
+    [int]$LeafPairMinSourcePanels = 64,
+    [int]$LeafPairMinTargets = 4,
     [string]$ExpansionAudit = 'off',
     [int]$ExpansionAuditSampleCount = 512,
     [int]$ExpansionAuditMaxPanels = 2048,
@@ -41,7 +59,8 @@ param(
     [switch]$Quick,
     [switch]$PrecondOnly,
     [switch]$TreeProbeOnly,
-    [switch]$SkipGridReference
+    [switch]$SkipGridReference,
+    [switch]$PreSolverProgress
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,6 +73,27 @@ $ExpansionCenters = @($ExpansionCenters | ForEach-Object {
     ([string]$_ -split ',') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 })
 $FragmentationSafety = @($FragmentationSafety | ForEach-Object {
+    ([string]$_ -split ',') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+})
+$ConvergenceDielectricAmp = @($ConvergenceDielectricAmp | ForEach-Object {
+    ([string]$_ -split ',') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+})
+$ConvergenceEstimatorModels = @($ConvergenceEstimatorModels | ForEach-Object {
+    ([string]$_ -split ',') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+})
+$ConvergenceChannelCalibrations = @($ConvergenceChannelCalibrations | ForEach-Object {
+    ([string]$_ -split ',') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+})
+$ConvergenceSplitPolicies = @($ConvergenceSplitPolicies | ForEach-Object {
+    ([string]$_ -split ',') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+})
+$ChannelMissedSemantics = @($ChannelMissedSemantics | ForEach-Object {
+    ([string]$_ -split ',') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+})
+$ExpansionAuditChannels = @($ExpansionAuditChannels | ForEach-Object {
+    ([string]$_ -split ',') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+})
+$ClusterPolicies = @($ClusterPolicies | ForEach-Object {
     ([string]$_ -split ',') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 })
 
@@ -80,6 +120,19 @@ function New-CleanDir([string]$Path) {
         Remove-Item -LiteralPath $Path -Recurse -Force
     }
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
+}
+
+function Get-RunSafeName([string]$Name) {
+    $safe = ($Name -replace '[^A-Za-z0-9_.-]', '_')
+    if ($safe.Length -le 96) { return $safe }
+    $sha = [System.Security.Cryptography.SHA1]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($safe)
+        $hash = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+    return ("{0}_{1}" -f $safe.Substring(0, 72), $hash.Substring(0, 12))
 }
 
 function Write-DummyPdb([string]$Path) {
@@ -183,6 +236,22 @@ function Format-Number($Value) {
     return ([double]$Value).ToString('G17', $InvariantCulture)
 }
 
+function Get-DerivedProduct($Left, $Right) {
+    $leftValue = Convert-ToDoubleOrNull $Left
+    $rightValue = Convert-ToDoubleOrNull $Right
+    if ($null -eq $leftValue -or $null -eq $rightValue) { return $null }
+    return $leftValue * $rightValue
+}
+
+function Get-DerivedRatio($Numerator, $Denominator) {
+    $numValue = Convert-ToDoubleOrNull $Numerator
+    $denValue = Convert-ToDoubleOrNull $Denominator
+    if ($null -eq $numValue -or $null -eq $denValue -or [Math]::Abs($denValue) -le 1.0e-300) {
+        return $null
+    }
+    return $numValue / $denValue
+}
+
 function Convert-ToProcessArgument([string]$Value) {
     if ($null -eq $Value) { return '""' }
     return '"' + ($Value -replace '"', '\"') + '"'
@@ -248,6 +317,10 @@ function New-TruthArgFile($Case, [string]$RunDir, [string]$PqrPath) {
         if ($Case.PSObject.Properties.Name -contains 'precond_block_near') {
             $argLines += "-pbe-tabi-precond-block-near=$($Case.precond_block_near)"
         }
+        if ($Case.PSObject.Properties.Name -contains 'precond_block_panel_cap') {
+            $argLines += "-pbe-tabi-precond-block-panel-cap=$($Case.precond_block_panel_cap)"
+            $argLines += "-pbe-tabi-precond-memory-budget-mb=$($Case.precond_memory_budget_mb)"
+        }
         $argLines += '-pbe-tabi-derivatives=analytic'
         $argLines += '-pbe-tabi-energy-projection=boundary'
         $argLines += "-pbe-tabi-near-integration=$NearIntegration"
@@ -261,13 +334,23 @@ function New-TruthArgFile($Case, [string]$RunDir, [string]$PqrPath) {
         $argLines += "-pbe-tabi-true-residual-sample-count=$TrueResidualSampleCount"
         $argLines += '-pbe-tabi-progress=auto'
         $argLines += '-pbe-tabi-progress-interval=5'
+        if ($PreSolverProgress) {
+            $argLines += '-pbe-tabi-pre-solver-progress=on'
+        }
         if ($Case.sum_mode -eq 'treecode') {
             $argLines += "-pbe-tabi-tree-leaf-size=$($Case.leaf)"
             $argLines += "-pbe-tabi-opening-theta=$($Case.theta.ToString('G17', $InvariantCulture))"
             $argLines += '-pbe-tabi-leaf-near-policy=exact'
             $argLines += '-pbe-tabi-leaf-panel-kernel=tile-avx2'
             $argLines += '-pbe-tabi-adaptive-level=strict'
-            $argLines += '-pbe-tabi-cluster-policy=off'
+            $clusterPolicy = if ($Case.PSObject.Properties.Name -contains 'cluster_policy') { $Case.cluster_policy } else { 'off' }
+            $targetBatchSize = if ($Case.PSObject.Properties.Name -contains 'target_batch_size') { $Case.target_batch_size } else { 1 }
+            $leafPairMinSourcePanels = if ($Case.PSObject.Properties.Name -contains 'leaf_pair_min_source_panels') { $Case.leaf_pair_min_source_panels } else { 64 }
+            $leafPairMinTargets = if ($Case.PSObject.Properties.Name -contains 'leaf_pair_min_targets') { $Case.leaf_pair_min_targets } else { 4 }
+            $argLines += "-pbe-tabi-cluster-policy=$clusterPolicy"
+            $argLines += "-pbe-tabi-target-batch-size=$targetBatchSize"
+            $argLines += "-pbe-tabi-leaf-pair-min-source-panels=$leafPairMinSourcePanels"
+            $argLines += "-pbe-tabi-leaf-pair-min-targets=$leafPairMinTargets"
             $argLines += "-pbe-tabi-interaction-mode=$($Case.interaction_mode)"
             if ($Case.PSObject.Properties.Name -contains 'node_bounds') {
                 $argLines += "-pbe-tabi-node-bounds=$($Case.node_bounds)"
@@ -323,8 +406,41 @@ function New-TruthArgFile($Case, [string]$RunDir, [string]$PqrPath) {
             if ($Case.PSObject.Properties.Name -contains 'convergence_calibration') {
                 $argLines += "-pbe-tabi-convergence-calibration=$($Case.convergence_calibration)"
             }
+            if ($Case.PSObject.Properties.Name -contains 'convergence_dielectric_amp') {
+                $argLines += "-pbe-tabi-convergence-dielectric-amp=$($Case.convergence_dielectric_amp)"
+            }
+            if ($Case.PSObject.Properties.Name -contains 'convergence_estimator_model') {
+                $argLines += "-pbe-tabi-convergence-estimator-model=$($Case.convergence_estimator_model)"
+            }
+            if ($Case.PSObject.Properties.Name -contains 'convergence_channel_calibration') {
+                $argLines += "-pbe-tabi-convergence-channel-calibration=$($Case.convergence_channel_calibration)"
+            }
+            if ($Case.PSObject.Properties.Name -contains 'convergence_split_policy') {
+                $argLines += "-pbe-tabi-convergence-split-policy=$($Case.convergence_split_policy)"
+            }
+            if ($Case.PSObject.Properties.Name -contains 'channel_missed_semantics') {
+                $argLines += "-pbe-tabi-channel-missed-semantics=$($Case.channel_missed_semantics)"
+            }
+            if ($Case.PSObject.Properties.Name -contains 'accepted_miss_diagnostics') {
+                $argLines += "-pbe-tabi-accepted-miss-diagnostics=$($Case.accepted_miss_diagnostics)"
+            }
+            if ($Case.PSObject.Properties.Name -contains 'accepted_miss_absolute_floor') {
+                $argLines += "-pbe-tabi-accepted-miss-absolute-floor=$($Case.accepted_miss_absolute_floor.ToString('G17', $InvariantCulture))"
+            }
+            if ($Case.PSObject.Properties.Name -contains 'convergence_k3_accepted_rho_cap') {
+                $argLines += "-pbe-tabi-convergence-k3-accepted-rho-cap=$($Case.convergence_k3_accepted_rho_cap.ToString('G17', $InvariantCulture))"
+            }
+            if ($Case.PSObject.Properties.Name -contains 'mac_distance_policy') {
+                $argLines += "-pbe-tabi-mac-distance-policy=$($Case.mac_distance_policy)"
+            }
+            if ($Case.PSObject.Properties.Name -contains 'mac_surface_margin_factor') {
+                $argLines += "-pbe-tabi-mac-surface-margin-factor=$($Case.mac_surface_margin_factor.ToString('G17', $InvariantCulture))"
+            }
             if ($Case.PSObject.Properties.Name -contains 'expansion_audit') {
                 $argLines += "-pbe-tabi-expansion-audit=$($Case.expansion_audit)"
+                if ($Case.PSObject.Properties.Name -contains 'expansion_audit_channel') {
+                    $argLines += "-pbe-tabi-expansion-audit-channel=$($Case.expansion_audit_channel)"
+                }
                 $argLines += "-pbe-tabi-expansion-audit-sample-count=$($Case.expansion_audit_sample_count)"
                 $argLines += "-pbe-tabi-expansion-audit-max-panels=$($Case.expansion_audit_max_panels)"
             }
@@ -340,6 +456,8 @@ function New-Case([string]$Name, [string]$Backend, [string]$SumMode,
                   [int]$Leaf, [double]$Theta, [int]$Threads,
                   [string]$InteractionMode = 'NA',
                   [string]$PrecondBlockNear = 'singular',
+                  [int]$PrecondBlockPanelCap = 32,
+                  [int]$PrecondMemoryBudgetMb = 256,
                   [string]$NodeBounds = 'moment',
                   [string]$TreeBuilder = 'grouped-morton',
                   [string]$MacSafety = 'off',
@@ -358,7 +476,22 @@ function New-Case([string]$Name, [string]$Backend, [string]$SumMode,
                   [double]$ConvergenceEstimatorErrorCap = 1.0e-3,
                   [double]$ConvergenceUnstableRhoCap = 0.25,
                   [string]$ConvergenceCalibration = 'stage3j',
+                  [string]$ConvergenceDielectricAmp = 'off',
+                  [string]$ConvergenceEstimatorModel = 'stage3l',
+                  [string]$ConvergenceChannelCalibration = 'stage3m',
+                  [string]$ConvergenceSplitPolicy = 'global',
+                  [string]$ChannelMissedSemanticsValue = 'legacy',
+                  [string]$AcceptedMissDiagnosticsValue = 'off',
+                  [double]$AcceptedMissAbsoluteFloorValue = 1.0e-7,
+                  [double]$K3AcceptedRhoCapValue = 0.0,
+                  [string]$MacDistancePolicyValue = 'center',
+                  [double]$MacSurfaceMarginFactorValue = 0.25,
+                  [string]$ClusterPolicy = 'off',
+                  [int]$TargetBatchSize = 1,
+                  [int]$LeafPairMinSourcePanels = 64,
+                  [int]$LeafPairMinTargets = 4,
                   [string]$ExpansionAudit = 'off',
+                  [string]$ExpansionAuditChannel = 'off',
                   [int]$ExpansionAuditSampleCount = 512,
                   [int]$ExpansionAuditMaxPanels = 2048,
                   [int]$TaylorOrder = 3) {
@@ -369,6 +502,8 @@ function New-Case([string]$Name, [string]$Backend, [string]$SumMode,
         formulation = $Formulation
         preconditioner = $Preconditioner
         precond_block_near = $PrecondBlockNear
+        precond_block_panel_cap = $PrecondBlockPanelCap
+        precond_memory_budget_mb = $PrecondMemoryBudgetMb
         restart = $Restart
         leaf = $Leaf
         theta = $Theta
@@ -393,7 +528,22 @@ function New-Case([string]$Name, [string]$Backend, [string]$SumMode,
         convergence_estimator_error_cap = $ConvergenceEstimatorErrorCap
         convergence_unstable_rho_cap = $ConvergenceUnstableRhoCap
         convergence_calibration = $ConvergenceCalibration
+        convergence_dielectric_amp = $ConvergenceDielectricAmp
+        convergence_estimator_model = $ConvergenceEstimatorModel
+        convergence_channel_calibration = $ConvergenceChannelCalibration
+        convergence_split_policy = $ConvergenceSplitPolicy
+        channel_missed_semantics = $ChannelMissedSemanticsValue
+        accepted_miss_diagnostics = $AcceptedMissDiagnosticsValue
+        accepted_miss_absolute_floor = $AcceptedMissAbsoluteFloorValue
+        convergence_k3_accepted_rho_cap = $K3AcceptedRhoCapValue
+        mac_distance_policy = $MacDistancePolicyValue
+        mac_surface_margin_factor = $MacSurfaceMarginFactorValue
+        cluster_policy = $ClusterPolicy
+        target_batch_size = $TargetBatchSize
+        leaf_pair_min_source_panels = $LeafPairMinSourcePanels
+        leaf_pair_min_targets = $LeafPairMinTargets
         expansion_audit = $ExpansionAudit
+        expansion_audit_channel = $ExpansionAuditChannel
         expansion_audit_sample_count = $ExpansionAuditSampleCount
         expansion_audit_max_panels = $ExpansionAuditMaxPanels
     }
@@ -408,8 +558,17 @@ function Get-LastProgress([string]$RunDir) {
     return $null
 }
 
+function Get-LastPrepareProgress([string]$RunDir) {
+    $path = Join-Path $RunDir 'pbe_tabi_prepare_progress.csv'
+    if (Test-Path -LiteralPath $path) {
+        $rows = @(Import-Csv -LiteralPath $path)
+        if ($rows.Count -gt 0) { return $rows[-1] }
+    }
+    return $null
+}
+
 function Invoke-TruthCase($Case) {
-    $safeName = ($Case.name -replace '[^A-Za-z0-9_.-]', '_')
+    $safeName = Get-RunSafeName $Case.name
     $runDir = Join-Path $WorkRoot $safeName
     New-CleanDir $runDir
     $pqrPath = Resolve-BarnasePqr -RunDir $runDir
@@ -430,6 +589,7 @@ function Invoke-TruthCase($Case) {
         throw "Missing memory profile for $($Case.name)"
     }
     $progress = Get-LastProgress -RunDir $runDir
+    $prepareProgress = Get-LastPrepareProgress -RunDir $runDir
     $status = if (-not $runResult.Completed) {
         'timeout'
     } elseif ($null -ne $energy) {
@@ -446,6 +606,20 @@ function Invoke-TruthCase($Case) {
     $leafPerMatvec = if ($null -ne $leafPanel -and $null -ne $matvec -and $matvec -gt 0.0) {
         $leafPanel / $matvec
     } else { $null }
+    $phiNorm = Get-ValueOrNA $timing 'tabi_phi_norm'
+    $phinNorm = Get-ValueOrNA $timing 'tabi_phin_norm'
+    $sourceNormS1 = Get-ValueOrNA $timing 'tabi_source_norm_s1'
+    $sourceNormS2 = Get-ValueOrNA $timing 'tabi_source_norm_s2'
+    $phantomGlobalCount = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_estimator_phantom_high_error_count' 'convergence_estimator_phantom_high_error_count'
+    $phantomGlobalAbsMax = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_estimator_phantom_high_error_abs_max' 'convergence_estimator_phantom_high_error_abs_max'
+    $phantomK1Count = Get-TimingOrProgressValue $timing $progress 'tabi_phantom_high_error_k1_count' 'phantom_high_error_k1_count'
+    $phantomK2Count = Get-TimingOrProgressValue $timing $progress 'tabi_phantom_high_error_k2_count' 'phantom_high_error_k2_count'
+    $phantomK3Count = Get-TimingOrProgressValue $timing $progress 'tabi_phantom_high_error_k3_count' 'phantom_high_error_k3_count'
+    $phantomK4Count = Get-TimingOrProgressValue $timing $progress 'tabi_phantom_high_error_k4_count' 'phantom_high_error_k4_count'
+    $phantomK1AbsMax = Get-TimingOrProgressValue $timing $progress 'tabi_phantom_high_error_k1_abs_max' 'phantom_high_error_k1_abs_max'
+    $phantomK2AbsMax = Get-TimingOrProgressValue $timing $progress 'tabi_phantom_high_error_k2_abs_max' 'phantom_high_error_k2_abs_max'
+    $phantomK3AbsMax = Get-TimingOrProgressValue $timing $progress 'tabi_phantom_high_error_k3_abs_max' 'phantom_high_error_k3_abs_max'
+    $phantomK4AbsMax = Get-TimingOrProgressValue $timing $progress 'tabi_phantom_high_error_k4_abs_max' 'phantom_high_error_k4_abs_max'
     return [PSCustomObject]@{
         case_id = $Case.name
         backend = $Case.backend
@@ -456,6 +630,8 @@ function Invoke-TruthCase($Case) {
         taylor_order = Get-TimingOrProgressValue $timing $progress 'tabi_taylor_order' 'taylor_order'
         preconditioner = if ($Case.backend -eq 'tabi') { $Case.preconditioner } else { 'NA' }
         preconditioner_block_near_requested = if ($Case.backend -eq 'tabi') { $Case.precond_block_near } else { 'NA' }
+        preconditioner_block_panel_cap_requested = if ($Case.backend -eq 'tabi') { $Case.precond_block_panel_cap } else { 'NA' }
+        preconditioner_memory_budget_mb_requested = if ($Case.backend -eq 'tabi') { $Case.precond_memory_budget_mb } else { 'NA' }
         restart = if ($Case.backend -eq 'tabi') { $Case.restart } else { 'NA' }
         near_integration = if ($Case.backend -eq 'tabi') { $NearIntegration } else { 'NA' }
         quad_buffer = if ($Case.backend -eq 'tabi') { $QuadBuffer } else { 'NA' }
@@ -480,7 +656,17 @@ function Invoke-TruthCase($Case) {
         requested_convergence_estimator_error_cap = if ($Case.sum_mode -eq 'treecode') { Format-Number $Case.convergence_estimator_error_cap } else { 'NA' }
         requested_convergence_unstable_rho_cap = if ($Case.sum_mode -eq 'treecode') { Format-Number $Case.convergence_unstable_rho_cap } else { 'NA' }
         requested_convergence_calibration = if ($Case.sum_mode -eq 'treecode') { $Case.convergence_calibration } else { 'NA' }
+        requested_convergence_dielectric_amp = if ($Case.sum_mode -eq 'treecode') { $Case.convergence_dielectric_amp } else { 'NA' }
+        requested_convergence_estimator_model = if ($Case.sum_mode -eq 'treecode') { $Case.convergence_estimator_model } else { 'NA' }
+        requested_convergence_channel_calibration = if ($Case.sum_mode -eq 'treecode') { $Case.convergence_channel_calibration } else { 'NA' }
+        requested_convergence_split_policy = if ($Case.sum_mode -eq 'treecode' -and $Case.PSObject.Properties.Name -contains 'convergence_split_policy') { $Case.convergence_split_policy } else { 'NA' }
+        requested_channel_missed_semantics = if ($Case.sum_mode -eq 'treecode' -and $Case.PSObject.Properties.Name -contains 'channel_missed_semantics') { $Case.channel_missed_semantics } else { 'NA' }
+        requested_cluster_policy = if ($Case.sum_mode -eq 'treecode') { $Case.cluster_policy } else { 'NA' }
+        requested_target_batch_size = if ($Case.sum_mode -eq 'treecode') { $Case.target_batch_size } else { 'NA' }
+        requested_leaf_pair_min_source_panels = if ($Case.sum_mode -eq 'treecode') { $Case.leaf_pair_min_source_panels } else { 'NA' }
+        requested_leaf_pair_min_targets = if ($Case.sum_mode -eq 'treecode') { $Case.leaf_pair_min_targets } else { 'NA' }
         requested_expansion_audit = if ($Case.sum_mode -eq 'treecode') { $Case.expansion_audit } else { 'NA' }
+        requested_expansion_audit_channel = if ($Case.sum_mode -eq 'treecode') { $Case.expansion_audit_channel } else { 'NA' }
         threads = $Case.threads
         status = $status
         exit_code = if ($runResult.Completed) { $runResult.ExitCode } else { 'timeout' }
@@ -528,6 +714,10 @@ function Invoke-TruthCase($Case) {
         timing_full_true_residual_confirm_calls = Get-ValueOrNA $timing 'tabi_full_true_residual_confirm_calls'
         timing_full_probe_seconds = Get-ValueOrNA $timing 'tabi_full_probe_seconds'
         timing_convergence_reason = Get-ValueOrNA $timing 'tabi_convergence_reason'
+        phi_norm = $phiNorm
+        phin_norm = $phinNorm
+        source_norm_s1 = $sourceNormS1
+        source_norm_s2 = $sourceNormS2
         interaction_mode = Get-TimingOrProgressValue $timing $progress 'tabi_interaction_mode' 'interaction_mode'
         node_bounds_mode = Get-TimingOrProgressValue $timing $progress 'tabi_node_bounds_mode' 'node_bounds_mode'
         tree_builder = Get-TimingOrProgressValue $timing $progress 'tabi_tree_builder' 'tree_builder'
@@ -536,6 +726,7 @@ function Invoke-TruthCase($Case) {
         mac_safety = Get-TimingOrProgressValue $timing $progress 'tabi_mac_safety' 'mac_safety'
         mac_gap_factor = Get-TimingOrProgressValue $timing $progress 'tabi_mac_gap_factor' 'mac_gap_factor'
         expansion_audit = Get-TimingOrProgressValue $timing $progress 'tabi_expansion_audit' 'expansion_audit'
+        expansion_audit_channel = Get-TimingOrProgressValue $timing $progress 'tabi_expansion_audit_channel' 'expansion_audit_channel'
         tree_depth_max = Get-ValueOrNA $timing 'tabi_tree_depth_max'
         mac_reject_radius_limited = Get-ValueOrNA $timing 'tabi_mac_reject_radius_limited'
         mac_accept_rate = Get-ValueOrNA $timing 'tabi_mac_accept_rate'
@@ -567,10 +758,28 @@ function Invoke-TruthCase($Case) {
         convergence_estimator_error_cap = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_estimator_error_cap' 'convergence_estimator_error_cap'
         convergence_unstable_rho_cap = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_unstable_rho_cap' 'convergence_unstable_rho_cap'
         convergence_calibration = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_calibration' 'convergence_calibration'
+        convergence_dielectric_amp = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_dielectric_amp' 'convergence_dielectric_amp'
+        convergence_estimator_model = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_estimator_model' 'convergence_estimator_model'
+        convergence_channel_calibration = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_channel_calibration' 'convergence_channel_calibration'
+        convergence_split_policy = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_split_policy' 'convergence_split_policy'
+        channel_missed_semantics = Get-TimingOrProgressValue $timing $progress 'tabi_channel_missed_semantics' 'channel_missed_semantics'
+        accepted_miss_diagnostics = Get-TimingOrProgressValue $timing $progress 'tabi_accepted_miss_diagnostics' 'accepted_miss_diagnostics'
+        accepted_miss_absolute_floor = Get-TimingOrProgressValue $timing $progress 'tabi_accepted_miss_absolute_floor' 'accepted_miss_absolute_floor'
+        convergence_k3_accepted_rho_cap = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k3_accepted_rho_cap' 'convergence_k3_accepted_rho_cap'
+        mac_distance_policy = Get-TimingOrProgressValue $timing $progress 'tabi_mac_distance_policy' 'mac_distance_policy'
+        mac_surface_margin_factor = Get-TimingOrProgressValue $timing $progress 'tabi_mac_surface_margin_factor' 'mac_surface_margin_factor'
+        cluster_policy = Get-TimingOrProgressValue $timing $progress 'tabi_cluster_policy' 'cluster_policy'
+        target_batch_size = Get-TimingOrProgressValue $timing $progress 'tabi_target_batch_size' 'target_batch_size'
+        leaf_pair_min_source_panels = Get-TimingOrProgressValue $timing $progress 'tabi_leaf_pair_min_source_panels' 'leaf_pair_min_source_panels'
+        leaf_pair_min_targets = Get-TimingOrProgressValue $timing $progress 'tabi_leaf_pair_min_targets' 'leaf_pair_min_targets'
         mac_convergence_rho_rejects = Get-TimingOrProgressValue $timing $progress 'tabi_mac_convergence_rho_rejects' 'mac_convergence_rho_rejects'
         mac_convergence_aspect_rejects = Get-TimingOrProgressValue $timing $progress 'tabi_mac_convergence_aspect_rejects' 'mac_convergence_aspect_rejects'
         mac_convergence_rho_reject_panels = Get-TimingOrProgressValue $timing $progress 'tabi_mac_convergence_rho_reject_panels' 'mac_convergence_rho_reject_panels'
         mac_convergence_aspect_reject_panels = Get-TimingOrProgressValue $timing $progress 'tabi_mac_convergence_aspect_reject_panels' 'mac_convergence_aspect_reject_panels'
+        mac_surface_margin_rejects = Get-TimingOrProgressValue $timing $progress 'tabi_mac_surface_margin_rejects' 'mac_surface_margin_rejects'
+        mac_surface_margin_reject_panels = Get-TimingOrProgressValue $timing $progress 'tabi_mac_surface_margin_reject_panels' 'mac_surface_margin_reject_panels'
+        convergence_k3_rho_cap_rejects = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k3_rho_cap_rejects' 'convergence_k3_rho_cap_rejects'
+        convergence_k3_rho_cap_reject_panels = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k3_rho_cap_reject_panels' 'convergence_k3_rho_cap_reject_panels'
         convergence_estimator_samples = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_estimator_samples' 'convergence_estimator_samples'
         convergence_estimator_unstable_far_count = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_estimator_unstable_far_count' 'convergence_estimator_unstable_far_count'
         convergence_estimator_unstable_far_panels = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_estimator_unstable_far_panels' 'convergence_estimator_unstable_far_panels'
@@ -586,8 +795,66 @@ function Invoke-TruthCase($Case) {
         convergence_tail_norm_pm1_mean = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_tail_norm_pm1_mean' 'convergence_tail_norm_pm1_mean'
         convergence_effective_jcp_amp_max = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_effective_jcp_amp_max' 'convergence_effective_jcp_amp_max'
         convergence_effective_jcp_amp_mean = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_effective_jcp_amp_mean' 'convergence_effective_jcp_amp_mean'
+        convergence_dielectric_amp_max = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_dielectric_amp_max' 'convergence_dielectric_amp_max'
+        convergence_dielectric_amp_mean = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_dielectric_amp_mean' 'convergence_dielectric_amp_mean'
+        convergence_k1_effective_jcp_amp_max = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k1_effective_jcp_amp_max' 'convergence_k1_effective_jcp_amp_max'
+        convergence_k2_effective_jcp_amp_max = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k2_effective_jcp_amp_max' 'convergence_k2_effective_jcp_amp_max'
+        convergence_k3_effective_jcp_amp_max = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k3_effective_jcp_amp_max' 'convergence_k3_effective_jcp_amp_max'
+        convergence_k4_effective_jcp_amp_max = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k4_effective_jcp_amp_max' 'convergence_k4_effective_jcp_amp_max'
+        convergence_k1_unstable_far_count = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k1_unstable_far_count' 'convergence_k1_unstable_far_count'
+        convergence_k2_unstable_far_count = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k2_unstable_far_count' 'convergence_k2_unstable_far_count'
+        convergence_k3_unstable_far_count = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k3_unstable_far_count' 'convergence_k3_unstable_far_count'
+        convergence_k4_unstable_far_count = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k4_unstable_far_count' 'convergence_k4_unstable_far_count'
+        convergence_k1_split_rejects = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k1_split_rejects' 'convergence_k1_split_rejects'
+        convergence_k2_split_rejects = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k2_split_rejects' 'convergence_k2_split_rejects'
+        convergence_k3_split_rejects = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k3_split_rejects' 'convergence_k3_split_rejects'
+        convergence_k4_split_rejects = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k4_split_rejects' 'convergence_k4_split_rejects'
+        convergence_k1_estimated_error_max = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k1_estimated_error_max' 'convergence_k1_estimated_error_max'
+        convergence_k2_estimated_error_max = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k2_estimated_error_max' 'convergence_k2_estimated_error_max'
+        convergence_k3_estimated_error_max = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k3_estimated_error_max' 'convergence_k3_estimated_error_max'
+        convergence_k4_estimated_error_max = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k4_estimated_error_max' 'convergence_k4_estimated_error_max'
+        convergence_k1_high_error_caught = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k1_high_error_caught' 'convergence_k1_high_error_caught'
+        convergence_k2_high_error_caught = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k2_high_error_caught' 'convergence_k2_high_error_caught'
+        convergence_k3_high_error_caught = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k3_high_error_caught' 'convergence_k3_high_error_caught'
+        convergence_k4_high_error_caught = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k4_high_error_caught' 'convergence_k4_high_error_caught'
+        convergence_k1_high_error_missed = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k1_high_error_missed' 'convergence_k1_high_error_missed'
+        convergence_k2_high_error_missed = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k2_high_error_missed' 'convergence_k2_high_error_missed'
+        convergence_k3_high_error_missed = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k3_high_error_missed' 'convergence_k3_high_error_missed'
+        convergence_k4_high_error_missed = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k4_high_error_missed' 'convergence_k4_high_error_missed'
+        accepted_miss_worst_channel = Get-TimingOrProgressValue $timing $progress 'tabi_accepted_miss_worst_channel' 'accepted_miss_worst_channel'
+        accepted_miss_k1_count = Get-TimingOrProgressValue $timing $progress 'tabi_accepted_miss_k1_count' 'accepted_miss_k1_count'
+        accepted_miss_k2_count = Get-TimingOrProgressValue $timing $progress 'tabi_accepted_miss_k2_count' 'accepted_miss_k2_count'
+        accepted_miss_k3_count = Get-TimingOrProgressValue $timing $progress 'tabi_accepted_miss_k3_count' 'accepted_miss_k3_count'
+        accepted_miss_k4_count = Get-TimingOrProgressValue $timing $progress 'tabi_accepted_miss_k4_count' 'accepted_miss_k4_count'
+        accepted_miss_k3_rho_min = Get-TimingOrProgressValue $timing $progress 'tabi_accepted_miss_k3_rho_min' 'accepted_miss_k3_rho_min'
+        accepted_miss_k3_rho_mean = Get-TimingOrProgressValue $timing $progress 'tabi_accepted_miss_k3_rho_mean' 'accepted_miss_k3_rho_mean'
+        accepted_miss_k3_rho_max = Get-TimingOrProgressValue $timing $progress 'tabi_accepted_miss_k3_rho_max' 'accepted_miss_k3_rho_max'
+        accepted_miss_k3_tail_ratio_mean = Get-TimingOrProgressValue $timing $progress 'tabi_accepted_miss_k3_tail_ratio_mean' 'accepted_miss_k3_tail_ratio_mean'
+        accepted_miss_k3_estimated_error_mean = Get-TimingOrProgressValue $timing $progress 'tabi_accepted_miss_k3_estimated_error_mean' 'accepted_miss_k3_estimated_error_mean'
+        convergence_k1_high_error_caught_by_split = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k1_high_error_caught_by_split' 'convergence_k1_high_error_caught_by_split'
+        convergence_k2_high_error_caught_by_split = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k2_high_error_caught_by_split' 'convergence_k2_high_error_caught_by_split'
+        convergence_k3_high_error_caught_by_split = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k3_high_error_caught_by_split' 'convergence_k3_high_error_caught_by_split'
+        convergence_k4_high_error_caught_by_split = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_k4_high_error_caught_by_split' 'convergence_k4_high_error_caught_by_split'
         convergence_estimator_high_error_caught = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_estimator_high_error_caught' 'convergence_estimator_high_error_caught'
         convergence_estimator_high_error_missed = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_estimator_high_error_missed' 'convergence_estimator_high_error_missed'
+        convergence_estimator_high_error_caught_by_split = Get-TimingOrProgressValue $timing $progress 'tabi_convergence_estimator_high_error_caught_by_split' 'convergence_estimator_high_error_caught_by_split'
+        convergence_estimator_phantom_high_error_count = $phantomGlobalCount
+        convergence_estimator_phantom_high_error_abs_max = $phantomGlobalAbsMax
+        phantom_high_error_k1_count = $phantomK1Count
+        phantom_high_error_k2_count = $phantomK2Count
+        phantom_high_error_k3_count = $phantomK3Count
+        phantom_high_error_k4_count = $phantomK4Count
+        phantom_high_error_k1_abs_max = $phantomK1AbsMax
+        phantom_high_error_k2_abs_max = $phantomK2AbsMax
+        phantom_high_error_k3_abs_max = $phantomK3AbsMax
+        phantom_high_error_k4_abs_max = $phantomK4AbsMax
+        phantom_global_abs_bound = Format-Number (Get-DerivedProduct $phantomGlobalCount $phantomGlobalAbsMax)
+        phantom_k1_abs_bound = Format-Number (Get-DerivedProduct $phantomK1Count $phantomK1AbsMax)
+        phantom_k2_abs_bound = Format-Number (Get-DerivedProduct $phantomK2Count $phantomK2AbsMax)
+        phantom_k3_abs_bound = Format-Number (Get-DerivedProduct $phantomK3Count $phantomK3AbsMax)
+        phantom_k4_abs_bound = Format-Number (Get-DerivedProduct $phantomK4Count $phantomK4AbsMax)
+        phantom_k3_abs_over_phi_norm = Format-Number (Get-DerivedRatio $phantomK3AbsMax $phiNorm)
+        phantom_k3_abs_over_phin_norm = Format-Number (Get-DerivedRatio $phantomK3AbsMax $phinNorm)
         moment_audit_nodes = Get-TimingOrProgressValue $timing $progress 'tabi_moment_audit_nodes' 'moment_audit_nodes'
         moment_translation_rel_error_max = Get-TimingOrProgressValue $timing $progress 'tabi_moment_translation_rel_error_max' 'moment_translation_rel_error_max'
         moment_translation_rel_error_mean = Get-TimingOrProgressValue $timing $progress 'tabi_moment_translation_rel_error_mean' 'moment_translation_rel_error_mean'
@@ -601,6 +868,21 @@ function Invoke-TruthCase($Case) {
         far_expansion_direct_seconds = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_direct_seconds' 'far_expansion_direct_seconds'
         far_expansion_rel_error_max = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_rel_error_max' 'far_expansion_rel_error_max'
         far_expansion_rel_error_mean = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_rel_error_mean' 'far_expansion_rel_error_mean'
+        far_expansion_rel_error_p95 = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_rel_error_p95' 'far_expansion_rel_error_p95'
+        far_expansion_rel_error_p99 = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_rel_error_p99' 'far_expansion_rel_error_p99'
+        far_expansion_worst_channel = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_worst_channel' 'far_expansion_worst_channel'
+        far_expansion_k1_rel_error_max = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_k1_rel_error_max' 'far_expansion_k1_rel_error_max'
+        far_expansion_k2_rel_error_max = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_k2_rel_error_max' 'far_expansion_k2_rel_error_max'
+        far_expansion_k3_rel_error_max = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_k3_rel_error_max' 'far_expansion_k3_rel_error_max'
+        far_expansion_k4_rel_error_max = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_k4_rel_error_max' 'far_expansion_k4_rel_error_max'
+        far_expansion_k1_rel_error_mean = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_k1_rel_error_mean' 'far_expansion_k1_rel_error_mean'
+        far_expansion_k2_rel_error_mean = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_k2_rel_error_mean' 'far_expansion_k2_rel_error_mean'
+        far_expansion_k3_rel_error_mean = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_k3_rel_error_mean' 'far_expansion_k3_rel_error_mean'
+        far_expansion_k4_rel_error_mean = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_k4_rel_error_mean' 'far_expansion_k4_rel_error_mean'
+        far_expansion_k1_rel_error_p99 = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_k1_rel_error_p99' 'far_expansion_k1_rel_error_p99'
+        far_expansion_k2_rel_error_p99 = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_k2_rel_error_p99' 'far_expansion_k2_rel_error_p99'
+        far_expansion_k3_rel_error_p99 = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_k3_rel_error_p99' 'far_expansion_k3_rel_error_p99'
+        far_expansion_k4_rel_error_p99 = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_k4_rel_error_p99' 'far_expansion_k4_rel_error_p99'
         far_expansion_mean_gate_pass = Get-TimingOrProgressValue $timing $progress 'tabi_far_expansion_mean_gate_pass' 'far_expansion_mean_gate_pass'
         far_convergence_rho_max = Get-TimingOrProgressValue $timing $progress 'tabi_far_convergence_rho_max' 'far_convergence_rho_max'
         far_convergence_rho_mean = Get-TimingOrProgressValue $timing $progress 'tabi_far_convergence_rho_mean' 'far_convergence_rho_mean'
@@ -610,15 +892,35 @@ function Invoke-TruthCase($Case) {
         accepted_far_aspect_ratio_mean = Get-TimingOrProgressValue $timing $progress 'tabi_accepted_far_aspect_ratio_mean' 'accepted_far_aspect_ratio_mean'
         leaf_panel_interactions = Format-Number $leafPanel
         leaf_panel_per_matvec = Format-Number $leafPerMatvec
+        leaf_pair_batch_interactions = Get-TimingOrProgressValue $timing $progress 'tabi_leaf_pair_batch_interactions' 'leaf_pair_batch_interactions'
+        leaf_pair_batch_targets = Get-TimingOrProgressValue $timing $progress 'tabi_leaf_pair_batch_targets' 'leaf_pair_batch_targets'
+        leaf_pair_batch_source_panels = Get-TimingOrProgressValue $timing $progress 'tabi_leaf_pair_batch_source_panels' 'leaf_pair_batch_source_panels'
+        leaf_pair_batch_residual_panels = Get-TimingOrProgressValue $timing $progress 'tabi_leaf_pair_batch_residual_panels' 'leaf_pair_batch_residual_panels'
+        leaf_pair_batch_fallbacks = Get-TimingOrProgressValue $timing $progress 'tabi_leaf_pair_batch_fallbacks' 'leaf_pair_batch_fallbacks'
+        leaf_pair_batch_seconds = Get-TimingOrProgressValue $timing $progress 'tabi_leaf_pair_batch_seconds' 'leaf_pair_batch_seconds'
         rss_bytes = Get-ValueOrNA $progress 'rss_bytes'
         peak_working_set_bytes = Get-ValueOrNA $memory 'peak_working_set_bytes'
         progress_phase = Get-ValueOrNA $progress 'phase'
+        tabi_prepare_progress_phase = Get-ValueOrNA $prepareProgress 'phase'
+        tabi_prepare_progress_status = Get-ValueOrNA $prepareProgress 'status'
+        tabi_prepare_progress_rss_bytes = Get-ValueOrNA $prepareProgress 'rss_bytes'
         preconditioner_effective = if ((Get-ValueOrNA $timing 'tabi_preconditioner_effective') -ne 'NA') {
             Get-ValueOrNA $timing 'tabi_preconditioner_effective'
         } else {
             Get-ValueOrNA $progress 'preconditioner_effective'
         }
         preconditioner_block_near = Get-ValueOrNA $timing 'tabi_preconditioner_block_near'
+        preconditioner_block_panel_cap = Get-TimingOrProgressValue $timing $progress 'tabi_preconditioner_block_panel_cap' 'preconditioner_block_panel_cap'
+        preconditioner_memory_budget_bytes = Get-TimingOrProgressValue $timing $progress 'tabi_preconditioner_memory_budget_bytes' 'preconditioner_memory_budget_bytes'
+        preconditioner_estimated_bytes = Get-TimingOrProgressValue $timing $progress 'tabi_preconditioner_estimated_bytes' 'preconditioner_estimated_bytes'
+        preconditioner_valid_blocks = Get-TimingOrProgressValue $timing $progress 'tabi_preconditioner_valid_blocks' 'preconditioner_valid_blocks'
+        preconditioner_valid_panels = Get-TimingOrProgressValue $timing $progress 'tabi_preconditioner_valid_panels' 'preconditioner_valid_panels'
+        preconditioner_ill_conditioned_blocks = Get-TimingOrProgressValue $timing $progress 'tabi_preconditioner_ill_conditioned_blocks' 'preconditioner_ill_conditioned_blocks'
+        preconditioner_setup_seconds = Get-TimingOrProgressValue $timing $progress 'tabi_preconditioner_setup_seconds' 'preconditioner_setup_seconds'
+        preconditioner_apply_seconds = Get-TimingOrProgressValue $timing $progress 'tabi_preconditioner_apply_seconds' 'preconditioner_apply_seconds'
+        preconditioner_apply_calls = Get-TimingOrProgressValue $timing $progress 'tabi_preconditioner_apply_calls' 'preconditioner_apply_calls'
+        promotion_readiness = 'pending'
+        promotion_readiness_reason = 'pending'
         decision_classification = 'pending'
         run_dir = $runDir
     }
@@ -634,6 +936,57 @@ function Convert-RowBestResidual($Row) {
     $value = Convert-ToDoubleOrNull $Row.timing_best_residual
     if ($null -eq $value) { $value = Convert-ToDoubleOrNull $Row.best_residual }
     return $value
+}
+
+function Get-PromotionReadiness($Row) {
+    if ($Row.backend -ne 'tabi' -or $Row.sum_mode -ne 'treecode') {
+        return [PSCustomObject]@{ Status = 'NA'; Reason = 'not_treecode' }
+    }
+    $reasons = New-Object System.Collections.Generic.List[string]
+    if ($Row.status -ne 'ok') { $reasons.Add("status=$($Row.status)") }
+
+    $residual = Convert-RowResidual $Row
+    if ($null -eq $residual) { $residual = Convert-RowBestResidual $Row }
+    if ($null -eq $residual) {
+        $residual = Convert-ToDoubleOrNull $Row.timing_sampled_true_residual_rel
+    }
+    if ($null -eq $residual -or $residual -gt 1.0e-4) {
+        $reasons.Add("residual=$([string](Format-Number $residual))")
+    }
+
+    $farMean = Convert-ToDoubleOrNull $Row.far_expansion_rel_error_mean
+    if ($null -eq $farMean -or $farMean -ge 5.0e-5) {
+        $reasons.Add("far_mean=$([string](Format-Number $farMean))")
+    }
+
+    $missed = Convert-ToDoubleOrNull $Row.convergence_estimator_high_error_missed
+    if ($null -ne $missed -and $missed -ne 0.0) {
+        $reasons.Add("global_missed=$([string](Format-Number $missed))")
+    }
+    foreach ($channelName in @('convergence_k1_high_error_missed',
+                               'convergence_k2_high_error_missed',
+                               'convergence_k3_high_error_missed',
+                               'convergence_k4_high_error_missed')) {
+        $channelMissed = Convert-ToDoubleOrNull $Row.$channelName
+        if ($null -ne $channelMissed -and $channelMissed -ne 0.0) {
+            $reasons.Add("${channelName}=$([string](Format-Number $channelMissed))")
+        }
+    }
+
+    $k3Ratio = Convert-ToDoubleOrNull $Row.phantom_k3_abs_over_phi_norm
+    if ($null -eq $k3Ratio -or $k3Ratio -ge 1.0e-4) {
+        $reasons.Add("phantom_k3_abs_over_phi_norm=$([string](Format-Number $k3Ratio))")
+    }
+
+    $k3Bound = Convert-ToDoubleOrNull $Row.phantom_k3_abs_bound
+    if ($null -eq $k3Bound -or $k3Bound -ge 1.0e-2) {
+        $reasons.Add("phantom_k3_abs_bound=$([string](Format-Number $k3Bound))")
+    }
+
+    if ($reasons.Count -eq 0) {
+        return [PSCustomObject]@{ Status = 'pass'; Reason = 'stage3t_gate_pass' }
+    }
+    return [PSCustomObject]@{ Status = 'fail'; Reason = ($reasons -join ';') }
 }
 
 if (-not (Test-Path -LiteralPath $TitanExe)) {
@@ -656,6 +1009,15 @@ if ($IncludeBufferAwareBlock) {
         $cases.Add((New-Case -Name ("direct_block_buffer_aware_r{0}" -f $restart) `
             -Backend 'tabi' -SumMode 'direct' -Formulation 'jcp2013' `
             -Preconditioner 'block' -PrecondBlockNear 'buffer-aware' `
+            -Restart $restart -Leaf 0 -Theta 0.0 -Threads 8))
+    }
+}
+if ($IncludeBudgetedBlock) {
+    foreach ($restart in $DirectRestarts) {
+        $cases.Add((New-Case -Name ("direct_block_budgeted_buffer_aware_r{0}" -f $restart) `
+            -Backend 'tabi' -SumMode 'direct' -Formulation 'jcp2013' `
+            -Preconditioner 'block-budgeted' -PrecondBlockNear 'buffer-aware' `
+            -PrecondBlockPanelCap $BudgetedBlockPanelCap -PrecondMemoryBudgetMb $BudgetedBlockMemoryMb `
             -Restart $restart -Leaf 0 -Theta 0.0 -Threads 8))
     }
 }
@@ -701,26 +1063,64 @@ if ($TreeProbeOnly) {
                                 $safeCenter = ($center -replace '[^A-Za-z0-9_-]', '_')
                                 foreach ($fragmentation in $FragmentationSafety) {
                                     $safeFragmentation = ($fragmentation -replace '[^A-Za-z0-9_-]', '_')
-                                    $probeCases.Add((New-Case -Name ("tree_mac_o{0}_leaf{1}_theta{2}_{3}_{4}_{5}_{6}_{7}" -f $taylorOrder,$leaf,$safeTheta,$safeBounds,$safeBuilder,$safeMac,$safeCenter,$safeFragmentation) `
-                                        -Backend 'tabi' -SumMode 'treecode' -Formulation 'jcp2013-treecode' `
-                                        -Preconditioner 'diagonal' -Restart 64 -Leaf $leaf -Theta $theta -Threads 8 `
-                                        -InteractionMode 'onthefly' -NodeBounds $bounds -TreeBuilder $builder `
-                                        -MacSafety $mac -ExpansionCenter $center -FragmentationSafety $fragmentation `
-                                        -MacGapFactor $MacGapFactor -MomentAudit $MomentAudit `
-                                        -MomentConstruction $MomentConstruction -MomentSum $MomentSum `
-                                        -ConvergenceAudit $ConvergenceAudit `
-                                        -ConvergenceSafety $ConvergenceSafety `
-                                        -ConvergenceRhoCap $ConvergenceRhoCap `
-                                        -MacAspectCap $MacAspectCap `
-                                        -ConvergenceEstimator $ConvergenceEstimator `
-                                        -ConvergenceTailThreshold $ConvergenceTailThreshold `
-                                        -ConvergenceEstimatorErrorCap $ConvergenceEstimatorErrorCap `
-                                        -ConvergenceUnstableRhoCap $ConvergenceUnstableRhoCap `
-                                        -ConvergenceCalibration $ConvergenceCalibration `
-                                        -ExpansionAudit $ExpansionAudit `
-                                        -ExpansionAuditSampleCount $ExpansionAuditSampleCount `
-                                        -ExpansionAuditMaxPanels $ExpansionAuditMaxPanels `
-                                        -TaylorOrder $taylorOrder))
+                                    foreach ($dielectricAmp in $ConvergenceDielectricAmp) {
+                                        $safeDielectric = ($dielectricAmp -replace '[^A-Za-z0-9_-]', '_')
+                                        foreach ($estimatorModel in $ConvergenceEstimatorModels) {
+                                            $safeModel = ($estimatorModel -replace '[^A-Za-z0-9_-]', '_')
+                                            foreach ($channelCalibration in $ConvergenceChannelCalibrations) {
+                                                $safeChannelCalibration = ($channelCalibration -replace '[^A-Za-z0-9_-]', '_')
+                                                foreach ($splitPolicy in $ConvergenceSplitPolicies) {
+                                                    $safeSplitPolicy = ($splitPolicy -replace '[^A-Za-z0-9_-]', '_')
+                                                    foreach ($auditChannel in $ExpansionAuditChannels) {
+                                                        $safeAuditChannel = ($auditChannel -replace '[^A-Za-z0-9_-]', '_')
+                                                        foreach ($missSemantics in $ChannelMissedSemantics) {
+                                                            $safeMissSemantics = ($missSemantics -replace '[^A-Za-z0-9_-]', '_')
+                                                            foreach ($clusterPolicy in $ClusterPolicies) {
+                                                                $safeCluster = ($clusterPolicy -replace '[^A-Za-z0-9_-]', '_')
+                                                                foreach ($targetBatchSize in $TargetBatchSizes) {
+                                                                    $probeCases.Add((New-Case -Name ("tree_mac_o{0}_leaf{1}_theta{2}_{3}_{4}_{5}_{6}_{7}_eps{8}_model{9}_cal{10}_split{11}_chan{12}_miss{13}_cluster{14}_b{15}" -f $taylorOrder,$leaf,$safeTheta,$safeBounds,$safeBuilder,$safeMac,$safeCenter,$safeFragmentation,$safeDielectric,$safeModel,$safeChannelCalibration,$safeSplitPolicy,$safeAuditChannel,$safeMissSemantics,$safeCluster,$targetBatchSize) `
+                                                                -Backend 'tabi' -SumMode 'treecode' -Formulation 'jcp2013-treecode' `
+                                                                -Preconditioner 'diagonal' -Restart 64 -Leaf $leaf -Theta $theta -Threads 8 `
+                                                                -InteractionMode 'onthefly' -NodeBounds $bounds -TreeBuilder $builder `
+                                                                -MacSafety $mac -ExpansionCenter $center -FragmentationSafety $fragmentation `
+                                                                -MacGapFactor $MacGapFactor -MomentAudit $MomentAudit `
+                                                                -MomentConstruction $MomentConstruction -MomentSum $MomentSum `
+                                                                -ConvergenceAudit $ConvergenceAudit `
+                                                                -ConvergenceSafety $ConvergenceSafety `
+                                                                -ConvergenceRhoCap $ConvergenceRhoCap `
+                                                                -MacAspectCap $MacAspectCap `
+                                                                -ConvergenceEstimator $ConvergenceEstimator `
+                                                                -ConvergenceTailThreshold $ConvergenceTailThreshold `
+                                                                -ConvergenceEstimatorErrorCap $ConvergenceEstimatorErrorCap `
+                                                                -ConvergenceUnstableRhoCap $ConvergenceUnstableRhoCap `
+                                                                -ConvergenceCalibration $ConvergenceCalibration `
+                                                                -ConvergenceDielectricAmp $dielectricAmp `
+                                                                -ConvergenceEstimatorModel $estimatorModel `
+                                                                -ConvergenceChannelCalibration $channelCalibration `
+                                                                -ConvergenceSplitPolicy $splitPolicy `
+                                                                -ChannelMissedSemanticsValue $missSemantics `
+                                                                -AcceptedMissDiagnosticsValue $AcceptedMissDiagnostics `
+                                                                -AcceptedMissAbsoluteFloorValue $AcceptedMissAbsoluteFloor `
+                                                                -K3AcceptedRhoCapValue $K3AcceptedRhoCap `
+                                                                -MacDistancePolicyValue $MacDistancePolicy `
+                                                                -MacSurfaceMarginFactorValue $MacSurfaceMarginFactor `
+                                                                -ClusterPolicy $clusterPolicy `
+                                                                -TargetBatchSize $targetBatchSize `
+                                                                -LeafPairMinSourcePanels $LeafPairMinSourcePanels `
+                                                                -LeafPairMinTargets $LeafPairMinTargets `
+                                                                -ExpansionAudit $ExpansionAudit `
+                                                                -ExpansionAuditChannel $auditChannel `
+                                                                -ExpansionAuditSampleCount $ExpansionAuditSampleCount `
+                                                                -ExpansionAuditMaxPanels $ExpansionAuditMaxPanels `
+                                                                -TaylorOrder $taylorOrder))
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -737,14 +1137,16 @@ if ($TreeProbeOnly) {
                         'direct_diagonal_r64','direct_diagonal_r100',
                         'direct_block_r64','direct_block_r100',
                         'direct_block_buffer_aware_r64',
-                        'direct_block_buffer_aware_r100')) {
+                        'direct_block_buffer_aware_r100',
+                        'direct_block_budgeted_buffer_aware_r64',
+                        'direct_block_budgeted_buffer_aware_r100')) {
         $match = @($cases | Where-Object { $_.name -eq $name } | Select-Object -First 1)
         if ($match.Count -gt 0) { $precondCases.Add($match[0]) }
     }
     $cases = $precondCases
 } elseif ($Quick) {
     $quickCases = New-Object System.Collections.Generic.List[object]
-    foreach ($name in @('grid_reference','direct_none_r64','direct_diagonal_r64','direct_block_r64','direct_block_buffer_aware_r64')) {
+    foreach ($name in @('grid_reference','direct_none_r64','direct_diagonal_r64','direct_block_r64','direct_block_buffer_aware_r64','direct_block_budgeted_buffer_aware_r64')) {
         $match = @($cases | Where-Object { $_.name -eq $name } | Select-Object -First 1)
         if ($match.Count -gt 0) { $quickCases.Add($match[0]) }
     }
@@ -857,8 +1259,22 @@ $bestRows = @($rows | Where-Object {
 if ($bestRows.Count -gt 0 -and $decision -eq 'inconclusive') {
     $decision = 'converged_true_residual_best'
 }
+$prepTimeoutRows = @($rows | Where-Object {
+    $_.status -eq 'timeout' -and
+        $_.progress_phase -eq 'NA' -and
+        $_.tabi_prepare_progress_phase -ne 'NA' -and
+        $_.tabi_prepare_progress_phase -ne 'solver_enter'
+})
+if ($prepTimeoutRows.Count -gt 0) {
+    $decision = 'prep_timeout'
+}
 
-foreach ($row in $rows) { $row.decision_classification = $decision }
+foreach ($row in $rows) {
+    $readiness = Get-PromotionReadiness $row
+    $row.promotion_readiness = $readiness.Status
+    $row.promotion_readiness_reason = $readiness.Reason
+    $row.decision_classification = $decision
+}
 
 $outCsv = Join-Path $WorkRoot 'pbe_tabi_barnase_truth_matrix.csv'
 $rows | Export-Csv -LiteralPath $outCsv -NoTypeInformation -Encoding ASCII

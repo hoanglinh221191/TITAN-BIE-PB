@@ -2725,3 +2725,2700 @@ Stage 3J decision:
   3. only after the max outliers are bounded near `<1e-3` or proven harmless
      by residual/energy gates should a 300s Barnase run or leaf-pair batching
      become the priority.
+
+## Stage 3K/9D - TABI Calibrated Hybrid Estimator and Mean-Error Promotion Gate
+
+Implemented:
+
+- Added hidden calibration control
+  `-pbe-tabi-convergence-calibration=stage3j|consecutive|aspect|consecutive-aspect`,
+  default `stage3j`.
+- `stage3j` preserves Stage 3J behavior: degree `p` tail only and static JCP
+  amplification `30`.
+- `consecutive` uses the consecutive-tail guard:
+  `tail_norm = max(norm(p), norm(p-1) * rho)`.
+- `aspect` uses dynamic JCP amplification:
+  `jcp_amp = 30 * max(1, node_aspect_ratio(node))`.
+- `consecutive-aspect` enables both calibration rules.
+- Extended timing/profile/progress diagnostics:
+  `tabi_convergence_calibration`,
+  `tabi_convergence_tail_norm_p_max/mean`,
+  `tabi_convergence_tail_norm_pm1_max/mean`,
+  `tabi_convergence_effective_jcp_amp_max/mean`, and
+  `tabi_far_expansion_mean_gate_pass`.
+- Mean gate is emitted from timing/profile/progress only when expansion-audit
+  sampled pairs exist, mean far-expansion error is `<5e-4`, and
+  high-error misses are `0`.
+- Extended harnesses:
+  - `test/pbe_tabi_convergence_calibration_smoke.ps1`;
+  - `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3KRows`;
+  - `test/pbe_tabi_barnase_truth_matrix.ps1` and
+    `test/pbe_tabi_barnase_tree_mac_probe.ps1` pass through/report the
+    calibration mode and mean-gate counters.
+
+Measured Stage 3K smoke evidence:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Calibration smoke:
+  `test/pbe_tabi_convergence_calibration_smoke.ps1`: PASS.
+  - panels `112`;
+  - `stage3j` estimated-error max `4.64661`;
+  - `consecutive` estimated-error max `8.38751`;
+  - `aspect` effective JCP amp max `38887.5`;
+  - `consecutive-aspect` effective JCP amp max `38887.5`;
+  - combined split rejects `119`;
+  - benign row retained far work (`135` far interactions).
+
+Measured Stage 3K medium matrix:
+
+- Command:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3KRows -CaseTimeoutSeconds 180 -AllowFailedStatus`.
+- Output:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+| fixture | row | sampled residual | matvec rel | energy drift rel | expansion mean | mean gate | missed | leaf work/matvec | classification |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| mini-protein | order3 `stage3j` | `9.759e-5` | `6.012e-7` | `3.505e-8` | `2.748e-4` | `1` | `0` | `7.289e6` | mean gate pass |
+| mini-protein | order3 `consecutive-aspect` | `9.759e-5` | `5.318e-7` | `3.839e-8` | `2.767e-4` | `1` | `0` | `7.291e6` | mean gate pass |
+| compact-mini-protein | order3 `stage3j` | `5.307e-5` | `6.265e-7` | `1.396e-7` | `3.253e-4` | `1` | `0` | `1.708e7` | mean gate pass |
+| compact-mini-protein | order3 `aspect` | `5.307e-5` | `4.946e-7` | `4.230e-8` | `3.153e-4` | `1` | `0` | `1.710e7` | mean gate pass |
+| charged-peptide | order3 calibrated rows | `1.770e-5` | `5.288e-16` | `0` | `0` | `0` | `0` | `5.021e6` | medium gate pass |
+
+- Medium rows pass the Stage 3E accuracy/residual gates.
+- Mean gate is intentionally not counted for charged-peptide because no
+  expansion-audit pairs were emitted in those rows (`mean_gate=0`).
+- `consecutive-aspect` did not materially improve medium mean error versus
+  `stage3j`; `aspect` slightly improved compact-mini-protein mean error while
+  preserving the same residual basin.
+- Relaxed `consecutive-aspect` error cap `3e-3` and order-4 fallback did not
+  satisfy the mean gate on compact-mini-protein because high-error misses
+  appeared (`21` and `87`, respectively).
+
+Barnase Stage 3K 120s probes:
+
+All rows used `surface_points=8`, `leaf=128`, `theta=0.6`, order `3`,
+`topdown-aabb`, `tight-aabb`, `physical-gap`, `area-centroid`,
+`fragmentation-safety=split`, `moment-construction=translated`,
+`moment-sum=naive`, `moment-audit=sampled`, `expansion-audit=sampled`,
+`convergence-audit=sampled`, `convergence-safety=split`,
+`convergence-estimator=hybrid`, `threshold=1e4`,
+`unstable_rho_cap=0.25`, `near=duffy_adaptive`, `quad_buffer=adaptive`, and
+`precond=diagonal`.
+
+| Barnase Stage 3K row | status | matvecs | sampled residual | true residual | expansion mean | mean gate | expansion max | missed | effective amp max | leaf work/matvec |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `stage3j`, cap `1e-3` | `timeout` | `37` | `4.53e-4` | `6.677e-4` | `2.65e-4` | `1` | `5.199e-2` | `0` | `30.0` | `2.241e8` |
+| `consecutive`, cap `1e-3` | `timeout` | `30` | `2.102e-3` | progress fallback | `2.46e-4` | `1` | `3.916e-2` | `0` | `30.0` | `2.241e8` |
+| `aspect`, cap `1e-3` | `timeout` | `37` | `4.53e-4` | `6.677e-4` | `2.64e-4` | `1` | `5.199e-2` | `0` | `57.278` | `2.241e8` |
+| `consecutive-aspect`, cap `1e-3` | `timeout` | `32` | `2.102e-3` | progress fallback | `2.79e-4` | `1` | `5.199e-2` | `0` | `57.278` | `2.241e8` |
+| `consecutive-aspect`, cap `3e-3` | `timeout` | `34` | `2.102e-3` | progress fallback | `2.70e-4` | `1` | `5.196e-2` | `0` | `57.278` | `2.241e8` |
+
+- Stage 3K confirms the user's mean-error direction: all Barnase 120s rows
+  emitted timeout-safe progress rows with far-expansion mean `<5e-4` and
+  high-error missed `0`.
+- No Stage 3K Barnase 120s row satisfied the promotion residual gate
+  `true or sampled residual <=1e-4`.
+- Therefore Barnase 300s was not run in Stage 3K, and no default was promoted.
+- `aspect` matches `stage3j` residual behavior while exposing dynamic JCP amp
+  counters; `consecutive` and `consecutive-aspect` were more conservative but
+  had worse 120s sampled residual in this run.
+- Remaining risk is the isolated max spike around `5.2e-2`: it no longer
+  blocks mean-gate evidence by itself, but promotion still requires residual
+  confirmation.
+
+Verification after Stage 3K:
+
+- `test/pbe_tabi_convergence_calibration_smoke.ps1`: PASS.
+- `test/pbe_tabi_convergence_estimator_smoke.ps1`: PASS.
+- `test/pbe_tabi_convergence_mac_safety_smoke.ps1`: PASS.
+- `test/pbe_tabi_far_expansion_audit_smoke.ps1`: PASS.
+- `test/pbe_tabi_fragmented_node_mac_smoke.ps1`: PASS.
+- `test/pbe_tabi_jcp_moment_construction_smoke.ps1`: PASS.
+- `test/pbe_tabi_jcp_mixed_derivative_smoke.ps1`: PASS.
+- `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3KRows -CaseTimeoutSeconds 180 -AllowFailedStatus`: PASS.
+- Barnase 120s Stage 3K rows above: PASS as timeout-safe evidence, no
+  promotion candidate.
+- `test/pbe_tabi_topdown_mac_audit.ps1`: PASS.
+- `test/pbe_tabi_treecode_accuracy.ps1`: PASS.
+- `test/pbe_tabi_tree_builder_smoke.ps1`: PASS.
+- `test/pbe_tabi_gmres_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_sampled_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_profile_smoke.ps1`: PASS.
+- `test/pbe_memory_profile_smoke.ps1`: PASS.
+- `test/pbe_clean_room_audit.ps1`: PASS.
+- `test/pbe_regression.ps1`: PASS.
+- `test/pbsa_smoke.ps1`: PASS.
+- `test/sasa_surface_smoke.ps1`: PASS.
+
+Stage 3K decision:
+
+- Keep production defaults unchanged.
+- Keep `topdown-aabb`, `physical-gap`, `area-centroid`,
+  `fragmentation-safety`, convergence estimator, convergence calibration, and
+  mean gate hidden/experimental.
+- Do not promote and do not run Barnase 300s yet.
+- Next branch should use the mean-gate evidence, but tune solver progress:
+  1. investigate why calibrated consecutive rows reduce max/mean expansion
+     error yet slow residual progress in Barnase 120s;
+  2. compare Stage 3J converged `hybrid_t1e4` against the current Stage 3K
+     `stage3j/aspect` rows under identical timeout/progress settings to
+     separate runtime variance from calibration behavior;
+  3. only if a 120s row again reaches residual `<=1e-4` with mean gate pass
+     and missed `0`, run the 300s confirmation before promotion.
+
+## Stage 3L/9E - TABI Dielectric-Aware Estimator and Target-Cluster Leaf Batching
+
+Implemented:
+
+- Added hidden `-pbe-tabi-convergence-dielectric-amp=off|on`, default `off`.
+- When enabled for JCP on-the-fly convergence estimation, the estimator uses
+  `max(30, abs(eps_ratio))` before optional aspect calibration. Existing
+  behavior is preserved when the flag is `off`.
+- Added timing/profile/progress fields:
+  `tabi_convergence_dielectric_amp`,
+  `tabi_convergence_dielectric_amp_max/mean`, plus the existing effective JCP
+  amp fields after aspect calibration.
+- Implemented hidden on-the-fly direct leaf batching through the existing
+  `-pbe-tabi-cluster-policy=off|leaf-pair-strict|leaf-pair-balanced` scaffold.
+  New hidden controls are:
+  `-pbe-tabi-target-batch-size=1|4|8`,
+  `-pbe-tabi-leaf-pair-min-source-panels`, and
+  `-pbe-tabi-leaf-pair-min-targets`.
+- Batching is conservative: only clean direct leaf paths are batched. Self,
+  one-ring, geometric-buffer, Duffy/adaptive-buffer, and target-specific
+  exclusion cases fall back to scalar leaf evaluation.
+- Added counters:
+  `tabi_leaf_pair_batch_interactions`,
+  `tabi_leaf_pair_batch_targets`,
+  `tabi_leaf_pair_batch_source_panels`,
+  `tabi_leaf_pair_batch_residual_panels`,
+  `tabi_leaf_pair_batch_fallbacks`, and
+  `tabi_leaf_pair_batch_seconds`.
+- Extended Stage 3L harness rows in:
+  - `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3LRows`;
+  - `test/pbe_tabi_barnase_truth_matrix.ps1` with dielectric amp, cluster
+    policy, target batch size, and leaf-pair threshold passthrough/reporting.
+- Added focused smokes:
+  - `test/pbe_tabi_dielectric_estimator_smoke.ps1`;
+  - `test/pbe_tabi_leaf_pair_batch_smoke.ps1`.
+
+Measured Stage 3L smoke evidence:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Dielectric estimator smoke: PASS.
+  - panels `120`;
+  - `dielectric_amp=off` reports amp max `30`;
+  - `dielectric_amp=on` with `eps_ratio=80` reports amp max `80`;
+  - estimated-error max increases from `1.12315` to `2.99506`;
+  - split rejects increase from `4` to `24`;
+  - low-eps case keeps conservative amp `30`.
+- Leaf-pair batch smoke: PASS.
+  - panels `96`;
+  - batched-vs-scalar relative RMS `1.0891e-16`;
+  - batch interactions `40`, batch targets `158`, source panels `2686`;
+  - singular/exclusion fallback counter `616`.
+
+Measured Stage 3L medium matrix:
+
+- Command:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3LRows -CaseTimeoutSeconds 180 -AllowFailedStatus`.
+- Output:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+| fixture | row | matvec rel | energy drift rel | sampled residual | expansion mean | missed | dielectric amp max | batch interactions | total seconds |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| mini-protein | order3 dielectric off | `5.318e-7` | `3.84e-8` | `9.759e-5` | `2.767e-4` | `0` | `30` | `0` | `NA` |
+| mini-protein | order3 dielectric on | `5.318e-7` | `3.84e-8` | `9.759e-5` | `2.767e-4` | `0` | `80` | `0` | `4.05` |
+| mini-protein | order4 dielectric on | `8.920e-8` | `9.18e-9` | `9.759e-5` | `5.56e-5` | `0` | `80` | `0` | `4.38` |
+| charged-peptide | order3 dielectric on | `5.288e-16` | `0` | `1.770e-5` | `0` | `0` | `80` | `0` | `2.78` |
+| compact-mini-protein | order3 dielectric on | `4.946e-7` | `4.02e-8` | `5.306e-5` | `3.38e-4` | `0` | `80` | `0` | `13.42` |
+| compact-mini-protein | order4 dielectric on | `6.964e-8` | `7.76e-9` | `5.306e-5` | `4.43e-5` | `4` | `80` | `0` | `11.37` |
+
+Batching rows on the same order3 dielectric-on settings:
+
+| fixture | cluster policy | batch interactions | batch seconds | total seconds | note |
+| --- | --- | ---: | ---: | ---: | --- |
+| mini-protein | `leaf-pair-strict` | `169425` | `1.925` | `4.40` | slower than cluster off |
+| mini-protein | `leaf-pair-balanced` | `169425` | `1.869` | `4.51` | slower than cluster off |
+| charged-peptide | `leaf-pair-strict` | `151820` | `1.262` | `3.10` | slower than cluster off |
+| charged-peptide | `leaf-pair-balanced` | `151820` | `1.329` | `3.22` | slower than cluster off |
+| compact-mini-protein | `leaf-pair-strict` | `648120` | `6.463` | `12.74` | slightly faster than cluster off |
+| compact-mini-protein | `leaf-pair-balanced` | `648120` | `5.441` | `10.78` | about `20%` faster than cluster off |
+
+Medium interpretation:
+
+- Dielectric amp wiring works and is visible in timing/profile/progress.
+- Medium accuracy/residual gates remain good for order3 rows, but the stricter
+  Stage 3L mean target `<5e-5` is not met on protein fixtures.
+- Order4 brings compact-mini-protein expansion mean under `5e-5`, but sampled
+  high-error misses remain nonzero (`4`), so it is not promotable.
+- Target batching is correct and can be a win on the larger compact fixture,
+  but it is not yet a broad performance win and should not be promoted.
+
+Barnase Stage 3L 120s probe:
+
+Command used one candidate row:
+`surface_points=8`, `leaf=128`, `theta=0.6`, order `3`, `topdown-aabb`,
+`tight-aabb`, `physical-gap`, `area-centroid`,
+`fragmentation-safety=split`, `moment-construction=translated`,
+`moment-sum=naive`, `moment-audit=sampled`, `expansion-audit=sampled`,
+`convergence-audit=sampled`, `convergence-safety=split`,
+`convergence-estimator=hybrid`, `convergence-calibration=consecutive-aspect`,
+`convergence-dielectric-amp=on`, `near=duffy_adaptive`,
+`quad_buffer=adaptive`, and `precond=diagonal`.
+
+| Barnase Stage 3L row | status | matvecs | gmres iter | sampled residual | true residual | expansion mean | expansion max | dielectric amp max | effective amp max | split rejects | leaf work/matvec |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| order3 theta0.6 dielectric on cluster off | `timeout` | `35` | `28` | `4.53e-4` | `6.677e-4` | `2.65e-4` | `5.199e-2` | `80` | `152.74` | `13994015` | `2.241e8` |
+
+- The Barnase progress row confirms timeout-safe Stage 3L counters.
+- The dielectric-aware estimator increases amplification as expected, but it
+  does not push Barnase below the Stage 3L residual or mean-error gates.
+- Barnase 300s was not run because no 120s Stage 3L row met the promotion gate.
+
+Verification after Stage 3L:
+
+- `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- `test/pbe_tabi_dielectric_estimator_smoke.ps1`: PASS.
+- `test/pbe_tabi_leaf_pair_batch_smoke.ps1`: PASS.
+- `test/pbe_tabi_convergence_calibration_smoke.ps1`: PASS.
+- `test/pbe_tabi_convergence_estimator_smoke.ps1`: PASS.
+- `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3LRows -CaseTimeoutSeconds 180 -AllowFailedStatus`: PASS.
+- Barnase 120s Stage 3L row above: PASS as timeout-safe evidence; no
+  promotion candidate.
+- `test/pbe_tabi_far_expansion_audit_smoke.ps1`: PASS.
+- `test/pbe_tabi_convergence_mac_safety_smoke.ps1`: PASS.
+- `test/pbe_tabi_fragmented_node_mac_smoke.ps1`: PASS.
+- `test/pbe_tabi_treecode_accuracy.ps1`: PASS.
+- `test/pbe_tabi_topdown_mac_audit.ps1`: PASS.
+- `test/pbe_tabi_tree_builder_smoke.ps1`: PASS.
+- `test/pbe_tabi_gmres_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_sampled_true_residual_smoke.ps1`: PASS.
+- `test/pbe_tabi_profile_smoke.ps1`: PASS.
+- `test/pbe_memory_profile_smoke.ps1`: PASS.
+- `test/pbe_clean_room_audit.ps1`: PASS.
+- `test/pbe_regression.ps1`: PASS.
+- `test/pbsa_smoke.ps1`: PASS.
+- `test/sasa_surface_smoke.ps1`: PASS.
+
+Stage 3L decision:
+
+- Keep production defaults unchanged.
+- Keep dielectric-aware estimator and leaf-pair batching hidden/experimental.
+- Do not promote and do not run Barnase 300s yet.
+- The user's dielectric-amplifier hypothesis is partially confirmed: the
+  estimator now sees `eps_ratio=80` and rejects more unstable nodes. However,
+  Barnase remains near the same residual/noise floor (`~6.7e-4` true residual)
+  and far-expansion mean (`~2.65e-4`), so dielectric amplification alone is not
+  enough.
+- Next branch should target the estimator's source norm/error model rather than
+  leaf batching:
+  1. calibrate the JCP estimator against block/channel contributions so the
+     error cap predicts the observed mean error scale (`~2.6e-4`) rather than
+     only increasing split count;
+  2. add percentile or per-channel expansion-audit gates (`p95/p99`, `K2`
+     source-normal channel, and phin channel) to decide whether isolated spikes
+     are harmless or still polluting GMRES;
+  3. keep leaf-pair batching available for larger fixtures, but only optimize
+     its SIMD/target-lane implementation after an accuracy row reaches
+     far-expansion mean `<5e-5` and residual `<=1e-4`.
+
+## Stage 3M/9F - Channel-Calibrated JCP Expansion Estimator
+
+Status: implemented as hidden/experimental diagnostics; production defaults
+unchanged.
+
+Stage 3M implementation:
+
+- Added hidden channel expansion audit flag
+  `-pbe-tabi-expansion-audit-channel=off|summary|sampled-detail`, default
+  `off`.
+- Added hidden channel estimator model flag
+  `-pbe-tabi-convergence-estimator-model=stage3l|channel-tail|channel-tail-eps`,
+  default `stage3l`.
+- Expansion audit now records overall `p95/p99`, worst channel, and
+  per-channel mean/max/p99 for:
+  - `K1_phi`;
+  - `K2_phi_normal`;
+  - `K3_phin`;
+  - `K4_mixed`.
+- Channel-aware estimator now computes per-channel estimated error and
+  high-error caught/missed counters. `channel-tail-eps` applies the dielectric
+  scaling to the K2 channel instead of only using one global amplifier.
+- Timing/profile/progress now expose:
+  `tabi_far_expansion_rel_error_p95`,
+  `tabi_far_expansion_rel_error_p99`,
+  `tabi_far_expansion_worst_channel`,
+  `tabi_far_expansion_k{1..4}_rel_error_{max,mean,p99}`,
+  `tabi_convergence_k{1..4}_estimated_error_max`,
+  `tabi_convergence_k{1..4}_high_error_caught`, and
+  `tabi_convergence_k{1..4}_high_error_missed`.
+- Extended harnesses:
+  - `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3MRows`;
+  - `test/pbe_tabi_barnase_truth_matrix.ps1` with estimator-model and
+    expansion-audit-channel passthrough plus timing/progress fallback fields.
+- Added focused smokes:
+  - `test/pbe_tabi_channel_expansion_audit_smoke.ps1`;
+  - `test/pbe_tabi_channel_estimator_smoke.ps1`.
+
+Measured Stage 3M smoke evidence:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Channel expansion audit smoke: PASS.
+  - panels `168`;
+  - sampled far-expansion pairs `129`;
+  - overall p99 `2.68676`;
+  - worst channel `K3_phin`;
+  - K2 channel max `3.69952`;
+  - phin-side channel checks reported nonzero K1/K3 maxima.
+- Channel estimator smoke: PASS.
+  - panels `164`;
+  - baseline global estimated-error max `415.909`;
+  - channel K2 estimated-error max `415.909`;
+  - split cap `207.955`;
+  - `channel-tail-eps` split rejects `70`;
+  - benign case retained far work (`350` far-node interactions).
+- Dielectric estimator smoke: PASS.
+  - `dielectric_amp=on` still reports `eps_ratio=80` and increases split
+    rejects versus `off`.
+- Leaf-pair batch smoke: PASS.
+  - batched-vs-scalar relative RMS `1.0891e-16`.
+
+Measured Stage 3M quick medium matrix:
+
+- Command:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3MRows -Quick -CaseTimeoutSeconds 180 -AllowFailedStatus`.
+- Output:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+- Scope: `mini-protein` only. Full three-fixture Stage 3M matrix is still
+  pending before any promotion decision.
+
+| row | matvec rel | energy drift rel | sampled residual | expansion mean | expansion p99 | worst channel | model | channel audit | K2 est max | K2 missed |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | ---: | ---: |
+| stage3l order3 theta0.6 | `5.318e-7` | `3.84e-8` | `9.759e-5` | `2.767e-4` | `1.493e-3` | `K3_phin` | `stage3l` | `summary` | `12.479` | `0` |
+| channel audit order3 theta0.6 | `2.188e-4` | `1.43e-5` | `9.761e-5` | `3.469e-2` | `5.967e-1` | `K2_phi_normal` | `channel-tail-eps` | `summary` | `6.344` | `0` |
+| channel-tail order3 theta0.6 | `5.318e-7` | `3.84e-8` | `9.759e-5` | `2.767e-4` | `1.493e-3` | `K3_phin` | `channel-tail` | `summary` | `2.365` | `0` |
+| channel-tail-eps order3 theta0.6 | `5.318e-7` | `3.84e-8` | `9.759e-5` | `2.767e-4` | `1.493e-3` | `K3_phin` | `channel-tail-eps` | `summary` | `6.306` | `0` |
+| channel-tail-eps order3 theta0.5 | `5.318e-7` | `3.84e-8` | `9.759e-5` | `2.767e-4` | `1.493e-3` | `K3_phin` | `channel-tail-eps` | `summary` | `2.538` | `0` |
+| channel-tail-eps order4 theta0.6 | `8.920e-8` | `9.18e-9` | `9.759e-5` | `5.576e-5` | `4.449e-4` | `K3_phin` | `channel-tail-eps` | `summary` | `1.614` | `0` |
+
+Medium interpretation:
+
+- Channel audit plumbing works: model/channel flags, p99, worst channel, and
+  per-channel estimator counters are visible in `pbe_timing.csv`.
+- On `mini-protein`, the primary order3 channel-tail-eps rows still sit at
+  expansion mean `2.767e-4`, above the Stage 3M gate `<5e-5`.
+- Order4 theta0.6 nearly reaches the strict mean gate (`5.576e-5`) and passes
+  the p99 gate (`4.449e-4`), but it is still a fallback diagnostic, not a
+  promotion candidate.
+- The audit-only row correctly exposes a K2-dominated high-error branch
+  (`worst_channel=K2_phi_normal`) without claiming it is an accepted split
+  candidate.
+
+Barnase Stage 3M 120s probe:
+
+- Command ran one candidate row:
+  `surface_points=8`, `leaf=128`, `theta=0.6`, order `3`,
+  `topdown-aabb`, `tight-aabb`, `physical-gap`, `area-centroid`,
+  `fragmentation-safety=split`, `moment-audit=sampled`,
+  `expansion-audit=sampled`, `expansion-audit-channel=summary`,
+  `convergence-audit=sampled`, `convergence-safety=split`,
+  `convergence-estimator=hybrid`,
+  `convergence-calibration=consecutive-aspect`,
+  `convergence-dielectric-amp=on`,
+  `convergence-estimator-model=channel-tail-eps`,
+  `near=duffy_adaptive`, `quad_buffer=adaptive`, and `precond=diagonal`.
+
+| Barnase Stage 3M row | status | total seconds | timing/progress counters |
+| --- | --- | ---: | --- |
+| order3 theta0.6 channel-tail-eps summary | `timeout` | `120.03` | `NA` |
+
+- This run timed out before `pbe_timing.csv` or
+  `pbe_tabi_longrun_progress.csv` emitted usable counters, so it is not a
+  promotion or accuracy datapoint.
+- Barnase 300s was not run.
+
+Stage 3M decision:
+
+- Keep production defaults unchanged.
+- Keep `channel-tail`, `channel-tail-eps`, and channel expansion audit hidden.
+- Do not promote and do not run Barnase 300s yet.
+- Next branch should focus on selectivity and earlier Barnase progress:
+  1. run the full three-fixture Stage 3M matrix before Barnase;
+  2. add a lower-cost Barnase pre-progress checkpoint or a smaller Barnase
+     diagnostic surface row so 120s probes always emit counters;
+  3. use the channel audit evidence to tune the K3/phin and K2/K4 source-norm
+     model, because order3 channel-tail-eps did not reduce mean error on
+     `mini-protein`;
+  4. keep order4 as fallback only if full medium rows confirm p99 and missed
+     gates without exploding leaf work.
+
+## Stage 3N/9G - TABI Pre-Solver Progress and K3/Phin Channel Calibration
+
+Stage 3N implementation:
+
+- Added hidden pre-solver progress flag:
+  `-pbe-tabi-pre-solver-progress=off|on`, default `off`.
+- When enabled, TABI writes `pbe_tabi_prepare_progress.csv` before
+  `solve_linear_pb`, with phases:
+  `tabi_prepare_start`, `pqr_loaded`, `tabi_options_built`, and
+  `solver_enter`.
+- Extended the Barnase truth matrix harness to read
+  `pbe_tabi_longrun_progress.csv` first and fall back to
+  `pbe_tabi_prepare_progress.csv` when a timeout happens before solver entry.
+  Such a run is classified as `prep_timeout`.
+- Added hidden K3/channel calibration flag:
+  `-pbe-tabi-convergence-channel-calibration=stage3m|k3-sqrt-eps|k3-eps|all-derivative-sqrt-eps`,
+  default `stage3m`.
+- `k3-sqrt-eps` scales the `K3_phin` channel by
+  `max(30, 30*sqrt(abs(eps_ratio)))`; `k3-eps` is the strict diagnostic
+  `max(30, abs(eps_ratio))`; `all-derivative-sqrt-eps` applies the sqrt-eps
+  amplifier to the derivative-side channels.
+- Timing/profile/progress now expose per-channel effective amp and
+  per-channel unstable/split reject counters for K1/K2/K3/K4.
+- Extended harnesses:
+  - `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3NRows`;
+  - `test/pbe_tabi_barnase_truth_matrix.ps1` with
+    `-ConvergenceChannelCalibrations` and `-PreSolverProgress`.
+- Added focused smokes:
+  - `test/pbe_tabi_presolver_progress_smoke.ps1`;
+  - `test/pbe_tabi_k3_channel_estimator_smoke.ps1`.
+
+Measured Stage 3N smoke evidence:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Pre-solver progress smoke: PASS.
+  - phases emitted:
+    `tabi_prepare_start;pqr_loaded;tabi_options_built;solver_enter`;
+  - solver-enter row preserved `k3-sqrt-eps`;
+  - RSS at smoke completion `8351744` bytes.
+- K3 channel estimator smoke: PASS.
+  - panels `164`;
+  - K3 amp increased from `30` to `268.328`;
+  - K3 estimated-error max increased from `9.44424` to `84.4718`;
+  - K3 channel split rejects increased from `38` to `71`;
+  - benign path retained far work (`350` far-node interactions).
+- Existing channel/audit gates after Stage 3N: PASS.
+  - channel expansion audit smoke: worst channel `K3_phin`, p99 `2.68676`;
+  - channel estimator smoke: `channel-tail-eps` split rejects `70` with
+    benign far work retained;
+  - dielectric estimator smoke: `dielectric_amp=on` reports amp `80`;
+  - convergence calibration smoke: consecutive/aspect calibration still
+    raises estimated error and keeps benign far work;
+  - leaf-pair batch smoke: batched-vs-scalar relative RMS `1.0891e-16`;
+  - convergence estimator smoke: split path reduced synthetic expansion
+    error from `5.16619e-05` to `1.9621e-06`.
+
+Measured Stage 3N full medium matrix:
+
+- Command:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3MRows -IncludeStage3NRows -CaseTimeoutSeconds 180 -AllowFailedStatus`.
+- Output:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+- Scope: full three-fixture medium matrix:
+  `mini-protein`, `charged-peptide`, and `compact-mini-protein`.
+
+| fixture | Stage 3N row | status | expansion mean | expansion p99 | worst channel | global missed | K1 missed | K3 missed | K4 missed | K3 amp max | K3 split rejects | leaf work/matvec |
+| --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| mini-protein | order3 theta0.6 k3-sqrt-eps | `ok` | `2.767e-4` | `1.493e-3` | `K3_phin` | `0` | `204` | `0` | `0` | `268.328` | `131055` | `7290772` |
+| mini-protein | order4 theta0.6 k3-sqrt-eps fallback | `ok` | `5.576e-5` | `4.449e-4` | `K3_phin` | `0` | `0` | `0` | `20` | `268.328` | `131055` | `7290772` |
+| charged-peptide | order3 theta0.6 k3-sqrt-eps | `ok` | `0` | `0` | `none` | `0` | `0` | `0` | `0` | `268.328` | `73120` | `5021476` |
+| compact-mini-protein | order3 theta0.6 k3-sqrt-eps | `ok` | `3.340e-4` | `4.655e-3` | `K4_mixed` | `0` | `40` | `0` | `0` | `268.328` | `700680` | `17098706` |
+| compact-mini-protein | order4 theta0.6 k3-sqrt-eps fallback | `ok` | `4.461e-5` | `5.805e-4` | `K4_mixed` | `0` | `0` | `0` | `263` | `268.328` | `700680` | `17098706` |
+
+Medium interpretation:
+
+- Stage 3N successfully targets the suspected K3/phin channel: K3 missed is
+  `0` in the measured medium rows, and K3 split counters/amps are visible.
+- No Stage 3N row passes the full promotion gate across all three fixtures:
+  order3 rows remain far above the mean/p99 targets on mini/compact; order4
+  improves mean sharply but still misses compact p99 and K4 per-channel missed
+  remains nonzero.
+- The remaining medium failures point away from K3 alone and toward a
+  K4/mixed or per-channel gate semantics branch. The global estimator missed
+  counter is `0`, but per-channel missed counters still expose local channel
+  underprediction.
+- Barnase 120s was not run in Stage 3N because the required full medium
+  candidate did not pass first. Barnase 300s was not run.
+
+Verification after Stage 3N:
+
+- `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- `test/pbe_tabi_presolver_progress_smoke.ps1`: PASS.
+- `test/pbe_tabi_k3_channel_estimator_smoke.ps1`: PASS.
+- `test/pbe_tabi_channel_expansion_audit_smoke.ps1`: PASS.
+- `test/pbe_tabi_channel_estimator_smoke.ps1`: PASS.
+- `test/pbe_tabi_dielectric_estimator_smoke.ps1`: PASS.
+- `test/pbe_tabi_convergence_calibration_smoke.ps1`: PASS.
+- `test/pbe_tabi_convergence_estimator_smoke.ps1`: PASS.
+- `test/pbe_tabi_leaf_pair_batch_smoke.ps1`: PASS.
+- Full Stage 3M+3N medium matrix: PASS as evidence collection, no promotion
+  candidate.
+- `git diff --check`: no whitespace errors; only existing line-ending
+  normalization warnings were reported.
+
+Stage 3N decision:
+
+- Keep production defaults unchanged.
+- Keep pre-solver progress, K3/channel calibration, channel estimator, and
+  channel expansion audit hidden.
+- Do not run Barnase 120s/300s yet.
+- Next branch should target the remaining medium blockers:
+  1. split per-channel `missed` semantics into "globally caught" versus
+     "same-channel caught" so promotion gates do not mix diagnostic meanings;
+  2. add K4/mixed calibration rows analogous to K3 sqrt-eps because compact
+     medium now reports `K4_mixed` as worst channel;
+  3. run a strict order4 K4 diagnostic only after confirming p99 can fall below
+     `5e-4` without increasing leaf work beyond the Stage 3L/3M envelope;
+  4. keep Barnase blocked until a full medium row passes mean, p99, residual,
+     and channel-missed gates.
+
+## Stage 3O/9H - TABI K4/Mixed Calibration and Accepted-Far Miss Semantics
+
+Stage 3O implementation:
+
+- Added hidden channel missed semantics flag:
+  `-pbe-tabi-channel-missed-semantics=legacy|accepted-only`, default
+  `legacy`.
+- With `accepted-only`, sampled per-channel `*_high_error_missed` now means a
+  high-error pair actually entered the accepted far Taylor path. High-error
+  candidates rejected by the convergence split are counted separately in:
+  `tabi_convergence_k{1..4}_high_error_caught_by_split` and
+  `tabi_convergence_estimator_high_error_caught_by_split`.
+- Extended sampled channel audit to sample split-rejected candidates without
+  changing traversal. These samples only feed `caught_by_split` counters.
+- Added hidden K4 calibration diagnostics:
+  `k4-sqrt-eps` and `k4-eps`, while preserving `all-derivative-sqrt-eps` as
+  the primary Stage 3O candidate.
+- Threaded the new semantics/caught-by-split counters through treecode stats,
+  timing/profile output, longrun progress, pre-solver progress context,
+  matrix CSV rows, and Barnase truth harness rows.
+- Updated the medium matrix classifier so audited estimator rows that do not
+  pass the mean/missed gate are labeled `convergence_mean_gate_followup`
+  instead of the older medium-gate pass label.
+- Extended harnesses:
+  - `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3ORows`;
+  - `test/pbe_tabi_barnase_truth_matrix.ps1` with
+    `-ChannelMissedSemantics`.
+- Added focused smokes:
+  - `test/pbe_tabi_channel_missed_semantics_smoke.ps1`;
+  - `test/pbe_tabi_k4_channel_estimator_smoke.ps1`.
+
+Measured Stage 3O smoke evidence:
+
+- Native build state:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS
+  (`Nothing to be done for all` after the Stage 3O engine rebuild).
+- Channel missed semantics smoke: PASS.
+  - panels `118`;
+  - accepted high-error missed `308`;
+  - split path missed `170`;
+  - split caught-by-split `138`;
+  - split rejects `69`.
+- K4 channel estimator smoke: PASS.
+  - panels `168`;
+  - K4 effective amp increased from `822.857` to `7359.86`;
+  - K4 estimated-error max increased from `70.0491` to `626.538`;
+  - K4 split rejects increased from `78` to `82`;
+  - benign path retained far work (`60` far-node interactions).
+- Existing channel/progress gates after Stage 3O: PASS.
+  - K3 channel estimator smoke: K3 amp `30 -> 268.328`, split rejects
+    `38 -> 71`;
+  - channel expansion audit smoke: worst channel `K3_phin`, p99 `2.68676`;
+  - channel estimator smoke: split rejects `70` with benign far work retained;
+  - pre-solver progress smoke: phases
+    `tabi_prepare_start;pqr_loaded;tabi_options_built;solver_enter`.
+
+Measured Stage 3O full medium matrix:
+
+- Command:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3MRows -IncludeStage3NRows -IncludeStage3ORows -CaseTimeoutSeconds 180 -AllowFailedStatus`.
+- Output:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+- Scope: full three-fixture medium matrix:
+  `mini-protein`, `charged-peptide`, and `compact-mini-protein`.
+
+| fixture | Stage 3O row | status | semantics | expansion mean | p99 report | global accepted missed | K1/K2/K3/K4 accepted missed | K4 caught by split | worst channel | K4 amp max | K4 split rejects | leaf work/matvec |
+| --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | --- | ---: | ---: | ---: |
+| mini-protein | order4 theta0.6 all-derivative-sqrt-eps | `ok` | `accepted-only` | `6.923e-5` | `4.904e-4` | `0` | `0/0/15/1` | `3512` | `K3_phin` | `517.780` | `131055` | `7290772` |
+| mini-protein | order4 theta0.5 all-derivative-sqrt-eps | `ok` | `accepted-only` | `6.460e-5` | `4.606e-4` | `0` | `0/0/22/21` | `1777` | `K4_mixed` | `517.780` | `83775` | `7290772` |
+| mini-protein | order4 theta0.6 k4-eps | `ok` | `accepted-only` | `7.051e-5` | `4.904e-4` | `0` | `0/0/16/1` | `3552` | `K4_mixed` | `154.372` | `131055` | `7290772` |
+| charged-peptide | order4 theta0.6 all-derivative-sqrt-eps | `ok` | `accepted-only` | `0` | `0` | `0` | `0/0/0/0` | `7621` | `none` | `601.125` | `73120` | `5021476` |
+| charged-peptide | order4 theta0.5 all-derivative-sqrt-eps | `ok` | `accepted-only` | `0` | `0` | `0` | `0/0/0/0` | `6286` | `none` | `601.125` | `27700` | `5021476` |
+| compact-mini-protein | order4 theta0.6 all-derivative-sqrt-eps | `ok` | `accepted-only` | `3.673e-5` | `4.824e-4` | `0` | `0/7/18/42` | `7755` | `K3_phin` | `622.798` | `700680` | `17098706` |
+| compact-mini-protein | order4 theta0.5 all-derivative-sqrt-eps | `ok` | `accepted-only` | `3.358e-5` | `4.218e-4` | `0` | `0/10/21/37` | `5448` | `K3_phin` | `622.798` | `454050` | `17098706` |
+| compact-mini-protein | order4 theta0.6 k4-eps | `ok` | `accepted-only` | `3.351e-5` | `4.243e-4` | `0` | `0/8/19/36` | `7711` | `K3_phin` | `185.683` | `694478` | `17084287` |
+
+Medium interpretation:
+
+- The accepted-only semantics fix resolves the diagnostic ambiguity: many
+  high-error K4 candidates are now visibly `caught_by_split`, while true
+  accepted-far misses remain separate.
+- `all-derivative-sqrt-eps` and strict `k4-eps` both reduce the compact
+  expansion mean below the Stage 3O target (`<5e-5`) with p99 now report-only,
+  but accepted per-channel misses remain nonzero on `mini-protein` and
+  `compact-mini-protein`.
+- `charged-peptide` passes the accepted-missed and mean evidence cleanly, but
+  there is no full three-fixture promotion candidate because:
+  - `mini-protein` accepted-only order4 rows remain above the mean gate
+    (`~7.1e-5`) and still have K3/K4 accepted misses;
+  - `compact-mini-protein` mean passes, but K2/K3/K4 accepted misses remain
+    nonzero.
+- Barnase 120s was not run in Stage 3O because the required full medium
+  candidate did not pass first. Barnase 300s was not run.
+
+Stage 3O decision:
+
+- Keep production defaults unchanged.
+- Keep channel missed semantics, K4 calibration, channel expansion audit, and
+  all convergence estimator modes hidden/experimental.
+- Do not run Barnase 120s/300s yet.
+- Next branch should target accepted-far residual channel misses instead of
+  p99:
+  1. inspect why K3 accepted misses remain on `mini-protein` even under
+     order4 all-derivative calibration;
+  2. add a selective accepted-far retry/split rule keyed by per-channel
+     estimator score or direct audit misses, without falling back to a blind
+     global rho cap;
+  3. use compact `k4-eps` only as a diagnostic lower bound, because it improves
+     mean but does not remove accepted misses;
+  4. keep Barnase blocked until all three medium fixtures have expansion mean
+     `<5e-5` and global/per-channel accepted-missed `0`.
+
+## Stage 3P/9I - TABI Polynomial-Derivative Channel Calibration and Order-3 Theta Rescue
+
+Stage 3P implementation:
+
+- Added hidden channel calibration mode:
+  `-pbe-tabi-convergence-channel-calibration=polynomial-eps`, default still
+  `stage3m`.
+- In the JCP `channel-tail-eps` estimator, `polynomial-eps` uses:
+  - K2/K3 amp `max(30, (taylor_order+1)*sqrt(abs(eps_ratio)))`;
+  - K4 amp `max(30, (taylor_order+1)*(taylor_order+2)*abs(eps_ratio))`;
+  - K2/K3/K4 aspect scaling when `convergence-calibration=consecutive-aspect`;
+  - K1 remains amp `1`.
+- Kept accepted-only miss semantics unchanged: accepted-far high-error samples
+  count as missed, split-rejected samples count as `caught_by_split`.
+- Extended the medium matrix with `-IncludeStage3PRows`:
+  order3 theta `0.50`, `0.45`, `0.40`, and order4 theta `0.60`, all using
+  `polynomial-eps` and `accepted-only`.
+- Added K2/K3 comparison columns to the matrix CSV:
+  `k2_k3_accepted_missed_delta`, `k2_k3_split_reject_delta`, and
+  `k2_k3_estimated_error_ratio`.
+- Added focused smoke:
+  `test/pbe_tabi_polynomial_channel_estimator_smoke.ps1`.
+
+Measured Stage 3P smoke evidence:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Polynomial channel estimator smoke: PASS.
+  - panels `168`;
+  - K3 amp increased from all-derivative `268.328` to polynomial `981.314`;
+  - polynomial K2 amp order3/order4: `981.314 -> 1226.64`;
+  - polynomial K4 amp order3/order4: `43885.7 -> 65828.6`;
+  - K3 split path active (`82` rejects; synthetic fixture was tail-saturated);
+  - benign path retained far work (`60` far-node interactions).
+- Regression-focused smokes after Stage 3P: PASS.
+  - channel missed semantics smoke;
+  - K4 channel estimator smoke;
+  - K3 channel estimator smoke;
+  - channel estimator smoke;
+  - channel expansion audit smoke;
+  - pre-solver progress smoke;
+  - dielectric estimator smoke;
+  - convergence calibration smoke.
+
+Measured Stage 3P full medium matrix:
+
+- Command:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3MRows -IncludeStage3NRows -IncludeStage3ORows -IncludeStage3PRows -CaseTimeoutSeconds 180 -AllowFailedStatus`.
+- Output:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+| fixture | Stage 3P row | status | expansion mean | p99 report | global missed | K1/K2/K3/K4 accepted missed | worst channel | K2/K3/K4 amp max | K2-K3 missed delta | leaf work/matvec |
+| --- | --- | --- | ---: | ---: | ---: | --- | --- | --- | ---: | ---: |
+| mini-protein | order3 theta0.50 polynomial | `ok` | `3.053e-4` | `1.321e-3` | `35` | `36/2/203/103` | `K4_mixed` | `69.04/69.04/3087.44` | `-201` | `7290772` |
+| mini-protein | order3 theta0.45 polynomial | `ok` | `2.975e-4` | `1.356e-3` | `43` | `36/2/237/122` | `K4_mixed` | `69.04/69.04/3087.44` | `-235` | `7290772` |
+| mini-protein | order3 theta0.40 polynomial | `ok` | `2.871e-4` | `1.481e-3` | `57` | `49/2/344/148` | `K4_mixed` | `69.04/69.04/3087.44` | `-342` | `7290772` |
+| mini-protein | order4 theta0.60 polynomial | `ok` | `7.374e-5` | `4.904e-4` | `0` | `0/0/14/0` | `K3_phin` | `86.30/86.30/4631.17` | `-14` | `7290772` |
+| charged-peptide | order3 theta0.50 polynomial | `ok` | `0` | `0` | `0` | `0/0/0/0` | `none` | `80.15/80.15/3584.42` | `0` | `5021476` |
+| charged-peptide | order3 theta0.45 polynomial | `ok` | `0` | `0` | `0` | `0/0/0/0` | `none` | `70.28/70.28/3143.17` | `0` | `5021476` |
+| compact-mini-protein | order3 theta0.50 polynomial | `ok` | `2.394e-4` | `2.591e-3` | `47` | `0/49/244/79` | `K3_phin` | `83.04/83.04/3713.65` | `-195` | `17098706` |
+| compact-mini-protein | order3 theta0.45 polynomial | `ok` | `2.372e-4` | `2.591e-3` | `53` | `0/61/267/95` | `K3_phin` | `66.37/66.37/2968.36` | `-206` | `17098706` |
+| compact-mini-protein | order4 theta0.60 polynomial | `ok` | `3.830e-5` | `4.824e-4` | `0` | `0/8/18/36` | `K3_phin` | `103.80/103.80/5570.48` | `-10` | `17098706` |
+
+Stage 3P interpretation:
+
+- The polynomial second-derivative K4 amp is active and large, but order3
+  polynomial-eps does not rescue medium accuracy. It worsens accepted misses
+  and leaves mean far above the `5e-5` gate on `mini-protein` and
+  `compact-mini-protein`.
+- Order4 polynomial preserves the compact mean gate, but still fails
+  full-medium promotion because `mini-protein` mean remains `7.374e-5` and
+  accepted K3 misses remain nonzero.
+- K2/K3 comparison columns show K3 remains the dominant accepted-miss channel
+  in Stage 3P order3 rows (`K2-K3 accepted missed delta` is strongly
+  negative), so the polynomial K2/K3 amp is not selective enough to replace
+  the Stage 3O order4 path.
+- No Stage 3P row passes full medium gates across all three fixtures.
+- Barnase 120s was not run because no full-medium candidate passed first.
+  Barnase 300s was not run.
+
+Stage 3P decision:
+
+- Keep production defaults unchanged.
+- Keep `polynomial-eps` hidden/experimental.
+- Do not promote and do not run Barnase yet.
+- Next branch should not continue tightening order3 polynomial blindly.
+  Better candidates are:
+  1. reinterpret polynomial calibration as a stricter derivative envelope for
+     K2/K3 as well, because the implemented K2/K3 formula is weaker than the
+     Stage 3O all-derivative sqrt-eps amp on these fixtures;
+  2. add a selective accepted-far retry/split rule for sampled K3 misses on
+     `mini-protein`, using accepted-only audit feedback rather than p99;
+  3. keep order4 theta0.6 as the current lower-bound accuracy branch, but
+     require accepted-missed `0` before Barnase.
+
+## Stage 3Q/9J - TABI Corrected Polynomial K2/K3 Amp and Selective K3 Split Probe
+
+Stage 3Q implementation:
+
+- Corrected hidden `polynomial-eps` K2/K3 amplification in the JCP
+  `channel-tail-eps` estimator:
+  - old Stage 3P K2/K3 amp:
+    `max(30, (taylor_order+1)*sqrt(abs(eps_ratio)))`;
+  - corrected Stage 3Q K2/K3 amp:
+    `max(30, (taylor_order+1)*30*sqrt(abs(eps_ratio)))`;
+  - K4 remains
+    `max(30, (taylor_order+1)*(taylor_order+2)*abs(eps_ratio))`;
+  - K1 remains amp `1`.
+- Added hidden split policy:
+  `-pbe-tabi-convergence-split-policy=global|k3-hot`, default `global`.
+  - `global` preserves existing behavior.
+  - `k3-hot` is only active for `channel-tail-eps` and only allows estimator
+    split when `K3_phin` is unstable. Non-channel models keep global behavior.
+- Plumbed the split policy through TABI options, tree workspace, stats,
+  timing/profile CSVs, prepare/longrun progress CSVs, the medium matrix, and
+  Barnase truth matrix.
+- Extended the medium matrix with `-IncludeStage3QRows`:
+  order3 theta `0.50`, `0.45`, `0.40` corrected polynomial/global;
+  order4 theta `0.60` corrected polynomial/global;
+  order4 theta `0.60` corrected polynomial/`k3-hot`;
+  order3 theta `0.45` corrected polynomial/`k3-hot`.
+- Added focused smoke:
+  `test/pbe_tabi_selective_k3_split_smoke.ps1`.
+
+Measured Stage 3Q smoke evidence:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Corrected polynomial smoke: PASS.
+  - panels `168`;
+  - all-derivative order3 K3 amp `268.328`;
+  - corrected polynomial order3 K2/K3 amp `29439.4`;
+  - corrected polynomial order4 K2/K3 amp `36799.3`;
+  - polynomial K4 amp order3/order4: `43885.7 -> 65828.6`;
+  - synthetic K3 split path active (`82` rejects);
+  - benign path retained far work (`60` far-node interactions).
+- Selective K3 split smoke: PASS.
+  - panels `176`;
+  - K3-dominated case under `k3-hot`: `153` K3 split rejects;
+  - K4-dominated diagnostic: global split rejects `138`, `k3-hot` split
+    rejects `0`;
+  - benign accepted-only missed stayed `0`, with `143` far-node interactions.
+- Adjacent channel/progress smokes after Stage 3Q: PASS.
+  - channel missed semantics smoke;
+  - K4 channel estimator smoke;
+  - K3 channel estimator smoke;
+  - channel expansion audit smoke;
+  - channel estimator smoke;
+  - pre-solver progress smoke.
+
+Measured Stage 3Q full medium matrix:
+
+- Command:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3MRows -IncludeStage3NRows -IncludeStage3ORows -IncludeStage3PRows -IncludeStage3QRows -CaseTimeoutSeconds 180 -AllowFailedStatus`.
+- Output:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+| fixture | Stage 3Q row | split policy | status | expansion mean | p99 report | global missed | K1/K2/K3/K4 accepted missed | worst channel | K2/K3/K4 amp max | K2-K3 missed delta | leaf work/matvec |
+| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- | ---: | ---: |
+| mini-protein | order3 theta0.50 corrected polynomial | `global` | `ok` | `2.970e-4` | `1.216e-3` | `29` | `29/1/199/97` | `K4_mixed` | `2071.12/2071.12/3087.44` | `-198` | `7290772` |
+| mini-protein | order3 theta0.45 corrected polynomial | `global` | `ok` | `2.980e-4` | `1.381e-3` | `44` | `37/2/263/127` | `K4_mixed` | `2071.12/2071.12/3087.44` | `-261` | `7290772` |
+| mini-protein | order3 theta0.40 corrected polynomial | `global` | `ok` | `2.948e-4` | `1.414e-3` | `58` | `51/2/342/153` | `K4_mixed` | `2071.12/2071.12/3087.44` | `-340` | `7290772` |
+| mini-protein | order4 theta0.60 corrected polynomial | `global` | `ok` | `7.274e-5` | `4.904e-4` | `0` | `0/0/14/0` | `K3_phin` | `2588.90/2588.90/4631.17` | `-14` | `7290772` |
+| mini-protein | order4 theta0.60 corrected polynomial | `k3-hot` | `ok` | `7.072e-5` | `4.904e-4` | `0` | `0/0/18/0` | `K3_phin` | `2588.90/2588.90/4631.17` | `-18` | `7290772` |
+| charged-peptide | order3 theta0.50 corrected polynomial | `global` | `ok` | `0` | `0` | `0` | `0/0/0/0` | `none` | `2404.50/2404.50/3584.42` | `0` | `5021476` |
+| charged-peptide | order4 theta0.60 corrected polynomial | `global` | `ok` | `0` | `0` | `0` | `0/0/0/0` | `none` | `3005.62/3005.62/5376.62` | `0` | `5021476` |
+| compact-mini-protein | order3 theta0.50 corrected polynomial | `global` | `ok` | `2.375e-4` | `2.643e-3` | `43` | `0/47/217/76` | `K3_phin` | `2491.19/2491.19/3713.65` | `-170` | `17098706` |
+| compact-mini-protein | order3 theta0.45 corrected polynomial | `global` | `ok` | `2.441e-4` | `2.552e-3` | `55` | `0/62/273/95` | `K3_phin` | `1991.24/1991.24/2968.36` | `-211` | `17098706` |
+| compact-mini-protein | order3 theta0.40 corrected polynomial | `global` | `ok` | `2.416e-4` | `2.511e-3` | `63` | `0/75/308/119` | `K3_phin` | `1991.24/1991.24/2968.36` | `-233` | `17098706` |
+| compact-mini-protein | order4 theta0.60 corrected polynomial | `global` | `ok` | `4.112e-5` | `5.587e-4` | `0` | `0/8/18/36` | `K3_phin` | `3113.99/3113.99/5570.48` | `-10` | `17098706` |
+| compact-mini-protein | order4 theta0.60 corrected polynomial | `k3-hot` | `ok` | `3.789e-5` | `4.824e-4` | `0` | `0/9/17/36` | `K3_phin` | `3113.99/3113.99/5570.48` | `-8` | `17098706` |
+
+Stage 3Q interpretation:
+
+- The corrected K2/K3 amp now exceeds Stage 3O by design and by smoke
+  evidence, so the Stage 3P formula bug is fixed.
+- Corrected order3 theta `0.45..0.50` does not rescue medium accuracy:
+  mean stays around `2.4e-4..3.0e-4` on `mini-protein` and
+  `compact-mini-protein`, with many accepted K3 misses.
+- Corrected order4 theta `0.60` remains the best accuracy branch:
+  - `charged-peptide` passes mean and accepted-missed gates;
+  - `compact-mini-protein` passes mean (`~3.8e-5..4.1e-5`) but still has
+    accepted K2/K3/K4 misses;
+  - `mini-protein` still fails the mean gate (`~7.1e-5`) and accepted K3
+    misses remain nonzero.
+- `k3-hot` works on a selective synthetic probe, but on the real medium
+  fixtures it does not reduce leaf work or clear accepted misses; K3 is hot in
+  the same regions that drive the candidate splits.
+- No Stage 3Q row passes full medium gates across all three fixtures.
+- Barnase 120s was not run because the mandatory full-medium candidate did
+  not pass first. Barnase 300s was not run.
+
+Stage 3Q decision:
+
+- Keep production defaults unchanged.
+- Keep corrected `polynomial-eps` and `convergence-split-policy` hidden and
+  experimental.
+- Do not promote and do not run Barnase yet.
+- Next branch should target accepted-far K3 misses directly on the order4
+  path. Recommended next work:
+  1. add an accepted-far retry/direct-descent probe for sampled high-error K3
+     candidates, gated by accepted-only audit evidence;
+  2. test a K3-specific estimator score that is stronger than corrected
+     polynomial only when K3 accepted misses are predicted, without forcing
+     K4-only nodes into the same split policy;
+  3. keep p99 report-only, but require mean `<5e-5` and accepted-missed `0`
+     before Barnase 120s.
+
+## Stage 3R/9K - TABI Accepted-Far K3 Structural-Miss Guard
+
+Stage 3R implementation:
+
+- Added hidden accepted-miss diagnostics:
+  `-pbe-tabi-accepted-miss-diagnostics=off|summary|sampled-detail`, default
+  `off`.
+  - Summary mode reports per-channel accepted-miss counts, panels, rho
+    min/mean/max, tail-ratio mean/max, estimated-error mean/max, and worst
+    channel.
+  - Sampled-detail mode writes `pbe_tabi_accepted_miss_diagnostics.csv` with
+    target index, source node, channel, rho, estimated error, and measured
+    direct-vs-Taylor relative error for sampled accepted misses.
+- Added deterministic K3 accepted-rho cap:
+  `-pbe-tabi-convergence-k3-accepted-rho-cap=<0.0..2.0>`, default `0.0`.
+  It is active on the JCP on-the-fly `channel-tail-eps` path and descends
+  accepted far candidates with rho above the cap before Taylor evaluation.
+- Added true-surface MAC diagnostic:
+  `-pbe-tabi-mac-distance-policy=center|surface-margin`, default `center`,
+  plus `-pbe-tabi-mac-surface-margin-factor=<0.0..0.75>`, default `0.25`.
+  `surface-margin` evaluates rho using `distance - factor*node.radius`, clamped
+  positive, and reports margin rejects/panels.
+- Plumbed all new fields through TABI options, tree workspace, stats,
+  timing/profile CSVs, longrun progress, medium matrix, and Barnase truth
+  matrix.
+- Extended the medium matrix with `-IncludeStage3RRows`:
+  baseline Stage 3Q order4 theta `0.60`, K3 cap `0.58/0.57/0.55/0.52`,
+  surface-margin `0.25`, and combined cap+surface-margin diagnostic.
+- Added focused smokes:
+  - `test/pbe_tabi_k3_accepted_rho_cap_smoke.ps1`;
+  - `test/pbe_tabi_surface_margin_mac_smoke.ps1`.
+
+Measured Stage 3R smoke evidence:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- K3 accepted-rho cap smoke: PASS.
+  - synthetic high-rho accepted far case: baseline far nodes `249`;
+    cap `0.58` produced `53` K3 rho-cap rejects over `728` panels and
+    increased leaf/direct work;
+  - benign low-rho case retained `196` far-node interactions and had no cap
+    rejects.
+- Surface-margin MAC smoke: PASS.
+  - hollow/elongated synthetic case: center far nodes `228`, surface-margin
+    far nodes `193`, surface-margin rejects `73`;
+  - benign/far case retained `216` far-node interactions.
+- Adjacent Stage 3Q/3O smokes after Stage 3R: PASS.
+  - polynomial channel estimator smoke;
+  - selective K3 split smoke;
+  - channel missed semantics smoke;
+  - topdown MAC audit smoke;
+  - treecode accuracy smoke;
+  - tree builder smoke;
+  - TABI profile smoke;
+  - memory profile smoke;
+  - sampled true-residual smoke.
+
+Measured Stage 3R full medium matrix:
+
+- Command:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3QRows -IncludeStage3RRows -CaseTimeoutSeconds 180 -AllowFailedStatus`.
+- Output:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+| fixture | Stage 3R row | status | expansion mean | K1/K2/K3/K4 accepted missed | K3 accepted-miss rho min/mean/max | K3 cap rejects | surface rejects | leaf/far work per matvec |
+| --- | --- | --- | ---: | --- | --- | ---: | ---: | --- |
+| mini-protein | order4 theta0.60 polynomial baseline | `ok` | `7.308e-5` | `0/0/17/1` | `~0.246/0.247/0.249` | `0` | `0` | `7290772/498` |
+| mini-protein | K3 rho cap `0.57` | `ok` | `6.844e-5` | `0/0/15/0` | `~0.246/0.247/0.249` | `0` | `0` | `7290772/498` |
+| mini-protein | surface-margin `0.25` | `ok` | `2.883e-5` | `0/0/1/0` | sampled K3 miss near `0.245` | `0` | `37170` | `7335697/173` |
+| charged-peptide | any Stage 3R row | `ok` | `0` | `0/0/0/0` | none | `0` | up to `35940` | `5021476/0` |
+| compact-mini-protein | order4 theta0.60 polynomial baseline | `ok` | `4.173e-5` | `0/7/17/36` | low-rho structural K3 misses | `0` | `0` | `17098706/1474` |
+| compact-mini-protein | K3 rho cap `0.55` | `ok` | `3.858e-5` | `0/7/14/37` | low-rho structural K3 misses | `0` | `0` | `17098706/1474` |
+| compact-mini-protein | surface-margin `0.25` | `ok` | `2.448e-5` | `0/3/0/0` | none | `0` | `197100` | `17228993/596` |
+
+Stage 3R interpretation:
+
+- The deterministic K3 cap implementation works on the synthetic high-rho
+  smoke, but the real `mini-protein` accepted K3 misses are not high-rho
+  `0.52..0.58` misses. The accepted-miss diagnostic shows them at about
+  `rho ~= 0.245..0.249`, so the comment's proposed high-rho cap does not touch
+  the actual medium blocker.
+- `surface-margin` is the strongest Stage 3R signal:
+  - `mini-protein` mean drops below the `<5e-5` gate (`2.883e-5`) and K3
+    accepted misses drop from `17` to `1`;
+  - `compact-mini-protein` mean drops to `2.448e-5` and K3/K4 accepted misses
+    drop to `0`, but K2 still has `3` accepted misses;
+  - leaf work rises only slightly in these rows, while far-node work drops
+    sharply.
+- No Stage 3R row passes full medium gates across all three fixtures because
+  accepted-missed is still nonzero on `mini-protein` and/or
+  `compact-mini-protein`.
+- Barnase 120s was not run because the mandatory full-medium candidate did not
+  pass. Barnase 300s was not run.
+
+Stage 3R decision:
+
+- Keep production defaults unchanged.
+- Keep accepted-miss diagnostics, K3 rho cap, and surface-margin MAC hidden and
+  experimental.
+- Do not promote and do not run Barnase yet.
+- The next branch should target the structural low-rho misses now exposed by
+  the accepted-miss diagnostics:
+  1. add a lower accepted-rho diagnostic around the observed K3 band
+     (`0.24..0.26`) only as a lower-bound probe, because `0.52..0.58` is not
+     relevant to the current medium misses;
+  2. generalize the accepted-rho or surface-margin guard to K2/K4 only where
+     accepted-only diagnostics show residual misses, rather than applying a
+     global cap;
+  3. consider a decoupled phi/phin tail estimator or true-surface distance
+     score that catches low-rho structural misses without relying on blind
+     amplitude increases;
+  4. require mean `<5e-5` and global/per-channel accepted-missed `0` on all
+     three medium fixtures before Barnase 120s.
+
+## Stage 3S/9L - TABI Absolute-Floor Miss Semantics and Surface-Margin Candidate
+
+Stage 3S implementation:
+
+- Added hidden audit control:
+  `-pbe-tabi-accepted-miss-absolute-floor=<0.0..1e-4>`, default `1e-7`.
+- Updated far-expansion truth gates so high-error `missed`, `caught`, and
+  `caught_by_split` require both:
+  - relative error above `-pbe-tabi-convergence-estimator-error-cap`;
+  - absolute JCP channel error above the accepted-miss absolute floor.
+- Kept relative mean/p95/p99 over all sampled expansion-audit pairs. Only
+  truth counters (`missed/caught/caught_by_split`) are floor-filtered.
+- Added phantom high-error counters:
+  - global `tabi_convergence_estimator_phantom_high_error_count` and
+    `tabi_convergence_estimator_phantom_high_error_abs_max`;
+  - per-channel `tabi_phantom_high_error_k{1..4}_count` and
+    `tabi_phantom_high_error_k{1..4}_abs_max`.
+- Extended sampled accepted-miss diagnostics with `abs_error,is_phantom` in
+  `pbe_tabi_accepted_miss_diagnostics.csv`.
+- Plumbed the floor and phantom counters through timing/profile CSVs, longrun
+  progress, the medium matrix, and the Barnase truth matrix.
+- Added `test/pbe_tabi_absolute_floor_miss_smoke.ps1`.
+- Extended `test/pbe_tabi_topdown_physical_gap_matrix.ps1` with
+  `-IncludeStage3SRows`:
+  - candidate: order4 theta `0.60`, `surface-margin=0.25`,
+    `polynomial-eps`, accepted-only, floor `1e-7`;
+  - sensitivity: same row with floor `1e-8`;
+  - baseline comparison: order4 theta `0.60`, center-distance,
+    `polynomial-eps`, accepted-only, floor `1e-7`.
+- Hardened the Barnase truth harness for Stage 3S evidence:
+  - added the accepted-miss absolute floor to CLI/csv output;
+  - shortened long run-directory names with a SHA1 suffix so deep Windows paths
+    do not fail before the solver starts.
+
+Measured Stage 3S smoke/build evidence:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Absolute-floor miss smoke: PASS.
+  - phantom accepted high-error case: `314` phantom high errors, `0` missed;
+  - real accepted high-error case: `314` missed;
+  - split real high-error case: `309` caught by split;
+  - split phantom case did not increment `caught_by_split`.
+- Adjacent focused gates after Stage 3S: PASS.
+  - channel missed semantics smoke;
+  - K3 accepted-rho cap smoke;
+  - surface-margin MAC smoke;
+  - polynomial channel estimator smoke;
+  - topdown MAC audit;
+  - treecode accuracy;
+  - tree builder smoke.
+
+Measured Stage 3S medium matrix:
+
+- Command:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3RRows -IncludeStage3SRows -CaseTimeoutSeconds 180 -AllowFailedStatus`.
+- Output:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+| fixture | Stage 3S row | status | matvec rel | sampled residual | expansion mean | p99 | accepted missed K1/K2/K3/K4 | phantom global | leaf work |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |
+| mini-protein | surface-margin floor `1e-7` | `ok` | `2.52e-8` | `9.76e-5` | `3.22e-5` | `1.21e-4` | `0/0/0/0` | `35` | `7335697` |
+| mini-protein | surface-margin floor `1e-8` | `ok` | `2.52e-8` | `9.76e-5` | `2.77e-5` | `1.19e-4` | `0/0/0/0` | `0` | `7335697` |
+| mini-protein | center floor `1e-7` | `ok` | `8.92e-8` | `9.76e-5` | `6.97e-5` | `4.90e-4` | `0/0/0/0` | `28` | `7290772` |
+| charged-peptide | surface-margin floor `1e-7` | `ok` | `5.29e-16` | `1.77e-5` | `0` | `0` | `0/0/0/0` | `13` | `5021476` |
+| charged-peptide | surface-margin floor `1e-8` | `ok` | `5.29e-16` | `1.77e-5` | `0` | `0` | `0/0/0/0` | `0` | `5021476` |
+| compact-mini-protein | surface-margin floor `1e-7` | `ok` | `2.87e-8` | `5.31e-5` | `2.54e-5` | `3.51e-4` | `0/0/0/0` | `40` | `17228993` |
+| compact-mini-protein | surface-margin floor `1e-8` | `ok` | `2.87e-8` | `5.31e-5` | `2.69e-5` | `3.51e-4` | `0/0/0/0` | `0` | `17228993` |
+| compact-mini-protein | center floor `1e-7` | `ok` | `6.96e-8` | `5.31e-5` | `3.74e-5` | `4.82e-4` | `0/0/0/0` | `24` | `17098706` |
+
+Stage 3S medium interpretation:
+
+- The comment was correct: the remaining Stage 3R accepted-only misses were
+  phantom high-relative-error samples with tiny absolute error. Adding the
+  absolute floor moves these into explicit phantom counters and removes them
+  from `missed/caught/caught_by_split` truth gates.
+- The Stage 3S surface-margin candidate passes all three medium fixtures:
+  energy drift `<5e-3`, matvec rel `<2.5e-3`, sampled residual within `2x`
+  grouped-morton, expansion mean `<5e-5`, and accepted-missed `0`.
+- Floor sensitivity is stable: both `1e-7` and `1e-8` pass medium gates.
+  The default/candidate floor remains `1e-7` because it isolates negligible
+  absolute perturbations while keeping the stricter `1e-8` row available as
+  a regression comparison.
+
+Measured Barnase Stage 3S confirmation:
+
+- 120s command:
+  `test/pbe_tabi_barnase_truth_matrix.ps1 -TreeProbeOnly -SkipGridReference -CaseTimeoutSeconds 120 ... -TreeLeafSizes 128 -TreeOpeningThetas 0.60 -TreeTaylorOrders 4 -NodeBoundsModes tight-aabb -TreeBuilders topdown-aabb -MacSafety physical-gap -ExpansionCenters area-centroid -FragmentationSafety split -NearIntegration duffy_adaptive -QuadBuffer adaptive -MomentAudit sampled -ConvergenceAudit sampled -ConvergenceSafety split -ConvergenceEstimator hybrid -ConvergenceCalibration consecutive-aspect -ConvergenceDielectricAmp on -ConvergenceEstimatorModels channel-tail-eps -ConvergenceChannelCalibrations polynomial-eps -ChannelMissedSemantics accepted-only -AcceptedMissDiagnostics summary -AcceptedMissAbsoluteFloor 1e-7 -MacDistancePolicy surface-margin -MacSurfaceMarginFactor 0.25 -ExpansionAudit sampled -ExpansionAuditChannels summary -PreSolverProgress`.
+- Output:
+  `test/tmp/b3s_abs/pbe_tabi_barnase_truth_matrix.csv`.
+
+| timeout | status | progress | panels | matvecs | sampled residual | expansion mean | p99 | accepted missed K1/K2/K3/K4 | phantom global | leaf/far work |
+| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- |
+| 120s | `timeout` | `gmres_iter`, prepare `solver_enter` | `15129` | `54` | `1.4e-5` | `3.2e-5` | `3.49e-4` | `0/0/0/0` | `483` | `225974749/NA` |
+
+- 120s interpretation: timeout-safe evidence is usable. Solver progress is
+  present, sampled residual is already below `1e-4`, expansion mean is below
+  `5e-5`, and accepted-missed is `0`, so the Stage 3S candidate was eligible
+  for 300s confirmation.
+
+- 300s command: same candidate/settings with `-CaseTimeoutSeconds 300`.
+- Output:
+  `test/tmp/b3s_300/pbe_tabi_barnase_truth_matrix.csv`.
+
+| timeout | status | decision | panels | gmres iter | matvecs | final residual | sampled residual | expansion mean | p99 | accepted missed K1/K2/K3/K4 | phantom global | leaf/far work |
+| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- |
+| 300s | `ok` | `safe_treecode_candidate` | `15129` | `64` | `81` | `7.34e-9` | `6.90e-9` | `3.72e-5` | `5.72e-4` | `0/0/0/0` | `954` | `225974749/12770` |
+
+Stage 3S decision:
+
+- The hidden production candidate is now evidence-backed:
+  - `taylor_order=4`;
+  - `mac-distance-policy=surface-margin`;
+  - `mac-surface-margin-factor=0.25`;
+  - `convergence-channel-calibration=polynomial-eps`;
+  - `channel-missed-semantics=accepted-only`;
+  - `accepted-miss-absolute-floor=1e-7`;
+  - `physical-gap`, `area-centroid`, and `fragmentation-safety=split`.
+- Medium + Barnase 120s + Barnase 300s gates pass. P99 remains report-only as
+  planned; the Barnase p99 spike `~5.72e-4` did not prevent sampled/full
+  residual from converging.
+- Keep direct TABI, grid backend, and DelPhi/pyDelPhi oracle-only policy
+  unchanged.
+- Production defaults remain unchanged in this implementation patch; the next
+  small branch can flip the experimental JCP treecode default/preset to the
+  Stage 3S candidate if desired, backed by the evidence above.
+
+## Stage 3T/9M - TABI Phantom-Floor Promotion Readiness Audit
+
+Stage 3T implementation:
+
+- Extended the medium and Barnase truth matrix CSV summaries with
+  promotion-safety derived columns:
+  - `phi_norm`, `phin_norm`, `source_norm_s1`, `source_norm_s2`;
+  - `phantom_global_abs_bound`;
+  - `phantom_k{1..4}_abs_bound`;
+  - `phantom_k3_abs_over_phi_norm`;
+  - `phantom_k3_abs_over_phin_norm`.
+- Added Barnase per-row promotion-readiness fields:
+  - `promotion_readiness`;
+  - `promotion_readiness_reason`.
+- The Barnase promotion-readiness gate requires:
+  - completed `status=ok`;
+  - residual `<=1e-4`;
+  - `far_expansion_rel_error_mean < 5e-5`;
+  - global and per-channel accepted-missed counters `0`;
+  - `phantom_k3_abs_over_phi_norm < 1e-4`;
+  - `phantom_k3_abs_bound < 1e-2`.
+- Added `-IncludeStage3TRows` to
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1`. The Stage 3T row uses the
+  same hidden candidate as Stage 3S:
+  order 4, theta `0.60`, `surface-margin=0.25`, `physical-gap`,
+  `area-centroid`, `fragmentation-safety=split`, `channel-tail-eps`,
+  `polynomial-eps`, `accepted-only`, absolute floor `1e-7`.
+
+Barnase 300s promotion-readiness evidence from the existing Stage 3S row:
+
+| field | value |
+| --- | ---: |
+| `phi_norm` | `0.001308301853` |
+| `phin_norm` | `0.01264949228` |
+| `phantom_high_error_k3_count` | `15696` |
+| `phantom_high_error_k3_abs_max` | `9.998896736e-8` |
+| `phantom_k3_abs_bound` | `0.0015694268` |
+| `phantom_k3_abs_over_phi_norm` | `7.6427e-5` |
+| `phantom_k3_abs_over_phin_norm` | `7.9046e-6` |
+| `far_expansion_rel_error_mean` | `3.7175e-5` |
+| accepted missed K1/K2/K3/K4 | `0/0/0/0` |
+| final residual | `7.3381e-9` |
+
+Measured Stage 3T verification:
+
+- PowerShell parser check for the updated medium and Barnase harnesses: PASS.
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS
+  (`Nothing to be done for 'all'`).
+- Focused smokes: PASS.
+  - `test/pbe_tabi_absolute_floor_miss_smoke.ps1`;
+  - `test/pbe_tabi_channel_missed_semantics_smoke.ps1`;
+  - `test/pbe_tabi_surface_margin_mac_smoke.ps1`;
+  - `test/pbe_tabi_polynomial_channel_estimator_smoke.ps1`;
+  - `test/pbe_tabi_treecode_accuracy.ps1`;
+  - `test/pbe_tabi_tree_builder_smoke.ps1`;
+  - `test/pbe_tabi_topdown_mac_audit.ps1`.
+- Stage 3S/3T full medium matrix:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3SRows -IncludeStage3TRows -CaseTimeoutSeconds 180 -AllowFailedStatus`: PASS.
+
+| fixture | Stage 3T status | classification | `phi_norm` | `phantom_k3_abs_bound` | `phantom_k3_abs_over_phi_norm` | expansion mean | accepted missed K1/K2/K3/K4 |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| mini-protein | `ok` | `convergence_mean_gate_medium_pass` | `4.975e-4` | `1.3387e-4` | `2.0080e-4` | `2.555e-5` | `0/0/0/0` |
+| charged-peptide | `ok` | `convergence_mean_gate_followup` | `4.348e-4` | `2.1720e-4` | `2.2989e-4` | `0` | `0/0/0/0` |
+| compact-mini-protein | `ok` | `convergence_mean_gate_medium_pass` | `7.028e-4` | `3.4566e-4` | `1.4215e-4` | `2.601e-5` | `0/0/0/0` |
+
+  Charged-peptide remains `convergence_mean_gate_followup` only because no
+  expansion-audit mean-gate pair is emitted there; energy/residual/accepted-miss
+  gates remain clean as in Stage 3S.
+
+Stage 3T decision:
+
+- The phantom floor is now validated against Barnase 300s norm scale:
+  `phantom_k3_abs_over_phi_norm` is below `1e-4`, and the conservative K3
+  phantom bound is below `0.01`.
+- The Stage 3S hidden candidate should be considered
+  `promotion_readiness=pass` once the updated Barnase harness is re-run or the
+  existing row is post-processed with the new columns.
+- Production defaults remain unchanged in Stage 3T. The next branch may either
+  promote the experimental JCP treecode preset/default to the evidence-backed
+  candidate, or keep it hidden and run broader regression timing first.
+
+## Stage 3U/9N - TABI Promotion-Readiness Regression Freeze
+
+Stage 3U implementation:
+
+- Kept production defaults unchanged. Stage 3U does not change public help,
+  manual behavior, direct TABI, grid backend, or DelPhi/pyDelPhi oracle-only
+  policy.
+- Added `-IncludeStage3URows` to
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1`:
+  - promotion-freeze row: Stage 3T candidate with cluster `off`;
+  - timing-only row: same candidate with `leaf-pair-balanced`, batch size `4`;
+  - floor-sensitivity row: same candidate with absolute floor `1e-8`.
+- Added `test/pbe_tabi_promotion_readiness_summary.ps1`.
+  The script reads the current medium matrix CSV plus the existing Barnase
+  300s CSV, recomputes missing derived Barnase metrics from `run_dir` timing
+  output when needed, and writes
+  `pbe_tabi_promotion_readiness_summary.csv`.
+- Promotion-readiness summary gates:
+  - medium candidate must pass status, matvec, energy, residual-vs-grouped,
+    far-expansion mean, and accepted-missed checks on all three fixtures;
+  - Barnase 300s must pass status, residual `<=1e-4`, expansion mean `<5e-5`,
+    accepted-missed `0`, `phantom_k3_abs_over_phi_norm <1e-4`, and
+    `phantom_k3_abs_bound <1e-2`;
+  - `production_default_changed` is explicitly reported as `false`.
+
+Measured Stage 3U verification:
+
+- PowerShell parser check for the updated medium, Barnase, and promotion
+  summary harnesses: PASS.
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS
+  (`Nothing to be done for 'all'`).
+- Focused TABI gates: PASS.
+  - `test/pbe_tabi_absolute_floor_miss_smoke.ps1`;
+  - `test/pbe_tabi_channel_missed_semantics_smoke.ps1`;
+  - `test/pbe_tabi_surface_margin_mac_smoke.ps1`;
+  - `test/pbe_tabi_polynomial_channel_estimator_smoke.ps1`;
+  - `test/pbe_tabi_treecode_accuracy.ps1`;
+  - `test/pbe_tabi_tree_builder_smoke.ps1`;
+  - `test/pbe_tabi_topdown_mac_audit.ps1`.
+- Stage 3S/3T/3U full medium matrix:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3SRows -IncludeStage3TRows -IncludeStage3URows -CaseTimeoutSeconds 180 -AllowFailedStatus`: PASS.
+
+| fixture | Stage 3U role | cluster | seconds | sampled residual | expansion mean | accepted missed | classification |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| mini-protein | promotion freeze | `off` | `3.78` | `9.76e-5` | `2.94e-5` | `0` | `convergence_mean_gate_medium_pass` |
+| charged-peptide | promotion freeze | `off` | `4.40` | `1.77e-5` | `0` | `0` | `convergence_mean_gate_followup` |
+| compact-mini-protein | promotion freeze | `off` | `16.30` | `5.31e-5` | `2.53e-5` | `0` | `convergence_mean_gate_medium_pass` |
+| mini-protein | timing report | `leaf-pair-balanced` | `4.16` | `9.76e-5` | `3.16e-5` | `0` | report-only |
+| charged-peptide | timing report | `leaf-pair-balanced` | `4.45` | `1.77e-5` | `0` | `0` | report-only |
+| compact-mini-protein | timing report | `leaf-pair-balanced` | `14.47` | `5.31e-5` | `2.86e-5` | `0` | report-only |
+
+- Promotion summary:
+  `test/pbe_tabi_promotion_readiness_summary.ps1 -MediumCsv test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv -BarnaseCsv test/tmp/b3s_300/pbe_tabi_barnase_truth_matrix.csv`: PASS.
+- Output:
+  `test/tmp/pbe_tabi_promotion_readiness_summary/pbe_tabi_promotion_readiness_summary.csv`.
+
+| scope | fixture | status | residual | expansion mean | accepted missed | K3 phantom bound | K3 abs / phi norm | overall |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| medium | mini-protein | `ok` | `9.76e-5` | `2.94e-5` | `0` | `1.33e-4` | report-only `2.01e-4` | `True` |
+| medium | charged-peptide | `ok` | `1.77e-5` | `0` | `0` | `2.16e-4` | report-only `2.30e-4` | `True` |
+| medium | compact-mini-protein | `ok` | `5.31e-5` | `2.53e-5` | `0` | `3.44e-4` | report-only `1.42e-4` | `True` |
+| Barnase 300s | barnase | `ok` | `7.34e-9` | `3.72e-5` | `0` | `1.57e-3` | `7.64e-5` | `True` |
+| overall | all | `ok` | `NA` | `NA` | `NA` | `NA` | `NA` | `True` |
+
+- Regression freeze gates: PASS.
+  - `test/pbe_tabi_gmres_true_residual_smoke.ps1`;
+  - `test/pbe_tabi_sampled_true_residual_smoke.ps1`;
+  - `test/pbe_tabi_profile_smoke.ps1`;
+  - `test/pbe_memory_profile_smoke.ps1`;
+  - `test/pbe_clean_room_audit.ps1`;
+  - `test/pbe_regression.ps1`;
+  - `test/pbsa_smoke.ps1`;
+  - `test/sasa_surface_smoke.ps1`.
+- `git diff --check` on the Stage 3U touched files: PASS; only existing
+  CRLF normalization warnings were reported.
+
+Stage 3U decision:
+
+- Stage 3U freezes the candidate as a hidden promotion-ready package:
+  summary `overall_pass=True`, Barnase 300s norm gate passes, and
+  `production_default_changed=false`.
+- Production defaults remain unchanged.
+- `leaf-pair-balanced` remains timing-only: it improves the compact-mini row in
+  this run but is slower on the smaller medium fixtures and is not part of the
+  promotion candidate.
+- The next branch may promote an explicit experimental preset/default for the
+  JCP treecode path, backed by Stage 3S/3T/3U evidence, or continue with a
+  broader timing campaign if runtime predictability is preferred.
+
+## Stage 3V/9O - TABI Experimental Preset and Grid-vs-TABI Compare Gate
+
+Stage 3V implementation:
+
+- Added hidden opt-in preset `-pbe-tabi-tree-preset=off|stage3u-safe`.
+  Production defaults remain unchanged; default preset is `off`.
+- The preset is applied at the CLI position where it appears. TABI flags before
+  the preset are overwritten by the preset; TABI flags after the preset override
+  it. This keeps the preset convenient while preserving explicit CLI precedence.
+- `stage3u-safe` expands to the Stage 3U promotion-freeze candidate:
+  `sum=treecode`, `formulation=jcp2013-treecode`, `taylor_order=4`,
+  `theta=0.60`, `tree_builder=topdown-aabb`, `node_bounds=tight-aabb`,
+  `mac_safety=physical-gap`, `expansion_center=area-centroid`,
+  `fragmentation_safety=split`, `mac_distance_policy=surface-margin`,
+  surface margin factor `0.25`, `convergence_estimator_model=channel-tail-eps`,
+  `convergence_channel_calibration=polynomial-eps`,
+  `channel_missed_semantics=accepted-only`,
+  `accepted_miss_absolute_floor=1e-7`, and `cluster_policy=off`.
+- The preset also freezes the Stage 3U validation context:
+  `leaf=128`, `near=duffy_adaptive`, `quad_buffer=adaptive`,
+  `interaction_mode=onthefly`, `precond=diagonal`, sampled moment,
+  convergence, and expansion/channel audits.
+- Added `tabi_tree_preset` to `pbe_timing.csv` and `tree_preset` to
+  `pbe_tabi_profile.csv`; the console/PBE summary also reports the preset.
+- Added `test/pbe_tabi_stage3u_preset_smoke.ps1` to assert that the preset
+  writes the expected profile/timing fields and expands to the Stage 3U safe
+  settings.
+- Extended `test/pbe_tabi_vs_grid_compare.ps1`:
+  - new `-UseStage3USafePreset` switch;
+  - new `-Threads` override, defaulting to `8` when the preset is used;
+  - robust absolute `WorkRoot` handling so relative work roots still produce
+    valid `arg.in` paths after the harness changes directory;
+  - compare columns for `time_ratio_tabi_over_grid`,
+    `energy_delta_tabi_minus_grid`, `energy_delta_rel_vs_grid`,
+    `peak_memory_ratio_tabi_over_grid`, `rss_ratio_tabi_over_grid`,
+    `tabi_residual`, `tabi_far_expansion_mean`, and
+    `tabi_accepted_missed_total`.
+
+Measured Stage 3V verification:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Parser checks for the updated preset and compare harnesses: PASS.
+- Focused TABI gates: PASS.
+  - `test/pbe_tabi_stage3u_preset_smoke.ps1`;
+  - `test/pbe_tabi_absolute_floor_miss_smoke.ps1`;
+  - `test/pbe_tabi_channel_missed_semantics_smoke.ps1`;
+  - `test/pbe_tabi_surface_margin_mac_smoke.ps1`;
+  - `test/pbe_tabi_polynomial_channel_estimator_smoke.ps1`;
+  - `test/pbe_tabi_tree_builder_smoke.ps1`;
+  - `test/pbe_tabi_treecode_accuracy.ps1`;
+  - `test/pbe_tabi_topdown_mac_audit.ps1`.
+- Promotion summary still passes after adding the preset:
+  `test/pbe_tabi_promotion_readiness_summary.ps1 -MediumCsv test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv -BarnaseCsv test/tmp/b3s_300/pbe_tabi_barnase_truth_matrix.csv`: PASS,
+  `overall_pass=True`, `production_default_changed=false`.
+- `git diff --check` on Stage 3V touched files: PASS; only existing CRLF
+  normalization warnings were reported.
+
+Stage 3V medium grid-vs-TABI compare:
+
+Command:
+
+`test/pbe_tabi_vs_grid_compare.ps1 -Fixtures mini-protein,charged-peptide,compact-mini-protein -UseStage3USafePreset -Mode perf`
+
+Output:
+
+`test/tmp/pbe_tabi_vs_grid_compare/pbe_tabi_vs_grid_compare.csv`
+
+| fixture | backend | seconds | energy kJ/mol | preset | time ratio TABI/grid | energy delta TABI-grid | energy rel delta | peak memory ratio | RSS ratio | TABI residual | expansion mean | accepted missed |
+| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| mini-protein | grid | `0.00453` | `-916.3506` | `grid` | `1` | `0` | `0` | `1` | `1` | `NA` | `NA` | `NA` |
+| mini-protein | TABI | `5.274` | `-1198.3724` | `stage3u-safe` | `1163.63` | `-282.0218` | `0.3078` | `1.386` | `1.106` | `0` | `3.05e-5` | `0` |
+| charged-peptide | grid | `0.00411` | `-529.2189` | `grid` | `1` | `0` | `0` | `1` | `1` | `NA` | `NA` | `NA` |
+| charged-peptide | TABI | `5.355` | `-843.7091` | `stage3u-safe` | `1301.76` | `-314.4902` | `0.5943` | `1.316` | `1.116` | `0` | `0` | `0` |
+| compact-mini-protein | grid | `0.00376` | `-1000.9248` | `grid` | `1` | `0` | `0` | `1` | `1` | `NA` | `NA` | `NA` |
+| compact-mini-protein | TABI | `15.233` | `-1418.3443` | `stage3u-safe` | `4050.92` | `-417.4195` | `0.4170` | `1.564` | `1.124` | `9.54e-7` | `3.18e-5` | `0` |
+
+Stage 3V Barnase compare note:
+
+- Optional Barnase salt0 compare was attempted with
+  `-UseStage3USafePreset -BarnaseTabiSurfacePoints 8`.
+- After fixing relative work-root handling, the Barnase grid side completed and
+  wrote `pbe_timing.csv` in about `2.23s`.
+- The full grid-vs-TABI Barnase compare did not emit the final compare summary
+  within the 360s turn budget because the TABI side was still running. This is
+  not a promotion gate failure; Stage 3V only requires the preset and medium
+  compare gate. It does confirm that protein-scale time remains a performance
+  branch, not a correctness branch.
+
+Stage 3V decision:
+
+- `stage3u-safe` is now a hidden experimental preset for repeatable evidence
+  runs. It is not a production default.
+- The medium compare gate demonstrates the current tradeoff clearly:
+  Stage 3U safe TABI passes its internal residual/expansion/missed diagnostics,
+  but grid is still orders of magnitude faster on small fixtures and remains
+  the fastest default path.
+- The reported medium energies are backend outputs for comparison only; they do
+  not replace direct-vs-treecode, residual, or Barnase promotion-readiness gates.
+- `leaf-pair-balanced` remains timing-only and is not part of `stage3u-safe`.
+- Recommended Stage 3W/9P: performance branch for the hidden preset, focused on
+  protein-scale throughput. Start with Barnase timeout-safe compare/progress and
+  then optimize leaf/matvec throughput only after the preset path keeps the
+  Stage 3U correctness counters clean.
+
+## Stage 3W/9P - TABI Stage3U Performance Branch
+
+Stage 3W implementation:
+
+- Added hidden preset `-pbe-tabi-tree-preset=stage3u-perf`; production default
+  remains `off` and `stage3u-safe` is unchanged.
+- `stage3u-perf` keeps the Stage 3U math/safety envelope:
+  order 4, theta `0.60`, `topdown-aabb`, `tight-aabb`, `physical-gap`,
+  `area-centroid`, `fragmentation-safety=split`, `surface-margin=0.25`,
+  `channel-tail-eps`, `polynomial-eps`, `accepted-only`, and absolute floor
+  `1e-7`.
+- The perf preset turns report-only audits off by default and enables the
+  performance path: `leaf-panel-kernel=tile-avx2`,
+  `cluster-policy=leaf-pair-balanced`, `leaf-pair-kernel=target-avx2`,
+  target batch size `4`, min source panels `64`, min targets `4`.
+- Added hidden `-pbe-tabi-leaf-pair-kernel=auto|scalar|target-avx2`. `auto`
+  selects `target-avx2` only for AVX2-capable JCP on-the-fly leaf-pair batches
+  with target batch size `4`; unsupported or unclean paths fall back to scalar.
+- Implemented `target-avx2` for clean JCP leaf-pair batches, vectorized across
+  four target panels per source panel. The fast path keeps target-lane
+  accumulators in AVX2 registers over the source span and stores once per
+  target batch.
+- Added timing/profile/progress counters:
+  `tabi_leaf_pair_batch_kernel`,
+  `tabi_leaf_pair_batch_vectorized_sources`,
+  `tabi_leaf_pair_batch_vector_lanes`, and
+  `tabi_leaf_pair_batch_pairs_per_second`.
+- Extended `test/pbe_tabi_vs_grid_compare.ps1` with
+  `-UseStage3UPerfPreset`, timeout/allow-timeout handling, and partial TABI
+  progress fields from `pbe_tabi_longrun_progress.csv` /
+  `pbe_tabi_prepare_progress.csv`.
+- Extended `test/pbe_tabi_topdown_physical_gap_matrix.ps1` with
+  `-IncludeStage3WRows`, including safe baseline, perf isolate, perf candidate,
+  validation audit row, and min-source threshold rows.
+- Added `test/pbe_tabi_leaf_pair_target_avx2_smoke.ps1` and extended
+  `test/pbe_tabi_stage3u_preset_smoke.ps1` to validate both `stage3u-safe` and
+  `stage3u-perf`.
+
+Measured Stage 3W verification:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Syntax checks for updated compare, matrix, and target-AVX2 smoke harnesses:
+  PASS.
+- Focused smokes:
+  - `test/pbe_tabi_leaf_pair_target_avx2_smoke.ps1`: PASS,
+    scalar-vs-AVX2 relative RMS `1.36e-16`, vectorized sources `2052`,
+    vector lanes `8208`, singular fallback relative RMS `1.20e-16`.
+  - `test/pbe_tabi_leaf_pair_batch_smoke.ps1`: PASS.
+  - `test/pbe_tabi_stage3u_preset_smoke.ps1`: PASS for both
+    `stage3u-safe` and `stage3u-perf`.
+- Quick Stage 3W matrix on `mini-protein`:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3WRows -Quick -AllowFailedStatus`:
+  PASS and emitted Stage 3W batch/vector counters.
+- Full Stage 3W matrix across all three medium fixtures was attempted but did
+  not emit the final CSV within the 360s tool timeout. No Titan child process
+  remained after timeout; this run is not counted as a valid gate result.
+
+Stage 3W medium perf compare:
+
+Safe baseline command:
+
+`test/pbe_tabi_vs_grid_compare.ps1 -WorkRoot test/tmp/pbe_tabi_vs_grid_compare_safe -Fixtures mini-protein,charged-peptide,compact-mini-protein -UseStage3USafePreset -Mode perf -CaseTimeoutSeconds 180 -AllowTimeout`
+
+Perf command:
+
+`test/pbe_tabi_vs_grid_compare.ps1 -Fixtures mini-protein,charged-peptide,compact-mini-protein -UseStage3UPerfPreset -Mode perf -CaseTimeoutSeconds 180 -AllowTimeout`
+
+| fixture | safe seconds | perf seconds | speedup | perf kernel | vectorized sources | pair/s |
+| --- | ---: | ---: | ---: | --- | ---: | ---: |
+| mini-protein | `4.3189` | `4.5147` | `0.9566x` | `target-avx2` | `32,116,491` | `1.04e8` |
+| charged-peptide | `4.3504` | `2.7403` | `1.5875x` | `target-avx2` | `21,235,170` | `1.26e8` |
+| compact-mini-protein | `17.5758` | `12.5717` | `1.3980x` | `target-avx2` | `65,629,872` | `6.94e7` |
+
+Stage 3W decision:
+
+- Correctness/plumbing for `target-avx2` passes focused smoke coverage, and
+  the perf preset emits the new counters correctly.
+- Performance gate is not yet met: medium geometric mean speedup is about
+  `1.29x`, below the Stage 3W target `1.5x`; `mini-protein` is `4.3%` slower,
+  which is within the `5%` no-regression allowance but leaves little margin.
+- `stage3u-perf` remains hidden experimental/timing-only and is not promoted.
+- Next branch should optimize batch-selection overhead and target reuse before
+  another Barnase timing run. The likely hotspot is not the vector arithmetic
+  itself, but the per-candidate `would_visit_leaf_direct_for_target` traversal
+  and batching overhead around many small/medium leaf pairs.
+
+## Stage 3X/9Q - TABI Leaf-Pair Batch Selection Overhead Reduction
+
+Stage 3X implementation:
+
+- Added hidden selector profiling:
+  `-pbe-tabi-leaf-pair-selection-profile=off|summary`.
+- Added hidden selector controls:
+  `-pbe-tabi-leaf-pair-probe-cache=off|per-matvec`,
+  `-pbe-tabi-leaf-pair-target-group=scan|same-target-leaf`, and
+  `-pbe-tabi-leaf-pair-max-lookahead=<4..128>`.
+- Added per-matvec probe cache for `would_visit_leaf_direct_for_target`,
+  keyed by `(target_index, source_node_index)`. The cache is local to each
+  matvec worker and is cleared between matvecs, so GMRES still sees a fixed
+  operator.
+- Added `target_leaf_index_by_panel` plus sorted `target_panels_by_leaf` in
+  `TreeWorkspace`. `same-target-leaf` selection now scans directly inside the
+  target leaf list instead of scanning original panel order and rejecting most
+  candidates.
+- Added hidden `stage3u-perf2` preset for timing experiments. It keeps Stage
+  3U math/safety and uses `leaf-pair-balanced`, `target-avx2`,
+  `probe-cache=per-matvec`, `target-group=same-target-leaf`, and lookahead
+  `32`. It is not a production default or promotion candidate yet.
+- Extended timing/profile/progress/matrix/compare CSVs with selection counters:
+  candidate scans, clean rejects, probe calls, probe node visits, probe/cache
+  hits/misses, insufficient-target batches, same-target-leaf rejects,
+  probe seconds, and selection seconds.
+- Extended `test/pbe_tabi_vs_grid_compare.ps1` with
+  `-UseStage3UPerf2Preset` and added
+  `test/pbe_tabi_leaf_pair_selection_profile_smoke.ps1`.
+
+Measured Stage 3X verification:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Focused smokes:
+  - `test/pbe_tabi_leaf_pair_selection_profile_smoke.ps1`: PASS,
+    scalar-vs-cached/target-leaf relative RMS `1.09e-16`, candidate scans
+    `374`, probe calls `374`, scan-mode cache hits `1004`, batches `128`.
+  - `test/pbe_tabi_stage3u_preset_smoke.ps1`: PASS for
+    `stage3u-safe`, `stage3u-perf`, and `stage3u-perf2`.
+  - `test/pbe_tabi_leaf_pair_target_avx2_smoke.ps1`: PASS,
+    relative RMS `1.36e-16`, vectorized sources `2052`.
+  - `test/pbe_tabi_leaf_pair_batch_smoke.ps1`: PASS.
+  - `test/pbe_tabi_tree_builder_smoke.ps1`: PASS.
+  - `test/pbe_tabi_treecode_accuracy.ps1`: PASS.
+  - `test/pbe_tabi_topdown_mac_audit.ps1`: PASS.
+- Quick Stage 3X matrix on `mini-protein`:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3XRows -Quick -AllowFailedStatus`:
+  PASS. Validation row kept `far_expansion_rel_error_mean=2.735e-05` and
+  accepted missed `0`.
+
+Stage 3X mini quick selector rows:
+
+| row | total s | batch s | selection s | probe s | batches | scans | probe calls | cache hits |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| scan/no-cache/lh32 | `4.1916` | `0.9612` | `2.7963` | `1.5038` | `169,320` | `546,720` | `509,160` | `0` |
+| cache/same-leaf/lh32 | `4.2491` | `0.9145` | `2.9061` | `1.5029` | `158,010` | `522,855` | `496,305` | `6,030` |
+| validation cache/same-leaf/lh32 | `4.7670` | `0.9796` | `3.0918` | `1.5938` | `158,010` | `522,855` | `496,305` | `6,030` |
+
+Stage 3X medium perf compare, sequential:
+
+Safe command:
+
+`test/pbe_tabi_vs_grid_compare.ps1 -WorkRoot test/tmp/pbe_tabi_vs_grid_compare_stage3x_safe_seq -Fixtures mini-protein,charged-peptide,compact-mini-protein -UseStage3USafePreset -Mode perf -CaseTimeoutSeconds 180 -AllowTimeout`
+
+Perf2 command:
+
+`test/pbe_tabi_vs_grid_compare.ps1 -WorkRoot test/tmp/pbe_tabi_vs_grid_compare_stage3x_perf2_seq2 -Fixtures mini-protein,charged-peptide,compact-mini-protein -UseStage3UPerf2Preset -Mode perf -CaseTimeoutSeconds 180 -AllowTimeout`
+
+| fixture | safe seconds | perf2 seconds | speedup | selection s | probe s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| mini-protein | `8.1792` | `4.4398` | `1.8423x` | `3.5308` | `1.8240` |
+| charged-peptide | `7.1704` | `6.1401` | `1.1678x` | `3.0270` | `0.7701` |
+| compact-mini-protein | `15.8590` | `16.6324` | `0.9535x` | `17.1335` | `10.6454` |
+
+Stage 3X decision:
+
+- Correctness gates for the new selector path pass focused smoke and the
+  `mini-protein` validation audit row.
+- Performance gate is not met. Medium geometric mean speedup is only about
+  `1.27x` versus the current safe sequential run, below the `1.5x` gate, and
+  `compact-mini-protein` regresses.
+- `stage3u-perf2` remains hidden experimental/timing-only and is not promoted.
+- Barnase timing was not run because medium performance gate did not pass.
+- Next branch should attack the remaining selection cost directly. The new CSV
+  shows compact-mini spends more time in selection/probe than in the AVX2
+  batch kernel itself, so the likely next step is target-leaf/source-leaf pair
+  reuse or a safe target-leaf directness proof that avoids per-target traversal
+  for clean leaf pairs.
+
+## Stage 3Y/9R - TABI Ancestor-Path Directness Probe and Leaf-Pair Reuse
+
+Stage 3Y implementation:
+
+- Added hidden leaf-pair directness controls:
+  `-pbe-tabi-leaf-pair-directness-probe=full-traversal|ancestor-path`,
+  `-pbe-tabi-leaf-pair-directness-cache=off|target-leaf-source-leaf`, and
+  `-pbe-tabi-leaf-pair-directness-verify=off|sampled|full-small`.
+  Defaults preserve the Stage 3X behavior.
+- Added `parent_index_by_node` and leaf ancestor paths to `TreeWorkspace`.
+  The `ancestor-path` probe checks only the ancestor chain of the candidate
+  source leaf and rejects batching when any ancestor would be accepted as a far
+  node instead of descending to that leaf.
+- Added an exact per-matvec `(target_leaf, source_leaf)` all-direct proof cache.
+  It only accelerates proven all-direct leaf pairs; mixed verdicts fall back to
+  per-target directness probes.
+- Added sampled/full-small verification counters comparing the new probe/cache
+  verdicts against the old full traversal.
+- Extended timing/profile/progress/matrix/compare CSVs with directness mode,
+  cache, verify, ancestor probe calls/visits/seconds, pair-cache hits/misses,
+  all-direct proofs, mixed fallbacks, and verified mismatches.
+- Extended `test/pbe_tabi_topdown_physical_gap_matrix.ps1` with
+  `-IncludeStage3YRows` and `test/pbe_tabi_vs_grid_compare.ps1` with
+  `-TabiExtraArgs` so compare rows can override hidden probe knobs after a
+  preset.
+- Added:
+  - `test/pbe_tabi_leaf_pair_directness_probe_smoke.ps1`;
+  - `test/pbe_tabi_leaf_pair_directness_cache_smoke.ps1`.
+
+Measured Stage 3Y verification:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Focused smokes:
+  - `test/pbe_tabi_leaf_pair_directness_probe_smoke.ps1`: PASS,
+    scalar-vs-batched relative RMS `0`, verify relative RMS `0`,
+    full traversal visits `2242`, ancestor visits `748`, verify checks `374`.
+  - `test/pbe_tabi_leaf_pair_directness_cache_smoke.ps1`: PASS,
+    scalar-vs-cache relative RMS `0`, no-cache probes `980`, cache probes `0`,
+    pair hits `308`, pair misses `56`, all-direct proofs `56`, mixed fallbacks
+    `0`, verify checks `980`.
+  - `test/pbe_tabi_leaf_pair_target_avx2_smoke.ps1`: PASS.
+  - `test/pbe_tabi_leaf_pair_batch_smoke.ps1`: PASS.
+  - `test/pbe_tabi_stage3u_preset_smoke.ps1`: PASS.
+  - `test/pbe_tabi_tree_builder_smoke.ps1`: PASS.
+  - `test/pbe_tabi_treecode_accuracy.ps1`: PASS.
+  - `test/pbe_tabi_topdown_mac_audit.ps1`: PASS.
+- Full Stage 3Y medium matrix:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3YRows -CaseTimeoutSeconds 180 -AllowFailedStatus`:
+  PASS.
+
+Stage 3Y medium matrix highlights:
+
+| fixture | row | total s | selection s | probe s | probe visits | ancestor visits | expansion mean | missed |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| mini-protein | perf2 full traversal | `3.2030` | `2.1912` | `1.1018` | `19,912,830` | `0` | `0` | `0` |
+| mini-protein | ancestor only | `3.2041` | `1.2752` | `0.1136` | `1,488,915` | `1,488,915` | `0` | `0` |
+| mini-protein | ancestor cache validation | `4.3142` | `1.8106` | `0.3976` | `5,059,815` | `4,737,600` | `2.78e-5` | `0` |
+| charged-peptide | perf2 full traversal | `4.0979` | `1.7886` | `0.4386` | `11,934,040` | `0` | `0` | `0` |
+| charged-peptide | ancestor only | `4.0878` | `1.4986` | `0.1437` | `1,280,080` | `1,280,080` | `0` | `0` |
+| compact-mini-protein | perf2 full traversal | `13.4146` | `12.8265` | `7.8284` | `126,673,320` | `0` | `0` | `0` |
+| compact-mini-protein | ancestor only | `13.5334` | `5.9962` | `0.3598` | `5,698,620` | `5,698,620` | `0` | `0` |
+| compact-mini-protein | ancestor cache validation | `13.1027` | `5.9375` | `0.9430` | `19,420,920` | `17,441,820` | `2.70e-5` | `0` |
+
+Stage 3Y medium compare:
+
+Commands:
+
+`test/pbe_tabi_vs_grid_compare.ps1 -WorkRoot test/tmp/pbe_tabi_vs_grid_compare_stage3y_safe -Fixtures mini-protein,charged-peptide,compact-mini-protein -UseStage3USafePreset -Mode perf -CaseTimeoutSeconds 180 -AllowTimeout`
+
+`test/pbe_tabi_vs_grid_compare.ps1 -WorkRoot test/tmp/pbe_tabi_vs_grid_compare_stage3y_perf2 -Fixtures mini-protein,charged-peptide,compact-mini-protein -UseStage3UPerf2Preset -Mode perf -CaseTimeoutSeconds 180 -AllowTimeout`
+
+`test/pbe_tabi_vs_grid_compare.ps1 -WorkRoot test/tmp/pbe_tabi_vs_grid_compare_stage3y_ancestor -Fixtures mini-protein,charged-peptide,compact-mini-protein -UseStage3UPerf2Preset -Mode perf -CaseTimeoutSeconds 180 -AllowTimeout -TabiExtraArgs '-pbe-tabi-leaf-pair-directness-probe=ancestor-path','-pbe-tabi-leaf-pair-directness-cache=off','-pbe-tabi-leaf-pair-directness-verify=off'`
+
+| fixture | safe s | perf2 s | ancestor s | ancestor speedup vs safe | ancestor selection s | ancestor probe s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| mini-protein | `6.2047` | `7.8892` | `7.2098` | `0.8606x` | `3.1885` | `0.2882` |
+| charged-peptide | `7.0235` | `6.0092` | `5.7667` | `1.2179x` | `2.4331` | `0.2327` |
+| compact-mini-protein | `15.2035` | `16.7701` | `14.7927` | `1.0278x` | `6.6864` | `0.4091` |
+
+Stage 3Y decision:
+
+- Correctness gate passes: directness verification mismatches are `0`, scalar
+  equivalence smokes pass, and validation rows keep far-expansion mean below
+  `5e-5` with accepted misses `0`.
+- The ancestor-path probe is real and useful locally: compact-mini probe visits
+  drop from `126.7M` to `5.70M`, and probe seconds drop from `7.83s` to
+  `0.36s` in the matrix row.
+- The end-to-end performance gate is still not met. Medium compare geometric
+  mean speedup for the ancestor row is only about `1.03x` versus
+  `stage3u-safe`, below the `1.5x` gate; mini-protein is slower than safe.
+- `stage3u-perf3` was not created. Barnase timing was not run.
+- The next branch should not spend more effort on probe traversal alone. The
+  remaining bottleneck has shifted into batch construction, candidate
+  bookkeeping, and the amount of leaf work exposed by the safe MAC. A better
+  Stage 3Z target is to precompute reusable leaf-pair worklists or switch to a
+  traversal that emits target-leaf/source-leaf tasks directly, then run the
+  same correctness gate before another Barnase timing attempt.
+
+## Stage 3Z/9S - TABI Deferred Leaf-Pair Worklist Scheduler
+
+Stage 3Z implementation:
+
+- Added hidden leaf-pair scheduler controls:
+  `-pbe-tabi-leaf-pair-scheduler=inline-select|deferred-worklist`,
+  `-pbe-tabi-leaf-pair-worklist-max-active=<64..8192>`, and
+  `-pbe-tabi-leaf-pair-worklist-verify=off|sampled|full-small`.
+  Defaults keep the old inline selection path.
+- Implemented `deferred-worklist` for JCP on-the-fly leaf interactions. Clean
+  direct leaf visits emitted by the real traversal are enqueued by
+  `(target_leaf, source_leaf_node)` and flushed through the existing
+  `target-avx2` batch kernel when a target batch is full. Unclean/singular/
+  one-ring/Duffy paths stay scalar and immediate.
+- Worklist state is per worker and per matvec only. It does not persist between
+  GMRES iterations and does not change MAC, estimator, or near-field safety.
+- Added timing/profile/progress counters for scheduler mode, worklist tasks,
+  groups, batched groups, scalar flushes, forced flushes, active group high
+  water mark, worklist seconds, and verify checks/mismatches.
+- Extended `test/pbe_tabi_topdown_physical_gap_matrix.ps1` with
+  `-IncludeStage3ZRows` and extended `test/pbe_tabi_vs_grid_compare.ps1` with
+  `-UseDeferredLeafPairWorklist` plus CSV worklist columns.
+- Added `test/pbe_tabi_leaf_pair_worklist_scheduler_smoke.ps1`.
+- `stage3u-safe`, production defaults, direct TABI, and grid backend remain
+  unchanged. No `stage3u-perf3` preset was created in this stage.
+
+Measured Stage 3Z verification:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- New worklist smoke:
+  `test/pbe_tabi_leaf_pair_worklist_scheduler_smoke.ps1`: PASS,
+  scalar-vs-worklist relative RMS `1.74536e-16`, forced-flush relative RMS
+  `1.54329e-16`, worklist tasks `960`, groups `272`, batched groups `208`,
+  forced flushes `949`, verify checks `960`, and verify mismatches `0`.
+- Focused smokes also pass:
+  - `test/pbe_tabi_leaf_pair_directness_probe_smoke.ps1`;
+  - `test/pbe_tabi_leaf_pair_directness_cache_smoke.ps1`;
+  - `test/pbe_tabi_leaf_pair_target_avx2_smoke.ps1`;
+  - `test/pbe_tabi_leaf_pair_batch_smoke.ps1`;
+  - `test/pbe_tabi_stage3u_preset_smoke.ps1`;
+  - `test/pbe_tabi_treecode_accuracy.ps1`;
+  - `test/pbe_tabi_tree_builder_smoke.ps1`;
+  - `test/pbe_tabi_topdown_mac_audit.ps1`.
+- Solver/profile/regression smoke gates pass after the engine change:
+  `pbe_tabi_gmres_true_residual_smoke.ps1`,
+  `pbe_tabi_sampled_true_residual_smoke.ps1`,
+  `pbe_tabi_profile_smoke.ps1`, `pbe_memory_profile_smoke.ps1`,
+  `pbe_clean_room_audit.ps1`, `pbe_regression.ps1`, `pbsa_smoke.ps1`, and
+  `sasa_surface_smoke.ps1`.
+- Full Stage 3Y+3Z medium matrix:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3YRows -IncludeStage3ZRows -CaseTimeoutSeconds 180 -AllowFailedStatus`:
+  PASS. Summary artifact:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/stage3z_summary.csv`.
+
+Stage 3Z medium matrix highlights:
+
+| fixture | best Stage 3Z row | total s | worklist s | tasks | batched groups | validation mean | accepted missed | verify mismatch |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mini-protein` | `deferred max2048 min64` | `3.8497` | `1.1541` | `680,415` | `158,010` | `2.757e-5` | `0` | `0` |
+| `charged-peptide` | `deferred max2048 min64` | `3.3934` | `0.9452` | `611,500` | `141,080` | `0` | `0` | `0` |
+| `compact-mini-protein` | `deferred max4096 min64` | `11.4155` | `4.4257` | `2,602,650` | `605,550` | `2.715e-5` | `0` | `0` |
+
+Stage 3Z medium compare:
+
+Commands:
+
+`test/pbe_tabi_vs_grid_compare.ps1 -WorkRoot test/tmp/pbe_tabi_vs_grid_compare_stage3z_safe -Fixtures mini-protein,charged-peptide,compact-mini-protein -UseStage3USafePreset -Mode perf -CaseTimeoutSeconds 180 -AllowTimeout`
+
+`test/pbe_tabi_vs_grid_compare.ps1 -WorkRoot test/tmp/pbe_tabi_vs_grid_compare_stage3z_perf2 -Fixtures mini-protein,charged-peptide,compact-mini-protein -UseStage3UPerf2Preset -Mode perf -CaseTimeoutSeconds 180 -AllowTimeout`
+
+`test/pbe_tabi_vs_grid_compare.ps1 -WorkRoot test/tmp/pbe_tabi_vs_grid_compare_stage3z_worklist -Fixtures mini-protein,charged-peptide,compact-mini-protein -UseStage3UPerf2Preset -Mode perf -CaseTimeoutSeconds 180 -AllowTimeout -TabiExtraArgs '-pbe-tabi-leaf-pair-scheduler=deferred-worklist','-pbe-tabi-leaf-pair-worklist-max-active=4096','-pbe-tabi-leaf-pair-worklist-verify=off'`
+
+Compare summary artifact:
+`test/tmp/pbe_tabi_vs_grid_compare_stage3z_worklist/stage3z_compare_summary.csv`.
+
+| fixture | safe s | perf2 s | worklist s | worklist speedup vs safe |
+| --- | ---: | ---: | ---: | ---: |
+| `mini-protein` | `5.0401` | `5.1172` | `6.8716` | `0.7335x` |
+| `charged-peptide` | `3.4453` | `2.8357` | `6.1512` | `0.5601x` |
+| `compact-mini-protein` | `12.3460` | `15.6388` | `17.4833` | `0.7062x` |
+
+Stage 3Z decision:
+
+- Correctness gate passes: worklist verify mismatches are `0`, scalar
+  equivalence smokes pass, and validation rows keep far-expansion mean below
+  `5e-5` with accepted misses `0`.
+- The worklist scheduler removes directness probe work from the batching path,
+  but the compare gate fails. Medium compare geometric mean speedup is
+  `0.662x` versus `stage3u-safe`, well below the `1.5x` target, and every
+  medium compare fixture is slower than safe.
+- Barnase timing was not run. `stage3u-perf3` was not created.
+- Defaults remain unchanged. The next performance branch should not add more
+  scheduling layers before reducing per-task bookkeeping and writeback cost, or
+  it should revisit whether batching can be emitted at target-leaf granularity
+  without storing many tiny `(target, source_leaf)` tasks.
+
+## Stage 3AA/9T - TABI Target-Leaf Block Batching
+
+Stage 3AA implementation:
+
+- Added hidden scheduler value
+  `-pbe-tabi-leaf-pair-scheduler=target-leaf-block` and hidden verifier
+  `-pbe-tabi-leaf-block-verify=off|sampled|full-small`.
+- Implemented a target-leaf/source-leaf grouping path for JCP on-the-fly clean
+  direct leaf visits. Real traversal remains the source of truth; clean direct
+  leaf candidates are grouped by `(target_leaf, source_leaf_node)` and flushed
+  through the existing `target-avx2` target batch kernel. Unclean, singular,
+  one-ring, Duffy, and adaptive-buffer paths stay scalar/immediate.
+- Added target-leaf block counters to timing/profile/progress output:
+  target leaves, targets, source groups, batched groups, scalar tail tasks,
+  group/flush/writeback seconds, and verify checks/mismatches.
+- Extended `test/pbe_tabi_topdown_physical_gap_matrix.ps1` with
+  `-IncludeStage3AARows`, including safe baseline, Stage 3Z deferred-worklist
+  diagnostic, target-leaf-block min-source sweeps, and an audit validation row.
+- Extended `test/pbe_tabi_vs_grid_compare.ps1` with
+  `-UseTargetLeafBlockBatching` and target-leaf block counter columns.
+- Added `test/pbe_tabi_leaf_block_scheduler_smoke.ps1`.
+- Production defaults, `stage3u-safe`, direct TABI, grid backend, MAC safety,
+  and estimator accuracy guards remain unchanged.
+
+Measured Stage 3AA verification:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- New leaf-block smoke:
+  `test/pbe_tabi_leaf_block_scheduler_smoke.ps1`: PASS,
+  scalar-vs-block relative RMS `1.65074e-16`, source groups `352`,
+  batched groups `150`, verify checks `960`, verify mismatches `0`, and
+  exclusion fallback relative RMS `1.58042e-16`.
+- Existing focused leaf-batch smokes still pass:
+  `test/pbe_tabi_leaf_pair_worklist_scheduler_smoke.ps1` and
+  `test/pbe_tabi_leaf_pair_target_avx2_smoke.ps1`.
+- Full Stage 3Z+3AA medium matrix:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3ZRows -IncludeStage3AARows -CaseTimeoutSeconds 180 -AllowFailedStatus`:
+  PASS. Summary artifact:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+- Compare harness smoke:
+  `test/pbe_tabi_vs_grid_compare.ps1 -Fixtures mini-protein -UseStage3UPerf2Preset -UseTargetLeafBlockBatching -Mode perf -CaseTimeoutSeconds 180 -AllowTimeout`:
+  PASS and emits target-leaf block counters.
+
+Stage 3AA medium matrix highlights:
+
+| fixture | safe s | active target-leaf-block row | block s | speedup vs safe | source groups | batched groups | validation mean | accepted misses | verify mismatch |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mini-protein` | `5.2921` | `min64` | `4.5500` | `1.163x` | `238,320` | `125,145` | `3.136e-5` | `0/0/0/0` | `0` |
+| `charged-peptide` | `3.6824` | `min64` | `3.1871` | `1.155x` | `217,380` | `106,260` | `0` | `0/0/0/0` | `0` |
+| `compact-mini-protein` | `15.9693` | `min64` | `14.3658` | `1.1116x` | `927,210` | `461,040` | `2.781e-5` | `0/0/0/0` | `0` |
+
+Additional Stage 3AA timing notes:
+
+- The audit validation row with `target-leaf-block min64` reports
+  `238,320` source groups and `125,145` batched groups on `mini-protein`,
+  `10,575` verifier checks, and zero verifier mismatches.
+- The same validation row keeps far-expansion mean below the Stage 3T/3U gate
+  on `mini-protein` and `compact-mini-protein`; `charged-peptide` remains the
+  known no-audit-pair follow-up row with clean accepted-miss counters.
+- The active `min64` target-leaf-block medium geometric mean speedup versus
+  the `stage3aa_safe_baseline` is only `1.143x`, below the `1.5x`
+  performance gate. Looser `min128` rows are faster on mini/charged but emit
+  no block groups there, so they are treated as diagnostics rather than a block
+  batching candidate; their best-row geomean is still only `1.185x`.
+
+Stage 3AA decision:
+
+- Correctness passes for the new scheduler path: scalar equivalence, verifier
+  mismatches, accepted-miss counters, and far-expansion mean gates are clean on
+  the measured rows.
+- Performance still fails. Target-leaf-block reduces some bookkeeping on
+  `mini-protein` and `charged-peptide`, but compact-mini remains dominated by
+  leaf work and grouping/flush overhead. The medium geomean speedup is below
+  the `1.5x` target, so Barnase timing was not run.
+- No new preset was created. Defaults remain unchanged.
+- Next branch should stop adding scheduler layers and target either
+  kernel-level throughput for the direct JCP leaf path or a safe leaf-work
+  reduction strategy that preserves Stage 3T/3U accuracy gates.
+
+## Stage 3AB/9U - TABI Direct JCP Leaf-Kernel Throughput
+
+Stage 3AB implementation:
+
+- Added hidden profiling/control flags:
+  `-pbe-tabi-leaf-kernel-profile=off|summary` and
+  `-pbe-tabi-jcp-direct-kernel=baseline|soa-avx2`.
+- Implemented `soa-avx2` for clean JCP on-the-fly leaf-pair target batches.
+  The path is only used for clean source spans with `target_batch_size=4`;
+  singular, one-ring, Duffy, adaptive-buffer, and exclusion cases remain on
+  the existing scalar/fallback path.
+- Added leaf-kernel counters to timing/profile/progress output:
+  scalar tasks, batch tasks, source-panel evals, scalar seconds,
+  target-avx2 seconds, tail seconds, SoA sources, SoA seconds, scalar-tail
+  seconds, and clean source panels per second.
+- Extended `test/pbe_tabi_topdown_physical_gap_matrix.ps1` with
+  `-IncludeStage3ABRows`, including safe baseline, Stage 3AA target-leaf-block
+  baseline, SoA rows for min-source `32/64/128`, and an audit validation row.
+- Extended `test/pbe_tabi_vs_grid_compare.ps1` with
+  `-UseSoaLeafPairKernel` for future compare rows.
+- Added `test/pbe_tabi_leaf_pair_target_soa_avx2_smoke.ps1`.
+- Production defaults, `stage3u-safe`, direct TABI, grid backend, MAC safety,
+  and estimator accuracy guards remain unchanged.
+
+Measured Stage 3AB verification:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- New SoA smoke:
+  `test/pbe_tabi_leaf_pair_target_soa_avx2_smoke.ps1`: PASS,
+  relative RMS `0`, batches `109`, SoA sources `2052`,
+  vectorized sources `2052`, clean source panels/sec `6.20783e7`, fallback
+  singular relative RMS `0`.
+- Existing focused smokes still pass:
+  `test/pbe_tabi_leaf_block_scheduler_smoke.ps1`,
+  `test/pbe_tabi_leaf_pair_target_avx2_smoke.ps1`,
+  `test/pbe_tabi_leaf_pair_worklist_scheduler_smoke.ps1`,
+  `test/pbe_tabi_tree_builder_smoke.ps1`,
+  `test/pbe_tabi_topdown_mac_audit.ps1`, and
+  `test/pbe_tabi_treecode_accuracy.ps1`.
+- Full Stage 3AA+3AB medium matrix:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3AARows -IncludeStage3ABRows -CaseTimeoutSeconds 180 -AllowFailedStatus`:
+  PASS. Summary artifact:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+Stage 3AB medium timing highlights:
+
+| fixture | safe s | best Stage 3AB row | best s | speedup vs safe | validation mean | accepted missed | SoA sources | SoA seconds |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mini-protein` | `3.4495` | safe baseline | `3.4495` | `1.000x` | `2.654e-5` | `0` | `10,780,845` | `0.7554` |
+| `charged-peptide` | `4.1113` | SoA min32 | `3.0023` | `1.369x` | `0` | `0` | `9,005,740` | `0.5226` |
+| `compact-mini-protein` | `13.5824` | SoA min128 | `12.9733` | `1.047x` | `2.854e-5` | `0` | `42,437,070` | `3.2829` |
+
+Stage 3AB min64 kernel isolate:
+
+| fixture | target-avx2 batch s | SoA batch s | target-avx2 panels/s | SoA panels/s |
+| --- | ---: | ---: | ---: | ---: |
+| `mini-protein` | `0.7040` | `0.6906` | `6.125e7` | `6.245e7` |
+| `charged-peptide` | `0.6073` | `0.4649` | `5.932e7` | `7.749e7` |
+| `compact-mini-protein` | `3.6407` | `3.4961` | `4.662e7` | `4.855e7` |
+
+Stage 3AB decision:
+
+- Correctness passes for the SoA direct leaf-kernel path: smoke equivalence,
+  validation accepted-miss counters, far-expansion mean, and leaf-block verify
+  mismatches are clean on the measured rows.
+- The SoA kernel improves clean batch throughput, especially on
+  `charged-peptide`, but total medium performance still fails. Geometric mean
+  speedup versus the Stage 3AB safe baseline is `0.992x` for min64 SoA,
+  `0.989x` for min32 SoA, and `1.001x` for min128 SoA, below the `1.5x`
+  gate. `mini-protein` is slower under target-leaf-block batching, and
+  `compact-mini-protein` only improves about `1.047x` at the best measured
+  SoA row.
+- Barnase timing was not run because the medium performance gate did not pass.
+- No new preset was created. Defaults remain unchanged.
+- Next branch should reduce safe leaf work rather than add another scheduler
+  layer or another small clean-batch kernel variant. Candidate directions:
+  adaptive safe leaf-work reduction under the Stage 3T/3U accuracy gates,
+  stricter batching only where target-leaf-block is profitable, or a larger
+  kernel redesign that attacks scalar tail and unclean direct pairs.
+
+## Stage 3AC/9V - TABI Safe Leaf-Work Reduction and Adaptive Surface-Margin Gate
+
+Stage 3AC implementation:
+
+- Added hidden leaf-work profiling:
+  `-pbe-tabi-leaf-work-profile=off|summary`.
+- Added hidden adaptive surface-margin controls:
+  `-pbe-tabi-mac-surface-margin-policy=all|adaptive`,
+  `-pbe-tabi-mac-surface-margin-aspect-threshold`, and
+  `-pbe-tabi-mac-surface-margin-rho-trigger`.
+- `surface-margin` keeps the Stage 3U behavior by default (`all`). In
+  `adaptive`, the margin distance is applied only to high-risk nodes with
+  `rho >= trigger` or aspect ratio above the threshold; benign candidates use
+  center-distance MAC.
+- Added timing/profile/progress counters for margin applied/skipped,
+  adaptive rejects, skipped accepted far nodes, and leaf-work buckets
+  (`mac-terminal`, physical-gap, fragmentation, convergence, surface-margin,
+  K3 rho cap, singular fallback, scalar tail).
+- Extended `test/pbe_tabi_topdown_physical_gap_matrix.ps1` with
+  `-IncludeStage3ACRows`, including leaf-size diagnostics, adaptive margin
+  rows, a sampled audit validation row, and a timing-only
+  target-leaf-block+SoA row.
+- Added `test/pbe_tabi_leaf_work_profile_smoke.ps1` and
+  `test/pbe_tabi_adaptive_surface_margin_smoke.ps1`.
+- Production defaults, `stage3u-safe`, direct TABI, grid backend, estimator
+  guards, and Stage 3T/3U promotion candidate remain unchanged.
+
+Measured Stage 3AC verification:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- New leaf-work profile smoke: PASS, leaf work `36,672`, accounted
+  `36,672`, surface-margin bucket `6,272`.
+- New adaptive surface-margin smoke: PASS, adaptive high-risk applied
+  `756`, adaptive rejects `74`, benign skipped `512`.
+- Existing focused smokes still pass:
+  `test/pbe_tabi_leaf_pair_target_soa_avx2_smoke.ps1`,
+  `test/pbe_tabi_leaf_block_scheduler_smoke.ps1`,
+  `test/pbe_tabi_tree_builder_smoke.ps1`,
+  `test/pbe_tabi_topdown_mac_audit.ps1`, and
+  `test/pbe_tabi_treecode_accuracy.ps1`.
+- Stage 3AC mini-protein matrix smoke:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -Fixtures mini-protein -IncludeStage3ACRows -CaseTimeoutSeconds 180 -AllowFailedStatus`:
+  PASS. Artifact:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+Stage 3AC mini-protein highlights:
+
+| row | seconds | leaf panels | accounted leaf panels | margin policy | applied | skipped | adaptive rejects | audit mean | accepted missed |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| `stage3ac_safe_baseline_leaf128_margin_all` | `3.0426` | `110,035,455` | `110,035,455` | `all` | `322,005` | `0` | `0` | `0` | `0` |
+| `stage3ac_adaptive_aspect3p0_rho0p55` | `5.9828` | `109,361,580` | `109,361,580` | `adaptive` | `207,195` | `114,810` | `23,715` | `0` | `0` |
+| `stage3ac_adaptive_aspect2p5_rho0p55` | `4.5117` | `109,361,580` | `109,361,580` | `adaptive` | `207,195` | `114,810` | `23,715` | `0` | `0` |
+| `stage3ac_adaptive_aspect3p0_rho0p50` | `4.6233` | `109,361,580` | `109,361,580` | `adaptive` | `230,760` | `91,245` | `37,170` | `0` | `0` |
+| `stage3ac_validation_adaptive_aspect3p0_rho0p55_audit` | `5.1890` | `109,361,580` | `109,361,580` | `adaptive` | `207,195` | `114,810` | `23,715` | `6.992e-5` | `0` |
+| `stage3ac_timing_adaptive_aspect3p0_rho0p55_block_soa` | `5.0109` | `109,361,580` | `109,361,580` | `adaptive` | `207,195` | `114,810` | `23,715` | `0` | `0` |
+
+Stage 3AC decision:
+
+- The implementation and counters are in place and verified. Adaptive margin
+  does reduce leaf work slightly on the mini-protein smoke
+  (`110.04M -> 109.36M` leaf-panel interactions), and the new bucket
+  accounting matches total leaf-panel interactions.
+- The first validation row does not pass the Stage 3T/3U far-expansion mean
+  gate on mini-protein (`6.992e-5`, gate `<5e-5`), so no Barnase timing was
+  run and no preset/default changed.
+- Medium full 3-fixture performance gate remains pending. The early evidence
+  suggests adaptive margin alone is too small a leaf-work reduction to reach
+  the `1.5x` geomean target, so the next branch should either tune adaptive
+  selectivity with sampled audit enabled or target safe reduction of
+  convergence/estimator-driven leaf work rather than another scheduler layer.
+
+## Stage 3AD/9W - TABI Leaf-Work Attribution and Risk-Scaled Surface Margin
+
+Stage 3AD implementation:
+
+- Extended `-pbe-tabi-leaf-work-profile=summary` with detailed attribution
+  buckets while preserving the aggregate columns:
+  `mac_terminal`, `physical_gap`, `fragmentation`, `convergence_estimator`,
+  `convergence_rho`, `convergence_aspect`, `surface_margin_hard`,
+  `surface_margin_soft`, `k3_rho_cap`, `singular_duffy_exclusion`, and
+  `scalar_tail`.
+- Added fraction columns for fast diagnosis:
+  `tabi_leaf_work_mac_terminal_frac`, `tabi_leaf_work_convergence_frac`,
+  `tabi_leaf_work_surface_margin_frac`,
+  `tabi_leaf_work_singular_fallback_frac`, and
+  `tabi_leaf_work_scalar_tail_frac`.
+- Added hidden risk-scaled surface-margin controls:
+  `-pbe-tabi-mac-surface-margin-policy=risk-scaled`,
+  `-pbe-tabi-mac-surface-margin-soft-aspect-threshold`,
+  `-pbe-tabi-mac-surface-margin-soft-rho-trigger`, and
+  `-pbe-tabi-mac-surface-margin-soft-factor`.
+- `risk-scaled` applies the full Stage 3U margin to hard-risk candidates,
+  a smaller margin to soft-risk candidates, and center-distance MAC to
+  benign candidates. The existing `all` behavior remains the default.
+- Added hard/soft margin counters to timing/profile/progress:
+  hard/soft applied counts, hard/soft rejects, and hard/soft reject panels.
+- Extended `test/pbe_tabi_topdown_physical_gap_matrix.ps1` with
+  `-IncludeStage3ADRows`, including full-margin baseline, sampled adaptive
+  validation rows, factor sweeps, risk-scaled rows, leaf overlays, and a
+  timing-only target-leaf-block+SoA row.
+- Added `test/pbe_tabi_leaf_work_attribution_smoke.ps1` and
+  `test/pbe_tabi_risk_scaled_surface_margin_smoke.ps1`.
+- Production defaults, `stage3u-safe`, direct TABI, grid backend, MAC safety,
+  estimator guards, and solver operator semantics remain unchanged.
+
+Measured Stage 3AD verification:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- New leaf-work attribution smoke: PASS, leaf work `36,672`, convergence
+  bucket `0`, surface-margin bucket `392`, selected fraction sum `0.754145`.
+- New risk-scaled surface-margin smoke: PASS, hard applied `756`, soft
+  applied `512`, benign skipped `724`.
+- Existing focused smokes still pass:
+  `test/pbe_tabi_leaf_work_profile_smoke.ps1`,
+  `test/pbe_tabi_adaptive_surface_margin_smoke.ps1`,
+  `test/pbe_tabi_leaf_pair_target_soa_avx2_smoke.ps1`,
+  `test/pbe_tabi_leaf_block_scheduler_smoke.ps1`,
+  `test/pbe_tabi_tree_builder_smoke.ps1`,
+  `test/pbe_tabi_topdown_mac_audit.ps1`,
+  `test/pbe_tabi_treecode_accuracy.ps1`,
+  `test/pbe_tabi_surface_margin_mac_smoke.ps1`,
+  `test/pbe_tabi_profile_smoke.ps1`, and
+  `test/pbe_memory_profile_smoke.ps1`.
+- Full Stage 3AD medium matrix:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3ADRows -CaseTimeoutSeconds 180 -AllowFailedStatus`:
+  PASS. Artifact:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+Stage 3AD medium attribution highlights:
+
+| fixture | safe leaf panels | adaptive/risk leaf panels | risk leaf96 leaf panels | safe mean | best audited mean | accepted missed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mini-protein` | `110.04M` | `109.36M` | `106.89M` | `2.77e-5` | `5.49e-5` (`leaf96`) | `0` |
+| `charged-peptide` | `100.43M` | `100.43M` | `98.24M` | `0` | `4.00e-5` (`leaf96`) | `8 global / 4 K2` |
+| `compact-mini-protein` | `516.87M` | `512.96M` | `506.77M` | `2.77e-5` | `4.70e-5` (`leaf96`) | `0` |
+
+Stage 3AD speed/leaf-work summary:
+
+| row | geomean speedup vs Stage 3AD safe | geomean leaf-panel ratio | gate status |
+| --- | ---: | ---: | --- |
+| `stage3ad_risk_scaled_leaf192` | `1.217x` | `1.003x` | timing improves, but leaf work is not reduced and audit pairs are not useful enough for promotion |
+| `stage3ad_timing_risk_scaled_block_soa` | `1.199x` | `0.995x` | timing-only, below `1.5x` |
+| `stage3ad_risk_scaled_hard2p5_rho0p55_soft2p0_rho0p45_factor0p20` | `0.984x` | `0.995x` | accuracy clean, slower than safe |
+| `stage3ad_validation_adaptive_aspect3p0_rho0p55_audit` | `0.882x` | `0.995x` | mean fails on mini-protein |
+| `stage3ad_risk_scaled_leaf96` | `0.724x` | `0.977x` | leaf work reduced, but mini mean `5.49e-5` and charged accepted misses fail gates |
+
+Stage 3AD decision:
+
+- The new attribution is working: bucket totals match
+  `leaf_panel_interactions` on the smoke and full medium rows, and the new
+  hard/soft margin counters identify that the current risk-scaled settings
+  mostly move candidates through hard-margin rejects; soft margin is applied
+  but did not create meaningful soft-reject leaf-work reductions on the medium
+  rows.
+- No full-medium row satisfies both accuracy and performance gates. The best
+  leaf-work reduction row (`leaf96`) reduces geomean leaf panels by only about
+  `2.3%`, remains below the `10%` leaf-work target, fails the mini mean gate
+  (`5.49e-5` vs `<5e-5`), and introduces accepted misses on
+  `charged-peptide`.
+- The fastest row (`leaf192`) reaches only `1.217x` geomean speedup and does
+  not reduce leaf work, so it is not a Stage 3AD candidate.
+- Barnase timing was not run because the full-medium performance/accuracy gate
+  did not pass. Defaults remain unchanged.
+- Next branch should reduce convergence/estimator-driven leaf work more
+  directly. The Stage 3AD buckets show convergence-driven leaf work is a large
+  fraction of the remaining direct workload, while binary/adaptive
+  surface-margin tuning is too small to unlock the `1.5x` target.
+
+## Stage 3AE/9X - TABI Refactor and Absolute-Aware Convergence Split Selectivity
+
+Stage 3AE implementation:
+
+- Added the first behavior-preserving TABI treecode refactor slice:
+  `titan_pbe/tabi_treecode_internal.h` and
+  `titan_pbe/tabi_treecode_internal.cpp`.
+  The internal header currently holds small convergence split/selectivity and
+  overreject classification helpers under `TitanPBE::Tabi::detail`.
+  The helpers are kept inline for now so standalone smoke harnesses that include
+  `tabi_treecode.cpp` continue to link without custom rules. This is the
+  scaffolding for the larger file split; `tabi_treecode.cpp` is not yet a thin
+  entrypoint.
+- Added hidden convergence overreject audit:
+  `-pbe-tabi-convergence-overreject-audit=off|sampled|full-small`.
+  Sampled split-rejected candidates can now be checked with the same
+  direct-vs-Taylor JCP expansion audit and classified as true high-error caught
+  candidates or low-error overrejects.
+- Added hidden absolute-aware split selectivity:
+  `-pbe-tabi-convergence-split-selectivity=legacy|absolute-aware|channel-absolute-aware`
+  and `-pbe-tabi-convergence-split-absolute-floor=<0.0..1e-4>`.
+  Defaults preserve legacy behavior. Experimental rows can reaccept a far node
+  only when the estimated relative error is high but the estimated absolute
+  error is below the configured floor.
+- Added timing/profile/progress fields for:
+  `tabi_convergence_split_selectivity`,
+  `tabi_convergence_split_absolute_floor`,
+  `tabi_convergence_overreject_audit`,
+  low-absolute reaccepted far counts/panels,
+  estimated absolute error max/mean, and global/per-channel overreject/caught
+  counters.
+- Extended `test/pbe_tabi_topdown_physical_gap_matrix.ps1` with
+  `-IncludeStage3AERows`, including legacy baseline, overreject audit,
+  absolute-aware floor sweep, channel-absolute-aware floor sweep, and a
+  timing-only target-leaf-block+SoA row.
+- Added focused smokes:
+  `test/pbe_tabi_convergence_overreject_audit_smoke.ps1` and
+  `test/pbe_tabi_absolute_aware_convergence_split_smoke.ps1`.
+- Production defaults, `stage3u-safe`, direct TABI, grid backend, public CLI
+  behavior, and solver operator defaults remain unchanged.
+
+Measured Stage 3AE verification:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- New absolute-aware convergence split smoke: PASS.
+- New convergence overreject audit smoke: PASS.
+- Focused smokes still pass:
+  `test/pbe_tabi_tree_builder_smoke.ps1`,
+  `test/pbe_tabi_treecode_accuracy.ps1`,
+  `test/pbe_tabi_topdown_mac_audit.ps1`,
+  `test/pbe_tabi_leaf_work_attribution_smoke.ps1`,
+  `test/pbe_tabi_risk_scaled_surface_margin_smoke.ps1`, and
+  `test/pbe_tabi_leaf_pair_target_soa_avx2_smoke.ps1`.
+- Stage 3AE mini-protein matrix smoke:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -Fixtures mini-protein -IncludeStage3AERows -CaseTimeoutSeconds 180 -AllowFailedStatus`:
+  PASS. Artifact:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_topdown_physical_gap_matrix.csv`.
+
+Stage 3AE mini-protein highlights:
+
+| row | seconds | leaf panels/matvec | mean error | low-abs reaccepted | overreject | caught | accepted missed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `stage3ae_safe_baseline_legacy_split` | `2.0466` | `7,335,697` | `2.618e-5` | `0` | `0` | `0` | `0` |
+| `stage3ae_overreject_audit_legacy_split` | `2.0347` | `7,335,697` | `0` | `0` | `6,171` | `1,509` | `0` |
+| `stage3ae_absolute_aware_floor1e8` | `2.0391` | `7,335,697` | `2.753e-5` | `0` | `6,133` | `1,439` | `0` |
+| `stage3ae_absolute_aware_floor3e8` | `2.0490` | `7,335,697` | `2.916e-5` | `0` | `6,116` | `1,445` | `0` |
+| `stage3ae_absolute_aware_floor1e7` | `2.0059` | `7,335,697` | `2.952e-5` | `0` | `6,152` | `1,421` | `0` |
+| `stage3ae_channel_absolute_aware_floor1e8` | `2.0599` | `7,335,697` | `3.001e-5` | `0` | `6,138` | `1,427` | `0` |
+| `stage3ae_channel_absolute_aware_floor3e8` | `2.0178` | `7,335,697` | `2.637e-5` | `0` | `6,110` | `1,454` | `0` |
+| `stage3ae_channel_absolute_aware_floor1e7` | `2.0407` | `7,335,697` | `2.745e-5` | `0` | `6,053` | `1,512` | `0` |
+| `stage3ae_timing_best_absaware_block_soa` | `1.9035` | `7,335,697` | `0` | `0` | `0` | `0` | `0` |
+
+Stage 3AE decision:
+
+- The hidden plumbing is in place and verified. The overreject audit is useful:
+  on mini-protein it found thousands of low-error split-rejected candidates
+  alongside true caught high-error candidates.
+- The first absolute-aware floor sweep did not reduce actual leaf work on the
+  mini-protein matrix: `low_abs_reaccepted_far_count` remained `0`, and
+  `leaf_panel_work_per_matvec` stayed unchanged across the selectivity rows.
+  This means the new decision path is wired, but the estimated absolute error
+  scale or floor needs calibration before it can unlock the Stage 3AD
+  convergence-driven leaf-work bucket.
+- Full 3-fixture Stage 3AE medium matrix and Barnase compare were not run
+  because the mini-protein selectivity smoke did not yet show leaf-work
+  reduction. Defaults remain unchanged.
+- Next branch should calibrate estimated absolute channel error against the
+  overreject audit oracle, or raise/select floors per channel with sampled
+  audit enabled, before adding more batching or scheduler layers.
+
+## Stage 3AF/9Y - TABI Treecode Translation-Unit Refactor Freeze
+
+Stage 3AF implementation:
+
+- Refactored `titan_pbe/tabi_treecode.cpp` from the monolithic treecode
+  implementation into a thin public forwarding facade plus bounded internal
+  translation units. No flag, preset, MAC rule, estimator rule, split
+  decision, CSV field, or production default was changed in this stage.
+- Expanded `titan_pbe/tabi_treecode_internal.h` into the private contract for
+  shared treecode structs and cross-TU helper declarations under
+  `TitanPBE::Tabi::detail`.
+- Split ownership as follows:
+
+| file | responsibility | lines |
+| --- | --- | ---: |
+| `tabi_treecode.cpp` | public API forwarding facade | `218` |
+| `tabi_treecode_geometry.cpp` | tree construction, bounds, interaction-list/workspace setup | `1,523` |
+| `tabi_treecode_series.cpp` | Taylor/JCP series, moments and moment audit | `1,345` |
+| `tabi_treecode_policy.cpp` | MAC, convergence/expansion audits and stats aggregation | `1,550` |
+| `tabi_treecode_leaf.cpp` | direct JCP leaf kernels, AVX2/SoA batching and directness probes | `1,510` |
+| `tabi_treecode_operator.cpp` | direct/tree/JCP traversal and matvec orchestration | `2,456` |
+| `tabi_treecode_internal.h` | internal shared contract | `806` |
+
+- Added `test/pbe_tabi_treecode_sources.ps1` as the single source-list helper
+  for standalone TABI smoke compiles, and routed the existing manual treecode
+  compile harnesses through it so future internal TU changes do not require
+  repeated per-script linker edits.
+- The context target is met: the facade is below `250` lines and every
+  implementation TU is below `3,000` lines. `tabi_solver.cpp` was intentionally
+  left outside this refactor.
+
+Stage 3AF parity evidence:
+
+- Native build:
+  `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Deterministic focused parity matches the Stage 3AE pre-refactor baseline:
+  - tree builder: `panels=512`, `grouped_nodes=73`, `topdown_nodes=73`,
+    `topdown_depth=2`;
+  - treecode accuracy: `rel3=9.38761e-07`, `rel4=1.35948e-07`,
+    `topdown_rel3=4.61951e-05`, `far=199`, `jcp_duffy=19416`;
+  - topdown MAC audit: `unsafe=392`, `rejects=392`,
+    `far_audit=392`, `far_safe=0`;
+  - leaf-work attribution: `leaf=36672`, `convergence=0`,
+    `margin=392`, `frac_sum=0.754145`;
+  - leaf-block scheduler: `rel=1.65074e-16`, `groups=352`,
+    `batched=150`, `verify_checks=960`;
+  - absolute-aware split, convergence overreject audit, far-expansion audit,
+    risk-scaled surface-margin and SoA/AVX2 smokes: PASS.
+- Mini-protein pre/post Stage 3AE matrix comparison preserved deterministic
+  gate fields for every Stage 3AE row:
+  status, leaf-panel work, low-absolute reaccepted count, and all accepted-miss
+  channel counts were unchanged. Sampled expansion/audit means are report-only
+  for this comparison because multithread sampled candidate selection is not
+  bitwise stable across separate runs.
+- Full post-refactor medium matrix:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3ADRows -IncludeStage3AERows -CaseTimeoutSeconds 180 -AllowFailedStatus`:
+  PASS. Representative Stage 3AE channel-absolute-aware floor `1e-7` rows:
+
+| fixture | leaf panels/matvec | expansion mean | low-abs reaccepted | accepted missed |
+| --- | ---: | ---: | ---: | ---: |
+| `mini-protein` | `7,335,697` | `2.778e-5` | `0` | `0` |
+| `charged-peptide` | `5,021,476` | `0` | `0` | `0` |
+| `compact-mini-protein` | `17,228,993` | `2.785e-5` | `0` | `0` |
+
+- Regression freeze passed:
+  GMRES true residual, sampled true residual, profile smoke, memory profile,
+  clean-room audit, PBE regression, PBSA smoke, and SASA surface smoke.
+
+Stage 3AF decision:
+
+- The treecode refactor is behavior-preserving on the focused deterministic
+  evidence and full medium gate run. Production defaults and `stage3u-safe`
+  remain unchanged, and no Barnase timing or promotion probe was run.
+- Stage 3AE's unresolved result remains unchanged after the split:
+  absolute-aware rows still produce `low_abs_reaccepted=0` and do not reduce
+  leaf-panel work, even though overreject audit identifies low-error rejected
+  candidates.
+- The next accuracy/performance branch should now calibrate
+  `estimated_abs_error` against the sampled direct-vs-Taylor overreject oracle,
+  using the new policy/series boundary rather than adding another batching or
+  scheduler layer.
+
+## Stage 3AG/9Z - TABI Overreject Oracle Calibration Matrix
+
+Stage 3AG implementation:
+
+- Added hidden report-only option
+  `-pbe-tabi-convergence-overreject-detail=off|summary|sampled-detail`,
+  default `off`. It is inert unless overreject audit is active and never
+  changes traversal, MAC, convergence split, or the GMRES operator.
+- Extended overreject accounting in `tabi_treecode_policy.cpp` with sampled
+  estimated-versus-oracle absolute-error summaries and `required_scale =
+  oracle_abs_error / estimated_abs_error` for the global result and each JCP
+  channel.
+- `sampled-detail` now emits
+  `pbe_tabi_convergence_overreject_calibration.csv` with pair metadata
+  (`target_index`, source node, channel, `rho`, aspect ratio, panels),
+  estimated and oracle relative/absolute errors, scale, and
+  `caught|overreject` classification.
+- Added Stage 3AG matrix rows and
+  `test/pbe_tabi_overreject_calibration_summary.ps1`. The summary evaluates
+  a fixed scale grid against the sampled `caught` oracle and reports projected
+  overreject reaccept panels only when no caught sample would be reaccepted.
+
+Stage 3AG verification:
+
+- Native build: `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- New oracle plumbing smoke:
+  `test/pbe_tabi_overreject_calibration_oracle_smoke.ps1`: PASS
+  (`required_scale=2e-07`, real high-error pair remains `caught`).
+- Existing focused gates pass:
+  convergence overreject audit, absolute-aware convergence split, tree builder,
+  treecode accuracy, topdown MAC audit, far-expansion audit, leaf-work
+  attribution, and leaf-work profile.
+- Full medium evidence:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3AERows -IncludeStage3AGRows -CaseTimeoutSeconds 180 -AllowFailedStatus`:
+  PASS. Detail artifacts are under
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/<fixture>/stage3ag_overreject_calibration_detail/`.
+- Calibration summary artifact:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_overreject_calibration_summary.csv`.
+- Regression freeze passes:
+  GMRES true residual, sampled true residual, profile, memory profile,
+  clean-room audit, PBE regression, PBSA smoke, and SASA surface smoke.
+
+Stage 3AG detail rows:
+
+| fixture | leaf panels/matvec | overreject | caught | oracle abs mean | estimated abs mean | required scale p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mini-protein` | `7,335,697` | `6,074` | `1,606` | `3.828e-7` | `2.075e-1` | `3.673e-5` |
+| `charged-peptide` | `5,021,476` | `4,731` | `5,509` | `9.808e-7` | `1.115` | `1.266e-5` |
+| `compact-mini-protein` | `17,228,993` | `11,356` | `4,004` | `2.439e-7` | `8.053e-2` | `6.727e-5` |
+
+Sampled safe-scale projection at absolute floor `1e-7`:
+
+| channel | scale with margin | caught reaccepted | overreject reaccepted panels | fraction vs safe leaf work |
+| --- | ---: | ---: | ---: | ---: |
+| global | `1e-5` | `0` | `1,833` | `0.0062%` |
+| `K1_phi` | `3e-6` | `0` | `394,241` | `1.33%` |
+| `K2_phi_normal` | `3e-4` | `0` | `14,486` | `0.049%` |
+| `K3_phin` | `3e-6` | `0` | `41,266` | `0.139%` |
+| `K4_mixed` | `3e-6` | `0` | `244,818` | `0.827%` |
+
+Stage 3AG decision:
+
+- Stage 3AG is report-only and confirms the Stage 3AE diagnosis: the
+  estimator absolute magnitude is much larger than the sampled direct
+  expansion oracle while all Stage 3AG leaf work remains identical to the
+  safe baseline.
+- No sampled-safe scale projects the required `>=10%` leaf-work reduction;
+  even the separate per-channel projections are small and are not additive
+  without double-counting pair work. Therefore the next stage must not enable
+  deterministic channel-scaled reaccept based on this calibration.
+- The next branch should revisit estimator channel shape and source norm
+  construction, especially the derivative channels, before any new split
+  selectivity or batching work. Production defaults and `stage3u-safe` remain
+  unchanged. No Barnase run was performed because Stage 3AG changes no
+  candidate operator.
+
+## Stage 3AH/10A - TABI Channel-Shape Estimator Feature Audit
+
+Stage 3AH implementation:
+
+- Added hidden report-only option
+  `-pbe-tabi-convergence-shape-audit=off|summary|sampled-detail`, default
+  `off`. It is only useful with overreject audit enabled and does not affect
+  MAC, convergence split, traversal, batching, or the GMRES operator.
+- Extended the split-rejected overreject audit path to write
+  `pbe_tabi_convergence_shape_calibration.csv` when `sampled-detail` is
+  active. Each row records channel/classification plus `rho`, `rho^(p+1)`,
+  aspect, panel count, radius, target distance, source norm, degree-`p` and
+  degree-`p-1` tail norms, tail ratio, effective amp, estimated/oracle errors,
+  and oracle-to-feature ratios.
+- Added Stage 3AH matrix rows and
+  `test/pbe_tabi_convergence_shape_summary.ps1`, which evaluates sampled
+  feature thresholds that would reaccept overrejects only below the minimum
+  caught feature value.
+
+Stage 3AH verification:
+
+- Native build: `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- New shape audit smoke:
+  `test/pbe_tabi_convergence_shape_audit_smoke.ps1`: PASS
+  (`records=10`, both `caught` and `overreject` classes present).
+- Focused gates pass:
+  overreject calibration oracle, convergence overreject audit, treecode
+  accuracy, tree builder, topdown MAC audit, and far-expansion audit.
+- Full medium evidence:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3AGRows -IncludeStage3AHRows -CaseTimeoutSeconds 180 -AllowFailedStatus`:
+  PASS. Detail artifacts are under
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/<fixture>/stage3ah_shape_audit_detail/`.
+- Shape summary artifact:
+  `test/tmp/pbe_tabi_topdown_physical_gap_matrix/pbe_tabi_convergence_shape_summary.csv`.
+- Regression freeze passes:
+  GMRES true residual, sampled true residual, profile, memory profile,
+  clean-room audit, PBE regression, PBSA smoke, and SASA surface smoke.
+
+Stage 3AH detail rows:
+
+| fixture | leaf panels/matvec | overreject | caught |
+| --- | ---: | ---: | ---: |
+| `mini-protein` | `7,335,697` | `6,116` | `1,564` |
+| `charged-peptide` | `5,021,476` | `4,758` | `5,482` |
+| `compact-mini-protein` | `17,228,993` | `11,160` | `4,200` |
+
+Best sampled feature projections:
+
+| channel | feature | caught | overreject | projected panels | projected fraction |
+| --- | --- | ---: | ---: | ---: | ---: |
+| global | `oracle_abs_over_source_norm` | `117` | `1,419` | `286,446` | `0.968%` |
+| `K3_phin` | `oracle_abs_over_source_norm` | `238` | `1,298` | `202,061` | `0.683%` |
+| `K3_phin` | `oracle_abs_over_tail_norm` | `238` | `1,298` | `198,815` | `0.672%` |
+| global | `oracle_abs_over_tail_norm` | `117` | `1,419` | `139,775` | `0.472%` |
+| `K2_phi_normal` | `oracle_abs_over_source_norm` | `609` | `927` | `114,479` | `0.387%` |
+| global | `tail_ratio` | `117` | `1,419` | `106,478` | `0.360%` |
+
+Stage 3AH decision:
+
+- No measured feature threshold separates enough low-error overreject work from
+  caught high-error samples. The best projection is below `1%` of safe leaf
+  work, far under the `10%` threshold for implementing estimator v2.
+- Do not add another absolute floor, scale, or split selectivity heuristic from
+  these sampled shape features.
+- The next branch should inspect source moment/channel semantics directly:
+  verify that K1/K3 and K2/K4 source moment mappings match the JCP Taylor
+  channel they estimate, then test whether decoupled phi/phin or derivative
+  source-norm construction gives a better caught/overreject separation.
+  Defaults and `stage3u-safe` remain unchanged. No Barnase run was performed.
+
+## Stage 3AI/10B - TABI Grid-Gap Performance Triage and Fused Leaf Kernel
+
+Stage 3AI implementation:
+
+- Added hidden `-pbe-tabi-matvec-cost-profile=off|summary`, default `off`.
+  When enabled, timing/profile/progress now report `matvec_cost_profile`,
+  `leaf_panels_per_second`, `clean_leaf_panels_per_second`, and
+  `tree_traversal_fraction` so grid-vs-TABI comparisons can separate GMRES,
+  tree traversal, and direct leaf throughput without changing the operator.
+- Extended hidden `-pbe-tabi-jcp-direct-kernel` to accept
+  `fused-soa-avx2`. The implementation routes clean JCP on-the-fly
+  leaf-pair batches through the existing SoA AVX2 source loop, but reports the
+  fused kernel name distinctly so Stage 3AI rows can isolate it from the older
+  `soa-avx2` label. Singular, one-ring, Duffy, and exclusion paths keep the
+  scalar fallback behavior.
+- Added `-IncludeStage3AIRows` to the medium matrix. Rows include the
+  `stage3u-safe` cluster-off baseline, current best perf-style row,
+  `soa-avx2`, `fused-soa-avx2` min-source sweeps, and a sampled audit
+  validation row.
+- Added `-UseStage3AIPerfProbe` to the grid-vs-TABI compare harness. The
+  compare CSV now includes `absolute_time_delta_vs_grid`,
+  `tabi_matvec_cost_profile`, `tabi_leaf_panels_per_second`,
+  `tabi_clean_leaf_panels_per_second`, and `tabi_tree_traversal_fraction`.
+
+Stage 3AI verification:
+
+- Native build: `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- New fused leaf-kernel smoke:
+  `test/pbe_tabi_leaf_pair_fused_soa_avx2_smoke.ps1`: PASS
+  (`rel=0`, `fused_sources=2052`, singular fallback remains accurate).
+- New matvec-cost profile smoke:
+  `test/pbe_tabi_matvec_cost_profile_smoke.ps1`: PASS
+  (`matvecs=33`, profile/timing columns emitted).
+- Focused gates pass:
+  tree builder, treecode accuracy, and topdown MAC audit.
+- Matrix syntax/sanity row:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -Fixtures mini-protein -IncludeStage3AIRows -CaseTimeoutSeconds 180 -AllowFailedStatus -Quick`:
+  PASS. Stage 3AI rows report `matvec_cost_profile=summary` and the requested
+  `fused-soa-avx2` kernel.
+- Grid-vs-TABI compare sanity:
+  `test/pbe_tabi_vs_grid_compare.ps1 -Fixtures mini-protein -UseStage3AIPerfProbe -Mode perf -CaseTimeoutSeconds 180 -AllowTimeout`:
+  PASS. The small-fixture grid ratio remains report-only; the row confirms the
+  new grid-gap columns are emitted.
+
+Stage 3AI decision:
+
+- Stage 3AI is a performance-instrumentation and kernel-labeling slice, not a
+  production promotion. `stage3u-safe`, production defaults, direct TABI,
+  estimator/MAC guards, and the grid backend remain unchanged.
+- Full medium geomean and Barnase timing are still pending. The next step is to
+  run the full Stage 3AI medium matrix and compare the fused kernel against
+  `stage3u-safe` and the current best perf row. If the speedup gate still fails,
+  the roadmap should follow the stated branch: reduce algorithmic matvec count
+  or improve preconditioning, not add another scheduler layer.
+
+## Stage 3AJ/10C - TABI Memory-Budgeted Leaf-Block Preconditioner
+
+Stage 3AJ implementation:
+
+- Added hidden `-pbe-tabi-precond=block-budgeted`, leaving legacy `block` and
+  all production defaults unchanged.
+- Added hidden budget controls:
+  `-pbe-tabi-precond-block-panel-cap=<8..32>` (default `32`) and
+  `-pbe-tabi-precond-memory-budget-mb=<16..512>` (default `256`).
+  The new path forms the existing leaf/chunk block ranges, estimates LU,
+  pivot, index, and diagonal storage before allocation, and reports
+  `diagonal_block_budget_cap` when the estimate exceeds its budget.
+- Reused the existing buffer-aware JCP block assembly, LU pivot/valid-panel
+  checks, and preconditioner apply path. Legacy `block` retains its previous
+  hard-cap behavior.
+- Added timing/profile/progress telemetry for configured cap/budget, estimated
+  bytes, valid/ill-conditioned blocks, valid panels, setup time, apply time,
+  and apply calls. This information is available in long-run progress rows for
+  timeout-safe Barnase probes.
+- Added `test/pbe_tabi_budgeted_block_precond_smoke.ps1`, Stage 3AJ matrix rows,
+  `-UseStage3AJBudgetedPreconditioner` in the grid-vs-TABI compare harness,
+  and budgeted-block reporting/options in the Barnase truth harness.
+
+Stage 3AJ verification:
+
+- Native build: `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Budgeted block smoke: PASS. The active small case reports
+  `block_budgeted_buffer_aware`; the explicit low-budget case reports
+  `diagonal_block_budget_cap` before allocating valid LU blocks
+  (`estimated_bytes=21662976`, `budget_bytes=16777216`, `valid_blocks=0`).
+- Legacy block buffer smoke, matvec-cost profile, fused SoA AVX2, treecode
+  accuracy, tree builder, topdown MAC audit, absolute-floor, channel-semantics,
+  surface-margin and polynomial-estimator smokes: PASS.
+- Full medium matrix:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3AJRows
+  -CaseTimeoutSeconds 180 -AllowFailedStatus`: PASS as a completed evidence
+  run; all 39 rows emitted status `ok`.
+- Regression freeze: GMRES true residual, sampled true residual, TABI profile,
+  memory profile, clean-room audit, PBE regression, PBSA smoke, and SASA
+  surface smoke: PASS.
+
+Stage 3AJ medium candidate evidence (`fused-soa-avx2`, cap `32`, budget
+`256 MB`, restart `64`, relative to fused-diagonal control):
+
+| Fixture | Estimated precond bytes | Matvec reduction | Time speedup | Sampled residual | Audit mean |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| mini-protein | 2558272 | 0% | 0.9250x | 5.0623e-5 | 2.3618e-5 |
+| charged-peptide | 2133120 | 0% | 0.9370x | 8.1240e-6 | 0 |
+| compact-mini-protein | 3883072 | 0% | 1.2010x | 2.7631e-5 | 5.9797e-5 |
+
+Stage 3AJ decision:
+
+- The new memory-budgeted path is functional and keeps medium energy/matvec
+  error and accepted-miss counters clean; it also improves sampled residuals.
+- It does not satisfy the performance branch: matvec reduction is `0%` on all
+  three medium fixtures, geomean speedup versus fused diagonal is only
+  `1.0135x`, and the compact validation audit mean remains above the
+  `5e-5` gate (`5.9797e-5`).
+- Barnase was not run because the full-medium candidate did not pass the
+  performance and audit-mean gates. Defaults and `stage3u-safe` remain
+  unchanged.
+- Next branch: a leaf-local block preconditioner alone is not changing Krylov
+  iteration count; evaluate a broader preconditioner correction
+  (overlapping/additive Schwarz or coarse correction) only behind hidden gates,
+  with medium evidence before any Barnase probe.
+
+## Stage 3AK/10D - TABI Exact-Galerkin Two-Level Coarse Correction Probe
+
+Stage 3AK implementation:
+
+- Added hidden `-pbe-tabi-precond=coarse-galerkin-probe` with
+  `-pbe-tabi-precond-coarse-aggregate-cap=<4..64>`,
+  `-pbe-tabi-precond-coarse-base=diagonal|block-budgeted`, and the
+  smoke-only verification mode `-pbe-tabi-precond-coarse-verify=full-small`.
+- Built deterministic topdown aggregates by splitting the largest splittable
+  tree node up to the aggregate cap. Each aggregate contributes constant
+  `phi` and `phin` modes; restriction is area weighted and reports its
+  `R*P=I` error.
+- Built the exact Galerkin matrix with the same hidden-safe JCP treecode
+  operator used by the solve, while isolating setup matvec statistics and
+  disabling report-only audit sampling during setup. The two-level apply is
+  `M_base^-1 (r - P R r) + P A_c^-1 R r`.
+- Added timeout/profile/timing fields for coarse dimension, storage,
+  pivot/status, setup matvec calls/seconds, apply calls/seconds, and
+  verification errors. Matrix CSV now reports
+  `gmres_matvec_reduction_excluding_setup` and
+  `setup_amortization_matvec_equivalent`.
+- Added `test/pbe_tabi_coarse_galerkin_precond_smoke.ps1` and
+  `-IncludeStage3AKRows` with diagonal, budgeted-block, coarse-cap
+  `8/16/32`, composed coarse-plus-block, and sampled-audit validation rows.
+- Added `-UseStage3AKCoarseProbe` and coarse telemetry columns to the
+  grid-vs-TABI compare harness for future report-only comparisons; Stage 3AK
+  itself does not run a Barnase timing probe.
+
+Stage 3AK verification:
+
+- Native build: `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS.
+- Exact Galerkin smoke: PASS, including active coarse construction,
+  `R*P=I`/column verification at tolerance `<=1e-12`, and low-budget
+  fallback before expensive block/coarse setup.
+- Focused gates pass: budgeted block preconditioner, matvec-cost profile,
+  fused SoA AVX2 leaf path, treecode accuracy, tree builder, topdown MAC
+  audit, absolute-floor, channel-semantics, polynomial-estimator, and
+  surface-margin smokes.
+- Full medium evidence completed:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3AIRows
+  -IncludeStage3AJRows -IncludeStage3AKRows -CaseTimeoutSeconds 180
+  -AllowFailedStatus`; all `21` Stage 3AK rows emitted `status=ok`.
+- Grid-vs-TABI schema sanity on `mini-protein` with
+  `-UseStage3AKCoarseProbe`: PASS; summary output preserves
+  `coarse_galerkin_probe_diagonal`, `coarse_status=active`, and setup matvec
+  telemetry.
+- Regression freeze pass: GMRES true residual, sampled true residual, TABI
+  profile, memory profile, clean-room audit, PBE regression, PBSA smoke, and
+  SASA surface smoke.
+
+Stage 3AK coarse-diagonal viability evidence (GMRES operator matvec reduction
+excludes exact-Galerkin setup matvecs):
+
+| Row | mini-protein | charged-peptide | compact-mini-protein | Geomean matvec reduction |
+| --- | ---: | ---: | ---: | ---: |
+| coarse diagonal, cap 8 | 0% | 0% | 4.17% | 1.41% |
+| coarse diagonal, cap 16 | 0% | 0% | 4.17% | 1.41% |
+| coarse diagonal, cap 32 | 0% | 6.67% | 4.17% | 3.65% |
+| coarse + block-budgeted, cap 16 | 8.33% | 6.67% | 8.33% | 7.78% |
+
+For cap `16` with diagonal base, coarse setup required `28`, `30`, and `30`
+operator matvecs and `7.33s`, `6.82s`, and `23.48s` respectively on the
+three fixtures, while its GMRES reduction was only `0%`, `0%`, and `4.17%`.
+The composed row does not isolate new coarse benefit: its reductions match the
+existing budgeted-block trend rather than crossing the viability threshold.
+
+Stage 3AK validation accuracy evidence (coarse diagonal cap `16`, sampled
+expansion/channel audit enabled):
+
+| Fixture | Energy drift rel | Sampled residual rel | Far expansion mean | Accepted misses K1/K2/K3/K4 |
+| --- | ---: | ---: | ---: | --- |
+| mini-protein | 2.0896e-5 | 6.7067e-5 | 6.1519e-5 | 0/0/0/0 |
+| charged-peptide | 3.9853e-6 | 8.7215e-6 | 0 | 0/0/0/0 |
+| compact-mini-protein | 1.2515e-6 | 3.2324e-5 | 4.4174e-5 | 0/0/0/0 |
+
+Stage 3AK decision:
+
+- Exact Galerkin coarse correction is implemented and accepted-miss clean, but
+  it fails both gating arguments: the best coarse-diagonal row reduces GMRES
+  matvecs by only `3.65%` geometric mean, far below the required `25%`, while
+  setup costs dozens of fine operator applications; the final validation rerun
+  also puts `mini-protein` expansion mean above gate (`6.1519e-5 > 5e-5`).
+- `charged-peptide` emitted no expansion-mean pair in its validation row and
+  remains a report-only follow-up case; it does not rescue the failed mini
+  mean gate.
+- The coarse branch is therefore closed for now; implementing a cheaper
+  coarse assembly would optimize setup for a correction that did not change
+  Krylov convergence enough on medium fixtures.
+- Barnase was not run, as specified for this probe and reinforced by the
+  failed medium viability gate. Production defaults, `stage3u-safe`, the grid
+  backend, and direct TABI remain unchanged.
+- Next branch: return to estimator/channel-shape or safe leaf-work
+  selectivity, using the Stage 3AH calibration evidence rather than adding
+  another preconditioner layer.
+
+## Stage 3AL/10E - TABI Kernel-Response Channel Estimator Audit
+
+Stage 3AL implementation:
+
+- Added hidden report-only option
+  `-pbe-tabi-convergence-kernel-response-audit=off|summary|sampled-detail`,
+  default `off`. It is evaluated only for sampled convergence-overreject
+  candidates and does not alter MAC, split, accepted-far evaluation, or
+  GMRES operator behavior.
+- Confirmed the live source mapping used by Taylor evaluation:
+  `K1_phi/K3_phin` are driven by `phin_scalar`, while
+  `K2_phi_normal/K4_mixed` are driven by `phi_normal`.
+- Added degree-filtered kernel response evaluation for degree `p` and `p-1`
+  moments through the existing JCP channel Taylor kernels. Detail mode emits
+  `pbe_tabi_kernel_response_calibration.csv` with source family,
+  `kernel_tail_p_abs`, `kernel_tail_pm1_abs`,
+  `kernel_tail_envelope_abs`, oracle error, and classification.
+- Added `test/pbe_tabi_kernel_response_channel_audit_smoke.ps1`,
+  `test/pbe_tabi_kernel_response_summary.ps1`, and
+  `-IncludeStage3ALRows` in the physical-gap matrix harness.
+
+Stage 3AL verification:
+
+- Native build: `mingw32-make PROFILE=native TARGET=titan.exe all -j1`:
+  PASS.
+- New kernel-response channel smoke: PASS; `phin_scalar` contributes only to
+  `K1/K3`, `phi_normal` contributes only to `K2/K4`, and detail CSV contains
+  both source families.
+- Existing focused gates pass: convergence shape audit, overreject
+  calibration oracle, convergence overreject audit, far-expansion audit,
+  moment construction, mixed derivative, treecode accuracy, tree builder,
+  and topdown MAC audit.
+- Full medium evidence completed:
+  `test/pbe_tabi_topdown_physical_gap_matrix.ps1 -IncludeStage3AGRows
+  -IncludeStage3AHRows -IncludeStage3ALRows -CaseTimeoutSeconds 180
+  -AllowFailedStatus`; all `9` Stage 3AL rows emitted `status=ok`.
+- Regression freeze pass: GMRES true residual, sampled true residual, TABI
+  profile, memory profile, clean-room audit, PBE regression, PBSA smoke, and
+  SASA surface smoke.
+
+Stage 3AL report-only parity evidence:
+
+| Fixture | Safe leaf panels/matvec | Summary leaf panels/matvec | Detail leaf panels/matvec | Safe/detail sampled residual rel |
+| --- | ---: | ---: | ---: | ---: |
+| mini-protein | 7,335,697 | 7,335,697 | 7,335,697 | 9.75894e-5 / 9.75894e-5 |
+| charged-peptide | 5,021,476 | 5,021,476 | 5,021,476 | 1.76983e-5 / 1.76983e-5 |
+| compact-mini-protein | 17,228,993 | 17,228,993 | 17,228,993 | 5.30641e-5 / 5.30641e-5 |
+
+Stage 3AL kernel-response projection:
+
+| Best safe channel | Safety scale | Caught would reaccept | Overreject would reaccept | Projected released panels | Fraction of safe leaf work |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| K4_mixed | 1 | 0 | 1,536 | 382,497 | 1.2928% |
+
+Stage 3AL decision:
+
+- Kernel-response features correctly distinguish the source-family mapping,
+  but they do not expose enough safely recoverable leaf work. The best
+  zero-caught projection releases only `1.2928%`, far below the required
+  `10%` threshold for an active estimator-v2 branch.
+- Do not implement kernel-response split selectivity, another reaccept floor,
+  or another local preconditioner from this evidence.
+- The estimator-selectivity performance branch is closed for now. The next
+  branch should reassess TABI versus grid positioning and decide whether TABI
+  remains an opt-in memory/accuracy path or needs a larger algorithmic change
+  before further runtime investment. Production defaults, `stage3u-safe`,
+  direct TABI, and the grid backend remain unchanged. No Barnase run was
+  performed because Stage 3AL is report-only.

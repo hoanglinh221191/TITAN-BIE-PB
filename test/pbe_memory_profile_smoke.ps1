@@ -15,7 +15,7 @@ function Convert-ToDouble([object]$Value) {
 & (Join-Path $PSScriptRoot 'pbe_tabi_vs_grid_compare.ps1') -TitanExe $TitanExe `
     -WorkRoot $WorkRoot -Mode accuracy -RepeatCount 1 `
     -Fixtures @('sphere') -ProfileMemory
-if ($LASTEXITCODE -ne 0) {
+if (-not $?) {
     throw 'pbe_tabi_vs_grid_compare memory profile run failed'
 }
 
