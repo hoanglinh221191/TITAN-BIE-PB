@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <sstream>
 #include <unordered_map>
@@ -95,6 +96,19 @@ void TitanContactMapAnalyzer::init(const Multi_MOL &mol1, const arguments &,
   active_atom_mask_.assign(atom_count_, 0);
   atom_index_to_contact_pos_.assign(atom_count_, -1);
   std::unordered_map<std::size_t, std::size_t> chain_residue_ordinals;
+  std::map<std::pair<std::size_t, std::size_t>, std::size_t> residue_ordinals;
+
+  for (std::size_t atom_idx = 0; atom_idx < atom_count_ &&
+                                 atom_idx < mol1.info.size();
+       ++atom_idx) {
+    titan_contact::ResidueKey residue =
+        titan_contact::residue_key_from_atom(mol1.info[atom_idx], 0);
+    const auto residue_id = std::make_pair(residue.chainnum, residue.resnr);
+    if (residue_ordinals.find(residue_id) == residue_ordinals.end()) {
+      residue_ordinals.emplace(residue_id,
+                               ++chain_residue_ordinals[residue.chainnum]);
+    }
+  }
 
   for (std::size_t atom_idx = 0; atom_idx < atom_count_ &&
                                  atom_idx < mol1.info.size();
@@ -111,7 +125,8 @@ void TitanContactMapAnalyzer::init(const Multi_MOL &mol1, const arguments &,
           return item == residue;
         });
     if (existing == residues_.end()) {
-      residue.ordinal = ++chain_residue_ordinals[residue.chainnum];
+      residue.ordinal =
+          residue_ordinals[std::make_pair(residue.chainnum, residue.resnr)];
       residues_.push_back(residue);
     } else {
       residue_ordinal =

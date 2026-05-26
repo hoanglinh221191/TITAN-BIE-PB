@@ -530,6 +530,8 @@ Implemented notes:
 - CLI options are `-cmap`, `-cmap-mode`, `-cmap-cut`, `-cmap-domain`, and
   `-cmap-min-seqsep`.
 - End-to-end smoke is `test/cmap_smoke.ps1`.
+- XDR and multi-input runs may use indexed output names such as
+  `contact_probability_edges_0.csv` to avoid overwriting per-trajectory files.
 
 Slice B: `-qnative` v1
 

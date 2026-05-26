@@ -556,6 +556,8 @@ IMPORTANT NOTES
     contact_probability_matrix.csv
     contact_probability_edges.csv
     contact_probability_summary.dat
+    Multi-input and XDR runs may append a trajectory index before the suffix,
+    for example contact_probability_edges_0.csv.
 
   Notes:
     - CMap analyzes molecule 1 and works in -nocal mode.
