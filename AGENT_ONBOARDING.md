@@ -15,7 +15,8 @@ TITAN is a high-performance molecular trajectory analysis engine centered on:
 - interaction energy / force analysis / subgroup decomposition (`-sg`)
 - GBSA / ALPB / screening-style reweighting helpers
 - hydrogen bonds, HBond/salt/water kinetics, and geometry observables
-- RMSD / RMSF / DSSP / Rg2 / LJ condensation / structure factor `S(q)`
+- RMSD / RMSF / DSSP / Rg2 / LJ condensation / structure factor `S(q)` /
+  side-chain contact probability maps (`-cmap`)
 - DCCM / network / communities / PCA / allostery / corr-kNN / LSP-MD
 - TICA / MSM / Validation / DHAM / MBAR / UMAP / TPT / ZTS
 - LLPS / GIST / IFP / AWH RC-binned IFP
@@ -42,8 +43,8 @@ If you only have a few minutes, read these in order:
 
 3. `impl_engine.cpp`
    Main orchestration file. This is where setup, streaming analyzers (`HBK`,
-   `SQ`, `Rg2`, `IFP`, `AWH`, subgroup decomposition), and postproc launch all
-   meet.
+   `SQ`, `CMap`, `Rg2`, `IFP`, `AWH`, subgroup decomposition), and postproc
+   launch all meet.
 
 4. `chunk_streamer.h` and `chunk_streamer.cpp`
    Input streaming layer for PDB and XTC/TRR trajectories.
@@ -136,6 +137,7 @@ Analysis modules:
 - `titan_dssp.cpp`
 - `titan_lj.cpp`
 - `titan_sq.cpp`, `titan_sq_core.cpp`
+- `titan_contact_map.cpp`, `titan_contact_primitives.cpp`
 - `titan_hbond_kinetics.cpp`
 - `titan_pbe.h` and `titan_pbe/` for frame-based PBE/PBSA electrostatics
 - `titan_pca.cpp`
@@ -1106,13 +1108,16 @@ If you change trajectory streaming:
 - verify replica boundaries still propagate correctly
 - recheck whether the change increases frame-copy pressure in the split path
 
-If you change RMS / DSSP / LJ / TPT behavior:
+If you change RMS / DSSP / LJ / SQ / CMap / TPT behavior:
 - inspect `titan_rms.cpp`
 - inspect `titan_rg.cpp` if the change affects trace-atom geometry observables
 - inspect `titan_dssp.cpp`
 - inspect `titan_lj.cpp`
 - inspect `titan_sq.cpp` / `titan_sq_core.cpp` if the change touches trace
   atom or condensed-phase channel semantics
+- inspect `titan_contact_map.cpp` and `titan_contact_primitives.cpp` if the
+  change touches side-chain contact definitions, glycine fallback,
+  residue-pair identity, or contact probability outputs
 - inspect `titan_tpt.cpp`
 - inspect `arguments.cpp` and `parse_arguments.cpp` for implied-module and PBC
   semantics
