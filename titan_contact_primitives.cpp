@@ -7,7 +7,7 @@
 namespace {
 
 constexpr const char *kInvalidModeMessage =
-    "CMap: -cmap-mode must be one of sidechain-heavy, cb, ca, bb.";
+    "CMap: -cmap-mode must be one of sidechain-com, sidechain-heavy, cb, ca, bb.";
 
 bool residue_key_equal(const titan_contact::ResidueKey &lhs,
                        const titan_contact::ResidueKey &rhs) noexcept {
@@ -20,6 +20,8 @@ void hash_combine(std::size_t &seed, std::size_t value) noexcept {
 
 bool residue_less_for_pair_order(const titan_contact::ResidueKey &lhs,
                                  const titan_contact::ResidueKey &rhs) {
+  if (lhs.molecule != rhs.molecule)
+    return lhs.molecule < rhs.molecule;
   if (lhs.chainnum != rhs.chainnum)
     return lhs.chainnum < rhs.chainnum;
   if (lhs.resnr != rhs.resnr)
@@ -43,8 +45,10 @@ bool ResiduePairKey::operator==(const ResiduePairKey &other) const noexcept {
 std::size_t ResiduePairKeyHash::operator()(
     const ResiduePairKey &pair) const noexcept {
   std::size_t seed = 0;
+  hash_combine(seed, pair.first.molecule);
   hash_combine(seed, pair.first.chainnum);
   hash_combine(seed, pair.first.resnr);
+  hash_combine(seed, pair.second.molecule);
   hash_combine(seed, pair.second.chainnum);
   hash_combine(seed, pair.second.resnr);
   return seed;
@@ -69,6 +73,8 @@ std::string trim_copy(std::string_view value) {
 
 ContactMode parse_contact_mode(std::string_view value) {
   const std::string mode = uppercase_copy(trim_copy(value));
+  if (mode == "SIDECHAIN-COM" || mode == "SC-COM")
+    return ContactMode::SidechainCOM;
   if (mode == "SIDECHAIN" || mode == "SIDECHAIN-HEAVY")
     return ContactMode::SidechainHeavy;
   if (mode == "CB")
@@ -82,6 +88,8 @@ ContactMode parse_contact_mode(std::string_view value) {
 
 const char *contact_mode_name(ContactMode mode) noexcept {
   switch (mode) {
+  case ContactMode::SidechainCOM:
+    return "sidechain-com";
   case ContactMode::SidechainHeavy:
     return "sidechain-heavy";
   case ContactMode::CB:
@@ -119,6 +127,8 @@ bool is_selected_contact_atom(const mol_info &info, ContactMode mode) {
   const bool gly = residue_name_starts_gly(resname);
 
   switch (mode) {
+  case ContactMode::SidechainCOM:
+    return info.is_side_chain();
   case ContactMode::SidechainHeavy:
     if (gly)
       return atom == "CA";
@@ -135,9 +145,10 @@ bool is_selected_contact_atom(const mol_info &info, ContactMode mode) {
   return false;
 }
 
-ResidueKey residue_key_from_atom(const mol_info &info, std::size_t ordinal) {
-  return ResidueKey{info.get_chainnum(), info.get_resnr(), info.get_chain(),
-                    info.get_res_name(), ordinal};
+ResidueKey residue_key_from_atom(const mol_info &info, std::size_t ordinal,
+                                 std::uint8_t molecule) {
+  return ResidueKey{molecule, info.get_chainnum(), info.get_resnr(),
+                    info.get_chain(), info.get_res_name(), ordinal};
 }
 
 ResiduePairKey make_ordered_pair(const ResidueKey &lhs,
@@ -148,11 +159,12 @@ ResiduePairKey make_ordered_pair(const ResidueKey &lhs,
 }
 
 bool same_residue(const ResidueKey &lhs, const ResidueKey &rhs) noexcept {
-  return lhs.chainnum == rhs.chainnum && lhs.resnr == rhs.resnr;
+  return lhs.molecule == rhs.molecule && lhs.chainnum == rhs.chainnum &&
+         lhs.resnr == rhs.resnr;
 }
 
 bool same_chain(const ResidueKey &lhs, const ResidueKey &rhs) noexcept {
-  return lhs.chainnum == rhs.chainnum;
+  return lhs.molecule == rhs.molecule && lhs.chainnum == rhs.chainnum;
 }
 
 } // namespace titan_contact

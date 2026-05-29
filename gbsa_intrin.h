@@ -6,6 +6,7 @@
 #include "cache_sigma_epsilon.h"
 #include "info.h"
 #include "stat_ener_res_res.h"
+#include <iosfwd>
 #include <string>
 #include <unordered_map>
 
@@ -19,9 +20,14 @@ struct GBSA_energy_snap {
   double G_polar;
   double G_nonpolar;
   double time;
+  double time_precompute_ms;
+  double time_energy_kernel_ms;
+  double time_decomposition_merge_ms;
+  double time_total_ms;
   GBSA_energy_snap()
       : total_energy(0.), E_vdw(0.), E_elec(0.), G_polar(0.), G_nonpolar(0.),
-        time(0.) {}
+        time(0.), time_precompute_ms(0.), time_energy_kernel_ms(0.),
+        time_decomposition_merge_ms(0.), time_total_ms(0.) {}
 };
 
 struct GBSA_decomposition {
@@ -37,7 +43,7 @@ struct GBSA_decomposition {
   double G_nonpolar;
   double total;
   size_t count;
-  std::vector<double> frame_energies;
+  std::vector<double> frame_mm_energies;
   GBSA_decomposition()
       : is_ligand(false), chainnum(0), resnr(0), E_vdw(0.), E_elec(0.),
         G_polar(0.), G_nonpolar(0.), total(0.), count(0) {}
@@ -89,7 +95,7 @@ public:
   void merge(const GBSA_Aggregator &other);
   void commit_frame_decompositions(const GBSA_Aggregator &frame_data,
                                    size_t current_frame_idx);
-  void print_all_stats(const std::string &dir_prefix);
+  void print_all_stats(const std::string &dir_prefix, std::fstream *log = nullptr);
   void initialize_trajectory(size_t traj_index);
 
   const std::vector<GBSA_decomposition> &get_decomp() const { return decomp; }

@@ -147,13 +147,16 @@ struct PbeArgs {
   bool dgsolv{false};
   bool pbsa{false};
   std::string pbsa_components{"auto"};
-  std::string pbsa_decomp{"off"};
+  std::string pbsa_decomp{"auto"};
+  std::string pbsa_mol1_type{"protein"};
+  std::string pbsa_mol2_type{"lig"};
   bool pbsa_ie{true};
   std::string pbsa_residue_frames{"off"};
   std::string pbsa_ie_block{"auto"};
   int pbsa_ie_min_samples{10};
   double pbsa_ie_filter_sigma{2.0};
   std::string pbsa_perf{"summary"};
+  std::string pbsa_grid_reuse{"auto"};
   std::string timing{"off"};
   std::string tabi_tree_preset{"off"};
   std::string tabi_sum{"auto"};
@@ -436,10 +439,43 @@ struct GraphArgs {
 
 struct CMapArgs {
   bool flag_cmap{false};
-  std::string mode{"sidechain-heavy"};
-  double cutoff_ang{4.5};
+  std::string mode{"sidechain-com"};
+  std::string scope{"mol1"};
+  double cutoff_ang{6.5};
+  bool cutoff_explicit{false};
   std::string domain{"both"};
+  bool domain_explicit{false};
   int min_seqsep{3};
+  bool min_seqsep_explicit{false};
+  bool new_option_explicit{false};
+  bool legacy_alias_seen{false};
+  bool legacy_alias_enabled{false};
+};
+
+struct QNativeArgs {
+  bool flag_qnative{false};
+  std::string ref_file{};
+  bool ref_explicit{false};
+  std::string mode{"sidechain-com"};
+  std::string scope{"mol1"};
+  double cutoff_ang{6.5};
+  bool cutoff_explicit{false};
+  std::string domain{"both"};
+  bool domain_explicit{false};
+  int min_seqsep{3};
+  bool min_seqsep_explicit{false};
+  bool soft{false};
+  bool soft_explicit{false};
+  double beta{5.0};
+  bool beta_explicit{false};
+};
+
+struct DihedralArgs {
+  bool flag_dihedral{false};
+  std::string kind{"backbone"};
+  std::string residues{"all"};
+  int stride{1};
+  bool export_tica{false};
 };
 
 struct UmapArgs {
@@ -568,6 +604,8 @@ public:
   CommunityArgs community;
   GraphArgs graph;
   CMapArgs cmap;
+  QNativeArgs qnative;
+  DihedralArgs dihedral;
   UmapArgs umap;
   DsspArgs dssp;
   RmsArgs rms;
@@ -601,8 +639,7 @@ public:
       flag_end_set, flag_energy_same_force, flag_maxforce, flag_new_emap,
       print_energy_res, self_int, flag_sidechain, flag_print_sidechain,
       flag_all_respair;
-  bool flag_sub_groups, flag_cal_contact,
-      flag_contact_map_explicit,
+  bool flag_sub_groups,
       flag_cal_dis_res_2com, flag_set_type_1, flag_set_type_2,
       flag_cal_dipole_moment, flag_charged_atom_distance_dis,
       flag_angle_dipole_efield, flag_sep_opdb, heat_capacity_cp, flag_cal_vol,
@@ -631,6 +668,7 @@ public:
   std::string mem_budget_gb_raw{"auto"};
   double mem_budget_gb{-1.0};
   bool low_memory{false};
+  std::string gbsa_perf{"summary"};
   std::string network_mode{"auto"};
   double network_sparse_cut{30.0};
   int network_sparse_k{24};
@@ -685,8 +723,7 @@ public:
         flag_new_emap{false}, print_energy_res{false}, self_int{false},
         flag_sidechain{true}, flag_print_sidechain{true},
         flag_all_respair{false},
-        flag_sub_groups{false}, flag_cal_contact{true},
-        flag_contact_map_explicit{false},
+        flag_sub_groups{false},
         flag_cal_dis_res_2com{false}, flag_set_type_1{false},
         flag_set_type_2{false}, flag_cal_dipole_moment{false},
         flag_charged_atom_distance_dis{false}, flag_angle_dipole_efield{false},
@@ -738,6 +775,16 @@ public:
         mol_1_type{"protein"}, mol_2_type{"lig"}, water_type{"surface"} {}
 
   int post_process();
+  bool needs_mol2_for_cmap_interface() const {
+    return cmap.flag_cmap && cmap.scope == "interface";
+  }
+  bool needs_mol2_for_qnative_interface() const {
+    return qnative.flag_qnative && qnative.scope == "interface";
+  }
+  bool needs_mol2_coordinates() const {
+    return !flag_nocal || needs_mol2_for_cmap_interface() ||
+           needs_mol2_for_qnative_interface();
+  }
   string get_build_number() const;
   int parse_arguments(int argc, char **argv);
   int parse_arguments_interactive(int argc);

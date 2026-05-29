@@ -806,6 +806,16 @@ struct FrameResult {
   double pbsa_time_components_ms{0.0};
   double pbsa_time_residue_ms{0.0};
   double pbsa_time_frame_ms{0.0};
+  std::string pbsa_grid_reuse_effective{"off"};
+  double pbsa_complex_reuse_delta_kj_mol{0.0};
+  double pbsa_receptor_reuse_delta_kj_mol{0.0};
+  double pbsa_ligand_reuse_delta_kj_mol{0.0};
+  std::size_t pbsa_complex_reuse_surface_hits{0};
+  std::size_t pbsa_complex_reuse_operator_hits{0};
+  std::size_t pbsa_receptor_reuse_surface_hits{0};
+  std::size_t pbsa_receptor_reuse_operator_hits{0};
+  std::size_t pbsa_ligand_reuse_surface_hits{0};
+  std::size_t pbsa_ligand_reuse_operator_hits{0};
   std::string status{"ok"};
 };
 

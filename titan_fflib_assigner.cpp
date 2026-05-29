@@ -640,7 +640,9 @@ bool should_report_hydrogens(const arguments &Arguments) {
 bool should_add_hydrogens(const arguments &Arguments, const Multi_MOL &mol) {
   if (!should_report_hydrogens(Arguments))
     return false;
-  if (Arguments.flag_1_pdb && !Arguments.flag_nocal && mol.m_mol.size() <= 1)
+  if (Arguments.flag_1_pdb &&
+      (!Arguments.flag_nocal || Arguments.cmap.flag_cmap) &&
+      mol.m_mol.size() <= 1)
     return false;
   return true;
 }
@@ -649,7 +651,9 @@ std::string hydrogen_skip_policy_message(const arguments &Arguments,
                                          const Multi_MOL &mol) {
   if (Arguments.flag_xdr)
     return "hydrogen not added for XDR trajectory atom-count stability";
-  if (Arguments.flag_1_pdb && !Arguments.flag_nocal && mol.m_mol.size() <= 1)
+  if (Arguments.flag_1_pdb &&
+      (!Arguments.flag_nocal || Arguments.cmap.flag_cmap) &&
+      mol.m_mol.size() <= 1)
     return "hydrogen not added because PDB trajectory frames keep original atom count";
   return "no heavy atom anchor found";
 }

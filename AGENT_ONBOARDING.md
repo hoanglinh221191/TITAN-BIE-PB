@@ -15,8 +15,8 @@ TITAN is a high-performance molecular trajectory analysis engine centered on:
 - interaction energy / force analysis / subgroup decomposition (`-sg`)
 - GBSA / ALPB / screening-style reweighting helpers
 - hydrogen bonds, HBond/salt/water kinetics, and geometry observables
-- RMSD / RMSF / DSSP / Rg2 / LJ condensation / structure factor `S(q)` /
-  side-chain contact probability maps (`-cmap`)
+- RMSD / RMSF / DSSP / Rg2 / backbone dihedrals / LJ condensation /
+  structure factor `S(q)` / side-chain contact probability maps (`-cmap`)
 - DCCM / network / communities / PCA / allostery / corr-kNN / LSP-MD
 - TICA / MSM / Validation / DHAM / MBAR / UMAP / TPT / ZTS
 - LLPS / GIST / IFP / AWH RC-binned IFP
@@ -1108,10 +1108,12 @@ If you change trajectory streaming:
 - verify replica boundaries still propagate correctly
 - recheck whether the change increases frame-copy pressure in the split path
 
-If you change RMS / DSSP / LJ / SQ / CMap / TPT behavior:
+If you change RMS / DSSP / dihedral / LJ / SQ / CMap / TPT behavior:
 - inspect `titan_rms.cpp`
 - inspect `titan_rg.cpp` if the change affects trace-atom geometry observables
 - inspect `titan_dssp.cpp`
+- inspect `titan_dihedral.cpp` if the change touches backbone phi/psi/omega
+  observables or circular feature export
 - inspect `titan_lj.cpp`
 - inspect `titan_sq.cpp` / `titan_sq_core.cpp` if the change touches trace
   atom or condensed-phase channel semantics

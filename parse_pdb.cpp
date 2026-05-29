@@ -523,7 +523,7 @@ build_pdb_route_plan(groups_cal &groups, const arguments &Arguments) {
   };
 
   update_max_index(groups.group_1_index());
-  if (!Arguments.flag_nocal)
+  if (Arguments.needs_mol2_coordinates())
     update_max_index(groups.group_2_index());
   if (Arguments.n_wat >= 0 && Arguments.n_wat < static_cast<int>(groups.group_num()))
     update_max_index(static_cast<size_t>(Arguments.n_wat));
@@ -557,7 +557,7 @@ build_pdb_route_plan(groups_cal &groups, const arguments &Arguments) {
     return std::unexpected(assigned.error());
   }
 
-  if (!Arguments.flag_nocal) {
+  if (Arguments.needs_mol2_coordinates()) {
     if (auto assigned =
             assign_group(groups.group_2_index(), PdbRouteTarget::Lig,
                          plan.lig_atom_count);
@@ -589,7 +589,7 @@ read_routed_pdb_chunk(std::istream &input_pdb, std::string_view input_name,
                      lig_out,
                      water_out,
                      route_plan,
-                     !Arguments.flag_nocal,
+                     Arguments.needs_mol2_coordinates(),
                      Arguments.n_wat >= 0,
                      capture_topology};
   return parse_pdb_stream_impl(

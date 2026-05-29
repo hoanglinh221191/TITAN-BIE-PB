@@ -151,12 +151,15 @@ IMPORTANT NOTES
   Main inputs:
     -gbsa or -alpb
     -igb, -ext_diel, -int_diel, -saltcon, -epsilon_in
+    -gbsa-perf off|summary|detail
 
   Typical outputs:
     gbsa_snapshots.dat
     gbsa_timeseries_avg.dat
     gbsa_summary.dat
     gbsa_decomposition.dat
+    gbsa_performance.dat
+    gbsa_performance_frames.csv   (with -gbsa-perf=detail)
     gbsa_average_emap_pairs.tsv
     gbsa_total_energy_maptype.tsv
     out_entropy.dat   (auto-enabled by -gbsa for free-energy completeness)
@@ -164,6 +167,8 @@ IMPORTANT NOTES
   Notes:
     - GBSA/ALPB are energy modules and are ignored in -nocal mode; remove
       -nocal to compute implicit-solvent free energies.
+    - GBSA interaction entropy uses E_MM = E_elec + E_vdw; the reported
+      energy kernel timing remains fused with GB pair-polar work.
 
 2.2b PBE
 
@@ -215,7 +220,7 @@ IMPORTANT NOTES
     -pbsa
     -pbsa-components, -pbsa-decomp, -pbsa-residue-frames
     -pbsa-ie, -pbsa-ie-block, -pbsa-ie-min-samples
-    -pbsa-ie-filter-sigma, -pbsa-perf
+    -pbsa-ie-filter-sigma, -pbsa-perf, -pbsa-grid-reuse
     -pbe-max-iter, -pbe-rms, -pbe-dphi, -pbe-omega
     -pbe-nl-max-iter, -pbe-nl-inner-iter, -pbe-nl-stagnation
     -pbe-nl-block, -pbe-nl-dphi, -pbe-nl-relax, -pbe-nl-clip
@@ -297,7 +302,8 @@ IMPORTANT NOTES
     mm_pbsa_ie_diagnostics.csv, and mm_pbsa_performance.dat when -pbsa is
     enabled
     optional: mm_pbsa_decomposition.dat and mm_pbsa_residue_*.csv when
-    -pbsa-decomp is molecule/residue
+    -pbsa-decomp is molecule/residue; mm_pbsa_unit_*.csv for hybrid/auto
+    protein-ligand decomposition
     energies are reported in kJ/mol and kcal/mol; kT is retained for continuity
     optional: pbe_phi_*.cube, pbe_epsilon_*.cube, and pbe_ion_*.cube
     optional: pbe_probe_sites.csv when DelPhi focus/probe fixture knobs are used
@@ -658,7 +664,8 @@ IMPORTANT NOTES
 
   Main inputs:
     -cmap
-    -cmap-mode <sidechain-heavy|cb|ca|bb>
+    -cmap-scope <mol1|interface>
+    -cmap-mode <sidechain-com|sidechain-heavy|cb|ca|bb>
     -cmap-cut <A>
     -cmap-domain <intra|inter|both>
     -cmap-min-seqsep <N>
@@ -667,13 +674,76 @@ IMPORTANT NOTES
     contact_probability_matrix.csv
     contact_probability_edges.csv
     contact_probability_summary.dat
+    contact_count_timeseries.csv
+    contact_residue_occupancy.csv
 
   Notes:
-    - sidechain is accepted as an alias for sidechain-heavy.
+    - sidechain-com is the default mode: mass-weighted side-chain COM at
+      distance <= 6.5 A, using legacy fallback semantics.
+    - sidechain-heavy remains an explicit atom-pair mode with default 4.5 A.
+    - interface produces a rectangular mol1 x mol2 matrix and works in -nocal.
     - backbone is accepted as an alias for bb.
     - Canonical syntax:
-      arg.in uses `-cmap-mode=sidechain-heavy`
-      CLI uses `-cmap-mode sidechain-heavy`
+      arg.in uses `-cmap-scope=interface`
+      CLI uses `-cmap-scope interface`
+
+2.4d Native Contacts Q
+
+  Purpose:
+    Compute the fraction of native contacts Q against the loaded reference or
+    first frame. The default native-contact definition matches CMap:
+    mass-weighted side-chain residue COM distance <= 6.5 A.
+
+  Main inputs:
+    -qnative
+    -qnative-ref <pdb|gro>
+    -qnative-scope <mol1|interface>
+    -qnative-mode <sidechain-com|sidechain-heavy|cb|ca|bb>
+    -qnative-cut <A>
+    -qnative-domain <intra|inter|both>
+    -qnative-min-seqsep <N>
+    -qnative-soft <true|false>
+    -qnative-beta <value>
+
+  Typical outputs:
+    qnative_timeseries.csv
+    qnative_native_contacts.csv
+    qnative_contact_occupancy.csv
+    qnative_summary.dat
+
+  Notes:
+    - sidechain-com is the default mode: mass-weighted side-chain COM at
+      distance <= 6.5 A, using the same fallback semantics as CMap.
+    - sidechain-heavy remains an explicit atom-pair mode with default 4.5 A.
+    - interface produces a bipartite mol1 x mol2 native-contact set and works
+      in -nocal.
+    - TPT accepts qnative_range:min,max, qnative_lt:x, and qnative_gt:x.
+
+2.4e Dihedral Backbone Analysis
+
+  Purpose:
+    Export backbone phi/psi/omega torsion observables for standard protein MD.
+    V1 is backbone-only; side-chain chi rotamers remain a future slice.
+
+  Main inputs:
+    -dihedral
+    -dihedral-kind <backbone>
+    -dihedral-residues <all|list/range>
+    -dihedral-stride <N>
+    -dihedral-export-tica
+
+  Typical outputs:
+    dihedral_backbone_timeseries.csv
+    dihedral_ramachandran.csv
+    dihedral_summary.dat
+    dihedral_feature_matrix.csv      (only with -dihedral-export-tica)
+
+  Notes:
+    - `-dihedral-kind` accepts only backbone in V1.
+    - `-dihedral-residues` defaults to all and accepts values such as
+      `10,12-20,A:30,A:35-40`.
+    - The feature matrix stores sin/cos columns for phi, psi, and omega.
+    - Missing terminal or incomplete torsions are written as `nan`.
 
 2.5 PCA / FES / Basin Extraction
 
@@ -1059,7 +1129,8 @@ IMPORTANT NOTES
       `ljpreset:gas`
       `protein:major_macro`
     `lj:` basin specs are only meaningful for LJ jobs. Protein jobs
-    normally use `micro:`, `macro:`, or `tica_rect:`.
+    normally use `micro:`, `macro:`, `tica_rect:`, or Q-native selectors
+    (`qnative_range:min,max`, `qnative_lt:x`, `qnative_gt:x`).
     Named LJ presets currently include `gas`, `dense`, `liquid`, and `solid`.
     Protein presets currently include `major_macro`, `minor_macro`,
     `low_pc1`, `high_pc1`, `low_pc2`, `high_pc2`,
@@ -1668,6 +1739,8 @@ IMPORTANT NOTES
 
   -gbsa                 Enable GBSA solvation analysis
   -alpb                 Enable ALPB and imply -gbsa
+  -gbsa-perf <mode>     off, summary, or detail. Default: summary.
+                        Reports a fused GBSA energy-kernel timing bucket.
   -igb <N>              GB model. Default: 5
   -ext_diel <val>       External dielectric. Default: 78.5
   -int_diel <val>       Internal dielectric. Default: 1.0
@@ -1731,12 +1804,14 @@ IMPORTANT NOTES
                         interaction entropy, and final dG.
                         Arg file: -pbsa=true; CLI: -pbsa true
   -pbsa-components <m>  auto or complex,receptor,ligand. Default: auto
-  -pbsa-decomp <mode>   off, molecule, or residue. Default: off
-                        residue writes component decomposition without
-                        re-solving PB per residue.
+  -pbsa-decomp <mode>   off, molecule, residue, hybrid, or auto. Default: auto
+                        auto selects hybrid only for protein-ligand input;
+                        hybrid writes protein residues and ligand atoms
+                        without re-solving PB per unit.
   -pbsa-ie <bool>       Enable interaction entropy correction. Default: true
                         Uses the same Duan-Zhang interaction entropy core as
-                        TITAN's -entropy module, with PBSA diagnostics.
+                        TITAN's -entropy module from E_MM = E_elec + E_vdw,
+                        with PBSA diagnostics.
                         Arg file: -pbsa-ie=true; CLI: -pbsa-ie true
   -pbsa-residue-frames <mode>
                         off or all. Default: off. all writes
@@ -1745,6 +1820,10 @@ IMPORTANT NOTES
   -pbsa-ie-min-samples <N>
                         Minimum samples before IE correction is applied.
                         Default: 10
+  -pbsa-grid-reuse <m> off, validate, or auto. Default: auto
+                        validate compares same-endpoint solvent/vacuum
+                        geometry/operator reuse against the baseline grid
+                        solve; auto remains gated until validation passes.
   -pbsa-ie-filter-sigma <val>
                         Sigma filter for IE samples. Default: 2.0
   -pbsa-perf <mode>     off, summary, or detail. Default: summary
@@ -2039,11 +2118,30 @@ IMPORTANT NOTES
   -graph-filter-component <m>
                         all | largest. Default: all
 
-  -cmap                 Side-chain contact probability map analysis
-  -cmap-mode <mode>     sidechain-heavy | cb | ca | bb. Default: sidechain-heavy
-  -cmap-cut <A>         Contact cutoff in Angstrom. Default: 4.5
+  -cmap                 Side-chain COM contact probability map analysis
+  -cmap-scope <mode>    mol1 | interface. Default: mol1
+  -cmap-mode <mode>     sidechain-com | sidechain-heavy | cb | ca | bb.
+                        Default: sidechain-com
+  -cmap-cut <A>         Default: 6.5 for sidechain-com; 4.5 for atom modes
   -cmap-domain <mode>   intra | inter | both. Default: both
   -cmap-min-seqsep <N>  Minimum intra-chain sequence separation. Default: 3
+  -qnative              Native-contact fraction Q analysis
+  -qnative-ref <file>   Optional reference; default: loaded reference/first frame
+  -qnative-scope <mode> mol1 | interface. Default: mol1
+  -qnative-mode <mode>  sidechain-com | sidechain-heavy | cb | ca | bb.
+                        Default: sidechain-com
+  -qnative-cut <A>      Default: 6.5 for sidechain-com; 4.5 for atom modes
+  -qnative-domain <m>   intra | inter | both. Default: both
+  -qnative-min-seqsep <N>
+                        Minimum intra-chain sequence separation. Default: 3
+  -qnative-soft <bool>  Use soft logistic native contacts. Default: false
+  -qnative-beta <val>   Soft-contact beta; valid only when soft=true
+  -dihedral             Backbone dihedral analysis: phi, psi, omega
+  -dihedral-kind <mode> backbone only in v1. Default: backbone
+  -dihedral-residues <s>
+                        all or list/ranges like 10,12-20,A:30,A:35-40
+  -dihedral-stride <N>  Analyze every Nth frame. Default: 1
+  -dihedral-export-tica Export sin/cos feature matrix for TICA prep
 
   -corr-knn             Raw continuous kNN MI / GC / TE export
   -corr-knn-k=<N>       Exact kNN estimator neighborhood size. Default: 4
@@ -2361,7 +2459,8 @@ IMPORTANT NOTES
   -all-subfolders       Process all subfolders and split outputs
   -cat-result           Concatenate results from multiple inputs
   -all-respair          Output all residue pairs
-  -contact-map no       Disable contact map output
+  -contact-map yes      Deprecated alias for interface sidechain-com CMap
+  -contact-map no       Disable the deprecated alias only
   -act                  Use all side-chain contacts
   -new_al               New alignment in single-PDB mode
   -new-al               Alias of -new_al

@@ -24,6 +24,7 @@ void _eigen_force_dtor() {
 
 #include <cmath>
 #include <cctype>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -60,6 +61,11 @@ struct ProteinMicrostateSummary {
   std::vector<double> coil_frac;
   std::vector<double> turn_frac;
   std::vector<double> bend_frac;
+};
+
+struct QNativeMicrostateSummary {
+  bool valid{false};
+  std::vector<double> mean_q;
 };
 
 enum class TptBasinLabel : unsigned char { Intermediate = 0, Source = 1, Sink = 2 };
@@ -995,10 +1001,56 @@ ProteinMicrostateSummary compute_protein_microstate_summary(
   return result;
 }
 
+QNativeMicrostateSummary compute_qnative_microstate_summary(
+    const TitanMSM &msm_analyzer, const TitanQNativeAnalyzer *qnative_analyzer,
+    std::fstream &log) {
+  QNativeMicrostateSummary result;
+  const int n_states = msm_analyzer.n_clusters();
+  result.mean_q.assign(static_cast<std::size_t>(n_states),
+                       std::numeric_limits<double>::quiet_NaN());
+  if (!qnative_analyzer)
+    return result;
+  const auto &q_values = qnative_analyzer->all_q_values();
+  const auto &states = msm_analyzer.discrete_traj();
+  if (q_values.empty() || states.empty())
+    return result;
+  const std::size_t n_frames = std::min(q_values.size(), states.size());
+  if (q_values.size() != states.size()) {
+    TitanUI::print_warning(
+        "TPT qnative selectors: qnative trajectory length does not exactly "
+        "match the MSM discrete trajectory. TITAN will use the shared prefix.");
+  }
+  std::vector<double> sum(static_cast<std::size_t>(n_states), 0.0);
+  std::vector<std::uint64_t> count(static_cast<std::size_t>(n_states), 0);
+  for (std::size_t frame = 0; frame < n_frames; ++frame) {
+    const int state = states[frame];
+    if (state < 0 || state >= n_states)
+      continue;
+    const double q = q_values[frame];
+    if (!std::isfinite(q))
+      continue;
+    const std::size_t idx = static_cast<std::size_t>(state);
+    sum[idx] += q;
+    ++count[idx];
+  }
+  for (int state = 0; state < n_states; ++state) {
+    const std::size_t idx = static_cast<std::size_t>(state);
+    if (count[idx] == 0)
+      continue;
+    result.mean_q[idx] = sum[idx] / static_cast<double>(count[idx]);
+  }
+  result.valid = std::any_of(count.begin(), count.end(),
+                             [](std::uint64_t c) { return c > 0; });
+  if (result.valid)
+    TitanUI::log_kv(log, "TPT QNative Summary", "available");
+  return result;
+}
+
 bool resolve_tpt_basin_spec(const std::string &spec, const TitanMSM &msm_analyzer,
                             const std::vector<int> &macro_assignments,
                             const LjMicrostateSummary &lj_summary,
                             const ProteinMicrostateSummary &protein_summary,
+                            const QNativeMicrostateSummary &qnative_summary,
                             const Eigen::VectorXd &state_pi,
                             std::vector<int> &states_out,
                             std::string &resolved_label,
@@ -1141,6 +1193,76 @@ bool resolve_tpt_basin_spec(const std::string &spec, const TitanMSM &msm_analyze
                                   resolved_label, error_message);
   }
 
+  if (prefix == "qnative_range" || prefix == "qnative_lt" ||
+      prefix == "qnative_gt") {
+    if (!qnative_summary.valid) {
+      error_message =
+          "qnative summaries are unavailable; enable -qnative or use a qnative selector so TITAN can collect Q";
+      return false;
+    }
+    auto parse_unit = [&](const std::string &raw, double &value_out,
+                          const char *name) {
+      char *end_ptr = nullptr;
+      value_out = std::strtod(raw.c_str(), &end_ptr);
+      if (end_ptr == raw.c_str() || *end_ptr != '\0' ||
+          !std::isfinite(value_out) || value_out < 0.0 ||
+          value_out > 1.0) {
+        error_message = std::string("invalid qnative ") + name +
+                        " in basin specification";
+        return false;
+      }
+      return true;
+    };
+    double q_min = 0.0;
+    double q_max = 1.0;
+    if (prefix == "qnative_range") {
+      const auto comma = body.find(',');
+      if (comma == std::string::npos ||
+          body.find(',', comma + 1) != std::string::npos) {
+        error_message = "qnative_range expects min,max";
+        return false;
+      }
+      if (!parse_unit(trim_copy(body.substr(0, comma)), q_min, "range minimum") ||
+          !parse_unit(trim_copy(body.substr(comma + 1)), q_max,
+                      "range maximum"))
+        return false;
+      if (q_min > q_max) {
+        error_message = "qnative_range minimum must be <= maximum";
+        return false;
+      }
+    } else {
+      double threshold = 0.0;
+      if (!parse_unit(trim_copy(body), threshold, "threshold"))
+        return false;
+      if (prefix == "qnative_lt") {
+        q_min = -std::numeric_limits<double>::infinity();
+        q_max = threshold;
+      } else {
+        q_min = threshold;
+        q_max = std::numeric_limits<double>::infinity();
+      }
+    }
+    for (int state = 0; state < n_states; ++state) {
+      const double q = qnative_summary.mean_q[static_cast<std::size_t>(state)];
+      if (!std::isfinite(q))
+        continue;
+      if (prefix == "qnative_lt") {
+        if (q < q_max)
+          states_out.push_back(state);
+      } else if (prefix == "qnative_gt") {
+        if (q > q_min)
+          states_out.push_back(state);
+      } else if (q >= q_min && q <= q_max) {
+        states_out.push_back(state);
+      }
+    }
+    if (states_out.empty()) {
+      error_message = "qnative basin " + spec + " resolved to zero microstates";
+      return false;
+    }
+    return true;
+  }
+
   error_message = "unsupported basin prefix '" + prefix + "'";
   return false;
 }
@@ -1151,6 +1273,7 @@ void write_tpt_state_labels(const std::string &filename,
                             const std::vector<int> &macro_assignments,
                             const LjMicrostateSummary &lj_summary,
                             const ProteinMicrostateSummary &protein_summary,
+                            const QNativeMicrostateSummary &qnative_summary,
                             const Eigen::VectorXd &state_pi) {
   std::ofstream out(filename);
   const size_t n_states = static_cast<size_t>(tpt_analyzer.n_states());
@@ -1170,6 +1293,8 @@ void write_tpt_state_labels(const std::string &filename,
       protein_summary.coil_frac.size() == n_states &&
       protein_summary.turn_frac.size() == n_states &&
       protein_summary.bend_frac.size() == n_states;
+  const bool include_qnative_metrics =
+      qnative_summary.valid && qnative_summary.mean_q.size() == n_states;
   out << "# state set macrostate pi q_plus q_minus reactive_density tica_c1 "
          "tica_c2";
   if (include_lj_metrics) {
@@ -1179,6 +1304,9 @@ void write_tpt_state_labels(const std::string &filename,
   if (include_protein_metrics) {
     out << " protein_rmsd protein_helix_frac protein_strand_frac "
            "protein_coil_frac protein_turn_frac protein_bend_frac";
+  }
+  if (include_qnative_metrics) {
+    out << " qnative_mean_Q";
   }
   out << '\n';
   out << std::setprecision(15);
@@ -1228,6 +1356,9 @@ void write_tpt_state_labels(const std::string &filename,
           << protein_summary.coil_frac[idx] << ' '
           << protein_summary.turn_frac[idx] << ' '
           << protein_summary.bend_frac[idx];
+    }
+    if (include_qnative_metrics) {
+      out << ' ' << qnative_summary.mean_q[static_cast<size_t>(state)];
     }
     out << '\n';
   }
@@ -3684,7 +3815,7 @@ void run_gbsa_postproc(const arguments &args, size_t tot_snap_allfiles,
         log << "Printing GBSA statistics & decompositions...\n";
         TitanUI::print_module_header("GBSA Statistics & Decompositions");
         std::string out_dir = ".";
-        global_gbsa_agg.print_all_stats(out_dir);
+        global_gbsa_agg.print_all_stats(out_dir, &log);
         TitanUI::print_info(
             "GBSA Decomposition files successfully written to " + out_dir);
       }
@@ -5496,6 +5627,7 @@ void run_tpt_postproc(const arguments &args,
                       const std::vector<std::string> &lj_feature_files,
                       const TitanRMSAnalyzer *rms_analyzer,
                       const TitanDSSPAnalyzer *protein_dssp_analyzer,
+                      const TitanQNativeAnalyzer *qnative_analyzer,
                       const Eigen::MatrixXd *dham_tpm,
                       const Eigen::VectorXd *dham_pi,
                       bool dham_converged,
@@ -5541,6 +5673,8 @@ void run_tpt_postproc(const arguments &args,
   const ProteinMicrostateSummary protein_summary =
       compute_protein_microstate_summary(*msm_analyzer, rms_analyzer,
                                          protein_dssp_analyzer, log);
+  const QNativeMicrostateSummary qnative_summary =
+      compute_qnative_microstate_summary(*msm_analyzer, qnative_analyzer, log);
 
   try {
     const bool kinetic_mode = (args.tpt.mode == "kinetic");
@@ -5627,15 +5761,15 @@ void run_tpt_postproc(const arguments &args,
     std::string sink_label;
     if (!resolve_tpt_basin_spec(args.tpt.source_spec, *msm_analyzer,
                                 macro_assignments, lj_summary, protein_summary,
-                                *model_pi_ptr, source_states, source_label,
-                                parse_error)) {
+                                qnative_summary, *model_pi_ptr, source_states,
+                                source_label, parse_error)) {
       TitanUI::print_error("TPT: invalid -tpt-source: " + parse_error);
       return;
     }
     if (!resolve_tpt_basin_spec(args.tpt.sink_spec, *msm_analyzer,
                                 macro_assignments, lj_summary, protein_summary,
-                                *model_pi_ptr, sink_states, sink_label,
-                                parse_error)) {
+                                qnative_summary, *model_pi_ptr, sink_states,
+                                sink_label, parse_error)) {
       TitanUI::print_error("TPT: invalid -tpt-sink: " + parse_error);
       return;
     }
@@ -5654,7 +5788,8 @@ void run_tpt_postproc(const arguments &args,
                            sink_label, model_source);
     write_tpt_state_labels(info_output.get_tpt_state_labels_filename(), analyzer,
                            *msm_analyzer, macro_assignments, lj_summary,
-                           protein_summary, analyzer.stationary_dist());
+                           protein_summary, qnative_summary,
+                           analyzer.stationary_dist());
     if (weight_selection && weight_selection->use_weights &&
         weight_selection->resolved_source == "mbar" &&
         weight_selection->global_frame_weights) {

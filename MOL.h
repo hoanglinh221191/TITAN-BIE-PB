@@ -169,21 +169,28 @@ public:
   // --- CORE METHODS ---
   void clear_MOL() noexcept {
     pos.clear();
-    pos.shrink_to_fit();
     if (force_vec.has_value()) {
       force_vec->clear();
-      force_vec->shrink_to_fit();
       force_vec.reset();
     }
     thread_local_forces.clear();
-    thread_local_forces.shrink_to_fit();
 
     Com.clear();
-    Com.shrink_to_fit();
     list_h_bonds.dat.clear();
-    list_h_bonds.dat.shrink_to_fit();
     flag_set_time = false;
     compute_forces = false;
+  }
+
+  void release_memory() noexcept {
+    clear_MOL();
+    pos.shrink_to_fit();
+    thread_local_forces.shrink_to_fit();
+    Com.shrink_to_fit();
+    list_h_bonds.dat.shrink_to_fit();
+  }
+
+  [[nodiscard]] bool coordinates_consistent() const noexcept {
+    return pos.x.size() == pos.y.size() && pos.x.size() == pos.z.size();
   }
 
   [[nodiscard]] size_t size() const noexcept { return pos.size(); }

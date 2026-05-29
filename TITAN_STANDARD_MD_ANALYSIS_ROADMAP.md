@@ -71,19 +71,19 @@ Muc tieu:
 
 - Bo sung contact frequency map standalone, khac voi DCCM correlation va khac
   voi IFP typed interactions.
-- Tao ma tran xac suat contact residue-residue N x N cho moi residue pair theo
-  dinh nghia side-chain contact.
+- Tao ma tran xac suat contact residue-residue theo dinh nghia side-chain COM;
+  matrix la vuong cho `mol1` va chu nhat cho `interface`.
 
 Scientific default:
 
-- Dinh nghia contact mac dinh: bat ky cap side-chain heavy atom nao giua hai
-  residue co khoang cach <= cutoff.
-- Glycine khong co side-chain: dung CA hoac pseudo-CB fallback va danh dau ro
-  trong metadata.
-- Loai bo backbone atom khoi default de contact map phan anh packing / binding
-  interface hon la proximity cua backbone.
+- Dinh nghia contact mac dinh: khoang cach giua hai mass-weighted side-chain
+  COM <= 6.5 A.
+- `sidechain-com` dung dung semantic legacy cua `MOL::take_com`: residue khong
+  co atom side-chain hop le fallback ve COM toan residue; glycine theo
+  side-chain marking hien co.
 - Ho tro tuy chon anchor khac chi nhu compatibility / speed mode:
-  - `sidechain-heavy` default
+  - `sidechain-com` default
+  - `sidechain-heavy` atom-pair packing mode
   - `cb` quick mode
   - `ca` legacy / coarse mode
   - `bb` backbone diagnostic only
@@ -91,8 +91,9 @@ Scientific default:
 CLI de xuat:
 
 - `-cmap`
-- `-cmap-mode <sidechain-heavy|cb|ca|bb>`
-- `-cmap-cut <A>` default 4.5 cho side-chain heavy atom
+- `-cmap-scope <mol1|interface>`
+- `-cmap-mode <sidechain-com|sidechain-heavy|cb|ca|bb>`
+- `-cmap-cut <A>` default 6.5 cho `sidechain-com`, 4.5 cho atom-based mode
 - `-cmap-domain <intra|inter|both>`
 - `-cmap-min-seqsep <N>` default 3 cho intra-chain protein
 - `-cmap-weight-source <uniform|mbar|auto>` chi cho equilibrium contact
@@ -109,8 +110,12 @@ Outputs:
     min_distance, contact_frames
 - `contact_probability_summary.dat`
   - cutoff, mode, domain, frames, residues, contact count, dense/sparse stats
-- `contact_frame_contacts.csv` optional
-  - sparse per-frame contact bits for downstream CV/TICA
+- `contact_count_timeseries.csv`
+  - so contact residue-pair theo frame
+- `contact_residue_occupancy.csv`
+  - occupancy theo residue va role molecule
+- `contact_probability_{matrix,edges,summary,residue_occupancy}_average.*`
+  - pooled outputs cho multi-trajectory
 - `contact_probability_bfactor.pdb` optional
   - per-residue contact degree/strength mapped to B-factor
 
@@ -150,8 +155,8 @@ Muc tieu:
 
 Scientific default:
 
-- Native contacts duoc xac dinh tu reference structure bang side-chain heavy atom
-  contact, cung default voi `-cmap`.
+- Native contacts duoc xac dinh tu reference structure bang mass-weighted
+  side-chain COM contact <= 6.5 A, cung default voi `-cmap`.
 - `Q(t) = formed_native_contacts(t) / total_native_contacts`.
 - Contact formed co the dung hard cutoff hoac soft switching function.
 
@@ -159,8 +164,9 @@ CLI de xuat:
 
 - `-qnative`
 - `-qnative-ref <pdb|gro>`
-- `-qnative-mode <sidechain-heavy|cb|ca>`
-- `-qnative-cut <A>`
+- `-qnative-scope <mol1|interface>`
+- `-qnative-mode <sidechain-com|sidechain-heavy|cb|ca|bb>`
+- `-qnative-cut <A>` default 6.5 cho `sidechain-com`, 4.5 cho atom modes
 - `-qnative-soft <true|false>`
 - `-qnative-beta <val>` cho switching function
 - `-qnative-domain <intra|inter|both>`
@@ -201,6 +207,19 @@ Verification:
 - Reference/contact-list parser handles residue numbering and chain IDs.
 - TPT selector test for `qnative_range`.
 - Default TPT behavior unchanged without Q selector.
+
+Slice B implementation ledger:
+
+- `QNativeArgs` mirrors CMap defaults and validation.
+- `titan_qnative.{h,cpp}` streams hard or soft Q from the same contact
+  primitive semantics as CMap.
+- Outputs are `qnative_timeseries.csv`, `qnative_native_contacts.csv`,
+  `qnative_contact_occupancy.csv`, and `qnative_summary.dat`, with indexed and
+  `_average` forms for multi-input runs.
+- TPT basin parser accepts `qnative_range:min,max`, `qnative_lt:x`, and
+  `qnative_gt:x`; selectors resolve on per-microstate mean Q.
+- Remaining future item: mixed-source feature export into TICA stays after
+  qnative + dihedral.
 
 ================================================================================
 5. Phase 3: Dihedral Analysis (`-dihedral`)
@@ -460,7 +479,9 @@ Verification:
 
 - Contact definition drift:
   - `-cmap` and `-qnative` must share the same contact primitive by default.
-  - Side-chain heavy atom contact is the scientific default.
+  - Mass-weighted side-chain COM contact at `<= 6.5 A` is the scientific
+    default.
+  - Side-chain heavy atom contact is an explicit packing/detail mode.
   - CA/CB modes are explicit fast/legacy options, not the main definition.
 
 - TICA feature ambiguity:
@@ -507,18 +528,20 @@ For each shipped module:
 12. First Implementation Slice Proposal
 ================================================================================
 
-Slice A: `-cmap` side-chain contact map v1
+Slice A: `-cmap` side-chain COM contact map v2
 
 Status: implemented in this branch.
 
-- Add side-chain atom classifier and glycine fallback.
+- Replace legacy map output with side-chain COM contact probability output.
 - Add `ContactPrimitive` shared between future `-cmap` and `-qnative`.
 - Implement `-cmap` parser/options/logging.
-- Compute side-chain contact occupancy using neighbor grid.
+- Compute mass-weighted side-chain COM occupancy; retain atom modes explicitly.
 - Export:
   - `contact_probability_matrix.csv`
   - `contact_probability_edges.csv`
   - `contact_probability_summary.dat`
+  - `contact_count_timeseries.csv`
+  - `contact_residue_occupancy.csv`
 - Add smoke test with known contacts.
 - Update docs/help.
 
@@ -527,8 +550,10 @@ Implemented notes:
 - Core contact helpers live in `titan_contact_primitives.{h,cpp}`.
 - Streaming analyzer lives in `titan_contact_map.{h,cpp}` and is wired through
   `impl_engine.cpp`.
-- CLI options are `-cmap`, `-cmap-mode`, `-cmap-cut`, `-cmap-domain`, and
-  `-cmap-min-seqsep`.
+- CLI options are `-cmap`, `-cmap-scope`, `-cmap-mode`, `-cmap-cut`,
+  `-cmap-domain`, and `-cmap-min-seqsep`.
+- Default is `sidechain-com` at `6.5 A`; `sidechain-heavy` is explicit.
+- Deprecated `-contact-map=yes` migrates to interface sidechain-COM CMap.
 - End-to-end smoke is `test/cmap_smoke.ps1`.
 - XDR and multi-input runs may use indexed output names such as
   `contact_probability_edges_0.csv` to avoid overwriting per-trajectory files.
@@ -542,6 +567,8 @@ Slice B: `-qnative` v1
 - Add synthetic folding/unfolding smoke.
 
 Slice C: `-dihedral` backbone v1
+
+Status: implemented in this branch.
 
 - Implement phi/psi/omega only first.
 - Export timeseries and Ramachandran occupancy.

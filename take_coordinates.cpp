@@ -50,14 +50,26 @@ int Multi_MOL::take_coordinate_from_group(
     return 1;
 
   size_t num_snaps = base_mol.m_mol.size();
+  for (size_t snap = 0; snap < num_snaps; ++snap) {
+    if (!base_mol.frame_coordinates_consistent(snap))
+      return 1;
+  }
+  for (size_t idx : group_indices) {
+    if (idx >= base_mol.info.size())
+      return 1;
+    for (size_t snap = 0; snap < num_snaps; ++snap) {
+      if (idx >= base_mol.m_mol[snap].size())
+        return 1;
+    }
+  }
+
   this->m_mol.resize(num_snaps);
 
   // Copy topology and info for the atoms in the group
   this->info.clear();
+  this->info.reserve(group_indices.size());
   for (size_t idx : group_indices) {
-    if (idx < base_mol.info.size()) {
-      this->info.emplace_back(base_mol.info[idx]);
-    }
+    this->info.emplace_back(base_mol.info[idx]);
   }
 
   // Copy trajectory frame by frame
@@ -65,13 +77,14 @@ int Multi_MOL::take_coordinate_from_group(
     this->m_mol[snap].force_f = string(_force_f);
     this->m_mol[snap].Box = base_mol.m_mol[snap].Box;
     this->m_mol[snap].set_time(base_mol.m_mol[snap].get_time());
+    this->m_mol[snap].pos.x.reserve(group_indices.size());
+    this->m_mol[snap].pos.y.reserve(group_indices.size());
+    this->m_mol[snap].pos.z.reserve(group_indices.size());
 
     for (size_t idx : group_indices) {
-      if (idx < base_mol.m_mol[snap].pos.x.size()) {
-        this->m_mol[snap].pos.x.emplace_back(base_mol.m_mol[snap].pos.x[idx]);
-        this->m_mol[snap].pos.y.emplace_back(base_mol.m_mol[snap].pos.y[idx]);
-        this->m_mol[snap].pos.z.emplace_back(base_mol.m_mol[snap].pos.z[idx]);
-      }
+      this->m_mol[snap].pos.x.emplace_back(base_mol.m_mol[snap].pos.x[idx]);
+      this->m_mol[snap].pos.y.emplace_back(base_mol.m_mol[snap].pos.y[idx]);
+      this->m_mol[snap].pos.z.emplace_back(base_mol.m_mol[snap].pos.z[idx]);
     }
   }
 

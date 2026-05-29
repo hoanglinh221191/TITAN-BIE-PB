@@ -312,11 +312,6 @@ int wrap_cal_force_map(TitanExecutor &executor, Multi_MOL &mol1,
                        const cache_sigma_epsilon &CachedData,
                        vector<energy_res> &Energy_res_mol1,
                        vector<energy_res> &Energy_res_mol2, info &info_output);
-void print_sidechain_contact(size_t num_threads, vector<d_min> &dis_min,
-                             arguments &Arguments, fstream &out_sc,
-                             vector<vector<size_t>> &out_sc_time,
-                             traj_sc &sc_rec_1traj, traj_sc &sc_lg_1traj,
-                             int filenum);
 istream &safeGetline(istream &is, string &t);
 int post_proc_cscd(vector<string> &list_input_name);
 bool check_end_cal(arguments &Arguments, vector<string> &input_line,
@@ -362,7 +357,6 @@ int add_hb_res(MOL &pro_in, MOL &lig, vector<mol_info> &info_rec,
                vector<mol_info> &info_lg, const arguments &Arguments,
                traj_hb &res_hb_rec_temp);
 int stat_hb_res(vector<traj_hb> &hb_reslist, string output_filename);
-int stat_sidechain_contact(vector<traj_sc> &sc_reslist, string output_filename);
 int set_chainnum(Multi_MOL &pro_in, Multi_MOL &lig, arguments const &Arguments);
 int process_time_of_infiles(Multi_MOL &pro_in, arguments &Arguments,
                             info &info_output, vector<double> &time_of_snap);
@@ -374,9 +368,6 @@ int process_adding_energies_forces(
     vector<vector<force>> &Force_e_vector,
     vector<vector<force>> &Force_v_vector, vector<size_t> &size_snap,
     size_t num_snap);
-int cal_sidechain_contact_time(arguments &Arguments, vector<double> &time,
-                               vector<vector<size_t>> &out_sc_time,
-                               info &info_output, folders &paths);
 int post_process_Energy_force_subgroups(
     vector<double> &time, vector<vector<energy_groups>> &EF_groups,
     folders &paths, arguments &Arguments, info &info_output);
@@ -395,13 +386,6 @@ int impl_nocal(Multi_MOL &pro_in, Multi_MOL &lig, fstream &log,
                vector<string> &input_line, h_groups &groups_1,
                h_groups &groups_2, vector<vector<size_t>> &Hbonds_vector,
                int &input_name, vector<vector<double>> &Volumes);
-int calc_contact_map(Multi_MOL &mol1, Multi_MOL &mol2, size_t num_threads,
-                     vector<d_min> &dis_min, arguments &Arguments,
-                     size_t num_snap, vector<vector<map_pos>> &matrix,
-                     vector<vector<int>> &pos_lookup_1,
-                     vector<vector<int>> &pos_lookup_2);
-int print_cont_map(vector<vector<map_pos>> &matrix, fstream &out_contact_map,
-                   size_t num_snap);
 int process_moleculetype(fstream &input_topo_protein, string &lig_name,
                          string &protein_1);
 int process_atomtypes(fstream &input_topo_protein, string &protein_1,

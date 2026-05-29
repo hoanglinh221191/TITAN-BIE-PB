@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <fstream>
@@ -52,6 +53,10 @@ std::string csv_escape(const std::string &value) {
   }
   out += "\"";
   return out;
+}
+
+bool is_ligand_type(const std::string &type) {
+  return type == "ligand" || type == "lig";
 }
 
 } // namespace
@@ -112,6 +117,14 @@ AnalyzerImpl::PbsaComponents AnalyzerImpl::compute_pbsa_components(
   return comp;
 }
 
+std::string AnalyzerImpl::effective_pbsa_decomp() const {
+  if (args_.pbsa_decomp != "auto")
+    return args_.pbsa_decomp;
+  const bool mol1_ligand = is_ligand_type(args_.pbsa_mol1_type);
+  const bool mol2_ligand = is_ligand_type(args_.pbsa_mol2_type);
+  return mol1_ligand != mol2_ligand ? "hybrid" : "off";
+}
+
 std::vector<AnalyzerImpl::ResidueFrameRow> AnalyzerImpl::compute_pbsa_residue_rows(
     const MOL &mol1, const MOL &mol2, const std::vector<Atom> &mol1_atoms,
     const std::vector<Atom> &mol2_atoms,
@@ -121,7 +134,9 @@ std::vector<AnalyzerImpl::ResidueFrameRow> AnalyzerImpl::compute_pbsa_residue_ro
     TitanExecutor &executor,
     const EnergyDecompositionProvider *energy_provider) const {
   std::vector<ResidueFrameRow> rows;
-  if (args_.pbsa_decomp != "residue" || energy_provider == nullptr ||
+  const std::string decomp = effective_pbsa_decomp();
+  if ((decomp != "residue" && decomp != "hybrid") ||
+      energy_provider == nullptr ||
       !energy_provider->ready())
     return rows;
 
@@ -132,27 +147,41 @@ std::vector<AnalyzerImpl::ResidueFrameRow> AnalyzerImpl::compute_pbsa_residue_ro
       mol2_solve.atom_reaction_kj_mol.size() < n2)
     return rows;
 
-  auto make_key = [](const char *molecule, const mol_info *info,
-                     std::size_t atom_index) {
+  const bool hybrid = decomp == "hybrid";
+  const bool mol1_atom = hybrid && is_ligand_type(args_.pbsa_mol1_type);
+  const bool mol2_atom = hybrid && is_ligand_type(args_.pbsa_mol2_type);
+  const char *mol1_role =
+      hybrid ? (mol1_atom ? "ligand" : "receptor") : "receptor";
+  const char *mol2_role =
+      hybrid ? (mol2_atom ? "ligand" : "receptor") : "ligand";
+
+  auto make_key = [](const char *molecule, bool atom_unit,
+                     const mol_info *info, std::size_t atom_index) {
     ResidueKey key;
     key.molecule = molecule;
+    key.unit_type = atom_unit ? "atom" : "residue";
     if (info != nullptr) {
       key.chainnum = info->get_chainnum();
       key.chain = info->get_chain();
       key.resnr = info->get_resnr();
       key.respos = info->get_respos();
       key.resname = info->get_res_name();
+      if (atom_unit)
+        key.atom_name = info->get_atom();
     } else {
       key.resnr = atom_index + 1;
       key.respos = atom_index + 1;
       key.resname = "UNK";
     }
+    if (atom_unit)
+      key.atom_index = atom_index + 1;
     return key;
   };
   auto key_id = [](const ResidueKey &key) {
-    return key.molecule + "|" + std::to_string(key.chainnum) + "|" +
-           key.chain + "|" + std::to_string(key.resnr) + "|" +
-           std::to_string(key.respos) + "|" + key.resname;
+    return key.molecule + "|" + key.unit_type + "|" +
+           std::to_string(key.chainnum) + "|" + key.chain + "|" +
+           std::to_string(key.resnr) + "|" + std::to_string(key.respos) +
+           "|" + key.resname + "|" + std::to_string(key.atom_index);
   };
   auto add = [&](std::map<std::string, ResidueContribution> &accum,
                  const ResidueKey &key, double elec, double vdw, double polar,
@@ -169,10 +198,10 @@ std::vector<AnalyzerImpl::ResidueFrameRow> AnalyzerImpl::compute_pbsa_residue_ro
   std::map<std::string, ResidueContribution> accum;
   for (std::size_t i = 0; i < n1; ++i) {
     const ResidueKey rec_key =
-        make_key("receptor", energy_provider->rec_info(i), i);
+        make_key(mol1_role, mol1_atom, energy_provider->rec_info(i), i);
     for (std::size_t j = 0; j < n2; ++j) {
       const ResidueKey lig_key =
-          make_key("ligand", energy_provider->lig_info(j), j);
+          make_key(mol2_role, mol2_atom, energy_provider->lig_info(j), j);
       const EnergyPairDecomposition pair =
           energy_provider->pair_energy(mol1, mol2, i, j);
       add(accum, rec_key, 0.5 * pair.elec, 0.5 * pair.vdw, 0.0, 0.0);
@@ -189,7 +218,7 @@ std::vector<AnalyzerImpl::ResidueFrameRow> AnalyzerImpl::compute_pbsa_residue_ro
 
   for (std::size_t i = 0; i < n1; ++i) {
     const ResidueKey rec_key =
-        make_key("receptor", energy_provider->rec_info(i), i);
+        make_key(mol1_role, mol1_atom, energy_provider->rec_info(i), i);
     const double polar =
         complex_solve.atom_reaction_kj_mol[i] -
         mol1_solve.atom_reaction_kj_mol[i];
@@ -201,7 +230,7 @@ std::vector<AnalyzerImpl::ResidueFrameRow> AnalyzerImpl::compute_pbsa_residue_ro
   }
   for (std::size_t j = 0; j < n2; ++j) {
     const ResidueKey lig_key =
-        make_key("ligand", energy_provider->lig_info(j), j);
+        make_key(mol2_role, mol2_atom, energy_provider->lig_info(j), j);
     const std::size_t complex_index = n1 + j;
     const double polar =
         complex_solve.atom_reaction_kj_mol[complex_index] -
@@ -237,9 +266,10 @@ void AnalyzerImpl::accumulate_pbsa_residue_rows(
     return;
 
   auto key_id = [](const ResidueKey &key) {
-    return key.molecule + "|" + std::to_string(key.chainnum) + "|" +
-           key.chain + "|" + std::to_string(key.resnr) + "|" +
-           std::to_string(key.respos) + "|" + key.resname;
+    return key.molecule + "|" + key.unit_type + "|" +
+           std::to_string(key.chainnum) + "|" + key.chain + "|" +
+           std::to_string(key.resnr) + "|" + std::to_string(key.respos) +
+           "|" + key.resname + "|" + std::to_string(key.atom_index);
   };
   auto add_stats = [&](ResidueStats &stats, const ResidueFrameRow &row) {
     stats.key = row.key;
@@ -250,6 +280,8 @@ void AnalyzerImpl::accumulate_pbsa_residue_rows(
     add_scalar(stats.polar, row.polar_kj_mol);
     add_scalar(stats.nonpolar, row.nonpolar_kj_mol);
     add_scalar(stats.total, row.total_kj_mol);
+      if (args_.pbsa_ie && result.pbsa_status == "ok")
+        stats.ie_values_kj_mol.push_back(row.mm_kj_mol);
   };
 
   double elec = 0.0;
@@ -330,7 +362,7 @@ void AnalyzerImpl::accumulate_pbsa(const FrameResult &result) {
   add_scalar(pbsa_no_entropy_stats_, result.pbsa_no_entropy_kj_mol);
   pbsa_rows_.push_back(result);
   if (args_.pbsa_ie && result.pbsa_status == "ok")
-    pbsa_ie_mm_energies_kj_.push_back(result.pbsa_mm_kj_mol);
+    pbsa_ie_values_kj_.push_back(result.pbsa_mm_kj_mol);
 }
 
 AnalyzerImpl::PbsaEntropyResult
@@ -376,7 +408,7 @@ AnalyzerImpl::compute_pbsa_entropy_for_values(
 }
 
 AnalyzerImpl::PbsaEntropyResult AnalyzerImpl::compute_pbsa_entropy() const {
-  return compute_pbsa_entropy_for_values(pbsa_ie_mm_energies_kj_);
+  return compute_pbsa_entropy_for_values(pbsa_ie_values_kj_);
 }
 
 void AnalyzerImpl::write_pbsa_energy_csv(const PbsaEntropyResult &entropy) const {
@@ -421,7 +453,7 @@ void AnalyzerImpl::write_pbsa_energy_csv(const PbsaEntropyResult &entropy) const
   for (const FrameResult &row : pbsa_rows_) {
     const double dg_bind = row.pbsa_no_entropy_kj_mol + minus_tds;
     out << row.trajectory_id << ',' << row.frame_index << ','
-        << row.global_index << ',' << row.time_ps << ",pbe,"
+        << row.global_index << ',' << row.time_ps << ",grid,"
         << row.atom_count << ',' << row.pbsa_receptor_atom_count << ','
         << row.pbsa_ligand_atom_count << ',' << row.nx << ',' << row.ny
         << ',' << row.nz << ',' << row.solver_mode << ',' << row.mg_levels
@@ -463,7 +495,8 @@ void AnalyzerImpl::write_pbsa_energy_csv(const PbsaEntropyResult &entropy) const
 
 void AnalyzerImpl::write_pbsa_decomposition(
     const PbsaEntropyResult &entropy) const {
-  if (!args_.pbsa || args_.pbsa_decomp == "off")
+  const std::string effective_decomp = effective_pbsa_decomp();
+  if (!args_.pbsa || effective_decomp == "off")
     return;
 
   std::ofstream out("mm_pbsa_decomposition.dat",
@@ -476,21 +509,33 @@ void AnalyzerImpl::write_pbsa_decomposition(
 
   out << "# TITAN MM/PBSA endpoint decomposition\n";
   out << "requested_decomp " << args_.pbsa_decomp << "\n";
-  out << "effective_decomp "
-      << (args_.pbsa_decomp == "residue" ? "residue" : "molecule") << "\n";
+  out << "effective_decomp " << effective_decomp << "\n";
   out << "residue_summary "
-      << (args_.pbsa_decomp == "residue" ? "mm_pbsa_residue_summary.csv"
+      << (effective_decomp == "residue" ? "mm_pbsa_residue_summary.csv"
                                           : "off")
       << "\n";
   out << "residue_by_trajectory "
-      << (args_.pbsa_decomp == "residue"
+      << (effective_decomp == "residue"
               ? "mm_pbsa_residue_by_trajectory.csv"
               : "off")
       << "\n";
   out << "residue_frame "
-      << (args_.pbsa_decomp == "residue" &&
+      << (effective_decomp == "residue" &&
                   args_.pbsa_residue_frames == "all"
               ? "mm_pbsa_residue_frame.csv"
+              : "off")
+      << "\n";
+  out << "unit_summary "
+      << (effective_decomp == "hybrid" ? "mm_pbsa_unit_summary.csv" : "off")
+      << "\n";
+  out << "unit_by_trajectory "
+      << (effective_decomp == "hybrid" ? "mm_pbsa_unit_by_trajectory.csv"
+                                        : "off")
+      << "\n";
+  out << "unit_frame "
+      << (effective_decomp == "hybrid" &&
+                  args_.pbsa_residue_frames == "all"
+              ? "mm_pbsa_unit_frame.csv"
               : "off")
       << "\n";
   out << "residue_closure_total_max_abs_kJmol "
@@ -503,6 +548,17 @@ void AnalyzerImpl::write_pbsa_decomposition(
       << format_fixed(pbsa_residue_closure_polar_max_abs_kj_, 10) << "\n";
   out << "residue_closure_nonpolar_max_abs_kJmol "
       << format_fixed(pbsa_residue_closure_nonpolar_max_abs_kj_, 10) << "\n";
+  out << "unit_closure_total_max_abs_kJmol "
+      << format_fixed(pbsa_residue_closure_max_abs_kj_, 10) << "\n";
+  out << "unit_closure_elec_max_abs_kJmol "
+      << format_fixed(pbsa_residue_closure_elec_max_abs_kj_, 10) << "\n";
+  out << "unit_closure_vdw_max_abs_kJmol "
+      << format_fixed(pbsa_residue_closure_vdw_max_abs_kj_, 10) << "\n";
+  out << "unit_closure_polar_max_abs_kJmol "
+      << format_fixed(pbsa_residue_closure_polar_max_abs_kj_, 10) << "\n";
+  out << "unit_closure_nonpolar_max_abs_kJmol "
+      << format_fixed(pbsa_residue_closure_nonpolar_max_abs_kj_, 10) << "\n";
+  out << "unit_entropy_closure not_applicable_nonlinear\n";
   out << "interaction_entropy_status " << entropy.status << "\n";
   out << "component,mean_kJmol,mean_kcalmol,std_kJmol,std_kcalmol\n";
   auto write_stat_row = [&](const char *name, const ScalarStats &stats) {
@@ -520,7 +576,7 @@ void AnalyzerImpl::write_pbsa_decomposition(
 }
 
 void AnalyzerImpl::write_pbsa_residue_outputs() const {
-  if (!args_.pbsa || args_.pbsa_decomp != "residue")
+  if (!args_.pbsa || effective_pbsa_decomp() != "residue")
     return;
 
   auto write_key = [](std::ofstream &out, const ResidueKey &key) {
@@ -611,6 +667,112 @@ void AnalyzerImpl::write_pbsa_residue_outputs() const {
   }
 }
 
+void AnalyzerImpl::write_pbsa_unit_outputs() const {
+  if (!args_.pbsa || effective_pbsa_decomp() != "hybrid")
+    return;
+
+  auto write_key = [](std::ofstream &out, const ResidueKey &key) {
+    out << csv_escape(key.molecule) << ',' << key.unit_type << ','
+        << key.chainnum << ',' << csv_escape(key.chain) << ',' << key.resnr
+        << ',' << key.respos << ',' << csv_escape(key.resname) << ',';
+    if (key.unit_type == "atom")
+      out << key.atom_index;
+    out << ',' << csv_escape(key.atom_name);
+  };
+  auto write_mean_std = [&](std::ofstream &out, const ScalarStats &stats) {
+    out << ',' << format_fixed(stats.mean, 10) << ','
+        << format_fixed(scalar_stddev(stats), 10);
+  };
+  auto write_header = [](std::ofstream &out) {
+    out << ",E_elec_kJmol_mean,E_elec_kJmol_std,"
+           "E_vdw_kJmol_mean,E_vdw_kJmol_std,"
+           "E_MM_kJmol_mean,E_MM_kJmol_std,"
+           "DeltaDeltaG_solv_PB_kJmol_mean,"
+           "DeltaDeltaG_solv_PB_kJmol_std,"
+           "DeltaG_nonpolar_SASA_kJmol_mean,"
+           "DeltaG_nonpolar_SASA_kJmol_std,"
+           "DeltaG_no_entropy_kJmol_mean,DeltaG_no_entropy_kJmol_std,"
+           "DeltaG_no_entropy_kcalmol_mean,IE_status,IE_samples,IE_ESS,"
+           "minus_TDeltaS_IE_kJmol,minus_TDeltaS_IE_kcalmol,"
+           "DeltaG_bind_IE_kJmol,DeltaG_bind_IE_kcalmol\n";
+  };
+  auto write_stats_row = [&](std::ofstream &out, const ResidueStats &stats) {
+    const PbsaEntropyResult entropy =
+        compute_pbsa_entropy_for_values(stats.ie_values_kj_mol);
+    const double minus_tds =
+        entropy.status == "ok" ? entropy.minus_tds_kj_mol : 0.0;
+    const double dg_ie = stats.total.mean + minus_tds;
+    write_key(out, stats.key);
+    out << ',' << stats.frames;
+    write_mean_std(out, stats.elec);
+    write_mean_std(out, stats.vdw);
+    write_mean_std(out, stats.mm);
+    write_mean_std(out, stats.polar);
+    write_mean_std(out, stats.nonpolar);
+    write_mean_std(out, stats.total);
+    out << ',' << format_fixed(stats.total.mean * kKJToKcal, 10) << ','
+        << entropy.status << ',' << entropy.samples << ','
+        << format_fixed(entropy.ess, 4) << ',' << format_fixed(minus_tds, 10)
+        << ',' << format_fixed(minus_tds * kKJToKcal, 10) << ','
+        << format_fixed(dg_ie, 10) << ','
+        << format_fixed(dg_ie * kKJToKcal, 10) << "\n";
+  };
+
+  std::ofstream summary("mm_pbsa_unit_summary.csv",
+                        std::ios::out | std::ios::trunc);
+  if (summary.is_open()) {
+    summary << "molecule_role,unit_type,chainnum,chain,resnr,respos,resname,"
+               "atom_index,atom_name,frames";
+    write_header(summary);
+    for (const auto &[id, stats] : pbsa_residue_stats_) {
+      (void)id;
+      write_stats_row(summary, stats);
+    }
+  } else {
+    TitanUI::print_warning("PBSA: failed to write mm_pbsa_unit_summary.csv.");
+  }
+
+  std::ofstream by_traj("mm_pbsa_unit_by_trajectory.csv",
+                        std::ios::out | std::ios::trunc);
+  if (by_traj.is_open()) {
+    by_traj << "trajectory_id,molecule_role,unit_type,chainnum,chain,resnr,"
+               "respos,resname,atom_index,atom_name,frames";
+    write_header(by_traj);
+    for (const auto &[id, stats] : pbsa_residue_traj_stats_) {
+      const std::size_t cut = id.find('|');
+      by_traj << (cut == std::string::npos ? id : id.substr(0, cut)) << ',';
+      write_stats_row(by_traj, stats);
+    }
+  } else {
+    TitanUI::print_warning(
+        "PBSA: failed to write mm_pbsa_unit_by_trajectory.csv.");
+  }
+
+  if (args_.pbsa_residue_frames == "all") {
+    std::ofstream frame("mm_pbsa_unit_frame.csv",
+                        std::ios::out | std::ios::trunc);
+    if (frame.is_open()) {
+      frame << "trajectory_id,frame_index,global_index,time_ps,molecule_role,"
+               "unit_type,chainnum,chain,resnr,respos,resname,atom_index,"
+               "atom_name,E_elec_kJmol,E_vdw_kJmol,E_MM_kJmol,"
+               "DeltaDeltaG_solv_PB_kJmol,DeltaG_nonpolar_SASA_kJmol,"
+               "DeltaG_no_entropy_kJmol,DeltaG_no_entropy_kcalmol\n";
+      frame << std::setprecision(10);
+      for (const ResidueFrameRow &row : pbsa_residue_frame_rows_) {
+        frame << row.trajectory_id << ',' << row.frame_index << ','
+              << row.global_index << ',' << row.time_ps << ',';
+        write_key(frame, row.key);
+        frame << ',' << row.elec_kj_mol << ',' << row.vdw_kj_mol << ','
+              << row.mm_kj_mol << ',' << row.polar_kj_mol << ','
+              << row.nonpolar_kj_mol << ',' << row.total_kj_mol << ','
+              << row.total_kj_mol * kKJToKcal << "\n";
+      }
+    } else {
+      TitanUI::print_warning("PBSA: failed to write mm_pbsa_unit_frame.csv.");
+    }
+  }
+}
+
 void AnalyzerImpl::write_pbsa_by_trajectory() const {
   if (!args_.pbsa)
     return;
@@ -623,7 +785,7 @@ void AnalyzerImpl::write_pbsa_by_trajectory() const {
     ScalarStats polar;
     ScalarStats nonpolar;
     ScalarStats no_entropy;
-    std::vector<double> mm_values;
+    std::vector<double> ie_values;
   };
   std::map<std::size_t, TrajStats> stats_by_traj;
   for (const FrameResult &row : pbsa_rows_) {
@@ -637,8 +799,8 @@ void AnalyzerImpl::write_pbsa_by_trajectory() const {
     add_scalar(stats.polar, row.pbsa_delta_solv_kj_mol);
     add_scalar(stats.nonpolar, row.pbsa_nonpolar_kj_mol);
     add_scalar(stats.no_entropy, row.pbsa_no_entropy_kj_mol);
-    if (args_.pbsa_ie && row.pbsa_status == "ok")
-      stats.mm_values.push_back(row.pbsa_mm_kj_mol);
+      if (args_.pbsa_ie && row.pbsa_status == "ok")
+        stats.ie_values.push_back(row.pbsa_mm_kj_mol);
   }
 
   std::ofstream out("mm_pbsa_by_trajectory.csv",
@@ -657,7 +819,7 @@ void AnalyzerImpl::write_pbsa_by_trajectory() const {
          "DeltaG_bind_IE_kJmol,DeltaG_bind_IE_kcalmol\n";
   for (const auto &[trajectory_id, stats] : stats_by_traj) {
     const PbsaEntropyResult entropy =
-        compute_pbsa_entropy_for_values(stats.mm_values);
+        compute_pbsa_entropy_for_values(stats.ie_values);
     const double minus_tds =
         entropy.status == "ok" ? entropy.minus_tds_kj_mol : 0.0;
     const double dg_ie = stats.no_entropy.mean + minus_tds;
@@ -723,13 +885,13 @@ void AnalyzerImpl::write_pbsa_ie_diagnostics(
   const std::size_t block_size =
       global_entropy.block_size > 0 ? global_entropy.block_size : 1;
   for (std::size_t begin = 0, block_index = 0;
-       begin < pbsa_ie_mm_energies_kj_.size();
+       begin < pbsa_ie_values_kj_.size();
        begin += block_size, ++block_index) {
     const std::size_t end =
-        std::min(pbsa_ie_mm_energies_kj_.size(), begin + block_size);
+        std::min(pbsa_ie_values_kj_.size(), begin + block_size);
     std::vector<double> block(
-        pbsa_ie_mm_energies_kj_.begin() + static_cast<std::ptrdiff_t>(begin),
-        pbsa_ie_mm_energies_kj_.begin() + static_cast<std::ptrdiff_t>(end));
+        pbsa_ie_values_kj_.begin() + static_cast<std::ptrdiff_t>(begin),
+        pbsa_ie_values_kj_.begin() + static_cast<std::ptrdiff_t>(end));
     write_entropy("block", 0, static_cast<int>(block_index),
                   compute_pbsa_entropy_for_values(block));
   }
@@ -749,6 +911,7 @@ void AnalyzerImpl::write_pbsa_performance() const {
   ScalarStats complex_t;
   ScalarStats receptor_t;
   ScalarStats ligand_t;
+  ScalarStats pb_solve_t;
   ScalarStats components_t;
   ScalarStats residue_t;
   ScalarStats frame_t;
@@ -758,6 +921,8 @@ void AnalyzerImpl::write_pbsa_performance() const {
     add_time(complex_t, row.pbsa_time_complex_ms);
     add_time(receptor_t, row.pbsa_time_receptor_ms);
     add_time(ligand_t, row.pbsa_time_ligand_ms);
+    add_time(pb_solve_t, row.pbsa_time_complex_ms + row.pbsa_time_receptor_ms +
+                             row.pbsa_time_ligand_ms);
     add_time(components_t, row.pbsa_time_components_ms);
     add_time(residue_t, row.pbsa_time_residue_ms);
     add_time(frame_t, row.pbsa_time_frame_ms);
@@ -771,17 +936,30 @@ void AnalyzerImpl::write_pbsa_performance() const {
     out << name << "_ms_max " << format_fixed(stats.max, 6) << "\n";
   };
   out << "# TITAN MM/PBSA performance summary\n";
+  out << "timing_granularity natural_boundaries\n";
+  out << "interaction_entropy_source E_MM_elec_plus_vdw\n";
   out << "frames " << pbsa_rows_.size() << "\n";
   out << "endpoint_solves " << (pbsa_rows_.size() * 6) << "\n";
   out << "max_grid_points " << max_grid_points_seen_ << "\n";
   out << "max_memory_bytes " << max_memory_bytes_seen_ << "\n";
   out << "residue_decomp " << args_.pbsa_decomp << "\n";
+  out << "grid_reuse_requested " << args_.pbsa_grid_reuse << "\n";
+  out << "grid_reuse_effective "
+      << (pbsa_rows_.empty() ? "off"
+                             : pbsa_rows_.front().pbsa_grid_reuse_effective)
+      << "\n";
   write_time("complex_solve", complex_t);
   write_time("receptor_solve", receptor_t);
   write_time("ligand_solve", ligand_t);
+  write_time("pb_solve", pb_solve_t);
   write_time("components", components_t);
+  write_time("mm_sasa_components", components_t);
   write_time("residue_decomp", residue_t);
+  write_time("decomposition", residue_t);
   write_time("frame_total", frame_t);
+  write_time("total", frame_t);
+  out << "entropy_output_ms " << format_fixed(pbsa_entropy_output_ms_, 6)
+      << "\n";
   out << "slowest_global_frame " << slowest_global << "\n";
   out << "slowest_frame_ms " << format_fixed(slowest_ms, 6) << "\n";
 
@@ -791,7 +969,9 @@ void AnalyzerImpl::write_pbsa_performance() const {
     if (detail.is_open()) {
       detail << "trajectory_id,frame_index,global_index,time_ps,"
                 "complex_solve_ms,receptor_solve_ms,ligand_solve_ms,"
-                "components_ms,residue_decomp_ms,frame_total_ms,"
+                "pb_solve_ms,"
+                "components_ms,mm_sasa_components_ms,residue_decomp_ms,"
+                "frame_total_ms,"
                 "grid_points,memory_bytes,status\n";
       detail << std::setprecision(10);
       for (const FrameResult &row : pbsa_rows_) {
@@ -800,6 +980,10 @@ void AnalyzerImpl::write_pbsa_performance() const {
                << row.pbsa_time_complex_ms << ','
                << row.pbsa_time_receptor_ms << ','
                << row.pbsa_time_ligand_ms << ','
+               << (row.pbsa_time_complex_ms + row.pbsa_time_receptor_ms +
+                   row.pbsa_time_ligand_ms)
+               << ','
+               << row.pbsa_time_components_ms << ','
                << row.pbsa_time_components_ms << ','
                << row.pbsa_time_residue_ms << ','
                << row.pbsa_time_frame_ms << ',' << row.grid_points << ','
@@ -809,6 +993,70 @@ void AnalyzerImpl::write_pbsa_performance() const {
       TitanUI::print_warning(
           "PBSA: failed to write mm_pbsa_performance_frames.csv.");
     }
+
+    std::ofstream endpoints("mm_pbsa_endpoint_timing.csv",
+                            std::ios::out | std::ios::trunc);
+    if (endpoints.is_open()) {
+      endpoints << "trajectory_id,frame_index,global_index,time_ps,endpoint,"
+                   "phase,timing_variant,"
+                   "setup_ms,surface_ms,epsilon_operator_ms,boundary_ms,"
+                   "solver_ms,energy_ms,reuse_surface_hits,"
+                   "reuse_operator_hits,status\n";
+      endpoints << std::setprecision(10);
+      for (const PbsaEndpointTimingRow &row : pbsa_endpoint_timing_rows_) {
+        endpoints << row.trajectory_id << ',' << row.frame_index << ','
+                  << row.global_index << ',' << row.time_ps << ','
+                  << row.endpoint << ',' << row.phase << ',' << row.variant
+                  << ',' << row.timing.setup_ms << ','
+                  << row.timing.surface_ms << ',' << row.timing.epsilon_ms
+                  << ',' << row.timing.boundary_ms << ','
+                  << row.timing.solver_ms << ',' << row.timing.energy_ms << ','
+                  << row.reuse_surface_hits << ',' << row.reuse_operator_hits
+                  << ',' << row.status << "\n";
+      }
+    } else {
+      TitanUI::print_warning(
+          "PBSA: failed to write mm_pbsa_endpoint_timing.csv.");
+    }
+  }
+
+  if (args_.pbsa_grid_reuse == "validate") {
+    std::ofstream validate("mm_pbsa_grid_reuse_validation.csv",
+                           std::ios::out | std::ios::trunc);
+    if (validate.is_open()) {
+      validate << "trajectory_id,frame_index,global_index,endpoint,"
+                  "reuse_status,reuse_surface_hits,reuse_operator_hits,"
+                  "reaction_energy_delta_kJmol,"
+                  "DeltaG_no_entropy_delta_kJmol\n";
+      validate << std::setprecision(10);
+      for (const FrameResult &row : pbsa_rows_) {
+        const double bind_delta =
+            row.pbsa_complex_reuse_delta_kj_mol -
+            row.pbsa_receptor_reuse_delta_kj_mol -
+            row.pbsa_ligand_reuse_delta_kj_mol;
+        auto write_delta = [&](const char *endpoint, double delta,
+                               std::size_t surface_hits,
+                               std::size_t operator_hits) {
+          validate << row.trajectory_id << ',' << row.frame_index << ','
+                   << row.global_index << ',' << endpoint << ','
+                   << row.pbsa_grid_reuse_effective << ',' << surface_hits
+                   << ',' << operator_hits << ',' << delta << ','
+                   << bind_delta << "\n";
+        };
+        write_delta("complex", row.pbsa_complex_reuse_delta_kj_mol,
+                    row.pbsa_complex_reuse_surface_hits,
+                    row.pbsa_complex_reuse_operator_hits);
+        write_delta("receptor", row.pbsa_receptor_reuse_delta_kj_mol,
+                    row.pbsa_receptor_reuse_surface_hits,
+                    row.pbsa_receptor_reuse_operator_hits);
+        write_delta("ligand", row.pbsa_ligand_reuse_delta_kj_mol,
+                    row.pbsa_ligand_reuse_surface_hits,
+                    row.pbsa_ligand_reuse_operator_hits);
+      }
+    } else {
+      TitanUI::print_warning(
+          "PBSA: failed to write mm_pbsa_grid_reuse_validation.csv.");
+    }
   }
 }
 
@@ -816,12 +1064,23 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
   if (!args_.pbsa)
     return;
 
+  const bool capture_performance = args_.pbsa_perf != "off";
+  const auto entropy_output_begin =
+      capture_performance ? std::chrono::steady_clock::now()
+                          : std::chrono::steady_clock::time_point{};
   const PbsaEntropyResult entropy = compute_pbsa_entropy();
   write_pbsa_energy_csv(entropy);
   write_pbsa_decomposition(entropy);
   write_pbsa_residue_outputs();
+  write_pbsa_unit_outputs();
   write_pbsa_by_trajectory();
   write_pbsa_ie_diagnostics(entropy);
+  if (capture_performance) {
+    pbsa_entropy_output_ms_ =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - entropy_output_begin)
+            .count();
+  }
   write_pbsa_performance();
 
   const double dg_no_entropy_kj = pbsa_no_entropy_stats_.mean;
@@ -854,9 +1113,16 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
 
   out << "# TITAN MM/PBSA summary\n";
   out << "model MM/PBSA_PBE_linear\n";
+  out << "pbsa_backend grid\n";
   out << "pbsa_enabled true\n";
   out << "pbsa_components_requested " << args_.pbsa_components << "\n";
   out << "pbsa_decomp_requested " << args_.pbsa_decomp << "\n";
+  out << "pbsa_decomp_effective " << effective_pbsa_decomp() << "\n";
+  out << "pbsa_grid_reuse_requested " << args_.pbsa_grid_reuse << "\n";
+  out << "pbsa_grid_reuse_effective "
+      << (pbsa_rows_.empty() ? "off"
+                             : pbsa_rows_.front().pbsa_grid_reuse_effective)
+      << "\n";
   out << "frames_total " << pbsa_frames_ << "\n";
   out << "frames_failed " << pbsa_failed_ << "\n";
   out << "temperature_K " << format_fixed(args_.temp) << "\n";
@@ -870,7 +1136,7 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
       << format_fixed(TitanSASA::kNonpolarGammaKcalPerMolA2, 8) << "\n";
   out << "endpoint_solves_per_frame 6\n";
   out << "energy_timeseries mm_pbsa_energy.csv\n";
-  if (args_.pbsa_decomp != "off")
+  if (effective_pbsa_decomp() != "off")
     out << "decomposition mm_pbsa_decomposition.dat\n";
   out << "interaction_entropy_enabled " << (args_.pbsa_ie ? "true" : "false")
       << "\n";
@@ -880,7 +1146,7 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
   out << "interaction_entropy_filter_sigma "
       << format_fixed(args_.pbsa_ie_filter_sigma) << "\n";
   out << "interaction_entropy_block_config " << args_.pbsa_ie_block << "\n";
-  out << "interaction_entropy_source MM_elec_plus_vdw\n";
+  out << "interaction_entropy_source E_MM_elec_plus_vdw\n";
   out << "interaction_entropy_samples " << entropy.samples
       << "\n";
   out << "interaction_entropy_filtered_samples " << entropy.filtered_samples
@@ -898,10 +1164,21 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
   out << "per_trajectory_summary mm_pbsa_by_trajectory.csv\n";
   if (args_.pbsa_perf != "off")
     out << "performance_summary mm_pbsa_performance.dat\n";
-  if (args_.pbsa_decomp == "residue") {
+  if (args_.pbsa_perf == "detail")
+    out << "endpoint_timing mm_pbsa_endpoint_timing.csv\n";
+  if (args_.pbsa_grid_reuse == "validate")
+    out << "grid_reuse_validation mm_pbsa_grid_reuse_validation.csv\n";
+  if (effective_pbsa_decomp() == "residue") {
     out << "residue_summary mm_pbsa_residue_summary.csv\n";
     out << "residue_by_trajectory mm_pbsa_residue_by_trajectory.csv\n";
     out << "residue_closure_total_max_abs_kJmol "
+        << format_fixed(pbsa_residue_closure_max_abs_kj_, 10) << "\n";
+  }
+  if (effective_pbsa_decomp() == "hybrid") {
+    out << "unit_summary mm_pbsa_unit_summary.csv\n";
+    out << "unit_by_trajectory mm_pbsa_unit_by_trajectory.csv\n";
+    out << "unit_entropy_closure not_applicable_nonlinear\n";
+    out << "unit_closure_total_max_abs_kJmol "
         << format_fixed(pbsa_residue_closure_max_abs_kj_, 10) << "\n";
   }
   write_energy_stats("E_elec", pbsa_elec_stats_);
@@ -934,14 +1211,14 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
   for (const auto &[trajectory_id, rows] : rows_by_traj) {
     (void)trajectory_id;
     ScalarStats noie;
-    std::vector<double> mm_values;
+    std::vector<double> ie_values;
     for (const FrameResult *row : rows) {
       add_scalar(noie, row->pbsa_no_entropy_kj_mol);
       if (args_.pbsa_ie && row->pbsa_status == "ok")
-        mm_values.push_back(row->pbsa_mm_kj_mol);
+        ie_values.push_back(row->pbsa_mm_kj_mol);
     }
     const PbsaEntropyResult traj_entropy =
-        compute_pbsa_entropy_for_values(mm_values);
+        compute_pbsa_entropy_for_values(ie_values);
     const double traj_minus_tds =
         traj_entropy.status == "ok" ? traj_entropy.minus_tds_kj_mol : 0.0;
     add_scalar(traj_equal_noie, noie.mean);
@@ -961,6 +1238,7 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
     TitanUI::log_kv(log, "Frames", std::to_string(pbsa_frames_));
     TitanUI::log_kv(log, "Failed", std::to_string(pbsa_failed_));
     TitanUI::log_kv(log, "Endpoint solves/frame", "6");
+    TitanUI::log_kv(log, "IE Source", "E_MM_elec_plus_vdw");
     TitanUI::log_kv(log, "IE Status", entropy.status);
     TitanUI::log_kv(log, "Interaction Entropy",
                     format_fixed(minus_tds_ie_kj) + " kJ/mol / " +
@@ -976,11 +1254,34 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
     TitanUI::log_kv(log, "IE Diagnostics", "mm_pbsa_ie_diagnostics.csv");
     if (args_.pbsa_perf != "off")
       TitanUI::log_kv(log, "Performance", "mm_pbsa_performance.dat");
-    if (args_.pbsa_decomp != "off")
+    if (args_.pbsa_perf != "off") {
+      double pb_solve_ms = 0.0;
+      double components_ms = 0.0;
+      double decomp_ms = 0.0;
+      double frame_ms = 0.0;
+      for (const FrameResult &row : pbsa_rows_) {
+        pb_solve_ms += row.pbsa_time_complex_ms + row.pbsa_time_receptor_ms +
+                       row.pbsa_time_ligand_ms;
+        components_ms += row.pbsa_time_components_ms;
+        decomp_ms += row.pbsa_time_residue_ms;
+        frame_ms += row.pbsa_time_frame_ms;
+      }
+      TitanUI::log_section(log, "MM/PBSA COMPONENT TIMING");
+      TitanUI::log_kv(log, "Timing Granularity", "natural_boundaries");
+      TitanUI::log_time(log, "PB Solve", pb_solve_ms / 1000.0);
+      TitanUI::log_time(log, "MM + SASA Components", components_ms / 1000.0);
+      TitanUI::log_time(log, "Decomposition", decomp_ms / 1000.0);
+      TitanUI::log_time(log, "Entropy + Output",
+                        pbsa_entropy_output_ms_ / 1000.0);
+      TitanUI::log_time(log, "Frame Total", frame_ms / 1000.0);
+    }
+    if (effective_pbsa_decomp() != "off")
       TitanUI::log_kv(log, "Decomposition", "mm_pbsa_decomposition.dat");
-    if (args_.pbsa_decomp == "residue")
+    if (effective_pbsa_decomp() == "residue")
       TitanUI::log_kv(log, "Residue Summary",
                       "mm_pbsa_residue_summary.csv");
+    if (effective_pbsa_decomp() == "hybrid")
+      TitanUI::log_kv(log, "Unit Summary", "mm_pbsa_unit_summary.csv");
   }
 }
 

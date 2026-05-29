@@ -17,6 +17,7 @@
 #include "titan_msm.h"
 #include "titan_pca.h"
 #include "titan_rms.h"
+#include "titan_qnative.h"
 #include "titan_tpt.h"
 #include "titan_validation.h"
 #include "titan_dssp.h"
@@ -153,6 +154,7 @@ void run_tpt_postproc(const arguments &args,
                       const std::vector<std::string> &lj_feature_files = {},
                       const TitanRMSAnalyzer *rms_analyzer = nullptr,
                       const TitanDSSPAnalyzer *protein_dssp_analyzer = nullptr,
+                      const TitanQNativeAnalyzer *qnative_analyzer = nullptr,
                       const Eigen::MatrixXd *dham_tpm = nullptr,
                       const Eigen::VectorXd *dham_pi = nullptr,
                       bool dham_converged = false,

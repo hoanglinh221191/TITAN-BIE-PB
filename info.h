@@ -7,10 +7,10 @@
 using std::string;
 class info {
   string Build, PdbFileName, TotalEnergyFileName, TotalEnergyTimeFileName,
-      SideChainName, LogFile, EmapLgFileName, EmapRecFileName, EntropyFile,
+      LogFile, EmapLgFileName, EmapRecFileName, EntropyFile,
       EntropyQuasiFile, group_1, group_2, stat_hbonds, stat_average_HB,
       stat_maxforce_res, emap, dis_energy_2mol, res_list_hb_rec, res_list_hb_lg,
-      side_chain_out, side_chain_time, out_energy_res_motif, dis_com_2mol,
+      out_energy_res_motif, dis_com_2mol,
       dipole_filename;
   double current_begin_time, current_end_time;
   double current_dt;
@@ -19,7 +19,7 @@ public:
   info(const arguments &Arguments)
       : Build{Arguments.get_build_number()}, PdbFileName{Arguments.pdb_name},
         TotalEnergyFileName{"cal.txt"}, TotalEnergyTimeFileName{"cal.xvg"},
-        SideChainName{"out_sc.txt"}, LogFile{"log.txt"},
+        LogFile{"log.txt"},
         EmapLgFileName{"ener_lg.txt"}, EmapRecFileName{"ener_rec.txt"},
         EntropyFile{"out_entropy.dat"},
         EntropyQuasiFile{"out_entropy_quasiHarmonic.dat"}, group_1{"mol1"},
@@ -27,9 +27,7 @@ public:
         stat_average_HB{"stat_average_HB.dat"},
         stat_maxforce_res{"_out_stat_maxforce_res.dat"}, emap{"out_emap_"},
         dis_energy_2mol{"out_dis_com_energy.dat"}, res_list_hb_rec{},
-        res_list_hb_lg{}, side_chain_out{"out_sc.txt"},
-        side_chain_time{"out_sc_time.dat"},
-        out_energy_res_motif{"_stat_energy_res.dat"},
+        res_list_hb_lg{}, out_energy_res_motif{"_stat_energy_res.dat"},
         dis_com_2mol{"out_dis_com.dat"}, current_begin_time{1000000000000.},
         current_end_time{}, current_dt{} {}
   string getBuild() const { return Build; }
@@ -83,12 +81,6 @@ public:
   string get_res_list_hb_lg_filename() {
     return "out_list_res_HB_" + group_2 + ".dat";
   }
-  string get_res_list_sc_contact_rec_filename() {
-    return "out_list_res_sidechain_contact_" + group_1 + ".dat";
-  }
-  string get_res_list_sc_contact_lg_filename() {
-    return "out_list_res_sidechain_contact_" + group_2 + ".dat";
-  }
   string getDisCom2Mol() const { return dis_com_2mol; }
   string getDisEner2Mol() const { return dis_energy_2mol; }
   string getDipoleFilename() const { return "_dipole_moment.dat"; }
@@ -99,7 +91,6 @@ public:
     return "_distributionDipoleEfield.dat";
   }
   string getOutputDistanceRes2COM() const { return "_distances_res_2COM.dat"; }
-  string getOuputAverageContactMap() const { return "average_contact_map.dat"; }
   string getOuputEnerMaptypeAve() const { return "_energy_maptype.tsv"; }
   string getOutputAverageEmap() const { return "average_emap_pairs.tsv"; }
   string getOutputAverageEmapMatrix() const {
@@ -231,6 +222,180 @@ public:
                                 : 0) +
              ".dat";
     return "contact_probability_summary.dat";
+  }
+  string get_cmap_timeseries_filename(const arguments &Arguments,
+                                      const std::vector<string> &input_line,
+                                      int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "contact_count_timeseries.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "contact_count_timeseries_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "contact_count_timeseries.csv";
+  }
+  string get_cmap_occupancy_filename(const arguments &Arguments,
+                                     const std::vector<string> &input_line,
+                                     int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "contact_residue_occupancy.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "contact_residue_occupancy_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "contact_residue_occupancy.csv";
+  }
+  string get_cmap_matrix_average_filename() const {
+    return "contact_probability_matrix_average.csv";
+  }
+  string get_cmap_edges_average_filename() const {
+    return "contact_probability_edges_average.csv";
+  }
+  string get_cmap_summary_average_filename() const {
+    return "contact_probability_summary_average.dat";
+  }
+  string get_cmap_occupancy_average_filename() const {
+    return "contact_residue_occupancy_average.csv";
+  }
+  string get_qnative_timeseries_filename(const arguments &Arguments,
+                                         const std::vector<string> &input_line,
+                                         int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "qnative_timeseries.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "qnative_timeseries_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "qnative_timeseries.csv";
+  }
+  string get_qnative_native_contacts_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "qnative_native_contacts.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "qnative_native_contacts_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "qnative_native_contacts.csv";
+  }
+  string get_qnative_occupancy_filename(const arguments &Arguments,
+                                        const std::vector<string> &input_line,
+                                        int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "qnative_contact_occupancy.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "qnative_contact_occupancy_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "qnative_contact_occupancy.csv";
+  }
+  string get_qnative_summary_filename(const arguments &Arguments,
+                                      const std::vector<string> &input_line,
+                                      int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "qnative_summary.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "qnative_summary_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "qnative_summary.dat";
+  }
+  string get_qnative_timeseries_average_filename() const {
+    return "qnative_timeseries_average.csv";
+  }
+  string get_qnative_native_contacts_average_filename() const {
+    return "qnative_native_contacts_average.csv";
+  }
+  string get_qnative_occupancy_average_filename() const {
+    return "qnative_contact_occupancy_average.csv";
+  }
+  string get_qnative_summary_average_filename() const {
+    return "qnative_summary_average.dat";
+  }
+  string get_dihedral_timeseries_filename(const arguments &Arguments,
+                                          const std::vector<string> &input_line,
+                                          int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "dihedral_backbone_timeseries.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "dihedral_backbone_timeseries_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "dihedral_backbone_timeseries.csv";
+  }
+  string get_dihedral_ramachandran_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "dihedral_ramachandran.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "dihedral_ramachandran_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "dihedral_ramachandran.csv";
+  }
+  string get_dihedral_summary_filename(const arguments &Arguments,
+                                       const std::vector<string> &input_line,
+                                       int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "dihedral_summary.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "dihedral_summary_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "dihedral_summary.dat";
+  }
+  string get_dihedral_feature_matrix_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "dihedral_feature_matrix.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "dihedral_feature_matrix_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "dihedral_feature_matrix.csv";
   }
   string get_network_community_summary_filename() const {
     return "network_community_summary.csv";
@@ -537,9 +702,6 @@ public:
            ".csv";
   }
 
-  string getSCout() const { return side_chain_out; }
-  string getContmap() const { return "contact_map_traj_"; }
-  string getSCtimeout() const { return side_chain_time; }
   void set_current_begin_time(double t) { current_begin_time = t; }
   double get_current_begin_time() const { return current_begin_time; }
   void set_current_end_time(double t) { current_end_time = t; }

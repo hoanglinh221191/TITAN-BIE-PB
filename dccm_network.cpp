@@ -1568,8 +1568,8 @@ void DCCMNetwork::init(const Multi_MOL &pro_in, const Multi_MOL &lig,
   latest_traj_x_.clear();
   latest_traj_y_.clear();
   latest_traj_z_.clear();
-  first_pro_frame_.clear_MOL();
-  first_lig_frame_.clear_MOL();
+  first_pro_frame_.release_memory();
+  first_lig_frame_.release_memory();
   first_pro_info_.clear();
   first_lig_info_.clear();
   has_first_snapshot_frame_ = false;
@@ -1754,7 +1754,7 @@ void DCCMNetwork::process_frame(const Multi_MOL &pro_in, const Multi_MOL &lig,
       first_lig_frame_ = lig.m_mol[l_snap];
       first_lig_info_ = lig.info;
     } else {
-      first_lig_frame_.clear_MOL();
+      first_lig_frame_.release_memory();
       first_lig_info_.clear();
     }
     has_first_snapshot_frame_ = true;

@@ -21,21 +21,39 @@ public:
   TitanContactMapAnalyzer() = default;
 
   void configure(const CMapArgs &args);
-  void init(const Multi_MOL &mol1, const arguments &args, std::fstream &log);
+  void init(const Multi_MOL &mol1, const Multi_MOL *mol2,
+            const arguments &args, std::fstream &log);
+  void init(const Multi_MOL &mol1, const arguments &args, std::fstream &log) {
+    init(mol1, nullptr, args, log);
+  }
+  void process_frame(const Multi_MOL &mol1, const Multi_MOL *mol2,
+                     std::size_t snap_idx, TitanExecutor &executor);
   void process_frame(const Multi_MOL &mol1, std::size_t snap_idx,
-                     TitanExecutor &executor);
+                     TitanExecutor &executor) {
+    process_frame(mol1, nullptr, snap_idx, executor);
+  }
   void finalize_trajectory(const std::string &base_dir, const info &info_output,
                            const arguments &args,
                            const std::vector<std::string> &input_line,
                            int input_name, std::fstream &log);
+  void finalize_all(const std::string &base_dir, const info &info_output,
+                    std::fstream &log);
 
   [[nodiscard]] bool enabled() const noexcept { return enabled_; }
   [[nodiscard]] bool initialized() const noexcept { return initialized_; }
 
 private:
-  struct ContactAtom {
-    std::size_t atom_index{};
+  struct ResidueSelection {
     titan_contact::ResidueKey residue;
+    std::vector<std::size_t> atoms;
+    std::vector<std::size_t> selected_atoms;
+  };
+
+  struct ContactPoint {
+    titan_contact::ResidueKey residue;
+    double x{};
+    double y{};
+    double z{};
   };
 
   struct ContactRecord {
@@ -47,6 +65,16 @@ private:
   };
 
   void reset_trajectory_state();
+  void accumulate_pooled_state();
+  void build_selections(const Multi_MOL &mol, std::uint8_t molecule,
+                        std::vector<ResidueSelection> &selections,
+                        std::vector<titan_contact::ResidueKey> &residues);
+  bool build_points(const Multi_MOL &mol, std::size_t snap_idx,
+                    const std::vector<ResidueSelection> &selections,
+                    std::vector<ContactPoint> &points) const;
+  [[nodiscard]] std::size_t residue_index(
+      const std::vector<titan_contact::ResidueKey> &residues,
+      const titan_contact::ResidueKey &residue) const;
   [[nodiscard]] bool pair_allowed(const titan_contact::ResidueKey &lhs,
                                   const titan_contact::ResidueKey &rhs) const;
   [[nodiscard]] bool has_valid_box(const box &frame_box) const noexcept;
@@ -55,15 +83,18 @@ private:
   void export_summary(const std::string &filename, std::fstream &log) const;
   void export_edges(const std::string &filename, std::fstream &log) const;
   void export_matrix(const std::string &filename, std::fstream &log) const;
+  void export_timeseries(const std::string &filename, std::fstream &log) const;
+  void export_occupancy(const std::string &filename, std::fstream &log) const;
 
   bool requested_{false};
   bool enabled_{false};
   bool initialized_{false};
   bool warned_invalid_box_{false};
 
-  titan_contact::ContactMode mode_{titan_contact::ContactMode::SidechainHeavy};
+  titan_contact::ContactMode mode_{titan_contact::ContactMode::SidechainCOM};
+  std::string scope_{"mol1"};
   std::string domain_{"both"};
-  double cutoff_a_{4.5};
+  double cutoff_a_{6.5};
   int min_seqsep_{3};
   std::size_t atom_count_{0};
 
@@ -72,14 +103,25 @@ private:
   std::uint64_t skipped_invalid_box_frames_{0};
   std::uint64_t skipped_incomplete_frames_{0};
 
-  std::vector<ContactAtom> contact_atoms_;
-  std::vector<titan_contact::ResidueKey> residues_;
-  std::vector<unsigned char> active_atom_mask_;
-  std::vector<int> atom_index_to_contact_pos_;
+  std::vector<ResidueSelection> row_selections_;
+  std::vector<ResidueSelection> col_selections_;
+  std::vector<titan_contact::ResidueKey> row_residues_;
+  std::vector<titan_contact::ResidueKey> col_residues_;
+  std::vector<std::uint64_t> row_occupancy_frames_;
+  std::vector<std::uint64_t> col_occupancy_frames_;
+  std::vector<std::pair<double, std::uint64_t>> contact_count_timeseries_;
   std::unordered_map<titan_contact::ResiduePairKey, ContactRecord,
                      titan_contact::ResiduePairKeyHash>
       records_;
-  titan_neighbor::HalfShellGrid neighbor_grid_;
+  std::uint64_t pooled_valid_frames_{0};
+  std::uint64_t pooled_total_frames_seen_{0};
+  std::uint64_t pooled_skipped_invalid_box_frames_{0};
+  std::uint64_t pooled_skipped_incomplete_frames_{0};
+  std::vector<std::uint64_t> pooled_row_occupancy_frames_;
+  std::vector<std::uint64_t> pooled_col_occupancy_frames_;
+  std::unordered_map<titan_contact::ResiduePairKey, ContactRecord,
+                     titan_contact::ResiduePairKeyHash>
+      pooled_records_;
 };
 
 #endif // TITAN_CONTACT_MAP_H

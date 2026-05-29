@@ -445,7 +445,7 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
     const fs::path traj_path = fs::absolute(fs::path(args_ref.traj_file));
     const std::string tf = traj_path.string();
     std::error_code ec;
-    const bool use_lig_group = !args_ref.flag_nocal;
+    const bool use_lig_group = args_ref.needs_mol2_coordinates();
 
     if (!fs::exists(traj_path, ec) || ec) {
       return std::unexpected("XDR: trajectory file not found: " + tf);
@@ -708,9 +708,9 @@ void ChunkStreamer::parallel_split_coordinates(
 
   // Pre-calculate target sizes to avoid redundant lookups
   size_t pro_size = groups_ref.groups_atom_number(groups_ref.group_1_index());
-  size_t lig_size =
-      args_ref.flag_nocal ? 0
-                          : groups_ref.groups_atom_number(groups_ref.group_2_index());
+  size_t lig_size = args_ref.needs_mol2_coordinates()
+                        ? groups_ref.groups_atom_number(groups_ref.group_2_index())
+                        : 0;
   size_t wat_size =
       (args_ref.n_wat >= 0) ? groups_ref.groups_atom_number(args_ref.n_wat) : 0;
 

@@ -150,6 +150,10 @@ public:
   void set_compute_forces(bool flag) { compute_forces = flag; }
 
   [[nodiscard]] string_view get_mol_type() const noexcept { return mol_type; }
+  [[nodiscard]] bool frame_coordinates_consistent(size_t frame_index) const
+      noexcept;
+  [[nodiscard]] bool topology_matches_frame(size_t frame_index) const noexcept;
+  [[nodiscard]] bool parameters_match_info() const noexcept;
 
   // --- CÁC HÀM XỬ LÝ CHÍNH ---
   int gen_vector_parameters();

@@ -1242,6 +1242,8 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_focused_field(
                                              : "nested_focus")
                  : "sor";
   field.mg_levels = levels;
+  const bool reuse_homogeneous_vacuum =
+      pbsa_reuse_vacuum_active_ && levels == 1 && map_result == nullptr;
 
   GridShape previous_shape;
   AlignedDoubleVector previous_phi;
@@ -1338,8 +1340,10 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_focused_field(
         args_.test_grid_size > 0 &&
         (args_.focus_center_user || args_.test_center_user);
     const GridShape shape =
-        delphi_test_focus_shape ? build_delphi_focus_shape()
-                                : build_shape(atoms, scale, margin);
+        reuse_homogeneous_vacuum
+            ? pbsa_reuse_shape_
+            : (delphi_test_focus_shape ? build_delphi_focus_shape()
+                                       : build_shape(atoms, scale, margin));
     std::vector<Atom> focus_atoms;
     const std::vector<Atom> *level_atoms = &atoms;
     if (args_.focus == "delphi" && has_previous) {
@@ -1384,9 +1388,11 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_focused_field(
     if (has_previous)
       add_timing_ms(TimingBucket::FocusChildSetup, focus_setup_ms);
     const auto surface_begin = std::chrono::steady_clock::now();
-    classify_surface(shape, *level_atoms, executor);
-    apply_oracle_surface_map(shape);
-    classify_ion_accessibility(shape, *level_atoms, executor);
+    if (!reuse_homogeneous_vacuum) {
+      classify_surface(shape, *level_atoms, executor);
+      apply_oracle_surface_map(shape);
+      classify_ion_accessibility(shape, *level_atoms, executor);
+    }
     const double surface_ms =
         std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - surface_begin)
@@ -1465,7 +1471,18 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_focused_field(
                                         : assign_charges(shape, *level_atoms));
     maybe_write_charge_grid_diff(shape, *level_atoms);
     AlignedDoubleVector energy_rho;
-    build_coefficients(shape, *level_atoms, eps_in, eps_out, kappa, executor);
+    if (reuse_homogeneous_vacuum) {
+      std::fill(eps_x_.begin(), eps_x_.end(), eps_out);
+      std::fill(eps_y_.begin(), eps_y_.end(), eps_out);
+      std::fill(eps_z_.begin(), eps_z_.end(), eps_out);
+      std::fill(screen_.begin(), screen_.end(), 0.0);
+      std::fill(denom_.begin(), denom_.end(), 6.0 * eps_out);
+      field.pbsa_reuse_surface_hit = true;
+      field.pbsa_reuse_operator_hit = true;
+    } else {
+      build_coefficients(shape, *level_atoms, eps_in, eps_out, kappa,
+                         executor);
+    }
     if (map_result != nullptr && (kappa > 0.0 || eps_out > eps_in + 1.0e-9))
       apply_stability_hysteresis(shape, *level_atoms);
     if (args_.biomodel == "rpbe") {

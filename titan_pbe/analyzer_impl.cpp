@@ -825,6 +825,8 @@ double fallback_radius_from_mass(double mass) noexcept {
 
 void AnalyzerImpl::configure(const arguments &args) {
   args_ = args.pbe;
+  args_.pbsa_mol1_type = args.mol_1_type;
+  args_.pbsa_mol2_type = args.mol_2_type;
   configured_threads_ = std::max<std::size_t>(1, args.nt);
   reset_grid_anchor();
   last_stability_state_ = StabilityFrameState{};
@@ -10976,10 +10978,42 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
     const std::vector<Atom> &atoms, TitanExecutor &executor,
     const FrameResult *map_result) {
   ReactionSolve solve;
+  TimingBuckets solvent_timing;
+  TimingBuckets vacuum_timing;
+  TimingBuckets reuse_timing;
+  const bool capture_pbsa_timing =
+      args_.pbsa && args_.pbsa_perf == "detail" &&
+      !stability_probe_solve_active_;
+  struct PbsaTimingScope {
+    AnalyzerImpl &self;
+    TimingBuckets *previous;
+    bool capture;
+    PbsaTimingScope(AnalyzerImpl &impl, TimingBuckets &timing, bool enabled)
+        : self(impl), previous(impl.active_timing_),
+          capture(enabled) {
+      if (capture)
+        self.active_timing_ = &timing;
+    }
+    ~PbsaTimingScope() {
+      if (capture)
+        self.active_timing_ = previous;
+    }
+  };
+  const bool validate_reuse =
+      args_.pbsa_grid_reuse == "validate" && args_.pbsa &&
+      !stability_probe_solve_active_ && args_.backend == "grid" &&
+      args_.model == "linear" && args_.biomodel == "pbe" &&
+      args_.dielectric_model == "two-dielectric" &&
+      args_.charge_assignment == "trilinear" &&
+      args_.test_energy_convention == "auto" && args_.focus == "off" &&
+      effective_solver_mode() == "sor";
   const double solvent_kappa = debye_kappa_inv_a(args_.salt, args_.temp);
-  const FieldSolve solvent = solve_physical_field(
-      atoms, args_.int_diel, args_.ext_diel, solvent_kappa, executor,
-      map_result);
+  FieldSolve solvent;
+  {
+    PbsaTimingScope timing_scope(*this, solvent_timing, capture_pbsa_timing);
+    solvent = solve_physical_field(atoms, args_.int_diel, args_.ext_diel,
+                                   solvent_kappa, executor, map_result);
+  }
   const ForensicAudit solvent_forensic =
       barnase_forensic_enabled() ? compute_forensic_audit(solvent.shape)
                                  : ForensicAudit{};
@@ -10990,9 +11024,26 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
       barnase_forensic_enabled();
   const AlignedDoubleVector solvent_screen_for_iscm =
       wants_iscm ? screen_ : AlignedDoubleVector{};
-  const FieldSolve vacuum =
-      solve_linear_field(atoms, args_.int_diel, args_.int_diel, 0.0, executor,
-                         nullptr);
+  FieldSolve vacuum;
+  {
+    PbsaTimingScope timing_scope(*this, vacuum_timing, capture_pbsa_timing);
+    vacuum = solve_linear_field(atoms, args_.int_diel, args_.int_diel, 0.0,
+                                executor, nullptr);
+  }
+  FieldSolve reused_vacuum;
+  if (validate_reuse) {
+    struct ReuseScope {
+      AnalyzerImpl &self;
+      ReuseScope(AnalyzerImpl &impl, const GridShape &shape) : self(impl) {
+        self.pbsa_reuse_shape_ = shape;
+        self.pbsa_reuse_vacuum_active_ = true;
+      }
+      ~ReuseScope() { self.pbsa_reuse_vacuum_active_ = false; }
+    } reuse_scope(*this, solvent.shape);
+    PbsaTimingScope timing_scope(*this, reuse_timing, capture_pbsa_timing);
+    reused_vacuum = solve_linear_field(atoms, args_.int_diel, args_.int_diel,
+                                       0.0, executor, nullptr);
+  }
 
   solve.shape = solvent.shape;
   solve.solvent = solvent.stats;
@@ -11014,6 +11065,9 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
   solve.stern_excluded_points = solvent.stern_excluded_points;
   solve.peak_memory_bytes =
       std::max(solvent.peak_memory_bytes, vacuum.peak_memory_bytes);
+  solve.pbsa_solvent_timing = solvent_timing;
+  solve.pbsa_vacuum_timing = vacuum_timing;
+  solve.pbsa_reuse_timing = reuse_timing;
   solve.pbe_model_effective = solvent.pbe_model_effective;
   solve.linear_seed_solver = solvent.linear_seed_solver;
   solve.nl_solver = solvent.nl_solver;
@@ -11072,6 +11126,12 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
   solve.vdwms_removed = solvent.vdwms_removed;
   solve.vdwms_exposed_points = solvent.vdwms_exposed_points;
   solve.vdwms_midpoint_rms = solvent.vdwms_midpoint_rms;
+  if (validate_reuse) {
+    solve.pbsa_reuse_surface_hits =
+        reused_vacuum.pbsa_reuse_surface_hit ? 1U : 0U;
+    solve.pbsa_reuse_operator_hits =
+        reused_vacuum.pbsa_reuse_operator_hit ? 1U : 0U;
+  }
 
   const auto energy_time_begin = std::chrono::steady_clock::now();
   double rpb_source_time_ms = 0.0;
@@ -11083,6 +11143,12 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
       atom_phase_energy_kcal(atoms, solvent.atom_phi);
   solve.vacuum_phase_kcal_mol =
       atom_phase_energy_kcal(atoms, vacuum.atom_phi);
+  if (validate_reuse) {
+    const double reused_vacuum_phase_kcal =
+        atom_phase_energy_kcal(atoms, reused_vacuum.atom_phi);
+    solve.pbsa_reuse_delta_kj_mol =
+        (reused_vacuum_phase_kcal - solve.vacuum_phase_kcal_mol) * kKcalToKJ;
+  }
   solve.atom_corrected_kcal_mol =
       solve.solvent_phase_kcal_mol - solve.vacuum_phase_kcal_mol;
   solve.coulomb_energy_kcal_mol =
@@ -11416,6 +11482,7 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_reaction_field(
       elapsed_ms(energy_time_begin, std::chrono::steady_clock::now()) -
       rpb_source_time_ms - probe_time_ms;
   add_timing_ms(TimingBucket::Energy, std::max(0.0, energy_ms));
+  solve.pbsa_energy_ms = std::max(0.0, energy_ms);
   if (map_result != nullptr) {
     const auto audit_output_begin = std::chrono::steady_clock::now();
     maybe_write_iscm_surface_charge_samples(*map_result, iscm_audit);
@@ -13919,6 +13986,79 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
             ? (mol2_solve.converged ? "ok" : "not_converged")
             : "missing_endpoint";
     if (have_endpoint_solve) {
+      result.pbsa_complex_reuse_delta_kj_mol =
+          complex_solve.pbsa_reuse_delta_kj_mol;
+      result.pbsa_receptor_reuse_delta_kj_mol =
+          mol1_solve.pbsa_reuse_delta_kj_mol;
+      result.pbsa_ligand_reuse_delta_kj_mol =
+          mol2_solve.pbsa_reuse_delta_kj_mol;
+      result.pbsa_complex_reuse_surface_hits =
+          complex_solve.pbsa_reuse_surface_hits;
+      result.pbsa_complex_reuse_operator_hits =
+          complex_solve.pbsa_reuse_operator_hits;
+      result.pbsa_receptor_reuse_surface_hits =
+          mol1_solve.pbsa_reuse_surface_hits;
+      result.pbsa_receptor_reuse_operator_hits =
+          mol1_solve.pbsa_reuse_operator_hits;
+      result.pbsa_ligand_reuse_surface_hits =
+          mol2_solve.pbsa_reuse_surface_hits;
+      result.pbsa_ligand_reuse_operator_hits =
+          mol2_solve.pbsa_reuse_operator_hits;
+      const std::size_t reuse_hits =
+          result.pbsa_complex_reuse_surface_hits +
+          result.pbsa_receptor_reuse_surface_hits +
+          result.pbsa_ligand_reuse_surface_hits;
+      if (args_.pbsa_grid_reuse == "validate")
+        result.pbsa_grid_reuse_effective =
+            reuse_hits == 3 ? "validate" : "ineligible";
+      else if (args_.pbsa_grid_reuse == "auto")
+        result.pbsa_grid_reuse_effective = "pending_gate";
+      else
+        result.pbsa_grid_reuse_effective = "off";
+      if (args_.pbsa_perf == "detail") {
+        auto append_timing =
+            [&](const std::string &endpoint, const std::string &phase,
+                const std::string &variant, const TimingBuckets &timing,
+                std::size_t surface_hits, std::size_t operator_hits,
+                const std::string &status) {
+              PbsaEndpointTimingRow row;
+              row.trajectory_id = result.trajectory_id;
+              row.frame_index = result.frame_index;
+              row.global_index = result.global_index;
+              row.time_ps = result.time_ps;
+              row.endpoint = endpoint;
+              row.phase = phase;
+              row.variant = variant;
+              row.timing = timing;
+              row.reuse_surface_hits = surface_hits;
+              row.reuse_operator_hits = operator_hits;
+              row.status = status;
+              pbsa_endpoint_timing_rows_.push_back(std::move(row));
+            };
+        auto append_endpoint = [&](const std::string &endpoint,
+                                   const ReactionSolve &endpoint_solve,
+                                   const std::string &status) {
+          append_timing(endpoint, "solvent", "baseline",
+                        endpoint_solve.pbsa_solvent_timing, 0U, 0U, status);
+          const bool reused = endpoint_solve.pbsa_reuse_surface_hits > 0U ||
+                              endpoint_solve.pbsa_reuse_operator_hits > 0U;
+          append_timing(endpoint, "vacuum", "baseline",
+                        endpoint_solve.pbsa_vacuum_timing, 0U, 0U, status);
+          if (reused) {
+            append_timing(endpoint, "vacuum", "reuse",
+                          endpoint_solve.pbsa_reuse_timing,
+                          endpoint_solve.pbsa_reuse_surface_hits,
+                          endpoint_solve.pbsa_reuse_operator_hits, status);
+          }
+          TimingBuckets energy_timing;
+          energy_timing.energy_ms = endpoint_solve.pbsa_energy_ms;
+          append_timing(endpoint, "reaction_energy", "baseline",
+                        energy_timing, 0U, 0U, status);
+        };
+        append_endpoint("complex", complex_solve, result.pbsa_complex_status);
+        append_endpoint("receptor", mol1_solve, result.pbsa_receptor_status);
+        append_endpoint("ligand", mol2_solve, result.pbsa_ligand_status);
+      }
       result.pbsa_receptor_solvent_iterations =
           mol1_solve.solvent_total_iterations;
       result.pbsa_receptor_vacuum_iterations =
@@ -13938,7 +14078,8 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
       result.pbsa_ligand_solvent_max_dphi = mol2_solve.solvent.max_dphi;
       result.pbsa_ligand_vacuum_max_dphi = mol2_solve.vacuum.max_dphi;
     }
-    if (args_.pbsa_decomp == "residue") {
+    const std::string pbsa_decomp = effective_pbsa_decomp();
+    if (pbsa_decomp == "residue" || pbsa_decomp == "hybrid") {
       const auto residue_time_begin = std::chrono::steady_clock::now();
       const std::vector<ResidueFrameRow> residue_rows =
           compute_pbsa_residue_rows(mol1, *mol2, mol1_atoms, mol2_atoms,

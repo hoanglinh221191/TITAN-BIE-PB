@@ -438,6 +438,13 @@ private:
     std::size_t ion_accessible_points{0};
     std::size_t stern_excluded_points{0};
     std::size_t peak_memory_bytes{0};
+    TimingBuckets pbsa_solvent_timing{};
+    TimingBuckets pbsa_vacuum_timing{};
+    TimingBuckets pbsa_reuse_timing{};
+    double pbsa_energy_ms{0.0};
+    double pbsa_reuse_delta_kj_mol{0.0};
+    std::size_t pbsa_reuse_surface_hits{0};
+    std::size_t pbsa_reuse_operator_hits{0};
     std::string pbe_backend{"grid"};
     double tabi_surface_build_ms{0.0};
     std::size_t tabi_surface_panels{0};
@@ -1103,6 +1110,8 @@ private:
     std::size_t ion_accessible_points{0};
     std::size_t stern_excluded_points{0};
     std::size_t peak_memory_bytes{0};
+    bool pbsa_reuse_surface_hit{false};
+    bool pbsa_reuse_operator_hit{false};
     std::string pbe_model_effective{"linear"};
     std::string linear_seed_solver{"none"};
     std::string nl_solver{"picard"};
@@ -1351,11 +1360,14 @@ private:
 
   struct ResidueKey {
     std::string molecule{"unknown"};
+    std::string unit_type{"residue"};
     std::size_t chainnum{0};
     std::string chain{" "};
     std::size_t resnr{0};
     std::size_t respos{0};
     std::string resname{"UND"};
+    std::size_t atom_index{0};
+    std::string atom_name{};
   };
 
   struct ResidueContribution {
@@ -1384,6 +1396,21 @@ private:
     ScalarStats polar{};
     ScalarStats nonpolar{};
     ScalarStats total{};
+    std::vector<double> ie_values_kj_mol;
+  };
+
+  struct PbsaEndpointTimingRow {
+    std::size_t trajectory_id{0};
+    std::size_t frame_index{0};
+    std::size_t global_index{0};
+    double time_ps{0.0};
+    std::string endpoint{};
+    std::string phase{};
+    std::string variant{"baseline"};
+    TimingBuckets timing{};
+    std::size_t reuse_surface_hits{0};
+    std::size_t reuse_operator_hits{0};
+    std::string status{"off"};
   };
 
   struct MultigridLevel {
@@ -1649,6 +1676,7 @@ private:
       const ReactionSolve &mol2_solve, const FrameResult &result,
       TitanExecutor &executor,
       const EnergyDecompositionProvider *energy_provider) const;
+  [[nodiscard]] std::string effective_pbsa_decomp() const;
     void accumulate_pbsa_residue_rows(
         const FrameResult &result, const std::vector<ResidueFrameRow> &rows);
     std::vector<Atom> load_probe_atoms(const std::string &path) const;
@@ -1815,6 +1843,7 @@ private:
   void write_pbsa_energy_csv(const PbsaEntropyResult &entropy) const;
   void write_pbsa_decomposition(const PbsaEntropyResult &entropy) const;
   void write_pbsa_residue_outputs() const;
+  void write_pbsa_unit_outputs() const;
   void write_pbsa_by_trajectory() const;
   void write_pbsa_ie_diagnostics(const PbsaEntropyResult &global_entropy) const;
   void write_pbsa_performance() const;
@@ -1887,6 +1916,8 @@ private:
   bool stability_samples_header_written_{false};
   bool wrote_first_map_{false};
   mutable TimingBuckets *active_timing_{nullptr};
+  bool pbsa_reuse_vacuum_active_{false};
+  GridShape pbsa_reuse_shape_{};
   mutable std::map<std::string, GridShape> grid_anchor_shapes_;
   StabilityFrameState last_stability_state_{};
   StabilityMediumState last_stability_medium_state_{};
@@ -1986,11 +2017,13 @@ private:
   ScalarStats pbsa_nonpolar_stats_{};
   ScalarStats pbsa_polar_stats_{};
   ScalarStats pbsa_no_entropy_stats_{};
-  std::vector<double> pbsa_ie_mm_energies_kj_;
+  std::vector<double> pbsa_ie_values_kj_;
   std::vector<FrameResult> pbsa_rows_;
+  std::vector<PbsaEndpointTimingRow> pbsa_endpoint_timing_rows_;
   std::vector<ResidueFrameRow> pbsa_residue_frame_rows_;
   std::map<std::string, ResidueStats> pbsa_residue_stats_;
   std::map<std::string, ResidueStats> pbsa_residue_traj_stats_;
+  double pbsa_entropy_output_ms_{0.0};
   double pbsa_residue_closure_max_abs_kj_{0.0};
   double pbsa_residue_closure_elec_max_abs_kj_{0.0};
   double pbsa_residue_closure_vdw_max_abs_kj_{0.0};

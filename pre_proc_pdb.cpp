@@ -21,7 +21,7 @@ int parse_begin_end_atoms_2mols(groups_cal &groups, arguments &Arguments,
         return 1;
 
       if (groups.groups_atom_number(groups.group_1_index()) == 0 ||
-          (!Arguments.flag_nocal &&
+          (Arguments.needs_mol2_coordinates() &&
            groups.groups_atom_number(groups.group_2_index()) == 0)) {
         cout << "Selected index group is empty!\n";
         return 1;
@@ -43,7 +43,9 @@ int parse_begin_end_atoms_2mols(groups_cal &groups, arguments &Arguments,
       groups.add_group_from_range("molecule 2", protein_1.m_mol[0].size() + 1,
                                   protein_1.m_mol[0].size() +
                                       protein_2.m_mol[0].size());
-    } else if (Arguments.flag_nocal == true && Arguments.com_dis_2mol == 0) {
+    } else if (Arguments.flag_nocal == true &&
+               !Arguments.needs_mol2_for_cmap_interface() &&
+               Arguments.com_dis_2mol == 0) {
       end_mol_1 = PDB.m_mol[0].size();
       groups.add_group_from_range("molecule 1", 1ull, end_mol_1);
       end_mol_2 = 0;
@@ -118,7 +120,7 @@ int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
   }
 
   if (can_subset_reference_directly &&
-      (Arguments.flag_nocal ||
+      (!Arguments.needs_mol2_coordinates() ||
        (!protein_1.m_mol.empty() && !protein_2.m_mol.empty()))) {
     if (Arguments.n_wat >= 0)
       water_traj.set_mol_type("water");
@@ -204,11 +206,15 @@ int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
   }
 
   if (can_subset_reference_directly &&
-      (Arguments.flag_nocal ||
+      (!Arguments.needs_mol2_coordinates() ||
        (!protein_1.m_mol.empty() && !protein_2.m_mol.empty()))) {
     if (flag != -1) {
       protein_1.wrapper_impl_post_proc(Arguments, type_2, amine);
       protein_2.wrapper_impl_post_proc(Arguments, type, amine);
+    } else if (Arguments.cmap.flag_cmap && Arguments.flag_sidechain) {
+      protein_1.check_side_chain(Arguments);
+      if (Arguments.needs_mol2_for_cmap_interface())
+        protein_2.check_side_chain(Arguments);
     }
 
     protein_1.set_mol_type(Arguments.mol_1_type);
@@ -232,7 +238,7 @@ int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
   trans_atom_to_MOL(PDB, protein_1, protein_2, groups, groups.group_1_index(),
                     groups.group_2_index(), Arguments, amine, flag_add_atom);
 
-  if (!Arguments.flag_nocal &&
+  if (Arguments.needs_mol2_coordinates() &&
       (protein_1.m_mol.empty() || protein_2.m_mol.empty())) {
     cout << "Cannot extract selected groups from reference structure "
          << Arguments.pdb_name << '\n';
@@ -242,6 +248,10 @@ int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
   if (flag != -1) {
     protein_1.wrapper_impl_post_proc(Arguments, type_2, amine);
     protein_2.wrapper_impl_post_proc(Arguments, type, amine);
+  } else if (Arguments.cmap.flag_cmap && Arguments.flag_sidechain) {
+    protein_1.check_side_chain(Arguments);
+    if (Arguments.needs_mol2_for_cmap_interface())
+      protein_2.check_side_chain(Arguments);
   }
 
   protein_1.set_mol_type(Arguments.mol_1_type);
@@ -299,7 +309,8 @@ int trans_atom_to_MOL(Multi_MOL &MOL_source, Multi_MOL &protein_des,
                       const arguments &Arguments, const amino_acid &amine,
                       int flag = 0) {
   if (flag == 0) {
-    if (Arguments.flag_nocal == true && groups.empty()) {
+    if (Arguments.flag_nocal == true &&
+        !Arguments.needs_mol2_for_cmap_interface() && groups.empty()) {
       protein_des = MOL_source;
       protein_des.gen_vector_parameters();
       return 0;
@@ -342,7 +353,8 @@ int trans_atom_to_MOL(Multi_MOL &MOL_source, Multi_MOL &protein_des,
             }(),
             MOL_source.get_mol_type());
       }
-      if (Arguments.flag_nocal == true)
+      if (Arguments.flag_nocal == true &&
+          !Arguments.needs_mol2_for_cmap_interface())
         continue;
 
       for (size_t j{}; j < groups.groups_atom_number(group_index_2); ++j) {

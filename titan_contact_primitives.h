@@ -10,18 +10,26 @@
 
 namespace titan_contact {
 
-enum class ContactMode : std::uint8_t { SidechainHeavy, CB, CA, Backbone };
+enum class ContactMode : std::uint8_t {
+  SidechainCOM,
+  SidechainHeavy,
+  CB,
+  CA,
+  Backbone
+};
 
 struct ResidueKey {
+  std::uint8_t molecule{1};
   std::size_t chainnum{};
   std::size_t resnr{};
   std::string chain;
   std::string resname;
   std::size_t ordinal{};
 
-  // CMap residue identity is chainnum/resnr; other fields are metadata.
+  // Interface CMap identity includes molecule role as well as residue id.
   bool operator==(const ResidueKey &other) const noexcept {
-    return chainnum == other.chainnum && resnr == other.resnr;
+    return molecule == other.molecule && chainnum == other.chainnum &&
+           resnr == other.resnr;
   }
 };
 
@@ -46,7 +54,8 @@ bool is_backbone_atom_name(std::string_view atom_name);
 bool is_hydrogen_atom_name(std::string_view atom_name);
 bool is_selected_contact_atom(const mol_info &info, ContactMode mode);
 
-ResidueKey residue_key_from_atom(const mol_info &info, std::size_t ordinal);
+ResidueKey residue_key_from_atom(const mol_info &info, std::size_t ordinal,
+                                 std::uint8_t molecule = 1);
 ResiduePairKey make_ordered_pair(const ResidueKey &lhs,
                                  const ResidueKey &rhs);
 

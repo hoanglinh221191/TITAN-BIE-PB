@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -313,12 +314,19 @@ int arguments::post_process() {
     };
     const std::string source_prefix = basin_prefix(tpt.source_spec);
     const std::string sink_prefix = basin_prefix(tpt.sink_spec);
+    const auto is_qnative_prefix = [](const std::string &prefix) {
+      return prefix == "qnative_range" || prefix == "qnative_lt" ||
+             prefix == "qnative_gt";
+    };
+    if (is_qnative_prefix(source_prefix) || is_qnative_prefix(sink_prefix))
+      qnative.flag_qnative = true;
     const auto prefix_supported = [](const std::string &prefix) {
       return prefix == "micro" || prefix == "state" || prefix == "states" ||
              prefix == "macro" || prefix == "tica_rect" || prefix == "lj" ||
              prefix == "ljpreset" || prefix == "lj_preset" ||
              prefix == "protein" || prefix == "prot" ||
-             prefix == "protein_preset";
+             prefix == "protein_preset" || prefix == "qnative_range" ||
+             prefix == "qnative_lt" || prefix == "qnative_gt";
     };
     if (!prefix_supported(source_prefix)) {
       TitanUI::print_error("TPT: unsupported -tpt-source prefix '" +
@@ -350,6 +358,49 @@ int arguments::post_process() {
         exit(EXIT_FAILURE);
       }
     }
+    auto validate_qnative_basin = [&](const std::string &spec,
+                                      const std::string &prefix,
+                                      const char *flag_name) {
+      if (!is_qnative_prefix(prefix))
+        return;
+      const auto colon_pos = spec.find(':');
+      if (colon_pos == std::string::npos) {
+        TitanUI::print_error(std::string("TPT: ") + flag_name +
+                             " qnative selector requires ':' payload.");
+        exit(EXIT_FAILURE);
+      }
+      const std::string body = spec.substr(colon_pos + 1);
+      auto parse_unit = [&](const std::string &raw, const char *what) {
+        char *end_ptr = nullptr;
+        const double value = std::strtod(raw.c_str(), &end_ptr);
+        if (end_ptr == raw.c_str() || *end_ptr != '\0' ||
+            !std::isfinite(value) || value < 0.0 || value > 1.0) {
+          TitanUI::print_error(std::string("TPT: ") + flag_name + " " + what +
+                               " must be a finite value in [0,1].");
+          exit(EXIT_FAILURE);
+        }
+        return value;
+      };
+      if (prefix == "qnative_range") {
+        const auto comma = body.find(',');
+        if (comma == std::string::npos || body.find(',', comma + 1) != std::string::npos) {
+          TitanUI::print_error(std::string("TPT: ") + flag_name +
+                               " qnative_range expects min,max.");
+          exit(EXIT_FAILURE);
+        }
+        const double q_min = parse_unit(body.substr(0, comma), "range minimum");
+        const double q_max = parse_unit(body.substr(comma + 1), "range maximum");
+        if (q_min > q_max) {
+          TitanUI::print_error(std::string("TPT: ") + flag_name +
+                               " qnative_range minimum must be <= maximum.");
+          exit(EXIT_FAILURE);
+        }
+      } else {
+        parse_unit(body, "threshold");
+      }
+    };
+    validate_qnative_basin(tpt.source_spec, source_prefix, "-tpt-source");
+    validate_qnative_basin(tpt.sink_spec, sink_prefix, "-tpt-sink");
     if ((source_prefix == "micro" || source_prefix == "state" ||
          source_prefix == "states") &&
         (sink_prefix == "micro" || sink_prefix == "state" ||
@@ -537,6 +588,22 @@ int arguments::post_process() {
       exit(EXIT_FAILURE);
     }
   }
+  if (cmap.legacy_alias_seen && cmap.new_option_explicit) {
+    TitanUI::print_error(
+        "CMap: do not mix deprecated -contact-map with -cmap options; migrate to -cmap -cmap-scope=interface -cmap-mode=sidechain-com.");
+    exit(EXIT_FAILURE);
+  }
+  if (cmap.legacy_alias_enabled) {
+    cmap.flag_cmap = true;
+    cmap.mode = "sidechain-com";
+    cmap.scope = "interface";
+    if (!cmap.cutoff_explicit) {
+      cmap.cutoff_ang = d_standard;
+      cmap.cutoff_explicit = true;
+    }
+    TitanUI::print_warning(
+        "Deprecated: -contact-map=yes now maps to -cmap -cmap-scope=interface -cmap-mode=sidechain-com; use -dsc for alias cutoff, or migrate fully to -cmap-cut.");
+  }
   if (cmap.flag_cmap) {
     std::transform(cmap.mode.begin(), cmap.mode.end(), cmap.mode.begin(),
                    [](unsigned char c) {
@@ -544,15 +611,18 @@ int arguments::post_process() {
                    });
     std::replace(cmap.mode.begin(), cmap.mode.end(), '_', '-');
     if (cmap.mode == "sidechain")
-      cmap.mode = "sidechain-heavy";
+      cmap.mode = "sidechain-com";
     if (cmap.mode == "backbone")
       cmap.mode = "bb";
-    if (cmap.mode != "sidechain-heavy" && cmap.mode != "cb" &&
+    if (cmap.mode != "sidechain-com" && cmap.mode != "sidechain-heavy" &&
+        cmap.mode != "cb" &&
         cmap.mode != "ca" && cmap.mode != "bb") {
       TitanUI::print_error(
-          "CMap: -cmap-mode must be one of sidechain-heavy, cb, ca, bb.");
+          "CMap: -cmap-mode must be one of sidechain-com, sidechain-heavy, cb, ca, bb.");
       exit(EXIT_FAILURE);
     }
+    if (!cmap.cutoff_explicit)
+      cmap.cutoff_ang = cmap.mode == "sidechain-com" ? 6.5 : 4.5;
     if (!std::isfinite(cmap.cutoff_ang) || cmap.cutoff_ang <= 0.0) {
       TitanUI::print_error("CMap: -cmap-cut must be > 0.");
       exit(EXIT_FAILURE);
@@ -569,6 +639,103 @@ int arguments::post_process() {
     }
     if (cmap.min_seqsep < 0) {
       TitanUI::print_error("CMap: -cmap-min-seqsep must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    std::transform(cmap.scope.begin(), cmap.scope.end(), cmap.scope.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (cmap.scope != "mol1" && cmap.scope != "interface") {
+      TitanUI::print_error(
+          "CMap: -cmap-scope must be one of mol1, interface.");
+      exit(EXIT_FAILURE);
+    }
+    if (cmap.scope == "interface" &&
+        (cmap.domain_explicit || cmap.min_seqsep_explicit)) {
+      TitanUI::print_error(
+          "CMap: -cmap-domain and -cmap-min-seqsep apply only to -cmap-scope=mol1.");
+      exit(EXIT_FAILURE);
+    }
+  }
+  if (qnative.flag_qnative) {
+    std::transform(qnative.mode.begin(), qnative.mode.end(),
+                   qnative.mode.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::replace(qnative.mode.begin(), qnative.mode.end(), '_', '-');
+    if (qnative.mode == "sidechain")
+      qnative.mode = "sidechain-com";
+    if (qnative.mode == "backbone")
+      qnative.mode = "bb";
+    if (qnative.mode != "sidechain-com" &&
+        qnative.mode != "sidechain-heavy" && qnative.mode != "cb" &&
+        qnative.mode != "ca" && qnative.mode != "bb") {
+      TitanUI::print_error(
+          "QNative: -qnative-mode must be one of sidechain-com, sidechain-heavy, cb, ca, bb.");
+      exit(EXIT_FAILURE);
+    }
+    if (!qnative.cutoff_explicit)
+      qnative.cutoff_ang = qnative.mode == "sidechain-com" ? 6.5 : 4.5;
+    if (!std::isfinite(qnative.cutoff_ang) || qnative.cutoff_ang <= 0.0) {
+      TitanUI::print_error("QNative: -qnative-cut must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    std::transform(qnative.domain.begin(), qnative.domain.end(),
+                   qnative.domain.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (qnative.domain != "intra" && qnative.domain != "inter" &&
+        qnative.domain != "both") {
+      TitanUI::print_error(
+          "QNative: -qnative-domain must be one of intra, inter, both.");
+      exit(EXIT_FAILURE);
+    }
+    if (qnative.min_seqsep < 0) {
+      TitanUI::print_error("QNative: -qnative-min-seqsep must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    std::transform(qnative.scope.begin(), qnative.scope.end(),
+                   qnative.scope.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (qnative.scope != "mol1" && qnative.scope != "interface") {
+      TitanUI::print_error(
+          "QNative: -qnative-scope must be one of mol1, interface.");
+      exit(EXIT_FAILURE);
+    }
+    if (qnative.scope == "interface" &&
+        (qnative.domain_explicit || qnative.min_seqsep_explicit)) {
+      TitanUI::print_error(
+          "QNative: -qnative-domain and -qnative-min-seqsep apply only to -qnative-scope=mol1.");
+      exit(EXIT_FAILURE);
+    }
+    if (qnative.beta_explicit && !qnative.soft) {
+      TitanUI::print_error(
+          "QNative: -qnative-beta is valid only with -qnative-soft=true.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(qnative.beta) || qnative.beta <= 0.0) {
+      TitanUI::print_error("QNative: -qnative-beta must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+  }
+  if (dihedral.flag_dihedral) {
+    std::transform(dihedral.kind.begin(), dihedral.kind.end(),
+                   dihedral.kind.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::replace(dihedral.kind.begin(), dihedral.kind.end(), '_', '-');
+    if (dihedral.kind != "backbone") {
+      TitanUI::print_error("Dihedral: v1 supports backbone only.");
+      exit(EXIT_FAILURE);
+    }
+    if (dihedral.stride < 1) {
+      TitanUI::print_error("Dihedral: -dihedral-stride must be >= 1.");
+      exit(EXIT_FAILURE);
+    }
+    if (dihedral.residues.empty()) {
+      TitanUI::print_error(
+          "Dihedral: -dihedral-residues must be 'all' or a residue list.");
       exit(EXIT_FAILURE);
     }
   }
@@ -913,6 +1080,11 @@ int arguments::post_process() {
   }
 
   if (flag_gbsa) {
+    if (gbsa_perf != "off" && gbsa_perf != "summary" &&
+        gbsa_perf != "detail") {
+      cout << "GBSA Error: -gbsa-perf must be off, summary, or detail.\n";
+      exit(EXIT_FAILURE);
+    }
     if (entropy == false) {
       TitanUI::print_info(
           "Note: -gbsa option is on, will automatically activate -entropy "
@@ -1855,9 +2027,21 @@ int arguments::post_process() {
       exit(EXIT_FAILURE);
     }
     if (pbe.pbsa_decomp != "off" && pbe.pbsa_decomp != "molecule" &&
-        pbe.pbsa_decomp != "residue") {
+        pbe.pbsa_decomp != "residue" && pbe.pbsa_decomp != "hybrid" &&
+        pbe.pbsa_decomp != "auto") {
       TitanUI::print_error(
-          "PBSA: -pbsa-decomp must be off, molecule, or residue.");
+          "PBSA: -pbsa-decomp must be off, molecule, residue, hybrid, or auto.");
+      exit(EXIT_FAILURE);
+    }
+    const bool pbsa_mol1_lig =
+        (mol_1_type == "ligand" || mol_1_type == "lig");
+    const bool pbsa_mol2_lig =
+        (mol_2_type == "ligand" || mol_2_type == "lig");
+    if (pbe.pbsa && pbe.pbsa_decomp == "hybrid" &&
+        pbsa_mol1_lig == pbsa_mol2_lig) {
+      TitanUI::print_error(
+          "PBSA: -pbsa-decomp=hybrid requires exactly one ligand molecule "
+          "(mol type ligand or lig).");
       exit(EXIT_FAILURE);
     }
     if (pbe.pbsa_residue_frames != "off" &&
@@ -1891,6 +2075,12 @@ int arguments::post_process() {
     if (pbe.pbsa_perf != "off" && pbe.pbsa_perf != "summary" &&
         pbe.pbsa_perf != "detail") {
       TitanUI::print_error("PBSA: -pbsa-perf must be off, summary, or detail.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.pbsa_grid_reuse != "off" && pbe.pbsa_grid_reuse != "validate" &&
+        pbe.pbsa_grid_reuse != "auto") {
+      TitanUI::print_error(
+          "PBSA: -pbsa-grid-reuse must be off, validate, or auto.");
       exit(EXIT_FAILURE);
     }
     if (pbe.timing != "off" && pbe.timing != "summary" &&
@@ -1984,7 +2174,7 @@ int arguments::post_process() {
             "PBE: -pbe=tabi v1 does not support focus or multigrid options.");
         exit(EXIT_FAILURE);
       }
-      if (pbe.dgsolv || pbe.pbsa || pbe.pbsa_decomp != "off") {
+      if (pbe.dgsolv || pbe.pbsa) {
         TitanUI::print_error(
             "PBE: -pbe=tabi v1 does not support PBSA, decomposition, or deltaG_solv.");
         exit(EXIT_FAILURE);
@@ -2388,7 +2578,7 @@ int arguments::post_process() {
     flag_cal_force = true;
   }
 
-  if (flag_topo_1 == false)
+  if (flag_topo_1 == false && !mol_2_type_explicit)
     mol_2_type = "protein";
 
   if (mol_2_type.find("protein") != string::npos &&

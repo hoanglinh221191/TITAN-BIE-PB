@@ -20,6 +20,10 @@ cmake-build-*/
 *.log
 *.xvg
 *.dat
+*csv
+*tsv
+*ndx
+*md
 
 # Thu vien hoac file moi truong
 lib_ff/
@@ -45,6 +49,13 @@ lib_ff/
 /example/
 /test_*
 /test/
+/test/*
+test/
+!/test/qnative_smoke.ps1
+!/test/titan_qnative_smoke.cpp
+!/test/dihedral_smoke.ps1
+!/test/titan_dihedral_smoke.cpp
+!/test/titan_contact_kernels_smoke.cpp
 /.codex*
 /smoke*
 /.pydeps*
@@ -53,7 +64,14 @@ lib_ff/
 
 /test/
 /test/*
+!/test/
 !/test/pbe_snapshot_stability_scan.ps1
+!/test/qnative_smoke.ps1
+!/test/titan_qnative_smoke.cpp
+!/test/dihedral_smoke.ps1
+!/test/titan_dihedral_smoke.cpp
+!/test/titan_contact_kernels_smoke.cpp
+!/test/titan_core_struct_smoke.cpp
 !/test/pbe_grid_boundary_pydelphi_compare.ps1
 !/test/pbe_timing_compare.ps1
 !/test/pbe_nwt_kernel_modes_smoke.ps1

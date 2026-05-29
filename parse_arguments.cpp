@@ -548,30 +548,133 @@ int arguments::parse_arguments(int argc, char **argv) {
       continue;
     }
     if (consume_bool_option(arg, {"-cmap", "--cmap"}, cmap.flag_cmap)) {
+      cmap.new_option_explicit = true;
       continue;
     }
     if (consume_option_value(arg, {"-cmap-mode", "--cmap-mode"},
                              common_value, i)) {
       cmap.flag_cmap = true;
+      cmap.new_option_explicit = true;
       cmap.mode = common_value;
       continue;
     }
     if (consume_option_value(arg, {"-cmap-cut", "--cmap-cut"},
                              common_value, i)) {
       cmap.flag_cmap = true;
+      cmap.new_option_explicit = true;
+      cmap.cutoff_explicit = true;
       cmap.cutoff_ang = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-cmap-scope", "--cmap-scope"},
+                             common_value, i)) {
+      cmap.flag_cmap = true;
+      cmap.new_option_explicit = true;
+      cmap.scope = common_value;
       continue;
     }
     if (consume_option_value(arg, {"-cmap-domain", "--cmap-domain"},
                              common_value, i)) {
       cmap.flag_cmap = true;
+      cmap.new_option_explicit = true;
+      cmap.domain_explicit = true;
       cmap.domain = common_value;
       continue;
     }
     if (consume_option_value(arg, {"-cmap-min-seqsep", "--cmap-min-seqsep"},
                              common_value, i)) {
       cmap.flag_cmap = true;
+      cmap.new_option_explicit = true;
+      cmap.min_seqsep_explicit = true;
       cmap.min_seqsep = stoi(common_value);
+      continue;
+    }
+    if (consume_bool_option(arg, {"-qnative", "--qnative"},
+                            qnative.flag_qnative)) {
+      continue;
+    }
+    if (consume_option_value(arg, {"-qnative-ref", "--qnative-ref"},
+                             common_value, i)) {
+      qnative.flag_qnative = true;
+      qnative.ref_explicit = true;
+      qnative.ref_file = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-qnative-mode", "--qnative-mode"},
+                             common_value, i)) {
+      qnative.flag_qnative = true;
+      qnative.mode = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-qnative-cut", "--qnative-cut"},
+                             common_value, i)) {
+      qnative.flag_qnative = true;
+      qnative.cutoff_explicit = true;
+      qnative.cutoff_ang = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-qnative-scope", "--qnative-scope"},
+                             common_value, i)) {
+      qnative.flag_qnative = true;
+      qnative.scope = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-qnative-domain", "--qnative-domain"},
+                             common_value, i)) {
+      qnative.flag_qnative = true;
+      qnative.domain_explicit = true;
+      qnative.domain = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-qnative-min-seqsep",
+                                   "--qnative-min-seqsep"},
+                             common_value, i)) {
+      qnative.flag_qnative = true;
+      qnative.min_seqsep_explicit = true;
+      qnative.min_seqsep = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-qnative-soft", "--qnative-soft"},
+                             common_value, i)) {
+      qnative.flag_qnative = true;
+      qnative.soft_explicit = true;
+      qnative.soft = parse_bool_equals(common_value, "-qnative-soft");
+      continue;
+    }
+    if (consume_option_value(arg, {"-qnative-beta", "--qnative-beta"},
+                             common_value, i)) {
+      qnative.flag_qnative = true;
+      qnative.beta_explicit = true;
+      qnative.beta = stod(common_value);
+      continue;
+    }
+    if (consume_bool_option(arg, {"-dihedral", "--dihedral"},
+                            dihedral.flag_dihedral)) {
+      continue;
+    }
+    if (consume_option_value(arg, {"-dihedral-kind", "--dihedral-kind"},
+                             common_value, i)) {
+      dihedral.flag_dihedral = true;
+      dihedral.kind = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-dihedral-residues",
+                                   "--dihedral-residues"},
+                             common_value, i)) {
+      dihedral.flag_dihedral = true;
+      dihedral.residues = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-dihedral-stride", "--dihedral-stride"},
+                             common_value, i)) {
+      dihedral.flag_dihedral = true;
+      dihedral.stride = stoi(common_value);
+      continue;
+    }
+    if (consume_bool_option(arg, {"-dihedral-export-tica",
+                                  "--dihedral-export-tica"},
+                            dihedral.export_tica)) {
+      dihedral.flag_dihedral = true;
       continue;
     }
     if (consume_option_value(arg, {"-graph-source", "--graph-source"},
@@ -768,7 +871,8 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (consume_option_value(arg, {"-pbsa-decomp", "--pbsa-decomp"},
                              common_value, i)) {
       pbe.pbsa_decomp =
-          require_choice(common_value, {"off", "molecule", "residue"},
+          require_choice(common_value,
+                         {"off", "molecule", "residue", "hybrid", "auto"},
                          "-pbsa-decomp");
       continue;
     }
@@ -807,6 +911,13 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.pbsa_perf =
           require_choice(common_value, {"off", "summary", "detail"},
                          "-pbsa-perf");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbsa-grid-reuse", "--pbsa-grid-reuse"},
+                             common_value, i)) {
+      pbe.pbsa_grid_reuse =
+          require_choice(common_value, {"off", "validate", "auto"},
+                         "-pbsa-grid-reuse");
       continue;
     }
     if (consume_option_value(arg, {"-pbe-timing", "--pbe-timing"},
@@ -2197,6 +2308,13 @@ int arguments::parse_arguments(int argc, char **argv) {
       continue;
     }
 
+    if (consume_option_value(arg, {"-gbsa-perf", "--gbsa-perf"},
+                             common_value, i)) {
+      gbsa_perf =
+          require_choice(common_value, {"off", "summary", "detail"},
+                         "-gbsa-perf");
+      continue;
+    }
     if (arg == "-gbsa") {
       flag_gbsa = true;
     }
@@ -4225,19 +4343,19 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]).find("-contact-map=") == 0) {
       string val = string(argv[i]).substr(string("-contact-map=").size());
-      flag_contact_map_explicit = true;
+      cmap.legacy_alias_seen = true;
       if (val == "no")
-        flag_cal_contact = false;
+        cmap.legacy_alias_enabled = false;
       else if (val == "yes")
-        flag_cal_contact = true;
+        cmap.legacy_alias_enabled = true;
     }
     if (string(argv[i]) == "-contact-map" && i + 1 < argc) {
       string val = string(argv[i + 1]);
-      flag_contact_map_explicit = true;
+      cmap.legacy_alias_seen = true;
       if (val == "no")
-        flag_cal_contact = false;
+        cmap.legacy_alias_enabled = false;
       else if (val == "yes")
-        flag_cal_contact = true;
+        cmap.legacy_alias_enabled = true;
       ++i;
     }
     if (string(argv[i]).find("-eq-weight-source=") == 0 ||

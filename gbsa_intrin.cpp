@@ -2,7 +2,9 @@
 #include "charmm_nonbonded.h"
 #include "titan_simd_dispatch.h"
 #include "titan_sasa.h"
+#include "titan_ui.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -910,8 +912,8 @@ void GBSA_Aggregator::commit_frame_decompositions(
       new_d.E_elec = 0;
       new_d.G_polar = 0;
       new_d.G_nonpolar = 0;
-      new_d.frame_energies.resize(current_frame_idx,
-                                  0.0); // Pad previous frames with 0.0
+      new_d.frame_mm_energies.resize(current_frame_idx,
+                                     0.0); // Pad previous frames with 0.0
       decomp_index[key] = decomp.size();
       decomp.emplace_back(std::move(new_d));
     }
@@ -924,7 +926,7 @@ void GBSA_Aggregator::commit_frame_decompositions(
     auto it = frame_data.decomp_index.find(key);
     if (it != frame_data.decomp_index.end()) {
       const auto &fd = frame_data.decomp[it->second];
-      current_energy = fd.total;
+      current_energy = fd.E_vdw + fd.E_elec;
       gd.E_vdw += fd.E_vdw;
       gd.E_elec += fd.E_elec;
       gd.G_polar += fd.G_polar;
@@ -932,11 +934,16 @@ void GBSA_Aggregator::commit_frame_decompositions(
       gd.total += fd.total;
       gd.count++;
     }
-    gd.frame_energies.push_back(current_energy);
+    gd.frame_mm_energies.push_back(current_energy);
   }
 }
 
-void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix) {
+void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix,
+                                      std::fstream *log) {
+  const bool capture_performance = Arguments.gbsa_perf != "off";
+  const auto entropy_output_begin =
+      capture_performance ? std::chrono::steady_clock::now()
+                          : std::chrono::steady_clock::time_point{};
   std::string eu_str = "(" + Arguments.eu + ")";
   // 1. Raw Snapshots
   for (size_t t = 0; t < trajectories.size(); ++t) {
@@ -1029,11 +1036,12 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix) {
     std::cerr << "[GBSA] ERROR: Cannot open output file: " << fname_sum << "\n";
     return;
   }
+  fsum << "interaction_entropy_source E_MM_elec_plus_vdw\n";
   fsum << "GRAND AVERAGE OVERALL TRAJECTORIES AND FRAMES " << eu_str << ":\n";
   double g_tot = 0., g_vdw = 0., g_elec = 0., g_pol = 0., g_nonpol = 0.;
 
   int total_frames = 0;
-  std::vector<double> global_total_energies;
+  std::vector<double> global_mm_energies;
 
   for (size_t t = 0; t < trajectories.size(); ++t) {
     total_frames += trajectories[t].size();
@@ -1044,7 +1052,8 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix) {
       g_pol += trajectories[t][f].G_polar;
       g_nonpol += trajectories[t][f].G_nonpolar;
 
-      global_total_energies.push_back(trajectories[t][f].total_energy);
+      global_mm_energies.push_back(trajectories[t][f].E_vdw +
+                                   trajectories[t][f].E_elec);
     }
   }
 
@@ -1056,7 +1065,7 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix) {
     double avg_gnonpol = (g_nonpol / total_frames) / Arguments.eu_par;
 
     double global_minus_TdS = calc_residue_interaction_entropy(
-        global_total_energies, Arguments.eu_par);
+        global_mm_energies, Arguments.eu_par);
     double global_dG_binding = avg_tot + global_minus_TdS;
 
     fsum << "Total(dH): " << avg_tot << " | VDW: " << avg_vdw
@@ -1069,15 +1078,15 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix) {
   fsum << "AVERAGE PER TRAJECTORY " << eu_str << ":\n";
   for (size_t t = 0; t < trajectories.size(); ++t) {
     double t_tot = 0.;
-    std::vector<double> traj_energies;
+    std::vector<double> traj_mm_energies;
     for (const auto &s : trajectories[t]) {
       t_tot += s.total_energy;
-      traj_energies.push_back(s.total_energy);
+      traj_mm_energies.push_back(s.E_vdw + s.E_elec);
     }
     if (!trajectories[t].empty()) {
       double t_avg = (t_tot / trajectories[t].size()) / Arguments.eu_par;
       double t_minus_TdS =
-          calc_residue_interaction_entropy(traj_energies, Arguments.eu_par);
+          calc_residue_interaction_entropy(traj_mm_energies, Arguments.eu_par);
       double t_dG = t_avg + t_minus_TdS;
 
       fsum << "Trajectory " << t << " Avg Total(dH) = " << t_avg
@@ -1115,8 +1124,8 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix) {
                        " | E_elec" + eu_str + " | G_polar" + eu_str +
                        " | G_nonpolar" + eu_str + " | Total" + eu_str +
                        " | -TdS_IE" + eu_str + " | dG_Binding" + eu_str + "\n";
-  fdec_rec << header;
-  fdec_lig << header;
+  fdec_rec << "# interaction_entropy_source E_MM_elec_plus_vdw\n" << header;
+  fdec_lig << "# interaction_entropy_source E_MM_elec_plus_vdw\n" << header;
 
   // FIX: Chia năng lượng phân rã cho total_frames thay vì d.count
   double div = (total_frames > 0) ? (double)total_frames : 1.0;
@@ -1132,7 +1141,8 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix) {
       double avg_total = (d.total / div) / Arguments.eu_par;
 
       double minus_TdS =
-          calc_residue_interaction_entropy(d.frame_energies, Arguments.eu_par);
+          calc_residue_interaction_entropy(d.frame_mm_energies,
+                                           Arguments.eu_par);
       double dG_binding = avg_total + minus_TdS;
 
       std::fstream &target_file = d.is_ligand ? fdec_lig : fdec_rec;
@@ -1146,4 +1156,84 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix) {
 
   fdec_rec.close();
   fdec_lig.close();
+
+  if (!capture_performance)
+    return;
+  const double entropy_output_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - entropy_output_begin)
+          .count();
+
+  double precompute_ms = 0.0;
+  double energy_kernel_ms = 0.0;
+  double decomp_merge_ms = 0.0;
+  double total_ms = 0.0;
+  size_t frame_count = 0;
+  for (const auto &trajectory : trajectories) {
+    for (const auto &snapshot : trajectory) {
+      precompute_ms += snapshot.time_precompute_ms;
+      energy_kernel_ms += snapshot.time_energy_kernel_ms;
+      decomp_merge_ms += snapshot.time_decomposition_merge_ms;
+      total_ms += snapshot.time_total_ms;
+      ++frame_count;
+    }
+  }
+
+  std::ofstream perf(dir_prefix + "/gbsa_performance.dat",
+                     std::ios::out | std::ios::trunc);
+  if (perf.is_open()) {
+    perf << "# TITAN MM/GBSA performance summary\n";
+    perf << "timing_granularity natural_boundaries_fused_energy_kernel\n";
+    perf << "interaction_entropy_source E_MM_elec_plus_vdw\n";
+    perf << "frames " << frame_count << "\n";
+    perf << std::fixed << std::setprecision(6);
+    perf << "gbsa_precompute_ms_total " << precompute_ms << "\n";
+    perf << "gbsa_energy_kernel_ms_total " << energy_kernel_ms << "\n";
+    perf << "decomposition_merge_ms_total " << decomp_merge_ms << "\n";
+    perf << "entropy_output_ms " << entropy_output_ms << "\n";
+    perf << "frame_total_ms_total " << total_ms << "\n";
+    perf << "total_ms_total " << total_ms << "\n";
+  } else {
+    TitanUI::print_warning("GBSA: failed to write gbsa_performance.dat.");
+  }
+
+  if (Arguments.gbsa_perf == "detail") {
+    std::ofstream frames(dir_prefix + "/gbsa_performance_frames.csv",
+                         std::ios::out | std::ios::trunc);
+    if (frames.is_open()) {
+      frames << "trajectory_id,frame_index,time_ps,gbsa_precompute_ms,"
+                "gbsa_energy_kernel_ms,decomposition_merge_ms,"
+                "frame_total_ms,status\n";
+      frames << std::setprecision(10);
+      for (size_t trajectory_id = 0; trajectory_id < trajectories.size();
+           ++trajectory_id) {
+        for (size_t frame_index = 0;
+             frame_index < trajectories[trajectory_id].size(); ++frame_index) {
+          const auto &snapshot = trajectories[trajectory_id][frame_index];
+          frames << trajectory_id << ',' << frame_index << ',' << snapshot.time
+                 << ',' << snapshot.time_precompute_ms << ','
+                 << snapshot.time_energy_kernel_ms << ','
+                 << snapshot.time_decomposition_merge_ms << ','
+                 << snapshot.time_total_ms << ",ok\n";
+        }
+      }
+    } else {
+      TitanUI::print_warning(
+          "GBSA: failed to write gbsa_performance_frames.csv.");
+    }
+  }
+
+  if (log != nullptr && log->is_open()) {
+    TitanUI::log_section(*log, "MM/GBSA COMPONENT TIMING");
+    TitanUI::log_kv(*log, "Timing Granularity",
+                    "natural_boundaries_fused_energy_kernel");
+    TitanUI::log_kv(*log, "IE Source", "E_MM_elec_plus_vdw");
+    TitanUI::log_time(*log, "GBSA Precompute", precompute_ms / 1000.0);
+    TitanUI::log_time(*log, "GBSA Energy Kernel (MM + GB pair fused)",
+                      energy_kernel_ms / 1000.0);
+    TitanUI::log_time(*log, "Decomposition Merge",
+                      decomp_merge_ms / 1000.0);
+    TitanUI::log_time(*log, "Entropy + Output", entropy_output_ms / 1000.0);
+    TitanUI::log_time(*log, "Frame Total", total_ms / 1000.0);
+  }
 }

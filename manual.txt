@@ -542,12 +542,13 @@ IMPORTANT NOTES
 
   Purpose:
     Compute a standalone residue-residue contact probability matrix from the
-    trajectory. The default scientific definition is side-chain heavy-atom
-    contact, with glycine using CA fallback.
+    trajectory. The default definition is a contact between mass-weighted
+    side-chain residue COM points at distance <= 6.5 A.
 
   Main inputs:
     -cmap
-    -cmap-mode <sidechain-heavy|cb|ca|bb>
+    -cmap-scope <mol1|interface>
+    -cmap-mode <sidechain-com|sidechain-heavy|cb|ca|bb>
     -cmap-cut <A>
     -cmap-domain <intra|inter|both>
     -cmap-min-seqsep <N>
@@ -556,17 +557,85 @@ IMPORTANT NOTES
     contact_probability_matrix.csv
     contact_probability_edges.csv
     contact_probability_summary.dat
+    contact_count_timeseries.csv
+    contact_residue_occupancy.csv
     Multi-input and XDR runs may append a trajectory index before the suffix,
     for example contact_probability_edges_0.csv.
 
   Notes:
-    - CMap analyzes molecule 1 and works in -nocal mode.
-    - `sidechain-heavy` is the default mode and excludes backbone atoms except
-      for glycine CA fallback.
+    - `mol1` is a square map within molecule 1; `interface` is a rectangular
+      molecule 1 x molecule 2 map and also works with -nocal.
+    - `sidechain-com` is the default mode and reuses legacy mass-weighted
+      side-chain COM/fallback semantics. Its default cutoff is 6.5 A.
+    - Atom modes (`sidechain-heavy`, `cb`, `ca`, `bb`) are explicit and keep
+      the 4.5 A default cutoff unless `-cmap-cut` overrides it.
     - Intra-chain contacts honor `-cmap-min-seqsep` using per-chain residue
       order, not raw PDB residue numbering.
     - The edge CSV reports contact probability, contact frame count, mean
       contact distance, and minimum contact distance for each observed pair.
+
+  2.3g Native Contacts Q
+
+  Purpose:
+    Compute the fraction of native contacts Q against the loaded reference or
+    first frame. The default native-contact definition matches CMap:
+    mass-weighted side-chain residue COM distance <= 6.5 A.
+
+  Main inputs:
+    -qnative
+    -qnative-ref <pdb|gro>        optional; default is loaded reference/first frame
+    -qnative-scope <mol1|interface>
+    -qnative-mode <sidechain-com|sidechain-heavy|cb|ca|bb>
+    -qnative-cut <A>
+    -qnative-domain <intra|inter|both>
+    -qnative-min-seqsep <N>
+    -qnative-soft <true|false>
+    -qnative-beta <value>
+
+  Typical outputs:
+    qnative_timeseries.csv
+    qnative_native_contacts.csv
+    qnative_contact_occupancy.csv
+    qnative_summary.dat
+    Multi-input and XDR runs may append a trajectory index before the suffix,
+    and also export *_average pooled summaries.
+
+  Notes:
+    - `mol1` is intramolecular Q for molecule 1; `interface` is a bipartite
+      molecule 1 x molecule 2 native-contact set and works with -nocal.
+    - `sidechain-com` is the default mode with 6.5 A cutoff. Atom modes are
+      explicit and default to 4.5 A unless `-qnative-cut` overrides it.
+    - `-qnative-domain` and `-qnative-min-seqsep` apply only to mol1 scope.
+    - TPT accepts `qnative_range:min,max`, `qnative_lt:x`, and
+      `qnative_gt:x` in `-tpt-source` or `-tpt-sink`.
+
+  2.3h Dihedral Backbone Analysis
+
+  Purpose:
+    Export protein backbone phi/psi/omega torsion observables. V1 is
+    backbone-only; side-chain chi rotamers are intentionally out of scope.
+
+  Main inputs:
+    -dihedral
+    -dihedral-kind <backbone>
+    -dihedral-residues <all|list/range>
+    -dihedral-stride <N>
+    -dihedral-export-tica
+
+  Typical outputs:
+    dihedral_backbone_timeseries.csv
+    dihedral_ramachandran.csv
+    dihedral_summary.dat
+    dihedral_feature_matrix.csv      only when -dihedral-export-tica is set
+    Multi-input and XDR runs may append a trajectory index before the suffix.
+
+  Notes:
+    - `-dihedral-kind` accepts only `backbone` in V1.
+    - `-dihedral-residues` defaults to `all`; examples:
+      `10,12-20,A:30,A:35-40`.
+    - Terminal, chain-break, or incomplete torsions are written as `nan`.
+    - The optional feature matrix exports sin/cos pairs for phi, psi, and
+      omega so downstream TICA can consume circular variables later.
 
   2.4 DCCM Network
 
@@ -989,7 +1058,8 @@ IMPORTANT NOTES
       `ljpreset:gas`
       `protein:major_macro`
     `lj:` basin specs are only meaningful for LJ jobs. Protein jobs
-    normally use `micro:`, `macro:`, or `tica_rect:`.
+    normally use `micro:`, `macro:`, `tica_rect:`, or Q-native selectors
+    (`qnative_range:min,max`, `qnative_lt:x`, `qnative_gt:x`).
     Named LJ presets currently include `gas`, `dense`, `liquid`, and `solid`.
     Protein presets currently include `major_macro`, `minor_macro`,
     `low_pc1`, `high_pc1`, `low_pc2`, `high_pc2`,
@@ -2204,13 +2274,36 @@ IMPORTANT NOTES
   -sq-rdf-max <val>     RDF max radius in Angstrom. Default: auto
   -sq-q-bin <val>       S(q) bin width in A^-1. Default: 0.05
   -sq-q-max <val>       S(q) max q in A^-1. Default: auto
-  -cmap                 Side-chain residue contact probability map
-                        Outputs contact_probability_{matrix,edges,summary}
-                        Works in -nocal mode on molecule 1
-  -cmap-mode <mode>     sidechain-heavy, cb, ca, or bb. Default: sidechain-heavy
-  -cmap-cut <val>       Contact cutoff in Angstrom. Default: 4.5
+  -cmap                 Side-chain COM contact probability map
+                        Outputs matrix, edges, summary, timeseries, occupancy
+  -cmap-scope <mode>    mol1 or interface. Default: mol1
+  -cmap-mode <mode>     sidechain-com, sidechain-heavy, cb, ca, or bb.
+                        Default: sidechain-com
+  -cmap-cut <val>       Contact cutoff in Angstrom. Default: 6.5 for
+                        sidechain-com, 4.5 for atom-based modes
   -cmap-domain <mode>   intra, inter, or both. Default: both
   -cmap-min-seqsep <N>  Minimum intra-chain residue separation. Default: 3
+
+  -qnative              Native-contact fraction Q analysis
+                        Outputs timeseries, native contacts, occupancy, summary
+  -qnative-ref <file>   Optional reference; default: loaded reference/first frame
+  -qnative-scope <mode> mol1 or interface. Default: mol1
+  -qnative-mode <mode>  sidechain-com, sidechain-heavy, cb, ca, or bb.
+                        Default: sidechain-com
+  -qnative-cut <val>    Native-contact cutoff in Angstrom. Default: 6.5 for
+                        sidechain-com, 4.5 for atom-based modes
+  -qnative-domain <m>   intra, inter, or both. Default: both
+  -qnative-min-seqsep <N>
+                        Minimum intra-chain residue separation. Default: 3
+  -qnative-soft <bool>  Use a logistic soft contact instead of hard cutoff
+  -qnative-beta <val>   Soft-contact beta. Valid only with -qnative-soft=true
+  -dihedral             Backbone dihedral analysis: phi, psi, omega
+                        Outputs timeseries, Ramachandran, summary
+  -dihedral-kind <mode> backbone only in v1. Default: backbone
+  -dihedral-residues <s>
+                        all or list/ranges like 10,12-20,A:30,A:35-40
+  -dihedral-stride <N>  Analyze every Nth frame. Default: 1
+  -dihedral-export-tica Export sin/cos feature matrix for TICA prep
 
   -rms                  RMSD + RMSF analysis
                         Atomistic protein/protein-user uses CA
@@ -2276,7 +2369,9 @@ IMPORTANT NOTES
   -all-subfolders       Process all subfolders and split outputs
   -cat-result           Concatenate results from multiple inputs
   -all-respair          Output all residue pairs
-  -contact-map no       Disable contact map output
+  -contact-map yes      Deprecated alias for -cmap -cmap-scope=interface
+                        -cmap-mode=sidechain-com; -dsc supplies its cutoff
+  -contact-map no       Disable the deprecated alias only
   -act                  Use all side-chain contacts
   -new_al               New alignment in single-PDB mode
   -new-al               Alias of -new_al

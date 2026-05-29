@@ -15,6 +15,21 @@ int sup_cal_dis_res_com(vector<multi_points> &com_res,
                         vector<double> &distances, vector<string> &name_res,
                         bool flag_o);
 
+bool Multi_MOL::frame_coordinates_consistent(size_t frame_index) const
+    noexcept {
+  return frame_index < m_mol.size() &&
+         m_mol[frame_index].coordinates_consistent();
+}
+
+bool Multi_MOL::topology_matches_frame(size_t frame_index) const noexcept {
+  return frame_coordinates_consistent(frame_index) &&
+         info.size() == m_mol[frame_index].size();
+}
+
+bool Multi_MOL::parameters_match_info() const noexcept {
+  return parameters.size() == info.size();
+}
+
 void Multi_MOL::post_process_coordinates_user_define(string_view type) {
   mol_type = type;
   generate_index();
@@ -239,8 +254,11 @@ int Multi_MOL::wrapper_impl_post_proc(arguments &Arguments, string_view type,
   return 0;
 }
 int Multi_MOL::add_coms(bool flag, size_t snap_index) {
+  if (snap_index >= m_mol.size() || Index.empty())
+    return 1;
   if (flag == false) {
-    for (size_t i{}; i < Index.size() - 1; ++i)
+    const size_t chain_count = Index.size() > 1 ? Index.size() - 1 : 1;
+    for (size_t i{}; i < chain_count; ++i)
       for (size_t j{}; j < Index[i].get_size_v(); ++j) {
         m_mol[snap_index].Com.emplace_back(
             Index[i].get_res_x_e(j), Index[i].get_res_y_e(j),
@@ -272,16 +290,45 @@ int Multi_MOL::gen_vector_parameters() {
 }
 
 int Multi_MOL::com_mol(const size_t num_snap, std::span<double> com) const {
+  if (com.size() < 3 || num_snap >= m_mol.size() ||
+      !m_mol[num_snap].coordinates_consistent() ||
+      parameters.size() < m_mol[num_snap].size())
+    return 1;
+
   double mol_mass{};
-  for (size_t i{}; i < m_mol[num_snap].size(); ++i) {
-    double mass{parameters[i].get_mass()};
-    com[0] += m_mol[num_snap].pos.x[i] * mass;
-    com[1] += m_mol[num_snap].pos.y[i] * mass;
-    com[2] += m_mol[num_snap].pos.z[i] * mass;
-    mol_mass += mass;
+  double x{};
+  double y{};
+  double z{};
+  double unit_x{};
+  double unit_y{};
+  double unit_z{};
+  const size_t atom_count = m_mol[num_snap].size();
+  if (atom_count == 0)
+    return 1;
+
+  for (size_t i{}; i < atom_count; ++i) {
+    unit_x += m_mol[num_snap].pos.x[i];
+    unit_y += m_mol[num_snap].pos.y[i];
+    unit_z += m_mol[num_snap].pos.z[i];
+    const double mass = parameters.mass[i];
+    if (mass > 0.0) {
+      x += m_mol[num_snap].pos.x[i] * mass;
+      y += m_mol[num_snap].pos.y[i] * mass;
+      z += m_mol[num_snap].pos.z[i] * mass;
+      mol_mass += mass;
+    }
   }
-  for (size_t i{}; i < 3; ++i)
-    com[i] /= mol_mass;
+
+  if (mol_mass > 0.0) {
+    com[0] = x / mol_mass;
+    com[1] = y / mol_mass;
+    com[2] = z / mol_mass;
+  } else {
+    const double denom = static_cast<double>(atom_count);
+    com[0] = unit_x / denom;
+    com[1] = unit_y / denom;
+    com[2] = unit_z / denom;
+  }
   return 0;
 }
 
@@ -534,7 +581,9 @@ double Multi_MOL::total_charge() const {
 }
 
 int Multi_MOL::cal_dis_res_2_com(const arguments &Arguments, fstream &output) {
-  size_t num_threads{Arguments.nt};
+  if (Index.size() < 2)
+    return 1;
+  size_t num_threads{std::max<size_t>(1, Arguments.nt)};
   vector<thread> workers(num_threads);
   vector<vector<double>> distances;
   vector<string> name_res;
@@ -548,7 +597,7 @@ int Multi_MOL::cal_dis_res_2_com(const arguments &Arguments, fstream &output) {
       if (num_threads_rest <= num_threads) {
         for (size_t i{}; i < num_threads_rest; ++i) {
           workers[i] =
-              thread(&MOL::take_com_all_atoms, this->m_mol[snap_num],
+              thread(&MOL::take_com_all_atoms, ref(this->m_mol[snap_num]),
                      ref(this->parameters), i + ite_thread,
                      this->Index[i + ite_thread + 1].get_res_pos_e(0),
                      ref(this->Index), ref(this->info), ref(pos_res[i]));
@@ -559,7 +608,7 @@ int Multi_MOL::cal_dis_res_2_com(const arguments &Arguments, fstream &output) {
       } else {
         for (size_t i{}; i < num_threads; ++i) {
           workers[i] =
-              thread(&MOL::take_com_all_atoms, this->m_mol[snap_num],
+              thread(&MOL::take_com_all_atoms, ref(this->m_mol[snap_num]),
                      ref(this->parameters), i + ite_thread,
                      this->Index[i + ite_thread + 1].get_res_pos_e(0),
                      ref(this->Index), ref(this->info), ref(pos_res[i]));
