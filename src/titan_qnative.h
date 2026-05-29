@@ -139,6 +139,10 @@ private:
   std::vector<ResidueSelection> trajectory_col_selections_;
   std::vector<titan_contact::ResidueKey> row_residues_;
   std::vector<titan_contact::ResidueKey> col_residues_;
+  std::vector<ContactPoint> row_points_scratch_;
+  std::vector<ContactPoint> col_points_scratch_;
+  titan_contact_kernel::PointSoA row_soa_scratch_;
+  titan_contact_kernel::PointSoA col_soa_scratch_;
   std::vector<NativeContact> native_contacts_;
   std::vector<titan_contact_kernel::NativePairIndex> native_pair_indices_;
   std::vector<ContactOccupancy> occupancy_;

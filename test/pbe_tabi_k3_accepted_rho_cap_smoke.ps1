@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$WorkRoot = (Join-Path $PSScriptRoot 'tmp\pbe_tabi_k3_accepted_rho_cap_smoke')
 )
 
@@ -37,7 +37,7 @@ New-CleanDir $WorkRoot
 
 $source = @'
 #include "titan_executor.h"
-#include "titan_pbe/tabi_types.h"
+#include "tabi/tabi_types.h"
 
 #include <cmath>
 #include <iostream>
@@ -171,10 +171,10 @@ $compileArgs = @(
     '-mavx2',
     '-mfma',
     '-DTITAN_RUNTIME_DISPATCH_HOTSPOTS=1',
-    "-I$RepoRoot",
-    (Join-Path $RepoRoot 'titan_pbe\tabi_near.cpp'),
+    ("-I" + (Join-Path $RepoRoot "src")),
+    (Join-Path $RepoRoot 'src\tabi\tabi_near.cpp'),
     (Get-PbeTabiTreecodeSources -RepoRoot $RepoRoot),
-    (Join-Path $RepoRoot 'titan_executor.cpp'),
+    (Join-Path $RepoRoot 'src\titan_executor.cpp'),
     $SourcePath,
     '-o',
     $ExePath

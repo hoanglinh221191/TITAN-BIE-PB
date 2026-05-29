@@ -30,6 +30,9 @@ int main() {
   require(titan_contact::parse_contact_mode("sidechain-heavy") ==
               ContactMode::SidechainHeavy,
           "parse sidechain-heavy");
+  require(titan_contact::parse_contact_mode("sidechain-com") ==
+              ContactMode::SidechainCOM,
+          "parse sidechain-com");
   require(titan_contact::parse_contact_mode("sidechain") ==
               ContactMode::SidechainHeavy,
           "parse sidechain alias");
@@ -48,7 +51,7 @@ int main() {
     require(false, "invalid parse throws");
   } catch (const std::invalid_argument &err) {
     require(std::string(err.what()) ==
-                "CMap: -cmap-mode must be one of sidechain-heavy, cb, ca, bb.",
+                "CMap: -cmap-mode must be one of sidechain-com, sidechain-heavy, cb, ca, bb.",
             "invalid parse message");
   }
 
@@ -87,16 +90,16 @@ int main() {
                                                    ContactMode::Backbone),
           "Backbone mode excludes SER H");
 
-  const auto residue_a = titan_contact::ResidueKey{1, 10, "A", "SER", 7};
-  const auto residue_b = titan_contact::ResidueKey{1, 10, "A", "SER", 7};
-  const auto residue_c = titan_contact::ResidueKey{1, 10, "A", "SER", 8};
+  const auto residue_a = titan_contact::ResidueKey{1, 0, 10, "A", "SER", 7};
+  const auto residue_b = titan_contact::ResidueKey{1, 0, 10, "A", "SER", 7};
+  const auto residue_c = titan_contact::ResidueKey{1, 0, 10, "A", "SER", 8};
   require(residue_a == residue_b, "ResidueKey equality matches identity");
   require(residue_a == residue_c, "ResidueKey equality ignores ordinal");
 
   const auto residue_meta_a =
-      titan_contact::ResidueKey{3, 30, "A", "LYS", 11};
+      titan_contact::ResidueKey{1, 3, 30, "A", "LYS", 11};
   const auto residue_meta_b =
-      titan_contact::ResidueKey{3, 30, "B", "ARG", 12};
+      titan_contact::ResidueKey{1, 3, 30, "B", "ARG", 12};
   require(residue_meta_a == residue_meta_b,
           "ResidueKey equality ignores metadata");
 

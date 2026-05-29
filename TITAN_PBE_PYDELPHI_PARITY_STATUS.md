@@ -26,10 +26,10 @@ public documentation may be used.
 
 ## Source Layout
 
-- The public API is `titan_pbe.h`; it now exposes `FrameResult` and a PIMPL
+- The public API is `src/titan_pbe.h`; it now exposes `FrameResult` and a PIMPL
   `TitanPBE::Analyzer` wrapper so engine call sites keep including the same
   header.
-- The implementation lives under `titan_pbe/`. Phase 3 module splitting has
+- The implementation lives under `src/tabi/`. Phase 3 module splitting has
   moved map/cube I/O to `audit_io.cpp`, PBSA aggregation/writers to `pbsa.cpp`,
   focus/probe helpers to `focus_probe.cpp`, and Gaussian/RPB audit helpers plus
   RPB source CSV/top-cell diagnostics to `gaussian_rpb.cpp`. Grid/radius/surface
@@ -48,7 +48,7 @@ public documentation may be used.
   ordering, and padded neighbor slots; public GBSA/PBSA/TABI outputs remain
   ordered by original atom index. TABI treecode acceleration is internal C++23
   code using Morton-ordered linear octree arrays plus a direct fallback.
-- `Makefile` builds `titan_pbe/*.cpp`; `compile.bat` remains unchanged because
+- `Makefile` builds `src/tabi/*.cpp`; `compile.bat` remains unchanged because
   it delegates to the Makefile.
 
 ## What Is Currently Locked Or Usable

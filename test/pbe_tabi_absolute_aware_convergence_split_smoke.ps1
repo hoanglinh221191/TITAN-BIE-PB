@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$WorkRoot = (Join-Path $PSScriptRoot 'tmp\pbe_tabi_absolute_aware_convergence_split_smoke')
 )
 
@@ -35,7 +35,7 @@ if (-not (Test-Path -LiteralPath $Compiler)) {
 New-CleanDir $WorkRoot
 
 $source = @'
-#include "titan_pbe/tabi_treecode_internal.h"
+#include "tabi/tabi_treecode_internal.h"
 
 #include <iostream>
 #include <stdexcept>
@@ -117,8 +117,8 @@ int main() {
 
 Set-Content -LiteralPath $SourcePath -Value $source -Encoding ASCII
 
-& $Compiler -std=c++23 -O2 -I"$RepoRoot" `
-    $SourcePath (Join-Path $RepoRoot 'titan_pbe\tabi_treecode_internal.cpp') `
+& $Compiler -std=c++23 -O2 $("-I" + (Join-Path $RepoRoot "src")) `
+    $SourcePath (Join-Path $RepoRoot 'src\tabi\tabi_treecode_internal.cpp') `
     -o $ExePath
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to compile absolute-aware convergence split smoke."

@@ -450,8 +450,8 @@ void TitanQNativeAnalyzer::process_frame(const Multi_MOL &mol1,
     return;
   }
 
-  std::vector<ContactPoint> row_points;
-  std::vector<ContactPoint> col_points;
+  auto &row_points = row_points_scratch_;
+  auto &col_points = col_points_scratch_;
   if (!build_points(mol1, snap_idx, trajectory_row_selections_, row_points) ||
       !(scope_ == "interface"
             ? build_points(*mol2, snap_idx, trajectory_col_selections_,
@@ -463,8 +463,11 @@ void TitanQNativeAnalyzer::process_frame(const Multi_MOL &mol1,
 
   ++valid_frames_;
   const BoxMatrix box_matrix(frame.Box);
-  titan_contact_kernel::PointSoA row_soa;
-  titan_contact_kernel::PointSoA col_soa;
+  auto &row_soa = row_soa_scratch_;
+  auto &col_soa = col_soa_scratch_;
+  row_soa.x.clear();
+  row_soa.y.clear();
+  row_soa.z.clear();
   row_soa.x.reserve(row_points.size());
   row_soa.y.reserve(row_points.size());
   row_soa.z.reserve(row_points.size());
@@ -473,6 +476,9 @@ void TitanQNativeAnalyzer::process_frame(const Multi_MOL &mol1,
     row_soa.y.push_back(point.y);
     row_soa.z.push_back(point.z);
   }
+  col_soa.x.clear();
+  col_soa.y.clear();
+  col_soa.z.clear();
   col_soa.x.reserve(col_points.size());
   col_soa.y.reserve(col_points.size());
   col_soa.z.reserve(col_points.size());

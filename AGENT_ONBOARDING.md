@@ -139,7 +139,7 @@ Analysis modules:
 - `titan_sq.cpp`, `titan_sq_core.cpp`
 - `titan_contact_map.cpp`, `titan_contact_primitives.cpp`
 - `titan_hbond_kinetics.cpp`
-- `titan_pbe.h` and `titan_pbe/` for frame-based PBE/PBSA electrostatics
+- `src/titan_pbe.h` and `src/tabi/` for frame-based PBE/PBSA electrostatics
 - `titan_pca.cpp`
 - `titan_kinetics.cpp` for TICA
 - `titan_msm.cpp` for MSM
@@ -376,10 +376,10 @@ If you add a new module:
 - PBE is intentionally a frame analyzer, not a standalone one-shot tool. Keep
   `pbe_energy.csv` long-table output and memory preflight behavior intact when
   extending nonlinear, Gaussian, or focusing variants.
-- PBE public API is now a small PIMPL shim in `titan_pbe.h`; implementation
-  lives under `titan_pbe/`. Keep `impl_engine.cpp` including `titan_pbe.h` and
+- PBE public API is now a small PIMPL shim in `src/titan_pbe.h`; implementation
+  lives under `src/tabi/`. Keep `impl_engine.cpp` including `titan_pbe.h` and
   put new PBE internals in the subdirectory. `Makefile` already builds
-  `titan_pbe/*.cpp`; `compile.bat` should not need separate source-list edits.
+  `src/tabi/*.cpp`; `compile.bat` should not need separate source-list edits.
   Phase 3 splitting has begun: map/cube I/O is in `audit_io.cpp`, PBSA
   aggregation/writers are in `pbsa.cpp`, focus/probe helpers are in
   `focus_probe.cpp`, and Gaussian/RPB audit helpers plus source diagnostics are
@@ -824,7 +824,7 @@ If you add a new module:
 - PBE backend routing is explicit. Bare `-pbe`, `-pbe=grid`, and aliases
   `-pbe=delphi|pydelphi|fd` use the established finite-difference grid solver.
   `-pbe=tabi` is a separate clean-room C++23 TABI v1 backend under
-  `titan_pbe/`; it is linear PB only and rejects nonlinear/RPB, Gaussian,
+  `src/tabi/`; it is linear PB only and rejects nonlinear/RPB, Gaussian,
   focus/multigrid, PBSA/decomposition, and grid-map modes. Keep TABI validation
   black-box-only against papers/oracle outputs; do not vendor or call external
   TABI-PB/NanoShaper at runtime. TABI now defaults to the JCP 2013 coupled

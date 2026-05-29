@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$WorkRoot = (Join-Path $PSScriptRoot 'tmp\pbe_tabi_geometric_near_buffer_smoke'),
     [string]$Cxx = ''
 )
@@ -55,7 +55,7 @@ Set-Content -LiteralPath $sourcePath -Encoding ASCII -Value @'
 #include <string>
 #include <vector>
 
-#include "titan_pbe/tabi_near.cpp"
+#include "tabi/tabi_near.cpp"
 
 namespace {
 

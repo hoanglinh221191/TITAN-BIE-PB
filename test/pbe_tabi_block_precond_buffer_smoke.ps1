@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$TitanExe = (Join-Path (Split-Path -Parent $PSScriptRoot) 'titan.exe'),
     [string]$WorkRoot = (Join-Path $PSScriptRoot 'tmp\pbe_tabi_block_precond_buffer_smoke')
 )
@@ -46,7 +46,7 @@ if (-not (Test-Path -LiteralPath $TitanExe)) { throw "Missing titan executable: 
 New-CleanDir $WorkRoot
 
 $source = @'
-#include "titan_pbe/tabi_near.h"
+#include "tabi/tabi_near.h"
 
 #include <cmath>
 #include <iostream>
@@ -95,7 +95,7 @@ int main() {
 }
 '@
 Set-Content -LiteralPath $SourcePath -Value $source -Encoding ASCII
-& $Compiler -std=c++23 -I"$RepoRoot" $SourcePath (Join-Path $RepoRoot 'titan_pbe\tabi_near.cpp') -o $ExePath
+& $Compiler -std=c++23 $("-I" + (Join-Path $RepoRoot "src")) $SourcePath (Join-Path $RepoRoot 'src\tabi\tabi_near.cpp') -o $ExePath
 if ($LASTEXITCODE -ne 0) { throw "Failed to compile geometric-buffer near kernel smoke." }
 & $ExePath | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Geometric-buffer near kernel smoke failed." }

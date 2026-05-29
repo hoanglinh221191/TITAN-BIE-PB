@@ -3,6 +3,7 @@
 
 #include "Multi_MOL.h"
 #include "arguments.h"
+#include "titan_contact_kernels.h"
 #include "titan_contact_primitives.h"
 #include "titan_neighbor_grid.h"
 
@@ -107,6 +108,10 @@ private:
   std::vector<ResidueSelection> col_selections_;
   std::vector<titan_contact::ResidueKey> row_residues_;
   std::vector<titan_contact::ResidueKey> col_residues_;
+  std::vector<ContactPoint> row_points_scratch_;
+  std::vector<ContactPoint> col_points_scratch_;
+  titan_contact_kernel::PointSoA row_soa_scratch_;
+  titan_contact_kernel::PointSoA col_soa_scratch_;
   std::vector<std::uint64_t> row_occupancy_frames_;
   std::vector<std::uint64_t> col_occupancy_frames_;
   std::vector<std::pair<double, std::uint64_t>> contact_count_timeseries_;

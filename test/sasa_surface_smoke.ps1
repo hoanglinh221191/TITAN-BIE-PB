@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$WorkRoot = (Join-Path $PSScriptRoot 'tmp\sasa_surface_smoke')
 )
 
@@ -279,10 +279,10 @@ $compileArgs = @(
     '-mavx2',
     '-mfma',
     '-DTITAN_RUNTIME_DISPATCH_HOTSPOTS=1',
-    "-I$RepoRoot",
-    (Join-Path $RepoRoot 'titan_surface.cpp'),
-    (Join-Path $RepoRoot 'titan_sasa.cpp'),
-    (Join-Path $RepoRoot 'titan_executor.cpp'),
+    ("-I" + (Join-Path $RepoRoot "src")),
+    (Join-Path $RepoRoot 'src\titan_surface.cpp'),
+    (Join-Path $RepoRoot 'src\titan_sasa.cpp'),
+    (Join-Path $RepoRoot 'src\titan_executor.cpp'),
     $SourcePath,
     '-o',
     $ExePath

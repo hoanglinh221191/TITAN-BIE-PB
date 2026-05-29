@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -136,6 +137,31 @@ void run_mol_invariants() {
           "release_memory explicitly returns coordinate storage");
 }
 
+void run_force_accessors_guard_release_builds() {
+  MOL frame;
+  frame.pos.x = {1.0, 2.0};
+  frame.pos.y = {1.0, 2.0};
+  frame.pos.z = {1.0, 2.0};
+
+  require(!frame.force_enabled(), "force buffers start disabled");
+  try {
+    (void)frame.get_force_x();
+    require(false, "get_force_x throws before force initialization");
+  } catch (const std::logic_error &err) {
+    require(std::string(err.what()) == "MOL force buffers are not initialized",
+            "get_force_x emits stable runtime guard message");
+  }
+
+  frame.initialize_forces(2);
+  require(frame.force_enabled(), "initialize_forces enables force buffers");
+  require(frame.get_force_x().size() == frame.pos.x.size(),
+          "force x span matches atom count");
+  require(frame.get_thread_force_x(1).size() == frame.pos.x.size(),
+          "thread-local force span matches atom count");
+  frame.clear_MOL();
+  require(!frame.force_enabled(), "clear_MOL disables force buffers");
+}
+
 } // namespace
 
 int main() {
@@ -143,6 +169,7 @@ int main() {
   run_sidechain_com_keeps_mass_weighting();
   run_all_atom_com_unit_weight_fallback();
   run_mol_invariants();
+  run_force_accessors_guard_release_builds();
   std::cout << "PASS titan_core_struct_smoke\n";
   return 0;
 }

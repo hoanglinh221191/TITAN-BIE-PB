@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$WorkRoot = (Join-Path $PSScriptRoot 'tmp\pbe_tabi_convergence_shape_audit_smoke')
 )
 
@@ -36,7 +36,7 @@ if (-not (Test-Path -LiteralPath $Compiler)) {
 New-CleanDir $WorkRoot
 
 $source = @'
-#include "titan_pbe/tabi_treecode_internal.h"
+#include "tabi/tabi_treecode_internal.h"
 
 #include <iostream>
 #include <stdexcept>
@@ -157,10 +157,10 @@ $compileArgs = @(
     '-mavx2',
     '-mfma',
     '-DTITAN_RUNTIME_DISPATCH_HOTSPOTS=1',
-    "-I$RepoRoot",
-    (Join-Path $RepoRoot 'titan_pbe\tabi_near.cpp'),
+    ("-I" + (Join-Path $RepoRoot "src")),
+    (Join-Path $RepoRoot 'src\tabi\tabi_near.cpp'),
     (Get-PbeTabiTreecodeSources -RepoRoot $RepoRoot),
-    (Join-Path $RepoRoot 'titan_executor.cpp'),
+    (Join-Path $RepoRoot 'src\titan_executor.cpp'),
     $SourcePath,
     '-o',
     $ExePath

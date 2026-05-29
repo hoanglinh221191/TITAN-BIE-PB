@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$WorkRoot = (Join-Path $PSScriptRoot 'tmp\pbe_tabi_surface_mesh_smoke')
 )
 
@@ -35,7 +35,7 @@ if (-not (Test-Path -LiteralPath $Compiler)) {
 New-CleanDir $WorkRoot
 
 $source = @'
-#include "titan_pbe/tabi_types.h"
+#include "tabi/tabi_types.h"
 
 #include <cmath>
 #include <iostream>
@@ -157,10 +157,10 @@ $compileArgs = @(
     '-mavx2',
     '-mfma',
     '-DTITAN_RUNTIME_DISPATCH_HOTSPOTS=1',
-    "-I$RepoRoot",
-    (Join-Path $RepoRoot 'titan_pbe\tabi_surface.cpp'),
-    (Join-Path $RepoRoot 'titan_surface.cpp'),
-    (Join-Path $RepoRoot 'titan_executor.cpp'),
+    ("-I" + (Join-Path $RepoRoot "src")),
+    (Join-Path $RepoRoot 'src\tabi\tabi_surface.cpp'),
+    (Join-Path $RepoRoot 'src\titan_surface.cpp'),
+    (Join-Path $RepoRoot 'src\titan_executor.cpp'),
     $SourcePath,
     '-o',
     $ExePath

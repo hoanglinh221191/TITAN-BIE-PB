@@ -11,6 +11,8 @@ LLVM_VERSION ?= 22
 LLVM_PREFIX ?= /usr/lib/llvm-$(LLVM_VERSION)
 BUILD_ROOT = build
 BUILD_DIR = $(BUILD_ROOT)/$(PROFILE)
+SRC_ROOT = src
+INCLUDE_DIRS = -I$(SRC_ROOT) -I$(SRC_ROOT)/gmxtraj/include -I$(SRC_ROOT)/eigen
 
 COMMON_CXX_DEFINES = -DTITAN_CXX23_FLOOR_GXX13=1 -DTITAN_RUNTIME_DISPATCH_HOTSPOTS=1
 ifeq ($(PROFILE),native)
@@ -44,8 +46,8 @@ ifeq ($(OS),Windows_NT)
     # Clang Flags: Thêm cờ chặn cảnh báo rác của Clang
     # Force Eigen to use its own aligned allocator on Windows.
     # This avoids AVX-aligned loads/stores from touching only 16-byte-aligned buffers.
-    CXXFLAGS = -I. -Igmxtraj/include -O3 $(ARCH_FLAGS) -fopenmp $(PIPE_FLAG) $(STACK_NOTE_FLAG) -std=c++23 -Wall -Wno-unused-command-line-argument -MMD -MP $(COMMON_CXX_DEFINES)
-    CFLAGS   = -Igmxtraj/include -O3 $(ARCH_FLAGS) -ffast-math $(PIPE_FLAG) $(STACK_NOTE_FLAG) -w -Wno-incompatible-pointer-types -Wno-unused-command-line-argument -MMD -MP
+    CXXFLAGS = $(INCLUDE_DIRS) -O3 $(ARCH_FLAGS) -fopenmp $(PIPE_FLAG) $(STACK_NOTE_FLAG) -std=c++23 -Wall -Wno-unused-command-line-argument -MMD -MP $(COMMON_CXX_DEFINES)
+    CFLAGS   = $(INCLUDE_DIRS) -O3 $(ARCH_FLAGS) -ffast-math $(PIPE_FLAG) $(STACK_NOTE_FLAG) -w -Wno-incompatible-pointer-types -Wno-unused-command-line-argument -MMD -MP
     
     # Ép dùng LLD linker siêu tốc của LLVM
     LDFLAGS = -fuse-ld=lld -static -static-libgcc -static-libstdc++ -fopenmp
@@ -107,8 +109,8 @@ else
     
     # GCC Flags: Chuẩn C++23, loại bỏ các cờ đặc thù của Clang
     # Keep Eigen on its own aligned-allocation path across Linux builds too.
-    CXXFLAGS = -I. -Igmxtraj/include -O3 $(ARCH_FLAGS) $(OPENMP_FLAG) $(CXX_STDLIB_FLAG) $(CLANG_STDLIB_INCLUDE_FLAGS) $(CLANG_OMP_INCLUDE_FLAGS) $(PIPE_FLAG) $(STACK_NOTE_FLAG) -std=c++23 -Wall -MMD -MP $(COMMON_CXX_DEFINES)
-    CFLAGS   = -Igmxtraj/include -O3 $(ARCH_FLAGS) -ffast-math $(OPENMP_FLAG) $(CLANG_OMP_INCLUDE_FLAGS) $(PIPE_FLAG) $(STACK_NOTE_FLAG) -w -MMD -MP
+    CXXFLAGS = $(INCLUDE_DIRS) -O3 $(ARCH_FLAGS) $(OPENMP_FLAG) $(CXX_STDLIB_FLAG) $(CLANG_STDLIB_INCLUDE_FLAGS) $(CLANG_OMP_INCLUDE_FLAGS) $(PIPE_FLAG) $(STACK_NOTE_FLAG) -std=c++23 -Wall -MMD -MP $(COMMON_CXX_DEFINES)
+    CFLAGS   = $(INCLUDE_DIRS) -O3 $(ARCH_FLAGS) -ffast-math $(OPENMP_FLAG) $(CLANG_OMP_INCLUDE_FLAGS) $(PIPE_FLAG) $(STACK_NOTE_FLAG) -w -MMD -MP
     
     # Linker mặc định của GCC (ld)
     LDFLAGS = $(STDLIB_LINK_FLAGS) $(CLANG_STDLIB_LINK_FLAGS) $(OPENMP_FLAG) $(CXX_STDLIB_FLAG) $(CLANG_STDLIB_LIBS)
@@ -122,13 +124,13 @@ else
 endif
 
 # ─── Tệp nguồn (Sources) ───
-ROOT_SRCS = $(wildcard *.cpp)
-PBE_SRCS  = $(wildcard titan_pbe/*.cpp)
+ROOT_SRCS = $(wildcard $(SRC_ROOT)/*.cpp)
+PBE_SRCS  = $(wildcard $(SRC_ROOT)/tabi/*.cpp)
 SRCS  = $(ROOT_SRCS) $(PBE_SRCS)
 OBJS  = $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(SRCS))
 DEPS  = $(OBJS:.o=.d)
 
-CSRCS = gmxtraj/xdrfile.c gmxtraj/xdrfile_xtc.c gmxtraj/xdrfile_trr.c
+CSRCS = $(SRC_ROOT)/gmxtraj/xdrfile.c $(SRC_ROOT)/gmxtraj/xdrfile_xtc.c $(SRC_ROOT)/gmxtraj/xdrfile_trr.c
 COBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(CSRCS))
 CDEPS = $(COBJS:.o=.d)
 
@@ -146,16 +148,16 @@ $(TARGET): $(OBJS) $(COBJS)
 	@$(CXX) -o $@ $^ $(LDFLAGS)
 	@echo Build successful!
 
-$(BUILD_DIR)/titan_rf_model.o: CXXFLAGS := $(filter-out -O3,$(CXXFLAGS)) -O0
+$(BUILD_DIR)/$(SRC_ROOT)/titan_rf_model.o: CXXFLAGS := $(filter-out -O3,$(CXXFLAGS)) -O0
 
 ifneq ($(OS),Windows_NT)
-$(BUILD_DIR)/solv_pbc_pbctopo.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/engine_postproc.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/impl_engine.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/solv_pbc_new_al.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/find_pull_direction.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/pull_direction_pathway.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/titan_rf_model.o: CXXFLAGS := $(filter-out -O3 -pipe,$(CXXFLAGS)) -O0
+$(BUILD_DIR)/$(SRC_ROOT)/solv_pbc_pbctopo.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
+$(BUILD_DIR)/$(SRC_ROOT)/engine_postproc.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
+$(BUILD_DIR)/$(SRC_ROOT)/impl_engine.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
+$(BUILD_DIR)/$(SRC_ROOT)/solv_pbc_new_al.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
+$(BUILD_DIR)/$(SRC_ROOT)/find_pull_direction.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
+$(BUILD_DIR)/$(SRC_ROOT)/pull_direction_pathway.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
+$(BUILD_DIR)/$(SRC_ROOT)/titan_rf_model.o: CXXFLAGS := $(filter-out -O3 -pipe,$(CXXFLAGS)) -O0
 endif
 
 $(BUILD_DIR)/%.o: %.cpp

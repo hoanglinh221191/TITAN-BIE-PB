@@ -1,4 +1,4 @@
-# TITAN PBE TABI Roadmap
+﻿# TITAN PBE TABI Roadmap
 
 This roadmap tracks the remaining work needed to move the clean-room TABI
 backend from the current validated core toward paper-level TABI 2013 and
@@ -1446,7 +1446,7 @@ Implemented in this slice:
 Measured Stage 2Y results:
 
 - Native build: `mingw32-make PROFILE=native TARGET=titan.exe all -j1`: PASS
-  after an incremental rebuild of `titan_pbe/tabi_solver.cpp`.
+  after an incremental rebuild of `src/tabi/tabi_solver.cpp`.
 - `test/pbe_tabi_true_residual_probe_smoke.ps1`: PASS. Confirms interval mode
   emits `gmres_true_probe` rows and nonzero probe call counts.
 - `test/pbe_tabi_gmres_true_residual_smoke.ps1`: PASS. Confirms the default
@@ -4824,8 +4824,8 @@ Stage 3AD decision:
 Stage 3AE implementation:
 
 - Added the first behavior-preserving TABI treecode refactor slice:
-  `titan_pbe/tabi_treecode_internal.h` and
-  `titan_pbe/tabi_treecode_internal.cpp`.
+  `src/tabi/tabi_treecode_internal.h` and
+  `src/tabi/tabi_treecode_internal.cpp`.
   The internal header currently holds small convergence split/selectivity and
   overreject classification helpers under `TitanPBE::Tabi::detail`.
   The helpers are kept inline for now so standalone smoke harnesses that include
@@ -4914,11 +4914,11 @@ Stage 3AE decision:
 
 Stage 3AF implementation:
 
-- Refactored `titan_pbe/tabi_treecode.cpp` from the monolithic treecode
+- Refactored `src/tabi/tabi_treecode.cpp` from the monolithic treecode
   implementation into a thin public forwarding facade plus bounded internal
   translation units. No flag, preset, MAC rule, estimator rule, split
   decision, CSV field, or production default was changed in this stage.
-- Expanded `titan_pbe/tabi_treecode_internal.h` into the private contract for
+- Expanded `src/tabi/tabi_treecode_internal.h` into the private contract for
   shared treecode structs and cross-TU helper declarations under
   `TitanPBE::Tabi::detail`.
 - Split ownership as follows:

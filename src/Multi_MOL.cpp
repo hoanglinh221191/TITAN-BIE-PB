@@ -1,5 +1,6 @@
 #include "Multi_MOL.h"
 #include "info.h"
+#include "titan_executor.h"
 #include <algorithm>
 #include <cmath>
 #include <ctime>
@@ -583,42 +584,24 @@ double Multi_MOL::total_charge() const {
 int Multi_MOL::cal_dis_res_2_com(const arguments &Arguments, fstream &output) {
   if (Index.size() < 2)
     return 1;
-  size_t num_threads{std::max<size_t>(1, Arguments.nt)};
-  vector<thread> workers(num_threads);
+  const size_t num_threads =
+      Arguments.nt < 1 ? size_t{1} : static_cast<size_t>(Arguments.nt);
+  TitanExecutor executor(num_threads);
   vector<vector<double>> distances;
   vector<string> name_res;
   for (size_t snap_num{}; snap_num < this->m_mol.size(); ++snap_num) {
     vector<double> dis_temp;
-    vector<multi_points> pos_res(num_threads);
-    size_t num_threads_rest(this->Index.size() - 1 > 0 ? this->Index.size() - 1
-                                                       : 1);
-    size_t ite_thread{};
-    while (num_threads_rest > 0) {
-      if (num_threads_rest <= num_threads) {
-        for (size_t i{}; i < num_threads_rest; ++i) {
-          workers[i] =
-              thread(&MOL::take_com_all_atoms, ref(this->m_mol[snap_num]),
-                     ref(this->parameters), i + ite_thread,
-                     this->Index[i + ite_thread + 1].get_res_pos_e(0),
-                     ref(this->Index), ref(this->info), ref(pos_res[i]));
-        }
-        for_each(workers.begin(), workers.begin() + num_threads_rest,
-                 mem_fn(&thread::join));
-        num_threads_rest = 0ull;
-      } else {
-        for (size_t i{}; i < num_threads; ++i) {
-          workers[i] =
-              thread(&MOL::take_com_all_atoms, ref(this->m_mol[snap_num]),
-                     ref(this->parameters), i + ite_thread,
-                     this->Index[i + ite_thread + 1].get_res_pos_e(0),
-                     ref(this->Index), ref(this->info), ref(pos_res[i]));
-        }
-        for (auto &t : workers)
-          t.join();
-        num_threads_rest -= num_threads;
-        ite_thread += num_threads;
+    const size_t chain_count = this->Index.size() - 1;
+    vector<multi_points> pos_res(chain_count);
+    executor.parallel_for(chain_count, num_threads, 1,
+                          [&](size_t, size_t begin, size_t end) {
+      for (size_t chain_idx = begin; chain_idx < end; ++chain_idx) {
+        this->m_mol[snap_num].take_com_all_atoms(
+            this->parameters, chain_idx,
+            this->Index[chain_idx + 1].get_res_pos_e(0), this->Index,
+            this->info, pos_res[chain_idx]);
       }
-    }
+    });
     bool flag_o{snap_num > 0 ? false : true};
     sup_cal_dis_res_com(pos_res, dis_temp, name_res, flag_o);
     distances.emplace_back(dis_temp);

@@ -160,9 +160,15 @@ public:
     }
   }
 
-  // Check safety guard before accessing forces
+  [[nodiscard]] bool force_enabled() const noexcept {
+    return compute_forces && force_vec.has_value();
+  }
+
+  // Check safety guard before accessing forces.
   void check_forces_allocated() const {
-    assert(compute_forces && force_vec.has_value() &&
+    if (!force_enabled())
+      throw std::logic_error("MOL force buffers are not initialized");
+    assert(force_enabled() &&
            "Forces accessed but not allocated! Use compute_forces=true.");
   }
 
@@ -234,14 +240,20 @@ public:
 
   [[nodiscard]] std::span<double> get_thread_force_x(size_t t_id) {
     check_forces_allocated();
+    if (t_id >= thread_local_forces.size())
+      throw std::out_of_range("MOL thread-local force buffer index is out of range");
     return thread_local_forces[t_id].x;
   }
   [[nodiscard]] std::span<double> get_thread_force_y(size_t t_id) {
     check_forces_allocated();
+    if (t_id >= thread_local_forces.size())
+      throw std::out_of_range("MOL thread-local force buffer index is out of range");
     return thread_local_forces[t_id].y;
   }
   [[nodiscard]] std::span<double> get_thread_force_z(size_t t_id) {
     check_forces_allocated();
+    if (t_id >= thread_local_forces.size())
+      throw std::out_of_range("MOL thread-local force buffer index is out of range");
     return thread_local_forces[t_id].z;
   }
 

@@ -33,18 +33,18 @@ New-CleanDir $OutRoot
 
 $productionFiles = New-Object System.Collections.Generic.List[string]
 $explicitProduction = @(
-    'titan_pbe.h',
-    'arguments.cpp',
-    'arguments.h',
-    'parse_arguments.cpp',
-    'impl_engine.cpp',
+    'src\titan_pbe.h',
+    'src\arguments.cpp',
+    'src\arguments.h',
+    'src\parse_arguments.cpp',
+    'src\impl_engine.cpp',
     'Makefile'
 )
 foreach ($name in $explicitProduction) {
     $path = Join-Path $RepoRoot $name
     if (Test-Path -LiteralPath $path) { $productionFiles.Add($path) }
 }
-$pbeDir = Join-Path $RepoRoot 'titan_pbe'
+$pbeDir = Join-Path $RepoRoot 'src\tabi'
 if (Test-Path -LiteralPath $pbeDir) {
     Get-ChildItem -LiteralPath $pbeDir -Recurse -File -Include *.cpp,*.h |
         ForEach-Object { $productionFiles.Add($_.FullName) }
