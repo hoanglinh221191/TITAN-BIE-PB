@@ -719,31 +719,180 @@ IMPORTANT NOTES
       in -nocal.
     - TPT accepts qnative_range:min,max, qnative_lt:x, and qnative_gt:x.
 
-2.4e Dihedral Backbone Analysis
+2.4e Dihedral Analysis
 
   Purpose:
-    Export backbone phi/psi/omega torsion observables for standard protein MD.
-    V1 is backbone-only; side-chain chi rotamers remain a future slice.
+    Export backbone phi/psi/omega and side-chain chi1/chi2 torsion
+    observables for standard protein MD.
 
   Main inputs:
     -dihedral
-    -dihedral-kind <backbone>
+    -dihedral-kind <backbone|sidechain|both>
     -dihedral-residues <all|list/range>
     -dihedral-stride <N>
     -dihedral-export-tica
 
   Typical outputs:
     dihedral_backbone_timeseries.csv
+    dihedral_sidechain_timeseries.csv
     dihedral_ramachandran.csv
+    dihedral_rotamer_populations.csv
+    dihedral_rotamer_transitions.csv
     dihedral_summary.dat
     dihedral_feature_matrix.csv      (only with -dihedral-export-tica)
 
   Notes:
-    - `-dihedral-kind` accepts only backbone in V1.
+    - `-dihedral-kind` defaults to backbone; sidechain emits chi1/chi2
+      rotamer populations and frame-to-frame transition counts.
     - `-dihedral-residues` defaults to all and accepts values such as
       `10,12-20,A:30,A:35-40`.
-    - The feature matrix stores sin/cos columns for phi, psi, and omega.
+    - The feature matrix stores sin/cos columns for enabled torsions.
+    - AVX2 accelerates MIC/bond-vector preparation; final atan2 remains scalar
+      per torsion for portability and accuracy.
     - Missing terminal or incomplete torsions are written as `nan`.
+
+2.4f Standalone Translational / Rotational MSD and Diffusion
+
+  Purpose:
+    Compute translational mean-squared displacement and diffusion summaries
+    for a selected molecule, atom set, backbone/trace, or residue range. This
+    is separate from LLPS dense-phase MSD outputs. With -msd-rot=true, also
+    compute rigid-body rotational MSD and diffusion from the same selection.
+
+  Main inputs:
+    -msd
+    -msd-selection <mol1|mol2|trace|backbone|atom:N,CA|residue:10,12-20,A:30>
+    -msd-mode <com|atom>
+    -msd-maxlag <N|auto>
+    -msd-fit-window <auto|tmin,tmax>
+    -msd-pbc <auto|unwrap|mic>
+    -msd-rot <true|false>
+    -msd-rot-fit-window <auto|tmin,tmax>
+
+  Typical outputs:
+    msd_timeseries.dat
+    msd_diffusion_summary.dat
+    msd_alpha_fit.dat
+    rotational_msd.dat
+    rotational_quaternion_timeseries.csv
+    rotational_covariance_fit.csv
+    rotational_diffusion_summary.dat
+
+  Notes:
+    - `-msd-mode` defaults to com; atom mode averages MSD over selected atoms.
+    - `-msd-maxlag=auto` uses min(frames - 1, 1000).
+    - `-msd-pbc=auto` unwraps by consecutive-frame MIC when all used frames
+      have valid boxes; otherwise it reports raw-coordinate policy.
+    - `-msd-rot=true` is supported with `-msd=true`.
+    - Rotational analysis uses the first analyzed frame as its Kabsch
+      reference and derives diffusion from the Favro quaternion covariance
+      tensor.
+    - The rotational summary records `reference_note` and a finite-size note
+      for downstream interpretation.
+    - arg.in examples should use equals syntax, for example
+      `-msd-selection=atom:CA`.
+
+2.4g Membrane Analysis (Phase 5)
+
+  Status:
+    Implemented. Phase 5A geometry and Phase 5B dynamics run in streaming mode
+    with a dedicated lipid coordinate target. -nocal=true does not enable
+    energy calculations.
+
+  Purpose:
+    Analyze lipid-bilayer leaflets, APL, thickness, order parameters,
+    interdigitation, and persistent flip-flop events.
+
+  Main arg.in inputs:
+    -membrane=true|false
+    -membrane-group=<auto|N>
+    -membrane-lipids=<auto|resname:list>
+    -membrane-head=<auto|atomname:list>
+    -membrane-tail=<auto|atomname:list>
+    -membrane-normal=<auto|x|y|z>
+    -membrane-grid=<auto|Nx,Ny>
+    -membrane-leaflet=<auto|upper-lower|user>
+    -membrane-leaflet-file=<csv>
+    -membrane-flipflop-persistence=<N>
+
+  Per-trajectory outputs:
+    membrane_leaflets.csv
+    membrane_apl_timeseries.csv
+    membrane_apl_per_lipid.csv
+    membrane_thickness_timeseries.csv
+    membrane_thickness_map.csv
+    membrane_summary.dat
+    membrane_order_parameters.csv
+    membrane_interdigitation.dat
+    membrane_flipflop_events.csv
+
+  Multi-input aggregate outputs:
+    membrane_summary_average.dat
+    membrane_thickness_map_average.csv
+    membrane_order_parameters_average.csv
+
+  Notes:
+    - Membrane analysis defaults off; selector fields default to auto.
+    - Flip-flop persistence defaults to 3 frames and must be >= 1.
+    - `-membrane-leaflet-file` is required exactly when leaflet mode is user.
+    - Auto grid sizing is aspect-aware, targets about 8 lipids per leaflet per
+      cell, and clamps each axis to 4..64 bins.
+    - Auto normal uses PCA with sign continuity. Auto leaflets use periodic
+      local-neighborhood PCA midplanes for undulating bilayers.
+    - membrane_summary.dat records a reference note for interpretation.
+    - arg.in uses the equals syntax shown above; bare `-membrane` also enables
+      the analyzer.
+
+2.4h NMR Order Parameters S2 (Phase 6)
+
+  Status:
+    Implemented in this branch. Phase 6 standalone S2 runtime integration is
+    complete.
+
+  Purpose:
+    Export Lipari-Szabo model-free S2 order parameters from backbone NH and/or
+    CA-C vectors for residue-level rigidity and flexibility analysis.
+
+  Main arg.in inputs:
+    -s2=true|false
+    -s2-vector=<nh|ca-c|both>
+    -s2-align=<rms|none>
+    -s2-maxlag=<auto|N>
+    -s2-fit-window=<auto|tmin,tmax>
+    -s2-residues=<all|list/range>
+    -s2-bfactor-pdb=<true|false>
+
+  Per-trajectory outputs:
+    s2_order_parameters.csv
+      chain, residue_number, residue_name, vector_type, plateau_C_raw,
+      S2 (clipped), tau_ps, fit_R2, fit_window_start_ps, fit_window_end_ps,
+      samples, fit_status
+    s2_correlation_functions.dat
+      chain, residue_number, residue_name, vector_type, lag_index,
+      lag_time_ps, C_t, samples
+    s2_summary.dat
+    s2_bfactor.pdb                 optional
+
+  Multi-input aggregate outputs:
+    s2_order_parameters_average.csv
+    s2_summary_average.dat
+    s2_bfactor_average.pdb         optional
+
+  Notes:
+    - S2 analysis defaults off. Bare `-s2` enables it.
+    - N-H rows require exact backbone H or HN atoms. PRO and terminal
+      residues without a backbone hydrogen are skipped with a warning.
+    - CA-C rows use the exact vector and are emitted independently of N-H rows.
+    - `-s2-align=rms` uses Kabsch alignment to the first analyzed frame.
+    - `-s2-align=provided` is rejected in v1 with a first-frame note.
+    - The legacy `-s2-plateau-window` spelling is rejected; use
+      `-s2-fit-window`.
+    - `-s2-maxlag` is `auto` or an integer >= 1.
+    - `-s2-fit-window` is `auto` or tmin,tmax with tmax > tmin.
+    - TitanExecutor uses aligned SoA buffers with AVX2/FMA kernels and a
+      scalar fallback.
+    - Fits run per trajectory. Multi-input aggregates report mean and SEM;
+      independent trajectories are never pooled into one C(t).
 
 2.5 PCA / FES / Basin Extraction
 
@@ -2136,12 +2285,46 @@ IMPORTANT NOTES
                         Minimum intra-chain sequence separation. Default: 3
   -qnative-soft <bool>  Use soft logistic native contacts. Default: false
   -qnative-beta <val>   Soft-contact beta; valid only when soft=true
-  -dihedral             Backbone dihedral analysis: phi, psi, omega
-  -dihedral-kind <mode> backbone only in v1. Default: backbone
+  -dihedral             Dihedral analysis: phi/psi/omega and chi1/chi2
+  -dihedral-kind <mode> backbone | sidechain | both. Default: backbone
   -dihedral-residues <s>
                         all or list/ranges like 10,12-20,A:30,A:35-40
   -dihedral-stride <N>  Analyze every Nth frame. Default: 1
-  -dihedral-export-tica Export sin/cos feature matrix for TICA prep
+  -dihedral-export-tica Export enabled torsions as sin/cos feature matrix
+  -msd                  Translational MSD and diffusion analysis
+  -msd-selection <sel>  mol1, mol2, trace, backbone, atom:N,CA, or
+                        residue:10,12-20,A:30. Default: mol1
+  -msd-mode <mode>      com or atom. Default: com
+  -msd-maxlag <N|auto>  Maximum lag index. Default: auto=min(frames-1,1000)
+  -msd-fit-window <w>   auto or tmin,tmax in ps. Default: auto
+  -msd-pbc <policy>     auto, unwrap, or mic. Default: auto
+  -msd-rot <bool>       Enable rotational MSD with -msd=true. Default: false
+  -msd-rot-fit-window <w>
+                        Rotational fit window: auto or tmin,tmax in ps
+
+  -membrane             Enable Phase 5 MARTINI membrane analysis
+  -membrane=<bool>      true or false. Default: false
+  -membrane-group=<g>   auto or group index >= 0. Default: auto
+  -membrane-lipids=<s>  auto or resname:list. Default: auto
+  -membrane-head=<s>    auto or atomname:list. Default: auto
+  -membrane-tail=<s>    auto or atomname:list. Default: auto
+  -membrane-normal=<n>  auto, x, y, or z. Default: auto
+  -membrane-grid=<g>    auto or Nx,Ny positive bins. Default: auto
+  -membrane-leaflet=<m> auto, upper-lower, or user. Default: auto
+  -membrane-leaflet-file=<csv>
+                        Required exactly when -membrane-leaflet=user
+  -membrane-flipflop-persistence=<N>
+                        Persistent reassignment frames. Default: 3
+
+  -s2                   Enable Phase 6 NMR order-parameter analysis
+  -s2=<bool>            true or false. Default: false
+  -s2-vector=<v>        nh, ca-c, or both. Default: both
+  -s2-align=<mode>      rms or none. Default: rms first-frame alignment
+  -s2-maxlag=<N|auto>   Maximum lag index. Default: auto
+  -s2-fit-window=<w>    auto or tmin,tmax in ps. Default: auto
+  -s2-residues=<s>      all or a non-empty residue list/range. Default: all
+  -s2-bfactor-pdb=<bool>
+                        Export S2 B-factor PDB. Default: false
 
   -corr-knn             Raw continuous kNN MI / GC / TE export
   -corr-knn-k=<N>       Exact kNN estimator neighborhood size. Default: 4
@@ -2441,6 +2624,8 @@ IMPORTANT NOTES
 4.7 Miscellaneous
 
   -nocal                No-energy mode; useful for PBC/utility workflows
+                        Explicit -g=<mol1>-<mol2> keeps both molecules for PBC
+                        and -opdb/-pqr output without enabling energy modules
                         DSSP in this mode analyzes molecule 1 only
                         LJ in this mode analyzes molecule 1 only
                         RMSD/RMSF in this mode analyzes molecule 1 only

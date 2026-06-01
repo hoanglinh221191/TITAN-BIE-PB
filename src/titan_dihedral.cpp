@@ -18,9 +18,7 @@
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
-constexpr double kDeg = 180.0 / kPi;
 constexpr double kRad = kPi / 180.0;
-constexpr double kEps = 1.0e-12;
 
 std::string trim_copy(std::string value) {
   const auto first = value.find_first_not_of(" \t\r\n");
@@ -38,6 +36,14 @@ std::string uppercase_copy(std::string value) {
   return value;
 }
 
+std::string lowercase_copy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  return value;
+}
+
 std::string normalized_atom_name(std::string value) {
   return uppercase_copy(trim_copy(std::move(value)));
 }
@@ -47,22 +53,6 @@ std::string join_output_path(const std::string &base_dir,
   if (base_dir.empty() || base_dir == ".")
     return filename;
   return (std::filesystem::path(base_dir) / filename).string();
-}
-
-double dot3(const TitanDihedralAnalyzer::Point &a,
-            const TitanDihedralAnalyzer::Point &b) {
-  return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-TitanDihedralAnalyzer::Point
-cross3(const TitanDihedralAnalyzer::Point &a,
-       const TitanDihedralAnalyzer::Point &b) {
-  return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z,
-          a.x * b.y - a.y * b.x};
-}
-
-double norm3(const TitanDihedralAnalyzer::Point &a) {
-  return std::sqrt(dot3(a, a));
 }
 
 TitanDihedralAnalyzer::Point
@@ -77,9 +67,40 @@ add3(const TitanDihedralAnalyzer::Point &a,
   return {a.x + b.x, a.y + b.y, a.z + b.z};
 }
 
-TitanDihedralAnalyzer::Point scale3(const TitanDihedralAnalyzer::Point &a,
-                                    double scale) {
-  return {a.x * scale, a.y * scale, a.z * scale};
+std::optional<std::string> chi1_terminal_atom(const std::string &resname) {
+  const std::string res = uppercase_copy(resname);
+  if (res == "CYS")
+    return "SG";
+  if (res == "SER")
+    return "OG";
+  if (res == "THR" || res == "ILE" || res == "VAL")
+    return "CG1";
+  if (res == "ARG" || res == "ASN" || res == "ASP" || res == "GLN" ||
+      res == "GLU" || res == "HIS" || res == "HID" || res == "HIE" ||
+      res == "HIP" || res == "LEU" || res == "LYS" || res == "MET" ||
+      res == "PHE" || res == "PRO" || res == "TRP" || res == "TYR")
+    return "CG";
+  return std::nullopt;
+}
+
+std::optional<std::array<std::string, 4>>
+chi2_atoms(const std::string &resname) {
+  const std::string res = uppercase_copy(resname);
+  if (res == "ARG" || res == "LYS" || res == "GLN" || res == "GLU")
+    return std::array<std::string, 4>{"CA", "CB", "CG", "CD"};
+  if (res == "ASN" || res == "ASP")
+    return std::array<std::string, 4>{"CA", "CB", "CG", "OD1"};
+  if (res == "HIS" || res == "HID" || res == "HIE" || res == "HIP")
+    return std::array<std::string, 4>{"CA", "CB", "CG", "ND1"};
+  if (res == "LEU" || res == "PHE" || res == "TRP" || res == "TYR")
+    return std::array<std::string, 4>{"CA", "CB", "CG", "CD1"};
+  if (res == "MET")
+    return std::array<std::string, 4>{"CA", "CB", "CG", "SD"};
+  if (res == "PRO")
+    return std::array<std::string, 4>{"CA", "CB", "CG", "CD"};
+  if (res == "ILE")
+    return std::array<std::string, 4>{"CA", "CB", "CG1", "CD1"};
+  return std::nullopt;
 }
 
 } // namespace
@@ -88,37 +109,20 @@ double TitanDihedralAnalyzer::compute_dihedral_deg(const Point &p0,
                                                    const Point &p1,
                                                    const Point &p2,
                                                    const Point &p3) {
-  const Point b0 = scale3(sub3(p0, p1), -1.0);
-  const Point b1 = sub3(p2, p1);
-  const Point b2 = sub3(p3, p2);
-  const double b1_norm = norm3(b1);
-  if (b1_norm <= kEps)
-    return std::numeric_limits<double>::quiet_NaN();
-
-  const Point b1_unit = scale3(b1, 1.0 / b1_norm);
-  const Point v = sub3(b0, scale3(b1_unit, dot3(b0, b1_unit)));
-  const Point w = sub3(b2, scale3(b1_unit, dot3(b2, b1_unit)));
-  if (norm3(v) <= kEps || norm3(w) <= kEps)
-    return std::numeric_limits<double>::quiet_NaN();
-
-  const double x = dot3(v, w);
-  const double y = dot3(cross3(b1_unit, v), w);
-  double angle = std::atan2(y, x) * kDeg;
-  while (angle > 180.0)
-    angle -= 360.0;
-  while (angle <= -180.0)
-    angle += 360.0;
-  return angle;
+  return titan_dihedral_kernel::compute_dihedral_deg_from_points(
+      p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, p3.x, p3.y,
+      p3.z);
 }
 
 void TitanDihedralAnalyzer::configure(const DihedralArgs &args) {
   requested_ = args.flag_dihedral;
-  kind_ = args.kind;
+  kind_ = lowercase_copy(trim_copy(args.kind));
   residue_selection_ = args.residues;
   stride_ = args.stride;
   export_tica_ = args.export_tica;
-  if (kind_ != "backbone")
-    throw std::invalid_argument("Dihedral: v1 supports backbone only.");
+  if (kind_ != "backbone" && kind_ != "sidechain" && kind_ != "both")
+    throw std::invalid_argument(
+        "Dihedral: -dihedral-kind must be backbone, sidechain, or both.");
   if (stride_ < 1)
     throw std::invalid_argument("Dihedral: -dihedral-stride must be >= 1.");
   enabled_ = requested_ && initialized_;
@@ -135,12 +139,19 @@ void TitanDihedralAnalyzer::init(const Multi_MOL &mol, const arguments &,
       if (residue_selected(residues_[i]))
         selected_indices_.push_back(i);
     }
+    if (wants_backbone())
+      build_backbone_plan();
+    if (wants_sidechain())
+      build_sidechain_plan();
     rama_valid_samples_.assign(residues_.size(), 0);
-    initialized_ = !selected_indices_.empty();
+    initialized_ = (wants_backbone() && !selected_indices_.empty()) ||
+                   (wants_sidechain() && !sidechain_indices_.empty());
     enabled_ = requested_ && initialized_;
     if (log.is_open()) {
       log << "Dihedral kind: " << kind_ << '\n';
       log << "Dihedral selected residues: " << selected_indices_.size()
+          << '\n';
+      log << "Dihedral sidechain residues: " << sidechain_indices_.size()
           << '\n';
       log << "Dihedral PBC policy: " << pbc_policy_ << '\n';
     }
@@ -169,15 +180,21 @@ void TitanDihedralAnalyzer::build_residue_map(
         local_index = 0;
       else
         ++local_index;
-      residues_.push_back(ResidueBackbone{
-          residues_.size() + 1, resnr, chainnum, local_index,
-          atom_info.get_chain(), atom_info.get_res_name(), -1, -1, -1});
+      ResidueBackbone residue;
+      residue.ordinal = residues_.size() + 1;
+      residue.resnr = resnr;
+      residue.chainnum = chainnum;
+      residue.local_index = local_index;
+      residue.chain = atom_info.get_chain();
+      residue.resname = atom_info.get_res_name();
+      residues_.push_back(std::move(residue));
       prev_chain = chainnum;
       prev_resnr = resnr;
     }
 
     ResidueBackbone &residue = residues_.back();
     const std::string atom_name = normalized_atom_name(atom_info.get_atom());
+    residue.atom_index_by_name.emplace(atom_name, static_cast<int>(atom_idx));
     if (atom_name == "N" && residue.atom_n < 0) {
       residue.atom_n = static_cast<int>(atom_idx);
     } else if (atom_name == "CA" && residue.atom_ca < 0) {
@@ -246,14 +263,29 @@ bool TitanDihedralAnalyzer::residue_selected(
   return false;
 }
 
+bool TitanDihedralAnalyzer::wants_backbone() const noexcept {
+  return kind_ == "backbone" || kind_ == "both";
+}
+
+bool TitanDihedralAnalyzer::wants_sidechain() const noexcept {
+  return kind_ == "sidechain" || kind_ == "both";
+}
+
 void TitanDihedralAnalyzer::reset_trajectory_state() {
   frames_seen_ = 0;
   frames_used_ = 0;
   finite_counts_ = {};
   missing_counts_ = {};
+  finite_chi_counts_ = {};
+  missing_chi_counts_ = {};
   frames_.clear();
+  sidechain_frames_.clear();
   rama_counts_.clear();
+  rotamer_counts_.clear();
+  rotamer_transitions_.clear();
   rama_valid_samples_.assign(residues_.size(), 0);
+  rotamer_valid_samples_.assign(sidechain_indices_.size(), {});
+  previous_rotamers_.assign(sidechain_indices_.size(), {});
 }
 
 bool TitanDihedralAnalyzer::adjacent_residues(std::size_t lhs,
@@ -316,6 +348,110 @@ double TitanDihedralAnalyzer::torsion(const MOL &frame, int atom0, int atom1,
   return compute_dihedral_deg(p0, p1, p2, p3);
 }
 
+int TitanDihedralAnalyzer::find_atom(const ResidueBackbone &residue,
+                                     const std::string &atom_name) const {
+  const auto it = residue.atom_index_by_name.find(normalized_atom_name(atom_name));
+  return it == residue.atom_index_by_name.end() ? -1 : it->second;
+}
+
+bool TitanDihedralAnalyzer::sidechain_defined(
+    const ResidueBackbone &residue) const {
+  return chi1_terminal_atom(residue.resname).has_value() ||
+         chi2_atoms(residue.resname).has_value();
+}
+
+std::string TitanDihedralAnalyzer::rotamer_name(double angle) const {
+  if (!std::isfinite(angle))
+    return {};
+  if (angle < -60.0)
+    return "gminus";
+  if (angle < 60.0)
+    return "trans";
+  return "gplus";
+}
+
+void TitanDihedralAnalyzer::build_backbone_plan() {
+  backbone_plan_.clear();
+  backbone_plan_positions_.clear();
+  backbone_plan_.reserve(selected_indices_.size() * 3);
+  backbone_plan_positions_.reserve(selected_indices_.size() * 3);
+  for (std::size_t selected_pos = 0; selected_pos < selected_indices_.size();
+       ++selected_pos) {
+    const std::size_t residue_index = selected_indices_[selected_pos];
+    const ResidueBackbone &residue = residues_[residue_index];
+    const ResidueBackbone *prev = nullptr;
+    const ResidueBackbone *next = nullptr;
+    if (residue_index > 0 && adjacent_residues(residue_index - 1, residue_index))
+      prev = &residues_[residue_index - 1];
+    if (residue_index + 1 < residues_.size() &&
+        adjacent_residues(residue_index, residue_index + 1))
+      next = &residues_[residue_index + 1];
+
+    if (prev != nullptr) {
+      backbone_plan_.push(prev->atom_c, residue.atom_n, residue.atom_ca,
+                          residue.atom_c, residue_index,
+                          titan_dihedral_kernel::TorsionKind::Phi);
+      backbone_plan_positions_.push_back(
+          {selected_pos, titan_dihedral_kernel::TorsionKind::Phi});
+    }
+    if (next != nullptr) {
+      backbone_plan_.push(residue.atom_n, residue.atom_ca, residue.atom_c,
+                          next->atom_n, residue_index,
+                          titan_dihedral_kernel::TorsionKind::Psi);
+      backbone_plan_positions_.push_back(
+          {selected_pos, titan_dihedral_kernel::TorsionKind::Psi});
+      backbone_plan_.push(residue.atom_ca, residue.atom_c, next->atom_n,
+                          next->atom_ca, residue_index,
+                          titan_dihedral_kernel::TorsionKind::Omega);
+      backbone_plan_positions_.push_back(
+          {selected_pos, titan_dihedral_kernel::TorsionKind::Omega});
+    }
+  }
+}
+
+void TitanDihedralAnalyzer::build_sidechain_plan() {
+  sidechain_indices_.clear();
+  sidechain_plan_.clear();
+  sidechain_plan_positions_.clear();
+  for (std::size_t residue_index = 0; residue_index < residues_.size();
+       ++residue_index) {
+    const ResidueBackbone &residue = residues_[residue_index];
+    if (!residue_selected(residue) || !sidechain_defined(residue))
+      continue;
+
+    const std::size_t sample_pos = sidechain_indices_.size();
+    sidechain_indices_.push_back(residue_index);
+
+    if (const auto terminal = chi1_terminal_atom(residue.resname)) {
+      const int a0 = find_atom(residue, "N");
+      const int a1 = find_atom(residue, "CA");
+      const int a2 = find_atom(residue, "CB");
+      const int a3 = find_atom(residue, *terminal);
+      if (a0 >= 0 && a1 >= 0 && a2 >= 0 && a3 >= 0) {
+        sidechain_plan_.push(a0, a1, a2, a3, residue_index,
+                             titan_dihedral_kernel::TorsionKind::Chi1);
+        sidechain_plan_positions_.push_back(
+            {sample_pos, titan_dihedral_kernel::TorsionKind::Chi1});
+      }
+    }
+
+    if (const auto atoms = chi2_atoms(residue.resname)) {
+      const int a0 = find_atom(residue, (*atoms)[0]);
+      const int a1 = find_atom(residue, (*atoms)[1]);
+      const int a2 = find_atom(residue, (*atoms)[2]);
+      const int a3 = find_atom(residue, (*atoms)[3]);
+      if (a0 >= 0 && a1 >= 0 && a2 >= 0 && a3 >= 0) {
+        sidechain_plan_.push(a0, a1, a2, a3, residue_index,
+                             titan_dihedral_kernel::TorsionKind::Chi2);
+        sidechain_plan_positions_.push_back(
+            {sample_pos, titan_dihedral_kernel::TorsionKind::Chi2});
+      }
+    }
+  }
+  sidechain_plan_.reserve(sidechain_plan_.size());
+  sidechain_plan_positions_.reserve(sidechain_plan_positions_.size());
+}
+
 void TitanDihedralAnalyzer::process_frame(const Multi_MOL &mol,
                                           std::size_t snap_idx,
                                           TitanExecutor &executor) {
@@ -335,6 +471,14 @@ void TitanDihedralAnalyzer::process_frame(const Multi_MOL &mol,
   if (use_mic)
     box_matrix.emplace(frame.Box);
   ++frames_used_;
+
+  if (wants_backbone())
+    process_backbone_frame(frame, trajectory_frame, use_mic,
+                           box_matrix ? &(*box_matrix) : nullptr, executor);
+  if (wants_sidechain())
+    process_sidechain_frame(frame, trajectory_frame, use_mic,
+                            box_matrix ? &(*box_matrix) : nullptr, executor);
+  return;
 
   FrameRecord record;
   record.frame = trajectory_frame;
@@ -414,6 +558,113 @@ void TitanDihedralAnalyzer::process_frame(const Multi_MOL &mol,
   frames_.push_back(std::move(record));
 }
 
+void TitanDihedralAnalyzer::process_backbone_frame(
+    const MOL &frame, std::size_t trajectory_frame, bool use_mic,
+    const BoxMatrix *box_matrix, TitanExecutor &executor) {
+  FrameRecord record;
+  record.frame = trajectory_frame;
+  record.time_ps = frame.get_time();
+  record.samples.resize(selected_indices_.size());
+
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  for (std::size_t selected_pos = 0; selected_pos < selected_indices_.size();
+       ++selected_pos) {
+    record.samples[selected_pos] =
+        AngleSample{selected_indices_[selected_pos], nan, nan, nan};
+  }
+
+  titan_dihedral_kernel::compute_torsions_parallel(
+      backbone_plan_, frame, use_mic, box_matrix, executor, backbone_result_);
+
+  for (std::size_t torsion_idx = 0;
+       torsion_idx < backbone_result_.angle_deg.size(); ++torsion_idx) {
+    const TorsionPlanPosition &pos = backbone_plan_positions_[torsion_idx];
+    AngleSample &sample = record.samples[pos.sample_index];
+    const double angle = backbone_result_.angle_deg[torsion_idx];
+    if (pos.kind == titan_dihedral_kernel::TorsionKind::Phi)
+      sample.phi = angle;
+    else if (pos.kind == titan_dihedral_kernel::TorsionKind::Psi)
+      sample.psi = angle;
+    else if (pos.kind == titan_dihedral_kernel::TorsionKind::Omega)
+      sample.omega = angle;
+  }
+
+  for (const AngleSample &sample : record.samples) {
+    const std::array<double, 3> angles{sample.phi, sample.psi, sample.omega};
+    for (std::size_t i = 0; i < angles.size(); ++i) {
+      if (std::isfinite(angles[i]))
+        ++finite_counts_[i];
+      else
+        ++missing_counts_[i];
+    }
+    if (std::isfinite(sample.phi) && std::isfinite(sample.psi)) {
+      ++rama_valid_samples_[sample.residue_index];
+      ++rama_counts_[std::make_tuple(sample.residue_index,
+                                     ramachandran_bin(sample.phi),
+                                     ramachandran_bin(sample.psi))];
+    }
+  }
+
+  frames_.push_back(std::move(record));
+}
+
+void TitanDihedralAnalyzer::process_sidechain_frame(
+    const MOL &frame, std::size_t trajectory_frame, bool use_mic,
+    const BoxMatrix *box_matrix, TitanExecutor &executor) {
+  SidechainFrameRecord record;
+  record.frame = trajectory_frame;
+  record.time_ps = frame.get_time();
+  record.samples.resize(sidechain_indices_.size());
+
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  for (std::size_t sample_pos = 0; sample_pos < sidechain_indices_.size();
+       ++sample_pos) {
+    record.samples[sample_pos] =
+        SidechainSample{sidechain_indices_[sample_pos], nan, nan};
+  }
+
+  titan_dihedral_kernel::compute_torsions_parallel(
+      sidechain_plan_, frame, use_mic, box_matrix, executor, sidechain_result_);
+
+  for (std::size_t torsion_idx = 0;
+       torsion_idx < sidechain_result_.angle_deg.size(); ++torsion_idx) {
+    const TorsionPlanPosition &pos = sidechain_plan_positions_[torsion_idx];
+    SidechainSample &sample = record.samples[pos.sample_index];
+    const double angle = sidechain_result_.angle_deg[torsion_idx];
+    if (pos.kind == titan_dihedral_kernel::TorsionKind::Chi1)
+      sample.chi1 = angle;
+    else if (pos.kind == titan_dihedral_kernel::TorsionKind::Chi2)
+      sample.chi2 = angle;
+  }
+
+  for (std::size_t sample_pos = 0; sample_pos < record.samples.size();
+       ++sample_pos) {
+    const SidechainSample &sample = record.samples[sample_pos];
+    const std::array<double, 2> angles{sample.chi1, sample.chi2};
+    for (std::size_t chi = 0; chi < angles.size(); ++chi) {
+      if (!std::isfinite(angles[chi])) {
+        ++missing_chi_counts_[chi];
+        previous_rotamers_[sample_pos][chi].clear();
+        continue;
+      }
+      ++finite_chi_counts_[chi];
+      ++rotamer_valid_samples_[sample_pos][chi];
+      const std::string rotamer = rotamer_name(angles[chi]);
+      ++rotamer_counts_[std::make_tuple(sample.residue_index,
+                                        static_cast<int>(chi + 1), rotamer)];
+      const std::string &previous = previous_rotamers_[sample_pos][chi];
+      if (!previous.empty()) {
+        ++rotamer_transitions_[std::make_tuple(
+            sample.residue_index, static_cast<int>(chi + 1), previous,
+            rotamer)];
+      }
+      previous_rotamers_[sample_pos][chi] = rotamer;
+    }
+  }
+
+  sidechain_frames_.push_back(std::move(record));
+}
+
 std::string
 TitanDihedralAnalyzer::residue_label(const ResidueBackbone &residue) const {
   std::ostringstream out;
@@ -480,6 +731,73 @@ void TitanDihedralAnalyzer::export_ramachandran(const std::string &filename,
     log << "Dihedral Ramachandran: " << filename << '\n';
 }
 
+void TitanDihedralAnalyzer::export_sidechain_timeseries(
+    const std::string &filename, std::fstream &log) const {
+  std::ofstream out(filename);
+  out << "frame,time_ps,residue,chain,resnr,resname,chi1_deg,chi2_deg\n";
+  out << std::fixed << std::setprecision(6);
+  for (const SidechainFrameRecord &frame : sidechain_frames_) {
+    for (const SidechainSample &sample : frame.samples) {
+      const ResidueBackbone &residue = residues_[sample.residue_index];
+      out << frame.frame << ',' << frame.time_ps << ','
+          << residue_label(residue) << ',' << residue.chain << ','
+          << residue.resnr << ',' << residue.resname << ','
+          << format_angle(sample.chi1) << ',' << format_angle(sample.chi2)
+          << '\n';
+    }
+  }
+  if (log.is_open())
+    log << "Dihedral sidechain timeseries: " << filename << '\n';
+}
+
+void TitanDihedralAnalyzer::export_rotamer_populations(
+    const std::string &filename, std::fstream &log) const {
+  std::ofstream out(filename);
+  out << "residue,chain,resnr,resname,chi,rotamer,count,occupancy,valid_samples\n";
+  out << std::fixed << std::setprecision(6);
+  for (const auto &entry : rotamer_counts_) {
+    const std::size_t residue_index = std::get<0>(entry.first);
+    const int chi = std::get<1>(entry.first);
+    const std::string &rotamer = std::get<2>(entry.first);
+    const std::uint64_t count = entry.second;
+    std::uint64_t valid = 0;
+    auto it = std::find(sidechain_indices_.begin(), sidechain_indices_.end(),
+                        residue_index);
+    if (it != sidechain_indices_.end()) {
+      const std::size_t sample_pos =
+          static_cast<std::size_t>(std::distance(sidechain_indices_.begin(), it));
+      valid = rotamer_valid_samples_[sample_pos][static_cast<std::size_t>(chi - 1)];
+    }
+    const double occupancy =
+        valid > 0 ? static_cast<double>(count) / static_cast<double>(valid)
+                  : 0.0;
+    const ResidueBackbone &residue = residues_[residue_index];
+    out << residue_label(residue) << ',' << residue.chain << ','
+        << residue.resnr << ',' << residue.resname << ",chi" << chi << ','
+        << rotamer << ',' << count << ',' << occupancy << ',' << valid << '\n';
+  }
+  if (log.is_open())
+    log << "Dihedral rotamer populations: " << filename << '\n';
+}
+
+void TitanDihedralAnalyzer::export_rotamer_transitions(
+    const std::string &filename, std::fstream &log) const {
+  std::ofstream out(filename);
+  out << "residue,chain,resnr,resname,chi,from_rotamer,to_rotamer,count\n";
+  for (const auto &entry : rotamer_transitions_) {
+    const std::size_t residue_index = std::get<0>(entry.first);
+    const int chi = std::get<1>(entry.first);
+    const std::string &from = std::get<2>(entry.first);
+    const std::string &to = std::get<3>(entry.first);
+    const ResidueBackbone &residue = residues_[residue_index];
+    out << residue_label(residue) << ',' << residue.chain << ','
+        << residue.resnr << ',' << residue.resname << ",chi" << chi << ','
+        << from << ',' << to << ',' << entry.second << '\n';
+  }
+  if (log.is_open())
+    log << "Dihedral rotamer transitions: " << filename << '\n';
+}
+
 void TitanDihedralAnalyzer::export_summary(const std::string &filename,
                                            std::fstream &log) const {
   std::ofstream out(filename);
@@ -492,12 +810,19 @@ void TitanDihedralAnalyzer::export_summary(const std::string &filename,
   out << "frames_used: " << frames_used_ << '\n';
   out << "residues_total: " << residues_.size() << '\n';
   out << "residues_selected: " << selected_indices_.size() << '\n';
+  out << "sidechain_residues_selected: " << sidechain_indices_.size() << '\n';
+  out << "backbone_torsions_planned: " << backbone_plan_.size() << '\n';
+  out << "sidechain_torsions_planned: " << sidechain_plan_.size() << '\n';
   out << "finite_phi: " << finite_counts_[0] << '\n';
   out << "finite_psi: " << finite_counts_[1] << '\n';
   out << "finite_omega: " << finite_counts_[2] << '\n';
   out << "missing_phi: " << missing_counts_[0] << '\n';
   out << "missing_psi: " << missing_counts_[1] << '\n';
   out << "missing_omega: " << missing_counts_[2] << '\n';
+  out << "finite_chi1: " << finite_chi_counts_[0] << '\n';
+  out << "finite_chi2: " << finite_chi_counts_[1] << '\n';
+  out << "missing_chi1: " << missing_chi_counts_[0] << '\n';
+  out << "missing_chi2: " << missing_chi_counts_[1] << '\n';
   if (log.is_open())
     log << "Dihedral summary: " << filename << '\n';
 }
@@ -506,19 +831,49 @@ void TitanDihedralAnalyzer::export_feature_matrix(const std::string &filename,
                                                   std::fstream &log) const {
   std::ofstream out(filename);
   out << "frame,time_ps";
-  for (const std::size_t residue_index : selected_indices_) {
-    const std::string label = residue_label(residues_[residue_index]);
-    out << ',' << label << "_phi_sin," << label << "_phi_cos";
-    out << ',' << label << "_psi_sin," << label << "_psi_cos";
-    out << ',' << label << "_omega_sin," << label << "_omega_cos";
+  if (wants_backbone()) {
+    for (const std::size_t residue_index : selected_indices_) {
+      const std::string label = residue_label(residues_[residue_index]);
+      out << ',' << label << "_phi_sin," << label << "_phi_cos";
+      out << ',' << label << "_psi_sin," << label << "_psi_cos";
+      out << ',' << label << "_omega_sin," << label << "_omega_cos";
+    }
+  }
+  if (wants_sidechain()) {
+    for (const std::size_t residue_index : sidechain_indices_) {
+      const std::string label = residue_label(residues_[residue_index]);
+      out << ',' << label << "_chi1_sin," << label << "_chi1_cos";
+      out << ',' << label << "_chi2_sin," << label << "_chi2_cos";
+    }
   }
   out << '\n';
   out << std::fixed << std::setprecision(6);
 
-  for (const FrameRecord &frame : frames_) {
-    out << frame.frame << ',' << frame.time_ps;
-    for (const AngleSample &sample : frame.samples) {
-      const std::array<double, 3> angles{sample.phi, sample.psi, sample.omega};
+  const std::size_t row_count =
+      wants_backbone() ? frames_.size() : sidechain_frames_.size();
+  for (std::size_t row = 0; row < row_count; ++row) {
+    const std::size_t frame_id =
+        wants_backbone() ? frames_[row].frame : sidechain_frames_[row].frame;
+    const double time_ps =
+        wants_backbone() ? frames_[row].time_ps : sidechain_frames_[row].time_ps;
+    out << frame_id << ',' << time_ps;
+    if (wants_backbone()) {
+      for (const AngleSample &sample : frames_[row].samples) {
+        const std::array<double, 3> angles{sample.phi, sample.psi,
+                                           sample.omega};
+        for (double angle : angles) {
+          if (!std::isfinite(angle)) {
+            out << ",nan,nan";
+          } else {
+            out << ',' << std::sin(angle * kRad) << ','
+                << std::cos(angle * kRad);
+          }
+        }
+      }
+    }
+    if (wants_sidechain()) {
+      for (const SidechainSample &sample : sidechain_frames_[row].samples) {
+        const std::array<double, 2> angles{sample.chi1, sample.chi2};
       for (double angle : angles) {
         if (!std::isfinite(angle)) {
           out << ",nan,nan";
@@ -527,6 +882,7 @@ void TitanDihedralAnalyzer::export_feature_matrix(const std::string &filename,
               << std::cos(angle * kRad);
         }
       }
+    }
     }
     out << '\n';
   }
@@ -541,14 +897,34 @@ void TitanDihedralAnalyzer::finalize_trajectory(
   if (!enabled_)
     return;
 
-  export_timeseries(
-      join_output_path(base_dir, info_output.get_dihedral_timeseries_filename(
-                                     args, input_line, input_name)),
-      log);
-  export_ramachandran(
-      join_output_path(base_dir, info_output.get_dihedral_ramachandran_filename(
-                                     args, input_line, input_name)),
-      log);
+  if (wants_backbone()) {
+    export_timeseries(
+        join_output_path(base_dir, info_output.get_dihedral_timeseries_filename(
+                                       args, input_line, input_name)),
+        log);
+    export_ramachandran(
+        join_output_path(base_dir,
+                         info_output.get_dihedral_ramachandran_filename(
+                             args, input_line, input_name)),
+        log);
+  }
+  if (wants_sidechain()) {
+    export_sidechain_timeseries(
+        join_output_path(base_dir,
+                         info_output.get_dihedral_sidechain_timeseries_filename(
+                             args, input_line, input_name)),
+        log);
+    export_rotamer_populations(
+        join_output_path(base_dir,
+                         info_output.get_dihedral_rotamer_populations_filename(
+                             args, input_line, input_name)),
+        log);
+    export_rotamer_transitions(
+        join_output_path(base_dir,
+                         info_output.get_dihedral_rotamer_transitions_filename(
+                             args, input_line, input_name)),
+        log);
+  }
   export_summary(
       join_output_path(base_dir, info_output.get_dihedral_summary_filename(
                                      args, input_line, input_name)),

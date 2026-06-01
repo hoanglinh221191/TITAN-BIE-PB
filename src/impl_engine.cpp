@@ -35,8 +35,11 @@
 #include "titan_dssp.h"
 #include "titan_hbond_kinetics.h"
 #include "titan_lj.h"
+#include "titan_msd.h"
+#include "titan_membrane.h"
 #include "titan_rg.h"
 #include "titan_rms.h"
+#include "titan_s2.h"
 #include "titan_sparse_graph_module.h"
 #include "titan_sg_streaming.h"
 #include "titan_sq.h"
@@ -153,16 +156,17 @@ prepare_pull_direct_snapshot(arguments &Arguments, de_arg &DE_arguments,
     ChunkStreamer snapshot_streamer(snapshot_args, output_info,
                                     Groups_from_index_file, force_f, executor,
                                     std::max<std::size_t>(1, num_threads));
-    auto stream_ok =
-        snapshot_streamer.open_streams(snapshot_args.pdb_name, name_lig, pro_in,
-                                       lig);
+    Multi_MOL snapshot_membrane(force_f);
+    auto stream_ok = snapshot_streamer.open_streams(
+        snapshot_args.pdb_name, name_lig, pro_in, lig, snapshot_membrane);
     if (!stream_ok)
       return std::unexpected(stream_ok.error());
 
     const std::size_t chunk_size =
         std::max<std::size_t>(32, std::min<std::size_t>(256, num_threads * 32));
 
-    Multi_MOL chunk_pro(force_f), chunk_lig(force_f), chunk_wat(force_f);
+    Multi_MOL chunk_pro(force_f), chunk_lig(force_f), chunk_wat(force_f),
+        chunk_membrane(force_f);
     MOL last_pro_frame, last_lig_frame;
     bool have_last_frame = false;
     bool have_last_lig_frame = snapshot_args.flag_nocal;
@@ -170,7 +174,7 @@ prepare_pull_direct_snapshot(arguments &Arguments, de_arg &DE_arguments,
 
     while (true) {
       auto chunk_status = snapshot_streamer.read_next_chunk(
-          chunk_size, chunk_pro, chunk_lig, chunk_wat);
+          chunk_size, chunk_pro, chunk_lig, chunk_wat, chunk_membrane);
       if (!chunk_status)
         return std::unexpected(chunk_status.error());
       if (chunk_status.value() == 0)
@@ -188,6 +192,7 @@ prepare_pull_direct_snapshot(arguments &Arguments, de_arg &DE_arguments,
       chunk_pro.m_mol.clear();
       chunk_lig.m_mol.clear();
       chunk_wat.m_mol.clear();
+      chunk_membrane.m_mol.clear();
     }
 
     if (!have_last_frame) {
@@ -531,7 +536,7 @@ int engine(arguments &Arguments) {
   vector<string> input_line, cscd_out_name;
   all_cscd cscd_out_dis;
   info_ener_res infoener_res;
-  std::vector<MOL> saved_pro_frame0, saved_lig_frame0;
+  std::vector<MOL> saved_pro_frame0, saved_lig_frame0, saved_membrane_frame0;
   bool topo_2_is_open{Arguments.flag_topo_2},
       topo_is_open(Arguments.flag_topo_1), status{true};
 
@@ -690,8 +695,16 @@ int engine(arguments &Arguments) {
     append_module_label(active_modules, "SQ");
   if (Arguments.cmap.flag_cmap)
     append_module_label(active_modules, "CMap");
+  if (Arguments.dihedral.flag_dihedral)
+    append_module_label(active_modules, "Dihedral");
   if (Arguments.qnative.flag_qnative)
     append_module_label(active_modules, "QNative");
+  if (Arguments.msd.flag_msd)
+    append_module_label(active_modules, "MSD");
+  if (Arguments.membrane.flag_membrane)
+    append_module_label(active_modules, "Membrane");
+  if (Arguments.s2.flag_s2)
+    append_module_label(active_modules, "S2");
   if (Arguments.rg.flag_rg2)
     append_module_label(active_modules, "Rg2");
   if (Arguments.rms.flag_rms)
@@ -762,6 +775,8 @@ int engine(arguments &Arguments) {
         auto_pbc_modules.push_back("RMSD/RMSF");
       if (Arguments.rg.flag_rg2)
         auto_pbc_modules.push_back("Rg2");
+      if (Arguments.msd.flag_msd)
+        auto_pbc_modules.push_back("MSD");
       if (Arguments.lj.flag_lj)
         auto_pbc_modules.push_back("LJ");
       if (Arguments.sq.flag_sq)
@@ -822,6 +837,9 @@ int engine(arguments &Arguments) {
   TitanContactMapAnalyzer cmap_analyzer;
   TitanDihedralAnalyzer dihedral_analyzer;
   TitanQNativeAnalyzer qnative_analyzer;
+  TitanMSDAnalyzer msd_analyzer;
+  TitanMembraneAnalyzer membrane_analyzer;
+  TitanS2Analyzer s2_analyzer;
   TitanRgAnalyzer rg_analyzer;
   TitanRMSAnalyzer rms_analyzer;
   std::vector<std::string> lj_feature_files;
@@ -833,7 +851,8 @@ int engine(arguments &Arguments) {
   DCCMNetwork dccm_analyzer;
   std::chrono::milliseconds time_gbsa{0}, time_cas{0}, time_dssp{0},
       time_hbk{0}, time_lj{0}, time_sq{0}, time_cmap{0},
-      time_dihedral{0}, time_qnative{0}, time_rg{0}, time_rms{0},
+      time_dihedral{0}, time_qnative{0}, time_msd{0}, time_rg{0}, time_rms{0},
+      time_membrane{0}, time_s2{0},
       time_network{0}, time_tda{0}, time_llps{0}, time_tica{0};
   std::unique_ptr<TitanLLPSCluster> dbscan_llps;
   EnergyDecompositionProvider llps_energy_provider;
@@ -857,6 +876,9 @@ int engine(arguments &Arguments) {
   cmap_analyzer.configure(Arguments.cmap);
   dihedral_analyzer.configure(Arguments.dihedral);
   qnative_analyzer.configure(Arguments.qnative);
+  msd_analyzer.configure(Arguments.msd);
+  membrane_analyzer.configure(Arguments.membrane);
+  s2_analyzer.configure(Arguments.s2);
   rg_analyzer.configure(Arguments.rg);
   rms_analyzer.configure(Arguments.rms);
   pbe_analyzer.configure(Arguments);
@@ -868,7 +890,8 @@ int engine(arguments &Arguments) {
       time_new_emap_other{}, time_avg_emap{}, time_contact{},
       time_input_init{}, time_input_stream{},
       time_cscd{0}, time_water{0}, time_na{0}, time_pbe{0};
-  Multi_MOL pro_in(force_f), lig(force_f), water_traj(force_f);
+  Multi_MOL pro_in(force_f), lig(force_f), water_traj(force_f),
+      membrane_traj(force_f);
   bool topo_initialized = false;
   bool charge_initialized = false;
 
@@ -912,6 +935,9 @@ int engine(arguments &Arguments) {
     const auto time_cmap_base = time_cmap;
     const auto time_dihedral_base = time_dihedral;
     const auto time_qnative_base = time_qnative;
+    const auto time_msd_base = time_msd;
+    const auto time_membrane_base = time_membrane;
+    const auto time_s2_base = time_s2;
     const auto time_rg_base = time_rg;
     const auto time_rms_base = time_rms;
     const auto time_network_base = time_network;
@@ -1005,7 +1031,7 @@ int engine(arguments &Arguments) {
     if (!topo_initialized) {
       auto init_result = initialize_topology_streaming(
           Arguments, log, name_pro, name_lig, force_f, input_name, input_line,
-          topo_2_is_open, topo_is_open, pro_in, lig, water_traj,
+          topo_2_is_open, topo_is_open, pro_in, lig, water_traj, membrane_traj,
           Groups_from_index_file, parameter, amine, info_output);
 
       if (!init_result) {
@@ -1036,10 +1062,13 @@ int engine(arguments &Arguments) {
         if (!saved_lig_frame0.empty())
           lig.m_mol = saved_lig_frame0;
         water_traj.m_mol.clear();
+        if (!saved_membrane_frame0.empty())
+          membrane_traj.m_mol = saved_membrane_frame0;
       } else {
         pro_in.m_mol.clear();
         lig.m_mol.clear();
         water_traj.m_mol.clear();
+        membrane_traj.m_mol.clear();
 
         // Reload coordinates-only from new file (flag_raw=1 = coords only, no
         // topo)
@@ -1051,8 +1080,10 @@ int engine(arguments &Arguments) {
           lig.info.clear();
           if (Arguments.n_wat >= 0)
             water_traj.info.clear();
+          if (Arguments.needs_membrane_coordinates())
+            membrane_traj.info.clear();
           const int r =
-              pre_proc_pdb(force_f, pro_in, lig, water_traj,
+              pre_proc_pdb(force_f, pro_in, lig, water_traj, membrane_traj,
                            Groups_from_index_file, -1, Arguments, amine,
                            info_output);
           if (r != 0) {
@@ -1481,7 +1512,7 @@ int engine(arguments &Arguments) {
     }
     if (Arguments.qnative.flag_qnative) {
       Multi_MOL qnative_ref_pro(force_f), qnative_ref_lig(force_f),
-          qnative_ref_water(force_f);
+          qnative_ref_water(force_f), qnative_ref_membrane(force_f);
       const Multi_MOL *qnative_ref_pro_ptr = &pro_in;
       const Multi_MOL *qnative_mol2 =
           Arguments.needs_mol2_for_qnative_interface() ? &lig : nullptr;
@@ -1493,7 +1524,8 @@ int engine(arguments &Arguments) {
         qnative_ref_args.traj_file.clear();
         const int ref_status = pre_proc_pdb(
             force_f, qnative_ref_pro, qnative_ref_lig, qnative_ref_water,
-            Groups_from_index_file, 0, qnative_ref_args, amine, info_output);
+            qnative_ref_membrane, Groups_from_index_file, 0, qnative_ref_args,
+            amine, info_output);
         if (ref_status != 0 || qnative_ref_pro.m_mol.empty()) {
           TitanUI::print_error("QNative: failed to load -qnative-ref " +
                                Arguments.qnative.ref_file);
@@ -1528,6 +1560,32 @@ int engine(arguments &Arguments) {
            Arguments.needs_mol2_for_qnative_interface())
               ? &lig
               : nullptr);
+    }
+    if (Arguments.msd.flag_msd) {
+      try {
+        msd_analyzer.init(pro_in,
+                          Arguments.needs_mol2_for_msd() ? &lig : nullptr,
+                          Arguments, log);
+      } catch (const std::exception &e) {
+        TitanUI::print_error(e.what());
+        return 1;
+      }
+    }
+    if (Arguments.membrane.flag_membrane) {
+      try {
+        membrane_analyzer.init(membrane_traj, log);
+      } catch (const std::exception &e) {
+        TitanUI::print_error(e.what());
+        return 1;
+      }
+    }
+    if (Arguments.s2.flag_s2) {
+      try {
+        s2_analyzer.init(pro_in, Arguments, log);
+      } catch (const std::exception &e) {
+        TitanUI::print_error(e.what());
+        return 1;
+      }
     }
     if (Arguments.rg.flag_rg2) {
       rg_analyzer.init(pro_in, lig, Arguments, log);
@@ -1612,7 +1670,8 @@ int engine(arguments &Arguments) {
     }
     streamer.set_frame0_positions(pos_pro, pos_lig);
 
-    auto stream_ok = streamer.open_streams(name_pro, name_lig, pro_in, lig);
+    auto stream_ok =
+        streamer.open_streams(name_pro, name_lig, pro_in, lig, membrane_traj);
     if (!stream_ok) {
       TitanUI::print_error(stream_ok.error());
       return 1;
@@ -1640,6 +1699,11 @@ int engine(arguments &Arguments) {
                : 0) +
           (Arguments.n_wat >= 0
                ? Groups_from_index_file.groups_atom_number(Arguments.n_wat)
+               : 0) +
+          (Arguments.needs_membrane_coordinates() &&
+                   Arguments.membrane.resolved_group >= 0
+               ? Groups_from_index_file.groups_atom_number(
+                     static_cast<size_t>(Arguments.membrane.resolved_group))
                : 0);
 
       // 3 coordinates * 8 bytes, multiplied by a safety factor to account for
@@ -2120,6 +2184,12 @@ int engine(arguments &Arguments) {
     append_module_label(resolved_modules, "Dihedral");
   if (qnative_analyzer.enabled())
     append_module_label(resolved_modules, "QNative");
+  if (msd_analyzer.enabled())
+    append_module_label(resolved_modules, "MSD");
+  if (membrane_analyzer.enabled())
+    append_module_label(resolved_modules, "Membrane");
+  if (s2_analyzer.enabled())
+    append_module_label(resolved_modules, "S2");
   if (rg_analyzer.enabled())
     append_module_label(resolved_modules, "Rg2");
   if (rms_analyzer.enabled())
@@ -2186,6 +2256,12 @@ int engine(arguments &Arguments) {
       append_module_label(streaming_modules, "Dihedral");
     if (qnative_analyzer.enabled())
       append_module_label(streaming_modules, "QNative");
+    if (msd_analyzer.enabled())
+      append_module_label(streaming_modules, "MSD");
+    if (membrane_analyzer.enabled())
+      append_module_label(streaming_modules, "Membrane");
+    if (s2_analyzer.enabled())
+      append_module_label(streaming_modules, "S2");
     if (rg_analyzer.enabled())
       append_module_label(streaming_modules, "Rg2");
     if (rms_analyzer.enabled())
@@ -2231,6 +2307,7 @@ int engine(arguments &Arguments) {
     // ========================================================================
     saved_pro_frame0 = pro_in.m_mol;
     saved_lig_frame0 = lig.m_mol;
+    saved_membrane_frame0 = membrane_traj.m_mol;
     hb_rec_1traj.clear_frame();
     hb_lg_1traj.clear_frame();
 
@@ -2255,12 +2332,13 @@ int engine(arguments &Arguments) {
     while (is_streaming) {
       const auto start_input_stream = std::chrono::steady_clock::now();
       auto expected_frames =
-          streamer.read_next_chunk(CHUNK_SIZE, pro_in, lig, water_traj);
+          streamer.read_next_chunk(CHUNK_SIZE, pro_in, lig, water_traj,
+                                   membrane_traj);
       time_input_stream += std::chrono::duration_cast<milliseconds>(
           std::chrono::steady_clock::now() - start_input_stream);
       if (!expected_frames) {
         TitanUI::print_error(expected_frames.error());
-        break;
+        return 1;
       }
 
       size_t chunk_num_snaps = expected_frames.value();
@@ -2295,11 +2373,23 @@ int engine(arguments &Arguments) {
       }
 
       auto start_pbc = std::chrono::steady_clock::now();
+      const bool have_mol2_frames =
+          !pro_in.m_mol.empty() && lig.m_mol.size() >= pro_in.m_mol.size() &&
+          std::all_of(pro_in.m_mol.begin(), pro_in.m_mol.end(),
+                      [&](const MOL &frame) {
+                        const size_t index =
+                            static_cast<size_t>(&frame - pro_in.m_mol.data());
+                        return lig.m_mol[index].size() != 0;
+                      });
+      const auto align_loaded_complex = [&]() {
+        if (have_mol2_frames)
+          align_complex(pro_in, lig, 0, 0);
+      };
       if (Arguments.pbc.solv_pbctopo) {
         pro_in.solve_pbc_pbctopo(lig, Arguments, &executor);
       } else if (Arguments.pbc.solv_pbcn) {
         pro_in.solv_pbc_pbcn(lig, Arguments);
-        align_complex(pro_in, lig, 0, 0);
+        align_loaded_complex();
       } else if (Arguments.pbc.solv_pbc_int == 1) {
         if (Arguments.pbc.chain_ref == -2) {
           executor.parallel_do(num_threads, [&](size_t worker_id) {
@@ -2308,25 +2398,26 @@ int engine(arguments &Arguments) {
         }
         if (Arguments.pbc.chain_ref > -2) {
           pro_in.solve_pbc_new(lig, Arguments, amine);
-          align_complex(pro_in, lig, 0, 0);
+          align_loaded_complex();
         }
       }
       if (Arguments.pbc.solv_pbc == 1) {
         executor.parallel_do(num_threads, [&](size_t worker_id) {
           pro_in.pbc_prob(lig, worker_id, num_threads);
         });
-        align_complex(pro_in, lig, 0, 0);
+        align_loaded_complex();
       }
       time_solve_pbc += std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now() - start_pbc);
 
       // ── NOCAL MODE: PBC only → write PDB/PQR → skip energy ──────────
       if (Arguments.flag_nocal) {
-        // Use align_to_box (position atoms within box) instead of
-        // align_complex (which aligns two molecules for interaction calc)
+        // Keep a loaded two-molecule system together. Single-molecule nocal
+        // workflows still center mol1 independently.
         if (Arguments.pbc.solv_pbcn || Arguments.pbc.solv_pbctopo ||
             Arguments.pbc.solv_pbc_int)
-          pro_in.align_to_box();
+          if (!have_mol2_frames)
+            pro_in.align_to_box();
 
         // PBC clustering (non-int mode)
         if (Arguments.pbc.solv_pbc_clust && !Arguments.pbc.solv_pbc_int)
@@ -2456,6 +2547,33 @@ int engine(arguments &Arguments) {
             time_qnative +=
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - start_qnative);
+          }
+
+          if (msd_analyzer.enabled()) {
+            auto start_msd = std::chrono::steady_clock::now();
+            const Multi_MOL *msd_mol2 =
+                Arguments.needs_mol2_for_msd() ? &lig : nullptr;
+            msd_analyzer.process_frame(pro_in, msd_mol2, chunk_snap_idx,
+                                       executor);
+            time_msd += std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_msd);
+          }
+
+          if (membrane_analyzer.enabled() &&
+              chunk_snap_idx < membrane_traj.m_mol.size()) {
+            auto start_membrane = std::chrono::steady_clock::now();
+            membrane_analyzer.process_frame(membrane_traj, chunk_snap_idx,
+                                            executor);
+            time_membrane +=
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start_membrane);
+          }
+
+          if (s2_analyzer.enabled()) {
+            auto start_s2 = std::chrono::steady_clock::now();
+            s2_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
+            time_s2 += std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_s2);
           }
 
           if (rg_analyzer.enabled()) {
@@ -3396,6 +3514,33 @@ int engine(arguments &Arguments) {
                   std::chrono::steady_clock::now() - start_qnative);
         }
 
+        if (msd_analyzer.enabled()) {
+          auto start_msd = std::chrono::steady_clock::now();
+          const Multi_MOL *msd_mol2 =
+              Arguments.needs_mol2_for_msd() ? &lig : nullptr;
+          msd_analyzer.process_frame(pro_in, msd_mol2, chunk_snap_idx,
+                                     executor);
+          time_msd += std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - start_msd);
+        }
+
+        if (membrane_analyzer.enabled() &&
+            chunk_snap_idx < membrane_traj.m_mol.size()) {
+          auto start_membrane = std::chrono::steady_clock::now();
+          membrane_analyzer.process_frame(membrane_traj, chunk_snap_idx,
+                                          executor);
+          time_membrane +=
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - start_membrane);
+        }
+
+        if (s2_analyzer.enabled()) {
+          auto start_s2 = std::chrono::steady_clock::now();
+          s2_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
+          time_s2 += std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - start_s2);
+        }
+
         if (hbk_analyzer.enabled()) {
           auto start_hbk = std::chrono::steady_clock::now();
           size_t lig_snap_hbk = (lig.m_mol.size() > 1) ? chunk_snap_idx : 0;
@@ -3812,6 +3957,7 @@ int engine(arguments &Arguments) {
         !saved_pro_frame0.empty()) {
       pro_in.m_mol = saved_pro_frame0;
       lig.m_mol = saved_lig_frame0;
+      membrane_traj.m_mol = saved_membrane_frame0;
 
       if (dssp_mol1_analyzer.enabled() ||
           (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled())) {
@@ -3857,11 +4003,38 @@ int engine(arguments &Arguments) {
         consumed_reference_structural_frame = true;
       }
 
+      if (msd_analyzer.enabled()) {
+        auto start_msd = std::chrono::steady_clock::now();
+        const Multi_MOL *msd_mol2 =
+            Arguments.needs_mol2_for_msd() ? &lig : nullptr;
+        msd_analyzer.process_frame(pro_in, msd_mol2, 0, executor);
+        time_msd += std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_msd);
+        consumed_reference_structural_frame = true;
+      }
+
       if (dihedral_analyzer.enabled()) {
         auto start_dihedral = std::chrono::steady_clock::now();
         dihedral_analyzer.process_frame(pro_in, 0, executor);
         time_dihedral += std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start_dihedral);
+        consumed_reference_structural_frame = true;
+      }
+
+      if (membrane_analyzer.enabled() && !membrane_traj.m_mol.empty()) {
+        auto start_membrane = std::chrono::steady_clock::now();
+        membrane_analyzer.process_frame(membrane_traj, 0, executor);
+        time_membrane +=
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_membrane);
+        consumed_reference_structural_frame = true;
+      }
+
+      if (s2_analyzer.enabled()) {
+        auto start_s2 = std::chrono::steady_clock::now();
+        s2_analyzer.process_frame(pro_in, 0, executor);
+        time_s2 += std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_s2);
         consumed_reference_structural_frame = true;
       }
     }
@@ -3978,6 +4151,22 @@ int engine(arguments &Arguments) {
       qnative_analyzer.finalize_trajectory(base_dir, info_output, Arguments,
                                            input_line, input_name, log);
     }
+    if (msd_analyzer.enabled()) {
+      const std::size_t traj_index =
+          input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
+      const std::size_t path_index =
+          (Arguments.flag_separation_results && traj_index < paths.get_size())
+              ? traj_index
+              : 0;
+      const std::string base_dir = paths.get_path(path_index);
+      try {
+        msd_analyzer.finalize_trajectory(base_dir, info_output, Arguments,
+                                         input_line, input_name, executor, log);
+      } catch (const std::exception &e) {
+        TitanUI::print_error(e.what());
+        return 1;
+      }
+    }
     if (dihedral_analyzer.enabled()) {
       const std::size_t traj_index =
           input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
@@ -3988,6 +4177,28 @@ int engine(arguments &Arguments) {
       const std::string base_dir = paths.get_path(path_index);
       dihedral_analyzer.finalize_trajectory(base_dir, info_output, Arguments,
                                             input_line, input_name, log);
+    }
+    if (membrane_analyzer.enabled()) {
+      const std::size_t traj_index =
+          input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
+      const std::size_t path_index =
+          (Arguments.flag_separation_results && traj_index < paths.get_size())
+              ? traj_index
+              : 0;
+      const std::string base_dir = paths.get_path(path_index);
+      membrane_analyzer.finalize_trajectory(base_dir, info_output, Arguments,
+                                            input_line, input_name, log);
+    }
+    if (s2_analyzer.enabled()) {
+      const std::size_t traj_index =
+          input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
+      const std::size_t path_index =
+          (Arguments.flag_separation_results && traj_index < paths.get_size())
+              ? traj_index
+              : 0;
+      const std::string base_dir = paths.get_path(path_index);
+      s2_analyzer.finalize_trajectory(base_dir, info_output, Arguments,
+                                      input_line, input_name, executor, log);
     }
     if (hbk_analyzer.enabled()) {
       const std::size_t traj_index =
@@ -4170,6 +4381,12 @@ int engine(arguments &Arguments) {
                       (time_dihedral - time_dihedral_base).count() / 1000.0);
     TitanUI::log_time(log, "QNative Analysis",
                       (time_qnative - time_qnative_base).count() / 1000.0);
+    TitanUI::log_time(log, "MSD Analysis",
+                      (time_msd - time_msd_base).count() / 1000.0);
+    TitanUI::log_time(log, "Membrane Analysis",
+                      (time_membrane - time_membrane_base).count() / 1000.0);
+    TitanUI::log_time(log, "S2 Analysis",
+                      (time_s2 - time_s2_base).count() / 1000.0);
     TitanUI::log_time(log, "RG2 Analysis",
                       (time_rg - time_rg_base).count() / 1000.0);
     TitanUI::log_time(log, "RMSD/RMSF Analysis",
@@ -4218,6 +4435,9 @@ int engine(arguments &Arguments) {
         (time_cmap - time_cmap_base).count() / 1000.0 +
         (time_dihedral - time_dihedral_base).count() / 1000.0 +
         (time_qnative - time_qnative_base).count() / 1000.0 +
+        (time_msd - time_msd_base).count() / 1000.0 +
+        (time_membrane - time_membrane_base).count() / 1000.0 +
+        (time_s2 - time_s2_base).count() / 1000.0 +
         (time_rg - time_rg_base).count() / 1000.0 +
         (time_rms - time_rms_base).count() / 1000.0 +
         (time_network - time_network_base).count() / 1000.0 +
@@ -4309,6 +4529,11 @@ int engine(arguments &Arguments) {
       (input_line.size() > 1 || Arguments.flag_listfile ||
        Arguments.flag_pattern_input || Arguments.flag_xdr)) {
     qnative_analyzer.finalize_all(".", info_output, log);
+  }
+  if (s2_analyzer.enabled() &&
+      (input_line.size() > 1 || Arguments.flag_listfile ||
+       Arguments.flag_pattern_input || Arguments.flag_xdr)) {
+    s2_analyzer.finalize_all(".", info_output, log);
   }
 
   if (status == false && input_name == Arguments.b_input) {

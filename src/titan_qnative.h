@@ -4,6 +4,7 @@
 #include "Multi_MOL.h"
 #include "BoxMatrix.h"
 #include "arguments.h"
+#include "titan_contact_geometry.h"
 #include "titan_contact_kernels.h"
 #include "titan_contact_primitives.h"
 
@@ -49,19 +50,6 @@ public:
   }
 
 private:
-  struct ResidueSelection {
-    titan_contact::ResidueKey residue;
-    std::vector<std::size_t> atoms;
-    std::vector<std::size_t> selected_atoms;
-  };
-
-  struct ContactPoint {
-    titan_contact::ResidueKey residue;
-    double x{};
-    double y{};
-    double z{};
-  };
-
   struct NativeContact {
     titan_contact::ResiduePairKey key;
     std::size_t row_index{};
@@ -83,18 +71,12 @@ private:
 
   void reset_trajectory_state();
   void accumulate_pooled_state();
-  void build_selections(const Multi_MOL &mol, std::uint8_t molecule,
-                        std::vector<ResidueSelection> &selections,
-                        std::vector<titan_contact::ResidueKey> &residues);
-  bool build_points(const Multi_MOL &mol, std::size_t snap_idx,
-                    const std::vector<ResidueSelection> &selections,
-                    std::vector<ContactPoint> &points) const;
   [[nodiscard]] bool has_valid_box(const box &frame_box) const noexcept;
   [[nodiscard]] bool pair_allowed(const titan_contact::ResidueKey &lhs,
                                   const titan_contact::ResidueKey &rhs) const;
   [[nodiscard]] double native_pair_distance(
-      const std::vector<ContactPoint> &row_points,
-      const std::vector<ContactPoint> &col_points,
+      const std::vector<titan_contact_geometry::ContactPoint> &row_points,
+      const std::vector<titan_contact_geometry::ContactPoint> &col_points,
       const titan_contact::ResiduePairKey &key, const BoxMatrix &box_matrix) const;
   void build_native_contacts_from_reference(const Multi_MOL &mol1,
                                             const Multi_MOL *mol2);
@@ -133,14 +115,14 @@ private:
   std::uint64_t skipped_invalid_box_frames_{0};
   std::uint64_t skipped_incomplete_frames_{0};
 
-  std::vector<ResidueSelection> row_selections_;
-  std::vector<ResidueSelection> col_selections_;
-  std::vector<ResidueSelection> trajectory_row_selections_;
-  std::vector<ResidueSelection> trajectory_col_selections_;
+  titan_contact_geometry::ContactGeometryCache row_geometry_;
+  titan_contact_geometry::ContactGeometryCache col_geometry_;
+  titan_contact_geometry::ContactGeometryCache trajectory_row_geometry_;
+  titan_contact_geometry::ContactGeometryCache trajectory_col_geometry_;
   std::vector<titan_contact::ResidueKey> row_residues_;
   std::vector<titan_contact::ResidueKey> col_residues_;
-  std::vector<ContactPoint> row_points_scratch_;
-  std::vector<ContactPoint> col_points_scratch_;
+  std::vector<titan_contact_geometry::ContactPoint> row_points_scratch_;
+  std::vector<titan_contact_geometry::ContactPoint> col_points_scratch_;
   titan_contact_kernel::PointSoA row_soa_scratch_;
   titan_contact_kernel::PointSoA col_soa_scratch_;
   std::vector<NativeContact> native_contacts_;

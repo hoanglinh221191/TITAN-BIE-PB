@@ -1,5 +1,6 @@
 #ifndef ARGUMENTS_H
 #define ARGUMENTS_H
+#include <cmath>
 #include <string>
 #include <vector>
 using namespace std;
@@ -478,6 +479,127 @@ struct DihedralArgs {
   bool export_tica{false};
 };
 
+struct MsdArgs {
+  bool flag_msd{false};
+  std::string selection{"mol1"};
+  std::string mode{"com"};
+  std::string maxlag{"auto"};
+  std::string fit_window{"auto"};
+  std::string pbc{"auto"};
+  bool rot{false};
+  std::string rot_fit_window{"auto"};
+};
+
+struct MembraneArgs {
+  bool flag_membrane{false};
+  std::string group{"auto"};
+  std::string lipids{"auto"};
+  std::string head{"auto"};
+  std::string tail{"auto"};
+  std::string normal{"auto"};
+  std::string grid{"auto"};
+  std::string leaflet{"auto"};
+  std::string leaflet_file{};
+  int flipflop_persistence{3};
+  int resolved_group{-1};
+
+  std::string validation_error() const {
+    const auto is_nonnegative_integer = [](const std::string &value) {
+      if (value.empty())
+        return false;
+      for (const char c : value) {
+        if (c < '0' || c > '9')
+          return false;
+      }
+      return true;
+    };
+    const auto is_positive_integer = [&](const std::string &value) {
+      if (!is_nonnegative_integer(value))
+        return false;
+      return value.find_first_not_of('0') != std::string::npos;
+    };
+
+    if (group != "auto" && !is_nonnegative_integer(group))
+      return "-membrane-group must be auto or an integer >= 0.";
+    if (normal != "auto" && normal != "x" && normal != "y" && normal != "z")
+      return "-membrane-normal must be one of auto, x, y, z.";
+    if (grid != "auto") {
+      const auto comma = grid.find(',');
+      if (comma == std::string::npos ||
+          grid.find(',', comma + 1) != std::string::npos ||
+          !is_positive_integer(grid.substr(0, comma)) ||
+          !is_positive_integer(grid.substr(comma + 1))) {
+        return "-membrane-grid must be auto or two positive integers Nx,Ny.";
+      }
+    }
+    if (leaflet != "auto" && leaflet != "upper-lower" && leaflet != "user")
+      return "-membrane-leaflet must be one of auto, upper-lower, user.";
+    if (flipflop_persistence < 1)
+      return "-membrane-flipflop-persistence must be >= 1.";
+    if (leaflet == "user" && leaflet_file.empty())
+      return "-membrane-leaflet=user requires -membrane-leaflet-file.";
+    if (leaflet != "user" && !leaflet_file.empty())
+      return "-membrane-leaflet-file is valid only with -membrane-leaflet=user.";
+    return {};
+  }
+};
+
+struct S2Args {
+  bool flag_s2{false};
+  std::string vector{"both"};
+  std::string align{"rms"};
+  std::string maxlag{"auto"};
+  std::string fit_window{"auto"};
+  std::string residues{"all"};
+  bool bfactor_pdb{false};
+
+  std::string validation_error() const {
+    const auto is_positive_integer = [](const std::string &value) {
+      if (value.empty())
+        return false;
+      for (const char c : value) {
+        if (c < '0' || c > '9')
+          return false;
+      }
+      return value.find_first_not_of('0') != std::string::npos;
+    };
+    const auto parse_double = [](const std::string &value, double &parsed) {
+      try {
+        size_t parsed_chars = 0;
+        parsed = std::stod(value, &parsed_chars);
+        return parsed_chars == value.size() && std::isfinite(parsed);
+      } catch (...) {
+        return false;
+      }
+    };
+
+    if (vector != "nh" && vector != "ca-c" && vector != "both")
+      return "-s2-vector must be one of nh, ca-c, both.";
+    if (align == "provided")
+      return "-s2-align=provided is not supported in v1; use rms for "
+             "first-frame alignment or none.";
+    if (align != "rms" && align != "none")
+      return "-s2-align must be one of rms, none.";
+    if (maxlag != "auto" && !is_positive_integer(maxlag))
+      return "-s2-maxlag must be auto or an integer >= 1.";
+    if (fit_window != "auto") {
+      const auto comma = fit_window.find(',');
+      double tmin = 0.0;
+      double tmax = 0.0;
+      if (comma == std::string::npos ||
+          fit_window.find(',', comma + 1) != std::string::npos ||
+          !parse_double(fit_window.substr(0, comma), tmin) ||
+          !parse_double(fit_window.substr(comma + 1), tmax) ||
+          !(tmax > tmin)) {
+        return "-s2-fit-window must be auto or tmin,tmax with tmax > tmin.";
+      }
+    }
+    if (residues.empty())
+      return "-s2-residues must be 'all' or a non-empty residue list.";
+    return {};
+  }
+};
+
 struct UmapArgs {
   bool flag_umap{false};
   int umap_neighbors{15};
@@ -606,6 +728,9 @@ public:
   CMapArgs cmap;
   QNativeArgs qnative;
   DihedralArgs dihedral;
+  MsdArgs msd;
+  MembraneArgs membrane;
+  S2Args s2;
   UmapArgs umap;
   DsspArgs dssp;
   RmsArgs rms;
@@ -645,7 +770,7 @@ public:
       flag_angle_dipole_efield, flag_sep_opdb, heat_capacity_cp, flag_cal_vol,
       flag_elec_screening, flag_interchain_energy,
       flag_cal_mindis, mol_1_type_explicit, mol_2_type_explicit,
-      flag_cat_result_multi_infile, opdb_name_explicit;
+      flag_cat_result_multi_infile, opdb_name_explicit, flag_groups_explicit;
   int igb;
   int flag_pqr, flag_all_side_chain_ct, begin_mol_2,
       energy_map, force_map, argc, group_1, group_2,
@@ -732,6 +857,7 @@ public:
         flag_cal_mindis{false}, mol_1_type_explicit{false},
         mol_2_type_explicit{false},
         flag_cat_result_multi_infile{false}, opdb_name_explicit{false},
+        flag_groups_explicit{false},
         // Core ints
         igb{5},
         flag_pqr{2}, flag_all_side_chain_ct{1}, begin_mol_2{},
@@ -781,9 +907,21 @@ public:
   bool needs_mol2_for_qnative_interface() const {
     return qnative.flag_qnative && qnative.scope == "interface";
   }
+  bool needs_mol2_for_msd() const {
+    return msd.flag_msd && msd.selection == "mol2";
+  }
+  bool needs_membrane_coordinates() const {
+    return membrane.flag_membrane;
+  }
+  bool needs_mol2_for_nocal_output() const {
+    return flag_nocal &&
+           ((flag_groups_explicit && group_1 != group_2) ||
+            begin_mol_2 > 0 || com_dis_2mol != 0);
+  }
   bool needs_mol2_coordinates() const {
-    return !flag_nocal || needs_mol2_for_cmap_interface() ||
-           needs_mol2_for_qnative_interface();
+    return !flag_nocal || needs_mol2_for_nocal_output() ||
+           needs_mol2_for_cmap_interface() ||
+           needs_mol2_for_qnative_interface() || needs_mol2_for_msd();
   }
   string get_build_number() const;
   int parse_arguments(int argc, char **argv);

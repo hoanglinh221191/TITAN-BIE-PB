@@ -199,6 +199,11 @@ public:
     return pos.x.size() == pos.y.size() && pos.x.size() == pos.z.size();
   }
 
+  [[nodiscard]] bool topology_consistent(size_t topology_atom_count) const
+      noexcept {
+    return coordinates_consistent() && topology_atom_count == size();
+  }
+
   [[nodiscard]] size_t size() const noexcept { return pos.size(); }
 
   template <typename T> void com_pushback(T &&_com) {

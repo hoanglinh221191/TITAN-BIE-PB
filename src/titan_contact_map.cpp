@@ -120,127 +120,23 @@ void TitanContactMapAnalyzer::accumulate_pooled_state() {
   }
 }
 
-void TitanContactMapAnalyzer::build_selections(
-    const Multi_MOL &mol, std::uint8_t molecule,
-    std::vector<ResidueSelection> &selections,
-    std::vector<titan_contact::ResidueKey> &residues) {
-  selections.clear();
-  residues.clear();
-  std::unordered_map<std::size_t, std::size_t> chain_ordinals;
-  const std::size_t atom_count = mol.info.size();
-
-  for (std::size_t atom_idx = 0; atom_idx < atom_count; ++atom_idx) {
-    titan_contact::ResidueKey key =
-        titan_contact::residue_key_from_atom(mol.info[atom_idx], 0, molecule);
-    auto found = std::find_if(selections.begin(), selections.end(),
-                              [&](const ResidueSelection &item) {
-                                return item.residue == key;
-                              });
-    if (found == selections.end()) {
-      key.ordinal = ++chain_ordinals[key.chainnum];
-      selections.push_back(ResidueSelection{key, {}, {}});
-      found = std::prev(selections.end());
-    }
-    found->atoms.push_back(atom_idx);
-    if (mode_ == titan_contact::ContactMode::SidechainCOM) {
-      if (mol.info[atom_idx].is_side_chain())
-        found->selected_atoms.push_back(atom_idx);
-    } else if (titan_contact::is_selected_contact_atom(mol.info[atom_idx],
-                                                        mode_)) {
-      found->selected_atoms.push_back(atom_idx);
-    }
-  }
-
-  if (mode_ != titan_contact::ContactMode::SidechainCOM) {
-    selections.erase(
-        std::remove_if(selections.begin(), selections.end(),
-                       [](const ResidueSelection &item) {
-                         return item.selected_atoms.empty();
-                       }),
-        selections.end());
-  }
-  for (const ResidueSelection &selection : selections)
-    residues.push_back(selection.residue);
-}
-
-bool TitanContactMapAnalyzer::build_points(
-    const Multi_MOL &mol, std::size_t snap_idx,
-    const std::vector<ResidueSelection> &selections,
-    std::vector<ContactPoint> &points) const {
-  points.clear();
-  if (snap_idx >= mol.m_mol.size())
-    return false;
-  const MOL &frame = mol.m_mol[snap_idx];
-  const std::size_t atom_limit =
-      std::min({frame.pos.x.size(), frame.pos.y.size(), frame.pos.z.size()});
-
-  if (mode_ == titan_contact::ContactMode::SidechainCOM) {
-    points.reserve(selections.size());
-    for (const ResidueSelection &selection : selections) {
-      const auto &indices = selection.selected_atoms.empty()
-                                ? selection.atoms
-                                : selection.selected_atoms;
-      double x = 0.0;
-      double y = 0.0;
-      double z = 0.0;
-      double total_mass = 0.0;
-      double unit_x = 0.0;
-      double unit_y = 0.0;
-      double unit_z = 0.0;
-      std::size_t valid_atoms = 0;
-      for (const std::size_t atom_idx : indices) {
-        if (atom_idx >= atom_limit || atom_idx >= mol.parameters.size())
-          return false;
-        ++valid_atoms;
-        unit_x += frame.pos.x[atom_idx];
-        unit_y += frame.pos.y[atom_idx];
-        unit_z += frame.pos.z[atom_idx];
-        const double mass = mol.parameters.mass[atom_idx];
-        if (mass > 0.0) {
-          x += frame.pos.x[atom_idx] * mass;
-          y += frame.pos.y[atom_idx] * mass;
-          z += frame.pos.z[atom_idx] * mass;
-          total_mass += mass;
-        }
-      }
-      if (valid_atoms == 0)
-        return false;
-      if (!(total_mass > 0.0)) {
-        const double denom = static_cast<double>(valid_atoms);
-        x = unit_x / denom;
-        y = unit_y / denom;
-        z = unit_z / denom;
-        total_mass = 1.0;
-      }
-      points.push_back(ContactPoint{selection.residue, x / total_mass,
-                                    y / total_mass, z / total_mass});
-    }
-    return true;
-  }
-
-  for (const ResidueSelection &selection : selections) {
-    for (const std::size_t atom_idx : selection.selected_atoms) {
-      if (atom_idx >= atom_limit)
-        return false;
-      points.push_back(ContactPoint{selection.residue, frame.pos.x[atom_idx],
-                                    frame.pos.y[atom_idx],
-                                    frame.pos.z[atom_idx]});
-    }
-  }
-  return true;
-}
-
 void TitanContactMapAnalyzer::init(const Multi_MOL &mol1, const Multi_MOL *mol2,
                                    const arguments &, std::fstream &log) {
-  build_selections(mol1, 1, row_selections_, row_residues_);
+  if (!row_geometry_.build(mol1, 1, mode_))
+    throw std::invalid_argument(
+        "CMap: failed to build molecule 1 contact geometry.");
+  row_residues_ = row_geometry_.residues();
   atom_count_ = mol1.info.size();
   if (scope_ == "interface") {
     if (mol2 == nullptr || mol2->info.empty())
       throw std::invalid_argument(
           "CMap: -cmap-scope=interface requires a valid molecule 2/group 2.");
-    build_selections(*mol2, 2, col_selections_, col_residues_);
+    if (!col_geometry_.build(*mol2, 2, mode_))
+      throw std::invalid_argument(
+          "CMap: failed to build molecule 2 contact geometry.");
+    col_residues_ = col_geometry_.residues();
   } else {
-    col_selections_ = row_selections_;
+    col_geometry_ = row_geometry_;
     col_residues_ = row_residues_;
   }
 
@@ -314,9 +210,9 @@ void TitanContactMapAnalyzer::process_frame(const Multi_MOL &mol1,
 
   auto &row_points = row_points_scratch_;
   auto &col_points = col_points_scratch_;
-  if (!build_points(mol1, snap_idx, row_selections_, row_points) ||
+  if (!row_geometry_.build_points(mol1, snap_idx, row_points) ||
       !(scope_ == "interface"
-            ? build_points(*mol2, snap_idx, col_selections_, col_points)
+            ? col_geometry_.build_points(*mol2, snap_idx, col_points)
             : (col_points = row_points, true))) {
     ++skipped_incomplete_frames_;
     return;
@@ -337,7 +233,7 @@ void TitanContactMapAnalyzer::process_frame(const Multi_MOL &mol1,
   row_soa.x.reserve(row_points.size());
   row_soa.y.reserve(row_points.size());
   row_soa.z.reserve(row_points.size());
-  for (const ContactPoint &point : row_points) {
+  for (const titan_contact_geometry::ContactPoint &point : row_points) {
     row_soa.x.push_back(point.x);
     row_soa.y.push_back(point.y);
     row_soa.z.push_back(point.z);
@@ -348,7 +244,7 @@ void TitanContactMapAnalyzer::process_frame(const Multi_MOL &mol1,
   col_soa.x.reserve(col_points.size());
   col_soa.y.reserve(col_points.size());
   col_soa.z.reserve(col_points.size());
-  for (const ContactPoint &point : col_points) {
+  for (const titan_contact_geometry::ContactPoint &point : col_points) {
     col_soa.x.push_back(point.x);
     col_soa.y.push_back(point.y);
     col_soa.z.push_back(point.z);
@@ -363,8 +259,10 @@ void TitanContactMapAnalyzer::process_frame(const Multi_MOL &mol1,
   auto consider_candidate =
       [&](std::size_t worker_id,
           const titan_contact_kernel::ContactCandidate &candidate) {
-        const ContactPoint &lhs = row_points[candidate.row];
-        const ContactPoint &rhs = col_points[candidate.col];
+        const titan_contact_geometry::ContactPoint &lhs =
+            row_points[candidate.row];
+        const titan_contact_geometry::ContactPoint &rhs =
+            col_points[candidate.col];
     if (!pair_allowed(lhs.residue, rhs.residue))
       return;
     const auto key = scope_ == "interface"

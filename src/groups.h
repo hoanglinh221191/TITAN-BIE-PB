@@ -5,6 +5,7 @@
 #include "miscellaneous.h"
 #include <set>
 #include <string>
+#include <optional>
 
 struct group_cal {
   bool is_continuous;
@@ -84,6 +85,7 @@ public:
       return 0;
   }
   std::string group_name(size_t group) const { return groups[group].name; }
+  std::optional<size_t> find_group_index(std::string_view name) const;
   bool is_cont(size_t group_index) { return groups[group_index].is_continuous; }
   int add_group_from_range(string group_name, size_t begin, size_t end) {
     if (groups.empty())

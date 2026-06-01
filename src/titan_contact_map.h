@@ -3,6 +3,7 @@
 
 #include "Multi_MOL.h"
 #include "arguments.h"
+#include "titan_contact_geometry.h"
 #include "titan_contact_kernels.h"
 #include "titan_contact_primitives.h"
 #include "titan_neighbor_grid.h"
@@ -44,19 +45,6 @@ public:
   [[nodiscard]] bool initialized() const noexcept { return initialized_; }
 
 private:
-  struct ResidueSelection {
-    titan_contact::ResidueKey residue;
-    std::vector<std::size_t> atoms;
-    std::vector<std::size_t> selected_atoms;
-  };
-
-  struct ContactPoint {
-    titan_contact::ResidueKey residue;
-    double x{};
-    double y{};
-    double z{};
-  };
-
   struct ContactRecord {
     titan_contact::ResiduePairKey key;
     std::uint64_t contact_frames{0};
@@ -67,12 +55,6 @@ private:
 
   void reset_trajectory_state();
   void accumulate_pooled_state();
-  void build_selections(const Multi_MOL &mol, std::uint8_t molecule,
-                        std::vector<ResidueSelection> &selections,
-                        std::vector<titan_contact::ResidueKey> &residues);
-  bool build_points(const Multi_MOL &mol, std::size_t snap_idx,
-                    const std::vector<ResidueSelection> &selections,
-                    std::vector<ContactPoint> &points) const;
   [[nodiscard]] std::size_t residue_index(
       const std::vector<titan_contact::ResidueKey> &residues,
       const titan_contact::ResidueKey &residue) const;
@@ -104,12 +86,12 @@ private:
   std::uint64_t skipped_invalid_box_frames_{0};
   std::uint64_t skipped_incomplete_frames_{0};
 
-  std::vector<ResidueSelection> row_selections_;
-  std::vector<ResidueSelection> col_selections_;
+  titan_contact_geometry::ContactGeometryCache row_geometry_;
+  titan_contact_geometry::ContactGeometryCache col_geometry_;
   std::vector<titan_contact::ResidueKey> row_residues_;
   std::vector<titan_contact::ResidueKey> col_residues_;
-  std::vector<ContactPoint> row_points_scratch_;
-  std::vector<ContactPoint> col_points_scratch_;
+  std::vector<titan_contact_geometry::ContactPoint> row_points_scratch_;
+  std::vector<titan_contact_geometry::ContactPoint> col_points_scratch_;
   titan_contact_kernel::PointSoA row_soa_scratch_;
   titan_contact_kernel::PointSoA col_soa_scratch_;
   std::vector<std::uint64_t> row_occupancy_frames_;

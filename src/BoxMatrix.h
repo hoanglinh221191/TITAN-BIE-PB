@@ -16,6 +16,31 @@ struct BoxMatrix {
   double m[3][3];
   double inv[3][3];
 
+  static bool valid_box(const box &b) noexcept {
+    const double a = b.get_a();
+    const double b_len = b.get_b();
+    const double c = b.get_c();
+    const double alpha = b.get_alpha() * M_PI / 180.0;
+    const double beta = b.get_beta() * M_PI / 180.0;
+    const double gamma = b.get_gamma() * M_PI / 180.0;
+    if (!std::isfinite(a) || !std::isfinite(b_len) || !std::isfinite(c) ||
+        !std::isfinite(alpha) || !std::isfinite(beta) ||
+        !std::isfinite(gamma) || !(a > 0.0) || !(b_len > 0.0) ||
+        !(c > 0.0) || !(alpha > 0.0 && alpha < M_PI) ||
+        !(beta > 0.0 && beta < M_PI) ||
+        !(gamma > 0.0 && gamma < M_PI))
+      return false;
+    const double sin_gamma = std::sin(gamma);
+    if (std::abs(sin_gamma) <= 1.0e-12)
+      return false;
+    const double m20 = c * std::cos(beta);
+    const double m21 =
+        c * (std::cos(alpha) - std::cos(beta) * std::cos(gamma)) /
+        sin_gamma;
+    const double m22_sq = c * c - m20 * m20 - m21 * m21;
+    return std::isfinite(m22_sq) && m22_sq > 1.0e-18;
+  }
+
   BoxMatrix(const box &b) {
     // v1: x-axis
     m[0][0] = b.get_a();
@@ -68,6 +93,7 @@ struct BoxMatrix {
     dz = m[0][2] * fx + m[1][2] * fy + m[2][2] * fz;
   }
 
+#if TITAN_COMPILED_WITH_AVX
   void apply_mic_avx(__m256d &dx, __m256d &dy, __m256d &dz) const {
     __m256d m00 = _mm256_set1_pd(inv[0][0]);
     __m256d m01 = _mm256_set1_pd(inv[0][1]);
@@ -86,12 +112,17 @@ struct BoxMatrix {
     __m256d fz = simd_compat::fmadd_pd(
         m20, dx, simd_compat::fmadd_pd(m21, dy, _mm256_mul_pd(m22, dz)));
 
-    fx = _mm256_sub_pd(
-        fx, _mm256_round_pd(fx, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
-    fy = _mm256_sub_pd(
-        fy, _mm256_round_pd(fy, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
-    fz = _mm256_sub_pd(
-        fz, _mm256_round_pd(fz, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+    const __m256d sign_mask = _mm256_set1_pd(-0.0);
+    const __m256d half = _mm256_set1_pd(0.5);
+    const auto round_half_away_from_zero = [&](const __m256d value) {
+      const __m256d signed_half =
+          _mm256_or_pd(half, _mm256_and_pd(value, sign_mask));
+      return _mm256_round_pd(_mm256_add_pd(value, signed_half),
+                             _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
+    };
+    fx = _mm256_sub_pd(fx, round_half_away_from_zero(fx));
+    fy = _mm256_sub_pd(fy, round_half_away_from_zero(fy));
+    fz = _mm256_sub_pd(fz, round_half_away_from_zero(fz));
 
     __m256d r00 = _mm256_set1_pd(m[0][0]);
     __m256d r01 = _mm256_set1_pd(m[1][0]);
@@ -110,6 +141,7 @@ struct BoxMatrix {
     dz = simd_compat::fmadd_pd(
         r02, fx, simd_compat::fmadd_pd(r12, fy, _mm256_mul_pd(r22, fz)));
   }
+#endif
 };
 
 #endif

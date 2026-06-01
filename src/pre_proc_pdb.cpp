@@ -44,8 +44,7 @@ int parse_begin_end_atoms_2mols(groups_cal &groups, arguments &Arguments,
                                   protein_1.m_mol[0].size() +
                                       protein_2.m_mol[0].size());
     } else if (Arguments.flag_nocal == true &&
-               !Arguments.needs_mol2_for_cmap_interface() &&
-               Arguments.com_dis_2mol == 0) {
+               !Arguments.needs_mol2_coordinates()) {
       end_mol_1 = PDB.m_mol[0].size();
       groups.add_group_from_range("molecule 1", 1ull, end_mol_1);
       end_mol_2 = 0;
@@ -94,16 +93,17 @@ int parse_begin_end_atoms_2mols(groups_cal &groups, arguments &Arguments,
 }
 
 int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
-                 Multi_MOL &water_traj, groups_cal &groups, int flag,
-                 arguments &Arguments, const amino_acid &amine,
-                 info &output_info) {
+                 Multi_MOL &water_traj, Multi_MOL &membrane_traj,
+                 groups_cal &groups, int flag, arguments &Arguments,
+                 const amino_acid &amine, info &output_info) {
 
   Multi_MOL PDB{};
   int flag_add_atom{0};
 
   const size_t reference_max_frames = 1;
   const bool can_subset_reference_directly =
-      !Arguments.flag_xdr && !groups.empty() && Arguments.new_al_1pdb == false;
+      !Arguments.flag_xdr && !Arguments.needs_membrane_coordinates() &&
+      !groups.empty() && Arguments.new_al_1pdb == false;
 
   if (can_subset_reference_directly) {
     bool saved_begin_set = Arguments.flag_begin_set;
@@ -137,6 +137,10 @@ int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
     water_traj.info.clear();
     water_traj.parameters.clear();
     water_traj.Index.clear();
+    membrane_traj.m_mol.clear();
+    membrane_traj.info.clear();
+    membrane_traj.parameters.clear();
+    membrane_traj.Index.clear();
 
     if (Arguments.new_al_1pdb == false) {
     // Temporarily disable begin/end time filters for reference PDB loading.
@@ -235,6 +239,33 @@ int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
     water_traj.set_mol_type("water");
   }
 
+  if (Arguments.needs_membrane_coordinates()) {
+    int membrane_group = Arguments.membrane.resolved_group;
+    if (membrane_group < 0) {
+      if (Arguments.membrane.group == "auto") {
+        const auto resolved = groups.find_group_index("lipid");
+        if (!resolved) {
+          cout << "Membrane analysis requires an index group named lipid or "
+                  "-membrane-group=<N>.\n";
+          return 1;
+        }
+        membrane_group = static_cast<int>(*resolved);
+      } else {
+        membrane_group = std::stoi(Arguments.membrane.group);
+      }
+      if (membrane_group < 0 ||
+          static_cast<size_t>(membrane_group) >= groups.group_num() ||
+          groups.groups_atom_number(static_cast<size_t>(membrane_group)) == 0) {
+        cout << "Membrane analysis selected an invalid or empty lipid group.\n";
+        return 1;
+      }
+      Arguments.membrane.resolved_group = membrane_group;
+    }
+    add_atom_to_MOL(PDB, membrane_traj, groups, membrane_group, Arguments,
+                    "lipid", amine, 0);
+    membrane_traj.set_mol_type("lipid");
+  }
+
   trans_atom_to_MOL(PDB, protein_1, protein_2, groups, groups.group_1_index(),
                     groups.group_2_index(), Arguments, amine, flag_add_atom);
 
@@ -310,7 +341,7 @@ int trans_atom_to_MOL(Multi_MOL &MOL_source, Multi_MOL &protein_des,
                       int flag = 0) {
   if (flag == 0) {
     if (Arguments.flag_nocal == true &&
-        !Arguments.needs_mol2_for_cmap_interface() && groups.empty()) {
+        !Arguments.needs_mol2_coordinates() && groups.empty()) {
       protein_des = MOL_source;
       protein_des.gen_vector_parameters();
       return 0;
@@ -354,7 +385,7 @@ int trans_atom_to_MOL(Multi_MOL &MOL_source, Multi_MOL &protein_des,
             MOL_source.get_mol_type());
       }
       if (Arguments.flag_nocal == true &&
-          !Arguments.needs_mol2_for_cmap_interface())
+          !Arguments.needs_mol2_coordinates())
         continue;
 
       for (size_t j{}; j < groups.groups_atom_number(group_index_2); ++j) {

@@ -43,6 +43,8 @@ int Multi_MOL::tran_multi_mol(std::span<double> TranVec) {
 }
 int Multi_MOL::align_to_box() {
   for (size_t i{}; i < m_mol.size(); ++i) {
+    if (m_mol[i].size() == 0)
+      continue;
     double v1[3]{}, v2[3]{}, v3[3]{};
     m_mol[i].Box.get_v1(v1);
     m_mol[i].Box.get_v2(v2);
@@ -90,8 +92,16 @@ int Multi_MOL::find_box_from_min_max() {
 }
 
 int align_complex(Multi_MOL &rec, Multi_MOL &lig, int begin, int end) {
+  if (rec.m_mol.empty())
+    return 0;
+  if (lig.m_mol.size() < rec.m_mol.size())
+    return 1;
+
   vector<double> X, Y, Z;
   for (size_t i{}; i < rec.m_mol.size(); ++i) {
+    const size_t atom_count = rec.m_mol[i].size() + lig.m_mol[i].size();
+    if (atom_count == 0)
+      return 1;
     double x{}, y{}, z{};
     for (size_t j{}; j < rec.m_mol[i].size(); ++j) {
       x += rec.m_mol[i].pos.x[j];
@@ -104,9 +114,9 @@ int align_complex(Multi_MOL &rec, Multi_MOL &lig, int begin, int end) {
       y += lig.m_mol[i].pos.y[j];
       z += lig.m_mol[i].pos.z[j];
     }
-    X.emplace_back(x / (rec.m_mol[i].size() + lig.m_mol[i].size()));
-    Y.emplace_back(y / (rec.m_mol[i].size() + lig.m_mol[i].size()));
-    Z.emplace_back(z / (rec.m_mol[i].size() + lig.m_mol[i].size()));
+    X.emplace_back(x / atom_count);
+    Y.emplace_back(y / atom_count);
+    Z.emplace_back(z / atom_count);
   }
   double X_mean{}, Y_mean{}, Z_mean{};
   for (size_t i{}; i < X.size(); ++i) {

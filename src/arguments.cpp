@@ -114,6 +114,15 @@ int arguments::post_process() {
     cout << "Time interval must not be negative!\n";
     exit(EXIT_FAILURE);
   }
+  if (const std::string membrane_error = membrane.validation_error();
+      !membrane_error.empty()) {
+    TitanUI::print_error("Membrane: " + membrane_error);
+    exit(EXIT_FAILURE);
+  }
+  if (const std::string s2_error = s2.validation_error(); !s2_error.empty()) {
+    TitanUI::print_error("S2: " + s2_error);
+    exit(EXIT_FAILURE);
+  }
   std::transform(eq_weight_source.begin(), eq_weight_source.end(),
                  eq_weight_source.begin(), [](unsigned char c) {
                    return static_cast<char>(std::tolower(c));
@@ -725,8 +734,10 @@ int arguments::post_process() {
                      return static_cast<char>(std::tolower(c));
                    });
     std::replace(dihedral.kind.begin(), dihedral.kind.end(), '_', '-');
-    if (dihedral.kind != "backbone") {
-      TitanUI::print_error("Dihedral: v1 supports backbone only.");
+    if (dihedral.kind != "backbone" && dihedral.kind != "sidechain" &&
+        dihedral.kind != "both") {
+      TitanUI::print_error(
+          "Dihedral: -dihedral-kind must be backbone, sidechain, or both.");
       exit(EXIT_FAILURE);
     }
     if (dihedral.stride < 1) {
@@ -737,6 +748,70 @@ int arguments::post_process() {
       TitanUI::print_error(
           "Dihedral: -dihedral-residues must be 'all' or a residue list.");
       exit(EXIT_FAILURE);
+    }
+  }
+  if (msd.flag_msd) {
+    std::transform(msd.selection.begin(), msd.selection.end(),
+                   msd.selection.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::transform(msd.mode.begin(), msd.mode.end(), msd.mode.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::transform(msd.maxlag.begin(), msd.maxlag.end(), msd.maxlag.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::transform(msd.fit_window.begin(), msd.fit_window.end(),
+                   msd.fit_window.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::transform(msd.pbc.begin(), msd.pbc.end(), msd.pbc.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::transform(msd.rot_fit_window.begin(), msd.rot_fit_window.end(),
+                   msd.rot_fit_window.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (msd.selection != "mol1" && msd.selection != "mol2" &&
+        msd.selection != "trace" && msd.selection != "backbone" &&
+        msd.selection.rfind("atom:", 0) != 0 &&
+        msd.selection.rfind("residue:", 0) != 0) {
+      TitanUI::print_error(
+          "MSD: -msd-selection must be mol1, mol2, trace, backbone, atom:<names>, or residue:<list>.");
+      exit(EXIT_FAILURE);
+    }
+    if (msd.mode != "com" && msd.mode != "atom") {
+      TitanUI::print_error("MSD: -msd-mode must be com or atom.");
+      exit(EXIT_FAILURE);
+    }
+    if (msd.maxlag != "auto") {
+      try {
+        if (std::stoi(msd.maxlag) < 1)
+          throw std::runtime_error("bad");
+      } catch (...) {
+        TitanUI::print_error("MSD: -msd-maxlag must be auto or an integer >= 1.");
+        exit(EXIT_FAILURE);
+      }
+    }
+    if (msd.pbc != "auto" && msd.pbc != "unwrap" && msd.pbc != "mic") {
+      TitanUI::print_error("MSD: -msd-pbc must be auto, unwrap, or mic.");
+      exit(EXIT_FAILURE);
+    }
+    if (msd.rot_fit_window != "auto") {
+      const auto comma = msd.rot_fit_window.find(',');
+      try {
+        if (comma == std::string::npos ||
+            !(std::stod(msd.rot_fit_window.substr(comma + 1)) >
+              std::stod(msd.rot_fit_window.substr(0, comma))))
+          throw std::runtime_error("bad");
+      } catch (...) {
+        TitanUI::print_error(
+            "MSD: -msd-rot-fit-window must be auto or tmin,tmax with tmax > tmin.");
+        exit(EXIT_FAILURE);
+      }
     }
   }
   if (msm.flag_msm || dham.flag_dham) {

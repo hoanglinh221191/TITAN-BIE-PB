@@ -413,11 +413,13 @@ ChunkStreamer::~ChunkStreamer() {
 
 std::expected<void, std::string> ChunkStreamer::open_streams(
     const std::string &name_pro, const std::string &name_lig,
-    const Multi_MOL &init_pro, const Multi_MOL &init_lig) {
+    const Multi_MOL &init_pro, const Multi_MOL &init_lig,
+    const Multi_MOL &init_membrane) {
 
   // Store topology references for later use in parallel_split_coordinates
   init_pro_ = &init_pro;
   init_lig_ = &init_lig;
+  init_membrane_ = &init_membrane;
   pdb_route_plan_ready_ = false;
   pdb_warned_direct_route_fallback_ = false;
   pdb_next_target_time_ = -1e18;
@@ -538,6 +540,19 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
       wat_size_ = 0;
     }
 
+    if (args_ref.needs_membrane_coordinates()) {
+      if (args_ref.membrane.resolved_group < 0)
+        return std::unexpected("XDR: membrane group has not been resolved.");
+      auto membrane_cache = cache_group_indices(
+          static_cast<size_t>(args_ref.membrane.resolved_group),
+          membrane_atom_indices0_, membrane_size_);
+      if (!membrane_cache)
+        return std::unexpected(membrane_cache.error());
+    } else {
+      membrane_atom_indices0_.clear();
+      membrane_size_ = 0;
+    }
+
     xdr_extract_runs_.clear();
     xdr_max_run_length_ = 0;
     xdr_has_overlapping_runs_ = false;
@@ -577,6 +592,8 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
     append_runs(pro_atom_indices0_, ChunkStreamer::XdrRunTarget::Pro);
     append_runs(lig_atom_indices0_, ChunkStreamer::XdrRunTarget::Lig);
     append_runs(wat_atom_indices0_, ChunkStreamer::XdrRunTarget::Wat);
+    append_runs(membrane_atom_indices0_,
+                ChunkStreamer::XdrRunTarget::Membrane);
 
     std::stable_sort(xdr_extract_runs_.begin(), xdr_extract_runs_.end(),
                      [](const auto &lhs, const auto &rhs) {
@@ -612,6 +629,7 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
     if (use_lig_group)
       update_max_index(lig_atom_indices0_);
     update_max_index(wat_atom_indices0_);
+    update_max_index(membrane_atom_indices0_);
     if (natoms_check <= static_cast<int>(max_selected_atom_index)) {
       return std::unexpected(
           "XDR: natoms too small for selected atom indices - XDR has " +
@@ -698,13 +716,16 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
 // ── FIX 1: parallel_split_coordinates with topology copy ──────────────
 void ChunkStreamer::parallel_split_coordinates(
     const Multi_MOL &source_chunk, const Multi_MOL &init_pro,
-    const Multi_MOL &init_lig, Multi_MOL &pro_out, Multi_MOL &lig_out,
-    Multi_MOL &wat_out, size_t num_frames) {
+    const Multi_MOL &init_lig, const Multi_MOL &init_membrane,
+    Multi_MOL &pro_out, Multi_MOL &lig_out, Multi_MOL &wat_out,
+    Multi_MOL &membrane_out, size_t num_frames) {
   // Resize outputs
   pro_out.m_mol.resize(num_frames);
   lig_out.m_mol.resize(num_frames);
   if (args_ref.n_wat >= 0)
     wat_out.m_mol.resize(num_frames);
+  if (args_ref.needs_membrane_coordinates())
+    membrane_out.m_mol.resize(num_frames);
 
   // Pre-calculate target sizes to avoid redundant lookups
   size_t pro_size = groups_ref.groups_atom_number(groups_ref.group_1_index());
@@ -713,6 +734,11 @@ void ChunkStreamer::parallel_split_coordinates(
                         : 0;
   size_t wat_size =
       (args_ref.n_wat >= 0) ? groups_ref.groups_atom_number(args_ref.n_wat) : 0;
+  size_t membrane_size =
+      args_ref.needs_membrane_coordinates()
+          ? groups_ref.groups_atom_number(
+                static_cast<size_t>(args_ref.membrane.resolved_group))
+          : 0;
 
   // Lambda to process a range of frames
   auto process_frames = [&](size_t start_f, size_t end_f) {
@@ -772,6 +798,27 @@ void ChunkStreamer::parallel_split_coordinates(
           }
         }
       }
+
+      if (membrane_size > 0) {
+        initialize_stream_frame(membrane_out.m_mol[f], init_membrane,
+                                source_chunk.m_mol[f].Box,
+                                source_chunk.m_mol[f].time_of_snap,
+                                membrane_size);
+        for (size_t j = 0; j < membrane_size; ++j) {
+          const size_t atom_idx =
+              groups_ref.atom_index(
+                  static_cast<size_t>(args_ref.membrane.resolved_group), j) -
+              1;
+          if (atom_idx < source_chunk.m_mol[f].pos.x.size()) {
+            membrane_out.m_mol[f].pos.x[j] =
+                source_chunk.m_mol[f].pos.x[atom_idx];
+            membrane_out.m_mol[f].pos.y[j] =
+                source_chunk.m_mol[f].pos.y[atom_idx];
+            membrane_out.m_mol[f].pos.z[j] =
+                source_chunk.m_mol[f].pos.z[atom_idx];
+          }
+        }
+      }
     }
   };
 
@@ -784,11 +831,14 @@ void ChunkStreamer::parallel_split_coordinates(
 
 std::expected<size_t, std::string>
 ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
-                               Multi_MOL &lig, Multi_MOL &water_traj) {
+                               Multi_MOL &lig, Multi_MOL &water_traj,
+                               Multi_MOL &membrane_traj) {
   pro_in.m_mol.clear();
   lig.m_mol.clear();
   if (args_ref.n_wat >= 0)
     water_traj.m_mol.clear();
+  if (args_ref.needs_membrane_coordinates())
+    membrane_traj.m_mol.clear();
 
   auto current_stream_offset = [](std::ifstream &stream, size_t fallback_total) {
     const std::streampos pos = stream.tellg();
@@ -820,12 +870,15 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
     const size_t pro_size = pro_size_;
     const size_t lig_size = lig_size_;
     const size_t wat_size = wat_size_;
+    const size_t membrane_size = membrane_size_;
 
     // Reserve frame slots only. Per-frame topology is shared from frame 0.
     pro_in.m_mol.reserve(chunk_size);
     lig.m_mol.reserve(chunk_size);
     if (wat_size > 0)
       water_traj.m_mol.reserve(chunk_size);
+    if (membrane_size > 0)
+      membrane_traj.m_mol.reserve(chunk_size);
 
     size_t frames_read = 0;
     size_t skip_count = 0;
@@ -918,7 +971,7 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
 
     auto select_target_positions =
         [&](XdrRunTarget target, MOL &pro_frame, MOL &lig_frame,
-            MOL *water_frame) -> AlignedVector3D * {
+            MOL *water_frame, MOL *membrane_frame) -> AlignedVector3D * {
       switch (target) {
       case XdrRunTarget::Pro:
         return &pro_frame.pos;
@@ -926,16 +979,19 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
         return &lig_frame.pos;
       case XdrRunTarget::Wat:
         return water_frame ? &water_frame->pos : nullptr;
+      case XdrRunTarget::Membrane:
+        return membrane_frame ? &membrane_frame->pos : nullptr;
       }
       return nullptr;
     };
 
     auto materialize_run_from_float =
         [&](const XdrAtomRun &run, const float *src_xyz, MOL &pro_frame,
-            MOL &lig_frame, MOL *water_frame)
+            MOL &lig_frame, MOL *water_frame, MOL *membrane_frame)
         -> std::expected<void, std::string> {
       auto *target_pos =
-          select_target_positions(run.target, pro_frame, lig_frame, water_frame);
+          select_target_positions(run.target, pro_frame, lig_frame, water_frame,
+                                  membrane_frame);
       if (!target_pos) {
         return std::unexpected(
             "XDR: water atom run requested without an initialized water frame.");
@@ -957,10 +1013,11 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
 
     auto materialize_run_from_double =
         [&](const XdrAtomRun &run, const double *src_xyz, MOL &pro_frame,
-            MOL &lig_frame, MOL *water_frame)
+            MOL &lig_frame, MOL *water_frame, MOL *membrane_frame)
         -> std::expected<void, std::string> {
       auto *target_pos =
-          select_target_positions(run.target, pro_frame, lig_frame, water_frame);
+          select_target_positions(run.target, pro_frame, lig_frame, water_frame,
+                                  membrane_frame);
       if (!target_pos) {
         return std::unexpected(
             "XDR: water atom run requested without an initialized water frame.");
@@ -1008,13 +1065,16 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
         MOL pro_frame;
         MOL lig_frame;
         MOL water_frame;
+        MOL membrane_frame;
         MOL *water_frame_ptr = nullptr;
+        MOL *membrane_frame_ptr = nullptr;
 
         auto initialize_output_frames = [&](const box &frame_box,
                                             double time_val) {
           pro_frame = MOL{};
           lig_frame = MOL{};
           water_frame = MOL{};
+          membrane_frame = MOL{};
           initialize_stream_frame(pro_frame, *init_pro_, frame_box, time_val,
                                   pro_size);
           initialize_stream_frame(lig_frame, *init_lig_, frame_box, time_val,
@@ -1025,6 +1085,13 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
             water_frame_ptr = &water_frame;
           } else {
             water_frame_ptr = nullptr;
+          }
+          if (membrane_size > 0) {
+            initialize_stream_frame(membrane_frame, *init_membrane_, frame_box,
+                                    time_val, membrane_size);
+            membrane_frame_ptr = &membrane_frame;
+          } else {
+            membrane_frame_ptr = nullptr;
           }
         };
 
@@ -1068,7 +1135,7 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
           for (const auto &run : xdr_extract_runs_) {
             auto materialized = materialize_run_from_float(
                 run, &xdr_pos_buf_[run.source_begin][0], pro_frame, lig_frame,
-                water_frame_ptr);
+                water_frame_ptr, membrane_frame_ptr);
             if (!materialized) {
               return std::unexpected(materialized.error());
             }
@@ -1151,7 +1218,7 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
 
                   auto materialized = materialize_run_from_double(
                       run, xdr_trr_double_scratch_.data(), pro_frame, lig_frame,
-                      water_frame_ptr);
+                      water_frame_ptr, membrane_frame_ptr);
                   if (!materialized) {
                     rc = exdrHEADER;
                     trr_error = materialized.error();
@@ -1169,7 +1236,7 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
 
                   auto materialized = materialize_run_from_float(
                       run, xdr_trr_float_scratch_.data(), pro_frame, lig_frame,
-                      water_frame_ptr);
+                      water_frame_ptr, membrane_frame_ptr);
                   if (!materialized) {
                     rc = exdrHEADER;
                     trr_error = materialized.error();
@@ -1261,7 +1328,7 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
             for (const auto &run : xdr_extract_runs_) {
               auto materialized = materialize_run_from_float(
                   run, &xdr_pos_buf_[run.source_begin][0], pro_frame, lig_frame,
-                  water_frame_ptr);
+                  water_frame_ptr, membrane_frame_ptr);
               if (!materialized) {
                 return std::unexpected(materialized.error());
               }
@@ -1273,6 +1340,9 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
         lig.m_mol.push_back(std::move(lig_frame));
         if (water_frame_ptr) {
           water_traj.m_mol.push_back(std::move(water_frame));
+        }
+        if (membrane_frame_ptr) {
+          membrane_traj.m_mol.push_back(std::move(membrane_frame));
         }
 
         ++frames_read;
@@ -1425,6 +1495,22 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
         }
       }
 
+      if (membrane_size > 0) {
+        membrane_traj.m_mol.emplace_back();
+        MOL &membrane_frame = membrane_traj.m_mol.back();
+        initialize_stream_frame(membrane_frame, *init_membrane_, frame_box,
+                                time_val, membrane_size);
+        for (size_t j = 0; j < membrane_size; ++j) {
+          const size_t ai = membrane_atom_indices0_[j];
+          membrane_frame.pos.x[j] =
+              static_cast<double>(xdr_pos_buf_[ai][0]) * NM_TO_ANG;
+          membrane_frame.pos.y[j] =
+              static_cast<double>(xdr_pos_buf_[ai][1]) * NM_TO_ANG;
+          membrane_frame.pos.z[j] =
+              static_cast<double>(xdr_pos_buf_[ai][2]) * NM_TO_ANG;
+        }
+      }
+
       ++frames_read;
     }
 
@@ -1522,7 +1608,8 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
     if (pdb_route_plan_ready_) {
       expected_frames = read_routed_pdb_chunk(
           stream_pro, args_ref.pdb_name, chunk_size, force_f, args_ref, info_ref,
-          pro_in, lig, water_traj, pdb_route_plan_, pdb_next_target_time_, false);
+          pro_in, lig, water_traj, membrane_traj, pdb_route_plan_,
+          pdb_next_target_time_, false);
     }
 
     if (!pdb_route_plan_ready_ || !expected_frames) {
@@ -1540,6 +1627,7 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
       pro_in.m_mol.clear();
       lig.m_mol.clear();
       water_traj.m_mol.clear();
+      membrane_traj.m_mol.clear();
 
       Multi_MOL chunk_pdb;
       expected_frames = chunk_pdb.read_pdb_chunk(stream_pro, chunk_size, args_ref,
@@ -1554,8 +1642,9 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
         return 0;
       }
 
-      parallel_split_coordinates(chunk_pdb, *init_pro_, *init_lig_, pro_in, lig,
-                                 water_traj, expected_frames.value());
+      parallel_split_coordinates(chunk_pdb, *init_pro_, *init_lig_,
+                                 *init_membrane_, pro_in, lig, water_traj,
+                                 membrane_traj, expected_frames.value());
     }
 
     const size_t load_after =

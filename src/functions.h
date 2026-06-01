@@ -85,8 +85,8 @@ std::expected<void, std::string> initialize_topology_streaming(
     std::string name_lig, std::string force_f, int input_name,
     std::vector<std::string> &input_line, bool topo_2_is_open,
     bool topo_is_open, Multi_MOL &pro_in, Multi_MOL &lig, Multi_MOL &water_traj,
-    groups_cal &Groups_from_index_file, para &parameter, amino_acid &amine,
-    info &output_info);
+    Multi_MOL &membrane_traj, groups_cal &Groups_from_index_file,
+    para &parameter, amino_acid &amine, info &output_info);
 int engine(arguments &Arguments);
 int take_amino_acids(amino_acid &amine, int &num_amine, string &force_f,
                      const arguments &Arguments);
@@ -240,9 +240,9 @@ void Fix_pbc(MOL &molecule_1, int coor, const double &min_dis, double size);
 void solve_pbc(MOL &mol_1, MOL &mol_2, box &box_type);
 void fix_dodecahedron(MOL &mol_1, MOL &mol_2, box &box_type);
 int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
-                 Multi_MOL &water_traj, groups_cal &groups, int flag,
-                 arguments &Arguments, const amino_acid &amine,
-                 info &output_info);
+                 Multi_MOL &water_traj, Multi_MOL &membrane_traj,
+                 groups_cal &groups, int flag, arguments &Arguments,
+                 const amino_acid &amine, info &output_info);
 // void pre_parameters(vector<sigma_epsilon>& parameters, const Multi_MOL&
 // pro_in, const Multi_MOL& lig, int begin, int end);
 int write_pqr(const Multi_MOL &pro_in, const Multi_MOL &lig,

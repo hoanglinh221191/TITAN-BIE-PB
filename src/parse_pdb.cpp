@@ -371,63 +371,58 @@ struct RoutedPdbSink {
   Multi_MOL &pro;
   Multi_MOL &lig;
   Multi_MOL &water;
+  Multi_MOL &membrane;
   const PdbRoutePlan &route_plan;
   const bool require_lig;
   const bool require_water;
+  const bool require_membrane;
   const bool capture_topology;
 
   bool append_atom(size_t frame_index, size_t source_atom_index,
                    std::string_view line, const box &box_type, double time_ps,
                    std::string_view force_f, std::string &error_message) {
     const PdbRouteEntry route = route_plan.route_for(source_atom_index);
-    if (route.target == PdbRouteTarget::None)
-      return true;
+    auto append_to = [&](Multi_MOL &target_mol, size_t reserve_hint,
+                         std::string_view target_type) {
+      if (frame_index >= target_mol.m_mol.size()) {
+        target_mol.begin_frame(frame_index, box_type, time_ps, force_f,
+                               expected_frame_atoms(target_mol, frame_index,
+                                                    reserve_hint),
+                               target_type);
+      }
+      if (capture_topology &&
+          (target_mol.info.empty() ||
+           target_mol.info.size() < target_mol.m_mol[0].pos.x.size() + 1)) {
+        target_mol.append_topology_if_frame0(
+            make_atom_info(line, source_atom_index - 1));
+      }
+      target_mol.append_xyz(frame_index, parse_atom_coord(line, 30),
+                            parse_atom_coord(line, 38),
+                            parse_atom_coord(line, 46));
+    };
 
-    Multi_MOL *target_mol = nullptr;
-    size_t reserve_hint = 0;
-    std::string_view target_type = "protein";
     switch (route.target) {
     case PdbRouteTarget::Pro:
-      target_mol = &pro;
-      reserve_hint = std::max(route_plan.pro_atom_count, pro.info.size());
-      target_type = pro.get_mol_type();
+      append_to(pro, std::max(route_plan.pro_atom_count, pro.info.size()),
+                pro.get_mol_type());
       break;
     case PdbRouteTarget::Lig:
-      target_mol = &lig;
-      reserve_hint = std::max(route_plan.lig_atom_count, lig.info.size());
-      target_type = lig.get_mol_type();
+      append_to(lig, std::max(route_plan.lig_atom_count, lig.info.size()),
+                lig.get_mol_type());
       break;
     case PdbRouteTarget::Wat:
-      target_mol = &water;
-      reserve_hint = std::max(route_plan.wat_atom_count, water.info.size());
-      target_type = "water";
+      append_to(water, std::max(route_plan.wat_atom_count, water.info.size()),
+                "water");
       break;
     case PdbRouteTarget::None:
       break;
     }
-
-    if (target_mol == nullptr) {
-      error_message = "Invalid routed PDB target.";
-      return false;
+    if (route_plan.membrane_route_for(source_atom_index) !=
+        std::numeric_limits<size_t>::max()) {
+      append_to(membrane,
+                std::max(route_plan.membrane_atom_count, membrane.info.size()),
+                "lipid");
     }
-
-    if (frame_index >= target_mol->m_mol.size()) {
-      target_mol->begin_frame(frame_index, box_type, time_ps, force_f,
-                              expected_frame_atoms(*target_mol, frame_index,
-                                                   reserve_hint),
-                              target_type);
-    }
-
-    if (capture_topology &&
-        (target_mol->info.empty() ||
-         target_mol->info.size() < target_mol->m_mol[0].pos.x.size() + 1)) {
-      target_mol->append_topology_if_frame0(
-          make_atom_info(line, source_atom_index - 1));
-    }
-
-    target_mol->append_xyz(frame_index, parse_atom_coord(line, 30),
-                           parse_atom_coord(line, 38),
-                           parse_atom_coord(line, 46));
     return true;
   }
 
@@ -471,7 +466,10 @@ struct RoutedPdbSink {
         !finalize_target(lig, frame_index, had_box, route_plan.lig_atom_count,
                          require_lig, "Ligand", local_warning) ||
         !finalize_target(water, frame_index, had_box, route_plan.wat_atom_count,
-                         require_water, "Water", local_warning)) {
+                         require_water, "Water", local_warning) ||
+        !finalize_target(membrane, frame_index, had_box,
+                         route_plan.membrane_atom_count, require_membrane,
+                         "Membrane", local_warning)) {
       if (!local_warning.empty()) {
         warning_message = local_warning + " Time " + std::to_string(time_ps) +
                           " ps.";
@@ -487,6 +485,7 @@ struct RoutedPdbSink {
     pro.discard_pending_frame(frame_index);
     lig.discard_pending_frame(frame_index);
     water.discard_pending_frame(frame_index);
+    membrane.discard_pending_frame(frame_index);
   }
 
   bool has_pending_frame(size_t frame_index) const {
@@ -496,7 +495,9 @@ struct RoutedPdbSink {
         frame_index < lig.m_mol.size() && !lig.m_mol[frame_index].pos.x.empty();
     const bool water_pending = frame_index < water.m_mol.size() &&
                                !water.m_mol[frame_index].pos.x.empty();
-    return pro_pending || lig_pending || water_pending;
+    const bool membrane_pending = frame_index < membrane.m_mol.size() &&
+                                  !membrane.m_mol[frame_index].pos.x.empty();
+    return pro_pending || lig_pending || water_pending || membrane_pending;
   }
 };
 
@@ -527,8 +528,13 @@ build_pdb_route_plan(groups_cal &groups, const arguments &Arguments) {
     update_max_index(groups.group_2_index());
   if (Arguments.n_wat >= 0 && Arguments.n_wat < static_cast<int>(groups.group_num()))
     update_max_index(static_cast<size_t>(Arguments.n_wat));
+  if (Arguments.needs_membrane_coordinates() &&
+      Arguments.membrane.resolved_group >= 0)
+    update_max_index(static_cast<size_t>(Arguments.membrane.resolved_group));
 
   plan.atom_routes.resize(max_source_atom_index + 1);
+  plan.membrane_routes.assign(max_source_atom_index + 1,
+                              std::numeric_limits<size_t>::max());
 
   auto assign_group = [&](size_t group_index, PdbRouteTarget target,
                           size_t &count_ref) -> std::expected<void, std::string> {
@@ -575,6 +581,22 @@ build_pdb_route_plan(groups_cal &groups, const arguments &Arguments) {
     }
   }
 
+  if (Arguments.needs_membrane_coordinates()) {
+    if (Arguments.membrane.resolved_group < 0)
+      return std::unexpected("Membrane group has not been resolved.");
+    const size_t membrane_group =
+        static_cast<size_t>(Arguments.membrane.resolved_group);
+    if (membrane_group >= groups.group_num())
+      return std::unexpected("Membrane group index is out of range.");
+    for (size_t i = 0; i < groups.groups_atom_number(membrane_group); ++i) {
+      const size_t source_atom_index = groups.atom_index(membrane_group, i);
+      if (source_atom_index >= plan.membrane_routes.size())
+        plan.membrane_routes.resize(source_atom_index + 1,
+                                    std::numeric_limits<size_t>::max());
+      plan.membrane_routes[source_atom_index] = plan.membrane_atom_count++;
+    }
+  }
+
   return plan;
 }
 
@@ -583,14 +605,17 @@ read_routed_pdb_chunk(std::istream &input_pdb, std::string_view input_name,
                       size_t chunk_size, std::string_view force_f,
                       arguments &Arguments, ::info &output_info,
                       Multi_MOL &pro_out, Multi_MOL &lig_out,
-                      Multi_MOL &water_out, const PdbRoutePlan &route_plan,
+                      Multi_MOL &water_out, Multi_MOL &membrane_out,
+                      const PdbRoutePlan &route_plan,
                       double &next_target_time_state, bool capture_topology) {
   RoutedPdbSink sink{pro_out,
                      lig_out,
                      water_out,
+                     membrane_out,
                      route_plan,
                      Arguments.needs_mol2_coordinates(),
                      Arguments.n_wat >= 0,
+                     Arguments.needs_membrane_coordinates(),
                      capture_topology};
   return parse_pdb_stream_impl(
       input_pdb, input_name,

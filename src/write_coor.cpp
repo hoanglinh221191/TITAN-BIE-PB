@@ -203,8 +203,15 @@ int write_pdb(const Multi_MOL& pro_in, const Multi_MOL& lig, const arguments& Ar
 		out_pdb << "TER\n";
 		num = 0;
 		
-		if (Arguments.flag_nocal == false)
+		const bool write_lig =
+			num_snap < lig.m_mol.size() && lig.m_mol[num_snap].size() != 0;
+		if (write_lig)
 		{
+			if (lig.info.size() < lig.m_mol[num_snap].size())
+			{
+				cout << "Cannot write molecule 2: topology is shorter than the coordinate frame.\n";
+				return 1;
+			}
 			for (size_t k{}; k < lig.m_mol[num_snap].size(); ++k)
 			{
 				k + pro_in.m_mol[num_snap].size() <= 99998 ? num = k + pro_in.m_mol[num_snap].size() : num = 99998;

@@ -64,6 +64,50 @@ Multi_MOL make_peptide(const std::vector<std::vector<double>> &xs,
   return mol;
 }
 
+Multi_MOL make_sidechain_fixture(bool omit_last_og = false) {
+  Multi_MOL mol;
+  mol.info = {
+      make_atom(1, "SER", "N"),   make_atom(1, "SER", "CA"),
+      make_atom(1, "SER", "CB"),  make_atom(1, "SER", "OG"),
+      make_atom(2, "ASN", "N"),   make_atom(2, "ASN", "CA"),
+      make_atom(2, "ASN", "CB"),  make_atom(2, "ASN", "CG"),
+      make_atom(2, "ASN", "OD1"), make_atom(3, "SER", "N"),
+      make_atom(3, "SER", "CA"),  make_atom(3, "SER", "CB")};
+  if (!omit_last_og)
+    mol.info.push_back(make_atom(3, "SER", "OG"));
+
+  std::vector<double> x0{1.0, 0.0, 0.0, 0.0, 3.0, 2.0,
+                         2.0, 2.0, 3.0, 5.0, 4.0, 4.0};
+  std::vector<double> y0{0.0, 0.0, 1.0, 1.0, 0.0, 0.0,
+                         1.0, 1.0, 1.0, 0.0, 0.0, 1.0};
+  std::vector<double> z0{0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                         0.0, 1.0, 1.0, 0.0, 0.0, 0.0};
+  std::vector<double> x1 = x0;
+  std::vector<double> y1 = y0;
+  std::vector<double> z1 = z0;
+  z1[3] = -1.0;
+  if (!omit_last_og) {
+    x0.push_back(4.0);
+    y0.push_back(1.0);
+    z0.push_back(1.0);
+    x1.push_back(4.0);
+    y1.push_back(1.0);
+    z1.push_back(-1.0);
+  }
+
+  for (std::size_t frame_idx = 0; frame_idx < 2; ++frame_idx) {
+    MOL frame(make_box(), static_cast<double>(frame_idx), "AMBER99SB");
+    const auto &x = frame_idx == 0 ? x0 : x1;
+    const auto &y = frame_idx == 0 ? y0 : y1;
+    const auto &z = frame_idx == 0 ? z0 : z1;
+    frame.pos.x.assign(x.begin(), x.end());
+    frame.pos.y.assign(y.begin(), y.end());
+    frame.pos.z.assign(z.begin(), z.end());
+    mol.m_mol.push_back(std::move(frame));
+  }
+  return mol;
+}
+
 std::string read_file(const fs::path &path) {
   std::ifstream in(path);
   std::ostringstream buffer;
@@ -215,6 +259,93 @@ void run_stride_uses_trajectory_ordinal(TitanExecutor &executor) {
           "exported frame ids reflect trajectory ordinal under chunk-local snap_idx");
 }
 
+void run_sidechain_contract(TitanExecutor &executor) {
+  arguments args;
+  args.dihedral.flag_dihedral = true;
+  args.dihedral.kind = "sidechain";
+  args.dihedral.export_tica = true;
+
+  Multi_MOL mol = make_sidechain_fixture(true);
+  const fs::path out_dir = new_output_dir("sidechain");
+  std::fstream log((out_dir / "run.log").string(),
+                   std::ios::out | std::ios::trunc);
+
+  TitanDihedralAnalyzer analyzer;
+  analyzer.configure(args.dihedral);
+  analyzer.init(mol, args, log);
+  require(analyzer.enabled(), "sidechain analyzer should be enabled");
+  for (std::size_t frame = 0; frame < mol.m_mol.size(); ++frame)
+    analyzer.process_frame(mol, frame, executor);
+
+  info output_info(args);
+  const std::vector<std::string> input_line{"dihedral-sidechain.pdb"};
+  analyzer.finalize_trajectory(out_dir.string(), output_info, args, input_line,
+                               0, log);
+
+  const std::string timeseries =
+      read_file(out_dir / "dihedral_sidechain_timeseries.csv");
+  const std::string populations =
+      read_file(out_dir / "dihedral_rotamer_populations.csv");
+  const std::string transitions =
+      read_file(out_dir / "dihedral_rotamer_transitions.csv");
+  const std::string summary = read_file(out_dir / "dihedral_summary.dat");
+  const std::string features =
+      read_file(out_dir / "dihedral_feature_matrix.csv");
+
+  require(contains(timeseries,
+                   "frame,time_ps,residue,chain,resnr,resname,chi1_deg,chi2_deg"),
+          "sidechain timeseries header is exported");
+  require(contains(timeseries, "A:1:SER") && contains(timeseries, "nan"),
+          "sidechain residues and missing chi values are exported");
+  require(contains(populations,
+                   "residue,chain,resnr,resname,chi,rotamer,count,occupancy,valid_samples") &&
+              contains(populations, "chi1"),
+          "rotamer populations are exported");
+  require(contains(transitions,
+                   "residue,chain,resnr,resname,chi,from_rotamer,to_rotamer,count") &&
+              contains(transitions, "gplus,gminus,1"),
+          "rotamer transitions count frame-to-frame state changes");
+  require(contains(summary, "kind: sidechain") &&
+              contains(summary, "finite_chi1:") &&
+              contains(summary, "missing_chi1:"),
+          "summary records sidechain counters");
+  require(contains(features, "A:1:SER_chi1_sin") &&
+              !contains(features, "_phi_sin"),
+          "sidechain feature matrix exports chi columns only");
+}
+
+void run_both_contract(TitanExecutor &executor) {
+  arguments args;
+  args.dihedral.flag_dihedral = true;
+  args.dihedral.kind = "both";
+  args.dihedral.export_tica = true;
+
+  Multi_MOL mol = make_sidechain_fixture(false);
+  const fs::path out_dir = new_output_dir("both");
+  std::fstream log((out_dir / "run.log").string(),
+                   std::ios::out | std::ios::trunc);
+
+  TitanDihedralAnalyzer analyzer;
+  analyzer.configure(args.dihedral);
+  analyzer.init(mol, args, log);
+  for (std::size_t frame = 0; frame < mol.m_mol.size(); ++frame)
+    analyzer.process_frame(mol, frame, executor);
+
+  info output_info(args);
+  const std::vector<std::string> input_line{"dihedral-both.pdb"};
+  analyzer.finalize_trajectory(out_dir.string(), output_info, args, input_line,
+                               0, log);
+
+  require(fs::exists(out_dir / "dihedral_backbone_timeseries.csv"),
+          "both emits backbone timeseries");
+  require(fs::exists(out_dir / "dihedral_sidechain_timeseries.csv"),
+          "both emits sidechain timeseries");
+  const std::string features =
+      read_file(out_dir / "dihedral_feature_matrix.csv");
+  require(contains(features, "_phi_sin") && contains(features, "_chi1_sin"),
+          "both feature matrix includes backbone and chi columns");
+}
+
 } // namespace
 
 int main() {
@@ -222,6 +353,8 @@ int main() {
   run_geometry_contract();
   run_analyzer_contract(executor);
   run_stride_uses_trajectory_ordinal(executor);
+  run_sidechain_contract(executor);
+  run_both_contract(executor);
   std::cout << "PASS titan_dihedral_smoke\n";
   return 0;
 }

@@ -24,7 +24,10 @@ $titanPath = (Resolve-Path -LiteralPath $titanPath).Path
 
 $outputs = @(
   "dihedral_backbone_timeseries.csv",
+  "dihedral_sidechain_timeseries.csv",
   "dihedral_ramachandran.csv",
+  "dihedral_rotamer_populations.csv",
+  "dihedral_rotamer_transitions.csv",
   "dihedral_summary.dat",
   "dihedral_feature_matrix.csv"
 )
@@ -82,37 +85,57 @@ $base = @"
 
 Push-Location $repo
 try {
-  Run-TitanCase "default" ($base + "`r`n" + @"
+  Run-TitanCase "backbone" ($base + "`r`n" + @"
 -dihedral
+-dihedral-kind=backbone
 "@)
   foreach ($file in @("dihedral_backbone_timeseries.csv", "dihedral_ramachandran.csv", "dihedral_summary.dat")) {
     if (-not (Test-Path -LiteralPath $file)) {
-      throw "default: missing expected output $file"
+      throw "backbone: missing expected output $file"
     }
   }
   if (-not (Select-String -Path "dihedral_summary.dat" -Pattern "kind: backbone" -Quiet) -or
       -not (Select-String -Path "dihedral_backbone_timeseries.csv" -Pattern "phi_deg,psi_deg,omega_deg" -Quiet)) {
-    throw "default: dihedral output does not match backbone contract"
+    throw "backbone: dihedral output does not match backbone contract"
   }
   if (Test-Path -LiteralPath "dihedral_feature_matrix.csv") {
-    throw "default: feature matrix generated without -dihedral-export-tica"
+    throw "backbone: feature matrix generated without -dihedral-export-tica"
   }
 
-  Run-TitanCase "feature_matrix" ($base + "`r`n" + @"
+  Run-TitanCase "sidechain" ($base + "`r`n" + @"
 -dihedral
+-dihedral-kind=sidechain
+"@)
+  foreach ($file in @("dihedral_sidechain_timeseries.csv", "dihedral_rotamer_populations.csv", "dihedral_rotamer_transitions.csv", "dihedral_summary.dat")) {
+    if (-not (Test-Path -LiteralPath $file)) {
+      throw "sidechain: missing expected output $file"
+    }
+  }
+  if (-not (Select-String -Path "dihedral_sidechain_timeseries.csv" -Pattern "chi1_deg,chi2_deg" -Quiet) -or
+      -not (Select-String -Path "dihedral_summary.dat" -Pattern "kind: sidechain" -Quiet)) {
+    throw "sidechain: output does not match chi1/chi2 contract"
+  }
+  if (Test-Path -LiteralPath "dihedral_backbone_timeseries.csv") {
+    throw "sidechain: backbone output generated for sidechain-only run"
+  }
+
+  Run-TitanCase "both_feature_matrix" ($base + "`r`n" + @"
+-dihedral
+-dihedral-kind=both
 -dihedral-residues=all
 -dihedral-stride=1
 -dihedral-export-tica
 "@)
   if (-not (Test-Path -LiteralPath "dihedral_feature_matrix.csv")) {
-    throw "feature_matrix: missing dihedral_feature_matrix.csv"
+    throw "both_feature_matrix: missing dihedral_feature_matrix.csv"
   }
   if (-not (Select-String -Path "dihedral_feature_matrix.csv" -Pattern "_phi_sin" -Quiet) -or
-      -not (Select-String -Path "dihedral_feature_matrix.csv" -Pattern "_omega_cos" -Quiet)) {
-    throw "feature_matrix: missing sin/cos torsion columns"
+      -not (Select-String -Path "dihedral_feature_matrix.csv" -Pattern "_omega_cos" -Quiet) -or
+      -not (Select-String -Path "dihedral_feature_matrix.csv" -Pattern "_chi1_sin" -Quiet)) {
+    throw "both_feature_matrix: missing sin/cos torsion columns"
   }
 
-  Expect-TitanReject "sidechain_rejected" ($base + "`r`n-dihedral`r`n-dihedral-kind=sidechain") "Dihedral: v1 supports backbone only."
+  Expect-TitanReject "bad_kind_rejected" ($base + "`r`n-dihedral`r`n-dihedral-kind=chi3") "Dihedral: -dihedral-kind must be backbone, sidechain, or both."
   Expect-TitanReject "bad_stride_rejected" ($base + "`r`n-dihedral`r`n-dihedral-stride=0") "Dihedral: -dihedral-stride must be >= 1."
 
   $listFile = Join-Path $work "same_pdb_twice.txt"
@@ -137,7 +160,7 @@ try {
   }
 
   Run-TitanCase "disabled" $base
-  foreach ($file in @("dihedral_backbone_timeseries.csv", "dihedral_ramachandran.csv", "dihedral_summary.dat", "dihedral_feature_matrix.csv")) {
+  foreach ($file in @("dihedral_backbone_timeseries.csv", "dihedral_sidechain_timeseries.csv", "dihedral_ramachandran.csv", "dihedral_rotamer_populations.csv", "dihedral_rotamer_transitions.csv", "dihedral_summary.dat", "dihedral_feature_matrix.csv")) {
     if (Test-Path -LiteralPath $file) {
       throw "disabled: dihedral output generated without -dihedral: $file"
     }

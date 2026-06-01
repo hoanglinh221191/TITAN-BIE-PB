@@ -23,8 +23,9 @@ std::expected<void, std::string> initialize_topology_streaming(
     arguments &Arguments, fstream &log, string name_pro, string name_lig,
     string force_f, int input_name, vector<string> &input_line,
     bool topo_2_is_open, bool topo_is_open, Multi_MOL &pro_in, Multi_MOL &lig,
-    Multi_MOL &water_traj, groups_cal &Groups_from_index_file, para &parameter,
-    amino_acid &amine, info &output_info) {
+    Multi_MOL &water_traj, Multi_MOL &membrane_traj,
+    groups_cal &Groups_from_index_file, para &parameter, amino_acid &amine,
+    info &output_info) {
 
   auto show_init_pdb_progress = [](const std::string &label, bool completed) {
     TitanUI::show_progress_exact(label, completed ? 1U : 0U, 1U, "Loading PDB");
@@ -72,8 +73,8 @@ std::expected<void, std::string> initialize_topology_streaming(
     if (Arguments.flag_nocal && Arguments.lj.flag_lj) {
       show_init_pdb_progress(file_label(Arguments.pdb_name), false);
       const int r_value =
-          pre_proc_pdb(force_f, pro_in, lig, water_traj, Groups_from_index_file,
-                       0, Arguments, amine, output_info);
+          pre_proc_pdb(force_f, pro_in, lig, water_traj, membrane_traj,
+                       Groups_from_index_file, 0, Arguments, amine, output_info);
       show_init_pdb_progress(file_label(Arguments.pdb_name), true);
       if (r_value != 0)
         return std::unexpected("pre_proc_pdb failed.");
@@ -121,8 +122,9 @@ std::expected<void, std::string> initialize_topology_streaming(
     if (Arguments.topo_name != "no" && (!Arguments.file_par || topo_is_open)) {
       show_init_pdb_progress(file_label(Arguments.pdb_name), false);
       const int r_value =
-          pre_proc_pdb(force_f, pro_in, lig, water_traj, Groups_from_index_file,
-                       flag_pre_proc, Arguments, amine, output_info);
+          pre_proc_pdb(force_f, pro_in, lig, water_traj, membrane_traj,
+                       Groups_from_index_file, flag_pre_proc, Arguments, amine,
+                       output_info);
       show_init_pdb_progress(file_label(Arguments.pdb_name), true);
       if (r_value != 0)
         return std::unexpected("pre_proc_pdb failed.");
@@ -143,8 +145,8 @@ std::expected<void, std::string> initialize_topology_streaming(
     } else {
       show_init_pdb_progress(file_label(Arguments.pdb_name), false);
       const int r_value =
-          pre_proc_pdb(force_f, pro_in, lig, water_traj, Groups_from_index_file,
-                       0, Arguments, amine, output_info);
+          pre_proc_pdb(force_f, pro_in, lig, water_traj, membrane_traj,
+                       Groups_from_index_file, 0, Arguments, amine, output_info);
       show_init_pdb_progress(file_label(Arguments.pdb_name), true);
       if (r_value != 0)
         return std::unexpected("pre_proc_pdb failed.");
@@ -198,6 +200,7 @@ int parse_input_pdb(arguments &Arguments, fstream &log, string name_pro,
                     bool topo_is_open, Multi_MOL &pro_in, Multi_MOL &lig,
                     Multi_MOL &water_traj, groups_cal &Groups_from_index_file,
                     para &parameter, amino_acid &amine, info &output_info) {
+  Multi_MOL membrane_traj;
   int flag_groups{helper_parse_groups(Groups_from_index_file, Arguments)};
 
   fstream test(name_pro, ios::in);
@@ -269,7 +272,8 @@ int parse_input_pdb(arguments &Arguments, fstream &log, string name_pro,
       if (Arguments.topo_name != "no" &&
           (Arguments.file_par == false || topo_is_open)) {
         const int r_value_pdb{pre_proc_pdb(
-            force_f, pro_in, lig, water_traj, Groups_from_index_file,
+            force_f, pro_in, lig, water_traj, membrane_traj,
+            Groups_from_index_file,
             flag_pre_proc, Arguments, amine, output_info)};
 
         if (r_value_pdb == 1) {
@@ -322,9 +326,9 @@ int parse_input_pdb(arguments &Arguments, fstream &log, string name_pro,
           }
         }
       } else {
-        const int r_value_pdb{pre_proc_pdb(force_f, pro_in, lig, water_traj,
-                                           Groups_from_index_file, 0, Arguments,
-                                           amine, output_info)};
+        const int r_value_pdb{pre_proc_pdb(
+            force_f, pro_in, lig, water_traj, membrane_traj,
+            Groups_from_index_file, 0, Arguments, amine, output_info)};
 
         if (r_value_pdb == 1) {
           std::cout << "\033[1;31m[FATAL ERROR]\033[0m Selected index group is "

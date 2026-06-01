@@ -677,6 +677,174 @@ int arguments::parse_arguments(int argc, char **argv) {
       dihedral.flag_dihedral = true;
       continue;
     }
+    if (arg.rfind("-s2-plateau-window", 0) == 0 ||
+        arg.rfind("--s2-plateau-window", 0) == 0) {
+      TitanUI::print_error(
+          "S2: -s2-plateau-window is no longer supported; use -s2-fit-window.");
+      exit(EXIT_FAILURE);
+    }
+    if (consume_bool_option(arg, {"-s2", "--s2"}, s2.flag_s2)) {
+      continue;
+    }
+    if (consume_option_value(arg, {"-s2-vector", "--s2-vector"},
+                             common_value, i)) {
+      s2.flag_s2 = true;
+      s2.vector = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-s2-align", "--s2-align"}, common_value,
+                             i)) {
+      s2.flag_s2 = true;
+      s2.align = lowercase_copy(common_value);
+      if (s2.align == "provided") {
+        TitanUI::print_error(
+            "S2: -s2-align=provided is not supported in v1; use rms for "
+            "first-frame alignment or none.");
+        exit(EXIT_FAILURE);
+      }
+      continue;
+    }
+    if (consume_option_value(arg, {"-s2-maxlag", "--s2-maxlag"},
+                             common_value, i)) {
+      s2.flag_s2 = true;
+      s2.maxlag = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-s2-fit-window", "--s2-fit-window"},
+                             common_value, i)) {
+      s2.flag_s2 = true;
+      s2.fit_window = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-s2-residues", "--s2-residues"},
+                             common_value, i)) {
+      s2.flag_s2 = true;
+      s2.residues = common_value;
+      continue;
+    }
+    if (consume_bool_option(arg, {"-s2-bfactor-pdb", "--s2-bfactor-pdb"},
+                            s2.bfactor_pdb)) {
+      s2.flag_s2 = s2.flag_s2 || s2.bfactor_pdb;
+      continue;
+    }
+    if (consume_bool_option(arg, {"-msd", "--msd"}, msd.flag_msd)) {
+      continue;
+    }
+    if (consume_option_value(arg, {"-msd-selection", "--msd-selection"},
+                             common_value, i)) {
+      msd.flag_msd = true;
+      msd.selection = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-msd-mode", "--msd-mode"}, common_value,
+                             i)) {
+      msd.flag_msd = true;
+      msd.mode = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-msd-maxlag", "--msd-maxlag"},
+                             common_value, i)) {
+      msd.flag_msd = true;
+      msd.maxlag = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-msd-fit-window", "--msd-fit-window"},
+                             common_value, i)) {
+      msd.flag_msd = true;
+      msd.fit_window = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-msd-pbc", "--msd-pbc"}, common_value,
+                             i)) {
+      msd.flag_msd = true;
+      msd.pbc = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-msd-rot", "--msd-rot"}, common_value,
+                             i)) {
+      msd.flag_msd = true;
+      msd.rot = parse_bool_equals(common_value, "-msd-rot");
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-msd-rot-fit-window", "--msd-rot-fit-window"},
+            common_value, i)) {
+      msd.flag_msd = true;
+      msd.rot = true;
+      msd.rot_fit_window = common_value;
+      continue;
+    }
+    if (consume_bool_option(arg, {"-membrane", "--membrane"},
+                            membrane.flag_membrane)) {
+      continue;
+    }
+    if (consume_option_value(arg, {"-membrane-group", "--membrane-group"},
+                             common_value, i)) {
+      membrane.flag_membrane = true;
+      membrane.group = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-membrane-lipids", "--membrane-lipids"},
+                             common_value, i)) {
+      membrane.flag_membrane = true;
+      membrane.lipids = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-membrane-head", "--membrane-head"},
+                             common_value, i)) {
+      membrane.flag_membrane = true;
+      membrane.head = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-membrane-tail", "--membrane-tail"},
+                             common_value, i)) {
+      membrane.flag_membrane = true;
+      membrane.tail = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-membrane-normal", "--membrane-normal"},
+                             common_value, i)) {
+      membrane.flag_membrane = true;
+      membrane.normal = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-membrane-grid", "--membrane-grid"},
+                             common_value, i)) {
+      membrane.flag_membrane = true;
+      membrane.grid = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-membrane-leaflet", "--membrane-leaflet"},
+                             common_value, i)) {
+      membrane.flag_membrane = true;
+      membrane.leaflet = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-membrane-leaflet-file", "--membrane-leaflet-file"},
+            common_value, i)) {
+      membrane.flag_membrane = true;
+      membrane.leaflet_file = common_value;
+      continue;
+    }
+    if (consume_option_value(
+            arg,
+            {"-membrane-flipflop-persistence",
+             "--membrane-flipflop-persistence"},
+            common_value, i)) {
+      membrane.flag_membrane = true;
+      try {
+        size_t parsed_chars = 0;
+        membrane.flipflop_persistence = stoi(common_value, &parsed_chars);
+        if (parsed_chars != common_value.size())
+          throw std::invalid_argument("trailing characters");
+      } catch (...) {
+        TitanUI::print_error(
+            "Membrane: -membrane-flipflop-persistence must be an integer >= 1.");
+        exit(EXIT_FAILURE);
+      }
+      continue;
+    }
     if (consume_option_value(arg, {"-graph-source", "--graph-source"},
                              common_value, i)) {
       graph.flag_graph = true;
@@ -3753,6 +3921,11 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (string(argv[i]) == "-1pdb") {
       flag_1_pdb = true;
     }
+    if (string(argv[i]).find("-1pdb=") == 0) {
+      flag_1_pdb =
+          parse_bool_equals(string(argv[i]).substr(string("-1pdb=").size()),
+                            "-1pdb");
+    }
     if (string(argv[i]) == "-hb") {
       flag_h_bond = 1;
       if (argc > i + 1 && string(argv[i + 1]) == "side-chain")
@@ -3764,6 +3937,13 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (string(argv[i]) == "-nocal") {
       flag_nocal = true;
       flag_1_pdb = true;
+    }
+    if (string(argv[i]).find("-nocal=") == 0) {
+      flag_nocal =
+          parse_bool_equals(string(argv[i]).substr(string("-nocal=").size()),
+                            "-nocal");
+      if (flag_nocal)
+        flag_1_pdb = true;
     }
     if (string(argv[i]) == "-all-subfolders") {
       flag_all_folders = true;
@@ -3915,9 +4095,11 @@ int arguments::parse_arguments(int argc, char **argv) {
       if (found != std::string::npos) {
         group_1 = stoi(string(argv[i + 1]).substr(0, found));
         group_2 = stoi(string(argv[i + 1]).substr(found + 1));
+        flag_groups_explicit = true;
       } else if (found_2 != std::string::npos) {
         group_1 = stoi(string(argv[i + 1]).substr(0, found_2));
         group_2 = stoi(string(argv[i + 1]).substr(found_2 + 1));
+        flag_groups_explicit = true;
       } else {
         cout << "Your argument -g is invalid!\n";
       }
@@ -4022,13 +4204,30 @@ int arguments::parse_arguments(int argc, char **argv) {
       distance_energy_cutoff = atof(argv[i + 1]);
       distance_energy_cutoff *= 0.1;
     }
-    if (string(argv[i]) == "-path-a" && i + 1 < argc) {
-      path_amino_acid = argv[i + 1];
+    if ((string(argv[i]) == "-path-a" && i + 1 < argc) ||
+        string(argv[i]).find("-path-a=") == 0) {
+      if (string(argv[i]).find("-path-a=") == 0)
+        path_amino_acid =
+            string(argv[i]).substr(string("-path-a=").size());
+      else
+        path_amino_acid = argv[i + 1];
+      if (path_amino_acid.empty()) {
+        TitanUI::print_error("-path-a must not be empty.");
+        exit(EXIT_FAILURE);
+      }
       if (path_amino_acid[path_amino_acid.length() - 1] != '/')
         path_amino_acid += '/';
     }
-    if (string(argv[i]) == "-path-n" && i + 1 < argc) {
-      path_nonbonded = argv[i + 1];
+    if ((string(argv[i]) == "-path-n" && i + 1 < argc) ||
+        string(argv[i]).find("-path-n=") == 0) {
+      if (string(argv[i]).find("-path-n=") == 0)
+        path_nonbonded = string(argv[i]).substr(string("-path-n=").size());
+      else
+        path_nonbonded = argv[i + 1];
+      if (path_nonbonded.empty()) {
+        TitanUI::print_error("-path-n must not be empty.");
+        exit(EXIT_FAILURE);
+      }
       if (path_nonbonded[path_nonbonded.length() - 1] != '/')
         path_nonbonded += '/';
     }
@@ -4754,7 +4953,9 @@ arguments::tokenize_arg_file(const std::string &filename) {
       if (ve != std::string::npos)
         value = value.substr(0, ve + 1);
 
-      if (flag == "-pbctopo-anchor-backend" || flag == "-community") {
+      if (flag == "-pbctopo-anchor-backend" || flag == "-community" ||
+          flag == "-membrane" || flag == "-s2" ||
+          flag == "-s2-bfactor-pdb") {
         tokens.push_back(flag + "=" + value);
       } else {
         // Split flag and value into separate tokens (single-dash only in arg.in)
@@ -4802,7 +5003,8 @@ int arguments::parse_arg_file() {
              flag == "-dham-temps" || flag == "-dham-ener" ||
              flag == "-mbar-temps" || flag == "-mbar-ener" ||
              flag == "-mbar-demux-map" ||
-             flag == "-path-a" || flag == "-path-n" || flag == "-pbc-ref";
+             flag == "-path-a" || flag == "-path-n" || flag == "-pbc-ref" ||
+             flag == "-membrane-leaflet-file";
     };
 
     for (size_t i = 0; i + 1 < tokens.size(); ++i) {
@@ -4857,6 +5059,8 @@ int arguments::parse_arg_file() {
       resolve(traj_file);
     if (pbc.flag_pbc_ref)
       resolve(pbc.ref_pdb_name);
+    if (!membrane.leaflet_file.empty())
+      resolve(membrane.leaflet_file);
     resolve(path_amino_acid);
     resolve(path_nonbonded);
     if (dham.flag_dham) {

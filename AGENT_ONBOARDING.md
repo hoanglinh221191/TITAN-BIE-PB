@@ -17,6 +17,10 @@ TITAN is a high-performance molecular trajectory analysis engine centered on:
 - hydrogen bonds, HBond/salt/water kinetics, and geometry observables
 - RMSD / RMSF / DSSP / Rg2 / backbone dihedrals / LJ condensation /
   structure factor `S(q)` / side-chain contact probability maps (`-cmap`)
+- Phase 5 MARTINI membrane analysis (`-membrane`): leaflet assignment, APL,
+  thickness, order proxy, interdigitation, and persistent flip-flop events
+- Phase 6 standalone S2 analysis (`-s2`): NMR order parameters, correlation
+  functions, summaries, and optional B-factor PDB exports
 - DCCM / network / communities / PCA / allostery / corr-kNN / LSP-MD
 - TICA / MSM / Validation / DHAM / MBAR / UMAP / TPT / ZTS
 - LLPS / GIST / IFP / AWH RC-binned IFP
@@ -33,13 +37,14 @@ If you only have a few minutes, read these in order:
 1. `arguments.h`
    Central runtime configuration and grouped defaults (`MsmArgs`, `DhamArgs`,
    `MbarArgs`, `ValidationArgs`, `CorrKnnArgs`, `SqArgs`,
-   `HBondKineticsArgs`, `LlpsArgs`, `AwhArgs`, PBC knobs, subgroup `-sg`
-   knobs, etc.).
+   `HBondKineticsArgs`, `LlpsArgs`, `AwhArgs`, `MembraneArgs`, `S2Args`, PBC
+   knobs, subgroup `-sg` knobs, etc.).
 
 2. `parse_arguments.cpp`
    CLI parsing, module implication rules, option normalization, and validation
    glue for new modules such as `-corr-knn`, `-validation`, `-mbar`, `-sq`,
-   `-hbk`, and `-sg`.
+   `-hbk`, `-sg`, the Phase 5 `-membrane` analyzer, and the Phase 6 `-s2`
+   standalone analyzer.
 
 3. `impl_engine.cpp`
    Main orchestration file. This is where setup, streaming analyzers (`HBK`,
@@ -99,6 +104,46 @@ Important pattern:
 - TITAN tries to do cheap, streaming work inside the trajectory loop.
 - Heavier solves and exports happen after the loop.
 
+Phase 5 membrane-analysis note:
+- Phase 5A and 5B are runtime-implemented. The analyzer owns a dedicated lipid
+  coordinate stream, so structural-only `-nocal=true -membrane=true` does not
+  enable energy calculations or consume `mol2`.
+- In `arg.in`, use equals syntax: `-membrane=true|false`,
+  `-membrane-group=<auto|N>`, `-membrane-lipids=<auto|resname:list>`,
+  `-membrane-head=<auto|atomname:list>`,
+  `-membrane-tail=<auto|atomname:list>`,
+  `-membrane-normal=<auto|x|y|z>`, `-membrane-grid=<auto|Nx,Ny>`,
+  `-membrane-leaflet=<auto|upper-lower|user>`,
+  `-membrane-leaflet-file=<csv>`, and
+  `-membrane-flipflop-persistence=<N>`. Bare `-membrane` also enables the
+  analyzer.
+- Auto normal uses PCA with sign continuity; auto leaflets use periodic local
+  PCA midplanes. The summary writes a `reference_note` so users know how to
+  interpret head-bead geometry.
+
+Phase 6 standalone S2 note:
+- Implemented in this branch. Phase 6 standalone S2 runtime integration is
+  complete.
+- In `arg.in`, use equals syntax: `-s2=true|false`,
+  `-s2-vector=<nh|ca-c|both>`, `-s2-align=<rms|none>`,
+  `-s2-maxlag=<auto|N>`, `-s2-fit-window=<auto|tmin,tmax>`,
+  `-s2-residues=<all|list/range>`, and `-s2-bfactor-pdb=<true|false>`.
+  Bare `-s2` also enables the analyzer.
+- V1 rejects `-s2-align=provided` because alignment is first-frame RMS or
+  none. It also rejects legacy `-s2-plateau-window`; use `-s2-fit-window`.
+- `s2_order_parameters.csv` records residue metadata, `vector_type`,
+  `plateau_C_raw`, clipped `S2`, `tau_ps`, `fit_R2`, the fit window,
+  `samples`, and `fit_status`. `s2_correlation_functions.dat` records each
+  residue/vector lag series. Optional PDB outputs are `s2_bfactor.pdb` and
+  `s2_bfactor_average.pdb`.
+- N-H rows require exact H/HN atoms. PRO and terminal residues without a
+  backbone hydrogen are skipped with a warning. Exact CA-C vectors are emitted
+  as independent rows.
+- RMS mode uses Kabsch alignment to the first analyzed frame. TitanExecutor
+  operates on aligned SoA buffers with AVX2/FMA kernels and a scalar fallback.
+- Fits run independently per trajectory. Multi-input aggregates report mean
+  and SEM; independent trajectories are never pooled into one C(t).
+
 ================================================================================
 4. Core architecture map
 ================================================================================
@@ -106,8 +151,8 @@ Important pattern:
 CLI and configuration:
 - `arguments.h`: defaults and grouped config structs (`MsmArgs`, `DhamArgs`,
   `MbarArgs`, `ValidationArgs`, `CorrKnnArgs`, `SqArgs`,
-  `HBondKineticsArgs`, `LlpsArgs`, `GistArgs`, `UmapArgs`, `AwhArgs`, subgroup
-  `-sg` settings, etc.).
+  `HBondKineticsArgs`, `LlpsArgs`, `GistArgs`, `UmapArgs`, `AwhArgs`,
+  `MembraneArgs`, `S2Args`, subgroup `-sg` settings, etc.).
 - `parse_arguments.cpp`: parsing and module dependency activation.
 - `arguments.cpp`: validation and post-processing of options.
 

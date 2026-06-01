@@ -13,6 +13,7 @@
 #include <expected>
 #include <fstream>
 #include <istream>
+#include <limits>
 #include <map>
 #include <span>
 #include <string>
@@ -154,6 +155,8 @@ public:
       noexcept;
   [[nodiscard]] bool topology_matches_frame(size_t frame_index) const noexcept;
   [[nodiscard]] bool parameters_match_info() const noexcept;
+  [[nodiscard]] bool parameters_match_frame(size_t frame_index) const noexcept;
+  [[nodiscard]] bool analysis_frame_ready(size_t frame_index) const noexcept;
 
   // --- CÁC HÀM XỬ LÝ CHÍNH ---
   int gen_vector_parameters();
@@ -278,10 +281,12 @@ struct PdbRouteEntry {
 
 struct PdbRoutePlan {
   std::vector<PdbRouteEntry> atom_routes;
+  std::vector<size_t> membrane_routes;
   size_t split_begin_mol_2{0};
   size_t pro_atom_count{0};
   size_t lig_atom_count{0};
   size_t wat_atom_count{0};
+  size_t membrane_atom_count{0};
 
   [[nodiscard]] bool uses_explicit_routes() const noexcept {
     return !atom_routes.empty();
@@ -301,6 +306,13 @@ struct PdbRoutePlan {
       return {PdbRouteTarget::Pro, source_atom_1based - 1};
     return {PdbRouteTarget::Lig, source_atom_1based - split_begin_mol_2};
   }
+
+  [[nodiscard]] size_t
+  membrane_route_for(size_t source_atom_1based) const noexcept {
+    if (source_atom_1based < membrane_routes.size())
+      return membrane_routes[source_atom_1based];
+    return std::numeric_limits<size_t>::max();
+  }
 };
 
 std::expected<PdbRoutePlan, std::string>
@@ -311,7 +323,8 @@ read_routed_pdb_chunk(std::istream &input_pdb, std::string_view input_name,
                       size_t chunk_size, std::string_view force_f,
                       arguments &Arguments, ::info &output_info,
                       Multi_MOL &pro_out, Multi_MOL &lig_out,
-                      Multi_MOL &water_out, const PdbRoutePlan &route_plan,
+                      Multi_MOL &water_out, Multi_MOL &membrane_out,
+                      const PdbRoutePlan &route_plan,
                       double &next_target_time_state, bool capture_topology);
 
 #endif // MULTI_MOL_H

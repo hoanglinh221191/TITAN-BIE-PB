@@ -248,13 +248,13 @@ Outputs:
 - `dihedral_backbone_timeseries.csv`
   - frame, time_ps, residue, phi, psi, omega
 - `dihedral_sidechain_timeseries.csv`
-  - frame, time_ps, residue, chi1, chi2, chi3, chi4 where available
+  - frame, time_ps, residue, chi1, chi2 in v1; chi3/chi4 optional future
 - `dihedral_ramachandran.csv`
   - residue, phi_bin, psi_bin, occupancy
 - `dihedral_rotamer_populations.csv`
   - residue, chi state, occupancy
 - `dihedral_rotamer_transitions.csv`
-  - residue, from_state, to_state, count, rate_per_ns
+  - residue, chi, from_state, to_state, count
 - `dihedral_feature_matrix.csv` optional
   - sin/cos encoded angles for TICA
 - `dihedral_summary.dat`
@@ -266,8 +266,10 @@ Implementation notes:
   - psi: N(i)-CA(i)-C(i)-N(i+1)
   - omega: CA(i)-C(i)-N(i+1)-CA(i+1)
   - chi definitions by residue type
-- Missing atoms produce explicit skipped-residue diagnostics, not fatal error.
-- PBC unwrap should be applied before angle calculation when needed.
+- Missing atoms produce `nan` angle samples, not fatal error.
+- Shared SoA torsion kernel uses TitanExecutor, aligned vectors, and AVX2
+  MIC/bond-vector preparation when available; final atan2 remains scalar per
+  torsion for accuracy and portability.
 
 Integration:
 
@@ -295,35 +297,46 @@ Verification:
 Muc tieu:
 
 - Tach MSD/diffusion khoi LLPS dense-phase-only output.
-- Ho tro selection tuy y cho translational diffusion, rotational diffusion, va
-  anomalous diffusion exponent alpha.
+- Slice 4A ho tro translational diffusion va anomalous exponent alpha.
+- Slice 4B ho tro rotational diffusion bang Kabsch orientation quaternion va
+  Favro quaternion covariance tensor.
 
 CLI de xuat:
 
 - `-msd`
-- `-msd-selection <mol1|mol2|protein|rna|residue-range|atom-selection>`
-- `-msd-mode <com|atom|residue|molecule>`
-- `-msd-maxlag <N>`
-- `-msd-fit-window <tmin,tmax>`
-- `-msd-pbc <unwrap|mic|auto>`
-- `-msd-rot <true|false>`
+- `-msd-selection <mol1|mol2|trace|backbone|atom:N,CA|residue:10,12-20,A:30>`
+- `-msd-mode <com|atom>`
+- `-msd-maxlag <N|auto>` default `auto = min(frames - 1, 1000)`
+- `-msd-fit-window <auto|tmin,tmax>`
+- `-msd-pbc <auto|unwrap|mic>`
+- `-msd-rot <true|false>`; `true` duoc ho tro khi co `-msd=true`
+- `-msd-rot-fit-window <auto|tmin,tmax>`
 
 Outputs:
 
 - `msd_timeseries.dat`
-  - lag_time_ps, MSD_A2, samples
+  - lag_index, lag_time_ps, MSD_A2, samples
 - `msd_diffusion_summary.dat`
-  - D_trans from Einstein relation, fit window, R2, uncertainty
+  - frames, points, selection, PBC policy, fit window, slope, D, R2
 - `msd_alpha_fit.dat`
   - anomalous exponent alpha from MSD ~ t^alpha
 - `rotational_msd.dat` optional
+  - lag index, lag time, rotational MSD, samples
+- `rotational_quaternion_timeseries.csv` optional
+  - orientation quaternion theo frame
+- `rotational_covariance_fit.csv` optional
+  - Favro quaternion covariance tensor va fit diagnostics
 - `rotational_diffusion_summary.dat` optional
+  - rotational diffusion fit, `reference_note`, va finite-size note
 
 Implementation notes:
 
 - Translational MSD needs unwrapped coordinates or robust image correction.
-- Rotational MSD should use quaternion orientation autocorrelation for rigid
-  body selections; fail closed if selection cannot define a stable body frame.
+- Rotational MSD dung orientation quaternion tu Kabsch fit voi first analyzed
+  frame lam reference; fail closed neu selection khong dinh nghia duoc stable
+  body frame.
+- Rotational diffusion dung Favro quaternion covariance tensor. Summary phai
+  giu `reference_note` va finite-size note de interpretation khong mat caveat.
 - Multi-time-origin algorithm should avoid O(F^2) blow-up for long trajectories.
 
 Verification:
@@ -332,6 +345,30 @@ Verification:
 - Ballistic/constant-velocity sanity fixture.
 - PBC wrap/unwrap test.
 - LLPS outputs remain unchanged; standalone `-msd` is separate.
+- Rotational synthetic trajectory validates quaternion continuity, tensor fit,
+  and first-analyzed-frame reference note.
+
+Slice 4A implementation ledger:
+
+- `MsdArgs` adds opt-in standalone translational MSD without changing LLPS
+  dense-phase MSD filenames or behavior.
+- `titan_msd.{h,cpp}` stores selected COM or atom tracks in aligned flattened
+  SoA arrays and computes bounded multi-time-origin lags through
+  `TitanExecutor`.
+- COM mode follows the hardened mass policy: mass-weighted when possible,
+  unit weights when selected total mass is zero.
+- `-msd-pbc=auto` unwraps by consecutive-frame MIC when all used frames have
+  valid boxes; otherwise it documents raw-coordinate policy in the summary.
+- Outputs are `msd_timeseries.dat`, `msd_diffusion_summary.dat`, and
+  `msd_alpha_fit.dat`, with `_N` suffixes for multi-input.
+- Slice 4B extends `-msd-rot=true` as an opt-in rotational path when `-msd=true`.
+- `-msd-rot-fit-window=<auto|tmin,tmax>` controls the rotational covariance fit
+  independently from the translational fit.
+- Rotational orientation is defined by Kabsch fit to the first analyzed frame.
+- Rotational diffusion is derived from the Favro quaternion covariance tensor.
+- Outputs are `rotational_msd.dat`, `rotational_quaternion_timeseries.csv`,
+  `rotational_covariance_fit.csv`, and `rotational_diffusion_summary.dat`.
+- The rotational summary records `reference_note` and a finite-size note.
 
 ================================================================================
 7. Phase 5: Lipid / Membrane Analysis (`-membrane`)
@@ -347,30 +384,38 @@ Core features:
 - Leaflet assignment
 - Area per lipid (APL)
 - Membrane thickness
-- Tail order parameters for MARTINI / atomistic mapping
+- Tail order proxy for MARTINI consecutive tail-bead vectors
 - Interdigitation and flip-flop diagnostics
 
-CLI de xuat:
+CLI:
 
 - `-membrane`
+- `-membrane-group <auto|N>`
 - `-membrane-lipids <auto|resname:list>`
 - `-membrane-head <auto|atomname:list>`
 - `-membrane-tail <auto|atomname:list>`
 - `-membrane-normal <z|x|y|auto>`
-- `-membrane-grid <Nx,Ny>`
+- `-membrane-grid <auto|Nx,Ny>`
 - `-membrane-leaflet <auto|upper-lower|user>`
+- `-membrane-leaflet-file <csv>`
+- `-membrane-flipflop-persistence <N>`
 
 Outputs:
 
 - `membrane_leaflets.csv`
   - lipid id, leaflet assignment over time or consensus leaflet
 - `membrane_apl_timeseries.csv`
+- `membrane_apl_per_lipid.csv`
 - `membrane_thickness_timeseries.csv`
 - `membrane_thickness_map.csv`
 - `membrane_order_parameters.csv`
   - lipid type, tail, bead/bond index, S_CD-like value
 - `membrane_interdigitation.dat`
+- `membrane_flipflop_events.csv`
 - `membrane_summary.dat`
+- multi-input aggregates: `membrane_summary_average.dat`,
+  `membrane_thickness_map_average.csv`, and
+  `membrane_order_parameters_average.csv`
 
 Implementation notes:
 
@@ -378,8 +423,9 @@ Implementation notes:
   - use phosphate/head beads for leaflet and thickness
   - use tail bead vectors for coarse-grained order proxies
 - Atomistic path can be added after MARTINI defaults are stable.
-- Leaflet assignment should be robust to undulations via midplane/grid model,
-  not only global z split.
+- Leaflet assignment uses local periodic PCA midplanes for auto mode, not only
+  a global z split.
+- Lipids use a dedicated coordinate stream and do not consume `mol2`.
 
 Integration:
 
@@ -391,7 +437,8 @@ Verification:
 
 - Small MARTINI bilayer fixture with known two-leaflet topology.
 - Tilted/undulating bilayer sanity case.
-- No-op behavior on non-membrane systems: warn and skip, not crash.
+- Unknown lipid templates warn and skip. A requested analysis with fewer than
+  four supported lipids fails clearly instead of emitting misleading output.
 
 ================================================================================
 8. Phase 6: NMR Order Parameters S2 (`-s2`)
@@ -408,32 +455,49 @@ Scientific core:
   - C(t) = <P2(mu(0) dot mu(t))>
   - S2 = plateau C(t -> infinity) or long-lag average
 - Primary vectors:
-  - backbone N-H when H exists
-  - C-alpha to C bond / surrogate vector when hydrogens are missing
+  - exact backbone N-H using H or HN atoms
+  - exact C-alpha to C bond as an independent row
 
-CLI de xuat:
+Public arg.in contract:
 
-- `-s2`
-- `-s2-vector <NH|CA-C|both>`
-- `-s2-align <rms|none|provided>`
-- `-s2-maxlag <N>`
-- `-s2-plateau-window <tmin,tmax>`
-- `-s2-residues <all|range/list>`
+- `-s2=true|false` or bare `-s2`
+- `-s2-vector=<nh|ca-c|both>`; default `both`
+- `-s2-align=<rms|none>`; default `rms`
+- `-s2-maxlag=<auto|N>`; default `auto`, explicit `N >= 1`
+- `-s2-fit-window=<auto|tmin,tmax>`; default `auto`, require `tmax > tmin`
+- `-s2-residues=<all|list/range>`
+- `-s2-bfactor-pdb=<true|false>`; default `false`
+
+V1 compatibility notes:
+
+- `-s2-align=provided` is rejected clearly because v1 supports first-frame RMS
+  alignment or no alignment only.
+- Legacy `-s2-plateau-window` is rejected clearly; use `-s2-fit-window`.
 
 Outputs:
 
 - `s2_order_parameters.csv`
-  - residue, vector_type, S2, plateau_start, plateau_end, samples
+  - chain, residue_number, residue_name, vector_type, plateau_C_raw,
+    clipped S2, tau_ps, fit_R2, fit_window_start_ps, fit_window_end_ps,
+    samples, fit_status
 - `s2_correlation_functions.dat`
-  - residue/vector, lag_time_ps, C(t)
+  - chain, residue_number, residue_name, vector_type, lag_index, lag_time_ps,
+    C(t), samples
 - `s2_summary.dat`
 - `s2_bfactor.pdb` optional
+- multi-input aggregates: `s2_order_parameters_average.csv`,
+  `s2_summary_average.dat`, and optional `s2_bfactor_average.pdb`
 
 Implementation notes:
 
-- Reuse RMSD alignment machinery when `-s2-align rms`.
-- If hydrogens are absent, warn and fall back only when requested or when a
-  documented surrogate is available.
+- N-H rows require exact H/HN atoms. PRO and terminal residues without a
+  backbone hydrogen are skipped with a warning.
+- CA-C uses the exact vector and is emitted as an independent row.
+- `-s2-align=rms` uses Kabsch alignment to the first analyzed frame.
+- TitanExecutor operates on aligned SoA buffers with AVX2/FMA kernels and a
+  scalar fallback.
+- Fit each trajectory independently. Multi-input aggregates report mean and
+  SEM; do not pool independent trajectories into one C(t).
 - Use bounded lag windows to avoid noisy tails being interpreted as plateau.
 
 Verification:
@@ -560,22 +624,130 @@ Implemented notes:
 
 Slice B: `-qnative` v1
 
+Status: implemented in this branch.
+
 - Reuse `ContactPrimitive`.
 - Build native contact list from reference.
 - Export Q timeseries and native contact occupancy.
 - Add TPT selector parser for `qnative_range`.
 - Add synthetic folding/unfolding smoke.
 
-Slice C: `-dihedral` backbone v1
+Slice C: `-dihedral` backbone + sidechain chi1/chi2 v1
 
 Status: implemented in this branch.
 
-- Implement phi/psi/omega only first.
-- Export timeseries and Ramachandran occupancy.
-- Add sin/cos feature export for TICA.
-- Add peptide fixture and angle periodicity tests.
+- Implement phi/psi/omega backbone torsions.
+- Implement sidechain chi1/chi2 rotamer populations and transition counts.
+- Export backbone/sidechain timeseries, Ramachandran, summary, and sin/cos
+  feature matrix for TICA prep.
+- Use TitanExecutor + aligned SoA torsion kernel with AVX2 MIC prep.
+- Chi3/chi4 and direct mixed-source TICA integration remain future optional
+  expansions.
 
-Recommended first target: Slice A.
+Slice 4A: `-msd` translational MSD v1
 
-Ly do: no dung ngay comment cua user ve residue-residue contact probability
-matrix, mo khoa graph/allostery/Q-native, va it phu thuoc nhat vao refactor TICA.
+Status: implemented in this branch.
+
+- Add standalone translational MSD separate from LLPS dense-phase MSD.
+- Support `mol1`, `mol2`, `trace`, `backbone`, `atom:<names>`, and
+  `residue:<ranges>` selections.
+- Support COM and atom-averaged modes with aligned SoA storage.
+- Compute bounded multi-time-origin lags through `TitanExecutor`.
+- Export `msd_timeseries.dat`, `msd_diffusion_summary.dat`, and
+  `msd_alpha_fit.dat` with indexed multi-input filenames.
+- Keep `-msd-rot=false` as the default.
+
+Slice 4B: `-msd-rot=true` rotational diffusion v1
+
+Status: implemented in this branch. Phase 4 complete.
+
+- Support `-msd-rot=true` together with `-msd=true`.
+- Add independent `-msd-rot-fit-window=<auto|tmin,tmax>`.
+- Use the first analyzed frame as the Kabsch reference orientation.
+- Derive rotational diffusion from the Favro quaternion covariance tensor.
+- Export `rotational_msd.dat`, `rotational_quaternion_timeseries.csv`,
+  `rotational_covariance_fit.csv`, and `rotational_diffusion_summary.dat`.
+- Preserve `reference_note` and finite-size note in the rotational summary.
+
+Completed target: Phase 5 membrane analysis.
+
+Phase 4, Phase 5, and the standalone Phase 6 S2 implementation are complete in
+this branch.
+
+Phase 5: membrane analysis
+
+Status: implemented in this branch. Phase 5 complete.
+
+Membrane analysis uses a dedicated lipid coordinate stream, so
+`-nocal=true -membrane=true` does not enable the energy pipeline or consume
+`mol2`. Auto normal uses PCA with sign continuity. Auto leaflet assignment
+uses periodic local-neighborhood PCA midplanes to remain useful for undulating
+bilayers.
+
+Public arg.in contract:
+
+- `-membrane=true|false` or bare `-membrane`
+- `-membrane-group=<auto|N>`
+- `-membrane-lipids=<auto|resname:list>`
+- `-membrane-head=<auto|atomname:list>`
+- `-membrane-tail=<auto|atomname:list>`
+- `-membrane-normal=<auto|x|y|z>`
+- `-membrane-grid=<auto|Nx,Ny>`
+- `-membrane-leaflet=<auto|upper-lower|user>`
+- `-membrane-leaflet-file=<csv>`
+- `-membrane-flipflop-persistence=<N>`
+
+Defaults are inert: membrane analysis is off, selector fields use `auto`,
+`-membrane-leaflet-file` is empty, and flip-flop persistence is 3 frames.
+Validation requires a non-negative explicit group, positive grid dimensions,
+positive persistence, and a leaflet CSV exactly when leaflet mode is `user`.
+
+Slice 5A: membrane APL + thickness v1
+
+Status: implemented in this branch.
+
+- Resolve lipid/head/tail selectors and membrane normal.
+- Assign leaflets automatically, as upper/lower, or from a user CSV.
+- Export `membrane_leaflets.csv`, `membrane_apl_timeseries.csv`,
+  `membrane_apl_per_lipid.csv`, `membrane_thickness_timeseries.csv`,
+  `membrane_thickness_map.csv`, and `membrane_summary.dat`.
+- Add aggregate `membrane_summary_average.dat` and
+  `membrane_thickness_map_average.csv`.
+
+Slice 5B: order parameters + interdigitation + flip-flop v1
+
+Status: implemented in this branch.
+
+- Export `membrane_order_parameters.csv`, `membrane_interdigitation.dat`, and
+  `membrane_flipflop_events.csv`.
+- Require persistent leaflet reassignment for the configured number of frames
+  before reporting a flip-flop event.
+- Add aggregate `membrane_order_parameters_average.csv`.
+
+Implementation notes:
+
+- APL uses periodic tiled-neighbor Voronoi clipping per leaflet.
+- Auto grid sizing is aspect-aware and targets about 8 lipids per leaflet per
+  cell, clamped to 4..64 bins per axis.
+- Headgroup projection has an AVX2 path with scalar fallback. Voronoi polygon
+  clipping remains scalar for numerical stability.
+- `membrane_summary.dat` records a `reference_note` explaining the head-bead
+  geometry, PCA normal, and local-midplane policy.
+
+Phase 6: NMR order parameters S2
+
+Status: implemented in this branch. Phase 6 standalone S2 runtime integration
+is complete.
+
+- Add inert `S2Args` defaults and parser support for bare or equals booleans.
+- Preserve `-s2=false` as one token when parsing `arg.in`.
+- Validate vector kind, alignment policy, maximum lag, fit window, and
+  non-empty residue selection.
+- Emit exact H/HN N-H rows, warn and skip PRO or terminal residues without a
+  backbone hydrogen, and emit exact CA-C vectors as independent rows.
+- Use first-analyzed-frame Kabsch alignment and TitanExecutor aligned SoA
+  buffers with AVX2/FMA kernels plus scalar fallback.
+- Fit each trajectory independently and aggregate mean and SEM without pooling
+  independent C(t) curves.
+- Export indexed per-trajectory results and stable aggregate outputs.
+- Cover parser behavior and standalone end-to-end runtime with S2 smoke tests.

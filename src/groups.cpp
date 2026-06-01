@@ -20,6 +20,24 @@
 
 using namespace std;
 
+std::optional<size_t> groups_cal::find_group_index(std::string_view name) const {
+  std::string wanted(name);
+  std::transform(wanted.begin(), wanted.end(), wanted.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  for (size_t i = 0; i < groups.size(); ++i) {
+    std::string candidate = groups[i].name;
+    std::transform(candidate.begin(), candidate.end(), candidate.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (candidate == wanted)
+      return i;
+  }
+  return std::nullopt;
+}
+
 namespace {
 
 std::string trim_copy(std::string_view text) {

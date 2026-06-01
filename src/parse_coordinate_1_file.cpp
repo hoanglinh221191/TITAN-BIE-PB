@@ -186,7 +186,7 @@ int helper_parse_coor_not_copy(Multi_MOL &pro_in, Multi_MOL &lig,
         I < lig.m_mol.size() && !lig.m_mol[I].pos.x.empty();
     const bool frame_complete =
         pro_has_current_frame &&
-        (Arguments.flag_nocal || lig_has_current_frame);
+        (!Arguments.needs_mol2_coordinates() || lig_has_current_frame);
 
     if (!frame_complete) {
       discard_uncommitted_frame(pro_in, I);
@@ -199,13 +199,12 @@ int helper_parse_coor_not_copy(Multi_MOL &pro_in, Multi_MOL &lig,
     }
 
     pro_in.check_and_pop_size_2last_snaps(I, " of molecule 1 ");
-    if (!Arguments.flag_nocal)
+    if (Arguments.needs_mol2_coordinates())
       lig.check_and_pop_size_2last_snaps(I, " of molecule 2 ");
 
-    if (flag_set_box == false && I != 0 && I < pro_in.m_mol.size() &&
-        I < lig.m_mol.size()) {
+    if (flag_set_box == false && I != 0 && I < pro_in.m_mol.size()) {
       pro_in.m_mol[I].Box = pro_in.m_mol[I - 1].Box;
-      if (!Arguments.flag_nocal)
+      if (Arguments.needs_mol2_coordinates() && I < lig.m_mol.size())
         lig.m_mol[I].Box = lig.m_mol[I - 1].Box;
     } else
       flag_set_box = false;
@@ -239,15 +238,16 @@ void take_coordinate(Multi_MOL &pro_in, Multi_MOL &lig, Multi_MOL &water_traj,
     double next_target_time_state = -1e18;
     const bool capture_topology =
         pro_in.info.empty() ||
-        (!Arguments.flag_nocal && lig.info.empty()) ||
+        (Arguments.needs_mol2_coordinates() && lig.info.empty()) ||
         (Arguments.n_wat >= 0 && water_traj.info.empty());
     const size_t frame_limit =
         max_frames > 0 ? max_frames : std::numeric_limits<size_t>::max();
 
+    Multi_MOL membrane_out;
     auto parsed = read_routed_pdb_chunk(
         routed_input, input_name, frame_limit, force_f, Arguments, output_info,
-        pro_in, lig, water_traj, route_plan.value(), next_target_time_state,
-        capture_topology);
+        pro_in, lig, water_traj, membrane_out, route_plan.value(),
+        next_target_time_state, capture_topology);
     if (!parsed) {
       TitanUI::print_warning("Falling back to legacy 1-PDB parser: " +
                              parsed.error());

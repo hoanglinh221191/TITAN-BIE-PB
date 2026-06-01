@@ -23,12 +23,20 @@ bool Multi_MOL::frame_coordinates_consistent(size_t frame_index) const
 }
 
 bool Multi_MOL::topology_matches_frame(size_t frame_index) const noexcept {
-  return frame_coordinates_consistent(frame_index) &&
-         info.size() == m_mol[frame_index].size();
+  return frame_index < m_mol.size() &&
+         m_mol[frame_index].topology_consistent(info.size());
 }
 
 bool Multi_MOL::parameters_match_info() const noexcept {
   return parameters.size() == info.size();
+}
+
+bool Multi_MOL::parameters_match_frame(size_t frame_index) const noexcept {
+  return frame_index < m_mol.size() && parameters.size() >= m_mol[frame_index].size();
+}
+
+bool Multi_MOL::analysis_frame_ready(size_t frame_index) const noexcept {
+  return topology_matches_frame(frame_index) && parameters_match_frame(frame_index);
 }
 
 void Multi_MOL::post_process_coordinates_user_define(string_view type) {
@@ -291,9 +299,7 @@ int Multi_MOL::gen_vector_parameters() {
 }
 
 int Multi_MOL::com_mol(const size_t num_snap, std::span<double> com) const {
-  if (com.size() < 3 || num_snap >= m_mol.size() ||
-      !m_mol[num_snap].coordinates_consistent() ||
-      parameters.size() < m_mol[num_snap].size())
+  if (com.size() < 3 || !analysis_frame_ready(num_snap))
     return 1;
 
   double mol_mass{};

@@ -1,4 +1,5 @@
 #include "MOL.h"
+#include "Multi_MOL.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -127,6 +128,10 @@ void run_mol_invariants() {
   frame.pos.y.push_back(2.0);
   require(frame.coordinates_consistent(),
           "coordinate invariant accepts matched x/y/z sizes");
+  require(frame.topology_consistent(2),
+          "topology invariant accepts matched topology atom count");
+  require(!frame.topology_consistent(1),
+          "topology invariant rejects topology/frame atom mismatch");
 
   const std::size_t old_capacity = frame.pos.x.capacity();
   frame.clear_MOL();
@@ -135,6 +140,52 @@ void run_mol_invariants() {
   frame.release_memory();
   require(frame.pos.x.capacity() == 0,
           "release_memory explicitly returns coordinate storage");
+}
+
+void run_multimol_analysis_frame_helpers() {
+  Multi_MOL mol;
+  mol.info = {make_atom(1, "ALA", "N", false),
+              make_atom(1, "ALA", "CA", false)};
+  mol.parameters.resize(2);
+
+  MOL frame;
+  frame.pos.x = {1.0, 2.0};
+  frame.pos.y = {1.0, 2.0};
+  frame.pos.z = {1.0, 2.0};
+  mol.m_mol.push_back(frame);
+
+  require(mol.frame_coordinates_consistent(0),
+          "Multi_MOL frame coordinate helper accepts consistent frame");
+  require(mol.topology_matches_frame(0),
+          "Multi_MOL topology helper accepts matched topology/frame");
+  require(mol.parameters_match_info(),
+          "Multi_MOL parameter/info helper accepts matched sizes");
+  require(mol.parameters_match_frame(0),
+          "Multi_MOL parameter/frame helper accepts matched sizes");
+  require(mol.analysis_frame_ready(0),
+          "Multi_MOL analysis helper accepts fully ready frame");
+
+  mol.parameters.resize(1);
+  require(!mol.parameters_match_info(),
+          "Multi_MOL parameter/info helper rejects short parameter vector");
+  require(!mol.parameters_match_frame(0),
+          "Multi_MOL parameter/frame helper rejects short parameter vector");
+  require(!mol.analysis_frame_ready(0),
+          "Multi_MOL analysis helper rejects short parameter vector");
+
+  mol.parameters.resize(2);
+  mol.info.pop_back();
+  require(!mol.topology_matches_frame(0),
+          "Multi_MOL topology helper rejects topology/frame mismatch");
+  require(!mol.analysis_frame_ready(0),
+          "Multi_MOL analysis helper rejects topology/frame mismatch");
+
+  mol.info.push_back(make_atom(1, "ALA", "CA", false));
+  mol.m_mol[0].pos.z.pop_back();
+  require(!mol.frame_coordinates_consistent(0),
+          "Multi_MOL coordinate helper rejects x/y/z mismatch");
+  require(!mol.analysis_frame_ready(0),
+          "Multi_MOL analysis helper rejects coordinate mismatch");
 }
 
 void run_force_accessors_guard_release_builds() {
@@ -169,6 +220,7 @@ int main() {
   run_sidechain_com_keeps_mass_weighting();
   run_all_atom_com_unit_weight_fallback();
   run_mol_invariants();
+  run_multimol_analysis_frame_helpers();
   run_force_accessors_guard_release_builds();
   std::cout << "PASS titan_core_struct_smoke\n";
   return 0;

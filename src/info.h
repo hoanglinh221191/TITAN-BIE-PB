@@ -397,6 +397,233 @@ public:
              ".csv";
     return "dihedral_feature_matrix.csv";
   }
+  string get_dihedral_sidechain_timeseries_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "dihedral_sidechain_timeseries.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "dihedral_sidechain_timeseries_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "dihedral_sidechain_timeseries.csv";
+  }
+  string get_dihedral_rotamer_populations_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "dihedral_rotamer_populations.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "dihedral_rotamer_populations_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "dihedral_rotamer_populations.csv";
+  }
+  string get_dihedral_rotamer_transitions_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "dihedral_rotamer_transitions.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "dihedral_rotamer_transitions_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "dihedral_rotamer_transitions.csv";
+  }
+  string get_msd_timeseries_filename(const arguments &Arguments,
+                                     const std::vector<string> &input_line,
+                                     int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "msd_timeseries.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "msd_timeseries_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "msd_timeseries.dat";
+  }
+  string get_msd_diffusion_summary_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "msd_diffusion_summary.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "msd_diffusion_summary_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "msd_diffusion_summary.dat";
+  }
+  string get_msd_alpha_fit_filename(const arguments &Arguments,
+                                    const std::vector<string> &input_line,
+                                    int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "msd_alpha_fit.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "msd_alpha_fit_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "msd_alpha_fit.dat";
+  }
+  string indexed_analysis_filename(const arguments &Arguments,
+                                   const std::vector<string> &input_line,
+                                   int input_name, const string &stem,
+                                   const string &extension) const {
+    if (Arguments.flag_separation_results)
+      return stem + extension;
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return stem + "_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             extension;
+    return stem + extension;
+  }
+  string get_rotational_msd_filename(const arguments &Arguments,
+                                     const std::vector<string> &input_line,
+                                     int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "rotational_msd", ".dat");
+  }
+  string get_rotational_quaternion_timeseries_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "rotational_quaternion_timeseries",
+                                     ".csv");
+  }
+  string get_rotational_covariance_fit_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "rotational_covariance_fit", ".csv");
+  }
+  string get_rotational_diffusion_summary_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "rotational_diffusion_summary", ".dat");
+  }
+  string get_membrane_leaflets_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_leaflets", ".csv");
+  }
+  string get_membrane_apl_timeseries_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_apl_timeseries", ".csv");
+  }
+  string get_membrane_apl_per_lipid_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_apl_per_lipid", ".csv");
+  }
+  string get_membrane_thickness_timeseries_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_thickness_timeseries", ".csv");
+  }
+  string get_membrane_thickness_map_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_thickness_map", ".csv");
+  }
+  string get_membrane_summary_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_summary", ".dat");
+  }
+  string get_membrane_order_parameters_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_order_parameters", ".csv");
+  }
+  string get_membrane_interdigitation_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_interdigitation", ".dat");
+  }
+  string get_membrane_flipflop_events_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_flipflop_events", ".csv");
+  }
+  string get_membrane_summary_average_filename() const {
+    return "membrane_summary_average.dat";
+  }
+  string get_membrane_thickness_map_average_filename() const {
+    return "membrane_thickness_map_average.csv";
+  }
+  string get_membrane_order_parameters_average_filename() const {
+    return "membrane_order_parameters_average.csv";
+  }
+  string get_s2_order_parameters_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "s2_order_parameters", ".csv");
+  }
+  string get_s2_correlation_functions_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "s2_correlation_functions", ".dat");
+  }
+  string get_s2_summary_filename(const arguments &Arguments,
+                                 const std::vector<string> &input_line,
+                                 int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "s2_summary", ".dat");
+  }
+  string get_s2_bfactor_filename(const arguments &Arguments,
+                                 const std::vector<string> &input_line,
+                                 int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "s2_bfactor", ".pdb");
+  }
+  string get_s2_order_parameters_average_filename() const {
+    return "s2_order_parameters_average.csv";
+  }
+  string get_s2_summary_average_filename() const {
+    return "s2_summary_average.dat";
+  }
+  string get_s2_bfactor_average_filename() const {
+    return "s2_bfactor_average.pdb";
+  }
   string get_network_community_summary_filename() const {
     return "network_community_summary.csv";
   }

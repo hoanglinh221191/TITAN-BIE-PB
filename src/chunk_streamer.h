@@ -34,15 +34,22 @@ public:
   std::expected<void, std::string> open_streams(const std::string &name_pro,
                                                 const std::string &name_lig,
                                                 const Multi_MOL &init_pro,
-                                                const Multi_MOL &init_lig);
+                                                const Multi_MOL &init_lig,
+                                                const Multi_MOL &init_membrane);
 
   std::expected<size_t, std::string> read_next_chunk(size_t chunk_size,
                                                      Multi_MOL &pro_in,
                                                      Multi_MOL &lig,
-                                                     Multi_MOL &water_traj);
+                                                     Multi_MOL &water_traj,
+                                                     Multi_MOL &membrane_traj);
 
 private:
-  enum class XdrRunTarget : std::uint8_t { Pro = 0, Lig = 1, Wat = 2 };
+  enum class XdrRunTarget : std::uint8_t {
+    Pro = 0,
+    Lig = 1,
+    Wat = 2,
+    Membrane = 3
+  };
 
   struct XdrAtomRun {
     size_t source_begin = 0;
@@ -77,9 +84,11 @@ private:
 
   void parallel_split_coordinates(const Multi_MOL &source_chunk,
                                   const Multi_MOL &init_pro,
-                                  const Multi_MOL &init_lig, Multi_MOL &pro_out,
-                                  Multi_MOL &lig_out, Multi_MOL &wat_out,
-                                  size_t num_frames);
+                                  const Multi_MOL &init_lig,
+                                  const Multi_MOL &init_membrane,
+                                  Multi_MOL &pro_out, Multi_MOL &lig_out,
+                                  Multi_MOL &wat_out,
+                                  Multi_MOL &membrane_out, size_t num_frames);
 
   // ── XDR state ──
   // Using opaque pointer + float arrays to avoid xdrfile.h in header
@@ -93,9 +102,11 @@ private:
   size_t pro_size_ = 0;
   size_t lig_size_ = 0;
   size_t wat_size_ = 0;
+  size_t membrane_size_ = 0;
   std::vector<size_t> pro_atom_indices0_;
   std::vector<size_t> lig_atom_indices0_;
   std::vector<size_t> wat_atom_indices0_;
+  std::vector<size_t> membrane_atom_indices0_;
   std::vector<XdrAtomRun> xdr_extract_runs_;
   size_t xdr_max_run_length_ = 0;
   bool xdr_has_overlapping_runs_ = false;
@@ -106,6 +117,7 @@ private:
 
   const Multi_MOL *init_pro_ = nullptr;
   const Multi_MOL *init_lig_ = nullptr;
+  const Multi_MOL *init_membrane_ = nullptr;
 
   // ── XDR time filter state (persists across chunks) ──
   double xdr_next_target_time_ = -1e18; // for -dt stride
