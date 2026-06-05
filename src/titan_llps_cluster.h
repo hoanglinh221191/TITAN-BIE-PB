@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -97,6 +98,70 @@ struct LLPSPaperConfig {
   double profile_bin_nm{0.2};
   int requested_blocks{0}; // 0 = auto
   std::string geometry{"auto"};
+  bool fractal_enabled{false};
+};
+
+struct LLPSPaperFractalConfig {
+  bool enabled{false};
+  double min_scale_nm{0.5};
+  double max_scale_fraction{0.75};
+};
+
+struct LLPSPaperFractalFrame {
+  int frame{0};
+  double time_ns{0.0};
+  int dense_nodes{0};
+  int dense_protein_nodes{0};
+  int dense_rna_nodes{0};
+  double df_mass_radius{std::numeric_limits<double>::quiet_NaN()};
+  double df_box_count{std::numeric_limits<double>::quiet_NaN()};
+  double kf_mass_radius{std::numeric_limits<double>::quiet_NaN()};
+  double fit_r2_mass_radius{0.0};
+  double fit_r2_box_count{0.0};
+  int scale_count_mass_radius{0};
+  int scale_count_box_count{0};
+  double dense_radius_nm{0.0};
+  double dense_rg_nm{0.0};
+  double mean_local_valency{0.0};
+  double protein_rna_neighbor_fraction{0.0};
+  bool valid{false};
+  std::string invalid_reason{"not_evaluated"};
+};
+
+struct LLPSPaperFractalScaleRow {
+  int frame{0};
+  double time_ns{0.0};
+  std::string method{"mass_radius"};
+  double scale_nm{0.0};
+  double value{0.0};
+  double log_scale{0.0};
+  double log_value{0.0};
+};
+
+class LLPSPaperFractalAccumulator {
+public:
+  void configure(const LLPSPaperFractalConfig &config);
+  bool enabled() const { return config_.enabled; }
+  void process_frame(double time_ns, int frame,
+                     const std::vector<LLPSNode> &nodes,
+                     const std::vector<bool> &is_dense, int giant_cluster_id,
+                     const box &Box);
+  void export_outputs(const info &info_output, std::fstream &log,
+                      int requested_blocks) const;
+  const std::vector<LLPSPaperFractalFrame> &frames() const { return frames_; }
+  const std::vector<LLPSPaperFractalScaleRow> &scales() const {
+    return scales_;
+  }
+
+#ifdef TITAN_LLPS_TESTING
+  static LLPSPaperFractalFrame debug_fit_points(
+      const std::vector<std::array<double, 3>> &points_nm);
+#endif
+
+private:
+  LLPSPaperFractalConfig config_;
+  std::vector<LLPSPaperFractalFrame> frames_;
+  std::vector<LLPSPaperFractalScaleRow> scales_;
 };
 
 class LLPSPaperAccumulator {
@@ -185,6 +250,7 @@ private:
   uint64_t skipped_no_dense_{0};
   uint64_t skipped_bad_box_{0};
   std::string observed_geometry_{"none"};
+  LLPSPaperFractalAccumulator fractal_;
 };
 
 class TitanLLPSCluster {

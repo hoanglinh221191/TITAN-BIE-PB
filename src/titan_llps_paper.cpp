@@ -12,6 +12,8 @@
 #include <numeric>
 #include <sstream>
 #include <string>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -63,6 +65,223 @@ struct BlockStats {
   double mean{0.0};
   double sem{0.0};
 };
+
+struct LinearFitResult {
+  double slope{std::numeric_limits<double>::quiet_NaN()};
+  double intercept{std::numeric_limits<double>::quiet_NaN()};
+  double r2{0.0};
+  int n{0};
+};
+
+LinearFitResult fit_line(const std::vector<std::pair<double, double>> &xy) {
+  LinearFitResult out;
+  out.n = static_cast<int>(xy.size());
+  if (xy.size() < 3)
+    return out;
+  double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0, syy = 0.0;
+  for (const auto &p : xy) {
+    sx += p.first;
+    sy += p.second;
+    sxx += p.first * p.first;
+    sxy += p.first * p.second;
+    syy += p.second * p.second;
+  }
+  const double n = static_cast<double>(xy.size());
+  const double denom = n * sxx - sx * sx;
+  if (std::abs(denom) < kEps)
+    return out;
+  out.slope = (n * sxy - sx * sy) / denom;
+  out.intercept = (sy - out.slope * sx) / n;
+  const double ss_tot = syy - sy * sy / n;
+  double ss_res = 0.0;
+  for (const auto &p : xy) {
+    const double yhat = out.slope * p.first + out.intercept;
+    const double d = p.second - yhat;
+    ss_res += d * d;
+  }
+  out.r2 = ss_tot > kEps ? std::max(0.0, 1.0 - ss_res / ss_tot) : 0.0;
+  return out;
+}
+
+uint64_t box_key(int ix, int iy, int iz) {
+  return (static_cast<uint64_t>(static_cast<uint32_t>(ix)) << 42) ^
+         (static_cast<uint64_t>(static_cast<uint32_t>(iy)) << 21) ^
+         static_cast<uint64_t>(static_cast<uint32_t>(iz));
+}
+
+std::vector<double> select_scales(const std::vector<double> &candidates,
+                                  double min_scale_nm) {
+  std::vector<double> selected;
+  selected.reserve(candidates.size());
+  for (double scale : candidates) {
+    if (scale >= min_scale_nm)
+      selected.push_back(scale);
+  }
+  if (selected.size() >= 3)
+    return selected;
+  return candidates;
+}
+
+void compute_fractal_frame_from_points(
+    const std::vector<std::array<double, 3>> &points_nm,
+    const LLPSPaperFractalConfig &config, LLPSPaperFractalFrame &row,
+    int frame, double time_ns,
+    std::vector<LLPSPaperFractalScaleRow> *scale_rows) {
+  row.frame = frame;
+  row.time_ns = time_ns;
+  row.dense_nodes = static_cast<int>(points_nm.size());
+  row.invalid_reason = "insufficient_scales";
+  if (points_nm.empty())
+    return;
+
+  std::array<double, 3> center = {0.0, 0.0, 0.0};
+  std::array<double, 3> min_nm = {std::numeric_limits<double>::max(),
+                                  std::numeric_limits<double>::max(),
+                                  std::numeric_limits<double>::max()};
+  std::array<double, 3> max_nm = {std::numeric_limits<double>::lowest(),
+                                  std::numeric_limits<double>::lowest(),
+                                  std::numeric_limits<double>::lowest()};
+  for (const auto &p : points_nm) {
+    for (int d = 0; d < 3; ++d) {
+      center[d] += p[d];
+      min_nm[d] = std::min(min_nm[d], p[d]);
+      max_nm[d] = std::max(max_nm[d], p[d]);
+    }
+  }
+  const double inv_n = 1.0 / static_cast<double>(points_nm.size());
+  for (double &v : center)
+    v *= inv_n;
+
+  double r2_sum = 0.0;
+  std::vector<double> distances;
+  distances.reserve(points_nm.size());
+  for (const auto &p : points_nm) {
+    double r2 = 0.0;
+    for (int d = 0; d < 3; ++d) {
+      const double delta = p[d] - center[d];
+      r2 += delta * delta;
+    }
+    r2_sum += r2;
+    const double r = std::sqrt(r2);
+    distances.push_back(r);
+    row.dense_radius_nm = std::max(row.dense_radius_nm, r);
+  }
+  row.dense_rg_nm = std::sqrt(r2_sum * inv_n);
+  if (row.dense_radius_nm <= kEps)
+    return;
+
+  const double max_fraction =
+      std::clamp(config.max_scale_fraction, 0.25, 1.0);
+  const std::vector<double> fractions = {0.25, 0.35, 0.50,
+                                         0.70, 0.90, 1.00};
+  std::vector<double> mass_candidates;
+  for (double fraction : fractions) {
+    if (fraction <= max_fraction || mass_candidates.size() < 3)
+      mass_candidates.push_back(fraction * row.dense_radius_nm);
+  }
+  const auto mass_scales =
+      select_scales(mass_candidates, std::max(0.1, config.min_scale_nm));
+  std::vector<std::pair<double, double>> mass_fit_xy;
+  for (double scale : mass_scales) {
+    int count = 0;
+    for (double r : distances) {
+      if (r <= scale + kEps)
+        ++count;
+    }
+    if (count <= 0)
+      continue;
+    const double log_scale = std::log(scale);
+    const double log_count = std::log(static_cast<double>(count));
+    mass_fit_xy.push_back({log_scale, log_count});
+    if (scale_rows) {
+      LLPSPaperFractalScaleRow scale_row;
+      scale_row.frame = frame;
+      scale_row.time_ns = time_ns;
+      scale_row.method = "mass_radius";
+      scale_row.scale_nm = scale;
+      scale_row.value = static_cast<double>(count);
+      scale_row.log_scale = log_scale;
+      scale_row.log_value = log_count;
+      scale_rows->push_back(scale_row);
+    }
+  }
+  const LinearFitResult mass_fit = fit_line(mass_fit_xy);
+  row.scale_count_mass_radius = mass_fit.n;
+  row.df_mass_radius = mass_fit.slope;
+  row.kf_mass_radius = std::isfinite(mass_fit.intercept)
+                           ? std::exp(mass_fit.intercept)
+                           : std::numeric_limits<double>::quiet_NaN();
+  row.fit_r2_mass_radius = mass_fit.r2;
+
+  std::array<double, 3> extent_nm = {max_nm[0] - min_nm[0],
+                                     max_nm[1] - min_nm[1],
+                                     max_nm[2] - min_nm[2]};
+  const double max_extent =
+      std::max(extent_nm[0], std::max(extent_nm[1], extent_nm[2]));
+  if (max_extent <= kEps)
+    return;
+
+  const std::vector<int> divisions = {2, 3, 4};
+  std::vector<double> box_candidates;
+  for (int div : divisions) {
+    const double scale = max_extent / static_cast<double>(div);
+    const double fraction = scale / std::max(kEps, max_extent);
+    if (fraction <= max_fraction || box_candidates.size() < 3)
+      box_candidates.push_back(scale);
+  }
+  const auto box_scales =
+      select_scales(box_candidates, std::max(0.1, config.min_scale_nm));
+  std::vector<std::pair<double, double>> box_fit_xy;
+  for (double scale : box_scales) {
+    if (scale <= kEps)
+      continue;
+    int div = std::max(1, static_cast<int>(std::ceil(max_extent / scale)));
+    std::unordered_set<uint64_t> occupied;
+    occupied.reserve(points_nm.size());
+    for (const auto &p : points_nm) {
+      int idx[3] = {0, 0, 0};
+      for (int d = 0; d < 3; ++d) {
+        const double shifted = p[d] - min_nm[d];
+        idx[d] = std::min(div - 1,
+                          std::max(0, static_cast<int>(shifted / scale)));
+      }
+      occupied.insert(box_key(idx[0], idx[1], idx[2]));
+    }
+    if (occupied.empty())
+      continue;
+    const double log_inv_scale = std::log(1.0 / scale);
+    const double log_count =
+        std::log(static_cast<double>(occupied.size()));
+    box_fit_xy.push_back({log_inv_scale, log_count});
+    if (scale_rows) {
+      LLPSPaperFractalScaleRow scale_row;
+      scale_row.frame = frame;
+      scale_row.time_ns = time_ns;
+      scale_row.method = "box_count";
+      scale_row.scale_nm = scale;
+      scale_row.value = static_cast<double>(occupied.size());
+      scale_row.log_scale = log_inv_scale;
+      scale_row.log_value = log_count;
+      scale_rows->push_back(scale_row);
+    }
+  }
+  const LinearFitResult box_fit = fit_line(box_fit_xy);
+  row.scale_count_box_count = box_fit.n;
+  row.df_box_count = box_fit.slope;
+  row.fit_r2_box_count = box_fit.r2;
+
+  if (row.scale_count_mass_radius < 3 || row.scale_count_box_count < 3) {
+    row.invalid_reason = "insufficient_scales";
+    return;
+  }
+  if (!std::isfinite(row.df_mass_radius) || row.df_mass_radius < 0.5 ||
+      row.df_mass_radius > 3.2) {
+    row.invalid_reason = "df_out_of_range";
+    return;
+  }
+  row.valid = true;
+  row.invalid_reason = "";
+}
 
 template <typename Fn>
 BlockStats block_reduce(const std::vector<LLPSPaperAccumulator::FrameRow> &rows,
@@ -152,11 +371,86 @@ double LLPSPaperAccumulator::RunningScalar::sem() const {
   return std::sqrt(var / static_cast<double>(n));
 }
 
+void LLPSPaperFractalAccumulator::configure(
+    const LLPSPaperFractalConfig &config) {
+  config_ = config;
+  config_.min_scale_nm = std::max(0.1, config_.min_scale_nm);
+  config_.max_scale_fraction =
+      std::clamp(config_.max_scale_fraction, 0.25, 1.0);
+  frames_.clear();
+  scales_.clear();
+}
+
+void LLPSPaperFractalAccumulator::process_frame(
+    double time_ns, int frame, const std::vector<LLPSNode> &nodes,
+    const std::vector<bool> &is_dense, int giant_cluster_id, const box &Box) {
+  (void)Box;
+  if (!config_.enabled)
+    return;
+
+  LLPSPaperFractalFrame row;
+  row.frame = frame;
+  row.time_ns = time_ns;
+  if (nodes.empty() || is_dense.size() != nodes.size() ||
+      giant_cluster_id <= 0) {
+    row.invalid_reason = "no_dense_cluster";
+    frames_.push_back(row);
+    return;
+  }
+
+  std::vector<std::array<double, 3>> points_nm;
+  points_nm.reserve(nodes.size());
+  for (std::size_t i = 0; i < nodes.size(); ++i) {
+    if (!is_dense[i])
+      continue;
+    ++row.dense_nodes;
+    if (nodes[i].type == 1)
+      ++row.dense_protein_nodes;
+    else
+      ++row.dense_rna_nodes;
+    points_nm.push_back({nodes[i].x / 10.0, nodes[i].y / 10.0,
+                         nodes[i].z / 10.0});
+  }
+
+  if (row.dense_nodes < 8) {
+    row.invalid_reason = "dense_nodes_lt_8";
+    frames_.push_back(row);
+    return;
+  }
+
+  compute_fractal_frame_from_points(points_nm, config_, row, frame, time_ns,
+                                    &scales_);
+  frames_.push_back(row);
+}
+
+void LLPSPaperFractalAccumulator::export_outputs(
+    const info &info_output, std::fstream &log, int requested_blocks) const {
+  (void)info_output;
+  (void)log;
+  (void)requested_blocks;
+}
+
+#ifdef TITAN_LLPS_TESTING
+LLPSPaperFractalFrame LLPSPaperFractalAccumulator::debug_fit_points(
+    const std::vector<std::array<double, 3>> &points_nm) {
+  LLPSPaperFractalConfig config;
+  config.enabled = true;
+  config.min_scale_nm = 0.1;
+  config.max_scale_fraction = 1.0;
+  LLPSPaperFractalFrame row;
+  compute_fractal_frame_from_points(points_nm, config, row, 0, 0.0, nullptr);
+  return row;
+}
+#endif
+
 void LLPSPaperAccumulator::configure(const LLPSPaperConfig &config) {
   config_ = config;
   config_.profile_bin_nm = std::max(0.01, config_.profile_bin_nm);
   if (config_.geometry != "droplet" && config_.geometry != "slab")
     config_.geometry = "auto";
+  LLPSPaperFractalConfig fractal_config;
+  fractal_config.enabled = config_.fractal_enabled;
+  fractal_.configure(fractal_config);
   frames_.clear();
   contact_rows_.clear();
   profile_bins_.clear();
@@ -172,6 +466,8 @@ void LLPSPaperAccumulator::process_frame(
     return;
   const double volume_nm3 = box_volume_nm3(Box);
   if (volume_nm3 <= 0.0 || nodes.empty() || is_dense.size() != nodes.size()) {
+    fractal_.process_frame(time_ps / 1000.0, frame_idx, nodes, is_dense,
+                           giant_cluster_id, Box);
     ++skipped_bad_box_;
     return;
   }
@@ -218,6 +514,8 @@ void LLPSPaperAccumulator::process_frame(
       row.dilute_rna_conc =
           static_cast<double>(row.dilute_rna_nodes) / row.dilute_volume_nm3;
     }
+    fractal_.process_frame(row.time_ns, frame_idx, nodes, is_dense,
+                           giant_cluster_id, Box);
     frames_.push_back(row);
     return;
   }
@@ -434,6 +732,8 @@ void LLPSPaperAccumulator::process_frame(
     }
   }
 
+  fractal_.process_frame(row.time_ns, frame_idx, nodes, is_dense,
+                         giant_cluster_id, Box);
   frames_.push_back(row);
 }
 
