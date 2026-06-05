@@ -684,6 +684,20 @@ Completed target: Phase 5 membrane analysis.
 Phase 4, Phase 5, and the standalone Phase 6 S2 implementation are complete in
 this branch.
 
+LLPS Paper Fractal Dense-Phase Morphology Status
+
+Status: implemented in this branch.
+
+- CLI flag: `-llps-paper-fractal=<auto|true|false>`, default `auto`, where
+  auto follows `-llps-paper`.
+- Exports dense-phase bead/residue fractal descriptors for citeable LLPS paper
+  outputs.
+- Citeable output files: `llps_paper_fractal_timeseries.csv`,
+  `llps_paper_fractal_scales.csv`, `llps_paper_fractal_summary.dat`, and
+  `llps_paper_fractal_readme.md`.
+- Caveat: these descriptors quantify dense-phase morphology only; they are not
+  standalone evidence for LLPS, binodal, or spinodal behavior.
+
 Phase 5: membrane analysis
 
 Status: implemented in this branch. Phase 5 complete.

@@ -1467,6 +1467,10 @@ IMPORTANT NOTES
       llps_contact_taxonomy.csv
       llps_contact_taxonomy_summary.dat
       llps_convergence_report.dat
+      llps_paper_fractal_timeseries.csv
+      llps_paper_fractal_scales.csv
+      llps_paper_fractal_summary.dat
+      llps_paper_fractal_readme.md
       llps_paper_summary.md
       llps_paper_summary.json
     log.txt sections:
@@ -2531,6 +2535,9 @@ IMPORTANT NOTES
                         Default: auto
   -llps-paper-geometry=<auto|droplet|slab>
                         Profile geometry policy. Default: auto
+  -llps-paper-fractal=<auto|true|false>
+                        Dense-phase bead/residue fractal descriptors for
+                        citeable LLPS paper outputs. Default: auto
   -llps-rna-information=<auto|true|false>
                         RNA information-theoretic entropy and coupling metrics
   -llps-rna-topology=<auto|true|false>
