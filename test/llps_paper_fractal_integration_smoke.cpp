@@ -1,10 +1,14 @@
 #define TITAN_LLPS_TESTING 1
 
+#include "arguments.h"
 #include "box_type.h"
+#include "info.h"
 #include "titan_llps_cluster.h"
 
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -13,6 +17,10 @@ static void fail(const char *message) {
             << "\n";
   std::exit(1);
 }
+
+std::string arguments::set_Buildnumber() { return "test"; }
+
+std::string arguments::get_build_number() const { return "test"; }
 
 static LLPSNode make_node(int id, double x, double y, double z) {
   LLPSNode node;
@@ -25,6 +33,18 @@ static LLPSNode make_node(int id, double x, double y, double z) {
   node.cluster_id = 1;
   node.is_core = true;
   return node;
+}
+
+static bool file_exists(const std::string &path) {
+  std::ifstream in(path);
+  return in.good();
+}
+
+static std::string read_text(const std::string &path) {
+  std::ifstream in(path);
+  std::ostringstream buffer;
+  buffer << in.rdbuf();
+  return buffer.str();
 }
 
 int main() {
@@ -79,6 +99,41 @@ int main() {
     fail("too few dense nodes should be invalid");
   if (too_few.frames()[0].invalid_reason != "dense_nodes_lt_8")
     fail("too few dense nodes should preserve invalid reason");
+
+  accumulator.process_frame(2.0, 8, few_nodes, few_dense, 1, cubic_box);
+
+  arguments args;
+  info output_info(args);
+  std::fstream log("llps_paper_fractal_integration_smoke.log",
+                   std::ios::out | std::ios::trunc);
+  accumulator.export_outputs(output_info, log, 0);
+  log.close();
+
+  const std::string timeseries =
+      output_info.get_llps_paper_fractal_timeseries_filename();
+  const std::string scales =
+      output_info.get_llps_paper_fractal_scales_filename();
+  const std::string summary =
+      output_info.get_llps_paper_fractal_summary_filename();
+  const std::string readme =
+      output_info.get_llps_paper_fractal_readme_filename();
+  if (!file_exists(timeseries))
+    fail("missing fractal timeseries export");
+  if (!file_exists(scales))
+    fail("missing fractal scales export");
+  if (!file_exists(summary))
+    fail("missing fractal summary export");
+  if (!file_exists(readme))
+    fail("missing fractal readme export");
+  const std::string timeseries_text = read_text(timeseries);
+  if (timeseries_text.find("df_mass_radius") == std::string::npos ||
+      timeseries_text.find("df_box_count") == std::string::npos)
+    fail("timeseries header missing fractal dimensions");
+  const std::string summary_text = read_text(summary);
+  if (summary_text.find(
+          "interpretation: morphology_descriptor_not_phase_boundary") ==
+      std::string::npos)
+    fail("summary missing morphology interpretation warning");
 
   std::cout << "PASS llps_paper_fractal_integration_smoke\n";
   return 0;

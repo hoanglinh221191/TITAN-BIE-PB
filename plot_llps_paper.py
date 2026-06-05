@@ -7890,6 +7890,18 @@ def _read_llps_key_value_file(path: Path) -> dict[str, str]:
     return values
 
 
+def read_key_value_dat(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if ":" not in line or line.lstrip().startswith("#"):
+            continue
+        key, value = line.split(":", 1)
+        out[key.strip()] = value.strip()
+    return out
+
+
 def _as_float(value: object, default: float = math.nan) -> float:
     try:
         if value is None:
@@ -7919,6 +7931,7 @@ def _read_llps_paper_replicate(row: dict[str, str], manifest_dir: Path) -> dict[
     summary_path = output_dir / "llps_paper_summary.json"
     convergence_path = output_dir / "llps_convergence_report.dat"
     composition_path = output_dir / "llps_composition_timeseries.csv"
+    fractal_summary_path = output_dir / "llps_paper_fractal_summary.dat"
     for required in (phase_path, summary_path, convergence_path, composition_path):
         if not required.exists():
             missing.append(required.name)
@@ -7934,6 +7947,16 @@ def _read_llps_paper_replicate(row: dict[str, str], manifest_dir: Path) -> dict[
     convergence = _read_llps_key_value_file(convergence_path)
     for key, value in convergence.items():
         result[f"convergence_{key}"] = value
+    fractal_summary = read_key_value_dat(fractal_summary_path)
+    for key in (
+        "mean_df_mass_radius",
+        "sem_df_mass_radius",
+        "mean_df_box_count",
+        "sem_df_box_count",
+        "interpretation",
+    ):
+        if key in fractal_summary:
+            result[key] = fractal_summary[key]
 
     if composition_path.exists():
         with composition_path.open("r", encoding="utf-8", errors="replace", newline="") as fh:
@@ -8024,6 +8047,11 @@ def run_llps_paper_ensemble(manifest_path: Path, outdir: Path, dpi: int) -> None
         "convergence_short_trajectory_warning",
         "convergence_stable_dense_phase",
         "composition_frames",
+        "mean_df_mass_radius",
+        "sem_df_mass_radius",
+        "mean_df_box_count",
+        "sem_df_box_count",
+        "interpretation",
     ]
     comparison_path = outdir / "llps_condition_comparison.csv"
     with comparison_path.open("w", encoding="utf-8", newline="") as fh:
@@ -8099,6 +8127,22 @@ def run_llps_paper_ensemble(manifest_path: Path, outdir: Path, dpi: int) -> None
                 f"{row.get('convergence_equilibration_drift_warning', '')} | "
                 f"{row.get('convergence_blocks', '')} |\n"
             )
+        if any("mean_df_mass_radius" in row or "mean_df_box_count" in row for row in replicates):
+            fh.write("\n## Fractal Morphology Summary\n\n")
+            fh.write(
+                "| Condition | Replica | mean_df_mass_radius | sem_df_mass_radius | "
+                "mean_df_box_count | sem_df_box_count | interpretation |\n"
+            )
+            fh.write("| --- | --- | --- | --- | --- | --- | --- |\n")
+            for row in replicates:
+                if "mean_df_mass_radius" not in row and "mean_df_box_count" not in row:
+                    continue
+                fh.write(
+                    f"| {row.get('condition_id', '')} | {row.get('replica_id', '')} | "
+                    f"{row.get('mean_df_mass_radius', '')} | {row.get('sem_df_mass_radius', '')} | "
+                    f"{row.get('mean_df_box_count', '')} | {row.get('sem_df_box_count', '')} | "
+                    f"{row.get('interpretation', '')} |\n"
+                )
 
     if phase_rows:
         labels = [str(row.get("label") or row.get("condition_id")) for row in phase_rows]

@@ -330,6 +330,77 @@ BlockStats block_reduce(const std::vector<LLPSPaperAccumulator::FrameRow> &rows,
   return out;
 }
 
+std::string format_paper_double(double value) {
+  if (!std::isfinite(value))
+    return "nan";
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(8) << value;
+  return oss.str();
+}
+
+template <typename Fn>
+BlockStats fractal_block_reduce(
+    const std::vector<LLPSPaperFractalFrame> &rows, int requested_blocks,
+    Fn value_of) {
+  std::vector<const LLPSPaperFractalFrame *> valid_rows;
+  valid_rows.reserve(rows.size());
+  for (const auto &row : rows) {
+    if (row.valid)
+      valid_rows.push_back(&row);
+  }
+
+  BlockStats out;
+  if (valid_rows.empty()) {
+    out.mean = std::numeric_limits<double>::quiet_NaN();
+    out.sem = std::numeric_limits<double>::quiet_NaN();
+    return out;
+  }
+
+  int blocks = requested_blocks > 0 ? requested_blocks : 5;
+  blocks = std::min<int>(blocks, static_cast<int>(valid_rows.size()));
+  if (valid_rows.size() < 20 && requested_blocks <= 0)
+    blocks = std::min<int>(
+        blocks, std::max<int>(1, static_cast<int>(valid_rows.size() / 2)));
+  blocks = std::max(1, blocks);
+  out.blocks = blocks;
+
+  std::vector<double> block_means;
+  block_means.reserve(static_cast<std::size_t>(blocks));
+  for (int b = 0; b < blocks; ++b) {
+    const std::size_t begin = static_cast<std::size_t>(
+        (static_cast<uint64_t>(b) * valid_rows.size()) /
+        static_cast<uint64_t>(blocks));
+    const std::size_t end = static_cast<std::size_t>(
+        (static_cast<uint64_t>(b + 1) * valid_rows.size()) /
+        static_cast<uint64_t>(blocks));
+    if (end <= begin)
+      continue;
+    double sum = 0.0;
+    for (std::size_t i = begin; i < end; ++i)
+      sum += value_of(*valid_rows[i]);
+    block_means.push_back(sum / static_cast<double>(end - begin));
+  }
+  if (block_means.empty()) {
+    out.mean = std::numeric_limits<double>::quiet_NaN();
+    out.sem = std::numeric_limits<double>::quiet_NaN();
+    return out;
+  }
+  out.mean = std::accumulate(block_means.begin(), block_means.end(), 0.0) /
+             static_cast<double>(block_means.size());
+  out.sem = 0.0;
+  if (block_means.size() > 1) {
+    double var = 0.0;
+    for (double v : block_means) {
+      const double d = v - out.mean;
+      var += d * d;
+    }
+    var /= static_cast<double>(block_means.size() - 1);
+    out.sem =
+        std::sqrt(var) / std::sqrt(static_cast<double>(block_means.size()));
+  }
+  return out;
+}
+
 double drift_slope_per_ns(
     const std::vector<LLPSPaperAccumulator::FrameRow> &rows) {
   if (rows.size() < 2)
@@ -442,9 +513,144 @@ void LLPSPaperFractalAccumulator::process_frame(
 
 void LLPSPaperFractalAccumulator::export_outputs(
     const info &info_output, std::fstream &log, int requested_blocks) const {
-  (void)info_output;
-  (void)log;
-  (void)requested_blocks;
+  if (!config_.enabled)
+    return;
+
+  const std::string timeseries_file =
+      info_output.get_llps_paper_fractal_timeseries_filename();
+  const std::string scales_file =
+      info_output.get_llps_paper_fractal_scales_filename();
+  const std::string summary_file =
+      info_output.get_llps_paper_fractal_summary_filename();
+  const std::string readme_file =
+      info_output.get_llps_paper_fractal_readme_filename();
+
+  {
+    std::ofstream out(timeseries_file);
+    out << "frame,time_ns,dense_nodes,dense_protein_nodes,dense_rna_nodes,"
+           "df_mass_radius,df_box_count,kf_mass_radius,fit_r2_mass_radius,"
+           "fit_r2_box_count,scale_count_mass_radius,scale_count_box_count,"
+           "dense_radius_nm,dense_rg_nm,mean_local_valency,"
+           "protein_rna_neighbor_fraction,valid,invalid_reason\n";
+    for (const auto &row : frames_) {
+      out << row.frame << "," << format_paper_double(row.time_ns) << ","
+          << row.dense_nodes << "," << row.dense_protein_nodes << ","
+          << row.dense_rna_nodes << ","
+          << format_paper_double(row.df_mass_radius) << ","
+          << format_paper_double(row.df_box_count) << ","
+          << format_paper_double(row.kf_mass_radius) << ","
+          << format_paper_double(row.fit_r2_mass_radius) << ","
+          << format_paper_double(row.fit_r2_box_count) << ","
+          << row.scale_count_mass_radius << "," << row.scale_count_box_count
+          << "," << format_paper_double(row.dense_radius_nm) << ","
+          << format_paper_double(row.dense_rg_nm) << ","
+          << format_paper_double(row.mean_local_valency) << ","
+          << format_paper_double(row.protein_rna_neighbor_fraction) << ","
+          << (row.valid ? "yes" : "no") << "," << row.invalid_reason << "\n";
+    }
+  }
+
+  {
+    std::ofstream out(scales_file);
+    out << "frame,time_ns,method,scale_nm,value,log_scale,log_value\n";
+    for (const auto &row : scales_) {
+      out << row.frame << "," << format_paper_double(row.time_ns) << ","
+          << row.method << "," << format_paper_double(row.scale_nm) << ","
+          << format_paper_double(row.value) << ","
+          << format_paper_double(row.log_scale) << ","
+          << format_paper_double(row.log_value) << "\n";
+    }
+  }
+
+  const auto df_mass =
+      fractal_block_reduce(frames_, requested_blocks,
+                           [](const LLPSPaperFractalFrame &r) {
+                             return r.df_mass_radius;
+                           });
+  const auto df_box =
+      fractal_block_reduce(frames_, requested_blocks,
+                           [](const LLPSPaperFractalFrame &r) {
+                             return r.df_box_count;
+                           });
+  const auto kf_mass =
+      fractal_block_reduce(frames_, requested_blocks,
+                           [](const LLPSPaperFractalFrame &r) {
+                             return r.kf_mass_radius;
+                           });
+  const auto dense_radius =
+      fractal_block_reduce(frames_, requested_blocks,
+                           [](const LLPSPaperFractalFrame &r) {
+                             return r.dense_radius_nm;
+                           });
+  const auto dense_rg =
+      fractal_block_reduce(frames_, requested_blocks,
+                           [](const LLPSPaperFractalFrame &r) {
+                             return r.dense_rg_nm;
+                           });
+  const auto fit_r2_mass =
+      fractal_block_reduce(frames_, requested_blocks,
+                           [](const LLPSPaperFractalFrame &r) {
+                             return r.fit_r2_mass_radius;
+                           });
+  const auto fit_r2_box =
+      fractal_block_reduce(frames_, requested_blocks,
+                           [](const LLPSPaperFractalFrame &r) {
+                             return r.fit_r2_box_count;
+                           });
+  const std::size_t frames_valid = static_cast<std::size_t>(
+      std::count_if(frames_.begin(), frames_.end(),
+                    [](const LLPSPaperFractalFrame &row) {
+                      return row.valid;
+                    }));
+  {
+    std::ofstream out(summary_file);
+    out << "enabled: yes\n";
+    out << "frames_total: " << frames_.size() << "\n";
+    out << "frames_valid: " << frames_valid << "\n";
+    out << "frames_invalid: " << (frames_.size() - frames_valid) << "\n";
+    out << "mean_df_mass_radius: " << format_paper_double(df_mass.mean)
+        << "\n";
+    out << "sem_df_mass_radius: " << format_paper_double(df_mass.sem) << "\n";
+    out << "mean_df_box_count: " << format_paper_double(df_box.mean) << "\n";
+    out << "sem_df_box_count: " << format_paper_double(df_box.sem) << "\n";
+    out << "mean_kf_mass_radius: " << format_paper_double(kf_mass.mean)
+        << "\n";
+    out << "sem_kf_mass_radius: " << format_paper_double(kf_mass.sem) << "\n";
+    out << "mean_dense_radius_nm: "
+        << format_paper_double(dense_radius.mean) << "\n";
+    out << "sem_dense_radius_nm: " << format_paper_double(dense_radius.sem)
+        << "\n";
+    out << "mean_dense_rg_nm: " << format_paper_double(dense_rg.mean)
+        << "\n";
+    out << "sem_dense_rg_nm: " << format_paper_double(dense_rg.sem) << "\n";
+    out << "mean_fit_r2_mass_radius: "
+        << format_paper_double(fit_r2_mass.mean) << "\n";
+    out << "mean_fit_r2_box_count: " << format_paper_double(fit_r2_box.mean)
+        << "\n";
+    out << "interpretation: morphology_descriptor_not_phase_boundary\n";
+  }
+
+  {
+    std::ofstream out(readme_file);
+    out << "# TITAN LLPS Paper Fractal Outputs\n\n";
+    out << "These files report dense-phase fractal morphology descriptors "
+           "from bead/residue occupancy in the LLPS DBSCAN dense phase.\n\n";
+    out << "Primary citation files:\n\n";
+    out << "- `llps_paper_fractal_timeseries.csv`: per-frame fractal "
+           "descriptors.\n";
+    out << "- `llps_paper_fractal_scales.csv`: scale-by-scale audit data for "
+           "log-log fits.\n";
+    out << "- `llps_paper_fractal_summary.dat`: block-averaged summary "
+           "statistics.\n\n";
+    out << "The descriptors quantify dense-phase morphology. They are not "
+           "standalone evidence for LLPS, binodal boundaries, or spinodal "
+           "behavior.\n";
+  }
+
+  TitanUI::log_kv(log, timeseries_file, "emitted");
+  TitanUI::log_kv(log, scales_file, "emitted");
+  TitanUI::log_kv(log, summary_file, "emitted");
+  TitanUI::log_kv(log, readme_file, "emitted");
 }
 
 #ifdef TITAN_LLPS_TESTING
@@ -1020,6 +1226,8 @@ void LLPSPaperAccumulator::export_outputs(const info &info_output,
                   "emitted");
   TitanUI::log_kv(log, info_output.get_llps_paper_summary_json_filename(),
                   "emitted");
+
+  fractal_.export_outputs(info_output, log, config_.requested_blocks);
 }
 
 void TitanLLPSCluster::configure_paper(const LLPSPaperConfig &config) {

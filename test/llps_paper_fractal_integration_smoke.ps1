@@ -18,5 +18,10 @@ $Compiler = if ($env:CXX) { $env:CXX } else { "g++" }
   "$repo\src\titan_llps_paper.cpp" `
   "-Wl,--gc-sections" -o $exe
 if ($LASTEXITCODE -ne 0) { throw "Failed to compile fractal integration smoke" }
-& $exe
-if ($LASTEXITCODE -ne 0) { throw "Fractal integration smoke failed" }
+Push-Location $WorkRoot
+try {
+  & $exe
+  if ($LASTEXITCODE -ne 0) { throw "Fractal integration smoke failed" }
+} finally {
+  Pop-Location
+}
