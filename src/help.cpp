@@ -2538,6 +2538,8 @@ IMPORTANT NOTES
   -llps-paper-fractal=<auto|true|false>
                         Dense-phase bead/residue fractal descriptors for
                         citeable LLPS paper outputs. Default: auto
+                        Morphology-only; not standalone LLPS, binodal, or
+                        spinodal evidence.
   -llps-rna-information=<auto|true|false>
                         RNA information-theoretic entropy and coupling metrics
   -llps-rna-topology=<auto|true|false>

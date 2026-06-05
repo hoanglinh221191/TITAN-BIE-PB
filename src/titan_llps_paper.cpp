@@ -123,6 +123,47 @@ std::vector<double> select_scales(const std::vector<double> &candidates,
   return candidates;
 }
 
+void compute_dense_neighbor_topology(
+    const std::vector<std::array<double, 3>> &points_nm,
+    const std::vector<int> &types, double cutoff_nm,
+    LLPSPaperFractalFrame &row) {
+  if (points_nm.size() < 2 || points_nm.size() != types.size()) {
+    row.mean_local_valency = std::numeric_limits<double>::quiet_NaN();
+    row.protein_rna_neighbor_fraction =
+        std::numeric_limits<double>::quiet_NaN();
+    return;
+  }
+
+  const double cutoff = std::max(0.1, cutoff_nm);
+  const double cutoff2 = cutoff * cutoff;
+  uint64_t neighbor_pairs = 0;
+  uint64_t protein_rna_pairs = 0;
+  for (std::size_t i = 0; i < points_nm.size(); ++i) {
+    for (std::size_t j = i + 1; j < points_nm.size(); ++j) {
+      double d2 = 0.0;
+      for (int dim = 0; dim < 3; ++dim) {
+        const double delta = points_nm[i][dim] - points_nm[j][dim];
+        d2 += delta * delta;
+      }
+      if (d2 > cutoff2 + kEps)
+        continue;
+      ++neighbor_pairs;
+      if ((types[i] == 1 && types[j] != 1) ||
+          (types[i] != 1 && types[j] == 1))
+        ++protein_rna_pairs;
+    }
+  }
+
+  row.mean_local_valency =
+      2.0 * static_cast<double>(neighbor_pairs) /
+      static_cast<double>(points_nm.size());
+  row.protein_rna_neighbor_fraction =
+      neighbor_pairs > 0
+          ? static_cast<double>(protein_rna_pairs) /
+                static_cast<double>(neighbor_pairs)
+          : std::numeric_limits<double>::quiet_NaN();
+}
+
 void compute_fractal_frame_from_points(
     const std::vector<std::array<double, 3>> &points_nm,
     const LLPSPaperFractalConfig &config, LLPSPaperFractalFrame &row,
@@ -471,6 +512,8 @@ void LLPSPaperFractalAccumulator::process_frame(
 
   std::vector<std::array<double, 3>> points_nm;
   points_nm.reserve(nodes.size());
+  std::vector<int> dense_types;
+  dense_types.reserve(nodes.size());
   const bool use_mic = BoxMatrix::valid_box(Box);
   std::optional<BoxMatrix> bmat;
   if (use_mic)
@@ -486,6 +529,7 @@ void LLPSPaperFractalAccumulator::process_frame(
       ++row.dense_protein_nodes;
     else
       ++row.dense_rna_nodes;
+    dense_types.push_back(nodes[i].type);
     if (use_mic) {
       const LLPSNode &ref = nodes[first_dense];
       double dx = nodes[i].x - ref.x;
@@ -506,6 +550,8 @@ void LLPSPaperFractalAccumulator::process_frame(
     return;
   }
 
+  compute_dense_neighbor_topology(points_nm, dense_types, config_.min_scale_nm,
+                                  row);
   compute_fractal_frame_from_points(points_nm, config_, row, frame, time_ns,
                                     &scales_);
   frames_.push_back(row);

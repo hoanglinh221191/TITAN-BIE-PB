@@ -22,10 +22,10 @@ std::string arguments::set_Buildnumber() { return "test"; }
 
 std::string arguments::get_build_number() const { return "test"; }
 
-static LLPSNode make_node(int id, double x, double y, double z) {
+static LLPSNode make_node(int id, double x, double y, double z, int type = 1) {
   LLPSNode node;
   node.id = id;
-  node.type = 1;
+  node.type = type;
   node.chain_idx = id;
   node.x = x;
   node.y = y;
@@ -55,13 +55,13 @@ int main() {
 
   std::vector<LLPSNode> nodes;
   nodes.push_back(make_node(0, 1.0, 50.0, 50.0));
-  nodes.push_back(make_node(1, 1.2, 50.4, 50.1));
+  nodes.push_back(make_node(1, 1.2, 50.4, 50.1, 2));
   nodes.push_back(make_node(2, 0.8, 49.8, 50.3));
-  nodes.push_back(make_node(3, 1.4, 50.1, 49.7));
+  nodes.push_back(make_node(3, 1.4, 50.1, 49.7, 2));
   nodes.push_back(make_node(4, 99.0, 50.2, 49.9));
-  nodes.push_back(make_node(5, 98.8, 49.7, 50.2));
+  nodes.push_back(make_node(5, 98.8, 49.7, 50.2, 2));
   nodes.push_back(make_node(6, 99.2, 50.3, 50.4));
-  nodes.push_back(make_node(7, 98.6, 49.9, 49.6));
+  nodes.push_back(make_node(7, 98.6, 49.9, 49.6, 2));
   std::vector<bool> dense(nodes.size(), true);
   const box cubic_box(100.0, 100.0, 100.0, 90.0, 90.0, 90.0);
 
@@ -75,10 +75,15 @@ int main() {
     fail("PBC seam frame should be valid");
   if (frame.dense_nodes != 8)
     fail("expected eight dense nodes");
-  if (frame.dense_protein_nodes != 8 || frame.dense_rna_nodes != 0)
+  if (frame.dense_protein_nodes != 4 || frame.dense_rna_nodes != 4)
     fail("dense protein/RNA counts changed");
   if (frame.dense_radius_nm >= 0.5)
     fail("dense radius should use MIC around the periodic seam");
+  if (frame.mean_local_valency <= 0.0)
+    fail("mixed dense frame should compute local valency");
+  if (frame.protein_rna_neighbor_fraction <= 0.0 ||
+      frame.protein_rna_neighbor_fraction > 1.0)
+    fail("mixed dense frame should compute protein-RNA neighbor fraction");
 
   LLPSPaperFractalAccumulator disabled;
   config.enabled = false;

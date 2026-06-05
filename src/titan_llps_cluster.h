@@ -122,8 +122,9 @@ struct LLPSPaperFractalFrame {
   int scale_count_box_count{0};
   double dense_radius_nm{0.0};
   double dense_rg_nm{0.0};
-  double mean_local_valency{0.0};
-  double protein_rna_neighbor_fraction{0.0};
+  double mean_local_valency{std::numeric_limits<double>::quiet_NaN()};
+  double protein_rna_neighbor_fraction{
+      std::numeric_limits<double>::quiet_NaN()};
   bool valid{false};
   std::string invalid_reason{"not_evaluated"};
 };
