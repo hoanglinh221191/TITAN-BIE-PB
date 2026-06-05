@@ -367,6 +367,7 @@ struct LlpsArgs {
   double llps_paper_profile_bin_nm{0.2};
   int llps_paper_blocks{0}; // 0 = auto
   std::string llps_paper_geometry{"auto"};
+  std::string llps_paper_fractal{"auto"};
   // DBSCAN bead-level morphology parameters (unit: Angstrom)
   double llps_dbscan_eps{15.0};    // epsilon (Å); default 15 Å ≈ 1.5 nm
   int    llps_dbscan_minpts{5};    // min neighbours (self excluded)

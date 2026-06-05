@@ -1273,6 +1273,18 @@ public:
   string get_llps_paper_summary_json_filename() const {
     return "llps_paper_summary.json";
   }
+  string get_llps_paper_fractal_timeseries_filename() const {
+    return "llps_paper_fractal_timeseries.csv";
+  }
+  string get_llps_paper_fractal_scales_filename() const {
+    return "llps_paper_fractal_scales.csv";
+  }
+  string get_llps_paper_fractal_summary_filename() const {
+    return "llps_paper_fractal_summary.dat";
+  }
+  string get_llps_paper_fractal_readme_filename() const {
+    return "llps_paper_fractal_readme.md";
+  }
   // IFP output file
   string get_ifp_filename() const { return "ifp_occupancy.csv"; }
   string get_ifp_rna_annotations_filename() const {

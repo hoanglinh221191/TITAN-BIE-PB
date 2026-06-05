@@ -3730,6 +3730,24 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-llps-paper-geometry");
     }
     if (consume_option_value(arg,
+                             {"-llps-paper-fractal",
+                              "--llps-paper-fractal"},
+                             llps_value, i)) {
+      llps.llps_paper_fractal =
+          require_choice(llps_value, {"auto", "true", "false", "yes", "no",
+                                      "on", "off", "1", "0"},
+                         "-llps-paper-fractal");
+      if (llps.llps_paper_fractal == "true" ||
+          llps.llps_paper_fractal == "yes" ||
+          llps.llps_paper_fractal == "on" ||
+          llps.llps_paper_fractal == "1") {
+        llps.flag_llps = true;
+        llps.llps_paper = true;
+        llps.llps_contacts = true;
+        llps.llps_dynamics = true;
+      }
+    }
+    if (consume_option_value(arg,
                              {"-llps-rna-intra-rcut",
                               "--llps-rna-intra-rcut"},
                              llps_value, i)) {
