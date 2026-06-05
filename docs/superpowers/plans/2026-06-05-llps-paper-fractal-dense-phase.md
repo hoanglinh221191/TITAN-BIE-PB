@@ -1,12 +1,37 @@
 # LLPS Paper Fractal Dense Phase Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]` / `- [x]`) syntax for tracking.
 
 **Goal:** Add paper-ready fractal morphology outputs for Martini protein/RNA LLPS trajectories, measured from bead/residue dense-phase occupancy rather than only from dimer macro-nodes.
 
 **Architecture:** Extend the existing `-llps-paper` bundle with a focused fractal accumulator inside the LLPS DBSCAN/paper path. The accumulator receives dense-phase nodes already produced by `TitanLLPSCluster`, computes scale-dependent bead/residue occupancy and mass-radius fits, and exports citeable files named `llps_paper_fractal_*`. The existing macro-node LLPS analyzer remains unchanged except for documentation that distinguishes macro percolation from dense-phase fractal morphology.
 
 **Tech Stack:** C++17, existing TITAN LLPS modules, existing PowerShell smoke scripts, existing `mingw32-make PROFILE=native TARGET=titan.exe all -j1` native build gate.
+
+## Execution Ledger
+
+Status: shipped on branch `codex/llps-paper-fractal`.
+
+Implementation commits:
+
+- `ed88587` - CLI contract and citeable filename helpers.
+- `13443d0` - dense-phase fractal descriptor computation.
+- `ed9a3de` - LLPS paper bundle wiring and PBC-safe dense geometry.
+- `cec4879` - citeable paper output exports and plot integration.
+- `a8b5b48` - help/manual/roadmap documentation.
+- `2e62b64` - committed this implementation plan.
+- `0cb3df6` - populated neighbor-metric descriptors instead of placeholders.
+- `c1cef6a` - README update for GitHub.
+
+Final verification evidence:
+
+- `.\test\llps_paper_fractal_args_smoke.ps1` PASS.
+- `.\test\llps_paper_fractal_smoke.ps1` PASS.
+- `.\test\llps_paper_fractal_integration_smoke.ps1` PASS.
+- `python -m py_compile plot_llps_paper.py` PASS.
+- `git diff --check` clean.
+- `mingw32-make PROFILE=native TARGET=titan.exe all -j1` build successful.
+- Final subagent re-review: APPROVED.
 
 ---
 
@@ -99,7 +124,7 @@ Interpretation guardrails:
 - Test: `test/llps_paper_fractal_args_smoke.cpp`
 - Test: `test/llps_paper_fractal_args_smoke.ps1`
 
-- [ ] **Step 1: Add the argument field**
+- [x] **Step 1: Add the argument field**
 
 In `src/arguments.h`, add this field immediately after `llps_paper_geometry`:
 
@@ -107,7 +132,7 @@ In `src/arguments.h`, add this field immediately after `llps_paper_geometry`:
   std::string llps_paper_fractal{"auto"};
 ```
 
-- [ ] **Step 2: Add filename helpers**
+- [x] **Step 2: Add filename helpers**
 
 In `src/info.h`, add these helpers after `get_llps_paper_summary_json_filename()`:
 
@@ -126,7 +151,7 @@ In `src/info.h`, add these helpers after `get_llps_paper_summary_json_filename()
   }
 ```
 
-- [ ] **Step 3: Parse the option**
+- [x] **Step 3: Parse the option**
 
 In `src/parse_arguments.cpp`, add this block after parsing `-llps-paper-geometry`:
 
@@ -151,7 +176,7 @@ In `src/parse_arguments.cpp`, add this block after parsing `-llps-paper-geometry
     }
 ```
 
-- [ ] **Step 4: Write the failing parser smoke**
+- [x] **Step 4: Write the failing parser smoke**
 
 Create `test/llps_paper_fractal_args_smoke.cpp`:
 
@@ -219,7 +244,7 @@ if ($LASTEXITCODE -ne 0) { throw "Fractal args smoke failed" }
 Write-Host "PASS llps_paper_fractal_args_smoke"
 ```
 
-- [ ] **Step 5: Run the failing smoke**
+- [x] **Step 5: Run the failing smoke**
 
 Run:
 
@@ -229,7 +254,7 @@ Run:
 
 Expected before implementation: compile failure or option parse failure referencing `llps_paper_fractal`.
 
-- [ ] **Step 6: Run the passing smoke**
+- [x] **Step 6: Run the passing smoke**
 
 Run:
 
@@ -243,7 +268,7 @@ Expected after implementation:
 PASS llps_paper_fractal_args_smoke
 ```
 
-- [ ] **Step 7: Commit Phase 1**
+- [x] **Step 7: Commit Phase 1**
 
 Run:
 
@@ -264,7 +289,7 @@ git commit -m "feat: add LLPS paper fractal CLI contract"
 - Test: `test/llps_paper_fractal_smoke.cpp`
 - Test: `test/llps_paper_fractal_smoke.ps1`
 
-- [ ] **Step 1: Add public result structures**
+- [x] **Step 1: Add public result structures**
 
 In `src/titan_llps_cluster.h`, add these declarations before `class LLPSPaperAccumulator`:
 
@@ -313,7 +338,7 @@ Add this member to `LLPSPaperConfig`:
   bool fractal_enabled{false};
 ```
 
-- [ ] **Step 2: Add the accumulator class declaration**
+- [x] **Step 2: Add the accumulator class declaration**
 
 In `src/titan_llps_cluster.h`, add this class before `class LLPSPaperAccumulator`:
 
@@ -351,7 +376,7 @@ Add this private member to `LLPSPaperAccumulator`:
   LLPSPaperFractalAccumulator fractal_;
 ```
 
-- [ ] **Step 3: Implement least-squares helpers**
+- [x] **Step 3: Implement least-squares helpers**
 
 In `src/titan_llps_paper.cpp`, add this helper in the anonymous namespace:
 
@@ -394,7 +419,7 @@ LinearFitResult fit_line(const std::vector<std::pair<double, double>> &xy) {
 }
 ```
 
-- [ ] **Step 4: Implement `LLPSPaperFractalAccumulator::configure`**
+- [x] **Step 4: Implement `LLPSPaperFractalAccumulator::configure`**
 
 In `src/titan_llps_paper.cpp`, add:
 
@@ -410,7 +435,7 @@ void LLPSPaperFractalAccumulator::configure(
 }
 ```
 
-- [ ] **Step 5: Implement the dense point extraction**
+- [x] **Step 5: Implement the dense point extraction**
 
 In `LLPSPaperFractalAccumulator::process_frame`, start with this body:
 
@@ -468,7 +493,7 @@ Add `compute_fractal_frame_from_points` as a private anonymous-namespace helper 
 - Set `df_box_count = slope` and `fit_r2_box_count`.
 - Mark valid when both fits have at least 3 scales and `df_mass_radius` is in `[0.5, 3.2]`.
 
-- [ ] **Step 6: Add the unit smoke**
+- [x] **Step 6: Add the unit smoke**
 
 Create `test/llps_paper_fractal_smoke.cpp`:
 
@@ -542,7 +567,7 @@ if ($LASTEXITCODE -ne 0) { throw "Fractal smoke failed" }
 Write-Host "PASS llps_paper_fractal_smoke"
 ```
 
-- [ ] **Step 7: Run the failing smoke**
+- [x] **Step 7: Run the failing smoke**
 
 Run:
 
@@ -552,7 +577,7 @@ Run:
 
 Expected before implementation: compile failure referencing `LLPSPaperFractalAccumulator`.
 
-- [ ] **Step 8: Run the passing smoke**
+- [x] **Step 8: Run the passing smoke**
 
 Run:
 
@@ -566,7 +591,7 @@ Expected after implementation:
 PASS llps_paper_fractal_smoke
 ```
 
-- [ ] **Step 9: Commit Phase 2**
+- [x] **Step 9: Commit Phase 2**
 
 Run:
 
@@ -586,7 +611,7 @@ git commit -m "feat: compute LLPS paper fractal dense-phase descriptors"
 - Modify: `src/impl_engine.cpp`
 - Test: `test/llps_paper_fractal_integration_smoke.ps1`
 
-- [ ] **Step 1: Configure the nested accumulator**
+- [x] **Step 1: Configure the nested accumulator**
 
 In `LLPSPaperAccumulator::configure`, after normalizing `config_`, add:
 
@@ -595,7 +620,7 @@ In `LLPSPaperAccumulator::configure`, after normalizing `config_`, add:
       {config_.enabled && config_.fractal_enabled, config_.profile_bin_nm, 0.75});
 ```
 
-- [ ] **Step 2: Process frames**
+- [x] **Step 2: Process frames**
 
 At the end of `LLPSPaperAccumulator::process_frame`, before returning, add:
 
@@ -606,7 +631,7 @@ At the end of `LLPSPaperAccumulator::process_frame`, before returning, add:
 
 For the early `first_dense < 0 || giant_cluster_id <= 0` branch, add the same call before `frames_.push_back(row); return;` so invalid frames are represented in `llps_paper_fractal_timeseries.csv`.
 
-- [ ] **Step 3: Export outputs**
+- [x] **Step 3: Export outputs**
 
 In `LLPSPaperAccumulator::export_outputs`, after existing paper outputs are written, add:
 
@@ -614,7 +639,7 @@ In `LLPSPaperAccumulator::export_outputs`, after existing paper outputs are writ
   fractal_.export_outputs(info_output, log, config_.requested_blocks);
 ```
 
-- [ ] **Step 4: Pass effective config from engine**
+- [x] **Step 4: Pass effective config from engine**
 
 In `src/impl_engine.cpp`, replace the existing `configure_paper` call:
 
@@ -651,7 +676,7 @@ Also log:
                       llps_fractal_enabled ? "enabled" : "disabled");
 ```
 
-- [ ] **Step 5: Create the integration smoke**
+- [x] **Step 5: Create the integration smoke**
 
 Create `test/llps_paper_fractal_integration_smoke.ps1`:
 
@@ -705,7 +730,7 @@ Write-Host "PASS llps_paper_fractal_integration_smoke"
 
 If the repository lacks a tiny LLPS trajectory fixture usable by `titan.exe`, convert this script during implementation into a C++ integration smoke that seeds `LLPSPaperAccumulator` directly with synthetic `LLPSNode` rows. Keep the output filenames and header checks identical.
 
-- [ ] **Step 6: Run the integration smoke**
+- [x] **Step 6: Run the integration smoke**
 
 Run:
 
@@ -719,7 +744,7 @@ Expected:
 PASS llps_paper_fractal_integration_smoke
 ```
 
-- [ ] **Step 7: Commit Phase 3**
+- [x] **Step 7: Commit Phase 3**
 
 Run:
 
@@ -739,7 +764,7 @@ git commit -m "feat: wire fractal descriptors into LLPS paper bundle"
 - Modify: `plot_llps_paper.py`
 - Test: `test/llps_paper_fractal_smoke.ps1`
 
-- [ ] **Step 1: Export timeseries**
+- [x] **Step 1: Export timeseries**
 
 Implement `LLPSPaperFractalAccumulator::export_outputs` with this timeseries header:
 
@@ -763,7 +788,7 @@ auto write_number = [](std::ostream &os, double value) {
 };
 ```
 
-- [ ] **Step 2: Export scales**
+- [x] **Step 2: Export scales**
 
 Write `llps_paper_fractal_scales.csv` with:
 
@@ -773,7 +798,7 @@ frame,time_ns,method,scale_nm,value,log_scale,log_value
 
 This file is the audit trail for reviewer-facing plots. It contains all scale rows, including frames later excluded from summary means.
 
-- [ ] **Step 3: Export summary**
+- [x] **Step 3: Export summary**
 
 Write `llps_paper_fractal_summary.dat` with exact keys:
 
@@ -799,7 +824,7 @@ interpretation: morphology_descriptor_not_phase_boundary
 
 Use the existing `block_reduce` pattern for SEM, with `config_.requested_blocks`.
 
-- [ ] **Step 4: Export README**
+- [x] **Step 4: Export README**
 
 Write `llps_paper_fractal_readme.md` with this content:
 
@@ -817,7 +842,7 @@ Primary citation files:
 The descriptors quantify dense-phase morphology. They are not standalone evidence for LLPS, binodal boundaries, or spinodal behavior.
 ```
 
-- [ ] **Step 5: Teach the plot aggregator to read the summary**
+- [x] **Step 5: Teach the plot aggregator to read the summary**
 
 In `plot_llps_paper.py`, add a tolerant loader:
 
@@ -844,7 +869,7 @@ sem_df_box_count
 interpretation
 ```
 
-- [ ] **Step 6: Run the smoke**
+- [x] **Step 6: Run the smoke**
 
 Run:
 
@@ -858,7 +883,7 @@ Expected:
 PASS llps_paper_fractal_smoke
 ```
 
-- [ ] **Step 7: Commit Phase 4**
+- [x] **Step 7: Commit Phase 4**
 
 Run:
 
@@ -878,7 +903,7 @@ git commit -m "feat: export citeable LLPS paper fractal summaries"
 - Modify: `manual.txt`
 - Modify: `TITAN_STANDARD_MD_ANALYSIS_ROADMAP.md`
 
-- [ ] **Step 1: Document the option in help**
+- [x] **Step 1: Document the option in help**
 
 In the LLPS option list in `src/help.cpp`, add:
 
@@ -888,7 +913,7 @@ In the LLPS option list in `src/help.cpp`, add:
                         citeable LLPS paper outputs. Default: auto
 ```
 
-- [ ] **Step 2: Document the outputs in help**
+- [x] **Step 2: Document the outputs in help**
 
 In the `with -llps-paper:` output list in `src/help.cpp`, add:
 
@@ -899,18 +924,18 @@ In the `with -llps-paper:` output list in `src/help.cpp`, add:
       llps_paper_fractal_readme.md
 ```
 
-- [ ] **Step 3: Mirror the same docs in `manual.txt`**
+- [x] **Step 3: Mirror the same docs in `manual.txt`**
 
 Apply the same option and output text to `manual.txt` so help/manual stay synchronized.
 
-- [ ] **Step 4: Update the roadmap ledger**
+- [x] **Step 4: Update the roadmap ledger**
 
 In `TITAN_STANDARD_MD_ANALYSIS_ROADMAP.md`, add a planned/shipped entry under the LLPS analysis section:
 
 ```markdown
 ### LLPS Paper Fractal Dense-Phase Morphology
 
-Status: planned for implementation.
+Status: shipped.
 
 Scope:
 - Dense-phase bead/residue occupancy descriptors for Martini protein/RNA LLPS.
@@ -922,9 +947,9 @@ Non-scope:
 - Claiming LLPS phase boundaries from fractal descriptors alone.
 ```
 
-When the implementation ships, change `Status: planned for implementation.` to `Status: shipped.` in the same commit as the passing smoke evidence.
+When the implementation ships, change `Status: shipped.` to `Status: shipped.` in the same commit as the passing smoke evidence.
 
-- [ ] **Step 5: Commit Phase 5**
+- [x] **Step 5: Commit Phase 5**
 
 Run:
 
@@ -942,7 +967,7 @@ git commit -m "docs: describe LLPS paper fractal outputs"
 **Files:**
 - No source edits unless a verification failure identifies a specific defect.
 
-- [ ] **Step 1: Run focused smokes**
+- [x] **Step 1: Run focused smokes**
 
 Run:
 
@@ -960,7 +985,7 @@ PASS llps_paper_fractal_smoke
 PASS llps_paper_fractal_integration_smoke
 ```
 
-- [ ] **Step 2: Run existing LLPS smokes**
+- [x] **Step 2: Run existing LLPS smokes**
 
 Run:
 
@@ -979,7 +1004,7 @@ llps_dense_msd_smoke PASS
 
 If `test\llps_dense_msd_smoke.ps1` does not exist in this checkout, compile and run `test\llps_dense_msd_smoke.cpp` using the same command shape as `test\llps_paper_fractal_smoke.ps1`, adding `src\titan_llps_cluster_dynamics.cpp` and any directly required split LLPS cluster source files reported by the linker.
 
-- [ ] **Step 3: Run native build**
+- [x] **Step 3: Run native build**
 
 Run:
 
@@ -989,7 +1014,7 @@ mingw32-make PROFILE=native TARGET=titan.exe all -j1
 
 Expected: build completes and writes `titan.exe`.
 
-- [ ] **Step 4: Run whitespace cleanup gate**
+- [x] **Step 4: Run whitespace cleanup gate**
 
 Run:
 
@@ -999,7 +1024,7 @@ git diff --check
 
 Expected: no output.
 
-- [ ] **Step 5: Inspect final diff**
+- [x] **Step 5: Inspect final diff**
 
 Run:
 
@@ -1010,7 +1035,7 @@ git diff -- src\arguments.h src\parse_arguments.cpp src\info.h src\titan_llps_cl
 
 Expected: only LLPS paper fractal, docs, tests, and aggregator changes are present.
 
-- [ ] **Step 6: Commit final verification notes if roadmap status changed**
+- [x] **Step 6: Commit final verification notes if roadmap status changed**
 
 Run:
 
