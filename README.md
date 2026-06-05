@@ -27,6 +27,7 @@ TITAN provides an end-to-end pipeline covering both structural thermodynamics an
 
 ### 4. Specialized Modules
 * **LLPS (Liquid-Liquid Phase Separation):** Detects dense/dilute phases, percolation, and spatial clustering (optimized for MARTINI coarse-grained systems).
+* **LLPS Paper Fractal Morphology:** With `-llps-paper -llps-paper-fractal=auto`, TITAN exports dense-phase bead/residue fractal descriptors for MARTINI protein/RNA condensates. The citeable sidecar files are `llps_paper_fractal_timeseries.csv`, `llps_paper_fractal_scales.csv`, `llps_paper_fractal_summary.dat`, and `llps_paper_fractal_readme.md`. These descriptors report morphology only; interpret them together with phase partition, convergence, contact, RNA compaction/topology, and thermodynamic evidence rather than as standalone LLPS/binodal/spinodal proof.
 * **CAS:** Computational Alanine Scanning for hotspot identification.
 
 ## 🛠️ Build Instructions
@@ -65,6 +66,12 @@ Analyze a MARTINI coarse-grained system for phase separation:
 
 Bash
 titan -s system.pdb -traj md.xtc -ff MARTINI -llps -llps-dbscan-eps 12 -llps-dbscan-minpts 8 -llps-fuzzy
+
+4. LLPS Paper Fractal Morphology
+Generate citeable dense-phase fractal morphology outputs for a MARTINI protein/RNA condensate:
+
+Bash
+titan -s system.pdb -traj md.xtc -ff MARTINI -llps-paper -llps-paper-fractal=auto -llps-dbscan-eps 12 -llps-dbscan-minpts 8
 🧠 Architecture Overview
 TITAN's runtime philosophy revolves around:
 
