@@ -4,8 +4,6 @@
 #include "functions.h"
 #include "martini_nonbonded.h"
 #include "miscellaneous.h"
-#include "new_emap.h"
-#include "stat_ener_res_res.h"
 #include "titan_simd_dispatch.h"
 #include "uti_func.h"
 #include <algorithm>

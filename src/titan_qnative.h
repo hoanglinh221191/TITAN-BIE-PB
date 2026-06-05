@@ -48,6 +48,12 @@ public:
   [[nodiscard]] const std::vector<double> &all_q_values() const noexcept {
     return all_q_values_;
   }
+  [[nodiscard]] bool latest_q_valid() const noexcept {
+    return !q_values_.empty();
+  }
+  [[nodiscard]] double latest_q() const noexcept {
+    return q_values_.empty() ? 0.0 : q_values_.back();
+  }
 
 private:
   struct NativeContact {

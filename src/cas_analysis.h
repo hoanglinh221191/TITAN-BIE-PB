@@ -6,27 +6,39 @@
 #include "functions.h"
 #include "gbsa_intrin.h"
 #include "groups.h"
-#include <mutex>
+#include "titan_executor.h"
+#include <cstddef>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
-struct CAS_Result {
-  int res_id;
-  std::string res_name;
-  double ddG_vdw;
-  double ddG_elec;
-  double ddG_polar;
-  double ddG_nonpolar;
-  double ddG_total;
-  double distance_sum;
-  int contact_frames;
+struct CASResidueKey {
+  std::string role;
+  std::size_t chainnum{};
+  std::string chain;
+  std::size_t resnr{};
+  std::string resname;
 
-  CAS_Result()
-      : res_id(0), res_name(""), ddG_vdw(0.0), ddG_elec(0.0), ddG_polar(0.0),
-        ddG_nonpolar(0.0), ddG_total(0.0), distance_sum(0.0),
-        contact_frames(0) {}
+  bool operator==(const CASResidueKey &rhs) const noexcept {
+    return role == rhs.role && chainnum == rhs.chainnum &&
+           chain == rhs.chain && resnr == rhs.resnr && resname == rhs.resname;
+  }
+};
+
+struct CASResidueKeyHash {
+  std::size_t operator()(const CASResidueKey &key) const noexcept;
+};
+
+struct CAS_Result {
+  CASResidueKey key;
+  std::string mutation_status{"valid_mutation"};
+  double ddG_vdw{};
+  double ddG_elec{};
+  double ddG_polar{};
+  double ddG_nonpolar{};
+  double ddG_total{};
+  double distance_sum{};
+  int contact_frames{};
 };
 
 struct CASMutationAtom {
@@ -37,22 +49,46 @@ struct CASMutationAtom {
   double radius{};
 };
 
+struct CASWorkerScratch {
+  AlignedDoubleVector mut_free_radii;
+  AlignedDoubleVector mut_complex_radii;
+  Multi_MOL_parameters parameters;
+};
+
+struct CASPerformanceStats {
+  std::size_t frames{};
+  std::size_t active_residue_evaluations{};
+  std::size_t mutation_evaluations{};
+  std::size_t skipped_noop_alanine{};
+  std::size_t skipped_no_mutatable_sidechain{};
+  std::size_t ligand_scan_skipped_nonprotein_frames{};
+  double gbsa_mutation_ms{};
+  double cas_total_ms{};
+};
+
 class CASAnalyzer {
 private:
-  std::unordered_map<int, CAS_Result> cas_receptor_data;
-  std::unordered_map<int, CAS_Result> cas_ligand_data;
-  std::unordered_map<int, std::vector<CASMutationAtom>> receptor_mutation_plans;
-  std::unordered_map<int, std::vector<CASMutationAtom>> ligand_mutation_plans;
-  std::vector<int> unique_res_rec;
-  std::vector<int> unique_res_lig;
+  std::unordered_map<CASResidueKey, CAS_Result, CASResidueKeyHash>
+      cas_receptor_data;
+  std::unordered_map<CASResidueKey, CAS_Result, CASResidueKeyHash>
+      cas_ligand_data;
+  std::unordered_map<CASResidueKey, std::vector<CASMutationAtom>,
+                     CASResidueKeyHash>
+      receptor_mutation_plans;
+  std::unordered_map<CASResidueKey, std::vector<CASMutationAtom>,
+                     CASResidueKeyHash>
+      ligand_mutation_plans;
+  std::vector<CASResidueKey> unique_res_rec;
+  std::vector<CASResidueKey> unique_res_lig;
+  std::vector<CASWorkerScratch> worker_scratch_;
+  CASPerformanceStats perf_;
   size_t global_total_frames;
   bool has_reference;
+  bool ligand_scan_enabled_{false};
   MOL ref_pro_frame;
   MOL ref_lig_frame;
   std::vector<mol_info> ref_pro_info;
   std::vector<mol_info> ref_lig_info;
-
-  // (mut_free_radii / mut_complex_radii moved to per-worker locals)
 
 public:
   CASAnalyzer();
@@ -60,7 +96,8 @@ public:
   void init(Multi_MOL &pro_in, Multi_MOL &lig, const std::string &mol_2_type);
 
   void process_frame(Multi_MOL &pro_in, Multi_MOL &lig, size_t num_snap,
-                     size_t num_threads, const std::vector<d_min> &dis_min,
+                     TitanExecutor &executor, size_t num_threads,
+                     const std::vector<d_min> &dis_min,
                      cache_sigma_epsilon &CachedData,
                      const arguments &Arguments, info &info_output,
                      const AlignedDoubleVector &rec_free_radii,
@@ -73,6 +110,11 @@ public:
                       double eu_par);
 
   void export_hotspot_pdb(const std::string &out_pdb_filename, double eu_par);
+
+  void export_summary(const std::string &summary_file,
+                      const arguments &Arguments) const;
+
+  void export_performance(const std::string &performance_file) const;
 };
 
 #endif // CAS_ANALYSIS_H

@@ -224,56 +224,6 @@ bool add_energy_res(
   return true;
 }
 
-int print_energy_res(vector<energy_res> &Energy_res, string name,
-                     folders &paths, int file_num, const arguments &Arguments) {
-  if (Energy_res.empty())
-    return 0;
-  fstream out(paths.get_path(file_num) + "/" + name + "_out_energy_res.dat",
-              ios::out);
-
-  out << left << setw(12) << "#Time(ps)";
-  for (size_t i{}; i < Energy_res.size(); ++i) {
-    string res_prefix = Energy_res[i].chain + to_string(Energy_res[i].resnr);
-    out << " " << setw(14) << (res_prefix + "_Tot") << " " << setw(14)
-        << (res_prefix + "_Elec") << " " << setw(14) << (res_prefix + "_VdW");
-  }
-  out << '\n';
-
-  size_t num_snaps{};
-  for (size_t i{}; i < Energy_res.size(); ++i) {
-    if (Energy_res[i].base.size() > num_snaps)
-      num_snaps = Energy_res[i].base.size();
-  }
-
-  for (size_t j{}; j < num_snaps; ++j) {
-    double frame_time = 0.0;
-    for (size_t i{}; i < Energy_res.size(); ++i) {
-      if (j < Energy_res[i].base.size()) {
-        frame_time = Energy_res[i].base[j].time;
-        break;
-      }
-    }
-    out << left << setw(12) << frame_time;
-    for (size_t i{}; i < Energy_res.size(); ++i) {
-      if (j < Energy_res[i].base.size()) {
-        double tot = (Energy_res[i].base[j].e_e + Energy_res[i].base[j].e_v) /
-                     Arguments.eu_par;
-        double elec = Energy_res[i].base[j].e_e / Arguments.eu_par;
-        double vdw = Energy_res[i].base[j].e_v / Arguments.eu_par;
-        out << " " << setw(14) << setprecision(6) << tot << " " << setw(14)
-            << setprecision(6) << elec << " " << setw(14) << setprecision(6)
-            << vdw;
-      } else {
-        out << " " << setw(14) << "0.0" << " " << setw(14) << "0.0" << " "
-            << setw(14) << "0.0";
-      }
-    }
-    out << '\n';
-  }
-  out.close();
-  return 0;
-}
-
 int print_force_res(vector<energy_res> &Energy_res, string name, folders &paths,
                     int file_num, const arguments &Arguments) {
   if (Energy_res.empty())
@@ -333,82 +283,6 @@ int print_force_res(vector<energy_res> &Energy_res, string name, folders &paths,
   }
   out.close();
   return 0;
-}
-
-int wrapper_add_energy_res(
-    const arguments &Arguments, vector<data_out> &data_processed,
-    vector<energy_res> &Energy_res, size_t num_snap, info &info_output,
-    unordered_map<pair<string, size_t>, size_t, pair_hash> &map_energy_res) {
-  for (size_t j{}; j < data_processed.size(); ++j) {
-    if (Arguments.print_energy_res == true &&
-        Arguments.flag_energy_same_force == false) {
-      add_energy_res(map_energy_res, Energy_res, data_processed[j].resnr,
-                     data_processed[j].chain, data_processed[j].resname,
-                     data_processed[j].E_E, data_processed[j].E_V,
-                     data_processed[j].F_elec, data_processed[j].F_vdw,
-                     1. * num_snap * info_output.get_current_dt() +
-                         info_output.get_current_begin_time());
-    }
-  }
-  return 0;
-}
-
-int impl_print_emap(
-    fstream &energy_file, const arguments &Arguments,
-    vector<data_out> &data_processed, vector<energy_res> &Energy_res,
-    size_t num_snap, info &info_output,
-    unordered_map<pair<string, size_t>, size_t, pair_hash> &map_energy_res) {
-  for (size_t j{}; j < data_processed.size(); ++j) {
-    if (Arguments.eu == "kcal/mol") {
-      energy_file << data_processed[j].chain << left << setw(3)
-                  << data_processed[j].resnr << right << setw(14)
-                  << setprecision(5) << data_processed[j].E_E / Arguments.eu_par
-                  << setw(15) << setprecision(5)
-                  << data_processed[j].E_V / Arguments.eu_par << '\n';
-    } else {
-      energy_file << data_processed[j].chain << left << setw(3)
-                  << data_processed[j].resnr << right << setw(14)
-                  << setprecision(5) << data_processed[j].E_E << setw(15)
-                  << setprecision(5) << data_processed[j].E_V << '\n';
-    }
-  }
-  return 0;
-}
-
-void print_energy_map(size_t nt, vector<vector<data_out>> &data,
-                      fstream &energy_file, bool flag_all_mode,
-                      const arguments &Arguments,
-                      vector<energy_res> &Energy_res, size_t num_snap,
-                      info &info_output) {
-  vector<data_out> data_processed;
-
-  filt_duplicate_e(data, data_processed);
-
-  unordered_map<pair<string, size_t>, size_t, pair_hash> map_energy_res;
-  for (size_t i{}; i < Energy_res.size(); ++i)
-    map_energy_res.emplace(
-        pair<string, size_t>(Energy_res[i].chain, Energy_res[i].resnr), i);
-
-  sort(data_processed.begin(), data_processed.end(), sort_my_list_e);
-  // size_t ddd{};
-
-  if (Arguments.nt < 4) {
-    impl_print_emap(energy_file, Arguments, data_processed, Energy_res,
-                    num_snap, info_output, map_energy_res);
-    wrapper_add_energy_res(Arguments, data_processed, Energy_res, num_snap,
-                           info_output, map_energy_res);
-  } else {
-    thread pemap = thread(impl_print_emap, ref(energy_file), ref(Arguments),
-                          ref(data_processed), ref(Energy_res), num_snap,
-                          ref(info_output), ref(map_energy_res));
-    thread paddres = thread(wrapper_add_energy_res, ref(Arguments),
-                            ref(data_processed), ref(Energy_res), num_snap,
-                            ref(info_output), ref(map_energy_res));
-    pemap.join();
-    paddres.join();
-  }
-
-  energy_file.close();
 }
 
 int impl_print_fmap(

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <fstream>
 #include <map>
+#include <utility>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -43,6 +44,10 @@ public:
 
   [[nodiscard]] bool enabled() const noexcept { return enabled_; }
   [[nodiscard]] bool initialized() const noexcept { return initialized_; }
+  [[nodiscard]] std::vector<std::pair<std::string, std::string>>
+  tica_feature_columns() const;
+  [[nodiscard]] bool append_latest_tica_features(
+      std::vector<double> &values) const;
 
 private:
   struct ResidueBackbone {

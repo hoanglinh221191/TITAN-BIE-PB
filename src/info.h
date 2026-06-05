@@ -7,11 +7,9 @@
 using std::string;
 class info {
   string Build, PdbFileName, TotalEnergyFileName, TotalEnergyTimeFileName,
-      LogFile, EmapLgFileName, EmapRecFileName, EntropyFile,
-      EntropyQuasiFile, group_1, group_2, stat_hbonds, stat_average_HB,
-      stat_maxforce_res, emap, dis_energy_2mol, res_list_hb_rec, res_list_hb_lg,
-      out_energy_res_motif, dis_com_2mol,
-      dipole_filename;
+      LogFile, EntropyFile, EntropyQuasiFile, group_1, group_2, stat_hbonds,
+      stat_average_HB, stat_maxforce_res, dis_energy_2mol, res_list_hb_rec,
+      res_list_hb_lg, dis_com_2mol, dipole_filename;
   double current_begin_time, current_end_time;
   double current_dt;
 
@@ -19,17 +17,14 @@ public:
   info(const arguments &Arguments)
       : Build{Arguments.get_build_number()}, PdbFileName{Arguments.pdb_name},
         TotalEnergyFileName{"cal.txt"}, TotalEnergyTimeFileName{"cal.xvg"},
-        LogFile{"log.txt"},
-        EmapLgFileName{"ener_lg.txt"}, EmapRecFileName{"ener_rec.txt"},
-        EntropyFile{"out_entropy.dat"},
+        LogFile{"log.txt"}, EntropyFile{"out_entropy.dat"},
         EntropyQuasiFile{"out_entropy_quasiHarmonic.dat"}, group_1{"mol1"},
         group_2{"mol2"}, stat_hbonds{"stat_hydrogenbonds.dat"},
         stat_average_HB{"stat_average_HB.dat"},
-        stat_maxforce_res{"_out_stat_maxforce_res.dat"}, emap{"out_emap_"},
+        stat_maxforce_res{"_out_stat_maxforce_res.dat"},
         dis_energy_2mol{"out_dis_com_energy.dat"}, res_list_hb_rec{},
-        res_list_hb_lg{}, out_energy_res_motif{"_stat_energy_res.dat"},
-        dis_com_2mol{"out_dis_com.dat"}, current_begin_time{1000000000000.},
-        current_end_time{}, current_dt{} {}
+        res_list_hb_lg{}, dis_com_2mol{"out_dis_com.dat"},
+        current_begin_time{1000000000000.}, current_end_time{}, current_dt{} {}
   string getBuild() const { return Build; }
   int get_info_group(const groups_cal &groups) {
     if (groups.get_parse_index_flag()) {
@@ -69,7 +64,6 @@ public:
   string get_stathb_name() const { return stat_hbonds; }
   string get_stat_ave_hb_name() const { return stat_average_HB; }
   string get_stat_maxforce_name() const { return stat_maxforce_res; }
-  string get_emap() const { return emap; }
   string getPdbFileName() const { return PdbFileName; }
   string get_pdboutname(const arguments &Arguments) const {
     return Arguments.get_pdbOutput();
@@ -91,12 +85,6 @@ public:
     return "_distributionDipoleEfield.dat";
   }
   string getOutputDistanceRes2COM() const { return "_distances_res_2COM.dat"; }
-  string getOuputEnerMaptypeAve() const { return "_energy_maptype.tsv"; }
-  string getOutputAverageEmap() const { return "average_emap_pairs.tsv"; }
-  string getOutputAverageEmapMatrix() const {
-    return "average_emap_matrix.tsv";
-  }
-  string getOutputEnerPdbtypeAve() const { return "_energy_pdbtype.pdb"; }
   string get_gbsa_snapshots_filename() const { return "gbsa_snapshots.dat"; }
   string get_gbsa_timeseries_avg_filename() const {
     return "gbsa_timeseries_avg.dat";
@@ -105,6 +93,52 @@ public:
   string get_gbsa_decomposition_filename() const {
     return "gbsa_decomposition.dat";
   }
+  string get_edecomp_mm_residue_matrix_elec_filename() const {
+    return "edecomp_mm_residue_matrix_elec.csv";
+  }
+  string get_edecomp_mm_residue_matrix_vdw_filename() const {
+    return "edecomp_mm_residue_matrix_vdw.csv";
+  }
+  string get_edecomp_mm_residue_matrix_total_filename() const {
+    return "edecomp_mm_residue_matrix_total.csv";
+  }
+  string get_edecomp_mm_residue_edges_filename() const {
+    return "edecomp_mm_residue_edges.csv";
+  }
+  string get_edecomp_mm_residue_ranking_filename() const {
+    return "edecomp_mm_residue_ranking.csv";
+  }
+  string get_edecomp_mm_atom_edges_filename() const {
+    return "edecomp_mm_atom_edges.csv";
+  }
+  string get_edecomp_mm_atom_ranking_filename() const {
+    return "edecomp_mm_atom_ranking.csv";
+  }
+  string get_edecomp_mmgbsa_residue_map_filename() const {
+    return "edecomp_mmgbsa_residue_map.csv";
+  }
+  string get_edecomp_mmgbsa_residue_ranking_filename() const {
+    return "edecomp_mmgbsa_residue_ranking.csv";
+  }
+  string get_edecomp_mmgbsa_atom_map_filename() const {
+    return "edecomp_mmgbsa_atom_map.csv";
+  }
+  string get_edecomp_mmgbsa_atom_ranking_filename() const {
+    return "edecomp_mmgbsa_atom_ranking.csv";
+  }
+  string get_edecomp_mmpbsa_residue_map_filename() const {
+    return "edecomp_mmpbsa_residue_map.csv";
+  }
+  string get_edecomp_mmpbsa_residue_ranking_filename() const {
+    return "edecomp_mmpbsa_residue_ranking.csv";
+  }
+  string get_edecomp_mmpbsa_atom_map_filename() const {
+    return "edecomp_mmpbsa_atom_map.csv";
+  }
+  string get_edecomp_mmpbsa_atom_ranking_filename() const {
+    return "edecomp_mmpbsa_atom_ranking.csv";
+  }
+  string get_edecomp_summary_filename() const { return "edecomp_summary.dat"; }
 
   string get_DE_output_filename() { return "DE_out_vector.dat"; }
   string get_DE_log_filename() { return "DE_log.dat"; }
@@ -123,6 +157,17 @@ public:
   string get_cas_ligand_filename() const { return "cas_ligand.dat"; }
   string get_cas_hotspot_pdb_filename() const {
     return "cas_hotspots_b_factor.pdb";
+  }
+  string get_cas_summary_filename() const { return "cas_summary.dat"; }
+  string get_cas_performance_filename() const { return "cas_performance.dat"; }
+  string get_titan_performance_summary_filename() const {
+    return "titan_performance_summary.dat";
+  }
+  string get_titan_performance_modules_filename() const {
+    return "titan_performance_modules.csv";
+  }
+  string get_titan_performance_frames_filename() const {
+    return "titan_performance_frames.csv";
   }
   string get_dssp_mol1_filename() const { return "dssp_mol1.dat"; }
   string get_dssp_mol2_filename() const { return "dssp_mol2.dat"; }
@@ -396,6 +441,51 @@ public:
                                 : 0) +
              ".csv";
     return "dihedral_feature_matrix.csv";
+  }
+  string get_features_by_frame_filename(const arguments &Arguments,
+                                        const std::vector<string> &input_line,
+                                        int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "features_by_frame.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "features_by_frame_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "features_by_frame.csv";
+  }
+  string get_features_metadata_filename(const arguments &Arguments,
+                                        const std::vector<string> &input_line,
+                                        int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "features_metadata.csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "features_metadata_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    return "features_metadata.csv";
+  }
+  string get_feature_export_summary_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    if (Arguments.flag_separation_results)
+      return "feature_export_summary.dat";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input)
+      return "feature_export_summary_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".dat";
+    return "feature_export_summary.dat";
   }
   string get_dihedral_sidechain_timeseries_filename(
       const arguments &Arguments, const std::vector<string> &input_line,
@@ -935,8 +1025,6 @@ public:
   double get_current_end_time() const { return current_end_time; }
   void set_current_dt(double dt) { current_dt = dt; }
   double get_current_dt() const { return current_dt; }
-  void set_out_energy_res_motif(string motif) { out_energy_res_motif = motif; }
-  string get_out_energy_res_motif() { return out_energy_res_motif; }
   string get_ml_features_filename() const { return "titan_ml_features.csv"; }
   string get_ml_prediction_filename() const {
     return "titan_rf_prediction.txt";

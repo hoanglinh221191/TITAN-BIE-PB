@@ -602,6 +602,36 @@ int arguments::post_process() {
         "CMap: do not mix deprecated -contact-map with -cmap options; migrate to -cmap -cmap-scope=interface -cmap-mode=sidechain-com.");
     exit(EXIT_FAILURE);
   }
+  std::transform(feature_export.source.begin(), feature_export.source.end(),
+                 feature_export.source.begin(), [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  if (feature_export.source != "auto" && feature_export.source != "dccm" &&
+      feature_export.source != "lj" && feature_export.source != "dihedral" &&
+      feature_export.source != "qnative" && feature_export.source != "cmap" &&
+      feature_export.source != "mixed") {
+    TitanUI::print_error(
+        "Feature export: -feature-source must be one of auto, dccm, lj, dihedral, qnative, cmap, mixed.");
+    exit(EXIT_FAILURE);
+  }
+  if (feature_export.source_explicit)
+    feature_export.export_features = true;
+  if (feature_export.source == "dihedral" || feature_export.source == "mixed")
+    dihedral.flag_dihedral = true;
+  if (feature_export.source == "qnative" || feature_export.source == "mixed")
+    qnative.flag_qnative = true;
+  if (feature_export.source == "cmap")
+    cmap.flag_cmap = true;
+  std::transform(perf_report.mode.begin(), perf_report.mode.end(),
+                 perf_report.mode.begin(), [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  if (perf_report.mode != "off" && perf_report.mode != "summary" &&
+      perf_report.mode != "detail") {
+    TitanUI::print_error(
+        "Performance report: -perf-report must be one of off, summary, detail.");
+    exit(EXIT_FAILURE);
+  }
   if (cmap.legacy_alias_enabled) {
     cmap.flag_cmap = true;
     cmap.mode = "sidechain-com";
@@ -1144,6 +1174,18 @@ int arguments::post_process() {
     nt = std::thread::hardware_concurrency();
     cout << "The number of threads is invalid. Will use " << nt
          << " threads!\n";
+  }
+
+  if (flag_cas && flag_nocal) {
+    TitanUI::print_error(
+        "CAS requires GBSA energy evaluation; -nocal=true cannot be combined "
+        "with -cas=true.");
+    exit(EXIT_FAILURE);
+  }
+  if (flag_cas && !flag_gbsa) {
+    flag_gbsa = true;
+    TitanUI::print_info(
+        "CAS auto-enabled GBSA because CAS uses GBSA alanine-scan energetics.");
   }
 
   if (flag_nocal && flag_gbsa) {
@@ -2289,13 +2331,6 @@ int arguments::post_process() {
     list.close();
   }
 
-  if (flag_energy_same_force == true) {
-    emap_level = fmap_level;
-    emap_type = fmap_type;
-    print_energy_res = print_force_res;
-    cout << "Note: Options for energy and force are same!\n";
-  }
-
   if (lj.flag_lj) {
     if (lj.lj_cluster_cutoff <= 0.0) {
       TitanUI::print_error("LJ: -lj-cut must be > 0.");
@@ -2642,12 +2677,6 @@ int arguments::post_process() {
             "turned on, will turn off clustered pbc solver!\n";
     pbc.solv_pbc_clust = false;
   }
-  /*if (flag_cal_force == true && print_energy_res == false)
-  {
-          cout << "WARNING! -cal-force option is on, will activate -energy-res
-  option\n"; print_energy_res = true;
-  }*/
-
   if (flag_maxforce == true && flag_cal_force == false) {
     cout << "Note: -max-force option is on, will activate -cal-force option!\n";
     flag_cal_force = true;
@@ -2655,10 +2684,6 @@ int arguments::post_process() {
 
   if (flag_topo_1 == false && !mol_2_type_explicit)
     mol_2_type = "protein";
-
-  if (mol_2_type.find("protein") != string::npos &&
-      mol_1_type.find("protein") != string::npos)
-    emap_type = "residue-residue";
 
   if (group_1 == group_2)
     self_int = true;

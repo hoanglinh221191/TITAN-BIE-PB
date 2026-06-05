@@ -67,6 +67,16 @@ struct MsmArgs {
   bool pca_symmetry_aware{false};
 };
 
+struct FeatureExportArgs {
+  bool export_features{false};
+  std::string source{"auto"};
+  bool source_explicit{false};
+};
+
+struct PerformanceReportArgs {
+  std::string mode{"off"};
+};
+
 struct GistArgs {
   bool flag_gist{false};
   double gist_resolution{0.5};
@@ -703,6 +713,41 @@ struct ZtsArgs {
 };
 
 // ── Main arguments struct ───────────────────────────────────
+struct EDecompArgs {
+  bool flag_edecomp{false};
+  std::string source{"mm"};
+  std::string level{"residue"};
+  std::string edge_top{"200"};
+  std::string rank_by{"abs-mean"};
+  std::string frame_output{"off"};
+  std::string perf{"summary"};
+
+  std::string validation_error() const {
+    if (source != "mm" && source != "gbsa" && source != "pbsa" &&
+        source != "all")
+      return "-edecomp-source must be one of mm, gbsa, pbsa, all.";
+    if (level != "residue" && level != "atom" && level != "both")
+      return "-edecomp-level must be one of residue, atom, both.";
+    if (edge_top != "all") {
+      if (edge_top.empty())
+        return "-edecomp-edge-top must be a positive integer or all.";
+      for (const char c : edge_top) {
+        if (c < '0' || c > '9')
+          return "-edecomp-edge-top must be a positive integer or all.";
+      }
+      if (edge_top.find_first_not_of('0') == std::string::npos)
+        return "-edecomp-edge-top must be a positive integer or all.";
+    }
+    if (rank_by != "abs-mean" && rank_by != "mean-abs")
+      return "-edecomp-rank-by must be one of abs-mean, mean-abs.";
+    if (frame_output != "off" && frame_output != "all")
+      return "-edecomp-frame-output must be one of off, all.";
+    if (perf != "off" && perf != "summary" && perf != "detail")
+      return "-edecomp-perf must be one of off, summary, detail.";
+    return {};
+  }
+};
+
 struct arguments {
 private:
   string Buildnumber;
@@ -714,6 +759,8 @@ public:
   // Domain sub-structs
   PbcArgs pbc;
   MsmArgs msm;
+  FeatureExportArgs feature_export;
+  PerformanceReportArgs perf_report;
   GistArgs gist;
   PbeArgs pbe;
   DeArgs de;
@@ -741,6 +788,7 @@ public:
   ValidationArgs validation;
   HBondKineticsArgs hbk;
   ZtsArgs zts;
+  EDecompArgs edecomp;
   std::string eq_weight_source{"auto"};
 
   // LSP-MD (Kornev, JCTC 2025) — Local Spatial Pattern network analysis
@@ -759,10 +807,11 @@ public:
       help, flag_network, flag_network_explicit, flag_pca, flag_tda, flag_ml,
       flag_cas,
       flag_allostery;
+  // Transitional engine-facing energy decomposition fields. New CLI input
+  // must use EDecompArgs; remove these after the engine migration lands.
   bool flag_all_folders, flag_separation_results, flag_sidechain_hbond,
       flag_cal_force, flag_use_CI, print_force_res, flag_begin_set,
-      flag_end_set, flag_energy_same_force, flag_maxforce, flag_new_emap,
-      print_energy_res, self_int, flag_sidechain, flag_print_sidechain,
+      flag_end_set, flag_maxforce, self_int, flag_sidechain, flag_print_sidechain,
       flag_all_respair;
   bool flag_sub_groups,
       flag_cal_dis_res_2com, flag_set_type_1, flag_set_type_2,
@@ -773,7 +822,7 @@ public:
       flag_cat_result_multi_infile, opdb_name_explicit, flag_groups_explicit;
   int igb;
   int flag_pqr, flag_all_side_chain_ct, begin_mol_2,
-      energy_map, force_map, argc, group_1, group_2,
+      force_map, argc, group_1, group_2,
       flag_h_bond, group_entropy_com, group_entropy_rec,
       group_entropy_lg, k_neighbor, dt, b_input, e_input, step_input,
       flag_cache, com_dis_energy_2mol, com_dis_2mol,
@@ -824,7 +873,7 @@ public:
       salt_concentration, epsilon_in;
   string topo_name, topo_name_2, pdb_name, out_pdb_name, index_name, force_f,
       command, path_amino_acid, path_nonbonded, name_out_cal_dis, arg_filename,
-      list_filename, emap_type, fmap_type, input_pattern, emap_level,
+      list_filename, fmap_type, input_pattern,
       fmap_level, out_motif, eu, fu, ref_file, tu, input_file_type, mol_1_type,
       mol_2_type, water_type;
 
@@ -844,8 +893,7 @@ public:
         flag_all_folders{false}, flag_separation_results{false},
         flag_sidechain_hbond{false}, flag_cal_force{false}, flag_use_CI{false},
         print_force_res{false}, flag_begin_set{false}, flag_end_set{false},
-        flag_energy_same_force{false}, flag_maxforce{false},
-        flag_new_emap{false}, print_energy_res{false}, self_int{false},
+        flag_maxforce{false}, self_int{false},
         flag_sidechain{true}, flag_print_sidechain{true},
         flag_all_respair{false},
         flag_sub_groups{false},
@@ -861,7 +909,7 @@ public:
         // Core ints
         igb{5},
         flag_pqr{2}, flag_all_side_chain_ct{1}, begin_mol_2{},
-        energy_map{2}, force_map{2}, argc{1}, group_1{}, group_2{},
+        force_map{2}, argc{1}, group_1{}, group_2{},
         flag_h_bond{0},
         group_entropy_com{-1}, group_entropy_rec{-1}, group_entropy_lg{-1},
         k_neighbor{4}, dt{0}, b_input{}, e_input{100000000},
@@ -895,8 +943,8 @@ public:
         force_f{"AMBER99SB"}, command{"-"}, path_amino_acid{"lib_ff/"},
         path_nonbonded{"lib_ff/"}, name_out_cal_dis{"out_cal_dis_com_"},
         arg_filename{"arg.in"}, list_filename{"input.txt"},
-        emap_type{"residue-atom"}, fmap_type{"residue-atom"}, input_pattern{},
-        emap_level{"per-res"}, fmap_level{"per-res"}, out_motif{"*"},
+        fmap_type{"residue-atom"}, input_pattern{},
+        fmap_level{"per-res"}, out_motif{"*"},
         eu{"kJ/mol"}, fu{"pN"}, ref_file{}, tu{"ps"}, input_file_type{".pdb"},
         mol_1_type{"protein"}, mol_2_type{"lig"}, water_type{"surface"} {}
 

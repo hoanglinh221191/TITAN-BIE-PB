@@ -3833,6 +3833,10 @@ void run_gbsa_postproc(const arguments &args, size_t tot_snap_allfiles,
                                       args.eu_par);
           cas_analyzer.export_hotspot_pdb(
               info_output.get_cas_hotspot_pdb_filename(), args.eu_par);
+          cas_analyzer.export_summary(info_output.get_cas_summary_filename(),
+                                      args);
+          cas_analyzer.export_performance(
+              info_output.get_cas_performance_filename());
         }
       } catch (const std::exception &e) {
         std::cerr << "[ERROR] Exception in CAS: " << e.what() << "\n";

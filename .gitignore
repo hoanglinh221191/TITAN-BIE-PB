@@ -37,6 +37,7 @@ lib_ff/
 *.pdf
 *.png
 !/TITAN_CORE_STRUCT_SOA_PERFORMANCE_REVIEW.md
+!/TITAN_ENERGY_DECOMPOSITION_REFACTOR_ROADMAP.md
 
 # Generated analysis outputs at repo root
 /network_edges.csv
@@ -80,6 +81,16 @@ test/
 !/test/titan_msd_smoke.cpp
 !/test/titan_rotational_diffusion_smoke.cpp
 !/test/titan_contact_kernels_smoke.cpp
+!/test/edecomp_args_smoke.ps1
+!/test/edecomp_smoke.ps1
+!/test/cas_smoke.ps1
+!/test/pdb_output_smoke.ps1
+!/test/feature_export_smoke.ps1
+!/test/performance_observer_smoke.ps1
+!/test/titan_observable_features_smoke.cpp
+!/test/titan_performance_observer_smoke.cpp
+!/test/titan_energy_decomposition_provider_smoke.cpp
+!/test/titan_energy_decomp_engine_smoke.cpp
 !/test/titan_contact_geometry_cache_smoke.cpp
 !/test/titan_core_struct_smoke.cpp
 !/test/pbe_grid_boundary_pydelphi_compare.ps1

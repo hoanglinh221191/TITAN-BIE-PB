@@ -890,6 +890,79 @@ void TitanDihedralAnalyzer::export_feature_matrix(const std::string &filename,
     log << "Dihedral feature matrix: " << filename << '\n';
 }
 
+std::vector<std::pair<std::string, std::string>>
+TitanDihedralAnalyzer::tica_feature_columns() const {
+  std::vector<std::pair<std::string, std::string>> columns;
+  if (wants_backbone()) {
+    for (const TorsionPlanPosition &pos : backbone_plan_positions_) {
+      const std::size_t residue_index = selected_indices_[pos.sample_index];
+      const std::string label = residue_label(residues_[residue_index]);
+      std::string torsion = "omega";
+      if (pos.kind == titan_dihedral_kernel::TorsionKind::Phi)
+        torsion = "phi";
+      else if (pos.kind == titan_dihedral_kernel::TorsionKind::Psi)
+        torsion = "psi";
+      columns.emplace_back(label + "_" + torsion + "_sin", label);
+      columns.emplace_back(label + "_" + torsion + "_cos", label);
+    }
+  }
+  if (wants_sidechain()) {
+    for (const TorsionPlanPosition &pos : sidechain_plan_positions_) {
+      const std::size_t residue_index = sidechain_indices_[pos.sample_index];
+      const std::string label = residue_label(residues_[residue_index]);
+      const std::string torsion =
+          pos.kind == titan_dihedral_kernel::TorsionKind::Chi1 ? "chi1"
+                                                               : "chi2";
+      columns.emplace_back(label + "_" + torsion + "_sin", label);
+      columns.emplace_back(label + "_" + torsion + "_cos", label);
+    }
+  }
+  return columns;
+}
+
+bool TitanDihedralAnalyzer::append_latest_tica_features(
+    std::vector<double> &values) const {
+  if (!enabled_)
+    return false;
+  if (wants_backbone()) {
+    if (frames_.empty())
+      return false;
+    const FrameRecord &frame = frames_.back();
+    for (const TorsionPlanPosition &pos : backbone_plan_positions_) {
+      if (pos.sample_index >= frame.samples.size())
+        return false;
+      const AngleSample &sample = frame.samples[pos.sample_index];
+      double angle = sample.omega;
+      if (pos.kind == titan_dihedral_kernel::TorsionKind::Phi)
+        angle = sample.phi;
+      else if (pos.kind == titan_dihedral_kernel::TorsionKind::Psi)
+        angle = sample.psi;
+      values.push_back(std::isfinite(angle) ? std::sin(angle * kRad)
+                                            : angle);
+      values.push_back(std::isfinite(angle) ? std::cos(angle * kRad)
+                                            : angle);
+    }
+  }
+  if (wants_sidechain()) {
+    if (sidechain_frames_.empty())
+      return false;
+    const SidechainFrameRecord &frame = sidechain_frames_.back();
+    for (const TorsionPlanPosition &pos : sidechain_plan_positions_) {
+      if (pos.sample_index >= frame.samples.size())
+        return false;
+      const SidechainSample &sample = frame.samples[pos.sample_index];
+      const double angle =
+          pos.kind == titan_dihedral_kernel::TorsionKind::Chi1 ? sample.chi1
+                                                               : sample.chi2;
+      values.push_back(std::isfinite(angle) ? std::sin(angle * kRad)
+                                            : angle);
+      values.push_back(std::isfinite(angle) ? std::cos(angle * kRad)
+                                            : angle);
+    }
+  }
+  return true;
+}
+
 void TitanDihedralAnalyzer::finalize_trajectory(
     const std::string &base_dir, const info &info_output, const arguments &args,
     const std::vector<std::string> &input_line, int input_name,

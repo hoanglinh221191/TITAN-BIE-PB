@@ -5,7 +5,6 @@
 #include "arguments.h"
 #include "cache_sigma_epsilon.h"
 #include "info.h"
-#include "stat_ener_res_res.h"
 #include <iosfwd>
 #include <string>
 #include <unordered_map>
@@ -130,7 +129,6 @@ int cal_energy_gbsa_avx2(
     const AlignedDoubleVector &lg_free_radii,
     const AlignedDoubleVector &rec_complex_radii,
     const AlignedDoubleVector &lg_complex_radii, GBSA_Aggregator *aggregator,
-    info_ener_res *infoener_res = nullptr,
     const GBSASasaCache *sasa_cache = nullptr,
     bool write_pair_cache = true);
 

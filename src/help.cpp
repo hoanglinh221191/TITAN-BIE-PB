@@ -95,6 +95,14 @@ GENERAL OUTPUT BEHAVIOR
   Module-specific output files are created only when the corresponding module
   is enabled. See Chapter 2 for module input/output details.
 
+  Shared performance observability:
+    -perf-report=<off|summary|detail>
+      Default: off. When enabled, Titan writes cross-module performance
+      summaries without replacing existing module-specific performance files.
+      summary writes titan_performance_summary.dat and
+      titan_performance_modules.csv; detail also writes
+      titan_performance_frames.csv.
+
 IMPORTANT NOTES
 
   - When DHAM is not enabled, or DHAM does not converge, the rest of the
@@ -138,8 +146,9 @@ IMPORTANT NOTES
   Typical outputs:
     cal.txt
     cal.xvg
-    average_emap_pairs.tsv
-    average_emap_matrix.tsv
+    edecomp_mm_residue_matrix_total.csv  (with -edecomp=true)
+    edecomp_mm_residue_edges.csv         (with -edecomp=true)
+    edecomp_mm_residue_ranking.csv       (with -edecomp=true)
     out_dis_com_energy.dat
     out_dis_com.dat
 
@@ -160,8 +169,8 @@ IMPORTANT NOTES
     gbsa_decomposition.dat
     gbsa_performance.dat
     gbsa_performance_frames.csv   (with -gbsa-perf=detail)
-    gbsa_average_emap_pairs.tsv
-    gbsa_total_energy_maptype.tsv
+    edecomp_mmgbsa_residue_map.csv       (with -edecomp-source=gbsa|all)
+    edecomp_mmgbsa_residue_ranking.csv   (with -edecomp-source=gbsa|all)
     out_entropy.dat   (auto-enabled by -gbsa for free-energy completeness)
 
   Notes:
@@ -1016,6 +1025,8 @@ IMPORTANT NOTES
     optional: -tica-lag=<N>, -tica-components=<N>
     optional: -tica-backend=<auto|exact_dense|exact_dual|randomized>
     optional: -tica-rank=<N>
+    optional: -feature-export=<true|false>
+    optional: -feature-source=<auto|dccm|lj|dihedral|qnative|cmap|mixed>
 
   Typical outputs:
     tica_eigenvalues.dat
@@ -1024,8 +1035,18 @@ IMPORTANT NOTES
     tica_fes_2d.dat         (when TICA FES postproc runs)
     tica_cluster_representatives.dat
     tica_zts_path.csv       (when -zts -zts-domain tica is enabled)
+    features_by_frame.csv   (when -feature-export is enabled)
+    features_metadata.csv
+    feature_export_summary.dat
 
   Notes:
+    - `-feature-source auto` preserves current behavior: protein-like jobs use
+      DCCM/pairwise C-alpha distance features, while LJ phase-2 jobs use the
+      LJ feature backend when no DCCM trace exists.
+    - Explicit `dihedral`, `qnative`, or `cmap` sources auto-enable that
+      producer with its normal defaults and route those features into TICA.
+    - `mixed` combines DCCM distances, QNative scalar Q, dihedral sin/cos
+      torsions, and CMap scalar contact count when CMap is active.
     - TICA-space ZTS uses the projection-cache capable backend path.
     - TITAN auto-promotes `-tica-backend exact_dense` when projection caching
       is required by MSM, DHAM, UMAP, or ZTS.
@@ -1557,11 +1578,15 @@ IMPORTANT NOTES
 2.14 Other Modules
 
   CAS:
-    Alanine-scanning style hotspot analysis.
+    GBSA alanine-like side-chain neutralization hotspot analysis.
+    `-cas=true` auto-enables GBSA and cannot run with `-nocal=true`.
+    CAS does not relax or repack mutated structures.
     Outputs include:
       cas_receptor.dat
       cas_ligand.dat
       cas_hotspots_b_factor.pdb
+      cas_summary.dat
+      cas_performance.dat
 
   TDA:
     Topological data analysis of structure/geometry.
@@ -2176,17 +2201,28 @@ IMPORTANT NOTES
                         hidden knob alone, to decide whether an energy mismatch
                         is field/operator or reaction-energy convention drift.
 
-  -emap [type]          Energy map type
-  -emap-level <level>   per-res or all
+  -edecomp=<bool>       Enable unified energy decomposition. Default: false
+  -edecomp-source=<m>   mm, gbsa, pbsa, or all. Default: mm
+                        gbsa requires -gbsa; pbsa requires -pbsa=true.
+                        all does not auto-enable GBSA or PBSA.
+  -edecomp-level=<m>    residue, atom, or both. Default: residue
+  -edecomp-edge-top=<N> Positive edge count or all. Default: 200
+  -edecomp-rank-by=<m>  abs-mean or mean-abs. Default: abs-mean
+  -edecomp-frame-output=<m>
+                        off or all. Default: off
+  -edecomp-perf=<m>     off, summary, or detail. Default: summary
+                        MM writes residue pair matrices plus sparse atom edges.
+                        MM/GBSA and MM/PBSA write endpoint entity maps/rankings only:
+                        edecomp_mmgbsa_{residue|atom}_map.csv and ranking.csv.
+                        edecomp_mmpbsa_{residue|atom}_map.csv and ranking.csv.
+                        Legacy -emap, -emap-level, -energy-res, -new-emap,
+                        and -useForceOptionforEnergy now fail; migrate to
+                        -edecomp=true and -edecomp-*.
   -fmap [type]          Force map type
   -fmap-level <level>   per-res or all
-  -energy-res           Per-residue energy decomposition
   -force-res            Per-residue force decomposition
-  -new-emap             New energy map format
   -com_energy <axis>    x, y, z, all, or default euclidean
   -interchain-energy    Pairwise inter-chain energy analysis
-  -useForceOptionforEnergy
-                        Reuse force options for energy output
   -denfo <val>          Distance-energy cutoff
   -dsc <val>            Standard distance cutoff. Default: 6.5 A
 
@@ -2358,6 +2394,11 @@ IMPORTANT NOTES
   -tica-components=<N>  Components kept. Default: 5
   -tica-backend=<name>  auto | exact_dense | exact_dual | randomized
   -tica-rank=<N>        Reduced-rank target for large-system TICA. Default: 64
+  -feature-export=<b>   Export routed observable features by frame. Default: false
+  -feature-source=<m>   auto | dccm | lj | dihedral | qnative | cmap | mixed
+  -perf-report=<mode>   off | summary | detail. Default: off
+                        Shared cross-module timing/counter report. It keeps
+                        existing module-specific performance files unchanged.
 
   -zts                  Zero-Temperature String minimum-energy path on PCA/TICA FES
   -zts-domain=<mode>    pca | tica. Default: pca unless both domains are active
@@ -2595,7 +2636,8 @@ IMPORTANT NOTES
   -lspmd                Local Spatial Pattern MD analysis
   -lspmd_cut=<val>      C-alpha cutoff in Angstrom. Default: 12.0
 
-  -cas                  Computational alanine scanning
+  -cas[=true|false]     GBSA alanine-like side-chain neutralization scan.
+                        Auto-enables -gbsa; incompatible with -nocal=true.
   -tda                  Topological data analysis
   -tda-max-points=<N>   Reservoir cap for TDA point-cloud CSV. Default: 200000
   -ml                   ML affinity prediction

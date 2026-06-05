@@ -33,10 +33,13 @@
 #include "titan_ifp.h"
 #include "titan_pca.h" // Ensured inclusion as per instruction
 #include "titan_dssp.h"
+#include "titan_energy_decomp_engine.h"
 #include "titan_hbond_kinetics.h"
 #include "titan_lj.h"
 #include "titan_msd.h"
 #include "titan_membrane.h"
+#include "titan_observable_features.h"
+#include "titan_performance_observer.h"
 #include "titan_rg.h"
 #include "titan_rms.h"
 #include "titan_s2.h"
@@ -71,6 +74,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -332,6 +336,180 @@ void append_module_label(std::string &modules, std::string_view label) {
   modules += label;
 }
 
+bool feature_source_is_observable_tica(const arguments &Arguments) {
+  const std::string &source = Arguments.feature_export.source;
+  return Arguments.feature_export.source_explicit && source != "dccm" &&
+         source != "lj";
+}
+
+bool feature_source_needs_dccm(const arguments &Arguments,
+                               bool legacy_tica_mode) {
+  if (legacy_tica_mode)
+    return true;
+  const std::string &source = Arguments.feature_export.source;
+  return source == "auto" || source == "dccm" || source == "mixed";
+}
+
+void add_dccm_feature_columns(std::vector<FeatureColumn> &columns, int n_ca) {
+  for (int a = 0; a < n_ca; ++a) {
+    for (int b = a + 1; b < n_ca; ++b) {
+      columns.push_back(FeatureColumn{
+          "dccm", "ca_distance_" + std::to_string(a) + "_" + std::to_string(b),
+          "A", false, "", "mol1_mol2_trace"});
+    }
+  }
+}
+
+bool append_dccm_pairwise_features(std::vector<double> &values,
+                                   DCCMNetwork &dccm_analyzer, int n_ca,
+                                   Eigen::MatrixXd &mobile,
+                                   Eigen::MatrixXd &ref_centered,
+                                   Eigen::Matrix3d &rotation,
+                                   bool &ref_initialized) {
+  if (n_ca <= 0 || dccm_analyzer.get_total_frames() == 0)
+    return false;
+  const auto &tx = dccm_analyzer.get_latest_traj_x();
+  const auto &ty = dccm_analyzer.get_latest_traj_y();
+  const auto &tz = dccm_analyzer.get_latest_traj_z();
+  if (tx.size() < static_cast<std::size_t>(n_ca) ||
+      ty.size() < static_cast<std::size_t>(n_ca) ||
+      tz.size() < static_cast<std::size_t>(n_ca))
+    return false;
+  for (int a = 0; a < n_ca; ++a) {
+    mobile(a, 0) = tx[static_cast<std::size_t>(a)];
+    mobile(a, 1) = ty[static_cast<std::size_t>(a)];
+    mobile(a, 2) = tz[static_cast<std::size_t>(a)];
+  }
+  if (!ref_initialized) {
+    ref_centered = mobile;
+    Eigen::RowVectorXd col_mean = ref_centered.colwise().mean();
+    ref_centered.rowwise() -= col_mean;
+    mobile = ref_centered;
+    ref_initialized = true;
+  } else {
+    TitanAlignment::align_frame_inplace(ref_centered, mobile, rotation);
+  }
+  for (int a = 0; a < n_ca; ++a) {
+    for (int b = a + 1; b < n_ca; ++b) {
+      const double dx = mobile(a, 0) - mobile(b, 0);
+      const double dy = mobile(a, 1) - mobile(b, 1);
+      const double dz = mobile(a, 2) - mobile(b, 2);
+      values.push_back(std::sqrt(dx * dx + dy * dy + dz * dz));
+    }
+  }
+  return true;
+}
+
+std::vector<FeatureColumn> build_observable_feature_columns(
+    const arguments &Arguments, int n_ca, const TitanQNativeAnalyzer &qnative,
+    const TitanDihedralAnalyzer &dihedral, const TitanContactMapAnalyzer &cmap,
+    const TitanLJAnalyzer &lj_analyzer, bool tica_use_lj_features) {
+  const std::string &source = Arguments.feature_export.source;
+  std::vector<FeatureColumn> columns;
+  const bool include_dccm =
+      source == "dccm" || source == "mixed" ||
+      (source == "auto" && Arguments.msm.flag_tica && !tica_use_lj_features);
+  const bool include_lj =
+      source == "lj" || (source == "auto" && tica_use_lj_features) ||
+      (source == "auto" && !Arguments.msm.flag_tica && lj_analyzer.enabled());
+  const bool include_qnative =
+      source == "qnative" || source == "mixed" ||
+      (source == "auto" && qnative.enabled());
+  const bool include_dihedral =
+      source == "dihedral" || source == "mixed" ||
+      (source == "auto" && dihedral.enabled());
+  const bool include_cmap =
+      source == "cmap" || (source == "mixed" && cmap.enabled()) ||
+      (source == "auto" && cmap.enabled());
+
+  if (include_dccm)
+    add_dccm_feature_columns(columns, n_ca);
+  if (include_lj) {
+    for (int i = 0; i < lj_analyzer.feature_dim(); ++i) {
+      columns.push_back(
+          FeatureColumn{"lj", "lj_phase2_" + std::to_string(i),
+                        "dimensionless", false, "", "mol1"});
+    }
+  }
+  if (include_qnative) {
+    columns.push_back(
+        FeatureColumn{"qnative", "Q", "fraction", false, "", "mol1"});
+  }
+  if (include_dihedral) {
+    for (const auto &[name, residue] : dihedral.tica_feature_columns()) {
+      columns.push_back(FeatureColumn{"dihedral", name, "dimensionless",
+                                      false, residue, "mol1"});
+    }
+  }
+  if (include_cmap) {
+    columns.push_back(
+        FeatureColumn{"cmap", "contact_count", "count", false, "", "mol1"});
+    if (source == "cmap") {
+      columns.push_back(FeatureColumn{"cmap", "contact_count_normalized",
+                                      "fraction", false, "", "mol1"});
+    }
+  }
+  return columns;
+}
+
+bool build_observable_feature_vector(
+    const arguments &Arguments, DCCMNetwork &dccm_analyzer, int n_ca,
+    Eigen::MatrixXd &mobile, Eigen::MatrixXd &ref_centered,
+    Eigen::Matrix3d &rotation, bool &ref_initialized,
+    const TitanQNativeAnalyzer &qnative, const TitanDihedralAnalyzer &dihedral,
+    const TitanContactMapAnalyzer &cmap, const TitanLJAnalyzer &lj_analyzer,
+    Eigen::VectorXd &out_values) {
+  const std::string &source = Arguments.feature_export.source;
+  std::vector<double> values;
+  const bool include_dccm =
+      source == "dccm" || source == "mixed" ||
+      (source == "auto" && Arguments.msm.flag_tica && n_ca > 0);
+  const bool include_lj =
+      source == "lj" ||
+      (source == "auto" && n_ca == 0 && lj_analyzer.has_feature_vector());
+  const bool include_qnative =
+      source == "qnative" || source == "mixed" ||
+      (source == "auto" && qnative.enabled());
+  const bool include_dihedral =
+      source == "dihedral" || source == "mixed" ||
+      (source == "auto" && dihedral.enabled());
+  const bool include_cmap = source == "cmap" ||
+                            (source == "mixed" && cmap.enabled()) ||
+                            (source == "auto" && cmap.enabled());
+
+  if (include_dccm &&
+      !append_dccm_pairwise_features(values, dccm_analyzer, n_ca, mobile,
+                                     ref_centered, rotation, ref_initialized))
+    return false;
+  if (include_lj) {
+    if (!lj_analyzer.has_feature_vector())
+      return false;
+    const Eigen::VectorXd &lj = lj_analyzer.latest_feature_vector();
+    for (Eigen::Index i = 0; i < lj.size(); ++i)
+      values.push_back(lj(i));
+  }
+  if (include_qnative) {
+    if (!qnative.latest_q_valid())
+      return false;
+    values.push_back(qnative.latest_q());
+  }
+  if (include_dihedral) {
+    if (!dihedral.append_latest_tica_features(values))
+      return false;
+  }
+  if (include_cmap) {
+    if (!cmap.latest_contact_count_valid())
+      return false;
+    values.push_back(cmap.latest_contact_count());
+    if (source == "cmap")
+      values.push_back(cmap.latest_contact_count_normalized());
+  }
+  out_values.resize(static_cast<Eigen::Index>(values.size()));
+  for (Eigen::Index i = 0; i < out_values.size(); ++i)
+    out_values(i) = values[static_cast<std::size_t>(i)];
+  return true;
+}
+
 std::string format_binary_bytes(long double bytes) {
   std::ostringstream oss;
   oss << std::fixed << std::setprecision(2);
@@ -363,9 +541,11 @@ bool should_enable_dense_pair_cache(const arguments &Arguments,
       Arguments.flag_sub_groups &&
       (Arguments.sg_mode == "cache" || Arguments.sg_cache == "on");
   if (!(Arguments.flag_cache == 1 || Arguments.force_map == 1 ||
-        Arguments.force_map == 3 || Arguments.flag_new_emap == true ||
-        Arguments.energy_map == 1 || Arguments.energy_map == 3 ||
-        Arguments.energy_map == 4 || sg_cache_requested)) {
+        Arguments.force_map == 3 ||
+        (Arguments.edecomp.flag_edecomp &&
+         (Arguments.edecomp.source == "mm" ||
+          Arguments.edecomp.source == "all")) ||
+        sg_cache_requested)) {
     reason = "not requested by active modules";
     return false;
   }
@@ -402,6 +582,144 @@ bool should_enable_dense_pair_cache(const arguments &Arguments,
 
   reason = "enabled (" + format_binary_bytes(estimated_bytes) + ")";
   return true;
+}
+
+bool edecomp_mm_requested(const arguments &Arguments) {
+  return Arguments.edecomp.flag_edecomp &&
+         (Arguments.edecomp.source == "mm" ||
+          Arguments.edecomp.source == "all");
+}
+
+bool edecomp_gbsa_requested(const arguments &Arguments) {
+  return Arguments.edecomp.flag_edecomp && Arguments.flag_gbsa &&
+         (Arguments.edecomp.source == "gbsa" ||
+          Arguments.edecomp.source == "all");
+}
+
+bool edecomp_pbsa_requested(const arguments &Arguments) {
+  return Arguments.edecomp.flag_edecomp && Arguments.pbe.pbsa &&
+         (Arguments.edecomp.source == "pbsa" ||
+          Arguments.edecomp.source == "all");
+}
+
+titan_energy_decomp::RankingMetric
+edecomp_rank_metric(const std::string &rank_by) {
+  if (rank_by == "mean-abs")
+    return titan_energy_decomp::RankingMetric::MeanAbs;
+  return titan_energy_decomp::RankingMetric::AbsMean;
+}
+
+titan_energy_decomp::EngineConfig make_edecomp_config(
+    const arguments &Arguments) {
+  titan_energy_decomp::EngineConfig config;
+  if (Arguments.edecomp.edge_top == "all") {
+    config.top_edge_count = std::numeric_limits<std::size_t>::max();
+  } else {
+    config.top_edge_count =
+        static_cast<std::size_t>(std::stoull(Arguments.edecomp.edge_top));
+  }
+  config.edge_metric = edecomp_rank_metric(Arguments.edecomp.rank_by);
+  config.ranking_metric = edecomp_rank_metric(Arguments.edecomp.rank_by);
+  config.sort_direction = titan_energy_decomp::SortDirection::Descending;
+  return config;
+}
+
+std::string edecomp_output_suffix(const arguments &Arguments,
+                                  const std::vector<std::string> &input_line,
+                                  int input_name) {
+  if (Arguments.flag_separation_results)
+    return {};
+  const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                           Arguments.flag_pattern_input || Arguments.flag_xdr;
+  if (!multi_input)
+    return {};
+  const int index =
+      input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
+  return "_" + std::to_string(index);
+}
+
+std::optional<std::size_t>
+find_edecomp_entity_index(const titan_energy_decomp::EntityAxis &axis,
+                          const std::string &chain, int resnr) {
+  for (std::size_t i = 0; i < axis.entities.size(); ++i) {
+    const auto &entity = axis.entities[i];
+    if (entity.chain == chain &&
+        static_cast<int>(entity.residue_number) == resnr) {
+      return i;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<std::size_t>
+find_edecomp_atom_entity_index(const titan_energy_decomp::EntityAxis &axis,
+                               std::size_t one_based_atom_index,
+                               const std::string &chain, int resnr,
+                               const std::string &atom_name) {
+  if (one_based_atom_index > 0 &&
+      one_based_atom_index <= axis.entities.size()) {
+    return one_based_atom_index - 1;
+  }
+  for (std::size_t i = 0; i < axis.entities.size(); ++i) {
+    const auto &entity = axis.entities[i];
+    if (entity.chain == chain &&
+        static_cast<int>(entity.residue_number) == resnr &&
+        (atom_name.empty() || entity.atom_name == atom_name)) {
+      return i;
+    }
+  }
+  return std::nullopt;
+}
+
+std::vector<titan_energy_decomp::EndpointEntityRow>
+make_gbsa_endpoint_rows(const GBSA_Aggregator &frame_decomp,
+                        const titan_energy_decomp::EndpointEntityDecompositionEngine
+                            &engine) {
+  std::vector<titan_energy_decomp::EndpointEntityRow> rows;
+  rows.reserve(frame_decomp.get_decomp().size());
+  const auto &mol1_residues = engine.mol1_axes().residues;
+  const auto &mol2_residues = engine.mol2_axes().residues;
+  for (const auto &entry : frame_decomp.get_decomp()) {
+    const std::string role = entry.is_ligand ? "mol2" : "mol1";
+    const auto &axis = entry.is_ligand ? mol2_residues : mol1_residues;
+    const auto entity_index =
+        find_edecomp_entity_index(axis, entry.chain_str, entry.resnr);
+    if (!entity_index)
+      continue;
+    rows.push_back({titan_energy_decomp::EntityKind::Residue, role,
+                    *entity_index, 0.5 * entry.E_elec, 0.5 * entry.E_vdw,
+                    entry.G_polar, entry.G_nonpolar});
+  }
+  return rows;
+}
+
+std::vector<titan_energy_decomp::EndpointEntityRow> make_pbsa_endpoint_rows(
+    const std::vector<TitanPBE::EDecompRow> &frame_rows,
+    const titan_energy_decomp::EndpointEntityDecompositionEngine &engine) {
+  std::vector<titan_energy_decomp::EndpointEntityRow> rows;
+  rows.reserve(frame_rows.size());
+  for (const TitanPBE::EDecompRow &entry : frame_rows) {
+    const std::string role =
+        (entry.molecule == "ligand" || entry.molecule == "mol2") ? "mol2"
+                                                                  : "mol1";
+    const bool atom_level = entry.unit_type == "atom";
+    const auto &axes = role == "mol2" ? engine.mol2_axes()
+                                      : engine.mol1_axes();
+    const auto entity_index =
+        atom_level ? find_edecomp_atom_entity_index(
+                         axes.atoms, entry.atom_index, entry.chain,
+                         static_cast<int>(entry.resnr), entry.atom_name)
+                   : find_edecomp_entity_index(
+                         axes.residues, entry.chain,
+                         static_cast<int>(entry.resnr));
+    if (!entity_index)
+      continue;
+    rows.push_back({atom_level ? titan_energy_decomp::EntityKind::Atom
+                               : titan_energy_decomp::EntityKind::Residue,
+                    role, *entity_index, entry.elec_kj_mol, entry.vdw_kj_mol,
+                    entry.polar_kj_mol, entry.nonpolar_kj_mol});
+  }
+  return rows;
 }
 
 void auto_adjust_polymer_type(arguments &Arguments, Multi_MOL &mol,
@@ -478,23 +796,7 @@ int engine(arguments &Arguments) {
 
   int sc_flag{Arguments.flag_all_side_chain_ct};
   auto total_run_time{chrono::steady_clock::now()};
-  chrono::milliseconds time_energymaptype{};
   string force_f{Arguments.force_f};
-
-  if (Arguments.energy_map > 0) {
-    fstream lg_ener_inter("ener_lg.txt", ios::out);
-    if (Arguments.mol_2_type.find("protein") != string::npos)
-      lg_ener_inter << "#Res" << setw(11) << "Electro." << setw(12)
-                    << "Van der W." << '\n';
-    else
-      lg_ener_inter << "#Atom/Res" << setw(11) << "Electro." << setw(12)
-                    << "Van der W." << '\n';
-    fstream rec_ener_inter("ener_rec.txt", ios::out);
-    rec_ener_inter << "#Res" << setw(12) << "Electro." << setw(12)
-                   << "Van der W." << '\n';
-    lg_ener_inter.close();
-    rec_ener_inter.close();
-  }
 
   if (Arguments.flag_cal_force && Arguments.force_map > 0) {
     fstream lg_force_inter("force_lg.txt", ios::out);
@@ -525,7 +827,6 @@ int engine(arguments &Arguments) {
   vector<force> Force_e, Force_v;
   vector<vector<force>> Force_e_vector, Force_v_vector;
   vector<energy_res> Force_res_stat_mol1, Force_res_stat_mol2;
-  vector<vector<energy_res>> Energy_res_stat_1, Energy_res_stat_2;
   vector<vector<energy_groups>> EF_subgroups;
   SgStreamingAnalyzer sg_streaming_analyzer;
   bool sg_streaming_initialized{false};
@@ -535,7 +836,6 @@ int engine(arguments &Arguments) {
   vector<double> time_of_snap;
   vector<string> input_line, cscd_out_name;
   all_cscd cscd_out_dis;
-  info_ener_res infoener_res;
   std::vector<MOL> saved_pro_frame0, saved_lig_frame0, saved_membrane_frame0;
   bool topo_2_is_open{Arguments.flag_topo_2},
       topo_is_open(Arguments.flag_topo_1), status{true};
@@ -735,11 +1035,10 @@ int engine(arguments &Arguments) {
     append_module_label(active_modules, "H-Bonds");
   if (Arguments.n_wat >= 0)
     append_module_label(active_modules, "Water");
-  if (Arguments.flag_new_emap)
-    append_module_label(active_modules, "EMAP");
-  if (Arguments.flag_energy_same_force) {
-    append_module_label(active_modules, "Energy/Force(=)");
-  }
+  if (Arguments.edecomp.flag_edecomp)
+    append_module_label(active_modules, "EDecomp");
+  if (edecomp_gbsa_requested(Arguments))
+    append_module_label(active_modules, "EDecomp-GBSA");
   if (Arguments.flag_allostery)
     append_module_label(active_modules, "Allostery");
   if (Arguments.lspmd.flag_lspmd)
@@ -805,6 +1104,13 @@ int engine(arguments &Arguments) {
   int input_name{};
   gen_input_list(Arguments, input_line, paths, log, input_name);
 
+  if (edecomp_mm_requested(Arguments) && Arguments.flag_nocal) {
+    TitanUI::print_error(
+        "Energy decomposition: -edecomp-source=mm requires energy "
+        "calculation; remove -nocal or select a future non-MM adapter.");
+    return 1;
+  }
+
   // ── Auto-detect XDR trajectory from -i file list when -s was used ──
   // If -s set flag_xdr but no -traj was given, detect from input_line
   if (Arguments.flag_xdr && Arguments.traj_file.empty() &&
@@ -837,6 +1143,8 @@ int engine(arguments &Arguments) {
   TitanContactMapAnalyzer cmap_analyzer;
   TitanDihedralAnalyzer dihedral_analyzer;
   TitanQNativeAnalyzer qnative_analyzer;
+  TitanObservableFeatureRouter feature_router;
+  TitanPerformanceObserver perf_observer;
   TitanMSDAnalyzer msd_analyzer;
   TitanMembraneAnalyzer membrane_analyzer;
   TitanS2Analyzer s2_analyzer;
@@ -852,7 +1160,7 @@ int engine(arguments &Arguments) {
   std::chrono::milliseconds time_gbsa{0}, time_cas{0}, time_dssp{0},
       time_hbk{0}, time_lj{0}, time_sq{0}, time_cmap{0},
       time_dihedral{0}, time_qnative{0}, time_msd{0}, time_rg{0}, time_rms{0},
-      time_membrane{0}, time_s2{0},
+      time_membrane{0}, time_s2{0}, time_edecomp{0},
       time_network{0}, time_tda{0}, time_llps{0}, time_tica{0};
   std::unique_ptr<TitanLLPSCluster> dbscan_llps;
   EnergyDecompositionProvider llps_energy_provider;
@@ -867,6 +1175,13 @@ int engine(arguments &Arguments) {
   std::unique_ptr<TitanGIST> gist_analyzer;
   TitanPBE::Analyzer pbe_analyzer;
   EnergyDecompositionProvider pbe_energy_provider;
+  EnergyDecompositionProvider edecomp_energy_provider;
+  std::unique_ptr<titan_energy_decomp::EnergyDecompositionEngine>
+      edecomp_engine;
+  std::unique_ptr<titan_energy_decomp::EndpointEntityDecompositionEngine>
+      edecomp_gbsa_engine;
+  std::unique_ptr<titan_energy_decomp::EndpointEntityDecompositionEngine>
+      edecomp_pbsa_engine;
 
   dssp_mol1_analyzer.configure(Arguments.dssp);
   dssp_mol2_analyzer.configure(Arguments.dssp);
@@ -882,14 +1197,19 @@ int engine(arguments &Arguments) {
   rg_analyzer.configure(Arguments.rg);
   rms_analyzer.configure(Arguments.rms);
   pbe_analyzer.configure(Arguments);
+  perf_observer.configure(Arguments.perf_report.mode);
 
-  double time_new_emap{};
-  std::chrono::milliseconds time_cal{}, time_emap{}, time_fmap{},
+  std::chrono::milliseconds time_cal{}, time_fmap{},
       time_subgroups_cal{}, time_solve_pbc{}, time_sc{}, time_hb{}, time_pdb{},
-      time_other{}, time_print_ener_res{}, time_print_force{}, time_maxforce{},
-      time_new_emap_other{}, time_avg_emap{}, time_contact{},
+      time_other{}, time_print_force{}, time_maxforce{}, time_contact{},
       time_input_init{}, time_input_stream{},
       time_cscd{0}, time_water{0}, time_na{0}, time_pbe{0};
+  auto elapsed_ms_since = [](const std::chrono::steady_clock::time_point &start)
+      -> double {
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::steady_clock::now() - start)
+        .count();
+  };
   Multi_MOL pro_in(force_f), lig(force_f), water_traj(force_f),
       membrane_traj(force_f);
   bool topo_initialized = false;
@@ -924,6 +1244,7 @@ int engine(arguments &Arguments) {
   Eigen::Matrix3d tica_R_global = Eigen::Matrix3d::Identity();
   bool tica_ref_initialized_global = false;
   bool tica_use_lj_features_global = false;
+  bool tica_use_observable_features_global = false;
   while (true) {
     const auto trajectory_timing_start = std::chrono::steady_clock::now();
     const auto time_gbsa_base = time_gbsa;
@@ -947,7 +1268,6 @@ int engine(arguments &Arguments) {
     const auto time_cscd_base = time_cscd;
     const auto time_hb_base = time_hb;
     const auto time_pdb_base = time_pdb;
-    const auto time_emap_base = time_emap;
     const auto time_fmap_base = time_fmap;
     const auto time_other_base = time_other;
     const auto time_water_base = time_water;
@@ -1014,7 +1334,6 @@ int engine(arguments &Arguments) {
     }
     water_analyzer.reset_trajectory_state();
 
-    multi_snap_emap rec_ener_inter;
     auto start_input_init{std::chrono::steady_clock::now()};
 
     // --- Total File Size ---
@@ -1149,7 +1468,7 @@ int engine(arguments &Arguments) {
         !Arguments.flag_nocal || Arguments.flag_gbsa || Arguments.flag_alpb ||
         Arguments.cmap.flag_cmap || Arguments.qnative.flag_qnative ||
         Arguments.flag_cal_force || Arguments.flag_maxforce ||
-        Arguments.flag_new_emap || Arguments.flag_use_CI ||
+        Arguments.flag_use_CI ||
         Arguments.flag_cal_dipole_moment ||
         Arguments.flag_charged_atom_distance_dis || Arguments.flag_cas ||
         Arguments.ifp.flag_ifp || Arguments.flag_pqr == 1;
@@ -1765,16 +2084,42 @@ int engine(arguments &Arguments) {
     if (Arguments.msm.flag_tica && !tica_analyzer) {
       int n_ca = static_cast<int>(dccm_analyzer.get_resnrs().size());
       const bool use_lj_tica_features =
-          Arguments.lj.flag_lj && lj_analyzer.phase2_ready() && n_ca == 0;
+          Arguments.feature_export.source == "lj" ||
+          (!Arguments.feature_export.source_explicit && Arguments.lj.flag_lj &&
+           lj_analyzer.phase2_ready() && n_ca == 0);
+      if (Arguments.feature_export.source == "lj" &&
+          !lj_analyzer.phase2_ready()) {
+        TitanUI::print_error(
+            "Feature export: -feature-source=lj requires active LJ phase-2 features.");
+        return 1;
+      }
+      const bool use_observable_tica_features =
+          feature_source_is_observable_tica(Arguments);
       std::string tica_feature_source =
-          use_lj_tica_features
-              ? "LJ condensation phase-2 features (density, cluster, CN, shell)"
-              : "pairwise C-alpha distances";
+          use_observable_tica_features
+              ? ("observable feature source: " + Arguments.feature_export.source)
+              : (use_lj_tica_features
+                     ? "LJ condensation phase-2 features (density, cluster, CN, shell)"
+                     : "pairwise C-alpha distances");
       // Science fix: pairwise inter-Cα distances (rotation+translation
       // invariant) D = N_ca*(N_ca-1)/2 — eliminates 6 spurious DOF from raw xyz
-      int tica_feature_dim =
-          use_lj_tica_features ? lj_analyzer.feature_dim()
-                               : n_ca * (n_ca - 1) / 2;
+      std::vector<FeatureColumn> feature_columns;
+      if (Arguments.feature_export.export_features ||
+          use_observable_tica_features) {
+        feature_columns = build_observable_feature_columns(
+            Arguments, n_ca, qnative_analyzer, dihedral_analyzer,
+            cmap_analyzer, lj_analyzer, use_lj_tica_features);
+      }
+      int tica_feature_dim = use_observable_tica_features
+                                 ? static_cast<int>(feature_columns.size())
+                                 : (use_lj_tica_features
+                                        ? lj_analyzer.feature_dim()
+                                        : n_ca * (n_ca - 1) / 2);
+      if (use_observable_tica_features && tica_feature_dim <= 0) {
+        TitanUI::print_error(
+            "Feature export: selected -feature-source produced zero TICA features.");
+        return 1;
+      }
       double tica_dt_ns = info_output.get_current_dt() > 0
                               ? info_output.get_current_dt() / 1000.0
                               : 0.001; // fallback 1 ps
@@ -1850,10 +2195,26 @@ int engine(arguments &Arguments) {
           requested_backend == TicaBackend::Auto &&
               selected_backend == TicaBackend::ExactDual);
       tica_use_lj_features_global = use_lj_tica_features;
+      tica_use_observable_features_global = use_observable_tica_features;
+      if (Arguments.feature_export.export_features ||
+          use_observable_tica_features) {
+        if (feature_columns.empty()) {
+          feature_columns = build_observable_feature_columns(
+              Arguments, n_ca, qnative_analyzer, dihedral_analyzer,
+              cmap_analyzer, lj_analyzer, use_lj_tica_features);
+        }
+        feature_router.configure(Arguments.feature_export.export_features,
+                                 use_observable_tica_features,
+                                 Arguments.feature_export.source);
+        feature_router.begin_trajectory(std::move(feature_columns),
+                                        Arguments.feature_export.source);
+      }
       TitanUI::log_kv(log, "TICA Feature Source", tica_feature_source);
       TitanUI::log_kv(
           log, "TICA Trace Scope",
-          use_lj_tica_features
+          use_observable_tica_features
+              ? "observable feature router"
+              : use_lj_tica_features
               ? "mol1 only (LJ feature backend)"
               : (Arguments.flag_nocal
                      ? "mol1 only (-nocal; mol2 ignored for DCCM/TICA)"
@@ -1864,10 +2225,14 @@ int engine(arguments &Arguments) {
         TitanUI::log_kv(log, "TICA Feature Dim (LJ phase-2)",
                         std::to_string(tica_feature_dim));
       }
-      if (!use_lj_tica_features) {
+      if (!use_lj_tica_features && !use_observable_tica_features) {
       TitanUI::log_kv(log, "TICA Cα Atoms", std::to_string(n_ca));
-      TitanUI::log_kv(log, "TICA Feature Dim (pairwise dist)",
-                      std::to_string(tica_feature_dim));
+        TitanUI::log_kv(log, "TICA Feature Dim (pairwise dist)",
+                        std::to_string(tica_feature_dim));
+      }
+      if (use_observable_tica_features) {
+        TitanUI::log_kv(log, "TICA Feature Dim (observable)",
+                        std::to_string(tica_feature_dim));
       }
       TitanUI::log_kv(log, "TICA Lag Time",
                       std::to_string(Arguments.msm.tica_lag) + " frames");
@@ -1887,6 +2252,38 @@ int engine(arguments &Arguments) {
                       bytes_to_mb_string(dual_memory_estimate));
       TitanUI::log_kv(log, "TICA Randomized Est",
                       bytes_to_mb_string(randomized_memory_estimate));
+    }
+
+    if (Arguments.msm.flag_tica && tica_analyzer &&
+        (Arguments.feature_export.export_features ||
+         tica_use_observable_features_global) &&
+        input_name > Arguments.b_input) {
+      const int n_ca = static_cast<int>(dccm_analyzer.get_resnrs().size());
+      auto feature_columns = build_observable_feature_columns(
+          Arguments, n_ca, qnative_analyzer, dihedral_analyzer, cmap_analyzer,
+          lj_analyzer, tica_use_lj_features_global);
+      feature_router.configure(Arguments.feature_export.export_features,
+                               tica_use_observable_features_global,
+                               Arguments.feature_export.source);
+      feature_router.begin_trajectory(std::move(feature_columns),
+                                      Arguments.feature_export.source);
+    }
+
+    if (!Arguments.msm.flag_tica && Arguments.feature_export.export_features) {
+      const int n_ca = static_cast<int>(dccm_analyzer.get_resnrs().size());
+      auto feature_columns = build_observable_feature_columns(
+          Arguments, n_ca, qnative_analyzer, dihedral_analyzer, cmap_analyzer,
+          lj_analyzer, false);
+      if (feature_columns.empty()) {
+        TitanUI::print_warning(
+            "Feature export: no active frame feature producers were resolved.");
+      } else {
+        feature_router.configure(true, false, Arguments.feature_export.source);
+        feature_router.begin_trajectory(std::move(feature_columns),
+                                        Arguments.feature_export.source);
+        TitanUI::log_kv(log, "Feature Export Dim",
+                        std::to_string(feature_router.feature_dim()));
+      }
     }
 
     // --- LLPS INITIALIZATION (after Martini topo parsed, chainnum set) ---
@@ -2074,6 +2471,54 @@ int engine(arguments &Arguments) {
                                : "none");
     }
 
+    if (edecomp_mm_requested(Arguments)) {
+      const double edecomp_cutoff_nm = titan_resolve_sg_cutoff_nm(Arguments);
+      edecomp_energy_provider.configure(pro_in, lig, CachedData, Arguments,
+                                        edecomp_cutoff_nm,
+                                        edecomp_cutoff_nm > 0.0);
+      if (!edecomp_engine) {
+        edecomp_engine =
+            std::make_unique<titan_energy_decomp::EnergyDecompositionEngine>(
+                titan_energy_decomp::make_axes(pro_in, "mol1"),
+                titan_energy_decomp::make_axes(lig, "mol2"),
+                make_edecomp_config(Arguments));
+      }
+      TitanUI::log_kv(log, "Energy Decomposition",
+                      "MM elec+vdW enabled");
+      TitanUI::log_kv(
+          log, "Energy Decomposition Pair Cutoff",
+          edecomp_cutoff_nm > 0.0
+              ? std::to_string(edecomp_cutoff_nm) + " nm fallback cutoff"
+              : "none");
+    }
+
+    if (edecomp_gbsa_requested(Arguments) && !edecomp_gbsa_engine) {
+      edecomp_gbsa_engine =
+          std::make_unique<titan_energy_decomp::EndpointEntityDecompositionEngine>(
+              titan_energy_decomp::make_axes(pro_in, "mol1"),
+              titan_energy_decomp::make_axes(lig, "mol2"),
+              make_edecomp_config(Arguments));
+      TitanUI::log_kv(log, "Energy Decomposition",
+                      "MM/GBSA endpoint maps enabled");
+    }
+
+    if (edecomp_pbsa_requested(Arguments) && !edecomp_pbsa_engine) {
+      edecomp_pbsa_engine =
+          std::make_unique<titan_energy_decomp::EndpointEntityDecompositionEngine>(
+              titan_energy_decomp::make_axes(pro_in, "mol1"),
+              titan_energy_decomp::make_axes(lig, "mol2"),
+              make_edecomp_config(Arguments));
+      pbe_analyzer.set_edecomp_sink(
+          [&](const std::vector<TitanPBE::EDecompRow> &rows) {
+            if (!edecomp_pbsa_engine)
+              return;
+            edecomp_pbsa_engine->process_frame(
+                make_pbsa_endpoint_rows(rows, *edecomp_pbsa_engine));
+          });
+      TitanUI::log_kv(log, "Energy Decomposition",
+                      "MM/PBSA endpoint maps enabled");
+    }
+
     // --- GIST Water Thermodynamics Initialization ---
     if (Arguments.gist.flag_gist) {
       // Auto-enable water tracking if not explicitly set
@@ -2159,6 +2604,14 @@ int engine(arguments &Arguments) {
     auto& tica_R               = tica_R_global;
     bool& tica_ref_initialized = tica_ref_initialized_global;
     const bool use_lj_tica_features = tica_use_lj_features_global;
+    const bool use_observable_tica_features =
+        tica_use_observable_features_global;
+    const bool tica_or_export_needs_dccm =
+        (Arguments.msm.flag_tica && !use_lj_tica_features &&
+         feature_source_needs_dccm(Arguments,
+                                   !use_observable_tica_features)) ||
+        (feature_router.active() && !feature_router.consume_tica() &&
+         feature_source_needs_dccm(Arguments, false));
 
     std::string resolved_modules;
     std::string skipped_modules;
@@ -2218,10 +2671,6 @@ int engine(arguments &Arguments) {
       append_module_label(resolved_modules, "H-Bonds");
     if (Arguments.n_wat >= 0)
       append_module_label(resolved_modules, "Water");
-    if (Arguments.flag_new_emap)
-      append_module_label(resolved_modules, "EMAP");
-    if (Arguments.flag_energy_same_force)
-      append_module_label(resolved_modules, "Energy/Force(=)");
     if (Arguments.flag_allostery)
       append_module_label(resolved_modules, "Allostery");
     if (Arguments.lspmd.flag_lspmd)
@@ -2279,6 +2728,12 @@ int engine(arguments &Arguments) {
       append_module_label(streaming_modules, "AWH-IFP");
     if (Arguments.llps.flag_llps)
       append_module_label(streaming_modules, "LLPS");
+    if (edecomp_mm_requested(Arguments))
+      append_module_label(streaming_modules, "EDecomp");
+    if (edecomp_gbsa_requested(Arguments))
+      append_module_label(streaming_modules, "EDecomp-GBSA");
+    if (edecomp_pbsa_requested(Arguments))
+      append_module_label(streaming_modules, "EDecomp-PBSA");
     if (streaming_modules.empty())
       streaming_modules = "I/O";
     if (!resolved_modules.empty() || !skipped_modules.empty()) {
@@ -2293,6 +2748,18 @@ int engine(arguments &Arguments) {
     if (pbe_analyzer.enabled()) {
       pbe_analyzer.begin_trajectory(
           static_cast<std::size_t>(input_name - Arguments.b_input + 1),
+          progress_source_label(Arguments, name_pro));
+    }
+    if (edecomp_mm_requested(Arguments) && edecomp_engine) {
+      edecomp_engine->begin_trajectory(
+          progress_source_label(Arguments, name_pro));
+    }
+    if (edecomp_gbsa_requested(Arguments) && edecomp_gbsa_engine) {
+      edecomp_gbsa_engine->begin_trajectory(
+          progress_source_label(Arguments, name_pro));
+    }
+    if (edecomp_pbsa_requested(Arguments) && edecomp_pbsa_engine) {
+      edecomp_pbsa_engine->begin_trajectory(
           progress_source_label(Arguments, name_pro));
     }
 
@@ -2317,10 +2784,6 @@ int engine(arguments &Arguments) {
         Arguments.ifp.flag_ifp || Arguments.flag_cas || Arguments.flag_ml ||
         Arguments.cal_dis_sc_contact ||
         (Arguments.flag_tda && Arguments.flag_sidechain) ||
-        Arguments.flag_new_emap ||
-        (Arguments.flag_energy_same_force == false &&
-         (Arguments.energy_map == 1 || Arguments.energy_map == 3 ||
-          Arguments.energy_map == 4)) ||
         (Arguments.flag_cal_force &&
          (Arguments.force_map == 1 || Arguments.force_map == 3)) ||
         (Arguments.flag_sub_groups && Arguments.flag_cal_mindis) ||
@@ -2526,16 +2989,35 @@ int engine(arguments &Arguments) {
                 Arguments.needs_mol2_for_cmap_interface() ? &lig : nullptr;
             cmap_analyzer.process_frame(pro_in, cmap_mol2, chunk_snap_idx,
                                         executor);
+            const auto end_cmap = std::chrono::steady_clock::now();
             time_cmap += std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - start_cmap);
+                    end_cmap - start_cmap);
+            perf_observer.add_frame_elapsed(
+                "CMap", static_cast<std::uint64_t>(
+                            tot_snap_allfiles + global_frame_counter +
+                            chunk_snap_idx),
+                pro_in.m_mol[chunk_snap_idx].time_of_snap,
+                std::chrono::duration<double, std::milli>(end_cmap -
+                                                          start_cmap)
+                    .count());
           }
 
           if (dihedral_analyzer.enabled()) {
             auto start_dihedral = std::chrono::steady_clock::now();
             dihedral_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
+            const auto end_dihedral = std::chrono::steady_clock::now();
             time_dihedral +=
                 std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - start_dihedral);
+                    end_dihedral - start_dihedral);
+            perf_observer.add_frame_elapsed(
+                "Dihedral",
+                static_cast<std::uint64_t>(tot_snap_allfiles +
+                                           global_frame_counter +
+                                           chunk_snap_idx),
+                pro_in.m_mol[chunk_snap_idx].time_of_snap,
+                std::chrono::duration<double, std::milli>(end_dihedral -
+                                                          start_dihedral)
+                    .count());
           }
 
           if (qnative_analyzer.enabled()) {
@@ -2544,9 +3026,19 @@ int engine(arguments &Arguments) {
                 Arguments.needs_mol2_for_qnative_interface() ? &lig : nullptr;
             qnative_analyzer.process_frame(pro_in, qnative_mol2, chunk_snap_idx,
                                            executor);
+            const auto end_qnative = std::chrono::steady_clock::now();
             time_qnative +=
                 std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - start_qnative);
+                    end_qnative - start_qnative);
+            perf_observer.add_frame_elapsed(
+                "QNative",
+                static_cast<std::uint64_t>(tot_snap_allfiles +
+                                           global_frame_counter +
+                                           chunk_snap_idx),
+                pro_in.m_mol[chunk_snap_idx].time_of_snap,
+                std::chrono::duration<double, std::milli>(end_qnative -
+                                                          start_qnative)
+                    .count());
           }
 
           if (msd_analyzer.enabled()) {
@@ -2555,8 +3047,16 @@ int engine(arguments &Arguments) {
                 Arguments.needs_mol2_for_msd() ? &lig : nullptr;
             msd_analyzer.process_frame(pro_in, msd_mol2, chunk_snap_idx,
                                        executor);
+            const auto end_msd = std::chrono::steady_clock::now();
             time_msd += std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start_msd);
+                end_msd - start_msd);
+            perf_observer.add_frame_elapsed(
+                "MSD", static_cast<std::uint64_t>(
+                           tot_snap_allfiles + global_frame_counter +
+                           chunk_snap_idx),
+                pro_in.m_mol[chunk_snap_idx].time_of_snap,
+                std::chrono::duration<double, std::milli>(end_msd - start_msd)
+                    .count());
           }
 
           if (membrane_analyzer.enabled() &&
@@ -2564,16 +3064,34 @@ int engine(arguments &Arguments) {
             auto start_membrane = std::chrono::steady_clock::now();
             membrane_analyzer.process_frame(membrane_traj, chunk_snap_idx,
                                             executor);
+            const auto end_membrane = std::chrono::steady_clock::now();
             time_membrane +=
                 std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - start_membrane);
+                    end_membrane - start_membrane);
+            perf_observer.add_frame_elapsed(
+                "Membrane",
+                static_cast<std::uint64_t>(tot_snap_allfiles +
+                                           global_frame_counter +
+                                           chunk_snap_idx),
+                pro_in.m_mol[chunk_snap_idx].time_of_snap,
+                std::chrono::duration<double, std::milli>(end_membrane -
+                                                          start_membrane)
+                    .count());
           }
 
           if (s2_analyzer.enabled()) {
             auto start_s2 = std::chrono::steady_clock::now();
             s2_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
+            const auto end_s2 = std::chrono::steady_clock::now();
             time_s2 += std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start_s2);
+                end_s2 - start_s2);
+            perf_observer.add_frame_elapsed(
+                "S2", static_cast<std::uint64_t>(tot_snap_allfiles +
+                                                 global_frame_counter +
+                                                 chunk_snap_idx),
+                pro_in.m_mol[chunk_snap_idx].time_of_snap,
+                std::chrono::duration<double, std::milli>(end_s2 - start_s2)
+                    .count());
           }
 
           if (rg_analyzer.enabled()) {
@@ -2584,6 +3102,7 @@ int engine(arguments &Arguments) {
           }
 
           if (Arguments.flag_nocal && use_lj_tica_features &&
+              !use_observable_tica_features &&
               Arguments.msm.flag_tica && tica_analyzer &&
               lj_analyzer.has_feature_vector()) {
             auto start_tica = std::chrono::steady_clock::now();
@@ -2634,7 +3153,7 @@ int engine(arguments &Arguments) {
           if (Arguments.flag_network || Arguments.flag_pca ||
               Arguments.corr_knn.flag_corr_knn ||
               Arguments.lspmd.flag_lspmd ||
-              (Arguments.msm.flag_tica && !use_lj_tica_features)) {
+              tica_or_export_needs_dccm) {
             dccm_analyzer.process_frame(
                 pro_in, lig, chunk_snap_idx, absolute_global_snap_idx,
                 pro_in.m_mol[chunk_snap_idx].time_of_snap, current_replica,
@@ -2644,7 +3163,44 @@ int engine(arguments &Arguments) {
               std::chrono::steady_clock::now() - start_network);
 
           if (Arguments.msm.flag_tica && tica_analyzer &&
-              !use_lj_tica_features) {
+              use_observable_tica_features) {
+            auto start_tica = std::chrono::steady_clock::now();
+            Eigen::VectorXd observable_features;
+            const bool have_tica_frame = build_observable_feature_vector(
+                Arguments, dccm_analyzer, tica_n_ca, tica_mobile,
+                tica_ref_centered, tica_R, tica_ref_initialized,
+                qnative_analyzer, dihedral_analyzer, cmap_analyzer,
+                lj_analyzer, observable_features);
+            if (have_tica_frame &&
+                feature_router.accept_frame(
+                    static_cast<std::uint64_t>(absolute_global_snap_idx),
+                    pro_in.m_mol[chunk_snap_idx].time_of_snap,
+                    observable_features)) {
+              tica_analyzer->accumulate_frame(observable_features);
+              if (need_tica_projection_cache && msm_analyzer) {
+                if (tica_analyzer->is_solved()) {
+                  Eigen::VectorXd proj =
+                      tica_analyzer->project_frame(observable_features);
+                  msm_analyzer->add_projected_frame(
+                      proj, current_replica,
+                      static_cast<int64_t>(absolute_global_snap_idx),
+                      current_box_volume_nm3);
+                  msm_analyzer->record_frame_time(
+                      pro_in.m_mol[chunk_snap_idx].time_of_snap,
+                      current_replica);
+                } else {
+                  msm_analyzer->add_pending_frame_metadata(
+                      pro_in.m_mol[chunk_snap_idx].time_of_snap,
+                      current_replica,
+                      static_cast<int64_t>(absolute_global_snap_idx),
+                      current_box_volume_nm3);
+                }
+              }
+            }
+            time_tica += std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_tica);
+          } else if (Arguments.msm.flag_tica && tica_analyzer &&
+                     !use_lj_tica_features) {
             auto start_tica = std::chrono::steady_clock::now();
             bool have_tica_frame = false;
             if (tica_n_ca > 0) {
@@ -2717,6 +3273,22 @@ int engine(arguments &Arguments) {
 
             time_tica += std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start_tica);
+          }
+
+          if (feature_router.active() && !feature_router.consume_tica()) {
+            Eigen::VectorXd observable_features;
+            const bool have_feature_frame = build_observable_feature_vector(
+                Arguments, dccm_analyzer, tica_n_ca, tica_mobile,
+                tica_ref_centered, tica_R, tica_ref_initialized,
+                qnative_analyzer, dihedral_analyzer, cmap_analyzer,
+                lj_analyzer, observable_features);
+            if (have_feature_frame) {
+              const bool accepted_for_export = feature_router.accept_frame(
+                  static_cast<std::uint64_t>(absolute_global_snap_idx),
+                  pro_in.m_mol[chunk_snap_idx].time_of_snap,
+                  observable_features);
+              (void)accepted_for_export;
+            }
           }
 
           // H-bond (self-interaction mode for nocal)
@@ -2879,8 +3451,15 @@ int engine(arguments &Arguments) {
               pbe_lig_params, static_cast<std::size_t>(progress_traj_id),
               global_snap_idx, tot_snap_allfiles + global_snap_idx, executor,
               log, Arguments.pbe.pbsa ? &pbe_energy_provider : nullptr);
+          const auto end_pbe = std::chrono::steady_clock::now();
           time_pbe += std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::steady_clock::now() - start_pbe);
+              end_pbe - start_pbe);
+          perf_observer.add_frame_elapsed(
+              Arguments.pbe.pbsa ? "PBSA" : "PBE",
+              static_cast<std::uint64_t>(tot_snap_allfiles + global_snap_idx),
+              pro_in.m_mol[chunk_snap_idx].time_of_snap,
+              std::chrono::duration<double, std::milli>(end_pbe - start_pbe)
+                  .count());
         }
 
         vector<d_min> dis_min(num_threads);
@@ -2963,7 +3542,6 @@ int engine(arguments &Arguments) {
           std::vector<GBSA_Aggregator> local_aggs(
               num_threads, GBSA_Aggregator(Arguments, info_output));
           std::vector<GBSA_energy_snap> gbsa_energies(num_threads);
-          std::vector<info_ener_res> infoener_res_v(num_threads);
 
           size_t active_lg_size = active_lg_mol.size();
           size_t rec_size = pro_in.m_mol[chunk_snap_idx].size();
@@ -2982,26 +3560,13 @@ int engine(arguments &Arguments) {
                 pro_in.parameters, lig.parameters, pro_in.lcpo_p1,
                 pro_in.lcpo_p2, lig.lcpo_p1, lig.lcpo_p2, rec_free_radii,
                 lg_free_radii, rec_complex_radii, lg_complex_radii,
-                &local_aggs[i], &infoener_res_v[i], &frame_sasa_cache,
-                true);
+                &local_aggs[i], &frame_sasa_cache, true);
 #endif
           });
 
           const auto gbsa_merge_begin =
               capture_gbsa_timing ? std::chrono::steady_clock::now()
                                   : gbsa_kernel_begin;
-          for (auto &ii : infoener_res_v) {
-            for (auto &ele : ii.position_map) {
-              infoener_res.add_energy(ele.first, ii.emap_ee[ele.second],
-                                      ii.emap_ev[ele.second]);
-            }
-          }
-          if (Arguments.flag_energy_same_force == false &&
-              (Arguments.energy_map == 1 || Arguments.energy_map == 3 ||
-               Arguments.energy_map == 4)) {
-            infoener_res.wrapper_impl_ener_maptype(
-                pro_in, lig, info_output, Arguments, chunk_snap_idx + 1);
-          }
 
           // Merge thread-local GBSA results back to the main pipeline
           frame_gbsa_total.time = pro_in.m_mol[chunk_snap_idx].time_of_snap;
@@ -3034,6 +3599,18 @@ int engine(arguments &Arguments) {
                           // Thread -> Frame
           }
 
+          if (edecomp_gbsa_requested(Arguments) && edecomp_gbsa_engine) {
+            try {
+              edecomp_gbsa_engine->process_frame(
+                  make_gbsa_endpoint_rows(frame_decomp,
+                                          *edecomp_gbsa_engine));
+            } catch (const std::exception &e) {
+              TitanUI::print_error(std::string("Energy decomposition GBSA: ") +
+                                   e.what());
+              return 1;
+            }
+          }
+
           global_gbsa_agg.commit_frame_decompositions(
               frame_decomp, tot_snap_allfiles + global_snap_idx);
           if (capture_gbsa_timing) {
@@ -3058,8 +3635,16 @@ int engine(arguments &Arguments) {
           global_gbsa_agg.add_snapshot(input_name - Arguments.b_input,
                                        frame_gbsa_total);
 
+          const auto end_gbsa = std::chrono::steady_clock::now();
           time_gbsa += std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::steady_clock::now() - start_energy_eval);
+              end_gbsa - start_energy_eval);
+          perf_observer.add_frame_elapsed(
+              "GBSA",
+              static_cast<std::uint64_t>(tot_snap_allfiles + global_snap_idx),
+              pro_in.m_mol[chunk_snap_idx].time_of_snap,
+              std::chrono::duration<double, std::milli>(end_gbsa -
+                                                        start_energy_eval)
+                  .count());
         } else {
           auto dispatch_energy_workers = [&](auto &&worker_fn) {
             executor.parallel_do(num_threads, [&](size_t worker_id) {
@@ -3350,6 +3935,31 @@ int engine(arguments &Arguments) {
           time_of_snap.push_back(t);
         }
 
+        if (edecomp_mm_requested(Arguments) && edecomp_engine) {
+          auto start_edecomp = std::chrono::steady_clock::now();
+          try {
+            edecomp_engine->process_frame(
+                {&CachedData, &edecomp_energy_provider,
+                 &pro_in.m_mol[chunk_snap_idx],
+                 &lig.m_mol[chunk_snap_idx]},
+                executor);
+          } catch (const std::exception &e) {
+            TitanUI::print_error(std::string("Energy decomposition: ") +
+                                 e.what());
+            return 1;
+          }
+          const auto end_edecomp = std::chrono::steady_clock::now();
+          time_edecomp += std::chrono::duration_cast<std::chrono::milliseconds>(
+              end_edecomp - start_edecomp);
+          perf_observer.add_frame_elapsed(
+              "EDecomp",
+              static_cast<std::uint64_t>(tot_snap_allfiles + global_snap_idx),
+              pro_in.m_mol[chunk_snap_idx].time_of_snap,
+              std::chrono::duration<double, std::milli>(end_edecomp -
+                                                        start_edecomp)
+                  .count());
+        }
+
         if (need_distance_scan) {
           auto start_sc{chrono::steady_clock::now()};
 
@@ -3492,15 +4102,30 @@ int engine(arguments &Arguments) {
               Arguments.needs_mol2_for_cmap_interface() ? &lig : nullptr;
           cmap_analyzer.process_frame(pro_in, cmap_mol2, chunk_snap_idx,
                                       executor);
+          const auto end_cmap = std::chrono::steady_clock::now();
           time_cmap += std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::steady_clock::now() - start_cmap);
+              end_cmap - start_cmap);
+          perf_observer.add_frame_elapsed(
+              "CMap", static_cast<std::uint64_t>(tot_snap_allfiles +
+                                                 global_snap_idx),
+              pro_in.m_mol[chunk_snap_idx].time_of_snap,
+              std::chrono::duration<double, std::milli>(end_cmap - start_cmap)
+                  .count());
         }
 
         if (dihedral_analyzer.enabled()) {
           auto start_dihedral = std::chrono::steady_clock::now();
           dihedral_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
+          const auto end_dihedral = std::chrono::steady_clock::now();
           time_dihedral += std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::steady_clock::now() - start_dihedral);
+              end_dihedral - start_dihedral);
+          perf_observer.add_frame_elapsed(
+              "Dihedral",
+              static_cast<std::uint64_t>(tot_snap_allfiles + global_snap_idx),
+              pro_in.m_mol[chunk_snap_idx].time_of_snap,
+              std::chrono::duration<double, std::milli>(end_dihedral -
+                                                        start_dihedral)
+                  .count());
         }
 
         if (qnative_analyzer.enabled()) {
@@ -3509,9 +4134,17 @@ int engine(arguments &Arguments) {
               Arguments.needs_mol2_for_qnative_interface() ? &lig : nullptr;
           qnative_analyzer.process_frame(pro_in, qnative_mol2, chunk_snap_idx,
                                          executor);
+          const auto end_qnative = std::chrono::steady_clock::now();
           time_qnative +=
               std::chrono::duration_cast<std::chrono::milliseconds>(
-                  std::chrono::steady_clock::now() - start_qnative);
+                  end_qnative - start_qnative);
+          perf_observer.add_frame_elapsed(
+              "QNative", static_cast<std::uint64_t>(tot_snap_allfiles +
+                                                    global_snap_idx),
+              pro_in.m_mol[chunk_snap_idx].time_of_snap,
+              std::chrono::duration<double, std::milli>(end_qnative -
+                                                        start_qnative)
+                  .count());
         }
 
         if (msd_analyzer.enabled()) {
@@ -3520,8 +4153,15 @@ int engine(arguments &Arguments) {
               Arguments.needs_mol2_for_msd() ? &lig : nullptr;
           msd_analyzer.process_frame(pro_in, msd_mol2, chunk_snap_idx,
                                      executor);
+          const auto end_msd = std::chrono::steady_clock::now();
           time_msd += std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::steady_clock::now() - start_msd);
+              end_msd - start_msd);
+          perf_observer.add_frame_elapsed(
+              "MSD", static_cast<std::uint64_t>(tot_snap_allfiles +
+                                                global_snap_idx),
+              pro_in.m_mol[chunk_snap_idx].time_of_snap,
+              std::chrono::duration<double, std::milli>(end_msd - start_msd)
+                  .count());
         }
 
         if (membrane_analyzer.enabled() &&
@@ -3529,16 +4169,31 @@ int engine(arguments &Arguments) {
           auto start_membrane = std::chrono::steady_clock::now();
           membrane_analyzer.process_frame(membrane_traj, chunk_snap_idx,
                                           executor);
+          const auto end_membrane = std::chrono::steady_clock::now();
           time_membrane +=
               std::chrono::duration_cast<std::chrono::milliseconds>(
-                  std::chrono::steady_clock::now() - start_membrane);
+                  end_membrane - start_membrane);
+          perf_observer.add_frame_elapsed(
+              "Membrane", static_cast<std::uint64_t>(tot_snap_allfiles +
+                                                     global_snap_idx),
+              pro_in.m_mol[chunk_snap_idx].time_of_snap,
+              std::chrono::duration<double, std::milli>(end_membrane -
+                                                        start_membrane)
+                  .count());
         }
 
         if (s2_analyzer.enabled()) {
           auto start_s2 = std::chrono::steady_clock::now();
           s2_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
+          const auto end_s2 = std::chrono::steady_clock::now();
           time_s2 += std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::steady_clock::now() - start_s2);
+              end_s2 - start_s2);
+          perf_observer.add_frame_elapsed(
+              "S2", static_cast<std::uint64_t>(tot_snap_allfiles +
+                                               global_snap_idx),
+              pro_in.m_mol[chunk_snap_idx].time_of_snap,
+              std::chrono::duration<double, std::milli>(end_s2 - start_s2)
+                  .count());
         }
 
         if (hbk_analyzer.enabled()) {
@@ -3584,12 +4239,19 @@ int engine(arguments &Arguments) {
           auto start_cas = std::chrono::steady_clock::now();
 
           cas_analyzer.process_frame(
-              pro_in, lig, chunk_snap_idx, num_threads, dis_min, CachedData,
-              Arguments, info_output, rec_free_radii, lg_free_radii,
+              pro_in, lig, chunk_snap_idx, executor, num_threads, dis_min,
+              CachedData, Arguments, info_output, rec_free_radii, lg_free_radii,
               rec_complex_radii, lg_complex_radii, frame_gbsa_total);
 
+          const auto end_cas = std::chrono::steady_clock::now();
           time_cas += std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::steady_clock::now() - start_cas);
+              end_cas - start_cas);
+          perf_observer.add_frame_elapsed(
+              "CAS", static_cast<std::uint64_t>(tot_snap_allfiles +
+                                                global_snap_idx),
+              pro_in.m_mol[chunk_snap_idx].time_of_snap,
+              std::chrono::duration<double, std::milli>(end_cas - start_cas)
+                  .count());
         }
 
         const int current_replica = input_name - Arguments.b_input;
@@ -3602,7 +4264,7 @@ int engine(arguments &Arguments) {
         auto start_network = std::chrono::steady_clock::now();
         if (Arguments.flag_network || Arguments.flag_pca ||
             Arguments.corr_knn.flag_corr_knn ||
-            Arguments.lspmd.flag_lspmd) {
+            Arguments.lspmd.flag_lspmd || tica_or_export_needs_dccm) {
           dccm_analyzer.process_frame(
               pro_in, lig, chunk_snap_idx, absolute_global_snap_idx,
               pro_in.m_mol[chunk_snap_idx].time_of_snap, current_replica,
@@ -3616,7 +4278,23 @@ int engine(arguments &Arguments) {
         auto start_tica = std::chrono::steady_clock::now();
         if (Arguments.msm.flag_tica && tica_analyzer) {
           bool have_tica_frame = false;
-          if (use_lj_tica_features && lj_analyzer.has_feature_vector()) {
+          if (use_observable_tica_features) {
+            Eigen::VectorXd observable_features;
+            have_tica_frame = build_observable_feature_vector(
+                Arguments, dccm_analyzer, tica_n_ca, tica_mobile,
+                tica_ref_centered, tica_R, tica_ref_initialized,
+                qnative_analyzer, dihedral_analyzer, cmap_analyzer,
+                lj_analyzer, observable_features);
+            if (have_tica_frame &&
+                feature_router.accept_frame(
+                    static_cast<std::uint64_t>(absolute_global_snap_idx),
+                    pro_in.m_mol[chunk_snap_idx].time_of_snap,
+                    observable_features)) {
+              tica_features = observable_features;
+            } else {
+              have_tica_frame = false;
+            }
+          } else if (use_lj_tica_features && lj_analyzer.has_feature_vector()) {
             tica_features = lj_analyzer.latest_feature_vector();
             have_tica_frame = (tica_features.size() > 0);
           } else if (tica_n_ca > 0) {
@@ -3692,6 +4370,21 @@ int engine(arguments &Arguments) {
         time_tica += std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start_tica);
 
+        if (feature_router.active() && !feature_router.consume_tica()) {
+          Eigen::VectorXd observable_features;
+          const bool have_feature_frame = build_observable_feature_vector(
+              Arguments, dccm_analyzer, tica_n_ca, tica_mobile,
+              tica_ref_centered, tica_R, tica_ref_initialized, qnative_analyzer,
+              dihedral_analyzer, cmap_analyzer, lj_analyzer,
+              observable_features);
+          if (have_feature_frame) {
+            const bool accepted_for_export = feature_router.accept_frame(
+                static_cast<std::uint64_t>(absolute_global_snap_idx),
+                pro_in.m_mol[chunk_snap_idx].time_of_snap, observable_features);
+            (void)accepted_for_export;
+          }
+        }
+
         auto start_tda = std::chrono::steady_clock::now();
         if (Arguments.flag_tda) {
           if (!Arguments.flag_sidechain) {
@@ -3745,22 +4438,6 @@ int engine(arguments &Arguments) {
         time_tda += std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start_tda);
 
-        auto start_emap = std::chrono::steady_clock::now();
-        if (Arguments.flag_energy_same_force == false &&
-            (Arguments.energy_map == 1 || Arguments.energy_map == 3 ||
-             Arguments.energy_map == 4) &&
-            !CachedData.elec_ener.empty()) {
-          wrap_cal_energy_map(executor, pro_in, lig, Arguments, chunk_snap_idx,
-                              dis_min, CachedData, Energy_res_mol1,
-                              Energy_res_mol2, info_output, infoener_res);
-        }
-        time_emap += std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start_emap);
-        // cout << "check emap..";
-        // cout << "Ener resmol1 size: " << Energy_res_mol1.size() << " size 1
-        // ele: " << sizeof(Energy_res_mol1[0]) << '\n'; cout << "Ener resmol2
-        // size: " << Energy_res_mol2.size() << " size 1 ele: " <<
-        // sizeof(Energy_res_mol2[0]) << '\n';
         auto start_fmap{std::chrono::steady_clock::now()};
         if (Arguments.flag_cal_force == true &&
             (Arguments.force_map == 1 || Arguments.force_map == 3) &&
@@ -3875,14 +4552,6 @@ int engine(arguments &Arguments) {
             }
           }
         }
-        // cout << "check hbond..";
-        clock_t start_new_emap{clock()};
-        if (Arguments.flag_new_emap == true && !CachedData.elec_ener.empty()) {
-          imp_cal_energy_rec_res(rec_ener_inter, pro_in, lig, chunk_snap_idx, 0,
-                                 0, dis_min, CachedData, Arguments);
-        }
-        time_new_emap += clock() - start_new_emap;
-        // cout << "check new emap..";
         auto start_subgroups = std::chrono::steady_clock::now();
         if (Arguments.flag_sub_groups == true && Arguments.flag_gbsa == false) {
           if (sg_streaming_analyzer.active()) {
@@ -4088,6 +4757,65 @@ int engine(arguments &Arguments) {
     if (pbe_analyzer.enabled()) {
       pbe_analyzer.end_trajectory(log);
     }
+    if (edecomp_mm_requested(Arguments) && edecomp_engine) {
+      const std::size_t traj_index =
+          input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
+      const std::size_t path_index =
+          (Arguments.flag_separation_results && traj_index < paths.get_size())
+              ? traj_index
+              : 0;
+      const std::string base_dir = paths.get_path(path_index);
+      try {
+        const auto result = edecomp_engine->finalize_trajectory();
+        titan_energy_decomp::export_result(
+            result, base_dir,
+            edecomp_output_suffix(Arguments, input_line, input_name));
+      } catch (const std::exception &e) {
+        TitanUI::print_error(std::string("Energy decomposition finalize: ") +
+                             e.what());
+        return 1;
+      }
+    }
+    if (edecomp_gbsa_requested(Arguments) && edecomp_gbsa_engine) {
+      const std::size_t traj_index =
+          input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
+      const std::size_t path_index =
+          (Arguments.flag_separation_results && traj_index < paths.get_size())
+              ? traj_index
+              : 0;
+      const std::string base_dir = paths.get_path(path_index);
+      try {
+        const auto result =
+            edecomp_gbsa_engine->finalize_trajectory("mmgbsa");
+        titan_energy_decomp::export_endpoint_result(
+            result, base_dir, "mmgbsa",
+            edecomp_output_suffix(Arguments, input_line, input_name));
+      } catch (const std::exception &e) {
+        TitanUI::print_error(std::string("Energy decomposition GBSA finalize: ") +
+                             e.what());
+        return 1;
+      }
+    }
+    if (edecomp_pbsa_requested(Arguments) && edecomp_pbsa_engine) {
+      const std::size_t traj_index =
+          input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
+      const std::size_t path_index =
+          (Arguments.flag_separation_results && traj_index < paths.get_size())
+              ? traj_index
+              : 0;
+      const std::string base_dir = paths.get_path(path_index);
+      try {
+        const auto result =
+            edecomp_pbsa_engine->finalize_trajectory("mmpbsa");
+        titan_energy_decomp::export_endpoint_result(
+            result, base_dir, "mmpbsa",
+            edecomp_output_suffix(Arguments, input_line, input_name));
+      } catch (const std::exception &e) {
+        TitanUI::print_error(std::string("Energy decomposition PBSA finalize: ") +
+                             e.what());
+        return 1;
+      }
+    }
     dssp_mol1_analyzer.finalize_trajectory();
     dssp_mol2_analyzer.finalize_trajectory();
     if (lj_analyzer.enabled()) {
@@ -4137,8 +4865,11 @@ int engine(arguments &Arguments) {
               ? traj_index
               : 0;
       const std::string base_dir = paths.get_path(path_index);
+      const auto start_cmap_export = std::chrono::steady_clock::now();
       cmap_analyzer.finalize_trajectory(base_dir, info_output, Arguments,
                                         input_line, input_name, log);
+      perf_observer.add_export_elapsed(
+          "CMap", elapsed_ms_since(start_cmap_export));
     }
     if (qnative_analyzer.enabled()) {
       const std::size_t traj_index =
@@ -4148,8 +4879,11 @@ int engine(arguments &Arguments) {
               ? traj_index
               : 0;
       const std::string base_dir = paths.get_path(path_index);
+      const auto start_qnative_export = std::chrono::steady_clock::now();
       qnative_analyzer.finalize_trajectory(base_dir, info_output, Arguments,
                                            input_line, input_name, log);
+      perf_observer.add_export_elapsed(
+          "QNative", elapsed_ms_since(start_qnative_export));
     }
     if (msd_analyzer.enabled()) {
       const std::size_t traj_index =
@@ -4159,6 +4893,7 @@ int engine(arguments &Arguments) {
               ? traj_index
               : 0;
       const std::string base_dir = paths.get_path(path_index);
+      const auto start_msd_export = std::chrono::steady_clock::now();
       try {
         msd_analyzer.finalize_trajectory(base_dir, info_output, Arguments,
                                          input_line, input_name, executor, log);
@@ -4166,6 +4901,8 @@ int engine(arguments &Arguments) {
         TitanUI::print_error(e.what());
         return 1;
       }
+      perf_observer.add_export_elapsed("MSD",
+                                       elapsed_ms_since(start_msd_export));
     }
     if (dihedral_analyzer.enabled()) {
       const std::size_t traj_index =
@@ -4175,8 +4912,31 @@ int engine(arguments &Arguments) {
               ? traj_index
               : 0;
       const std::string base_dir = paths.get_path(path_index);
+      const auto start_dihedral_export = std::chrono::steady_clock::now();
       dihedral_analyzer.finalize_trajectory(base_dir, info_output, Arguments,
                                             input_line, input_name, log);
+      perf_observer.add_export_elapsed(
+          "Dihedral", elapsed_ms_since(start_dihedral_export));
+    }
+    if (feature_router.active()) {
+      const std::size_t traj_index =
+          input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
+      const std::size_t path_index =
+          (Arguments.flag_separation_results && traj_index < paths.get_size())
+              ? traj_index
+              : 0;
+      const std::string base_dir = paths.get_path(path_index);
+      feature_router.export_outputs(
+          base_dir + "/" +
+              info_output.get_features_by_frame_filename(Arguments, input_line,
+                                                         input_name),
+          base_dir + "/" +
+              info_output.get_features_metadata_filename(Arguments, input_line,
+                                                         input_name),
+          base_dir + "/" +
+              info_output.get_feature_export_summary_filename(
+                  Arguments, input_line, input_name),
+          log);
     }
     if (membrane_analyzer.enabled()) {
       const std::size_t traj_index =
@@ -4186,8 +4946,11 @@ int engine(arguments &Arguments) {
               ? traj_index
               : 0;
       const std::string base_dir = paths.get_path(path_index);
+      const auto start_membrane_export = std::chrono::steady_clock::now();
       membrane_analyzer.finalize_trajectory(base_dir, info_output, Arguments,
                                             input_line, input_name, log);
+      perf_observer.add_export_elapsed(
+          "Membrane", elapsed_ms_since(start_membrane_export));
     }
     if (s2_analyzer.enabled()) {
       const std::size_t traj_index =
@@ -4197,8 +4960,11 @@ int engine(arguments &Arguments) {
               ? traj_index
               : 0;
       const std::string base_dir = paths.get_path(path_index);
+      const auto start_s2_export = std::chrono::steady_clock::now();
       s2_analyzer.finalize_trajectory(base_dir, info_output, Arguments,
                                       input_line, input_name, executor, log);
+      perf_observer.add_export_elapsed("S2",
+                                       elapsed_ms_since(start_s2_export));
     }
     if (hbk_analyzer.enabled()) {
       const std::size_t traj_index =
@@ -4259,28 +5025,6 @@ int engine(arguments &Arguments) {
           file.close();
     }
 
-    auto start_print_ener = std::chrono::steady_clock::now();
-    if (Arguments.print_energy_res == true) {
-      if (Arguments.flag_energy_same_force == true) {
-        print_energy_res(Force_res_mol1, info_output.get_group_1_name(), paths,
-                         input_name - Arguments.b_input, Arguments);
-        print_energy_res(Force_res_mol2, info_output.get_group_2_name(), paths,
-                         input_name - Arguments.b_input, Arguments);
-      } else {
-        print_energy_res(Energy_res_mol1, info_output.get_group_1_name(), paths,
-                         input_name - Arguments.b_input, Arguments);
-        print_energy_res(Energy_res_mol2, info_output.get_group_2_name(), paths,
-                         input_name - Arguments.b_input, Arguments);
-      }
-
-      Energy_res_stat_1.emplace_back(Energy_res_mol1);
-      Energy_res_stat_2.emplace_back(Energy_res_mol2);
-    }
-    //<< std::endl;
-    time_print_ener_res +=
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start_print_ener);
-
     auto start_print_force = std::chrono::steady_clock::now();
     if (Arguments.flag_cal_force == true && Arguments.print_force_res == true) {
       print_force_res(Force_res_mol1, info_output.get_group_1_name(), paths,
@@ -4302,22 +5046,6 @@ int engine(arguments &Arguments) {
     }
     time_maxforce += std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start_maxforce);
-
-    auto start_new_emap_other = std::chrono::steady_clock::now();
-    if (Arguments.flag_new_emap == true) {
-      rec_ener_inter.ana_emap(Arguments, info_output, paths, input_name);
-    }
-    time_new_emap_other +=
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start_new_emap_other);
-
-    auto start_avg_emap = std::chrono::steady_clock::now();
-    if (Arguments.energy_map == 1 && tot_snap_allfiles > 0) {
-      infoener_res.print_average_emap(pro_in, lig, tot_snap_allfiles,
-                                      info_output, Arguments);
-    }
-    time_avg_emap += std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start_avg_emap);
 
     if (Arguments.flag_h_bond == 1) {
       hb_lg_1traj.snap_num = global_frame_counter;
@@ -4403,8 +5131,6 @@ int engine(arguments &Arguments) {
                       (time_hb - time_hb_base).count() / 1000.0);
     TitanUI::log_time(log, "PDB Output",
                       (time_pdb - time_pdb_base).count() / 1000.0);
-    TitanUI::log_time(log, "Energy Map (EMAP)",
-                      (time_emap - time_emap_base).count() / 1000.0);
     TitanUI::log_time(log, "Force Map (FMAP)",
                       (time_fmap - time_fmap_base).count() / 1000.0);
     TitanUI::log_time(log, "Contact Map & Dis2Mol",
@@ -4446,7 +5172,6 @@ int engine(arguments &Arguments) {
         (time_cscd - time_cscd_base).count() / 1000.0 +
         (time_hb - time_hb_base).count() / 1000.0 +
         (time_pdb - time_pdb_base).count() / 1000.0 +
-        (time_emap - time_emap_base).count() / 1000.0 +
         (time_fmap - time_fmap_base).count() / 1000.0 +
         (time_other - time_other_base).count() / 1000.0 +
         (time_water - time_water_base).count() / 1000.0 +
@@ -4468,24 +5193,6 @@ int engine(arguments &Arguments) {
     //<< std::endl;
     //<< std::endl;
     if (check_end_cal(Arguments, input_line, input_name) == true) {
-      //<< Arguments.energy_map << std::endl;
-      if (Arguments.energy_map == 1 || Arguments.energy_map == 4) {
-        auto start_enermaptype = chrono::steady_clock::now();
-        TitanUI::log_kv(log, "Status", "Building energy maptype...");
-        //<< std::endl;
-        // Restore Frame 0 data so print_energy_pdbtype can write coords
-        if (pro_in.m_mol.empty())
-          pro_in.m_mol = saved_pro_frame0;
-        if (lig.m_mol.empty())
-          lig.m_mol = saved_lig_frame0;
-
-        infoener_res.wrapper_impl_ener_maptype(pro_in, lig, info_output,
-                                               Arguments, tot_snap_allfiles);
-        TitanUI::log_kv(log, "Status", "Energy maptype done.");
-        time_energymaptype += chrono::duration_cast<milliseconds>(
-            chrono::steady_clock::now() - start_enermaptype);
-      }
-
       break;
     }
 
@@ -4534,6 +5241,46 @@ int engine(arguments &Arguments) {
       (input_line.size() > 1 || Arguments.flag_listfile ||
        Arguments.flag_pattern_input || Arguments.flag_xdr)) {
     s2_analyzer.finalize_all(".", info_output, log);
+  }
+  if (edecomp_mm_requested(Arguments) && edecomp_engine &&
+      (input_line.size() > 1 || Arguments.flag_listfile ||
+       Arguments.flag_pattern_input || Arguments.flag_xdr)) {
+    try {
+      titan_energy_decomp::export_all_results(edecomp_engine->finalize_all(),
+                                              ".");
+    } catch (const std::exception &e) {
+      TitanUI::print_error(std::string("Energy decomposition aggregate: ") +
+                           e.what());
+      return 1;
+    }
+  }
+  if (edecomp_gbsa_requested(Arguments) && edecomp_gbsa_engine &&
+      (input_line.size() > 1 || Arguments.flag_listfile ||
+       Arguments.flag_pattern_input || Arguments.flag_xdr)) {
+    try {
+      titan_energy_decomp::export_endpoint_all_results(
+          edecomp_gbsa_engine->finalize_all("mmgbsa"),
+          edecomp_gbsa_engine->finalize_pooled_frames("mmgbsa"), ".",
+          "mmgbsa");
+    } catch (const std::exception &e) {
+      TitanUI::print_error(std::string("Energy decomposition GBSA aggregate: ") +
+                           e.what());
+      return 1;
+    }
+  }
+  if (edecomp_pbsa_requested(Arguments) && edecomp_pbsa_engine &&
+      (input_line.size() > 1 || Arguments.flag_listfile ||
+       Arguments.flag_pattern_input || Arguments.flag_xdr)) {
+    try {
+      titan_energy_decomp::export_endpoint_all_results(
+          edecomp_pbsa_engine->finalize_all("mmpbsa"),
+          edecomp_pbsa_engine->finalize_pooled_frames("mmpbsa"), ".",
+          "mmpbsa");
+    } catch (const std::exception &e) {
+      TitanUI::print_error(std::string("Energy decomposition PBSA aggregate: ") +
+                           e.what());
+      return 1;
+    }
   }
 
   if (status == false && input_name == Arguments.b_input) {
@@ -4695,53 +5442,6 @@ int engine(arguments &Arguments) {
         std::cerr << "[ERROR] stat_hb_res() lg crashed!\n";
       }
     }
-  }
-
-  if (Arguments.print_energy_res == true) {
-    try {
-      stat_energy_res(Energy_res_stat_1, 1, Arguments, info_output,
-                      info_output.get_group_1_name());
-    } catch (const std::exception &e) {
-      std::cerr << "[ERROR] stat_energy_res() 1: " << e.what() << "\n";
-    } catch (...) {
-      std::cerr << "[ERROR] stat_energy_res() 1 crashed!\n";
-    }
-
-    try {
-      stat_energy_res(Energy_res_stat_2, 1, Arguments, info_output,
-                      info_output.get_group_2_name());
-    } catch (const std::exception &e) {
-      std::cerr << "[ERROR] stat_energy_res() 2: " << e.what() << "\n";
-    } catch (...) {
-      std::cerr << "[ERROR] stat_energy_res() 2 crashed!\n";
-    }
-  }
-
-  if (Arguments.flag_gbsa && tot_snap_allfiles > 0 &&
-      !infoener_res.emap_ee.empty()) {
-    if (pro_in.m_mol.empty())
-      pro_in.m_mol = saved_pro_frame0;
-    if (lig.m_mol.empty())
-      lig.m_mol = saved_lig_frame0;
-
-    const bool mol1_is_lig = (Arguments.mol_1_type == "ligand" ||
-                              Arguments.mol_1_type == "lig");
-    const bool mol2_is_lig = (Arguments.mol_2_type == "ligand" ||
-                              Arguments.mol_2_type == "lig");
-
-    Multi_MOL *gbsa_map_mol1 = &pro_in;
-    Multi_MOL *gbsa_map_mol2 = &lig;
-    if (mol1_is_lig && !mol2_is_lig) {
-      gbsa_map_mol1 = &lig;
-      gbsa_map_mol2 = &pro_in;
-    }
-
-    infoener_res.wrapper_impl_ener_maptype(*gbsa_map_mol1, *gbsa_map_mol2,
-                                           info_output, Arguments,
-                                           tot_snap_allfiles, "gbsa_");
-    infoener_res.print_average_emap(*gbsa_map_mol1, *gbsa_map_mol2,
-                                    tot_snap_allfiles, info_output, Arguments,
-                                    "gbsa_");
   }
 
   // --- Post-loop analysis (extracted to engine_postproc.cpp) ---------------
@@ -4961,6 +5661,11 @@ int engine(arguments &Arguments) {
          "----------\n";
   TitanUI::log_time(log, "TOTAL POST-PROCESSING",
                     total_postproc.count() / 1000.0);
+
+  perf_observer.export_outputs(
+      info_output.get_titan_performance_summary_filename(),
+      info_output.get_titan_performance_modules_filename(),
+      info_output.get_titan_performance_frames_filename(), log);
 
   TitanUI::log_section(log, "TITAN ENGINE TERMINATED SUCCESSFULLY");
   TitanUI::print_info(

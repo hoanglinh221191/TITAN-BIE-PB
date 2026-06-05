@@ -43,6 +43,15 @@ public:
 
   [[nodiscard]] bool enabled() const noexcept { return enabled_; }
   [[nodiscard]] bool initialized() const noexcept { return initialized_; }
+  [[nodiscard]] bool latest_contact_count_valid() const noexcept {
+    return !contact_count_timeseries_.empty();
+  }
+  [[nodiscard]] double latest_contact_count() const noexcept {
+    return contact_count_timeseries_.empty()
+               ? 0.0
+               : static_cast<double>(contact_count_timeseries_.back().second);
+  }
+  [[nodiscard]] double latest_contact_count_normalized() const noexcept;
 
 private:
   struct ContactRecord {
@@ -68,6 +77,7 @@ private:
   void export_matrix(const std::string &filename, std::fstream &log) const;
   void export_timeseries(const std::string &filename, std::fstream &log) const;
   void export_occupancy(const std::string &filename, std::fstream &log) const;
+  [[nodiscard]] std::size_t feature_pair_count() const;
 
   bool requested_{false};
   bool enabled_{false};

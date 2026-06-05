@@ -40,15 +40,12 @@ Muc tieu:
 Cong viec:
 
 - Them `titan_observable_features.{h,cpp}` hoac helper tuong duong:
-  - dang ky feature channel: `dccm`, `lj`, `dihedral`, `qnative`, `cmap`,
-    `msd`, `membrane`, `s2`
+  - dang ky feature channel v1: `dccm`, `lj`, `dihedral`, `qnative`, `cmap`
   - export matrix `features_by_frame.csv` khi user bat explicit flag
   - ho tro feature metadata: name, residue id, atom ids, unit, periodic angle
 - Them CLI chung:
   - `-feature-export`
   - `-feature-source <auto|dccm|lj|dihedral|qnative|cmap|mixed>`
-  - `-feature-stride <N>`
-  - `-feature-standardize <none|zscore|circular>`
 - TICA integration:
   - giu default cu: protein-like jobs van di qua network/DCCM neu user khong
     chon feature source moi
@@ -59,9 +56,22 @@ Cong viec:
 
 Exit criteria:
 
-- Default `-tica` output khong doi neu khong bat feature-source moi.
-- `-feature-export` co fixture nho tao duoc feature matrix va metadata.
-- TICA smoke voi feature source moi sinh `tica_*` binh thuong.
+- [x] Default `-tica` output khong doi neu khong bat feature-source moi.
+- [x] `-feature-export` co fixture nho tao duoc feature matrix va metadata.
+- [x] TICA wiring voi feature source moi sinh feature vectors cho
+  `dihedral`, `qnative`, `cmap`, `mixed`, `dccm`, va `lj`.
+
+Implementation status:
+
+- [x] `FeatureExportArgs`, parser validation, filename contract, help/manual.
+- [x] Shared `TitanObservableFeatureRouter` with per-frame CSV, metadata CSV,
+  summary, fixed-dimension validation, and non-finite TICA-frame rejection.
+- [x] Producer accessors for QNative scalar Q, Dihedral sin/cos torsions, CMap
+  scalar contact count, DCCM pairwise distances, and LJ phase-2 vectors.
+- [x] TICA consume path for explicit `-feature-source` while preserving legacy
+  `auto` behavior.
+- [ ] Future: S2/membrane frame-feature semantics and sparse per-contact CMap
+  bit vectors.
 
 ================================================================================
 3. Phase 1: Side-chain Residue Contact Probability Map (`-cmap`)

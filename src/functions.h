@@ -17,8 +17,6 @@ using std::string_view;
 #include "info.h"
 #include "matrix.h"
 #include "miscellaneous.h"
-#include "new_emap.h"
-#include "stat_ener_res_res.h"
 #include "stat_hb_and_sc_contact.h"
 #include <thread>
 
@@ -299,13 +297,6 @@ int impl_cscd(Multi_MOL &pro_in, Multi_MOL &lig, const arguments &Arguments,
               vector<fstream> &out_files);
 int impl_add_coms_2_mols(Multi_MOL &mol1, Multi_MOL &mol2, arguments &Arguments,
                          size_t snap_index);
-int wrap_cal_energy_map(TitanExecutor &executor, Multi_MOL &mol1,
-                        Multi_MOL &mol2, arguments &Arguments, size_t num_snap,
-                        const vector<d_min> &dmin,
-                        const cache_sigma_epsilon &CachedData,
-                        vector<energy_res> &Energy_res_mol1,
-                        vector<energy_res> &Energy_res_mol2, info &info_output,
-                        info_ener_res &infoener_res);
 int wrap_cal_force_map(TitanExecutor &executor, Multi_MOL &mol1,
                        Multi_MOL &mol2, const arguments &Arguments,
                        size_t num_snap, const vector<d_min> &dmin,
@@ -316,8 +307,6 @@ istream &safeGetline(istream &is, string &t);
 int post_proc_cscd(vector<string> &list_input_name);
 bool check_end_cal(arguments &Arguments, vector<string> &input_line,
                    int &input_name);
-int print_energy_res(vector<energy_res> &Energy_res, string name,
-                     folders &paths, int file_num, const arguments &Arguments);
 int print_force_res(vector<energy_res> &Energy_res, string name, folders &paths,
                     int file_num, const arguments &Arguments);
 int find_maxforce_res(vector<energy_res> &Energy_res, string name,
@@ -327,23 +316,6 @@ int stat_maxforce_res(vector<energy_res> &Force_res_stat, string name,
                       const info &infos, arguments &Arguments);
 int print_cscd(arguments &Arguments, all_cscd &out_dis,
                vector<string> &list_file_name);
-int imp_cal_energy_rec_res(multi_snap_emap &rec_ener_inter,
-                           const Multi_MOL &rec, const Multi_MOL &lg,
-                           size_t num_snap, size_t begin, size_t end,
-                           const vector<d_min> &dmin,
-                           const cache_sigma_epsilon &CachedData,
-                           const arguments &Arguments);
-int imp_cal_energy_rec(
-    vector<data_out> &rec_ener_inter, info_ener_res &infoener_res,
-    const Multi_MOL &rec, const Multi_MOL &lg, size_t num_snap, size_t begin,
-    size_t end, const vector<d_min> &dmin,
-    const cache_sigma_epsilon &CachedData, bool flag_all_mode,
-    const Multi_MOL_parameters &rec_parameters,
-    const Multi_MOL_parameters &lg_parameters,
-    unordered_map<pair<size_t, size_t>, pair<size_t, size_t>, pair_hash>
-        &map_list_res,
-    vector<pair<size_t, size_t>> &list_res, const arguments &Arguments,
-    const vector<bool> &is_lg_dmin_res);
 int stat_hbonds(vector<vector<size_t>> &Hbonds_vector, const info &infos,
                 arguments &Arguments, vector<double> &time_of_snaps,
                 vector<string> &list_name);
@@ -378,8 +350,6 @@ int Energy_force_subgroups(groups_cal &groups, const Multi_MOL &rec,
                            vector<energy_groups> &Energy_groups_out,
                            size_t num_snap, size_t MAX_NUM,
                            arguments &Arguments, TitanExecutor &executor);
-int stat_energy_res(vector<vector<energy_res>> &Energy_stat_res, int file_num,
-                    const arguments &Arguments, info &info_output, string name);
 int impl_nocal(Multi_MOL &pro_in, Multi_MOL &lig, fstream &log,
                arguments &Arguments, info &info_output, TitanExecutor &executor,
                amino_acid &amine, para &parameter, folders &paths,

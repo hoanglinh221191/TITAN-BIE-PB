@@ -180,6 +180,30 @@ bool TitanContactMapAnalyzer::pair_allowed(
   return true;
 }
 
+std::size_t TitanContactMapAnalyzer::feature_pair_count() const {
+  std::size_t count = 0;
+  for (std::size_t row = 0; row < row_residues_.size(); ++row) {
+    for (std::size_t col = 0; col < col_residues_.size(); ++col) {
+      if (scope_ == "mol1" && col <= row)
+        continue;
+      if (pair_allowed(row_residues_[row], col_residues_[col]))
+        ++count;
+    }
+  }
+  return count;
+}
+
+double TitanContactMapAnalyzer::latest_contact_count_normalized() const
+    noexcept {
+  if (contact_count_timeseries_.empty())
+    return 0.0;
+  const std::size_t possible = feature_pair_count();
+  if (possible == 0)
+    return 0.0;
+  return static_cast<double>(contact_count_timeseries_.back().second) /
+         static_cast<double>(possible);
+}
+
 std::size_t TitanContactMapAnalyzer::residue_index(
     const std::vector<titan_contact::ResidueKey> &residues,
     const titan_contact::ResidueKey &residue) const {

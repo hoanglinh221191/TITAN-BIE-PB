@@ -3,6 +3,7 @@
 #include "analyzer_impl.h"
 
 #include <memory>
+#include <utility>
 
 namespace TitanPBE {
 
@@ -17,6 +18,10 @@ Analyzer &Analyzer::operator=(Analyzer &&) noexcept = default;
 void Analyzer::configure(const arguments &args) { impl_->configure(args); }
 
 bool Analyzer::enabled() const noexcept { return impl_ && impl_->enabled(); }
+
+void Analyzer::set_edecomp_sink(EDecompSink sink) {
+  impl_->set_edecomp_sink(std::move(sink));
+}
 
 void Analyzer::begin_trajectory(std::size_t trajectory_id,
                                 const std::string &source_label) {

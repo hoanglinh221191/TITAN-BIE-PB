@@ -8,8 +8,10 @@
 
 #include <cstddef>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 class TitanExecutor;
 class EnergyDecompositionProvider;
@@ -17,6 +19,23 @@ class EnergyDecompositionProvider;
 namespace TitanPBE {
 
 class AnalyzerImpl;
+
+struct EDecompRow {
+  std::string molecule;
+  std::string unit_type;
+  std::string chain;
+  std::size_t resnr{0};
+  std::size_t respos{0};
+  std::string resname;
+  std::size_t atom_index{0};
+  std::string atom_name;
+  double elec_kj_mol{0.0};
+  double vdw_kj_mol{0.0};
+  double polar_kj_mol{0.0};
+  double nonpolar_kj_mol{0.0};
+};
+
+using EDecompSink = std::function<void(const std::vector<EDecompRow> &)>;
 
 class Analyzer {
 public:
@@ -30,6 +49,7 @@ public:
 
   void configure(const arguments &args);
   [[nodiscard]] bool enabled() const noexcept;
+  void set_edecomp_sink(EDecompSink sink);
 
   void begin_trajectory(std::size_t trajectory_id,
                         const std::string &source_label);

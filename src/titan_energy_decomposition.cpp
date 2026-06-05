@@ -8,6 +8,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
+
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
 
 namespace {
 
@@ -30,6 +35,18 @@ martini_config_for_cutoff(const arguments &args, double cutoff_nm,
   }
   return cfg;
 }
+
+#ifdef __AVX2__
+__m256d mic_delta_avx2(__m256d delta, double box_len) {
+  if (!(box_len > 0.0) || !std::isfinite(box_len))
+    return delta;
+  const __m256d lengths = _mm256_set1_pd(box_len);
+  const __m256d shifts = _mm256_round_pd(
+      _mm256_div_pd(delta, lengths),
+      _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+  return _mm256_sub_pd(delta, _mm256_mul_pd(shifts, lengths));
+}
+#endif
 
 } // namespace
 
@@ -89,6 +106,73 @@ EnergyPairDecomposition EnergyDecompositionProvider::pair_energy(
                              lig_pos);
 }
 
+bool EnergyDecompositionProvider::inter_pair_energies_batch(
+    const MOL &rec_frame, const MOL &lig_frame, std::size_t rec_begin,
+    std::size_t rec_end, std::size_t lig_begin, std::size_t lig_end,
+    std::span<double> elec_out, std::span<double> vdw_out) const {
+  if (!ready() || rec_ == nullptr || lig_ == nullptr ||
+      !rec_frame.coordinates_consistent() ||
+      !lig_frame.coordinates_consistent() || rec_begin > rec_end ||
+      lig_begin > lig_end || rec_end > rec_frame.size() ||
+      lig_end > lig_frame.size() || rec_end > rec_->parameters.size() ||
+      lig_end > lig_->parameters.size())
+    return false;
+
+  const std::size_t rec_count = rec_end - rec_begin;
+  const std::size_t lig_count = lig_end - lig_begin;
+  if (lig_count != 0 &&
+      rec_count > std::numeric_limits<std::size_t>::max() / lig_count)
+    return false;
+  const std::size_t output_size = rec_count * lig_count;
+  if (elec_out.size() < output_size || vdw_out.size() < output_size)
+    return false;
+
+  for (std::size_t lig_pos = lig_begin; lig_pos < lig_end; ++lig_pos) {
+    const std::size_t row = lig_pos - lig_begin;
+    std::size_t rec_pos = rec_begin;
+#ifdef __AVX2__
+    const __m256d lig_x = _mm256_set1_pd(lig_frame.pos.x[lig_pos]);
+    const __m256d lig_y = _mm256_set1_pd(lig_frame.pos.y[lig_pos]);
+    const __m256d lig_z = _mm256_set1_pd(lig_frame.pos.z[lig_pos]);
+    for (; rec_pos + 4 <= rec_end; rec_pos += 4) {
+      __m256d dx = _mm256_sub_pd(
+          _mm256_loadu_pd(rec_frame.pos.x.data() + rec_pos), lig_x);
+      __m256d dy = _mm256_sub_pd(
+          _mm256_loadu_pd(rec_frame.pos.y.data() + rec_pos), lig_y);
+      __m256d dz = _mm256_sub_pd(
+          _mm256_loadu_pd(rec_frame.pos.z.data() + rec_pos), lig_z);
+      dx = mic_delta_avx2(dx, rec_frame.Box.get_a());
+      dy = mic_delta_avx2(dy, rec_frame.Box.get_b());
+      dz = mic_delta_avx2(dz, rec_frame.Box.get_c());
+      const __m256d squared_distance = _mm256_add_pd(
+          _mm256_add_pd(_mm256_mul_pd(dx, dx), _mm256_mul_pd(dy, dy)),
+          _mm256_mul_pd(dz, dz));
+      alignas(32) double squared_distance_lane[4];
+      _mm256_store_pd(squared_distance_lane, squared_distance);
+      for (std::size_t lane = 0; lane < 4; ++lane) {
+        const auto energy = pair_energy_generic_at_distance(
+            rec_frame, *rec_, rec_pos + lane, lig_frame, *lig_, lig_pos,
+            0.1 * std::sqrt(squared_distance_lane[lane]));
+        const std::size_t index =
+            titan_energy_cache_index(row, rec_count, rec_pos - rec_begin + lane);
+        elec_out[index] = energy.elec;
+        vdw_out[index] = energy.vdw;
+      }
+    }
+#endif
+    for (; rec_pos < rec_end; ++rec_pos) {
+      const auto energy =
+          pair_energy_generic(rec_frame, *rec_, rec_pos, lig_frame, *lig_,
+                              lig_pos);
+      const std::size_t index =
+          titan_energy_cache_index(row, rec_count, rec_pos - rec_begin);
+      elec_out[index] = energy.elec;
+      vdw_out[index] = energy.vdw;
+    }
+  }
+  return true;
+}
+
 EnergyPairDecomposition EnergyDecompositionProvider::rec_pair_energy(
     const MOL &rec_frame, std::size_t rec_pos_a, std::size_t rec_pos_b) const {
   if (cached_data_ == nullptr || args_ == nullptr || rec_ == nullptr)
@@ -122,11 +206,11 @@ const mol_info *EnergyDecompositionProvider::lig_info(
 EnergyPairDecomposition EnergyDecompositionProvider::pair_energy_generic(
     const MOL &frame_a, const Multi_MOL &mol_a, std::size_t pos_a,
     const MOL &frame_b, const Multi_MOL &mol_b, std::size_t pos_b) const {
-  EnergyPairDecomposition out;
   if (cached_data_ == nullptr || args_ == nullptr || pos_a >= frame_a.size() ||
       pos_b >= frame_b.size() || pos_a >= mol_a.parameters.size() ||
-      pos_b >= mol_b.parameters.size())
-    return out;
+      pos_b >= mol_b.parameters.size() || !frame_a.coordinates_consistent() ||
+      !frame_b.coordinates_consistent())
+    return {};
 
   double dx = frame_a.pos.x[pos_a] - frame_b.pos.x[pos_b];
   double dy = frame_a.pos.y[pos_a] - frame_b.pos.y[pos_b];
@@ -135,6 +219,20 @@ EnergyPairDecomposition EnergyDecompositionProvider::pair_energy_generic(
   dy = titan_energy_mic_delta(dy, frame_a.Box.get_b());
   dz = titan_energy_mic_delta(dz, frame_a.Box.get_c());
   const double d_nm = 0.1 * std::sqrt(dx * dx + dy * dy + dz * dz);
+  return pair_energy_generic_at_distance(frame_a, mol_a, pos_a, frame_b, mol_b,
+                                         pos_b, d_nm);
+}
+
+EnergyPairDecomposition
+EnergyDecompositionProvider::pair_energy_generic_at_distance(
+    const MOL &frame_a, const Multi_MOL &mol_a, std::size_t pos_a,
+    const MOL &frame_b, const Multi_MOL &mol_b, std::size_t pos_b,
+    double d_nm) const {
+  EnergyPairDecomposition out;
+  if (cached_data_ == nullptr || args_ == nullptr || pos_a >= frame_a.size() ||
+      pos_b >= frame_b.size() || pos_a >= mol_a.parameters.size() ||
+      pos_b >= mol_b.parameters.size())
+    return out;
   if (d_nm <= 1e-10)
     return out;
   if (cutoff_active_ && cutoff_nm_ > 0.0 && d_nm > cutoff_nm_)

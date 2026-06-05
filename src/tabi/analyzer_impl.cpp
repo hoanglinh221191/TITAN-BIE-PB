@@ -14079,7 +14079,9 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
       result.pbsa_ligand_vacuum_max_dphi = mol2_solve.vacuum.max_dphi;
     }
     const std::string pbsa_decomp = effective_pbsa_decomp();
-    if (pbsa_decomp == "residue" || pbsa_decomp == "hybrid") {
+    const bool legacy_pbsa_decomp =
+        pbsa_decomp == "residue" || pbsa_decomp == "hybrid";
+    if (legacy_pbsa_decomp || edecomp_sink_) {
       const auto residue_time_begin = std::chrono::steady_clock::now();
       const std::vector<ResidueFrameRow> residue_rows =
           compute_pbsa_residue_rows(mol1, *mol2, mol1_atoms, mol2_atoms,
@@ -14089,7 +14091,29 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
       const auto residue_time_end = std::chrono::steady_clock::now();
       result.pbsa_time_residue_ms =
           elapsed_ms(residue_time_begin, residue_time_end);
-      accumulate_pbsa_residue_rows(result, residue_rows);
+      if (legacy_pbsa_decomp)
+        accumulate_pbsa_residue_rows(result, residue_rows);
+      if (edecomp_sink_) {
+        std::vector<EDecompRow> sink_rows;
+        sink_rows.reserve(residue_rows.size());
+        for (const ResidueFrameRow &row : residue_rows) {
+          EDecompRow sink_row;
+          sink_row.molecule = row.key.molecule;
+          sink_row.unit_type = row.key.unit_type;
+          sink_row.chain = row.key.chain;
+          sink_row.resnr = row.key.resnr;
+          sink_row.respos = row.key.respos;
+          sink_row.resname = row.key.resname;
+          sink_row.atom_index = row.key.atom_index;
+          sink_row.atom_name = row.key.atom_name;
+          sink_row.elec_kj_mol = row.elec_kj_mol;
+          sink_row.vdw_kj_mol = row.vdw_kj_mol;
+          sink_row.polar_kj_mol = row.polar_kj_mol;
+          sink_row.nonpolar_kj_mol = row.nonpolar_kj_mol;
+          sink_rows.push_back(std::move(sink_row));
+        }
+        edecomp_sink_(sink_rows);
+      }
     }
   }
 

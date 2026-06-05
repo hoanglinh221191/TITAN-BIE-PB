@@ -2,9 +2,7 @@
 #include "force.h"
 #include "functions.h"
 #include "miscellaneous.h"
-#include "new_emap.h"
 #include "titan_simd_dispatch.h"
-#include "stat_ener_res_res.h"
 #include "uti_func.h"
 #include <algorithm>
 #include <cmath>

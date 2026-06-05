@@ -5,6 +5,7 @@
 #include "cache_sigma_epsilon.h"
 
 #include <cstddef>
+#include <span>
 #include <string>
 
 struct arguments;
@@ -26,6 +27,11 @@ struct EnergyPairDecomposition {
                                                      const char *needle);
 [[nodiscard]] double titan_energy_mic_delta(double d, double box_len);
 [[nodiscard]] double titan_resolve_sg_cutoff_nm(const arguments &args);
+[[nodiscard]] constexpr std::size_t
+titan_energy_cache_index(std::size_t mol2_atom, std::size_t mol1_size,
+                         std::size_t mol1_atom) noexcept {
+  return mol2_atom * mol1_size + mol1_atom;
+}
 
 class EnergyDecompositionProvider {
 public:
@@ -47,6 +53,10 @@ public:
   [[nodiscard]] EnergyPairDecomposition
   pair_energy(const MOL &rec_frame, const MOL &lig_frame,
               std::size_t rec_pos, std::size_t lig_pos) const;
+  [[nodiscard]] bool inter_pair_energies_batch(
+      const MOL &rec_frame, const MOL &lig_frame, std::size_t rec_begin,
+      std::size_t rec_end, std::size_t lig_begin, std::size_t lig_end,
+      std::span<double> elec_out, std::span<double> vdw_out) const;
   [[nodiscard]] EnergyPairDecomposition
   rec_pair_energy(const MOL &rec_frame, std::size_t rec_pos_a,
                   std::size_t rec_pos_b) const;
@@ -61,6 +71,10 @@ private:
   pair_energy_generic(const MOL &frame_a, const Multi_MOL &mol_a,
                       std::size_t pos_a, const MOL &frame_b,
                       const Multi_MOL &mol_b, std::size_t pos_b) const;
+  [[nodiscard]] EnergyPairDecomposition pair_energy_generic_at_distance(
+      const MOL &frame_a, const Multi_MOL &mol_a, std::size_t pos_a,
+      const MOL &frame_b, const Multi_MOL &mol_b, std::size_t pos_b,
+      double d_nm) const;
   const Multi_MOL *rec_{nullptr};
   const Multi_MOL *lig_{nullptr};
   const cache_sigma_epsilon *cached_data_{nullptr};

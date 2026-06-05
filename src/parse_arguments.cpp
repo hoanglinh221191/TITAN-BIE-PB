@@ -273,11 +273,25 @@ int arguments::parse_arguments(int argc, char **argv) {
       };
   auto consume_bool_option =
       [&](const std::string &arg, std::initializer_list<const char *> flags,
-          bool &value_out) {
+          bool &value_out, int &arg_index) {
         for (const char *flag : flags) {
           const std::string flag_text(flag);
           const std::string prefix = flag_text + "=";
           if (arg == flag_text) {
+            if (arg_index + 1 < argc) {
+              std::string next = string(argv[arg_index + 1]);
+              std::transform(next.begin(), next.end(), next.begin(),
+                             [](unsigned char c) {
+                               return static_cast<char>(std::tolower(c));
+                             });
+              if (next == "1" || next == "0" || next == "true" ||
+                  next == "false" || next == "yes" || next == "no" ||
+                  next == "on" || next == "off") {
+                value_out = parse_bool_equals(next, flag);
+                ++arg_index;
+                return true;
+              }
+            }
             value_out = true;
             return true;
           }
@@ -518,6 +532,117 @@ int arguments::parse_arguments(int argc, char **argv) {
     const std::string arg = string(argv[i]);
     std::string common_value;
 
+    if (arg == "-useForceOptionforEnergy" ||
+        arg.rfind("-useForceOptionforEnergy=", 0) == 0) {
+      TitanUI::print_error(
+          "Energy decomposition: legacy option " + arg +
+          " is no longer supported; use -edecomp=true for energy "
+          "decomposition and keep -fmap for force maps.");
+      exit(EXIT_FAILURE);
+    }
+    if (arg == "-emap" || arg.rfind("-emap=", 0) == 0 ||
+        arg == "-emap-level" || arg.rfind("-emap-level=", 0) == 0 ||
+        arg == "-energy-res" || arg.rfind("-energy-res=", 0) == 0 ||
+        arg == "-new-emap" || arg.rfind("-new-emap=", 0) == 0) {
+      TitanUI::print_error(
+          "Energy decomposition: legacy option " + arg +
+          " is no longer supported; use -edecomp=true and the -edecomp-* "
+          "options.");
+      exit(EXIT_FAILURE);
+    }
+    if (consume_option_value(arg, {"-f"}, common_value, i)) {
+      pdb_name = common_value;
+      flag_1_pdb = true;
+      continue;
+    }
+    if (consume_option_value(arg, {"-s"}, common_value, i)) {
+      pdb_name = common_value;
+      flag_1_pdb = true;
+      flag_xdr = true;
+      continue;
+    }
+    if (consume_option_value(arg, {"-n"}, common_value, i)) {
+      index_name = common_value;
+      flag_index = true;
+      continue;
+    }
+    if (consume_option_value(arg, {"-g"}, common_value, i)) {
+      auto found = common_value.find("&");
+      auto found_2 = common_value.find("-");
+      if (found != std::string::npos) {
+        group_1 = stoi(common_value.substr(0, found));
+        group_2 = stoi(common_value.substr(found + 1));
+        flag_groups_explicit = true;
+      } else if (found_2 != std::string::npos) {
+        group_1 = stoi(common_value.substr(0, found_2));
+        group_2 = stoi(common_value.substr(found_2 + 1));
+        flag_groups_explicit = true;
+      } else {
+        TitanUI::print_error("Your argument -g is invalid!");
+        exit(EXIT_FAILURE);
+      }
+      if (group_1 == group_2)
+        self_int = true;
+      continue;
+    }
+    if (consume_option_value(arg, {"-ff"}, common_value, i)) {
+      force_f = common_value;
+      transform(force_f.begin(), force_f.end(), force_f.begin(), ::toupper);
+      continue;
+    }
+    if (consume_bool_option(arg, {"-gbsa"}, flag_gbsa, i)) {
+      continue;
+    }
+    if (consume_bool_option(arg, {"-cas"}, flag_cas, i)) {
+      continue;
+    }
+    if (consume_bool_option(arg, {"-edecomp", "--edecomp"},
+                            edecomp.flag_edecomp, i)) {
+      continue;
+    }
+    if (consume_option_value(arg, {"-edecomp-source", "--edecomp-source"},
+                             common_value, i)) {
+      edecomp.flag_edecomp = true;
+      edecomp.source = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-edecomp-level", "--edecomp-level"},
+                             common_value, i)) {
+      edecomp.flag_edecomp = true;
+      edecomp.level = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-edecomp-edge-top", "--edecomp-edge-top"},
+                             common_value, i)) {
+      edecomp.flag_edecomp = true;
+      edecomp.edge_top = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-edecomp-rank-by", "--edecomp-rank-by"},
+                             common_value, i)) {
+      edecomp.flag_edecomp = true;
+      edecomp.rank_by = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-edecomp-frame-output", "--edecomp-frame-output"},
+            common_value, i)) {
+      edecomp.flag_edecomp = true;
+      edecomp.frame_output = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-edecomp-perf", "--edecomp-perf"},
+                             common_value, i)) {
+      edecomp.flag_edecomp = true;
+      edecomp.perf = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-perf-report", "--perf-report"},
+                             common_value, i)) {
+      perf_report.mode = lowercase_copy(common_value);
+      continue;
+    }
+
     if (arg.rfind("-mol-1-type=", 0) == 0) {
       assign_mol_type(arg.substr(12), true);
       continue;
@@ -544,10 +669,21 @@ int arguments::parse_arguments(int argc, char **argv) {
       exit(EXIT_FAILURE);
     }
 
-    if (consume_bool_option(arg, {"-graph", "--graph"}, graph.flag_graph)) {
+    if (consume_bool_option(arg, {"-graph", "--graph"}, graph.flag_graph, i)) {
       continue;
     }
-    if (consume_bool_option(arg, {"-cmap", "--cmap"}, cmap.flag_cmap)) {
+    if (consume_bool_option(arg, {"-feature-export", "--feature-export"},
+                            feature_export.export_features, i)) {
+      continue;
+    }
+    if (consume_option_value(arg, {"-feature-source", "--feature-source"},
+                             common_value, i)) {
+      feature_export.source = common_value;
+      feature_export.source_explicit = true;
+      feature_export.export_features = true;
+      continue;
+    }
+    if (consume_bool_option(arg, {"-cmap", "--cmap"}, cmap.flag_cmap, i)) {
       cmap.new_option_explicit = true;
       continue;
     }
@@ -590,7 +726,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       continue;
     }
     if (consume_bool_option(arg, {"-qnative", "--qnative"},
-                            qnative.flag_qnative)) {
+                            qnative.flag_qnative, i)) {
       continue;
     }
     if (consume_option_value(arg, {"-qnative-ref", "--qnative-ref"},
@@ -649,7 +785,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       continue;
     }
     if (consume_bool_option(arg, {"-dihedral", "--dihedral"},
-                            dihedral.flag_dihedral)) {
+                            dihedral.flag_dihedral, i)) {
       continue;
     }
     if (consume_option_value(arg, {"-dihedral-kind", "--dihedral-kind"},
@@ -673,7 +809,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (consume_bool_option(arg, {"-dihedral-export-tica",
                                   "--dihedral-export-tica"},
-                            dihedral.export_tica)) {
+                            dihedral.export_tica, i)) {
       dihedral.flag_dihedral = true;
       continue;
     }
@@ -683,7 +819,7 @@ int arguments::parse_arguments(int argc, char **argv) {
           "S2: -s2-plateau-window is no longer supported; use -s2-fit-window.");
       exit(EXIT_FAILURE);
     }
-    if (consume_bool_option(arg, {"-s2", "--s2"}, s2.flag_s2)) {
+    if (consume_bool_option(arg, {"-s2", "--s2"}, s2.flag_s2, i)) {
       continue;
     }
     if (consume_option_value(arg, {"-s2-vector", "--s2-vector"},
@@ -723,11 +859,11 @@ int arguments::parse_arguments(int argc, char **argv) {
       continue;
     }
     if (consume_bool_option(arg, {"-s2-bfactor-pdb", "--s2-bfactor-pdb"},
-                            s2.bfactor_pdb)) {
+                            s2.bfactor_pdb, i)) {
       s2.flag_s2 = s2.flag_s2 || s2.bfactor_pdb;
       continue;
     }
-    if (consume_bool_option(arg, {"-msd", "--msd"}, msd.flag_msd)) {
+    if (consume_bool_option(arg, {"-msd", "--msd"}, msd.flag_msd, i)) {
       continue;
     }
     if (consume_option_value(arg, {"-msd-selection", "--msd-selection"},
@@ -775,7 +911,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       continue;
     }
     if (consume_bool_option(arg, {"-membrane", "--membrane"},
-                            membrane.flag_membrane)) {
+                            membrane.flag_membrane, i)) {
       continue;
     }
     if (consume_option_value(arg, {"-membrane-group", "--membrane-group"},
@@ -924,7 +1060,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       }
     }
     if (consume_bool_option(arg, {"-low-memory", "--low-memory"},
-                            low_memory)) {
+                            low_memory, i)) {
       continue;
     }
     if (consume_option_value(arg, {"-network-mode", "--network-mode"},
@@ -2490,9 +2626,6 @@ int arguments::parse_arguments(int argc, char **argv) {
       flag_alpb = true;
       flag_gbsa = true;
     }
-    if (arg == "-cas") {
-      flag_cas = true;
-    }
     if (arg == "-dssp") {
       dssp.flag_dssp = true;
     }
@@ -3407,7 +3540,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
 
     // --- LLPS flags ---
-    if (consume_bool_option(arg, {"-llps"}, llps.flag_llps)) {
+    if (consume_bool_option(arg, {"-llps"}, llps.flag_llps, i)) {
     }
     std::string llps_value;
     if (consume_option_value(arg, {"-llps-rcut"}, llps_value, i)) {
@@ -3422,7 +3555,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (consume_option_value(arg, {"-llps-dimer-size"}, llps_value, i)) {
       llps.llps_dimer_size = stoi(llps_value);
     }
-    if (consume_bool_option(arg, {"-llps-contacts"}, llps.llps_contacts)) {
+    if (consume_bool_option(arg, {"-llps-contacts"}, llps.llps_contacts, i)) {
     }
     if (consume_option_value(arg, {"-llps-sticker"}, llps_value, i)) {
       llps.llps_sticker_beads = llps_value;
@@ -3443,13 +3576,13 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-llps-kernel");
     }
     if (consume_bool_option(arg, {"-llps-dynamics", "--llps-dynamics"},
-                            llps.llps_dynamics)) {
+                            llps.llps_dynamics, i)) {
     }
     bool llps_detailed_flag = llps.llps_dynamics_detailed;
     if (consume_bool_option(arg,
                             {"-llps-dynamics-detailed",
                              "--llps-dynamics-detailed"},
-                            llps_detailed_flag)) {
+                            llps_detailed_flag, i)) {
       llps.llps_dynamics_detailed = llps_detailed_flag;
       if (llps_detailed_flag)
         llps.llps_dynamics = true;
@@ -3526,7 +3659,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (consume_bool_option(arg,
                             {"-llps-rna-topology-detailed",
                              "--llps-rna-topology-detailed"},
-                            llps_rna_topology_detailed_flag)) {
+                            llps_rna_topology_detailed_flag, i)) {
       llps.llps_rna_topology_detailed = llps_rna_topology_detailed_flag;
       if (llps_rna_topology_detailed_flag) {
         llps.llps_dynamics = true;
@@ -3552,7 +3685,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (consume_bool_option(arg,
                             {"-llps-energy-detailed",
                              "--llps-energy-detailed"},
-                            llps_energy_detailed_flag)) {
+                            llps_energy_detailed_flag, i)) {
       llps.llps_energy_detailed = llps_energy_detailed_flag;
       if (llps_energy_detailed_flag) {
         llps.llps_dynamics = true;
@@ -3562,7 +3695,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     bool llps_paper_flag = llps.llps_paper;
     if (consume_bool_option(arg, {"-llps-paper", "--llps-paper"},
-                            llps_paper_flag)) {
+                            llps_paper_flag, i)) {
       llps.llps_paper = llps_paper_flag;
       if (llps_paper_flag) {
         llps.flag_llps = true;
@@ -3628,7 +3761,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (consume_bool_option(arg,
                             {"-llps-rna-clamp-require-loop",
                              "--llps-rna-clamp-require-loop"},
-                            llps_rna_clamp_require_loop_flag)) {
+                            llps_rna_clamp_require_loop_flag, i)) {
       llps.llps_rna_clamp_require_loop = llps_rna_clamp_require_loop_flag;
     }
     if (consume_option_value(arg,
@@ -3649,7 +3782,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (consume_option_value(arg, {"-llps-dbscan-minpts"}, llps_value, i)) {
       llps.llps_dbscan_minpts = stoi(llps_value);
     }
-    if (consume_bool_option(arg, {"-llps-fuzzy"}, llps.llps_fuzzy)) {
+    if (consume_bool_option(arg, {"-llps-fuzzy"}, llps.llps_fuzzy, i)) {
     }
     // --- GIST Water Thermodynamics flags ---
     if (string(argv[i]) == "-gist") {
@@ -3797,8 +3930,10 @@ int arguments::parse_arguments(int argc, char **argv) {
         string(argv[i]).rfind("-opdbsep=", 0) == 0) {
       opdb = true;
       const string arg(argv[i]);
-      if (arg == "-opdbsep" || arg.rfind("-opdbsep=", 0) == 0)
+      if (arg == "-opdbsep" || arg.rfind("-opdbsep=", 0) == 0) {
         flag_separation_results = true;
+        flag_sep_opdb = true;
+      }
 
       if (arg.rfind("-opdb=", 0) == 0 || arg.rfind("-opdbsep=", 0) == 0) {
         const size_t eq_pos = arg.find('=');
@@ -3824,9 +3959,6 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]) == "-act") {
       flag_all_side_chain_ct = 0;
-    }
-    if (string(argv[i]) == "-useForceOptionforEnergy") {
-      flag_energy_same_force = true;
     }
     if (string(argv[i]) == "-h" || string(argv[i]) == "--help") {
       help = true;
@@ -3966,13 +4098,6 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]) == "-max-force") {
       flag_maxforce = true;
-    }
-    if (string(argv[i]) == "-new-emap") {
-      flag_new_emap = true;
-    }
-    if (string(argv[i]) == "-energy-res") {
-      print_energy_res = true;
-      energy_map = 1;
     }
     if (string(argv[i]) == "-force-res") {
       print_force_res = true;
@@ -4167,29 +4292,23 @@ int arguments::parse_arguments(int argc, char **argv) {
       }
       i += consumed_tokens;
     }
-    if (string(argv[i]) == "-emap") {
-      energy_map = 1;
-      if (i + 1 < argc && (string(argv[i + 1]) == "residue-atom" ||
-                           string(argv[i + 1]) == "residue-residue" ||
-                           string(argv[i + 1]) == "atom-atom" ||
-                           string(argv[i + 1]) == "atom-residue"))
-        emap_type = string(argv[i + 1]);
-    }
-    if (string(argv[i]) == "-emap-level" && i + 1 < argc) {
-      if (string(argv[i + 1]) == "all" || string(argv[i + 1]) == "per-res")
-        emap_level = string(argv[i + 1]);
-    }
-    if (string(argv[i]) == "-fmap") {
+    if (arg == "-fmap" &&
+        (i + 1 >= argc || std::string(argv[i + 1]).rfind("-", 0) == 0)) {
       force_map = 1;
-      if (i + 1 < argc && (string(argv[i + 1]) == "residue-atom" ||
-                           string(argv[i + 1]) == "residue-residue" ||
-                           string(argv[i + 1]) == "atom-atom" ||
-                           string(argv[i + 1]) == "atom-residue"))
-        fmap_type = string(argv[i + 1]);
+      continue;
     }
-    if (string(argv[i]) == "-fmap-level" && i + 1 < argc) {
-      if (string(argv[i + 1]) == "all" || string(argv[i + 1]) == "per-res")
-        fmap_level = string(argv[i + 1]);
+    if (consume_option_value(arg, {"-fmap"}, common_value, i)) {
+      force_map = 1;
+      if (common_value == "residue-atom" ||
+          common_value == "residue-residue" || common_value == "atom-atom" ||
+          common_value == "atom-residue")
+        fmap_type = common_value;
+      continue;
+    }
+    if (consume_option_value(arg, {"-fmap-level"}, common_value, i)) {
+      if (common_value == "all" || common_value == "per-res")
+        fmap_level = common_value;
+      continue;
     }
     if (string(argv[i]) == "-nt" && i + 1 < argc) {
       if (stoi(string(argv[i + 1])) < 0)
@@ -4899,6 +5018,24 @@ int arguments::parse_arguments(int argc, char **argv) {
     flag_use_common_topo = true;
   }
 
+  if (edecomp.flag_edecomp) {
+    const std::string validation_error = edecomp.validation_error();
+    if (!validation_error.empty()) {
+      TitanUI::print_error("Energy decomposition: " + validation_error);
+      exit(EXIT_FAILURE);
+    }
+    if (edecomp.source == "gbsa" && !flag_gbsa) {
+      TitanUI::print_error(
+          "Energy decomposition: -edecomp-source=gbsa requires -gbsa.");
+      exit(EXIT_FAILURE);
+    }
+    if (edecomp.source == "pbsa" && !pbe.pbsa) {
+      TitanUI::print_error(
+          "Energy decomposition: -edecomp-source=pbsa requires -pbsa=true.");
+      exit(EXIT_FAILURE);
+    }
+  }
+
   if (pbc.solv_pbctopo) {
     const bool conflict_with_reference =
         pbc.solv_pbc == 1 || pbc.solv_pbc_int == 1 || pbc.solv_pbcn ||
@@ -4954,7 +5091,7 @@ arguments::tokenize_arg_file(const std::string &filename) {
         value = value.substr(0, ve + 1);
 
       if (flag == "-pbctopo-anchor-backend" || flag == "-community" ||
-          flag == "-membrane" || flag == "-s2" ||
+          flag == "-edecomp" || flag == "-membrane" || flag == "-s2" ||
           flag == "-s2-bfactor-pdb") {
         tokens.push_back(flag + "=" + value);
       } else {
@@ -5122,29 +5259,6 @@ int arguments::parse_arguments_interactive(int argc_in) {
     force_f = "CHARMM36";
   } else
     force_f = "OPLSAA";
-
-  do {
-    cout
-        << "Do you want to create energy map? (yes = 1, no = 2, or custom = 3)";
-    if (!(cin >> energy_map)) {
-      cin.clear();
-      cin.ignore(10000, '\n');
-    }
-  } while (energy_map != 1 && energy_map != 2 && energy_map != 3);
-  if (energy_map == 3) {
-    cout << "Please specify type of energy map calculation: (residue-atom | "
-            "atom-atom | residue-residue | atom-residue)";
-    string temp{};
-    getline(cin, temp);
-    string::size_type pos{temp.find("-")};
-    if (pos != string::npos &&
-        (temp.substr(0, pos) == "residue" || temp.substr(0, pos) == "atom") &&
-        (temp.substr(pos + 1) == "residue" || temp.substr(pos + 1) == "atom")) {
-      emap_type = temp;
-    } else {
-      cout << "Cannot parse! will use default value (residue-atom)\n";
-    }
-  }
 
   do {
     cout << "Do you want to take only minimun sc-ct distance? (Y/N=1/2)";

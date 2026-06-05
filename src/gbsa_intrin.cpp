@@ -190,7 +190,7 @@ int cal_energy_gbsa_avx2(
     const AlignedDoubleVector &lg_free_radii,
     const AlignedDoubleVector &rec_complex_radii,
     const AlignedDoubleVector &lg_complex_radii, GBSA_Aggregator *aggregator,
-    info_ener_res *infoener_res, const GBSASasaCache *sasa_cache,
+    const GBSASasaCache *sasa_cache,
     bool write_pair_cache) {
   (void)num_snap;
   (void)rec_lcpo_p1;
@@ -226,27 +226,6 @@ int cal_energy_gbsa_avx2(
       Arguments.force_f.find("CHARMM") != std::string::npos;
   const bool can_write_pair_cache =
       write_pair_cache && !CachedData.elec_ener.empty();
-
-  auto add_pair_map = [&](size_t rec_idx, size_t lig_idx, double pair_elec,
-                          double pair_vdw) {
-    if (infoener_res == nullptr)
-      return;
-
-    size_t rec_cn = info_rec[rec_idx].get_chainnum();
-    size_t lg_cn = info_lg[lig_idx].get_chainnum();
-    size_t rec_in = is_lig_rec ? (rec_idx + 1)
-                               : info_rec[rec_idx].get_internal_resnr();
-    size_t lg_in = is_lig_lg ? (lig_idx + 1)
-                             : info_lg[lig_idx].get_internal_resnr();
-
-    if (is_lig_rec && !is_lig_lg) {
-      infoener_res->add_energy(std::make_tuple(lg_cn, rec_cn, lg_in, rec_in),
-                               pair_elec, pair_vdw);
-    } else {
-      infoener_res->add_energy(std::make_tuple(rec_cn, lg_cn, rec_in, lg_in),
-                               pair_elec, pair_vdw);
-    }
-  };
 
   const size_t rec_size = rec.size();
   const size_t lg_size = lg.size();
@@ -652,7 +631,6 @@ int cal_energy_gbsa_avx2(
           lig_decomp.ee += elec_a[k];
           lig_decomp.gpol += gpol_a[k];
         }
-        add_pair_map(i + k, j, elec_a[k] + gpol_a[k], vdw_a[k]);
       }
     }
 
@@ -749,7 +727,6 @@ int cal_energy_gbsa_avx2(
         lig_decomp.ee += elec;
         lig_decomp.gpol += gpol;
       }
-      add_pair_map(i, j, elec + gpol, vdw);
     }
   }
 

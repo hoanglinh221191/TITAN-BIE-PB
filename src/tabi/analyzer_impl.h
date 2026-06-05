@@ -5,6 +5,7 @@
 #include "../MOL_para.h"
 #include "../aligned_allocator.h"
 #include "../arguments.h"
+#include "../titan_pbe.h"
 #include "types.h"
 
 #include <array>
@@ -13,6 +14,7 @@
 #include <fstream>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 class TitanExecutor;
@@ -26,6 +28,7 @@ public:
 
   void configure(const arguments &args);
   [[nodiscard]] bool enabled() const noexcept { return args_.flag_pbe; }
+  void set_edecomp_sink(EDecompSink sink) { edecomp_sink_ = std::move(sink); }
 
   void begin_trajectory(std::size_t trajectory_id,
                         const std::string &source_label);
@@ -1918,6 +1921,7 @@ private:
   mutable TimingBuckets *active_timing_{nullptr};
   bool pbsa_reuse_vacuum_active_{false};
   GridShape pbsa_reuse_shape_{};
+  EDecompSink edecomp_sink_{};
   mutable std::map<std::string, GridShape> grid_anchor_shapes_;
   StabilityFrameState last_stability_state_{};
   StabilityMediumState last_stability_medium_state_{};

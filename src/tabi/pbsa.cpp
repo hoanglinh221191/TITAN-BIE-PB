@@ -134,7 +134,9 @@ std::vector<AnalyzerImpl::ResidueFrameRow> AnalyzerImpl::compute_pbsa_residue_ro
     TitanExecutor &executor,
     const EnergyDecompositionProvider *energy_provider) const {
   std::vector<ResidueFrameRow> rows;
-  const std::string decomp = effective_pbsa_decomp();
+  std::string decomp = effective_pbsa_decomp();
+  if (edecomp_sink_ && decomp != "hybrid")
+    decomp = "residue";
   if ((decomp != "residue" && decomp != "hybrid") ||
       energy_provider == nullptr ||
       !energy_provider->ready())

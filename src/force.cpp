@@ -29,16 +29,6 @@ void print_force_map(size_t nt, vector<vector<data_out>> &data,
                      fstream &force_file, bool flag_all_mode,
                      const arguments &Arguments, vector<energy_res> &Energy_res,
                      size_t num_snap, info &info_output);
-void print_energy_map(size_t nt, vector<vector<data_out>> &data,
-                      fstream &energy_file, bool flag_all_mode,
-                      arguments &Arguments, vector<energy_res> &Energy_res,
-                      size_t num_snap, info &info_output);
-int wrapper_print_energy(size_t nt, vector<vector<data_out>> &data_lg,
-                         vector<vector<data_out>> &data_rec, bool flag_all_mode,
-                         const arguments &Arguments,
-                         vector<energy_res> &Energy_res_mol1,
-                         vector<energy_res> &Energy_res_mol2, size_t num_snap,
-                         info &info_output);
 
 int force_energy_add(const cache_sigma_epsilon &CachedData, size_t i,
                      double &electro_energy, double &van_der_waals_energy,
@@ -217,14 +207,6 @@ int helper_print_force(size_t nt, vector<vector<data_out>> &data_lg,
   return 0;
 }
 
-int helper_print_energy(size_t nt, vector<vector<data_out>> &data_lg,
-                        vector<vector<data_out>> &data_rec,
-                        fstream &lg_ener_inter, fstream &rec_ener_inter,
-                        bool flag_all_mode, arguments &Arguments,
-                        vector<energy_res> &Energy_res_mol1,
-                        vector<energy_res> &Energy_res_mol2, size_t num_snap,
-                        info &info_output);
-
 int wrapper_print_force(size_t nt, vector<vector<data_out>> &data_lg,
                         vector<vector<data_out>> &data_rec, bool flag_all_mode,
                         const arguments &Arguments,
@@ -254,11 +236,6 @@ int wrapper_print_force(size_t nt, vector<vector<data_out>> &data_lg,
                        Energy_res_mol2, num_snap, info_output);
   }
 
-  if (Arguments.flag_energy_same_force == true) {
-    wrapper_print_energy(nt, data_lg, data_rec, flag_all_mode, Arguments,
-                         Energy_res_mol1, Energy_res_mol2, num_snap,
-                         info_output);
-  }
   return 0;
 }
 
