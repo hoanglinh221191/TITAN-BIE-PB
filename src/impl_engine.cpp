@@ -2409,6 +2409,15 @@ int engine(arguments &Arguments) {
                       Arguments.llps.llps_energy_correlation);
       TitanUI::log_kv(log, "LLPS Paper Bundle",
                       Arguments.llps.llps_paper ? "enabled" : "disabled");
+      const bool llps_fractal_enabled =
+          Arguments.llps.llps_paper_fractal == "auto"
+              ? Arguments.llps.llps_paper
+              : (Arguments.llps.llps_paper_fractal == "true" ||
+                 Arguments.llps.llps_paper_fractal == "yes" ||
+                 Arguments.llps.llps_paper_fractal == "on" ||
+                 Arguments.llps.llps_paper_fractal == "1");
+      TitanUI::log_kv(log, "LLPS Paper Fractal",
+                      llps_fractal_enabled ? "enabled" : "disabled");
       if (Arguments.llps.llps_paper) {
         TitanUI::log_kv(log, "LLPS Paper Profile Bin (nm)",
                         std::to_string(
@@ -2450,7 +2459,8 @@ int engine(arguments &Arguments) {
           {Arguments.llps.llps_paper,
            Arguments.llps.llps_paper_profile_bin_nm,
            Arguments.llps.llps_paper_blocks,
-           Arguments.llps.llps_paper_geometry});
+           Arguments.llps.llps_paper_geometry,
+           llps_fractal_enabled});
       dbscan_llps->configure_trace_outputs(info_output);
       if (Arguments.llps.llps_fuzzy) {
         dbscan_llps->enable_fuzzy(true);

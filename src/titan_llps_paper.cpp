@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -384,7 +385,6 @@ void LLPSPaperFractalAccumulator::configure(
 void LLPSPaperFractalAccumulator::process_frame(
     double time_ns, int frame, const std::vector<LLPSNode> &nodes,
     const std::vector<bool> &is_dense, int giant_cluster_id, const box &Box) {
-  (void)Box;
   if (!config_.enabled)
     return;
 
@@ -400,16 +400,33 @@ void LLPSPaperFractalAccumulator::process_frame(
 
   std::vector<std::array<double, 3>> points_nm;
   points_nm.reserve(nodes.size());
+  const bool use_mic = BoxMatrix::valid_box(Box);
+  std::optional<BoxMatrix> bmat;
+  if (use_mic)
+    bmat.emplace(Box);
+  std::size_t first_dense = nodes.size();
   for (std::size_t i = 0; i < nodes.size(); ++i) {
     if (!is_dense[i])
       continue;
+    if (first_dense == nodes.size())
+      first_dense = i;
     ++row.dense_nodes;
     if (nodes[i].type == 1)
       ++row.dense_protein_nodes;
     else
       ++row.dense_rna_nodes;
-    points_nm.push_back({nodes[i].x / 10.0, nodes[i].y / 10.0,
-                         nodes[i].z / 10.0});
+    if (use_mic) {
+      const LLPSNode &ref = nodes[first_dense];
+      double dx = nodes[i].x - ref.x;
+      double dy = nodes[i].y - ref.y;
+      double dz = nodes[i].z - ref.z;
+      bmat->apply_mic(dx, dy, dz);
+      points_nm.push_back({(ref.x + dx) / 10.0, (ref.y + dy) / 10.0,
+                           (ref.z + dz) / 10.0});
+    } else {
+      points_nm.push_back({nodes[i].x / 10.0, nodes[i].y / 10.0,
+                           nodes[i].z / 10.0});
+    }
   }
 
   if (row.dense_nodes < 8) {
