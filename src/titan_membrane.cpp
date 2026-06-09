@@ -17,6 +17,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace {
@@ -84,11 +85,25 @@ std::array<double, 3> normalized(std::array<double, 3> a) {
   return a;
 }
 
-void apply_mic(const MOL &frame, double &dx, double &dy, double &dz) {
-  if (BoxMatrix::valid_box(frame.Box)) {
-    BoxMatrix matrix(frame.Box);
+void apply_mic(const box &active_box, double &dx, double &dy, double &dz) {
+  if (BoxMatrix::valid_box(active_box)) {
+    BoxMatrix matrix(active_box);
     matrix.apply_mic(dx, dy, dz);
   }
+}
+
+bool membrane_backbone_atom(const std::string &name) {
+  const std::string upper = uppercase_copy(name);
+  return upper == "N" || upper == "H" || upper == "HN" || upper == "CA" ||
+         upper == "C" || upper == "O" || upper == "OXT";
+}
+
+bool supported_martini_lipid(const std::string &resname) {
+  static const std::unordered_set<std::string> supported{
+      "DOPA", "DOPC", "DOPE", "DOPG", "DOPS", "DPPC", "DPPE", "DPPG",
+      "DPPS", "POPC", "POPE", "POPG", "POPS", "DLPC", "DMPC", "CHOL",
+      "CHL1"};
+  return supported.contains(uppercase_copy(resname));
 }
 
 double polygon_area(const std::vector<Point2D> &polygon) {
@@ -206,11 +221,11 @@ smallest_covariance_axis(const AlignedDoubleVector &x,
       {vectors[0][smallest], vectors[1][smallest], vectors[2][smallest]});
 }
 
-std::pair<double, double> tangent_lengths(const MOL &frame,
+std::pair<double, double> tangent_lengths(const box &active_box,
                                          const std::array<double, 3> &normal,
                                          const std::array<double, 3> &u,
                                          const std::array<double, 3> &v) {
-  BoxMatrix matrix(frame.Box);
+  BoxMatrix matrix(active_box);
   const std::array<std::array<double, 3>, 3> edges{{
       {matrix.m[0][0], matrix.m[0][1], matrix.m[0][2]},
       {matrix.m[1][0], matrix.m[1][1], matrix.m[1][2]},
@@ -250,11 +265,16 @@ void TitanMembraneAnalyzer::init(const Multi_MOL &lipids, std::fstream &log) {
         "Membrane: fewer than four supported lipids were selected.");
   const MOL *reference_frame =
       lipids.m_mol.empty() ? nullptr : &lipids.m_mol.front();
+  if (reference_frame != nullptr && BoxMatrix::valid_box(reference_frame->Box)) {
+    reference_box_ = reference_frame->Box;
+    have_reference_box_ = true;
+  }
   std::tie(grid_x_, grid_y_) = resolved_grid(reference_frame);
   if (args_.leaflet == "user")
     load_user_leaflets();
   flip_states_.assign(lipid_plans_.size(), {});
   thickness_cells_.assign(static_cast<std::size_t>(grid_x_ * grid_y_), {});
+  curvature_cells_.assign(static_cast<std::size_t>(grid_x_ * grid_y_), {});
   initialized_ = true;
   enabled_ = true;
   reset_trajectory_state();
@@ -273,9 +293,18 @@ void TitanMembraneAnalyzer::reset_trajectory_state() {
   leaflet_rows_.clear();
   order_accumulators_.clear();
   flip_events_.clear();
+  contact_rows_.clear();
+  protein_contact_counts_.clear();
+  lipid_contact_counts_.clear();
+  near_lipid_ids_.clear();
+  enrichment_counts_.clear();
+  proximity_accumulators_.clear();
   std::fill(flip_states_.begin(), flip_states_.end(), FlipState{});
   std::fill(thickness_cells_.begin(), thickness_cells_.end(), ThicknessCell{});
+  std::fill(curvature_cells_.begin(), curvature_cells_.end(), CurvatureCell{});
   skipped_frames_ = 0;
+  contact_frames_ = 0;
+  contact_skipped_frames_ = 0;
   have_previous_normal_ = false;
 }
 
@@ -283,10 +312,6 @@ void TitanMembraneAnalyzer::build_topology_cache(const Multi_MOL &lipids,
                                                  std::fstream &log) {
   lipid_plans_.clear();
   unknown_lipids_ = 0;
-  const std::unordered_set<std::string> supported{
-      "DOPA", "DOPC", "DOPE", "DOPG", "DOPS", "DPPC", "DPPE", "DPPG",
-      "DPPS", "POPC", "POPE", "POPG", "POPS", "DLPC", "DMPC", "CHOL",
-      "CHL1"};
   std::unordered_set<std::string> selected;
   if (args_.lipids.rfind("resname:", 0) == 0) {
     for (std::string value : split(args_.lipids.substr(8), ','))
@@ -319,7 +344,7 @@ void TitanMembraneAnalyzer::build_topology_cache(const Multi_MOL &lipids,
   }
 
   for (const ResidueAtoms &residue : residues) {
-    const bool accepted = selected.empty() ? supported.contains(residue.resname)
+    const bool accepted = selected.empty() ? supported_martini_lipid(residue.resname)
                                            : selected.contains(residue.resname);
     if (!accepted) {
       ++unknown_lipids_;
@@ -441,7 +466,7 @@ void TitanMembraneAnalyzer::build_tangent_basis(
 }
 
 void TitanMembraneAnalyzer::classify_leaflets(
-    const MOL &frame, const std::array<double, 3> &normal,
+    const MOL &frame, const box &active_box, const std::array<double, 3> &normal,
     std::vector<int> &leaflets, AlignedDoubleVector &signed_distance) const {
   std::array<double, 3> center{0.0, 0.0, 0.0};
   for (std::size_t i = 0; i < head_x_.size(); ++i) {
@@ -462,7 +487,7 @@ void TitanMembraneAnalyzer::classify_leaflets(
   std::vector<std::vector<std::size_t>> cells;
   if (use_local_midplane) {
     build_tangent_basis(normal, u, v);
-    std::tie(lu, lv) = tangent_lengths(frame, normal, u, v);
+    std::tie(lu, lv) = tangent_lengths(active_box, normal, u, v);
     cells.resize(static_cast<std::size_t>(grid_x_ * grid_y_));
     auto periodic_cell = [](double value, double length, int bins) {
       value = std::fmod(value, length);
@@ -513,7 +538,7 @@ void TitanMembraneAnalyzer::classify_leaflets(
             double rx = head_x_[j] - anchor[0];
             double ry = head_y_[j] - anchor[1];
             double rz = head_z_[j] - anchor[2];
-            apply_mic(frame, rx, ry, rz);
+            apply_mic(active_box, rx, ry, rz);
             local_x.push_back(anchor[0] + rx);
             local_y.push_back(anchor[1] + ry);
             local_z.push_back(anchor[2] + rz);
@@ -537,19 +562,19 @@ void TitanMembraneAnalyzer::classify_leaflets(
     std::array<double, 3> local_delta{head_x_[i] - local_center[0],
                                       head_y_[i] - local_center[1],
                                       head_z_[i] - local_center[2]};
-    apply_mic(frame, local_delta[0], local_delta[1], local_delta[2]);
+    apply_mic(active_box, local_delta[0], local_delta[1], local_delta[2]);
     signed_distance[i] = dot(local_delta, local_normal);
     leaflets[i] = signed_distance[i] >= 0.0 ? 1 : -1;
   }
 }
 
 void TitanMembraneAnalyzer::compute_apl(
-    const MOL &frame, const std::array<double, 3> &normal,
+    const MOL &frame, const box &active_box, const std::array<double, 3> &normal,
     const std::vector<int> &leaflets, TitanExecutor &executor,
     std::vector<double> &apl, double &surface_area) const {
   std::array<double, 3> u{}, v{};
   build_tangent_basis(normal, u, v);
-  const auto [lu, lv] = tangent_lengths(frame, normal, u, v);
+  const auto [lu, lv] = tangent_lengths(active_box, normal, u, v);
   surface_area = lu * lv;
   std::vector<Point2D> projected(lipid_plans_.size());
   std::size_t projected_count = 0;
@@ -608,8 +633,13 @@ void TitanMembraneAnalyzer::compute_apl(
 }
 
 void TitanMembraneAnalyzer::update_order_parameters(
-    const MOL &frame, const std::array<double, 3> &normal) {
-  for (const LipidPlan &lipid : lipid_plans_) {
+    const MOL &frame, const box &active_box,
+    const std::array<double, 3> &normal,
+    const std::vector<int> *leaflets,
+    const std::set<std::size_t> *near_lipids) {
+  for (std::size_t lipid_idx = 0; lipid_idx < lipid_plans_.size();
+       ++lipid_idx) {
+    const LipidPlan &lipid = lipid_plans_[lipid_idx];
     for (std::size_t tail_idx = 0; tail_idx < lipid.tails.size(); ++tail_idx) {
       const auto &tail = lipid.tails[tail_idx];
       for (std::size_t bond = 1; bond < tail.size(); ++bond) {
@@ -618,7 +648,7 @@ void TitanMembraneAnalyzer::update_order_parameters(
         double dx = frame.pos.x[b] - frame.pos.x[a];
         double dy = frame.pos.y[b] - frame.pos.y[a];
         double dz = frame.pos.z[b] - frame.pos.z[a];
-        apply_mic(frame, dx, dy, dz);
+        apply_mic(active_box, dx, dy, dz);
         const double value =
             order_parameter(dx, dy, dz, normal[0], normal[1], normal[2]);
         if (!std::isfinite(value))
@@ -630,6 +660,15 @@ void TitanMembraneAnalyzer::update_order_parameters(
         acc.sum += value;
         acc.sum_sq += value * value;
         ++acc.count;
+        if (leaflets != nullptr && near_lipids != nullptr &&
+            lipid_idx < leaflets->size()) {
+          record_proximity_value(
+              "order_S",
+              "tail" + std::to_string(tail_idx + 1) + ":bond" +
+                  std::to_string(bond),
+              leaflet_name((*leaflets)[lipid_idx]), lipid.resname, value,
+              near_lipids->contains(lipid_idx));
+        }
       }
     }
   }
@@ -668,14 +707,17 @@ void TitanMembraneAnalyzer::compute_interdigitation(
 }
 
 void TitanMembraneAnalyzer::update_thickness_map(
-    const MOL &frame, const std::array<double, 3> &normal,
-    const std::vector<int> &leaflets, double &mean_thickness) {
+    const MOL &frame, const box &active_box,
+    const std::array<double, 3> &normal,
+    const std::vector<int> &leaflets, double &mean_thickness,
+    std::vector<double> *per_lipid_thickness) {
   std::array<double, 3> u{}, v{};
   build_tangent_basis(normal, u, v);
-  const auto [lu, lv] = tangent_lengths(frame, normal, u, v);
+  const auto [lu, lv] = tangent_lengths(active_box, normal, u, v);
   const std::size_t cell_count = static_cast<std::size_t>(grid_x_ * grid_y_);
   std::vector<double> upper_sum(cell_count, 0.0), lower_sum(cell_count, 0.0);
   std::vector<std::size_t> upper_count(cell_count, 0), lower_count(cell_count, 0);
+  std::vector<std::size_t> lipid_cell(lipid_plans_.size(), 0);
   for (std::size_t i = 0; i < lipid_plans_.size(); ++i) {
     const std::array<double, 3> point{head_x_[i], head_y_[i], head_z_[i]};
     double pu = dot(point, u);
@@ -685,6 +727,7 @@ void TitanMembraneAnalyzer::update_thickness_map(
     const int ix = std::min(grid_x_ - 1, static_cast<int>(pu / lu * grid_x_));
     const int iy = std::min(grid_y_ - 1, static_cast<int>(pv / lv * grid_y_));
     const std::size_t cell = static_cast<std::size_t>(iy * grid_x_ + ix);
+    lipid_cell[i] = cell;
     const double height = dot(point, normal);
     if (leaflets[i] > 0) {
       upper_sum[cell] += height;
@@ -696,11 +739,14 @@ void TitanMembraneAnalyzer::update_thickness_map(
   }
   double thickness_sum = 0.0;
   std::size_t thickness_count = 0;
+  std::vector<double> local_thickness(
+      cell_count, std::numeric_limits<double>::quiet_NaN());
   for (std::size_t cell = 0; cell < cell_count; ++cell) {
     if (upper_count[cell] == 0 || lower_count[cell] == 0)
       continue;
     const double thickness = upper_sum[cell] / upper_count[cell] -
                              lower_sum[cell] / lower_count[cell];
+    local_thickness[cell] = thickness;
     thickness_cells_[cell].sum += thickness;
     thickness_cells_[cell].sum_sq += thickness * thickness;
     ++thickness_cells_[cell].count;
@@ -726,9 +772,19 @@ void TitanMembraneAnalyzer::update_thickness_map(
     if (nu == 0 || nl == 0)
       throw std::runtime_error("Membrane: could not resolve both leaflets.");
     mean_thickness = upper / nu - lower / nl;
+    if (per_lipid_thickness != nullptr)
+      per_lipid_thickness->assign(lipid_plans_.size(), mean_thickness);
     return;
   }
   mean_thickness = thickness_sum / static_cast<double>(thickness_count);
+  if (per_lipid_thickness != nullptr) {
+    per_lipid_thickness->assign(lipid_plans_.size(), mean_thickness);
+    for (std::size_t i = 0; i < lipid_plans_.size(); ++i) {
+      const double local = local_thickness[lipid_cell[i]];
+      if (std::isfinite(local))
+        (*per_lipid_thickness)[i] = local;
+    }
+  }
 }
 
 void TitanMembraneAnalyzer::update_flipflop(const std::vector<int> &leaflets,
@@ -763,13 +819,407 @@ void TitanMembraneAnalyzer::update_flipflop(const std::vector<int> &leaflets,
   }
 }
 
+void TitanMembraneAnalyzer::build_protein_cache(const Multi_MOL &protein) {
+  if (protein_cache_ready_)
+    return;
+  protein_plans_.clear();
+  std::unordered_map<std::string, std::size_t> residue_slots;
+  for (std::size_t atom_idx = 0; atom_idx < protein.info.size(); ++atom_idx) {
+    const mol_info &atom = protein.info[atom_idx];
+    const std::string chain = atom.get_chain();
+    const std::string resname = uppercase_copy(atom.get_original_res_name());
+    if (supported_martini_lipid(resname))
+      continue;
+    const std::size_t resnr = atom.get_resnr();
+    const std::string label =
+        "mol1|" + chain + ":" + std::to_string(resnr) + ":" + resname;
+    auto [it, inserted] = residue_slots.emplace(label, protein_plans_.size());
+    if (inserted) {
+      ProteinResiduePlan plan;
+      plan.label = label;
+      plan.chain = chain;
+      plan.resname = resname;
+      plan.resnr = resnr;
+      protein_plans_.push_back(std::move(plan));
+    }
+    ProteinResiduePlan &plan = protein_plans_[it->second];
+    plan.atoms.push_back(atom_idx);
+    if (!membrane_backbone_atom(atom.get_atom()))
+      plan.sidechain_atoms.push_back(atom_idx);
+  }
+  protein_cache_ready_ = true;
+}
+
+std::array<double, 3>
+TitanMembraneAnalyzer::residue_com(const MOL &frame,
+                                   const ProteinResiduePlan &plan,
+                                   const Multi_MOL &protein) const {
+  const std::vector<std::size_t> &atoms =
+      plan.sidechain_atoms.empty() ? plan.atoms : plan.sidechain_atoms;
+  if (atoms.empty())
+    throw std::runtime_error("Membrane contacts: empty protein residue plan.");
+  std::array<double, 3> weighted{0.0, 0.0, 0.0};
+  std::array<double, 3> unit{0.0, 0.0, 0.0};
+  double mass_sum = 0.0;
+  std::size_t valid = 0;
+  for (const std::size_t atom : atoms) {
+    if (atom >= frame.size())
+      throw std::runtime_error(
+          "Membrane contacts: protein atom index exceeds frame size.");
+    const double x = frame.pos.x[atom];
+    const double y = frame.pos.y[atom];
+    const double z = frame.pos.z[atom];
+    unit[0] += x;
+    unit[1] += y;
+    unit[2] += z;
+    ++valid;
+    const double mass =
+        atom < protein.parameters.mass.size() ? protein.parameters.mass[atom]
+                                              : 0.0;
+    if (mass > 0.0) {
+      weighted[0] += x * mass;
+      weighted[1] += y * mass;
+      weighted[2] += z * mass;
+      mass_sum += mass;
+    }
+  }
+  if (valid == 0)
+    throw std::runtime_error(
+        "Membrane contacts: no valid atoms for protein residue COM.");
+  if (mass_sum > 0.0)
+    return {weighted[0] / mass_sum, weighted[1] / mass_sum,
+            weighted[2] / mass_sum};
+  const double denom = static_cast<double>(valid);
+  return {unit[0] / denom, unit[1] / denom, unit[2] / denom};
+}
+
+void TitanMembraneAnalyzer::update_protein_lipid_contacts(
+    const Multi_MOL *protein, const Multi_MOL &lipids, const MOL &lipid_frame,
+    const box &active_box, const std::array<double, 3> &,
+    const std::vector<int> &leaflets, std::size_t snap_idx, double time_ps,
+    TitanExecutor &executor, std::set<std::size_t> &near_lipids_out) {
+  if (!args_.protein_contacts && !args_.enrichment)
+    return;
+  ++contact_frames_;
+  if (protein == nullptr || protein->m_mol.empty() ||
+      snap_idx >= protein->m_mol.size()) {
+    ++contact_skipped_frames_;
+    return;
+  }
+  build_protein_cache(*protein);
+  const MOL &protein_frame = protein->m_mol[snap_idx];
+  if (!protein_frame.coordinates_consistent()) {
+    ++contact_skipped_frames_;
+    return;
+  }
+
+  struct LipidSite {
+    std::size_t lipid_index{0};
+    std::size_t atom_index{0};
+    std::string bead_name;
+    std::string bead_class;
+  };
+  std::vector<LipidSite> sites;
+  sites.reserve(lipid_plans_.size() * 5);
+  for (std::size_t lipid_idx = 0; lipid_idx < lipid_plans_.size(); ++lipid_idx) {
+    const std::size_t head = lipid_plans_[lipid_idx].head_atom;
+    sites.push_back({lipid_idx, head,
+                     head < lipids.info.size()
+                         ? uppercase_copy(lipids.info[head].get_atom())
+                         : "UNKNOWN",
+                     "head"});
+    for (const auto &tail : lipid_plans_[lipid_idx].tails) {
+      for (std::size_t atom : tail)
+        sites.push_back({lipid_idx, atom,
+                         atom < lipids.info.size()
+                             ? uppercase_copy(lipids.info[atom].get_atom())
+                             : "UNKNOWN",
+                         "tail"});
+    }
+  }
+
+  if (args_.enrichment) {
+    for (std::size_t lipid_idx = 0; lipid_idx < lipid_plans_.size();
+         ++lipid_idx) {
+      const std::string key = lipid_plans_[lipid_idx].resname + "," +
+                              leaflet_name(leaflets[lipid_idx]);
+      ++enrichment_counts_[key].bulk_count;
+    }
+  }
+
+  std::vector<std::array<double, 3>> protein_points(protein_plans_.size());
+  executor.parallel_for(protein_plans_.size(), executor.capacity(), 16,
+                        [&](std::size_t, std::size_t begin, std::size_t end) {
+    for (std::size_t i = begin; i < end; ++i)
+      protein_points[i] = residue_com(protein_frame, protein_plans_[i],
+                                      *protein);
+  });
+
+  const double cutoff2 = args_.contact_cut * args_.contact_cut;
+  const std::size_t worker_count = std::max<std::size_t>(1, executor.capacity());
+  std::vector<std::vector<ContactRow>> worker_rows(worker_count);
+  executor.parallel_for(
+      protein_plans_.size(), executor.capacity(), 8,
+      [&](std::size_t worker, std::size_t begin, std::size_t end) {
+        std::vector<ContactRow> &rows =
+            worker_rows[std::min(worker, worker_rows.size() - 1)];
+        for (std::size_t res_idx = begin; res_idx < end; ++res_idx) {
+          const auto &residue = protein_plans_[res_idx];
+          const auto &point = protein_points[res_idx];
+          for (const LipidSite &site : sites) {
+            if (site.atom_index >= lipid_frame.size())
+              continue;
+            double dx = lipid_frame.pos.x[site.atom_index] - point[0];
+            double dy = lipid_frame.pos.y[site.atom_index] - point[1];
+            double dz = lipid_frame.pos.z[site.atom_index] - point[2];
+            apply_mic(active_box, dx, dy, dz);
+            const double distance2 = dx * dx + dy * dy + dz * dz;
+            if (distance2 > cutoff2)
+              continue;
+            const LipidPlan &lipid = lipid_plans_[site.lipid_index];
+            rows.push_back({site.lipid_index,
+                            snap_idx,
+                            time_ps,
+                            residue.label,
+                            residue.chain,
+                            residue.resnr,
+                            residue.resname,
+                            lipid.id,
+                            lipid.resname,
+                            leaflet_name(leaflets[site.lipid_index]),
+                            site.bead_name,
+                            site.bead_class,
+                            std::sqrt(distance2)});
+          }
+        }
+      });
+
+  std::set<std::string> near_lipids;
+  for (auto &rows : worker_rows) {
+    for (const ContactRow &row : rows) {
+      contact_rows_.push_back(row);
+      ++protein_contact_counts_[row.protein_residue];
+      ++lipid_contact_counts_[row.lipid_id + "," + row.lipid_resname + "," +
+                              row.leaflet];
+      near_lipid_ids_.insert(row.lipid_id);
+      near_lipids_out.insert(row.lipid_index);
+      near_lipids.insert(row.lipid_id + "|" + row.lipid_resname + "|" +
+                         row.leaflet);
+    }
+  }
+  if (args_.enrichment) {
+    for (const std::string &entry : near_lipids) {
+      const auto first = entry.find('|');
+      const auto second = entry.find('|', first + 1);
+      if (first == std::string::npos || second == std::string::npos)
+        continue;
+      const std::string key = entry.substr(first + 1, second - first - 1) +
+                              "," + entry.substr(second + 1);
+      ++enrichment_counts_[key].near_count;
+    }
+  }
+}
+
+void TitanMembraneAnalyzer::update_curvature_grid(
+    const std::array<double, 3> &normal, const std::vector<int> &leaflets,
+    const box &active_box, std::vector<double> *per_lipid_curvature) {
+  if (args_.curvature != "grid")
+    return;
+  if (curvature_cells_.empty())
+    curvature_cells_.assign(static_cast<std::size_t>(grid_x_ * grid_y_), {});
+  std::array<double, 3> u{}, v{};
+  build_tangent_basis(normal, u, v);
+  const auto [lu, lv] = tangent_lengths(active_box, normal, u, v);
+  const std::size_t cell_count = static_cast<std::size_t>(grid_x_ * grid_y_);
+  std::vector<double> upper_sum(cell_count, 0.0), lower_sum(cell_count, 0.0);
+  std::vector<std::size_t> upper_count(cell_count, 0), lower_count(cell_count, 0);
+  std::vector<std::size_t> lipid_cell(lipid_plans_.size(), 0);
+  double upper_global = 0.0;
+  double lower_global = 0.0;
+  std::size_t upper_n = 0;
+  std::size_t lower_n = 0;
+  for (std::size_t i = 0; i < lipid_plans_.size(); ++i) {
+    const std::array<double, 3> point{head_x_[i], head_y_[i], head_z_[i]};
+    double pu = dot(point, u);
+    double pv = dot(point, v);
+    pu -= std::floor(pu / lu) * lu;
+    pv -= std::floor(pv / lv) * lv;
+    const int ix = std::min(grid_x_ - 1, static_cast<int>(pu / lu * grid_x_));
+    const int iy = std::min(grid_y_ - 1, static_cast<int>(pv / lv * grid_y_));
+    const std::size_t cell = static_cast<std::size_t>(iy * grid_x_ + ix);
+    lipid_cell[i] = cell;
+    const double height = dot(point, normal);
+    if (leaflets[i] > 0) {
+      upper_sum[cell] += height;
+      ++upper_count[cell];
+      upper_global += height;
+      ++upper_n;
+    } else {
+      lower_sum[cell] += height;
+      ++lower_count[cell];
+      lower_global += height;
+      ++lower_n;
+    }
+  }
+  if (upper_n == 0 || lower_n == 0)
+    return;
+  upper_global /= static_cast<double>(upper_n);
+  lower_global /= static_cast<double>(lower_n);
+  const double cell_area = (lu / grid_x_) * (lv / grid_y_);
+  const double scale = cell_area > kEpsilon ? 1.0 / std::sqrt(cell_area) : 1.0;
+  std::vector<double> local_curvature(
+      cell_count, std::numeric_limits<double>::quiet_NaN());
+  for (std::size_t cell = 0; cell < cell_count; ++cell) {
+    double proxy = 0.0;
+    std::size_t samples = 0;
+    if (upper_count[cell] > 0) {
+      proxy += upper_sum[cell] / upper_count[cell] - upper_global;
+      ++samples;
+    }
+    if (lower_count[cell] > 0) {
+      proxy += lower_sum[cell] / lower_count[cell] - lower_global;
+      ++samples;
+    }
+    if (samples == 0)
+      continue;
+    proxy = proxy / static_cast<double>(samples) * scale;
+    local_curvature[cell] = proxy;
+    curvature_cells_[cell].sum += proxy;
+    curvature_cells_[cell].sum_sq += proxy * proxy;
+    ++curvature_cells_[cell].count;
+  }
+  if (per_lipid_curvature != nullptr) {
+    per_lipid_curvature->assign(lipid_plans_.size(), 0.0);
+    for (std::size_t i = 0; i < lipid_plans_.size(); ++i) {
+      const double local = local_curvature[lipid_cell[i]];
+      if (std::isfinite(local))
+        (*per_lipid_curvature)[i] = local;
+    }
+  }
+}
+
+void TitanMembraneAnalyzer::record_proximity_value(
+    const std::string &observable, const std::string &group,
+    const std::string &leaflet, const std::string &resname, double value,
+    bool near) {
+  if (!std::isfinite(value))
+    return;
+  const std::string key = observable + "," + group + "," + leaflet + "," +
+                          resname;
+  ProximityAccumulator &acc = proximity_accumulators_[key];
+  if (near) {
+    acc.near_sum += value;
+    acc.near_sum_sq += value * value;
+    ++acc.near_count;
+  } else {
+    acc.far_sum += value;
+    acc.far_sum_sq += value * value;
+    ++acc.far_count;
+  }
+}
+
+void TitanMembraneAnalyzer::record_proximity_direct(
+    const std::string &observable, const std::string &group,
+    const std::string &leaflet, const std::string &resname, double near_value,
+    double far_value) {
+  const std::string key = observable + "," + group + "," + leaflet + "," +
+                          resname;
+  ProximityAccumulator &acc = proximity_accumulators_[key];
+  if (std::isfinite(near_value)) {
+    acc.near_sum += near_value;
+    acc.near_sum_sq += near_value * near_value;
+    ++acc.near_count;
+  }
+  if (std::isfinite(far_value)) {
+    acc.far_sum += far_value;
+    acc.far_sum_sq += far_value * far_value;
+    ++acc.far_count;
+  }
+}
+
+void TitanMembraneAnalyzer::update_proximity_coupling(
+    const std::vector<double> &apl,
+    const std::vector<double> &per_lipid_thickness,
+    const std::vector<double> &per_lipid_curvature,
+    const std::vector<int> &leaflets,
+    const std::set<std::size_t> &near_lipids) {
+  if (!args_.protein_contacts && !args_.enrichment)
+    return;
+
+  struct CompositionCounter {
+    std::size_t near_count{0};
+    std::size_t far_count{0};
+  };
+  std::map<std::string, std::size_t> near_totals_by_leaflet;
+  std::map<std::string, std::size_t> far_totals_by_leaflet;
+  std::map<std::string, CompositionCounter> composition;
+
+  for (std::size_t i = 0; i < lipid_plans_.size(); ++i) {
+    const std::string leaflet = leaflet_name(leaflets[i]);
+    const std::string &resname = lipid_plans_[i].resname;
+    const bool near = near_lipids.contains(i);
+    if (i < apl.size())
+      record_proximity_value("apl_A2", "per_lipid", leaflet, resname, apl[i],
+                             near);
+    if (i < per_lipid_thickness.size())
+      record_proximity_value("thickness_A", "headgroup_cell", leaflet, resname,
+                             per_lipid_thickness[i], near);
+    if (args_.curvature == "grid" && i < per_lipid_curvature.size())
+      record_proximity_value("curvature_proxy_Ainv", "headgroup_cell", leaflet,
+                             resname, per_lipid_curvature[i], near);
+    record_proximity_value("contact_probability", "lipid_frame", leaflet,
+                           resname, near ? 1.0 : 0.0, near);
+
+    const std::string key = leaflet + "," + resname;
+    if (near) {
+      ++near_totals_by_leaflet[leaflet];
+      ++composition[key].near_count;
+    } else {
+      ++far_totals_by_leaflet[leaflet];
+      ++composition[key].far_count;
+    }
+  }
+
+  if (args_.enrichment) {
+    for (const auto &[key, counts] : composition) {
+      const auto comma = key.find(',');
+      const std::string leaflet =
+          comma == std::string::npos ? "unknown" : key.substr(0, comma);
+      const std::string resname =
+          comma == std::string::npos ? key : key.substr(comma + 1);
+      const double near_total =
+          static_cast<double>(near_totals_by_leaflet[leaflet]);
+      const double far_total =
+          static_cast<double>(far_totals_by_leaflet[leaflet]);
+      const double near_fraction =
+          near_total > 0.0 ? counts.near_count / near_total
+                           : std::numeric_limits<double>::quiet_NaN();
+      const double far_fraction =
+          far_total > 0.0 ? counts.far_count / far_total
+                          : std::numeric_limits<double>::quiet_NaN();
+      record_proximity_direct("lipid_enrichment", "leaflet_composition",
+                              leaflet, resname, near_fraction, far_fraction);
+    }
+  }
+}
+
 void TitanMembraneAnalyzer::process_frame(const Multi_MOL &lipids,
+                                          std::size_t snap_idx,
+                                          TitanExecutor &executor) {
+  process_frame(lipids, nullptr, snap_idx, executor);
+}
+
+void TitanMembraneAnalyzer::process_frame(const Multi_MOL &lipids,
+                                          const Multi_MOL *protein,
                                           std::size_t snap_idx,
                                           TitanExecutor &executor) {
   if (!enabled_ || snap_idx >= lipids.m_mol.size())
     return;
   const MOL &frame = lipids.m_mol[snap_idx];
-  if (!frame.coordinates_consistent() || !BoxMatrix::valid_box(frame.Box)) {
+  const box *active_box = BoxMatrix::valid_box(frame.Box)
+                              ? &frame.Box
+                              : (have_reference_box_ ? &reference_box_ : nullptr);
+  if (!frame.coordinates_consistent() || active_box == nullptr) {
     ++skipped_frames_;
     return;
   }
@@ -787,7 +1237,7 @@ void TitanMembraneAnalyzer::process_frame(const Multi_MOL &lipids,
   const std::array<double, 3> normal = resolve_normal(frame);
   std::vector<int> leaflets;
   AlignedDoubleVector signed_distance;
-  classify_leaflets(frame, normal, leaflets, signed_distance);
+  classify_leaflets(frame, *active_box, normal, leaflets, signed_distance);
   std::size_t upper_count = 0;
   std::size_t lower_count = 0;
   for (int leaflet : leaflets)
@@ -797,15 +1247,25 @@ void TitanMembraneAnalyzer::process_frame(const Multi_MOL &lipids,
 
   std::vector<double> apl;
   double surface_area = 0.0;
-  compute_apl(frame, normal, leaflets, executor, apl, surface_area);
+  compute_apl(frame, *active_box, normal, leaflets, executor, apl, surface_area);
   const double mean_apl =
       std::accumulate(apl.begin(), apl.end(), 0.0) / apl.size();
   double thickness = 0.0;
-  update_thickness_map(frame, normal, leaflets, thickness);
+  std::vector<double> per_lipid_thickness;
+  update_thickness_map(frame, *active_box, normal, leaflets, thickness,
+                       &per_lipid_thickness);
   double interdigitation = 0.0;
   double penetration = 0.0;
   compute_interdigitation(frame, normal, leaflets, interdigitation, penetration);
-  update_order_parameters(frame, normal);
+  std::set<std::size_t> near_lipids;
+  update_protein_lipid_contacts(protein, lipids, frame, *active_box, normal,
+                                leaflets, snap_idx, frame.get_time(),
+                                executor, near_lipids);
+  std::vector<double> per_lipid_curvature;
+  update_curvature_grid(normal, leaflets, *active_box, &per_lipid_curvature);
+  update_order_parameters(frame, *active_box, normal, &leaflets, &near_lipids);
+  update_proximity_coupling(apl, per_lipid_thickness, per_lipid_curvature,
+                            leaflets, near_lipids);
   update_flipflop(leaflets, snap_idx, frame.get_time());
 
   frame_summaries_.push_back({snap_idx, frame.get_time(), mean_apl, thickness,
@@ -967,6 +1427,186 @@ void TitanMembraneAnalyzer::export_flipflop_events(
         << row.from_leaflet << ',' << row.to_leaflet << '\n';
 }
 
+void TitanMembraneAnalyzer::export_protein_lipid_contacts(
+    const std::string &filename) const {
+  std::ofstream out(filename);
+  out << "frame,time_ps,protein_residue,protein_chain,protein_resnr,"
+         "protein_resname,lipid_id,lipid_resname,leaflet,bead_name,"
+         "bead_class,distance_A,contact_count,contact_probability\n";
+  const double denom = contact_frames_ > 0 ? static_cast<double>(contact_frames_)
+                                           : 1.0;
+  for (const ContactRow &row : contact_rows_) {
+    out << row.frame << ',' << row.time_ps << ',' << row.protein_residue << ','
+        << row.protein_chain << ',' << row.protein_resnr << ','
+        << row.protein_resname << ',' << row.lipid_id << ','
+        << row.lipid_resname << ',' << row.leaflet << ',' << row.bead_name
+        << ',' << row.bead_class << ',' << row.distance_a << ",1,"
+        << 1.0 / denom << '\n';
+  }
+}
+
+void TitanMembraneAnalyzer::export_lipid_enrichment(
+    const std::string &filename) const {
+  std::ofstream out(filename);
+  out << "resname,leaflet,near_count,bulk_count,near_fraction,"
+         "bulk_fraction,enrichment\n";
+  std::map<std::string, std::size_t> near_totals;
+  std::map<std::string, std::size_t> bulk_totals;
+  for (const auto &[key, acc] : enrichment_counts_) {
+    const auto comma = key.find(',');
+    const std::string leaflet =
+        comma == std::string::npos ? "unknown" : key.substr(comma + 1);
+    near_totals[leaflet] += acc.near_count;
+    bulk_totals[leaflet] += acc.bulk_count;
+  }
+  for (const auto &[key, acc] : enrichment_counts_) {
+    const auto comma = key.find(',');
+    const std::string resname =
+        comma == std::string::npos ? key : key.substr(0, comma);
+    const std::string leaflet =
+        comma == std::string::npos ? "unknown" : key.substr(comma + 1);
+    const double near_total = static_cast<double>(near_totals[leaflet]);
+    const double bulk_total = static_cast<double>(bulk_totals[leaflet]);
+    const double near_fraction =
+        near_total > 0.0 ? acc.near_count / near_total : 0.0;
+    const double bulk_fraction =
+        bulk_total > 0.0 ? acc.bulk_count / bulk_total : 0.0;
+    const double enrichment =
+        bulk_fraction > 0.0 ? near_fraction / bulk_fraction
+                            : std::numeric_limits<double>::quiet_NaN();
+    out << resname << ',' << leaflet << ',' << acc.near_count << ','
+        << acc.bulk_count << ',' << near_fraction << ',' << bulk_fraction
+        << ',' << enrichment << '\n';
+  }
+}
+
+void TitanMembraneAnalyzer::export_curvature_map(
+    const std::string &filename) const {
+  std::ofstream out(filename);
+  out << "grid_x,grid_y,curvature_proxy_Ainv,std_curvature_proxy_Ainv,samples\n";
+  for (int iy = 0; iy < grid_y_; ++iy) {
+    for (int ix = 0; ix < grid_x_; ++ix) {
+      const auto &cell = curvature_cells_[static_cast<std::size_t>(
+          iy * grid_x_ + ix)];
+      if (cell.count == 0) {
+        out << ix << ',' << iy << ",nan,nan,0\n";
+        continue;
+      }
+      const double mean = cell.sum / cell.count;
+      const double variance =
+          std::max(0.0, cell.sum_sq / cell.count - mean * mean);
+      out << ix << ',' << iy << ',' << mean << ',' << std::sqrt(variance)
+          << ',' << cell.count << '\n';
+    }
+  }
+}
+
+void TitanMembraneAnalyzer::export_proximity_coupling(
+    const std::string &filename) const {
+  std::ofstream out(filename);
+  out << std::fixed << std::setprecision(8);
+  out << "observable,group,leaflet,resname,mean_near,mean_far,"
+         "delta_near_minus_far,samples_near,samples_far\n";
+  for (const auto &[key, acc] : proximity_accumulators_) {
+    const double near_mean =
+        acc.near_count > 0
+            ? acc.near_sum / static_cast<double>(acc.near_count)
+            : std::numeric_limits<double>::quiet_NaN();
+    const double far_mean =
+        acc.far_count > 0 ? acc.far_sum / static_cast<double>(acc.far_count)
+                          : std::numeric_limits<double>::quiet_NaN();
+    const double delta = std::isfinite(near_mean) && std::isfinite(far_mean)
+                             ? near_mean - far_mean
+                             : std::numeric_limits<double>::quiet_NaN();
+    out << key << ',' << near_mean << ',' << far_mean << ',' << delta << ','
+        << acc.near_count << ',' << acc.far_count << '\n';
+  }
+}
+
+void TitanMembraneAnalyzer::export_coupling_summary(
+    const std::string &filename) const {
+  std::ofstream out(filename);
+  out << std::fixed << std::setprecision(8);
+  out << "module: membrane protein-lipid coupling\n";
+  out << "contact_note: Contacts use mol1 residue side-chain COM with all-atom "
+         "fallback and MARTINI lipid head/tail bead sites.\n";
+  out << "protein_lipid_contact_cut_A: " << args_.contact_cut << '\n';
+  out << "protein_contacts_enabled: "
+      << (args_.protein_contacts ? "true" : "false") << '\n';
+  out << "enrichment_enabled: " << (args_.enrichment ? "true" : "false")
+      << '\n';
+  out << "curvature_policy: " << args_.curvature << '\n';
+  out << "frames_analyzed: " << frame_summaries_.size() << '\n';
+  out << "contact_frames: " << contact_frames_ << '\n';
+  out << "contact_skipped_frames: " << contact_skipped_frames_ << '\n';
+  out << "protein_residues: " << protein_plans_.size() << '\n';
+  out << "lipids: " << lipid_plans_.size() << '\n';
+  out << "contact_rows: " << contact_rows_.size() << '\n';
+  double near_apl = 0.0;
+  double far_apl = 0.0;
+  std::size_t near_apl_count = 0;
+  std::size_t far_apl_count = 0;
+  for (const AplRow &row : apl_rows_) {
+    if (near_lipid_ids_.contains(row.lipid_id)) {
+      near_apl += row.apl_a2;
+      ++near_apl_count;
+    } else {
+      far_apl += row.apl_a2;
+      ++far_apl_count;
+    }
+  }
+  if (near_apl_count > 0 && far_apl_count > 0) {
+    const double near_mean = near_apl / static_cast<double>(near_apl_count);
+    const double far_mean = far_apl / static_cast<double>(far_apl_count);
+    out << "near_lipid_mean_apl_A2: " << near_mean << '\n';
+    out << "far_lipid_mean_apl_A2: " << far_mean << '\n';
+    out << "delta_near_minus_far_apl_A2: " << near_mean - far_mean << '\n';
+  } else {
+    out << "near_lipid_mean_apl_A2: nan\n";
+    out << "far_lipid_mean_apl_A2: nan\n";
+    out << "delta_near_minus_far_apl_A2: nan\n";
+  }
+  out << "proximity_coupling_note: Near/far coupling uses per-frame "
+         "protein-lipid contacts; near lipids have at least one contact in the "
+         "frame and far lipids are non-contacting lipids in the same leaflet. "
+         "Energy/solvation terms are not interpreted as membrane coupling.\n";
+  for (const auto &[key, acc] : proximity_accumulators_) {
+    const double near_mean =
+        acc.near_count > 0
+            ? acc.near_sum / static_cast<double>(acc.near_count)
+            : std::numeric_limits<double>::quiet_NaN();
+    const double far_mean =
+        acc.far_count > 0 ? acc.far_sum / static_cast<double>(acc.far_count)
+                          : std::numeric_limits<double>::quiet_NaN();
+    if (!std::isfinite(near_mean) || !std::isfinite(far_mean))
+      continue;
+    const auto first = key.find(',');
+    const std::string observable =
+        first == std::string::npos ? key : key.substr(0, first);
+    if (observable == "apl_A2" || observable == "thickness_A" ||
+        observable == "order_S" || observable == "curvature_proxy_Ainv") {
+      out << "top_delta_" << observable << ": " << key << ','
+          << near_mean - far_mean << '\n';
+    }
+  }
+  auto write_top = [&](const char *prefix,
+                       const std::map<std::string, std::size_t> &counts) {
+    std::vector<std::pair<std::string, std::size_t>> rows(counts.begin(),
+                                                          counts.end());
+    std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b) {
+      if (a.second != b.second)
+        return a.second > b.second;
+      return a.first < b.first;
+    });
+    const std::size_t limit = std::min<std::size_t>(5, rows.size());
+    for (std::size_t i = 0; i < limit; ++i)
+      out << prefix << "_" << (i + 1) << ": " << rows[i].first << ','
+          << rows[i].second << '\n';
+  };
+  write_top("top_protein_residue", protein_contact_counts_);
+  write_top("top_lipid", lipid_contact_counts_);
+}
+
 void TitanMembraneAnalyzer::export_summary(const std::string &filename) const {
   std::ofstream out(filename);
   out << std::fixed << std::setprecision(8);
@@ -1036,6 +1676,68 @@ void TitanMembraneAnalyzer::accumulate_trajectory() {
       continue;
     append(aggregate_order_parameters_[key], acc.sum / acc.count);
   }
+  auto append_coupling = [](CouplingCounter &acc, double value) {
+    if (!std::isfinite(value))
+      return;
+    acc.sum += value;
+    acc.sum_sq += value * value;
+    ++acc.count;
+  };
+  if (args_.enrichment) {
+    std::map<std::string, std::size_t> near_totals;
+    std::map<std::string, std::size_t> bulk_totals;
+    for (const auto &[key, acc] : enrichment_counts_) {
+      const auto comma = key.find(',');
+      const std::string leaflet =
+          comma == std::string::npos ? "unknown" : key.substr(comma + 1);
+      near_totals[leaflet] += acc.near_count;
+      bulk_totals[leaflet] += acc.bulk_count;
+    }
+    for (const auto &[key, acc] : enrichment_counts_) {
+      const auto comma = key.find(',');
+      const std::string leaflet =
+          comma == std::string::npos ? "unknown" : key.substr(comma + 1);
+      const double near_total = static_cast<double>(near_totals[leaflet]);
+      const double bulk_total = static_cast<double>(bulk_totals[leaflet]);
+      const double near_fraction =
+          near_total > 0.0 ? acc.near_count / near_total : 0.0;
+      const double bulk_fraction =
+          bulk_total > 0.0 ? acc.bulk_count / bulk_total : 0.0;
+      const double enrichment =
+          bulk_fraction > 0.0 ? near_fraction / bulk_fraction
+                              : std::numeric_limits<double>::quiet_NaN();
+      append_coupling(aggregate_enrichment_[key], enrichment);
+    }
+  }
+  if (args_.curvature == "grid") {
+    if (aggregate_curvature_cells_.size() < curvature_cells_.size())
+      aggregate_curvature_cells_.resize(curvature_cells_.size());
+    for (std::size_t i = 0; i < curvature_cells_.size(); ++i) {
+      if (curvature_cells_[i].count == 0)
+        continue;
+      append_coupling(aggregate_curvature_cells_[i],
+                      curvature_cells_[i].sum / curvature_cells_[i].count);
+    }
+  }
+  if (args_.protein_contacts || args_.enrichment) {
+    for (const auto &[key, acc] : proximity_accumulators_) {
+      ProximityAccumulator &target = aggregate_proximity_[key];
+      if (acc.near_count > 0) {
+        const double mean = acc.near_sum / static_cast<double>(acc.near_count);
+        target.near_sum += mean;
+        target.near_sum_sq += mean * mean;
+        ++target.near_count;
+      }
+      if (acc.far_count > 0) {
+        const double mean = acc.far_sum / static_cast<double>(acc.far_count);
+        target.far_sum += mean;
+        target.far_sum_sq += mean * mean;
+        ++target.far_count;
+      }
+    }
+  }
+  aggregate_contact_frames_ += contact_frames_;
+  aggregate_contact_rows_ += contact_rows_.size();
   ++aggregate_trajectories_;
 }
 
@@ -1077,8 +1779,13 @@ void TitanMembraneAnalyzer::export_average(const std::string &base_dir,
     out << "grid_x,grid_y,mean_thickness_A,sem_thickness_A,replicates\n";
     for (int iy = 0; iy < grid_y_; ++iy) {
       for (int ix = 0; ix < grid_x_; ++ix) {
-        const auto &acc = aggregate_thickness_cells_[static_cast<std::size_t>(
-            iy * grid_x_ + ix)];
+        const std::size_t cell_index =
+            static_cast<std::size_t>(iy * grid_x_ + ix);
+        const ThicknessCell empty_cell{};
+        const auto &acc =
+            cell_index < aggregate_thickness_cells_.size()
+                ? aggregate_thickness_cells_[cell_index]
+                : empty_cell;
         const auto [mean, sem] = mean_sem(acc);
         out << ix << ',' << iy << ',' << mean << ',' << sem << ',' << acc.count
             << '\n';
@@ -1093,6 +1800,82 @@ void TitanMembraneAnalyzer::export_average(const std::string &base_dir,
       const auto [mean, sem] = mean_sem(acc);
       out << key << ',' << mean << ',' << sem << ',' << acc.count << '\n';
     }
+  }
+  if (args_.enrichment) {
+    std::ofstream out(join_output_path(
+        base_dir, info_output.get_membrane_lipid_enrichment_average_filename()));
+    out << "resname,leaflet,mean_enrichment,sem_enrichment,replicates\n";
+    for (const auto &[key, acc] : aggregate_enrichment_) {
+      const auto comma = key.find(',');
+      const std::string resname =
+          comma == std::string::npos ? key : key.substr(0, comma);
+      const std::string leaflet =
+          comma == std::string::npos ? "unknown" : key.substr(comma + 1);
+      const auto [mean, sem] = mean_sem(
+          ThicknessCell{acc.sum, acc.sum_sq, acc.count});
+      out << resname << ',' << leaflet << ',' << mean << ',' << sem << ','
+          << acc.count << '\n';
+    }
+  }
+  if (args_.curvature == "grid") {
+    std::ofstream out(join_output_path(
+        base_dir, info_output.get_membrane_curvature_map_average_filename()));
+    out << "grid_x,grid_y,mean_curvature_proxy_Ainv,"
+           "sem_curvature_proxy_Ainv,replicates\n";
+    for (int iy = 0; iy < grid_y_; ++iy) {
+      for (int ix = 0; ix < grid_x_; ++ix) {
+        const std::size_t cell_index =
+            static_cast<std::size_t>(iy * grid_x_ + ix);
+        const CouplingCounter empty_cell{};
+        const auto &acc =
+            cell_index < aggregate_curvature_cells_.size()
+                ? aggregate_curvature_cells_[cell_index]
+                : empty_cell;
+        const auto [mean, sem] = mean_sem(
+            ThicknessCell{acc.sum, acc.sum_sq, acc.count});
+        out << ix << ',' << iy << ',' << mean << ',' << sem << ','
+            << acc.count << '\n';
+      }
+    }
+  }
+  if (args_.protein_contacts || args_.enrichment) {
+    std::ofstream out(join_output_path(
+        base_dir,
+        info_output.get_membrane_proximity_coupling_average_filename()));
+    out << std::fixed << std::setprecision(8);
+    out << "observable,group,leaflet,resname,mean_near,sem_near,mean_far,"
+           "sem_far,delta_near_minus_far,sem_delta,replicates\n";
+    for (const auto &[key, acc] : aggregate_proximity_) {
+      const auto near_stats =
+          mean_sem(ThicknessCell{acc.near_sum, acc.near_sum_sq,
+                                 acc.near_count});
+      const auto far_stats =
+          mean_sem(ThicknessCell{acc.far_sum, acc.far_sum_sq, acc.far_count});
+      const double delta =
+          std::isfinite(near_stats.first) && std::isfinite(far_stats.first)
+              ? near_stats.first - far_stats.first
+              : std::numeric_limits<double>::quiet_NaN();
+      const double sem_delta =
+          std::isfinite(near_stats.second) && std::isfinite(far_stats.second)
+              ? std::sqrt(near_stats.second * near_stats.second +
+                          far_stats.second * far_stats.second)
+              : std::numeric_limits<double>::quiet_NaN();
+      out << key << ',' << near_stats.first << ',' << near_stats.second << ','
+          << far_stats.first << ',' << far_stats.second << ',' << delta << ','
+          << sem_delta << ','
+          << std::max(acc.near_count, acc.far_count) << '\n';
+    }
+  }
+  if (args_.protein_contacts || args_.enrichment || args_.curvature == "grid") {
+    std::ofstream out(join_output_path(
+        base_dir, info_output.get_membrane_coupling_summary_average_filename()));
+    out << std::fixed << std::setprecision(8);
+    out << "module: membrane protein-lipid coupling replicate aggregate\n";
+    out << "replicates: " << aggregate_trajectories_ << '\n';
+    out << "contact_frames: " << aggregate_contact_frames_ << '\n';
+    out << "contact_rows: " << aggregate_contact_rows_ << '\n';
+    out << "average_policy: replicate means with SEM for stable scalar maps; "
+           "trajectory timeseries remain separate.\n";
   }
 }
 
@@ -1126,6 +1909,31 @@ void TitanMembraneAnalyzer::finalize_trajectory(
   export_flipflop_events(join_output_path(
       base_dir, info_output.get_membrane_flipflop_events_filename(
                     args, input_line, input_name)));
+  if (args_.protein_contacts || args_.enrichment) {
+    export_protein_lipid_contacts(join_output_path(
+        base_dir, info_output.get_membrane_protein_lipid_contacts_filename(
+                      args, input_line, input_name)));
+  }
+  if (args_.enrichment) {
+    export_lipid_enrichment(join_output_path(
+        base_dir, info_output.get_membrane_lipid_enrichment_filename(
+                      args, input_line, input_name)));
+  }
+  if (args_.curvature == "grid") {
+    export_curvature_map(join_output_path(
+        base_dir, info_output.get_membrane_curvature_map_filename(
+                      args, input_line, input_name)));
+  }
+  if (args_.protein_contacts || args_.enrichment) {
+    export_proximity_coupling(join_output_path(
+        base_dir, info_output.get_membrane_proximity_coupling_filename(
+                      args, input_line, input_name)));
+  }
+  if (args_.protein_contacts || args_.enrichment || args_.curvature == "grid") {
+    export_coupling_summary(join_output_path(
+        base_dir, info_output.get_membrane_coupling_summary_filename(
+                      args, input_line, input_name)));
+  }
   export_summary(join_output_path(
       base_dir,
       info_output.get_membrane_summary_filename(args, input_line, input_name)));

@@ -53,6 +53,15 @@ mol_info make_atom(std::size_t resnr, const std::string &name) {
   return atom;
 }
 
+mol_info make_protein_atom(std::size_t resnr, const std::string &name,
+                           const std::string &chain = "A",
+                           const std::string &resname = "LEU") {
+  mol_info atom(resnr, name, name, chain, resname);
+  atom.set_respos(resnr);
+  atom.set_internal_resnr(resnr);
+  return atom;
+}
+
 void append_lipid(Multi_MOL &lipids, MOL &frame, std::size_t resnr, double x,
                   double y, double head_z, bool upper) {
   lipids.info.push_back(make_atom(resnr, "PO4"));
@@ -91,6 +100,19 @@ Multi_MOL make_bilayer() {
       lipids.info.resize(lipids.parameters.size());
   }
   return lipids;
+}
+
+Multi_MOL make_nearby_protein() {
+  Multi_MOL protein;
+  MOL frame(make_box(), 0.0, "MARTINI");
+  for (const std::string &name : {"N", "CA", "CB", "CG"})
+    protein.info.push_back(make_protein_atom(1, name));
+  frame.pos.x.insert(frame.pos.x.end(), {5.0, 5.2, 5.4, 5.4});
+  frame.pos.y.insert(frame.pos.y.end(), {5.0, 5.2, 5.4, 5.4});
+  frame.pos.z.insert(frame.pos.z.end(), {6.0, 5.8, 5.6, 5.4});
+  protein.parameters.resize(protein.info.size());
+  protein.m_mol.push_back(std::move(frame));
+  return protein;
 }
 
 Multi_MOL make_undulating_bilayer() {
@@ -236,12 +258,58 @@ void run_user_leaflet_contract() {
           "user leaflet CSV controls runtime assignment");
 }
 
+void run_proximity_coupling_contract() {
+  const fs::path out_dir =
+      fs::temp_directory_path() / "titan_membrane_proximity_smoke";
+  fs::remove_all(out_dir);
+  fs::create_directories(out_dir);
+  std::fstream log((out_dir / "run.log").string(),
+                   std::ios::out | std::ios::trunc);
+  Multi_MOL lipids = make_bilayer();
+  Multi_MOL protein = make_nearby_protein();
+  arguments args;
+  args.membrane.flag_membrane = true;
+  args.membrane.normal = "z";
+  args.membrane.grid = "2,2";
+  args.membrane.protein_contacts = true;
+  args.membrane.enrichment = true;
+  args.membrane.curvature = "grid";
+  TitanExecutor executor(4);
+  TitanMembraneAnalyzer analyzer;
+  analyzer.configure(args.membrane);
+  analyzer.init(lipids, log);
+  analyzer.process_frame(lipids, &protein, 0, executor);
+  info output_info(args);
+  analyzer.finalize_trajectory(out_dir.string(), output_info, args,
+                               {"synthetic.pdb"}, 0, log);
+  const fs::path coupling_path = out_dir / "membrane_proximity_coupling.csv";
+  require(fs::exists(coupling_path),
+          "protein-proximity coupling output is written");
+  const std::string coupling = read_file(coupling_path);
+  require(coupling.find("apl_A2") != std::string::npos,
+          "proximity coupling includes APL rows");
+  require(coupling.find("thickness_A") != std::string::npos,
+          "proximity coupling includes thickness rows");
+  require(coupling.find("order_S") != std::string::npos,
+          "proximity coupling includes order rows");
+  require(coupling.find("curvature_proxy_Ainv") != std::string::npos,
+          "proximity coupling includes curvature rows");
+  require(coupling.find("lipid_enrichment") != std::string::npos,
+          "proximity coupling includes leaflet composition rows");
+  const std::string summary =
+      read_file(out_dir / "membrane_coupling_summary.dat");
+  require(summary.find("proximity_coupling_note: Near/far") !=
+              std::string::npos,
+          "coupling summary documents near/far policy");
+}
+
 } // namespace
 
 int main() {
   run_core_contract();
   run_auto_local_midplane_contract();
   run_user_leaflet_contract();
+  run_proximity_coupling_contract();
   std::cout << "PASS titan_membrane_smoke\n";
   return 0;
 }

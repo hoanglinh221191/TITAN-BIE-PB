@@ -62,6 +62,9 @@ void check_defaults() {
   require(args.edecomp.rank_by == "abs-mean", "ranking defaults to abs-mean");
   require(args.edecomp.frame_output == "off", "frame output defaults off");
   require(args.edecomp.perf == "summary", "performance output defaults summary");
+  require(!args.hotspot.flag_hotspot_report, "hotspot report defaults off");
+  require(args.hotspot.source == "both", "hotspot source defaults to both");
+  require(args.hotspot.rank_by == "combined", "hotspot rank defaults to combined");
 }
 
 void check_parser_contract() {
@@ -127,6 +130,33 @@ void check_parser_contract() {
   require(fmap.fmap_type == "residue-atom", "force-map type remains accepted");
   require(fmap.fmap_level == "per-res", "force-map level remains accepted");
   require(fmap.print_force_res, "force-res remains accepted");
+
+  arguments hotspot;
+  parse(hotspot, {"titan", "-hotspot-report=true"});
+  require(hotspot.hotspot.flag_hotspot_report, "hotspot report is enabled");
+  require(hotspot.hotspot.source == "both", "hotspot source defaults to both");
+  require(hotspot.hotspot.rank_by == "combined", "hotspot both defaults to combined");
+  require(hotspot.flag_cas, "hotspot both auto-enables CAS");
+  require(hotspot.edecomp.flag_edecomp, "hotspot both auto-enables EDecomp");
+
+  arguments hotspot_cas;
+  parse(hotspot_cas, {"titan", "-hotspot-report=true",
+                      "-hotspot-source=cas"});
+  require(hotspot_cas.hotspot.rank_by == "cas-ddg",
+          "hotspot CAS source defaults to CAS ddG ranking");
+  require(hotspot_cas.flag_cas, "hotspot CAS source enables CAS");
+  require(!hotspot_cas.edecomp.flag_edecomp,
+          "hotspot CAS source does not enable EDecomp");
+
+  arguments hotspot_edecomp;
+  parse(hotspot_edecomp, {"titan", "-hotspot-report=true",
+                          "-hotspot-source=edecomp"});
+  require(hotspot_edecomp.hotspot.rank_by == "edecomp-abs-mean",
+          "hotspot EDecomp source defaults to EDecomp ranking");
+  require(!hotspot_edecomp.flag_cas,
+          "hotspot EDecomp source does not enable CAS");
+  require(hotspot_edecomp.edecomp.flag_edecomp,
+          "hotspot EDecomp source enables EDecomp");
 }
 
 int run_probe(const std::string &probe) {
@@ -157,6 +187,16 @@ int run_probe(const std::string &probe) {
     parse(args, {"titan", "-new-emap"});
   } else if (probe == "--probe-legacy-use-force-energy") {
     parse(args, {"titan", "-useForceOptionforEnergy"});
+  } else if (probe == "--probe-hotspot-source") {
+    parse(args, {"titan", "-hotspot-report=true", "-hotspot-source=bad"});
+  } else if (probe == "--probe-hotspot-rank") {
+    parse(args, {"titan", "-hotspot-report=true", "-hotspot-rank-by=bad"});
+  } else if (probe == "--probe-hotspot-atom-edecomp") {
+    parse(args, {"titan", "-hotspot-report=true", "-hotspot-source=edecomp",
+                 "-edecomp-level=atom"});
+  } else if (probe == "--probe-hotspot-cas-rank-mismatch") {
+    parse(args, {"titan", "-hotspot-report=true", "-hotspot-source=cas",
+                 "-hotspot-rank-by=edecomp-abs-mean"});
   }
   return 0;
 }
@@ -192,6 +232,12 @@ void check_rejections(const fs::path &executable) {
   expect_reject(executable, "--probe-legacy-new-emap", "use -edecomp");
   expect_reject(executable, "--probe-legacy-use-force-energy", "use -edecomp");
   expect_reject(executable, "--probe-legacy-use-force-energy", "force maps");
+  expect_reject(executable, "--probe-hotspot-source", "-hotspot-source");
+  expect_reject(executable, "--probe-hotspot-rank", "-hotspot-rank-by");
+  expect_reject(executable, "--probe-hotspot-atom-edecomp",
+                "requires -edecomp-level=residue");
+  expect_reject(executable, "--probe-hotspot-cas-rank-mismatch",
+                "requires -hotspot-source=edecomp or both");
 }
 
 } // namespace

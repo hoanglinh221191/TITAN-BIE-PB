@@ -160,6 +160,13 @@ public:
   }
   string get_cas_summary_filename() const { return "cas_summary.dat"; }
   string get_cas_performance_filename() const { return "cas_performance.dat"; }
+  string get_hotspot_residue_ranking_filename() const {
+    return "hotspot_residue_ranking.csv";
+  }
+  string get_hotspot_summary_filename() const { return "hotspot_summary.dat"; }
+  string get_hotspot_bfactor_pdb_filename() const {
+    return "hotspot_bfactor.pdb";
+  }
   string get_titan_performance_summary_filename() const {
     return "titan_performance_summary.dat";
   }
@@ -169,6 +176,31 @@ public:
   string get_titan_performance_frames_filename() const {
     return "titan_performance_frames.csv";
   }
+  string get_uncertainty_summary_filename() const {
+    return "uncertainty_summary.dat";
+  }
+  string get_cmap_uncertainty_filename() const { return "cmap_uncertainty.csv"; }
+  string get_qnative_uncertainty_filename() const {
+    return "qnative_uncertainty.csv";
+  }
+  string get_dihedral_uncertainty_filename() const {
+    return "dihedral_uncertainty.csv";
+  }
+  string get_msd_uncertainty_filename() const { return "msd_uncertainty.csv"; }
+  string get_s2_uncertainty_filename() const { return "s2_uncertainty.csv"; }
+  string get_membrane_uncertainty_filename() const {
+    return "membrane_uncertainty.csv";
+  }
+  string get_edecomp_uncertainty_filename() const {
+    return "edecomp_uncertainty.csv";
+  }
+  string get_titan_outputs_manifest_filename() const {
+    return "titan_outputs_manifest.csv";
+  }
+  string get_titan_run_config_summary_filename() const {
+    return "titan_run_config_summary.dat";
+  }
+  string get_titan_schema_filename() const { return "titan_schema.json"; }
   string get_dssp_mol1_filename() const { return "dssp_mol1.dat"; }
   string get_dssp_mol2_filename() const { return "dssp_mol2.dat"; }
   string get_dssp_mol1_content_filename() const {
@@ -672,6 +704,36 @@ public:
     return indexed_analysis_filename(Arguments, input_line, input_name,
                                      "membrane_flipflop_events", ".csv");
   }
+  string get_membrane_protein_lipid_contacts_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_protein_lipid_contacts", ".csv");
+  }
+  string get_membrane_lipid_enrichment_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_lipid_enrichment", ".csv");
+  }
+  string get_membrane_curvature_map_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_curvature_map", ".csv");
+  }
+  string get_membrane_proximity_coupling_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_proximity_coupling", ".csv");
+  }
+  string get_membrane_coupling_summary_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return indexed_analysis_filename(Arguments, input_line, input_name,
+                                     "membrane_coupling_summary", ".dat");
+  }
   string get_membrane_summary_average_filename() const {
     return "membrane_summary_average.dat";
   }
@@ -680,6 +742,18 @@ public:
   }
   string get_membrane_order_parameters_average_filename() const {
     return "membrane_order_parameters_average.csv";
+  }
+  string get_membrane_lipid_enrichment_average_filename() const {
+    return "membrane_lipid_enrichment_average.csv";
+  }
+  string get_membrane_curvature_map_average_filename() const {
+    return "membrane_curvature_map_average.csv";
+  }
+  string get_membrane_proximity_coupling_average_filename() const {
+    return "membrane_proximity_coupling_average.csv";
+  }
+  string get_membrane_coupling_summary_average_filename() const {
+    return "membrane_coupling_summary_average.dat";
   }
   string get_s2_order_parameters_filename(
       const arguments &Arguments, const std::vector<string> &input_line,

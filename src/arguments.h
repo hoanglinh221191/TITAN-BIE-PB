@@ -77,6 +77,19 @@ struct PerformanceReportArgs {
   std::string mode{"off"};
 };
 
+struct UncertaintyArgs {
+  std::string mode{"off"};
+  std::string blocks{"auto"};
+  int bootstrap_samples{200};
+  unsigned int seed{42};
+};
+
+struct OutputManifestArgs {
+  bool dry_run{false};
+  bool output_manifest{false};
+  std::string schema_export{"off"};
+};
+
 struct GistArgs {
   bool flag_gist{false};
   double gist_resolution{0.5};
@@ -513,6 +526,10 @@ struct MembraneArgs {
   std::string leaflet_file{};
   int flipflop_persistence{3};
   int resolved_group{-1};
+  bool protein_contacts{false};
+  double contact_cut{6.5};
+  bool enrichment{false};
+  std::string curvature{"off"};
 
   std::string validation_error() const {
     const auto is_nonnegative_integer = [](const std::string &value) {
@@ -551,6 +568,10 @@ struct MembraneArgs {
       return "-membrane-leaflet=user requires -membrane-leaflet-file.";
     if (leaflet != "user" && !leaflet_file.empty())
       return "-membrane-leaflet-file is valid only with -membrane-leaflet=user.";
+    if (!(contact_cut > 0.0) || !std::isfinite(contact_cut))
+      return "-membrane-contact-cut must be a finite positive distance in A.";
+    if (curvature != "off" && curvature != "grid")
+      return "-membrane-curvature must be one of off, grid.";
     return {};
   }
 };
@@ -749,6 +770,28 @@ struct EDecompArgs {
   }
 };
 
+struct HotspotReportArgs {
+  bool flag_hotspot_report{false};
+  std::string source{"both"};
+  std::string rank_by{"combined"};
+  bool rank_by_explicit{false};
+
+  std::string validation_error() const {
+    if (source != "cas" && source != "edecomp" && source != "both")
+      return "-hotspot-source must be one of cas, edecomp, both.";
+    if (rank_by != "cas-ddg" && rank_by != "edecomp-abs-mean" &&
+        rank_by != "combined")
+      return "-hotspot-rank-by must be one of cas-ddg, edecomp-abs-mean, combined.";
+    if (source == "cas" && rank_by == "edecomp-abs-mean")
+      return "-hotspot-rank-by=edecomp-abs-mean requires -hotspot-source=edecomp or both.";
+    if (source == "edecomp" && rank_by == "cas-ddg")
+      return "-hotspot-rank-by=cas-ddg requires -hotspot-source=cas or both.";
+    if (source != "both" && rank_by == "combined")
+      return "-hotspot-rank-by=combined requires -hotspot-source=both.";
+    return {};
+  }
+};
+
 struct arguments {
 private:
   string Buildnumber;
@@ -762,6 +805,8 @@ public:
   MsmArgs msm;
   FeatureExportArgs feature_export;
   PerformanceReportArgs perf_report;
+  UncertaintyArgs uncertainty;
+  OutputManifestArgs output_manifest;
   GistArgs gist;
   PbeArgs pbe;
   DeArgs de;
@@ -790,6 +835,7 @@ public:
   HBondKineticsArgs hbk;
   ZtsArgs zts;
   EDecompArgs edecomp;
+  HotspotReportArgs hotspot;
   std::string eq_weight_source{"auto"};
 
   // LSP-MD (Kornev, JCTC 2025) — Local Spatial Pattern network analysis

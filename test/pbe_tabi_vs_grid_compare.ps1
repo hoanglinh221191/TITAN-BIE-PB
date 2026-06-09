@@ -51,6 +51,8 @@ $FixtureMap = @{
     'mini-protein' = 'mini-protein.pqr'
     'charged-peptide' = 'charged-peptide.pqr'
     'compact-mini-protein' = 'compact-mini-protein.pqr'
+    'research-medium' = 'rec_027.pqr'
+    'research-large' = 'rec_0.pqr'
     '1a63' = '1a63.pqr'
     'barnase_linear_salt0' = 'barnase.pqr'
     'barnase_linear_salt015' = 'barnase.pqr'
@@ -189,11 +191,42 @@ function Convert-DelPhiPdbToPqr([string]$PdbPath, [string]$CrgPath, [string]$Siz
     Set-Content -LiteralPath $OutPath -Value $out -Encoding ASCII
 }
 
+function Convert-ResearchPqr([string]$SourcePath, [string]$RunDir, [string]$OutputName) {
+    if (-not (Test-Path -LiteralPath $SourcePath)) { return $SourcePath }
+    $outPath = Join-Path $RunDir $OutputName
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($line in Get-Content -LiteralPath $SourcePath) {
+        $trim = $line.Trim()
+        if ($trim.StartsWith('ATOM') -or $trim.StartsWith('HETATM')) {
+            $tokens = @($trim -split '\s+' | Where-Object { $_ })
+            if ($tokens.Count -ge 10) {
+                $radius = 0.0
+                if ([double]::TryParse($tokens[$tokens.Count - 1],
+                        [System.Globalization.NumberStyles]::Float,
+                        $InvariantCulture, [ref]$radius) -and $radius -le 0.0) {
+                    $tokens[$tokens.Count - 1] = '0.600'
+                    $out.Add(($tokens -join ' '))
+                    continue
+                }
+            }
+        }
+        $out.Add($line)
+    }
+    Set-Content -LiteralPath $outPath -Value $out -Encoding ASCII
+    return $outPath
+}
+
 function Resolve-ComparePqr([string]$Fixture, [string]$RunDir) {
     $pqrName = $FixtureMap[$Fixture]
     if ([string]::IsNullOrWhiteSpace($pqrName)) { throw "Unknown fixture: $Fixture" }
     $localPqr = Join-Path $InputRoot $pqrName
     if (Test-Path -LiteralPath $localPqr) { return $localPqr }
+    if ($Fixture -eq 'research-medium') {
+        return Convert-ResearchPqr -SourcePath (Join-Path $RepoRoot 'example\1\rec_027.pqr') -RunDir $RunDir -OutputName 'research-medium_normalized.pqr'
+    }
+    if ($Fixture -eq 'research-large') {
+        return Convert-ResearchPqr -SourcePath (Join-Path $RepoRoot 'example\4\rec_0.pqr') -RunDir $RunDir -OutputName 'research-large_normalized.pqr'
+    }
     if ($Fixture -notlike 'barnase*') { return $localPqr }
     $fixtureDir = Join-Path $PyDelPhiRoot 'pydelphi\data\test_examples\barnase'
     $directPqr = Join-Path $fixtureDir $pqrName
@@ -245,13 +278,14 @@ function New-ArgFile([string]$RunDir, [string]$Backend, [string]$PqrPath, [strin
     $libPath = Convert-ToTitanPath ((Resolve-Path -LiteralPath (Join-Path $RepoRoot 'lib_ff')).Path.TrimEnd('\') + '\')
     $gold = Get-GoldenRow $Fixture
     $salt = Get-RowValue $gold 'salt_M' '0.15'
+    $isResearch = $Fixture -eq 'research-medium' -or $Fixture -eq 'research-large'
     $scale = if ($Fixture -like 'barnase*') { Get-RowValue $gold 'scale' '2.0' } else { '0.35' }
     $gridSize = if ($Fixture -like 'barnase*') { Get-RowValue $gold 'grid_size' '' } else { '' }
     $surface = if ($Fixture -like 'barnase*') { 'vdw' } else { 'vdw' }
     $margin = if ($Fixture -like 'barnase*') { '0.0' } else { '2.0' }
-    $maxGrid = if ($Fixture -like 'barnase*') { '4000000' } else { '300000' }
-    $maxIter = if ($Fixture -like 'barnase*') { '1200' } else { '800' }
-    $rms = if ($Fixture -like 'barnase*') { '5e-4' } else { '1e-4' }
+    $maxGrid = if ($Fixture -like 'barnase*' -or $isResearch) { '4000000' } else { '300000' }
+    $maxIter = if ($Fixture -like 'barnase*' -or $isResearch) { '1200' } else { '800' }
+    $rms = if ($Fixture -like 'barnase*' -or $isResearch) { '5e-4' } else { '1e-4' }
     $argLines = @(
         "-f=$(Convert-ToTitanPath $pdbPath)",
         '-1pdb',

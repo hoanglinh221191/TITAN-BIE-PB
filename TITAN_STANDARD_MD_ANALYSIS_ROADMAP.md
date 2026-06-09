@@ -720,6 +720,10 @@ Public arg.in contract:
 - `-membrane-leaflet=<auto|upper-lower|user>`
 - `-membrane-leaflet-file=<csv>`
 - `-membrane-flipflop-persistence=<N>`
+- `-membrane-protein-contacts=<true|false>`
+- `-membrane-contact-cut=<A>`
+- `-membrane-enrichment=<true|false>`
+- `-membrane-curvature=<off|grid>`
 
 Defaults are inert: membrane analysis is off, selector fields use `auto`,
 `-membrane-leaflet-file` is empty, and flip-flop persistence is 3 frames.
@@ -747,6 +751,27 @@ Status: implemented in this branch.
 - Require persistent leaflet reassignment for the configured number of frames
   before reporting a flip-flop event.
 - Add aggregate `membrane_order_parameters_average.csv`.
+
+Protein-lipid extension v1/v2
+
+Status: implemented in this branch. V2 protein-proximity coupling is complete.
+
+- `-membrane-protein-contacts=true`, `-membrane-enrichment=true`, and
+  `-membrane-curvature=grid` auto-enable `-membrane=true`.
+- Contacts use mol1 protein residue side-chain COM with all-atom fallback and
+  MARTINI lipid head/tail bead sites. Default cutoff is 6.5 A.
+- Export `membrane_protein_lipid_contacts.csv`,
+  `membrane_lipid_enrichment.csv`, `membrane_curvature_map.csv`,
+  `membrane_proximity_coupling.csv`, and `membrane_coupling_summary.dat`.
+- Multi-input aggregates add `membrane_lipid_enrichment_average.csv`,
+  `membrane_curvature_map_average.csv`,
+  `membrane_proximity_coupling_average.csv`, and
+  `membrane_coupling_summary_average.dat`.
+- `membrane_proximity_coupling.csv` reports near-vs-far deltas for APL,
+  thickness, MARTINI tail order, curvature proxy, contact probability, and
+  leaflet composition. Near lipids are lipids with at least one protein-lipid
+  contact in that frame; far lipids are non-contacting lipids in the same
+  leaflet.
 
 Implementation notes:
 

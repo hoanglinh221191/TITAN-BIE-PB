@@ -103,6 +103,33 @@ GENERAL OUTPUT BEHAVIOR
       titan_performance_modules.csv; detail also writes
       titan_performance_frames.csv.
 
+  Shared uncertainty / convergence diagnostics:
+    -uncertainty=<off|block|bootstrap>
+      Default: off. When enabled, Titan writes opt-in sidecar diagnostics and
+      leaves all point-estimate output schemas unchanged.
+    -uncertainty-blocks=<auto|N>
+      Default: auto. auto uses deterministic contiguous blocks: insufficient
+      below 10 samples, 5 blocks for 10..49, and min(20,sqrt(N)) from 50 up.
+    -uncertainty-bootstrap=<N>
+      Default: 200. Used only for bootstrap mode, resampling block means.
+    -uncertainty-seed=<N>
+      Default: 42. Deterministic bootstrap seed.
+    Output sidecars include uncertainty_summary.dat and module files such as
+      cmap_uncertainty.csv, qnative_uncertainty.csv,
+      dihedral_uncertainty.csv, msd_uncertainty.csv, s2_uncertainty.csv,
+      membrane_uncertainty.csv, and edecomp_uncertainty.csv.
+
+  Output manifest / dry-run:
+    -output-manifest=<true|false>
+      Default: false. Writes titan_outputs_manifest.csv and
+      titan_run_config_summary.dat for the resolved configuration.
+    -dry-run=<true|false>
+      Default: false. Implies -output-manifest=true, writes manifest/schema
+      sidecars, then exits before coordinate loading and trajectory processing.
+    -schema-export=<off|json>
+      Default: off. json writes titan_schema.json with the public option
+      schema used by the manifest/dry-run layer.
+
 IMPORTANT NOTES
 
   - When DHAM is not enabled, or DHAM does not converge, the rest of the
@@ -823,6 +850,10 @@ IMPORTANT NOTES
     -membrane-leaflet=<auto|upper-lower|user>
     -membrane-leaflet-file=<csv>
     -membrane-flipflop-persistence=<N>
+    -membrane-protein-contacts=<true|false>
+    -membrane-contact-cut=<A>
+    -membrane-enrichment=<true|false>
+    -membrane-curvature=<off|grid>
 
   Per-trajectory outputs:
     membrane_leaflets.csv
@@ -834,11 +865,20 @@ IMPORTANT NOTES
     membrane_order_parameters.csv
     membrane_interdigitation.dat
     membrane_flipflop_events.csv
+    membrane_protein_lipid_contacts.csv
+    membrane_lipid_enrichment.csv
+    membrane_curvature_map.csv
+    membrane_proximity_coupling.csv
+    membrane_coupling_summary.dat
 
   Multi-input aggregate outputs:
     membrane_summary_average.dat
     membrane_thickness_map_average.csv
     membrane_order_parameters_average.csv
+    membrane_lipid_enrichment_average.csv
+    membrane_curvature_map_average.csv
+    membrane_proximity_coupling_average.csv
+    membrane_coupling_summary_average.dat
 
   Notes:
     - Membrane analysis defaults off; selector fields default to auto.
@@ -848,6 +888,13 @@ IMPORTANT NOTES
       cell, and clamps each axis to 4..64 bins.
     - Auto normal uses PCA with sign continuity. Auto leaflets use periodic
       local-neighborhood PCA midplanes for undulating bilayers.
+    - `-membrane-protein-contacts`, `-membrane-enrichment`, and
+      `-membrane-curvature=grid` auto-enable membrane analysis.
+    - Protein-lipid contacts are structural contacts between mol1 residue
+      side-chain COMs and MARTINI lipid head/tail beads, not energy terms.
+    - membrane_proximity_coupling.csv reports near-vs-far APL, thickness,
+      order, curvature, contact-probability, and leaflet-composition deltas
+      using per-frame protein-lipid contacts.
     - membrane_summary.dat records a reference note for interpretation.
     - arg.in uses the equals syntax shown above; bare `-membrane` also enables
       the analyzer.
@@ -1592,6 +1639,15 @@ IMPORTANT NOTES
       cas_summary.dat
       cas_performance.dat
 
+  Hotspot report:
+    `-hotspot-report=true` writes a residue-level CAS/EDecomp consensus
+    ranking. The combined score is dimensionless rank consensus, not a new
+    physical energy; raw CAS and EDecomp components remain in the CSV.
+    Outputs include:
+      hotspot_residue_ranking.csv
+      hotspot_summary.dat
+      hotspot_bfactor.pdb
+
   TDA:
     Topological data analysis of structure/geometry.
 
@@ -2222,6 +2278,13 @@ IMPORTANT NOTES
                         Legacy -emap, -emap-level, -energy-res, -new-emap,
                         and -useForceOptionforEnergy now fail; migrate to
                         -edecomp=true and -edecomp-*.
+  -hotspot-report=<b>   CAS + EDecomp residue hotspot report. Default: false
+  -hotspot-source=<m>   cas, edecomp, or both. Default: both
+                        cas auto-enables -cas=true; edecomp auto-enables
+                        -edecomp=true and requires residue or both level.
+  -hotspot-rank-by=<m>  cas-ddg, edecomp-abs-mean, or combined.
+                        Defaults to combined for source=both, cas-ddg for
+                        source=cas, and edecomp-abs-mean for source=edecomp.
   -fmap [type]          Force map type
   -fmap-level <level>   per-res or all
   -force-res            Per-residue force decomposition
@@ -2355,6 +2418,14 @@ IMPORTANT NOTES
                         Required exactly when -membrane-leaflet=user
   -membrane-flipflop-persistence=<N>
                         Persistent reassignment frames. Default: 3
+  -membrane-protein-contacts=<bool>
+                        Protein residue side-chain COM to lipid bead contacts
+  -membrane-contact-cut=<A>
+                        Protein-lipid contact cutoff. Default: 6.5
+  -membrane-enrichment=<bool>
+                        Lipid resname/leaflet enrichment near mol1 protein
+  -membrane-curvature=<off|grid>
+                        Headgroup-grid curvature proxy. Default: off
 
   -s2                   Enable Phase 6 NMR order-parameter analysis
   -s2=<bool>            true or false. Default: false
@@ -2403,6 +2474,17 @@ IMPORTANT NOTES
   -perf-report=<mode>   off | summary | detail. Default: off
                         Shared cross-module timing/counter report. It keeps
                         existing module-specific performance files unchanged.
+  -uncertainty=<mode>   off | block | bootstrap. Default: off
+  -uncertainty-blocks=<auto|N>
+  -uncertainty-bootstrap=<N>
+  -uncertainty-seed=<N>
+                        Opt-in block/bootstrap sidecars; point estimates and
+                        existing output schemas are unchanged.
+  -output-manifest=<b>  Write titan_outputs_manifest.csv and
+                        titan_run_config_summary.dat. Default: false
+  -dry-run=<b>          Validate and write manifest/schema/config sidecars,
+                        then exit before trajectory processing. Default: false
+  -schema-export=<m>    off | json. Default: off
 
   -zts                  Zero-Temperature String minimum-energy path on PCA/TICA FES
   -zts-domain=<mode>    pca | tica. Default: pca unless both domains are active
@@ -2647,6 +2729,12 @@ IMPORTANT NOTES
 
   -cas[=true|false]     GBSA alanine-like side-chain neutralization scan.
                         Auto-enables -gbsa; incompatible with -nocal=true.
+  -hotspot-report=<bool>
+                        Export CAS/EDecomp hotspot_residue_ranking.csv,
+                        hotspot_summary.dat, and hotspot_bfactor.pdb when
+                        a B-factor template is available.
+  -hotspot-source=<m>   cas, edecomp, or both. Default: both
+  -hotspot-rank-by=<m>  cas-ddg, edecomp-abs-mean, or combined
   -tda                  Topological data analysis
   -tda-max-points=<N>   Reservoir cap for TDA point-cloud CSV. Default: 200000
   -ml                   ML affinity prediction

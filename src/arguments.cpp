@@ -632,6 +632,52 @@ int arguments::post_process() {
         "Performance report: -perf-report must be one of off, summary, detail.");
     exit(EXIT_FAILURE);
   }
+  std::transform(uncertainty.mode.begin(), uncertainty.mode.end(),
+                 uncertainty.mode.begin(), [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  if (uncertainty.mode != "off" && uncertainty.mode != "block" &&
+      uncertainty.mode != "bootstrap") {
+    TitanUI::print_error(
+        "Uncertainty: -uncertainty must be one of off, block, bootstrap.");
+    exit(EXIT_FAILURE);
+  }
+  std::transform(uncertainty.blocks.begin(), uncertainty.blocks.end(),
+                 uncertainty.blocks.begin(), [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  if (uncertainty.blocks != "auto") {
+    try {
+      const int n_blocks = std::stoi(uncertainty.blocks);
+      if (n_blocks < 1) {
+        TitanUI::print_error(
+            "Uncertainty: -uncertainty-blocks must be auto or a positive integer.");
+        exit(EXIT_FAILURE);
+      }
+    } catch (...) {
+      TitanUI::print_error(
+          "Uncertainty: -uncertainty-blocks must be auto or a positive integer.");
+      exit(EXIT_FAILURE);
+    }
+  }
+  if (uncertainty.bootstrap_samples < 1) {
+    TitanUI::print_error(
+        "Uncertainty: -uncertainty-bootstrap must be a positive integer.");
+    exit(EXIT_FAILURE);
+  }
+  std::transform(output_manifest.schema_export.begin(),
+                 output_manifest.schema_export.end(),
+                 output_manifest.schema_export.begin(), [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  if (output_manifest.schema_export != "off" &&
+      output_manifest.schema_export != "json") {
+    TitanUI::print_error(
+        "Output manifest: -schema-export must be one of off, json.");
+    exit(EXIT_FAILURE);
+  }
+  if (output_manifest.dry_run)
+    output_manifest.output_manifest = true;
   if (cmap.legacy_alias_enabled) {
     cmap.flag_cmap = true;
     cmap.mode = "sidechain-com";

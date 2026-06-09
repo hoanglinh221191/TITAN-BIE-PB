@@ -637,9 +637,64 @@ int arguments::parse_arguments(int argc, char **argv) {
       edecomp.perf = lowercase_copy(common_value);
       continue;
     }
+    if (consume_bool_option(arg, {"-hotspot-report", "--hotspot-report"},
+                            hotspot.flag_hotspot_report, i)) {
+      continue;
+    }
+    if (consume_option_value(arg, {"-hotspot-source", "--hotspot-source"},
+                             common_value, i)) {
+      hotspot.flag_hotspot_report = true;
+      hotspot.source = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-hotspot-rank-by", "--hotspot-rank-by"},
+                             common_value, i)) {
+      hotspot.flag_hotspot_report = true;
+      hotspot.rank_by = lowercase_copy(common_value);
+      hotspot.rank_by_explicit = true;
+      continue;
+    }
     if (consume_option_value(arg, {"-perf-report", "--perf-report"},
                              common_value, i)) {
       perf_report.mode = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-uncertainty", "--uncertainty"},
+                             common_value, i)) {
+      uncertainty.mode = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-uncertainty-blocks",
+                                   "--uncertainty-blocks"},
+                             common_value, i)) {
+      uncertainty.blocks = lowercase_copy(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-uncertainty-bootstrap",
+                                   "--uncertainty-bootstrap"},
+                             common_value, i)) {
+      uncertainty.bootstrap_samples = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-uncertainty-seed",
+                                   "--uncertainty-seed"},
+                             common_value, i)) {
+      uncertainty.seed = static_cast<unsigned int>(stoul(common_value));
+      continue;
+    }
+    if (consume_bool_option(arg, {"-dry-run", "--dry-run"},
+                            output_manifest.dry_run, i)) {
+      if (output_manifest.dry_run)
+        output_manifest.output_manifest = true;
+      continue;
+    }
+    if (consume_bool_option(arg, {"-output-manifest", "--output-manifest"},
+                            output_manifest.output_manifest, i)) {
+      continue;
+    }
+    if (consume_option_value(arg, {"-schema-export", "--schema-export"},
+                             common_value, i)) {
+      output_manifest.schema_export = lowercase_copy(common_value);
       continue;
     }
 
@@ -979,6 +1034,48 @@ int arguments::parse_arguments(int argc, char **argv) {
             "Membrane: -membrane-flipflop-persistence must be an integer >= 1.");
         exit(EXIT_FAILURE);
       }
+      continue;
+    }
+    if (consume_bool_option(arg,
+                            {"-membrane-protein-contacts",
+                             "--membrane-protein-contacts"},
+                            membrane.protein_contacts, i)) {
+      if (membrane.protein_contacts)
+        membrane.flag_membrane = true;
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-membrane-contact-cut",
+                              "--membrane-contact-cut"},
+                             common_value, i)) {
+      membrane.flag_membrane = true;
+      try {
+        size_t parsed_chars = 0;
+        membrane.contact_cut = stod(common_value, &parsed_chars);
+        if (parsed_chars != common_value.size())
+          throw std::invalid_argument("trailing characters");
+      } catch (...) {
+        TitanUI::print_error(
+            "Membrane: -membrane-contact-cut must be a positive number.");
+        exit(EXIT_FAILURE);
+      }
+      continue;
+    }
+    if (consume_bool_option(arg, {"-membrane-enrichment",
+                                  "--membrane-enrichment"},
+                            membrane.enrichment, i)) {
+      if (membrane.enrichment) {
+        membrane.flag_membrane = true;
+        membrane.protein_contacts = true;
+      }
+      continue;
+    }
+    if (consume_option_value(arg, {"-membrane-curvature",
+                                   "--membrane-curvature"},
+                             common_value, i)) {
+      membrane.curvature = lowercase_copy(common_value);
+      if (membrane.curvature == "grid")
+        membrane.flag_membrane = true;
       continue;
     }
     if (consume_option_value(arg, {"-graph-source", "--graph-source"},
@@ -5036,6 +5133,35 @@ int arguments::parse_arguments(int argc, char **argv) {
     flag_use_common_topo = true;
   }
 
+  if (hotspot.flag_hotspot_report) {
+    hotspot.source = lowercase_copy(hotspot.source);
+    hotspot.rank_by = lowercase_copy(hotspot.rank_by);
+    if (!hotspot.rank_by_explicit) {
+      if (hotspot.source == "cas")
+        hotspot.rank_by = "cas-ddg";
+      else if (hotspot.source == "edecomp")
+        hotspot.rank_by = "edecomp-abs-mean";
+      else
+        hotspot.rank_by = "combined";
+    }
+    if (const std::string validation_error = hotspot.validation_error();
+        !validation_error.empty()) {
+      TitanUI::print_error("Hotspot report: " + validation_error);
+      exit(EXIT_FAILURE);
+    }
+    if (hotspot.source == "cas" || hotspot.source == "both")
+      flag_cas = true;
+    if (hotspot.source == "edecomp" || hotspot.source == "both") {
+      edecomp.flag_edecomp = true;
+      if (edecomp.level == "atom") {
+        TitanUI::print_error(
+            "Hotspot report: EDecomp hotspot ranking requires "
+            "-edecomp-level=residue or -edecomp-level=both.");
+        exit(EXIT_FAILURE);
+      }
+    }
+  }
+
   if (edecomp.flag_edecomp) {
     const std::string validation_error = edecomp.validation_error();
     if (!validation_error.empty()) {
@@ -5109,7 +5235,8 @@ arguments::tokenize_arg_file(const std::string &filename) {
         value = value.substr(0, ve + 1);
 
       if (flag == "-pbctopo-anchor-backend" || flag == "-community" ||
-          flag == "-edecomp" || flag == "-membrane" || flag == "-s2" ||
+          flag == "-edecomp" || flag == "-hotspot-report" ||
+          flag == "-membrane" || flag == "-s2" ||
           flag == "-s2-bfactor-pdb") {
         tokens.push_back(flag + "=" + value);
       } else {

@@ -19,6 +19,7 @@
 #include "engine_postproc.h"
 #include "titan_alignment.h"
 #include "titan_build_info.h"
+#include "titan_config_schema.h"
 #include "titan_contact_map.h"
 #include "titan_dihedral.h"
 #include "titan_qnative.h"
@@ -35,10 +36,12 @@
 #include "titan_dssp.h"
 #include "titan_energy_decomp_engine.h"
 #include "titan_hbond_kinetics.h"
+#include "titan_hotspot_report.h"
 #include "titan_lj.h"
 #include "titan_msd.h"
 #include "titan_membrane.h"
 #include "titan_observable_features.h"
+#include "titan_output_manifest.h"
 #include "titan_performance_observer.h"
 #include "titan_rg.h"
 #include "titan_rms.h"
@@ -46,6 +49,7 @@
 #include "titan_sparse_graph_module.h"
 #include "titan_sg_streaming.h"
 #include "titan_sq.h"
+#include "titan_uncertainty.h"
 #include "titan_umap.h"
 #include "water_analysis.h"
 
@@ -847,7 +851,6 @@ int engine(arguments &Arguments) {
 
   /************************************/
   fstream cal_out;
-  cal_out.open("cal.txt", ios::out);
   /*************************************/
   fstream log;
   log.open("log.txt", ios::out);
@@ -856,6 +859,31 @@ int engine(arguments &Arguments) {
   TitanUI::log_logo(log);
   /*************************************/
   /******************************************/
+
+  if (Arguments.output_manifest.output_manifest ||
+      Arguments.output_manifest.schema_export == "json") {
+    auto manifest_rows =
+        titan_output_manifest::build_output_manifest(Arguments, info_output);
+    titan_output_manifest::export_output_manifest(
+        manifest_rows, info_output.get_titan_outputs_manifest_filename(), &log);
+    titan_output_manifest::export_run_config_summary(
+        Arguments, manifest_rows,
+        info_output.get_titan_run_config_summary_filename(), &log);
+    if (Arguments.output_manifest.schema_export == "json") {
+      titan_config_schema::export_schema_json(
+          Arguments, info_output.get_titan_schema_filename(), &log);
+    }
+    if (Arguments.output_manifest.dry_run) {
+      TitanUI::print_info(
+          "Dry-run complete: wrote manifest/config/schema outputs and skipped trajectory processing.");
+      TitanUI::log_message(
+          log,
+          "[DryRun] Exiting before coordinate loading and trajectory processing.");
+      return 0;
+    }
+  }
+
+  cal_out.open("cal.txt", ios::out);
 
   if (Arguments.com_dis_energy_2mol != 4) {
     for (size_t i{}; i < paths.get_size(); ++i) {
@@ -1039,6 +1067,8 @@ int engine(arguments &Arguments) {
     append_module_label(active_modules, "EDecomp");
   if (edecomp_gbsa_requested(Arguments))
     append_module_label(active_modules, "EDecomp-GBSA");
+  if (Arguments.hotspot.flag_hotspot_report)
+    append_module_label(active_modules, "Hotspot");
   if (Arguments.flag_allostery)
     append_module_label(active_modules, "Allostery");
   if (Arguments.lspmd.flag_lspmd)
@@ -3072,8 +3102,8 @@ int engine(arguments &Arguments) {
           if (membrane_analyzer.enabled() &&
               chunk_snap_idx < membrane_traj.m_mol.size()) {
             auto start_membrane = std::chrono::steady_clock::now();
-            membrane_analyzer.process_frame(membrane_traj, chunk_snap_idx,
-                                            executor);
+            membrane_analyzer.process_frame(membrane_traj, &pro_in,
+                                            chunk_snap_idx, executor);
             const auto end_membrane = std::chrono::steady_clock::now();
             time_membrane +=
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -4177,8 +4207,8 @@ int engine(arguments &Arguments) {
         if (membrane_analyzer.enabled() &&
             chunk_snap_idx < membrane_traj.m_mol.size()) {
           auto start_membrane = std::chrono::steady_clock::now();
-          membrane_analyzer.process_frame(membrane_traj, chunk_snap_idx,
-                                          executor);
+          membrane_analyzer.process_frame(membrane_traj, &pro_in,
+                                          chunk_snap_idx, executor);
           const auto end_membrane = std::chrono::steady_clock::now();
           time_membrane +=
               std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -4702,7 +4732,7 @@ int engine(arguments &Arguments) {
 
       if (membrane_analyzer.enabled() && !membrane_traj.m_mol.empty()) {
         auto start_membrane = std::chrono::steady_clock::now();
-        membrane_analyzer.process_frame(membrane_traj, 0, executor);
+        membrane_analyzer.process_frame(membrane_traj, &pro_in, 0, executor);
         time_membrane +=
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start_membrane);
@@ -5464,6 +5494,22 @@ int engine(arguments &Arguments) {
   auto time_pp_gbsa = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_gbsa);
 
+  if (Arguments.hotspot.flag_hotspot_report) {
+    try {
+      TitanUI::print_module_header("CAS + EDecomp Hotspot Report");
+      titan_hotspot::export_report(
+          ".", titan_hotspot::make_config_from_arguments(Arguments,
+                                                         info_output));
+      TitanUI::log_kv(log, "Hotspot Report",
+                      info_output.get_hotspot_residue_ranking_filename());
+      TitanUI::print_info("Hotspot report exported to " +
+                          info_output.get_hotspot_residue_ranking_filename());
+    } catch (const std::exception &e) {
+      TitanUI::print_error(std::string("Hotspot report: ") + e.what());
+      return 1;
+    }
+  }
+
   auto start_pp_dssp = std::chrono::steady_clock::now();
   run_dssp_postproc(Arguments, dssp_mol1_analyzer, dssp_mol2_analyzer,
                     info_output, log);
@@ -5671,6 +5717,8 @@ int engine(arguments &Arguments) {
          "----------\n";
   TitanUI::log_time(log, "TOTAL POST-PROCESSING",
                     total_postproc.count() / 1000.0);
+
+  titan_uncertainty::export_uncertainty_outputs(Arguments, info_output, log);
 
   perf_observer.export_outputs(
       info_output.get_titan_performance_summary_filename(),

@@ -6,6 +6,58 @@ TABI-PB 2.0 coverage.
 
 Last updated: 2026-05-16
 
+## Phase 7 Decision Gate - Benchmark-Gated Direction
+
+Status: implemented as a benchmark gate harness.
+
+Phase 7 intentionally does not add new solver machinery. The gate script
+`test/pbe_tabi_phase7_gate.ps1` wraps the existing PBE/TABI perf matrix and
+exports a normalized decision package:
+
+```text
+test/tmp/pbe_tabi_phase7_gate/pbe_tabi_phase7_matrix.csv
+test/tmp/pbe_tabi_phase7_gate/pbe_tabi_phase7_decision.csv
+test/tmp/pbe_tabi_phase7_gate/pbe_tabi_phase7_summary.dat
+```
+
+The gate compares `grid`, `tabi_direct`, and `tabi_treecode` on the selected
+research fixtures, records wall time, RSS, energy/accuracy status, GMRES
+iterations, final residuals, accepted-miss evidence when present, and failure
+modes. The current built-in Phase 7 fixtures are:
+
+- `research-medium`: `example/1/rec_027.pqr` (~6k atoms, charged/radius PQR).
+- `research-large`: `example/4/rec_0.pqr` (~12.7k atoms, charged/radius PQR).
+
+TABI can become a promotion candidate only when treecode rows pass accuracy and
+accepted-miss evidence and also show at least one practical advantage:
+
+- at least `30%` lower memory than grid on two or more medium fixtures;
+- runtime within `1.25x` grid on two or more medium fixtures;
+- grid preflight/memory failure while TABI passes the same target fixture.
+
+Current production decision: keep the finite-difference `grid` backend as the
+default. TABI remains hidden/experimental or explicit opt-in until a full
+medium-fixture gate run emits `promote_candidate`. Missing accepted-miss
+evidence is treated conservatively and blocks promotion.
+
+The gate resolves the research fixtures directly from `example/` and therefore
+does not require `test/pbe_inputs_local` for the Phase 7 decision path.
+
+Latest local Phase 7 evidence with `-CaseTimeoutSeconds=60`:
+
+| Fixture | Grid status / seconds | TABI direct | TABI treecode | Decision signal |
+| --- | ---: | ---: | ---: | --- |
+| research-medium | ok / ~0.62 s | timeout / 60 s | timeout / 60 s | no runtime gate |
+| research-large | ok / ~1.52 s | timeout / 60 s | timeout / 60 s | no runtime gate |
+
+Decision: `keep_experimental`, `promote_candidate=false`,
+`decision_reason=accuracy_or_runtime_failure_present`. This is strong enough to
+pause new TABI machinery for the current research fixtures and keep production
+PBE on the grid backend.
+
+No FMM, new scheduler layer, or additional preconditioner should be added until
+this gate passes on the target workload.
+
 ## Current Status
 
 TABI is now useful as an internal linear-PB backend, but it is not yet a full

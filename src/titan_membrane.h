@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <fstream>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -35,6 +36,8 @@ public:
   void init(const Multi_MOL &lipids, std::fstream &log);
   void process_frame(const Multi_MOL &lipids, std::size_t snap_idx,
                      TitanExecutor &executor);
+  void process_frame(const Multi_MOL &lipids, const Multi_MOL *protein,
+                     std::size_t snap_idx, TitanExecutor &executor);
   void finalize_trajectory(const std::string &base_dir, const info &info_output,
                            const arguments &args,
                            const std::vector<std::string> &input_line,
@@ -105,6 +108,57 @@ private:
     double signed_distance_a{0.0};
   };
 
+  struct ProteinResiduePlan {
+    std::string label;
+    std::string chain;
+    std::string resname;
+    std::size_t resnr{0};
+    std::vector<std::size_t> atoms;
+    std::vector<std::size_t> sidechain_atoms;
+  };
+
+  struct ContactRow {
+    std::size_t lipid_index{0};
+    std::size_t frame{0};
+    double time_ps{0.0};
+    std::string protein_residue;
+    std::string protein_chain;
+    std::size_t protein_resnr{0};
+    std::string protein_resname;
+    std::string lipid_id;
+    std::string lipid_resname;
+    std::string leaflet;
+    std::string bead_name;
+    std::string bead_class;
+    double distance_a{0.0};
+  };
+
+  struct CouplingCounter {
+    double sum{0.0};
+    double sum_sq{0.0};
+    std::size_t count{0};
+  };
+
+  struct ProximityAccumulator {
+    double near_sum{0.0};
+    double near_sum_sq{0.0};
+    double far_sum{0.0};
+    double far_sum_sq{0.0};
+    std::size_t near_count{0};
+    std::size_t far_count{0};
+  };
+
+  struct EnrichmentAccumulator {
+    std::size_t near_count{0};
+    std::size_t bulk_count{0};
+  };
+
+  struct CurvatureCell {
+    double sum{0.0};
+    double sum_sq{0.0};
+    std::size_t count{0};
+  };
+
   void reset_trajectory_state();
   void build_topology_cache(const Multi_MOL &lipids, std::fstream &log);
   [[nodiscard]] std::array<double, 3>
@@ -112,24 +166,65 @@ private:
   void build_tangent_basis(const std::array<double, 3> &normal,
                            std::array<double, 3> &u,
                            std::array<double, 3> &v) const noexcept;
-  void classify_leaflets(const MOL &frame, const std::array<double, 3> &normal,
+  void classify_leaflets(const MOL &frame, const box &active_box,
+                         const std::array<double, 3> &normal,
                          std::vector<int> &leaflets,
                          AlignedDoubleVector &signed_distance) const;
-  void compute_apl(const MOL &frame, const std::array<double, 3> &normal,
+  void compute_apl(const MOL &frame, const box &active_box,
+                   const std::array<double, 3> &normal,
                    const std::vector<int> &leaflets, TitanExecutor &executor,
                    std::vector<double> &apl, double &surface_area) const;
-  void update_order_parameters(const MOL &frame,
-                               const std::array<double, 3> &normal);
+  void update_order_parameters(const MOL &frame, const box &active_box,
+                               const std::array<double, 3> &normal,
+                               const std::vector<int> *leaflets = nullptr,
+                               const std::set<std::size_t> *near_lipids =
+                                   nullptr);
   void update_flipflop(const std::vector<int> &leaflets, std::size_t frame,
                        double time_ps);
   void compute_interdigitation(const MOL &frame,
                                const std::array<double, 3> &normal,
                                const std::vector<int> &leaflets,
                                double &overlap, double &penetration) const;
-  void update_thickness_map(const MOL &frame,
+  void update_thickness_map(const MOL &frame, const box &active_box,
                             const std::array<double, 3> &normal,
                             const std::vector<int> &leaflets,
-                            double &mean_thickness);
+                            double &mean_thickness,
+                            std::vector<double> *per_lipid_thickness =
+                                nullptr);
+  void build_protein_cache(const Multi_MOL &protein);
+  [[nodiscard]] std::array<double, 3>
+  residue_com(const MOL &frame, const ProteinResiduePlan &plan,
+              const Multi_MOL &protein) const;
+  void update_protein_lipid_contacts(const Multi_MOL *protein,
+                                     const Multi_MOL &lipids,
+                                     const MOL &lipid_frame,
+                                     const box &active_box,
+                                     const std::array<double, 3> &normal,
+                                     const std::vector<int> &leaflets,
+                                     std::size_t snap_idx, double time_ps,
+                                     TitanExecutor &executor,
+                                     std::set<std::size_t> &near_lipids);
+  void update_curvature_grid(const std::array<double, 3> &normal,
+                             const std::vector<int> &leaflets,
+                             const box &active_box,
+                             std::vector<double> *per_lipid_curvature =
+                                 nullptr);
+  void update_proximity_coupling(
+      const std::vector<double> &apl,
+      const std::vector<double> &per_lipid_thickness,
+      const std::vector<double> &per_lipid_curvature,
+      const std::vector<int> &leaflets,
+      const std::set<std::size_t> &near_lipids);
+  void record_proximity_value(const std::string &observable,
+                              const std::string &group,
+                              const std::string &leaflet,
+                              const std::string &resname, double value,
+                              bool near);
+  void record_proximity_direct(const std::string &observable,
+                               const std::string &group,
+                               const std::string &leaflet,
+                               const std::string &resname, double near_value,
+                               double far_value);
   [[nodiscard]] std::pair<int, int> resolved_grid(const MOL *frame) const;
   [[nodiscard]] std::string leaflet_name(int leaflet) const;
   void load_user_leaflets();
@@ -142,6 +237,11 @@ private:
   void export_order_parameters(const std::string &filename) const;
   void export_interdigitation(const std::string &filename) const;
   void export_flipflop_events(const std::string &filename) const;
+  void export_protein_lipid_contacts(const std::string &filename) const;
+  void export_lipid_enrichment(const std::string &filename) const;
+  void export_curvature_map(const std::string &filename) const;
+  void export_proximity_coupling(const std::string &filename) const;
+  void export_coupling_summary(const std::string &filename) const;
   void export_summary(const std::string &filename) const;
   void accumulate_trajectory();
   void export_average(const std::string &base_dir,
@@ -171,12 +271,30 @@ private:
   int grid_y_{0};
   std::size_t skipped_frames_{0};
   std::size_t unknown_lipids_{0};
+  box reference_box_;
+  bool have_reference_box_{false};
+  std::vector<ProteinResiduePlan> protein_plans_;
+  bool protein_cache_ready_{false};
+  std::vector<ContactRow> contact_rows_;
+  std::map<std::string, std::size_t> protein_contact_counts_;
+  std::map<std::string, std::size_t> lipid_contact_counts_;
+  std::set<std::string> near_lipid_ids_;
+  std::map<std::string, EnrichmentAccumulator> enrichment_counts_;
+  std::vector<CurvatureCell> curvature_cells_;
+  std::map<std::string, ProximityAccumulator> proximity_accumulators_;
+  std::size_t contact_frames_{0};
+  std::size_t contact_skipped_frames_{0};
+  std::size_t aggregate_contact_frames_{0};
+  std::size_t aggregate_contact_rows_{0};
 
   ThicknessCell aggregate_apl_;
   ThicknessCell aggregate_thickness_;
   ThicknessCell aggregate_interdigitation_;
   std::vector<ThicknessCell> aggregate_thickness_cells_;
   std::map<std::string, ThicknessCell> aggregate_order_parameters_;
+  std::map<std::string, CouplingCounter> aggregate_enrichment_;
+  std::vector<CouplingCounter> aggregate_curvature_cells_;
+  std::map<std::string, ProximityAccumulator> aggregate_proximity_;
   std::size_t aggregate_trajectories_{0};
 };
 
