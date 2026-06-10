@@ -133,7 +133,8 @@ TitanPBE::Tabi::TreeWorkspace make_tree(
     const std::vector<TitanPBE::Tabi::Panel> &panels, TitanExecutor &executor,
     const std::string &cluster_policy, const std::string &scheduler,
     const std::string &verify, int worklist_max_active,
-    int min_source_panels) {
+    int min_source_panels,
+    const std::string &leaf_pair_kernel = "target-avx2") {
   TitanPBE::Tabi::TreeWorkspace tree =
       TitanPBE::Tabi::build_tree_workspace(
           panels, executor, 16, 0.05, "exact", "tile-avx2", "strict", "off",
@@ -143,7 +144,7 @@ TitanPBE::Tabi::TreeWorkspace make_tree(
           "stage3j", cluster_policy, "off", 4, min_source_panels, 2);
   tree.taylor_order = 3;
   tree.derivative_mode = "analytic";
-  tree.leaf_pair_kernel = "target-avx2";
+  tree.leaf_pair_kernel = leaf_pair_kernel;
   tree.leaf_pair_selection_profile = "summary";
   tree.leaf_pair_probe_cache = "per-matvec";
   tree.leaf_pair_target_group = "same-target-leaf";
@@ -153,6 +154,7 @@ TitanPBE::Tabi::TreeWorkspace make_tree(
   tree.leaf_pair_worklist_max_active =
       static_cast<std::size_t>(std::max(1, worklist_max_active));
   tree.leaf_pair_worklist_verify = verify;
+  tree.leaf_block_verify = verify;
   return tree;
 }
 
@@ -185,10 +187,15 @@ int main() {
   TitanPBE::Tabi::TreeWorkspace forced_tree =
       make_tree(clean_panels, executor, "leaf-pair-balanced",
                 "deferred-worklist", "full-small", 1, 16);
+  TitanPBE::Tabi::TreeWorkspace cost_tile_tree =
+      make_tree(clean_panels, executor, "leaf-pair-balanced",
+                "cost-tile-worklist", "full-small", 2048, 16,
+                "target-avx2-4x4");
 
   std::vector<double> scalar_out;
   std::vector<double> worklist_out;
   std::vector<double> forced_out;
+  std::vector<double> cost_tile_out;
   const TitanPBE::Tabi::TreecodeStats scalar_stats =
       apply_fixture(clean_panels, clean_unknowns, executor, scalar_tree,
                     scalar_out);
@@ -198,13 +205,19 @@ int main() {
   const TitanPBE::Tabi::TreecodeStats forced_stats =
       apply_fixture(clean_panels, clean_unknowns, executor, forced_tree,
                     forced_out);
+  const TitanPBE::Tabi::TreecodeStats cost_tile_stats =
+      apply_fixture(clean_panels, clean_unknowns, executor, cost_tile_tree,
+                    cost_tile_out);
 
   const double worklist_rel = relative_rms(scalar_out, worklist_out);
   const double forced_rel = relative_rms(scalar_out, forced_out);
+  const double cost_tile_rel = relative_rms(scalar_out, cost_tile_out);
   require_true("deferred worklist keeps scalar traversal accuracy",
                worklist_rel <= 1.0e-12);
   require_true("forced flush worklist keeps scalar traversal accuracy",
                forced_rel <= 1.0e-12);
+  require_true("cost-tile 4x4 keeps scalar traversal accuracy",
+               cost_tile_rel <= 1.0e-12);
   require_true("deferred scheduler mode is reported",
                worklist_stats.leaf_pair_scheduler == "deferred-worklist");
   require_true("worklist enqueued tasks",
@@ -225,6 +238,35 @@ int main() {
                forced_stats.leaf_pair_worklist_forced_flushes > 0);
   require_true("forced flush verification has no mismatches",
                forced_stats.leaf_pair_worklist_verify_mismatches == 0);
+  require_true("cost-tile scheduler mode is reported",
+               cost_tile_stats.leaf_pair_scheduler == "cost-tile-worklist");
+  require_true("cost-tile uses 4x4 batch kernel",
+               cost_tile_stats.leaf_pair_batch_kernel == "target-avx2-4x4");
+  require_true("cost-tile creates source tile groups",
+               cost_tile_stats.leaf_block_source_groups > 0);
+  require_true("cost-tile batches groups",
+               cost_tile_stats.leaf_block_batched_groups > 0);
+  require_true("cost-tile vectorizes source panels",
+               cost_tile_stats.leaf_pair_batch_vectorized_sources > 0);
+  require_true("cost-tile full-small verification checked tasks",
+               cost_tile_stats.leaf_block_verify_checks > 0);
+  require_true("cost-tile verification has no mismatches",
+               cost_tile_stats.leaf_block_verify_mismatches == 0);
+
+  TitanExecutor executor4(4);
+  TitanPBE::Tabi::TreeWorkspace cost_tile_tree4 =
+      make_tree(clean_panels, executor4, "leaf-pair-balanced",
+                "cost-tile-worklist", "full-small", 2048, 16,
+                "target-avx2-4x4");
+  std::vector<double> cost_tile_out4;
+  const TitanPBE::Tabi::TreecodeStats cost_tile_stats4 =
+      apply_fixture(clean_panels, clean_unknowns, executor4, cost_tile_tree4,
+                    cost_tile_out4);
+  const double cost_tile_rel4 = relative_rms(scalar_out, cost_tile_out4);
+  require_true("cost-tile 4x4 is deterministic with four workers",
+               cost_tile_rel4 <= 1.0e-12);
+  require_true("cost-tile four-worker verification has no mismatches",
+               cost_tile_stats4.leaf_block_verify_mismatches == 0);
 
   const std::vector<TitanPBE::Tabi::Panel> exclusion_panels =
       build_exclusion_fixture();
@@ -255,10 +297,16 @@ int main() {
   std::cout << "PBE TABI leaf-pair worklist scheduler smoke PASS panels="
             << clean_panels.size() << " rel=" << worklist_rel
             << " forced_rel=" << forced_rel
+            << " cost_tile_rel=" << cost_tile_rel
+            << " cost_tile_rel4=" << cost_tile_rel4
             << " tasks=" << worklist_stats.leaf_pair_worklist_tasks
             << " groups=" << worklist_stats.leaf_pair_worklist_groups
             << " batched="
             << worklist_stats.leaf_pair_worklist_batched_groups
+            << " cost_tile_groups="
+            << cost_tile_stats.leaf_block_source_groups
+            << " cost_tile_batched="
+            << cost_tile_stats.leaf_block_batched_groups
             << " forced_flushes="
             << forced_stats.leaf_pair_worklist_forced_flushes
             << " verify_checks="

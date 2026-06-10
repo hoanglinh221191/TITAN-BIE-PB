@@ -523,6 +523,11 @@ private:
     std::size_t tabi_leaf_residual_panel_interactions{0};
     std::size_t tabi_smooth_leaf_node_interactions{0};
     std::size_t tabi_leaf_pruned_interactions{0};
+    std::size_t tabi_leaf_mac_candidates{0};
+    std::size_t tabi_leaf_mac_accepted{0};
+    std::size_t tabi_leaf_mac_rejected{0};
+    std::size_t tabi_leaf_mac_far_panels{0};
+    std::size_t tabi_leaf_mac_direct_panels_saved_estimate{0};
     std::string tabi_leaf_work_profile{"off"};
     std::size_t tabi_leaf_work_mac_terminal_panels{0};
     std::size_t tabi_leaf_work_physical_gap_panels{0};
@@ -926,6 +931,9 @@ private:
     std::size_t tabi_preconditioner_valid_blocks{0};
     std::size_t tabi_preconditioner_valid_panels{0};
     std::size_t tabi_preconditioner_ill_conditioned_blocks{0};
+    std::size_t tabi_preconditioner_quality_rejected_blocks{0};
+    double tabi_preconditioner_quality_probe_max_gain{0.0};
+    std::string tabi_preconditioner_quality_status{"off"};
     double tabi_preconditioner_setup_ms{0.0};
     double tabi_preconditioner_apply_ms{0.0};
     std::size_t tabi_preconditioner_apply_calls{0};

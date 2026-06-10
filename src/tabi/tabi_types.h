@@ -196,6 +196,7 @@ struct Options {
   int leaf_pair_worklist_max_active{2048};
   std::string leaf_pair_worklist_verify{"off"};
   std::string leaf_block_verify{"off"};
+  std::string leaf_mac{"off"};
   std::string interaction_mode{"auto"};
   std::string node_bounds{"moment"};
   std::string tree_builder{"grouped-morton"};
@@ -358,6 +359,11 @@ struct Result {
   std::size_t leaf_residual_panel_interactions{0};
   std::size_t smooth_leaf_node_interactions{0};
   std::size_t leaf_pruned_interactions{0};
+  std::size_t leaf_mac_candidates{0};
+  std::size_t leaf_mac_accepted{0};
+  std::size_t leaf_mac_rejected{0};
+  std::size_t leaf_mac_far_panels{0};
+  std::size_t leaf_mac_direct_panels_saved_estimate{0};
   std::string leaf_work_profile{"off"};
   std::size_t leaf_work_mac_terminal_panels{0};
   std::size_t leaf_work_physical_gap_panels{0};
@@ -458,6 +464,7 @@ struct Result {
   std::size_t leaf_pair_worklist_verify_checks{0};
   std::size_t leaf_pair_worklist_verify_mismatches{0};
   std::string leaf_block_verify{"off"};
+  std::string leaf_mac{"off"};
   std::size_t leaf_block_target_leaves{0};
   std::size_t leaf_block_targets{0};
   std::size_t leaf_block_source_groups{0};
@@ -744,6 +751,9 @@ struct Result {
   std::size_t preconditioner_valid_blocks{0};
   std::size_t preconditioner_valid_panels{0};
   std::size_t preconditioner_ill_conditioned_blocks{0};
+  std::size_t preconditioner_quality_rejected_blocks{0};
+  double preconditioner_quality_probe_max_gain{0.0};
+  std::string preconditioner_quality_status{"off"};
   double preconditioner_setup_ms{0.0};
   double preconditioner_apply_ms{0.0};
   std::size_t preconditioner_apply_calls{0};
@@ -813,6 +823,11 @@ struct TreecodeStats {
   std::size_t leaf_residual_panel_interactions{0};
   std::size_t smooth_leaf_node_interactions{0};
   std::size_t leaf_pruned_interactions{0};
+  std::size_t leaf_mac_candidates{0};
+  std::size_t leaf_mac_accepted{0};
+  std::size_t leaf_mac_rejected{0};
+  std::size_t leaf_mac_far_panels{0};
+  std::size_t leaf_mac_direct_panels_saved_estimate{0};
   std::string leaf_work_profile{"off"};
   std::size_t leaf_work_mac_terminal_panels{0};
   std::size_t leaf_work_physical_gap_panels{0};
@@ -913,6 +928,7 @@ struct TreecodeStats {
   std::size_t leaf_pair_worklist_verify_checks{0};
   std::size_t leaf_pair_worklist_verify_mismatches{0};
   std::string leaf_block_verify{"off"};
+  std::string leaf_mac{"off"};
   std::size_t leaf_block_target_leaves{0};
   std::size_t leaf_block_targets{0};
   std::size_t leaf_block_source_groups{0};
@@ -1358,6 +1374,11 @@ struct TreeInteractionLists {
   std::size_t leaf_tile_panel_count{0};
   std::size_t smooth_leaf_node_count{0};
   std::size_t leaf_pruned_count{0};
+  std::size_t leaf_mac_candidates{0};
+  std::size_t leaf_mac_accepted{0};
+  std::size_t leaf_mac_rejected{0};
+  std::size_t leaf_mac_far_panels{0};
+  std::size_t leaf_mac_direct_panels_saved_estimate{0};
   std::size_t adaptive_smooth_leaf_accepted{0};
   std::size_t adaptive_smooth_leaf_rejected{0};
   std::size_t adaptive_span_tile_accepted{0};
@@ -1475,6 +1496,7 @@ struct TreeWorkspace {
   std::size_t leaf_pair_worklist_max_active{2048};
   std::string leaf_pair_worklist_verify{"off"};
   std::string leaf_block_verify{"off"};
+  std::string leaf_mac{"off"};
   std::size_t target_batch_size{1};
   std::size_t leaf_pair_min_source_panels{64};
   std::size_t leaf_pair_min_targets{4};
@@ -1671,7 +1693,8 @@ TreeWorkspace build_tree_workspace(const std::vector<Panel> &panels,
                                        &convergence_shape_audit = "off",
                                    const std::string
                                        &convergence_kernel_response_audit =
-                                           "off");
+                                           "off",
+                                   const std::string &leaf_mac = "off");
 
 void apply_treecode_operator(const std::vector<Panel> &panels,
                              const std::vector<double> &density,

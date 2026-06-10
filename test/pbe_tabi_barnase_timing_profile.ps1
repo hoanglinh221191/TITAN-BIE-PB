@@ -9,7 +9,9 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+$WorkRoot = [System.IO.Path]::GetFullPath($WorkRoot)
 $PerfMatrixScript = Join-Path $PSScriptRoot 'pbe_tabi_perf_matrix.ps1'
+$TriageHelperScript = Join-Path $PSScriptRoot 'pbe_tabi_triage_helpers.ps1'
 $PerfWorkRoot = Join-Path $WorkRoot 'perf_matrix'
 $OutCsv = Join-Path $WorkRoot 'pbe_tabi_barnase_timing_profile.csv'
 
@@ -85,6 +87,10 @@ if (-not (Test-Path -LiteralPath $TitanExe)) {
 if (-not (Test-Path -LiteralPath $PerfMatrixScript)) {
     throw "Missing TABI perf matrix script: $PerfMatrixScript"
 }
+if (-not (Test-Path -LiteralPath $TriageHelperScript)) {
+    throw "Missing TABI triage helper script: $TriageHelperScript"
+}
+. $TriageHelperScript
 
 New-CleanDir $WorkRoot
 
@@ -128,11 +134,14 @@ $summaryRows = foreach ($row in $rows) {
         $null
     }
     $classification = Get-ProgressClassification -PerfRow $row -ProgressRow $progress
+    $triage = New-TabiTriageRecord -Row $row -RunDir $row.run_dir -ExistingClassification $classification
     [PSCustomObject]@{
         fixture = $row.fixture
         mode = $row.mode
         status = $row.status
-        classification = $classification
+        classification = $triage.triage_classification
+        progress_classification = $classification
+        triage_classification = $triage.triage_classification
         total_seconds = $row.total_seconds
         energy_kJmol = $row.energy_kJmol
         peak_ram_bytes = $row.peak_ram_bytes
@@ -151,7 +160,17 @@ $summaryRows = foreach ($row in $rows) {
         leaf_residual_panel_interactions = Get-ValueOrNA $progress 'leaf_residual_panel_interactions'
         far_node_interactions = Get-ValueOrNA $progress 'far_node_interactions'
         singular_near_interactions = Get-ValueOrNA $progress 'singular_near_interactions'
-        preconditioner_effective = Get-ValueOrNA $progress 'preconditioner_effective'
+        seconds_per_matvec = $triage.seconds_per_matvec
+        leaf_panel_interactions_per_matvec = $triage.leaf_panel_interactions_per_matvec
+        leaf_vs_n2_ratio = $triage.leaf_vs_n2_ratio
+        residual_delta_per_matvec = $triage.residual_delta_per_matvec
+        preconditioner_requested = $triage.preconditioner_requested
+        preconditioner_effective = $triage.preconditioner_effective
+        preconditioner_downgrade = $triage.preconditioner_downgrade
+        prepare_progress_phase = $triage.prepare_progress_phase
+        prepare_progress_status = $triage.prepare_progress_status
+        prepare_progress_rss_bytes = $triage.prepare_progress_rss_bytes
+        triage_source = $triage.triage_source
         threads = if ($row.threads) { $row.threads } else { Get-ValueOrNA $progress 'threads' }
         rss_bytes = Get-ValueOrNA $progress 'rss_bytes'
         source_matrix_csv = $matrixCsv

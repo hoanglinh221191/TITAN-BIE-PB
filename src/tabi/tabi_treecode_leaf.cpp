@@ -580,13 +580,28 @@ void direct_jcp_target_batch_tile_sum_scalar(
 
 #if TITAN_SIMD_X86
 TITAN_TARGET_AVX2
+inline __m256d avx2_lane_mask_pd(unsigned bits) noexcept {
+  return _mm256_castsi256_pd(_mm256_set_epi64x(
+      (bits & 0x8u) ? -1ll : 0ll, (bits & 0x4u) ? -1ll : 0ll,
+      (bits & 0x2u) ? -1ll : 0ll, (bits & 0x1u) ? -1ll : 0ll));
+}
+
+inline std::size_t popcount4(unsigned bits) noexcept {
+  bits &= 0x0fu;
+  return static_cast<std::size_t>((bits & 0x1u) + ((bits >> 1) & 0x1u) +
+                                  ((bits >> 2) & 0x1u) +
+                                  ((bits >> 3) & 0x1u));
+}
+
+TITAN_TARGET_AVX2
 void direct_jcp_target_batch_tile_sum_avx2(
     const std::vector<Panel> &panels,
     const std::vector<std::size_t> &target_indices,
     const TreePanelCache &panel_cache, const TreeUnknownCache &unknown_cache,
     double eps_ratio, double kappa, bool coupled, const TreeNode &node,
     std::vector<JcpAccum> &accum, std::size_t &near_count,
-    std::size_t &vectorized_sources, std::size_t &vector_lanes) noexcept {
+    std::size_t &vectorized_sources, std::size_t &vector_lanes,
+    bool branchless_masked = false) noexcept {
   accum.assign(target_indices.size(), JcpAccum{});
   if (target_indices.empty())
     return;
@@ -646,8 +661,12 @@ void direct_jcp_target_batch_tile_sum_avx2(
             pos < panel_cache.ordered_original_index.size()
                 ? panel_cache.ordered_original_index[pos]
                 : pos;
-        if (original == target_indices[0] || original == target_indices[1] ||
-            original == target_indices[2] || original == target_indices[3]) {
+        unsigned lane_bits = 0x0fu;
+        for (std::size_t lane = 0; lane < 4; ++lane) {
+          if (original == target_indices[lane])
+            lane_bits &= ~(1u << lane);
+        }
+        if (!branchless_masked && lane_bits != 0x0fu) {
           for (std::size_t lane = 0; lane < 4; ++lane) {
             if (original == target_indices[lane])
               continue;
@@ -677,7 +696,9 @@ void direct_jcp_target_batch_tile_sum_avx2(
             _mm256_mul_pd(uz, uz));
         const int valid_mask =
             _mm256_movemask_pd(_mm256_cmp_pd(r2, r2_floor_v, _CMP_GT_OQ));
-        if (valid_mask != 0x0f) {
+        const unsigned valid_bits =
+            lane_bits & static_cast<unsigned>(valid_mask);
+        if (!branchless_masked && valid_bits != 0x0fu) {
           for (std::size_t lane = 0; lane < 4; ++lane) {
             const Panel &target = panels[target_indices[lane]];
             if (accumulate_jcp_leaf_source(
@@ -694,7 +715,10 @@ void direct_jcp_target_batch_tile_sum_avx2(
           }
           continue;
         }
-        const __m256d r = _mm256_sqrt_pd(r2);
+        const __m256d lane_mask = avx2_lane_mask_pd(valid_bits);
+        const __m256d r2_safe =
+            branchless_masked ? _mm256_max_pd(r2, r2_floor_v) : r2;
+        const __m256d r = _mm256_sqrt_pd(r2_safe);
         const __m256d inv_r = _mm256_div_pd(one_v, r);
         const __m256d inv_r2 = _mm256_mul_pd(inv_r, inv_r);
         const __m256d inv_r3 = _mm256_mul_pd(inv_r2, inv_r);
@@ -764,36 +788,38 @@ void direct_jcp_target_batch_tile_sum_avx2(
           const __m256d mixedk = _mm256_add_pd(
               _mm256_mul_pd(fsecond_k, nxu_nyu),
               _mm256_mul_pd(fprime_k_over_r, tangent_metric));
-          acc_phi_v = _mm256_add_pd(
-              acc_phi_v,
-              _mm256_mul_pd(
-                  area,
-                  _mm256_add_pd(
-                      _mm256_mul_pd(_mm256_sub_pd(g0, gk), phin_j),
-                      _mm256_mul_pd(
-                          _mm256_sub_pd(_mm256_mul_pd(eps_v, source_dk),
-                                        source_d0),
-                          phi_j))));
-          acc_phin_v = _mm256_add_pd(
-              acc_phin_v,
-              _mm256_mul_pd(
-                  area,
-                  _mm256_add_pd(
-                      _mm256_mul_pd(
-                          _mm256_sub_pd(target_d0,
-                                        _mm256_mul_pd(inv_eps_v, target_dk)),
-                          phin_j),
-                      _mm256_mul_pd(_mm256_sub_pd(mixedk, mixed0),
-                                    phi_j))));
+          __m256d phi_term = _mm256_mul_pd(
+              area,
+              _mm256_add_pd(
+                  _mm256_mul_pd(_mm256_sub_pd(g0, gk), phin_j),
+                  _mm256_mul_pd(
+                      _mm256_sub_pd(_mm256_mul_pd(eps_v, source_dk),
+                                    source_d0),
+                      phi_j)));
+          __m256d phin_term = _mm256_mul_pd(
+              area,
+              _mm256_add_pd(
+                  _mm256_mul_pd(
+                      _mm256_sub_pd(target_d0,
+                                    _mm256_mul_pd(inv_eps_v, target_dk)),
+                      phin_j),
+                  _mm256_mul_pd(_mm256_sub_pd(mixedk, mixed0), phi_j)));
+          if (branchless_masked) {
+            phi_term = _mm256_and_pd(phi_term, lane_mask);
+            phin_term = _mm256_and_pd(phin_term, lane_mask);
+          }
+          acc_phi_v = _mm256_add_pd(acc_phi_v, phi_term);
+          acc_phin_v = _mm256_add_pd(acc_phin_v, phin_term);
         } else {
-          acc_phi_v = _mm256_add_pd(
-              acc_phi_v,
-              _mm256_mul_pd(area,
-                            _mm256_mul_pd(
-                                poisson_scale_v,
-                                _mm256_mul_pd(source_d0, phi_j))));
+          __m256d phi_term = _mm256_mul_pd(
+              area,
+              _mm256_mul_pd(poisson_scale_v,
+                            _mm256_mul_pd(source_d0, phi_j)));
+          if (branchless_masked)
+            phi_term = _mm256_and_pd(phi_term, lane_mask);
+          acc_phi_v = _mm256_add_pd(acc_phi_v, phi_term);
         }
-        near_count += 4;
+        near_count += branchless_masked ? popcount4(valid_bits) : 4;
         ++vectorized_sources;
         vector_lanes += 4;
       }
@@ -826,9 +852,16 @@ void direct_jcp_target_batch_tile_sum_avx2(
     std::size_t t = 0;
     for (; t + 4 <= target_indices.size(); t += 4) {
       bool clean_chunk = true;
+      unsigned lane_bits = 0x0fu;
       for (std::size_t lane = 0; lane < 4; ++lane) {
         const std::size_t target_index = target_indices[t + lane];
-        if (target_index >= panels.size() || target_index == original) {
+        if (target_index >= panels.size()) {
+          clean_chunk = false;
+          break;
+        }
+        if (target_index == original)
+          lane_bits &= ~(1u << lane);
+        if (!branchless_masked && target_index == original) {
           clean_chunk = false;
           break;
         }
@@ -869,7 +902,9 @@ void direct_jcp_target_batch_tile_sum_avx2(
           _mm256_mul_pd(uz, uz));
       const int valid_mask =
           _mm256_movemask_pd(_mm256_cmp_pd(r2, r2_floor_v, _CMP_GT_OQ));
-      if (valid_mask != 0x0f) {
+      const unsigned valid_bits =
+          lane_bits & static_cast<unsigned>(valid_mask);
+      if (!branchless_masked && valid_bits != 0x0fu) {
         for (std::size_t lane = 0; lane < 4; ++lane) {
           const std::size_t target_index = target_indices[t + lane];
           const Panel &target = panels[target_index];
@@ -882,7 +917,10 @@ void direct_jcp_target_batch_tile_sum_avx2(
         }
         continue;
       }
-      const __m256d r = _mm256_sqrt_pd(r2);
+      const __m256d lane_mask = avx2_lane_mask_pd(valid_bits);
+      const __m256d r2_safe =
+          branchless_masked ? _mm256_max_pd(r2, r2_floor_v) : r2;
+      const __m256d r = _mm256_sqrt_pd(r2_safe);
       const __m256d inv_r = _mm256_div_pd(one_v, r);
       const __m256d inv_r2 = _mm256_mul_pd(inv_r, inv_r);
       const __m256d inv_r3 = _mm256_mul_pd(inv_r2, inv_r);
@@ -965,8 +1003,14 @@ void direct_jcp_target_batch_tile_sum_avx2(
                                   _mm256_mul_pd(inv_eps_v, target_dk)),
                     phin_j),
                 _mm256_mul_pd(_mm256_sub_pd(mixedk, mixed0), phi_j)));
-        _mm256_store_pd(phi_lane, phi_term);
-        _mm256_store_pd(phin_lane, phin_term);
+        _mm256_store_pd(
+            phi_lane,
+            branchless_masked ? _mm256_and_pd(phi_term, lane_mask)
+                              : phi_term);
+        _mm256_store_pd(
+            phin_lane,
+            branchless_masked ? _mm256_and_pd(phin_term, lane_mask)
+                              : phin_term);
         for (std::size_t lane = 0; lane < 4; ++lane) {
           accum[t + lane].phi += phi_lane[lane];
           accum[t + lane].phin += phin_lane[lane];
@@ -975,11 +1019,14 @@ void direct_jcp_target_batch_tile_sum_avx2(
         const __m256d phi_term = _mm256_mul_pd(
             area, _mm256_mul_pd(poisson_scale_v,
                                 _mm256_mul_pd(source_d0, phi_j)));
-        _mm256_store_pd(phi_lane, phi_term);
+        _mm256_store_pd(
+            phi_lane,
+            branchless_masked ? _mm256_and_pd(phi_term, lane_mask)
+                              : phi_term);
         for (std::size_t lane = 0; lane < 4; ++lane)
           accum[t + lane].phi += phi_lane[lane];
       }
-      near_count += 4;
+      near_count += branchless_masked ? popcount4(valid_bits) : 4;
       ++vectorized_sources;
       vector_lanes += 4;
     }
@@ -993,6 +1040,256 @@ void direct_jcp_target_batch_tile_sum_avx2(
               target.nz, sx, sy, sz, snx, sny, snz, area_scalar, phi_scalar,
               phin_scalar, eps_ratio, inv_eps_ratio, poisson_scale,
               inv_four_pi, kk, coupled))
+        ++near_count;
+    }
+  }
+}
+
+TITAN_TARGET_AVX2
+void direct_jcp_target_source_tile_sum_avx2_4x4(
+    const std::vector<Panel> &panels,
+    const std::vector<std::size_t> &target_indices,
+    const TreePanelCache &panel_cache, const TreeUnknownCache &unknown_cache,
+    double eps_ratio, double kappa, bool coupled, const TreeNode &node,
+    std::vector<JcpAccum> &accum, std::size_t &near_count,
+    std::size_t &vectorized_sources, std::size_t &vector_lanes) noexcept {
+  accum.assign(target_indices.size(), JcpAccum{});
+  if (target_indices.empty())
+    return;
+  const double inv_eps_ratio = 1.0 / std::max(1.0e-12, eps_ratio);
+  const double poisson_scale = eps_ratio - 1.0;
+  const double inv_four_pi = 1.0 / (4.0 * kPi);
+  const double kk = std::max(0.0, kappa);
+  const std::size_t source_begin = node.first_panel;
+  const std::size_t source_end = node.first_panel + node.panel_count;
+  const __m256d eps_v = _mm256_set1_pd(eps_ratio);
+  const __m256d inv_eps_v = _mm256_set1_pd(inv_eps_ratio);
+  const __m256d poisson_scale_v = _mm256_set1_pd(poisson_scale);
+  const __m256d inv_four_pi_v = _mm256_set1_pd(inv_four_pi);
+  const __m256d kk_v = _mm256_set1_pd(kk);
+  const __m256d one_v = _mm256_set1_pd(1.0);
+  const __m256d two_v = _mm256_set1_pd(2.0);
+  const __m256d three_v = _mm256_set1_pd(3.0);
+  const __m256d neg_one_v = _mm256_set1_pd(-1.0);
+  const __m256d r2_floor_v = _mm256_set1_pd(1.0e-28);
+  alignas(32) double tx_lane[4];
+  alignas(32) double ty_lane[4];
+  alignas(32) double tz_lane[4];
+  alignas(32) double tnx_lane[4];
+  alignas(32) double tny_lane[4];
+  alignas(32) double tnz_lane[4];
+  alignas(32) double r_lane[4];
+  alignas(32) double exp_lane[4];
+  alignas(32) double phi_lane[4];
+  alignas(32) double phin_lane[4];
+
+  auto process_source = [&](std::size_t pos, const __m256d &tx,
+                            const __m256d &ty, const __m256d &tz,
+                            const __m256d &tnx, const __m256d &tny,
+                            const __m256d &tnz,
+                            const std::size_t *targets,
+                            __m256d &acc_phi_v,
+                            __m256d &acc_phin_v) noexcept {
+    const std::size_t original =
+        pos < panel_cache.ordered_original_index.size()
+            ? panel_cache.ordered_original_index[pos]
+            : pos;
+    unsigned lane_bits = 0x0fu;
+    for (std::size_t lane = 0; lane < 4; ++lane) {
+      if (original == targets[lane])
+        lane_bits &= ~(1u << lane);
+    }
+    const double sx = panel_cache.ordered_x[pos];
+    const double sy = panel_cache.ordered_y[pos];
+    const double sz = panel_cache.ordered_z[pos];
+    const __m256d ux = _mm256_sub_pd(tx, _mm256_set1_pd(sx));
+    const __m256d uy = _mm256_sub_pd(ty, _mm256_set1_pd(sy));
+    const __m256d uz = _mm256_sub_pd(tz, _mm256_set1_pd(sz));
+    const __m256d r2 = _mm256_add_pd(
+        _mm256_add_pd(_mm256_mul_pd(ux, ux), _mm256_mul_pd(uy, uy)),
+        _mm256_mul_pd(uz, uz));
+    const unsigned valid_bits =
+        lane_bits & static_cast<unsigned>(_mm256_movemask_pd(
+                        _mm256_cmp_pd(r2, r2_floor_v, _CMP_GT_OQ)));
+    const __m256d lane_mask = avx2_lane_mask_pd(valid_bits);
+    const __m256d r2_safe = _mm256_max_pd(r2, r2_floor_v);
+    const __m256d r = _mm256_sqrt_pd(r2_safe);
+    const __m256d inv_r = _mm256_div_pd(one_v, r);
+    const __m256d inv_r2 = _mm256_mul_pd(inv_r, inv_r);
+    const __m256d inv_r3 = _mm256_mul_pd(inv_r2, inv_r);
+    const __m256d snx_v = _mm256_set1_pd(panel_cache.ordered_nx[pos]);
+    const __m256d sny_v = _mm256_set1_pd(panel_cache.ordered_ny[pos]);
+    const __m256d snz_v = _mm256_set1_pd(panel_cache.ordered_nz[pos]);
+    const __m256d area = _mm256_set1_pd(panel_cache.ordered_area[pos]);
+    const __m256d phi_j = _mm256_set1_pd(unknown_cache.ordered_phi[pos]);
+    const __m256d phin_j = _mm256_set1_pd(unknown_cache.ordered_phin[pos]);
+    const __m256d source_projection = _mm256_add_pd(
+        _mm256_add_pd(_mm256_mul_pd(snx_v, ux),
+                      _mm256_mul_pd(sny_v, uy)),
+        _mm256_mul_pd(snz_v, uz));
+    const __m256d target_projection = _mm256_add_pd(
+        _mm256_add_pd(_mm256_mul_pd(tnx, ux), _mm256_mul_pd(tny, uy)),
+        _mm256_mul_pd(tnz, uz));
+    const __m256d source_d0 =
+        _mm256_mul_pd(inv_four_pi_v,
+                      _mm256_mul_pd(source_projection, inv_r3));
+    if (coupled) {
+      _mm256_store_pd(r_lane, r);
+      for (int lane = 0; lane < 4; ++lane)
+        exp_lane[lane] = std::exp(-kk * r_lane[lane]);
+      const __m256d expkr = _mm256_load_pd(exp_lane);
+      const __m256d one_plus_kr =
+          _mm256_add_pd(one_v, _mm256_mul_pd(kk_v, r));
+      const __m256d source_dk =
+          _mm256_mul_pd(_mm256_mul_pd(expkr, one_plus_kr), source_d0);
+      const __m256d g0 = _mm256_mul_pd(inv_four_pi_v, inv_r);
+      const __m256d gk = _mm256_mul_pd(expkr, g0);
+      const __m256d target_d0 = _mm256_mul_pd(
+          neg_one_v,
+          _mm256_mul_pd(inv_four_pi_v,
+                        _mm256_mul_pd(target_projection, inv_r3)));
+      const __m256d target_dk =
+          _mm256_mul_pd(_mm256_mul_pd(expkr, one_plus_kr), target_d0);
+      const __m256d nxu = _mm256_mul_pd(target_projection, inv_r);
+      const __m256d nyu = _mm256_mul_pd(source_projection, inv_r);
+      const __m256d nxny = _mm256_add_pd(
+          _mm256_add_pd(_mm256_mul_pd(tnx, snx_v),
+                        _mm256_mul_pd(tny, sny_v)),
+          _mm256_mul_pd(tnz, snz_v));
+      const __m256d nxu_nyu = _mm256_mul_pd(nxu, nyu);
+      const __m256d tangent_metric = _mm256_sub_pd(nxny, nxu_nyu);
+      const __m256d mixed0 = _mm256_mul_pd(
+          inv_four_pi_v,
+          _mm256_mul_pd(inv_r3,
+                        _mm256_sub_pd(_mm256_mul_pd(three_v, nxu_nyu),
+                                      nxny)));
+      const __m256d fprime_k_over_r = _mm256_mul_pd(
+          neg_one_v,
+          _mm256_mul_pd(_mm256_mul_pd(expkr, one_plus_kr),
+                        _mm256_mul_pd(inv_four_pi_v, inv_r3)));
+      const __m256d fsecond_k = _mm256_mul_pd(
+          expkr,
+          _mm256_mul_pd(
+              inv_four_pi_v,
+              _mm256_add_pd(
+                  _mm256_add_pd(_mm256_mul_pd(_mm256_mul_pd(kk_v, kk_v),
+                                              inv_r),
+                                _mm256_mul_pd(_mm256_mul_pd(two_v, kk_v),
+                                              inv_r2)),
+                  _mm256_mul_pd(two_v, inv_r3))));
+      const __m256d mixedk = _mm256_add_pd(
+          _mm256_mul_pd(fsecond_k, nxu_nyu),
+          _mm256_mul_pd(fprime_k_over_r, tangent_metric));
+      const __m256d phi_term = _mm256_and_pd(
+          _mm256_mul_pd(
+              area,
+              _mm256_add_pd(
+                  _mm256_mul_pd(_mm256_sub_pd(g0, gk), phin_j),
+                  _mm256_mul_pd(
+                      _mm256_sub_pd(_mm256_mul_pd(eps_v, source_dk),
+                                    source_d0),
+                      phi_j))),
+          lane_mask);
+      const __m256d phin_term = _mm256_and_pd(
+          _mm256_mul_pd(
+              area,
+              _mm256_add_pd(
+                  _mm256_mul_pd(
+                      _mm256_sub_pd(target_d0,
+                                    _mm256_mul_pd(inv_eps_v, target_dk)),
+                      phin_j),
+                  _mm256_mul_pd(_mm256_sub_pd(mixedk, mixed0), phi_j))),
+          lane_mask);
+      acc_phi_v = _mm256_add_pd(acc_phi_v, phi_term);
+      acc_phin_v = _mm256_add_pd(acc_phin_v, phin_term);
+    } else {
+      const __m256d phi_term = _mm256_and_pd(
+          _mm256_mul_pd(area,
+                        _mm256_mul_pd(poisson_scale_v,
+                                      _mm256_mul_pd(source_d0, phi_j))),
+          lane_mask);
+      acc_phi_v = _mm256_add_pd(acc_phi_v, phi_term);
+    }
+    near_count += popcount4(valid_bits);
+  };
+
+  std::size_t t = 0;
+  for (; t + 4 <= target_indices.size(); t += 4) {
+    bool targets_valid = true;
+    std::size_t targets[4] = {};
+    for (std::size_t lane = 0; lane < 4; ++lane) {
+      targets[lane] = target_indices[t + lane];
+      if (targets[lane] >= panels.size()) {
+        targets_valid = false;
+        break;
+      }
+      const Panel &target = panels[targets[lane]];
+      tx_lane[lane] = target.x;
+      ty_lane[lane] = target.y;
+      tz_lane[lane] = target.z;
+      tnx_lane[lane] = target.nx;
+      tny_lane[lane] = target.ny;
+      tnz_lane[lane] = target.nz;
+    }
+    if (!targets_valid)
+      continue;
+    const __m256d tx = _mm256_load_pd(tx_lane);
+    const __m256d ty = _mm256_load_pd(ty_lane);
+    const __m256d tz = _mm256_load_pd(tz_lane);
+    const __m256d tnx = _mm256_load_pd(tnx_lane);
+    const __m256d tny = _mm256_load_pd(tny_lane);
+    const __m256d tnz = _mm256_load_pd(tnz_lane);
+    __m256d acc_phi_v = _mm256_setzero_pd();
+    __m256d acc_phin_v = _mm256_setzero_pd();
+    std::size_t pos = source_begin;
+    for (; pos + 4 <= source_end; pos += 4) {
+      process_source(pos, tx, ty, tz, tnx, tny, tnz, targets, acc_phi_v,
+                     acc_phin_v);
+      process_source(pos + 1, tx, ty, tz, tnx, tny, tnz, targets,
+                     acc_phi_v, acc_phin_v);
+      process_source(pos + 2, tx, ty, tz, tnx, tny, tnz, targets,
+                     acc_phi_v, acc_phin_v);
+      process_source(pos + 3, tx, ty, tz, tnx, tny, tnz, targets,
+                     acc_phi_v, acc_phin_v);
+      vectorized_sources += 4;
+      vector_lanes += 16;
+    }
+    for (; pos < source_end; ++pos) {
+      process_source(pos, tx, ty, tz, tnx, tny, tnz, targets, acc_phi_v,
+                     acc_phin_v);
+      ++vectorized_sources;
+      vector_lanes += 4;
+    }
+    _mm256_store_pd(phi_lane, acc_phi_v);
+    if (coupled)
+      _mm256_store_pd(phin_lane, acc_phin_v);
+    for (std::size_t lane = 0; lane < 4; ++lane) {
+      accum[t + lane].phi += phi_lane[lane];
+      if (coupled)
+        accum[t + lane].phin += phin_lane[lane];
+    }
+  }
+  for (; t < target_indices.size(); ++t) {
+    const std::size_t target_index = target_indices[t];
+    if (target_index >= panels.size())
+      continue;
+    const Panel &target = panels[target_index];
+    for (std::size_t pos = source_begin; pos < source_end; ++pos) {
+      const std::size_t original =
+          pos < panel_cache.ordered_original_index.size()
+              ? panel_cache.ordered_original_index[pos]
+              : pos;
+      if (original == target_index)
+        continue;
+      if (accumulate_jcp_leaf_source(
+              accum[t], target.x, target.y, target.z, target.nx, target.ny,
+              target.nz, panel_cache.ordered_x[pos],
+              panel_cache.ordered_y[pos], panel_cache.ordered_z[pos],
+              panel_cache.ordered_nx[pos], panel_cache.ordered_ny[pos],
+              panel_cache.ordered_nz[pos], panel_cache.ordered_area[pos],
+              unknown_cache.ordered_phi[pos], unknown_cache.ordered_phin[pos],
+              eps_ratio, inv_eps_ratio, poisson_scale, inv_four_pi, kk,
+              coupled))
         ++near_count;
     }
   }
@@ -1028,6 +1325,7 @@ void direct_jcp_target_batch_soa_avx2(
   const __m256d two_v = _mm256_set1_pd(2.0);
   const __m256d three_v = _mm256_set1_pd(3.0);
   const __m256d neg_one_v = _mm256_set1_pd(-1.0);
+  const __m256d r2_floor_v = _mm256_set1_pd(1.0e-28);
   alignas(32) double tx_lane[4];
   alignas(32) double ty_lane[4];
   alignas(32) double tz_lane[4];
@@ -1056,6 +1354,15 @@ void direct_jcp_target_batch_soa_avx2(
   __m256d acc_phi_v = _mm256_setzero_pd();
   __m256d acc_phin_v = _mm256_setzero_pd();
   for (std::size_t pos = node.first_panel; pos < end; ++pos) {
+    const std::size_t original =
+        pos < panel_cache.ordered_original_index.size()
+            ? panel_cache.ordered_original_index[pos]
+            : pos;
+    unsigned lane_bits = 0x0fu;
+    for (std::size_t lane = 0; lane < 4; ++lane) {
+      if (original == target_indices[lane])
+        lane_bits &= ~(1u << lane);
+    }
     const double sx = panel_cache.ordered_x[pos];
     const double sy = panel_cache.ordered_y[pos];
     const double sz = panel_cache.ordered_z[pos];
@@ -1065,7 +1372,12 @@ void direct_jcp_target_batch_soa_avx2(
     const __m256d r2 = _mm256_add_pd(
         _mm256_add_pd(_mm256_mul_pd(ux, ux), _mm256_mul_pd(uy, uy)),
         _mm256_mul_pd(uz, uz));
-    const __m256d r = _mm256_sqrt_pd(r2);
+    const unsigned valid_bits =
+        lane_bits & static_cast<unsigned>(_mm256_movemask_pd(
+                        _mm256_cmp_pd(r2, r2_floor_v, _CMP_GT_OQ)));
+    const __m256d lane_mask = avx2_lane_mask_pd(valid_bits);
+    const __m256d r2_safe = _mm256_max_pd(r2, r2_floor_v);
+    const __m256d r = _mm256_sqrt_pd(r2_safe);
     const __m256d inv_r = _mm256_div_pd(one_v, r);
     const __m256d inv_r2 = _mm256_mul_pd(inv_r, inv_r);
     const __m256d inv_r3 = _mm256_mul_pd(inv_r2, inv_r);
@@ -1131,8 +1443,7 @@ void direct_jcp_target_batch_soa_avx2(
       const __m256d mixedk = _mm256_add_pd(
           _mm256_mul_pd(fsecond_k, nxu_nyu),
           _mm256_mul_pd(fprime_k_over_r, tangent_metric));
-      acc_phi_v = _mm256_add_pd(
-          acc_phi_v,
+      const __m256d phi_term = _mm256_and_pd(
           _mm256_mul_pd(
               area,
               _mm256_add_pd(
@@ -1140,9 +1451,9 @@ void direct_jcp_target_batch_soa_avx2(
                   _mm256_mul_pd(
                       _mm256_sub_pd(_mm256_mul_pd(eps_v, source_dk),
                                     source_d0),
-                      phi_j))));
-      acc_phin_v = _mm256_add_pd(
-          acc_phin_v,
+                      phi_j))),
+          lane_mask);
+      const __m256d phin_term = _mm256_and_pd(
           _mm256_mul_pd(
               area,
               _mm256_add_pd(
@@ -1150,15 +1461,19 @@ void direct_jcp_target_batch_soa_avx2(
                       _mm256_sub_pd(target_d0,
                                     _mm256_mul_pd(inv_eps_v, target_dk)),
                       phin_j),
-                  _mm256_mul_pd(_mm256_sub_pd(mixedk, mixed0), phi_j))));
+                  _mm256_mul_pd(_mm256_sub_pd(mixedk, mixed0), phi_j))),
+          lane_mask);
+      acc_phi_v = _mm256_add_pd(acc_phi_v, phi_term);
+      acc_phin_v = _mm256_add_pd(acc_phin_v, phin_term);
     } else {
-      acc_phi_v = _mm256_add_pd(
-          acc_phi_v,
+      const __m256d phi_term = _mm256_and_pd(
           _mm256_mul_pd(area,
                         _mm256_mul_pd(poisson_scale_v,
-                                      _mm256_mul_pd(source_d0, phi_j))));
+                                      _mm256_mul_pd(source_d0, phi_j))),
+          lane_mask);
+      acc_phi_v = _mm256_add_pd(acc_phi_v, phi_term);
     }
-    near_count += 4;
+    near_count += popcount4(valid_bits);
     ++vectorized_sources;
     vector_lanes += 4;
     ++soa_sources;
@@ -1194,6 +1509,19 @@ void direct_jcp_target_batch_tile_sum(
   }
   if (kernel == "target-avx2") {
     direct_jcp_target_batch_tile_sum_avx2(
+        panels, target_indices, panel_cache, unknown_cache, eps_ratio, kappa,
+        coupled, node, accum, near_count, vectorized_sources, vector_lanes);
+    return;
+  }
+  if (kernel == "target-avx2-v2") {
+    direct_jcp_target_batch_tile_sum_avx2(
+        panels, target_indices, panel_cache, unknown_cache, eps_ratio, kappa,
+        coupled, node, accum, near_count, vectorized_sources, vector_lanes,
+        true);
+    return;
+  }
+  if (kernel == "target-avx2-4x4") {
+    direct_jcp_target_source_tile_sum_avx2_4x4(
         panels, target_indices, panel_cache, unknown_cache, eps_ratio, kappa,
         coupled, node, accum, near_count, vectorized_sources, vector_lanes);
     return;
@@ -1320,7 +1648,8 @@ std::string resolve_leaf_panel_kernel(const std::string &requested) {
 }
 
 std::string normalize_leaf_pair_kernel(const std::string &requested) {
-  if (requested == "scalar" || requested == "target-avx2")
+  if (requested == "scalar" || requested == "target-avx2" ||
+      requested == "target-avx2-v2" || requested == "target-avx2-4x4")
     return requested;
   return "auto";
 }
@@ -1330,6 +1659,12 @@ std::string resolve_leaf_pair_batch_kernel(const std::string &requested,
   if (requested == "scalar")
     return "scalar";
 #if TITAN_SIMD_X86 && TITAN_RUNTIME_TARGET_ATTRS
+  if (requested == "target-avx2-v2" && target_batch_size == 4 &&
+      titan_simd_dispatch::runtime_has_avx2())
+    return "target-avx2-v2";
+  if (requested == "target-avx2-4x4" && target_batch_size == 4 &&
+      titan_simd_dispatch::runtime_has_avx2())
+    return "target-avx2-4x4";
   if ((requested == "auto" || requested == "target-avx2") &&
       target_batch_size == 4 && titan_simd_dispatch::runtime_has_avx2())
     return "target-avx2";
@@ -1438,7 +1773,10 @@ bool would_visit_leaf_direct_for_target(
     const bool contains_target =
         target_rank >= node.first_panel &&
         target_rank < node.first_panel + node.panel_count;
-    if (!is_leaf && !contains_target) {
+    const bool leaf_mac_enabled = tree.leaf_mac == "on";
+    const bool evaluate_node_mac =
+        !contains_target && (!is_leaf || leaf_mac_enabled);
+    if (evaluate_node_mac) {
       const double dx = target.x - node.cx;
       const double dy = target.y - node.cy;
       const double dz = target.z - node.cz;
@@ -1451,6 +1789,8 @@ bool would_visit_leaf_direct_for_target(
             source_node.first_panel + source_node.panel_count <=
                 node.first_panel + node.panel_count;
         if (tree.fragmentation_safety == "split" && node.fragmented) {
+          if (is_leaf && node_index == source_node_index)
+            return true;
           push_child_nodes(tree, node, stack);
           continue;
         }
@@ -1459,6 +1799,8 @@ bool would_visit_leaf_direct_for_target(
                                            taylor_order, coupled, mac.rho,
                                            eps_ratio);
         if (estimator.split_reject) {
+          if (is_leaf && node_index == source_node_index)
+            return true;
           push_child_nodes(tree, node, stack);
           continue;
         }
@@ -1467,6 +1809,8 @@ bool would_visit_leaf_direct_for_target(
             tree.convergence_k3_accepted_rho_cap > 0.0;
         if (k3_rho_cap_active &&
             mac.rho > tree.convergence_k3_accepted_rho_cap) {
+          if (is_leaf && node_index == source_node_index)
+            return true;
           push_child_nodes(tree, node, stack);
           continue;
         }
@@ -1513,32 +1857,48 @@ bool would_visit_leaf_direct_for_target_ancestor_path(
     const bool contains_target =
         target_rank >= node.first_panel &&
         target_rank < node.first_panel + node.panel_count;
-    if (is_leaf)
-      return node_index == source_node_index;
-    if (contains_target)
+    if (contains_target) {
+      if (is_leaf)
+        return node_index == source_node_index;
       continue;
+    }
+    const bool leaf_mac_enabled = tree.leaf_mac == "on";
+    if (is_leaf && !leaf_mac_enabled)
+      return node_index == source_node_index;
     const double dx = target.x - node.cx;
     const double dy = target.y - node.cy;
     const double dz = target.z - node.cz;
     const double distance =
         std::sqrt(std::max(1.0e-16, dx * dx + dy * dy + dz * dz));
     const MacDecision mac = evaluate_mac(target, node, tree, distance);
-    if (!mac.accepted)
+    if (!mac.accepted) {
+      if (is_leaf)
+        return node_index == source_node_index;
       continue;
-    if (tree.fragmentation_safety == "split" && node.fragmented)
+    }
+    if (tree.fragmentation_safety == "split" && node.fragmented) {
+      if (is_leaf)
+        return node_index == source_node_index;
       continue;
+    }
     const ConvergenceEstimatorDecision estimator =
         evaluate_convergence_estimator(tree, node, jcp_moments, node_index,
                                        taylor_order, coupled, mac.rho,
                                        eps_ratio);
-    if (estimator.split_reject)
+    if (estimator.split_reject) {
+      if (is_leaf)
+        return node_index == source_node_index;
       continue;
+    }
     const bool k3_rho_cap_active =
         tree.convergence_estimator_model == "channel-tail-eps" &&
         tree.convergence_k3_accepted_rho_cap > 0.0;
     if (k3_rho_cap_active &&
-        mac.rho > tree.convergence_k3_accepted_rho_cap)
+        mac.rho > tree.convergence_k3_accepted_rho_cap) {
+      if (is_leaf)
+        return node_index == source_node_index;
       continue;
+    }
     return false;
   }
   return false;

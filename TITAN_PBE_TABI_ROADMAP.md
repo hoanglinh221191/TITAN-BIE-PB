@@ -4,7 +4,7 @@ This roadmap tracks the remaining work needed to move the clean-room TABI
 backend from the current validated core toward paper-level TABI 2013 and
 TABI-PB 2.0 coverage.
 
-Last updated: 2026-05-16
+Last updated: 2026-06-09
 
 ## Phase 7 Decision Gate - Benchmark-Gated Direction
 
@@ -57,6 +57,229 @@ PBE on the grid backend.
 
 No FMM, new scheduler layer, or additional preconditioner should be added until
 this gate passes on the target workload.
+
+## TABI Review Follow-Up - Immediate Triage
+
+Status: implemented as a short diagnostic/refinement slice before any new
+solver machinery.
+
+The local review in `tabi_review_report.md` is directionally useful. Its two
+most actionable observations match the latest Barnase timing profile:
+
+- The run is GMRES/matvec limited, not setup limited. Barnase grid finished in
+  about `0.054s`, while TABI treecode timed out at `180s` after only `17`
+  matvecs. Surface construction was about `0.04s`, tree build about `1.57s`,
+  and preconditioner setup was negligible.
+- The active treecode row produced roughly `14.34B` leaf-panel interactions
+  for `39011` panels, which is worse than a simple `N^2` panel-pair sanity
+  bound. This means the tree traversal/leaf-near policy is degenerating into a
+  leaf-direct workload rather than acting as a useful acceleration.
+- The effective preconditioner was `diagonal_block_memory_cap`, so the solver
+  was running with a weak diagonal fallback. This explains why the residual
+  stayed at `1.000000000000e+00` through the observed GMRES iterations.
+
+Immediate actions that are worth doing:
+
+1. Add a timeout-safe large-protein triage report to the Barnase/profile
+   harnesses. It should emit:
+   - `leaf_panel_interactions_per_matvec`;
+   - `leaf_vs_n2_ratio`;
+   - `seconds_per_matvec`;
+   - `residual_delta_per_matvec`;
+   - requested/effective preconditioner and downgrade reason;
+   - a classification such as `preconditioner_downgraded`,
+     `leaf_work_super_n2`, `matvec_limited`, or `convergence_stalled`.
+2. Fail fast on hopeless TABI rows before long timeouts. If the progress file
+   shows both `residual_delta_per_matvec ~= 0` and `leaf_vs_n2_ratio > 1`
+   after the first few matvecs, classify the run as diagnostic failure and stop
+   instead of waiting for the full timeout.
+3. Run a small review-driven parameter sweep, but keep it behind hidden
+   benchmark scripts:
+   - leaf size `32/64/128`;
+   - opening theta around the current safe range;
+   - surface points `8/24` for Barnase profiling only;
+   - `block-budgeted` memory budgets large enough to avoid the silent diagonal
+     downgrade when the estimate is reasonable.
+4. Treat the review's "increase preconditioner budget" recommendation as a
+   diagnostic branch, not as a default change. It is valid only if the reported
+   effective preconditioner becomes real block/budgeted-block and GMRES
+   matvecs or residual trend improve on medium fixtures first.
+5. Treat the review's "deepen the tree / reduce leaf size" recommendation as
+   a work-count branch, not as a guaranteed speedup. It is valid only if
+   `leaf_vs_n2_ratio` drops below `1` and wall time per matvec improves without
+   violating accuracy/audit gates.
+
+Not immediate:
+
+- Do not add FMM/BLDTT, a new scheduler layer, or another coarse
+  preconditioner from this review alone. Previous medium-fixture evidence
+  already showed local block and exact-Galerkin coarse correction did not
+  reduce Krylov work enough.
+- Do not promote TABI or change `grid` default until the Phase 7 decision gate
+  emits `promote_candidate=true`.
+
+Implemented triage harness:
+
+- Added shared PowerShell triage helpers and
+  `test/pbe_tabi_large_protein_triage.ps1`.
+- Extended `test/pbe_tabi_barnase_timing_profile.ps1` and
+  `test/pbe_tabi_phase7_gate.ps1` with the triage columns above.
+- The triage is report-only. It does not change production solver defaults,
+  TABI parameters, or the finite-difference grid default.
+
+Latest timeout-safe triage smoke, representative row
+`surface_points=24`, `leaf=128`, `theta=0.8`, `nt=8`,
+`CaseTimeoutSeconds=30`:
+
+| Fixture | Grid seconds | TABI status | Triage classification | seconds/matvec | leaf_vs_n2 | Effective preconditioner |
+| --- | ---: | --- | --- | ---: | ---: | --- |
+| `barnase` | `0.093` | timeout | `preconditioner_downgraded` | `12.61` | `1.109` | `diagonal_block_memory_cap` |
+| `research-medium` | `0.710` | timeout | `preconditioner_downgraded` | `NA` | `0` | `diagonal_block_pending` |
+| `research-large` | `1.265` | timeout | `timeout_no_profile` | `NA` | `0` | `diagonal` |
+
+Decision from the triage slice:
+
+- The review's preconditioner concern is confirmed on Barnase and
+  research-medium: TABI is not reaching a useful block preconditioner before
+  the timeout.
+- Barnase also confirms the leaf-work concern with `leaf_vs_n2 > 1` once GMRES
+  starts, but the higher-priority diagnosis remains preconditioner downgrade.
+- Research-large needs either a longer diagnostic timeout or earlier progress
+  instrumentation before its failure can be split more precisely than
+  `timeout_no_profile`.
+
+## TABI Preconditioner Activation Diagnostic
+
+Status: implemented as a report-only preconditioner activation probe.
+
+New diagnostic harness:
+
+- `test/pbe_tabi_preconditioner_activation_probe.ps1` sweeps `grid`,
+  `diagonal`, `block`, and `block-budgeted` modes.
+- `test/pbe_tabi_perf_matrix.ps1` now accepts diagnostic-only
+  `PreconditionerBlockNear`, `PreconditionerBlockPanelCap`, and
+  `PreconditionerMemoryBudgetMb` script parameters, and still writes generated
+  `arg.in` files with `-option=value` syntax.
+- `test/pbe_tabi_triage_helpers.ps1` now exports preconditioner setup/apply,
+  budget, valid-block, valid-panel, ill-conditioned-block, and effective-mode
+  telemetry when the underlying TABI run emits it.
+- The human-readable result is captured in
+  `TITAN_TABI_PRECONDITIONER_ACTIVATION_REPORT.txt`.
+
+Focused local probe, representative row `surface_points=24`, `leaf=128`,
+`theta=0.8`, `nt=8`, `CaseTimeoutSeconds=30`, `block-budgeted budget=256MB`,
+`block_panel_cap=32`:
+
+| Fixture | Requested preconditioner | Status | Effective preconditioner | Activation class | Triage class | seconds/matvec | leaf_vs_n2 |
+| --- | --- | --- | --- | --- | --- | ---: | ---: |
+| `barnase` | `diagonal` | timeout | `diagonal` | `diagonal_only` | `matvec_limited` | `15.77` | `0.554` |
+| `barnase` | `block` | timeout | `diagonal_block_memory_cap` | `memory_capped` | `preconditioner_downgraded` | `12.59` | `1.109` |
+| `barnase` | `block-budgeted` | timeout | `NA` | `diagonal_only` | `barnase_probe_timeout` | `NA` | `NA` |
+| `research-medium` | `block-budgeted` | timeout | `NA` | `diagonal_only` | `timeout_no_profile` | `NA` | `NA` |
+| `research-large` | `block-budgeted` | timeout | `NA` | `diagonal_only` | `timeout_no_profile` | `NA` | `NA` |
+
+Activation decision:
+
+- No tested branch produced a useful block/budgeted-block effective
+  preconditioner on the representative fixtures.
+- Barnase `block` still downgrades to `diagonal_block_memory_cap` and also
+  shows bad leaf work once GMRES starts (`leaf_vs_n2 > 1`).
+- The `block-budgeted` rows timed out before enough effective preconditioner
+  telemetry was emitted, so the next fix should be earlier activation telemetry
+  and fail-fast classification, not leaf-kernel optimization.
+
+Gate for moving to leaf-kernel optimization:
+
+- At least one medium fixture must report a real block/budgeted-block effective
+  preconditioner.
+- The same row must show GMRES/residual progress, not only setup timeout.
+- Only then should leaf-kernel work be prioritized, and only if `leaf_vs_n2`
+  remains high after preconditioner activation is fixed.
+
+Follow-up implementation after this diagnostic:
+
+- Added `src/tabi/tabi_preconditioner.h` and
+  `src/tabi/tabi_preconditioner.cpp`.
+- Moved JCP block preconditioner, budgeted block range/estimate logic, dense LU
+  helpers, and coarse Galerkin preconditioner support out of
+  `tabi_solver.cpp`.
+- Changed `block-budgeted` activation policy so it is governed by the explicit
+  preconditioner memory budget, not the legacy whole-process working-set soft
+  cap.
+- Changed block application so ill-conditioned local blocks fall back to
+  diagonal behavior locally instead of resetting the entire preconditioner.
+- Changed buffer-aware block preconditioner construction to use a fast
+  centroid/local kernel approximation; full Duffy/adaptive near-field kernels
+  remain in the production operator.
+- Added `test/titan_tabi_preconditioner_smoke.cpp` to exercise the new module
+  directly with a synthetic panel/tree fixture.
+
+## TABI Leaf-Kernel Transition Probe
+
+Status: implemented as a benchmark-only transition probe.
+
+The operator-near preconditioner branch moved Barnase into a leaf-kernel-limited
+regime: the effective preconditioner can become `block_budgeted_operator_near`,
+the quality gate passes, and setup time is negligible, but each GMRES matvec is
+still too expensive. The next gate therefore measures tree/leaf options before
+any new kernel rewrite:
+
+- `test/pbe_tabi_leaf_kernel_transition_probe.ps1` sweeps leaf size, opening
+  theta, and existing scheduler/kernel variants under a fixed
+  `block-budgeted + operator-near` preconditioner.
+- The probe writes
+  `test/tmp/pbe_tabi_leaf_kernel_transition_probe/pbe_tabi_leaf_kernel_transition_probe.csv`
+  and the human-readable
+  `TITAN_TABI_LEAF_KERNEL_OPTIMIZATION_REPORT.txt`.
+- `test/pbe_tabi_perf_matrix.ps1` now accepts diagnostic-only `TabiExtraArgs`,
+  allowing the probe to test existing hidden scheduler paths without adding
+  production CLI behavior.
+
+Decision rules:
+
+- `tree_depth_win`: leaf-panel work per matvec drops by at least `3x` versus
+  Barnase baseline `leaf=128`, `theta=0.8`, `tile-avx2`, with clean
+  verify/accepted-miss evidence.
+- `scheduler_win`: seconds per matvec drops by at least `1.5x` without growing
+  leaf-panel work beyond `1.2x`.
+- `mac_accuracy_fail`: accepted-miss or verify mismatch evidence is nonzero.
+- `memory_limited`: peak memory exceeds `2x` the baseline row.
+- `no_win`: no clean row meets the promotion gates.
+
+Promotion remains conservative: a candidate can enter the Phase 7 experimental
+gate only when Barnase reaches seconds/matvec `<3` or leaf-panel work/matvec
+drops by at least `3x` with clean verification. The finite-difference `grid`
+backend remains the production default.
+
+Latest Barnase scheduler transition probe:
+
+Command shape:
+
+```text
+test/pbe_tabi_leaf_kernel_transition_probe.ps1 -Fixtures barnase -TreeLeafSizes 64,128 -OpeningThetas 0.8 -SchedulerVariants baseline,deferred-worklist,target-leaf-block,soa-avx2 -CaseTimeoutSeconds 30
+```
+
+Result summary:
+
+| Scheduler | leaf | theta | status | seconds/matvec | leaf work/matvec | decision |
+| --- | ---: | ---: | --- | ---: | ---: | --- |
+| baseline | 128 | 0.8 | timeout | `5.189` | `843.5M` | `no_win` |
+| baseline | 64 | 0.8 | timeout | `10.936` | `603.9M` | `no_win` |
+| soa-avx2 | 128 | 0.8 | timeout | `11.293` | `843.5M` | `no_win` |
+| soa-avx2 | 64 | 0.8 | timeout | `18.537` | `603.9M` | `no_win` |
+| deferred-worklist | 64/128 | 0.8 | timeout | `NA` | `NA` | `no_win` |
+| target-leaf-block | 64/128 | 0.8 | timeout | `NA` | `NA` | `no_win` |
+
+Interpretation:
+
+- The existing hidden scheduler variants do not provide an immediate Barnase
+  win under the operator-near preconditioner.
+- `leaf=64` reduces leaf work but slows matvec time, so tree-depth tuning alone
+  is not enough.
+- The next implementation branch should attack safe work-count/kernel structure
+  directly: reduce unclean/scalar tail work, reuse packed source/target blocks,
+  and split tasks by estimated pair cost. Another scheduler wrapper is unlikely
+  to pass the `1.5x` gate without changing the hot leaf path.
 
 ## Current Status
 
@@ -1578,7 +1801,7 @@ Recommended Stage 2Z:
 Implemented in this slice:
 
 - Added hidden TABI controls:
-  - `-pbe-tabi-precond-block-near=singular|buffer-aware`
+  - `-pbe-tabi-precond-block-near=singular|buffer-aware|operator-near`
   - `-pbe-tabi-node-bounds=moment|tight-aabb`
 - Kept defaults unchanged:
   - `precond=auto` still does not auto-enable block;
@@ -5474,3 +5697,279 @@ Stage 3AL decision:
   before further runtime investment. Production defaults, `stage3u-safe`,
   direct TABI, and the grid backend remain unchanged. No Barnase run was
   performed because Stage 3AL is report-only.
+
+## Immediate TABI Preconditioner Refactor and Controlled Probe
+
+Status: implemented as a focused preconditioner-quality triage slice after the
+Phase 7 large-protein benchmark showed that grid remains the production
+default and TABI remains experimental.
+
+Implementation:
+
+- Split JCP block/coarse preconditioner code out of `tabi_solver.cpp` into the
+  dedicated internal submodule `src/tabi/tabi_preconditioner.h` and
+  `src/tabi/tabi_preconditioner.cpp`.
+- Reused worker-local scratch during block application instead of allocating a
+  local vector for every block apply.
+- Changed `block-budgeted` activation so it uses the configured memory budget
+  instead of the legacy whole-process working-set soft cap.
+- Allowed partial block preconditioners when valid panel coverage is high
+  enough; ill-conditioned local blocks now remain local fallback information
+  instead of always discarding the full preconditioner.
+- Made the `buffer-aware` preconditioner matrix cheaper to build by using the
+  centroid/local kernel approximation inside the preconditioner only. The
+  production operator still uses the requested near-field integration.
+- Added `operator-near` block matrix construction, which uses the same
+  near-pair evaluator semantics as the real JCP operator for block entries
+  instead of the centroid/local approximation.
+- Added symmetric diagonal-magnitude scaling before block LU and a deterministic
+  block quality gate. Timing/progress outputs now include
+  `preconditioner_quality_rejected_blocks`,
+  `preconditioner_quality_probe_max_gain`, and
+  `preconditioner_quality_status`.
+- Added `test/titan_tabi_preconditioner_smoke.cpp` and
+  `test/pbe_tabi_preconditioner_controlled_probe.ps1`.
+
+Controlled probe command:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File test\pbe_tabi_preconditioner_controlled_probe.ps1 -TitanExe .\titan.exe -CaseTimeoutSeconds 45 -SurfacePoints 24 -Threads 2
+```
+
+Controlled probe result:
+
+| Case | Effective preconditioner | Matvecs | Iterations | Final residual | Energy status |
+| --- | --- | ---: | ---: | ---: | --- |
+| direct_diagonal | diagonal | 18 | 16 | 1.03e-6 | ok |
+| direct_block_buffer_aware | block_budgeted_buffer_aware | 45 | 40 | 7.36e-2 | failed |
+| direct_block_operator_near | block_budgeted_operator_near | 9 | 8 | 7.05e-5 | ok |
+| treecode_diagonal | diagonal | 18 | 16 | 1.03e-6 | ok |
+| treecode_block_buffer_aware | block_budgeted_buffer_aware | 45 | 40 | 7.36e-2 | failed |
+| treecode_block_operator_near | block_budgeted_operator_near | 9 | 8 | 7.05e-5 | ok |
+
+Decision:
+
+- The new preconditioner submodule is wired correctly: `block-budgeted`
+  activates in both direct and treecode controlled runs and writes normal timing
+  output.
+- `buffer-aware` is now confirmed as the bad approximation branch: it worsens
+  Krylov convergence on the controlled fixture.
+- `operator-near` fixes the controlled quality gate: it reduces GMRES work from
+  18 to 9 matvecs in both direct and treecode cases.
+- Next work should run Barnase/research-medium with
+  `-pbe-tabi-precond-block-near=operator-near`. If the matvec reduction survives
+  representative fixtures, retire `buffer-aware` from promotion consideration
+  and make `operator-near` the serious block-budgeted branch.
+- Production default remains `-pbe=grid`; TABI remains explicit/experimental.
+
+## TABI Kernel Rewrite V2A - Branchless Target AVX2
+
+Status: implemented as the first safe kernel-rewrite slice after the
+large-protein leaf-kernel transition report showed that scheduler wrappers and
+SoA retargeting were not enough for Barnase.
+
+Implementation:
+
+- Added hidden `-pbe-tabi-leaf-pair-kernel=target-avx2-v2`.
+- Kept `auto` and existing `target-avx2` behavior unchanged; V2 is opt-in only.
+- Reused the existing leaf-pair target-batch entry point, but added a masked
+  AVX2 path for self/degenerate lanes. V2 clamps invalid-distance lanes before
+  division and masks their contribution to zero instead of falling back the
+  whole 4-target batch to scalar.
+- Wired `target-avx2-v2` through parser validation, leaf-pair kernel
+  normalization, runtime resolver, dispatcher, and leaf-kernel transition probe.
+- Extended `test/pbe_tabi_leaf_pair_target_avx2_smoke.ps1` so scalar,
+  `target-avx2`, and `target-avx2-v2` are compared in the same fixture.
+
+Verification snapshot:
+
+- TDD red was observed before implementation: the V2 smoke failed because
+  `target-avx2-v2` resolved to scalar.
+- After implementation, `test/pbe_tabi_leaf_pair_target_avx2_smoke.ps1`
+  passed with scalar-vs-V2 relative RMS `1.36044e-16` on the clean fixture and
+  `1.20471e-16` on the singular/exclusion fixture.
+- The `soa-avx2` path now masks self/degenerate lanes before division as well.
+  `test/pbe_tabi_leaf_pair_target_soa_avx2_smoke.ps1` includes a direct
+  self-lane probe and passes with no non-finite accumulation.
+- Quick Barnase probe with `target-avx2-v2` active confirmed the kernel was
+  used (`leaf_pair_batch_kernel=target-avx2-v2`, `415,414,900` vectorized
+  sources for leaf size 128), but the run still timed out and remained
+  `no_win`: `11.13 s/matvec` for V2A versus `12.02 s/matvec` for the baseline
+  leaf-size-128 row in the same quick run.
+
+Decision:
+
+- V2A addresses the first kernel-rewrite issue, the unclean-path scalar
+  fallback penalty, without changing production defaults.
+- The follow-up review correctly identifies that V2A still has low arithmetic
+  intensity: both `soa-avx2` and `target-avx2-v2` are still fundamentally
+  4-target x 1-source kernels with per-source broadcast. This is now an
+  optimization limitation, not a NaN/self-interaction correctness bug.
+- Remaining kernel-rewrite work is V2B: true 4x4 or 4x8 source-register
+  blocking, packed contiguous source/target tiles, and cost-tile task splitting
+  through a static worklist. Do not promote V2A without Barnase timing evidence
+  from `test/pbe_tabi_leaf_kernel_transition_probe.ps1`.
+
+## TABI Kernel Rewrite V2B - 4x4 Leaf Kernel And Cost-Tile Worklist
+
+Status: implemented as an experimental, opt-in follow-up to V2A. V2B improves
+the internal architecture but does not yet provide a Barnase promotion win.
+
+Implementation:
+
+- Added hidden `-pbe-tabi-leaf-pair-kernel=target-avx2-4x4`.
+- Added hidden `-pbe-tabi-leaf-pair-scheduler=cost-tile-worklist`.
+- Added `direct_jcp_target_source_tile_sum_avx2_4x4`, a 4-target x 4-source
+  AVX2 microtile that keeps V2A's branchless self/degenerate lane masking and
+  handles source and target tails with scalar fallback.
+- Added static cost-tile scheduling for direct near leaf-pair work. Source leaf
+  spans are split into fixed 32-panel tiles, grouped by target leaf, sorted by
+  estimated pair count, and then executed through the batch kernel. Far
+  Taylor/MAC logic is unchanged.
+- Updated the leaf-block verifier so cost-tile partial source spans are checked
+  against the same span, not the whole original source leaf.
+- Updated the leaf-kernel transition probe with the `cost-tile-4x4` variant and
+  cost-tile/4x4 telemetry columns:
+  `leaf_pair_cost_tile_tasks`, `leaf_pair_cost_tile_source_panels`,
+  `leaf_pair_cost_tile_target_panels`, `leaf_pair_cost_tile_seconds`, and
+  `leaf_pair_kernel_4x4_sources`.
+
+Verification snapshot:
+
+- `test/pbe_tabi_leaf_pair_target_avx2_smoke.ps1` passes and compares scalar,
+  legacy `target-avx2`, V2A, and V2B 4x4 on clean, self/degenerate, singular,
+  and tail source/target fixtures. Clean scalar-vs-4x4 relative RMS was
+  `1.36044e-16`.
+- `test/pbe_tabi_leaf_pair_worklist_scheduler_smoke.ps1` passes with
+  `cost_tile_rel=1.7068e-16`, `cost_tile_rel4=1.7068e-16`, full-small verifier
+  enabled, and deterministic output for one and four workers.
+- Native build passed with `mingw32-make PROFILE=native TARGET=titan.exe all -j1`.
+- Quick Barnase probe (`baseline,target-avx2-v2,cost-tile-4x4`; leaf sizes
+  `64,128`; theta `0.8`; 30 s timeout) produced clean but non-promotable rows:
+
+| Scheduler | leaf_size | status | sec/matvec | batch kernel | decision |
+| --- | ---: | --- | ---: | --- | --- |
+| baseline | 128 | timeout | `9.393` | scalar | `no_win` |
+| target-avx2-v2 | 128 | timeout | `11.612` | target-avx2-v2 | `no_win` |
+| cost-tile-4x4 | 128 | timeout | `12.066` | target-avx2-4x4 | `no_win` |
+| baseline | 64 | timeout | `18.349` | scalar | `no_win` |
+| target-avx2-v2 | 64 | timeout | `22.619` | target-avx2-v2 | `no_win` |
+| cost-tile-4x4 | 64 | timeout | `27.222` | target-avx2-4x4 | `no_win` |
+
+Decision:
+
+- V2B proves correctness and plumbing for a cleaner microtile/worklist path, but
+  the current 4x4 implementation is still slower than the scalar baseline on
+  the quick Barnase gate.
+- Do not promote V2B into any experimental preset. Keep `-pbe=grid` as the
+  production default and TABI as explicit/experimental.
+- The next useful TABI decision is algorithmic ROI: either profile why the
+  4x4 path adds overhead despite lower-level vectorization, or pause TABI
+  solver investment in favor of grid/PBSA robustness until a larger algorithmic
+  change is justified.
+
+## TABI V2C - Leaf-MAC Traversal Gate
+
+Status: implemented as an experimental traversal/work-count gate after review
+showed that leaf nodes were always forced into direct near-field work even when
+the same MAC/safety gates could accept them as far nodes. This is not a
+production default change.
+
+Implementation:
+
+- Added hidden `-pbe-tabi-leaf-mac=<off|audit|on>`, default `off`.
+- `audit` evaluates leaf MAC candidates and writes counters while preserving
+  the old direct-leaf behavior exactly.
+- `on` allows a non-target-containing leaf node to use the existing far/Taylor
+  path when `evaluate_mac` accepts it. Leaves containing the target remain
+  direct.
+- Applied the policy to non-JCP traversal, JCP on-the-fly traversal, and the
+  cached interaction-list builder.
+- Leaf-MAC accepted nodes still pass through existing fragmentation safety,
+  convergence estimator, expansion audit, and accepted-miss diagnostics.
+- Added counters:
+  `leaf_mac_candidates`, `leaf_mac_accepted`, `leaf_mac_rejected`,
+  `leaf_mac_far_panels`, and `leaf_mac_direct_panels_saved_estimate`.
+- Updated the leaf-kernel transition probe with a `leaf-mac` variant.
+
+Verification snapshot:
+
+- `test/pbe_tabi_leaf_mac_smoke.ps1` passed on a synthetic clustered fixture.
+  `audit` preserved the old output, while `on` reduced direct leaf work and
+  stayed close to the direct reference (`jcp_rel=0.00377998`,
+  `non_jcp_rel=0.000718785`, saved panels `6424`).
+- Follow-up diagnostic fix: leaf nodes accepted by Leaf-MAC now fall back to
+  direct evaluation instead of `push_child_nodes(...); continue` when
+  fragmentation split, convergence-estimator split, or the K3 rho cap rejects
+  the far approximation. This prevents leaf drops and avoids expensive
+  split-channel audit on leaves that cannot actually be split.
+- The directness probe used by leaf-pair batching is now Leaf-MAC-aware only
+  for `leaf_mac=on`. A leaf that would be handled as far returns `false`; a
+  leaf that falls back to direct returns `true`; `leaf_mac=audit` remains direct.
+- Follow-up control-flow fix: JCP traversal now rechecks
+  `leaf_mac_fallback_to_direct` before K3 rho cap, far Taylor evaluation, far
+  expansion audit, and `continue`. Setting the flag inside the estimator block
+  no longer lets the same leaf continue through the far path and skip direct
+  evaluation.
+- Quick Barnase transition probe (`baseline,target-avx2-v2,cost-tile-4x4,
+  leaf-mac`; leaf sizes `64,128`; theta `0.8`; 30 s timeout) completed and
+  kept all rows non-promotable. Leaf-MAC rows reached `gmres_start` but timed
+  out before the first matvec/progress row with nonzero work counters, so the
+  current implementation is not ready for promotion on Barnase.
+
+Decision:
+
+- Keep `-pbe=grid` as the production PBE default and keep TABI explicit and
+  experimental.
+- Only consider Leaf-MAC for an experimental preset if Barnase/research fixtures
+  show at least `3x` lower leaf work per matvec or `1.5x` faster seconds per
+  matvec with `accepted_miss=0`, clean verifier/audit rows, and no GMRES
+  regression.
+- If further TABI work continues, the next question is why Leaf-MAC cached
+  setup/first matvec stalls before producing work counters on Barnase; do not
+  promote V2C based only on the synthetic smoke.
+
+## TABI V2D - Precomputed Convergence Norms
+
+Status: implemented as a Leaf-MAC stall diagnostic/optimization after review
+identified `evaluate_convergence_estimator` as an O(moment-terms) hot path when
+Leaf-MAC exposes millions of target-leaf candidate pairs.
+
+Implementation:
+
+- Extended `PackedJcpMoments` with `convergence_norms`, one entry per tree
+  node.
+- Precomputed scalar `phin`, normal `phi_normal`, and per-channel
+  source/tail norms immediately after JCP moment construction.
+- Updated `evaluate_convergence_estimator` to read cached source/tail norms in
+  O(1) when the cache is valid for the current Taylor order, while preserving
+  the old scan path as a fallback for manually constructed/legacy moment
+  payloads.
+- Kept target-dependent parts of the estimator unchanged: `rho`, aspect,
+  dielectric/channel amplification, and split-selectivity policy are still
+  evaluated per target-node pair.
+
+Verification snapshot:
+
+- `test/pbe_tabi_leaf_mac_smoke.ps1` now checks that the convergence norm cache
+  is built and that cached estimator output matches the fallback scan path on a
+  synthetic Leaf-MAC candidate.
+- The same smoke includes a forced convergence-split leaf case. It verifies that
+  fallback leaves do not increment Leaf-MAC far-panel counters, do not run far
+  expansion audit, and still execute direct leaf work.
+- `mingw32-make PROFILE=native TARGET=titan.exe all -j1` passed.
+- Quick Barnase transition probe still produced no promotable Leaf-MAC row:
+  `leaf-mac` timed out before nonzero matvec/work counters at leaf sizes `64`
+  and `128`. In the current quick harness, those rows report
+  `convergence_estimator=off`, so the remaining stall is not explained by the
+  convergence split/audit control-flow bug.
+
+Decision:
+
+- V2D removes the repeated moment-norm scan as a known algorithmic hazard, but
+  does not by itself make Leaf-MAC a Barnase candidate.
+- Keep `-pbe=grid` as production default and keep Leaf-MAC experimental.
+- The next diagnostic should focus on why Leaf-MAC still times out before the
+  first progress/work row after estimator norm caching: likely cached list
+  construction, pre-matvec traversal volume, or another target-leaf policy path
+  before counters are flushed.

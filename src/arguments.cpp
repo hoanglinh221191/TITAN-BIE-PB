@@ -1362,9 +1362,10 @@ int arguments::post_process() {
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_precond_block_near != "singular" &&
-        pbe.tabi_precond_block_near != "buffer-aware") {
+        pbe.tabi_precond_block_near != "buffer-aware" &&
+        pbe.tabi_precond_block_near != "operator-near") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-precond-block-near must be singular or buffer-aware.");
+          "PBE: -pbe-tabi-precond-block-near must be singular, buffer-aware, or operator-near.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_precond_block_panel_cap < 8 ||
@@ -1448,9 +1449,11 @@ int arguments::post_process() {
     }
     if (pbe.tabi_leaf_pair_kernel != "auto" &&
         pbe.tabi_leaf_pair_kernel != "scalar" &&
-        pbe.tabi_leaf_pair_kernel != "target-avx2") {
+        pbe.tabi_leaf_pair_kernel != "target-avx2" &&
+        pbe.tabi_leaf_pair_kernel != "target-avx2-v2" &&
+        pbe.tabi_leaf_pair_kernel != "target-avx2-4x4") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-leaf-pair-kernel must be auto, scalar, or target-avx2.");
+          "PBE: -pbe-tabi-leaf-pair-kernel must be auto, scalar, target-avx2, target-avx2-v2, or target-avx2-4x4.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_leaf_kernel_profile != "off" &&
@@ -1518,9 +1521,10 @@ int arguments::post_process() {
     }
     if (pbe.tabi_leaf_pair_scheduler != "inline-select" &&
         pbe.tabi_leaf_pair_scheduler != "deferred-worklist" &&
-        pbe.tabi_leaf_pair_scheduler != "target-leaf-block") {
+        pbe.tabi_leaf_pair_scheduler != "target-leaf-block" &&
+        pbe.tabi_leaf_pair_scheduler != "cost-tile-worklist") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-leaf-pair-scheduler must be inline-select, deferred-worklist, or target-leaf-block.");
+          "PBE: -pbe-tabi-leaf-pair-scheduler must be inline-select, deferred-worklist, target-leaf-block, or cost-tile-worklist.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_leaf_pair_worklist_max_active < 64 ||
@@ -1541,6 +1545,12 @@ int arguments::post_process() {
         pbe.tabi_leaf_block_verify != "full-small") {
       TitanUI::print_error(
           "PBE: -pbe-tabi-leaf-block-verify must be off, sampled, or full-small.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_leaf_mac != "off" && pbe.tabi_leaf_mac != "audit" &&
+        pbe.tabi_leaf_mac != "on") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-leaf-mac must be off, audit, or on.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_target_batch_size != 1 &&

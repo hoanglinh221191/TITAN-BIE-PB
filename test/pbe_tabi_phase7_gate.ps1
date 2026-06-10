@@ -9,8 +9,10 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+$WorkRoot = [System.IO.Path]::GetFullPath($WorkRoot)
 $InvariantCulture = [System.Globalization.CultureInfo]::InvariantCulture
 $PerfMatrixScript = Join-Path $PSScriptRoot 'pbe_tabi_perf_matrix.ps1'
+$TriageHelperScript = Join-Path $PSScriptRoot 'pbe_tabi_triage_helpers.ps1'
 
 function Convert-ToDoubleOrNull([object]$Value) {
     if ($null -eq $Value) { return $null }
@@ -115,6 +117,7 @@ function New-NormalizedRow($Row, $GridByFixture) {
     $acceptedMissStatus = if ($mode -eq 'tabi_treecode') { Get-AcceptedMissStatus $Row } else { 'NA' }
     $ramBytes = Convert-ToDoubleOrNull (Get-RowValue $Row 'peak_ram_bytes')
     $energyRel = Get-EnergyRelVsGrid $Row $GridByFixture
+    $triage = New-TabiTriageRecord -Row $Row -RunDir (Get-RowValue $Row 'run_dir') -ExistingClassification (Get-RowValue $Row 'performance_classification')
     [PSCustomObject]@{
         fixture = $fixture
         mode = $mode
@@ -130,6 +133,18 @@ function New-NormalizedRow($Row, $GridByFixture) {
         time_ratio_vs_grid = Get-RowValue $Row 'time_ratio_vs_grid'
         ram_ratio_vs_grid = Get-RowValue $Row 'ram_ratio_vs_grid'
         failure_mode = Get-FailureMode $Row $energyStatus $acceptedMissStatus
+        triage_classification = $triage.triage_classification
+        seconds_per_matvec = $triage.seconds_per_matvec
+        leaf_panel_interactions_per_matvec = $triage.leaf_panel_interactions_per_matvec
+        leaf_vs_n2_ratio = $triage.leaf_vs_n2_ratio
+        residual_delta_per_matvec = $triage.residual_delta_per_matvec
+        preconditioner_requested = $triage.preconditioner_requested
+        preconditioner_effective = $triage.preconditioner_effective
+        preconditioner_downgrade = $triage.preconditioner_downgrade
+        prepare_progress_phase = $triage.prepare_progress_phase
+        prepare_progress_status = $triage.prepare_progress_status
+        prepare_progress_rss_bytes = $triage.prepare_progress_rss_bytes
+        triage_source = $triage.triage_source
         decision_reason = 'input_row'
         surface_points = Get-RowValue $Row 'surface_points'
         tree_leaf_size = Get-RowValue $Row 'tree_leaf_size'
@@ -234,6 +249,10 @@ if (-not (Test-Path -LiteralPath $PerfMatrixScript)) {
 if (-not (Test-Path -LiteralPath $TitanExe)) {
     throw "Missing titan executable: $TitanExe"
 }
+if (-not (Test-Path -LiteralPath $TriageHelperScript)) {
+    throw "Missing TABI triage helper script: $TriageHelperScript"
+}
+. $TriageHelperScript
 
 New-CleanDir $WorkRoot
 $matrixWork = Join-Path $WorkRoot 'matrix_run'
@@ -274,6 +293,9 @@ $decision = New-Decision $normalized ([bool]$Quick)
 $decisionCsv = Join-Path $WorkRoot 'pbe_tabi_phase7_decision.csv'
 @($decision) | Export-Csv -LiteralPath $decisionCsv -NoTypeInformation -Encoding ASCII
 
+$triageClassifications = (@($normalized | Group-Object triage_classification | Sort-Object Name | ForEach-Object {
+    "$($_.Name)=$($_.Count)"
+}) -join ';')
 $summary = @(
     'phase: 7',
     'title: Benchmark-Gated PBE/TABI Direction',
@@ -292,6 +314,7 @@ $summary = @(
     "missing_accepted_miss_evidence_count: $($decision.missing_accepted_miss_evidence_count)",
     "accuracy_failure_count: $($decision.accuracy_failure_count)",
     "decision_reason: $($decision.decision_reason)",
+    "triage_classifications: $triageClassifications",
     'gate_policy: promote only if treecode passes accuracy/residual/accepted-miss evidence and memory/runtime/science advantage on medium fixtures',
     'note: quick mode validates harness only and must not change production defaults',
     "matrix_csv: $matrixCsv",

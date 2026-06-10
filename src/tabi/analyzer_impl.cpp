@@ -6961,6 +6961,11 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_leaf_work_scalar_tail_frac,"
            "tabi_smooth_leaf_node_interactions,"
            "tabi_leaf_pruned_interactions,"
+           "tabi_leaf_mac_candidates,"
+           "tabi_leaf_mac_accepted,"
+           "tabi_leaf_mac_rejected,"
+           "tabi_leaf_mac_far_panels,"
+           "tabi_leaf_mac_direct_panels_saved_estimate,"
            "tabi_adaptive_smooth_leaf_accepted,"
            "tabi_adaptive_smooth_leaf_rejected,"
            "tabi_adaptive_span_tile_accepted,"
@@ -7349,6 +7354,9 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_preconditioner_valid_blocks,"
            "tabi_preconditioner_valid_panels,"
            "tabi_preconditioner_ill_conditioned_blocks,"
+           "tabi_preconditioner_quality_rejected_blocks,"
+           "tabi_preconditioner_quality_probe_max_gain,"
+           "tabi_preconditioner_quality_status,"
            "tabi_preconditioner_setup_seconds,"
            "tabi_preconditioner_apply_seconds,"
            "tabi_preconditioner_apply_calls,"
@@ -7526,6 +7534,11 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << result.tabi_leaf_work_scalar_tail_frac << ','
               << result.tabi_smooth_leaf_node_interactions << ','
               << result.tabi_leaf_pruned_interactions << ','
+              << result.tabi_leaf_mac_candidates << ','
+              << result.tabi_leaf_mac_accepted << ','
+              << result.tabi_leaf_mac_rejected << ','
+              << result.tabi_leaf_mac_far_panels << ','
+              << result.tabi_leaf_mac_direct_panels_saved_estimate << ','
               << result.tabi_adaptive_smooth_leaf_accepted << ','
               << result.tabi_adaptive_smooth_leaf_rejected << ','
               << result.tabi_adaptive_span_tile_accepted << ','
@@ -8014,6 +8027,9 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << result.tabi_preconditioner_valid_blocks << ','
               << result.tabi_preconditioner_valid_panels << ','
               << result.tabi_preconditioner_ill_conditioned_blocks << ','
+              << result.tabi_preconditioner_quality_rejected_blocks << ','
+              << result.tabi_preconditioner_quality_probe_max_gain << ','
+              << csv_escape(result.tabi_preconditioner_quality_status) << ','
               << seconds(result.tabi_preconditioner_setup_ms) << ','
               << seconds(result.tabi_preconditioner_apply_ms) << ','
               << result.tabi_preconditioner_apply_calls << ','
@@ -8426,7 +8442,10 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "leaf_work_singular_fallback_frac,"
            "leaf_work_scalar_tail_frac,"
            "smooth_leaf_node_interactions,"
-           "leaf_pruned_interactions,adaptive_smooth_leaf_accepted,"
+           "leaf_pruned_interactions,leaf_mac_candidates,"
+           "leaf_mac_accepted,leaf_mac_rejected,leaf_mac_far_panels,"
+           "leaf_mac_direct_panels_saved_estimate,"
+           "adaptive_smooth_leaf_accepted,"
            "adaptive_smooth_leaf_rejected,adaptive_span_tile_accepted,"
            "adaptive_span_tile_rejected,adaptive_exact_leaf_fallbacks,"
            "adaptive_reject_one_ring_overlap,"
@@ -8493,6 +8512,9 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "preconditioner_block_panel_cap,preconditioner_memory_budget_bytes,"
            "preconditioner_estimated_bytes,preconditioner_valid_blocks,"
            "preconditioner_valid_panels,preconditioner_ill_conditioned_blocks,"
+           "preconditioner_quality_rejected_blocks,"
+           "preconditioner_quality_probe_max_gain,"
+           "preconditioner_quality_status,"
            "preconditioner_setup_seconds,preconditioner_apply_seconds,"
            "preconditioner_apply_calls,"
            "preconditioner_coarse_aggregate_cap,preconditioner_coarse_aggregates,"
@@ -8953,6 +8975,11 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << result.tabi_leaf_work_scalar_tail_frac << ','
       << result.tabi_smooth_leaf_node_interactions << ','
       << result.tabi_leaf_pruned_interactions << ','
+      << result.tabi_leaf_mac_candidates << ','
+      << result.tabi_leaf_mac_accepted << ','
+      << result.tabi_leaf_mac_rejected << ','
+      << result.tabi_leaf_mac_far_panels << ','
+      << result.tabi_leaf_mac_direct_panels_saved_estimate << ','
       << result.tabi_adaptive_smooth_leaf_accepted << ','
       << result.tabi_adaptive_smooth_leaf_rejected << ','
       << result.tabi_adaptive_span_tile_accepted << ','
@@ -9047,6 +9074,9 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << result.tabi_preconditioner_valid_blocks << ','
       << result.tabi_preconditioner_valid_panels << ','
       << result.tabi_preconditioner_ill_conditioned_blocks << ','
+      << result.tabi_preconditioner_quality_rejected_blocks << ','
+      << result.tabi_preconditioner_quality_probe_max_gain << ','
+      << csv_escape(result.tabi_preconditioner_quality_status) << ','
       << seconds(result.tabi_preconditioner_setup_ms) << ','
       << seconds(result.tabi_preconditioner_apply_ms) << ','
       << result.tabi_preconditioner_apply_calls << ','
@@ -11589,6 +11619,7 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   options.leaf_pair_worklist_verify =
       args_.tabi_leaf_pair_worklist_verify;
   options.leaf_block_verify = args_.tabi_leaf_block_verify;
+  options.leaf_mac = args_.tabi_leaf_mac;
   options.target_batch_size = args_.tabi_target_batch_size;
   options.leaf_pair_min_source_panels =
       args_.tabi_leaf_pair_min_source_panels;
@@ -11764,6 +11795,12 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_smooth_leaf_node_interactions =
       tabi.smooth_leaf_node_interactions;
   solve.tabi_leaf_pruned_interactions = tabi.leaf_pruned_interactions;
+  solve.tabi_leaf_mac_candidates = tabi.leaf_mac_candidates;
+  solve.tabi_leaf_mac_accepted = tabi.leaf_mac_accepted;
+  solve.tabi_leaf_mac_rejected = tabi.leaf_mac_rejected;
+  solve.tabi_leaf_mac_far_panels = tabi.leaf_mac_far_panels;
+  solve.tabi_leaf_mac_direct_panels_saved_estimate =
+      tabi.leaf_mac_direct_panels_saved_estimate;
   solve.tabi_leaf_work_profile = tabi.leaf_work_profile;
   solve.tabi_leaf_work_mac_terminal_panels =
       tabi.leaf_work_mac_terminal_panels;
@@ -12408,6 +12445,12 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_preconditioner_valid_panels = tabi.preconditioner_valid_panels;
   solve.tabi_preconditioner_ill_conditioned_blocks =
       tabi.preconditioner_ill_conditioned_blocks;
+  solve.tabi_preconditioner_quality_rejected_blocks =
+      tabi.preconditioner_quality_rejected_blocks;
+  solve.tabi_preconditioner_quality_probe_max_gain =
+      tabi.preconditioner_quality_probe_max_gain;
+  solve.tabi_preconditioner_quality_status =
+      tabi.preconditioner_quality_status;
   solve.tabi_preconditioner_setup_ms = tabi.preconditioner_setup_ms;
   solve.tabi_preconditioner_apply_ms = tabi.preconditioner_apply_ms;
   solve.tabi_preconditioner_apply_calls = tabi.preconditioner_apply_calls;
@@ -12806,6 +12849,12 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_smooth_leaf_node_interactions;
     result.tabi_leaf_pruned_interactions =
         tabi_solve.tabi_leaf_pruned_interactions;
+    result.tabi_leaf_mac_candidates = tabi_solve.tabi_leaf_mac_candidates;
+    result.tabi_leaf_mac_accepted = tabi_solve.tabi_leaf_mac_accepted;
+    result.tabi_leaf_mac_rejected = tabi_solve.tabi_leaf_mac_rejected;
+    result.tabi_leaf_mac_far_panels = tabi_solve.tabi_leaf_mac_far_panels;
+    result.tabi_leaf_mac_direct_panels_saved_estimate =
+        tabi_solve.tabi_leaf_mac_direct_panels_saved_estimate;
     result.tabi_leaf_work_profile = tabi_solve.tabi_leaf_work_profile;
     result.tabi_leaf_work_mac_terminal_panels =
         tabi_solve.tabi_leaf_work_mac_terminal_panels;
@@ -13501,6 +13550,12 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_preconditioner_valid_panels;
     result.tabi_preconditioner_ill_conditioned_blocks =
         tabi_solve.tabi_preconditioner_ill_conditioned_blocks;
+    result.tabi_preconditioner_quality_rejected_blocks =
+        tabi_solve.tabi_preconditioner_quality_rejected_blocks;
+    result.tabi_preconditioner_quality_probe_max_gain =
+        tabi_solve.tabi_preconditioner_quality_probe_max_gain;
+    result.tabi_preconditioner_quality_status =
+        tabi_solve.tabi_preconditioner_quality_status;
     result.tabi_preconditioner_setup_ms =
         tabi_solve.tabi_preconditioner_setup_ms;
     result.tabi_preconditioner_apply_ms =

@@ -1,0 +1,63 @@
+TITAN TABI Leaf-Kernel Optimization Report
+==========================================
+
+quick_mode: True
+fixtures: barnase
+case_timeout_seconds: 30
+preconditioner: block-budgeted
+preconditioner_block_near: operator-near
+production_default_note: grid remains the production PBE default; TABI remains experimental.
+theta_policy_note: theta/MAC direction is treated empirically; only clean measured rows can be promoted.
+
+Baseline
+--------
+baseline_row: leaf_size=128 theta=0.8 scheduler=baseline leaf_near_policy=exact leaf_panel_kernel=tile-avx2 adaptive=strict cluster=off
+
+Decision Counts
+---------------
+decision_no_win: 8
+
+Top Barnase Rows
+----------------
+| Scheduler | leaf_size | theta | status | sec/matvec | leaf_work/matvec | verify | decision | promote |
+| --- | ---: | ---: | --- | ---: | ---: | --- | --- | --- |
+| baseline | 128 | 0.80000000000000004 | timeout | 12.2419835 | 843545779 | clean | no_win | false |
+| target-avx2-v2 | 128 | 0.80000000000000004 | timeout | 13.613962000000001 | 843545779 | clean | no_win | false |
+| baseline | 64 | 0.80000000000000004 | timeout | 16.018619999999999 | 603853233 | clean | no_win | false |
+| cost-tile-4x4 | 128 | 0.80000000000000004 | timeout | 18.226409 | 843545779 | clean | no_win | false |
+| cost-tile-4x4 | 64 | 0.80000000000000004 | timeout | 27.382169999999999 | 603853233 | clean | no_win | false |
+| leaf-mac | 128 | 0.80000000000000004 | timeout | NA | NA | clean | no_win | false |
+| leaf-mac | 64 | 0.80000000000000004 | timeout | NA | NA | clean | no_win | false |
+| target-avx2-v2 | 64 | 0.80000000000000004 | timeout | NA | NA | clean | no_win | false |
+
+Leaf-Pair Kernel Rows
+---------------------
+| Scheduler | leaf_size | theta | batch_kernel | vector_sources | vector_lanes | cost_tile_tasks | cost_tile_seconds |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| baseline | 64 | 0.80000000000000004 | scalar | 0 | 0 | 0 | 0 |
+| baseline | 128 | 0.80000000000000004 | scalar | 0 | 0 | 0 | 0 |
+| target-avx2-v2 | 64 | 0.80000000000000004 | scalar | 0 | 0 | 0 | 0 |
+| target-avx2-v2 | 128 | 0.80000000000000004 | target-avx2-v2 | 415414900 | 1661659600 | 0 | 0 |
+| cost-tile-4x4 | 64 | 0.80000000000000004 | target-avx2-4x4 | 70539628 | 282158512 | 6912568 | 23.565334 |
+| cost-tile-4x4 | 128 | 0.80000000000000004 | target-avx2-4x4 | 117855093 | 471420372 | 7879404 | 32.383089 |
+| leaf-mac | 64 | 0.80000000000000004 | scalar | 0 | 0 | 0 | 0 |
+| leaf-mac | 128 | 0.80000000000000004 | scalar | 0 | 0 | 0 | 0 |
+
+Leaf-MAC Rows
+-------------
+| Scheduler | leaf_size | theta | candidates | accepted | far_panels | saved_panels | decision |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| leaf-mac | 64 | 0.80000000000000004 | 0 | 0 | 0 | 0 | no_win |
+| leaf-mac | 128 | 0.80000000000000004 | 0 | 0 | 0 | 0 | no_win |
+
+leaf_mac_note: one or more Barnase Leaf-MAC rows timed out before producing a nonzero matvec/progress work counter; treat these rows as setup/first-matvec stalls, not as evidence that no leaf MAC candidates exist.
+leaf_mac_control_flow_fix: JCP Leaf-MAC fallback now rechecks leaf_mac_fallback_to_direct before K3, far Taylor, far audit, and continue. A forced convergence-split leaf smoke now verifies fallback leaves are evaluated by the direct path and do not increment leaf-MAC far panels or far expansion audit counters.
+v2d_convergence_norm_cache: precomputed JCP convergence norms are stored in PackedJcpMoments, so evaluate_convergence_estimator reads source/tail norms in O(1) when cache is valid. The leaf-MAC smoke verifies cached-vs-fallback estimator equivalence.
+leaf_mac_quick_gate_after_fix: Barnase quick rows still time out before the first matvec counter. The current leaf-mac harness row reports convergence_estimator=off, so this remaining stall is not explained by the convergence split/audit control-flow bug.
+
+Recommendation
+--------------
+recommendation: no clean promote candidate yet; best Barnase row is scheduler=baseline, leaf_size=128, theta=0.80000000000000004, sec_per_matvec=12.2419835, decision=no_win. Leaf-MAC was exercised as a traversal/work-count fix; inspect leaf_mac_saved_panels and accuracy diagnostics before returning to micro-kernel work.
+
+probe_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\pbe_tabi_leaf_kernel_transition_probe\pbe_tabi_leaf_kernel_transition_probe.csv
+summary_dat: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\pbe_tabi_leaf_kernel_transition_probe\pbe_tabi_leaf_kernel_transition_summary.dat

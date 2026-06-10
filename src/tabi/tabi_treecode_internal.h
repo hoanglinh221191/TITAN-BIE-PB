@@ -416,6 +416,8 @@ struct DeferredLeafPairWorkItem {
 struct DeferredLeafPairGroup {
   std::size_t target_leaf_index{std::numeric_limits<std::size_t>::max()};
   std::size_t source_node_index{std::numeric_limits<std::size_t>::max()};
+  std::size_t source_first_panel{std::numeric_limits<std::size_t>::max()};
+  std::size_t source_panel_count{0};
   std::vector<DeferredLeafPairWorkItem> items;
 };
 
@@ -504,9 +506,24 @@ struct AdaptivePruneParams {
 
 
 
+struct JcpConvergenceNorms {
+  bool valid{false};
+  int taylor_order{0};
+  double scalar_source_norm{0.0};
+  double scalar_tail_norm_p{0.0};
+  double scalar_tail_norm_pm1{0.0};
+  double normal_source_norm{0.0};
+  double normal_tail_norm_p{0.0};
+  double normal_tail_norm_pm1{0.0};
+  std::array<double, kJcpExpansionChannelCount> channel_source_norm{};
+  std::array<double, kJcpExpansionChannelCount> channel_tail_norm_p{};
+  std::array<double, kJcpExpansionChannelCount> channel_tail_norm_pm1{};
+};
+
 struct PackedJcpMoments {
   std::vector<NodeMoments> phin;
   std::array<std::vector<NodeMoments>, 3> phi_normal;
+  std::vector<JcpConvergenceNorms> convergence_norms;
 };
 
 
@@ -870,7 +887,8 @@ TreeWorkspace build_tree_workspace_impl(const std::vector<Panel> &panels,
                                    const std::string
                                        &convergence_shape_audit,
                                    const std::string
-                                       &convergence_kernel_response_audit);
+                                       &convergence_kernel_response_audit,
+                                   const std::string &leaf_mac);
 void apply_direct_operator_impl(const std::vector<Panel> &panels,
                            const std::vector<double> &density,
                            double contrast, double kappa,

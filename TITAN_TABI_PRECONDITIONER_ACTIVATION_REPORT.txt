@@ -1,0 +1,157 @@
+TITAN TABI Preconditioner Activation Report
+===========================================
+
+Date: 2026-06-09
+Scope: report-only TABI diagnostic slice. No production solver defaults were
+changed and no new TABI algorithm was added.
+
+Inputs
+------
+
+Harness:
+- test/pbe_tabi_preconditioner_activation_probe.ps1
+- test/pbe_tabi_perf_matrix.ps1
+- test/pbe_tabi_triage_helpers.ps1
+
+Focused probe:
+- fixtures: barnase, research-medium, research-large
+- modes: grid, diagonal, block, block-budgeted
+- block-budgeted settings: budget=256 MB, block_panel_cap=32
+- surface_points=24, tree_leaf_size=128, opening_theta=0.8
+- leaf_near_policy=exact, leaf_panel_kernel=tile-avx2
+- threads=8, case_timeout=30 s
+
+Generated data:
+- test/tmp/pbe_tabi_preconditioner_activation_probe/pbe_tabi_preconditioner_activation_probe.csv
+- test/tmp/pbe_tabi_preconditioner_activation_probe/pbe_tabi_preconditioner_activation_probe_summary.dat
+
+Focused Result Table
+--------------------
+
+| Fixture | Preconditioner | Status | Time s | Effective preconditioner | Activation class | Triage class | sec/matvec | leaf_vs_n2 |
+| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: |
+| barnase | grid | ok | 0.092 | grid | grid_reference | grid_reference | NA | NA |
+| research-medium | grid | ok | 0.682 | grid | grid_reference | grid_reference | NA | NA |
+| research-large | grid | ok | 2.629 | grid | grid_reference | grid_reference | NA | NA |
+| barnase | diagonal | timeout | 30.082 | diagonal | diagonal_only | matvec_limited | 15.765 | 0.554 |
+| research-medium | diagonal | failed | 0.082 | NA | diagonal_only | exit_code_1 | NA | NA |
+| research-large | diagonal | failed | 0.058 | NA | diagonal_only | exit_code_1 | NA | NA |
+| barnase | block | timeout | 30.079 | diagonal_block_memory_cap | memory_capped | preconditioner_downgraded | 12.589 | 1.109 |
+| research-medium | block | failed | 0.085 | NA | diagonal_only | exit_code_1 | NA | NA |
+| research-large | block | timeout | 30.069 | diagonal | diagonal_only | timeout_no_profile | NA | 0 |
+| barnase | block-budgeted | timeout | 30.063 | NA | diagonal_only | barnase_probe_timeout | NA | NA |
+| research-medium | block-budgeted | timeout | 30.037 | NA | diagonal_only | timeout_no_profile | NA | NA |
+| research-large | block-budgeted | timeout | 30.045 | NA | diagonal_only | timeout_no_profile | NA | NA |
+
+Interpretation
+--------------
+
+1. The useful block preconditioner still does not activate on the representative
+   probe. The only row with a clear requested block path, Barnase/block, falls
+   back to `diagonal_block_memory_cap`.
+
+2. The Barnase/block row confirms two problems at once:
+   - preconditioner downgrade has priority because the effective preconditioner
+     is diagonal fallback;
+   - leaf work is still bad once GMRES starts (`leaf_vs_n2=1.109`), so leaf
+     optimization remains relevant, but it is not the first thing to tune.
+
+3. The block-budgeted rows did not produce enough early preconditioner telemetry
+   before timeout. That means the immediate blocker is partly instrumentation and
+   activation-path visibility, not just numerical convergence.
+
+4. `research-medium` and `research-large` still strongly favor grid for current
+   production use. Grid finished in less than 3 seconds for all three fixtures,
+   while TABI rows either failed early or timed out.
+
+Implemented Follow-Up
+---------------------
+
+The next implementation moved beyond telemetry and refactored the
+preconditioner itself:
+
+- New internal module:
+  - `src/tabi/tabi_preconditioner.h`
+  - `src/tabi/tabi_preconditioner.cpp`
+- `tabi_solver.cpp` now delegates block/coarse preconditioner construction and
+  application to the module instead of embedding those structs in the solver.
+- Block application reuses worker-local scratch vectors instead of allocating a
+  local vector for every block application.
+- `block-budgeted` no longer uses the legacy whole-process working-set soft cap
+  as an activation blocker. It relies on the configured preconditioner memory
+  budget instead.
+- Ill-conditioned local blocks now fall back to diagonal behavior locally; they
+  no longer force the entire block preconditioner to be discarded when valid
+  block coverage is still high enough.
+- Buffer-aware block construction now uses a fast centroid/local kernel for the
+  preconditioner matrix instead of the expensive near-pair Duffy/adaptive
+  operator kernel. The production operator still uses the requested near-field
+  integration; the approximation is limited to the preconditioner.
+
+Validation added:
+
+- `test/titan_tabi_preconditioner_smoke.cpp` builds a synthetic panel/tree
+  fixture, constructs a buffer-aware block preconditioner, verifies positive
+  memory estimate, full panel coverage, and finite apply output.
+
+Updated Decision
+----------------
+
+The preconditioner path has now received the first structural improvement. The
+next useful benchmark is not another telemetry-only probe; it is a short
+activation/performance run that checks whether the new `block-budgeted` path
+finishes setup and reduces GMRES work on Barnase or the medium research
+fixture.
+
+Production policy remains unchanged:
+
+- keep `-pbe=grid` as the default backend;
+- keep TABI explicit/experimental;
+- do not promote TABI until the Phase 7 benchmark gate emits
+  `promote_candidate=true`.
+
+Controlled Activation Probe After Refactor
+------------------------------------------
+
+Added `test/pbe_tabi_preconditioner_controlled_probe.ps1`, which generates a
+small synthetic PQR fixture in `test/tmp` and now runs six controlled cases:
+direct/treecode diagonal, direct/treecode block-budgeted with the old
+`buffer-aware` block matrix, and direct/treecode block-budgeted with the new
+`operator-near` block matrix. This avoids the missing `test/pbe_inputs_local`
+fixture dependency and isolates preconditioner quality from large-protein setup
+cost.
+
+Run:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File test\pbe_tabi_preconditioner_controlled_probe.ps1 -TitanExe .\titan.exe -CaseTimeoutSeconds 45 -SurfacePoints 24 -Threads 2
+```
+
+Result:
+
+| Case | Status | Panels | Matvecs | Iterations | Effective preconditioner | Quality status | Total seconds | Final residual | Energy status |
+| --- | --- | ---: | ---: | ---: | --- | --- | ---: | ---: | --- |
+| direct_diagonal | ok | 937 | 18 | 16 | diagonal | off | 3.166 | 1.03e-6 | ok |
+| direct_block_buffer_aware | ok | 937 | 45 | 40 | block_budgeted_buffer_aware | pass | 9.991 | 7.36e-2 | failed |
+| direct_block_operator_near | ok | 937 | 9 | 8 | block_budgeted_operator_near | pass | 2.110 | 7.05e-5 | ok |
+| treecode_diagonal | ok | 937 | 18 | 16 | diagonal | off | 3.433 | 1.03e-6 | ok |
+| treecode_block_buffer_aware | ok | 937 | 45 | 40 | block_budgeted_buffer_aware | pass | 7.703 | 7.36e-2 | failed |
+| treecode_block_operator_near | ok | 937 | 9 | 8 | block_budgeted_operator_near | pass | 1.327 | 7.05e-5 | ok |
+
+Interpretation:
+
+1. The refactored preconditioner activates cleanly. Both direct and treecode
+   controlled `operator-near` cases wrote `pbe_timing.csv` and reported
+   `block_budgeted_operator_near`.
+2. The old `buffer-aware` matrix is the confirmed bad branch: it still increases
+   GMRES work from 18 to 45 matvecs and fails convergence.
+3. The new `operator-near` matrix fixes the quality problem on the controlled
+   fixture: it cuts GMRES work from 18 to 9 matvecs and converges successfully.
+4. The quality gate telemetry is present in timing/progress outputs:
+   `preconditioner_quality_rejected_blocks`,
+   `preconditioner_quality_probe_max_gain`, and
+   `preconditioner_quality_status`.
+5. The next benchmark should move from the synthetic controlled fixture to
+   Barnase/research-medium with `-pbe-tabi-precond-block-near=operator-near`.
+   If the same matvec reduction survives there, `operator-near` should replace
+   `buffer-aware` as the only serious block-budgeted branch.

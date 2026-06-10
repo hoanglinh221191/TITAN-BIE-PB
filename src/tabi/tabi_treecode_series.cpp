@@ -922,6 +922,104 @@ void accumulate_jcp_panel_moments(
   }
 }
 
+double convergence_norm_by_degree(const NodeMoments &moments,
+                                  const std::vector<MomentIndex> &indices,
+                                  int degree, double radius) noexcept {
+  double out = 0.0;
+  const double safe_radius = std::max(1.0e-12, radius);
+  const double scale = pow_int(safe_radius, degree);
+  for (std::size_t m = 0; m < indices.size(); ++m) {
+    const MomentIndex &index = indices[m];
+    if (index.ax + index.ay + index.az != degree)
+      continue;
+    out = std::max(out, std::abs(moments.values[m]) /
+                            std::max(1.0e-300, scale));
+  }
+  return out;
+}
+
+void observe_convergence_norms(const NodeMoments &moments,
+                               const std::vector<MomentIndex> &indices,
+                               int taylor_order, double radius,
+                               double &source_norm, double &tail_norm_p,
+                               double &tail_norm_pm1) noexcept {
+  source_norm =
+      std::max(source_norm, convergence_norm_by_degree(moments, indices, 0,
+                                                       radius));
+  source_norm =
+      std::max(source_norm, convergence_norm_by_degree(moments, indices, 1,
+                                                       radius));
+  tail_norm_p =
+      std::max(tail_norm_p, convergence_norm_by_degree(
+                                moments, indices, taylor_order, radius));
+  tail_norm_pm1 =
+      std::max(tail_norm_pm1,
+               convergence_norm_by_degree(moments, indices, taylor_order - 1,
+                                          radius));
+}
+
+void precompute_jcp_convergence_norms(PackedJcpMoments &packed,
+                                      const TreeWorkspace &tree,
+                                      int taylor_order,
+                                      TitanExecutor &executor) {
+  packed.convergence_norms.assign(tree.nodes.size(), JcpConvergenceNorms{});
+  if (tree.nodes.empty() || taylor_order <= 0)
+    return;
+  const auto &indices = moment_indices(taylor_order);
+  if (indices.empty())
+    return;
+  const std::size_t node_count = tree.nodes.size();
+  const std::size_t workers = effective_workers(executor, node_count);
+  executor.parallel_for(
+      node_count, workers, 16,
+      [&](std::size_t, std::size_t begin, std::size_t end) {
+        for (std::size_t node_index = begin; node_index < end; ++node_index) {
+          const TreeNode &node = tree.nodes[node_index];
+          JcpConvergenceNorms norms;
+          norms.valid = true;
+          norms.taylor_order = taylor_order;
+          if (node_index < packed.phin.size()) {
+            observe_convergence_norms(
+                packed.phin[node_index], indices, taylor_order, node.radius,
+                norms.scalar_source_norm, norms.scalar_tail_norm_p,
+                norms.scalar_tail_norm_pm1);
+            observe_convergence_norms(
+                packed.phin[node_index], indices, taylor_order, node.radius,
+                norms.channel_source_norm[kJcpK1PhiChannel],
+                norms.channel_tail_norm_p[kJcpK1PhiChannel],
+                norms.channel_tail_norm_pm1[kJcpK1PhiChannel]);
+            observe_convergence_norms(
+                packed.phin[node_index], indices, taylor_order, node.radius,
+                norms.channel_source_norm[kJcpK3PhinChannel],
+                norms.channel_tail_norm_p[kJcpK3PhinChannel],
+                norms.channel_tail_norm_pm1[kJcpK3PhinChannel]);
+          }
+          if (node_index < packed.phi_normal[0].size()) {
+            for (int component = 0; component < 3; ++component) {
+              const NodeMoments &moments =
+                  packed.phi_normal[static_cast<std::size_t>(component)]
+                                    [node_index];
+              observe_convergence_norms(
+                  moments, indices, taylor_order, node.radius,
+                  norms.normal_source_norm, norms.normal_tail_norm_p,
+                  norms.normal_tail_norm_pm1);
+              observe_convergence_norms(
+                  moments, indices, taylor_order, node.radius,
+                  norms.channel_source_norm[kJcpK2PhiNormalChannel],
+                  norms.channel_tail_norm_p[kJcpK2PhiNormalChannel],
+                  norms.channel_tail_norm_pm1[kJcpK2PhiNormalChannel]);
+              observe_convergence_norms(
+                  moments, indices, taylor_order, node.radius,
+                  norms.channel_source_norm[kJcpK4MixedChannel],
+                  norms.channel_tail_norm_p[kJcpK4MixedChannel],
+                  norms.channel_tail_norm_pm1[kJcpK4MixedChannel]);
+            }
+          }
+          packed.convergence_norms[node_index] = norms;
+        }
+      });
+}
+
 PackedJcpMoments compute_jcp_node_moments_packed(
     const std::vector<Panel> &panels, const std::vector<double> &unknowns,
     bool coupled, const TreeWorkspace &tree, int taylor_order,
@@ -930,6 +1028,7 @@ PackedJcpMoments compute_jcp_node_moments_packed(
   packed.phin.assign(tree.nodes.size(), NodeMoments{});
   for (auto &channel : packed.phi_normal)
     channel.assign(tree.nodes.size(), NodeMoments{});
+  packed.convergence_norms.assign(tree.nodes.size(), JcpConvergenceNorms{});
   const auto &indices = moment_indices(taylor_order);
   const auto &lookup = moment_lookup();
   if (tree.moment_levels.empty())
@@ -960,6 +1059,7 @@ PackedJcpMoments compute_jcp_node_moments_packed(
             }
           }
         });
+    precompute_jcp_convergence_norms(packed, tree, taylor_order, executor);
     return packed;
   }
 
@@ -1023,6 +1123,7 @@ PackedJcpMoments compute_jcp_node_moments_packed(
           }
         });
   }
+  precompute_jcp_convergence_norms(packed, tree, taylor_order, executor);
   return packed;
 }
 

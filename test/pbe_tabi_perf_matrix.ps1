@@ -24,16 +24,31 @@ param(
     [int]$CaseTimeoutSeconds = 0,
     [string]$NearIntegrationMode = 'centroid',
     [string]$Preconditioner = 'block',
+    [string]$PreconditionerBlockNear = '',
+    [int]$PreconditionerBlockPanelCap = 0,
+    [int]$PreconditionerMemoryBudgetMb = 0,
+    [string[]]$TabiExtraArgs = @(),
     [switch]$AllowFailedStatus
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+$WorkRoot = [System.IO.Path]::GetFullPath($WorkRoot)
 $InvariantCulture = [System.Globalization.CultureInfo]::InvariantCulture
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $InputRoot = Join-Path $PSScriptRoot 'pbe_inputs_local'
 $PyDelPhiRoot = Join-Path $RepoRoot '.codex_tmp\pyDelPhi'
+$NormalizedTabiExtraArgs = @()
+foreach ($extraArg in $TabiExtraArgs) {
+    foreach ($part in ([string]$extraArg -split ',')) {
+        $trimmed = $part.Trim()
+        if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+            $NormalizedTabiExtraArgs += $trimmed
+        }
+    }
+}
+$TabiExtraArgs = $NormalizedTabiExtraArgs
 
 $FixtureMap = @{
     'sphere' = 'sphere.pqr'
@@ -208,7 +223,7 @@ function New-ArgFile([string]$RunDir, [string]$Fixture, [string]$Mode,
     $backend = if ($Mode -eq 'grid') { 'grid' } else { 'tabi' }
     $argLines = @(
         "-f=$(Convert-ToTitanPath $pdbPath)",
-        '-1pdb',
+        '-1pdb=true',
         '-ff=AMBER99SB',
         '-g=1&1',
         "-path-a=$libPath",
@@ -237,6 +252,15 @@ function New-ArgFile([string]$RunDir, [string]$Fixture, [string]$Mode,
         $argLines += '-pbe-tabi-sum=treecode'
         $argLines += '-pbe-tabi-formulation=jcp2013-treecode'
         $argLines += "-pbe-tabi-precond=$Preconditioner"
+        if (-not [string]::IsNullOrWhiteSpace($PreconditionerBlockNear)) {
+            $argLines += "-pbe-tabi-precond-block-near=$PreconditionerBlockNear"
+        }
+        if ($PreconditionerBlockPanelCap -gt 0) {
+            $argLines += "-pbe-tabi-precond-block-panel-cap=$PreconditionerBlockPanelCap"
+        }
+        if ($PreconditionerMemoryBudgetMb -gt 0) {
+            $argLines += "-pbe-tabi-precond-memory-budget-mb=$PreconditionerMemoryBudgetMb"
+        }
         $argLines += "-pbe-tabi-tree-leaf-size=$LeafSize"
         $argLines += "-pbe-tabi-opening-theta=$($OpeningTheta.ToString('G17', $InvariantCulture))"
         $argLines += "-pbe-tabi-leaf-near-policy=$LeafNearPolicy"
@@ -251,7 +275,13 @@ function New-ArgFile([string]$RunDir, [string]$Fixture, [string]$Mode,
         $argLines += "-pbe-tabi-near-integration=$NearIntegrationMode"
         $argLines += "-pbe-tabi-surface-points=$SurfacePoints"
         $argLines += "-pbe-tabi-gmres-restart=$GmresRestart"
+        foreach ($extraArg in $TabiExtraArgs) {
+            if (-not [string]::IsNullOrWhiteSpace($extraArg)) {
+                $argLines += $extraArg
+            }
+        }
         if ($TimingMode -eq 'detail') {
+            $argLines += '-pbe-tabi-pre-solver-progress=on'
             $argLines += '-pbe-tabi-progress=auto'
             $argLines += "-pbe-tabi-progress-interval=$TabiProgressIntervalSeconds"
         }
@@ -294,6 +324,11 @@ function New-SkippedRow([string]$Fixture, [string]$Mode, [int]$SurfacePoints,
         leaf_tile_interactions = 'NA'; leaf_tile_panel_interactions = 'NA'
         leaf_residual_panel_interactions = 'NA'
         leaf_pruned_interactions = 'NA'
+        leaf_mac_candidates = 'NA'
+        leaf_mac_accepted = 'NA'
+        leaf_mac_rejected = 'NA'
+        leaf_mac_far_panels = 'NA'
+        leaf_mac_direct_panels_saved_estimate = 'NA'
         adaptive_smooth_leaf_accepted = 'NA'
         adaptive_smooth_leaf_rejected = 'NA'
         adaptive_span_tile_accepted = 'NA'
@@ -314,6 +349,21 @@ function New-SkippedRow([string]$Fixture, [string]$Mode, [int]$SurfacePoints,
         leaf_tile_eval_seconds = 'NA'; leaf_residual_eval_seconds = 'NA'
         leaf_panel_kernel = 'NA'; leaf_tile_status = 'NA'
         leaf_panel_pairs_per_second = 'NA'
+        preconditioner_requested = if ($Mode -like 'tabi*') { $Preconditioner } else { 'NA' }
+        preconditioner_effective = 'NA'
+        preconditioner_block_near = if ($Mode -like 'tabi*') { $PreconditionerBlockNear } else { 'NA' }
+        preconditioner_block_panel_cap = if ($Mode -like 'tabi*' -and $PreconditionerBlockPanelCap -gt 0) { $PreconditionerBlockPanelCap } else { 'NA' }
+        preconditioner_memory_budget_bytes = if ($Mode -like 'tabi*' -and $PreconditionerMemoryBudgetMb -gt 0) { [int64]$PreconditionerMemoryBudgetMb * 1024 * 1024 } else { 'NA' }
+        preconditioner_estimated_bytes = 'NA'
+        preconditioner_valid_blocks = 'NA'
+        preconditioner_valid_panels = 'NA'
+        preconditioner_ill_conditioned_blocks = 'NA'
+        preconditioner_quality_rejected_blocks = 'NA'
+        preconditioner_quality_probe_max_gain = 'NA'
+        preconditioner_quality_status = 'NA'
+        preconditioner_setup_seconds = 'NA'
+        preconditioner_apply_seconds = 'NA'
+        preconditioner_apply_calls = 'NA'
         smooth_node_eval_limited = 'false'
         tile_fast = 'false'; tile_math_limited = 'false'
         tile_memory_limited = 'false'
@@ -405,8 +455,44 @@ function New-TimeoutRow([string]$Fixture, [string]$Mode, [int]$SurfacePoints,
             $row.leaf_panel_kernel = Get-RowValue $timing[0] 'tabi_leaf_panel_kernel' 'NA'
             $row.leaf_tile_status = Get-RowValue $timing[0] 'tabi_leaf_tile_status' 'NA'
             $row.leaf_panel_pairs_per_second = Get-RowValue $timing[0] 'tabi_leaf_panel_pairs_per_second' 'NA'
+            $row.preconditioner_requested = Get-RowValue $timing[0] 'tabi_preconditioner_requested' (Get-RowValue $timing[0] 'preconditioner_requested' $row.preconditioner_requested)
+            $row.preconditioner_effective = Get-RowValue $timing[0] 'tabi_preconditioner_effective' (Get-RowValue $timing[0] 'preconditioner_effective' 'NA')
+            $row.preconditioner_block_near = Get-RowValue $timing[0] 'tabi_preconditioner_block_near' $row.preconditioner_block_near
+            $row.preconditioner_block_panel_cap = Get-RowValue $timing[0] 'tabi_preconditioner_block_panel_cap' (Get-RowValue $timing[0] 'preconditioner_block_panel_cap' $row.preconditioner_block_panel_cap)
+            $row.preconditioner_memory_budget_bytes = Get-RowValue $timing[0] 'tabi_preconditioner_memory_budget_bytes' (Get-RowValue $timing[0] 'preconditioner_memory_budget_bytes' $row.preconditioner_memory_budget_bytes)
+            $row.preconditioner_estimated_bytes = Get-RowValue $timing[0] 'tabi_preconditioner_estimated_bytes' (Get-RowValue $timing[0] 'preconditioner_estimated_bytes' 'NA')
+            $row.preconditioner_valid_blocks = Get-RowValue $timing[0] 'tabi_preconditioner_valid_blocks' (Get-RowValue $timing[0] 'preconditioner_valid_blocks' 'NA')
+            $row.preconditioner_valid_panels = Get-RowValue $timing[0] 'tabi_preconditioner_valid_panels' (Get-RowValue $timing[0] 'preconditioner_valid_panels' 'NA')
+            $row.preconditioner_ill_conditioned_blocks = Get-RowValue $timing[0] 'tabi_preconditioner_ill_conditioned_blocks' (Get-RowValue $timing[0] 'preconditioner_ill_conditioned_blocks' 'NA')
+            $row.preconditioner_quality_rejected_blocks = Get-RowValue $timing[0] 'tabi_preconditioner_quality_rejected_blocks' (Get-RowValue $timing[0] 'preconditioner_quality_rejected_blocks' 'NA')
+            $row.preconditioner_quality_probe_max_gain = Get-RowValue $timing[0] 'tabi_preconditioner_quality_probe_max_gain' (Get-RowValue $timing[0] 'preconditioner_quality_probe_max_gain' 'NA')
+            $row.preconditioner_quality_status = Get-RowValue $timing[0] 'tabi_preconditioner_quality_status' (Get-RowValue $timing[0] 'preconditioner_quality_status' 'NA')
+            $row.preconditioner_setup_seconds = Get-RowValue $timing[0] 'tabi_preconditioner_setup_seconds' (Get-RowValue $timing[0] 'preconditioner_setup_seconds' 'NA')
+            $row.preconditioner_apply_seconds = Get-RowValue $timing[0] 'tabi_preconditioner_apply_seconds' (Get-RowValue $timing[0] 'preconditioner_apply_seconds' 'NA')
+            $row.preconditioner_apply_calls = Get-RowValue $timing[0] 'tabi_preconditioner_apply_calls' (Get-RowValue $timing[0] 'preconditioner_apply_calls' 'NA')
         }
     }
+    return $row
+}
+
+function New-FailedRow([string]$Fixture, [string]$Mode, [int]$SurfacePoints,
+                       [int]$LeafSize, [double]$OpeningTheta,
+                       [string]$LeafNearPolicy, [string]$LeafPanelKernel,
+                       [string]$AdaptiveLevel,
+                       [string]$ClusterPolicy,
+                       [string]$InteractionMode,
+                       [int]$ThreadCount,
+                       [string]$RunDir, [double]$ElapsedSeconds,
+                       [int]$ExitCode) {
+    $row = New-TimeoutRow -Fixture $Fixture -Mode $Mode -SurfacePoints $SurfacePoints `
+        -LeafSize $LeafSize -OpeningTheta $OpeningTheta -LeafNearPolicy $LeafNearPolicy `
+        -LeafPanelKernel $LeafPanelKernel -AdaptiveLevel $AdaptiveLevel `
+        -ClusterPolicy $ClusterPolicy -InteractionMode $InteractionMode `
+        -ThreadCount $ThreadCount `
+        -RunDir $RunDir `
+        -ElapsedSeconds $ElapsedSeconds
+    $row.status = 'failed'
+    $row.performance_classification = "exit_code_$ExitCode"
     return $row
 }
 
@@ -496,6 +582,16 @@ function Invoke-PerfCase([string]$Fixture, [string]$Mode, [int]$SurfacePoints,
         }
         $elapsedSeconds = $runResult.ElapsedSeconds
         if ($runResult.ExitCode -ne 0) {
+            if ($AllowFailedStatus) {
+                return New-FailedRow -Fixture $Fixture -Mode $Mode -SurfacePoints $SurfacePoints `
+                    -LeafSize $LeafSize -OpeningTheta $OpeningTheta -LeafNearPolicy $LeafNearPolicy `
+                    -LeafPanelKernel $LeafPanelKernel -AdaptiveLevel $AdaptiveLevel `
+                    -ClusterPolicy $ClusterPolicy -InteractionMode $InteractionMode `
+                    -ThreadCount $ThreadCount `
+                    -RunDir $runDir `
+                    -ElapsedSeconds $runResult.ElapsedSeconds `
+                    -ExitCode $runResult.ExitCode
+            }
             throw "TITAN exited with code $($runResult.ExitCode) for $runName"
         }
     } else {
@@ -597,6 +693,11 @@ function Invoke-PerfCase([string]$Fixture, [string]$Mode, [int]$SurfacePoints,
         leaf_residual_panel_interactions = Format-Number $leafResidualPanelCount
         smooth_leaf_node_interactions = Format-Number $smoothLeaf
         leaf_pruned_interactions = Format-Number $leafPruned
+        leaf_mac_candidates = Get-RowValue $timing 'tabi_leaf_mac_candidates' 'NA'
+        leaf_mac_accepted = Get-RowValue $timing 'tabi_leaf_mac_accepted' 'NA'
+        leaf_mac_rejected = Get-RowValue $timing 'tabi_leaf_mac_rejected' 'NA'
+        leaf_mac_far_panels = Get-RowValue $timing 'tabi_leaf_mac_far_panels' 'NA'
+        leaf_mac_direct_panels_saved_estimate = Get-RowValue $timing 'tabi_leaf_mac_direct_panels_saved_estimate' 'NA'
         adaptive_smooth_leaf_accepted = Format-Number $adaptiveSmoothAccepted
         adaptive_smooth_leaf_rejected = Format-Number $adaptiveSmoothRejected
         adaptive_span_tile_accepted = Format-Number $adaptiveSpanAccepted
@@ -621,8 +722,21 @@ function Invoke-PerfCase([string]$Fixture, [string]$Mode, [int]$SurfacePoints,
         leaf_panel_kernel = Get-RowValue $timing 'tabi_leaf_panel_kernel' 'NA'
         leaf_tile_status = Get-RowValue $timing 'tabi_leaf_tile_status' 'NA'
         leaf_panel_pairs_per_second = Format-Number $leafPanelPairsPerSecond
-        preconditioner_requested = if ($Mode -like 'tabi*') { Get-RowValue $audit 'preconditioner_requested' 'NA' } else { 'NA' }
-        preconditioner_effective = if ($Mode -like 'tabi*') { Get-RowValue $audit 'preconditioner_effective' 'NA' } else { 'NA' }
+        preconditioner_requested = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_requested' (Get-RowValue $audit 'preconditioner_requested' 'NA') } else { 'NA' }
+        preconditioner_effective = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_effective' (Get-RowValue $audit 'preconditioner_effective' 'NA') } else { 'NA' }
+        preconditioner_block_near = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_block_near' $PreconditionerBlockNear } else { 'NA' }
+        preconditioner_block_panel_cap = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_block_panel_cap' 'NA' } else { 'NA' }
+        preconditioner_memory_budget_bytes = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_memory_budget_bytes' 'NA' } else { 'NA' }
+        preconditioner_estimated_bytes = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_estimated_bytes' 'NA' } else { 'NA' }
+        preconditioner_valid_blocks = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_valid_blocks' 'NA' } else { 'NA' }
+        preconditioner_valid_panels = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_valid_panels' 'NA' } else { 'NA' }
+        preconditioner_ill_conditioned_blocks = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_ill_conditioned_blocks' 'NA' } else { 'NA' }
+        preconditioner_quality_rejected_blocks = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_quality_rejected_blocks' 'NA' } else { 'NA' }
+        preconditioner_quality_probe_max_gain = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_quality_probe_max_gain' 'NA' } else { 'NA' }
+        preconditioner_quality_status = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_quality_status' 'NA' } else { 'NA' }
+        preconditioner_setup_seconds = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_setup_seconds' 'NA' } else { 'NA' }
+        preconditioner_apply_seconds = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_apply_seconds' 'NA' } else { 'NA' }
+        preconditioner_apply_calls = if ($Mode -like 'tabi*') { Get-RowValue $timing 'tabi_preconditioner_apply_calls' 'NA' } else { 'NA' }
         smooth_node_eval_limited = 'false'
         tile_fast = 'false'
         tile_math_limited = 'false'

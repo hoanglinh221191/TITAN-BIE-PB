@@ -1425,7 +1425,8 @@ int arguments::parse_arguments(int argc, char **argv) {
                                    "--pbe-tabi-precond-block-near"},
                              common_value, i)) {
       pbe.tabi_precond_block_near =
-          require_choice(common_value, {"singular", "buffer-aware"},
+          require_choice(common_value, {"singular", "buffer-aware",
+                                        "operator-near"},
                          "-pbe-tabi-precond-block-near");
       continue;
     }
@@ -1521,7 +1522,9 @@ int arguments::parse_arguments(int argc, char **argv) {
                                    "--pbe-tabi-leaf-pair-kernel"},
                             common_value, i)) {
       pbe.tabi_leaf_pair_kernel =
-          require_choice(common_value, {"auto", "scalar", "target-avx2"},
+          require_choice(common_value,
+                         {"auto", "scalar", "target-avx2",
+                          "target-avx2-v2", "target-avx2-4x4"},
                          "-pbe-tabi-leaf-pair-kernel");
       continue;
     }
@@ -1617,7 +1620,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.tabi_leaf_pair_scheduler =
           require_choice(common_value,
                          {"inline-select", "deferred-worklist",
-                          "target-leaf-block"},
+                          "target-leaf-block", "cost-tile-worklist"},
                          "-pbe-tabi-leaf-pair-scheduler");
       continue;
     }
@@ -1644,6 +1647,14 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.tabi_leaf_block_verify =
           require_choice(common_value, {"off", "sampled", "full-small"},
                          "-pbe-tabi-leaf-block-verify");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-leaf-mac",
+                                   "--pbe-tabi-leaf-mac"},
+                             common_value, i)) {
+      pbe.tabi_leaf_mac =
+          require_choice(common_value, {"off", "audit", "on"},
+                         "-pbe-tabi-leaf-mac");
       continue;
     }
     if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",

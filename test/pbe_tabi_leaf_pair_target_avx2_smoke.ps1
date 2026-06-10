@@ -37,6 +37,7 @@ New-CleanDir $WorkRoot
 
 $source = @'
 #include "titan_executor.h"
+#include "tabi/tabi_treecode_internal.h"
 #include "tabi/tabi_types.h"
 
 #include <algorithm>
@@ -154,6 +155,66 @@ TitanPBE::Tabi::TreecodeStats apply_fixture(
   return stats;
 }
 
+void require_all_finite(const std::string &label,
+                        const std::vector<TitanPBE::Tabi::detail::JcpAccum>
+                            &accum) {
+  for (const auto &value : accum) {
+    require_true(label + " phi finite", std::isfinite(value.phi));
+    require_true(label + " phin finite", std::isfinite(value.phin));
+  }
+}
+
+void run_direct_4x4_tail_probe(
+    const std::vector<TitanPBE::Tabi::Panel> &panels,
+    const std::vector<double> &unknowns, std::size_t panel_count) {
+  std::vector<std::size_t> order(panels.size(), 0);
+  for (std::size_t i = 0; i < order.size(); ++i)
+    order[i] = i;
+  const TitanPBE::Tabi::TreePanelCache panel_cache =
+      TitanPBE::Tabi::detail::build_tree_panel_cache(panels, order);
+  const TitanPBE::Tabi::detail::TreeUnknownCache unknown_cache =
+      TitanPBE::Tabi::detail::build_tree_unknown_cache(panels, unknowns, true,
+                                                       order);
+  TitanPBE::Tabi::TreeNode node;
+  node.first_panel = 0;
+  node.panel_count = panel_count;
+  const std::vector<std::size_t> target_indices{0, 1, 2, 3, 4, 5, 6};
+  std::vector<TitanPBE::Tabi::detail::JcpAccum> scalar_accum;
+  std::vector<TitanPBE::Tabi::detail::JcpAccum> avx4x4_accum;
+  std::size_t scalar_near = 0;
+  std::size_t avx4x4_near = 0;
+  std::size_t vector_sources = 0;
+  std::size_t vector_lanes = 0;
+  std::size_t soa_sources = 0;
+  TitanPBE::Tabi::detail::direct_jcp_target_batch_tile_sum(
+      panels, target_indices, panel_cache, unknown_cache, 80.0, 0.10, true,
+      node, "scalar", scalar_accum, scalar_near, vector_sources,
+      vector_lanes, true, soa_sources);
+  vector_sources = 0;
+  vector_lanes = 0;
+  soa_sources = 0;
+  TitanPBE::Tabi::detail::direct_jcp_target_batch_tile_sum(
+      panels, target_indices, panel_cache, unknown_cache, 80.0, 0.10, true,
+      node, "target-avx2-4x4", avx4x4_accum, avx4x4_near, vector_sources,
+      vector_lanes, true, soa_sources);
+  require_all_finite("target-avx2-4x4 direct", avx4x4_accum);
+  require_true("target-avx2-4x4 direct near count",
+               scalar_near == avx4x4_near);
+  require_true("target-avx2-4x4 direct vectorizes", vector_sources > 0);
+  require_true("target-avx2-4x4 direct same accum size",
+               scalar_accum.size() == avx4x4_accum.size());
+  for (std::size_t i = 0; i < scalar_accum.size(); ++i) {
+    const double phi_delta =
+        std::abs(scalar_accum[i].phi - avx4x4_accum[i].phi);
+    const double phin_delta =
+        std::abs(scalar_accum[i].phin - avx4x4_accum[i].phin);
+    require_true("target-avx2-4x4 direct phi matches scalar",
+                 phi_delta <= 1.0e-12);
+    require_true("target-avx2-4x4 direct phin matches scalar",
+                 phin_delta <= 1.0e-12);
+  }
+}
+
 } // namespace
 
 int main() {
@@ -162,32 +223,72 @@ int main() {
   const std::vector<TitanPBE::Tabi::Panel> clean_panels =
       build_clean_fixture();
   const std::vector<double> clean_unknowns = make_unknowns(clean_panels.size());
+  run_direct_4x4_tail_probe(clean_panels, clean_unknowns, 8);
+  run_direct_4x4_tail_probe(clean_panels, clean_unknowns, 7);
+  run_direct_4x4_tail_probe(clean_panels, clean_unknowns, 5);
+  run_direct_4x4_tail_probe(clean_panels, clean_unknowns, 3);
 
   TitanPBE::Tabi::TreeWorkspace scalar_tree =
       make_tree(clean_panels, executor, "leaf-pair-balanced", "scalar");
   TitanPBE::Tabi::TreeWorkspace avx2_tree =
       make_tree(clean_panels, executor, "leaf-pair-balanced", "target-avx2");
+  TitanPBE::Tabi::TreeWorkspace avx2_v2_tree =
+      make_tree(clean_panels, executor, "leaf-pair-balanced",
+                "target-avx2-v2");
+  TitanPBE::Tabi::TreeWorkspace avx2_4x4_tree =
+      make_tree(clean_panels, executor, "leaf-pair-balanced",
+                "target-avx2-4x4");
   std::vector<double> scalar_out;
   std::vector<double> avx2_out;
+  std::vector<double> avx2_v2_out;
+  std::vector<double> avx2_4x4_out;
   const TitanPBE::Tabi::TreecodeStats scalar_stats =
       apply_fixture(clean_panels, clean_unknowns, executor, scalar_tree,
                     scalar_out);
   const TitanPBE::Tabi::TreecodeStats avx2_stats =
       apply_fixture(clean_panels, clean_unknowns, executor, avx2_tree,
                     avx2_out);
+  const TitanPBE::Tabi::TreecodeStats avx2_v2_stats =
+      apply_fixture(clean_panels, clean_unknowns, executor, avx2_v2_tree,
+                    avx2_v2_out);
+  const TitanPBE::Tabi::TreecodeStats avx2_4x4_stats =
+      apply_fixture(clean_panels, clean_unknowns, executor, avx2_4x4_tree,
+                    avx2_4x4_out);
   const double rel = relative_rms(scalar_out, avx2_out);
+  const double rel_v2 = relative_rms(scalar_out, avx2_v2_out);
+  const double rel_4x4 = relative_rms(scalar_out, avx2_4x4_out);
 
   require_true("target-avx2 keeps scalar batch accuracy", rel <= 1.0e-12);
+  require_true("target-avx2-v2 keeps scalar batch accuracy",
+               rel_v2 <= 1.0e-12);
+  require_true("target-avx2-4x4 keeps scalar batch accuracy",
+               rel_4x4 <= 1.0e-12);
   require_true("scalar batch interactions are counted",
                scalar_stats.leaf_pair_batch_interactions > 0);
   require_true("target-avx2 batch interactions are counted",
                avx2_stats.leaf_pair_batch_interactions > 0);
+  require_true("target-avx2-v2 batch interactions are counted",
+               avx2_v2_stats.leaf_pair_batch_interactions > 0);
+  require_true("target-avx2-4x4 batch interactions are counted",
+               avx2_4x4_stats.leaf_pair_batch_interactions > 0);
   require_true("target-avx2 kernel is reported",
                avx2_stats.leaf_pair_batch_kernel == "target-avx2");
+  require_true("target-avx2-v2 kernel is reported",
+               avx2_v2_stats.leaf_pair_batch_kernel == "target-avx2-v2");
+  require_true("target-avx2-4x4 kernel is reported",
+               avx2_4x4_stats.leaf_pair_batch_kernel == "target-avx2-4x4");
   require_true("target-avx2 vectorized sources counted",
                avx2_stats.leaf_pair_batch_vectorized_sources > 0);
   require_true("target-avx2 vector lanes counted",
                avx2_stats.leaf_pair_batch_vector_lanes > 0);
+  require_true("target-avx2-v2 vectorized sources counted",
+               avx2_v2_stats.leaf_pair_batch_vectorized_sources > 0);
+  require_true("target-avx2-v2 vector lanes counted",
+               avx2_v2_stats.leaf_pair_batch_vector_lanes > 0);
+  require_true("target-avx2-4x4 vectorized sources counted",
+               avx2_4x4_stats.leaf_pair_batch_vectorized_sources > 0);
+  require_true("target-avx2-4x4 vector lanes counted",
+               avx2_4x4_stats.leaf_pair_batch_vector_lanes > 0);
 
   const std::vector<TitanPBE::Tabi::Panel> singular_panels =
       build_singular_fixture();
@@ -197,27 +298,43 @@ int main() {
       make_tree(singular_panels, executor, "leaf-pair-strict", "scalar");
   TitanPBE::Tabi::TreeWorkspace singular_tree =
       make_tree(singular_panels, executor, "leaf-pair-strict", "target-avx2");
+  TitanPBE::Tabi::TreeWorkspace singular_v2_tree =
+      make_tree(singular_panels, executor, "leaf-pair-strict",
+                "target-avx2-v2");
   std::vector<double> singular_scalar_out;
   std::vector<double> singular_out;
+  std::vector<double> singular_v2_out;
   const TitanPBE::Tabi::TreecodeStats singular_scalar_stats =
       apply_fixture(singular_panels, singular_unknowns, executor,
                     singular_scalar_tree, singular_scalar_out);
   const TitanPBE::Tabi::TreecodeStats singular_stats =
       apply_fixture(singular_panels, singular_unknowns, executor,
                     singular_tree, singular_out);
+  const TitanPBE::Tabi::TreecodeStats singular_v2_stats =
+      apply_fixture(singular_panels, singular_unknowns, executor,
+                    singular_v2_tree, singular_v2_out);
   const double singular_rel = relative_rms(singular_scalar_out, singular_out);
+  const double singular_rel_v2 =
+      relative_rms(singular_scalar_out, singular_v2_out);
   require_true("singular/exclusion cases fall back",
                singular_stats.leaf_pair_batch_fallbacks > 0);
   require_true("singular/exclusion fallback remains accurate",
                singular_rel <= 1.0e-12);
+  require_true("target-avx2-v2 singular/exclusion remains accurate",
+               singular_rel_v2 <= 1.0e-12);
+  require_true("target-avx2-v2 singular/exclusion still vectorizes",
+               singular_v2_stats.leaf_pair_batch_vectorized_sources > 0);
 
   std::cout << "PBE TABI leaf-pair target-avx2 smoke PASS panels="
-            << clean_panels.size() << " rel=" << rel << " batches="
+            << clean_panels.size() << " rel=" << rel
+            << " rel_v2=" << rel_v2 << " rel_4x4=" << rel_4x4
+            << " batches="
             << avx2_stats.leaf_pair_batch_interactions << " vector_sources="
             << avx2_stats.leaf_pair_batch_vectorized_sources
             << " vector_lanes=" << avx2_stats.leaf_pair_batch_vector_lanes
             << " fallbacks=" << singular_stats.leaf_pair_batch_fallbacks
             << " singular_rel=" << singular_rel
+            << " singular_rel_v2=" << singular_rel_v2
             << "\n";
   return 0;
 }

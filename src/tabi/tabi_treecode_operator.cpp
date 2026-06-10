@@ -98,6 +98,11 @@ void apply_treecode_operator_impl(const std::vector<Panel> &panels,
   std::vector<std::size_t> local_mac_convergence_aspect_panel(workers, 0);
   std::vector<std::size_t> local_mac_surface_margin_reject(workers, 0);
   std::vector<std::size_t> local_mac_surface_margin_panel(workers, 0);
+  std::vector<std::size_t> local_leaf_mac_candidates(workers, 0);
+  std::vector<std::size_t> local_leaf_mac_accepted(workers, 0);
+  std::vector<std::size_t> local_leaf_mac_rejected(workers, 0);
+  std::vector<std::size_t> local_leaf_mac_far_panels(workers, 0);
+  std::vector<std::size_t> local_leaf_mac_saved_panels(workers, 0);
   std::vector<MacAuditTally> local_mac_audit(workers);
   std::vector<FragmentationTally> local_fragmentation_audit(workers);
   executor.parallel_for(
@@ -121,13 +126,24 @@ void apply_treecode_operator_impl(const std::vector<Panel> &panels,
             const bool contains_target =
                 target_rank >= node.first_panel &&
                 target_rank < node.first_panel + node.panel_count;
-            if (!leaf && !contains_target) {
+            const bool leaf_mac_enabled = tree.leaf_mac != "off";
+            const bool evaluate_node_mac =
+                !contains_target && (!leaf || leaf_mac_enabled);
+            if (evaluate_node_mac) {
+              if (leaf)
+                ++local_leaf_mac_candidates[worker];
               const double dx = target.x - node.cx;
               const double dy = target.y - node.cy;
               const double dz = target.z - node.cz;
               const double distance =
                   std::sqrt(std::max(1.0e-16, dx * dx + dy * dy + dz * dz));
               const MacDecision mac = evaluate_mac(target, node, tree, distance);
+              if (leaf) {
+                if (mac.accepted)
+                  ++local_leaf_mac_accepted[worker];
+                else
+                  ++local_leaf_mac_rejected[worker];
+              }
               if (mac.ratio_accept && tree.mac_safety != "off") {
                 record_far_geometric_audit(local_mac_audit[worker], node,
                                            mac.gap, mac.gap_ratio,
@@ -147,7 +163,8 @@ void apply_treecode_operator_impl(const std::vector<Panel> &panels,
                 ++local_mac_surface_margin_reject[worker];
                 local_mac_surface_margin_panel[worker] += node.panel_count;
               }
-              if (mac.accepted) {
+              if (mac.accepted && (!leaf || tree.leaf_mac == "on")) {
+                bool leaf_mac_fallback_to_direct = false;
                 const bool fragmented_far =
                     tree.fragmentation_safety != "off" && node.fragmented;
                 if (fragmented_far) {
@@ -156,17 +173,28 @@ void apply_treecode_operator_impl(const std::vector<Panel> &panels,
                   record_fragmentation_audit(local_fragmentation_audit[worker],
                                              node, split);
                   if (split) {
-                    push_child_nodes(tree, node, stack);
-                    continue;
+                    if (leaf) {
+                      leaf_mac_fallback_to_direct = true;
+                    } else {
+                      push_child_nodes(tree, node, stack);
+                      continue;
+                    }
                   }
                 }
+                if (!leaf_mac_fallback_to_direct) {
                 coupled += node_kernel_taylor(target, node,
                                                moments[node_index], taylor_order,
                                                kappa, tree.derivative_mode);
+                if (leaf) {
+                  local_leaf_mac_far_panels[worker] += node.panel_count;
+                  local_leaf_mac_saved_panels[worker] += node.panel_count;
+                }
                 ++far_count;
                 continue;
+                }
               }
-              ++local_mac_reject[worker];
+              if (!leaf)
+                ++local_mac_reject[worker];
             }
             if (leaf) {
               coupled += direct_ordered_sum(
@@ -220,6 +248,21 @@ void apply_treecode_operator_impl(const std::vector<Panel> &panels,
     }
     stats->near_interactions += near_total;
     stats->far_interactions += far_total;
+    stats->leaf_mac_candidates += std::accumulate(
+        local_leaf_mac_candidates.begin(), local_leaf_mac_candidates.end(),
+        std::size_t{0});
+    stats->leaf_mac_accepted += std::accumulate(
+        local_leaf_mac_accepted.begin(), local_leaf_mac_accepted.end(),
+        std::size_t{0});
+    stats->leaf_mac_rejected += std::accumulate(
+        local_leaf_mac_rejected.begin(), local_leaf_mac_rejected.end(),
+        std::size_t{0});
+    stats->leaf_mac_far_panels += std::accumulate(
+        local_leaf_mac_far_panels.begin(), local_leaf_mac_far_panels.end(),
+        std::size_t{0});
+    stats->leaf_mac_direct_panels_saved_estimate += std::accumulate(
+        local_leaf_mac_saved_panels.begin(), local_leaf_mac_saved_panels.end(),
+        std::size_t{0});
     stats->mac_reject_radius_limited += std::accumulate(
         local_mac_reject.begin(), local_mac_reject.end(), std::size_t{0});
     stats->mac_convergence_rho_rejects += std::accumulate(
@@ -434,6 +477,11 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
     std::vector<std::size_t> local_mac_surface_margin_soft_panel(workers, 0);
     std::vector<std::size_t> local_k3_rho_cap_reject(workers, 0);
     std::vector<std::size_t> local_k3_rho_cap_panel(workers, 0);
+    std::vector<std::size_t> local_leaf_mac_candidates(workers, 0);
+    std::vector<std::size_t> local_leaf_mac_accepted(workers, 0);
+    std::vector<std::size_t> local_leaf_mac_rejected(workers, 0);
+    std::vector<std::size_t> local_leaf_mac_far_panels(workers, 0);
+    std::vector<std::size_t> local_leaf_mac_saved_panels(workers, 0);
     std::vector<MacAuditTally> local_mac_audit(workers);
     std::vector<FragmentationTally> local_fragmentation_audit(workers);
     std::vector<ExpansionAuditTally> local_expansion_audit(workers);
@@ -471,8 +519,12 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
           const bool target_leaf_block_active =
               leaf_pair_batching_enabled(tree) &&
               tree.leaf_pair_scheduler == "target-leaf-block";
+          const bool cost_tile_worklist_active =
+              leaf_pair_batching_enabled(tree) &&
+              tree.leaf_pair_scheduler == "cost-tile-worklist";
           const bool deferred_batch_active =
-              deferred_worklist_active || target_leaf_block_active;
+              deferred_worklist_active || target_leaf_block_active ||
+              cost_tile_worklist_active;
           std::vector<double> worklist_sum_phi;
           std::vector<double> worklist_sum_phin;
           if (deferred_batch_active) {
@@ -481,7 +533,7 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
               worklist_sum_phin.assign(end - begin, 0.0);
             if (deferred_worklist_active)
               leaf_pair_worklist.reserve(256);
-            if (target_leaf_block_active)
+            if (target_leaf_block_active || cost_tile_worklist_active)
               leaf_block_groups.reserve(64);
           }
           stack.reserve(64);
@@ -574,37 +626,38 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
           };
           auto should_verify_batch =
               [&](std::size_t target_index,
-                  std::size_t source_node_index,
+                  std::size_t source_key,
                   const std::string &verify_mode) noexcept {
             if (verify_mode == "off")
               return false;
             if (verify_mode == "full-small")
               return n <= 4096;
-            return ((target_index + 31 * source_node_index) % 64) == 0;
+            return ((target_index + 31 * source_key) % 64) == 0;
           };
           auto verify_group_accum =
-              [&](std::size_t target_index, std::size_t source_node_index,
-                  const JcpAccum &candidate_accum,
+              [&](std::size_t target_index, const TreeNode &source_node,
+                  std::size_t source_key, const JcpAccum &candidate_accum,
                   bool leaf_block_mode) noexcept {
             const std::string &verify_mode =
                 leaf_block_mode ? tree.leaf_block_verify
                                 : tree.leaf_pair_worklist_verify;
-            if (!should_verify_batch(target_index, source_node_index,
-                                     verify_mode))
+            if (!should_verify_batch(target_index, source_key, verify_mode))
               return;
             LeafPairBatchTally &batch_tally = local_leaf_pair_batch[worker];
             if (leaf_block_mode)
               ++batch_tally.leaf_block_verify_checks;
             else
               ++batch_tally.worklist_verify_checks;
-            if (source_node_index >= tree.nodes.size()) {
+            if (source_node.panel_count == 0 ||
+                source_node.first_panel >= tree.order.size() ||
+                source_node.panel_count >
+                    tree.order.size() - source_node.first_panel) {
               if (leaf_block_mode)
                 ++batch_tally.leaf_block_verify_mismatches;
               else
                 ++batch_tally.worklist_verify_mismatches;
               return;
             }
-            const TreeNode &source_node = tree.nodes[source_node_index];
             std::size_t direct_count = 0;
             const JcpAccum reference = direct_jcp_ordered_sum(
                 panels[target_index], target_index, *panel_cache,
@@ -628,7 +681,13 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
               return;
             LeafPairBatchTally &batch_tally = local_leaf_pair_batch[worker];
             const auto worklist_begin = std::chrono::steady_clock::now();
-            const TreeNode &source_node = tree.nodes[group.source_node_index];
+            TreeNode source_node = tree.nodes[group.source_node_index];
+            if (group.source_first_panel !=
+                    std::numeric_limits<std::size_t>::max() &&
+                group.source_panel_count > 0) {
+              source_node.first_panel = group.source_first_panel;
+              source_node.panel_count = group.source_panel_count;
+            }
             if (!leaf_block_mode)
               ++batch_tally.worklist_groups;
             std::size_t item_offset = 0;
@@ -661,8 +720,8 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
                    ++k) {
                 add_worklist_accum(worklist_batch_targets[k],
                                    worklist_batch_accum[k]);
-                verify_group_accum(worklist_batch_targets[k],
-                                   group.source_node_index,
+                verify_group_accum(worklist_batch_targets[k], source_node,
+                                   group.source_first_panel,
                                    worklist_batch_accum[k],
                                    leaf_block_mode);
               }
@@ -682,7 +741,9 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
               batch_tally.soa_sources += batch_soa_sources;
               if (batch_soa_sources > 0)
                 batch_tally.soa_ms += batch_ms;
-              else if (leaf_pair_batch_kernel == "target-avx2")
+              else if (leaf_pair_batch_kernel == "target-avx2" ||
+                       leaf_pair_batch_kernel == "target-avx2-v2" ||
+                       leaf_pair_batch_kernel == "target-avx2-4x4")
                 batch_tally.target_avx2_ms += batch_ms;
               batch_tally.ms += batch_ms;
               leaf_count += batch_near_count;
@@ -715,7 +776,8 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
                                    std::chrono::steady_clock::now())
                       : 0.0;
               add_worklist_accum(target_index, near);
-              verify_group_accum(target_index, group.source_node_index, near,
+              verify_group_accum(target_index, source_node,
+                                 group.source_first_panel, near,
                                  leaf_block_mode);
               leaf_count += direct_count;
               if (leaf_block_mode)
@@ -742,6 +804,25 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
             group.items.clear();
           };
           auto flush_leaf_block_groups = [&](bool force_scalar) noexcept {
+            if (cost_tile_worklist_active) {
+              std::sort(leaf_block_groups.begin(), leaf_block_groups.end(),
+                        [](const DeferredLeafPairGroup &a,
+                           const DeferredLeafPairGroup &b) {
+                          const std::size_t a_cost =
+                              a.items.size() *
+                              std::max<std::size_t>(1, a.source_panel_count);
+                          const std::size_t b_cost =
+                              b.items.size() *
+                              std::max<std::size_t>(1, b.source_panel_count);
+                          if (a_cost != b_cost)
+                            return a_cost > b_cost;
+                          if (a.target_leaf_index != b.target_leaf_index)
+                            return a.target_leaf_index < b.target_leaf_index;
+                          if (a.source_node_index != b.source_node_index)
+                            return a.source_node_index < b.source_node_index;
+                          return a.source_first_panel < b.source_first_panel;
+                        });
+            }
             for (DeferredLeafPairGroup &group : leaf_block_groups)
               flush_worklist_group(group, force_scalar, true);
             leaf_block_groups.clear();
@@ -764,6 +845,11 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
             if (group.items.empty()) {
               group.target_leaf_index = target_leaf;
               group.source_node_index = source_node_index;
+              if (source_node_index < tree.nodes.size()) {
+                const TreeNode &source_node = tree.nodes[source_node_index];
+                group.source_first_panel = source_node.first_panel;
+                group.source_panel_count = source_node.panel_count;
+              }
             }
             group.items.push_back({target_index, leaf_reason});
             ++batch_tally.worklist_tasks;
@@ -814,6 +900,11 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
               group = &leaf_block_groups.back();
               group->target_leaf_index = target_leaf;
               group->source_node_index = source_node_index;
+              if (source_node_index < tree.nodes.size()) {
+                const TreeNode &source_node = tree.nodes[source_node_index];
+                group->source_first_panel = source_node.first_panel;
+                group->source_panel_count = source_node.panel_count;
+              }
               ++batch_tally.leaf_block_source_groups;
             }
             group->items.push_back({target_index, leaf_reason});
@@ -833,18 +924,66 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
             }
             return true;
           };
+          auto enqueue_cost_tile_task =
+              [&](std::size_t target_index,
+                  std::size_t source_node_index,
+                  LeafWorkReason leaf_reason) noexcept {
+            const auto group_begin = std::chrono::steady_clock::now();
+            LeafPairBatchTally &batch_tally = local_leaf_pair_batch[worker];
+            if (source_node_index >= tree.nodes.size())
+              return false;
+            const std::size_t target_leaf =
+                target_index < tree.target_leaf_index_by_panel.size()
+                    ? tree.target_leaf_index_by_panel[target_index]
+                    : std::numeric_limits<std::size_t>::max();
+            if (target_leaf >= tree.target_panels_by_leaf.size())
+              return false;
+            const TreeNode &source_node = tree.nodes[source_node_index];
+            constexpr std::size_t kCostTileSourcePanels = 32;
+            const std::size_t source_end =
+                source_node.first_panel + source_node.panel_count;
+            for (std::size_t first = source_node.first_panel;
+                 first < source_end; first += kCostTileSourcePanels) {
+              const std::size_t count =
+                  std::min<std::size_t>(kCostTileSourcePanels,
+                                        source_end - first);
+              DeferredLeafPairGroup *group = nullptr;
+              for (DeferredLeafPairGroup &candidate_group :
+                   leaf_block_groups) {
+                if (candidate_group.source_node_index == source_node_index &&
+                    candidate_group.target_leaf_index == target_leaf &&
+                    candidate_group.source_first_panel == first) {
+                  group = &candidate_group;
+                  break;
+                }
+              }
+              if (group == nullptr) {
+                leaf_block_groups.push_back({});
+                group = &leaf_block_groups.back();
+                group->target_leaf_index = target_leaf;
+                group->source_node_index = source_node_index;
+                group->source_first_panel = first;
+                group->source_panel_count = count;
+                ++batch_tally.leaf_block_source_groups;
+              }
+              group->items.push_back({target_index, leaf_reason});
+            }
+            batch_tally.leaf_block_group_ms +=
+                elapsed_ms(group_begin, std::chrono::steady_clock::now());
+            return true;
+          };
           std::size_t active_leaf_block_target_leaf =
               std::numeric_limits<std::size_t>::max();
           for (std::size_t i = begin; i < end; ++i) {
             const Panel &target = panels[i];
             const std::size_t target_rank = rank[i];
-            if (target_leaf_block_active) {
+            if (target_leaf_block_active || cost_tile_worklist_active) {
               const std::size_t target_leaf =
                   i < tree.target_leaf_index_by_panel.size()
                       ? tree.target_leaf_index_by_panel[i]
                       : std::numeric_limits<std::size_t>::max();
               if (target_leaf != active_leaf_block_target_leaf) {
-                flush_leaf_block_groups(true);
+                flush_leaf_block_groups(!cost_tile_worklist_active);
                 active_leaf_block_target_leaf = target_leaf;
                 ++local_leaf_pair_batch[worker].leaf_block_target_leaves;
               }
@@ -872,7 +1011,12 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
                   target_rank >= node.first_panel &&
                   target_rank < node.first_panel + node.panel_count;
               LeafWorkReason child_leaf_reason = leaf_reason;
-              if (!is_leaf && !contains_target) {
+              const bool leaf_mac_enabled = tree.leaf_mac != "off";
+              const bool evaluate_node_mac =
+                  !contains_target && (!is_leaf || leaf_mac_enabled);
+              if (evaluate_node_mac) {
+                if (is_leaf)
+                  ++local_leaf_mac_candidates[worker];
                 const double dx = target.x - node.cx;
                 const double dy = target.y - node.cy;
                 const double dz = target.z - node.cz;
@@ -880,6 +1024,12 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
                     std::max(1.0e-16, dx * dx + dy * dy + dz * dz));
                 const MacDecision mac =
                     evaluate_mac(target, node, tree, distance);
+                if (is_leaf) {
+                  if (mac.accepted)
+                    ++local_leaf_mac_accepted[worker];
+                  else
+                    ++local_leaf_mac_rejected[worker];
+                }
                 if (mac.surface_margin_applied)
                   ++local_mac_surface_margin_applied[worker];
                 if (mac.surface_margin_skipped)
@@ -935,9 +1085,10 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
                   child_leaf_reason = LeafWorkReason::ConvergenceAspect;
                 else
                   child_leaf_reason = LeafWorkReason::MacTerminal;
-                if (mac.accepted) {
+                if (mac.accepted && (!is_leaf || tree.leaf_mac == "on")) {
                   if (mac.surface_margin_skipped)
                     ++local_mac_surface_margin_skipped_accepted[worker];
+                  bool leaf_mac_fallback_to_direct = false;
                   const bool fragmented_far =
                       tree.fragmentation_safety != "off" && node.fragmented;
                   if (fragmented_far) {
@@ -946,164 +1097,197 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
                     record_fragmentation_audit(
                         local_fragmentation_audit[worker], node, split);
                     if (split) {
-                      push_child_nodes(tree, node, stack,
-                                       LeafWorkReason::Fragmentation);
-                      continue;
+                      if (is_leaf) {
+                        child_leaf_reason = LeafWorkReason::Fragmentation;
+                        leaf_mac_fallback_to_direct = true;
+                      } else {
+                        push_child_nodes(tree, node, stack,
+                                         LeafWorkReason::Fragmentation);
+                        continue;
+                      }
                     }
                   }
-                  if (tree.convergence_audit != "off") {
-                    record_far_convergence_audit(
-                        local_convergence_audit[worker], node, mac.rho);
-                  }
-                  const ConvergenceEstimatorDecision estimator =
-                      evaluate_convergence_estimator(
-                          tree, node, jcp_moments, node_index, taylor_order,
-                          coupled, mac.rho, eps_ratio);
-                  record_convergence_estimator(
-                      local_convergence_estimator[worker], node, estimator);
                   const std::array<NodeMoments, 3> normal_moments = {
                       jcp_moments.phi_normal[0][node_index],
                       jcp_moments.phi_normal[1][node_index],
                       jcp_moments.phi_normal[2][node_index]};
-                  if (estimator.split_reject) {
-                    const bool split_channel_audit =
-                        tree.channel_missed_semantics == "accepted-only" &&
-                        tree.expansion_audit_channel != "off" &&
-                        tree.expansion_audit != "off";
-                    const bool split_overreject_audit =
-                        tree.convergence_overreject_audit != "off";
-                    const std::string &split_audit_mode =
-                        tree.expansion_audit != "off"
-                            ? tree.expansion_audit
-                            : tree.convergence_overreject_audit;
-                    if ((split_channel_audit || split_overreject_audit) &&
-                        should_audit_far_expansion_mode(
-                            tree, split_audit_mode, n, node,
-                            expansion_audit_candidates)) {
-                      std::size_t direct_panel_count = 0;
-                      const JcpChannelAccum direct_channels =
-                          direct_jcp_ordered_channel_sum_scalar(
-                              target, i, *panel_cache, unknown_cache,
-                              eps_ratio, kappa, coupled, tree.order,
-                              node.first_panel, node.panel_count,
-                              direct_panel_count);
-                      (void)direct_panel_count;
-                      const JcpChannelAccum far_channels =
-                          taylor_jcp_node_channel_sum(
-                          target, node, jcp_moments.phin[node_index],
-                          normal_moments, eps_ratio, kappa, coupled,
-                          taylor_order, tree.derivative_mode);
-                      JcpChannelAccum kernel_tail_p;
-                      JcpChannelAccum kernel_tail_pm1;
-                      if (tree.convergence_kernel_response_audit != "off") {
-                        kernel_tail_p = taylor_jcp_node_channel_degree_sum(
-                            target, node, jcp_moments.phin[node_index],
-                            normal_moments, eps_ratio, kappa, coupled,
-                            taylor_order, tree.derivative_mode, taylor_order);
-                        kernel_tail_pm1 = taylor_jcp_node_channel_degree_sum(
-                            target, node, jcp_moments.phin[node_index],
-                            normal_moments, eps_ratio, kappa, coupled,
-                            taylor_order, tree.derivative_mode,
-                            std::max(0, taylor_order - 1));
-                      }
-                      if (split_channel_audit) {
-                        record_split_far_expansion_channel_audit(
-                            local_expansion_audit[worker],
-                            sum_jcp_channels(far_channels),
-                            sum_jcp_channels(direct_channels), far_channels,
-                            direct_channels, estimator, coupled,
-                            tree.convergence_estimator_error_cap,
-                            tree.accepted_miss_absolute_floor);
-                      }
-                      if (split_overreject_audit) {
-                        record_convergence_overreject_audit(
-                            local_expansion_audit[worker],
-                            sum_jcp_channels(far_channels),
-                            sum_jcp_channels(direct_channels), far_channels,
-                            direct_channels, estimator, node, coupled,
-                            tree.convergence_estimator_error_cap,
-                            tree.accepted_miss_absolute_floor,
-                            tree.convergence_overreject_detail,
-                            tree.convergence_shape_audit,
-                            tree.convergence_kernel_response_audit, i,
-                            node_index, mac.rho, distance, taylor_order,
-                            kernel_tail_p, kernel_tail_pm1);
+                  ConvergenceEstimatorDecision estimator;
+                  if (!leaf_mac_fallback_to_direct) {
+                    if (tree.convergence_audit != "off") {
+                      record_far_convergence_audit(
+                          local_convergence_audit[worker], node, mac.rho);
+                    }
+                    estimator = evaluate_convergence_estimator(
+                        tree, node, jcp_moments, node_index, taylor_order,
+                        coupled, mac.rho, eps_ratio);
+                    record_convergence_estimator(
+                        local_convergence_estimator[worker], node, estimator);
+                    if (estimator.split_reject) {
+                      if (is_leaf) {
+                        child_leaf_reason =
+                            LeafWorkReason::ConvergenceEstimator;
+                        leaf_mac_fallback_to_direct = true;
+                      } else {
+                        const bool split_channel_audit =
+                            tree.channel_missed_semantics == "accepted-only" &&
+                            tree.expansion_audit_channel != "off" &&
+                            tree.expansion_audit != "off";
+                        const bool split_overreject_audit =
+                            tree.convergence_overreject_audit != "off";
+                        const std::string &split_audit_mode =
+                            tree.expansion_audit != "off"
+                                ? tree.expansion_audit
+                                : tree.convergence_overreject_audit;
+                        if ((split_channel_audit || split_overreject_audit) &&
+                            should_audit_far_expansion_mode(
+                                tree, split_audit_mode, n, node,
+                                expansion_audit_candidates)) {
+                          std::size_t direct_panel_count = 0;
+                          const JcpChannelAccum direct_channels =
+                              direct_jcp_ordered_channel_sum_scalar(
+                                  target, i, *panel_cache, unknown_cache,
+                                  eps_ratio, kappa, coupled, tree.order,
+                                  node.first_panel, node.panel_count,
+                                  direct_panel_count);
+                          (void)direct_panel_count;
+                          const JcpChannelAccum far_channels =
+                              taylor_jcp_node_channel_sum(
+                                  target, node, jcp_moments.phin[node_index],
+                                  normal_moments, eps_ratio, kappa, coupled,
+                                  taylor_order, tree.derivative_mode);
+                          JcpChannelAccum kernel_tail_p;
+                          JcpChannelAccum kernel_tail_pm1;
+                          if (tree.convergence_kernel_response_audit !=
+                              "off") {
+                            kernel_tail_p =
+                                taylor_jcp_node_channel_degree_sum(
+                                    target, node,
+                                    jcp_moments.phin[node_index],
+                                    normal_moments, eps_ratio, kappa, coupled,
+                                    taylor_order, tree.derivative_mode,
+                                    taylor_order);
+                            kernel_tail_pm1 =
+                                taylor_jcp_node_channel_degree_sum(
+                                    target, node,
+                                    jcp_moments.phin[node_index],
+                                    normal_moments, eps_ratio, kappa, coupled,
+                                    taylor_order, tree.derivative_mode,
+                                    std::max(0, taylor_order - 1));
+                          }
+                          if (split_channel_audit) {
+                            record_split_far_expansion_channel_audit(
+                                local_expansion_audit[worker],
+                                sum_jcp_channels(far_channels),
+                                sum_jcp_channels(direct_channels),
+                                far_channels, direct_channels, estimator,
+                                coupled, tree.convergence_estimator_error_cap,
+                                tree.accepted_miss_absolute_floor);
+                          }
+                          if (split_overreject_audit) {
+                            record_convergence_overreject_audit(
+                                local_expansion_audit[worker],
+                                sum_jcp_channels(far_channels),
+                                sum_jcp_channels(direct_channels),
+                                far_channels, direct_channels, estimator, node,
+                                coupled, tree.convergence_estimator_error_cap,
+                                tree.accepted_miss_absolute_floor,
+                                tree.convergence_overreject_detail,
+                                tree.convergence_shape_audit,
+                                tree.convergence_kernel_response_audit, i,
+                                node_index, mac.rho, distance, taylor_order,
+                                kernel_tail_p, kernel_tail_pm1);
+                          }
+                        }
+                        push_child_nodes(
+                            tree, node, stack,
+                            LeafWorkReason::ConvergenceEstimator);
+                        continue;
                       }
                     }
-                    push_child_nodes(tree, node, stack,
-                                     LeafWorkReason::ConvergenceEstimator);
-                    continue;
                   }
                   const bool k3_rho_cap_active =
                       tree.convergence_estimator_model == "channel-tail-eps" &&
                       tree.convergence_k3_accepted_rho_cap > 0.0;
-                  if (k3_rho_cap_active &&
+                  if (!leaf_mac_fallback_to_direct && k3_rho_cap_active &&
                       mac.rho > tree.convergence_k3_accepted_rho_cap) {
                     ++local_k3_rho_cap_reject[worker];
                     local_k3_rho_cap_panel[worker] += node.panel_count;
-                    push_child_nodes(tree, node, stack,
-                                     LeafWorkReason::K3RhoCap);
-                    continue;
-                  }
-                  const JcpAccum far = taylor_jcp_node_sum(
-                      target, node, jcp_moments.phin[node_index],
-                      normal_moments, eps_ratio, kappa, coupled,
-                      taylor_order, tree.derivative_mode);
-                  if (should_audit_far_expansion(
-                          tree, n, node, expansion_audit_candidates)) {
-                    std::size_t direct_panel_count = 0;
-                    const auto direct_begin =
-                        std::chrono::steady_clock::now();
-                    JcpAccum direct;
-                    JcpChannelAccum direct_channels;
-                    JcpChannelAccum far_channels;
-                    const bool channel_audit =
-                        tree.expansion_audit_channel != "off";
-                    if (channel_audit) {
-                      direct_channels = direct_jcp_ordered_channel_sum_scalar(
-                          target, i, *panel_cache, unknown_cache, eps_ratio,
-                          kappa, coupled, tree.order, node.first_panel,
-                          node.panel_count, direct_panel_count);
-                      direct = sum_jcp_channels(direct_channels);
-                      far_channels = taylor_jcp_node_channel_sum(
-                          target, node, jcp_moments.phin[node_index],
-                          normal_moments, eps_ratio, kappa, coupled,
-                          taylor_order, tree.derivative_mode);
+                    if (is_leaf) {
+                      child_leaf_reason = LeafWorkReason::K3RhoCap;
+                      leaf_mac_fallback_to_direct = true;
                     } else {
-                      direct = direct_jcp_ordered_sum(
-                          target, i, *panel_cache, unknown_cache, eps_ratio,
-                          kappa, coupled, tree.order, node.first_panel,
-                          node.panel_count, leaf_panel_kernel,
-                          direct_panel_count);
+                      push_child_nodes(tree, node, stack,
+                                       LeafWorkReason::K3RhoCap);
+                      continue;
                     }
-                    const double direct_ms = elapsed_ms(
-                        direct_begin, std::chrono::steady_clock::now());
-                    record_far_expansion_audit(
-                        local_expansion_audit[worker], far, direct, coupled,
-                        node.panel_count, direct_ms, estimator.active,
-                        estimator.unstable,
-                        estimator.split_reject,
-                        tree.convergence_estimator_error_cap,
-                        tree.accepted_miss_absolute_floor,
-                        tree.channel_missed_semantics);
-                    if (channel_audit) {
-                      record_far_expansion_channel_audit(
-                          local_expansion_audit[worker], far_channels,
-                          direct_channels, estimator,
+                  }
+                  if (!leaf_mac_fallback_to_direct) {
+                    const JcpAccum far = taylor_jcp_node_sum(
+                        target, node, jcp_moments.phin[node_index],
+                        normal_moments, eps_ratio, kappa, coupled,
+                        taylor_order, tree.derivative_mode);
+                    if (should_audit_far_expansion(
+                            tree, n, node, expansion_audit_candidates)) {
+                      std::size_t direct_panel_count = 0;
+                      const auto direct_begin =
+                          std::chrono::steady_clock::now();
+                      JcpAccum direct;
+                      JcpChannelAccum direct_channels;
+                      JcpChannelAccum far_channels;
+                      const bool channel_audit =
+                          tree.expansion_audit_channel != "off";
+                      if (channel_audit) {
+                        direct_channels =
+                            direct_jcp_ordered_channel_sum_scalar(
+                                target, i, *panel_cache, unknown_cache,
+                                eps_ratio, kappa, coupled, tree.order,
+                                node.first_panel, node.panel_count,
+                                direct_panel_count);
+                        direct = sum_jcp_channels(direct_channels);
+                        far_channels = taylor_jcp_node_channel_sum(
+                            target, node, jcp_moments.phin[node_index],
+                            normal_moments, eps_ratio, kappa, coupled,
+                            taylor_order, tree.derivative_mode);
+                      } else {
+                        direct = direct_jcp_ordered_sum(
+                            target, i, *panel_cache, unknown_cache, eps_ratio,
+                            kappa, coupled, tree.order, node.first_panel,
+                            node.panel_count, leaf_panel_kernel,
+                            direct_panel_count);
+                      }
+                      const double direct_ms = elapsed_ms(
+                          direct_begin, std::chrono::steady_clock::now());
+                      record_far_expansion_audit(
+                          local_expansion_audit[worker], far, direct, coupled,
+                          node.panel_count, direct_ms, estimator.active,
+                          estimator.unstable, estimator.split_reject,
                           tree.convergence_estimator_error_cap,
                           tree.accepted_miss_absolute_floor,
-                          tree.channel_missed_semantics,
-                          tree.accepted_miss_diagnostics, i, node_index,
-                          node.panel_count, mac.rho);
+                          tree.channel_missed_semantics);
+                      if (channel_audit) {
+                        record_far_expansion_channel_audit(
+                            local_expansion_audit[worker], far_channels,
+                            direct_channels, estimator,
+                            tree.convergence_estimator_error_cap,
+                            tree.accepted_miss_absolute_floor,
+                            tree.channel_missed_semantics,
+                            tree.accepted_miss_diagnostics, i, node_index,
+                            node.panel_count, mac.rho);
+                      }
                     }
+                    sum_phi_i += far.phi;
+                    if (coupled)
+                      sum_phin_i += far.phin;
+                    if (is_leaf) {
+                      local_leaf_mac_far_panels[worker] += node.panel_count;
+                      local_leaf_mac_saved_panels[worker] += node.panel_count;
+                    }
+                    ++far_count;
+                    continue;
                   }
-                  sum_phi_i += far.phi;
-                  if (coupled)
-                    sum_phin_i += far.phin;
-                  ++far_count;
-                  continue;
                 }
-                ++local_mac_reject[worker];
+                if (!is_leaf)
+                  ++local_mac_reject[worker];
               }
               if (is_leaf) {
                 const std::size_t skip_key =
@@ -1148,6 +1332,10 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
                   }
                   if (batch_candidate && target_leaf_block_active) {
                     if (enqueue_leaf_block_task(i, node_index, leaf_reason))
+                      continue;
+                  }
+                  if (batch_candidate && cost_tile_worklist_active) {
+                    if (enqueue_cost_tile_task(i, node_index, leaf_reason))
                       continue;
                   }
                   if (batch_candidate) {
@@ -1334,7 +1522,9 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
                       batch_tally.soa_sources += batch_soa_sources;
                       if (batch_soa_sources > 0)
                         batch_tally.soa_ms += batch_ms;
-                      else if (leaf_pair_batch_kernel == "target-avx2")
+                      else if (leaf_pair_batch_kernel == "target-avx2" ||
+                               leaf_pair_batch_kernel == "target-avx2-v2" ||
+                               leaf_pair_batch_kernel == "target-avx2-4x4")
                         batch_tally.target_avx2_ms += batch_ms;
                       batch_tally.ms += batch_ms;
                       leaf_count += batch_near_count;
@@ -1408,8 +1598,8 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
               flush_worklist_group(entry.second, true, false);
             }
             leaf_pair_worklist.clear();
-            if (target_leaf_block_active)
-              flush_leaf_block_groups(true);
+            if (target_leaf_block_active || cost_tile_worklist_active)
+              flush_leaf_block_groups(!cost_tile_worklist_active);
             const auto writeback_begin = std::chrono::steady_clock::now();
             for (std::size_t i = begin; i < end; ++i) {
               const std::size_t offset = i - begin;
@@ -1424,7 +1614,7 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
               if (coupled)
                 out[n + i] = lhs_phin * unknowns[n + i] - sum_phin_i;
             }
-            if (target_leaf_block_active) {
+            if (target_leaf_block_active || cost_tile_worklist_active) {
               local_leaf_pair_batch[worker].leaf_block_writeback_ms +=
                   elapsed_ms(writeback_begin,
                              std::chrono::steady_clock::now());
@@ -1654,6 +1844,21 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
       stats->leaf_near_interactions += leaf_total;
       stats->leaf_panel_interactions += leaf_total;
       stats->leaf_residual_panel_interactions += leaf_total;
+      stats->leaf_mac_candidates += std::accumulate(
+          local_leaf_mac_candidates.begin(), local_leaf_mac_candidates.end(),
+          std::size_t{0});
+      stats->leaf_mac_accepted += std::accumulate(
+          local_leaf_mac_accepted.begin(), local_leaf_mac_accepted.end(),
+          std::size_t{0});
+      stats->leaf_mac_rejected += std::accumulate(
+          local_leaf_mac_rejected.begin(), local_leaf_mac_rejected.end(),
+          std::size_t{0});
+      stats->leaf_mac_far_panels += std::accumulate(
+          local_leaf_mac_far_panels.begin(), local_leaf_mac_far_panels.end(),
+          std::size_t{0});
+      stats->leaf_mac_direct_panels_saved_estimate += std::accumulate(
+          local_leaf_mac_saved_panels.begin(), local_leaf_mac_saved_panels.end(),
+          std::size_t{0});
       stats->leaf_work_mac_terminal_panels +=
           leaf_work_total.mac_terminal_panels;
       stats->leaf_work_physical_gap_panels +=
@@ -2305,6 +2510,18 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
     stats->smooth_leaf_node_interactions += smooth_leaf_total;
     stats->leaf_pruned_interactions +=
         interactions.valid_for(n) ? interactions.leaf_pruned_count : 0;
+    stats->leaf_mac_candidates +=
+        interactions.valid_for(n) ? interactions.leaf_mac_candidates : 0;
+    stats->leaf_mac_accepted +=
+        interactions.valid_for(n) ? interactions.leaf_mac_accepted : 0;
+    stats->leaf_mac_rejected +=
+        interactions.valid_for(n) ? interactions.leaf_mac_rejected : 0;
+    stats->leaf_mac_far_panels +=
+        interactions.valid_for(n) ? interactions.leaf_mac_far_panels : 0;
+    stats->leaf_mac_direct_panels_saved_estimate +=
+        interactions.valid_for(n)
+            ? interactions.leaf_mac_direct_panels_saved_estimate
+            : 0;
     stats->adaptive_smooth_leaf_accepted +=
         interactions.valid_for(n) ? interactions.adaptive_smooth_leaf_accepted
                                   : 0;

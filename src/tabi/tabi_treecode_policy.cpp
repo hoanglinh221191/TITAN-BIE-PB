@@ -1832,6 +1832,12 @@ ConvergenceEstimatorDecision evaluate_convergence_estimator(
       std::isfinite(eps_ratio) ? std::abs(eps_ratio) : 1.0;
   const double aspect = std::max(1.0, node_aspect_ratio(node));
   const double rho_factor = pow_int(rho, taylor_order + 1);
+  const JcpConvergenceNorms *cached_norms = nullptr;
+  if (node_index < packed.convergence_norms.size()) {
+    const JcpConvergenceNorms &candidate = packed.convergence_norms[node_index];
+    if (candidate.valid && candidate.taylor_order == taylor_order)
+      cached_norms = &candidate;
+  }
 
   auto norms_for_moments = [&](const NodeMoments &moments, double &source_norm,
                                double &tail_norm_p,
@@ -1877,16 +1883,28 @@ ConvergenceEstimatorDecision evaluate_convergence_estimator(
     double source_norm = 0.0;
     double tail_norm_p = 0.0;
     double tail_norm_pm1 = 0.0;
-    if (coupled)
-      norms_for_moments(packed.phin[node_index], source_norm, tail_norm_p,
-                        tail_norm_pm1);
-    if (node_index < packed.phi_normal[0].size()) {
-      norms_for_moments(packed.phi_normal[0][node_index], source_norm,
-                        tail_norm_p, tail_norm_pm1);
-      norms_for_moments(packed.phi_normal[1][node_index], source_norm,
-                        tail_norm_p, tail_norm_pm1);
-      norms_for_moments(packed.phi_normal[2][node_index], source_norm,
-                        tail_norm_p, tail_norm_pm1);
+    if (cached_norms != nullptr) {
+      source_norm = cached_norms->normal_source_norm;
+      tail_norm_p = cached_norms->normal_tail_norm_p;
+      tail_norm_pm1 = cached_norms->normal_tail_norm_pm1;
+      if (coupled) {
+        source_norm = std::max(source_norm, cached_norms->scalar_source_norm);
+        tail_norm_p = std::max(tail_norm_p, cached_norms->scalar_tail_norm_p);
+        tail_norm_pm1 =
+            std::max(tail_norm_pm1, cached_norms->scalar_tail_norm_pm1);
+      }
+    } else {
+      if (coupled)
+        norms_for_moments(packed.phin[node_index], source_norm, tail_norm_p,
+                          tail_norm_pm1);
+      if (node_index < packed.phi_normal[0].size()) {
+        norms_for_moments(packed.phi_normal[0][node_index], source_norm,
+                          tail_norm_p, tail_norm_pm1);
+        norms_for_moments(packed.phi_normal[1][node_index], source_norm,
+                          tail_norm_p, tail_norm_pm1);
+        norms_for_moments(packed.phi_normal[2][node_index], source_norm,
+                          tail_norm_p, tail_norm_pm1);
+      }
     }
     decision.tail_norm_p = tail_norm_p;
     decision.tail_norm_pm1 = tail_norm_pm1;
@@ -1916,18 +1934,33 @@ ConvergenceEstimatorDecision evaluate_convergence_estimator(
       norms_for_moments(moments, source_norm[channel], tail_norm_p[channel],
                         tail_norm_pm1[channel]);
     };
-    if (coupled) {
-      observe_channel(kJcpK1PhiChannel, packed.phin[node_index]);
-      observe_channel(kJcpK3PhinChannel, packed.phin[node_index]);
-    }
-    if (node_index < packed.phi_normal[0].size()) {
-      for (int component = 0; component < 3; ++component) {
-        const NodeMoments &moments =
-            packed.phi_normal[static_cast<std::size_t>(component)]
-                             [node_index];
-        observe_channel(kJcpK2PhiNormalChannel, moments);
-        if (coupled)
-          observe_channel(kJcpK4MixedChannel, moments);
+    if (cached_norms != nullptr) {
+      auto copy_channel = [&](std::size_t channel) {
+        source_norm[channel] = cached_norms->channel_source_norm[channel];
+        tail_norm_p[channel] = cached_norms->channel_tail_norm_p[channel];
+        tail_norm_pm1[channel] = cached_norms->channel_tail_norm_pm1[channel];
+      };
+      if (coupled) {
+        copy_channel(kJcpK1PhiChannel);
+        copy_channel(kJcpK3PhinChannel);
+      }
+      copy_channel(kJcpK2PhiNormalChannel);
+      if (coupled)
+        copy_channel(kJcpK4MixedChannel);
+    } else {
+      if (coupled) {
+        observe_channel(kJcpK1PhiChannel, packed.phin[node_index]);
+        observe_channel(kJcpK3PhinChannel, packed.phin[node_index]);
+      }
+      if (node_index < packed.phi_normal[0].size()) {
+        for (int component = 0; component < 3; ++component) {
+          const NodeMoments &moments =
+              packed.phi_normal[static_cast<std::size_t>(component)]
+                               [node_index];
+          observe_channel(kJcpK2PhiNormalChannel, moments);
+          if (coupled)
+            observe_channel(kJcpK4MixedChannel, moments);
+        }
       }
     }
     const bool eps_channel_model =

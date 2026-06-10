@@ -638,6 +638,11 @@ TreeInteractionLists build_tree_interactions(const std::vector<Panel> &panels,
   std::vector<std::size_t> mac_convergence_aspect_panel_by_target(n, 0);
   std::vector<std::size_t> mac_surface_margin_reject_by_target(n, 0);
   std::vector<std::size_t> mac_surface_margin_panel_by_target(n, 0);
+  std::vector<std::size_t> leaf_mac_candidates_by_target(n, 0);
+  std::vector<std::size_t> leaf_mac_accepted_by_target(n, 0);
+  std::vector<std::size_t> leaf_mac_rejected_by_target(n, 0);
+  std::vector<std::size_t> leaf_mac_far_panels_by_target(n, 0);
+  std::vector<std::size_t> leaf_mac_saved_panels_by_target(n, 0);
   std::vector<MacAuditTally> mac_audit_by_target(n);
   std::vector<FragmentationTally> fragmentation_by_target(n);
   const AdaptivePruneParams adaptive_params =
@@ -669,13 +674,24 @@ TreeInteractionLists build_tree_interactions(const std::vector<Panel> &panels,
             const bool contains_target =
                 target_rank >= node.first_panel &&
                 target_rank < node.first_panel + node.panel_count;
-            if (!is_leaf && !contains_target) {
+            const bool leaf_mac_enabled = tree.leaf_mac != "off";
+            const bool evaluate_node_mac =
+                !contains_target && (!is_leaf || leaf_mac_enabled);
+            if (evaluate_node_mac) {
+              if (is_leaf)
+                ++leaf_mac_candidates_by_target[i];
               const double dx = target.x - node.cx;
               const double dy = target.y - node.cy;
               const double dz = target.z - node.cz;
               const double distance =
                   std::sqrt(std::max(1.0e-16, dx * dx + dy * dy + dz * dz));
               const MacDecision mac = evaluate_mac(target, node, tree, distance);
+              if (is_leaf) {
+                if (mac.accepted)
+                  ++leaf_mac_accepted_by_target[i];
+                else
+                  ++leaf_mac_rejected_by_target[i];
+              }
               if (mac.ratio_accept && tree.mac_safety != "off") {
                 record_far_geometric_audit(mac_audit_by_target[i], node,
                                            mac.gap, mac.gap_ratio,
@@ -695,7 +711,8 @@ TreeInteractionLists build_tree_interactions(const std::vector<Panel> &panels,
                 ++mac_surface_margin_reject_by_target[i];
                 mac_surface_margin_panel_by_target[i] += node.panel_count;
               }
-              if (mac.accepted) {
+              if (mac.accepted && (!is_leaf || tree.leaf_mac == "on")) {
+                bool leaf_mac_fallback_to_direct = false;
                 const bool fragmented_far =
                     tree.fragmentation_safety != "off" && node.fragmented;
                 if (fragmented_far) {
@@ -704,14 +721,25 @@ TreeInteractionLists build_tree_interactions(const std::vector<Panel> &panels,
                   record_fragmentation_audit(fragmentation_by_target[i], node,
                                              split);
                   if (split) {
-                    push_child_nodes(tree, node, stack);
-                    continue;
+                    if (is_leaf) {
+                      leaf_mac_fallback_to_direct = true;
+                    } else {
+                      push_child_nodes(tree, node, stack);
+                      continue;
+                    }
                   }
                 }
+                if (!leaf_mac_fallback_to_direct) {
                 far.push_back(node_index);
+                if (is_leaf) {
+                  leaf_mac_far_panels_by_target[i] += node.panel_count;
+                  leaf_mac_saved_panels_by_target[i] += node.panel_count;
+                }
                 continue;
+                }
               }
-              ++mac_reject_by_target[i];
+              if (!is_leaf)
+                ++mac_reject_by_target[i];
             }
             if (is_leaf) {
               bool has_singular_panel = false;
@@ -891,6 +919,12 @@ TreeInteractionLists build_tree_interactions(const std::vector<Panel> &panels,
     lists.mac_surface_margin_rejects += mac_surface_margin_reject_by_target[i];
     lists.mac_surface_margin_reject_panels +=
         mac_surface_margin_panel_by_target[i];
+    lists.leaf_mac_candidates += leaf_mac_candidates_by_target[i];
+    lists.leaf_mac_accepted += leaf_mac_accepted_by_target[i];
+    lists.leaf_mac_rejected += leaf_mac_rejected_by_target[i];
+    lists.leaf_mac_far_panels += leaf_mac_far_panels_by_target[i];
+    lists.leaf_mac_direct_panels_saved_estimate +=
+        leaf_mac_saved_panels_by_target[i];
     MacAuditTally tally;
     tally.unsafe_count = lists.far_geometric_unsafe_count;
     tally.unsafe_panels = lists.far_geometric_unsafe_panels;
@@ -1125,7 +1159,8 @@ TreeWorkspace build_tree_workspace_impl(const std::vector<Panel> &panels,
                                    const std::string
                                        &convergence_shape_audit,
                                    const std::string
-                                       &convergence_kernel_response_audit) {
+                                       &convergence_kernel_response_audit,
+                                   const std::string &leaf_mac) {
   const auto build_begin = std::chrono::steady_clock::now();
   TreeWorkspace tree;
   tree.taylor_order = kTaylorOrderDefault;
@@ -1194,7 +1229,8 @@ TreeWorkspace build_tree_workspace_impl(const std::vector<Panel> &panels,
           : std::string("off");
   tree.leaf_pair_scheduler =
       (leaf_pair_scheduler == "deferred-worklist" ||
-       leaf_pair_scheduler == "target-leaf-block")
+       leaf_pair_scheduler == "target-leaf-block" ||
+       leaf_pair_scheduler == "cost-tile-worklist")
           ? leaf_pair_scheduler
           : std::string("inline-select");
   tree.leaf_pair_worklist_max_active = static_cast<std::size_t>(
@@ -1208,6 +1244,9 @@ TreeWorkspace build_tree_workspace_impl(const std::vector<Panel> &panels,
       (leaf_block_verify == "sampled" || leaf_block_verify == "full-small")
           ? leaf_block_verify
           : std::string("off");
+  tree.leaf_mac =
+      (leaf_mac == "audit" || leaf_mac == "on") ? leaf_mac
+                                                 : std::string("off");
   tree.leaf_pair_max_lookahead = static_cast<std::size_t>(
       std::clamp(leaf_pair_max_lookahead, 4, 128));
   tree.convergence_split_selectivity =
