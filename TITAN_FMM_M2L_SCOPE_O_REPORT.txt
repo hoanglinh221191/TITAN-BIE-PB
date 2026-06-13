@@ -1,0 +1,28 @@
+TITAN FMM/M2L Scope O Repeatability And Cap-256 Stress Gate
+==========================================================
+
+quick_mode: False
+scope: hidden_cli_repeatability_cap256_stress
+hidden_option: -pbe-tabi-fmm-m2l=single-matvec-analytic
+production_default: grid
+fmm_status: hidden_experimental
+opening_theta: 0.6
+audit_sample_count: 512
+repeat_count: 3
+case_timeout_seconds: 600
+scope_o_gate: timeout_not_verified
+failure_classes: timeout_not_verified
+
+Repeatability aggregates:
+repeatability: fixture=research-medium atom_cap=128 repeats=3 energy_spread=0 energy_gate=0.8346021509 audit_max=0.00323097 speedup_median=7.15721267875626 speedup_min=5.14596932441632 gate=pass
+repeatability: fixture=research-large atom_cap=128 repeats=3 energy_spread=0 energy_gate=0.6380393848 audit_max=0.00261365 speedup_median=5.72520286151872 speedup_min=4.9350600868128 gate=pass
+repeatability: fixture=research-alt atom_cap=128 repeats=3 energy_spread=0 energy_gate=0.7196209606 audit_max=0.00499974 speedup_median=8.92799795952675 speedup_min=7.53845927941774 gate=pass
+
+Stress rows:
+stress: fixture=research-medium atom_cap=256 sampled_atoms=256 panels=12250 energy_delta_abs=NaN fmm_residual=2.28745E-07 audit_rel=0.00502187 speedup=NaN gate=timeout_not_verified
+stress: fixture=research-large atom_cap=256 sampled_atoms=0 panels=0 energy_delta_abs=NaN fmm_residual=NaN audit_rel=NaN speedup=NaN gate=skipped
+
+acceptance: repeat rows must pass Scope N-style gates; per-fixture energy spread, audit max, median speedup, and min speedup must pass; full mode also requires cap-256 medium and gated large stress rows to pass.
+timeout_policy: timeout_not_verified blocks promotion planning but is not classified as a solver failure.
+decision: Scope O is implemented but did not pass the full promotion-readiness gate. Cap-128 repeatability is strong; cap-256 stress remains unverified because the direct baseline did not produce finite energy before timeout, so energy delta and speedup cannot be checked.
+next_gate: Do not expose FMM/M2L publicly. Either make the cap-256 direct verifier finish inside the gate or run a longer hidden integration/regression gate only after cap-256 verification is available.

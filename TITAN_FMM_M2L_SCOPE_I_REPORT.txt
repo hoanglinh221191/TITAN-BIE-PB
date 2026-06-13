@@ -1,0 +1,19 @@
+TITAN FMM/M2L Scope I Probe Summary
+==================================
+
+quick_mode: False
+scope: hidden_offline_analytical_derivative_operator
+surface_source: TitanPBE::Tabi::build_surface
+surface_points: 4
+max_sampled_panels: 2048
+order: 2
+theta: 0.8
+timing_repeats: 5
+rows: 2
+scope_i_gate_pass_rows: 2
+row: fixture=research-medium atoms=6063 surface_panels=55062 sampled_panels=2048 parity=2.40586437131e-15 offline_aggregate=0.0002820320478 offline_phi=0.000273385086965 offline_phin=0.00601041008738 near_pairs=3272704 far_pairs=921600 speedup=4.55058282166 gate=pass
+row: fixture=research-large atoms=12752 surface_panels=113468 sampled_panels=2048 parity=3.23379276979e-15 offline_aggregate=0.0014179982537 offline_phi=0.00140552481985 offline_phin=0.00925772972043 near_pairs=2953216 far_pairs=1241088 speedup=4.47373490841 gate=pass
+
+decision_note: Scope I is an offline analytical derivative operator. It does not run GMRES, add a public CLI, or change the production PBE backend.
+next_gate: Scope I pass rows justify planning a hidden single-matvec production adapter next; production default remains grid.
+matrix_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_i\fmm_m2l_scope_i_matrix.csv

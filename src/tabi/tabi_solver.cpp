@@ -3460,7 +3460,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
             options.convergence_overreject_detail,
             options.convergence_shape_audit,
             options.convergence_kernel_response_audit,
-            result.leaf_mac);
+            result.leaf_mac, options.fmm_m2l);
       jcp_tree.leaf_mac = result.leaf_mac;
       jcp_tree.taylor_order = result.taylor_order;
       jcp_tree.derivative_mode = result.derivative_mode;
@@ -4271,6 +4271,12 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.leaf_mac_far_panels = jcp_tree_stats.leaf_mac_far_panels;
       result.leaf_mac_direct_panels_saved_estimate =
           jcp_tree_stats.leaf_mac_direct_panels_saved_estimate;
+      result.fmm_m2l_mode = jcp_tree_stats.fmm_m2l_mode;
+      result.fmm_m2l_near_pairs = jcp_tree_stats.fmm_m2l_near_pairs;
+      result.fmm_m2l_far_pairs = jcp_tree_stats.fmm_m2l_far_pairs;
+      result.fmm_m2l_setup_ms = jcp_tree_stats.fmm_m2l_setup_ms;
+      result.fmm_m2l_apply_ms = jcp_tree_stats.fmm_m2l_apply_ms;
+      result.fmm_m2l_finite_outputs = jcp_tree_stats.fmm_m2l_finite_outputs;
       result.leaf_work_profile = jcp_tree_stats.leaf_work_profile;
       result.leaf_work_mac_terminal_panels =
           jcp_tree_stats.leaf_work_mac_terminal_panels;
@@ -5226,7 +5232,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         options.convergence_overreject_detail,
         options.convergence_shape_audit,
         options.convergence_kernel_response_audit,
-        result.leaf_mac);
+        result.leaf_mac, options.fmm_m2l);
     tree.leaf_mac = result.leaf_mac;
     tree.taylor_order = result.taylor_order;
     tree.derivative_mode = result.derivative_mode;

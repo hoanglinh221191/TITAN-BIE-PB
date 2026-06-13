@@ -1,0 +1,12 @@
+TITAN FMM/M2L Scope F Probe Summary
+==================================
+
+quick_mode: False
+fixture: tabi-panel-like-jcp-derivative-bridge
+threads: 8
+rows: 12
+scope_f_gate_pass_rows: 5
+best_row: panels=2048 order=4 theta=0.7 aggregate_rel_rms_error=0.0648357897519 max_channel_rel_rms_error=0.0648646161014 k2=0.0648646161014 k3=0.00587158026322 k4=0.0505188958911 near_pairs=26042368 far_pairs=41066496 speedup=3.42307506673 gate=pass
+
+decision_note: Scope F is a finite-difference derivative-channel bridge for K2/K3/K4. It is not production derivative M2L and does not run GMRES.
+matrix_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_f\fmm_m2l_scope_f_matrix.csv

@@ -197,6 +197,7 @@ struct Options {
   std::string leaf_pair_worklist_verify{"off"};
   std::string leaf_block_verify{"off"};
   std::string leaf_mac{"off"};
+  std::string fmm_m2l{"off"};
   std::string interaction_mode{"auto"};
   std::string node_bounds{"moment"};
   std::string tree_builder{"grouped-morton"};
@@ -465,6 +466,12 @@ struct Result {
   std::size_t leaf_pair_worklist_verify_mismatches{0};
   std::string leaf_block_verify{"off"};
   std::string leaf_mac{"off"};
+  std::string fmm_m2l_mode{"off"};
+  std::size_t fmm_m2l_near_pairs{0};
+  std::size_t fmm_m2l_far_pairs{0};
+  double fmm_m2l_setup_ms{0.0};
+  double fmm_m2l_apply_ms{0.0};
+  bool fmm_m2l_finite_outputs{true};
   std::size_t leaf_block_target_leaves{0};
   std::size_t leaf_block_targets{0};
   std::size_t leaf_block_source_groups{0};
@@ -929,6 +936,12 @@ struct TreecodeStats {
   std::size_t leaf_pair_worklist_verify_mismatches{0};
   std::string leaf_block_verify{"off"};
   std::string leaf_mac{"off"};
+  std::string fmm_m2l_mode{"off"};
+  std::size_t fmm_m2l_near_pairs{0};
+  std::size_t fmm_m2l_far_pairs{0};
+  double fmm_m2l_setup_ms{0.0};
+  double fmm_m2l_apply_ms{0.0};
+  bool fmm_m2l_finite_outputs{true};
   std::size_t leaf_block_target_leaves{0};
   std::size_t leaf_block_targets{0};
   std::size_t leaf_block_source_groups{0};
@@ -1497,6 +1510,7 @@ struct TreeWorkspace {
   std::string leaf_pair_worklist_verify{"off"};
   std::string leaf_block_verify{"off"};
   std::string leaf_mac{"off"};
+  std::string fmm_m2l{"off"};
   std::size_t target_batch_size{1};
   std::size_t leaf_pair_min_source_panels{64};
   std::size_t leaf_pair_min_targets{4};
@@ -1694,7 +1708,23 @@ TreeWorkspace build_tree_workspace(const std::vector<Panel> &panels,
                                    const std::string
                                        &convergence_kernel_response_audit =
                                            "off",
-                                   const std::string &leaf_mac = "off");
+                                   const std::string &leaf_mac = "off",
+                                   const std::string &fmm_m2l = "off");
+
+struct FmmM2lSingleMatvecStats {
+  std::size_t near_pairs{0};
+  std::size_t far_pairs{0};
+  double setup_ms{0.0};
+  double apply_ms{0.0};
+  bool finite_outputs{true};
+};
+
+void apply_jcp_fmm_m2l_single_matvec(
+    const std::vector<Panel> &panels, const std::vector<double> &unknowns,
+    double eps_ratio, double kappa, double lhs_phi, double lhs_phin,
+    std::size_t leaf_size, double opening_theta, TitanExecutor &executor,
+    std::vector<double> &out, FmmM2lSingleMatvecStats *stats = nullptr,
+    bool coupled = true);
 
 void apply_treecode_operator(const std::vector<Panel> &panels,
                              const std::vector<double> &density,

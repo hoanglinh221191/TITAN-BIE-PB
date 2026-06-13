@@ -14,6 +14,7 @@
 #include <fstream>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -340,6 +341,38 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
   const std::size_t n = panels.size();
   if (n == 0) {
     out.clear();
+    return;
+  }
+  if (tree.fmm_m2l == "single-matvec-analytic") {
+    if (unknowns.size() < (coupled ? 2 * n : n)) {
+      throw std::runtime_error(
+          "PBE TABI: -pbe-tabi-fmm-m2l=single-matvec-analytic received an incomplete JCP unknown vector.");
+    }
+    if (near_integration != "centroid" && near_integration != "off") {
+      throw std::runtime_error(
+          "PBE TABI: -pbe-tabi-fmm-m2l=single-matvec-analytic currently supports centroid near integration only.");
+    }
+    FmmM2lSingleMatvecStats fmm_stats;
+    TitanPBE::Tabi::apply_jcp_fmm_m2l_single_matvec(
+        panels, unknowns, eps_ratio, kappa, lhs_phi, lhs_phin,
+        tree.leaf_size, tree.opening_theta, executor, out, &fmm_stats,
+        coupled);
+    if (stats != nullptr) {
+      stats->matvec_mode = "jcp2013_fmm_m2l_single_matvec_analytic";
+      stats->taylor_order = tree.taylor_order;
+      stats->derivative_mode = tree.derivative_mode;
+      stats->near_integration = near_integration;
+      stats->quad_buffer = quad_buffer;
+      stats->fmm_m2l_mode = tree.fmm_m2l;
+      stats->fmm_m2l_near_pairs = fmm_stats.near_pairs;
+      stats->fmm_m2l_far_pairs = fmm_stats.far_pairs;
+      stats->fmm_m2l_setup_ms = fmm_stats.setup_ms;
+      stats->fmm_m2l_apply_ms = fmm_stats.apply_ms;
+      stats->fmm_m2l_finite_outputs = fmm_stats.finite_outputs;
+      stats->near_interactions += fmm_stats.near_pairs;
+      stats->far_interactions += fmm_stats.far_pairs;
+      stats->tree_traversal_ms += fmm_stats.apply_ms;
+    }
     return;
   }
   if (tree.nodes.empty() || tree.order.size() != n ||

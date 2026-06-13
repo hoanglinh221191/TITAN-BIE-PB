@@ -95,7 +95,8 @@ TreeWorkspace build_tree_workspace(const std::vector<Panel> &panels,
                                        &convergence_shape_audit,
                                    const std::string
                                        &convergence_kernel_response_audit,
-                                   const std::string &leaf_mac) {
+                                   const std::string &leaf_mac,
+                                   const std::string &fmm_m2l) {
   return detail::build_tree_workspace_impl(
       panels,
       executor,
@@ -169,7 +170,8 @@ TreeWorkspace build_tree_workspace(const std::vector<Panel> &panels,
       convergence_overreject_detail,
       convergence_shape_audit,
       convergence_kernel_response_audit,
-      leaf_mac);
+      leaf_mac,
+      fmm_m2l);
 }
 
 void apply_direct_operator(const std::vector<Panel> &panels,

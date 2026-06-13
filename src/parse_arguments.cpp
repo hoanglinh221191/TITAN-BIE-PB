@@ -1657,6 +1657,14 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-pbe-tabi-leaf-mac");
       continue;
     }
+    if (consume_option_value(arg, {"-pbe-tabi-fmm-m2l",
+                                   "--pbe-tabi-fmm-m2l"},
+                             common_value, i)) {
+      pbe.tabi_fmm_m2l =
+          require_choice(common_value, {"off", "single-matvec-analytic"},
+                         "-pbe-tabi-fmm-m2l");
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",
                                    "--pbe-tabi-interaction-mode"},
                              common_value, i)) {

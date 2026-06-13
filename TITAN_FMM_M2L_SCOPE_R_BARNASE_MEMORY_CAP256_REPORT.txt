@@ -1,0 +1,37 @@
+TITAN FMM/M2L Scope R Barnase Fair-Memory + Cap-256 Gate
+==========================================================
+
+quick_mode: False
+scope: hidden_cli_bounded_barnase_memory_cap256
+hidden_option: -pbe-tabi-fmm-m2l=single-matvec-analytic
+production_default: grid
+fmm_status: hidden_experimental
+max_iter: 240
+restart: 64
+tolerance: 1E-06
+surface_points: 8
+opening_theta: 0.6
+audit_sample_count: 512
+case_timeout_seconds: 900
+scope_r_gate: memory_regression
+cap128_energy_spread_kj_mol: 0
+
+Rows:
+row: tier=cap128 cap=128 repeat=1 backend=grid status=not_converged iter=170 residual=NaN energy=-7471.69752 energy_delta=NaN audit=NaN speedup=NaN wall=7.0472151 peak_mb=208.0859375 ratio_grid=NaN ratio_direct=NaN gate=grid_reference
+row: tier=cap128 cap=128 repeat=1 backend=direct status=ok iter=128 residual=1.62414E-08 energy=-7481.838424 energy_delta=NaN audit=0 speedup=NaN wall=130.5619144 peak_mb=16.4140625 ratio_grid=NaN ratio_direct=NaN gate=direct_reference
+row: tier=cap128 cap=128 repeat=1 backend=fmm status=ok iter=128 residual=1.27442E-08 energy=-7480.120262 energy_delta=1.71816199999921 audit=0.00267974 speedup=6.79186965354641 wall=20.1869533 peak_mb=528.484375 ratio_grid=2.53974094236906 ratio_direct=32.1970490242742 gate=cap128_ready
+row: tier=cap128 cap=128 repeat=2 backend=grid status=not_converged iter=170 residual=NaN energy=-7471.69752 energy_delta=NaN audit=NaN speedup=NaN wall=4.6842215 peak_mb=208.08984375 ratio_grid=NaN ratio_direct=NaN gate=grid_reference
+row: tier=cap128 cap=128 repeat=2 backend=direct status=ok iter=128 residual=1.62414E-08 energy=-7481.838424 energy_delta=NaN audit=0 speedup=NaN wall=138.4703562 peak_mb=16.40234375 ratio_grid=NaN ratio_direct=NaN gate=direct_reference
+row: tier=cap128 cap=128 repeat=2 backend=fmm status=ok iter=128 residual=1.27442E-08 energy=-7480.120262 energy_delta=1.71816199999921 audit=0.00267974 speedup=8.20741428681991 wall=17.6885259 peak_mb=528.58984375 ratio_grid=2.54020010887725 ratio_direct=32.2264824958323 gate=cap128_ready
+row: tier=cap128 cap=128 repeat=3 backend=grid status=not_converged iter=170 residual=NaN energy=-7471.69752 energy_delta=NaN audit=NaN speedup=NaN wall=3.538038 peak_mb=208.09765625 ratio_grid=NaN ratio_direct=NaN gate=grid_reference
+row: tier=cap128 cap=128 repeat=3 backend=direct status=ok iter=128 residual=1.62414E-08 energy=-7481.838424 energy_delta=NaN audit=0 speedup=NaN wall=143.459449 peak_mb=16.390625 ratio_grid=NaN ratio_direct=NaN gate=direct_reference
+row: tier=cap128 cap=128 repeat=3 backend=fmm status=ok iter=128 residual=1.27442E-08 energy=-7480.120262 energy_delta=1.71816199999921 audit=0.00267974 speedup=7.87966766310386 wall=19.1687554 peak_mb=529.328125 ratio_grid=2.54365250689843 ratio_direct=32.2945662535748 gate=cap128_ready
+row: tier=cap256 cap=256 repeat=1 backend=direct status=energy=failed;profile=failed iter=240 residual=0.0140401 energy=-10578.18628 energy_delta=NaN audit=0 speedup=NaN wall=754.6999937 peak_mb=22.27734375 ratio_grid=NaN ratio_direct=NaN gate=direct_reference
+row: tier=cap256 cap=256 repeat=1 backend=fmm status=energy=failed;profile=failed iter=240 residual=0.0131365 energy=-10581.76145 energy_delta=3.57517000000007 audit=0.0062981 speedup=7.7089210551281 wall=100.9105812 peak_mb=1500.921875 ratio_grid=NaN ratio_direct=67.37436436963 gate=memory_regression
+
+memory_note: peak_working_set_bytes is process-level memory from the launched titan.exe process; solver_memory_bytes remains the internal solver estimate.
+timeout_policy: timeout_not_verified blocks promotion planning but is not classified as solver failure.
+barnase_note: Scope R uses the Scope Q converged preset for bounded Barnase and does not retry legacy TABI leaf-kernel paths.
+matrix_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_r\fmm_m2l_scope_r_matrix.csv
+memory_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_r\fmm_m2l_scope_r_memory.csv
+decision_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_r\fmm_m2l_scope_r_decision.csv

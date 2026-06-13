@@ -8134,7 +8134,10 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "surface_geometry,panels,mesh_vertices,mesh_triangles,"
            "surface_point_count_requested,panel_density_per_A2,"
            "panel_budget_status,"
-           "matvec_mode,status,convergence_reason,reaction_energy_source,"
+           "matvec_mode,fmm_m2l_mode,fmm_m2l_near_pairs,"
+           "fmm_m2l_far_pairs,fmm_m2l_setup_seconds,"
+           "fmm_m2l_apply_seconds,fmm_m2l_finite_outputs,"
+           "status,convergence_reason,reaction_energy_source,"
            "iterations,residual,residual_history,gmres_restart_requested,"
            "gmres_restart_effective,best_residual,best_residual_iter,"
            "final_residual,best_preconditioned_residual,"
@@ -8552,6 +8555,12 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << result.tabi_panel_density_per_a2 << ','
       << csv_escape(result.tabi_panel_budget_status) << ','
       << csv_escape(result.tabi_matvec_mode) << ','
+      << csv_escape(result.tabi_fmm_m2l_mode) << ','
+      << result.tabi_fmm_m2l_near_pairs << ','
+      << result.tabi_fmm_m2l_far_pairs << ','
+      << seconds(result.tabi_fmm_m2l_setup_ms) << ','
+      << seconds(result.tabi_fmm_m2l_apply_ms) << ','
+      << (result.tabi_fmm_m2l_finite_outputs ? "true" : "false") << ','
       << csv_escape(result.tabi_status) << ','
       << csv_escape(result.tabi_convergence_reason) << ','
       << csv_escape(result.tabi_reaction_energy_source) << ','
@@ -11620,6 +11629,7 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
       args_.tabi_leaf_pair_worklist_verify;
   options.leaf_block_verify = args_.tabi_leaf_block_verify;
   options.leaf_mac = args_.tabi_leaf_mac;
+  options.fmm_m2l = args_.tabi_fmm_m2l;
   options.target_batch_size = args_.tabi_target_batch_size;
   options.leaf_pair_min_source_panels =
       args_.tabi_leaf_pair_min_source_panels;
@@ -11725,6 +11735,12 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_near_interactions = tabi.near_interactions;
   solve.tabi_far_interactions = tabi.far_interactions;
   solve.tabi_matvec_mode = tabi.matvec_mode;
+  solve.tabi_fmm_m2l_mode = tabi.fmm_m2l_mode;
+  solve.tabi_fmm_m2l_near_pairs = tabi.fmm_m2l_near_pairs;
+  solve.tabi_fmm_m2l_far_pairs = tabi.fmm_m2l_far_pairs;
+  solve.tabi_fmm_m2l_setup_ms = tabi.fmm_m2l_setup_ms;
+  solve.tabi_fmm_m2l_apply_ms = tabi.fmm_m2l_apply_ms;
+  solve.tabi_fmm_m2l_finite_outputs = tabi.fmm_m2l_finite_outputs;
   solve.tabi_status = tabi.status;
   solve.tabi_convergence_reason = tabi.convergence_reason;
   solve.tabi_residual_history = tabi.residual_history;
@@ -12756,6 +12772,14 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
     result.tabi_near_interactions = tabi_solve.tabi_near_interactions;
     result.tabi_far_interactions = tabi_solve.tabi_far_interactions;
     result.tabi_matvec_mode = tabi_solve.tabi_matvec_mode;
+    result.tabi_fmm_m2l_mode = tabi_solve.tabi_fmm_m2l_mode;
+    result.tabi_fmm_m2l_near_pairs =
+        tabi_solve.tabi_fmm_m2l_near_pairs;
+    result.tabi_fmm_m2l_far_pairs = tabi_solve.tabi_fmm_m2l_far_pairs;
+    result.tabi_fmm_m2l_setup_ms = tabi_solve.tabi_fmm_m2l_setup_ms;
+    result.tabi_fmm_m2l_apply_ms = tabi_solve.tabi_fmm_m2l_apply_ms;
+    result.tabi_fmm_m2l_finite_outputs =
+        tabi_solve.tabi_fmm_m2l_finite_outputs;
     result.tabi_status = tabi_solve.tabi_status;
     result.tabi_convergence_reason = tabi_solve.tabi_convergence_reason;
     result.tabi_residual_history = tabi_solve.tabi_residual_history;

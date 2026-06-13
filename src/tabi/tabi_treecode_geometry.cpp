@@ -1160,7 +1160,8 @@ TreeWorkspace build_tree_workspace_impl(const std::vector<Panel> &panels,
                                        &convergence_shape_audit,
                                    const std::string
                                        &convergence_kernel_response_audit,
-                                   const std::string &leaf_mac) {
+                                   const std::string &leaf_mac,
+                                   const std::string &fmm_m2l) {
   const auto build_begin = std::chrono::steady_clock::now();
   TreeWorkspace tree;
   tree.taylor_order = kTaylorOrderDefault;
@@ -1247,6 +1248,9 @@ TreeWorkspace build_tree_workspace_impl(const std::vector<Panel> &panels,
   tree.leaf_mac =
       (leaf_mac == "audit" || leaf_mac == "on") ? leaf_mac
                                                  : std::string("off");
+  tree.fmm_m2l = fmm_m2l == "single-matvec-analytic"
+                     ? std::string("single-matvec-analytic")
+                     : std::string("off");
   tree.leaf_pair_max_lookahead = static_cast<std::size_t>(
       std::clamp(leaf_pair_max_lookahead, 4, 128));
   tree.convergence_split_selectivity =

@@ -1,0 +1,20 @@
+TITAN FMM/M2L Scope J Probe Summary
+==================================
+
+quick_mode: True
+scope: hidden_production_panel_single_matvec_adapter
+hidden_option: -pbe-tabi-fmm-m2l=single-matvec-analytic
+production_default: unchanged_grid_default
+sign_convention: output equals production apply_jcp_treecode_operator convention lhs*unknown - integral_sum
+surface_points: 4
+max_sampled_panels: 256
+leaf_size: 64
+theta: 0.8
+timing_repeats: 1
+rows: 1
+scope_j_gate_pass_rows: 0
+row: fixture=research-medium atoms=6063 surface_panels=55062 sampled_panels=256 aggregate=7.14888186056e-16 phi=7.14929614793e-16 phin=5.60498142052e-16 near_pairs=65536 far_pairs=0 setup_ms=0.6018 apply_ms=1.545 speedup=2.35611650485 gate=no_far_work
+
+acceptance: finite outputs, aggregate relative RMS <= 1e-2 on real fixtures, speedup >= 1.2 on research-medium; research-large is gated behind medium pass.
+next_gate: If Scope J passes, plan a guarded GMRES experiment. If it fails, optimize adapter internals or pause FMM/M2L integration.
+matrix_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_j\fmm_m2l_scope_j_matrix.csv

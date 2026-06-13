@@ -1553,6 +1553,12 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-leaf-mac must be off, audit, or on.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.tabi_fmm_m2l != "off" &&
+        pbe.tabi_fmm_m2l != "single-matvec-analytic") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-m2l must be off or single-matvec-analytic.");
+      exit(EXIT_FAILURE);
+    }
     if (pbe.tabi_target_batch_size != 1 &&
         pbe.tabi_target_batch_size != 4 &&
         pbe.tabi_target_batch_size != 8) {

@@ -1,0 +1,12 @@
+TITAN FMM/M2L Scope A Probe Summary
+==================================
+
+quick_mode: False
+threads: 4
+rows: 2
+promote_to_scope_b_rows: 2
+promising_scalar_rows: 0
+best_row: panels=2048 kernel=yukawa order=2 theta=0.6 rel_rms_error=0.000111452663183 speedup=5.07641331915 decision=promote_to_scope_b
+
+decision_note: Scope A is research-only. Do not wire M2L into TABI JCP unless a row reaches promote_to_scope_b or the user explicitly overrides the gate.
+matrix_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_a\fmm_m2l_scope_a_matrix.csv

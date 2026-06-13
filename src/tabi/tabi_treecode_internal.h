@@ -888,7 +888,8 @@ TreeWorkspace build_tree_workspace_impl(const std::vector<Panel> &panels,
                                        &convergence_shape_audit,
                                    const std::string
                                        &convergence_kernel_response_audit,
-                                   const std::string &leaf_mac);
+                                   const std::string &leaf_mac,
+                                   const std::string &fmm_m2l);
 void apply_direct_operator_impl(const std::vector<Panel> &panels,
                            const std::vector<double> &density,
                            double contrast, double kappa,

@@ -1,0 +1,29 @@
+TITAN FMM/M2L Scope Q Barnase Convergence Sweep
+=================================================
+
+quick_mode: False
+scope: hidden_cli_bounded_barnase_convergence
+hidden_option: -pbe-tabi-fmm-m2l=single-matvec-analytic
+production_default: grid
+fmm_status: hidden_experimental
+atom_cap: 128
+surface_points: 8
+opening_theta: 0.6
+audit_sample_count: 512
+case_timeout_seconds: 900
+scope_q_class: strict_converged
+next_scope: consider_scope_r_hidden_barnase_cap256_or_broader_regression
+
+Rows:
+row: condition=baseline_120_r24_1e-6 max_iter=120 restart=24 tolerance=1E-06 direct_status=energy=failed;profile=failed fmm_status=energy=failed;profile=failed direct_iter=120 fmm_iter=120 direct_true_residual=0.000916239 fmm_true_residual=0.00080777 energy_delta_abs=2.35446700000011 audit_rel=0.00268276 speedup=7.19904154957848 class=convergence_pending
+row: condition=iter_240_r24_1e-6 max_iter=240 restart=24 tolerance=1E-06 direct_status=ok fmm_status=ok direct_iter=240 fmm_iter=240 direct_true_residual=9.31161E-07 fmm_true_residual=6.26312E-07 energy_delta_abs=1.71630600000026 audit_rel=0.00267975 speedup=7.33699472759227 class=strict_converged
+row: condition=restart_240_r48_1e-6 max_iter=240 restart=48 tolerance=1E-06 direct_status=ok fmm_status=ok direct_iter=144 fmm_iter=144 direct_true_residual=3.67003E-08 fmm_true_residual=3.60205E-08 energy_delta_abs=1.71815199999946 audit_rel=0.00267974 speedup=5.80161722872744 class=strict_converged
+row: condition=restart_240_r64_1e-6 max_iter=240 restart=64 tolerance=1E-06 direct_status=ok fmm_status=ok direct_iter=128 fmm_iter=128 direct_true_residual=1.62414E-08 fmm_true_residual=1.27442E-08 energy_delta_abs=1.71816199999921 audit_rel=0.00267974 speedup=7.29937238362816 class=strict_converged
+row: condition=practical_240_r48_1e-4 max_iter=240 restart=48 tolerance=0.0001 direct_status=ok fmm_status=ok direct_iter=96 fmm_iter=96 direct_true_residual=3.8199E-06 fmm_true_residual=3.9362E-06 energy_delta_abs=1.71843499999977 audit_rel=0.00267976 speedup=8.78905322029987 class=practical_converged
+row: condition=long_360_r64_1e-6 max_iter=360 restart=64 tolerance=1E-06 direct_status=ok fmm_status=ok direct_iter=128 fmm_iter=128 direct_true_residual=1.62414E-08 fmm_true_residual=1.27442E-08 energy_delta_abs=1.71816199999921 audit_rel=0.00267974 speedup=7.69025022741776 class=strict_converged
+
+classification_note: strict_converged requires both direct and FMM status ok at 1e-6; practical_converged requires the same gates at a looser 1e-4 row.
+timeout_policy: timeout_not_verified blocks promotion planning but is not classified as solver failure.
+barnase_note: Scope Q diagnoses the bounded Barnase cap-128 convergence gap from Scope P; it does not retry legacy TABI leaf-kernel work.
+matrix_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_q\fmm_m2l_scope_q_matrix.csv
+decision_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_q\fmm_m2l_scope_q_decision.csv

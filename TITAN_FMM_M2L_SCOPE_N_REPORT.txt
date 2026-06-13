@@ -1,0 +1,28 @@
+TITAN FMM/M2L Scope N Physics, Resolution, And Scale Matrix
+============================================================
+
+quick_mode: True
+scope: hidden_cli_physics_resolution_scale_matrix
+hidden_option: -pbe-tabi-fmm-m2l=single-matvec-analytic
+production_default: grid
+fmm_status: hidden_experimental
+audit_mode: sampled
+audit_sample_count: 128
+opening_theta: 0.6
+case_timeout_seconds: 360
+required_rows: 2
+rows_written: 2
+pass_rows: 2
+warning_rows: 0
+timeout_rows: 0
+scope_n_gate: pass
+failure_classes: 
+
+row: condition=medium_cap64_baseline fixture=research-medium atoms=64 surface=8 salt=0.15 eps=1/80 panels=3065 direct_energy=-3427.733029 fmm_energy=-3426.741884 energy_delta_abs=0.99114499999996 fmm_residual=5.39077E-15 audit_rel=0.00315387 audit_rows=128 speedup=5.85256632481759 warning= gate=pass
+row: condition=medium_cap64_salt0 fixture=research-medium atoms=64 surface=8 salt=0 eps=1/80 panels=3065 direct_energy=-3440.721839 fmm_energy=-3440.49291 energy_delta_abs=0.22892899999988 fmm_residual=1.5998E-15 audit_rel=0.00115141 audit_rows=128 speedup=5.88816977398638 warning= gate=pass
+
+acceptance: all required rows must pass status, finite telemetry, residual, sampled direct-operator audit, and fixture energy gates; cap-128 medium and large additionally require matvec speedup >= 1.2.
+timeout_policy: timeout_not_verified is evidence missing, not a solver failure classification.
+next_gate: Scope O repeatability and cap-256 stress only after the full Scope N matrix passes.
+matrix_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_n\fmm_m2l_scope_n_matrix.csv
+decision_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_n\fmm_m2l_scope_n_decision.csv

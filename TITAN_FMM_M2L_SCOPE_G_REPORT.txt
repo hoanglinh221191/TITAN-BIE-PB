@@ -1,0 +1,18 @@
+TITAN FMM/M2L Scope G Probe Summary
+==================================
+
+quick_mode: False
+surface_source: TitanPBE::Tabi::build_surface
+surface_points: 4
+max_sampled_panels: 2048
+order: 2
+theta: 0.8
+timing_repeats: 5
+rows: 2
+scope_g_gate_pass_rows: 2
+row: fixture=research-medium atoms=6063 surface_panels=55062 sampled_panels=2048 parity=2.40586437131e-15 k1=0.00274278083935 derivative_aggregate=0.0219441041137 derivative_significant_max=0.0219428237622 near_pairs=52838400 far_pairs=22659072 speedup=1.74161167298 gate=pass
+row: fixture=research-large atoms=12752 surface_panels=113468 sampled_panels=2048 parity=3.23379276979e-15 k1=0.00550837970958 derivative_aggregate=0.000341432712451 derivative_significant_max=0.00269078367932 near_pairs=47038464 far_pairs=28459008 speedup=1.7558248512 gate=pass
+
+channel_policy: max-relative gate applies only to channels whose reference RMS is at least 0.1% of the strongest derivative channel; aggregate relative RMS always remains mandatory.
+decision_note: Scope G is an offline production-surface comparison. It does not run GMRES or change the production PBE backend.
+matrix_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_g\fmm_m2l_scope_g_matrix.csv

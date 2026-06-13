@@ -4,7 +4,7 @@ This roadmap tracks the remaining work needed to move the clean-room TABI
 backend from the current validated core toward paper-level TABI 2013 and
 TABI-PB 2.0 coverage.
 
-Last updated: 2026-06-09
+Last updated: 2026-06-11
 
 ## Phase 7 Decision Gate - Benchmark-Gated Direction
 
@@ -5973,3 +5973,159 @@ Decision:
   first progress/work row after estimator norm caching: likely cached list
   construction, pre-matvec traversal volume, or another target-leaf policy path
   before counters are flushed.
+
+## FMM/M2L Scope A - Scalar Prototype Gate
+
+Status: Scope A scalar prototype, Scope B point-cloud gate, Scope C
+panel-shaped scalar gate, Scope D JCP-channel-shaped gate, Scope E K1
+bridge gate, Scope F derivative-channel bridge gate, Scope G
+production-surface offline JCP comparison, and Scope H hidden offline
+single-matvec bridge implemented in `TITAN_FMM_M2L_ROADMAP.md`. Scope I
+analytical derivative offline operator is also implemented and passed. Scope J
+hidden production-panel single-matvec adapter, Scope K guarded GMRES, Scope L
+bounded end-to-end solve, Scope M hidden CLI, and Scope N hidden matrix gates
+are implemented and passed. Scope O is implemented; cap-128 repeatability
+passed, but the cap-256 stress tier is `timeout_not_verified`, so the full
+Scope O promotion-readiness gate did not pass. Scope P Barnase hidden FMM/M2L
+gate is implemented; bounded Barnase cap-64 quick passed, while full cap-128
+failed the current convergence/status gate despite finite audit-clean FMM rows.
+Scope Q Barnase convergence sweep is implemented and passed; cap-128 strict
+`1e-6` convergence requires a larger GMRES budget than Scope P used.
+Scope R fair-memory/cap-256 Barnase gate is implemented; cap-128 remains
+converged and fast, but process memory is high and cap-256 is not
+promotion-ready.
+
+Rationale:
+
+- Leaf-kernel V2A/V2B and Leaf-MAC V2C/V2D did not produce a promotable
+  Barnase candidate.
+- The remaining algorithmic question is whether a true near/direct plus
+  far/M2L architecture has enough ROI to justify deeper TABI solver work.
+- Scope A is intentionally isolated from production PBE/TABI code: it will
+  prototype scalar Laplace/Yukawa M2L on synthetic panels, compare against
+  all-direct reference, and gate any Scope B TABI integration on measured
+  accuracy, setup cost, and speedup.
+- The first representative Scope A probe passed on synthetic 2048-panel
+  Laplace/Yukawa rows. Best row:
+  `kernel=yukawa order=2 theta=0.6 rel_rms_error=0.000111452663183 speedup=5.07641331915 decision=promote_to_scope_b`.
+- Scope B added an explicit point-cloud API and a deterministic
+  mini-protein-like fixture. The first representative Scope B probe passed:
+  `kernel=yukawa order=2 theta=0.55 rel_rms_error=0.000539123021504 speedup=3.29716804201 gate=pass`.
+- Scope C added a TABI-panel-shaped scalar adapter (`PrototypePanel` plus
+  `point_cloud_from_panels`). The first representative Scope C probe passed:
+  `kernel=laplace order=2 theta=0.5 rel_rms_error=0.000643292468717 speedup=1.69286812112 gate=pass`.
+- Scope D added a research-only JCP-channel-shaped four-channel probe. The
+  first representative Scope D probe passed with nonzero far work:
+  `kernel=yukawa order=2 theta=0.8 aggregate_rel_rms_error=0.00413466788901 max_channel_rel_rms_error=0.00591104044265 near_pairs=6094848 far_pairs=10682368 speedup=6.14330704128 gate=pass`.
+- Scope E added a real JCP K1 scalar bridge: direct K1 reference
+  `G0-Gk` vs Laplace-minus-Yukawa M2L. The first representative Scope E probe
+  passed:
+  `order=2 theta=0.7 rel_rms_error=0.00621637754907 near_pairs=3784704 far_pairs=4603904 speedup=5.60205568647 gate=pass`.
+- Scope F added a finite-difference derivative-channel bridge for K2/K3/K4.
+  The first representative Scope F probe passed:
+  `order=4 theta=0.7 aggregate_rel_rms_error=0.0648357897519 max_channel_rel_rms_error=0.0648646161014 near_pairs=26042368 far_pairs=41066496 speedup=3.42307506673 gate=pass`.
+- Scope G used production `build_surface` panels and production direct JCP as
+  an independent reference. Both bounded real-surface fixtures passed:
+  `research-medium parity=2.40586437131e-15 k1=0.00274278083935 derivative_aggregate=0.0219441041137 speedup=1.74161167298`,
+  `research-large parity=3.23379276979e-15 k1=0.00550837970958 derivative_aggregate=0.000341432712451 speedup=1.7558248512`.
+- Scope H combined K1-K4 into production-shaped offline `phi/phin` vectors.
+  The representative `research-medium` row was accurate enough
+  (`offline_aggregate=0.0218073842146`) but failed the integration gate because
+  it was slower than production direct JCP on the bounded sample
+  (`speedup=0.675245335009`, `gate=no_speedup`).
+- Scope I replaced the finite-difference derivative bridge with analytical
+  derivative kernels. Both bounded real-surface rows passed:
+  `research-medium offline_aggregate=0.0002820320478 speedup=3.55950049282`,
+  `research-large offline_aggregate=0.0014179982537 speedup=4.41025749568`.
+- Scope J routes the analytical derivative operator through a hidden
+  production-panel single-matvec adapter that consumes the real coupled JCP
+  unknown vector and writes production-sign output. Both bounded real-surface
+  rows passed:
+  `research-medium aggregate=0.0002820320478 speedup=4.83624860675`,
+  `research-large aggregate=0.0014179982537 speedup=6.25971893616`.
+- Scope K runs a guarded GMRES experiment using the Scope J adapter on bounded
+  production-surface panel samples. Both real fixtures passed at `1024`
+  sampled panels:
+  `research-medium adapter_residual=5.4590676773e-07 direct_true_residual=2.96990273845e-05 speedup=3.20555382964`,
+  `research-large adapter_residual=3.85417787791e-07 direct_true_residual=4.21884160643e-05 speedup=3.23620232888`.
+- Scope L runs the hidden FMM/M2L adapter inside bounded end-to-end
+  `solve_linear_pb` TABI solves, then compares direct JCP and FMM/M2L
+  convergence, residuals, energies, and matvec timing on the same sampled atom
+  set. Both bounded real-fixture rows passed at `128` sampled atoms:
+  `research-medium panels=6133 fmm_true_residual=6.23991642839e-11 direct_energy=-8347.94314733 fmm_energy=-8340.06650253 energy_delta_abs=7.87664480659 energy_delta_rel=0.000943543177951 speedup=7.60893491996 gate=pass`;
+  `research-large panels=6132 fmm_true_residual=5.4563596887e-15 direct_energy=-6380.19795965 fmm_energy=-6375.2583789 energy_delta_abs=4.93958074564 energy_delta_rel=0.000774204934844 speedup=9.12711951306 gate=pass`.
+- Scope M runs the same hidden FMM/M2L path through real `titan.exe -a arg.in`
+  CLI cases with bounded sampled PQR fixtures. Both direct and FMM CLI rows
+  exited `0`, reported `status=ok`, wrote FMM/M2L telemetry in
+  `pbe_tabi_profile.csv`, and passed the energy/residual/speed gates:
+  `research-medium panels=6133 fmm_true_residual=6.23992e-11 direct_energy=-8347.943147 fmm_energy=-8340.066503 energy_delta_abs=7.87664399999994 energy_delta_rel=0.000943543081367363 speedup=5.88432380093087 gate=pass`;
+  `research-large panels=6132 fmm_true_residual=5.45636e-15 direct_energy=-6380.19796 fmm_energy=-6375.258379 energy_delta_abs=4.93958100000054 energy_delta_rel=0.000774204974668301 speedup=12.4719178640643 gate=pass`.
+- Scope N runs the hidden FMM/M2L path through a broader CLI matrix covering
+  scale, alternate fixture geometry, salt `0.0/0.15/0.5 M`, dielectric `1/80`
+  and `4/80`, Poisson salt-zero, and a real resolution bump. The full matrix
+  passed `8/8` rows with sampled direct-operator audit and `opening_theta=0.6`.
+  `surface=16` is the resolution row because `surface=12` does not change the
+  current mesh bucket relative to `surface=8`. Key rows:
+  `medium_cap128_baseline audit_rel=0.00323097 energy_delta_abs=1.9216379999998 speedup=5.21319583986574`;
+  `large_cap128_baseline audit_rel=0.00261365 energy_delta_abs=0.195887999999286 speedup=5.93470020675396`;
+  `alt_cap128_baseline audit_rel=0.00499974 energy_delta_abs=5.21474400000079 speedup=5.71991452350604`;
+  `medium_cap64_salt0 audit_rel=0.00113586 energy_delta_abs=0.22892899999988 speedup=4.99505955726381`;
+  `medium_cap64_surface16 panels=5110 audit_rel=0.00417215 energy_delta_abs=1.32726600000024 speedup=6.5734317938785`.
+- Scope O adds repeatability and cap-256 stress gates. The cap-128
+  repeatability tier passed all three fixtures with three FMM repeats and
+  deterministic energies: `research-medium audit_max=0.00323097
+  speedup_median=7.15721267875626 speedup_min=5.14596932441632`;
+  `research-large audit_max=0.00261365 speedup_median=5.72520286151872
+  speedup_min=4.9350600868128`; `research-alt audit_max=0.00499974
+  speedup_median=8.92799795952675 speedup_min=7.53845927941774`.
+  The full gate remains blocked because cap-256 stress is
+  `timeout_not_verified`: `research-medium panels=12250
+  fmm_true_residual=2.28745e-07 audit_rel=0.00502187 fmm_energy=-16086.4942`,
+  but the direct baseline did not produce finite energy before timeout, so
+  energy delta and speedup cannot be verified. `research-large` cap-256 was
+  correctly skipped.
+- Scope P adds a bounded Barnase hidden FMM/M2L CLI gate, separate from the
+  legacy TABI treecode Barnase probes. The quick cap-64 smoke passed:
+  `panels=3053 energy_delta_abs=0.526157 audit_rel=0.00143331
+  fmm_residual=1.50766e-11 speedup=4.82697815048099`. The full cap-128
+  repeatability tier ran three repeats at `panels=5802`; the hidden FMM rows
+  were finite, deterministic, audit-clean, and fast
+  (`energy_delta_abs=2.354467`, `audit_rel=0.00268276`, speedup range
+  `6.01715806698311..9.17630425009285`). The full gate did not pass because
+  current direct and FMM CLI rows report non-`ok` status at the `1e-6` / `120`
+  iteration gate (`direct_true_residual=0.000916239`,
+  `fmm_true_residual=0.00080777`). Cap-256 Barnase stress was skipped because
+  cap-128 did not pass.
+- Scope Q runs a bounded Barnase cap-128 convergence sweep over GMRES
+  iteration budget, restart, and tolerance. It reproduced the Scope P baseline
+  failure at `max_iter=120`, `restart=24`, `1e-6`
+  (`direct_true_residual=0.000916239`, `fmm_true_residual=0.00080777`), then
+  showed that the issue is iteration/restart budget rather than FMM accuracy:
+  `max_iter=240`, `restart=24`, `1e-6` converged strictly with
+  `fmm_true_residual=6.26312e-7`, `energy_delta_abs=1.716306`,
+  `audit_rel=0.00267975`, `speedup=7.337`; `restart=64` converged in `128`
+  iterations with `fmm_true_residual=1.27442e-8` and `speedup=7.299`. Scope Q
+  final class is `strict_converged`.
+- Scope R adds fair process-level memory measurement and cap-256 stress for
+  bounded Barnase using the Scope Q preset. Cap-128 repeated strict convergence
+  three times with zero FMM energy spread, `energy_delta_abs=1.718162`,
+  `audit_rel=0.00267974`, and FMM speedups `6.79x..8.21x`. Process peak memory
+  shows the current hidden adapter is heavy: grid around `208 MB`, direct TABI
+  around `16.4 MB`, and FMM/M2L around `528..529 MB`. Cap-256 did not converge
+  at `240` iterations (`direct_true_residual=0.0140401`,
+  `fmm_true_residual=0.0131365`); FMM remained audit-clean and fast but peaked
+  at `1500.9 MB`, about `67x` direct. Scope R final class is
+  `memory_regression`.
+
+Decision:
+
+- Keep `-pbe=grid` as production default.
+- Keep TABI, Leaf-MAC, and FMM/M2L research paths explicit/experimental.
+- Scope L/M use `128` atoms as the safe default bounded cap because even that
+  size produced about `6133` panels and a costly direct baseline. The earlier
+  `512` atom cap remains useful as a manual stress test, not as the default
+  smoke.
+- Scope O and Scope R still block public exposure. Scope Q fixed bounded
+  Barnase cap-128 convergence, but Scope R shows cap-256 and memory footprint
+  are now the limiting issues. Next work should reduce hidden FMM/M2L memory
+  before another promotion-readiness gate.

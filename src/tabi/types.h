@@ -122,6 +122,12 @@ struct FrameResult {
   std::size_t tabi_near_interactions{0};
   std::size_t tabi_far_interactions{0};
   std::string tabi_matvec_mode{"off"};
+  std::string tabi_fmm_m2l_mode{"off"};
+  std::size_t tabi_fmm_m2l_near_pairs{0};
+  std::size_t tabi_fmm_m2l_far_pairs{0};
+  double tabi_fmm_m2l_setup_ms{0.0};
+  double tabi_fmm_m2l_apply_ms{0.0};
+  bool tabi_fmm_m2l_finite_outputs{true};
   std::string tabi_status{"off"};
   std::string tabi_convergence_reason{"off"};
   std::string tabi_residual_history{};
