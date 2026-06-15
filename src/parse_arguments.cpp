@@ -1409,6 +1409,7 @@ int arguments::parse_arguments(int argc, char **argv) {
           {"titan-v1", "jcp2013", "jcp2013-centroid", "jcp2013-treecode",
            "tabi2-nodepatch", "calibrated-debug"},
           "-pbe-tabi-formulation");
+      pbe.tabi_formulation_explicit = true;
       continue;
     }
     if (consume_option_value(arg, {"-pbe-tabi-precond",
@@ -1417,8 +1418,11 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.tabi_precond =
           require_choice(common_value,
                          {"auto", "none", "diagonal", "block",
-                          "block-budgeted", "coarse-galerkin-probe"},
+                          "block-budgeted", "coarse-galerkin-probe",
+                          "fmm-block-jacobi", "fmm-overlap-schwarz",
+                          "fmm-nearfield-ilu0"},
                          "-pbe-tabi-precond");
+      pbe.tabi_precond_explicit = true;
       continue;
     }
     if (consume_option_value(arg, {"-pbe-tabi-precond-block-near",
@@ -1434,6 +1438,25 @@ int arguments::parse_arguments(int argc, char **argv) {
                                    "--pbe-tabi-precond-block-panel-cap"},
                              common_value, i)) {
       pbe.tabi_precond_block_panel_cap = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-precond-overlap-panel-cap",
+                                   "--pbe-tabi-precond-overlap-panel-cap"},
+                             common_value, i)) {
+      pbe.tabi_precond_overlap_panel_cap = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-precond-ilu-neighbor-cap",
+                                   "--pbe-tabi-precond-ilu-neighbor-cap"},
+                             common_value, i)) {
+      pbe.tabi_precond_ilu_neighbor_cap = stoi(common_value);
+      pbe.tabi_precond_ilu_neighbor_cap_explicit = true;
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-precond-ilu-drop-tol",
+                                   "--pbe-tabi-precond-ilu-drop-tol"},
+                             common_value, i)) {
+      pbe.tabi_precond_ilu_drop_tol = stod(common_value);
       continue;
     }
     if (consume_option_value(arg, {"-pbe-tabi-precond-memory-budget-mb",
@@ -1661,8 +1684,9 @@ int arguments::parse_arguments(int argc, char **argv) {
                                    "--pbe-tabi-fmm-m2l"},
                              common_value, i)) {
       pbe.tabi_fmm_m2l =
-          require_choice(common_value, {"off", "single-matvec-analytic"},
+          require_choice(common_value, {"auto", "off", "single-matvec-analytic"},
                          "-pbe-tabi-fmm-m2l");
+      pbe.tabi_fmm_m2l_explicit = true;
       continue;
     }
     if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",

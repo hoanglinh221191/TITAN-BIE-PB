@@ -215,13 +215,12 @@ IMPORTANT NOTES
     experimental/report-only, and `auto` remains centroid until analytic gates
     pass. The legacy scalar `titan-v1`
     formulation is retained only as a hidden debug path. `jcp2013-centroid` is the paper-style
-    direct centroid-collocation path; `jcp2013-treecode` and
-    `tabi2-nodepatch` are hidden experimental/report paths until their
-    accuracy gates pass. `-pbe-tabi-sum=auto|direct` uses the direct JCP 2013
-    operator. Forced `-pbe-tabi-formulation=jcp2013-treecode` now runs the
-    coupled JCP 2013 treecode operator and reports `jcp2013_treecode`; the
-    legacy scalar treecode remains available only when explicitly pinning
-    `-pbe-tabi-formulation=titan-v1`.
+    direct centroid-collocation path. When users explicitly choose TABI
+    treecode (`-pbe=tabi -pbe-tabi-sum=treecode`), TITAN resolves to the
+    coupled JCP 2013 treecode path and now uses the analytical FMM/M2L engine
+    with sparse near-field ILU(0) by default. The legacy TABI treecode remains
+    available for regression with `-pbe-tabi-fmm-m2l=off`; `tabi2-nodepatch`
+    remains a hidden report path.
     `pbe_timing.csv` reports TABI mesh, diagonal, RHS, GMRES, matvec,
     BIE-formulation, and tree counters; `-pbe-timing=summary|detail` also
     writes `pbe_memory_profile.csv`, while `detail` writes
@@ -250,7 +249,7 @@ IMPORTANT NOTES
     -pbe-focus, -pbe-multigrid, -pbe-focus-levels, -pbe-focus-margin
     -pbe-mg-levels, -pbe-mg-pre, -pbe-mg-post, -pbe-mg-coarse-iter
     -pbe-map, -pbe-map-frames, -pbe-max-grid, -pbe-kernel
-    hidden TABI debug only: -pbe-tabi-sum=auto|direct|treecode,
+    TABI advanced/debug: -pbe-tabi-sum=auto|direct|treecode,
       -pbe-tabi-geometry=triangle|point-panel,
       -pbe-tabi-diagonal=solid-angle|flat|off,
       -pbe-tabi-surface-points=<24..4096>,
@@ -258,7 +257,12 @@ IMPORTANT NOTES
       -pbe-tabi-formulation=titan-v1|jcp2013|jcp2013-centroid|
         jcp2013-treecode|tabi2-nodepatch|calibrated-debug,
       -pbe-tabi-energy-projection=boundary|born-check|charge-potential-debug,
-      -pbe-tabi-precond=auto|none|diagonal|block,
+      -pbe-tabi-fmm-m2l=auto|off|single-matvec-analytic,
+      -pbe-tabi-precond=auto|none|diagonal|block|block-budgeted|
+        coarse-galerkin-probe|fmm-block-jacobi|fmm-overlap-schwarz|
+        fmm-nearfield-ilu0,
+      -pbe-tabi-precond-ilu-neighbor-cap=<32..1024>,
+      -pbe-tabi-precond-ilu-drop-tol=<0..1e-2>,
       -pbe-tabi-near-integration=auto|centroid|analytic_singular|
         duffy_adaptive
     hidden PQR parity only: -pbe-parity-dump, -pbe-parity-map-dump,

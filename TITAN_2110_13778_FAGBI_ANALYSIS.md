@@ -1,0 +1,327 @@
+# TITAN Analysis Of arXiv 2110.13778
+
+Source reviewed: `2110.13778v1.pdf`, "A Cartesian FMM-accelerated Galerkin
+boundary integral Poisson-Boltzmann solver" by Chen, Tausch, and Geng.
+
+## Paper In One Page
+
+The paper describes a Galerkin boundary integral Poisson-Boltzmann solver
+accelerated by Cartesian FMM. The solver targets the same core problem as
+TITAN's TABI/PBE work: solve a dense, nonsymmetric boundary-integral PB system
+with GMRES, where a direct matrix-vector product is too expensive.
+
+Core ingredients:
+
+- Well-conditioned derivative-form boundary integral PB formulation with
+  coupled surface unknowns: potential and normal derivative.
+- Galerkin discretization on a triangulated molecular surface.
+- Four coupled kernels `K1..K4` from Coulomb, screened Coulomb, and their
+  normal derivatives.
+- Duffy/cubature treatment for singular or near-singular panel integrals.
+- Cartesian FMM for the boundary matrix-vector product.
+- Treecode for final solvation-energy projection to atomic charge locations.
+- Block diagonal preconditioner built from local direct interactions in tree
+  cubes/clusters.
+- Adaptive FMM order by level: coarser levels use higher Taylor order so
+  FMM truncation error tracks discretization error.
+
+The important empirical messages:
+
+- For the Kirkwood sphere, Galerkin + better singular treatment improves
+  convergence versus older collocation/removal approaches.
+- Direct matrix-vector products scale like `O(N^2)`, while FMM shows `O(N)`
+  behavior in CPU and memory.
+- On protein 1A63, at `N=132,133` triangles, direct matrix-vector solve took
+  about 36,530 seconds while FMM took about 37 seconds, with similar solvation
+  energy.
+- Block diagonal preconditioning substantially reduces GMRES iterations for
+  hard protein cases without changing energy meaningfully.
+
+## Mapping To TITAN Today
+
+TITAN is already aligned with the paper in several important ways.
+
+Implemented or partially implemented in TITAN:
+
+- TABI/PBE backend with boundary-integral linear PB machinery.
+- Coupled JCP 2013 treecode path with `K1..K4` semantics.
+- Analytical FMM/M2L matvec path for production panels and production unknowns.
+- `FmmM2lAnalyticContext` cache so geometry/work are not rebuilt every GMRES
+  iteration.
+- Sparse near-field ILU(0) over the FMM near-source graph.
+- Controlled Scope Y behavior: `-pbe=grid` remains the production default, but
+  explicit `-pbe=tabi -pbe-tabi-sum=treecode` defaults to analytical FMM/M2L +
+  `fmm-nearfield-ilu0`.
+- Extensive hidden probe matrix for Barnase, bounded cap-128/cap-256, memory,
+  repeatability, and direct/FMM parity.
+
+This means TITAN has moved from the old TABI treecode bottleneck toward the
+paper's main algorithmic direction: an FMM-like boundary-integral matvec with
+local near-field preconditioning.
+
+## Major Gaps Versus The Paper
+
+### 1. TITAN FMM Is Still A Matvec Adapter, Not Full FAGBI
+
+The paper's solver is a full Cartesian FMM boundary-element algorithm with
+near-field direct blocks, moment calculation, upward pass, interaction phase,
+downward pass, and final evaluation. TITAN's current FMM/M2L path is a strong
+analytical single-matvec adapter integrated into GMRES, but it should be audited
+as a full FMM pipeline:
+
+- persistent moment storage per node;
+- explicit M2M/M2L/L2L/L2P accounting;
+- adaptive order by tree level;
+- error estimate tied to discretization and surface resolution.
+
+### 2. Near-Field Integration Mismatch
+
+The paper emphasizes Duffy/cubature singular treatment as a key reason Galerkin
+accuracy improves. TITAN currently has advanced near-integration paths, but the
+FMM/M2L single-matvec treecode route has historically constrained the FMM path
+to centroid-compatible near integration in some code paths.
+
+This is the biggest scientific gap before claiming paper-level parity.
+
+### 3. Galerkin Discretization Parity
+
+The paper is Galerkin with piecewise constant basis and panel integrals.
+TITAN's TABI path has JCP/treecode, direct analytical kernels, and surface
+panels, but the exact Galerkin-vs-collocation equivalence should be made
+explicit in one contract:
+
+- what each matrix entry represents;
+- whether entries are panel-integrated or centroid-evaluated;
+- which quadrature/singularity policy is used per `K1..K4`;
+- how solvation energy projection is computed.
+
+### 4. Preconditioner Direction
+
+The paper's block diagonal preconditioner is local-cluster direct interaction.
+TITAN tested that family and found it insufficient for bounded Barnase cap-256.
+TITAN's sparse near-field ILU(0) is stronger and appears more appropriate for
+the current implementation.
+
+Interpretation: TITAN should keep ILU0 as the practical default for TABI
+treecode, but keep block-Jacobi in the benchmark suite because it is the closest
+paper analogue.
+
+### 5. Validation Set
+
+The paper validates on:
+
+- Kirkwood sphere;
+- protein 1A63;
+- a 27-protein set with iteration and CPU comparisons.
+
+TITAN currently has a strong Barnase-centered gate and research-medium/large
+sampled gates, but it needs a paper-facing validation matrix:
+
+- Kirkwood analytic sphere over surface resolutions;
+- 1A63 or paper-like PDB/PQR fixture;
+- a small multi-protein set with `grid`, direct TABI, FMM/M2L+ILU0, and
+  optional block-Jacobi comparison.
+
+## Recommended TITAN Roadmap From This Paper
+
+Scopes Z1-Z4 close parity gaps with the FAGBI paper. Scope Z5 is different:
+it is the TITAN novelty axis. Its purpose is to show that TITAN is not merely
+reimplementing FAGBI, but advancing the preconditioning strategy for dense
+protein boundary-integral PB systems.
+
+### Scope Z1 - Paper-Parity Validation Matrix
+
+Goal: make TITAN's TABI treecode default defensible against the paper's
+benchmarks.
+
+Tasks:
+
+- Add a Kirkwood sphere FMM/TABI matrix with surface resolution sweep.
+- Add 1A63 if fixture can be generated from PDB2PQR-compatible inputs.
+- Report solvation energy, GMRES iterations, true residual, sampled direct
+  matvec parity, CPU time, memory, and preconditioner effective mode.
+- Compare `grid`, TABI direct, FMM/M2L+ILU0, and FMM/M2L+block-Jacobi.
+
+Acceptance:
+
+- FMM/M2L energy tracks direct TABI within the existing audit tolerance.
+- Iteration count and wall time are stable across repeated runs.
+- Grid remains default unless the broader user-facing gate later says
+  otherwise.
+
+Implementation status:
+
+- Z1A harness implemented:
+  `test/pbe_fagbi_scope_z1a_parity_matrix.ps1`.
+- Z1A full result: `z1a_accuracy_gap`. Barnase, research-medium, and
+  research-alt cap-128 protein rows passed TABI direct energy and sampled
+  matvec-audit checks, but the analytic centered Born and off-center Kirkwood
+  sphere rows at surface point counts 8, 12, and 24 exceeded the oracle error
+  thresholds. This is useful paper-parity evidence: the current treecode
+  default is operational on protein sampled rows, but analytic accuracy parity
+  still needs Z2/Z3 work before claiming FAGBI equivalence.
+- Z1A report:
+  `TITAN_FAGBI_SCOPE_Z1A_PARITY_VALIDATION_REPORT.txt`.
+- Z1B near-field attribution harness implemented:
+  `test/pbe_fagbi_scope_z1b_near_field_attribution.ps1`.
+- Z1B full result: `z1b_mesh_dominant`. The direct TABI matrix compared
+  `centroid`, `analytic_singular`, and `duffy_adaptive` on centered Born and
+  off-center Kirkwood spheres at `20/80/320/1280` actual icosphere panels and
+  salt `0.0/0.15 M`. All 48 rows completed without near fallback. At zero salt
+  the three methods produced identical energies. At `0.15 M`, the largest
+  non-centroid improvement was `1.90x` on the coarsest off-center sphere and
+  shrank to about `1.03-1.12x` at 1280 panels. Mesh refinement reduced the
+  oracle error consistently for both fixtures, reaching about `0.83-1.50%`.
+  Therefore the Z1A oracle gap is primarily a surface-resolution/discretization
+  issue; centroid near quadrature is a secondary contribution rather than the
+  demonstrated sole cause.
+- Z1B report:
+  `TITAN_FMM_M2L_SCOPE_Z1B_NEAR_FIELD_ATTRIBUTION_REPORT.txt`.
+
+### Scope Z2 - Duffy/Cubature Near-Field For FMM Path
+
+Goal: integrate higher-order near quadrature into FMM only after the Z1B
+attribution result and a mesh-resolution gate justify its cost.
+
+Tasks:
+
+- First complete a surface-resolution study beyond 1280 panels or with an
+  explicitly controlled geometric error metric.
+- Remove or narrow the centroid-only restriction for FMM/M2L near-field only
+  where `analytic_singular` or Duffy shows measured benefit.
+- Route self/edge/vertex/geometric near pairs through the same Duffy/cubature
+  policy used by direct JCP.
+- Add per-kernel `K1..K4` audit rows for FMM near-field acceptance/fallback.
+
+Acceptance:
+
+- FMM/M2L with Duffy near-field remains finite and audit-clean on small
+  fixtures.
+- Kirkwood energy convergence improves versus centroid at matched geometry, or
+  the integration is not promoted.
+- Performance regression is bounded and explained.
+
+### Scope Z3 - Adaptive FMM Order By Level
+
+Goal: adopt the paper's accuracy/performance tradeoff instead of one global
+Taylor order.
+
+Tasks:
+
+- Implement level-dependent order `p_l = p_L + L - l` behind an advanced flag.
+- Record per-level order, term count, and timing.
+- Gate on Kirkwood and protein fixtures.
+
+Acceptance:
+
+- Accuracy improves at similar timing, or timing improves at similar accuracy.
+- No hidden default change until matrix evidence is good.
+
+### Scope Z4 - Paper-Style Protein Panel Benchmark
+
+Goal: produce a direct analogue of the paper's 1A63 and 27-protein tables.
+
+Tasks:
+
+- Build reusable PQR/surface fixture workflow.
+- Add deterministic cap/resolution tiers so CI can run small rows and local
+  developer machines can run full rows.
+- Export `titan_pbe_fagbi_benchmark.csv`.
+
+Acceptance:
+
+- Benchmark table includes energy, iterations, timing, memory, and error/audit
+  columns.
+- Rows are reproducible and use `-option=value` arg files.
+
+### Scope Z5 - Preconditioner Collapse And Sparse ILU Breakthrough
+
+Goal: make TITAN's main scientific difference visible: paper-style local
+block-diagonal preconditioning can stall on dense protein meshes, while TITAN's
+sparse near-field ILU(0) over the FMM near-source graph restores Krylov
+convergence.
+
+This should become the "money plot" for a TITAN-FAGBI paper.
+
+Tasks:
+
+- Build an ultra-dense benchmark case, starting with bounded Barnase cap-256.
+- Run the same FMM/M2L operator and GMRES budget with:
+  - diagonal preconditioner;
+  - FMM-native Block-Jacobi as the closest paper analogue;
+  - restricted Additive-Schwarz as an intermediate local-overlap control;
+  - TITAN sparse near-field ILU(0), default neighbor cap `64`.
+- Export per-iteration convergence traces:
+  `iteration,preconditioner,true_residual,gmres_residual,matvec_ms,apply_ms`.
+- Export final ranking table with iterations to `1e-6`, final true residual,
+  wall time, peak memory, preconditioner setup/apply time, and direct/FMM energy
+  delta when direct verification finishes.
+- Generate a publication-ready log-residual plot:
+  `diagonal` versus `block-diagonal` versus `sparse ILU(0)`.
+
+Acceptance:
+
+- Block-Jacobi remains non-strict on the ultra-dense case, documenting the
+  local-block limitation.
+- Sparse ILU(0) reaches strict residual on the same FMM/M2L operator without
+  violating sampled matvec audit or energy gates.
+- Peak memory stays within the existing Scope X.1 envelope and is reported
+  beside convergence, so the gain is not hiding a memory blow-up.
+- The plot is reproducible from committed CSV outputs and can be regenerated
+  without manual spreadsheet work.
+
+Implementation status:
+
+- Z5A harness implemented:
+  `test/pbe_fmm_m2l_scope_z5_preconditioner_money_plot.ps1`.
+- Z5A quick Barnase cap-128 result: `harness_ready_but_no_contrast`;
+  both Block-Jacobi and sparse ILU(0) reached strict residual, so the paper
+  contrast must be measured in Z5B on Barnase cap-256.
+- Z5B full Barnase cap-256 result: `money_plot_pass`. The required
+  Block-Diagonal/FMM Block-Jacobi row stalled at
+  `true_residual=2.13074e-4` after 720 iterations, while TITAN sparse
+  near-field ILU(0) reached `true_residual=5.64662e-15` after 128 iterations.
+  Both rows were audit-clean (`tree_vs_direct_matvec_rel` about `6.85e-3`).
+- Z5C multi-fixture result: `barnase_only_money_plot`. Barnase cap-256
+  repeated the same money plot in three repeats, but sampled
+  `research-medium`, `research-alt`, and gated `research-large` cap-256 did not
+  show Block-Diagonal collapse because Block-Jacobi also reached strict
+  residual in 128 iterations. This narrows the publication claim to dense or
+  high-coupling Barnase-style meshes unless future fixtures reproduce the same
+  contrast.
+- Z5 report:
+  `TITAN_FMM_M2L_SCOPE_Z5_PRECONDITIONER_MONEY_PLOT_REPORT.txt`.
+- Z5C report:
+  `TITAN_FMM_M2L_SCOPE_Z5C_MULTI_FIXTURE_MONEY_PLOT_REPORT.txt`.
+- Generated paper-figure artifacts:
+  `test/tmp/fmm_m2l_scope_z5/fmm_m2l_scope_z5_residual_trace.csv` and
+  `test/tmp/fmm_m2l_scope_z5/fmm_m2l_scope_z5_money_plot.svg`.
+  Z5C generalization artifacts live under `test/tmp/fmm_m2l_scope_z5c/`.
+
+Publication claim:
+
+> Purely local block-diagonal preconditioning is insufficient for dense
+> protein-scale boundary-integral PB systems because strong near-field coupling
+> crosses tree-cell boundaries. TITAN's sparse near-field ILU(0), built from the
+> FMM near-source graph, captures that coupling while preserving the accelerated
+> FMM/M2L matvec.
+
+## Practical Conclusion For TITAN
+
+The paper strongly supports the direction TITAN has already moved toward:
+treecode alone is not enough; a real FMM-style boundary matvec plus local
+near-field preconditioning is the right architecture.
+
+However, the paper also raises the bar for scientific parity. TITAN should not
+claim "FAGBI-equivalent" yet. The current best description is:
+
+> TITAN TABI treecode now defaults to an analytical FMM/M2L matvec with sparse
+> near-field ILU(0), inspired by the FMM-accelerated boundary integral PB
+> direction. Full Galerkin/Duffy/adaptive-order paper parity remains a staged
+> validation and implementation roadmap.
+
+The strongest independent paper angle is still Scope Z5: the sparse near-field
+ILU(0) preconditioner is not a catch-up feature. It is TITAN's differentiating
+algorithmic contribution over paper-style block-diagonal preconditioning on the
+Barnase cap-256 dense/high-coupling mesh. Z5C shows this should be presented as
+a targeted breakthrough first, not yet as a universal protein-fixture result.

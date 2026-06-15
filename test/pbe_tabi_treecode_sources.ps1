@@ -9,5 +9,6 @@
         (Join-Path $RepoRoot 'src\tabi\tabi_treecode_policy.cpp')
         (Join-Path $RepoRoot 'src\tabi\tabi_treecode_leaf.cpp')
         (Join-Path $RepoRoot 'src\tabi\tabi_treecode_operator.cpp')
+        (Join-Path $RepoRoot 'src\tabi\tabi_fmm_m2l_prototype.cpp')
     )
 }

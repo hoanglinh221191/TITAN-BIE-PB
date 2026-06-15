@@ -1,0 +1,13 @@
+# TITAN FMM/M2L Scope U FMM Block Preconditioner Report
+
+mode: quick
+decision: strict_converged
+
+Rows:
+cap128_240_r64_1e-6 direct status=ok residual=1.62414E-08 audit=0 speedup=1 precond=diagonal class=direct_reference
+cap128_240_r64_1e-6 fmm_diagonal status=ok residual=1.27442E-08 audit=0.00269123 speedup=16.0198910412454 precond=diagonal class=diagonal_reference
+cap128_240_r64_1e-6 fmm_block_jacobi status=ok residual=1.41048E-08 audit=0.00269123 speedup=12.2291273337529 precond=fmm_block_jacobi class=strict_converged
+
+Notes:
+- FMM/M2L remains hidden and grid remains the production default.
+- fmm-block-jacobi is an experimental native preconditioner built from FMM context leaf blocks.

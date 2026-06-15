@@ -12,8 +12,8 @@ restart: 24
 tolerance: 1E-06
 rows: 2
 scope_l_gate_pass_rows: 2
-row: fixture=research-medium atoms=128 direct_status=ok fmm_status=ok direct_energy=-8347.94314733 fmm_energy=-8340.06650253 energy_delta_abs=7.87664480659 direct_residual=5.1918200866e-11 fmm_residual=6.23991642839e-11 speedup=9.70468107655 fmm_mode=single-matvec-analytic fmm_far_pairs=30152301 gate=pass
-row: fixture=research-large atoms=128 direct_status=ok fmm_status=ok direct_energy=-6380.19795965 fmm_energy=-6375.2583789 energy_delta_abs=4.93958074564 direct_residual=4.22212983807e-15 fmm_residual=5.4563596887e-15 speedup=7.97195717132 fmm_mode=single-matvec-analytic fmm_far_pairs=31158166 gate=pass
+row: fixture=research-medium atoms=128 direct_status=ok fmm_status=ok direct_energy=-8347.94314733 fmm_energy=-8340.06650253 energy_delta_abs=7.87664480659 direct_residual=5.1918200866e-11 fmm_residual=6.23991642839e-11 speedup=24.8357026019 fmm_mode=single-matvec-analytic fmm_far_pairs=30152301 gate=pass
+row: fixture=research-large atoms=128 direct_status=ok fmm_status=ok direct_energy=-6380.19795965 fmm_energy=-6375.2583789 energy_delta_abs=4.93958074564 direct_residual=4.22212983807e-15 fmm_residual=5.4563596887e-15 speedup=22.9009352818 fmm_mode=single-matvec-analytic fmm_far_pairs=31158166 gate=pass
 
 acceptance: direct/FMM status ok, finite energy and residual, FMM true residual bounded against direct, energy delta within fixture gate, and matvec speedup >= 1.2 on medium.
 next_gate: If Scope L passes, plan Scope M controlled titan.exe hidden CLI smoke and broader energy/regression matrix.

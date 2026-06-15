@@ -1,0 +1,34 @@
+TITAN FMM/M2L Scope T Barnase Cap-256 Convergence Sweep
+=========================================================
+
+quick_mode: False
+scope: hidden_cli_bounded_barnase_cap256_convergence
+hidden_option: -pbe-tabi-fmm-m2l=single-matvec-analytic
+production_default: grid
+fmm_status: hidden_experimental
+atom_cap: 256
+surface_points: 8
+opening_theta: 0.6
+audit_sample_count: 512
+case_timeout_seconds: 2400
+scope_t_class: restart_limited
+next_scope: plan_cap256_gmres_restart_preset_gate
+
+Rows:
+row: condition=baseline_240_r64_1e-6 backend=direct max_iter=240 restart=64 tolerance=1E-06 status=energy=failed;profile=failed iter=240 true_residual=0.0140401 energy=-10578.18628 audit_rel=0 direct_verification=not_applicable direct_status= energy_delta_abs=NaN speedup=NaN wall=884.4992483 peak_mb=22.28125 class=direct_reference
+row: condition=long_720_r128_1e-6 backend=direct max_iter=720 restart=128 tolerance=1E-06 status=energy=failed;profile=failed iter=720 true_residual=0.000194446 energy=-10422.84894 audit_rel=0 direct_verification=not_applicable direct_status= energy_delta_abs=NaN speedup=NaN wall=2234.7735845 peak_mb=32.30859375 class=direct_reference
+row: condition=baseline_240_r64_1e-6 backend=fmm max_iter=240 restart=64 tolerance=1E-06 status=energy=failed;profile=failed iter=240 true_residual=0.0131365 energy=-10581.76145 audit_rel=0.0062981 direct_verification=verified direct_status=energy=failed;profile=failed energy_delta_abs=3.57517000000007 speedup=17.2234195914988 wall=53.0040658 peak_mb=26.96875 class=convergence_pending
+row: condition=iter_360_r64_1e-6 backend=fmm max_iter=360 restart=64 tolerance=1E-06 status=energy=failed;profile=failed iter=360 true_residual=0.00919207 energy=-10542.61103 audit_rel=0.00640508 direct_verification=skipped_not_selected direct_status= energy_delta_abs=NaN speedup=NaN wall=70.9189668 peak_mb=26.92578125 class=convergence_pending
+row: condition=iter_480_r64_1e-6 backend=fmm max_iter=480 restart=64 tolerance=1E-06 status=energy=failed;profile=failed iter=480 true_residual=0.00640712 energy=-10525.93198 audit_rel=0.0064836 direct_verification=skipped_not_selected direct_status= energy_delta_abs=NaN speedup=NaN wall=91.1342514 peak_mb=26.984375 class=convergence_pending
+row: condition=restart_480_r96_1e-6 backend=fmm max_iter=480 restart=96 tolerance=1E-06 status=energy=failed;profile=failed iter=480 true_residual=0.00111163 energy=-10424.33503 audit_rel=0.00682807 direct_verification=skipped_not_selected direct_status= energy_delta_abs=NaN speedup=NaN wall=91.9740859 peak_mb=31.9296875 class=convergence_pending
+row: condition=restart_480_r128_1e-6 backend=fmm max_iter=480 restart=128 tolerance=1E-06 status=energy=failed;profile=failed iter=480 true_residual=0.00147099 energy=-10416.67083 audit_rel=0.00684931 direct_verification=skipped_not_selected direct_status= energy_delta_abs=NaN speedup=NaN wall=85.3352881 peak_mb=36.85546875 class=convergence_pending
+row: condition=long_720_r128_1e-6 backend=fmm max_iter=720 restart=128 tolerance=1E-06 status=energy=failed;profile=failed iter=720 true_residual=0.000185057 energy=-10415.51757 audit_rel=0.00685148 direct_verification=verified direct_status=energy=failed;profile=failed energy_delta_abs=7.33136999999988 speedup=19.9215070643642 wall=116.6691044 peak_mb=36.890625 class=convergence_pending
+row: condition=practical_360_r96_1e-4 backend=fmm max_iter=360 restart=96 tolerance=0.0001 status=energy=failed;profile=failed iter=360 true_residual=0.00252553 energy=-10445.04537 audit_rel=0.00678151 direct_verification=skipped_not_selected direct_status= energy_delta_abs=NaN speedup=NaN wall=58.9779758 peak_mb=31.91796875 class=convergence_pending
+row: condition=practical_480_r128_1e-4 backend=fmm max_iter=480 restart=128 tolerance=0.0001 status=energy=failed;profile=failed iter=480 true_residual=0.00147099 energy=-10416.67083 audit_rel=0.00684931 direct_verification=skipped_not_selected direct_status= energy_delta_abs=NaN speedup=NaN wall=94.5665334 peak_mb=36.890625 class=convergence_pending
+
+classification_note: strict_converged_verified requires both direct and FMM status ok at 1e-6; practical_converged applies only to 1e-4 rows that pass verification gates.
+direct_policy: full mode verifies direct only for the baseline and the best/promising FMM condition; quick mode is FMM-only.
+timeout_policy: timeout_not_verified blocks promotion planning but is not classified as solver failure.
+barnase_note: Scope T diagnoses the bounded Barnase cap-256 convergence/status gap from refreshed Scope R; it does not retry legacy TABI leaf-kernel work.
+matrix_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_t\fmm_m2l_scope_t_matrix.csv
+decision_csv: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fmm_m2l_scope_t\fmm_m2l_scope_t_decision.csv

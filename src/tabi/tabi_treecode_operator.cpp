@@ -356,7 +356,7 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
     TitanPBE::Tabi::apply_jcp_fmm_m2l_single_matvec(
         panels, unknowns, eps_ratio, kappa, lhs_phi, lhs_phin,
         tree.leaf_size, tree.opening_theta, executor, out, &fmm_stats,
-        coupled);
+        coupled, &tree.fmm_m2l_context);
     if (stats != nullptr) {
       stats->matvec_mode = "jcp2013_fmm_m2l_single_matvec_analytic";
       stats->taylor_order = tree.taylor_order;

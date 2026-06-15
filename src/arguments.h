@@ -193,10 +193,16 @@ struct PbeArgs {
   int tabi_taylor_order{3};
   std::string tabi_derivatives{"analytic"};
   std::string tabi_formulation{"jcp2013"};
+  bool tabi_formulation_explicit{false};
   std::string tabi_energy_projection{"boundary"};
   std::string tabi_precond{"auto"};
+  bool tabi_precond_explicit{false};
   std::string tabi_precond_block_near{"singular"};
   int tabi_precond_block_panel_cap{32};
+  int tabi_precond_overlap_panel_cap{64};
+  int tabi_precond_ilu_neighbor_cap{192};
+  bool tabi_precond_ilu_neighbor_cap_explicit{false};
+  double tabi_precond_ilu_drop_tol{0.0};
   int tabi_precond_memory_budget_mb{256};
   int tabi_precond_coarse_aggregate_cap{16};
   std::string tabi_precond_coarse_base{"diagonal"};
@@ -223,7 +229,8 @@ struct PbeArgs {
   std::string tabi_leaf_pair_worklist_verify{"off"};
   std::string tabi_leaf_block_verify{"off"};
   std::string tabi_leaf_mac{"off"};
-  std::string tabi_fmm_m2l{"off"};
+  std::string tabi_fmm_m2l{"auto"};
+  bool tabi_fmm_m2l_explicit{false};
   std::string tabi_interaction_mode{"auto"};
   std::string tabi_node_bounds{"moment"};
   std::string tabi_tree_builder{"grouped-morton"};

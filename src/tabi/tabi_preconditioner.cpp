@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <utility>
 
 namespace TitanPBE::Tabi {
 namespace {
@@ -376,6 +377,8 @@ void JcpBlockPreconditioner::apply_block_with_scratch(
     std::vector<double> &out, std::vector<double> &scratch) const {
   const std::size_t n = panel_count;
   const std::size_t m = block.panels.size();
+  const std::size_t owned =
+      block.owned_count == 0 ? m : std::min(block.owned_count, m);
   const std::size_t dim = coupled ? 2 * m : m;
   if (block.valid && block.lu.size() == dim * dim) {
     scratch.assign(dim, 0.0);
@@ -394,7 +397,7 @@ void JcpBlockPreconditioner::apply_block_with_scratch(
       for (std::size_t i = 0; i < dim; ++i)
         scratch[i] *= block.scale[i];
     }
-    for (std::size_t r = 0; r < m; ++r) {
+    for (std::size_t r = 0; r < owned; ++r) {
       const std::size_t panel = block.panels[r];
       if (panel < out.size())
         out[panel] = scratch[r];
@@ -402,7 +405,8 @@ void JcpBlockPreconditioner::apply_block_with_scratch(
         out[n + panel] = scratch[m + r];
     }
   } else {
-    for (const std::size_t panel : block.panels) {
+    for (std::size_t r = 0; r < owned; ++r) {
+      const std::size_t panel = block.panels[r];
       if (panel < out.size())
         out[panel] =
             in[panel] * (panel < inv_diag.size() ? inv_diag[panel] : 1.0);
@@ -572,14 +576,67 @@ std::size_t estimate_jcp_block_preconditioner_bytes(
   return bytes;
 }
 
-std::shared_ptr<JcpBlockPreconditioner> build_jcp_block_preconditioner(
-    const std::vector<Panel> &panels, const TreeWorkspace &tree, bool coupled,
+std::size_t estimate_jcp_block_preconditioner_bytes_from_panel_groups(
+    const std::vector<std::vector<std::size_t>> &panel_groups,
+    std::size_t diagonal_size, bool coupled) noexcept {
+  std::vector<JcpOwnedFactorPanelGroup> owned_factor_groups;
+  owned_factor_groups.reserve(panel_groups.size());
+  for (const auto &group : panel_groups) {
+    JcpOwnedFactorPanelGroup converted;
+    converted.owned_panels = group;
+    converted.factor_panels = group;
+    owned_factor_groups.push_back(std::move(converted));
+  }
+  return estimate_jcp_block_preconditioner_bytes_from_owned_factor_groups(
+      owned_factor_groups, diagonal_size, coupled);
+}
+
+std::size_t estimate_jcp_block_preconditioner_bytes_from_owned_factor_groups(
+    const std::vector<JcpOwnedFactorPanelGroup> &panel_groups,
+    std::size_t diagonal_size, bool coupled) noexcept {
+  std::size_t bytes = diagonal_size * sizeof(double);
+  for (const auto &group : panel_groups) {
+    const std::size_t m = group.factor_panels.size();
+    const std::size_t dim = coupled ? 2 * m : m;
+    bytes += m * sizeof(std::size_t);
+    bytes += dim * dim * sizeof(double);
+    bytes += dim * sizeof(int);
+  }
+  return bytes;
+}
+
+std::shared_ptr<JcpBlockPreconditioner>
+build_jcp_block_preconditioner_from_panel_groups(
+    const std::vector<Panel> &panels, bool coupled,
     double eps_ratio, double kappa, double lhs_phi, double lhs_phin,
     const std::vector<double> &diagonal, const std::string &near_integration,
     const std::string &quad_buffer, const std::string &block_near_mode,
-    const std::vector<JcpBlockRange> &ranges, TitanExecutor &executor) {
+    const std::vector<std::vector<std::size_t>> &panel_groups,
+    TitanExecutor &executor) {
+  std::vector<JcpOwnedFactorPanelGroup> owned_factor_groups;
+  owned_factor_groups.reserve(panel_groups.size());
+  for (const auto &group : panel_groups) {
+    JcpOwnedFactorPanelGroup converted;
+    converted.owned_panels = group;
+    converted.factor_panels = group;
+    owned_factor_groups.push_back(std::move(converted));
+  }
+  return build_jcp_block_preconditioner_from_owned_factor_groups(
+      panels, coupled, eps_ratio, kappa, lhs_phi, lhs_phin, diagonal,
+      near_integration, quad_buffer, block_near_mode, owned_factor_groups,
+      executor);
+}
+
+std::shared_ptr<JcpBlockPreconditioner>
+build_jcp_block_preconditioner_from_owned_factor_groups(
+    const std::vector<Panel> &panels, bool coupled,
+    double eps_ratio, double kappa, double lhs_phi, double lhs_phin,
+    const std::vector<double> &diagonal, const std::string &near_integration,
+    const std::string &quad_buffer, const std::string &block_near_mode,
+    const std::vector<JcpOwnedFactorPanelGroup> &panel_groups,
+    TitanExecutor &executor) {
   const std::size_t n = panels.size();
-  if (n == 0 || tree.order.size() != n)
+  if (n == 0)
     return {};
   auto precond = std::make_shared<JcpBlockPreconditioner>();
   precond->panel_count = n;
@@ -594,14 +651,30 @@ std::shared_ptr<JcpBlockPreconditioner> build_jcp_block_preconditioner(
   const bool buffer_aware = block_near_mode == "buffer-aware" ||
                             block_near_mode == "operator-near";
   const bool operator_near = block_near_mode == "operator-near";
-  auto build_block = [&](std::size_t begin, std::size_t end) {
+  auto build_block = [&](const JcpOwnedFactorPanelGroup &panel_group) {
     JcpBlockPreconditioner::Block block;
-    const std::size_t count = end - begin;
-    block.panels.reserve(count);
-    for (std::size_t pos = begin; pos < end; ++pos)
-      block.panels.push_back(tree.order[pos]);
+    block.panels.reserve(panel_group.factor_panels.size());
+    std::vector<unsigned char> owned_seen(n, 0);
+    std::vector<unsigned char> factor_seen(n, 0);
+    for (const std::size_t panel : panel_group.owned_panels) {
+      if (panel < n && !owned_seen[panel]) {
+        owned_seen[panel] = 1;
+        factor_seen[panel] = 1;
+        block.panels.push_back(panel);
+      }
+    }
+    block.owned_count = block.panels.size();
+    for (const std::size_t panel : panel_group.factor_panels) {
+      if (panel < n && !factor_seen[panel]) {
+        factor_seen[panel] = 1;
+        block.panels.push_back(panel);
+      }
+    }
+    block.halo_count = block.panels.size() - block.owned_count;
     const std::size_t m = block.panels.size();
     const std::size_t dim = coupled ? 2 * m : m;
+    if (dim == 0 || block.owned_count == 0)
+      return block;
     block.lu.assign(dim * dim, 0.0);
     for (std::size_t r = 0; r < m; ++r) {
       const std::size_t target_index = block.panels[r];
@@ -677,13 +750,13 @@ std::shared_ptr<JcpBlockPreconditioner> build_jcp_block_preconditioner(
     return block;
   };
 
-  precond->blocks.resize(ranges.size());
-  const std::size_t workers = solver_workers(executor, ranges.size());
+  precond->blocks.resize(panel_groups.size());
+  const std::size_t workers = solver_workers(executor, panel_groups.size());
   executor.parallel_for(
-      ranges.size(), workers, 1,
+      panel_groups.size(), workers, 1,
       [&](std::size_t, std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end; ++i)
-          precond->blocks[i] = build_block(ranges[i].first, ranges[i].second);
+          precond->blocks[i] = build_block(panel_groups[i]);
       });
   for (const auto &block : precond->blocks) {
     if (block.ill_conditioned)
@@ -694,7 +767,8 @@ std::shared_ptr<JcpBlockPreconditioner> build_jcp_block_preconditioner(
         std::max(precond->quality_probe_max_gain, block.quality_gain);
     if (block.valid) {
       ++precond->valid_blocks;
-      precond->valid_panel_count += block.panels.size();
+      precond->valid_panel_count +=
+          block.owned_count == 0 ? block.panels.size() : block.owned_count;
     }
   }
   precond->quality_status =
@@ -702,6 +776,31 @@ std::shared_ptr<JcpBlockPreconditioner> build_jcp_block_preconditioner(
   if (precond->valid_blocks == 0 && !precond->blocks.empty())
     precond->quality_status = "all_rejected";
   return precond;
+}
+
+std::shared_ptr<JcpBlockPreconditioner> build_jcp_block_preconditioner(
+    const std::vector<Panel> &panels, const TreeWorkspace &tree, bool coupled,
+    double eps_ratio, double kappa, double lhs_phi, double lhs_phin,
+    const std::vector<double> &diagonal, const std::string &near_integration,
+    const std::string &quad_buffer, const std::string &block_near_mode,
+    const std::vector<JcpBlockRange> &ranges, TitanExecutor &executor) {
+  if (tree.order.size() != panels.size())
+    return {};
+  std::vector<std::vector<std::size_t>> panel_groups;
+  panel_groups.reserve(ranges.size());
+  for (const JcpBlockRange &range : ranges) {
+    if (range.first >= range.second || range.second > tree.order.size())
+      continue;
+    std::vector<std::size_t> group;
+    group.reserve(range.second - range.first);
+    for (std::size_t pos = range.first; pos < range.second; ++pos)
+      group.push_back(tree.order[pos]);
+    if (!group.empty())
+      panel_groups.push_back(std::move(group));
+  }
+  return build_jcp_block_preconditioner_from_panel_groups(
+      panels, coupled, eps_ratio, kappa, lhs_phi, lhs_phin, diagonal,
+      near_integration, quad_buffer, block_near_mode, panel_groups, executor);
 }
 
 std::shared_ptr<JcpCoarseGalerkinPreconditioner>

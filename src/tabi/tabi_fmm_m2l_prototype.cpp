@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <set>
 #include <stdexcept>
@@ -538,6 +539,7 @@ PointSoA make_panel_geometry_points(const std::vector<PrototypePanel> &panels) {
 std::vector<PanelSourceMoments>
 compute_panel_source_moments(const Tree &tree,
                              const std::vector<PrototypePanel> &panels,
+                             const std::vector<double> &phi_values,
                              const std::vector<double> &phin_values) {
   std::vector<PanelSourceMoments> moments(tree.cells.size());
   for (std::size_t node_index = 0; node_index < tree.cells.size(); ++node_index) {
@@ -552,7 +554,7 @@ compute_panel_source_moments(const Tree &tree,
       acc.phin_px += q_phin * (source.x - cell.qx);
       acc.phin_py += q_phin * (source.y - cell.qy);
       acc.phin_pz += q_phin * (source.z - cell.qz);
-      const double q_phi = source.area * source.scalar_density;
+      const double q_phi = source.area * phi_values[source_index];
       acc.phi_nx += q_phi * source.nx;
       acc.phi_ny += q_phi * source.ny;
       acc.phi_nz += q_phi * source.nz;
@@ -563,7 +565,8 @@ compute_panel_source_moments(const Tree &tree,
 }
 
 void add_jcp_direct_pair(const PrototypePanel &target,
-                         const PrototypePanel &source, double source_phin,
+                         const PrototypePanel &source, double source_phi,
+                         double source_phin,
                          double eps_ratio, double kappa, double &phi_out,
                          double &phin_out) {
   constexpr double inv_four_pi = 0.079577471545947667884;
@@ -606,12 +609,20 @@ void add_jcp_direct_pair(const PrototypePanel &target,
       expkr * inv_four_pi *
       (kk * kk * inv_r + 2.0 * kk * inv_r2 + 2.0 * inv_r3);
   const double mixedk = fsecond_k * nxu_nyu + fprime_k_over_r * tangent_metric;
-  const double phi = source.scalar_density;
+  const double phi = source_phi;
   phi_out += source.area * ((g0 - gk) * phin +
                             (safe_eps_ratio * source_dk - source_d0) * phi);
   phin_out += source.area *
               ((target_d0 - inv_eps_ratio * target_dk) * phin +
                (mixedk - mixed0) * phi);
+}
+
+void add_jcp_direct_pair(const PrototypePanel &target,
+                         const PrototypePanel &source, double source_phin,
+                         double eps_ratio, double kappa, double &phi_out,
+                         double &phin_out) {
+  add_jcp_direct_pair(target, source, source.scalar_density, source_phin,
+                      eps_ratio, kappa, phi_out, phin_out);
 }
 
 void add_jcp_far_cell(const PrototypePanel &target, const Cell &source_cell,
@@ -677,6 +688,399 @@ void add_jcp_far_cell(const PrototypePanel &target, const Cell &source_cell,
 }
 
 } // namespace
+
+namespace {
+
+PrototypeConfig normalize_jcp_analytic_config(PrototypeConfig config) {
+  config.max_leaf_size = std::max(1, config.max_leaf_size);
+  config.threads = std::max(1, config.threads);
+  return config;
+}
+
+bool same_double(double a, double b) noexcept {
+  return std::abs(a - b) <=
+         1.0e-12 * std::max({1.0, std::abs(a), std::abs(b)});
+}
+
+} // namespace
+
+struct FmmM2lAnalyticContext::Impl {
+  PrototypeConfig config;
+  std::vector<PrototypePanel> panels;
+  PointSoA points;
+  Tree source_tree;
+  Tree target_tree;
+  std::size_t near_pairs{0};
+  std::size_t far_pairs{0};
+  std::size_t work_items{0};
+  double eps_ratio{1.0};
+  double kappa{0.0};
+  double setup_seconds{0.0};
+};
+
+FmmM2lAnalyticContext::FmmM2lAnalyticContext(
+    const PrototypeConfig &input_config, std::vector<PrototypePanel> panels,
+    double eps_ratio, double kappa)
+    : impl_(std::make_unique<Impl>()) {
+  if (panels.empty()) {
+    throw std::invalid_argument(
+        "JCP analytic FMM/M2L context requires at least one panel");
+  }
+  if (!std::isfinite(kappa) || kappa < 0.0) {
+    throw std::invalid_argument(
+        "JCP analytic FMM/M2L context requires finite kappa >= 0");
+  }
+  const auto setup_begin = Clock::now();
+  impl_->config = normalize_jcp_analytic_config(input_config);
+  impl_->panels = std::move(panels);
+  impl_->eps_ratio = eps_ratio;
+  impl_->kappa = kappa;
+  impl_->points = make_panel_geometry_points(impl_->panels);
+  impl_->source_tree = build_tree(
+      impl_->points, static_cast<std::size_t>(impl_->config.max_leaf_size));
+  impl_->target_tree = build_tree(
+      impl_->points, static_cast<std::size_t>(impl_->config.max_leaf_size));
+  if (!impl_->source_tree.cells.empty() && !impl_->target_tree.cells.empty()) {
+    build_work(impl_->target_tree, impl_->source_tree, 0, 0,
+               impl_->config.separation_theta, true);
+  }
+  sort_work(impl_->target_tree);
+  PrototypeMetrics counts;
+  compute_counts_and_operators(impl_->target_tree, impl_->source_tree,
+                               impl_->config, counts);
+  impl_->near_pairs = counts.near_pairs;
+  impl_->far_pairs = counts.far_pairs;
+  for (int target_node : impl_->target_tree.target_leaf_nodes) {
+    const TargetLeafWork &work =
+        impl_->target_tree.work[static_cast<std::size_t>(target_node)];
+    impl_->work_items += work.near_sources.size() + work.far_sources.size();
+  }
+  impl_->setup_seconds = elapsed_seconds(setup_begin, Clock::now());
+}
+
+FmmM2lAnalyticContext::~FmmM2lAnalyticContext() = default;
+
+FmmM2lAnalyticContext::FmmM2lAnalyticContext(
+    FmmM2lAnalyticContext &&) noexcept = default;
+
+FmmM2lAnalyticContext &
+FmmM2lAnalyticContext::operator=(FmmM2lAnalyticContext &&) noexcept = default;
+
+bool FmmM2lAnalyticContext::matches(const PrototypeConfig &input_config,
+                                    std::size_t panel_count, double eps_ratio,
+                                    double kappa) const noexcept {
+  if (impl_ == nullptr) {
+    return false;
+  }
+  const PrototypeConfig config = normalize_jcp_analytic_config(input_config);
+  return panel_count == impl_->panels.size() &&
+         config.kernel == impl_->config.kernel &&
+         config.max_leaf_size == impl_->config.max_leaf_size &&
+         config.expansion_order == impl_->config.expansion_order &&
+         same_double(config.separation_theta, impl_->config.separation_theta) &&
+         same_double(eps_ratio, impl_->eps_ratio) &&
+         same_double(kappa, impl_->kappa);
+}
+
+std::size_t FmmM2lAnalyticContext::panel_count() const noexcept {
+  return impl_ == nullptr ? 0 : impl_->panels.size();
+}
+
+std::size_t FmmM2lAnalyticContext::context_nodes() const noexcept {
+  return impl_ == nullptr
+             ? 0
+             : impl_->source_tree.cells.size() + impl_->target_tree.cells.size();
+}
+
+std::size_t FmmM2lAnalyticContext::context_work_items() const noexcept {
+  return impl_ == nullptr ? 0 : impl_->work_items;
+}
+
+double FmmM2lAnalyticContext::setup_seconds() const noexcept {
+  return impl_ == nullptr ? 0.0 : impl_->setup_seconds;
+}
+
+std::vector<std::vector<std::size_t>>
+FmmM2lAnalyticContext::block_panel_ids(std::size_t max_block_size) const {
+  if (impl_ == nullptr) {
+    throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
+  }
+  const std::size_t cap = std::max<std::size_t>(1, max_block_size);
+  std::vector<std::vector<std::size_t>> blocks;
+  for (const int node_index : impl_->target_tree.target_leaf_nodes) {
+    if (node_index < 0 ||
+        static_cast<std::size_t>(node_index) >= impl_->target_tree.cells.size()) {
+      continue;
+    }
+    const Cell &cell =
+        impl_->target_tree.cells[static_cast<std::size_t>(node_index)];
+    const std::size_t end = std::min(cell.end, impl_->target_tree.order.size());
+    for (std::size_t begin = cell.begin; begin < end; begin += cap) {
+      const std::size_t block_end = std::min(end, begin + cap);
+      std::vector<std::size_t> block;
+      block.reserve(block_end - begin);
+      for (std::size_t pos = begin; pos < block_end; ++pos) {
+        const std::size_t panel = impl_->target_tree.order[pos];
+        if (panel < impl_->panels.size()) {
+          block.push_back(panel);
+        }
+      }
+      if (!block.empty()) {
+        blocks.push_back(std::move(block));
+      }
+    }
+  }
+  return blocks;
+}
+
+std::vector<FmmM2lOverlapPanelGroup>
+FmmM2lAnalyticContext::overlap_panel_groups(
+    std::size_t owned_block_size, std::size_t overlap_panel_cap) const {
+  if (impl_ == nullptr) {
+    throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
+  }
+  const std::size_t owned_cap = std::max<std::size_t>(1, owned_block_size);
+  const std::size_t halo_cap = overlap_panel_cap;
+  std::vector<FmmM2lOverlapPanelGroup> groups;
+  const std::size_t n = impl_->panels.size();
+
+  for (const int node_index : impl_->target_tree.target_leaf_nodes) {
+    if (node_index < 0 ||
+        static_cast<std::size_t>(node_index) >= impl_->target_tree.cells.size()) {
+      continue;
+    }
+    const Cell &cell =
+        impl_->target_tree.cells[static_cast<std::size_t>(node_index)];
+    const std::size_t end = std::min(cell.end, impl_->target_tree.order.size());
+    const TargetLeafWork &work =
+        impl_->target_tree.work[static_cast<std::size_t>(node_index)];
+
+    for (std::size_t begin = cell.begin; begin < end; begin += owned_cap) {
+      const std::size_t block_end = std::min(end, begin + owned_cap);
+      FmmM2lOverlapPanelGroup group;
+      group.owned_panels.reserve(block_end - begin);
+      group.factor_panels.reserve(block_end - begin + halo_cap);
+      std::vector<unsigned char> owned_mask(n, 0);
+      std::vector<unsigned char> factor_mask(n, 0);
+
+      double cx = 0.0;
+      double cy = 0.0;
+      double cz = 0.0;
+      for (std::size_t pos = begin; pos < block_end; ++pos) {
+        const std::size_t panel = impl_->target_tree.order[pos];
+        if (panel >= n || owned_mask[panel])
+          continue;
+        owned_mask[panel] = 1;
+        factor_mask[panel] = 1;
+        group.owned_panels.push_back(panel);
+        group.factor_panels.push_back(panel);
+        cx += impl_->panels[panel].x;
+        cy += impl_->panels[panel].y;
+        cz += impl_->panels[panel].z;
+      }
+      if (group.owned_panels.empty())
+        continue;
+      const double inv_owned =
+          1.0 / static_cast<double>(group.owned_panels.size());
+      cx *= inv_owned;
+      cy *= inv_owned;
+      cz *= inv_owned;
+
+      if (halo_cap > 0) {
+        std::vector<std::pair<double, std::size_t>> candidates;
+        for (const int source_node : work.near_sources) {
+          if (source_node < 0 ||
+              static_cast<std::size_t>(source_node) >=
+                  impl_->source_tree.cells.size()) {
+            continue;
+          }
+          const Cell &source_cell =
+              impl_->source_tree.cells[static_cast<std::size_t>(source_node)];
+          const std::size_t source_end =
+              std::min(source_cell.end, impl_->source_tree.order.size());
+          for (std::size_t pos = source_cell.begin; pos < source_end; ++pos) {
+            const std::size_t panel = impl_->source_tree.order[pos];
+            if (panel >= n || owned_mask[panel] || factor_mask[panel])
+              continue;
+            factor_mask[panel] = 1;
+            const double dx = impl_->panels[panel].x - cx;
+            const double dy = impl_->panels[panel].y - cy;
+            const double dz = impl_->panels[panel].z - cz;
+            candidates.push_back({dx * dx + dy * dy + dz * dz, panel});
+          }
+        }
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const auto &lhs, const auto &rhs) {
+                    if (lhs.first != rhs.first)
+                      return lhs.first < rhs.first;
+                    return lhs.second < rhs.second;
+                  });
+        const std::size_t selected = std::min(halo_cap, candidates.size());
+        group.halo_count = selected;
+        for (std::size_t i = 0; i < selected; ++i)
+          group.factor_panels.push_back(candidates[i].second);
+      }
+      groups.push_back(std::move(group));
+    }
+  }
+  return groups;
+}
+
+std::vector<std::vector<std::size_t>>
+FmmM2lAnalyticContext::near_panel_graph(std::size_t neighbor_cap) const {
+  if (impl_ == nullptr) {
+    throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
+  }
+  const std::size_t n = impl_->panels.size();
+  const std::size_t cap = std::max<std::size_t>(1, neighbor_cap);
+  std::vector<std::vector<std::size_t>> graph(n);
+
+  for (const int node_index : impl_->target_tree.target_leaf_nodes) {
+    if (node_index < 0 ||
+        static_cast<std::size_t>(node_index) >= impl_->target_tree.cells.size()) {
+      continue;
+    }
+    const Cell &target_cell =
+        impl_->target_tree.cells[static_cast<std::size_t>(node_index)];
+    const std::size_t target_end =
+        std::min(target_cell.end, impl_->target_tree.order.size());
+    const TargetLeafWork &work =
+        impl_->target_tree.work[static_cast<std::size_t>(node_index)];
+
+    for (std::size_t tpos = target_cell.begin; tpos < target_end; ++tpos) {
+      const std::size_t target_panel = impl_->target_tree.order[tpos];
+      if (target_panel >= n)
+        continue;
+      std::vector<unsigned char> seen(n, 0);
+      std::vector<std::pair<double, std::size_t>> candidates;
+      auto add_candidate = [&](std::size_t source_panel) {
+        if (source_panel >= n || seen[source_panel])
+          return;
+        seen[source_panel] = 1;
+        const double dx = impl_->panels[source_panel].x -
+                          impl_->panels[target_panel].x;
+        const double dy = impl_->panels[source_panel].y -
+                          impl_->panels[target_panel].y;
+        const double dz = impl_->panels[source_panel].z -
+                          impl_->panels[target_panel].z;
+        candidates.push_back({dx * dx + dy * dy + dz * dz, source_panel});
+      };
+      add_candidate(target_panel);
+      for (const int source_node : work.near_sources) {
+        if (source_node < 0 ||
+            static_cast<std::size_t>(source_node) >=
+                impl_->source_tree.cells.size()) {
+          continue;
+        }
+        const Cell &source_cell =
+            impl_->source_tree.cells[static_cast<std::size_t>(source_node)];
+        const std::size_t source_end =
+            std::min(source_cell.end, impl_->source_tree.order.size());
+        for (std::size_t spos = source_cell.begin; spos < source_end; ++spos)
+          add_candidate(impl_->source_tree.order[spos]);
+      }
+      std::sort(candidates.begin(), candidates.end(),
+                [](const auto &lhs, const auto &rhs) {
+                  if (lhs.first != rhs.first)
+                    return lhs.first < rhs.first;
+                  return lhs.second < rhs.second;
+                });
+      std::vector<std::size_t> row;
+      const std::size_t selected = std::min(cap, candidates.size());
+      row.reserve(selected);
+      for (std::size_t i = 0; i < selected; ++i)
+        row.push_back(candidates[i].second);
+      std::sort(row.begin(), row.end());
+      row.erase(std::unique(row.begin(), row.end()), row.end());
+      graph[target_panel] = std::move(row);
+    }
+  }
+  for (std::size_t panel = 0; panel < n; ++panel) {
+    if (graph[panel].empty())
+      graph[panel].push_back(panel);
+  }
+  return graph;
+}
+
+JcpAnalyticOperatorResult
+FmmM2lAnalyticContext::apply(const std::vector<double> &phi_values,
+                             const std::vector<double> &phin_values,
+                             TitanExecutor &executor) const {
+  if (impl_ == nullptr) {
+    throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
+  }
+  if (phi_values.size() != impl_->panels.size() ||
+      phin_values.size() != impl_->panels.size()) {
+    throw std::invalid_argument(
+        "JCP analytic FMM/M2L context density vectors must match panels");
+  }
+
+  JcpAnalyticOperatorResult result;
+  result.panels = impl_->panels.size();
+  result.near_pairs = impl_->near_pairs;
+  result.far_pairs = impl_->far_pairs;
+  result.setup_seconds = impl_->setup_seconds;
+  result.context_nodes = context_nodes();
+  result.context_work_items = context_work_items();
+  result.phi.assign(impl_->panels.size(), 0.0);
+  result.phin.assign(impl_->panels.size(), 0.0);
+
+  const std::vector<PanelSourceMoments> source_moments =
+      compute_panel_source_moments(impl_->source_tree, impl_->panels,
+                                   phi_values, phin_values);
+
+  const auto apply_begin = Clock::now();
+  const std::size_t workers = std::max<std::size_t>(1, executor.capacity());
+  executor.parallel_for(
+      impl_->target_tree.target_leaf_nodes.size(), workers, 1,
+      [&](std::size_t, std::size_t begin, std::size_t end) {
+        for (std::size_t leaf_pos = begin; leaf_pos < end; ++leaf_pos) {
+          const int target_node = impl_->target_tree.target_leaf_nodes[leaf_pos];
+          const Cell &target_cell =
+              impl_->target_tree.cells[static_cast<std::size_t>(target_node)];
+          const TargetLeafWork &work =
+              impl_->target_tree.work[static_cast<std::size_t>(target_node)];
+          for (std::size_t tpos = target_cell.begin; tpos < target_cell.end;
+               ++tpos) {
+            const std::size_t ti = impl_->target_tree.order[tpos];
+            double phi_sum = 0.0;
+            double phin_sum = 0.0;
+            const PrototypePanel &target = impl_->panels[ti];
+            for (int source_node : work.near_sources) {
+              const Cell &source_cell =
+                  impl_->source_tree.cells[static_cast<std::size_t>(source_node)];
+              for (std::size_t spos = source_cell.begin; spos < source_cell.end;
+                   ++spos) {
+                const std::size_t si = impl_->source_tree.order[spos];
+                if (ti == si) {
+                  continue;
+                }
+                add_jcp_direct_pair(target, impl_->panels[si], phi_values[si],
+                                    phin_values[si], impl_->eps_ratio,
+                                    impl_->kappa, phi_sum, phin_sum);
+              }
+            }
+            for (int source_node : work.far_sources) {
+              const std::size_t source_index =
+                  static_cast<std::size_t>(source_node);
+              add_jcp_far_cell(target, impl_->source_tree.cells[source_index],
+                               source_moments[source_index], impl_->eps_ratio,
+                               impl_->kappa, phi_sum, phin_sum);
+            }
+            result.phi[ti] = phi_sum;
+            result.phin[ti] = phin_sum;
+          }
+        }
+      });
+  result.apply_seconds = elapsed_seconds(apply_begin, Clock::now());
+
+  result.finite_outputs =
+      std::all_of(result.phi.begin(), result.phi.end(),
+                  [](double value) { return std::isfinite(value); }) &&
+      std::all_of(result.phin.begin(), result.phin.end(),
+                  [](double value) { return std::isfinite(value); });
+  return result;
+}
 
 const char *kernel_kind_name(KernelKind kernel) noexcept {
   switch (kernel) {
@@ -1473,6 +1877,18 @@ JcpAnalyticOperatorResult evaluate_jcp_offline_operator_analytic(
     const PrototypeConfig &input_config, const std::vector<PrototypePanel> &panels,
     const std::vector<double> &phi_values,
     const std::vector<double> &phin_values, double eps_ratio, double kappa) {
+  PrototypeConfig config = normalize_jcp_analytic_config(input_config);
+  TitanExecutor executor(static_cast<std::size_t>(std::max(1, config.threads)));
+  return evaluate_jcp_offline_operator_analytic(config, panels, phi_values,
+                                                phin_values, eps_ratio, kappa,
+                                                executor);
+}
+
+JcpAnalyticOperatorResult evaluate_jcp_offline_operator_analytic(
+    const PrototypeConfig &input_config, const std::vector<PrototypePanel> &panels,
+    const std::vector<double> &phi_values,
+    const std::vector<double> &phin_values, double eps_ratio, double kappa,
+    TitanExecutor &executor) {
   if (panels.empty()) {
     throw std::invalid_argument(
         "JCP analytic offline operator requires at least one panel");
@@ -1481,104 +1897,8 @@ JcpAnalyticOperatorResult evaluate_jcp_offline_operator_analytic(
     throw std::invalid_argument(
         "JCP analytic offline operator density vectors must match panels");
   }
-  PrototypeConfig config = input_config;
-  config.max_leaf_size = std::max(1, config.max_leaf_size);
-  config.threads = std::max(1, config.threads);
-  if (!std::isfinite(kappa) || kappa < 0.0) {
-    throw std::invalid_argument(
-        "JCP analytic offline operator requires finite kappa >= 0");
-  }
-
-  std::vector<PrototypePanel> source_panels = panels;
-  for (std::size_t i = 0; i < source_panels.size(); ++i) {
-    source_panels[i].scalar_density = phi_values[i];
-  }
-
-  JcpAnalyticOperatorResult result;
-  result.panels = panels.size();
-  result.phi.assign(panels.size(), 0.0);
-  result.phin.assign(panels.size(), 0.0);
-
-  const auto setup_begin = Clock::now();
-  const PointSoA points = make_panel_geometry_points(panels);
-  Tree source_tree =
-      build_tree(points, static_cast<std::size_t>(config.max_leaf_size));
-  Tree target_tree =
-      build_tree(points, static_cast<std::size_t>(config.max_leaf_size));
-  if (!source_tree.cells.empty() && !target_tree.cells.empty()) {
-    build_work(target_tree, source_tree, 0, 0, config.separation_theta, true);
-  }
-  sort_work(target_tree);
-  PrototypeMetrics counts;
-  compute_counts_and_operators(target_tree, source_tree, config, counts);
-  result.near_pairs = counts.near_pairs;
-  result.far_pairs = counts.far_pairs;
-  const std::vector<PanelSourceMoments> source_moments =
-      compute_panel_source_moments(source_tree, source_panels, phin_values);
-  const auto setup_end = Clock::now();
-  result.setup_seconds = elapsed_seconds(setup_begin, setup_end);
-
-  const auto apply_begin = Clock::now();
-  TitanExecutor executor(static_cast<std::size_t>(std::max(1, config.threads)));
-  const std::size_t workers = std::max<std::size_t>(1, executor.capacity());
-  executor.parallel_for(target_tree.target_leaf_nodes.size(), workers, 1,
-                        [&](std::size_t, std::size_t begin, std::size_t end) {
-                          for (std::size_t leaf_pos = begin; leaf_pos < end;
-                               ++leaf_pos) {
-                            const int target_node =
-                                target_tree.target_leaf_nodes[leaf_pos];
-                            const Cell &target_cell =
-                                target_tree.cells[static_cast<std::size_t>(
-                                    target_node)];
-                            const TargetLeafWork &work =
-                                target_tree.work[static_cast<std::size_t>(
-                                    target_node)];
-                            for (std::size_t tpos = target_cell.begin;
-                                 tpos < target_cell.end; ++tpos) {
-                              const std::size_t ti = target_tree.order[tpos];
-                              double phi_sum = 0.0;
-                              double phin_sum = 0.0;
-                              const PrototypePanel &target = panels[ti];
-                              for (int source_node : work.near_sources) {
-                                const Cell &source_cell =
-                                    source_tree.cells[static_cast<std::size_t>(
-                                        source_node)];
-                                for (std::size_t spos = source_cell.begin;
-                                     spos < source_cell.end; ++spos) {
-                                  const std::size_t si =
-                                      source_tree.order[spos];
-                                  if (ti == si) {
-                                    continue;
-                                  }
-                                  add_jcp_direct_pair(target, source_panels[si],
-                                                      phin_values[si],
-                                                      eps_ratio, kappa, phi_sum,
-                                                      phin_sum);
-                                }
-                              }
-                              for (int source_node : work.far_sources) {
-                                const std::size_t source_index =
-                                    static_cast<std::size_t>(source_node);
-                                add_jcp_far_cell(target,
-                                                 source_tree.cells[source_index],
-                                                 source_moments[source_index],
-                                                 eps_ratio, kappa, phi_sum,
-                                                 phin_sum);
-                              }
-                              result.phi[ti] = phi_sum;
-                              result.phin[ti] = phin_sum;
-                            }
-                          }
-                        });
-  const auto apply_end = Clock::now();
-  result.apply_seconds = elapsed_seconds(apply_begin, apply_end);
-
-  result.finite_outputs =
-      std::all_of(result.phi.begin(), result.phi.end(),
-                  [](double value) { return std::isfinite(value); }) &&
-      std::all_of(result.phin.begin(), result.phin.end(),
-                  [](double value) { return std::isfinite(value); });
-  return result;
+  FmmM2lAnalyticContext context(input_config, panels, eps_ratio, kappa);
+  return context.apply(phi_values, phin_values, executor);
 }
 
 namespace {
@@ -2026,11 +2346,58 @@ std::string classify_scope_a_decision(const PrototypeMetrics &metrics,
 
 namespace TitanPBE::Tabi {
 
+std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
+ensure_jcp_fmm_m2l_context(
+    const std::vector<Panel> &panels, double eps_ratio, double kappa,
+    std::size_t leaf_size, double opening_theta, TitanExecutor &executor,
+    std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
+        *context_cache) {
+  titan::tabi::fmm_m2l::PrototypeConfig config;
+  config.kernel = titan::tabi::fmm_m2l::KernelKind::Yukawa;
+  config.kappa = kappa;
+  config.max_leaf_size =
+      static_cast<int>(std::clamp<std::size_t>(leaf_size == 0 ? 64 : leaf_size,
+                                               8, 512));
+  config.expansion_order = 4;
+  config.separation_theta =
+      std::clamp(std::isfinite(opening_theta) && opening_theta > 0.0
+                     ? opening_theta
+                     : 0.8,
+                 0.05, 2.0);
+  config.threads =
+      static_cast<int>(std::max<std::size_t>(1, executor.capacity()));
+
+  std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext> local_context;
+  std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext> &context =
+      context_cache != nullptr ? *context_cache : local_context;
+  if (context == nullptr ||
+      !context->matches(config, panels.size(), eps_ratio, kappa)) {
+    std::vector<titan::tabi::fmm_m2l::PrototypePanel> prototype;
+    prototype.reserve(panels.size());
+    for (const Panel &panel : panels) {
+      titan::tabi::fmm_m2l::PrototypePanel converted;
+      converted.x = panel.x;
+      converted.y = panel.y;
+      converted.z = panel.z;
+      converted.nx = panel.nx;
+      converted.ny = panel.ny;
+      converted.nz = panel.nz;
+      converted.area = panel.area;
+      prototype.push_back(converted);
+    }
+    context = std::make_shared<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>(
+        config, std::move(prototype), eps_ratio, kappa);
+  }
+  return context;
+}
+
 void apply_jcp_fmm_m2l_single_matvec(
     const std::vector<Panel> &panels, const std::vector<double> &unknowns,
     double eps_ratio, double kappa, double lhs_phi, double lhs_phin,
     std::size_t leaf_size, double opening_theta, TitanExecutor &executor,
-    std::vector<double> &out, FmmM2lSingleMatvecStats *stats, bool coupled) {
+    std::vector<double> &out, FmmM2lSingleMatvecStats *stats, bool coupled,
+    std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
+        *context_cache) {
   const std::size_t n = panels.size();
   if (n == 0) {
     out.clear();
@@ -2044,43 +2411,19 @@ void apply_jcp_fmm_m2l_single_matvec(
         "PBE TABI FMM/M2L single-matvec received an incomplete JCP unknown vector");
   }
 
-  std::vector<titan::tabi::fmm_m2l::PrototypePanel> prototype;
-  prototype.reserve(n);
   std::vector<double> phi(n, 0.0);
   std::vector<double> phin(n, 0.0);
   for (std::size_t i = 0; i < n; ++i) {
-    const Panel &panel = panels[i];
-    titan::tabi::fmm_m2l::PrototypePanel converted;
-    converted.x = panel.x;
-    converted.y = panel.y;
-    converted.z = panel.z;
-    converted.nx = panel.nx;
-    converted.ny = panel.ny;
-    converted.nz = panel.nz;
-    converted.area = panel.area;
-    converted.scalar_density = unknowns[i];
-    prototype.push_back(converted);
     phi[i] = unknowns[i];
     phin[i] = coupled ? unknowns[n + i] : 0.0;
   }
 
-  titan::tabi::fmm_m2l::PrototypeConfig config;
-  config.kernel = titan::tabi::fmm_m2l::KernelKind::Yukawa;
-  config.kappa = kappa;
-  config.max_leaf_size =
-      static_cast<int>(std::clamp<std::size_t>(leaf_size == 0 ? 64 : leaf_size,
-                                               8, 512));
-  config.expansion_order = 4;
-  config.separation_theta =
-      std::clamp(std::isfinite(opening_theta) && opening_theta > 0.0
-                     ? opening_theta
-                     : 0.8,
-                 0.05, 2.0);
-  config.threads = static_cast<int>(std::max<std::size_t>(1, executor.capacity()));
+  const std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext> context =
+      ensure_jcp_fmm_m2l_context(panels, eps_ratio, kappa, leaf_size,
+                                 opening_theta, executor, context_cache);
 
   const titan::tabi::fmm_m2l::JcpAnalyticOperatorResult result =
-      titan::tabi::fmm_m2l::evaluate_jcp_offline_operator_analytic(
-          config, prototype, phi, phin, eps_ratio, kappa);
+      context->apply(phi, phin, executor);
 
   out.assign(coupled ? 2 * n : n, 0.0);
   bool finite = result.finite_outputs;
@@ -2098,6 +2441,9 @@ void apply_jcp_fmm_m2l_single_matvec(
     stats->far_pairs = result.far_pairs;
     stats->setup_ms = 1000.0 * result.setup_seconds;
     stats->apply_ms = 1000.0 * result.apply_seconds;
+    stats->cached = context_cache != nullptr;
+    stats->context_nodes = result.context_nodes;
+    stats->context_work_items = result.context_work_items;
     stats->finite_outputs = finite;
   }
 }

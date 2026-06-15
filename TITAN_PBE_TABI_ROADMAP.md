@@ -5991,9 +5991,13 @@ gate is implemented; bounded Barnase cap-64 quick passed, while full cap-128
 failed the current convergence/status gate despite finite audit-clean FMM rows.
 Scope Q Barnase convergence sweep is implemented and passed; cap-128 strict
 `1e-6` convergence requires a larger GMRES budget than Scope P used.
-Scope R fair-memory/cap-256 Barnase gate is implemented; cap-128 remains
-converged and fast, but process memory is high and cap-256 is not
-promotion-ready.
+Scope R fair-memory/cap-256 Barnase gate is implemented. Its original
+memory-regression conclusion is stale after Scope S: hidden FMM/M2L no longer
+builds unused legacy cached tree-interaction lists. The refreshed full Scope R
+gate keeps cap-128 converged, fast, and memory-light; cap-256 remains not
+promotion-ready because both direct and FMM hit the current `240`
+iteration/status gate. Scope T Barnase cap-256 convergence sweep is
+implemented and classifies the remaining blocker as `restart_limited`.
 
 Rationale:
 
@@ -6106,16 +6110,65 @@ Rationale:
   `audit_rel=0.00267975`, `speedup=7.337`; `restart=64` converged in `128`
   iterations with `fmm_true_residual=1.27442e-8` and `speedup=7.299`. Scope Q
   final class is `strict_converged`.
-- Scope R adds fair process-level memory measurement and cap-256 stress for
-  bounded Barnase using the Scope Q preset. Cap-128 repeated strict convergence
+- Scope S fixes the Scope R process-memory regression by reusing the analytical
+  FMM/M2L context and avoiding unused legacy cached tree-interaction lists in
+  the hidden FMM path. The refreshed full Scope R run uses the Scope Q preset
+  (`max_iter=240`, `restart=64`, `1e-6`). Cap-128 repeated strict convergence
   three times with zero FMM energy spread, `energy_delta_abs=1.718162`,
-  `audit_rel=0.00267974`, and FMM speedups `6.79x..8.21x`. Process peak memory
-  shows the current hidden adapter is heavy: grid around `208 MB`, direct TABI
-  around `16.4 MB`, and FMM/M2L around `528..529 MB`. Cap-256 did not converge
-  at `240` iterations (`direct_true_residual=0.0140401`,
-  `fmm_true_residual=0.0131365`); FMM remained audit-clean and fast but peaked
-  at `1500.9 MB`, about `67x` direct. Scope R final class is
-  `memory_regression`.
+  `audit_rel=0.00267974`, and FMM speedups `9.43x..11.66x`. Process peak memory
+  is now close to direct TABI: grid around `208 MB`, direct TABI around
+  `16.43..16.47 MB`, and FMM/M2L around `18.65..18.67 MB`. Cap-256 no longer
+  shows memory blow-up (`27 MB` FMM peak), but direct and FMM both reached the
+  `240` iteration limit without `status=ok` (`direct_true_residual=0.0140401`,
+  `fmm_true_residual=0.0131365`). FMM remained audit-clean and fast
+  (`speedup=17.17x`). Refreshed Scope R final class is
+  `cap128_ready_cap256_not_promotion_ready`.
+- Scope T diagnoses the refreshed Scope R cap-256 convergence/status blocker.
+  Baseline `240/r64/1e-6` reproduced the non-converged state
+  (`direct_true_residual=0.0140401`, `fmm_true_residual=0.0131365`) while
+  staying audit-clean and fast (`audit_rel=0.0062981`, `speedup=17.22x`).
+  Raising iteration count at restart `64` improved slowly
+  (`360/r64=0.00919207`, `480/r64=0.00640712`), but larger restart produced the
+  main residual drop (`480/r96=0.00111163`, `480/r128=0.00147099`). The best
+  row `720/r128/1e-6` reached `fmm_true_residual=0.000185057`, direct
+  verification `direct_true_residual=0.000194446`,
+  `energy_delta_abs=7.33137`, `audit_rel=0.00685148`, and `speedup=19.92x`.
+  Scope T final class is `restart_limited`.
+- Scope U implements the first FMM-native preconditioner slice. Hidden
+  `-pbe-tabi-precond=fmm-block-jacobi` builds local coupled JCP blocks from
+  `FmmM2lAnalyticContext` panel groups and does not rebuild legacy
+  `TreeWorkspace` interactions solely for preconditioning. The full Barnase
+  gate keeps cap-128 strict (`true_residual=1.41048e-8`,
+  `energy_delta_abs=1.718147`, `audit_rel=0.00267974`, `speedup=10.07x`,
+  `peak_working_set=23.73 MB`). Cap-256 remains not promotion-ready but the
+  native block preconditioner improves the long-budget residual:
+  `480/r128/1e-6` improves from diagonal `0.00147099` to block `0.000852217`
+  with clean sampled audit (`0.00686342`) and modest memory (`44.98 MB`).
+  Direct verification timed out for the longer cap-256 rows.
+- Scope V opens larger block caps for the hidden FMM-native preconditioner only.
+  Parser behavior is now split: `fmm-block-jacobi` accepts caps `8..128`, while
+  legacy `block` and `block-budgeted` remain capped at `32`. Quick Barnase
+  cap-128 probes passed parser validation and strict convergence for caps
+  `32/64/128`. Full Barnase cap-256 shows cap-only tuning is not the missing
+  piece: at `480/r128/1e-6`, cap `32` residual is `0.000852217`, while caps
+  `64/128` are both `0.000958293`; at `720/r128/1e-6`, cap `32` is
+  `0.000213074`, while caps `64/128` are both `0.000230641`. Cap `64/128`
+  remain audit-clean and memory-light, but do not improve convergence. Cap
+  `128` matches cap `64` because current FMM tree leaves are size `64`.
+- Scope W adds hidden `-pbe-tabi-precond=fmm-overlap-schwarz`, a Restricted
+  Additive-Schwarz preconditioner built from FMM `near_sources`. It factors
+  owned plus halo panels but writes back owned panels only. Quick Barnase
+  cap-128 passed parser, telemetry, sampled audit, and strict convergence:
+  overlap `0` reached `true_residual=1.41048e-8`, `audit_rel=0.00269123`,
+  `speedup=11.89x`, peak memory `23.83 MB`; overlap `32` improved residual to
+  `3.06488e-9` with `speedup=13.11x`, peak memory `44.61 MB`; overlap `64`
+  reached `5.90696e-9`, `speedup=11.91x`, peak memory `80.09 MB`. Full
+  Barnase cap-256 Scope W is a no-win: at `480/r128/1e-6`, baseline
+  `fmm-block-jacobi` cap `32` reached `0.000852217`, while overlap `32/64`
+  worsened to `0.00109664` and `0.00116147`; at `720/r128/1e-6`, baseline
+  reached `0.000213074`, while overlap `32/64` worsened to `0.000239418` and
+  `0.000344171`. Overlap `128` fell back to diagonal because of the memory
+  budget, so it is not a valid Schwarz win.
 
 Decision:
 
@@ -6125,7 +6178,66 @@ Decision:
   size produced about `6133` panels and a costly direct baseline. The earlier
   `512` atom cap remains useful as a manual stress test, not as the default
   smoke.
-- Scope O and Scope R still block public exposure. Scope Q fixed bounded
-  Barnase cap-128 convergence, but Scope R shows cap-256 and memory footprint
-  are now the limiting issues. Next work should reduce hidden FMM/M2L memory
-  before another promotion-readiness gate.
+- Scope X adds hidden `-pbe-tabi-precond=fmm-nearfield-ilu0`, a sparse
+  near-field ILU(0) preconditioner over the FMM near-source graph. It uses a
+  deterministic per-panel neighbor graph, sparse coupled `2x2` BSR storage,
+  ILU(0) with no fill beyond near-source sparsity, and hidden telemetry for nnz
+  blocks, average/max degree, neighbor cap, drop tolerance, setup/apply timing,
+  and budget/factor fallback labels.
+- Scope X.1 verifies sparse near-field ILU on bounded Barnase cap-256. The
+  FMM/ILU candidate reaches strict residual in `128` iterations; cap `64` is
+  the preferred row with `true_residual=5.64662e-15`, audit `0.00684539`, peak
+  working set `61.58 MB`, and speedup `20.61x` versus direct. Direct TABI
+  verification completed but did not converge strictly at the same `720/r128`
+  budget (`direct_true_residual=0.000194446`), leaving Scope X.1 classified as
+  `strict_fmm_pending_direct`. The direct/FMM energy delta was `4.55179 kJ/mol`,
+  inside tolerance, but the non-converged oracle blocks promotion.
+- Scope Y implements the controlled TABI treecode default. `-pbe=grid` remains
+  the production PBE default, but users who explicitly choose
+  `-pbe=tabi -pbe-tabi-sum=treecode` now get analytical FMM/M2L plus sparse
+  near-field ILU(0) by default. The resolver maps `-pbe-tabi-fmm-m2l=auto` to
+  `single-matvec-analytic` on the coupled JCP treecode path, maps
+  `-pbe-tabi-precond=auto` to `fmm-nearfield-ilu0`, and uses ILU neighbor cap
+  `64`. `-pbe-tabi-fmm-m2l=off` remains the legacy treecode escape hatch, and
+  explicit preconditioner overrides are preserved.
+- Scope Z5A adds the preconditioner money-plot harness for the prospective
+  TITAN-FAGBI paper. It compares local block-style preconditioners with sparse
+  near-field ILU(0), exports residual traces and an SVG convergence plot, and
+  first validated the machinery on Barnase cap-128. The quick cap-128 run was
+  `harness_ready_but_no_contrast`: Block-Jacobi and sparse ILU(0) both
+  converged strictly.
+- Scope Z5B completes the denser Barnase cap-256 scientific gate. The required
+  Block-Diagonal/FMM Block-Jacobi row stalled at `true_residual=2.13074e-4`
+  after 720 iterations, while sparse near-field ILU(0) reached
+  `true_residual=5.64662e-15` after 128 iterations with audit
+  `tree_vs_direct_matvec_rel=0.00684539`. The decision is `money_plot_pass`.
+- Scope Z5C extends this into a multi-fixture repeatability/generalization
+  matrix. Barnase cap-256 repeated three times with the same contrast:
+  Block-Jacobi stalled at `2.13074e-4`, sparse ILU(0) reached
+  `5.64662e-15`, and the residual ratio was `3.77e10`. The sampled
+  `research-medium`, `research-alt`, and gated `research-large` cap-256 rows
+  did not reproduce the collapse because Block-Jacobi also reached strict
+  residual in 128 iterations. Z5C decision: `barnase_only_money_plot`.
+- Scope Z1A implements the FAGBI paper-parity validation harness. It compares
+  `grid`, TABI direct, default TABI treecode FMM/M2L+ILU0, and FMM/M2L with
+  Block-Jacobi on analytic Born/Kirkwood rows and sampled protein rows. The
+  first full gate produced `z1a_accuracy_gap`: Barnase, research-medium, and
+  research-alt cap-128 passed the direct-reference energy and sampled-audit
+  checks, but analytic Born and off-center Kirkwood rows at surface point
+  counts 8, 12, and 24 exceeded the oracle error thresholds.
+- Scope Z1B replaces the aliased `8/12/24` interpretation with actual
+  icosphere panel levels `20/80/320/1280` and compares direct TABI
+  `centroid`, `analytic_singular`, and `duffy_adaptive` at salt `0.0/0.15 M`.
+  The full 48-row gate completed without fallback and classified
+  `z1b_mesh_dominant`. At zero salt the modes were identical; at `0.15 M`
+  non-centroid gains were largest on coarse geometry and diminished with mesh
+  refinement. The next scientific gate is therefore surface discretization
+  and resolution, not unconditional FMM-Duffy promotion.
+- Scope O and refreshed Scope R still block grid-default promotion. Scope Q
+  fixed bounded Barnase cap-128 convergence, Scope S removed the hidden
+  FMM/M2L memory regression, Scope U/V/W established that dense block and
+  overlap preconditioners are insufficient for cap-256, Scope X.1 selected
+  near-field ILU, and Scope Y makes that engine the default only inside explicit
+  TABI treecode runs. Keep `-pbe=grid` as production default until
+  repeatability, broader cap-256 fixtures, and verification policy are all
+  demonstrated.

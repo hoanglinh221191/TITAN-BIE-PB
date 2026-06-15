@@ -1,4 +1,5 @@
 #include "tabi/tabi_fmm_m2l_prototype.h"
+#include "titan_executor.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -6,11 +7,14 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
 using titan::tabi::fmm_m2l::KernelKind;
+using titan::tabi::fmm_m2l::FmmM2lAnalyticContext;
 using titan::tabi::fmm_m2l::JcpChannelPrototypeMetrics;
+using titan::tabi::fmm_m2l::JcpAnalyticOperatorResult;
 using titan::tabi::fmm_m2l::JcpDerivativeBridgeMetrics;
 using titan::tabi::fmm_m2l::JcpK1BridgeMetrics;
 using titan::tabi::fmm_m2l::PrototypeConfig;
@@ -19,6 +23,7 @@ using titan::tabi::fmm_m2l::classify_scope_a_decision;
 using titan::tabi::fmm_m2l::classify_scope_d_decision;
 using titan::tabi::fmm_m2l::classify_scope_e_decision;
 using titan::tabi::fmm_m2l::classify_scope_f_decision;
+using titan::tabi::fmm_m2l::evaluate_jcp_offline_operator_analytic;
 using titan::tabi::fmm_m2l::kernel_kind_name;
 using titan::tabi::fmm_m2l::make_mini_protein_like_point_cloud;
 using titan::tabi::fmm_m2l::make_tabi_panel_like_fixture;
@@ -44,6 +49,20 @@ void expect_close(double lhs, double rhs, double tol, const std::string &message
   if (std::abs(lhs - rhs) > tol) {
     fail(message + " lhs=" + std::to_string(lhs) + " rhs=" + std::to_string(rhs));
   }
+}
+
+double relative_l2(const std::vector<double> &a, const std::vector<double> &b) {
+  if (a.size() != b.size()) {
+    fail("relative_l2 size mismatch");
+  }
+  double err2 = 0.0;
+  double ref2 = 0.0;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    const double err = a[i] - b[i];
+    err2 += err * err;
+    ref2 += a[i] * a[i];
+  }
+  return std::sqrt(err2 / std::max(ref2, 1.0e-30));
 }
 
 KernelKind parse_kernel(const std::string &value) {
@@ -406,6 +425,52 @@ void run_smoke_tests() {
   expect(deriv.far_pairs > 0, "JCP derivative bridge must report far work");
   expect(deriv.aggregate_rel_rms_error < 0.2,
          "JCP derivative bridge aggregate approximation is unexpectedly poor");
+
+  PrototypeConfig ctx_cfg = panel_cfg;
+  ctx_cfg.kernel = KernelKind::Yukawa;
+  ctx_cfg.kappa = 0.18;
+  ctx_cfg.max_leaf_size = 32;
+  ctx_cfg.separation_theta = 0.65;
+  ctx_cfg.threads = 4;
+  const auto ctx_panels = make_tabi_panel_like_fixture(192, 101);
+  std::vector<double> phi(ctx_panels.size(), 0.0);
+  std::vector<double> phin(ctx_panels.size(), 0.0);
+  for (std::size_t i = 0; i < ctx_panels.size(); ++i) {
+    const double t = static_cast<double>(i + 1);
+    phi[i] = 0.35 * std::cos(0.021 * t) + 0.15 * ctx_panels[i].nx;
+    phin[i] = 0.42 * std::sin(0.017 * t) + 0.10 * ctx_panels[i].nz;
+  }
+  TitanExecutor one_worker(1);
+  TitanExecutor four_workers(4);
+  const JcpAnalyticOperatorResult one_shot =
+      evaluate_jcp_offline_operator_analytic(ctx_cfg, ctx_panels, phi, phin,
+                                             0.025, ctx_cfg.kappa, one_worker);
+  FmmM2lAnalyticContext context(ctx_cfg, ctx_panels, 0.025, ctx_cfg.kappa);
+  expect(context.matches(ctx_cfg, ctx_panels.size(), 0.025, ctx_cfg.kappa),
+         "FMM/M2L context must match its construction parameters");
+  expect(context.context_nodes() > 0, "FMM/M2L context must cache tree nodes");
+  expect(context.context_work_items() > 0,
+         "FMM/M2L context must cache interaction work");
+  const JcpAnalyticOperatorResult cached = context.apply(phi, phin, four_workers);
+  expect(cached.finite_outputs, "cached FMM/M2L apply outputs must be finite");
+  expect(cached.near_pairs == one_shot.near_pairs,
+         "cached FMM/M2L near pair count must match one-shot");
+  expect(cached.far_pairs == one_shot.far_pairs,
+         "cached FMM/M2L far pair count must match one-shot");
+  expect(relative_l2(one_shot.phi, cached.phi) <= 1.0e-12,
+         "cached FMM/M2L phi must match one-shot");
+  expect(relative_l2(one_shot.phin, cached.phin) <= 1.0e-12,
+         "cached FMM/M2L phin must match one-shot");
+  for (std::size_t i = 0; i < phi.size(); ++i) {
+    phi[i] += 0.01 * std::sin(0.031 * static_cast<double>(i + 1));
+    phin[i] -= 0.01 * std::cos(0.027 * static_cast<double>(i + 1));
+  }
+  const JcpAnalyticOperatorResult cached_second =
+      context.apply(phi, phin, four_workers);
+  expect(cached_second.finite_outputs,
+         "reused FMM/M2L context outputs must stay finite");
+  expect(cached_second.context_nodes == context.context_nodes(),
+         "reused FMM/M2L context must report stable node count");
 }
 
 } // namespace

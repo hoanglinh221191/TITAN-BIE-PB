@@ -1,0 +1,16 @@
+# TITAN FMM/M2L Scope V Block Cap Sweep Report
+
+mode: quick
+decision: strict_converged_verified
+
+Rows:
+cap128_240_r64_1e-6 direct cap=0 status=ok residual=1.62414E-08 audit=0 speedup=1 mem_ratio=NaN precond=diagonal class=direct_reference
+cap128_240_r64_1e-6 fmm_block_jacobi cap=32 status=ok residual=1.41048E-08 audit=0.00269123 speedup=10.9375891192278 mem_ratio=1 precond=fmm_block_jacobi class=strict_converged_verified
+cap128_240_r64_1e-6 fmm_block_jacobi cap=64 status=ok residual=1.29783E-08 audit=0.00269123 speedup=16.8916027017169 mem_ratio=1.13987949845302 precond=fmm_block_jacobi class=strict_converged_verified
+cap128_240_r64_1e-6 fmm_block_jacobi cap=128 status=ok residual=1.29783E-08 audit=0.00269123 speedup=19.5083301379618 mem_ratio=1.14248493730663 precond=fmm_block_jacobi class=strict_converged_verified
+
+Notes:
+- FMM/M2L remains hidden and grid remains the production default.
+- Legacy block and block-budgeted preconditioners remain capped at 32 panels.
+- fmm-block-jacobi cap 64/128 is an experimental convergence diagnostic.
+- With the current tree leaf size 64, cap 128 cannot exceed the leaf-local block span and is expected to match cap 64 when leaves are full.

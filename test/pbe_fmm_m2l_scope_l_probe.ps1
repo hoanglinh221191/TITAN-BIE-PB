@@ -36,6 +36,7 @@ $ExePath = Join-Path $WorkRoot 'titan_fmm_m2l_scope_l_probe.exe'
 $Sources = @(
     'test\titan_fmm_m2l_scope_l_probe.cpp',
     'src\tabi\tabi_fmm_m2l_prototype.cpp',
+    'src\tabi\tabi_fmm_m2l_preconditioner.cpp',
     'src\tabi\tabi_solver.cpp',
     'src\tabi\tabi_surface.cpp',
     'src\titan_surface.cpp',

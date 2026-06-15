@@ -7349,6 +7349,9 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_preconditioner_requested,tabi_preconditioner_effective,"
            "tabi_preconditioner_block_near,"
            "tabi_preconditioner_block_panel_cap,"
+           "tabi_preconditioner_overlap_panel_cap,"
+           "tabi_preconditioner_ilu_neighbor_cap,"
+           "tabi_preconditioner_ilu_drop_tol,"
            "tabi_preconditioner_memory_budget_bytes,"
            "tabi_preconditioner_estimated_bytes,"
            "tabi_preconditioner_valid_blocks,"
@@ -7360,6 +7363,9 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_preconditioner_setup_seconds,"
            "tabi_preconditioner_apply_seconds,"
            "tabi_preconditioner_apply_calls,"
+           "tabi_preconditioner_sparse_nnz_blocks,"
+           "tabi_preconditioner_sparse_avg_degree,"
+           "tabi_preconditioner_sparse_max_degree,"
            "tabi_preconditioner_coarse_aggregate_cap,"
            "tabi_preconditioner_coarse_aggregates,"
            "tabi_preconditioner_coarse_dimension,"
@@ -8022,6 +8028,9 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << csv_escape(result.tabi_preconditioner_effective) << ','
               << csv_escape(result.tabi_preconditioner_block_near) << ','
               << result.tabi_preconditioner_block_panel_cap << ','
+              << result.tabi_preconditioner_overlap_panel_cap << ','
+              << result.tabi_preconditioner_ilu_neighbor_cap << ','
+              << result.tabi_preconditioner_ilu_drop_tol << ','
               << result.tabi_preconditioner_memory_budget_bytes << ','
               << result.tabi_preconditioner_estimated_bytes << ','
               << result.tabi_preconditioner_valid_blocks << ','
@@ -8033,6 +8042,9 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << seconds(result.tabi_preconditioner_setup_ms) << ','
               << seconds(result.tabi_preconditioner_apply_ms) << ','
               << result.tabi_preconditioner_apply_calls << ','
+              << result.tabi_preconditioner_sparse_nnz_blocks << ','
+              << result.tabi_preconditioner_sparse_avg_degree << ','
+              << result.tabi_preconditioner_sparse_max_degree << ','
               << result.tabi_preconditioner_coarse_aggregate_cap << ','
               << result.tabi_preconditioner_coarse_aggregates << ','
               << result.tabi_preconditioner_coarse_dimension << ','
@@ -8512,7 +8524,9 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "nonmanifold_edges,formulation,energy_projection,fallback_used,"
            "preconditioner_requested,preconditioner_effective,"
            "preconditioner_block_near,"
-           "preconditioner_block_panel_cap,preconditioner_memory_budget_bytes,"
+           "preconditioner_block_panel_cap,preconditioner_overlap_panel_cap,"
+           "preconditioner_ilu_neighbor_cap,preconditioner_ilu_drop_tol,"
+           "preconditioner_memory_budget_bytes,"
            "preconditioner_estimated_bytes,preconditioner_valid_blocks,"
            "preconditioner_valid_panels,preconditioner_ill_conditioned_blocks,"
            "preconditioner_quality_rejected_blocks,"
@@ -8520,6 +8534,9 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "preconditioner_quality_status,"
            "preconditioner_setup_seconds,preconditioner_apply_seconds,"
            "preconditioner_apply_calls,"
+           "preconditioner_sparse_nnz_blocks,"
+           "preconditioner_sparse_avg_degree,"
+           "preconditioner_sparse_max_degree,"
            "preconditioner_coarse_aggregate_cap,preconditioner_coarse_aggregates,"
            "preconditioner_coarse_dimension,preconditioner_coarse_base,"
            "preconditioner_coarse_matrix_bytes,preconditioner_coarse_pivot_ratio,"
@@ -9078,6 +9095,9 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << csv_escape(result.tabi_preconditioner_effective) << ','
       << csv_escape(result.tabi_preconditioner_block_near) << ','
       << result.tabi_preconditioner_block_panel_cap << ','
+      << result.tabi_preconditioner_overlap_panel_cap << ','
+      << result.tabi_preconditioner_ilu_neighbor_cap << ','
+      << result.tabi_preconditioner_ilu_drop_tol << ','
       << result.tabi_preconditioner_memory_budget_bytes << ','
       << result.tabi_preconditioner_estimated_bytes << ','
       << result.tabi_preconditioner_valid_blocks << ','
@@ -9089,6 +9109,9 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << seconds(result.tabi_preconditioner_setup_ms) << ','
       << seconds(result.tabi_preconditioner_apply_ms) << ','
       << result.tabi_preconditioner_apply_calls << ','
+      << result.tabi_preconditioner_sparse_nnz_blocks << ','
+      << result.tabi_preconditioner_sparse_avg_degree << ','
+      << result.tabi_preconditioner_sparse_max_degree << ','
       << result.tabi_preconditioner_coarse_aggregate_cap << ','
       << result.tabi_preconditioner_coarse_aggregates << ','
       << result.tabi_preconditioner_coarse_dimension << ','
@@ -11596,6 +11619,11 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   options.preconditioner = args_.tabi_precond;
   options.preconditioner_block_near = args_.tabi_precond_block_near;
   options.preconditioner_block_panel_cap = args_.tabi_precond_block_panel_cap;
+  options.preconditioner_overlap_panel_cap =
+      args_.tabi_precond_overlap_panel_cap;
+  options.preconditioner_ilu_neighbor_cap =
+      args_.tabi_precond_ilu_neighbor_cap;
+  options.preconditioner_ilu_drop_tol = args_.tabi_precond_ilu_drop_tol;
   options.preconditioner_memory_budget_mb = args_.tabi_precond_memory_budget_mb;
   options.preconditioner_coarse_aggregate_cap =
       args_.tabi_precond_coarse_aggregate_cap;
@@ -12453,6 +12481,11 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_preconditioner_block_near = tabi.preconditioner_block_near;
   solve.tabi_preconditioner_block_panel_cap =
       tabi.preconditioner_block_panel_cap;
+  solve.tabi_preconditioner_overlap_panel_cap =
+      tabi.preconditioner_overlap_panel_cap;
+  solve.tabi_preconditioner_ilu_neighbor_cap =
+      tabi.preconditioner_ilu_neighbor_cap;
+  solve.tabi_preconditioner_ilu_drop_tol = tabi.preconditioner_ilu_drop_tol;
   solve.tabi_preconditioner_memory_budget_bytes =
       tabi.preconditioner_memory_budget_bytes;
   solve.tabi_preconditioner_estimated_bytes =
@@ -12470,6 +12503,12 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_preconditioner_setup_ms = tabi.preconditioner_setup_ms;
   solve.tabi_preconditioner_apply_ms = tabi.preconditioner_apply_ms;
   solve.tabi_preconditioner_apply_calls = tabi.preconditioner_apply_calls;
+  solve.tabi_preconditioner_sparse_nnz_blocks =
+      tabi.preconditioner_sparse_nnz_blocks;
+  solve.tabi_preconditioner_sparse_avg_degree =
+      tabi.preconditioner_sparse_avg_degree;
+  solve.tabi_preconditioner_sparse_max_degree =
+      tabi.preconditioner_sparse_max_degree;
   solve.tabi_preconditioner_coarse_aggregate_cap =
       tabi.preconditioner_coarse_aggregate_cap;
   solve.tabi_preconditioner_coarse_aggregates =
@@ -13564,6 +13603,12 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_preconditioner_block_near;
     result.tabi_preconditioner_block_panel_cap =
         tabi_solve.tabi_preconditioner_block_panel_cap;
+    result.tabi_preconditioner_overlap_panel_cap =
+        tabi_solve.tabi_preconditioner_overlap_panel_cap;
+    result.tabi_preconditioner_ilu_neighbor_cap =
+        tabi_solve.tabi_preconditioner_ilu_neighbor_cap;
+    result.tabi_preconditioner_ilu_drop_tol =
+        tabi_solve.tabi_preconditioner_ilu_drop_tol;
     result.tabi_preconditioner_memory_budget_bytes =
         tabi_solve.tabi_preconditioner_memory_budget_bytes;
     result.tabi_preconditioner_estimated_bytes =
@@ -13586,6 +13631,12 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_preconditioner_apply_ms;
     result.tabi_preconditioner_apply_calls =
         tabi_solve.tabi_preconditioner_apply_calls;
+    result.tabi_preconditioner_sparse_nnz_blocks =
+        tabi_solve.tabi_preconditioner_sparse_nnz_blocks;
+    result.tabi_preconditioner_sparse_avg_degree =
+        tabi_solve.tabi_preconditioner_sparse_avg_degree;
+    result.tabi_preconditioner_sparse_max_degree =
+        tabi_solve.tabi_preconditioner_sparse_max_degree;
     result.tabi_preconditioner_coarse_aggregate_cap =
         tabi_solve.tabi_preconditioner_coarse_aggregate_cap;
     result.tabi_preconditioner_coarse_aggregates =

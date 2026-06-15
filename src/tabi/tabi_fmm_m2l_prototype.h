@@ -162,6 +162,12 @@ struct PrototypePanel {
   double scalar_density = 1.0;
 };
 
+struct FmmM2lOverlapPanelGroup {
+  std::vector<std::size_t> owned_panels;
+  std::vector<std::size_t> factor_panels;
+  std::size_t halo_count{0};
+};
+
 class FmmM2lAnalyticContext {
 public:
   FmmM2lAnalyticContext(const PrototypeConfig &config,
@@ -183,6 +189,13 @@ public:
   [[nodiscard]] std::size_t context_nodes() const noexcept;
   [[nodiscard]] std::size_t context_work_items() const noexcept;
   [[nodiscard]] double setup_seconds() const noexcept;
+  [[nodiscard]] std::vector<std::vector<std::size_t>>
+  block_panel_ids(std::size_t max_block_size) const;
+  [[nodiscard]] std::vector<FmmM2lOverlapPanelGroup>
+  overlap_panel_groups(std::size_t owned_block_size,
+                       std::size_t overlap_panel_cap) const;
+  [[nodiscard]] std::vector<std::vector<std::size_t>>
+  near_panel_graph(std::size_t neighbor_cap) const;
 
   JcpAnalyticOperatorResult apply(const std::vector<double> &phi,
                                   const std::vector<double> &phin,

@@ -25,6 +25,33 @@ function Test-FmmCliFinite([double]$Value) {
         (-not [double]::IsInfinity($Value))
 }
 
+function Convert-FmmCliResidualHistory([string]$History) {
+    $rows = New-Object System.Collections.Generic.List[object]
+    if ([string]::IsNullOrWhiteSpace($History)) {
+        return @()
+    }
+    $tokens = @($History -split '[;| ]+' | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_)
+    })
+    $iteration = 0
+    foreach ($token in $tokens) {
+        $valueText = $token
+        if ($token -match '^[0-9]+[:=](.+)$') {
+            $iteration = [int]($token -replace '[:=].+$', '')
+            $valueText = $Matches[1]
+        }
+        $value = Convert-FmmCliDouble $valueText
+        if (Test-FmmCliFinite $value) {
+            $rows.Add([pscustomobject]@{
+                iteration = $iteration
+                residual = $value
+            }) | Out-Null
+            $iteration += 1
+        }
+    }
+    return $rows.ToArray()
+}
+
 function Get-FmmCliSafeName([string]$Text) {
     return ($Text -replace '[^A-Za-z0-9_.-]', '_')
 }
@@ -250,7 +277,12 @@ function Write-FmmCliArgFile(
     [double]$ExternalDielectric,
     [double]$TemperatureK,
     [double]$OpeningTheta = 0.8,
-    [int]$AuditSampleCount = 0
+    [int]$AuditSampleCount = 0,
+    [string]$Preconditioner = 'diagonal',
+    [int]$PreconditionerBlockPanelCap = 32,
+    [int]$PreconditionerOverlapPanelCap = 64,
+    [int]$PreconditionerIluNeighborCap = 192,
+    [double]$PreconditionerIluDropTol = 0.0
 ) {
     $pdbPath = Join-Path $RunDir 'driver.pdb'
     Write-FmmCliDummyPdb $pdbPath
@@ -290,7 +322,11 @@ function Write-FmmCliArgFile(
         "-pbe-tabi-opening-theta=$(& $format $OpeningTheta)",
         '-pbe-tabi-near-integration=centroid',
         '-pbe-tabi-quad-buffer=off',
-        '-pbe-tabi-precond=diagonal',
+        "-pbe-tabi-precond=$Preconditioner",
+        "-pbe-tabi-precond-block-panel-cap=$PreconditionerBlockPanelCap",
+        "-pbe-tabi-precond-overlap-panel-cap=$PreconditionerOverlapPanelCap",
+        "-pbe-tabi-precond-ilu-neighbor-cap=$PreconditionerIluNeighborCap",
+        "-pbe-tabi-precond-ilu-drop-tol=$(& $format $PreconditionerIluDropTol)",
         "-pbe-tabi-gmres-restart=$Restart",
         '-pbe-tabi-true-residual-probe=restart',
         '-pbe-tabi-true-residual-probe-scope=sampled',
@@ -450,6 +486,7 @@ function Read-FmmCliCaseResult(
         iterations = Convert-FmmCliInt64 $profile.iterations
         final_residual = Convert-FmmCliDouble $profile.final_residual
         true_residual = Convert-FmmCliDouble $profile.true_residual_rel
+        residual_history = [string]$profile.residual_history
         energy_kj_mol = Convert-FmmCliDouble $energy.E_rxn_kJmol
         matvec_seconds_avg = Convert-FmmCliDouble $profile.matvec_seconds_avg
         total_seconds = Convert-FmmCliDouble $profile.total_seconds

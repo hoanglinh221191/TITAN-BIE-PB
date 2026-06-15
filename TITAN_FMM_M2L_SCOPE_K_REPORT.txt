@@ -15,8 +15,8 @@ max_iterations: 72
 tolerance: 1E-06
 rows: 2
 scope_k_gate_pass_rows: 2
-row: fixture=research-medium sampled_panels=1024 adapter_residual=5.4590676773e-07 direct_true_residual=2.96990273845e-05 solution_rel_error=3.30454500936e-05 direct_matvec_ms=69.1474944444 adapter_matvec_ms=22.8320722222 speedup=3.02852468981 near_pairs=950272 far_pairs=98304 gate=pass
-row: fixture=research-large sampled_panels=1024 adapter_residual=3.85417787791e-07 direct_true_residual=4.21884160643e-05 solution_rel_error=4.30472433914e-05 direct_matvec_ms=73.47795 adapter_matvec_ms=22.33373 speedup=3.28999902838 near_pairs=954368 far_pairs=94208 gate=pass
+row: fixture=research-medium sampled_panels=1024 adapter_residual=5.4590676773e-07 direct_true_residual=2.96990273845e-05 solution_rel_error=3.30454500936e-05 direct_matvec_ms=73.5078666667 adapter_matvec_ms=28.03855 speedup=2.62167147255 near_pairs=950272 far_pairs=98304 gate=pass
+row: fixture=research-large sampled_panels=1024 adapter_residual=3.85417787791e-07 direct_true_residual=4.21884160643e-05 solution_rel_error=4.30472433914e-05 direct_matvec_ms=87.58748 adapter_matvec_ms=29.74492 speedup=2.94461978718 near_pairs=954368 far_pairs=94208 gate=pass
 
 acceptance: finite outputs, adapter residual <= 1e-6, direct true residual <= 5e-3 on medium or <= 2e-2 on large, solution relative error <= 5e-2, speedup >= 1.2 on medium.
 next_gate: If Scope K passes medium, plan Scope L hidden end-to-end PB solve and energy comparison. If it fails, do not wire production GMRES.

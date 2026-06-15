@@ -1,0 +1,13 @@
+TITAN FMM/M2L Scope X Sparse Near-Field ILU Report
+Decision: strict_verified
+Fixture: barnase sampled cap 128 (128 atoms)
+
+Rows:
+direct_120_r64: stage=quick kind=direct effective=diagonal residual=5.42852E-08 audit=0 nnz=0 improve=1.0645 mem_ratio=0.68565 direct=self dE=0 speedup=1 class=direct_reference
+diag_120_r64: stage=quick kind=fmm-diagonal effective=diagonal residual=4.73167E-08 audit=0.00269123 nnz=0 improve=1.2213 mem_ratio=0.77693 direct=completed dE=1.7182 speedup=8.6509 class=diagonal_reference
+block_120_r64: stage=quick kind=fmm-block effective=fmm_block_jacobi residual=5.77887E-08 audit=0.00269123 nnz=0 improve=1 mem_ratio=1 direct=completed dE=1.7182 speedup=8.4274 class=block_reference
+ilu64_120_r64: stage=quick kind=fmm-ilu effective=fmm_nearfield_ilu0 residual=2.44098E-15 audit=0.00269123 nnz=371328 improve=2.3674E+07 mem_ratio=1.4146 direct=completed dE=1.7183 speedup=9.2555 class=strict_verified
+ilu128_120_r64: stage=quick kind=fmm-ilu effective=fmm_nearfield_ilu0 residual=3.85709E-15 audit=0.00269123 nnz=742656 improve=1.4982E+07 mem_ratio=2.2589 direct=completed dE=1.7183 speedup=8.8876 class=strict_verified
+ilu192_120_r64: stage=quick kind=fmm-ilu effective=fmm_nearfield_ilu0 residual=5.30689E-14 audit=0.00269123 nnz=1113984 improve=1.0889E+06 mem_ratio=3.0942 direct=completed dE=1.7183 speedup=10.988 class=strict_verified
+
+Production default unchanged: -pbe=grid. FMM/M2L sparse ILU is hidden/experimental.

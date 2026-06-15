@@ -16,9 +16,16 @@ namespace TitanPBE::Tabi {
 
 using JcpBlockRange = std::pair<std::size_t, std::size_t>;
 
+struct JcpOwnedFactorPanelGroup {
+  std::vector<std::size_t> owned_panels;
+  std::vector<std::size_t> factor_panels;
+};
+
 struct JcpBlockPreconditioner {
   struct Block {
     std::vector<std::size_t> panels;
+    std::size_t owned_count{0};
+    std::size_t halo_count{0};
     std::vector<double> lu;
     std::vector<int> pivots;
     std::vector<double> scale;
@@ -89,6 +96,32 @@ make_jcp_block_ranges(const TreeWorkspace &tree, std::size_t panel_count,
 std::size_t estimate_jcp_block_preconditioner_bytes(
     const std::vector<JcpBlockRange> &ranges, std::size_t diagonal_size,
     bool coupled) noexcept;
+
+std::size_t estimate_jcp_block_preconditioner_bytes_from_panel_groups(
+    const std::vector<std::vector<std::size_t>> &panel_groups,
+    std::size_t diagonal_size, bool coupled) noexcept;
+
+std::size_t estimate_jcp_block_preconditioner_bytes_from_owned_factor_groups(
+    const std::vector<JcpOwnedFactorPanelGroup> &panel_groups,
+    std::size_t diagonal_size, bool coupled) noexcept;
+
+std::shared_ptr<JcpBlockPreconditioner>
+build_jcp_block_preconditioner_from_panel_groups(
+    const std::vector<Panel> &panels, bool coupled, double eps_ratio,
+    double kappa, double lhs_phi, double lhs_phin,
+    const std::vector<double> &diagonal, const std::string &near_integration,
+    const std::string &quad_buffer, const std::string &block_near_mode,
+    const std::vector<std::vector<std::size_t>> &panel_groups,
+    TitanExecutor &executor);
+
+std::shared_ptr<JcpBlockPreconditioner>
+build_jcp_block_preconditioner_from_owned_factor_groups(
+    const std::vector<Panel> &panels, bool coupled, double eps_ratio,
+    double kappa, double lhs_phi, double lhs_phin,
+    const std::vector<double> &diagonal, const std::string &near_integration,
+    const std::string &quad_buffer, const std::string &block_near_mode,
+    const std::vector<JcpOwnedFactorPanelGroup> &panel_groups,
+    TitanExecutor &executor);
 
 std::shared_ptr<JcpBlockPreconditioner> build_jcp_block_preconditioner(
     const std::vector<Panel> &panels, const TreeWorkspace &tree, bool coupled,

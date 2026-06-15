@@ -7,11 +7,16 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 class TitanExecutor;
+
+namespace titan::tabi::fmm_m2l {
+class FmmM2lAnalyticContext;
+}
 
 namespace TitanPBE::Tabi {
 
@@ -171,6 +176,9 @@ struct Options {
   std::string preconditioner{"auto"};
   std::string preconditioner_block_near{"singular"};
   int preconditioner_block_panel_cap{32};
+  int preconditioner_overlap_panel_cap{64};
+  int preconditioner_ilu_neighbor_cap{192};
+  double preconditioner_ilu_drop_tol{0.0};
   int preconditioner_memory_budget_mb{256};
   int preconditioner_coarse_aggregate_cap{16};
   std::string preconditioner_coarse_base{"diagonal"};
@@ -753,6 +761,9 @@ struct Result {
   std::string preconditioner_effective{"diagonal"};
   std::string preconditioner_block_near{"singular"};
   int preconditioner_block_panel_cap{32};
+  int preconditioner_overlap_panel_cap{64};
+  int preconditioner_ilu_neighbor_cap{192};
+  double preconditioner_ilu_drop_tol{0.0};
   std::size_t preconditioner_memory_budget_bytes{0};
   std::size_t preconditioner_estimated_bytes{0};
   std::size_t preconditioner_valid_blocks{0};
@@ -764,6 +775,9 @@ struct Result {
   double preconditioner_setup_ms{0.0};
   double preconditioner_apply_ms{0.0};
   std::size_t preconditioner_apply_calls{0};
+  std::size_t preconditioner_sparse_nnz_blocks{0};
+  double preconditioner_sparse_avg_degree{0.0};
+  std::size_t preconditioner_sparse_max_degree{0};
   int preconditioner_coarse_aggregate_cap{16};
   std::size_t preconditioner_coarse_aggregates{0};
   std::size_t preconditioner_coarse_dimension{0};
@@ -1511,6 +1525,8 @@ struct TreeWorkspace {
   std::string leaf_block_verify{"off"};
   std::string leaf_mac{"off"};
   std::string fmm_m2l{"off"};
+  mutable std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
+      fmm_m2l_context;
   std::size_t target_batch_size{1};
   std::size_t leaf_pair_min_source_panels{64};
   std::size_t leaf_pair_min_targets{4};
@@ -1716,15 +1732,27 @@ struct FmmM2lSingleMatvecStats {
   std::size_t far_pairs{0};
   double setup_ms{0.0};
   double apply_ms{0.0};
+  bool cached{false};
+  std::size_t context_nodes{0};
+  std::size_t context_work_items{0};
   bool finite_outputs{true};
 };
+
+std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
+ensure_jcp_fmm_m2l_context(
+    const std::vector<Panel> &panels, double eps_ratio, double kappa,
+    std::size_t leaf_size, double opening_theta, TitanExecutor &executor,
+    std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
+        *context_cache = nullptr);
 
 void apply_jcp_fmm_m2l_single_matvec(
     const std::vector<Panel> &panels, const std::vector<double> &unknowns,
     double eps_ratio, double kappa, double lhs_phi, double lhs_phin,
     std::size_t leaf_size, double opening_theta, TitanExecutor &executor,
     std::vector<double> &out, FmmM2lSingleMatvecStats *stats = nullptr,
-    bool coupled = true);
+    bool coupled = true,
+    std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
+        *context_cache = nullptr);
 
 void apply_treecode_operator(const std::vector<Panel> &panels,
                              const std::vector<double> &density,

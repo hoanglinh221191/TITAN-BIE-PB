@@ -932,6 +932,9 @@ private:
     std::string tabi_preconditioner_effective{"off"};
     std::string tabi_preconditioner_block_near{"off"};
     int tabi_preconditioner_block_panel_cap{32};
+    int tabi_preconditioner_overlap_panel_cap{64};
+    int tabi_preconditioner_ilu_neighbor_cap{192};
+    double tabi_preconditioner_ilu_drop_tol{0.0};
     std::size_t tabi_preconditioner_memory_budget_bytes{0};
     std::size_t tabi_preconditioner_estimated_bytes{0};
     std::size_t tabi_preconditioner_valid_blocks{0};
@@ -943,6 +946,9 @@ private:
     double tabi_preconditioner_setup_ms{0.0};
     double tabi_preconditioner_apply_ms{0.0};
     std::size_t tabi_preconditioner_apply_calls{0};
+    std::size_t tabi_preconditioner_sparse_nnz_blocks{0};
+    double tabi_preconditioner_sparse_avg_degree{0.0};
+    std::size_t tabi_preconditioner_sparse_max_degree{0};
     int tabi_preconditioner_coarse_aggregate_cap{16};
     std::size_t tabi_preconditioner_coarse_aggregates{0};
     std::size_t tabi_preconditioner_coarse_dimension{0};

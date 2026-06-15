@@ -1,4 +1,5 @@
 #include "tabi_types.h"
+#include "tabi_fmm_m2l_preconditioner.h"
 #include "tabi_preconditioner.h"
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -539,6 +540,9 @@ public:
             "leaf_block_verify_mismatches,"
             "singular_near_interactions,preconditioner_effective,"
             "preconditioner_block_panel_cap,"
+            "preconditioner_overlap_panel_cap,"
+            "preconditioner_ilu_neighbor_cap,"
+            "preconditioner_ilu_drop_tol,"
             "preconditioner_memory_budget_bytes,"
             "preconditioner_estimated_bytes,"
             "preconditioner_valid_blocks,preconditioner_valid_panels,"
@@ -548,6 +552,9 @@ public:
             "preconditioner_quality_status,"
             "preconditioner_setup_seconds,preconditioner_apply_seconds,"
             "preconditioner_apply_calls,"
+            "preconditioner_sparse_nnz_blocks,"
+            "preconditioner_sparse_avg_degree,"
+            "preconditioner_sparse_max_degree,"
             "preconditioner_coarse_aggregate_cap,"
             "preconditioner_coarse_aggregates,"
             "preconditioner_coarse_dimension,"
@@ -1777,6 +1784,9 @@ public:
          << singular << ','
          << csv_escape_progress(result.preconditioner_effective) << ','
          << result.preconditioner_block_panel_cap << ','
+         << result.preconditioner_overlap_panel_cap << ','
+         << result.preconditioner_ilu_neighbor_cap << ','
+         << result.preconditioner_ilu_drop_tol << ','
          << result.preconditioner_memory_budget_bytes << ','
          << result.preconditioner_estimated_bytes << ','
          << result.preconditioner_valid_blocks << ','
@@ -1788,6 +1798,9 @@ public:
          << result.preconditioner_setup_ms / 1000.0 << ','
          << result.preconditioner_apply_ms / 1000.0 << ','
          << result.preconditioner_apply_calls << ','
+         << result.preconditioner_sparse_nnz_blocks << ','
+         << result.preconditioner_sparse_avg_degree << ','
+         << result.preconditioner_sparse_max_degree << ','
          << result.preconditioner_coarse_aggregate_cap << ','
          << result.preconditioner_coarse_aggregates << ','
          << result.preconditioner_coarse_dimension << ','
@@ -2823,8 +2836,16 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
               options.preconditioner_block_near == "operator-near"
           ? options.preconditioner_block_near
           : std::string("singular");
-  result.preconditioner_block_panel_cap =
-      std::clamp(options.preconditioner_block_panel_cap, 8, 32);
+  const int preconditioner_block_cap_max =
+      result.preconditioner_requested == "fmm-block-jacobi" ? 128 : 32;
+  result.preconditioner_block_panel_cap = std::clamp(
+      options.preconditioner_block_panel_cap, 8, preconditioner_block_cap_max);
+  result.preconditioner_overlap_panel_cap =
+      std::clamp(options.preconditioner_overlap_panel_cap, 0, 128);
+  result.preconditioner_ilu_neighbor_cap =
+      std::clamp(options.preconditioner_ilu_neighbor_cap, 32, 1024);
+  result.preconditioner_ilu_drop_tol =
+      std::clamp(options.preconditioner_ilu_drop_tol, 0.0, 1.0e-2);
   result.preconditioner_memory_budget_bytes =
       static_cast<std::size_t>(
           std::clamp(options.preconditioner_memory_budget_mb, 16, 512)) *
@@ -3393,16 +3414,23 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         result.leaf_pair_max_lookahead;
     jcp_tree_stats.expansion_audit = result.expansion_audit;
     jcp_tree_stats.expansion_audit_channel = result.expansion_audit_channel;
-    const bool needs_jcp_tree =
-        experimental_treecode || result.preconditioner_requested == "block" ||
+    const bool fmm_m2l_single_matvec =
+        experimental_treecode &&
+        options.fmm_m2l == "single-matvec-analytic";
+    const bool preconditioner_needs_jcp_tree =
+        result.preconditioner_requested == "block" ||
         result.preconditioner_requested == "block-budgeted" ||
         result.preconditioner_requested == "coarse-galerkin-probe";
+    const bool needs_jcp_tree = experimental_treecode ||
+                                preconditioner_needs_jcp_tree;
     if (needs_jcp_tree) {
       progress.write("tree_build_start", result, &jcp_tree_stats,
                      matvec_calls, 0, 0, 0.0, "running", true);
       const std::string jcp_tree_interaction_mode =
-          experimental_treecode ? options.interaction_mode
-                                : std::string("onthefly");
+          fmm_m2l_single_matvec && !preconditioner_needs_jcp_tree
+              ? std::string("onthefly")
+              : (experimental_treecode ? options.interaction_mode
+                                       : std::string("onthefly"));
       jcp_tree = build_tree_workspace(
           panels, executor, static_cast<std::size_t>(
                                 std::max(8, options.tree_leaf_size)),
@@ -3802,6 +3830,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     std::function<void(const std::vector<double> &, std::vector<double> &)>
         custom_preconditioner;
     std::shared_ptr<JcpBlockPreconditioner> block_preconditioner;
+    std::shared_ptr<JcpSparseIluPreconditioner> sparse_ilu_preconditioner;
     std::shared_ptr<JcpCoarseGalerkinPreconditioner> coarse_preconditioner;
     double preconditioner_setup_ms = 0.0;
     constexpr std::size_t kBlockPanelPrebuildCap = 12000;
@@ -3810,6 +3839,12 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         result.preconditioner_requested == "block-budgeted";
     const bool coarse_probe =
         result.preconditioner_requested == "coarse-galerkin-probe";
+    const bool fmm_block_jacobi =
+        result.preconditioner_requested == "fmm-block-jacobi";
+    const bool fmm_overlap_schwarz =
+        result.preconditioner_requested == "fmm-overlap-schwarz";
+    const bool fmm_nearfield_ilu0 =
+        result.preconditioner_requested == "fmm-nearfield-ilu0";
     auto block_effective_label = [&](bool budgeted,
                                      bool partial) -> std::string {
       std::string base = budgeted ? "block_budgeted" : "block";
@@ -3821,7 +3856,205 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         base += "_partial";
       return base;
     };
-    if ((legacy_block || budgeted_block) &&
+    if (fmm_block_jacobi || fmm_overlap_schwarz || fmm_nearfield_ilu0) {
+      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls,
+                     0, 0, 0.0, "running", true);
+      if (!experimental_treecode || !fmm_m2l_single_matvec || !coupled) {
+        throw std::invalid_argument(
+            "PBE TABI FMM-native preconditioners require coupled "
+            "JCP treecode with -pbe-tabi-fmm-m2l=single-matvec-analytic");
+      }
+      result.preconditioner_block_near = "operator-near";
+      const auto precond_begin = std::chrono::steady_clock::now();
+      const auto fmm_context = ensure_jcp_fmm_m2l_context(
+          panels, eps_ratio, kappa,
+          static_cast<std::size_t>(std::max(8, options.tree_leaf_size)),
+          options.tree_opening_theta, executor, &jcp_tree.fmm_m2l_context);
+      if (fmm_nearfield_ilu0) {
+        result.preconditioner_estimated_bytes =
+            estimate_fmm_m2l_nearfield_ilu0_bytes(
+                *fmm_context, diagonal.size(), coupled,
+                static_cast<std::size_t>(
+                    result.preconditioner_ilu_neighbor_cap));
+      } else {
+        result.preconditioner_estimated_bytes =
+            fmm_overlap_schwarz
+                ? estimate_fmm_m2l_overlap_schwarz_bytes(
+                      *fmm_context, diagonal.size(), coupled,
+                      static_cast<std::size_t>(
+                          result.preconditioner_block_panel_cap),
+                      static_cast<std::size_t>(
+                          result.preconditioner_overlap_panel_cap))
+                : estimate_fmm_m2l_block_jacobi_bytes(
+                      *fmm_context, diagonal.size(), coupled,
+                      static_cast<std::size_t>(
+                          result.preconditioner_block_panel_cap));
+      }
+      const bool block_budget_cap =
+          result.preconditioner_estimated_bytes >
+          result.preconditioner_memory_budget_bytes;
+      if (!block_budget_cap) {
+        if (fmm_nearfield_ilu0) {
+          sparse_ilu_preconditioner =
+              build_fmm_m2l_nearfield_ilu0_preconditioner(
+                  panels, *fmm_context, coupled, eps_ratio, kappa, lhs_phi,
+                  lhs_phin, diagonal,
+                  static_cast<std::size_t>(
+                      result.preconditioner_ilu_neighbor_cap),
+                  result.preconditioner_ilu_drop_tol, executor,
+                  result.near_integration, result.quad_buffer);
+        } else if (fmm_overlap_schwarz) {
+          block_preconditioner =
+              build_fmm_m2l_overlap_schwarz_preconditioner(
+                  panels, *fmm_context, coupled, eps_ratio, kappa, lhs_phi,
+                  lhs_phin, diagonal,
+                  static_cast<std::size_t>(
+                      result.preconditioner_block_panel_cap),
+                  static_cast<std::size_t>(
+                      result.preconditioner_overlap_panel_cap),
+                  executor, result.near_integration, result.quad_buffer);
+        } else {
+          block_preconditioner = build_fmm_m2l_block_jacobi_preconditioner(
+              panels, *fmm_context, coupled, eps_ratio, kappa, lhs_phi,
+              lhs_phin, diagonal,
+              static_cast<std::size_t>(result.preconditioner_block_panel_cap),
+              executor, result.near_integration, result.quad_buffer);
+        }
+      }
+      preconditioner_setup_ms =
+          elapsed_ms(precond_begin, std::chrono::steady_clock::now());
+      result.preconditioner_setup_ms = preconditioner_setup_ms;
+      if (fmm_nearfield_ilu0) {
+        result.preconditioner_valid_blocks =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->valid_blocks
+                : 0;
+        result.preconditioner_valid_panels =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->valid_panel_count
+                : 0;
+        result.preconditioner_ill_conditioned_blocks =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->ill_conditioned_blocks
+                : 0;
+        result.preconditioner_quality_rejected_blocks = 0;
+        result.preconditioner_quality_probe_max_gain = 0.0;
+        result.preconditioner_quality_status =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->quality_status
+                : std::string("off");
+        result.preconditioner_sparse_nnz_blocks =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->nnz_blocks
+                : 0;
+        result.preconditioner_sparse_avg_degree =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->avg_degree
+                : 0.0;
+        result.preconditioner_sparse_max_degree =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->max_degree
+                : 0;
+      } else {
+        result.preconditioner_valid_blocks =
+            block_preconditioner != nullptr ? block_preconditioner->valid_blocks
+                                            : 0;
+        result.preconditioner_valid_panels =
+            block_preconditioner != nullptr
+                ? block_preconditioner->valid_panel_count
+                : 0;
+        result.preconditioner_ill_conditioned_blocks =
+            block_preconditioner != nullptr
+                ? block_preconditioner->ill_conditioned_blocks
+                : 0;
+        result.preconditioner_quality_rejected_blocks =
+            block_preconditioner != nullptr
+                ? block_preconditioner->quality_rejected_blocks
+                : 0;
+        result.preconditioner_quality_probe_max_gain =
+            block_preconditioner != nullptr
+                ? block_preconditioner->quality_probe_max_gain
+                : 0.0;
+        result.preconditioner_quality_status =
+            block_preconditioner != nullptr
+                ? block_preconditioner->quality_status
+                : std::string("off");
+      }
+      const bool block_ill_conditioned =
+          block_preconditioner != nullptr &&
+          block_preconditioner->ill_conditioned_blocks > 0;
+      const bool ilu_ill_conditioned =
+          sparse_ilu_preconditioner != nullptr &&
+          sparse_ilu_preconditioner->ill_conditioned_blocks > 0;
+      const std::size_t block_panel_threshold =
+          static_cast<std::size_t>(std::ceil(0.70 * static_cast<double>(
+                                               std::max<std::size_t>(
+                                                   1, panels.size()))));
+      if (fmm_nearfield_ilu0 && sparse_ilu_preconditioner != nullptr &&
+          sparse_ilu_preconditioner->valid_panel_count == panels.size() &&
+          !ilu_ill_conditioned && !block_budget_cap) {
+        result.preconditioner_effective = "fmm_nearfield_ilu0";
+        result.memory_bytes += result.preconditioner_estimated_bytes;
+        custom_preconditioner =
+            [sparse_ilu_preconditioner](const std::vector<double> &in,
+                                        std::vector<double> &out) {
+              sparse_ilu_preconditioner->apply(in, out);
+            };
+      } else if (!fmm_nearfield_ilu0 && block_preconditioner != nullptr &&
+          block_preconditioner->valid_blocks > 0 &&
+          block_preconditioner->valid_panel_count >= block_panel_threshold &&
+          !block_budget_cap) {
+        const bool partial_block =
+            block_ill_conditioned ||
+            block_preconditioner->valid_panel_count < panels.size();
+        if (fmm_overlap_schwarz) {
+          result.preconditioner_effective =
+              partial_block ? "fmm_overlap_schwarz_partial"
+                            : "fmm_overlap_schwarz";
+        } else {
+          result.preconditioner_effective =
+              partial_block ? "fmm_block_jacobi_partial" : "fmm_block_jacobi";
+        }
+        result.memory_bytes += result.preconditioner_estimated_bytes;
+        custom_preconditioner =
+            [block_preconditioner, &executor](const std::vector<double> &in,
+                                              std::vector<double> &out) {
+              block_preconditioner->apply_parallel(in, out, executor);
+            };
+      } else if (block_budget_cap) {
+        block_preconditioner.reset();
+        sparse_ilu_preconditioner.reset();
+        if (fmm_nearfield_ilu0) {
+          result.preconditioner_effective = "diagonal_fmm_ilu_budget_cap";
+        } else {
+          result.preconditioner_effective =
+              fmm_overlap_schwarz ? "diagonal_fmm_overlap_budget_cap"
+                                  : "diagonal_fmm_block_budget_cap";
+        }
+      } else if (block_ill_conditioned || ilu_ill_conditioned) {
+        block_preconditioner.reset();
+        sparse_ilu_preconditioner.reset();
+        if (fmm_nearfield_ilu0) {
+          result.preconditioner_effective = "diagonal_fmm_ilu_factor_fallback";
+        } else {
+          result.preconditioner_effective =
+              fmm_overlap_schwarz ? "diagonal_fmm_overlap_ill_conditioned"
+                                  : "diagonal_fmm_block_ill_conditioned";
+        }
+      } else {
+        block_preconditioner.reset();
+        sparse_ilu_preconditioner.reset();
+        if (fmm_nearfield_ilu0) {
+          result.preconditioner_effective = "diagonal_fmm_ilu_fallback";
+        } else {
+          result.preconditioner_effective =
+              fmm_overlap_schwarz ? "diagonal_fmm_overlap_fallback"
+                                  : "diagonal_fmm_block_fallback";
+        }
+      }
+      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0,
+                     0, 0.0, "running", true);
+    } else if ((legacy_block || budgeted_block) &&
         !jcp_tree.nodes.empty() &&
         (!legacy_block || panels.size() <= kBlockPanelPrebuildCap)) {
       progress.write("precond_start", result, &jcp_tree_stats, matvec_calls,

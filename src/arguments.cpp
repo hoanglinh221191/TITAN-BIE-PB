@@ -1298,6 +1298,30 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-tree-preset must be off, stage3u-safe, stage3u-perf, or stage3u-perf2.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.backend == "tabi" && pbe.tabi_sum == "treecode" &&
+        !pbe.tabi_formulation_explicit &&
+        pbe.tabi_formulation == "jcp2013") {
+      pbe.tabi_formulation = "jcp2013-treecode";
+    }
+    const bool scope_y_treecode_default =
+        pbe.backend == "tabi" && pbe.tabi_sum == "treecode" &&
+        pbe.tabi_formulation == "jcp2013-treecode" &&
+        pbe.tabi_tree_preset == "off";
+    if (pbe.tabi_fmm_m2l == "auto") {
+      pbe.tabi_fmm_m2l = scope_y_treecode_default
+                             ? "single-matvec-analytic"
+                             : "off";
+    }
+    if (pbe.tabi_fmm_m2l == "single-matvec-analytic" &&
+        pbe.tabi_precond == "auto") {
+      pbe.tabi_precond = "fmm-nearfield-ilu0";
+      if (!pbe.tabi_precond_ilu_neighbor_cap_explicit) {
+        pbe.tabi_precond_ilu_neighbor_cap = 64;
+      }
+    } else if (pbe.tabi_precond == "fmm-nearfield-ilu0" &&
+               !pbe.tabi_precond_ilu_neighbor_cap_explicit) {
+      pbe.tabi_precond_ilu_neighbor_cap = 64;
+    }
     if (pbe.tabi_geometry != "triangle" &&
         pbe.tabi_geometry != "point-panel") {
       TitanUI::print_error(
@@ -1356,9 +1380,22 @@ int arguments::post_process() {
     if (pbe.tabi_precond != "auto" && pbe.tabi_precond != "none" &&
         pbe.tabi_precond != "diagonal" && pbe.tabi_precond != "block" &&
         pbe.tabi_precond != "block-budgeted" &&
-        pbe.tabi_precond != "coarse-galerkin-probe") {
+        pbe.tabi_precond != "coarse-galerkin-probe" &&
+        pbe.tabi_precond != "fmm-block-jacobi" &&
+        pbe.tabi_precond != "fmm-overlap-schwarz" &&
+        pbe.tabi_precond != "fmm-nearfield-ilu0") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-precond must be auto, none, diagonal, block, block-budgeted, or coarse-galerkin-probe.");
+          "PBE: -pbe-tabi-precond must be auto, none, diagonal, block, block-budgeted, coarse-galerkin-probe, fmm-block-jacobi, fmm-overlap-schwarz, or fmm-nearfield-ilu0.");
+      exit(EXIT_FAILURE);
+    }
+    const bool fmm_native_preconditioner =
+        pbe.tabi_precond == "fmm-block-jacobi" ||
+        pbe.tabi_precond == "fmm-overlap-schwarz" ||
+        pbe.tabi_precond == "fmm-nearfield-ilu0";
+    if (fmm_native_preconditioner &&
+        pbe.tabi_fmm_m2l != "single-matvec-analytic") {
+      TitanUI::print_error(
+          "PBE: FMM-native preconditioners require -pbe-tabi-fmm-m2l=single-matvec-analytic.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_precond_block_near != "singular" &&
@@ -1368,10 +1405,33 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-precond-block-near must be singular, buffer-aware, or operator-near.");
       exit(EXIT_FAILURE);
     }
+    const int max_block_panel_cap =
+        pbe.tabi_precond == "fmm-block-jacobi" ? 128 : 32;
     if (pbe.tabi_precond_block_panel_cap < 8 ||
-        pbe.tabi_precond_block_panel_cap > 32) {
+        pbe.tabi_precond_block_panel_cap > max_block_panel_cap) {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-precond-block-panel-cap must be between 8 and 32.");
+          pbe.tabi_precond == "fmm-block-jacobi"
+              ? "PBE: -pbe-tabi-precond-block-panel-cap must be between 8 and 128 for fmm-block-jacobi."
+              : "PBE: -pbe-tabi-precond-block-panel-cap must be between 8 and 32 for this preconditioner.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_precond_overlap_panel_cap < 0 ||
+        pbe.tabi_precond_overlap_panel_cap > 128) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-precond-overlap-panel-cap must be between 0 and 128.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_precond_ilu_neighbor_cap < 32 ||
+        pbe.tabi_precond_ilu_neighbor_cap > 1024) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-precond-ilu-neighbor-cap must be between 32 and 1024.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(pbe.tabi_precond_ilu_drop_tol) ||
+        pbe.tabi_precond_ilu_drop_tol < 0.0 ||
+        pbe.tabi_precond_ilu_drop_tol > 1.0e-2) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-precond-ilu-drop-tol must be finite and between 0 and 1e-2.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_precond_memory_budget_mb < 16 ||
@@ -1553,10 +1613,11 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-leaf-mac must be off, audit, or on.");
       exit(EXIT_FAILURE);
     }
-    if (pbe.tabi_fmm_m2l != "off" &&
+    if (pbe.tabi_fmm_m2l != "auto" &&
+        pbe.tabi_fmm_m2l != "off" &&
         pbe.tabi_fmm_m2l != "single-matvec-analytic") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-fmm-m2l must be off or single-matvec-analytic.");
+          "PBE: -pbe-tabi-fmm-m2l must be auto, off, or single-matvec-analytic.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_target_batch_size != 1 &&

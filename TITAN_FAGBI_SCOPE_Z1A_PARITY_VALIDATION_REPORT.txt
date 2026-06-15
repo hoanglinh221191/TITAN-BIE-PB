@@ -1,0 +1,26 @@
+TITAN FAGBI Scope Z1A Parity Validation Report
+Decision: z1a_accuracy_gap
+Generated: 2026-06-15T17:57:55
+
+Purpose
+Measure TITAN TABI treecode against FAGBI-style validation axes before implementing Duffy/cubature or adaptive FMM order work.
+
+Key gates
+- Analytic FMM rows compare against Born/Kirkwood oracle energy.
+- Protein FMM rows compare against TABI direct energy and sampled matvec audit.
+- Grid remains the production default; this report does not promote TABI over grid.
+
+Decision counts
+accuracy_fail_rows: 2
+runtime_fail_rows: 0
+blocked_missing_fixture: False
+blocked_profile_schema: False
+
+FMM/ILU0 rows
+born_centered class=analytic_born sp=8 cap=0 status=ok rel=0.116498 audit=7.59851E-17 iters=48 failure=oracle_error_fail
+kirkwood_offcenter class=analytic_kirkwood sp=8 cap=0 status=ok rel=0.14539 audit=1.12123E-16 iters=48 failure=oracle_error_fail
+barnase class=protein sp=8 cap=64 status=ok rel=0.000173631 audit=0.00170759 iters=48 failure=ok
+
+Matrix: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z1a\fagbi_scope_z1a_matrix.csv
+Decision: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z1a\fagbi_scope_z1a_decision.csv
+Plot: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z1a\fagbi_scope_z1a_accuracy_plot.svg
