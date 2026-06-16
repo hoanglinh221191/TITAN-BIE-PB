@@ -574,6 +574,11 @@ struct FrameResult {
   double tabi_surface_quality_normal_radial_dot_min{0.0};
   double tabi_surface_quality_normal_radial_dot_mean{0.0};
   double tabi_surface_quality_centroid_radial_error_max{0.0};
+  double tabi_surface_quality_planar_area_a2{0.0};
+  double tabi_surface_quality_planar_area_rel_error_vs_4piR2{0.0};
+  double tabi_surface_quality_enclosed_volume_a3{0.0};
+  double tabi_surface_quality_enclosed_volume_rel_error_vs_4piR3_over3{0.0};
+  double tabi_surface_quality_triangle_area_cv{0.0};
   std::size_t tabi_mesh_vertices{0};
   std::size_t tabi_mesh_triangles{0};
   std::size_t tabi_boundary_nodes{0};

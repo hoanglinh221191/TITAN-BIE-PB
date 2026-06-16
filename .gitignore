@@ -258,6 +258,15 @@ test/
 !/test/pbe_fagbi_scope_z1b_harness_contract_smoke.ps1
 !/test/pbe_fagbi_scope_z1b_near_field_attribution.ps1
 !/test/pbe_fagbi_validation_helpers.ps1
+!/test/pbe_fagbi_scope_z1c_harness_contract_smoke.ps1
+!/test/pbe_fagbi_scope_z1c_surface_discretization.ps1
+!/TITAN_FMM_M2L_SCOPE_Z1C_SURFACE_DISCRETIZATION_REPORT.txt
+!/test/pbe_fagbi_scope_z1d_harness_contract_smoke.ps1
+!/test/pbe_fagbi_scope_z1d_highres_parser_smoke.ps1
+!/test/pbe_fagbi_scope_z1d_high_resolution_surface.ps1
+!/test/pbe_fagbi_scope_z1d_targeted_missing_row.ps1
+!/TITAN_FMM_M2L_SCOPE_Z1D_HIGH_RESOLUTION_REPORT.txt
+!/TITAN_FMM_M2L_SCOPE_Z1D_TARGETED_VERIFY_REPORT.txt
 !/test/pbe_tabi_leaf_block_scheduler_smoke.ps1
 !/test/pbe_tabi_channel_expansion_audit_smoke.ps1
 !/test/pbe_tabi_channel_estimator_smoke.ps1

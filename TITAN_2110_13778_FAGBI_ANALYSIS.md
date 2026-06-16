@@ -177,6 +177,35 @@ Implementation status:
   demonstrated sole cause.
 - Z1B report:
   `TITAN_FMM_M2L_SCOPE_Z1B_NEAR_FIELD_ATTRIBUTION_REPORT.txt`.
+- Z1C surface-discretization harness implemented:
+  `test/pbe_fagbi_scope_z1c_surface_discretization.ps1`.
+- Z1C full result: `resolution_limited`, with `preferred_mesh=none`. All 32
+  direct TABI rows completed without fallback across centered Born and
+  off-center Kirkwood spheres, salt `0.0/0.15 M`, `icosphere/latlong`, and
+  approximately `80/320/1280/5120` panels. Every finest-mesh transition
+  improved the energy error by at least `1.5x`, while no transition met the
+  operator-plateau pattern. At the finest level, median oracle error was
+  `0.6419%` for icosphere and `0.6755%` for latlong; planar area error was
+  `0.1195%` and `0.1586%`, respectively. The two meshes are therefore a quality
+  tie at this resolution, and the current evidence supports a Z1D refinement
+  study beyond about 5120 panels rather than an immediate collocation rewrite.
+- Z1C report:
+  `TITAN_FMM_M2L_SCOPE_Z1C_SURFACE_DISCRETIZATION_REPORT.txt`.
+- Z1D high-resolution harness implemented:
+  `test/pbe_fagbi_scope_z1d_high_resolution_surface.ps1`.
+- Z1D full result is now `z1d_resolution_converged_after_targeted_verify`. The
+  full matrix first completed seven of eight rows, then Scope Z1D.1 reran the
+  missing off-center Kirkwood `0.15 M` / 20480-panel row with the same direct
+  TABI `analytic_singular` settings and a longer timeout. The targeted row
+  completed in `1750.93 s`, with `0.1374%` oracle error, final residual
+  `6.12512e-15`, and zero near fallbacks. All four 20480-panel rows are now
+  below the 0.5% oracle threshold (`0.3705%`, `0.2682%`, `0.3874%`, and
+  `0.1374%`). Treat high-resolution direct runtime as expensive but no longer
+  a missing-evidence blocker for Z1.
+- Z1D report:
+  `TITAN_FMM_M2L_SCOPE_Z1D_HIGH_RESOLUTION_REPORT.txt`.
+- Z1D.1 targeted report:
+  `TITAN_FMM_M2L_SCOPE_Z1D_TARGETED_VERIFY_REPORT.txt`.
 
 ### Scope Z2 - Duffy/Cubature Near-Field For FMM Path
 
@@ -185,8 +214,11 @@ attribution result and a mesh-resolution gate justify its cost.
 
 Tasks:
 
-- First complete a surface-resolution study beyond 1280 panels or with an
-  explicitly controlled geometric error metric.
+- Z1C completed the controlled geometry study through about 5120 panels and
+  classified the remaining gap as resolution-limited. Z1D/Z1D.1 then verified
+  that all required 20480-panel direct TABI rows cross below 0.5% oracle error.
+  The remaining caveat is runtime cost, not observed surface-convergence
+  accuracy.
 - Remove or narrow the centroid-only restriction for FMM/M2L near-field only
   where `analytic_singular` or Duffy shows measured benefit.
 - Route self/edge/vertex/geometric near pairs through the same Duffy/cubature

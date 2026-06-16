@@ -3188,8 +3188,9 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       build_surface(atoms, options, &result, &executor);
   result.panel_count = panels.size();
   result.boundary_nodes = panels.size();
+  const int surface_point_max = options.highres_surface ? 65536 : 4096;
   result.surface_point_count_requested =
-      std::clamp(options.surface_point_count, 8, 4096);
+      std::clamp(options.surface_point_count, 8, surface_point_max);
   result.panel_density_per_a2 =
       result.surface_area_a2 > 1.0e-12
           ? static_cast<double>(result.panel_count) / result.surface_area_a2

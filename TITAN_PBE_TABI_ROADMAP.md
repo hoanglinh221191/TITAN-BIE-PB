@@ -6233,6 +6233,23 @@ Decision:
   non-centroid gains were largest on coarse geometry and diminished with mesh
   refinement. The next scientific gate is therefore surface discretization
   and resolution, not unconditional FMM-Duffy promotion.
+- Scope Z1C measures direct TABI surface discretization on centered Born and
+  off-center Kirkwood spheres at salt `0.0/0.15 M`, using icosphere and
+  latlong meshes through about 5120 panels. All 32 rows were finite and
+  fallback-free. The decision is `resolution_limited`, with all eight finest
+  transitions improving energy error by at least `1.5x`, zero plateau groups,
+  and no preferred mesh (`0.6419%` vs `0.6755%` median finest oracle error).
+  Plan Z1D for higher resolution before changing the direct operator or FMM
+  near-field policy.
+- Scope Z1D implements the controlled high-resolution gate. It preserves the
+  public `4096` surface-point cap unless `-pbe-tabi-highres-surface=true` is
+  used on direct TABI `-pbe-test-pqr` benchmark rows. The initial full gate was
+  `z1d_runtime_limited`, but Scope Z1D.1 reran the missing Kirkwood `0.15 M`
+  20480-panel row and completed it: `0.1374%` oracle error, `1750.93 s`, final
+  residual `6.12512e-15`, and zero near fallbacks. All required 20480-panel
+  direct TABI rows are now below the 0.5% oracle-error threshold, so Z1D is
+  converged after targeted verification. Keep the runtime cost visible, but do
+  not block Z2/Z3 planning on missing high-resolution evidence.
 - Scope O and refreshed Scope R still block grid-default promotion. Scope Q
   fixed bounded Barnase cap-128 convergence, Scope S removed the hidden
   FMM/M2L memory regression, Scope U/V/W established that dense block and

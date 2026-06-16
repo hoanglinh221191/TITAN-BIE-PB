@@ -1,0 +1,28 @@
+TITAN FMM/M2L Scope Z1C Surface Discretization Report
+Accuracy class: resolution_limited
+Preferred mesh: none
+Mesh comparison: mesh_quality_tie
+Generated: 2026-06-16T00:11:00
+
+Purpose
+Separate surface-resolution and mesh-quality error from direct operator discretization before Scope Z2 near-field integration.
+
+Matrix
+- Fixtures: centered Born and off-center Kirkwood.
+- Backend: TABI Direct; FMM/M2L disabled; analytic_singular near integration.
+- Mesh modes: icosphere and latlong; target panels: 80,320,1280,5120.
+- Salts: 0,0.15 M.
+
+Measured classification
+- Invalid rows: 0.
+- Resolution-limited transitions: 8/8.
+- Operator-plateau transitions: 0/8.
+- Icosphere median finest energy error: 0.00641876897169523.
+- Latlong median finest energy error: 0.00675466543849607.
+
+Next decision
+Plan Scope Z1D with a surface-resolution range beyond the current approximately 5120-panel cap.
+
+Matrix CSV: C:\tmp\elec_vdw-fagbi-z1c\test\tmp\fagbi_scope_z1c\fagbi_scope_z1c_matrix.csv
+Convergence CSV: C:\tmp\elec_vdw-fagbi-z1c\test\tmp\fagbi_scope_z1c\fagbi_scope_z1c_convergence.csv
+SVG: C:\tmp\elec_vdw-fagbi-z1c\test\tmp\fagbi_scope_z1c\fagbi_scope_z1c_geometry_energy_plot.svg

@@ -1344,9 +1344,24 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-derivatives must be analytic or finite-diff-debug.");
       exit(EXIT_FAILURE);
     }
-    if (pbe.tabi_surface_points < 8 || pbe.tabi_surface_points > 4096) {
+    if (pbe.tabi_highres_surface) {
+      const bool direct_test_pqr =
+          pbe.backend == "tabi" && pbe.tabi_sum == "direct" &&
+          !pbe.test_pqr.empty() && pbe.tabi_fmm_m2l == "off";
+      if (!direct_test_pqr) {
+        TitanUI::print_error(
+            "PBE: -pbe-tabi-highres-surface=true is restricted to direct TABI -pbe-test-pqr benchmark runs with FMM/M2L off.");
+        exit(EXIT_FAILURE);
+      }
+    }
+    const int tabi_surface_point_max =
+        pbe.tabi_highres_surface ? 65536 : 4096;
+    if (pbe.tabi_surface_points < 8 ||
+        pbe.tabi_surface_points > tabi_surface_point_max) {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-surface-points must be between 8 and 4096.");
+          pbe.tabi_highres_surface
+              ? "PBE: -pbe-tabi-surface-points must be between 8 and 65536 when -pbe-tabi-highres-surface=true."
+              : "PBE: -pbe-tabi-surface-points must be between 8 and 4096.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_sphere_mesh != "auto" &&

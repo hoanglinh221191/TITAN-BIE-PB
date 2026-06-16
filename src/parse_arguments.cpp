@@ -1381,6 +1381,11 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.tabi_surface_points = stoi(common_value);
       continue;
     }
+    if (consume_bool_option(arg, {"-pbe-tabi-highres-surface",
+                                  "--pbe-tabi-highres-surface"},
+                            pbe.tabi_highres_surface, i)) {
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-tabi-sphere-mesh",
                                    "--pbe-tabi-sphere-mesh"},
                              common_value, i)) {

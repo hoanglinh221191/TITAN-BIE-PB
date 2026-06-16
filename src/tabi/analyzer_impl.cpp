@@ -9422,7 +9422,9 @@ void AnalyzerImpl::write_tabi_surface_quality_header_if_needed() {
            "status,sphere_mesh_mode,panel_count,total_area,"
            "area_rel_error_vs_4piR2,triangle_area_min,triangle_area_mean,"
            "triangle_area_max,triangle_aspect_max,normal_radial_dot_min,"
-           "normal_radial_dot_mean,centroid_radial_error_max\n";
+           "normal_radial_dot_mean,centroid_radial_error_max,"
+           "planar_area,planar_area_rel_error_vs_4piR2,enclosed_volume,"
+           "enclosed_volume_rel_error_vs_4piR3_over3,triangle_area_cv\n";
     tabi_surface_quality_header_written_ = true;
   }
 }
@@ -9445,7 +9447,12 @@ void AnalyzerImpl::append_tabi_surface_quality_row(const FrameResult &result) {
       << result.tabi_surface_quality_triangle_aspect_max << ','
       << result.tabi_surface_quality_normal_radial_dot_min << ','
       << result.tabi_surface_quality_normal_radial_dot_mean << ','
-      << result.tabi_surface_quality_centroid_radial_error_max << '\n';
+      << result.tabi_surface_quality_centroid_radial_error_max << ','
+      << result.tabi_surface_quality_planar_area_a2 << ','
+      << result.tabi_surface_quality_planar_area_rel_error_vs_4piR2 << ','
+      << result.tabi_surface_quality_enclosed_volume_a3 << ','
+      << result.tabi_surface_quality_enclosed_volume_rel_error_vs_4piR3_over3
+      << ',' << result.tabi_surface_quality_triangle_area_cv << '\n';
 }
 
 void AnalyzerImpl::write_memory_profile_header_if_needed() {
@@ -11609,6 +11616,7 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   options.surface_geometry = args_.tabi_geometry;
   options.diagonal_mode = args_.tabi_diagonal;
   options.surface_point_count = args_.tabi_surface_points;
+  options.highres_surface = args_.tabi_highres_surface;
   options.sphere_mesh_mode = args_.tabi_sphere_mesh;
   options.tree_leaf_size = args_.tabi_tree_leaf_size;
   options.tree_opening_theta = args_.tabi_tree_opening_theta;
@@ -12462,6 +12470,16 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
       tabi.surface_quality_normal_radial_dot_mean;
   solve.tabi_surface_quality_centroid_radial_error_max =
       tabi.surface_quality_centroid_radial_error_max;
+  solve.tabi_surface_quality_planar_area_a2 =
+      tabi.surface_quality_planar_area_a2;
+  solve.tabi_surface_quality_planar_area_rel_error_vs_4piR2 =
+      tabi.surface_quality_planar_area_rel_error_vs_4piR2;
+  solve.tabi_surface_quality_enclosed_volume_a3 =
+      tabi.surface_quality_enclosed_volume_a3;
+  solve.tabi_surface_quality_enclosed_volume_rel_error_vs_4piR3_over3 =
+      tabi.surface_quality_enclosed_volume_rel_error_vs_4piR3_over3;
+  solve.tabi_surface_quality_triangle_area_cv =
+      tabi.surface_quality_triangle_area_cv;
   solve.tabi_mesh_vertices = tabi.mesh_vertices;
   solve.tabi_mesh_triangles = tabi.mesh_triangles;
   solve.tabi_boundary_nodes = tabi.boundary_nodes;
@@ -13580,6 +13598,16 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_surface_quality_normal_radial_dot_mean;
     result.tabi_surface_quality_centroid_radial_error_max =
         tabi_solve.tabi_surface_quality_centroid_radial_error_max;
+    result.tabi_surface_quality_planar_area_a2 =
+        tabi_solve.tabi_surface_quality_planar_area_a2;
+    result.tabi_surface_quality_planar_area_rel_error_vs_4piR2 =
+        tabi_solve.tabi_surface_quality_planar_area_rel_error_vs_4piR2;
+    result.tabi_surface_quality_enclosed_volume_a3 =
+        tabi_solve.tabi_surface_quality_enclosed_volume_a3;
+    result.tabi_surface_quality_enclosed_volume_rel_error_vs_4piR3_over3 =
+        tabi_solve.tabi_surface_quality_enclosed_volume_rel_error_vs_4piR3_over3;
+    result.tabi_surface_quality_triangle_area_cv =
+        tabi_solve.tabi_surface_quality_triangle_area_cv;
     result.tabi_mesh_vertices = tabi_solve.tabi_mesh_vertices;
     result.tabi_mesh_triangles = tabi_solve.tabi_mesh_triangles;
     result.tabi_boundary_nodes = tabi_solve.tabi_boundary_nodes;

@@ -48,6 +48,95 @@ function Get-FagbiIcosphereTargetPoints([int]$Level) {
     return [int](20 * [math]::Pow(4, $Level))
 }
 
+function Get-FagbiSurfaceResolution(
+    [ValidateSet('icosphere','latlong')][string]$MeshMode,
+    [ValidateSet(80,320,1280,5120)][int]$TargetPanels
+) {
+    if ($MeshMode -eq 'icosphere') {
+        $requestedPoints = if ($TargetPanels -eq 5120) { 1281 } else { $TargetPanels }
+        return [pscustomobject]@{
+            mesh_mode = $MeshMode
+            target_panels = $TargetPanels
+            requested_points = $requestedPoints
+            expected_panels = $TargetPanels
+        }
+    }
+    $mapping = @{
+        80 = @{ request=16; actual=80 }
+        320 = @{ request=81; actual=360 }
+        1280 = @{ request=289; actual=1224 }
+        5120 = @{ request=1225; actual=5040 }
+    }
+    $entry = $mapping[$TargetPanels]
+    return [pscustomobject]@{
+        mesh_mode = $MeshMode
+        target_panels = $TargetPanels
+        requested_points = [int]$entry.request
+        expected_panels = [int]$entry.actual
+    }
+}
+
+function Get-FagbiZ1cCaseSpecs([switch]$Quick) {
+    $salts = if ($Quick) { @(0.15) } else { @(0.0,0.15) }
+    $targets = if ($Quick) { @(320,1280) } else { @(80,320,1280,5120) }
+    foreach ($fixture in @('born_centered','kirkwood_offcenter')) {
+        foreach ($salt in $salts) {
+            foreach ($meshMode in @('icosphere','latlong')) {
+                foreach ($target in $targets) {
+                    $resolution = Get-FagbiSurfaceResolution `
+                        -MeshMode $meshMode `
+                        -TargetPanels $target
+                    [pscustomobject]@{
+                        fixture = $fixture
+                        salt_M = [double]$salt
+                        mesh_mode = $meshMode
+                        target_panels = [int]$target
+                        requested_points = [int]$resolution.requested_points
+                        expected_panels = [int]$resolution.expected_panels
+                    }
+                }
+            }
+        }
+    }
+}
+
+function Get-FagbiHighresSurfaceResolution(
+    [ValidateSet(5120,20480,81920)][int]$TargetPanels
+) {
+    $mapping = @{
+        5120 = @{ request=1281; actual=5120 }
+        20480 = @{ request=5121; actual=20480 }
+        81920 = @{ request=20481; actual=81920 }
+    }
+    $entry = $mapping[$TargetPanels]
+    return [pscustomobject]@{
+        mesh_mode = 'icosphere'
+        target_panels = $TargetPanels
+        requested_points = [int]$entry.request
+        expected_panels = [int]$entry.actual
+    }
+}
+
+function Get-FagbiZ1dCaseSpecs([switch]$Quick) {
+    $fixtures = if ($Quick) { @('born_centered') } else { @('born_centered','kirkwood_offcenter') }
+    $salts = if ($Quick) { @(0.15) } else { @(0.0,0.15) }
+    foreach ($fixture in $fixtures) {
+        foreach ($salt in $salts) {
+            foreach ($target in @(5120,20480)) {
+                $resolution = Get-FagbiHighresSurfaceResolution -TargetPanels $target
+                [pscustomobject]@{
+                    fixture = $fixture
+                    salt_M = [double]$salt
+                    mesh_mode = 'icosphere'
+                    target_panels = [int]$target
+                    requested_points = [int]$resolution.requested_points
+                    expected_panels = [int]$resolution.expected_panels
+                }
+            }
+        }
+    }
+}
+
 function Get-FagbiDebyeKappaInvA([double]$SaltM, [double]$TemperatureK = 298.15) {
     if ($SaltM -le 0.0) { return 0.0 }
     return 0.3291 * [math]::Sqrt($SaltM) *

@@ -60,21 +60,28 @@ void require_close_rel(const std::string &label, double a, double b,
                              " vs " + std::to_string(b));
 }
 
-TitanPBE::Tabi::Options options() {
+TitanPBE::Tabi::Options options(const std::string &mesh_mode = "latlong",
+                                int surface_points = 96,
+                                bool highres_surface = false) {
   TitanPBE::Tabi::Options opt;
   opt.surface_mode = "vdw";
   opt.surface_geometry = "triangle";
   opt.diagonal_mode = "solid-angle";
   opt.probe_radius = 0.0;
+  opt.sphere_mesh_mode = mesh_mode;
+  opt.surface_point_count = surface_points;
+  opt.highres_surface = highres_surface;
   return opt;
 }
 
 TitanPBE::Tabi::Result build_case(
     const std::string &label,
-    const std::vector<TitanPBE::Tabi::Atom> &atoms) {
+    const std::vector<TitanPBE::Tabi::Atom> &atoms,
+    const std::string &mesh_mode = "latlong", int surface_points = 96) {
   TitanPBE::Tabi::Result result;
   std::vector<TitanPBE::Tabi::Panel> panels =
-      TitanPBE::Tabi::build_surface(atoms, options(), &result);
+      TitanPBE::Tabi::build_surface(atoms, options(mesh_mode, surface_points),
+                                    &result);
   require_true(label + " geometry", result.surface_geometry == "triangle");
   require_true(label + " panel count", !panels.empty());
   require_true(label + " mesh vertices", result.mesh_vertices > 0);
@@ -100,6 +107,102 @@ TitanPBE::Tabi::Result build_case(
   return result;
 }
 
+double panel_face_radial_dot(const TitanPBE::Tabi::Panel &panel,
+                             const TitanPBE::Tabi::Atom &atom) {
+  const double ux = panel.v1x - panel.v0x;
+  const double uy = panel.v1y - panel.v0y;
+  const double uz = panel.v1z - panel.v0z;
+  const double vx = panel.v2x - panel.v0x;
+  const double vy = panel.v2y - panel.v0y;
+  const double vz = panel.v2z - panel.v0z;
+  double nx = uy * vz - uz * vy;
+  double ny = uz * vx - ux * vz;
+  double nz = ux * vy - uy * vx;
+  const double nlen = std::sqrt(nx * nx + ny * ny + nz * nz);
+  const double cx = (panel.v0x + panel.v1x + panel.v2x) / 3.0 - atom.x;
+  const double cy = (panel.v0y + panel.v1y + panel.v2y) / 3.0 - atom.y;
+  const double cz = (panel.v0z + panel.v1z + panel.v2z) / 3.0 - atom.z;
+  const double clen = std::sqrt(cx * cx + cy * cy + cz * cz);
+  double dot = (nx * cx + ny * cy + nz * cz) / (nlen * clen);
+  if (dot < 0.0)
+    dot = -dot;
+  return dot;
+}
+
+double panel_flat_centroid_error(const TitanPBE::Tabi::Panel &panel,
+                                 const TitanPBE::Tabi::Atom &atom) {
+  const double cx = (panel.v0x + panel.v1x + panel.v2x) / 3.0 - atom.x;
+  const double cy = (panel.v0y + panel.v1y + panel.v2y) / 3.0 - atom.y;
+  const double cz = (panel.v0z + panel.v1z + panel.v2z) / 3.0 - atom.z;
+  return std::abs(std::sqrt(cx * cx + cy * cy + cz * cz) - atom.radius);
+}
+
+void require_geometry_telemetry_matches_panels(
+    const std::string &label, const TitanPBE::Tabi::Atom &atom,
+    const std::string &mesh_mode, int surface_points) {
+  TitanPBE::Tabi::Result result;
+  const std::vector<TitanPBE::Tabi::Panel> panels =
+      TitanPBE::Tabi::build_surface({atom}, options(mesh_mode, surface_points),
+                                    &result);
+  double dot_min = 1.0;
+  double centroid_error_max = 0.0;
+  for (const auto &panel : panels) {
+    dot_min = std::min(dot_min, panel_face_radial_dot(panel, atom));
+    centroid_error_max = std::max(
+        centroid_error_max, panel_flat_centroid_error(panel, atom));
+  }
+  require_close_rel(label + " face normal dot",
+                    result.surface_quality_normal_radial_dot_min, dot_min,
+                    1.0e-12);
+  require_close_rel(label + " flat centroid error",
+                    result.surface_quality_centroid_radial_error_max,
+                    centroid_error_max, 1.0e-12);
+  require_true(label + " planar area finite",
+               std::isfinite(result.surface_quality_planar_area_a2) &&
+                   result.surface_quality_planar_area_a2 > 0.0);
+  require_true(label + " enclosed volume finite",
+               std::isfinite(result.surface_quality_enclosed_volume_a3) &&
+                   result.surface_quality_enclosed_volume_a3 > 0.0);
+  require_true(label + " triangle area cv finite",
+               std::isfinite(result.surface_quality_triangle_area_cv) &&
+                   result.surface_quality_triangle_area_cv >= 0.0);
+}
+
+void require_highres_icosphere_counts(const TitanPBE::Tabi::Atom &atom) {
+  struct Case {
+    int requested;
+    std::size_t expected_panels;
+  };
+  const std::vector<Case> cases{{1281, 5120}, {5121, 20480},
+                                {20481, 81920}};
+  double previous_area_error = std::numeric_limits<double>::infinity();
+  double previous_volume_error = std::numeric_limits<double>::infinity();
+  for (const auto &test_case : cases) {
+    TitanPBE::Tabi::Result result;
+    const std::vector<TitanPBE::Tabi::Panel> panels =
+        TitanPBE::Tabi::build_surface(
+            {atom}, options("icosphere", test_case.requested, true), &result);
+    require_true("highres panel count",
+                 panels.size() == test_case.expected_panels);
+    require_true("highres result triangles",
+                 result.mesh_triangles == test_case.expected_panels);
+    require_true("highres planar area finite",
+                 std::isfinite(result.surface_quality_planar_area_a2));
+    require_true("highres volume finite",
+                 std::isfinite(result.surface_quality_enclosed_volume_a3));
+    require_true("highres planar area convergence",
+                 result.surface_quality_planar_area_rel_error_vs_4piR2 <
+                     previous_area_error);
+    require_true("highres volume convergence",
+                 result.surface_quality_enclosed_volume_rel_error_vs_4piR3_over3 <
+                     previous_volume_error);
+    previous_area_error =
+        result.surface_quality_planar_area_rel_error_vs_4piR2;
+    previous_volume_error =
+        result.surface_quality_enclosed_volume_rel_error_vs_4piR3_over3;
+  }
+}
+
 } // namespace
 
 int main() {
@@ -109,6 +212,21 @@ int main() {
   require_close_rel("single sphere area", single.surface_area_a2,
                     4.0 * kPi * radius * radius, 0.08);
   require_true("single sphere nonmanifold", single.nonmanifold_edges == 0);
+
+  const TitanPBE::Tabi::Atom sphere{0.0, 0.0, 0.0, 1.0, radius};
+  require_geometry_telemetry_matches_panels("icosphere telemetry", sphere,
+                                            "icosphere", 320);
+  require_geometry_telemetry_matches_panels("latlong telemetry", sphere,
+                                            "latlong", 81);
+  const auto ico_coarse = build_case("ico_coarse", {sphere}, "icosphere", 80);
+  const auto ico_fine = build_case("ico_fine", {sphere}, "icosphere", 1280);
+  require_true("icosphere planar area convergence",
+               ico_fine.surface_quality_planar_area_rel_error_vs_4piR2 <
+                   ico_coarse.surface_quality_planar_area_rel_error_vs_4piR2);
+  require_true("icosphere volume convergence",
+               ico_fine.surface_quality_enclosed_volume_rel_error_vs_4piR3_over3 <
+                   ico_coarse.surface_quality_enclosed_volume_rel_error_vs_4piR3_over3);
+  require_highres_icosphere_counts(sphere);
 
   const auto two =
       build_case("two_overlapping_atoms",

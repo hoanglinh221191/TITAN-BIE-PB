@@ -1053,6 +1053,25 @@ Decision:
   meshes. Do not treat FMM Duffy integration as the automatic next fix; first
   extend the surface-resolution/discretization study, then integrate only the
   near policy with demonstrated marginal value.
+- Scope Z1C adds corrected surface-quality telemetry and a direct-only
+  geometry-convergence matrix. The full 32-row gate completed without fallback
+  and classified `resolution_limited`: all eight `1280 -> approximately 5120`
+  transitions improved energy error by at least `1.5x`, while none showed an
+  operator-discretization plateau. Finest median oracle error was `0.6419%` for
+  icosphere and `0.6755%` for latlong, so `preferred_mesh=none` and
+  `mesh_quality_tie`. The next accuracy scope is Z1D refinement beyond the
+  current approximately 5120-panel range, not an immediate FMM-Duffy or
+  collocation rewrite.
+- Scope Z1D adds the high-resolution direct TABI gate:
+  `test/pbe_fagbi_scope_z1d_high_resolution_surface.ps1`, with the hidden
+  `-pbe-tabi-highres-surface=true` guard. The full run initially reached
+  `z1d_runtime_limited`: 7/8 rows completed, and the completed 20480-panel rows
+  were below 0.5% oracle error (`0.3705%`, `0.2682%`, `0.3874%`). Scope Z1D.1
+  added `test/pbe_fagbi_scope_z1d_targeted_missing_row.ps1` and verified the
+  missing Kirkwood `0.15 M` row at 20480 panels: `0.1374%` oracle error,
+  `1750.93 s`, final residual `6.12512e-15`, and zero near fallbacks. Treat
+  Z1D as high-resolution converged after targeted verification; the remaining
+  constraint is direct-runtime cost, not missing surface-convergence evidence.
 - Next step is broader controlled-treecode validation, not grid promotion.
   Scope Q removed the Barnase cap-128 convergence blocker, Scope S removed the
   hidden FMM/M2L memory regression, Scope U/V/W eliminated dense local

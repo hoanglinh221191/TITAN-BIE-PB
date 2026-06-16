@@ -605,7 +605,9 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
                                 const Options &options) {
   const double probe =
       options.surface_mode == "sas" ? std::max(0.0, options.probe_radius) : 0.0;
-  const int point_count = std::clamp(options.surface_point_count, 8, 4096);
+  const int surface_point_max = options.highres_surface ? 65536 : 4096;
+  const int point_count =
+      std::clamp(options.surface_point_count, 8, surface_point_max);
   const std::string sphere_mesh_mode =
       resolve_sphere_mesh_mode(options.sphere_mesh_mode);
   const UnitSphereMesh &unit_mesh =
@@ -630,6 +632,9 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
   double quality_area_min = std::numeric_limits<double>::infinity();
   double quality_area_max = 0.0;
   double quality_area_sum = 0.0;
+  double quality_area_square_sum = 0.0;
+  double quality_planar_area_sum = 0.0;
+  double quality_signed_volume_sum = 0.0;
   double quality_aspect_max = 0.0;
   double quality_radial_dot_min = std::numeric_limits<double>::infinity();
   double quality_radial_dot_sum = 0.0;
@@ -707,6 +712,7 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
       double normal_len = norm3(nx, ny, nz);
       if (normal_len <= 1.0e-14)
         continue;
+      const double planar_area = 0.5 * normal_len;
       double area = spherical_triangle_area_unit(ua, ub, uc) * radius * radius;
       if (!std::isfinite(area) || area <= 1.0e-14)
         area = 0.5 * normal_len;
@@ -718,18 +724,20 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
       nx /= normal_len;
       ny /= normal_len;
       nz /= normal_len;
-      const double radial_x = px - atom.x;
-      const double radial_y = py - atom.y;
-      const double radial_z = pz - atom.z;
+      const double flat_px = (va.x + vb.x + vc.x) / 3.0;
+      const double flat_py = (va.y + vb.y + vc.y) / 3.0;
+      const double flat_pz = (va.z + vb.z + vc.z) / 3.0;
+      const double radial_x = flat_px - atom.x;
+      const double radial_y = flat_py - atom.y;
+      const double radial_z = flat_pz - atom.z;
+      bool face_flipped = false;
       if (nx * radial_x + ny * radial_y + nz * radial_z < 0.0) {
         std::swap(ib, ic);
         nx = -nx;
         ny = -ny;
         nz = -nz;
+        face_flipped = true;
       }
-      nx = panel_ux;
-      ny = panel_uy;
-      nz = panel_uz;
       const double radial_len = norm3(radial_x, radial_y, radial_z);
       const double radial_dot =
           radial_len > 1.0e-14
@@ -738,6 +746,14 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
       quality_area_min = std::min(quality_area_min, area);
       quality_area_max = std::max(quality_area_max, area);
       quality_area_sum += area;
+      quality_area_square_sum += area * area;
+      quality_planar_area_sum += planar_area;
+      const double signed_volume =
+          (va.x * (vb.y * vc.z - vb.z * vc.y) -
+           va.y * (vb.x * vc.z - vb.z * vc.x) +
+           va.z * (vb.x * vc.y - vb.y * vc.x)) /
+          6.0;
+      quality_signed_volume_sum += face_flipped ? -signed_volume : signed_volume;
       if (edge_min > 1.0e-14)
         quality_aspect_max = std::max(quality_aspect_max, edge_max / edge_min);
       quality_radial_dot_min = std::min(quality_radial_dot_min, radial_dot);
@@ -765,9 +781,9 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
       panel.x = px;
       panel.y = py;
       panel.z = pz;
-      panel.nx = nx;
-      panel.ny = ny;
-      panel.nz = nz;
+      panel.nx = panel_ux;
+      panel.ny = panel_uy;
+      panel.nz = panel_uz;
       panel.area = area;
       panel.diagonal = 1.0;
       panel.solid_angle = kTwoPi;
@@ -804,7 +820,15 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
         quality_radial_dot_sum / static_cast<double>(quality_count);
     mesh.quality_centroid_radial_error_max =
         quality_centroid_radial_error_max;
+    const double area_mean = quality_area_sum / static_cast<double>(quality_count);
+    const double area_variance = std::max(
+        0.0, quality_area_square_sum / static_cast<double>(quality_count) -
+                 area_mean * area_mean);
+    mesh.quality_triangle_area_cv =
+        area_mean > 1.0e-14 ? std::sqrt(area_variance) / area_mean : 0.0;
   }
+  mesh.quality_planar_area_a2 = quality_planar_area_sum;
+  mesh.quality_enclosed_volume_a3 = std::abs(quality_signed_volume_sum);
   if (area_by_atom.size() == 1) {
     const std::size_t atom_index = area_by_atom.begin()->first;
     const auto radius_it = radius_by_atom.find(atom_index);
@@ -814,6 +838,14 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
     if (exact_area > 1.0e-14) {
       mesh.quality_area_rel_error_vs_4piR2 =
           std::abs(quality_area_sum - exact_area) / exact_area;
+      mesh.quality_planar_area_rel_error_vs_4piR2 =
+          std::abs(quality_planar_area_sum - exact_area) / exact_area;
+    }
+    const double exact_volume = (4.0 / 3.0) * kPi * radius * radius * radius;
+    if (exact_volume > 1.0e-14) {
+      mesh.quality_enclosed_volume_rel_error_vs_4piR3_over3 =
+          std::abs(mesh.quality_enclosed_volume_a3 - exact_volume) /
+          exact_volume;
     }
   }
   finalize_solid_angle_diagonal(mesh, options.diagonal_mode);
@@ -840,8 +872,9 @@ std::vector<Panel> build_point_panel_surface(const std::vector<Atom> &atoms,
   TitanSurface::Options surface_options;
   surface_options.probe_radius = options.probe_radius;
   surface_options.min_cell_size = 1.0;
+  const int surface_point_max = options.highres_surface ? 65536 : 4096;
   surface_options.point_count =
-      std::clamp(options.surface_point_count, 8, 4096);
+      std::clamp(options.surface_point_count, 8, surface_point_max);
   surface_options.surface_mode =
       options.surface_mode == "sas" ? std::string("sas") : std::string("vdw");
   surface_options.emit_panels = true;
@@ -935,6 +968,16 @@ std::vector<Panel> build_surface(const std::vector<Atom> &atoms,
         mesh.quality_normal_radial_dot_mean;
     result->surface_quality_centroid_radial_error_max =
         mesh.quality_centroid_radial_error_max;
+    result->surface_quality_planar_area_a2 =
+        mesh.quality_planar_area_a2;
+    result->surface_quality_planar_area_rel_error_vs_4piR2 =
+        mesh.quality_planar_area_rel_error_vs_4piR2;
+    result->surface_quality_enclosed_volume_a3 =
+        mesh.quality_enclosed_volume_a3;
+    result->surface_quality_enclosed_volume_rel_error_vs_4piR3_over3 =
+        mesh.quality_enclosed_volume_rel_error_vs_4piR3_over3;
+    result->surface_quality_triangle_area_cv =
+        mesh.quality_triangle_area_cv;
     result->surface_build_ms =
         elapsed_ms(surface_begin, std::chrono::steady_clock::now());
     result->surface_neighbor_ms = mesh.neighbor_build_ms;

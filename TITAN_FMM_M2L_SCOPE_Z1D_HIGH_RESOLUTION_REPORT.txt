@@ -1,0 +1,27 @@
+TITAN FMM/M2L Scope Z1D High-Resolution Surface Report
+Accuracy class: z1d_resolution_converged_after_targeted_verify
+Generated: 2026-06-16T15:47:35
+
+Purpose
+Extend Z1C beyond approximately 5120 panels using direct TABI and analytic_singular near integration.
+
+Matrix
+- Fixtures: centered Born and off-center Kirkwood.
+- Backend: TABI Direct; FMM/M2L disabled; analytic_singular near integration.
+- Mesh: icosphere only; target panels: 5120,20480.
+- Salts: 0,0.15 M.
+
+Measured classification
+- The original full Z1D matrix completed 7/8 rows and classified as z1d_runtime_limited because the Kirkwood salt 0.15 M 20480-panel row timed out at 1800 s.
+- Scope Z1D.1 reran exactly that missing row with the same direct TABI settings and a longer 5400 s timeout.
+- Z1D.1 completed successfully: Kirkwood salt 0.15 M, 20480 panels, oracle relative error = 0.1374%, wall_seconds = 1750.9304727, iterations = 32, final_residual = 6.12512e-15, near_fallbacks = 0.
+- Combined 20480-panel oracle errors: Born salt 0.0 = 0.3705%, Born salt 0.15 = 0.2682%, Kirkwood salt 0.0 = 0.3874%, Kirkwood salt 0.15 = 0.1374%.
+- All required 20480-panel rows are now below the 0.5% oracle-error threshold.
+
+Next decision
+Proceed to Scope Z2A or Z3 with high-resolution surface error no longer the dominant observed blocker. Keep the high-resolution direct runtime cost noted: the final Kirkwood row took about 29.2 minutes on nt=1.
+
+Matrix CSV: C:\tmp\elec_vdw-fagbi-z1c\test\tmp\fagbi_scope_z1d\fagbi_scope_z1d_matrix.csv
+Targeted verification CSV: C:\tmp\elec_vdw-fagbi-z1c\test\tmp\fagbi_scope_z1d_targeted\fagbi_scope_z1d_targeted_matrix.csv
+Convergence CSV: C:\tmp\elec_vdw-fagbi-z1c\test\tmp\fagbi_scope_z1d\fagbi_scope_z1d_convergence.csv
+SVG: C:\tmp\elec_vdw-fagbi-z1c\test\tmp\fagbi_scope_z1d\fagbi_scope_z1d_highres_plot.svg

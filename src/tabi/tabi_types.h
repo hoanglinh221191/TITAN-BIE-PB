@@ -105,6 +105,11 @@ struct SurfaceMesh {
   double quality_normal_radial_dot_min{0.0};
   double quality_normal_radial_dot_mean{0.0};
   double quality_centroid_radial_error_max{0.0};
+  double quality_planar_area_a2{0.0};
+  double quality_planar_area_rel_error_vs_4piR2{0.0};
+  double quality_enclosed_volume_a3{0.0};
+  double quality_enclosed_volume_rel_error_vs_4piR3_over3{0.0};
+  double quality_triangle_area_cv{0.0};
 };
 
 inline constexpr std::size_t kNearBlockCount = 4;
@@ -166,6 +171,7 @@ struct Options {
   std::string surface_geometry{"triangle"};
   std::string diagonal_mode{"solid-angle"};
   int surface_point_count{96};
+  bool highres_surface{false};
   std::string sphere_mesh_mode{"auto"};
   int tree_leaf_size{32};
   double tree_opening_theta{0.45};
@@ -292,6 +298,11 @@ struct Result {
   double surface_quality_normal_radial_dot_min{0.0};
   double surface_quality_normal_radial_dot_mean{0.0};
   double surface_quality_centroid_radial_error_max{0.0};
+  double surface_quality_planar_area_a2{0.0};
+  double surface_quality_planar_area_rel_error_vs_4piR2{0.0};
+  double surface_quality_enclosed_volume_a3{0.0};
+  double surface_quality_enclosed_volume_rel_error_vs_4piR3_over3{0.0};
+  double surface_quality_triangle_area_cv{0.0};
   std::size_t exposed_points{0};
   std::size_t buried_points{0};
   double total_charge{0.0};
