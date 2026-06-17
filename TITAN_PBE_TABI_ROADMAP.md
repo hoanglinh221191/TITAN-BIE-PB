@@ -6317,6 +6317,13 @@ Decision:
   FMM rows are marked paper-usable. The maximum sampled audit was
   `0.00748955`, cap-128 relative energy deltas stayed below `7.4e-4`, and
   three grid rows remained context warnings rather than paper oracle rows.
+- Scope Z4C adds the paper packaging harness
+  `test/pbe_fagbi_scope_z4c_paper_packaging.ps1`. It reads the Z4B artifacts
+  by default and generated `TITAN_FMM_M2L_SCOPE_Z4C_PAPER_PACKAGE_REPORT.txt`
+  with decision `z4c_paper_package_ready`: six FMM main-table rows, nine
+  supplement/context rows, a reference-policy table, and a runtime/memory SVG.
+  This closes the first paper-panel artifact pass without changing solver
+  behavior or the grid production default.
 - Scope O and refreshed Scope R still block grid-default promotion. Scope Q
   fixed bounded Barnase cap-128 convergence, Scope S removed the hidden
   FMM/M2L memory regression, Scope U/V/W established that dense block and

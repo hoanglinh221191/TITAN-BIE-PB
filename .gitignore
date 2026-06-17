@@ -284,6 +284,8 @@ test/
 !/test/pbe_fagbi_scope_z4a_protein_panel_benchmark.ps1
 !/TITAN_FMM_M2L_SCOPE_Z4B_REFERENCE_POLICY_REPORT.txt
 !/test/pbe_fagbi_scope_z4b_reference_policy_gate.ps1
+!/TITAN_FMM_M2L_SCOPE_Z4C_PAPER_PACKAGE_REPORT.txt
+!/test/pbe_fagbi_scope_z4c_paper_packaging.ps1
 !/test/pbe_tabi_channel_expansion_audit_smoke.ps1
 !/test/pbe_tabi_channel_estimator_smoke.ps1
 !/test/pbe_tabi_presolver_progress_smoke.ps1

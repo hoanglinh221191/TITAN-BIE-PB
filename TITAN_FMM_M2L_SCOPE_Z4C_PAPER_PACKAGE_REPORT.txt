@@ -1,0 +1,32 @@
+# TITAN FMM/M2L Scope Z4C Paper Package Report
+
+Decision: z4c_paper_package_ready
+
+Z4C packages the Z4B reference-policy gate into paper-ready tables and a compact runtime/memory figure. It does not run solver rows unless -RefreshZ4B is explicitly passed.
+
+Artifacts:
+- Main table: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4c\fagbi_scope_z4c_main_table.csv
+- Supplement table: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4c\fagbi_scope_z4c_supplement_table.csv
+- Reference policy table: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4c\fagbi_scope_z4c_reference_policy_table.csv
+- Decision: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4c\fagbi_scope_z4c_decision.csv
+- Summary: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4c\fagbi_scope_z4c_summary.dat
+- Plot: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4c\fagbi_scope_z4c_runtime_memory_plot.svg
+
+Main FMM rows:
+- fixture=barnase, cap=128, energy=-7445.946996, ref_kind=full_direct_tabi_energy, direct_delta=1.61370100000022, audit=0.0026758, wall_s=61.9649857, rss_mb=33.97265625, paper_usable=True
+- fixture=barnase, cap=256, energy=-10180.016, ref_kind=sampled_direct_operator_audit, direct_delta=nan, audit=0.00748955, wall_s=111.8157979, rss_mb=51.9140625, paper_usable=True
+- fixture=research-medium, cap=128, energy=-8312.377363, ref_kind=full_direct_tabi_energy, direct_delta=1.91575399999965, audit=0.00323059, wall_s=65.5826886, rss_mb=35.234375, paper_usable=True
+- fixture=research-medium, cap=256, energy=-16016.98772, ref_kind=sampled_direct_operator_audit, direct_delta=nan, audit=0.00502011, wall_s=173.936225, rss_mb=60.73046875, paper_usable=True
+- fixture=research-alt, cap=128, energy=-7166.985493, ref_kind=full_direct_tabi_energy, direct_delta=-5.21426500000052, audit=0.00499984, wall_s=58.8542793, rss_mb=35.11328125, paper_usable=True
+- fixture=research-alt, cap=256, energy=-13639.29245, ref_kind=sampled_direct_operator_audit, direct_delta=nan, audit=0.00531705, wall_s=158.7959613, rss_mb=60.66015625, paper_usable=True
+
+Supplement/context rows:
+- fixture=barnase, cap=128, backend=grid_context, role=grid_context_ok, status=ok, energy=-7473.266182, wall_s=4.0092196, rss_mb=208.08203125
+- fixture=barnase, cap=128, backend=tabi_direct_full, role=full_direct_tabi_reference, status=ok, energy=-7447.560697, wall_s=254.2216904, rss_mb=16.453125
+- fixture=barnase, cap=256, backend=grid_context, role=grid_context_ok, status=ok, energy=-10744.00686, wall_s=5.7415465, rss_mb=216.87890625
+- fixture=research-medium, cap=128, backend=grid_context, role=grid_context_only_not_converged, status=not_converged, energy=-8474.660576, wall_s=12.8260121, rss_mb=445.30859375
+- fixture=research-medium, cap=128, backend=tabi_direct_full, role=full_direct_tabi_reference, status=ok, energy=-8314.293117, wall_s=167.4455636, rss_mb=16.8984375
+- fixture=research-medium, cap=256, backend=grid_context, role=grid_context_only_not_converged, status=not_converged, energy=-16447.02875, wall_s=15.1984719, rss_mb=482.9296875
+- fixture=research-alt, cap=128, backend=grid_context, role=grid_context_only_not_converged, status=not_converged, energy=-7152.700814, wall_s=11.5492268, rss_mb=396.92578125
+- fixture=research-alt, cap=128, backend=tabi_direct_full, role=full_direct_tabi_reference, status=ok, energy=-7161.771228, wall_s=159.825816, rss_mb=16.88671875
+- fixture=research-alt, cap=256, backend=grid_context, role=grid_context_ok, status=ok, energy=-13852.3372, wall_s=11.4303059, rss_mb=439.09375

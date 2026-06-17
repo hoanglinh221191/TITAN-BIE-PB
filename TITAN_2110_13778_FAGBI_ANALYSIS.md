@@ -319,6 +319,14 @@ Status:
   `0.000230417`, and `0.000728069` for Barnase, research-medium, and
   research-alt. Three grid rows were context warnings, so grid should stay a
   runtime/memory comparator rather than a paper oracle for this panel.
+- Scope Z4C adds `test/pbe_fagbi_scope_z4c_paper_packaging.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z4C_PAPER_PACKAGE_REPORT.txt`. It packages the Z4B
+  reference-policy artifacts into a six-row FMM main table, nine-row
+  supplement/context table, reference-policy table, and runtime/memory SVG.
+  The package classified `z4c_paper_package_ready`: all six FMM rows are
+  paper-usable, cap-128 rows retain full direct TABI energy references, and
+  cap-256 rows retain sampled direct-operator audit references. This is a
+  paper-artifact step only; it does not change TABI/FMM defaults.
 
 Tasks:
 

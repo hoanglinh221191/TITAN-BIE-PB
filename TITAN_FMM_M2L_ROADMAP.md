@@ -1138,6 +1138,13 @@ Decision:
   paper-usable. The maximum sampled audit stayed `0.00748955`; three grid
   context rows were warnings, confirming grid should remain context-only for
   this paper panel when not converged.
+- Scope Z4C adds `test/pbe_fagbi_scope_z4c_paper_packaging.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z4C_PAPER_PACKAGE_REPORT.txt`. The package classified
+  `z4c_paper_package_ready` from the full Z4B artifacts, writing a six-row FMM
+  main table, nine-row supplement/context table, reference-policy table, and
+  runtime/memory SVG. It is intentionally packaging-only: no solver rows are
+  run unless `-RefreshZ4B` is passed, and the grid production default is not
+  changed.
 - Next step is broader controlled-treecode validation, not grid promotion.
   Scope Q removed the Barnase cap-128 convergence blocker, Scope S removed the
   hidden FMM/M2L memory regression, Scope U/V/W eliminated dense local
