@@ -38,6 +38,7 @@ lib_ff/
 *.png
 !/TITAN_CORE_STRUCT_SOA_PERFORMANCE_REVIEW.md
 !/TITAN_ENERGY_DECOMPOSITION_REFACTOR_ROADMAP.md
+!/data_structure_performance_report.md
 !/TITAN_FMM_M2L_ROADMAP.md
 !/TITAN_NEXT_IMPROVEMENT_ROADMAP.md
 !/TITAN_TABI_PRECONDITIONER_ACTIVATION_REPORT.txt
@@ -144,6 +145,8 @@ test/
 !/test/titan_tica_estimator_smoke.cpp
 !/test/titan_mbar_weights_smoke.cpp
 !/test/mbar_tica_metadata_smoke.ps1
+!/test/titan_tica_timing_smoke.cpp
+!/test/tica_timing_smoke.ps1
 !/test/edecomp_args_smoke.ps1
 !/test/edecomp_smoke.ps1
 !/test/cas_smoke.ps1

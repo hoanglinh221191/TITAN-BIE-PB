@@ -107,7 +107,7 @@ public:
 
   // Project all pending raw TICA feature frames into proj_mat_ once a TICA
   // model is available.
-  void project_pending_features(const TitanKinetics &tica_analyzer);
+  void project_pending_features(TitanKinetics &tica_analyzer);
 
   // Update the number of K-Means microstates without discarding already
   // collected TICA features or projections.
