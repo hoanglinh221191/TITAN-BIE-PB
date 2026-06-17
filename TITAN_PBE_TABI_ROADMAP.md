@@ -6299,6 +6299,15 @@ Decision:
   `1e-2` on every required fixture and theta `0.7` stayed marginal on
   Barnase/research-alt. Use theta `0.6` for the next Z4 paper-style protein
   panel benchmark; no production grid default changes follow from Z3D.
+- Scope Z4A adds the protein panel benchmark harness
+  `test/pbe_fagbi_scope_z4a_protein_panel_benchmark.ps1`. The full
+  Barnase/research-medium/research-alt cap `128/256` run generated
+  `TITAN_FMM_M2L_SCOPE_Z4A_PROTEIN_PANEL_BENCHMARK_REPORT.txt` and classified
+  `z4a_direct_limited_fmm_pass`: FMM/M2L + ILU0 passed every required sampled
+  audit row with theta `0.6`, cap-128 direct TABI references completed, and
+  cap-256 direct references were skipped by runtime policy. Some grid
+  comparator rows reported `not_converged`; keep grid as production default,
+  but use Z4B to tighten reference/verification policy for paper tables.
 - Scope O and refreshed Scope R still block grid-default promotion. Scope Q
   fixed bounded Barnase cap-128 convergence, Scope S removed the hidden
   FMM/M2L memory regression, Scope U/V/W established that dense block and

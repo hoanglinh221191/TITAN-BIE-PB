@@ -301,6 +301,14 @@ Status:
   `1e-2` on every required fixture, and theta `0.7` remained marginal on
   Barnase/research-alt. This confirms theta `0.6` as the fixed policy for the
   next Z4 paper-style protein panel benchmark.
+- Scope Z4A adds `test/pbe_fagbi_scope_z4a_protein_panel_benchmark.ps1`. The
+  full Barnase/research-medium/research-alt cap `128/256` protein panel
+  completed with decision `z4a_direct_limited_fmm_pass`: FMM/ILU0 used theta
+  `0.6`, order `4`, and `analytic_singular` near integration, passed all
+  sampled audit gates (`max=0.00748955`), and matched completed cap-128 direct
+  references within the energy gate. Direct cap-256 remains runtime-limited,
+  so the next paper-evidence step should refine reference policy rather than
+  adding adaptive order immediately.
 
 Tasks:
 

@@ -1120,6 +1120,15 @@ Decision:
   theta `0.8` was rejected (`0.0154722`, `0.0106041`, `0.0142016`), while
   theta `0.7` was still marginal on Barnase/research-alt. Keep theta `0.6`
   for Z4 paper-style protein panels; do not loosen the default policy yet.
+- Scope Z4A adds `test/pbe_fagbi_scope_z4a_protein_panel_benchmark.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z4A_PROTEIN_PANEL_BENCHMARK_REPORT.txt`. The full
+  Barnase/research-medium/research-alt cap `128/256` protein panel completed
+  with decision `z4a_direct_limited_fmm_pass`: all FMM/ILU0 rows passed status,
+  finite output, and sampled audit (`max=0.00748955`), direct TABI completed
+  for cap-128 references, and direct cap-256 rows were intentionally classified
+  as skipped under the runtime budget. Grid comparator rows were fast but
+  `not_converged` on some research fixtures, so Z4B should focus on reference
+  policy rather than changing the FMM treecode default.
 - Next step is broader controlled-treecode validation, not grid promotion.
   Scope Q removed the Barnase cap-128 convergence blocker, Scope S removed the
   hidden FMM/M2L memory regression, Scope U/V/W eliminated dense local
