@@ -348,15 +348,18 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
       throw std::runtime_error(
           "PBE TABI: -pbe-tabi-fmm-m2l=single-matvec-analytic received an incomplete JCP unknown vector.");
     }
-    if (near_integration != "centroid" && near_integration != "off") {
+    if (near_integration != "centroid" && near_integration != "off" &&
+        near_integration != "analytic_singular" &&
+        near_integration != "duffy_adaptive") {
       throw std::runtime_error(
-          "PBE TABI: -pbe-tabi-fmm-m2l=single-matvec-analytic currently supports centroid near integration only.");
+          "PBE TABI: -pbe-tabi-fmm-m2l=single-matvec-analytic supports centroid, analytic_singular, or duffy_adaptive near integration.");
     }
     FmmM2lSingleMatvecStats fmm_stats;
     TitanPBE::Tabi::apply_jcp_fmm_m2l_single_matvec(
         panels, unknowns, eps_ratio, kappa, lhs_phi, lhs_phin,
-        tree.leaf_size, tree.opening_theta, executor, out, &fmm_stats,
-        coupled, &tree.fmm_m2l_context);
+        tree.leaf_size, tree.opening_theta, tree.taylor_order, executor, out,
+        &fmm_stats, coupled, &tree.fmm_m2l_context, near_integration,
+        quad_buffer);
     if (stats != nullptr) {
       stats->matvec_mode = "jcp2013_fmm_m2l_single_matvec_analytic";
       stats->taylor_order = tree.taylor_order;
@@ -364,11 +367,25 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
       stats->near_integration = near_integration;
       stats->quad_buffer = quad_buffer;
       stats->fmm_m2l_mode = tree.fmm_m2l;
+      stats->fmm_m2l_expansion_order = fmm_stats.expansion_order;
       stats->fmm_m2l_near_pairs = fmm_stats.near_pairs;
       stats->fmm_m2l_far_pairs = fmm_stats.far_pairs;
       stats->fmm_m2l_setup_ms = fmm_stats.setup_ms;
       stats->fmm_m2l_apply_ms = fmm_stats.apply_ms;
       stats->fmm_m2l_finite_outputs = fmm_stats.finite_outputs;
+      stats->near_kernel_policy = fmm_stats.near_kernel_policy;
+      stats->near_self_pairs += fmm_stats.near_self_pairs;
+      stats->near_one_ring_pairs += fmm_stats.near_one_ring_pairs;
+      stats->near_duffy_pairs += fmm_stats.near_duffy_pairs;
+      stats->near_centroid_pairs += fmm_stats.near_centroid_pairs;
+      stats->near_fallbacks += fmm_stats.near_fallbacks;
+      stats->duffy_subdivisions_max =
+          std::max(stats->duffy_subdivisions_max,
+                   fmm_stats.duffy_subdivisions_max);
+      if (fmm_stats.near_duffy_pairs > 0) {
+        stats->duffy_subdivisions_mean =
+            fmm_stats.duffy_subdivisions_mean;
+      }
       stats->near_interactions += fmm_stats.near_pairs;
       stats->far_interactions += fmm_stats.far_pairs;
       stats->tree_traversal_ms += fmm_stats.apply_ms;

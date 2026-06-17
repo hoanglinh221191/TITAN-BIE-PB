@@ -1072,6 +1072,54 @@ Decision:
   `1750.93 s`, final residual `6.12512e-15`, and zero near fallbacks. Treat
   Z1D as high-resolution converged after targeted verification; the remaining
   constraint is direct-runtime cost, not missing surface-convergence evidence.
+- Scope Z2A enables analytic-singular near-field parity for the FMM/M2L path:
+  `test/pbe_fagbi_scope_z2a_fmm_near_parity.ps1` verifies that
+  `-pbe-tabi-fmm-m2l=single-matvec-analytic` now accepts
+  `-pbe-tabi-near-integration=analytic_singular` and uses the shared
+  production near kernel. The full smoke passed Born, off-center Kirkwood, and
+  sampled protein cap-128 rows; the protein row reported near pairs
+  `13,815,687`, far pairs `23,798,002`, and sampled audit RMS `0.00344495`.
+  Scope Z2B enables explicit `duffy_adaptive` for the same FMM/M2L near-source
+  path with `quad_buffer=adaptive`: Born and off-center Kirkwood direct/FMM
+  Duffy rows reported `one_ring_cpv`, zero fallbacks, and finite output; the
+  sampled protein cap-128 FMM row reported Duffy pairs `4,777,175`, near pairs
+  `13,815,687`, far pairs `23,798,002`, and sampled audit RMS `0.00338017`.
+  `near=auto` remains conservative; Duffy is supported explicitly but not
+  promoted into the default policy by Z2B.
+- Scope Z3A wires `-pbe-tabi-taylor-order=3|4` into the FMM/M2L context instead
+  of hard-coding expansion order `4`, and adds
+  `fmm_m2l_expansion_order` to `pbe_tabi_profile.csv`. The new harness
+  `test/pbe_fagbi_scope_z3a_fmm_order_matrix.ps1` writes matrix, decision,
+  summary, report, and SVG artifacts under `test/tmp/fagbi_scope_z3a/`.
+  The quick analytic Born/Kirkwood gate passed and confirmed effective FMM
+  orders `3` and `4`; the quick decision was `z3a_order3_sufficient` because
+  the low-resolution analytic rows showed identical sampled audit and runtime
+  within noise. Treat this as order-plumbing evidence, not a final adaptive
+  order policy. Full protein/order/theta validation remains the next Z3 step.
+- Scope Z3B adds `test/pbe_fagbi_scope_z3b_fmm_order_theta_matrix.ps1` for the
+  required fixed-order/theta matrix. The full Born/Kirkwood plus
+  Barnase/research-medium cap-128 sweep completed 24/24 rows, wrote
+  `TITAN_FMM_M2L_SCOPE_Z3B_FMM_ORDER_THETA_MATRIX_REPORT.txt`. The latest
+  rerun classified `z3b_adaptive_order_justified`, but the matrix still shows
+  theta `0.45 -> 0.8` changing sampled audit/runtime substantially while fixed
+  orders `3|4` produce matching FMM order telemetry and similar accuracy.
+  Prefer theta-policy gates before implementing adaptive-by-level order.
+- Scope Z3C adds `test/pbe_fagbi_scope_z3c_theta_policy_gate.ps1` and the
+  report `TITAN_FMM_M2L_SCOPE_Z3C_THETA_POLICY_REPORT.txt`. The full
+  Barnase/research-medium/research-alt cap-128 gate completed 12/12 rows and
+  classified `z3c_theta06_safe_default`: theta `0.8` gave median speedup
+  `2.23x` versus theta `0.6`, but research-alt audit was `0.0137388` and
+  exceeded the `1e-2` gate. Theta `0.7` remained marginal on research-alt
+  (`0.00901184`), so theta `0.6` is the conservative policy for now.
+- Scope Z3D adds `test/pbe_fagbi_scope_z3d_theta_cap256_repeatability.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z3D_THETA_CAP256_REPEATABILITY_REPORT.txt`. The full
+  cap-256 gate completed 15/15 rows and classified
+  `z3d_theta06_confirmed`: theta `0.6` repeated cleanly three times on
+  Barnase, research-medium, and research-alt with audit maxima
+  `0.00748955`, `0.00502011`, and `0.00531705`, respectively. Diagnostic
+  theta `0.8` was rejected (`0.0154722`, `0.0106041`, `0.0142016`), while
+  theta `0.7` was still marginal on Barnase/research-alt. Keep theta `0.6`
+  for Z4 paper-style protein panels; do not loosen the default policy yet.
 - Next step is broader controlled-treecode validation, not grid promotion.
   Scope Q removed the Barnase cap-128 convergence blocker, Scope S removed the
   hidden FMM/M2L memory regression, Scope U/V/W eliminated dense local

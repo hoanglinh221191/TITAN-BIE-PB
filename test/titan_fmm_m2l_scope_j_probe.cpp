@@ -219,8 +219,8 @@ MatvecRun run_adapter(const std::vector<TitanPBE::Tabi::Panel> &panels,
   MatvecRun run;
   const auto begin = Clock::now();
   TitanPBE::Tabi::apply_jcp_fmm_m2l_single_matvec(
-      panels, unknowns, eps_ratio, kappa, 0.0, 0.0, leaf_size, theta, executor,
-      run.out, &run.fmm_stats);
+      panels, unknowns, eps_ratio, kappa, 0.0, 0.0, leaf_size, theta, 4,
+      executor, run.out, &run.fmm_stats);
   const auto end = Clock::now();
   run.seconds = std::chrono::duration<double>(end - begin).count();
   return run;

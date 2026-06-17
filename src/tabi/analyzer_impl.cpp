@@ -8146,7 +8146,8 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "surface_geometry,panels,mesh_vertices,mesh_triangles,"
            "surface_point_count_requested,panel_density_per_A2,"
            "panel_budget_status,"
-           "matvec_mode,fmm_m2l_mode,fmm_m2l_near_pairs,"
+           "matvec_mode,fmm_m2l_mode,fmm_m2l_expansion_order,"
+           "fmm_m2l_near_pairs,"
            "fmm_m2l_far_pairs,fmm_m2l_setup_seconds,"
            "fmm_m2l_apply_seconds,fmm_m2l_finite_outputs,"
            "status,convergence_reason,reaction_energy_source,"
@@ -8573,6 +8574,7 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << csv_escape(result.tabi_panel_budget_status) << ','
       << csv_escape(result.tabi_matvec_mode) << ','
       << csv_escape(result.tabi_fmm_m2l_mode) << ','
+      << result.tabi_fmm_m2l_expansion_order << ','
       << result.tabi_fmm_m2l_near_pairs << ','
       << result.tabi_fmm_m2l_far_pairs << ','
       << seconds(result.tabi_fmm_m2l_setup_ms) << ','
@@ -11772,6 +11774,7 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_far_interactions = tabi.far_interactions;
   solve.tabi_matvec_mode = tabi.matvec_mode;
   solve.tabi_fmm_m2l_mode = tabi.fmm_m2l_mode;
+  solve.tabi_fmm_m2l_expansion_order = tabi.fmm_m2l_expansion_order;
   solve.tabi_fmm_m2l_near_pairs = tabi.fmm_m2l_near_pairs;
   solve.tabi_fmm_m2l_far_pairs = tabi.fmm_m2l_far_pairs;
   solve.tabi_fmm_m2l_setup_ms = tabi.fmm_m2l_setup_ms;
@@ -12830,6 +12833,8 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
     result.tabi_far_interactions = tabi_solve.tabi_far_interactions;
     result.tabi_matvec_mode = tabi_solve.tabi_matvec_mode;
     result.tabi_fmm_m2l_mode = tabi_solve.tabi_fmm_m2l_mode;
+    result.tabi_fmm_m2l_expansion_order =
+        tabi_solve.tabi_fmm_m2l_expansion_order;
     result.tabi_fmm_m2l_near_pairs =
         tabi_solve.tabi_fmm_m2l_near_pairs;
     result.tabi_fmm_m2l_far_pairs = tabi_solve.tabi_fmm_m2l_far_pairs;

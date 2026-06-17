@@ -1,0 +1,37 @@
+# TITAN FMM/M2L Scope Z3B Order/Theta Matrix Report
+
+Decision: z3b_adaptive_order_justified
+
+Z3B measures fixed FMM/M2L expansion order and opening-theta behavior before any adaptive-order implementation.
+
+Artifacts:
+- Matrix: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3b\fagbi_scope_z3b_matrix.csv
+- Decision: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3b\fagbi_scope_z3b_decision.csv
+- Summary: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3b\fagbi_scope_z3b_summary.dat
+- Plot: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3b\fagbi_scope_z3b_order_theta_plot.svg
+
+Rows:
+- born_p3_theta0p45: fixture=born, p=3, theta=0.45, status=ok, audit=0, rel_error=0.0586720880685339, matvec_s=0.000113569, precond=fmm_nearfield_ilu0
+- born_p4_theta0p45: fixture=born, p=4, theta=0.45, status=ok, audit=0, rel_error=0.0586720880685339, matvec_s=0.000111729, precond=fmm_nearfield_ilu0
+- born_p3_theta0p6: fixture=born, p=3, theta=0.6, status=ok, audit=0, rel_error=0.0586720880685339, matvec_s=0.000115957, precond=fmm_nearfield_ilu0
+- born_p4_theta0p6: fixture=born, p=4, theta=0.6, status=ok, audit=0, rel_error=0.0586720880685339, matvec_s=0.000114771, precond=fmm_nearfield_ilu0
+- born_p3_theta0p8: fixture=born, p=3, theta=0.8, status=ok, audit=0, rel_error=0.0586720880685339, matvec_s=0.000115402, precond=fmm_nearfield_ilu0
+- born_p4_theta0p8: fixture=born, p=4, theta=0.8, status=ok, audit=0, rel_error=0.0586720880685339, matvec_s=0.000116052, precond=fmm_nearfield_ilu0
+- kirkwood_p3_theta0p45: fixture=kirkwood, p=3, theta=0.45, status=ok, audit=0, rel_error=0.049376958989435, matvec_s=0.000115229, precond=fmm_nearfield_ilu0
+- kirkwood_p4_theta0p45: fixture=kirkwood, p=4, theta=0.45, status=ok, audit=0, rel_error=0.049376958989435, matvec_s=0.000118798, precond=fmm_nearfield_ilu0
+- kirkwood_p3_theta0p6: fixture=kirkwood, p=3, theta=0.6, status=ok, audit=0, rel_error=0.049376958989435, matvec_s=0.000113895, precond=fmm_nearfield_ilu0
+- kirkwood_p4_theta0p6: fixture=kirkwood, p=4, theta=0.6, status=ok, audit=0, rel_error=0.049376958989435, matvec_s=0.000115134, precond=fmm_nearfield_ilu0
+- kirkwood_p3_theta0p8: fixture=kirkwood, p=3, theta=0.8, status=ok, audit=0, rel_error=0.049376958989435, matvec_s=0.000114414, precond=fmm_nearfield_ilu0
+- kirkwood_p4_theta0p8: fixture=kirkwood, p=4, theta=0.8, status=ok, audit=0, rel_error=0.049376958989435, matvec_s=0.000115488, precond=fmm_nearfield_ilu0
+- barnase_p3_theta0p45: fixture=barnase, p=3, theta=0.45, status=ok, audit=0.000929718, rel_error=NaN, matvec_s=1.67107, precond=fmm_nearfield_ilu0
+- barnase_p4_theta0p45: fixture=barnase, p=4, theta=0.45, status=ok, audit=0.000929718, rel_error=NaN, matvec_s=1.79165, precond=fmm_nearfield_ilu0
+- barnase_p3_theta0p6: fixture=barnase, p=3, theta=0.6, status=ok, audit=0.0026758, rel_error=NaN, matvec_s=1.08979, precond=fmm_nearfield_ilu0
+- barnase_p4_theta0p6: fixture=barnase, p=4, theta=0.6, status=ok, audit=0.0026758, rel_error=NaN, matvec_s=1.03228, precond=fmm_nearfield_ilu0
+- barnase_p3_theta0p8: fixture=barnase, p=3, theta=0.8, status=ok, audit=0.00641036, rel_error=NaN, matvec_s=0.356091, precond=fmm_nearfield_ilu0
+- barnase_p4_theta0p8: fixture=barnase, p=4, theta=0.8, status=ok, audit=0.00641036, rel_error=NaN, matvec_s=0.574418, precond=fmm_nearfield_ilu0
+- research-medium_p3_theta0p45: fixture=research-medium, p=3, theta=0.45, status=ok, audit=0.00131724, rel_error=NaN, matvec_s=1.81451, precond=fmm_nearfield_ilu0
+- research-medium_p4_theta0p45: fixture=research-medium, p=4, theta=0.45, status=ok, audit=0.00131724, rel_error=NaN, matvec_s=1.77828, precond=fmm_nearfield_ilu0
+- research-medium_p3_theta0p6: fixture=research-medium, p=3, theta=0.6, status=ok, audit=0.00323059, rel_error=NaN, matvec_s=0.71413, precond=fmm_nearfield_ilu0
+- research-medium_p4_theta0p6: fixture=research-medium, p=4, theta=0.6, status=ok, audit=0.00323059, rel_error=NaN, matvec_s=0.691427, precond=fmm_nearfield_ilu0
+- research-medium_p3_theta0p8: fixture=research-medium, p=3, theta=0.8, status=ok, audit=0.00801111, rel_error=NaN, matvec_s=0.271788, precond=fmm_nearfield_ilu0
+- research-medium_p4_theta0p8: fixture=research-medium, p=4, theta=0.8, status=ok, audit=0.00801111, rel_error=NaN, matvec_s=0.492306, precond=fmm_nearfield_ilu0

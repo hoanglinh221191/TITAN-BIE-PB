@@ -463,6 +463,7 @@ private:
     std::size_t tabi_far_interactions{0};
     std::string tabi_matvec_mode{"off"};
     std::string tabi_fmm_m2l_mode{"off"};
+    int tabi_fmm_m2l_expansion_order{0};
     std::size_t tabi_fmm_m2l_near_pairs{0};
     std::size_t tabi_fmm_m2l_far_pairs{0};
     double tabi_fmm_m2l_setup_ms{0.0};

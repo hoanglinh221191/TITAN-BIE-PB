@@ -1,0 +1,11 @@
+# TITAN FMM/M2L Scope Z3A Fixed-Order Matrix Report
+
+Decision: z3a_order4_confirmed
+
+Z3A verifies that `-pbe-tabi-taylor-order=3|4` controls the FMM/M2L expansion order.
+The full adaptive-by-level policy remains a future scope.
+
+Artifacts:
+- Matrix: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3a\fagbi_scope_z3a_matrix.csv
+- Decision: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3a\fagbi_scope_z3a_decision.csv
+- Plot: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3a\fagbi_scope_z3a_order_plot.svg

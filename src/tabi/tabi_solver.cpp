@@ -3870,7 +3870,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       const auto fmm_context = ensure_jcp_fmm_m2l_context(
           panels, eps_ratio, kappa,
           static_cast<std::size_t>(std::max(8, options.tree_leaf_size)),
-          options.tree_opening_theta, executor, &jcp_tree.fmm_m2l_context);
+          options.tree_opening_theta, result.taylor_order, executor,
+          &jcp_tree.fmm_m2l_context);
       if (fmm_nearfield_ilu0) {
         result.preconditioner_estimated_bytes =
             estimate_fmm_m2l_nearfield_ilu0_bytes(
@@ -4506,6 +4507,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.leaf_mac_direct_panels_saved_estimate =
           jcp_tree_stats.leaf_mac_direct_panels_saved_estimate;
       result.fmm_m2l_mode = jcp_tree_stats.fmm_m2l_mode;
+      result.fmm_m2l_expansion_order =
+          jcp_tree_stats.fmm_m2l_expansion_order;
       result.fmm_m2l_near_pairs = jcp_tree_stats.fmm_m2l_near_pairs;
       result.fmm_m2l_far_pairs = jcp_tree_stats.fmm_m2l_far_pairs;
       result.fmm_m2l_setup_ms = jcp_tree_stats.fmm_m2l_setup_ms;

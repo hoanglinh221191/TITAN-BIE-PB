@@ -8,6 +8,10 @@
 
 class TitanExecutor;
 
+namespace TitanPBE::Tabi {
+struct Panel;
+}
+
 namespace titan::tabi::fmm_m2l {
 
 enum class KernelKind {
@@ -111,6 +115,14 @@ struct JcpAnalyticOperatorResult {
   std::size_t panels = 0;
   std::size_t near_pairs = 0;
   std::size_t far_pairs = 0;
+  std::size_t near_self_pairs = 0;
+  std::size_t near_one_ring_pairs = 0;
+  std::size_t near_duffy_pairs = 0;
+  std::size_t near_centroid_pairs = 0;
+  std::size_t near_fallbacks = 0;
+  std::size_t duffy_subdivisions_max = 0;
+  double duffy_subdivisions_mean = 0.0;
+  std::string near_kernel_policy = "centroid";
   double setup_seconds = 0.0;
   double apply_seconds = 0.0;
   std::size_t context_nodes = 0;
@@ -199,7 +211,13 @@ public:
 
   JcpAnalyticOperatorResult apply(const std::vector<double> &phi,
                                   const std::vector<double> &phin,
-                                  TitanExecutor &executor) const;
+                                  TitanExecutor &executor,
+                                  bool coupled = true,
+                                  const std::string &near_integration =
+                                      "centroid",
+                                  const std::string &quad_buffer = "off",
+                                  const std::vector<TitanPBE::Tabi::Panel>
+                                      *production_panels = nullptr) const;
 
 private:
   struct Impl;

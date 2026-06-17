@@ -212,6 +212,30 @@ Implementation status:
 Goal: integrate higher-order near quadrature into FMM only after the Z1B
 attribution result and a mesh-resolution gate justify its cost.
 
+Status:
+
+- Scope Z2A implemented the first parity step:
+  `-pbe-tabi-fmm-m2l=single-matvec-analytic` now accepts
+  `-pbe-tabi-near-integration=analytic_singular` and routes FMM/M2L near
+  pairs through the shared production K1..K4 near kernel.
+- Scope Z2B implemented the explicit Duffy/adaptive gate:
+  `-pbe-tabi-near-integration=duffy_adaptive` with
+  `-pbe-tabi-quad-buffer=adaptive` now runs through the FMM/M2L near-source
+  path and reports the shared `one_ring_cpv` near-kernel policy.
+- Centroid remains the conservative `auto`/default near policy for treecode
+  rows; Z2B does not promote Duffy into `auto`.
+- Z2A smoke result:
+  `TITAN_FMM_M2L_SCOPE_Z2A_FMM_NEAR_PARITY_REPORT.txt`. Born and off-center
+  Kirkwood analytic rows completed with FMM/M2L `analytic_singular`; a
+  sampled protein cap-128 row completed with near pairs `13,815,687`, far
+  pairs `23,798,002`, and sampled audit RMS `0.00344495`.
+- Z2B smoke result:
+  `TITAN_FMM_M2L_SCOPE_Z2B_DUFFY_GATE_REPORT.txt`. Born and off-center
+  Kirkwood direct/FMM Duffy rows completed with `one_ring_cpv`, zero
+  fallbacks, and finite outputs. A sampled protein cap-128 FMM row completed
+  with Duffy pairs `4,777,175`, near pairs `13,815,687`, far pairs
+  `23,798,002`, and sampled audit RMS `0.00338017`.
+
 Tasks:
 
 - Z1C completed the controlled geometry study through about 5120 panels and
@@ -219,10 +243,13 @@ Tasks:
   that all required 20480-panel direct TABI rows cross below 0.5% oracle error.
   The remaining caveat is runtime cost, not observed surface-convergence
   accuracy.
-- Remove or narrow the centroid-only restriction for FMM/M2L near-field only
-  where `analytic_singular` or Duffy shows measured benefit.
-- Route self/edge/vertex/geometric near pairs through the same Duffy/cubature
-  policy used by direct JCP.
+- Implemented for `analytic_singular`: the FMM/M2L centroid-only restriction
+  is narrowed, and self-singular near pairs use the same production kernel
+  used by direct JCP.
+- Implemented for explicit `duffy_adaptive`: FMM/M2L uses the same production
+  Duffy/CPV near kernel as direct JCP. Promotion into `near=auto` remains a
+  future policy decision and should require matched-geometry benefit, not just
+  safety.
 - Add per-kernel `K1..K4` audit rows for FMM near-field acceptance/fallback.
 
 Acceptance:
@@ -238,9 +265,47 @@ Acceptance:
 Goal: adopt the paper's accuracy/performance tradeoff instead of one global
 Taylor order.
 
+Status:
+
+- Scope Z3A implemented fixed-order FMM plumbing and a validation harness:
+  `-pbe-tabi-taylor-order=3|4` now controls the FMM/M2L context instead of
+  leaving the analytical context hard-coded at order `4`.
+- `pbe_tabi_profile.csv` now reports `fmm_m2l_expansion_order`, allowing
+  order-specific matrix rows to distinguish legacy treecode order from the
+  effective FMM/M2L expansion order.
+- Z3A quick result:
+  `TITAN_FMM_M2L_SCOPE_Z3A_FMM_ORDER_MATRIX_REPORT.txt`. Born and off-center
+  Kirkwood rows at theta `0.6` completed for orders `3` and `4`; reported FMM
+  expansion orders matched the request, and the quick decision was
+  `z3a_order3_sufficient`. This is order-plumbing evidence only; it does not
+  yet replace the planned adaptive-by-level matrix.
+- Scope Z3B adds the fixed-order/theta matrix harness
+  `test/pbe_fagbi_scope_z3b_fmm_order_theta_matrix.ps1`. The full
+  Born/Kirkwood + Barnase/research-medium cap-128 matrix completed all 24 rows
+  with effective FMM orders matching requested `3|4`; the latest rerun
+  classified `z3b_adaptive_order_justified`. The measured rows still show theta
+  controls the main audit/runtime tradeoff more than fixed order in this
+  matrix. Adaptive-by-level should therefore wait for a theta-policy decision
+  rather than being implemented only because order `4` exists.
+- Scope Z3C adds `test/pbe_fagbi_scope_z3c_theta_policy_gate.ps1`. The full
+  Barnase/research-medium/research-alt cap-128 matrix completed all 12 rows
+  with decision `z3c_theta06_safe_default`: theta `0.8` was about `2.23x`
+  faster than theta `0.6` by median matvec time, but research-alt exceeded the
+  sampled audit gate (`0.0137388`), and theta `0.7` was still marginal on
+  research-alt (`0.00901184`). Keep theta `0.6` as the conservative policy
+  until a later cap-256/repeatability confirmation proves otherwise.
+- Scope Z3D adds `test/pbe_fagbi_scope_z3d_theta_cap256_repeatability.ps1`.
+  The full Barnase/research-medium/research-alt cap-256 gate completed all 15
+  rows with decision `z3d_theta06_confirmed`: theta `0.6` repeated cleanly
+  three times per fixture with audit maxima below `8e-3`, theta `0.8` exceeded
+  `1e-2` on every required fixture, and theta `0.7` remained marginal on
+  Barnase/research-alt. This confirms theta `0.6` as the fixed policy for the
+  next Z4 paper-style protein panel benchmark.
+
 Tasks:
 
-- Implement level-dependent order `p_l = p_L + L - l` behind an advanced flag.
+- Implement level-dependent order `p_l = p_L + L - l` behind an advanced flag
+  only after fixed-order protein/order/theta evidence justifies it.
 - Record per-level order, term count, and timing.
 - Gate on Kirkwood and protein fixtures.
 

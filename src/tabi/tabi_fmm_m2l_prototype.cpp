@@ -1,4 +1,5 @@
 #include "tabi/tabi_fmm_m2l_prototype.h"
+#include "tabi/tabi_near.h"
 #include "tabi/tabi_types.h"
 
 #include "aligned_allocator.h"
@@ -617,6 +618,27 @@ void add_jcp_direct_pair(const PrototypePanel &target,
                (mixedk - mixed0) * phi);
 }
 
+void add_jcp_near_kernel_pair(const TitanPBE::Tabi::Panel &target,
+                              std::size_t target_index,
+                              const TitanPBE::Tabi::Panel &source,
+                              std::size_t source_index, double source_phi,
+                              double source_phin, double eps_ratio,
+                              double kappa, bool coupled,
+                              const std::string &near_integration,
+                              const std::string &quad_buffer,
+                              double &phi_out, double &phin_out,
+                              TitanPBE::Tabi::TreecodeStats *stats) {
+  const TitanPBE::Tabi::JcpNearPairKernel selected =
+      TitanPBE::Tabi::evaluate_jcp_near_pair_kernel(
+          target, target_index, source, source_index, eps_ratio, kappa,
+          coupled, near_integration, quad_buffer, stats);
+  if (!selected.valid)
+    return;
+  phi_out += selected.k1 * source_phin + selected.k2 * source_phi;
+  if (coupled)
+    phin_out += selected.k3 * source_phin + selected.k4 * source_phi;
+}
+
 void add_jcp_direct_pair(const PrototypePanel &target,
                          const PrototypePanel &source, double source_phin,
                          double eps_ratio, double kappa, double &phi_out,
@@ -1005,7 +1027,12 @@ FmmM2lAnalyticContext::near_panel_graph(std::size_t neighbor_cap) const {
 JcpAnalyticOperatorResult
 FmmM2lAnalyticContext::apply(const std::vector<double> &phi_values,
                              const std::vector<double> &phin_values,
-                             TitanExecutor &executor) const {
+                             TitanExecutor &executor,
+                             bool coupled,
+                             const std::string &near_integration,
+                             const std::string &quad_buffer,
+                             const std::vector<TitanPBE::Tabi::Panel>
+                                 *production_panels) const {
   if (impl_ == nullptr) {
     throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
   }
@@ -1013,6 +1040,14 @@ FmmM2lAnalyticContext::apply(const std::vector<double> &phi_values,
       phin_values.size() != impl_->panels.size()) {
     throw std::invalid_argument(
         "JCP analytic FMM/M2L context density vectors must match panels");
+  }
+  const bool use_production_near_kernel =
+      near_integration != "centroid" && near_integration != "off";
+  if (use_production_near_kernel &&
+      (production_panels == nullptr ||
+       production_panels->size() != impl_->panels.size())) {
+    throw std::invalid_argument(
+        "JCP analytic FMM/M2L analytic near integration requires production panel geometry");
   }
 
   JcpAnalyticOperatorResult result;
@@ -1031,9 +1066,14 @@ FmmM2lAnalyticContext::apply(const std::vector<double> &phi_values,
 
   const auto apply_begin = Clock::now();
   const std::size_t workers = std::max<std::size_t>(1, executor.capacity());
+  std::vector<TitanPBE::Tabi::TreecodeStats> local_near_stats(
+      use_production_near_kernel ? workers : 0);
   executor.parallel_for(
       impl_->target_tree.target_leaf_nodes.size(), workers, 1,
-      [&](std::size_t, std::size_t begin, std::size_t end) {
+      [&](std::size_t worker, std::size_t begin, std::size_t end) {
+        TitanPBE::Tabi::TreecodeStats *worker_near_stats =
+            use_production_near_kernel ? &local_near_stats[worker]
+                                       : nullptr;
         for (std::size_t leaf_pos = begin; leaf_pos < end; ++leaf_pos) {
           const int target_node = impl_->target_tree.target_leaf_nodes[leaf_pos];
           const Cell &target_cell =
@@ -1052,12 +1092,20 @@ FmmM2lAnalyticContext::apply(const std::vector<double> &phi_values,
               for (std::size_t spos = source_cell.begin; spos < source_cell.end;
                    ++spos) {
                 const std::size_t si = impl_->source_tree.order[spos];
-                if (ti == si) {
-                  continue;
+                if (use_production_near_kernel) {
+                  add_jcp_near_kernel_pair(
+                      (*production_panels)[ti], ti, (*production_panels)[si],
+                      si, phi_values[si], phin_values[si], impl_->eps_ratio,
+                      impl_->kappa, coupled, near_integration, quad_buffer,
+                      phi_sum, phin_sum, worker_near_stats);
+                } else {
+                  if (ti == si) {
+                    continue;
+                  }
+                  add_jcp_direct_pair(target, impl_->panels[si], phi_values[si],
+                                      phin_values[si], impl_->eps_ratio,
+                                      impl_->kappa, phi_sum, phin_sum);
                 }
-                add_jcp_direct_pair(target, impl_->panels[si], phi_values[si],
-                                    phin_values[si], impl_->eps_ratio,
-                                    impl_->kappa, phi_sum, phin_sum);
               }
             }
             for (int source_node : work.far_sources) {
@@ -1073,6 +1121,41 @@ FmmM2lAnalyticContext::apply(const std::vector<double> &phi_values,
         }
       });
   result.apply_seconds = elapsed_seconds(apply_begin, Clock::now());
+
+  if (use_production_near_kernel) {
+    for (const TitanPBE::Tabi::TreecodeStats &worker_stats :
+         local_near_stats) {
+      const std::size_t previous_duffy = result.near_duffy_pairs;
+      result.near_self_pairs += worker_stats.near_self_pairs;
+      result.near_one_ring_pairs += worker_stats.near_one_ring_pairs;
+      result.near_duffy_pairs += worker_stats.near_duffy_pairs;
+      result.near_centroid_pairs += worker_stats.near_centroid_pairs;
+      result.near_fallbacks += worker_stats.near_fallbacks;
+      result.duffy_subdivisions_max =
+          std::max(result.duffy_subdivisions_max,
+                   worker_stats.duffy_subdivisions_max);
+      if (worker_stats.near_duffy_pairs > 0) {
+        const double old_count = static_cast<double>(previous_duffy);
+        const double new_count = static_cast<double>(result.near_duffy_pairs);
+        result.duffy_subdivisions_mean =
+            new_count <= 0.0
+                ? 0.0
+                : (result.duffy_subdivisions_mean * old_count +
+                   worker_stats.duffy_subdivisions_mean *
+                       static_cast<double>(worker_stats.near_duffy_pairs)) /
+                      new_count;
+      }
+      if (worker_stats.near_self_pairs + worker_stats.near_one_ring_pairs +
+              worker_stats.near_duffy_pairs +
+              worker_stats.near_centroid_pairs +
+              worker_stats.near_geometric_buffer_pairs >
+          0) {
+        result.near_kernel_policy = worker_stats.near_kernel_policy;
+      }
+    }
+  } else {
+    result.near_centroid_pairs = result.near_pairs;
+  }
 
   result.finite_outputs =
       std::all_of(result.phi.begin(), result.phi.end(),
@@ -2349,7 +2432,8 @@ namespace TitanPBE::Tabi {
 std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
 ensure_jcp_fmm_m2l_context(
     const std::vector<Panel> &panels, double eps_ratio, double kappa,
-    std::size_t leaf_size, double opening_theta, TitanExecutor &executor,
+    std::size_t leaf_size, double opening_theta, int expansion_order,
+    TitanExecutor &executor,
     std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
         *context_cache) {
   titan::tabi::fmm_m2l::PrototypeConfig config;
@@ -2358,7 +2442,7 @@ ensure_jcp_fmm_m2l_context(
   config.max_leaf_size =
       static_cast<int>(std::clamp<std::size_t>(leaf_size == 0 ? 64 : leaf_size,
                                                8, 512));
-  config.expansion_order = 4;
+  config.expansion_order = std::clamp(expansion_order, 3, 4);
   config.separation_theta =
       std::clamp(std::isfinite(opening_theta) && opening_theta > 0.0
                      ? opening_theta
@@ -2394,10 +2478,13 @@ ensure_jcp_fmm_m2l_context(
 void apply_jcp_fmm_m2l_single_matvec(
     const std::vector<Panel> &panels, const std::vector<double> &unknowns,
     double eps_ratio, double kappa, double lhs_phi, double lhs_phin,
-    std::size_t leaf_size, double opening_theta, TitanExecutor &executor,
+    std::size_t leaf_size, double opening_theta, int expansion_order,
+    TitanExecutor &executor,
     std::vector<double> &out, FmmM2lSingleMatvecStats *stats, bool coupled,
     std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
-        *context_cache) {
+        *context_cache,
+    const std::string &near_integration,
+    const std::string &quad_buffer) {
   const std::size_t n = panels.size();
   if (n == 0) {
     out.clear();
@@ -2420,10 +2507,12 @@ void apply_jcp_fmm_m2l_single_matvec(
 
   const std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext> context =
       ensure_jcp_fmm_m2l_context(panels, eps_ratio, kappa, leaf_size,
-                                 opening_theta, executor, context_cache);
+                                 opening_theta, expansion_order, executor,
+                                 context_cache);
 
   const titan::tabi::fmm_m2l::JcpAnalyticOperatorResult result =
-      context->apply(phi, phin, executor);
+      context->apply(phi, phin, executor, coupled, near_integration, quad_buffer,
+                     &panels);
 
   out.assign(coupled ? 2 * n : n, 0.0);
   bool finite = result.finite_outputs;
@@ -2439,6 +2528,15 @@ void apply_jcp_fmm_m2l_single_matvec(
   if (stats != nullptr) {
     stats->near_pairs = result.near_pairs;
     stats->far_pairs = result.far_pairs;
+    stats->near_self_pairs = result.near_self_pairs;
+    stats->near_one_ring_pairs = result.near_one_ring_pairs;
+    stats->near_duffy_pairs = result.near_duffy_pairs;
+    stats->near_centroid_pairs = result.near_centroid_pairs;
+    stats->near_fallbacks = result.near_fallbacks;
+    stats->duffy_subdivisions_max = result.duffy_subdivisions_max;
+    stats->duffy_subdivisions_mean = result.duffy_subdivisions_mean;
+    stats->near_kernel_policy = result.near_kernel_policy;
+    stats->expansion_order = std::clamp(expansion_order, 3, 4);
     stats->setup_ms = 1000.0 * result.setup_seconds;
     stats->apply_ms = 1000.0 * result.apply_seconds;
     stats->cached = context_cache != nullptr;
