@@ -42,6 +42,54 @@ constexpr double kBarNm3ToKJPerMol = 0.06022140857;
 constexpr double kEnergyTimeFilterTolerancePs = 1e-3;
 constexpr int kLjFeatureColumns = 20;
 
+void log_tica_timing_stats(std::fstream &log,
+                           const TitanKinetics::TimingStats &stats) {
+  TitanUI::log_time(log, "TICA Feature Build", stats.feature_build_seconds);
+  TitanUI::log_time(log, "TICA Cache Write", stats.cache_write_seconds);
+  TitanUI::log_time(log, "TICA Cache Read", stats.cache_read_seconds);
+  TitanUI::log_time(log, "TICA Spool Write", stats.spool_write_seconds);
+  TitanUI::log_time(log, "TICA Spool Read", stats.spool_read_seconds);
+  TitanUI::log_time(log, "TICA Cache Promotion", stats.cache_promotion_seconds);
+  TitanUI::log_time(log, "TICA exact_dual Center",
+                    stats.exact_dual_center_seconds);
+  TitanUI::log_time(log, "TICA exact_dual SVD", stats.exact_dual_svd_seconds);
+  TitanUI::log_time(log, "TICA randomized Sketch",
+                    stats.randomized_sketch_seconds);
+  TitanUI::log_time(log, "TICA randomized QR", stats.randomized_qr_seconds);
+  TitanUI::log_time(log, "TICA randomized Compress",
+                    stats.randomized_compression_seconds);
+  TitanUI::log_time(log, "TICA randomized SVD", stats.randomized_svd_seconds);
+  TitanUI::log_time(log, "TICA Reduced Solve Replay",
+                    stats.reduced_solve_replay_seconds);
+  TitanUI::log_time(log, "TICA Reduced Eigensolve",
+                    stats.reduced_eigensolve_seconds);
+  TitanUI::log_time(log, "TICA Projection Replay",
+                    stats.projection_replay_seconds);
+
+  TitanUI::log_kv(log, "TICA Cache Write Frames",
+                  std::to_string(stats.cache_write_frames));
+  TitanUI::log_kv(log, "TICA Spool Write Frames",
+                  std::to_string(stats.spool_write_frames));
+  TitanUI::log_kv(log, "TICA Promoted Cache Frames",
+                  std::to_string(stats.promoted_cache_frames));
+  TitanUI::log_kv(log, "TICA Randomized Sketch Frames",
+                  std::to_string(stats.randomized_sketch_read_frames));
+  TitanUI::log_kv(log, "TICA Randomized Compress Frames",
+                  std::to_string(stats.randomized_compression_read_frames));
+  TitanUI::log_kv(log, "TICA Reduced Replay Frames",
+                  std::to_string(stats.reduced_solve_replay_frames));
+  TitanUI::log_kv(log, "TICA Projection Replay Frames",
+                  std::to_string(stats.projection_replay_frames));
+  TitanUI::log_kv(log, "TICA Raw Cache Released Frames",
+                  std::to_string(stats.raw_feature_cache_released_frames));
+  TitanUI::log_kv(log, "TICA Cache Write Bytes",
+                  std::to_string(stats.cache_write_bytes));
+  TitanUI::log_kv(log, "TICA Spool Write Bytes",
+                  std::to_string(stats.spool_write_bytes));
+  TitanUI::log_kv(log, "TICA Spool Read Bytes",
+                  std::to_string(stats.spool_read_bytes));
+}
+
 struct LjMicrostateSummary {
   bool valid{false};
   std::vector<double> rho_bulk_nm3;
@@ -4087,6 +4135,8 @@ void run_tica_msm_postproc(const arguments &args,
     } else {
       TitanUI::log_kv(log, "MSM Analysis", "skipped (module not enabled)");
     }
+
+    log_tica_timing_stats(log, tica_analyzer->timing_stats());
 
     auto time_tica = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start_tica);

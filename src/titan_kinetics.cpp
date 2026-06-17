@@ -54,6 +54,11 @@ int singular_rank(const Eigen::VectorXd &singular_values, int dim_hint) {
   return rank;
 }
 
+double seconds_since(std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+      .count();
+}
+
 } // namespace
 
 std::string tica_backend_to_string(TicaBackend backend) {
@@ -166,8 +171,30 @@ void TitanKinetics::remove_spool_file_() {
   spool_path_.clear();
 }
 
+void TitanKinetics::add_feature_build_seconds(double seconds) {
+  if (seconds > 0.0 && std::isfinite(seconds)) {
+    timing_stats_.feature_build_seconds += seconds;
+  }
+}
+
+void TitanKinetics::release_raw_feature_cache() {
+  if (frame_cache_.rows() <= 0) {
+    return;
+  }
+  const int64_t released_rows =
+      std::min<int64_t>(n_frames_, static_cast<int64_t>(frame_cache_.rows()));
+  FrameMatrixRM released;
+  frame_cache_.swap(released);
+  frame_cache_.resize(0, dim_);
+  timing_stats_.raw_feature_cache_released_frames += released_rows;
+}
+
 void TitanKinetics::append_cached_frame_(const Eigen::VectorXd &x) {
+  const uint64_t frame_bytes =
+      static_cast<uint64_t>(std::max(0, dim_)) * sizeof(double);
+
   if (backend_ == TicaBackend::Randomized) {
+    const auto start = std::chrono::steady_clock::now();
     if (!spool_writer_.is_open()) {
       open_spool_for_write_();
     }
@@ -176,6 +203,9 @@ void TitanKinetics::append_cached_frame_(const Eigen::VectorXd &x) {
     if (!spool_writer_) {
       throw std::runtime_error("TICA randomized: failed writing spool file.");
     }
+    timing_stats_.spool_write_seconds += seconds_since(start);
+    ++timing_stats_.spool_write_frames;
+    timing_stats_.spool_write_bytes += frame_bytes;
     return;
   }
 
@@ -183,6 +213,7 @@ void TitanKinetics::append_cached_frame_(const Eigen::VectorXd &x) {
     return;
   }
 
+  const auto start = std::chrono::steady_clock::now();
   if (n_frames_ >= frame_cache_.rows()) {
     const int64_t new_rows =
         std::max<int64_t>(int64_t(1024), frame_cache_.rows() * 2);
@@ -193,6 +224,7 @@ void TitanKinetics::append_cached_frame_(const Eigen::VectorXd &x) {
       if (estimated_bytes >
           static_cast<long double>(feature_cache_cap_bytes_)) {
         backend_ = TicaBackend::Randomized;
+        const auto promotion_start = std::chrono::steady_clock::now();
         open_spool_for_write_();
         for (int64_t i = 0; i < n_frames_; ++i) {
           spool_writer_.write(
@@ -200,15 +232,24 @@ void TitanKinetics::append_cached_frame_(const Eigen::VectorXd &x) {
               static_cast<std::streamsize>(dim_ * sizeof(double)));
         }
         frame_cache_.resize(0, dim_);
+        timing_stats_.cache_promotion_seconds += seconds_since(promotion_start);
+        timing_stats_.promoted_cache_frames += n_frames_;
+        timing_stats_.spool_write_frames += n_frames_;
+        timing_stats_.spool_write_bytes +=
+            static_cast<uint64_t>(std::max<int64_t>(0, n_frames_)) * frame_bytes;
         TitanUI::print_warning(
             "TICA: feature cache exceeded auto memory budget. "
             "Promoting backend from exact_dual to randomized.");
+        const auto write_start = std::chrono::steady_clock::now();
         spool_writer_.write(reinterpret_cast<const char *>(x.data()),
                             static_cast<std::streamsize>(dim_ * sizeof(double)));
         if (!spool_writer_) {
           throw std::runtime_error(
               "TICA randomized: failed writing promoted spool file.");
         }
+        timing_stats_.spool_write_seconds += seconds_since(write_start);
+        ++timing_stats_.spool_write_frames;
+        timing_stats_.spool_write_bytes += frame_bytes;
         return;
       }
     }
@@ -216,6 +257,9 @@ void TitanKinetics::append_cached_frame_(const Eigen::VectorXd &x) {
   }
 
   frame_cache_.row(n_frames_) = x.transpose();
+  timing_stats_.cache_write_seconds += seconds_since(start);
+  ++timing_stats_.cache_write_frames;
+  timing_stats_.cache_write_bytes += frame_bytes;
 }
 
 std::vector<int64_t> TitanKinetics::build_segment_boundaries_() const {
@@ -331,11 +375,16 @@ Eigen::MatrixXd TitanKinetics::build_exact_dual_basis_() {
     return {};
   }
 
+  const auto center_start = std::chrono::steady_clock::now();
   Eigen::MatrixXd centered = frame_cache_.topRows(n_frames_);
   centered.rowwise() -= mean_.transpose();
+  timing_stats_.exact_dual_center_seconds += seconds_since(center_start);
 
+  const auto svd_start = std::chrono::steady_clock::now();
   Eigen::JacobiSVD<Eigen::MatrixXd> svd(centered,
                                         Eigen::ComputeThinU | Eigen::ComputeThinV);
+  timing_stats_.exact_dual_svd_seconds += seconds_since(svd_start);
+  ++timing_stats_.exact_dual_svd_calls;
   const int rank = singular_rank(svd.singularValues(), dim_);
   if (rank <= 0) {
     throw std::runtime_error("TICA exact_dual: centered feature matrix is rank-deficient.");
@@ -371,6 +420,7 @@ Eigen::MatrixXd TitanKinetics::build_randomized_basis_() {
   std::vector<double> row_buffer(static_cast<size_t>(dim_));
 
   {
+    const auto sketch_start = std::chrono::steady_clock::now();
     std::ifstream in(spool_path_, std::ios::binary);
     if (!in.is_open()) {
       throw std::runtime_error("TICA randomized: cannot open spool file for sketch pass.");
@@ -386,14 +436,24 @@ Eigen::MatrixXd TitanKinetics::build_randomized_basis_() {
       centered -= mean_row;
       Y.row(i).noalias() = centered * omega;
     }
+    const double sketch_seconds = seconds_since(sketch_start);
+    timing_stats_.randomized_sketch_seconds += sketch_seconds;
+    timing_stats_.spool_read_seconds += sketch_seconds;
+    timing_stats_.randomized_sketch_read_frames += n_frames_;
+    timing_stats_.spool_read_bytes +=
+        static_cast<uint64_t>(std::max<int64_t>(0, n_frames_)) *
+        static_cast<uint64_t>(std::max(0, dim_)) * sizeof(double);
   }
 
+  const auto qr_start = std::chrono::steady_clock::now();
   Eigen::HouseholderQR<Eigen::MatrixXd> qr(Y);
   Eigen::MatrixXd Q =
       qr.householderQ() * Eigen::MatrixXd::Identity(n_frames_, sketch_rank);
+  timing_stats_.randomized_qr_seconds += seconds_since(qr_start);
 
   Eigen::MatrixXd B = Eigen::MatrixXd::Zero(sketch_rank, dim_);
   {
+    const auto compression_start = std::chrono::steady_clock::now();
     std::ifstream in(spool_path_, std::ios::binary);
     if (!in.is_open()) {
       throw std::runtime_error(
@@ -411,10 +471,20 @@ Eigen::MatrixXd TitanKinetics::build_randomized_basis_() {
       centered -= mean_row;
       B.noalias() += Q.row(i).transpose() * centered;
     }
+    const double compression_seconds = seconds_since(compression_start);
+    timing_stats_.randomized_compression_seconds += compression_seconds;
+    timing_stats_.spool_read_seconds += compression_seconds;
+    timing_stats_.randomized_compression_read_frames += n_frames_;
+    timing_stats_.spool_read_bytes +=
+        static_cast<uint64_t>(std::max<int64_t>(0, n_frames_)) *
+        static_cast<uint64_t>(std::max(0, dim_)) * sizeof(double);
   }
 
+  const auto svd_start = std::chrono::steady_clock::now();
   Eigen::JacobiSVD<Eigen::MatrixXd> svd(B,
                                         Eigen::ComputeThinU | Eigen::ComputeThinV);
+  timing_stats_.randomized_svd_seconds += seconds_since(svd_start);
+  ++timing_stats_.randomized_svd_calls;
   const int available_rank = singular_rank(svd.singularValues(), dim_);
   const int basis_rank = std::min(target_rank, available_rank);
   if (basis_rank <= 0) {
@@ -427,23 +497,60 @@ Eigen::MatrixXd TitanKinetics::build_randomized_basis_() {
   return svd.matrixV().leftCols(basis_rank);
 }
 
-Eigen::MatrixXd
-TitanKinetics::project_all_frames_to_basis_(const Eigen::MatrixXd &basis) const {
-  if (basis.cols() == 0) {
-    return {};
+void TitanKinetics::project_all_frames_to_sink(
+    const ProjectionSink &sink) const {
+  if (!solved_ || n_frames_ <= 0) {
+    return;
+  }
+  if (!sink) {
+    throw std::runtime_error("TICA: projection sink is empty.");
+  }
+  if (backend_ == TicaBackend::ExactDense) {
+    throw std::runtime_error(
+        "TICA exact_dense does not retain per-frame history for projection replay.");
   }
 
-  Eigen::MatrixXd projected(n_frames_, basis.cols());
+  const int basis_cols = std::max(0, retained_components_);
+  Eigen::VectorXd output_row = Eigen::VectorXd::Zero(std::max(1, n_comp_));
+  if (basis_cols == 0) {
+    ++timing_stats_.projection_replay_calls;
+    timing_stats_.projection_replay_frames += n_frames_;
+    for (int64_t i = 0; i < n_frames_; ++i) {
+      const Eigen::Ref<const Eigen::VectorXd> output_ref(output_row);
+      sink(i, output_ref);
+    }
+    return;
+  }
+
+  const Eigen::MatrixXd basis = eigenvectors_.leftCols(basis_cols);
   RowVectorXd mean_row = mean_.transpose();
   RowVectorXd centered(dim_);
+  RowVectorXd projected_row(basis_cols);
+  const uint64_t replay_bytes =
+      static_cast<uint64_t>(std::max<int64_t>(0, n_frames_)) *
+      static_cast<uint64_t>(std::max(0, dim_)) * sizeof(double);
+  const auto replay_start = std::chrono::steady_clock::now();
 
   if (backend_ == TicaBackend::ExactDual) {
+    if (frame_cache_.rows() < n_frames_) {
+      throw std::runtime_error(
+          "TICA exact_dual: raw feature cache is unavailable for projection replay.");
+    }
     for (int64_t i = 0; i < n_frames_; ++i) {
       centered = frame_cache_.row(i);
       centered -= mean_row;
-      projected.row(i).noalias() = centered * basis;
+      projected_row.noalias() = centered * basis;
+      output_row.setZero();
+      output_row.head(basis_cols) = projected_row.transpose();
+      const Eigen::Ref<const Eigen::VectorXd> output_ref(output_row);
+      sink(i, output_ref);
     }
-    return projected;
+    const double replay_seconds = seconds_since(replay_start);
+    timing_stats_.cache_read_seconds += replay_seconds;
+    timing_stats_.projection_replay_seconds += replay_seconds;
+    ++timing_stats_.projection_replay_calls;
+    timing_stats_.projection_replay_frames += n_frames_;
+    return;
   }
 
   std::ifstream in(spool_path_, std::ios::binary);
@@ -461,10 +568,19 @@ TitanKinetics::project_all_frames_to_basis_(const Eigen::MatrixXd &basis) const 
     Eigen::Map<const RowVectorXd> row(row_buffer.data(), dim_);
     centered = row;
     centered -= mean_row;
-    projected.row(i).noalias() = centered * basis;
+    projected_row.noalias() = centered * basis;
+    output_row.setZero();
+    output_row.head(basis_cols) = projected_row.transpose();
+    const Eigen::Ref<const Eigen::VectorXd> output_ref(output_row);
+    sink(i, output_ref);
   }
 
-  return projected;
+  const double replay_seconds = seconds_since(replay_start);
+  timing_stats_.spool_read_seconds += replay_seconds;
+  timing_stats_.spool_read_bytes += replay_bytes;
+  timing_stats_.projection_replay_seconds += replay_seconds;
+  ++timing_stats_.projection_replay_calls;
+  timing_stats_.projection_replay_frames += n_frames_;
 }
 
 void TitanKinetics::solve_reduced_from_basis_(const Eigen::MatrixXd &basis,
@@ -496,6 +612,10 @@ void TitanKinetics::solve_reduced_from_basis_(const Eigen::MatrixXd &basis,
   int ring_count = 0;
   RowVectorXd mean_row = mean_.transpose();
   RowVectorXd centered(dim_);
+  const uint64_t replay_bytes =
+      static_cast<uint64_t>(std::max<int64_t>(0, n_frames_)) *
+      static_cast<uint64_t>(std::max(0, dim_)) * sizeof(double);
+  const auto replay_start = std::chrono::steady_clock::now();
 
   const auto process_projected_row = [&](int64_t frame_idx) {
     while (next_boundary < boundaries.size() &&
@@ -524,12 +644,21 @@ void TitanKinetics::solve_reduced_from_basis_(const Eigen::MatrixXd &basis,
   };
 
   if (backend_ == TicaBackend::ExactDual) {
+    if (frame_cache_.rows() < n_frames_) {
+      throw std::runtime_error(
+          "TICA exact_dual: raw feature cache is unavailable for reduced solve.");
+    }
     for (int64_t i = 0; i < n_frames_; ++i) {
       centered = frame_cache_.row(i);
       centered -= mean_row;
       z_row.noalias() = centered * basis;
       process_projected_row(i);
     }
+    const double replay_seconds = seconds_since(replay_start);
+    timing_stats_.cache_read_seconds += replay_seconds;
+    timing_stats_.reduced_solve_replay_seconds += replay_seconds;
+    ++timing_stats_.reduced_solve_replay_calls;
+    timing_stats_.reduced_solve_replay_frames += n_frames_;
   } else {
     std::ifstream in(spool_path_, std::ios::binary);
     if (!in.is_open()) {
@@ -549,6 +678,12 @@ void TitanKinetics::solve_reduced_from_basis_(const Eigen::MatrixXd &basis,
       z_row.noalias() = centered * basis;
       process_projected_row(i);
     }
+    const double replay_seconds = seconds_since(replay_start);
+    timing_stats_.spool_read_seconds += replay_seconds;
+    timing_stats_.spool_read_bytes += replay_bytes;
+    timing_stats_.reduced_solve_replay_seconds += replay_seconds;
+    ++timing_stats_.reduced_solve_replay_calls;
+    timing_stats_.reduced_solve_replay_frames += n_frames_;
   }
 
   C0 /= static_cast<double>(n_frames_);
@@ -561,7 +696,9 @@ void TitanKinetics::solve_reduced_from_basis_(const Eigen::MatrixXd &basis,
                       std::to_string(C0.trace()) +
                       ", regularization eps = " + std::to_string(epsilon));
 
+  const auto eigensolve_start = std::chrono::steady_clock::now();
   Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> solver(Ctau, C0);
+  timing_stats_.reduced_eigensolve_seconds += seconds_since(eigensolve_start);
   if (solver.info() != Eigen::Success) {
     throw std::runtime_error("TICA " + label +
                              ": reduced generalized eigensolver failed.");
@@ -770,12 +907,18 @@ TitanKinetics::FrameMatrixRM TitanKinetics::project_all_frames() const {
     return projected;
   }
 
-  const Eigen::MatrixXd dense_projected =
-      project_all_frames_to_basis_(eigenvectors_.leftCols(basis_cols));
-  if (dense_projected.rows() != projected.rows()) {
-    throw std::runtime_error(
-        "TICA: project_all_frames() row-count mismatch.");
+  int64_t projected_rows = 0;
+  project_all_frames_to_sink(
+      [&](int64_t frame_index, const Eigen::Ref<const Eigen::VectorXd> &row) {
+        if (frame_index < 0 || frame_index >= n_frames_) {
+          throw std::runtime_error(
+              "TICA: project_all_frames() frame index out of range.");
+        }
+        projected.row(frame_index).leftCols(row.size()) = row.transpose();
+        ++projected_rows;
+      });
+  if (projected_rows != n_frames_) {
+    throw std::runtime_error("TICA: project_all_frames() row-count mismatch.");
   }
-  projected.leftCols(basis_cols) = dense_projected;
   return projected;
 }

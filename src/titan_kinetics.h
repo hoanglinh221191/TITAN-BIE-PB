@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -37,6 +38,44 @@ class TitanKinetics {
 public:
   using FrameMatrixRM =
       Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+  using ProjectionSink =
+      std::function<void(int64_t, const Eigen::Ref<const Eigen::VectorXd> &)>;
+
+  struct TimingStats {
+    double feature_build_seconds = 0.0;
+    double cache_write_seconds = 0.0;
+    double cache_read_seconds = 0.0;
+    double spool_write_seconds = 0.0;
+    double spool_read_seconds = 0.0;
+    double cache_promotion_seconds = 0.0;
+    double exact_dual_center_seconds = 0.0;
+    double exact_dual_svd_seconds = 0.0;
+    double randomized_sketch_seconds = 0.0;
+    double randomized_qr_seconds = 0.0;
+    double randomized_compression_seconds = 0.0;
+    double randomized_svd_seconds = 0.0;
+    double reduced_solve_replay_seconds = 0.0;
+    double reduced_eigensolve_seconds = 0.0;
+    double projection_replay_seconds = 0.0;
+
+    int64_t cache_write_frames = 0;
+    int64_t spool_write_frames = 0;
+    int64_t promoted_cache_frames = 0;
+    int64_t randomized_sketch_read_frames = 0;
+    int64_t randomized_compression_read_frames = 0;
+    int64_t reduced_solve_replay_frames = 0;
+    int64_t projection_replay_frames = 0;
+    int64_t raw_feature_cache_released_frames = 0;
+
+    uint64_t cache_write_bytes = 0;
+    uint64_t spool_write_bytes = 0;
+    uint64_t spool_read_bytes = 0;
+
+    int exact_dual_svd_calls = 0;
+    int randomized_svd_calls = 0;
+    int reduced_solve_replay_calls = 0;
+    int projection_replay_calls = 0;
+  };
 
   // ---- Construction --------------------------------------------------------
   // feature_dim : dimensionality D of the feature vector (e.g. 3*N_atoms)
@@ -86,6 +125,19 @@ public:
   // feature matrix in RAM.
   FrameMatrixRM project_all_frames() const;
 
+  // Stream all cached frames in solved TICA space to a caller-provided sink.
+  // This avoids allocating a second n_frames x n_components matrix when the
+  // caller already owns the destination projection cache.
+  void project_all_frames_to_sink(const ProjectionSink &sink) const;
+
+  // Engine-side feature construction happens before accumulate_frame(), so the
+  // trajectory loop reports that timing explicitly through this hook.
+  void add_feature_build_seconds(double seconds);
+
+  // Release exact_dual raw feature rows after a reduced projection cache has
+  // been built. Solved eigenvectors and project_frame() remain valid.
+  void release_raw_feature_cache();
+
   // ---- Accessors -----------------------------------------------------------
   int feature_dim() const { return dim_; }
   int lag_time() const { return lag_; }
@@ -97,6 +149,8 @@ public:
   int randomized_rank() const { return randomized_rank_; }
   TicaBackend backend() const { return backend_; }
   TicaBackend requested_backend() const { return requested_backend_; }
+  int64_t raw_feature_cache_rows() const { return frame_cache_.rows(); }
+  const TimingStats &timing_stats() const { return timing_stats_; }
 
   const Eigen::VectorXd &eigenvalues() const { return eigenvalues_; }
   const Eigen::MatrixXd &eigenvectors() const { return eigenvectors_; }
@@ -135,6 +189,7 @@ private:
   std::vector<int64_t> traj_break_indices_;
   std::filesystem::path spool_path_;
   std::ofstream spool_writer_;
+  mutable TimingStats timing_stats_;
 
   // Results (populated by solve_tica)
   bool solved_;
@@ -159,7 +214,6 @@ private:
 
   Eigen::MatrixXd build_exact_dual_basis_();
   Eigen::MatrixXd build_randomized_basis_();
-  Eigen::MatrixXd project_all_frames_to_basis_(const Eigen::MatrixXd &basis) const;
 };
 
 #endif // TITAN_KINETICS_H

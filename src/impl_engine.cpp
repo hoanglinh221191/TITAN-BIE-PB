@@ -3167,7 +3167,14 @@ int engine(arguments &Arguments) {
                 tot_snap_allfiles + global_frame_counter + chunk_snap_idx;
             const double current_box_volume_nm3 =
                 frame_box_volume_nm3(pro_in.m_mol[chunk_snap_idx].Box);
+            const auto start_tica_feature_build =
+                std::chrono::steady_clock::now();
             tica_features = lj_analyzer.latest_feature_vector();
+            tica_analyzer->add_feature_build_seconds(
+                std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() -
+                    start_tica_feature_build)
+                    .count());
             tica_analyzer->accumulate_frame(tica_features);
 
             if (need_tica_projection_cache && msm_analyzer) {
@@ -3221,12 +3228,19 @@ int engine(arguments &Arguments) {
           if (Arguments.msm.flag_tica && tica_analyzer &&
               use_observable_tica_features) {
             auto start_tica = std::chrono::steady_clock::now();
+            const auto start_tica_feature_build =
+                std::chrono::steady_clock::now();
             Eigen::VectorXd observable_features;
             const bool have_tica_frame = build_observable_feature_vector(
                 Arguments, dccm_analyzer, tica_n_ca, tica_mobile,
                 tica_ref_centered, tica_R, tica_ref_initialized,
                 qnative_analyzer, dihedral_analyzer, cmap_analyzer,
                 lj_analyzer, observable_features);
+            tica_analyzer->add_feature_build_seconds(
+                std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() -
+                    start_tica_feature_build)
+                    .count());
             if (have_tica_frame &&
                 feature_router.accept_frame(
                     static_cast<std::uint64_t>(absolute_global_snap_idx),
@@ -3258,6 +3272,8 @@ int engine(arguments &Arguments) {
           } else if (Arguments.msm.flag_tica && tica_analyzer &&
                      !use_lj_tica_features) {
             auto start_tica = std::chrono::steady_clock::now();
+            const auto start_tica_feature_build =
+                std::chrono::steady_clock::now();
             bool have_tica_frame = false;
             if (tica_n_ca > 0) {
               size_t nf = dccm_analyzer.get_total_frames();
@@ -3300,6 +3316,11 @@ int engine(arguments &Arguments) {
                 have_tica_frame = true;
               }
             }
+            tica_analyzer->add_feature_build_seconds(
+                std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() -
+                    start_tica_feature_build)
+                    .count());
 
             if (have_tica_frame) {
               const double current_box_volume_nm3 =
@@ -4333,6 +4354,8 @@ int engine(arguments &Arguments) {
         // align) ---
         auto start_tica = std::chrono::steady_clock::now();
         if (Arguments.msm.flag_tica && tica_analyzer) {
+          const auto start_tica_feature_build =
+              std::chrono::steady_clock::now();
           bool have_tica_frame = false;
           if (use_observable_tica_features) {
             Eigen::VectorXd observable_features;
@@ -4399,6 +4422,11 @@ int engine(arguments &Arguments) {
               have_tica_frame = true;
             }
           }
+          tica_analyzer->add_feature_build_seconds(
+              std::chrono::duration<double>(
+                  std::chrono::steady_clock::now() -
+                  start_tica_feature_build)
+                  .count());
           if (have_tica_frame) {
             const double current_box_volume_nm3 =
                 frame_box_volume_nm3(pro_in.m_mol[chunk_snap_idx].Box);

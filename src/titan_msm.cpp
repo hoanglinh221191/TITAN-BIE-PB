@@ -446,7 +446,7 @@ void TitanMSM::record_frame_time(double time_ps, int /*replica_id*/) {
     frame_timestamps_.back() = time_ps;
 }
 
-void TitanMSM::project_pending_features(const TitanKinetics &tica_analyzer) {
+void TitanMSM::project_pending_features(TitanKinetics &tica_analyzer) {
   if (!tica_analyzer.is_solved()) {
     TitanUI::print_error(
         "TitanMSM::project_pending_features: TICA model is not solved.");
@@ -468,23 +468,45 @@ void TitanMSM::project_pending_features(const TitanKinetics &tica_analyzer) {
   frame_global_indices_.clear();
 
   if (raw_feat_mat_.cols() == 0) {
-    TitanKinetics::FrameMatrixRM projected;
-    try {
-      projected = tica_analyzer.project_all_frames();
-    } catch (const std::exception &e) {
-      TitanUI::print_warning(e.what());
-      return;
-    }
-    if (projected.rows() != n_raw_frames_) {
+    if (tica_analyzer.num_frames() != n_raw_frames_) {
       TitanUI::print_error(
-          "TitanMSM::project_pending_features: projected frame count (" +
-          std::to_string(projected.rows()) +
+          "TitanMSM::project_pending_features: TICA frame count (" +
+          std::to_string(tica_analyzer.num_frames()) +
           ") does not match pending metadata frame count (" +
           std::to_string(n_raw_frames_) + ").");
       return;
     }
 
-    proj_mat_ = projected;
+    proj_mat_.resize(n_raw_frames_, n_comp_);
+    int64_t projected_rows = 0;
+    try {
+      tica_analyzer.project_all_frames_to_sink(
+          [&](int64_t frame_index,
+              const Eigen::Ref<const Eigen::VectorXd> &projected_row) {
+            if (frame_index < 0 || frame_index >= n_raw_frames_) {
+              throw std::runtime_error(
+                  "TitanMSM::project_pending_features: projection frame index out of range.");
+            }
+            if (projected_row.size() != n_comp_) {
+              throw std::runtime_error(
+                  "TitanMSM::project_pending_features: projected row dimension mismatch.");
+            }
+            proj_mat_.row(frame_index) = projected_row.transpose();
+            ++projected_rows;
+          });
+    } catch (const std::exception &e) {
+      TitanUI::print_warning(e.what());
+      return;
+    }
+    if (projected_rows != n_raw_frames_) {
+      TitanUI::print_error(
+          "TitanMSM::project_pending_features: projected frame count (" +
+          std::to_string(projected_rows) +
+          ") does not match pending metadata frame count (" +
+          std::to_string(n_raw_frames_) + ").");
+      return;
+    }
+
     n_proj_frames_ = n_raw_frames_;
     frame_replica_ids_ = raw_frame_replica_ids_;
     frame_timestamps_ = raw_frame_timestamps_;
@@ -493,12 +515,14 @@ void TitanMSM::project_pending_features(const TitanKinetics &tica_analyzer) {
     traj_break_indices_ = raw_traj_break_indices_;
 
     n_raw_frames_ = 0;
+    raw_feat_mat_.resize(0, 0);
     raw_traj_break_indices_.clear();
     raw_frame_replica_ids_.clear();
     raw_frame_timestamps_.clear();
     raw_frame_box_volumes_nm3_.clear();
     raw_frame_global_indices_.clear();
     last_added_was_raw_ = false;
+    tica_analyzer.release_raw_feature_cache();
     return;
   }
 
@@ -525,12 +549,14 @@ void TitanMSM::project_pending_features(const TitanKinetics &tica_analyzer) {
   n_proj_frames_ = n_raw_frames_;
 
   n_raw_frames_ = 0;
+  raw_feat_mat_.resize(0, 0);
   raw_traj_break_indices_.clear();
   raw_frame_replica_ids_.clear();
   raw_frame_timestamps_.clear();
   raw_frame_box_volumes_nm3_.clear();
   raw_frame_global_indices_.clear();
   last_added_was_raw_ = false;
+  tica_analyzer.release_raw_feature_cache();
 }
 
 void TitanMSM::reconfigure_clusters(int n_clusters) {
