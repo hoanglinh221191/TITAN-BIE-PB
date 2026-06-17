@@ -6308,6 +6308,15 @@ Decision:
   cap-256 direct references were skipped by runtime policy. Some grid
   comparator rows reported `not_converged`; keep grid as production default,
   but use Z4B to tighten reference/verification policy for paper tables.
+- Scope Z4B adds the reference/verification policy harness
+  `test/pbe_fagbi_scope_z4b_reference_policy_gate.ps1`. The full
+  Barnase/research-medium/research-alt cap `128/256` run generated
+  `TITAN_FMM_M2L_SCOPE_Z4B_REFERENCE_POLICY_REPORT.txt` and classified
+  `z4b_reference_policy_pass`: cap-128 FMM rows use full direct TABI energy
+  references, cap-256 FMM rows use sampled direct-operator audit, and all six
+  FMM rows are marked paper-usable. The maximum sampled audit was
+  `0.00748955`, cap-128 relative energy deltas stayed below `7.4e-4`, and
+  three grid rows remained context warnings rather than paper oracle rows.
 - Scope O and refreshed Scope R still block grid-default promotion. Scope Q
   fixed bounded Barnase cap-128 convergence, Scope S removed the hidden
   FMM/M2L memory regression, Scope U/V/W established that dense block and

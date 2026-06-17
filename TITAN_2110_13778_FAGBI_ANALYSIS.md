@@ -309,6 +309,16 @@ Status:
   references within the energy gate. Direct cap-256 remains runtime-limited,
   so the next paper-evidence step should refine reference policy rather than
   adding adaptive order immediately.
+- Scope Z4B adds `test/pbe_fagbi_scope_z4b_reference_policy_gate.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z4B_REFERENCE_POLICY_REPORT.txt`. The full
+  Barnase/research-medium/research-alt cap `128/256` gate completed with
+  decision `z4b_reference_policy_pass`: cap-128 FMM rows use full direct TABI
+  energy references, cap-256 FMM rows use sampled direct-operator audit, and
+  all six FMM rows are paper-reference usable. The maximum FMM audit remained
+  `0.00748955`; cap-128 relative energy deltas were `0.000216675`,
+  `0.000230417`, and `0.000728069` for Barnase, research-medium, and
+  research-alt. Three grid rows were context warnings, so grid should stay a
+  runtime/memory comparator rather than a paper oracle for this panel.
 
 Tasks:
 
