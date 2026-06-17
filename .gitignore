@@ -141,6 +141,9 @@ test/
 !/test/titan_msd_smoke.cpp
 !/test/titan_rotational_diffusion_smoke.cpp
 !/test/titan_contact_kernels_smoke.cpp
+!/test/titan_tica_estimator_smoke.cpp
+!/test/titan_mbar_weights_smoke.cpp
+!/test/mbar_tica_metadata_smoke.ps1
 !/test/edecomp_args_smoke.ps1
 !/test/edecomp_smoke.ps1
 !/test/cas_smoke.ps1
