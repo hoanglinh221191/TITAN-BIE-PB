@@ -1145,6 +1145,13 @@ Decision:
   runtime/memory SVG. It is intentionally packaging-only: no solver rows are
   run unless `-RefreshZ4B` is passed, and the grid production default is not
   changed.
+- Scope Z4D adds `test/pbe_fagbi_scope_z4d_manuscript_export.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z4D_MANUSCRIPT_EXPORT_REPORT.txt`. The export classified
+  `z4d_manuscript_assets_ready`, writing manuscript-ready CSV/Markdown main
+  tables, a supplement CSV, methods text, and a figure caption from the Z4C
+  package. It preserves the Z4B policy: cap-128 FMM rows cite full direct TABI
+  energy, cap-256 rows cite sampled direct-operator audit, and grid remains
+  production default/context-only for this paper panel.
 - Next step is broader controlled-treecode validation, not grid promotion.
   Scope Q removed the Barnase cap-128 convergence blocker, Scope S removed the
   hidden FMM/M2L memory regression, Scope U/V/W eliminated dense local

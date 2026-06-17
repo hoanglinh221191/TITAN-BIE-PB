@@ -6324,6 +6324,13 @@ Decision:
   supplement/context rows, a reference-policy table, and a runtime/memory SVG.
   This closes the first paper-panel artifact pass without changing solver
   behavior or the grid production default.
+- Scope Z4D adds `test/pbe_fagbi_scope_z4d_manuscript_export.ps1`. It generated
+  `TITAN_FMM_M2L_SCOPE_Z4D_MANUSCRIPT_EXPORT_REPORT.txt` with decision
+  `z4d_manuscript_assets_ready`, exporting manuscript-ready CSV/Markdown main
+  tables, a supplement CSV, a methods box, and a figure caption. The generated
+  assets keep the reference policy explicit: cap-128 uses full direct TABI
+  energy, cap-256 uses sampled direct-operator audit, and grid remains context
+  only when it is not a converged oracle row.
 - Scope O and refreshed Scope R still block grid-default promotion. Scope Q
   fixed bounded Barnase cap-128 convergence, Scope S removed the hidden
   FMM/M2L memory regression, Scope U/V/W established that dense block and

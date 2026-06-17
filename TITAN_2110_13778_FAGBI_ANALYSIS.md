@@ -327,6 +327,13 @@ Status:
   paper-usable, cap-128 rows retain full direct TABI energy references, and
   cap-256 rows retain sampled direct-operator audit references. This is a
   paper-artifact step only; it does not change TABI/FMM defaults.
+- Scope Z4D adds `test/pbe_fagbi_scope_z4d_manuscript_export.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z4D_MANUSCRIPT_EXPORT_REPORT.txt`. It converts the
+  Z4C package into manuscript-ready CSV/Markdown main tables, a supplement CSV,
+  a methods box, and a figure caption. The export classified
+  `z4d_manuscript_assets_ready` with six FMM main rows, nine supplement rows,
+  and maximum sampled audit `0.00748955`; cap-128 rows cite full direct TABI
+  energy while cap-256 rows cite sampled direct-operator audit.
 
 Tasks:
 
