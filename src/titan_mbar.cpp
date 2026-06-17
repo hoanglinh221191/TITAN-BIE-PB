@@ -2256,6 +2256,10 @@ void write_summary_file(const std::string &filename, const CoreResult &result,
       << "\n";
   out << "MBAR Mapped Global Frames      : " << result.mapped_global_frames
       << "\n";
+  out << "MBAR Mapped TICA Frames        : "
+      << result.mapped_tica_global_frames << "\n";
+  out << "MBAR Mapped PCA Frames         : "
+      << result.mapped_pca_global_frames << "\n";
   out << "MBAR Box Volume Metadata       : "
       << (result.box_volume_metadata_available ? "available" : "not_used")
       << "\n";

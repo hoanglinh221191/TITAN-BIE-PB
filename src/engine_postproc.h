@@ -44,6 +44,8 @@ struct PostprocEquilibriumWeights {
   std::string mode_label{"uniform"};
   double target_temp_k{300.0};
   const std::vector<double> *global_frame_weights{nullptr};
+  const std::vector<double> *tica_global_frame_weights{nullptr};
+  const std::vector<double> *pca_global_frame_weights{nullptr};
   bool use_weights{false};
 };
 
@@ -131,7 +133,8 @@ run_mbar_postproc(const arguments &args,
                   std::unique_ptr<TitanMSM> &msm_analyzer,
                   DCCMNetwork *dccm_analyzer, TitanExecutor &executor,
                   info &info_output, std::fstream &log,
-                  std::vector<double> *out_frame_weights = nullptr);
+                  std::vector<double> *out_frame_weights = nullptr,
+                  std::vector<double> *out_pca_frame_weights = nullptr);
 
 void run_mbar_projection_exports_postproc(
     const arguments &args, std::unique_ptr<TitanMSM> &msm_analyzer,
@@ -140,7 +143,8 @@ void run_mbar_projection_exports_postproc(
 
 PostprocEquilibriumWeights resolve_postproc_equilibrium_weights(
     const arguments &args, const std::vector<double> *dham_frame_weights,
-    const std::vector<double> *mbar_frame_weights, std::fstream &log);
+    const std::vector<double> *mbar_tica_frame_weights,
+    const std::vector<double> *mbar_pca_frame_weights, std::fstream &log);
 
 void run_msm_equilibrium_postproc(
     const arguments &args, std::unique_ptr<TitanMSM> &msm_analyzer,

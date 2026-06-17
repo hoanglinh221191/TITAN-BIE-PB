@@ -79,11 +79,15 @@ struct CoreResult {
   std::vector<WindowAuditRow> window_audit{};
   std::vector<FrameWeightRow> frame_weights{};
   std::vector<double> global_frame_weights{};
+  std::vector<double> tica_global_frame_weights{};
+  std::vector<double> pca_global_frame_weights{};
   std::vector<CvPoint> cv_scan{};
   std::size_t usable_replica_series{0};
   std::size_t active_sampled_states{0};
   std::size_t total_usable_samples{0};
   std::size_t mapped_global_frames{0};
+  std::size_t mapped_tica_global_frames{0};
+  std::size_t mapped_pca_global_frames{0};
   std::size_t solver_iterations{0};
   std::size_t solver_line_search_backtracks{0};
   double target_temp_k{300.0};

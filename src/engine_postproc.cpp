@@ -5,6 +5,7 @@
 #include "titan_alignment.h"
 #include "titan_corr_knn.h"
 #include "titan_executor.h"
+#include "titan_mbar_weights.h"
 #include "titan_sparse_graph_module.h"
 #include "titan_ui.h"
 #include <Eigen/Dense>
@@ -2815,6 +2816,18 @@ bool is_mbar_equilibrium_weight_source(
          !weight_selection.global_frame_weights->empty();
 }
 
+const std::vector<double> *
+context_global_frame_weights(const PostprocEquilibriumWeights &weight_selection,
+                             bool pca_context) {
+  if (!weight_selection.use_weights)
+    return nullptr;
+  if (weight_selection.resolved_source == "mbar") {
+    return pca_context ? weight_selection.pca_global_frame_weights
+                       : weight_selection.tica_global_frame_weights;
+  }
+  return weight_selection.global_frame_weights;
+}
+
 MappedEquilibriumFrameWeights map_global_weights_to_local_frame_context(
     const std::string &label, const std::vector<int64_t> &local_global_indices,
     const std::vector<double> &global_frame_weights) {
@@ -3677,7 +3690,8 @@ void rebuild_msm_projections_from_dccm(const arguments &args,
 
 PostprocEquilibriumWeights resolve_postproc_equilibrium_weights(
     const arguments &args, const std::vector<double> *dham_frame_weights,
-    const std::vector<double> *mbar_frame_weights, std::fstream &log) {
+    const std::vector<double> *mbar_tica_frame_weights,
+    const std::vector<double> *mbar_pca_frame_weights, std::fstream &log) {
   PostprocEquilibriumWeights selection;
   selection.requested_source = args.eq_weight_source;
 
@@ -3687,6 +3701,8 @@ PostprocEquilibriumWeights resolve_postproc_equilibrium_weights(
     selection.mode_label = "uniform";
     selection.target_temp_k = 300.0;
     selection.global_frame_weights = nullptr;
+    selection.tica_global_frame_weights = nullptr;
+    selection.pca_global_frame_weights = nullptr;
     selection.use_weights = false;
   };
   const auto try_source = [&](const std::string &source_name,
@@ -3699,10 +3715,32 @@ PostprocEquilibriumWeights resolve_postproc_equilibrium_weights(
           (source_name == "mbar") ? "MBAR-weighted" : "DHAM-weighted";
       selection.target_temp_k = target_temp_k;
       selection.global_frame_weights = weights;
+      selection.tica_global_frame_weights = weights;
+      selection.pca_global_frame_weights = weights;
       selection.use_weights = true;
       return true;
     }
     return false;
+  };
+  const auto try_mbar_source = [&]() {
+    const bool have_tica =
+        mbar_tica_frame_weights && !mbar_tica_frame_weights->empty();
+    const bool have_pca =
+        mbar_pca_frame_weights && !mbar_pca_frame_weights->empty();
+    if (!have_tica && !have_pca)
+      return false;
+    selection.resolved_source = "mbar";
+    selection.source_name = "mbar";
+    selection.mode_label = "MBAR-weighted";
+    selection.target_temp_k = args.mbar.target_temp;
+    selection.tica_global_frame_weights =
+        have_tica ? mbar_tica_frame_weights : nullptr;
+    selection.pca_global_frame_weights =
+        have_pca ? mbar_pca_frame_weights : nullptr;
+    selection.global_frame_weights =
+        have_tica ? mbar_tica_frame_weights : mbar_pca_frame_weights;
+    selection.use_weights = true;
+    return true;
   };
 
   use_uniform();
@@ -3725,7 +3763,7 @@ PostprocEquilibriumWeights resolve_postproc_equilibrium_weights(
       TitanUI::print_warning(
           "Equilibrium weights: -eq-weight-source mbar requested without "
           "-mbar. Falling back to uniform.");
-    } else if (!try_source("mbar", mbar_frame_weights, args.mbar.target_temp)) {
+    } else if (!try_mbar_source()) {
       TitanUI::print_warning(
           "Equilibrium weights: requested MBAR, but no converged MBAR frame "
           "weights are available. Falling back to uniform.");
@@ -3745,17 +3783,17 @@ void run_msm_equilibrium_postproc(
     info &info_output, std::fstream &log,
     const PostprocEquilibriumWeights &weight_selection) {
   (void)args;
+  const auto *weights = context_global_frame_weights(weight_selection, false);
   if (!(msm_analyzer && msm_analyzer->is_built() && weight_selection.use_weights &&
         weight_selection.resolved_source == "mbar" &&
-        weight_selection.global_frame_weights)) {
+        weights)) {
     return;
   }
 
   const auto macro_assignments =
       msm_analyzer->compute_pcca_macrostates(args.msm.msm_macrostates);
   EquilibriumPopulationSummary summary;
-  if (!compute_equilibrium_populations(*msm_analyzer,
-                                       *weight_selection.global_frame_weights,
+  if (!compute_equilibrium_populations(*msm_analyzer, *weights,
                                        macro_assignments, summary)) {
     TitanUI::print_warning(
         "MSM equilibrium summary: unable to map selected frame weights onto "
@@ -4081,12 +4119,11 @@ void run_tica_fes_postproc(const arguments &args,
   try {
     auto start_tica_fes = std::chrono::steady_clock::now();
     TitanUI::print_module_header("TICA 2D Free Energy Surface");
+    const auto *weights = context_global_frame_weights(weight_selection, false);
     TitanPCA::execute_tica_fes_analysis(
         args, msm_analyzer->proj_mat_ref(), msm_analyzer->n_frames(),
         msm_analyzer->get_frame_global_indices(), executor, info_output, log,
-        weight_selection.global_frame_weights
-            ? *weight_selection.global_frame_weights
-            : std::vector<double>{},
+        weights ? *weights : std::vector<double>{},
         make_pca_weight_context(weight_selection), metrics);
     auto time_tica_fes = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start_tica_fes);
@@ -4153,7 +4190,8 @@ void run_umap_postproc(const arguments &args,
     if (umap_analyzer->is_fitted()) {
       umap_analyzer->write_embedding(
           info_output.get_umap_embedding_filename(), log);
-      if (is_mbar_equilibrium_weight_source(weight_selection)) {
+      const auto *weights = context_global_frame_weights(weight_selection, false);
+      if (is_mbar_equilibrium_weight_source(weight_selection) && weights) {
         const auto &embedding = umap_analyzer->embedding();
         const auto &global_indices = msm_analyzer->get_frame_global_indices();
         if (static_cast<std::size_t>(embedding.rows()) != global_indices.size()) {
@@ -4161,7 +4199,7 @@ void run_umap_postproc(const arguments &args,
               "UMAP: frame/global-index count mismatch. Skipping MBAR sidecars.");
         } else {
           const auto mapped_context = map_global_weights_to_local_frame_context(
-              "UMAP", global_indices, *weight_selection.global_frame_weights);
+              "UMAP", global_indices, *weights);
           if (mapped_context.use_weights) {
             write_umap_equilibrium_summary_file(
                 info_output.get_umap_equilibrium_summary_filename(),
@@ -4256,8 +4294,11 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
 
   try {
     if (tot_snap_allfiles > 0) {
+      const auto *pca_context_weights =
+          context_global_frame_weights(weight_selection, true);
       const bool want_mbar_sidecars =
-          is_mbar_equilibrium_weight_source(weight_selection);
+          is_mbar_equilibrium_weight_source(weight_selection) &&
+          pca_context_weights;
       MappedEquilibriumFrameWeights dccm_weight_context;
       auto start_dccm = std::chrono::steady_clock::now();
       TitanUI::print_module_header("DCCM Network Analysis");
@@ -4284,7 +4325,7 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
       if (want_mbar_sidecars) {
         dccm_weight_context = map_global_weights_to_local_frame_context(
             "DCCM", dccm_analyzer.get_global_frame_indices(),
-            *weight_selection.global_frame_weights);
+            *pca_context_weights);
       }
 
       if (dccm_weight_context.use_weights &&
@@ -4578,9 +4619,8 @@ void run_dccm_pca_postproc(const arguments &args, size_t tot_snap_allfiles,
         const auto &pca_traj_z = dccm_analyzer.get_traj_z();
         const size_t pca_frame_count = pca_traj_x.size();
         std::vector<double> pca_frame_weights;
-        if (weight_selection.global_frame_weights &&
-            !weight_selection.global_frame_weights->empty()) {
-          const auto &global_weights = *weight_selection.global_frame_weights;
+        if (pca_context_weights && !pca_context_weights->empty()) {
+          const auto &global_weights = *pca_context_weights;
           const auto &dccm_global_indices = dccm_analyzer.get_global_frame_indices();
           if (dccm_global_indices.size() != pca_frame_count) {
             TitanUI::print_warning(
@@ -4665,10 +4705,13 @@ void run_lspmd_postproc(const arguments &args, DCCMNetwork &dccm_analyzer,
     if (graph_runtime) {
       graph_runtime->capture_lspmd(dccm_analyzer, result);
     }
-    if (is_mbar_equilibrium_weight_source(weight_selection)) {
+    const auto *pca_context_weights =
+        context_global_frame_weights(weight_selection, true);
+    if (is_mbar_equilibrium_weight_source(weight_selection) &&
+        pca_context_weights) {
       const auto mapped_context = map_global_weights_to_local_frame_context(
           "LSP-MD", dccm_analyzer.get_global_frame_indices(),
-          *weight_selection.global_frame_weights);
+          *pca_context_weights);
       if (mapped_context.use_weights) {
         const bool dccm_context_already_written =
             args.flag_network_explicit || args.flag_allostery ||
@@ -5466,10 +5509,13 @@ run_mbar_postproc(const arguments &args,
                   std::unique_ptr<TitanMSM> &msm_analyzer,
                   DCCMNetwork *dccm_analyzer, TitanExecutor &executor,
                   info &info_output, std::fstream &log,
-                  std::vector<double> *out_frame_weights) {
+                  std::vector<double> *out_frame_weights,
+                  std::vector<double> *out_pca_frame_weights) {
   TitanMBAR::CoreResult mbar_result;
   if (out_frame_weights)
     out_frame_weights->clear();
+  if (out_pca_frame_weights)
+    out_pca_frame_weights->clear();
   if (!args.mbar.flag_mbar)
     return mbar_result;
 
@@ -5481,22 +5527,84 @@ run_mbar_postproc(const arguments &args,
   const bool want_pca =
       (args.mbar.domain == "pca" || args.mbar.domain == "both");
 
-  TitanMBAR::FrameMetadata metadata;
-  if (dccm_analyzer && dccm_analyzer->get_total_frames() > 0 &&
-      (want_pca || !want_tica)) {
-    metadata.replica_ids = dccm_analyzer->get_traj_replicas();
-    metadata.timestamps_ps = dccm_analyzer->get_traj_times();
-    metadata.global_indices = dccm_analyzer->get_global_frame_indices();
-    metadata.box_volumes_nm3 = dccm_analyzer->get_traj_box_volumes_nm3();
-  } else if (msm_analyzer && msm_analyzer->n_frames() > 0) {
-    metadata.replica_ids = msm_analyzer->get_frame_replica_ids();
-    metadata.timestamps_ps = msm_analyzer->get_frame_timestamps();
-    metadata.global_indices = msm_analyzer->get_frame_global_indices();
-    metadata.box_volumes_nm3 = msm_analyzer->get_frame_box_volumes_nm3();
+  auto make_tica_metadata = [&]() {
+    TitanMBAR::FrameMetadata metadata;
+    if (msm_analyzer && msm_analyzer->n_frames() > 0) {
+      metadata.replica_ids = msm_analyzer->get_frame_replica_ids();
+      metadata.timestamps_ps = msm_analyzer->get_frame_timestamps();
+      metadata.global_indices = msm_analyzer->get_frame_global_indices();
+      metadata.box_volumes_nm3 = msm_analyzer->get_frame_box_volumes_nm3();
+    }
+    return metadata;
+  };
+  auto make_pca_metadata = [&]() {
+    TitanMBAR::FrameMetadata metadata;
+    if (dccm_analyzer && dccm_analyzer->get_total_frames() > 0) {
+      metadata.replica_ids = dccm_analyzer->get_traj_replicas();
+      metadata.timestamps_ps = dccm_analyzer->get_traj_times();
+      metadata.global_indices = dccm_analyzer->get_global_frame_indices();
+      metadata.box_volumes_nm3 = dccm_analyzer->get_traj_box_volumes_nm3();
+    }
+    return metadata;
+  };
+
+  const TitanMBAR::FrameMetadata tica_metadata = make_tica_metadata();
+  const TitanMBAR::FrameMetadata pca_metadata = make_pca_metadata();
+  const bool have_tica_metadata = !tica_metadata.empty();
+  const bool have_pca_metadata = !pca_metadata.empty();
+
+  TitanMBAR::FrameMetadata primary_metadata;
+  std::string primary_metadata_context{"energy-only"};
+  if (want_tica && have_tica_metadata) {
+    primary_metadata = tica_metadata;
+    primary_metadata_context = "tica";
+  } else if (want_pca && have_pca_metadata) {
+    primary_metadata = pca_metadata;
+    primary_metadata_context = "pca";
+    if (want_tica) {
+      TitanUI::print_warning(
+          "MBAR: mbar-domain=both requested but no TICA/MSM metadata is "
+          "available. Solving with PCA/DCCM metadata; weighted TICA exports "
+          "will be unavailable unless TICA projections are present.");
+    }
   }
+  TitanUI::log_kv(log, "MBAR Primary Metadata", primary_metadata_context);
 
   mbar_result =
-      TitanMBAR::run_temperature_ladder_reweighting(args, metadata, executor, log);
+      TitanMBAR::run_temperature_ladder_reweighting(args, primary_metadata,
+                                                    executor, log);
+
+  if (!mbar_result.global_frame_weights.empty()) {
+    if (primary_metadata_context == "tica") {
+      mbar_result.tica_global_frame_weights = mbar_result.global_frame_weights;
+      mbar_result.mapped_tica_global_frames = mbar_result.mapped_global_frames;
+      if (want_pca && have_pca_metadata) {
+        const auto remap = TitanMBAR::remap_frame_weights_to_metadata(
+            mbar_result.frame_weights, pca_metadata);
+        mbar_result.pca_global_frame_weights = remap.global_frame_weights;
+        mbar_result.mapped_pca_global_frames = remap.mapped_global_frames;
+      }
+    } else if (primary_metadata_context == "pca") {
+      mbar_result.pca_global_frame_weights = mbar_result.global_frame_weights;
+      mbar_result.mapped_pca_global_frames = mbar_result.mapped_global_frames;
+      if (want_tica && have_tica_metadata) {
+        const auto remap = TitanMBAR::remap_frame_weights_to_metadata(
+            mbar_result.frame_weights, tica_metadata);
+        mbar_result.tica_global_frame_weights = remap.global_frame_weights;
+        mbar_result.mapped_tica_global_frames = remap.mapped_global_frames;
+      }
+    }
+  }
+
+  if (mbar_result.mapped_tica_global_frames > 0) {
+    TitanUI::log_kv(log, "MBAR Mapped TICA Frames",
+                    std::to_string(mbar_result.mapped_tica_global_frames));
+  }
+  if (mbar_result.mapped_pca_global_frames > 0) {
+    TitanUI::log_kv(log, "MBAR Mapped PCA Frames",
+                    std::to_string(mbar_result.mapped_pca_global_frames));
+  }
+
   TitanMBAR::write_window_audit_file(info_output.get_mbar_window_audit_filename(),
                                      mbar_result.window_audit);
   TitanMBAR::write_frame_weights_file(
@@ -5528,14 +5636,20 @@ run_mbar_postproc(const arguments &args,
     TitanUI::log_time(log, "MBAR Analysis", time_mbar.count() / 1000.0);
     return mbar_result;
   }
-  if (out_frame_weights)
-    *out_frame_weights = mbar_result.global_frame_weights;
+  if (out_frame_weights) {
+    if (!mbar_result.tica_global_frame_weights.empty()) {
+      *out_frame_weights = mbar_result.tica_global_frame_weights;
+    } else {
+      *out_frame_weights = mbar_result.global_frame_weights;
+    }
+  }
+  if (out_pca_frame_weights) {
+    *out_pca_frame_weights = mbar_result.pca_global_frame_weights;
+  }
 
   auto time_mbar = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_mbar);
   TitanUI::log_time(log, "MBAR Analysis", time_mbar.count() / 1000.0);
-  (void)want_tica;
-  (void)want_pca;
   return mbar_result;
 }
 
@@ -5550,6 +5664,16 @@ void run_mbar_projection_exports_postproc(
       (args.mbar.domain == "tica" || args.mbar.domain == "both");
   const bool want_pca =
       (args.mbar.domain == "pca" || args.mbar.domain == "both");
+  const std::vector<double> *tica_weights =
+      !mbar_result.tica_global_frame_weights.empty()
+          ? &mbar_result.tica_global_frame_weights
+          : (args.mbar.domain == "tica" ? &mbar_result.global_frame_weights
+                                         : nullptr);
+  const std::vector<double> *pca_weights =
+      !mbar_result.pca_global_frame_weights.empty()
+          ? &mbar_result.pca_global_frame_weights
+          : (args.mbar.domain == "pca" ? &mbar_result.global_frame_weights
+                                        : nullptr);
 
   if (want_tica) {
     if (!(msm_analyzer && msm_analyzer->n_frames() > 0 &&
@@ -5557,7 +5681,7 @@ void run_mbar_projection_exports_postproc(
       TitanUI::print_warning(
           "MBAR/TICA: no valid TICA projection metadata available. "
           "Skipping weighted TICA FES.");
-    } else if (mbar_result.global_frame_weights.empty()) {
+    } else if (!tica_weights || tica_weights->empty()) {
       TitanUI::print_warning(
           "MBAR/TICA: no mapped global frame weights available. "
           "Skipping weighted TICA FES.");
@@ -5565,7 +5689,7 @@ void run_mbar_projection_exports_postproc(
       bool use_weights = false;
       const auto local_weights = map_global_weights_to_local_indices(
           "MBAR/TICA", msm_analyzer->get_frame_global_indices(),
-          mbar_result.global_frame_weights, use_weights);
+          *tica_weights, use_weights);
       if (use_weights) {
         std::vector<std::pair<double, double>> projections(
             static_cast<std::size_t>(msm_analyzer->n_frames()));
@@ -5590,7 +5714,7 @@ void run_mbar_projection_exports_postproc(
       TitanUI::print_warning(
           "MBAR/PCA: no PCA trajectory metadata available. "
           "Skipping weighted PCA FES.");
-    } else if (mbar_result.global_frame_weights.empty()) {
+    } else if (!pca_weights || pca_weights->empty()) {
       TitanUI::print_warning(
           "MBAR/PCA: no mapped global frame weights available. "
           "Skipping weighted PCA FES.");
@@ -5609,7 +5733,7 @@ void run_mbar_projection_exports_postproc(
         bool use_weights = false;
         const auto local_weights = map_global_weights_to_local_indices(
             "MBAR/PCA", dccm_analyzer->get_global_frame_indices(),
-            mbar_result.global_frame_weights, use_weights);
+            *pca_weights, use_weights);
         if (use_weights) {
           TitanPCA::export_projection_fes_analysis(
               "MBAR PCA", "PCA", args, projections, local_weights, true,
@@ -5794,12 +5918,14 @@ void run_tpt_postproc(const arguments &args,
                            *msm_analyzer, macro_assignments, lj_summary,
                            protein_summary, qnative_summary,
                            analyzer.stationary_dist());
+    const auto *tica_context_weights =
+        weight_selection ? context_global_frame_weights(*weight_selection, false)
+                         : nullptr;
     if (weight_selection && weight_selection->use_weights &&
-        weight_selection->resolved_source == "mbar" &&
-        weight_selection->global_frame_weights) {
+        weight_selection->resolved_source == "mbar" && tica_context_weights) {
       EquilibriumPopulationSummary equilibrium_summary;
       if (compute_equilibrium_populations(*msm_analyzer,
-                                          *weight_selection->global_frame_weights,
+                                          *tica_context_weights,
                                           macro_assignments,
                                           equilibrium_summary)) {
         write_tpt_equilibrium_overlay_file(

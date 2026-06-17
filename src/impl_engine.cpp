@@ -49,6 +49,7 @@
 #include "titan_sparse_graph_module.h"
 #include "titan_sg_streaming.h"
 #include "titan_sq.h"
+#include "titan_tica_estimator.h"
 #include "titan_uncertainty.h"
 #include "titan_umap.h"
 #include "water_analysis.h"
@@ -2177,8 +2178,21 @@ int engine(arguments &Arguments) {
       long double estimated_total_traj_bytes =
           static_cast<long double>(std::max<size_t>(1, total_traj_bytes)) *
           static_cast<long double>(std::max<size_t>(1, Arguments.number_of_files));
+      TitanTicaFrameEstimateConfig frame_estimate_config;
+      frame_estimate_config.begin_time_ps = Arguments.begin_time;
+      frame_estimate_config.end_time_ps = Arguments.end_time;
+      frame_estimate_config.dt_ps = static_cast<double>(Arguments.dt);
+      frame_estimate_config.begin_set = Arguments.flag_begin_set;
+      frame_estimate_config.end_set = Arguments.flag_end_set;
+      frame_estimate_config.trajectory_count =
+          input_line.empty() ? 0 : input_line.size();
+      frame_estimate_config.number_of_files = Arguments.number_of_files;
+      frame_estimate_config.fallback_estimated_frames =
+          estimated_total_traj_bytes / bytes_per_frame_estimate;
+      const TitanTicaFrameEstimate frame_estimate =
+          estimate_tica_selected_frames(frame_estimate_config);
       long double estimated_frames =
-          std::max(1.0L, estimated_total_traj_bytes / bytes_per_frame_estimate);
+          static_cast<long double>(std::max<std::size_t>(1, frame_estimate.frames));
       const int sketch_rank =
           std::max(Arguments.msm.tica_components, Arguments.msm.tica_rank);
       const long double dense_memory_estimate =
@@ -2276,6 +2290,8 @@ int engine(arguments &Arguments) {
                       std::to_string(Arguments.msm.tica_rank));
       TitanUI::log_kv(log, "TICA Estimated Frames",
                       std::to_string(static_cast<int64_t>(estimated_frames)));
+      TitanUI::log_kv(log, "TICA Frame Estimate Source",
+                      frame_estimate.source);
       TitanUI::log_kv(log, "TICA Dense Memory Est",
                       bytes_to_mb_string(dense_memory_estimate));
       TitanUI::log_kv(log, "TICA Dual Cache Est",
@@ -5537,16 +5553,19 @@ int engine(arguments &Arguments) {
       std::chrono::steady_clock::now() - start_pp_dham);
 
   std::vector<double> mbar_frame_weights;
+  std::vector<double> mbar_pca_frame_weights;
   auto start_pp_mbar = std::chrono::steady_clock::now();
   const TitanMBAR::CoreResult mbar_result =
       run_mbar_postproc(Arguments, msm_analyzer, &dccm_analyzer, executor,
-                        info_output, log, &mbar_frame_weights);
+                        info_output, log, &mbar_frame_weights,
+                        &mbar_pca_frame_weights);
   auto time_pp_mbar = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_mbar);
 
   const PostprocEquilibriumWeights equilibrium_weights =
       resolve_postproc_equilibrium_weights(Arguments, &dham_frame_weights,
-                                           &mbar_frame_weights, log);
+                                           &mbar_frame_weights,
+                                           &mbar_pca_frame_weights, log);
   run_msm_equilibrium_postproc(Arguments, msm_analyzer, info_output, log,
                                equilibrium_weights);
 
