@@ -334,6 +334,13 @@ Status:
   `z4d_manuscript_assets_ready` with six FMM main rows, nine supplement rows,
   and maximum sampled audit `0.00748955`; cap-128 rows cite full direct TABI
   energy while cap-256 rows cite sampled direct-operator audit.
+- Scope Z4E adds `test/pbe_fagbi_scope_z4e_evidence_manifest.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z4E_EVIDENCE_MANIFEST_REPORT.txt`. The evidence
+  manifest classified `z4e_evidence_bundle_ready`, hashing `37` required
+  artifacts, recording command provenance, mapping six paper-facing claims to
+  their Z1-Z5 evidence, and recording five limitations. Z4E is packaging/audit
+  only: it introduces no new numerical evidence and keeps grid as production
+  default.
 
 Tasks:
 

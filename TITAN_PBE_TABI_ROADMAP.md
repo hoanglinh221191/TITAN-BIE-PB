@@ -6331,6 +6331,12 @@ Decision:
   assets keep the reference policy explicit: cap-128 uses full direct TABI
   energy, cap-256 uses sampled direct-operator audit, and grid remains context
   only when it is not a converged oracle row.
+- Scope Z4E adds `test/pbe_fagbi_scope_z4e_evidence_manifest.ps1`. It generated
+  `TITAN_FMM_M2L_SCOPE_Z4E_EVIDENCE_MANIFEST_REPORT.txt` with decision
+  `z4e_evidence_bundle_ready`, including a 37-artifact manifest, checksum
+  table, command provenance table, claim map, limitations map, and Markdown
+  evidence bundle. This is packaging/audit-only and preserves the Z4B/Z4D
+  reference policy without changing solver behavior or public defaults.
 - Scope O and refreshed Scope R still block grid-default promotion. Scope Q
   fixed bounded Barnase cap-128 convergence, Scope S removed the hidden
   FMM/M2L memory regression, Scope U/V/W established that dense block and

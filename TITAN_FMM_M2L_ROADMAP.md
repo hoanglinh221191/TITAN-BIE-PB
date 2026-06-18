@@ -1152,6 +1152,13 @@ Decision:
   package. It preserves the Z4B policy: cap-128 FMM rows cite full direct TABI
   energy, cap-256 rows cite sampled direct-operator audit, and grid remains
   production default/context-only for this paper panel.
+- Scope Z4E adds `test/pbe_fagbi_scope_z4e_evidence_manifest.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z4E_EVIDENCE_MANIFEST_REPORT.txt`. The manifest
+  classified `z4e_evidence_bundle_ready`: it hashes `37` required artifacts,
+  writes claim/limitation maps, records command provenance, and resolves the
+  older Z5 money-plot artifacts via report pointers when they live in the
+  source checkout rather than this worktree. It is packaging/audit-only and
+  does not rerun solver gates.
 - Next step is broader controlled-treecode validation, not grid promotion.
   Scope Q removed the Barnase cap-128 convergence blocker, Scope S removed the
   hidden FMM/M2L memory regression, Scope U/V/W eliminated dense local
