@@ -6337,6 +6337,14 @@ Decision:
   table, command provenance table, claim map, limitations map, and Markdown
   evidence bundle. This is packaging/audit-only and preserves the Z4B/Z4D
   reference policy without changing solver behavior or public defaults.
+- Scope Z4F adds `test/pbe_fagbi_scope_z4f_manuscript_skeleton.ps1`, a
+  deterministic `python-docx` builder, checksum-drift and render-contract
+  smokes, and `TITAN_FMM_M2L_SCOPE_Z4F_MANUSCRIPT_SKELETON_REPORT.txt`. The
+  measured decision is `z4f_manuscript_skeleton_ready`: a nine-page
+  journal-neutral Word draft passed structural and visual QA with six mapped
+  claims, five limitations, six protein rows, and two embedded evidence
+  figures. Citation gaps remain separate and explicit; no solver behavior or
+  default changed.
 - Scope O and refreshed Scope R still block grid-default promotion. Scope Q
   fixed bounded Barnase cap-128 convergence, Scope S removed the hidden
   FMM/M2L memory regression, Scope U/V/W established that dense block and

@@ -341,6 +341,14 @@ Status:
   their Z1-Z5 evidence, and recording five limitations. Z4E is packaging/audit
   only: it introduces no new numerical evidence and keeps grid as production
   default.
+- Scope Z4F adds `test/pbe_fagbi_scope_z4f_manuscript_skeleton.ps1` plus a
+  bundled-Python DOCX builder. It classified `z4f_manuscript_skeleton_ready`
+  after SHA256 verification, structural checks, and visual inspection of all
+  nine rendered pages. The journal-neutral Word draft contains a 204-word
+  abstract, six protein rows, two evidence figures, a supplementary context
+  table, a six-claim trace, and all five Z4E limitations. Bibliographic gaps
+  remain explicit in a separate CSV; Z4F does not invent citations or add new
+  numerical evidence.
 
 Tasks:
 

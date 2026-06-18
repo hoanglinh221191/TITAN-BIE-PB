@@ -290,6 +290,11 @@ test/
 !/test/pbe_fagbi_scope_z4d_manuscript_export.ps1
 !/TITAN_FMM_M2L_SCOPE_Z4E_EVIDENCE_MANIFEST_REPORT.txt
 !/test/pbe_fagbi_scope_z4e_evidence_manifest.ps1
+!/TITAN_FMM_M2L_SCOPE_Z4F_MANUSCRIPT_SKELETON_REPORT.txt
+!/test/pbe_fagbi_scope_z4f_contract_smoke.ps1
+!/test/pbe_fagbi_scope_z4f_render_smoke.ps1
+!/test/pbe_fagbi_scope_z4f_manuscript_skeleton.ps1
+!/test/pbe_fagbi_scope_z4f_build_docx.py
 !/test/pbe_tabi_channel_expansion_audit_smoke.ps1
 !/test/pbe_tabi_channel_estimator_smoke.ps1
 !/test/pbe_tabi_presolver_progress_smoke.ps1

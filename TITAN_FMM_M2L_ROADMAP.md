@@ -1159,6 +1159,13 @@ Decision:
   older Z5 money-plot artifacts via report pointers when they live in the
   source checkout rather than this worktree. It is packaging/audit-only and
   does not rerun solver gates.
+- Scope Z4F adds an evidence-backed Word manuscript skeleton generated from
+  Z4D/Z4E and the Z5 figure artifacts. The final decision is
+  `z4f_manuscript_skeleton_ready`: all Z4E hashes matched, the six claims and
+  five limitations were covered, six protein rows and two figures were
+  embedded, and all nine Word-rendered pages passed visual inspection. The
+  separate citation-gap CSV keeps unresolved literature work visible without
+  fabricating references. Grid remains the production PBE default.
 - Next step is broader controlled-treecode validation, not grid promotion.
   Scope Q removed the Barnase cap-128 convergence blocker, Scope S removed the
   hidden FMM/M2L memory regression, Scope U/V/W eliminated dense local
