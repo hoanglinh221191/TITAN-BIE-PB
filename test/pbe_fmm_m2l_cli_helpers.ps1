@@ -282,7 +282,10 @@ function Write-FmmCliArgFile(
     [int]$PreconditionerBlockPanelCap = 32,
     [int]$PreconditionerOverlapPanelCap = 64,
     [int]$PreconditionerIluNeighborCap = 192,
-    [double]$PreconditionerIluDropTol = 0.0
+    [double]$PreconditionerIluDropTol = 0.0,
+    [ValidateSet('centroid','analytic_singular','duffy_adaptive')]
+    [string]$NearIntegration = 'centroid',
+    [ValidateSet(3,4)][int]$TaylorOrder = 4
 ) {
     $pdbPath = Join-Path $RunDir 'driver.pdb'
     Write-FmmCliDummyPdb $pdbPath
@@ -320,8 +323,9 @@ function Write-FmmCliArgFile(
         "-pbe-tabi-surface-points=$SurfacePoints",
         '-pbe-tabi-tree-leaf-size=64',
         "-pbe-tabi-opening-theta=$(& $format $OpeningTheta)",
-        '-pbe-tabi-near-integration=centroid',
+        "-pbe-tabi-near-integration=$NearIntegration",
         '-pbe-tabi-quad-buffer=off',
+        "-pbe-tabi-taylor-order=$TaylorOrder",
         "-pbe-tabi-precond=$Preconditioner",
         "-pbe-tabi-precond-block-panel-cap=$PreconditionerBlockPanelCap",
         "-pbe-tabi-precond-overlap-panel-cap=$PreconditionerOverlapPanelCap",

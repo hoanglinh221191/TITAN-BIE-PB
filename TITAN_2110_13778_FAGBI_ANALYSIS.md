@@ -349,6 +349,16 @@ Status:
   table, a six-claim trace, and all five Z4E limitations. Bibliographic gaps
   remain explicit in a separate CSV; Z4F does not invent citations or add new
   numerical evidence.
+- Scope Z4G replaces sampled internal labels with cached public complete-
+  protein fixtures for Barnase, 1A63, and 1SH1. Fixture preparation is pinned
+  to PDB2PQR 3.7.1, AMBER, pH 7.0, model 1/chain A; non-positive AMBER
+  hydrogen radii are deterministically floored to 0.6 A and recorded in the
+  manifest without removing atoms. The quick complete-1SH1 gate converged to
+  `true_residual=4.36458e-14`, but its sampled direct-operator RMS was
+  `2.05699e-2`, above the required `8e-3`. Z4G is therefore currently
+  `z4g_operator_accuracy_gap`; the full matrix and external manuscript are
+  intentionally blocked rather than packaging the old atom-sampled results as
+  complete-protein evidence.
 
 Tasks:
 
@@ -470,3 +480,27 @@ ILU(0) preconditioner is not a catch-up feature. It is TITAN's differentiating
 algorithmic contribution over paper-style block-diagonal preconditioning on the
 Barnase cap-256 dense/high-coupling mesh. Z5C shows this should be presented as
 a targeted breakthrough first, not yet as a universal protein-fixture result.
+
+## Scope Z4H Full-Protein Accuracy Recovery
+
+Z4H tested whether tightening the FMM opening criterion could recover the
+complete-protein operator-audit gap exposed by Z4G. On full 1SH1, decreasing
+theta from `0.6` to `0.45` reduced sampled direct-operator RMS from
+`2.05699e-2` to `6.38179e-3`, at roughly a threefold wall-time cost in the
+full sweep. The highest passing 1SH1 value was therefore `theta=0.45`.
+
+That value did not transfer to the other complete proteins. With 2048 audit
+samples, candidate RMS was `9.72521e-2` on Barnase and `1.00216` on 1A63,
+while 1SH1 remained within gate at `6.52454e-3`. All GMRES solves reported
+small residuals, so this is an operator-parity failure rather than a linear
+solver convergence failure. The measured decision is
+`z4h_fixture_specific_policy`.
+
+Consequences:
+
+- do not replace the current TABI treecode policy with `theta=0.45`;
+- keep Z4G external manuscript promotion fail-closed;
+- do not present complete-protein energies for Barnase or 1A63 as validated;
+- the next numerical scope must diagnose geometry/interaction-list or
+  expansion-accuracy behavior on the failing full proteins, rather than
+  extending the manuscript pipeline.

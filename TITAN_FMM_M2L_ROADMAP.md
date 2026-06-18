@@ -1166,6 +1166,23 @@ Decision:
   embedded, and all nine Word-rendered pages passed visual inspection. The
   separate citation-gap CSV keeps unresolved literature work visible without
   fabricating references. Grid remains the production PBE default.
+- Scope Z4G adds reproducible complete-protein preparation and benchmark
+  harnesses for Barnase, 1A63, and 1SH1, plus an external-language manuscript
+  builder with the sparse near-field block-ILU(0) formulation. PDB2PQR 3.7.1
+  AMBER fixtures retain every atom; non-positive hydrogen radii are floored to
+  0.6 A with explicit provenance. The quick full-1SH1 FMM/ILU0 row converged
+  (`true_residual=4.36458e-14`) but failed the operator-audit gate
+  (`2.05699e-2 > 8e-3`). Decision: `z4g_operator_accuracy_gap`. Do not run the
+  expensive full matrix or call the external manuscript ready until a safer
+  full-protein FMM policy passes this fixture.
+- Scope Z4H adds `test/pbe_fagbi_scope_z4h_full_protein_theta_recovery.ps1`
+  and `TITAN_FMM_M2L_SCOPE_Z4H_FULL_PROTEIN_ACCURACY_REPORT.txt`. The 1SH1
+  sweep selected `theta=0.45` (`audit=6.38179e-3`), but full confirmation
+  classified `z4h_fixture_specific_policy`: candidate audit RMS was
+  `9.72521e-2` on Barnase and `1.00216` on 1A63, versus `6.52454e-3` on 1SH1.
+  Small GMRES residuals on all rows do not rescue failed operator parity.
+  Keep Z4G fail-closed and investigate full-protein FMM geometry/expansion
+  behavior before any policy or manuscript promotion.
 - Next step is broader controlled-treecode validation, not grid promotion.
   Scope Q removed the Barnase cap-128 convergence blocker, Scope S removed the
   hidden FMM/M2L memory regression, Scope U/V/W eliminated dense local

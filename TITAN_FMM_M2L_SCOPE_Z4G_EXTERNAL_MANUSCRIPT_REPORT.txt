@@ -1,0 +1,19 @@
+# TITAN FMM/M2L Scope Z4G External Manuscript Report
+
+Decision: z4g_operator_accuracy_gap
+
+This benchmark uses complete prepared PQR structures. Atom-subsampled development rows are excluded.
+
+Measured FMM rows:
+- Stichodactyla helianthus neurotoxin I (1SH1): atoms=696, panels=6673, status=ok, residual=4.36458E-14, audit_rms=0.0205699, wall_s=77.8453521, peak_rss_mb=44.0703125
+
+Fixture preparation:
+- PDB2PQR 3.7.1, AMBER, pH 7.0, model 1 and chain A.
+- Non-positive PDB2PQR hydrogen radii are deterministically floored to 0.6 A and counted in the provenance manifest.
+
+Matrix: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4g\fagbi_scope_z4g_matrix.csv
+Fixture provenance: C:\tmp\elec_vdw-fagbi-z2a\test\pbe_inputs_public\public_fixture_manifest.csv
+Runtime figure: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4g\fagbi_scope_z4g_runtime_memory.svg
+Preconditioner convergence figure: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4g\fagbi_scope_z4g_preconditioner_convergence.svg
+
+Grid remains the production Poisson-Boltzmann default.

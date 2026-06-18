@@ -6345,6 +6345,20 @@ Decision:
   claims, five limitations, six protein rows, and two embedded evidence
   figures. Citation gaps remain separate and explicit; no solver behavior or
   default changed.
+- Scope Z4G adds public complete-protein fixture preparation (Barnase, 1A63,
+  and 1SH1), a no-sampling benchmark harness, and an external manuscript
+  builder that documents the 2 x 2 block-CSR near graph and ILU(0) no-fill
+  triangular solves. The quick 1SH1 row reached
+  `true_residual=4.36458e-14`, but sampled direct-operator RMS was
+  `2.05699e-2`, exceeding the `8e-3` gate. Z4G is therefore
+  `z4g_operator_accuracy_gap`; full benchmarking and manuscript promotion are
+  fail-closed. Grid remains the production default.
+- Scope Z4H adds the complete-protein theta recovery harness. Full 1SH1
+  selected `theta=0.45` (`audit=6.38179e-3`), but 2048-sample confirmation
+  failed transferability on Barnase (`9.72521e-2`) and 1A63 (`1.00216`). The
+  decision is `z4h_fixture_specific_policy`; therefore no TABI treecode
+  default changes follow, and Z4G remains fail-closed pending an operator-level
+  accuracy diagnosis on the complete failing proteins.
 - Scope O and refreshed Scope R still block grid-default promotion. Scope Q
   fixed bounded Barnase cap-128 convergence, Scope S removed the hidden
   FMM/M2L memory regression, Scope U/V/W established that dense block and
