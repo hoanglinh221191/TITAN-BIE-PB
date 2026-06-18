@@ -1,4 +1,5 @@
 #include "tabi_types.h"
+#include "tabi_fmm_m2l_prototype.h"
 #include "tabi_fmm_m2l_preconditioner.h"
 #include "tabi_preconditioner.h"
 #if defined(_WIN32)
@@ -19,6 +20,7 @@
 #include "../titan_executor.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -27,9 +29,11 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <map>
 #include <numeric>
 #include <stdexcept>
 #include <sstream>
+#include <tuple>
 #include <vector>
 
 namespace TitanPBE::Tabi {
@@ -40,6 +44,217 @@ constexpr double kCoulombKcalPerMol = 332.063713299;
 constexpr double kKcalToKJ = 4.184;
 constexpr double kKBKJPerMolK = 0.00831446261815324;
 constexpr std::size_t kParallelVectorThreshold = 32768;
+
+struct AttributionAggregate {
+  double error_sq{0.0};
+  double reference_sq{0.0};
+  double max_abs_error{0.0};
+  std::size_t count{0};
+};
+
+struct AttributionSummaryKey {
+  std::string probe;
+  std::string component;
+  std::string region;
+  std::string channel;
+
+  bool operator<(const AttributionSummaryKey &other) const noexcept {
+    return std::tie(probe, component, region, channel) <
+           std::tie(other.probe, other.component, other.region,
+                    other.channel);
+  }
+};
+
+struct AttributionLevelKey {
+  std::string probe;
+  std::string component;
+  std::string channel;
+  int source_depth{0};
+  std::string mac_bin;
+
+  bool operator<(const AttributionLevelKey &other) const noexcept {
+    return std::tie(probe, component, channel, source_depth, mac_bin) <
+           std::tie(other.probe, other.component, other.channel,
+                    other.source_depth, other.mac_bin);
+  }
+};
+
+void add_attribution_value(AttributionAggregate &aggregate, double approximate,
+                           double direct) noexcept {
+  const double error = approximate - direct;
+  aggregate.error_sq += error * error;
+  aggregate.reference_sq += direct * direct;
+  aggregate.max_abs_error =
+      std::max(aggregate.max_abs_error, std::abs(error));
+  ++aggregate.count;
+}
+
+double attribution_rel_rms(const AttributionAggregate &aggregate) noexcept {
+  return std::sqrt(std::max(0.0, aggregate.error_sq)) /
+         std::max(1.0e-300,
+                  std::sqrt(std::max(0.0, aggregate.reference_sq)));
+}
+
+std::string attribution_mac_bin(double rho) {
+  if (rho < 0.2)
+    return "[0.0;0.2)";
+  if (rho < 0.3)
+    return "[0.2;0.3)";
+  if (rho < 0.4)
+    return "[0.3;0.4)";
+  if (rho < 0.5)
+    return "[0.4;0.5)";
+  if (rho < 0.6)
+    return "[0.5;0.6)";
+  return "[0.6;inf)";
+}
+
+void write_operator_attribution_outputs(
+    const std::vector<titan::tabi::fmm_m2l::JcpOperatorAttributionResult>
+        &results,
+    double aggregate_audit_rel, double aggregate_direct_sq) {
+  static constexpr std::array<const char *, 4> channel_names{
+      "K1", "K2", "K3", "K4"};
+  std::ofstream samples("pbe_tabi_operator_attribution_samples.csv",
+                        std::ios::out | std::ios::trunc);
+  std::ofstream summary("pbe_tabi_operator_attribution_summary.csv",
+                        std::ios::out | std::ios::trunc);
+  std::ofstream levels("pbe_tabi_operator_attribution_levels.csv",
+                       std::ios::out | std::ios::trunc);
+  if (!samples.is_open() || !summary.is_open() || !levels.is_open()) {
+    throw std::runtime_error(
+        "PBE TABI: failed to open sampled-detail attribution outputs.");
+  }
+  samples << "configured_expansion_order,implemented_far_moment_degree,probe,"
+             "target_panel,row_component,region,channel,source_node,"
+             "source_depth,source_panels,distance_A,source_radius_A,mac_ratio,"
+             "approximate,direct,error,relative_error\n";
+
+  std::map<AttributionSummaryKey, AttributionAggregate> aggregates;
+  std::map<AttributionLevelKey, AttributionAggregate> level_aggregates;
+  std::map<std::string, double> probe_error_sq;
+  std::map<std::pair<std::string, std::size_t>,
+           std::pair<std::array<double, 4>, std::array<double, 4>>>
+      target_totals;
+  std::map<std::string, const titan::tabi::fmm_m2l::JcpOperatorAttributionResult *>
+      result_by_probe;
+
+  for (const auto &result : results) {
+    result_by_probe[result.probe] = &result;
+    for (const auto &record : result.records) {
+      auto &target_total = target_totals[{record.probe, record.target_panel}];
+      for (std::size_t channel = 0; channel < channel_names.size(); ++channel) {
+        const std::string component = channel < 2 ? "phi" : "phin";
+        const double approximate = record.approximate[channel];
+        const double direct = record.direct[channel];
+        const double error = approximate - direct;
+        const double relative =
+            std::abs(error) / std::max(1.0e-300, std::abs(direct));
+        samples << result.configured_expansion_order << ','
+                << result.implemented_far_moment_degree << ',' << record.probe
+                << ',' << record.target_panel << ',' << component << ','
+                << record.region << ',' << channel_names[channel] << ','
+                << record.source_node << ',' << record.source_depth << ','
+                << record.source_panels << ',' << record.distance << ','
+                << record.source_radius << ',' << record.mac_ratio << ','
+                << approximate << ',' << direct << ',' << error << ','
+                << relative << '\n';
+        AttributionSummaryKey key{record.probe, component, record.region,
+                                  channel_names[channel]};
+        add_attribution_value(aggregates[key], approximate, direct);
+        probe_error_sq[record.probe] += error * error;
+        target_total.first[channel] += approximate;
+        target_total.second[channel] += direct;
+        if (record.region == "far") {
+          AttributionLevelKey level_key{
+              record.probe, component, channel_names[channel],
+              record.source_depth, attribution_mac_bin(record.mac_ratio)};
+          add_attribution_value(level_aggregates[level_key], approximate,
+                                direct);
+        }
+      }
+    }
+  }
+
+  for (const auto &[target_key, values] : target_totals) {
+    const auto &[probe, target_panel] = target_key;
+    (void)target_panel;
+    for (std::size_t component_index = 0; component_index < 2;
+         ++component_index) {
+      const std::size_t first = component_index == 0 ? 0 : 2;
+      const double approximate =
+          values.first[first] + values.first[first + 1];
+      const double direct = values.second[first] + values.second[first + 1];
+      add_attribution_value(
+          aggregates[{probe, component_index == 0 ? "phi" : "phin",
+                      "total", "aggregate"}],
+          approximate, direct);
+      add_attribution_value(aggregates[{probe, "both", "total", "aggregate"}],
+                            approximate, direct);
+    }
+  }
+
+  summary << "configured_expansion_order,implemented_far_moment_degree,probe,"
+             "row_component,region,channel,samples,error_rms,reference_rms,"
+             "relative_rms,max_abs_error,error_fraction,recomposition_rel_error,"
+             "aggregate_audit_rel,reference_gap\n";
+  for (const auto &[key, aggregate] : aggregates) {
+    const auto *result = result_by_probe.at(key.probe);
+    const double error_rms =
+        aggregate.count > 0
+            ? std::sqrt(aggregate.error_sq / static_cast<double>(aggregate.count))
+            : 0.0;
+    const double reference_rms =
+        aggregate.count > 0 ? std::sqrt(aggregate.reference_sq /
+                                        static_cast<double>(aggregate.count))
+                            : 0.0;
+    const double fraction =
+        probe_error_sq[key.probe] > 0.0
+            ? aggregate.error_sq / probe_error_sq[key.probe]
+            : 0.0;
+    const double attribution_audit_rel =
+        key.probe == "solution" && key.component == "both" &&
+                key.region == "total" && key.channel == "aggregate"
+            ? std::sqrt(std::max(0.0, aggregate.error_sq)) /
+                  std::max(1.0e-300,
+                           std::sqrt(std::max(0.0, aggregate_direct_sq)))
+            : 0.0;
+    const double reference_gap =
+        key.probe == "solution" && key.component == "both" &&
+                key.region == "total" && key.channel == "aggregate"
+            ? std::abs(attribution_audit_rel - aggregate_audit_rel)
+            : 0.0;
+    summary << result->configured_expansion_order << ','
+            << result->implemented_far_moment_degree << ',' << key.probe << ','
+            << key.component << ',' << key.region << ',' << key.channel << ','
+            << aggregate.count << ',' << error_rms << ',' << reference_rms
+            << ',' << attribution_rel_rms(aggregate) << ','
+            << aggregate.max_abs_error << ',' << fraction << ','
+            << result->recomposition_rel_error << ',' << aggregate_audit_rel
+            << ',' << reference_gap << '\n';
+  }
+
+  levels << "configured_expansion_order,implemented_far_moment_degree,probe,"
+            "row_component,channel,source_depth,mac_bin,samples,error_rms,"
+            "reference_rms,relative_rms,max_abs_error\n";
+  for (const auto &[key, aggregate] : level_aggregates) {
+    const auto *result = result_by_probe.at(key.probe);
+    const double error_rms =
+        aggregate.count > 0
+            ? std::sqrt(aggregate.error_sq / static_cast<double>(aggregate.count))
+            : 0.0;
+    const double reference_rms =
+        aggregate.count > 0 ? std::sqrt(aggregate.reference_sq /
+                                        static_cast<double>(aggregate.count))
+                            : 0.0;
+    levels << result->configured_expansion_order << ','
+           << result->implemented_far_moment_degree << ',' << key.probe << ','
+           << key.component << ',' << key.channel << ',' << key.source_depth
+           << ',' << key.mac_bin << ',' << aggregate.count << ',' << error_rms
+           << ',' << reference_rms << ',' << attribution_rel_rms(aggregate)
+           << ',' << aggregate.max_abs_error << '\n';
+  }
+}
 
 struct FormulationConfig {
   std::string formulation{"jcp2013"};
@@ -4379,9 +4594,21 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       const auto audit_begin = std::chrono::steady_clock::now();
       const std::vector<double> &audit_x =
           !linear.best_x.empty() ? linear.best_x : linear.x;
-      const std::vector<std::size_t> audit_rows = build_audit_rows(
-          audit_x.size(), options.matvec_audit,
-          options.matvec_audit_sample_count);
+      std::vector<std::size_t> audit_rows;
+      if (options.matvec_audit == "sampled-detail") {
+        const std::vector<std::size_t> audit_targets = build_audit_rows(
+            panels.size(), "sampled", options.matvec_audit_sample_count);
+        audit_rows.reserve(audit_targets.size() * (coupled ? 2u : 1u));
+        audit_rows.insert(audit_rows.end(), audit_targets.begin(),
+                          audit_targets.end());
+        if (coupled) {
+          for (const std::size_t target : audit_targets)
+            audit_rows.push_back(panels.size() + target);
+        }
+      } else {
+        audit_rows = build_audit_rows(audit_x.size(), options.matvec_audit,
+                                      options.matvec_audit_sample_count);
+      }
       if (!audit_x.empty() && !audit_rows.empty()) {
         std::vector<double> tree_ax;
         apply_jcp_treecode_operator(panels, audit_x, eps_ratio, kappa, lhs_phi,
@@ -4461,6 +4688,45 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
             std::sqrt(std::max(0.0, diff_sq)) /
             std::max(1.0e-300, std::sqrt(std::max(0.0, direct_sq)));
         result.matvec_audit_rows = audit_rows.size();
+        if (options.matvec_audit == "sampled-detail") {
+          const auto context = ensure_jcp_fmm_m2l_context(
+              panels, eps_ratio, kappa, jcp_tree.leaf_size,
+              jcp_tree.opening_theta, jcp_tree.taylor_order, executor,
+              &jcp_tree.fmm_m2l_context);
+          std::vector<double> solution_phi(panels.size(), 0.0);
+          std::vector<double> solution_phin(panels.size(), 0.0);
+          std::vector<double> phi_probe(panels.size(), 0.0);
+          std::vector<double> phin_probe(panels.size(), 0.0);
+          for (std::size_t panel = 0; panel < panels.size(); ++panel) {
+            solution_phi[panel] = audit_x[panel];
+            solution_phin[panel] =
+                coupled ? audit_x[panels.size() + panel] : 0.0;
+            const double t = static_cast<double>(panel + 1);
+            phi_probe[panel] = 0.5 * std::sin(0.013 * t) + 0.25;
+            phin_probe[panel] = 0.5 * std::cos(0.017 * t) - 0.15;
+          }
+          const std::vector<double> zeros(panels.size(), 0.0);
+          std::vector<titan::tabi::fmm_m2l::JcpOperatorAttributionResult>
+              attribution;
+          attribution.reserve(3);
+          attribution.push_back(context->attribute(
+              solution_phi, solution_phin,
+              static_cast<std::size_t>(options.matvec_audit_sample_count),
+              "solution", executor, coupled, result.near_integration,
+              result.quad_buffer, &panels));
+          attribution.push_back(context->attribute(
+              phi_probe, zeros,
+              static_cast<std::size_t>(options.matvec_audit_sample_count),
+              "phi_only", executor, coupled, result.near_integration,
+              result.quad_buffer, &panels));
+          attribution.push_back(context->attribute(
+              zeros, phin_probe,
+              static_cast<std::size_t>(options.matvec_audit_sample_count),
+              "phin_only", executor, coupled, result.near_integration,
+              result.quad_buffer, &panels));
+          write_operator_attribution_outputs(
+              attribution, result.tree_vs_direct_matvec_rel, direct_sq);
+        }
       }
       result.matvec_audit_ms =
           elapsed_ms(audit_begin, std::chrono::steady_clock::now());

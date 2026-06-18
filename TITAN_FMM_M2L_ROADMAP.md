@@ -1183,6 +1183,19 @@ Decision:
   Small GMRES residuals on all rows do not rescue failed operator parity.
   Keep Z4G fail-closed and investigate full-protein FMM geometry/expansion
   behavior before any policy or manuscript promotion.
+- Scope Z4I adds channel-aware full-protein operator attribution through
+  `-pbe-tabi-matvec-audit=sampled-detail` and the harness
+  `test/pbe_fagbi_scope_z4i_operator_attribution.ps1`. The full nine-row
+  Barnase/1A63/1SH1 theta matrix classified
+  `z4i_far_order_implementation_gap`: near error was zero, far error accounted
+  for the complete sampled channel error, K2 dominated every row, attribution
+  recomposition was below `5.4e-15`, and direct-audit reference gaps stayed
+  below `4.3e-14`. Telemetry now makes the structural mismatch explicit:
+  configured expansion order is `4`, while the current far-cell evaluator
+  implements moment degree `1`. Theta tightening rescued 1SH1 but left
+  Barnase at `2.16504e-2` and 1A63 at `8.60231e-1` even at theta `0.35`.
+  Next: Z4J genuine higher-order analytical moments/M2L, starting with K2;
+  do not change TABI or grid defaults from this diagnostic evidence.
 - Next step is broader controlled-treecode validation, not grid promotion.
   Scope Q removed the Barnase cap-128 convergence blocker, Scope S removed the
   hidden FMM/M2L memory regression, Scope U/V/W eliminated dense local

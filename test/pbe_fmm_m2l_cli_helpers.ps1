@@ -278,6 +278,8 @@ function Write-FmmCliArgFile(
     [double]$TemperatureK,
     [double]$OpeningTheta = 0.8,
     [int]$AuditSampleCount = 0,
+    [ValidateSet('auto','off','sampled','sampled-detail')]
+    [string]$AuditMode = 'auto',
     [string]$Preconditioner = 'diagonal',
     [int]$PreconditionerBlockPanelCap = 32,
     [int]$PreconditionerOverlapPanelCap = 64,
@@ -336,8 +338,14 @@ function Write-FmmCliArgFile(
         '-pbe-tabi-true-residual-probe-scope=sampled',
         '-pbe-tabi-true-residual-sample-count=512'
         )
-        if ($AuditSampleCount -gt 0) {
-            $argLines += '-pbe-tabi-matvec-audit=sampled'
+        $resolvedAuditMode = if ($AuditMode -eq 'auto') {
+            if ($AuditSampleCount -gt 0) { 'sampled' } else { 'off' }
+        } else { $AuditMode }
+        if ($resolvedAuditMode -ne 'off') {
+            if ($AuditSampleCount -le 0) {
+                throw "Audit mode $resolvedAuditMode requires AuditSampleCount > 0"
+            }
+            $argLines += "-pbe-tabi-matvec-audit=$resolvedAuditMode"
             $argLines += "-pbe-tabi-matvec-audit-sample-count=$AuditSampleCount"
         } else {
             $argLines += '-pbe-tabi-matvec-audit=off'

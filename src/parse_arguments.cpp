@@ -2079,7 +2079,8 @@ int arguments::parse_arguments(int argc, char **argv) {
                                    "--pbe-tabi-matvec-audit"},
                              common_value, i)) {
       pbe.tabi_matvec_audit =
-          require_choice(common_value, {"off", "sampled", "full-small"},
+          require_choice(common_value,
+                         {"off", "sampled", "sampled-detail", "full-small"},
                          "-pbe-tabi-matvec-audit");
       continue;
     }

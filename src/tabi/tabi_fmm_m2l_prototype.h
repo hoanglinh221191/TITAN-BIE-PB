@@ -2,6 +2,7 @@
 #define TITAN_TABI_FMM_M2L_PROTOTYPE_H
 
 #include <cstddef>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -132,6 +133,32 @@ struct JcpAnalyticOperatorResult {
   bool finite_outputs = true;
 };
 
+struct JcpOperatorAttributionRecord {
+  std::string probe;
+  std::size_t target_panel{0};
+  std::string region;
+  int source_node{-1};
+  int source_depth{-1};
+  std::size_t source_panels{0};
+  double distance{0.0};
+  double source_radius{0.0};
+  double mac_ratio{0.0};
+  std::array<double, 4> approximate{};
+  std::array<double, 4> direct{};
+};
+
+struct JcpOperatorAttributionResult {
+  std::string probe;
+  std::vector<std::size_t> sampled_targets;
+  std::vector<JcpOperatorAttributionRecord> records;
+  int configured_expansion_order{0};
+  int implemented_far_moment_degree{1};
+  std::size_t near_records{0};
+  std::size_t far_records{0};
+  double recomposition_rel_error{0.0};
+  bool finite_outputs{true};
+};
+
 struct JcpGuardedGmresMetrics {
   std::size_t panels = 0;
   std::size_t near_pairs = 0;
@@ -218,6 +245,15 @@ public:
                                   const std::string &quad_buffer = "off",
                                   const std::vector<TitanPBE::Tabi::Panel>
                                       *production_panels = nullptr) const;
+
+  JcpOperatorAttributionResult attribute(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      std::size_t sample_count, const std::string &probe,
+      TitanExecutor &executor, bool coupled = true,
+      const std::string &near_integration = "centroid",
+      const std::string &quad_buffer = "off",
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr)
+      const;
 
 private:
   struct Impl;

@@ -38,6 +38,7 @@ struct Cell {
   std::size_t end = 0;
   int left = -1;
   int right = -1;
+  int depth = 0;
   double cx = 0.0;
   double cy = 0.0;
   double cz = 0.0;
@@ -215,11 +216,12 @@ void compute_cell_geometry(Tree &tree, const PointSoA &points, int node_index) {
 }
 
 int build_node(Tree &tree, const PointSoA &points, std::size_t begin,
-               std::size_t end, std::size_t max_leaf) {
+               std::size_t end, std::size_t max_leaf, int depth) {
   const int node_index = static_cast<int>(tree.cells.size());
   Cell cell;
   cell.begin = begin;
   cell.end = end;
+  cell.depth = depth;
   tree.cells.push_back(cell);
   compute_cell_geometry(tree, points, node_index);
 
@@ -269,8 +271,8 @@ int build_node(Tree &tree, const PointSoA &points, std::size_t begin,
                      return lhs < rhs;
                    });
 
-  const int left = build_node(tree, points, begin, mid, max_leaf);
-  const int right = build_node(tree, points, mid, end, max_leaf);
+  const int left = build_node(tree, points, begin, mid, max_leaf, depth + 1);
+  const int right = build_node(tree, points, mid, end, max_leaf, depth + 1);
   tree.cells[static_cast<std::size_t>(node_index)].left = left;
   tree.cells[static_cast<std::size_t>(node_index)].right = right;
   return node_index;
@@ -282,7 +284,8 @@ Tree build_tree(const PointSoA &points, std::size_t max_leaf) {
   std::iota(tree.order.begin(), tree.order.end(), std::size_t{0});
   tree.panel_id = points.panel_id;
   tree.cells.reserve(points.x.size() / std::max<std::size_t>(1, max_leaf) * 2 + 8);
-  build_node(tree, points, 0, points.x.size(), std::max<std::size_t>(1, max_leaf));
+  build_node(tree, points, 0, points.x.size(),
+             std::max<std::size_t>(1, max_leaf), 0);
   tree.work.resize(tree.cells.size());
   for (int node : tree.target_leaf_nodes) {
     tree.work[static_cast<std::size_t>(node)].target_node = node;
@@ -516,6 +519,22 @@ struct PanelSourceMoments {
   double phi_nz = 0.0;
 };
 
+using JcpChannelValues = std::array<double, 4>;
+
+void add_channels(JcpChannelValues &target,
+                  const JcpChannelValues &source) noexcept {
+  for (std::size_t channel = 0; channel < target.size(); ++channel)
+    target[channel] += source[channel];
+}
+
+double channel_phi(const JcpChannelValues &channels) noexcept {
+  return channels[0] + channels[1];
+}
+
+double channel_phin(const JcpChannelValues &channels) noexcept {
+  return channels[2] + channels[3];
+}
+
 double jcp_phin_for_panel(const PrototypePanel &panel, std::size_t index) {
   const double t = static_cast<double>(index + 1);
   return 0.65 * std::sin(0.017 * t) + 0.35 * panel.nz;
@@ -565,11 +584,10 @@ compute_panel_source_moments(const Tree &tree,
   return moments;
 }
 
-void add_jcp_direct_pair(const PrototypePanel &target,
-                         const PrototypePanel &source, double source_phi,
-                         double source_phin,
-                         double eps_ratio, double kappa, double &phi_out,
-                         double &phin_out) {
+JcpChannelValues jcp_direct_pair_channels(
+    const PrototypePanel &target, const PrototypePanel &source,
+    double source_phi, double source_phin, double eps_ratio, double kappa) {
+  JcpChannelValues channels{};
   constexpr double inv_four_pi = 0.079577471545947667884;
   const double safe_eps_ratio = std::max(1.0e-12, eps_ratio);
   const double inv_eps_ratio = 1.0 / safe_eps_ratio;
@@ -579,7 +597,7 @@ void add_jcp_direct_pair(const PrototypePanel &target,
   const double uz = target.z - source.z;
   const double r2 = ux * ux + uy * uy + uz * uz;
   if (!(r2 > 1.0e-28)) {
-    return;
+    return channels;
   }
   const double r = std::sqrt(r2);
   const double inv_r = 1.0 / r;
@@ -611,11 +629,46 @@ void add_jcp_direct_pair(const PrototypePanel &target,
       (kk * kk * inv_r + 2.0 * kk * inv_r2 + 2.0 * inv_r3);
   const double mixedk = fsecond_k * nxu_nyu + fprime_k_over_r * tangent_metric;
   const double phi = source_phi;
-  phi_out += source.area * ((g0 - gk) * phin +
-                            (safe_eps_ratio * source_dk - source_d0) * phi);
-  phin_out += source.area *
-              ((target_d0 - inv_eps_ratio * target_dk) * phin +
-               (mixedk - mixed0) * phi);
+  channels[0] = source.area * (g0 - gk) * phin;
+  channels[1] = source.area *
+                (safe_eps_ratio * source_dk - source_d0) * phi;
+  channels[2] = source.area *
+                (target_d0 - inv_eps_ratio * target_dk) * phin;
+  channels[3] = source.area * (mixedk - mixed0) * phi;
+  return channels;
+}
+
+void add_jcp_direct_pair(const PrototypePanel &target,
+                         const PrototypePanel &source, double source_phi,
+                         double source_phin, double eps_ratio, double kappa,
+                         double &phi_out, double &phin_out) {
+  const JcpChannelValues channels = jcp_direct_pair_channels(
+      target, source, source_phi, source_phin, eps_ratio, kappa);
+  phi_out += channel_phi(channels);
+  phin_out += channel_phin(channels);
+}
+
+JcpChannelValues jcp_near_kernel_pair_channels(
+    const TitanPBE::Tabi::Panel &target, std::size_t target_index,
+    const TitanPBE::Tabi::Panel &source, std::size_t source_index,
+    double source_phi, double source_phin, double eps_ratio, double kappa,
+    bool coupled, const std::string &near_integration,
+    const std::string &quad_buffer,
+    TitanPBE::Tabi::TreecodeStats *stats) {
+  JcpChannelValues channels{};
+  const TitanPBE::Tabi::JcpNearPairKernel selected =
+      TitanPBE::Tabi::evaluate_jcp_near_pair_kernel(
+          target, target_index, source, source_index, eps_ratio, kappa,
+          coupled, near_integration, quad_buffer, stats);
+  if (!selected.valid)
+    return channels;
+  channels[0] = selected.k1 * source_phin;
+  channels[1] = selected.k2 * source_phi;
+  if (coupled) {
+    channels[2] = selected.k3 * source_phin;
+    channels[3] = selected.k4 * source_phi;
+  }
+  return channels;
 }
 
 void add_jcp_near_kernel_pair(const TitanPBE::Tabi::Panel &target,
@@ -628,15 +681,11 @@ void add_jcp_near_kernel_pair(const TitanPBE::Tabi::Panel &target,
                               const std::string &quad_buffer,
                               double &phi_out, double &phin_out,
                               TitanPBE::Tabi::TreecodeStats *stats) {
-  const TitanPBE::Tabi::JcpNearPairKernel selected =
-      TitanPBE::Tabi::evaluate_jcp_near_pair_kernel(
-          target, target_index, source, source_index, eps_ratio, kappa,
-          coupled, near_integration, quad_buffer, stats);
-  if (!selected.valid)
-    return;
-  phi_out += selected.k1 * source_phin + selected.k2 * source_phi;
-  if (coupled)
-    phin_out += selected.k3 * source_phin + selected.k4 * source_phi;
+  const JcpChannelValues channels = jcp_near_kernel_pair_channels(
+      target, target_index, source, source_index, source_phi, source_phin,
+      eps_ratio, kappa, coupled, near_integration, quad_buffer, stats);
+  phi_out += channel_phi(channels);
+  phin_out += channel_phin(channels);
 }
 
 void add_jcp_direct_pair(const PrototypePanel &target,
@@ -647,9 +696,10 @@ void add_jcp_direct_pair(const PrototypePanel &target,
                       eps_ratio, kappa, phi_out, phin_out);
 }
 
-void add_jcp_far_cell(const PrototypePanel &target, const Cell &source_cell,
-                      const PanelSourceMoments &moments, double eps_ratio,
-                      double kappa, double &phi_out, double &phin_out) {
+JcpChannelValues jcp_far_cell_channels(
+    const PrototypePanel &target, const Cell &source_cell,
+    const PanelSourceMoments &moments, double eps_ratio, double kappa) {
+  JcpChannelValues channels{};
   constexpr double inv_four_pi = 0.079577471545947667884;
   const double safe_eps_ratio = std::max(1.0e-12, eps_ratio);
   const double inv_eps_ratio = 1.0 / safe_eps_ratio;
@@ -659,7 +709,7 @@ void add_jcp_far_cell(const PrototypePanel &target, const Cell &source_cell,
   const double uz = target.z - source_cell.qz;
   const double r2 = ux * ux + uy * uy + uz * uz;
   if (!(r2 > 1.0e-28)) {
-    return;
+    return channels;
   }
   const double r = std::sqrt(r2);
   const double inv_r = 1.0 / r;
@@ -705,8 +755,20 @@ void add_jcp_far_cell(const PrototypePanel &target, const Cell &source_cell,
   const double mixedk = fsecond_k * nxu_nyu + fprime_k_over_r * tangent_metric;
   const double k4 = mixedk - mixed0;
 
-  phi_out += k1 + k2;
-  phin_out += k3 + k4;
+  channels[0] = k1;
+  channels[1] = k2;
+  channels[2] = k3;
+  channels[3] = k4;
+  return channels;
+}
+
+void add_jcp_far_cell(const PrototypePanel &target, const Cell &source_cell,
+                      const PanelSourceMoments &moments, double eps_ratio,
+                      double kappa, double &phi_out, double &phin_out) {
+  const JcpChannelValues channels = jcp_far_cell_channels(
+      target, source_cell, moments, eps_ratio, kappa);
+  phi_out += channel_phi(channels);
+  phin_out += channel_phin(channels);
 }
 
 } // namespace
@@ -1162,6 +1224,171 @@ FmmM2lAnalyticContext::apply(const std::vector<double> &phi_values,
                   [](double value) { return std::isfinite(value); }) &&
       std::all_of(result.phin.begin(), result.phin.end(),
                   [](double value) { return std::isfinite(value); });
+  return result;
+}
+
+JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute(
+    const std::vector<double> &phi_values,
+    const std::vector<double> &phin_values, std::size_t sample_count,
+    const std::string &probe, TitanExecutor &executor, bool coupled,
+    const std::string &near_integration, const std::string &quad_buffer,
+    const std::vector<TitanPBE::Tabi::Panel> *production_panels) const {
+  if (impl_ == nullptr) {
+    throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
+  }
+  const std::size_t n = impl_->panels.size();
+  if (phi_values.size() != n || phin_values.size() != n) {
+    throw std::invalid_argument(
+        "JCP operator attribution density vectors must match panels");
+  }
+  if (production_panels == nullptr || production_panels->size() != n) {
+    throw std::invalid_argument(
+        "JCP operator attribution requires production panel geometry");
+  }
+
+  JcpOperatorAttributionResult result;
+  result.probe = probe;
+  result.configured_expansion_order = impl_->config.expansion_order;
+  result.implemented_far_moment_degree = 1;
+  const std::size_t target_count =
+      std::min(n, std::max<std::size_t>(1, sample_count));
+  result.sampled_targets.reserve(target_count);
+  std::size_t previous = std::numeric_limits<std::size_t>::max();
+  for (std::size_t sample = 0; sample < target_count; ++sample) {
+    std::size_t target =
+        ((2 * sample + 1) * n) / std::max<std::size_t>(1, 2 * target_count);
+    target = std::min(target, n - 1);
+    if (target != previous) {
+      result.sampled_targets.push_back(target);
+      previous = target;
+    }
+  }
+
+  std::vector<int> target_leaf_by_panel(n, -1);
+  for (const int target_node : impl_->target_tree.target_leaf_nodes) {
+    const Cell &target_cell =
+        impl_->target_tree.cells[static_cast<std::size_t>(target_node)];
+    for (std::size_t pos = target_cell.begin; pos < target_cell.end; ++pos) {
+      const std::size_t panel = impl_->target_tree.order[pos];
+      if (panel < n)
+        target_leaf_by_panel[panel] = target_node;
+    }
+  }
+
+  const std::vector<PanelSourceMoments> source_moments =
+      compute_panel_source_moments(impl_->source_tree, impl_->panels,
+                                   phi_values, phin_values);
+  const JcpAnalyticOperatorResult applied =
+      apply(phi_values, phin_values, executor, coupled, near_integration,
+            quad_buffer, production_panels);
+
+  double recompose_diff_sq = 0.0;
+  double applied_sq = 0.0;
+  for (const std::size_t target_panel : result.sampled_targets) {
+    const int target_node = target_leaf_by_panel[target_panel];
+    if (target_node < 0) {
+      result.finite_outputs = false;
+      continue;
+    }
+    const Cell &target_cell =
+        impl_->target_tree.cells[static_cast<std::size_t>(target_node)];
+    const TargetLeafWork &work =
+        impl_->target_tree.work[static_cast<std::size_t>(target_node)];
+    const PrototypePanel &target = impl_->panels[target_panel];
+
+    JcpChannelValues reconstructed{};
+    JcpOperatorAttributionRecord near_record;
+    near_record.probe = probe;
+    near_record.target_panel = target_panel;
+    near_record.region = "near";
+    near_record.source_depth = -1;
+    for (const int source_node : work.near_sources) {
+      const Cell &source_cell =
+          impl_->source_tree.cells[static_cast<std::size_t>(source_node)];
+      near_record.source_panels += source_cell.count();
+      for (std::size_t pos = source_cell.begin; pos < source_cell.end; ++pos) {
+        const std::size_t source_panel = impl_->source_tree.order[pos];
+        const JcpChannelValues channels = jcp_near_kernel_pair_channels(
+            (*production_panels)[target_panel], target_panel,
+            (*production_panels)[source_panel], source_panel,
+            phi_values[source_panel], phin_values[source_panel],
+            impl_->eps_ratio, impl_->kappa, coupled, near_integration,
+            quad_buffer, nullptr);
+        add_channels(near_record.approximate, channels);
+        add_channels(near_record.direct, channels);
+      }
+    }
+    add_channels(reconstructed, near_record.approximate);
+    result.records.push_back(near_record);
+    ++result.near_records;
+
+    for (const int source_node : work.far_sources) {
+      const std::size_t source_index = static_cast<std::size_t>(source_node);
+      const Cell &source_cell = impl_->source_tree.cells[source_index];
+      JcpOperatorAttributionRecord record;
+      record.probe = probe;
+      record.target_panel = target_panel;
+      record.region = "far";
+      record.source_node = source_node;
+      record.source_depth = source_cell.depth;
+      record.source_panels = source_cell.count();
+      // Match the exact cell-center metric used by accept_far/build_work so
+      // depth/MAC attribution bins describe the interaction list that ran.
+      const double dx = target_cell.cx - source_cell.cx;
+      const double dy = target_cell.cy - source_cell.cy;
+      const double dz = target_cell.cz - source_cell.cz;
+      record.distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+      record.source_radius = source_cell.radius;
+      record.mac_ratio =
+          record.distance > 1.0e-12
+              ? (target_cell.radius + source_cell.radius) / record.distance
+              : std::numeric_limits<double>::infinity();
+      record.approximate = jcp_far_cell_channels(
+          target, source_cell, source_moments[source_index], impl_->eps_ratio,
+          impl_->kappa);
+      for (std::size_t pos = source_cell.begin; pos < source_cell.end; ++pos) {
+        const std::size_t source_panel = impl_->source_tree.order[pos];
+        const JcpChannelValues channels = jcp_near_kernel_pair_channels(
+            (*production_panels)[target_panel], target_panel,
+            (*production_panels)[source_panel], source_panel,
+            phi_values[source_panel], phin_values[source_panel],
+            impl_->eps_ratio, impl_->kappa, coupled, near_integration,
+            quad_buffer, nullptr);
+        add_channels(record.direct, channels);
+      }
+      add_channels(reconstructed, record.approximate);
+      result.records.push_back(record);
+      ++result.far_records;
+    }
+
+    const double reconstructed_phi = channel_phi(reconstructed);
+    const double reconstructed_phin = channel_phin(reconstructed);
+    const double phi_delta = reconstructed_phi - applied.phi[target_panel];
+    recompose_diff_sq += phi_delta * phi_delta;
+    applied_sq += applied.phi[target_panel] * applied.phi[target_panel];
+    if (coupled) {
+      const double phin_delta =
+          reconstructed_phin - applied.phin[target_panel];
+      recompose_diff_sq += phin_delta * phin_delta;
+      applied_sq += applied.phin[target_panel] * applied.phin[target_panel];
+    }
+  }
+  result.recomposition_rel_error =
+      std::sqrt(std::max(0.0, recompose_diff_sq)) /
+      std::max(1.0e-300, std::sqrt(std::max(0.0, applied_sq)));
+  for (const JcpOperatorAttributionRecord &record : result.records) {
+    result.finite_outputs =
+        result.finite_outputs && std::isfinite(record.distance) &&
+        std::isfinite(record.source_radius) && std::isfinite(record.mac_ratio);
+    for (std::size_t channel = 0; channel < 4; ++channel) {
+      result.finite_outputs =
+          result.finite_outputs && std::isfinite(record.approximate[channel]) &&
+          std::isfinite(record.direct[channel]);
+    }
+  }
+  result.finite_outputs =
+      result.finite_outputs && applied.finite_outputs &&
+      std::isfinite(result.recomposition_rel_error);
   return result;
 }
 

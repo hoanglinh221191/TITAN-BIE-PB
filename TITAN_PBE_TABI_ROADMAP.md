@@ -6359,6 +6359,17 @@ Decision:
   decision is `z4h_fixture_specific_policy`; therefore no TABI treecode
   default changes follow, and Z4G remains fail-closed pending an operator-level
   accuracy diagnosis on the complete failing proteins.
+- Scope Z4I adds `sampled-detail` FMM/M2L operator attribution and the full
+  `test/pbe_fagbi_scope_z4i_operator_attribution.ps1` matrix. All nine
+  Barnase/1A63/1SH1 theta rows completed and classified
+  `z4i_far_order_implementation_gap`: near error fraction was zero, far error
+  fraction was one, K2 dominated every row, recomposition error stayed below
+  `5.4e-15`, and reference gaps stayed below `4.3e-14`. The diagnostic records
+  configured order `4` versus implemented far moment degree `1`. Tightening
+  theta to `0.35` reduced Barnase audit to `2.16504e-2` and 1SH1 to
+  `2.10383e-3`, but 1A63 remained at `8.60231e-1`. The next solver scope is
+  genuine higher-order analytical moments/M2L (Z4J), not more theta-only
+  tuning. Grid remains the production PBE default and Z4I changes no policy.
 - Scope O and refreshed Scope R still block grid-default promotion. Scope Q
   fixed bounded Barnase cap-128 convergence, Scope S removed the hidden
   FMM/M2L memory regression, Scope U/V/W established that dense block and

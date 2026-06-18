@@ -504,3 +504,36 @@ Consequences:
 - the next numerical scope must diagnose geometry/interaction-list or
   expansion-accuracy behavior on the failing full proteins, rather than
   extending the manuscript pipeline.
+
+## Scope Z4I Full-Protein Operator Attribution
+
+Z4I implemented `sampled-detail` attribution for the analytical FMM/M2L
+operator and completed the full Barnase, 1A63, and 1SH1 matrix at opening
+theta `0.6`, `0.45`, and `0.35`. The diagnostic decomposes the sampled
+operator error into near/far regions, coupled K1-K4 channels, source-tree
+depth, and MAC-ratio bins for the converged solution and deterministic
+`phi_only`/`phin_only` probes.
+
+The measured decision is `z4i_far_order_implementation_gap`:
+
+- all nine rows completed with finite output;
+- the shared analytical-singular near path reproduced the direct near
+  contribution exactly in the sampled rows (`near_error_fraction=0`);
+- accepted far cells accounted for the complete measured channel error
+  (`far_error_fraction=1`), and K2 was the dominant channel in every row;
+- attribution recomposition stayed below `5.4e-15`, while the bridge to the
+  existing sampled direct-operator audit stayed below `4.3e-14`;
+- the configured expansion order was `4`, but the production far-cell
+  operator reported implemented moment degree `1` (monopole/dipole data only).
+
+Tightening theta reduced Barnase audit RMS from `0.288126` to `0.0918591`
+and `0.0216504`, but did not reach the `8e-3` gate. On 1A63, the same sweep
+gave `0.967063`, `1.00371`, and `0.860231`; the tightest value improved by
+only about 11 percent and remained unusable. 1SH1 was less demanding and
+reached `0.00638179` at theta `0.45` and `0.00210383` at theta `0.35`.
+
+Therefore, Z4I rules out the near kernel and the direct-reference verifier as
+the primary causes of the full-protein gap. The next numerical scope should
+be Z4J: implement genuine higher-order analytical source moments and M2L/local
+evaluation, beginning with the K2 translation, then repeat the same
+attribution gate. Further theta-only tuning is not a sufficient remedy.
