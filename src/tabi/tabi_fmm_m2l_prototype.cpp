@@ -1,5 +1,6 @@
 #include "tabi/tabi_fmm_m2l_prototype.h"
 #include "tabi/tabi_fmm_m2l_cartesian.h"
+#include "tabi/tabi_fmm_m2l_local.h"
 #include "tabi/tabi_near.h"
 #include "tabi/tabi_types.h"
 
@@ -1236,7 +1237,7 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute(
     const std::vector<TitanPBE::Tabi::Panel> *production_panels) const {
   return attribute_impl(phi_values, phin_values, sample_count, probe, executor,
                         coupled, near_integration, quad_buffer,
-                        production_panels, false);
+                        production_panels, 0);
 }
 
 JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_cartesian(
@@ -1247,7 +1248,18 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_cartesian(
     const std::vector<TitanPBE::Tabi::Panel> *production_panels) const {
   return attribute_impl(phi_values, phin_values, sample_count, probe, executor,
                         coupled, near_integration, quad_buffer,
-                        production_panels, true);
+                        production_panels, 1);
+}
+
+JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_local_p4(
+    const std::vector<double> &phi_values,
+    const std::vector<double> &phin_values, std::size_t sample_count,
+    const std::string &probe, TitanExecutor &executor, bool coupled,
+    const std::string &near_integration, const std::string &quad_buffer,
+    const std::vector<TitanPBE::Tabi::Panel> *production_panels) const {
+  return attribute_impl(phi_values, phin_values, sample_count, probe, executor,
+                        coupled, near_integration, quad_buffer,
+                        production_panels, 2);
 }
 
 JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
@@ -1256,7 +1268,7 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
     const std::string &probe, TitanExecutor &executor, bool coupled,
     const std::string &near_integration, const std::string &quad_buffer,
     const std::vector<TitanPBE::Tabi::Panel> *production_panels,
-    bool cartesian) const {
+    int approximation_mode) const {
   if (impl_ == nullptr) {
     throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
   }
@@ -1270,10 +1282,16 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
         "JCP operator attribution requires production panel geometry");
   }
 
+  const bool cartesian = approximation_mode != 0;
+  const bool local_mode = approximation_mode == 2;
   JcpOperatorAttributionResult result;
-  result.approximation_mode =
-      cartesian ? "cartesian_p" + std::to_string(impl_->config.expansion_order)
-                : "legacy_degree1";
+  result.approximation_mode = local_mode
+                                  ? "local_m2l_p4"
+                                  : (cartesian ? "cartesian_p" +
+                                                     std::to_string(
+                                                         impl_->config
+                                                             .expansion_order)
+                                               : "legacy_degree1");
   result.probe = probe;
   result.configured_expansion_order = impl_->config.expansion_order;
   result.implemented_far_moment_degree =
@@ -1330,6 +1348,60 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
   }
   result.moment_build_seconds =
       elapsed_seconds(moment_begin, Clock::now());
+
+  std::vector<int> local_target_nodes;
+  std::vector<int> local_index_by_target_node(
+      impl_->target_tree.cells.size(), -1);
+  std::vector<CartesianJcpLocalP4> local_expansions;
+  if (local_mode) {
+    for (const std::size_t target_panel : result.sampled_targets) {
+      const int target_node = target_leaf_by_panel[target_panel];
+      if (target_node >= 0)
+        local_target_nodes.push_back(target_node);
+    }
+    std::sort(local_target_nodes.begin(), local_target_nodes.end());
+    local_target_nodes.erase(
+        std::unique(local_target_nodes.begin(), local_target_nodes.end()),
+        local_target_nodes.end());
+    local_expansions.resize(local_target_nodes.size());
+    for (std::size_t i = 0; i < local_target_nodes.size(); ++i)
+      local_index_by_target_node[static_cast<std::size_t>(
+          local_target_nodes[i])] = static_cast<int>(i);
+    const auto m2l_begin = Clock::now();
+    const std::size_t workers = std::max<std::size_t>(1, executor.capacity());
+    executor.parallel_for(
+        local_target_nodes.size(), workers, 1,
+        [&](std::size_t, std::size_t begin, std::size_t end) {
+          for (std::size_t local_index = begin; local_index < end;
+               ++local_index) {
+            const int target_node = local_target_nodes[local_index];
+            const Cell &target_cell = impl_->target_tree.cells[
+                static_cast<std::size_t>(target_node)];
+            const TargetLeafWork &work = impl_->target_tree.work[
+                static_cast<std::size_t>(target_node)];
+            CartesianJcpLocalP4 accumulated;
+            for (const int source_node : work.far_sources) {
+              const std::size_t source_index =
+                  static_cast<std::size_t>(source_node);
+              const Cell &source_cell = impl_->source_tree.cells[source_index];
+              const CartesianJcpLocalP4 translated =
+                  translate_cartesian_jcp_m2l_p4(
+                      cartesian_moments[source_index], source_cell.qx,
+                      source_cell.qy, source_cell.qz, target_cell.qx,
+                      target_cell.qy, target_cell.qz, impl_->eps_ratio,
+                      impl_->kappa);
+              accumulate_cartesian_jcp_local(accumulated, translated);
+            }
+            local_expansions[local_index] = accumulated;
+          }
+        });
+    result.m2l_seconds = elapsed_seconds(m2l_begin, Clock::now());
+    result.local_target_leaves = local_target_nodes.size();
+    for (const int target_node : local_target_nodes) {
+      result.local_m2l_pairs += impl_->target_tree.work[
+          static_cast<std::size_t>(target_node)].far_sources.size();
+    }
+  }
   JcpAnalyticOperatorResult applied;
   if (!cartesian) {
     applied = apply(phi_values, phin_values, executor, coupled,
@@ -1376,7 +1448,47 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
     result.records.push_back(near_record);
     ++result.near_records;
 
-    for (const int source_node : work.far_sources) {
+    if (local_mode) {
+      JcpOperatorAttributionRecord record;
+      record.probe = probe;
+      record.target_panel = target_panel;
+      record.region = "far";
+      record.source_node = -2;
+      record.source_depth = -1;
+      record.distance = 0.0;
+      record.source_radius = 0.0;
+      record.mac_ratio = 0.0;
+      const int local_index = local_index_by_target_node[
+          static_cast<std::size_t>(target_node)];
+      if (local_index < 0) {
+        result.finite_outputs = false;
+      } else {
+        const auto l2p_begin = Clock::now();
+        record.approximate = evaluate_cartesian_jcp_l2p(
+            target, target_cell.qx, target_cell.qy, target_cell.qz,
+            local_expansions[static_cast<std::size_t>(local_index)]);
+        result.l2p_seconds += elapsed_seconds(l2p_begin, Clock::now());
+      }
+      for (const int source_node : work.far_sources) {
+        const Cell &source_cell = impl_->source_tree.cells[
+            static_cast<std::size_t>(source_node)];
+        record.source_panels += source_cell.count();
+        for (std::size_t pos = source_cell.begin; pos < source_cell.end;
+             ++pos) {
+          const std::size_t source_panel = impl_->source_tree.order[pos];
+          const JcpChannelValues channels = jcp_near_kernel_pair_channels(
+              (*production_panels)[target_panel], target_panel,
+              (*production_panels)[source_panel], source_panel,
+              phi_values[source_panel], phin_values[source_panel],
+              impl_->eps_ratio, impl_->kappa, coupled, near_integration,
+              quad_buffer, nullptr);
+          add_channels(record.direct, channels);
+        }
+      }
+      add_channels(reconstructed, record.approximate);
+      result.records.push_back(record);
+      ++result.far_records;
+    } else for (const int source_node : work.far_sources) {
       const std::size_t source_index = static_cast<std::size_t>(source_node);
       const Cell &source_cell = impl_->source_tree.cells[source_index];
       JcpOperatorAttributionRecord record;
@@ -1442,6 +1554,8 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
   result.recomposition_rel_error =
       std::sqrt(std::max(0.0, recompose_diff_sq)) /
       std::max(1.0e-300, std::sqrt(std::max(0.0, applied_sq)));
+  if (local_mode)
+    result.far_evaluation_seconds = result.m2l_seconds + result.l2p_seconds;
   for (const JcpOperatorAttributionRecord &record : result.records) {
     result.finite_outputs =
         result.finite_outputs && std::isfinite(record.distance) &&

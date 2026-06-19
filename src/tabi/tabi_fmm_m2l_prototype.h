@@ -159,6 +159,10 @@ struct JcpOperatorAttributionResult {
   double recomposition_rel_error{0.0};
   double moment_build_seconds{0.0};
   double far_evaluation_seconds{0.0};
+  double m2l_seconds{0.0};
+  double l2p_seconds{0.0};
+  std::size_t local_target_leaves{0};
+  std::size_t local_m2l_pairs{0};
   bool finite_outputs{true};
 };
 
@@ -267,6 +271,15 @@ public:
       const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr)
       const;
 
+  JcpOperatorAttributionResult attribute_local_p4(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      std::size_t sample_count, const std::string &probe,
+      TitanExecutor &executor, bool coupled = true,
+      const std::string &near_integration = "centroid",
+      const std::string &quad_buffer = "off",
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr)
+      const;
+
 private:
   JcpOperatorAttributionResult attribute_impl(
       const std::vector<double> &phi, const std::vector<double> &phin,
@@ -274,7 +287,7 @@ private:
       TitanExecutor &executor, bool coupled,
       const std::string &near_integration, const std::string &quad_buffer,
       const std::vector<TitanPBE::Tabi::Panel> *production_panels,
-      bool cartesian) const;
+      int approximation_mode) const;
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

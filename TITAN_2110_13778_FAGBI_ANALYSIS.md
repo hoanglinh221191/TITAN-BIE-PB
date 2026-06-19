@@ -560,3 +560,23 @@ because it performs source-cell M2P independently for sampled targets. The
 next scope is Z4K: translate these validated degree-four moments into a true
 target-local M2L/L2P path and test whether the accuracy gain can be retained
 at production matvec cost. No production policy changes follow from Z4J.
+
+## Scope Z4K Target-Leaf Local M2L/L2P Gate
+
+Z4K implemented p4 source-to-local translation at target-leaf centers using
+dedicated order-8 kernel jets (165 terms), followed by p4 L2P. The candidate
+remained attribution-only and the full Barnase/1A63/1SH1 theta `0.6/0.45`
+matrix classified `z4k_local_theta06_accuracy_gap`; guarded GMRES was not
+enabled.
+
+Local-vs-p4-M2P relative RMS stayed between about `1.0e-6` and `1.15e-4`,
+confirming the translation and K1-K4 L2P formulas. Barnase and 1SH1 passed the
+theta-0.6 audit gate at `0.00420459` and `0.000399779`, respectively, but
+1A63 reached `0.00961167`, above the fixed `8e-3` threshold. Theta `0.45`
+reduced the 1A63 local audit to `0.00337859` but is diagnostic-only.
+
+The local path also missed the performance gate: measured p4-M2P/local
+speedup ranged from `0.42x` to `1.64x`, versus the required `4x`. L2P cost was
+negligible; order-8 M2L jet construction dominated. Further work should
+optimize or precompute translation operators before reconsidering GMRES, and
+must separately address the theta-0.6 1A63 accuracy margin.

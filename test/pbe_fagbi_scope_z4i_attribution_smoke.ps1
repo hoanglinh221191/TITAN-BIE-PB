@@ -15,6 +15,7 @@ $exe = Join-Path $WorkRoot 'titan_fmm_m2l_scope_z4i_attribution_smoke.exe'
 $sources = @(
     'test\titan_fmm_m2l_scope_z4i_attribution_smoke.cpp',
     'src\tabi\tabi_fmm_m2l_cartesian.cpp',
+    'src\tabi\tabi_fmm_m2l_local.cpp',
     'src\tabi\tabi_fmm_m2l_prototype.cpp',
     'src\titan_executor.cpp',
     'src\tabi\tabi_near.cpp',

@@ -1211,3 +1211,11 @@ Decision:
   below `8e-3`, including 1A63 at `0.00291735`. Production GMRES remains on
   the degree-one operator. Next: Z4K true target-local M2L/L2P integration;
   retain grid as production default.
+- Scope Z4K adds target-leaf p4 M2L/L2P using a dedicated order-8 kernel-jet
+  engine without enlarging legacy treecode series storage. The full candidate
+  matrix classified `z4k_local_theta06_accuracy_gap`: translation parity
+  versus p4 M2P was `1.0e-6` to `1.15e-4`, but 1A63 theta `0.6` audit was
+  `0.00961167` and exceeded the `8e-3` gate. M2L construction dominated cost;
+  speedup versus p4 M2P ranged only `0.42x–1.64x`, below the required `4x`.
+  `gmres-p4` remains fail-closed. Next work, if pursued, must optimize cached
+  or recurrence-based translation operators before solver integration.

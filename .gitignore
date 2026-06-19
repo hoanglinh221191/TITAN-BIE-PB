@@ -295,6 +295,7 @@ test/
 !/TITAN_FMM_M2L_SCOPE_Z4H_FULL_PROTEIN_ACCURACY_REPORT.txt
 !/TITAN_FMM_M2L_SCOPE_Z4I_OPERATOR_ATTRIBUTION_REPORT.txt
 !/TITAN_FMM_M2L_SCOPE_Z4J_CARTESIAN_M2P_REPORT.txt
+!/TITAN_FMM_M2L_SCOPE_Z4K_LOCAL_M2L_REPORT.txt
 !/test/pbe_fagbi_scope_z4f_contract_smoke.ps1
 !/test/pbe_fagbi_scope_z4f_render_smoke.ps1
 !/test/pbe_fagbi_scope_z4f_manuscript_skeleton.ps1
@@ -316,6 +317,10 @@ test/
 !/test/pbe_fagbi_scope_z4j_parser_smoke.ps1
 !/test/pbe_fagbi_scope_z4j_cartesian_m2p_accuracy.ps1
 !/test/titan_fmm_m2l_scope_z4j_cartesian_smoke.cpp
+!/test/pbe_fagbi_scope_z4k_local_smoke.ps1
+!/test/pbe_fagbi_scope_z4k_parser_smoke.ps1
+!/test/pbe_fagbi_scope_z4k_local_m2l_gate.ps1
+!/test/titan_fmm_m2l_scope_z4k_local_smoke.cpp
 !/test/pbe_inputs_public/
 !/test/pbe_inputs_public/*.pdb
 !/test/pbe_inputs_public/*.pqr

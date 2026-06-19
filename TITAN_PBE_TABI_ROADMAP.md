@@ -6387,3 +6387,10 @@ Decision:
   the higher-order formulas but does not wire them into GMRES. Z4K should
   implement true local M2L/L2P before any TABI policy change. Grid remains
   the production PBE default.
+- Scope Z4K implements diagnostic target-leaf p4 M2L/L2P with source/local
+  order `4` and kernel derivative order `8`. Full-protein attribution produced
+  `z4k_local_theta06_accuracy_gap`: Barnase and 1SH1 passed at theta `0.6`,
+  while 1A63 reached `0.00961167`; theta `0.45` passed but cannot promote the
+  path. Translation matched p4 M2P closely, yet M2L timing achieved only
+  `0.42x–1.64x` relative speedup. Hidden `gmres-p4` therefore remains rejected,
+  the production FMM operator is unchanged, and grid remains the PB default.

@@ -209,7 +209,12 @@ void write_operator_attribution_outputs(
   summary << "approximation_mode,configured_expansion_order,implemented_far_moment_degree,probe,"
              "row_component,region,channel,samples,error_rms,reference_rms,"
              "relative_rms,max_abs_error,error_fraction,recomposition_rel_error,"
-             "aggregate_audit_rel,reference_gap,moment_build_seconds,far_evaluation_seconds\n";
+             "aggregate_audit_rel,reference_gap,moment_build_seconds,far_evaluation_seconds,"
+             "m2l_seconds,l2p_seconds,local_target_leaves,local_m2l_pairs,"
+             "fmm_local_mode,fmm_local_source_order,fmm_local_target_order,"
+             "fmm_local_kernel_derivative_order,fmm_local_target_leaves,"
+             "fmm_local_m2l_pairs,fmm_local_moment_seconds,fmm_local_m2l_seconds,"
+             "fmm_local_l2p_seconds,fmm_local_finite_outputs\n";
   for (const auto &[key, aggregate] : aggregates) {
     const auto *result =
         result_by_probe.at({key.approximation_mode, key.probe});
@@ -248,7 +253,21 @@ void write_operator_attribution_outputs(
             << aggregate.max_abs_error << ',' << fraction << ','
             << result->recomposition_rel_error << ',' << attribution_audit_rel
             << ',' << reference_gap << ',' << result->moment_build_seconds
-            << ',' << result->far_evaluation_seconds << '\n';
+            << ',' << result->far_evaluation_seconds << ','
+            << result->m2l_seconds << ',' << result->l2p_seconds << ','
+            << result->local_target_leaves << ',' << result->local_m2l_pairs
+            << ','
+            << (result->approximation_mode == "local_m2l_p4" ? "audit-p4"
+                                                               : "off")
+            << ','
+            << (result->approximation_mode == "local_m2l_p4" ? 4 : 0) << ','
+            << (result->approximation_mode == "local_m2l_p4" ? 4 : 0) << ','
+            << (result->approximation_mode == "local_m2l_p4" ? 8 : 0) << ','
+            << result->local_target_leaves << ',' << result->local_m2l_pairs
+            << ',' << result->moment_build_seconds << ','
+            << result->m2l_seconds << ',' << result->l2p_seconds << ','
+            << (result->finite_outputs ? "true" : "false")
+            << '\n';
   }
 
   levels << "approximation_mode,configured_expansion_order,implemented_far_moment_degree,probe,"
@@ -4727,7 +4746,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           const std::vector<double> zeros(panels.size(), 0.0);
           std::vector<titan::tabi::fmm_m2l::JcpOperatorAttributionResult>
               attribution;
-          attribution.reserve(options.fmm_cartesian_audit == "on" ? 6 : 3);
+          attribution.reserve(9);
           attribution.push_back(context->attribute(
               solution_phi, solution_phin,
               static_cast<std::size_t>(options.matvec_audit_sample_count),
@@ -4755,6 +4774,23 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                 "phi_only", executor, coupled, result.near_integration,
                 result.quad_buffer, &panels));
             attribution.push_back(context->attribute_cartesian(
+                zeros, phin_probe,
+                static_cast<std::size_t>(options.matvec_audit_sample_count),
+                "phin_only", executor, coupled, result.near_integration,
+                result.quad_buffer, &panels));
+          }
+          if (options.fmm_local == "audit-p4") {
+            attribution.push_back(context->attribute_local_p4(
+                solution_phi, solution_phin,
+                static_cast<std::size_t>(options.matvec_audit_sample_count),
+                "solution", executor, coupled, result.near_integration,
+                result.quad_buffer, &panels));
+            attribution.push_back(context->attribute_local_p4(
+                phi_probe, zeros,
+                static_cast<std::size_t>(options.matvec_audit_sample_count),
+                "phi_only", executor, coupled, result.near_integration,
+                result.quad_buffer, &panels));
+            attribution.push_back(context->attribute_local_p4(
                 zeros, phin_probe,
                 static_cast<std::size_t>(options.matvec_audit_sample_count),
                 "phin_only", executor, coupled, result.near_integration,

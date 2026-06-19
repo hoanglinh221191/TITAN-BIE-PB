@@ -1657,6 +1657,27 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-fmm-cartesian-audit=on requires analytical FMM/M2L TABI treecode with -pbe-tabi-matvec-audit=sampled-detail and Taylor order 3 or 4.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.tabi_fmm_local != "off" &&
+        pbe.tabi_fmm_local != "audit-p4" &&
+        pbe.tabi_fmm_local != "gmres-p4") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local must be off, audit-p4, or gmres-p4.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local == "audit-p4" &&
+        !(pbe.backend == "tabi" && pbe.tabi_sum == "treecode" &&
+          pbe.tabi_fmm_m2l == "single-matvec-analytic" &&
+          pbe.tabi_matvec_audit == "sampled-detail" &&
+          pbe.tabi_taylor_order == 4)) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local=audit-p4 requires analytical FMM/M2L TABI treecode with -pbe-tabi-matvec-audit=sampled-detail and Taylor order 4.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local == "gmres-p4") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local=gmres-p4 is fail-closed until the Z4K theta-0.6 candidate gate passes.");
+      exit(EXIT_FAILURE);
+    }
     if (pbe.tabi_matvec_audit_sample_count < 128 ||
         pbe.tabi_matvec_audit_sample_count > 4096) {
       TitanUI::print_error(

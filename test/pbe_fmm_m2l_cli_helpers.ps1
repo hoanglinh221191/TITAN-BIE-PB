@@ -288,7 +288,8 @@ function Write-FmmCliArgFile(
     [ValidateSet('centroid','analytic_singular','duffy_adaptive')]
     [string]$NearIntegration = 'centroid',
     [ValidateSet(3,4)][int]$TaylorOrder = 4,
-    [ValidateSet('off','on')][string]$FmmCartesianAudit = 'off'
+    [ValidateSet('off','on')][string]$FmmCartesianAudit = 'off',
+    [ValidateSet('off','audit-p4','gmres-p4')][string]$FmmLocal = 'off'
 ) {
     $pdbPath = Join-Path $RunDir 'driver.pdb'
     Write-FmmCliDummyPdb $pdbPath
@@ -324,6 +325,7 @@ function Write-FmmCliArgFile(
         '-pbe-tabi-formulation=jcp2013-treecode',
         "-pbe-tabi-fmm-m2l=$FmmMode",
         "-pbe-tabi-fmm-cartesian-audit=$FmmCartesianAudit",
+        "-pbe-tabi-fmm-local=$FmmLocal",
         "-pbe-tabi-surface-points=$SurfacePoints",
         '-pbe-tabi-tree-leaf-size=64',
         "-pbe-tabi-opening-theta=$(& $format $OpeningTheta)",

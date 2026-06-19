@@ -1702,6 +1702,14 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-pbe-tabi-fmm-cartesian-audit");
       continue;
     }
+    if (consume_option_value(arg, {"-pbe-tabi-fmm-local",
+                                   "--pbe-tabi-fmm-local"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local =
+          require_choice(common_value, {"off", "audit-p4", "gmres-p4"},
+                         "-pbe-tabi-fmm-local");
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",
                                    "--pbe-tabi-interaction-mode"},
                              common_value, i)) {
