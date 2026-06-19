@@ -53,19 +53,21 @@ struct AttributionAggregate {
 };
 
 struct AttributionSummaryKey {
+  std::string approximation_mode;
   std::string probe;
   std::string component;
   std::string region;
   std::string channel;
 
   bool operator<(const AttributionSummaryKey &other) const noexcept {
-    return std::tie(probe, component, region, channel) <
-           std::tie(other.probe, other.component, other.region,
-                    other.channel);
+    return std::tie(approximation_mode, probe, component, region, channel) <
+           std::tie(other.approximation_mode, other.probe, other.component,
+                    other.region, other.channel);
   }
 };
 
 struct AttributionLevelKey {
+  std::string approximation_mode;
   std::string probe;
   std::string component;
   std::string channel;
@@ -73,9 +75,10 @@ struct AttributionLevelKey {
   std::string mac_bin;
 
   bool operator<(const AttributionLevelKey &other) const noexcept {
-    return std::tie(probe, component, channel, source_depth, mac_bin) <
-           std::tie(other.probe, other.component, other.channel,
-                    other.source_depth, other.mac_bin);
+    return std::tie(approximation_mode, probe, component, channel,
+                    source_depth, mac_bin) <
+           std::tie(other.approximation_mode, other.probe, other.component,
+                    other.channel, other.source_depth, other.mac_bin);
   }
 };
 
@@ -125,24 +128,27 @@ void write_operator_attribution_outputs(
     throw std::runtime_error(
         "PBE TABI: failed to open sampled-detail attribution outputs.");
   }
-  samples << "configured_expansion_order,implemented_far_moment_degree,probe,"
+  samples << "approximation_mode,configured_expansion_order,implemented_far_moment_degree,probe,"
              "target_panel,row_component,region,channel,source_node,"
              "source_depth,source_panels,distance_A,source_radius_A,mac_ratio,"
              "approximate,direct,error,relative_error\n";
 
   std::map<AttributionSummaryKey, AttributionAggregate> aggregates;
   std::map<AttributionLevelKey, AttributionAggregate> level_aggregates;
-  std::map<std::string, double> probe_error_sq;
-  std::map<std::pair<std::string, std::size_t>,
+  std::map<std::pair<std::string, std::string>, double> probe_error_sq;
+  std::map<std::tuple<std::string, std::string, std::size_t>,
            std::pair<std::array<double, 4>, std::array<double, 4>>>
       target_totals;
-  std::map<std::string, const titan::tabi::fmm_m2l::JcpOperatorAttributionResult *>
+  std::map<std::pair<std::string, std::string>,
+           const titan::tabi::fmm_m2l::JcpOperatorAttributionResult *>
       result_by_probe;
 
   for (const auto &result : results) {
-    result_by_probe[result.probe] = &result;
+    result_by_probe[{result.approximation_mode, result.probe}] = &result;
     for (const auto &record : result.records) {
-      auto &target_total = target_totals[{record.probe, record.target_panel}];
+      auto &target_total = target_totals[{result.approximation_mode,
+                                          record.probe,
+                                          record.target_panel}];
       for (std::size_t channel = 0; channel < channel_names.size(); ++channel) {
         const std::string component = channel < 2 ? "phi" : "phin";
         const double approximate = record.approximate[channel];
@@ -150,7 +156,8 @@ void write_operator_attribution_outputs(
         const double error = approximate - direct;
         const double relative =
             std::abs(error) / std::max(1.0e-300, std::abs(direct));
-        samples << result.configured_expansion_order << ','
+        samples << result.approximation_mode << ','
+                << result.configured_expansion_order << ','
                 << result.implemented_far_moment_degree << ',' << record.probe
                 << ',' << record.target_panel << ',' << component << ','
                 << record.region << ',' << channel_names[channel] << ','
@@ -159,15 +166,18 @@ void write_operator_attribution_outputs(
                 << record.source_radius << ',' << record.mac_ratio << ','
                 << approximate << ',' << direct << ',' << error << ','
                 << relative << '\n';
-        AttributionSummaryKey key{record.probe, component, record.region,
+        AttributionSummaryKey key{result.approximation_mode, record.probe,
+                                  component, record.region,
                                   channel_names[channel]};
         add_attribution_value(aggregates[key], approximate, direct);
-        probe_error_sq[record.probe] += error * error;
+        probe_error_sq[{result.approximation_mode, record.probe}] +=
+            error * error;
         target_total.first[channel] += approximate;
         target_total.second[channel] += direct;
         if (record.region == "far") {
           AttributionLevelKey level_key{
-              record.probe, component, channel_names[channel],
+              result.approximation_mode, record.probe, component,
+              channel_names[channel],
               record.source_depth, attribution_mac_bin(record.mac_ratio)};
           add_attribution_value(level_aggregates[level_key], approximate,
                                 direct);
@@ -177,7 +187,7 @@ void write_operator_attribution_outputs(
   }
 
   for (const auto &[target_key, values] : target_totals) {
-    const auto &[probe, target_panel] = target_key;
+    const auto &[approximation_mode, probe, target_panel] = target_key;
     (void)target_panel;
     for (std::size_t component_index = 0; component_index < 2;
          ++component_index) {
@@ -186,20 +196,23 @@ void write_operator_attribution_outputs(
           values.first[first] + values.first[first + 1];
       const double direct = values.second[first] + values.second[first + 1];
       add_attribution_value(
-          aggregates[{probe, component_index == 0 ? "phi" : "phin",
+          aggregates[{approximation_mode, probe,
+                      component_index == 0 ? "phi" : "phin",
                       "total", "aggregate"}],
           approximate, direct);
-      add_attribution_value(aggregates[{probe, "both", "total", "aggregate"}],
+      add_attribution_value(aggregates[{approximation_mode, probe, "both",
+                                        "total", "aggregate"}],
                             approximate, direct);
     }
   }
 
-  summary << "configured_expansion_order,implemented_far_moment_degree,probe,"
+  summary << "approximation_mode,configured_expansion_order,implemented_far_moment_degree,probe,"
              "row_component,region,channel,samples,error_rms,reference_rms,"
              "relative_rms,max_abs_error,error_fraction,recomposition_rel_error,"
-             "aggregate_audit_rel,reference_gap\n";
+             "aggregate_audit_rel,reference_gap,moment_build_seconds,far_evaluation_seconds\n";
   for (const auto &[key, aggregate] : aggregates) {
-    const auto *result = result_by_probe.at(key.probe);
+    const auto *result =
+        result_by_probe.at({key.approximation_mode, key.probe});
     const double error_rms =
         aggregate.count > 0
             ? std::sqrt(aggregate.error_sq / static_cast<double>(aggregate.count))
@@ -209,8 +222,9 @@ void write_operator_attribution_outputs(
                                         static_cast<double>(aggregate.count))
                             : 0.0;
     const double fraction =
-        probe_error_sq[key.probe] > 0.0
-            ? aggregate.error_sq / probe_error_sq[key.probe]
+        probe_error_sq[{key.approximation_mode, key.probe}] > 0.0
+            ? aggregate.error_sq /
+                  probe_error_sq[{key.approximation_mode, key.probe}]
             : 0.0;
     const double attribution_audit_rel =
         key.probe == "solution" && key.component == "both" &&
@@ -221,24 +235,28 @@ void write_operator_attribution_outputs(
             : 0.0;
     const double reference_gap =
         key.probe == "solution" && key.component == "both" &&
-                key.region == "total" && key.channel == "aggregate"
+                key.region == "total" && key.channel == "aggregate" &&
+                key.approximation_mode == "legacy_degree1"
             ? std::abs(attribution_audit_rel - aggregate_audit_rel)
             : 0.0;
-    summary << result->configured_expansion_order << ','
+    summary << result->approximation_mode << ','
+            << result->configured_expansion_order << ','
             << result->implemented_far_moment_degree << ',' << key.probe << ','
             << key.component << ',' << key.region << ',' << key.channel << ','
             << aggregate.count << ',' << error_rms << ',' << reference_rms
             << ',' << attribution_rel_rms(aggregate) << ','
             << aggregate.max_abs_error << ',' << fraction << ','
-            << result->recomposition_rel_error << ',' << aggregate_audit_rel
-            << ',' << reference_gap << '\n';
+            << result->recomposition_rel_error << ',' << attribution_audit_rel
+            << ',' << reference_gap << ',' << result->moment_build_seconds
+            << ',' << result->far_evaluation_seconds << '\n';
   }
 
-  levels << "configured_expansion_order,implemented_far_moment_degree,probe,"
+  levels << "approximation_mode,configured_expansion_order,implemented_far_moment_degree,probe,"
             "row_component,channel,source_depth,mac_bin,samples,error_rms,"
             "reference_rms,relative_rms,max_abs_error\n";
   for (const auto &[key, aggregate] : level_aggregates) {
-    const auto *result = result_by_probe.at(key.probe);
+    const auto *result =
+        result_by_probe.at({key.approximation_mode, key.probe});
     const double error_rms =
         aggregate.count > 0
             ? std::sqrt(aggregate.error_sq / static_cast<double>(aggregate.count))
@@ -247,7 +265,8 @@ void write_operator_attribution_outputs(
         aggregate.count > 0 ? std::sqrt(aggregate.reference_sq /
                                         static_cast<double>(aggregate.count))
                             : 0.0;
-    levels << result->configured_expansion_order << ','
+    levels << result->approximation_mode << ','
+           << result->configured_expansion_order << ','
            << result->implemented_far_moment_degree << ',' << key.probe << ','
            << key.component << ',' << key.channel << ',' << key.source_depth
            << ',' << key.mac_bin << ',' << aggregate.count << ',' << error_rms
@@ -4708,7 +4727,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           const std::vector<double> zeros(panels.size(), 0.0);
           std::vector<titan::tabi::fmm_m2l::JcpOperatorAttributionResult>
               attribution;
-          attribution.reserve(3);
+          attribution.reserve(options.fmm_cartesian_audit == "on" ? 6 : 3);
           attribution.push_back(context->attribute(
               solution_phi, solution_phin,
               static_cast<std::size_t>(options.matvec_audit_sample_count),
@@ -4724,6 +4743,23 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
               static_cast<std::size_t>(options.matvec_audit_sample_count),
               "phin_only", executor, coupled, result.near_integration,
               result.quad_buffer, &panels));
+          if (options.fmm_cartesian_audit == "on") {
+            attribution.push_back(context->attribute_cartesian(
+                solution_phi, solution_phin,
+                static_cast<std::size_t>(options.matvec_audit_sample_count),
+                "solution", executor, coupled, result.near_integration,
+                result.quad_buffer, &panels));
+            attribution.push_back(context->attribute_cartesian(
+                phi_probe, zeros,
+                static_cast<std::size_t>(options.matvec_audit_sample_count),
+                "phi_only", executor, coupled, result.near_integration,
+                result.quad_buffer, &panels));
+            attribution.push_back(context->attribute_cartesian(
+                zeros, phin_probe,
+                static_cast<std::size_t>(options.matvec_audit_sample_count),
+                "phin_only", executor, coupled, result.near_integration,
+                result.quad_buffer, &panels));
+          }
           write_operator_attribution_outputs(
               attribution, result.tree_vs_direct_matvec_rel, direct_sq);
         }

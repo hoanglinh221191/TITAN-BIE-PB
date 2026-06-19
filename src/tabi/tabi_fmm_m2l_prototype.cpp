@@ -1,4 +1,5 @@
 #include "tabi/tabi_fmm_m2l_prototype.h"
+#include "tabi/tabi_fmm_m2l_cartesian.h"
 #include "tabi/tabi_near.h"
 #include "tabi/tabi_types.h"
 
@@ -1233,6 +1234,29 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute(
     const std::string &probe, TitanExecutor &executor, bool coupled,
     const std::string &near_integration, const std::string &quad_buffer,
     const std::vector<TitanPBE::Tabi::Panel> *production_panels) const {
+  return attribute_impl(phi_values, phin_values, sample_count, probe, executor,
+                        coupled, near_integration, quad_buffer,
+                        production_panels, false);
+}
+
+JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_cartesian(
+    const std::vector<double> &phi_values,
+    const std::vector<double> &phin_values, std::size_t sample_count,
+    const std::string &probe, TitanExecutor &executor, bool coupled,
+    const std::string &near_integration, const std::string &quad_buffer,
+    const std::vector<TitanPBE::Tabi::Panel> *production_panels) const {
+  return attribute_impl(phi_values, phin_values, sample_count, probe, executor,
+                        coupled, near_integration, quad_buffer,
+                        production_panels, true);
+}
+
+JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
+    const std::vector<double> &phi_values,
+    const std::vector<double> &phin_values, std::size_t sample_count,
+    const std::string &probe, TitanExecutor &executor, bool coupled,
+    const std::string &near_integration, const std::string &quad_buffer,
+    const std::vector<TitanPBE::Tabi::Panel> *production_panels,
+    bool cartesian) const {
   if (impl_ == nullptr) {
     throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
   }
@@ -1247,9 +1271,13 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute(
   }
 
   JcpOperatorAttributionResult result;
+  result.approximation_mode =
+      cartesian ? "cartesian_p" + std::to_string(impl_->config.expansion_order)
+                : "legacy_degree1";
   result.probe = probe;
   result.configured_expansion_order = impl_->config.expansion_order;
-  result.implemented_far_moment_degree = 1;
+  result.implemented_far_moment_degree =
+      cartesian ? impl_->config.expansion_order : 1;
   const std::size_t target_count =
       std::min(n, std::max<std::size_t>(1, sample_count));
   result.sampled_targets.reserve(target_count);
@@ -1275,12 +1303,38 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute(
     }
   }
 
-  const std::vector<PanelSourceMoments> source_moments =
-      compute_panel_source_moments(impl_->source_tree, impl_->panels,
-                                   phi_values, phin_values);
-  const JcpAnalyticOperatorResult applied =
-      apply(phi_values, phin_values, executor, coupled, near_integration,
-            quad_buffer, production_panels);
+  std::vector<PanelSourceMoments> source_moments;
+  std::vector<CartesianJcpMoments> cartesian_moments;
+  const auto moment_begin = Clock::now();
+  if (cartesian) {
+    cartesian_moments.resize(impl_->source_tree.cells.size());
+    const std::size_t workers = std::max<std::size_t>(1, executor.capacity());
+    executor.parallel_for(
+        impl_->source_tree.cells.size(), workers, 1,
+        [&](std::size_t, std::size_t begin, std::size_t end) {
+          for (std::size_t source_index = begin; source_index < end;
+               ++source_index) {
+            const Cell &source_cell = impl_->source_tree.cells[source_index];
+            const std::span<const std::size_t> source_indices(
+                impl_->source_tree.order.data() + source_cell.begin,
+                source_cell.count());
+            cartesian_moments[source_index] = build_cartesian_jcp_moments(
+                impl_->panels, phi_values, phin_values, source_indices,
+                source_cell.qx, source_cell.qy, source_cell.qz,
+                impl_->config.expansion_order);
+          }
+        });
+  } else {
+    source_moments = compute_panel_source_moments(
+        impl_->source_tree, impl_->panels, phi_values, phin_values);
+  }
+  result.moment_build_seconds =
+      elapsed_seconds(moment_begin, Clock::now());
+  JcpAnalyticOperatorResult applied;
+  if (!cartesian) {
+    applied = apply(phi_values, phin_values, executor, coupled,
+                    near_integration, quad_buffer, production_panels);
+  }
 
   double recompose_diff_sq = 0.0;
   double applied_sq = 0.0;
@@ -1343,9 +1397,18 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute(
           record.distance > 1.0e-12
               ? (target_cell.radius + source_cell.radius) / record.distance
               : std::numeric_limits<double>::infinity();
-      record.approximate = jcp_far_cell_channels(
-          target, source_cell, source_moments[source_index], impl_->eps_ratio,
-          impl_->kappa);
+      const auto far_begin = Clock::now();
+      record.approximate =
+          cartesian
+              ? evaluate_cartesian_jcp_m2p(
+                    target, source_cell.qx, source_cell.qy, source_cell.qz,
+                    cartesian_moments[source_index], impl_->eps_ratio,
+                    impl_->kappa)
+              : jcp_far_cell_channels(target, source_cell,
+                                      source_moments[source_index],
+                                      impl_->eps_ratio, impl_->kappa);
+      result.far_evaluation_seconds +=
+          elapsed_seconds(far_begin, Clock::now());
       for (std::size_t pos = source_cell.begin; pos < source_cell.end; ++pos) {
         const std::size_t source_panel = impl_->source_tree.order[pos];
         const JcpChannelValues channels = jcp_near_kernel_pair_channels(
@@ -1363,14 +1426,17 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute(
 
     const double reconstructed_phi = channel_phi(reconstructed);
     const double reconstructed_phin = channel_phin(reconstructed);
-    const double phi_delta = reconstructed_phi - applied.phi[target_panel];
+    const double applied_phi =
+        cartesian ? reconstructed_phi : applied.phi[target_panel];
+    const double applied_phin =
+        cartesian ? reconstructed_phin : applied.phin[target_panel];
+    const double phi_delta = reconstructed_phi - applied_phi;
     recompose_diff_sq += phi_delta * phi_delta;
-    applied_sq += applied.phi[target_panel] * applied.phi[target_panel];
+    applied_sq += applied_phi * applied_phi;
     if (coupled) {
-      const double phin_delta =
-          reconstructed_phin - applied.phin[target_panel];
+      const double phin_delta = reconstructed_phin - applied_phin;
       recompose_diff_sq += phin_delta * phin_delta;
-      applied_sq += applied.phin[target_panel] * applied.phin[target_panel];
+      applied_sq += applied_phin * applied_phin;
     }
   }
   result.recomposition_rel_error =
@@ -1387,7 +1453,7 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute(
     }
   }
   result.finite_outputs =
-      result.finite_outputs && applied.finite_outputs &&
+      result.finite_outputs && (cartesian || applied.finite_outputs) &&
       std::isfinite(result.recomposition_rel_error);
   return result;
 }

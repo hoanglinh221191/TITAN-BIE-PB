@@ -1694,6 +1694,14 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.tabi_fmm_m2l_explicit = true;
       continue;
     }
+    if (consume_option_value(arg, {"-pbe-tabi-fmm-cartesian-audit",
+                                   "--pbe-tabi-fmm-cartesian-audit"},
+                             common_value, i)) {
+      pbe.tabi_fmm_cartesian_audit =
+          require_choice(common_value, {"off", "on"},
+                         "-pbe-tabi-fmm-cartesian-audit");
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",
                                    "--pbe-tabi-interaction-mode"},
                              common_value, i)) {

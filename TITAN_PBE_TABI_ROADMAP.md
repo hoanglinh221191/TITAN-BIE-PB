@@ -6378,3 +6378,12 @@ Decision:
   TABI treecode runs. Keep `-pbe=grid` as production default until
   repeatability, broader cap-256 fixtures, and verification policy are all
   demonstrated.
+- Scope Z4J adds `-pbe-tabi-fmm-cartesian-audit=on` for diagnostic
+  `sampled-detail` runs and evaluates complete Cartesian p4 K1-K4 moments
+  against the same direct source-cell references as legacy degree one. The
+  full matrix decision is `z4j_p4_tight_theta_pass`: Barnase and 1SH1 pass
+  the `8e-3` audit gate at theta `0.6`, while 1A63 is narrowly high at
+  `0.00853174` and passes at theta `0.45` with `0.00291735`. This validates
+  the higher-order formulas but does not wire them into GMRES. Z4K should
+  implement true local M2L/L2P before any TABI policy change. Grid remains
+  the production PBE default.

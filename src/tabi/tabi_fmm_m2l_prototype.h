@@ -148,6 +148,7 @@ struct JcpOperatorAttributionRecord {
 };
 
 struct JcpOperatorAttributionResult {
+  std::string approximation_mode{"legacy_degree1"};
   std::string probe;
   std::vector<std::size_t> sampled_targets;
   std::vector<JcpOperatorAttributionRecord> records;
@@ -156,6 +157,8 @@ struct JcpOperatorAttributionResult {
   std::size_t near_records{0};
   std::size_t far_records{0};
   double recomposition_rel_error{0.0};
+  double moment_build_seconds{0.0};
+  double far_evaluation_seconds{0.0};
   bool finite_outputs{true};
 };
 
@@ -255,7 +258,23 @@ public:
       const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr)
       const;
 
+  JcpOperatorAttributionResult attribute_cartesian(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      std::size_t sample_count, const std::string &probe,
+      TitanExecutor &executor, bool coupled = true,
+      const std::string &near_integration = "centroid",
+      const std::string &quad_buffer = "off",
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr)
+      const;
+
 private:
+  JcpOperatorAttributionResult attribute_impl(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      std::size_t sample_count, const std::string &probe,
+      TitanExecutor &executor, bool coupled,
+      const std::string &near_integration, const std::string &quad_buffer,
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels,
+      bool cartesian) const;
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

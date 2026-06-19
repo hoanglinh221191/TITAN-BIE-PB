@@ -537,3 +537,26 @@ the primary causes of the full-protein gap. The next numerical scope should
 be Z4J: implement genuine higher-order analytical source moments and M2L/local
 evaluation, beginning with the K2 translation, then repeat the same
 attribution gate. Further theta-only tuning is not a sufficient remedy.
+
+## Scope Z4J Cartesian p4 M2P Accuracy Gate
+
+Z4J implemented complete Cartesian source moments through degree four for
+K1-K4 and evaluated them only as a `sampled-detail` attribution candidate.
+The production GMRES operator remains the legacy degree-one far evaluator.
+The full Barnase, 1A63, and 1SH1 matrix at theta `0.6/0.45` classified
+`z4j_p4_tight_theta_pass`.
+
+At theta `0.6`, Cartesian p4 reduced sampled operator RMS from `0.288126` to
+`0.00366315` on Barnase and from `0.0205699` to `0.000339393` on 1SH1. On
+1A63 it reduced RMS from `0.967063` to `0.00853174`, a large correction but
+slightly above the strict `8e-3` gate. Tightening theta to `0.45` reduced the
+1A63 p4 RMS to `0.00291735`; Barnase and 1SH1 reached `0.00030948` and
+`0.000032918`, respectively.
+
+K2 remained the largest residual channel, but its squared error fell by
+orders of magnitude on every required row; no channel migration or reference
+bridge failure was observed. The p4 evaluator is intentionally expensive
+because it performs source-cell M2P independently for sampled targets. The
+next scope is Z4K: translate these validated degree-four moments into a true
+target-local M2L/L2P path and test whether the accuracy gain can be retained
+at production matvec cost. No production policy changes follow from Z4J.

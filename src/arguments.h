@@ -232,6 +232,7 @@ struct PbeArgs {
   std::string tabi_leaf_mac{"off"};
   std::string tabi_fmm_m2l{"auto"};
   bool tabi_fmm_m2l_explicit{false};
+  std::string tabi_fmm_cartesian_audit{"off"};
   std::string tabi_interaction_mode{"auto"};
   std::string tabi_node_bounds{"moment"};
   std::string tabi_tree_builder{"grouped-morton"};

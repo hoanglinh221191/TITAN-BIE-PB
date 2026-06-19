@@ -1203,3 +1203,11 @@ Decision:
   treecode default preconditioner. Keep `-pbe=grid` as production default until
   repeatability, broader fixtures, and a robust verification oracle are all
   demonstrated.
+- Scope Z4J implements a diagnostic-only full Cartesian p4 M2P candidate for
+  K1-K4. The full Barnase/1A63/1SH1 theta `0.6/0.45` matrix classified
+  `z4j_p4_tight_theta_pass`. At theta `0.6`, audit RMS changed from
+  `0.288126` to `0.00366315` on Barnase, `0.967063` to `0.00853174` on 1A63,
+  and `0.0205699` to `0.000339393` on 1SH1. Theta `0.45` brought all three
+  below `8e-3`, including 1A63 at `0.00291735`. Production GMRES remains on
+  the degree-one operator. Next: Z4K true target-local M2L/L2P integration;
+  retain grid as production default.

@@ -1642,6 +1642,21 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-matvec-audit=sampled-detail requires analytical FMM/M2L TABI treecode.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.tabi_fmm_cartesian_audit != "off" &&
+        pbe.tabi_fmm_cartesian_audit != "on") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-cartesian-audit must be off or on.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_cartesian_audit == "on" &&
+        !(pbe.backend == "tabi" && pbe.tabi_sum == "treecode" &&
+          pbe.tabi_fmm_m2l == "single-matvec-analytic" &&
+          pbe.tabi_matvec_audit == "sampled-detail" &&
+          (pbe.tabi_taylor_order == 3 || pbe.tabi_taylor_order == 4))) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-cartesian-audit=on requires analytical FMM/M2L TABI treecode with -pbe-tabi-matvec-audit=sampled-detail and Taylor order 3 or 4.");
+      exit(EXIT_FAILURE);
+    }
     if (pbe.tabi_matvec_audit_sample_count < 128 ||
         pbe.tabi_matvec_audit_sample_count > 4096) {
       TitanUI::print_error(
