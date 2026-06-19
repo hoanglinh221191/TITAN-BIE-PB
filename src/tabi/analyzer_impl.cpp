@@ -11747,6 +11747,8 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
       args_.tabi_matvec_audit_sample_count;
   options.fmm_cartesian_audit = args_.tabi_fmm_cartesian_audit;
   options.fmm_local = args_.tabi_fmm_local;
+  options.fmm_local_refine = args_.tabi_fmm_local_refine;
+  options.fmm_local_refine_tol = args_.tabi_fmm_local_refine_tol;
   options.true_residual_probe = args_.tabi_true_residual_probe;
   options.true_residual_probe_scope = args_.tabi_true_residual_probe_scope;
   options.true_residual_probe_interval =

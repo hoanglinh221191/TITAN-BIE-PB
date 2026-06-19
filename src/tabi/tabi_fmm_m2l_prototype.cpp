@@ -1237,7 +1237,7 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute(
     const std::vector<TitanPBE::Tabi::Panel> *production_panels) const {
   return attribute_impl(phi_values, phin_values, sample_count, probe, executor,
                         coupled, near_integration, quad_buffer,
-                        production_panels, 0);
+                        production_panels, 0, "off", 4.0e-3);
 }
 
 JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_cartesian(
@@ -1248,7 +1248,7 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_cartesian(
     const std::vector<TitanPBE::Tabi::Panel> *production_panels) const {
   return attribute_impl(phi_values, phin_values, sample_count, probe, executor,
                         coupled, near_integration, quad_buffer,
-                        production_panels, 1);
+                        production_panels, 1, "off", 4.0e-3);
 }
 
 JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_local_p4(
@@ -1256,10 +1256,11 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_local_p4(
     const std::vector<double> &phin_values, std::size_t sample_count,
     const std::string &probe, TitanExecutor &executor, bool coupled,
     const std::string &near_integration, const std::string &quad_buffer,
-    const std::vector<TitanPBE::Tabi::Panel> *production_panels) const {
+    const std::vector<TitanPBE::Tabi::Panel> *production_panels,
+    const std::string &refine_mode, double refine_tolerance) const {
   return attribute_impl(phi_values, phin_values, sample_count, probe, executor,
                         coupled, near_integration, quad_buffer,
-                        production_panels, 2);
+                        production_panels, 2, refine_mode, refine_tolerance);
 }
 
 JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
@@ -1268,7 +1269,8 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
     const std::string &probe, TitanExecutor &executor, bool coupled,
     const std::string &near_integration, const std::string &quad_buffer,
     const std::vector<TitanPBE::Tabi::Panel> *production_panels,
-    int approximation_mode) const {
+    int approximation_mode, const std::string &refine_mode,
+    double refine_tolerance) const {
   if (impl_ == nullptr) {
     throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
   }
@@ -1284,6 +1286,18 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
 
   const bool cartesian = approximation_mode != 0;
   const bool local_mode = approximation_mode == 2;
+  const bool refine_local =
+      local_mode && refine_mode == "p3-p4-tail";
+  if (local_mode && refine_mode != "off" && !refine_local) {
+    throw std::invalid_argument(
+        "JCP local M2L refinement must be off or p3-p4-tail");
+  }
+  if (refine_local &&
+      (!std::isfinite(refine_tolerance) || refine_tolerance < 1.0e-4 ||
+       refine_tolerance > 5.0e-2)) {
+    throw std::invalid_argument(
+        "JCP local M2L refinement tolerance must be in [1e-4, 5e-2]");
+  }
   JcpOperatorAttributionResult result;
   result.approximation_mode = local_mode
                                   ? "local_m2l_p4"
@@ -1293,6 +1307,8 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
                                                              .expansion_order)
                                                : "legacy_degree1");
   result.probe = probe;
+  result.local_refine_mode = local_mode ? refine_mode : "off";
+  result.local_refine_tolerance = refine_tolerance;
   result.configured_expansion_order = impl_->config.expansion_order;
   result.implemented_far_moment_degree =
       cartesian ? impl_->config.expansion_order : 1;
@@ -1353,6 +1369,7 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
   std::vector<int> local_index_by_target_node(
       impl_->target_tree.cells.size(), -1);
   std::vector<CartesianJcpLocalP4> local_expansions;
+  std::vector<TargetLeafWork> local_work;
   if (local_mode) {
     for (const std::size_t target_panel : result.sampled_targets) {
       const int target_node = target_leaf_by_panel[target_panel];
@@ -1364,9 +1381,157 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
         std::unique(local_target_nodes.begin(), local_target_nodes.end()),
         local_target_nodes.end());
     local_expansions.resize(local_target_nodes.size());
+    local_work.resize(local_target_nodes.size());
     for (std::size_t i = 0; i < local_target_nodes.size(); ++i)
-      local_index_by_target_node[static_cast<std::size_t>(
-          local_target_nodes[i])] = static_cast<int>(i);
+      local_index_by_target_node[static_cast<std::size_t>(local_target_nodes[i])] =
+          static_cast<int>(i);
+    for (std::size_t i = 0; i < local_target_nodes.size(); ++i) {
+      local_work[i] = impl_->target_tree.work[
+          static_cast<std::size_t>(local_target_nodes[i])];
+      result.local_far_pairs_before += local_work[i].far_sources.size();
+    }
+
+    if (refine_local) {
+      const auto refine_begin = Clock::now();
+      struct PairTailMetric {
+        int source_node{-1};
+        double tail_sq{0.0};
+        double signal_sq{0.0};
+      };
+      for (std::size_t local_index = 0;
+           local_index < local_target_nodes.size(); ++local_index) {
+        const int target_node = local_target_nodes[local_index];
+        const Cell &target_cell = impl_->target_tree.cells[
+            static_cast<std::size_t>(target_node)];
+        TargetLeafWork &work = local_work[local_index];
+        double first_tail_ratio = 0.0;
+        double final_tail_ratio = 0.0;
+        bool first_iteration = true;
+
+        auto sort_leaf_work = [&]() {
+          std::sort(work.near_sources.begin(), work.near_sources.end());
+          work.near_sources.erase(
+              std::unique(work.near_sources.begin(), work.near_sources.end()),
+              work.near_sources.end());
+          std::sort(work.far_sources.begin(), work.far_sources.end());
+          work.far_sources.erase(
+              std::unique(work.far_sources.begin(), work.far_sources.end()),
+              work.far_sources.end());
+        };
+        std::function<void(int)> append_source = [&](int source_node) {
+          const Cell &source_cell = impl_->source_tree.cells[
+              static_cast<std::size_t>(source_node)];
+          if (accept_far(impl_->target_tree, impl_->source_tree, target_node,
+                         source_node, impl_->config.separation_theta, true)) {
+            work.far_sources.push_back(source_node);
+            return;
+          }
+          if (source_cell.is_leaf()) {
+            work.near_sources.push_back(source_node);
+            return;
+          }
+          append_source(source_cell.left);
+          append_source(source_cell.right);
+        };
+
+        while (true) {
+          std::vector<PairTailMetric> metrics;
+          metrics.reserve(work.far_sources.size());
+          double tail_sq = 0.0;
+          double signal_sq = 0.0;
+          for (const int source_node : work.far_sources) {
+            const std::size_t source_index =
+                static_cast<std::size_t>(source_node);
+            const Cell &source_cell = impl_->source_tree.cells[source_index];
+            const CartesianJcpLocalP4 translated =
+                translate_cartesian_jcp_m2l_p4(
+                    cartesian_moments[source_index], source_cell.qx,
+                    source_cell.qy, source_cell.qz, target_cell.qx,
+                    target_cell.qy, target_cell.qz, impl_->eps_ratio,
+                    impl_->kappa);
+            PairTailMetric metric;
+            metric.source_node = source_node;
+            for (std::size_t pos = target_cell.begin; pos < target_cell.end;
+                 ++pos) {
+              const std::size_t target_panel = impl_->target_tree.order[pos];
+              const PrototypePanel &target = impl_->panels[target_panel];
+              const auto p4 = evaluate_cartesian_jcp_l2p_order(
+                  target, target_cell.qx, target_cell.qy, target_cell.qz,
+                  translated, 4);
+              const auto p3 = evaluate_cartesian_jcp_l2p_order(
+                  target, target_cell.qx, target_cell.qy, target_cell.qz,
+                  translated, 3);
+              const double p4_phi = p4[0] + p4[1];
+              const double p3_phi = p3[0] + p3[1];
+              const double phi_tail = p4_phi - p3_phi;
+              metric.tail_sq += phi_tail * phi_tail;
+              metric.signal_sq += p4_phi * p4_phi;
+              if (coupled) {
+                const double p4_phin = p4[2] + p4[3];
+                const double p3_phin = p3[2] + p3[3];
+                const double phin_tail = p4_phin - p3_phin;
+                metric.tail_sq += phin_tail * phin_tail;
+                metric.signal_sq += p4_phin * p4_phin;
+              }
+            }
+            tail_sq += metric.tail_sq;
+            signal_sq += metric.signal_sq;
+            metrics.push_back(metric);
+          }
+          final_tail_ratio = std::sqrt(std::max(0.0, tail_sq)) /
+                             std::max(1.0e-300,
+                                      std::sqrt(std::max(0.0, signal_sq)));
+          if (first_iteration) {
+            first_tail_ratio = final_tail_ratio;
+            first_iteration = false;
+          }
+          if (final_tail_ratio <= refine_tolerance || metrics.empty())
+            break;
+
+          std::sort(metrics.begin(), metrics.end(),
+                    [&](const PairTailMetric &lhs,
+                        const PairTailMetric &rhs) {
+                      if (lhs.tail_sq != rhs.tail_sq)
+                        return lhs.tail_sq > rhs.tail_sq;
+                      const int lhs_depth = impl_->source_tree.cells[
+                          static_cast<std::size_t>(lhs.source_node)].depth;
+                      const int rhs_depth = impl_->source_tree.cells[
+                          static_cast<std::size_t>(rhs.source_node)].depth;
+                      if (lhs_depth != rhs_depth)
+                        return lhs_depth < rhs_depth;
+                      return lhs.source_node < rhs.source_node;
+                    });
+          const int selected = metrics.front().source_node;
+          work.far_sources.erase(
+              std::remove(work.far_sources.begin(), work.far_sources.end(),
+                          selected),
+              work.far_sources.end());
+          const Cell &selected_cell = impl_->source_tree.cells[
+              static_cast<std::size_t>(selected)];
+          ++result.local_refined_cells;
+          if (selected_cell.is_leaf()) {
+            work.near_sources.push_back(selected);
+            result.local_direct_fallback_panels += selected_cell.count();
+            result.local_direct_fallback_pairs +=
+                target_cell.count() * selected_cell.count();
+          } else {
+            append_source(selected_cell.left);
+            append_source(selected_cell.right);
+            result.local_split_children += 2;
+          }
+          sort_leaf_work();
+        }
+        result.local_tail_ratio_before =
+            std::max(result.local_tail_ratio_before, first_tail_ratio);
+        result.local_tail_ratio_after =
+            std::max(result.local_tail_ratio_after, final_tail_ratio);
+      }
+      result.local_refinement_seconds =
+          elapsed_seconds(refine_begin, Clock::now());
+    }
+    for (const TargetLeafWork &work : local_work)
+      result.local_far_pairs_after += work.far_sources.size();
+
     const auto m2l_begin = Clock::now();
     const std::size_t workers = std::max<std::size_t>(1, executor.capacity());
     executor.parallel_for(
@@ -1377,8 +1542,7 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
             const int target_node = local_target_nodes[local_index];
             const Cell &target_cell = impl_->target_tree.cells[
                 static_cast<std::size_t>(target_node)];
-            const TargetLeafWork &work = impl_->target_tree.work[
-                static_cast<std::size_t>(target_node)];
+            const TargetLeafWork &work = local_work[local_index];
             CartesianJcpLocalP4 accumulated;
             for (const int source_node : work.far_sources) {
               const std::size_t source_index =
@@ -1397,10 +1561,7 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
         });
     result.m2l_seconds = elapsed_seconds(m2l_begin, Clock::now());
     result.local_target_leaves = local_target_nodes.size();
-    for (const int target_node : local_target_nodes) {
-      result.local_m2l_pairs += impl_->target_tree.work[
-          static_cast<std::size_t>(target_node)].far_sources.size();
-    }
+    result.local_m2l_pairs = result.local_far_pairs_after;
   }
   JcpAnalyticOperatorResult applied;
   if (!cartesian) {
@@ -1418,8 +1579,14 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
     }
     const Cell &target_cell =
         impl_->target_tree.cells[static_cast<std::size_t>(target_node)];
+    const int local_index = local_mode
+                                ? local_index_by_target_node[
+                                      static_cast<std::size_t>(target_node)]
+                                : -1;
     const TargetLeafWork &work =
-        impl_->target_tree.work[static_cast<std::size_t>(target_node)];
+        local_mode && local_index >= 0
+            ? local_work[static_cast<std::size_t>(local_index)]
+            : impl_->target_tree.work[static_cast<std::size_t>(target_node)];
     const PrototypePanel &target = impl_->panels[target_panel];
 
     JcpChannelValues reconstructed{};
@@ -1458,8 +1625,6 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
       record.distance = 0.0;
       record.source_radius = 0.0;
       record.mac_ratio = 0.0;
-      const int local_index = local_index_by_target_node[
-          static_cast<std::size_t>(target_node)];
       if (local_index < 0) {
         result.finite_outputs = false;
       } else {

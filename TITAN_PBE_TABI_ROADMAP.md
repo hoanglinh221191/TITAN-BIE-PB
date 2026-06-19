@@ -6394,3 +6394,11 @@ Decision:
   path. Translation matched p4 M2P closely, yet M2L timing achieved only
   `0.42x–1.64x` relative speedup. Hidden `gmres-p4` therefore remains rejected,
   the production FMM operator is unchanged, and grid remains the PB default.
+- Scope Z4L implements sampled-detail p3/p4 tail refinement for target-leaf
+  local M2L. At theta `0.6`, tolerance `0.002` brought 1A63 below the audit
+  gate (`0.00734897`) and retained clean Barnase/1SH1 results. The measured
+  decision is `z4l_accuracy_pass_costly`: 1A63 runtime increased about
+  `7.48x` and 15,551 source panels fell back to direct attribution. This
+  validates the error indicator but not production use. `gmres-p4` remains
+  rejected, the degree-one production operator remains unchanged, and grid
+  remains the production PBE default.

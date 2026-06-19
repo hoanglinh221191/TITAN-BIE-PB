@@ -47,6 +47,11 @@ std::array<double, 4> evaluate_cartesian_jcp_l2p(
     double target_center_y, double target_center_z,
     const CartesianJcpLocalP4 &local) noexcept;
 
+std::array<double, 4> evaluate_cartesian_jcp_l2p_order(
+    const PrototypePanel &target, double target_center_x,
+    double target_center_y, double target_center_z,
+    const CartesianJcpLocalP4 &local, int target_order) noexcept;
+
 } // namespace titan::tabi::fmm_m2l
 
 #endif // TITAN_TABI_FMM_M2L_LOCAL_H

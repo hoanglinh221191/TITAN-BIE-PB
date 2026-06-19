@@ -234,6 +234,8 @@ struct PbeArgs {
   bool tabi_fmm_m2l_explicit{false};
   std::string tabi_fmm_cartesian_audit{"off"};
   std::string tabi_fmm_local{"off"};
+  std::string tabi_fmm_local_refine{"off"};
+  double tabi_fmm_local_refine_tol{4.0e-3};
   std::string tabi_interaction_mode{"auto"};
   std::string tabi_node_bounds{"moment"};
   std::string tabi_tree_builder{"grouped-morton"};

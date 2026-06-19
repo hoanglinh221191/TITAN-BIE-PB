@@ -288,9 +288,10 @@ void translate_moments(const std::array<double, kCartesianJcpMomentMax> &moments
 }
 
 double evaluate_scalar(const std::array<double, kCartesianLocalTermMax> &local,
-                       double dx, double dy, double dz) noexcept {
+                       double dx, double dy, double dz,
+                       int target_order = kCartesianLocalTargetOrder) noexcept {
   const std::vector<MultiIndex> &indices =
-      indices_through(kCartesianLocalTargetOrder);
+      indices_through(std::clamp(target_order, 0, kCartesianLocalTargetOrder));
   double value = 0.0;
   for (std::size_t i = 0; i < indices.size(); ++i) {
     const MultiIndex &index = indices[i];
@@ -302,9 +303,10 @@ double evaluate_scalar(const std::array<double, kCartesianLocalTermMax> &local,
 
 std::array<double, 3>
 evaluate_gradient(const std::array<double, kCartesianLocalTermMax> &local,
-                  double dx, double dy, double dz) noexcept {
+                  double dx, double dy, double dz,
+                  int target_order = kCartesianLocalTargetOrder) noexcept {
   const std::vector<MultiIndex> &indices =
-      indices_through(kCartesianLocalTargetOrder);
+      indices_through(std::clamp(target_order, 0, kCartesianLocalTargetOrder));
   std::array<double, 3> gradient{};
   for (std::size_t i = 0; i < indices.size(); ++i) {
     const MultiIndex &index = indices[i];
@@ -399,20 +401,32 @@ std::array<double, 4> evaluate_cartesian_jcp_l2p(
     const PrototypePanel &target, double target_center_x,
     double target_center_y, double target_center_z,
     const CartesianJcpLocalP4 &local) noexcept {
+  return evaluate_cartesian_jcp_l2p_order(
+      target, target_center_x, target_center_y, target_center_z, local,
+      kCartesianLocalTargetOrder);
+}
+
+std::array<double, 4> evaluate_cartesian_jcp_l2p_order(
+    const PrototypePanel &target, double target_center_x,
+    double target_center_y, double target_center_z,
+    const CartesianJcpLocalP4 &local, int target_order) noexcept {
+  const int order = std::clamp(target_order, 0, kCartesianLocalTargetOrder);
   const double dx = target.x - target_center_x;
   const double dy = target.y - target_center_y;
   const double dz = target.z - target_center_z;
   std::array<double, 4> channels{};
   channels[0] = evaluate_scalar(
-      local.fields[static_cast<std::size_t>(JcpLocalField::K1)], dx, dy, dz);
+      local.fields[static_cast<std::size_t>(JcpLocalField::K1)], dx, dy, dz,
+      order);
   channels[1] = evaluate_scalar(
-      local.fields[static_cast<std::size_t>(JcpLocalField::K2)], dx, dy, dz);
+      local.fields[static_cast<std::size_t>(JcpLocalField::K2)], dx, dy, dz,
+      order);
   const auto k3_gradient = evaluate_gradient(
       local.fields[static_cast<std::size_t>(JcpLocalField::K3Potential)], dx,
-      dy, dz);
+      dy, dz, order);
   const auto k4_gradient = evaluate_gradient(
       local.fields[static_cast<std::size_t>(JcpLocalField::K4Potential)], dx,
-      dy, dz);
+      dy, dz, order);
   channels[2] = target.nx * k3_gradient[0] + target.ny * k3_gradient[1] +
                 target.nz * k3_gradient[2];
   channels[3] = target.nx * k4_gradient[0] + target.ny * k4_gradient[1] +

@@ -265,6 +265,8 @@ struct Options {
   int matvec_audit_sample_count{1024};
   std::string fmm_cartesian_audit{"off"};
   std::string fmm_local{"off"};
+  std::string fmm_local_refine{"off"};
+  double fmm_local_refine_tol{4.0e-3};
   std::string progress{"off"};
   int progress_interval_seconds{5};
   std::string true_residual_probe{"restart"};

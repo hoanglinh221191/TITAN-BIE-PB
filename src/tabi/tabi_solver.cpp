@@ -214,7 +214,13 @@ void write_operator_attribution_outputs(
              "fmm_local_mode,fmm_local_source_order,fmm_local_target_order,"
              "fmm_local_kernel_derivative_order,fmm_local_target_leaves,"
              "fmm_local_m2l_pairs,fmm_local_moment_seconds,fmm_local_m2l_seconds,"
-             "fmm_local_l2p_seconds,fmm_local_finite_outputs\n";
+             "fmm_local_l2p_seconds,fmm_local_finite_outputs,"
+             "fmm_local_refine_mode,fmm_local_refine_tolerance,"
+             "fmm_local_tail_ratio_before,fmm_local_tail_ratio_after,"
+             "fmm_local_refined_cells,fmm_local_split_children,"
+             "fmm_local_direct_fallback_panels,fmm_local_direct_fallback_pairs,"
+             "fmm_local_far_pairs_before,"
+             "fmm_local_far_pairs_after,fmm_local_refinement_seconds\n";
   for (const auto &[key, aggregate] : aggregates) {
     const auto *result =
         result_by_probe.at({key.approximation_mode, key.probe});
@@ -267,6 +273,17 @@ void write_operator_attribution_outputs(
             << ',' << result->moment_build_seconds << ','
             << result->m2l_seconds << ',' << result->l2p_seconds << ','
             << (result->finite_outputs ? "true" : "false")
+            << ',' << result->local_refine_mode << ','
+            << result->local_refine_tolerance << ','
+            << result->local_tail_ratio_before << ','
+            << result->local_tail_ratio_after << ','
+            << result->local_refined_cells << ','
+            << result->local_split_children << ','
+            << result->local_direct_fallback_panels << ','
+            << result->local_direct_fallback_pairs << ','
+            << result->local_far_pairs_before << ','
+            << result->local_far_pairs_after << ','
+            << result->local_refinement_seconds
             << '\n';
   }
 
@@ -4784,17 +4801,20 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                 solution_phi, solution_phin,
                 static_cast<std::size_t>(options.matvec_audit_sample_count),
                 "solution", executor, coupled, result.near_integration,
-                result.quad_buffer, &panels));
+                result.quad_buffer, &panels, options.fmm_local_refine,
+                options.fmm_local_refine_tol));
             attribution.push_back(context->attribute_local_p4(
                 phi_probe, zeros,
                 static_cast<std::size_t>(options.matvec_audit_sample_count),
                 "phi_only", executor, coupled, result.near_integration,
-                result.quad_buffer, &panels));
+                result.quad_buffer, &panels, options.fmm_local_refine,
+                options.fmm_local_refine_tol));
             attribution.push_back(context->attribute_local_p4(
                 zeros, phin_probe,
                 static_cast<std::size_t>(options.matvec_audit_sample_count),
                 "phin_only", executor, coupled, result.near_integration,
-                result.quad_buffer, &panels));
+                result.quad_buffer, &panels, options.fmm_local_refine,
+                options.fmm_local_refine_tol));
           }
           write_operator_attribution_outputs(
               attribution, result.tree_vs_direct_matvec_rel, direct_sq);

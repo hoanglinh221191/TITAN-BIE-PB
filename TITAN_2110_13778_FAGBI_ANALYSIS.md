@@ -580,3 +580,19 @@ speedup ranged from `0.42x` to `1.64x`, versus the required `4x`. L2P cost was
 negligible; order-8 M2L jet construction dominated. Further work should
 optimize or precompute translation operators before reconsidering GMRES, and
 must separately address the theta-0.6 1A63 accuracy margin.
+
+## Scope Z4L Adaptive Far-Cell Accuracy Refinement
+
+Z4L added a diagnostic-only p3/p4 local-tail estimator that selectively
+splits risky accepted far cells while leaving theta fixed at `0.6`. The full
+256-target matrix classified `z4l_accuracy_pass_costly`. On 1A63, tolerance
+`0.002` reduced sampled audit RMS from `0.00961167` to `0.00734897`, crossing
+the fixed `8e-3` gate. Barnase and 1SH1 remained within gate at `0.00333376`
+and `0.00034668`.
+
+The estimator therefore correlates with the direct operator error, but the
+winning 1A63 row refined 770 cells, moved 15,551 source panels to direct
+attribution, and increased wall time from `261.35 s` to `1954.01 s` (about
+`7.48x`). This is an accuracy result, not a production-performance result.
+GMRES-p4 remains disabled. Any Z4M work should first reduce direct fallback
+and order-8 translation cost without relaxing the theta-0.6 accuracy gate.

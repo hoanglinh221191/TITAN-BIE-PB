@@ -163,6 +163,17 @@ struct JcpOperatorAttributionResult {
   double l2p_seconds{0.0};
   std::size_t local_target_leaves{0};
   std::size_t local_m2l_pairs{0};
+  std::string local_refine_mode{"off"};
+  double local_refine_tolerance{4.0e-3};
+  double local_tail_ratio_before{0.0};
+  double local_tail_ratio_after{0.0};
+  std::size_t local_refined_cells{0};
+  std::size_t local_split_children{0};
+  std::size_t local_direct_fallback_panels{0};
+  std::size_t local_direct_fallback_pairs{0};
+  std::size_t local_far_pairs_before{0};
+  std::size_t local_far_pairs_after{0};
+  double local_refinement_seconds{0.0};
   bool finite_outputs{true};
 };
 
@@ -277,7 +288,9 @@ public:
       TitanExecutor &executor, bool coupled = true,
       const std::string &near_integration = "centroid",
       const std::string &quad_buffer = "off",
-      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr)
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr,
+      const std::string &refine_mode = "off",
+      double refine_tolerance = 4.0e-3)
       const;
 
 private:
@@ -287,7 +300,8 @@ private:
       TitanExecutor &executor, bool coupled,
       const std::string &near_integration, const std::string &quad_buffer,
       const std::vector<TitanPBE::Tabi::Panel> *production_panels,
-      int approximation_mode) const;
+      int approximation_mode, const std::string &refine_mode,
+      double refine_tolerance) const;
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

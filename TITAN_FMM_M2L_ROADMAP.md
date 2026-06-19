@@ -1219,3 +1219,11 @@ Decision:
   speedup versus p4 M2P ranged only `0.42x–1.64x`, below the required `4x`.
   `gmres-p4` remains fail-closed. Next work, if pursued, must optimize cached
   or recurrence-based translation operators before solver integration.
+- Scope Z4L adds diagnostic p3/p4 tail-driven far-cell refinement at fixed
+  theta `0.6`. The full decision is `z4l_accuracy_pass_costly`: tolerance
+  `0.002` reduced 1A63 audit from `0.00961167` to `0.00734897`, while Barnase
+  and 1SH1 reached `0.00333376` and `0.00034668`. The 1A63 row took
+  `1954.01 s` versus `261.35 s` without refinement and moved 15,551 source
+  panels to direct attribution. Keep GMRES-p4 fail-closed. A future Z4M must
+  compress/refactor refined work and optimize order-8 translations before
+  solver integration; no default changes follow from Z4L.

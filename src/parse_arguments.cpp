@@ -1710,6 +1710,20 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-pbe-tabi-fmm-local");
       continue;
     }
+    if (consume_option_value(arg, {"-pbe-tabi-fmm-local-refine",
+                                   "--pbe-tabi-fmm-local-refine"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local_refine =
+          require_choice(common_value, {"off", "p3-p4-tail"},
+                         "-pbe-tabi-fmm-local-refine");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-fmm-local-refine-tol",
+                                   "--pbe-tabi-fmm-local-refine-tol"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local_refine_tol = stod(common_value);
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",
                                    "--pbe-tabi-interaction-mode"},
                              common_value, i)) {

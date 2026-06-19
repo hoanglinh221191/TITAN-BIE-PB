@@ -1678,6 +1678,25 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-fmm-local=gmres-p4 is fail-closed until the Z4K theta-0.6 candidate gate passes.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.tabi_fmm_local_refine != "off" &&
+        pbe.tabi_fmm_local_refine != "p3-p4-tail") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-refine must be off or p3-p4-tail.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_refine == "p3-p4-tail" &&
+        pbe.tabi_fmm_local != "audit-p4") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-refine=p3-p4-tail requires -pbe-tabi-fmm-local=audit-p4.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(pbe.tabi_fmm_local_refine_tol) ||
+        pbe.tabi_fmm_local_refine_tol < 1.0e-4 ||
+        pbe.tabi_fmm_local_refine_tol > 5.0e-2) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-refine-tol must be between 0.0001 and 0.05.");
+      exit(EXIT_FAILURE);
+    }
     if (pbe.tabi_matvec_audit_sample_count < 128 ||
         pbe.tabi_matvec_audit_sample_count > 4096) {
       TitanUI::print_error(
