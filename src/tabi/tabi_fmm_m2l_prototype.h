@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -174,6 +175,49 @@ struct JcpOperatorAttributionResult {
   std::size_t local_far_pairs_before{0};
   std::size_t local_far_pairs_after{0};
   double local_refinement_seconds{0.0};
+  std::uint64_t local_plan_hash{0};
+  std::size_t local_plan_build_count{0};
+  std::size_t local_static_probe_count{0};
+  std::string local_cache_mode{"off"};
+  std::size_t local_cache_operators{0};
+  std::size_t local_cache_bytes{0};
+  std::size_t local_cache_build_count{0};
+  std::size_t local_cache_hits{0};
+  double local_plan_seconds{0.0};
+  double local_cache_seconds{0.0};
+  double local_candidate_apply_seconds{0.0};
+  std::size_t local_candidate_repeat_count{1};
+  double local_candidate_median_apply_seconds{0.0};
+  double local_candidate_direct_reference_seconds{0.0};
+  bool finite_outputs{true};
+};
+
+struct JcpLocalP4CandidateResult {
+  std::vector<double> phi;
+  std::vector<double> phin;
+  std::string refine_mode{"off"};
+  double refine_tolerance{2.0e-3};
+  std::string cache_mode{"off"};
+  std::string status{"ok"};
+  std::uint64_t plan_hash{0};
+  std::size_t plan_build_count{0};
+  std::size_t static_probe_count{0};
+  std::size_t refined_cells{0};
+  std::size_t split_children{0};
+  std::size_t direct_fallback_panels{0};
+  std::size_t direct_fallback_pairs{0};
+  std::size_t far_pairs{0};
+  std::size_t cache_operator_count{0};
+  std::size_t cache_bytes{0};
+  std::size_t cache_build_count{0};
+  std::size_t cache_hits{0};
+  double plan_seconds{0.0};
+  double cache_seconds{0.0};
+  double moment_seconds{0.0};
+  double m2l_seconds{0.0};
+  double direct_fallback_seconds{0.0};
+  double l2p_seconds{0.0};
+  double apply_seconds{0.0};
   bool finite_outputs{true};
 };
 
@@ -292,6 +336,29 @@ public:
       const std::string &refine_mode = "off",
       double refine_tolerance = 4.0e-3)
       const;
+
+  JcpLocalP4CandidateResult apply_local_p4_candidate(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      TitanExecutor &executor, bool coupled = true,
+      const std::string &near_integration = "centroid",
+      const std::string &quad_buffer = "off",
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr,
+      const std::string &refine_mode = "operator-tail-static",
+      double refine_tolerance = 2.0e-3,
+      const std::string &cache_mode = "kernel-jet",
+      std::size_t cache_budget_mb = 256) const;
+
+  JcpOperatorAttributionResult attribute_local_p4_candidate(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      std::size_t sample_count, const std::string &probe,
+      TitanExecutor &executor, bool coupled = true,
+      const std::string &near_integration = "centroid",
+      const std::string &quad_buffer = "off",
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr,
+      double refine_tolerance = 2.0e-3,
+      const std::string &cache_mode = "kernel-jet",
+      std::size_t cache_budget_mb = 256,
+      std::size_t repeat_count = 1) const;
 
 private:
   JcpOperatorAttributionResult attribute_impl(

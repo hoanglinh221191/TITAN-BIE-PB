@@ -220,7 +220,16 @@ void write_operator_attribution_outputs(
              "fmm_local_refined_cells,fmm_local_split_children,"
              "fmm_local_direct_fallback_panels,fmm_local_direct_fallback_pairs,"
              "fmm_local_far_pairs_before,"
-             "fmm_local_far_pairs_after,fmm_local_refinement_seconds\n";
+             "fmm_local_far_pairs_after,fmm_local_refinement_seconds,"
+             "fmm_local_plan_hash,fmm_local_plan_build_count,"
+             "fmm_local_static_probe_count,fmm_local_cache_mode,"
+             "fmm_local_cache_operators,fmm_local_cache_bytes,"
+             "fmm_local_cache_build_count,fmm_local_cache_hits,"
+             "fmm_local_plan_seconds,fmm_local_cache_seconds,"
+             "fmm_local_candidate_apply_seconds,"
+             "fmm_local_candidate_repeat_count,"
+             "fmm_local_candidate_median_apply_seconds,"
+             "fmm_local_candidate_direct_reference_seconds\n";
   for (const auto &[key, aggregate] : aggregates) {
     const auto *result =
         result_by_probe.at({key.approximation_mode, key.probe});
@@ -283,7 +292,21 @@ void write_operator_attribution_outputs(
             << result->local_direct_fallback_pairs << ','
             << result->local_far_pairs_before << ','
             << result->local_far_pairs_after << ','
-            << result->local_refinement_seconds
+            << result->local_refinement_seconds << ','
+            << result->local_plan_hash << ','
+            << result->local_plan_build_count << ','
+            << result->local_static_probe_count << ','
+            << result->local_cache_mode << ','
+            << result->local_cache_operators << ','
+            << result->local_cache_bytes << ','
+            << result->local_cache_build_count << ','
+            << result->local_cache_hits << ','
+            << result->local_plan_seconds << ','
+            << result->local_cache_seconds << ','
+            << result->local_candidate_apply_seconds << ','
+            << result->local_candidate_repeat_count << ','
+            << result->local_candidate_median_apply_seconds << ','
+            << result->local_candidate_direct_reference_seconds
             << '\n';
   }
 
@@ -4797,24 +4820,69 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                 result.quad_buffer, &panels));
           }
           if (options.fmm_local == "audit-p4") {
-            attribution.push_back(context->attribute_local_p4(
+            if (options.fmm_local_refine == "operator-tail-static") {
+              const std::size_t cache_budget_mb = static_cast<std::size_t>(
+                  std::max(0, options.fmm_local_cache_budget_mb));
+              attribution.push_back(context->attribute_local_p4_candidate(
+                  solution_phi, solution_phin,
+                  static_cast<std::size_t>(options.matvec_audit_sample_count),
+                  "solution", executor, coupled, result.near_integration,
+                  result.quad_buffer, &panels, options.fmm_local_refine_tol,
+                  options.fmm_local_cache, cache_budget_mb));
+              attribution.push_back(context->attribute_local_p4_candidate(
+                  phi_probe, zeros,
+                  static_cast<std::size_t>(options.matvec_audit_sample_count),
+                  "phi_only", executor, coupled, result.near_integration,
+                  result.quad_buffer, &panels, options.fmm_local_refine_tol,
+                  options.fmm_local_cache, cache_budget_mb));
+              attribution.push_back(context->attribute_local_p4_candidate(
+                  zeros, phin_probe,
+                  static_cast<std::size_t>(options.matvec_audit_sample_count),
+                  "phin_only", executor, coupled, result.near_integration,
+                  result.quad_buffer, &panels, options.fmm_local_refine_tol,
+                  options.fmm_local_cache, cache_budget_mb));
+            } else {
+              attribution.push_back(context->attribute_local_p4(
+                  solution_phi, solution_phin,
+                  static_cast<std::size_t>(options.matvec_audit_sample_count),
+                  "solution", executor, coupled, result.near_integration,
+                  result.quad_buffer, &panels, options.fmm_local_refine,
+                  options.fmm_local_refine_tol));
+              attribution.push_back(context->attribute_local_p4(
+                  phi_probe, zeros,
+                  static_cast<std::size_t>(options.matvec_audit_sample_count),
+                  "phi_only", executor, coupled, result.near_integration,
+                  result.quad_buffer, &panels, options.fmm_local_refine,
+                  options.fmm_local_refine_tol));
+              attribution.push_back(context->attribute_local_p4(
+                  zeros, phin_probe,
+                  static_cast<std::size_t>(options.matvec_audit_sample_count),
+                  "phin_only", executor, coupled, result.near_integration,
+                  result.quad_buffer, &panels, options.fmm_local_refine,
+                  options.fmm_local_refine_tol));
+            }
+          }
+          if (options.fmm_local == "single-matvec-p4") {
+            const std::size_t cache_budget_mb = static_cast<std::size_t>(
+                std::max(0, options.fmm_local_cache_budget_mb));
+            attribution.push_back(context->attribute_local_p4_candidate(
                 solution_phi, solution_phin,
                 static_cast<std::size_t>(options.matvec_audit_sample_count),
                 "solution", executor, coupled, result.near_integration,
-                result.quad_buffer, &panels, options.fmm_local_refine,
-                options.fmm_local_refine_tol));
-            attribution.push_back(context->attribute_local_p4(
+                result.quad_buffer, &panels, options.fmm_local_refine_tol,
+                options.fmm_local_cache, cache_budget_mb, 5));
+            attribution.push_back(context->attribute_local_p4_candidate(
                 phi_probe, zeros,
                 static_cast<std::size_t>(options.matvec_audit_sample_count),
                 "phi_only", executor, coupled, result.near_integration,
-                result.quad_buffer, &panels, options.fmm_local_refine,
-                options.fmm_local_refine_tol));
-            attribution.push_back(context->attribute_local_p4(
+                result.quad_buffer, &panels, options.fmm_local_refine_tol,
+                options.fmm_local_cache, cache_budget_mb));
+            attribution.push_back(context->attribute_local_p4_candidate(
                 zeros, phin_probe,
                 static_cast<std::size_t>(options.matvec_audit_sample_count),
                 "phin_only", executor, coupled, result.near_integration,
-                result.quad_buffer, &panels, options.fmm_local_refine,
-                options.fmm_local_refine_tol));
+                result.quad_buffer, &panels, options.fmm_local_refine_tol,
+                options.fmm_local_cache, cache_budget_mb));
           }
           write_operator_attribution_outputs(
               attribution, result.tree_vs_direct_matvec_rel, direct_sq);

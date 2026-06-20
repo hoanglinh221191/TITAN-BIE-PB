@@ -596,3 +596,19 @@ attribution, and increased wall time from `261.35 s` to `1954.01 s` (about
 `7.48x`). This is an accuracy result, not a production-performance result.
 GMRES-p4 remains disabled. Any Z4M work should first reduce direct fallback
 and order-8 translation cost without relaxing the theta-0.6 accuracy gate.
+
+## Scope Z4M Static Refinement And Cached p4 Translation Gate
+
+Z4M replaced solution-dependent refinement with a density-independent plan
+built from four normalized Rademacher operator probes and added compact
+order-8 kernel-jet caching. The quick full-1SH1 comparison classified
+`z4m_accuracy_pass_cache_limited`: cached and uncached candidates had the
+same sampled audit RMS (`1.03558e-4`), zero recomposition/reference gap, and
+the same plan hash. The cache occupied `17.25 MB`, increased peak RSS from
+`44.46 MB` to `53.93 MB`, and reduced median full-vector apply time from
+`0.760 s` to `0.587 s` (`1.29x`), below the required `3x` gate.
+
+The static plan refined 8,846 cells and left 15,996,854 direct-fallback panel
+pairs. The remaining cost is therefore fallback work rather than repeated
+kernel-jet construction. Full three-protein verification remains pending,
+`gmres-p4` stays fail-closed, and Z4N is not justified by Z4M quick evidence.

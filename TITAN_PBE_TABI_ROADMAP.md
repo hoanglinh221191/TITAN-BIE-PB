@@ -6402,3 +6402,10 @@ Decision:
   validates the error indicator but not production use. `gmres-p4` remains
   rejected, the degree-one production operator remains unchanged, and grid
   remains the production PBE default.
+- Scope Z4M implements a diagnostic static p4 refinement plan and reusable
+  compact kernel-jet cache. Quick full-1SH1 evidence classified
+  `z4m_accuracy_pass_cache_limited`: the cached candidate preserved audit RMS
+  `1.03558e-4` and used only `53.93 MB` peak RSS, but achieved `1.29x` apply
+  speedup rather than the required `3x`. Direct fallback still covered
+  15,996,854 panel pairs. `gmres-p4` remains fail-closed and no TABI or grid
+  production policy changes follow from this result.

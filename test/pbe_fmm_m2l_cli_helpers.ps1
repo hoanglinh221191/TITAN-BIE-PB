@@ -289,9 +289,11 @@ function Write-FmmCliArgFile(
     [string]$NearIntegration = 'centroid',
     [ValidateSet(3,4)][int]$TaylorOrder = 4,
     [ValidateSet('off','on')][string]$FmmCartesianAudit = 'off',
-    [ValidateSet('off','audit-p4','gmres-p4')][string]$FmmLocal = 'off',
-    [ValidateSet('off','p3-p4-tail')][string]$FmmLocalRefine = 'off',
-    [double]$FmmLocalRefineTolerance = 4.0e-3
+    [ValidateSet('off','audit-p4','single-matvec-p4','gmres-p4')][string]$FmmLocal = 'off',
+    [ValidateSet('off','p3-p4-tail','operator-tail-static')][string]$FmmLocalRefine = 'off',
+    [double]$FmmLocalRefineTolerance = 4.0e-3,
+    [ValidateSet('off','kernel-jet')][string]$FmmLocalCache = 'off',
+    [ValidateRange(64,1024)][int]$FmmLocalCacheBudgetMb = 256
 ) {
     $pdbPath = Join-Path $RunDir 'driver.pdb'
     Write-FmmCliDummyPdb $pdbPath
@@ -330,6 +332,8 @@ function Write-FmmCliArgFile(
         "-pbe-tabi-fmm-local=$FmmLocal",
         "-pbe-tabi-fmm-local-refine=$FmmLocalRefine",
         "-pbe-tabi-fmm-local-refine-tol=$(& $format $FmmLocalRefineTolerance)",
+        "-pbe-tabi-fmm-local-cache=$FmmLocalCache",
+        "-pbe-tabi-fmm-local-cache-budget-mb=$FmmLocalCacheBudgetMb",
         "-pbe-tabi-surface-points=$SurfacePoints",
         '-pbe-tabi-tree-leaf-size=64',
         "-pbe-tabi-opening-theta=$(& $format $OpeningTheta)",

@@ -1706,7 +1706,8 @@ int arguments::parse_arguments(int argc, char **argv) {
                                    "--pbe-tabi-fmm-local"},
                              common_value, i)) {
       pbe.tabi_fmm_local =
-          require_choice(common_value, {"off", "audit-p4", "gmres-p4"},
+          require_choice(common_value,
+                         {"off", "audit-p4", "single-matvec-p4", "gmres-p4"},
                          "-pbe-tabi-fmm-local");
       continue;
     }
@@ -1714,7 +1715,8 @@ int arguments::parse_arguments(int argc, char **argv) {
                                    "--pbe-tabi-fmm-local-refine"},
                              common_value, i)) {
       pbe.tabi_fmm_local_refine =
-          require_choice(common_value, {"off", "p3-p4-tail"},
+          require_choice(common_value,
+                         {"off", "p3-p4-tail", "operator-tail-static"},
                          "-pbe-tabi-fmm-local-refine");
       continue;
     }
@@ -1722,6 +1724,20 @@ int arguments::parse_arguments(int argc, char **argv) {
                                    "--pbe-tabi-fmm-local-refine-tol"},
                              common_value, i)) {
       pbe.tabi_fmm_local_refine_tol = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-fmm-local-cache",
+                                   "--pbe-tabi-fmm-local-cache"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local_cache =
+          require_choice(common_value, {"off", "kernel-jet"},
+                         "-pbe-tabi-fmm-local-cache");
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-fmm-local-cache-budget-mb",
+                                   "--pbe-tabi-fmm-local-cache-budget-mb"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local_cache_budget_mb = stoi(common_value);
       continue;
     }
     if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",

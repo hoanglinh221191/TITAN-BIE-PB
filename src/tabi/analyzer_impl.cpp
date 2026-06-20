@@ -11749,6 +11749,8 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   options.fmm_local = args_.tabi_fmm_local;
   options.fmm_local_refine = args_.tabi_fmm_local_refine;
   options.fmm_local_refine_tol = args_.tabi_fmm_local_refine_tol;
+  options.fmm_local_cache = args_.tabi_fmm_local_cache;
+  options.fmm_local_cache_budget_mb = args_.tabi_fmm_local_cache_budget_mb;
   options.true_residual_probe = args_.tabi_true_residual_probe;
   options.true_residual_probe_scope = args_.tabi_true_residual_probe_scope;
   options.true_residual_probe_interval =

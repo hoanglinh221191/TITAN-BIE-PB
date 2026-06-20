@@ -1227,3 +1227,11 @@ Decision:
   panels to direct attribution. Keep GMRES-p4 fail-closed. A future Z4M must
   compress/refactor refined work and optimize order-8 translations before
   solver integration; no default changes follow from Z4L.
+- Scope Z4M adds a density-independent four-probe refinement plan, compact
+  order-8 kernel-jet caching, and a diagnostic full-vector p4 apply. The quick
+  full-1SH1 decision is `z4m_accuracy_pass_cache_limited`: audit RMS was
+  `1.03558e-4`, cache parity/reference checks were clean, cache storage was
+  `17.25 MB`, and median apply improved from `0.760 s` to `0.587 s` (`1.29x`).
+  The plan still retained 15,996,854 direct-fallback panel pairs, so it missed
+  the required `3x` speed gate. Do not plan Z4N guarded GMRES yet; first reduce
+  or accelerate deterministic fallback work. Grid remains the PB default.

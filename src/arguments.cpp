@@ -1659,9 +1659,19 @@ int arguments::post_process() {
     }
     if (pbe.tabi_fmm_local != "off" &&
         pbe.tabi_fmm_local != "audit-p4" &&
+        pbe.tabi_fmm_local != "single-matvec-p4" &&
         pbe.tabi_fmm_local != "gmres-p4") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-fmm-local must be off, audit-p4, or gmres-p4.");
+          "PBE: -pbe-tabi-fmm-local must be off, audit-p4, single-matvec-p4, or gmres-p4.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local == "single-matvec-p4" &&
+        !(pbe.backend == "tabi" && pbe.tabi_sum == "treecode" &&
+          pbe.tabi_fmm_m2l == "single-matvec-analytic" &&
+          pbe.tabi_matvec_audit == "sampled-detail" &&
+          pbe.tabi_taylor_order == 4)) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local=single-matvec-p4 requires analytical FMM/M2L TABI treecode with -pbe-tabi-matvec-audit=sampled-detail and Taylor order 4.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_fmm_local == "audit-p4" &&
@@ -1679,15 +1689,53 @@ int arguments::post_process() {
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_fmm_local_refine != "off" &&
-        pbe.tabi_fmm_local_refine != "p3-p4-tail") {
+        pbe.tabi_fmm_local_refine != "p3-p4-tail" &&
+        pbe.tabi_fmm_local_refine != "operator-tail-static") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-fmm-local-refine must be off or p3-p4-tail.");
+          "PBE: -pbe-tabi-fmm-local-refine must be off, p3-p4-tail, or operator-tail-static.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_refine == "operator-tail-static" &&
+        pbe.tabi_fmm_local != "audit-p4" &&
+        pbe.tabi_fmm_local != "single-matvec-p4") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-refine=operator-tail-static requires -pbe-tabi-fmm-local=audit-p4 or single-matvec-p4.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_fmm_local_refine == "p3-p4-tail" &&
         pbe.tabi_fmm_local != "audit-p4") {
       TitanUI::print_error(
           "PBE: -pbe-tabi-fmm-local-refine=p3-p4-tail requires -pbe-tabi-fmm-local=audit-p4.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_cache != "off" &&
+        pbe.tabi_fmm_local_cache != "kernel-jet") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-cache must be off or kernel-jet.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_cache == "kernel-jet" &&
+        pbe.tabi_fmm_local_refine != "operator-tail-static") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-cache=kernel-jet requires operator-tail-static refinement.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local == "single-matvec-p4" &&
+        pbe.tabi_fmm_local_refine != "operator-tail-static") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local=single-matvec-p4 requires operator-tail-static refinement.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local == "single-matvec-p4" &&
+        pbe.tabi_fmm_local_cache != "kernel-jet") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local=single-matvec-p4 requires kernel-jet cache.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_cache_budget_mb < 64 ||
+        pbe.tabi_fmm_local_cache_budget_mb > 1024) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-cache-budget-mb must be between 64 and 1024.");
       exit(EXIT_FAILURE);
     }
     if (!std::isfinite(pbe.tabi_fmm_local_refine_tol) ||

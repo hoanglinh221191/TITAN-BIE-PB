@@ -262,9 +262,38 @@ Jet8 source_normal_component_jet(double tx, double ty, double tz, double sx,
                1.0 / (4.0 * kPi));
 }
 
-void translate_moments(const std::array<double, kCartesianJcpMomentMax> &moments,
-                       const Jet8 &kernel,
-                       std::array<double, kCartesianLocalTermMax> &local) {
+std::array<double, kCartesianKernelJetTermCount>
+compact_jet(const Jet8 &jet) noexcept {
+  std::array<double, kCartesianKernelJetTermCount> compact{};
+  const std::vector<MultiIndex> &indices =
+      indices_through(kCartesianLocalKernelOrder);
+  for (std::size_t i = 0; i < indices.size(); ++i) {
+    const MultiIndex &index = indices[i];
+    compact[i] = jet.coeff[cube_index(index.x, index.y, index.z)];
+  }
+  return compact;
+}
+
+std::size_t compact_index(int x, int y, int z) noexcept {
+  static const std::array<std::size_t, kJetSize> lookup = [] {
+    std::array<std::size_t, kJetSize> result{};
+    result.fill(kCartesianKernelJetTermCount);
+    std::size_t compact = 0;
+    for (int degree = 0; degree <= kCartesianLocalKernelOrder; ++degree) {
+      for (int ix = degree; ix >= 0; --ix) {
+        for (int iy = degree - ix; iy >= 0; --iy)
+          result[cube_index(ix, iy, degree - ix - iy)] = compact++;
+      }
+    }
+    return result;
+  }();
+  return lookup[cube_index(x, y, z)];
+}
+
+void translate_moments_compact(
+    const std::array<double, kCartesianJcpMomentMax> &moments,
+    const std::array<double, kCartesianKernelJetTermCount> &kernel,
+    std::array<double, kCartesianLocalTermMax> &local) {
   const std::vector<MultiIndex> &source =
       indices_through(kCartesianLocalSourceOrder);
   const std::vector<MultiIndex> &target =
@@ -278,10 +307,11 @@ void translate_moments(const std::array<double, kCartesianJcpMomentMax> &moments
       const int gx = alpha.x + beta.x;
       const int gy = alpha.y + beta.y;
       const int gz = alpha.z + beta.z;
+      const std::size_t kernel_index = compact_index(gx, gy, gz);
       const double factor =
           sign * binomial(gx, alpha.x) * binomial(gy, alpha.y) *
           binomial(gz, alpha.z);
-      value += moments[a] * factor * kernel.coeff[cube_index(gx, gy, gz)];
+      value += moments[a] * factor * kernel[kernel_index];
     }
     local[b] += value;
   }
@@ -337,12 +367,18 @@ CartesianJcpLocalP4 translate_cartesian_jcp_m2l_p4(
     double source_center_y, double source_center_z, double target_center_x,
     double target_center_y, double target_center_z, double eps_ratio,
     double kappa) {
-  CartesianJcpLocalP4 local;
-  if (moments.order != kCartesianLocalSourceOrder ||
-      moments.term_count != kCartesianLocalTermMax) {
-    local.finite_outputs = false;
-    return local;
-  }
+  return apply_cartesian_jcp_m2l_operator_p4(
+      moments, build_cartesian_jcp_m2l_operator_p4(
+                   source_center_x, source_center_y, source_center_z,
+                   target_center_x, target_center_y, target_center_z,
+                   eps_ratio, kappa));
+}
+
+CartesianJcpM2lOperatorP4 build_cartesian_jcp_m2l_operator_p4(
+    double source_center_x, double source_center_y, double source_center_z,
+    double target_center_x, double target_center_y, double target_center_z,
+    double eps_ratio, double kappa) {
+  CartesianJcpM2lOperatorP4 result;
   const double safe_eps = std::max(1.0e-12, eps_ratio);
   const Jet8 green0 = green_jet(target_center_x, target_center_y,
                                 target_center_z, source_center_x,
@@ -350,11 +386,9 @@ CartesianJcpLocalP4 translate_cartesian_jcp_m2l_p4(
   const Jet8 greenk = green_jet(target_center_x, target_center_y,
                                 target_center_z, source_center_x,
                                 source_center_y, source_center_z, kappa);
-  translate_moments(moments.phin, subtract(green0, greenk),
-                    local.fields[static_cast<std::size_t>(JcpLocalField::K1)]);
-  translate_moments(
-      moments.phin, subtract(green0, scale(greenk, 1.0 / safe_eps)),
-      local.fields[static_cast<std::size_t>(JcpLocalField::K3Potential)]);
+  result.jets[0] = compact_jet(subtract(green0, greenk));
+  result.jets[1] =
+      compact_jet(subtract(green0, scale(greenk, 1.0 / safe_eps)));
   for (int component = 0; component < 3; ++component) {
     const Jet8 source0 = source_normal_component_jet(
         target_center_x, target_center_y, target_center_z, source_center_x,
@@ -362,15 +396,44 @@ CartesianJcpLocalP4 translate_cartesian_jcp_m2l_p4(
     const Jet8 sourcek = source_normal_component_jet(
         target_center_x, target_center_y, target_center_z, source_center_x,
         source_center_y, source_center_z, component, kappa);
-    translate_moments(
+    result.jets[2 + static_cast<std::size_t>(component)] =
+        compact_jet(subtract(scale(sourcek, safe_eps), source0));
+    result.jets[5 + static_cast<std::size_t>(component)] =
+        compact_jet(subtract(source0, sourcek));
+  }
+  for (const auto &jet : result.jets) {
+    for (const double value : jet)
+      result.finite_outputs = result.finite_outputs && std::isfinite(value);
+  }
+  return result;
+}
+
+CartesianJcpLocalP4 apply_cartesian_jcp_m2l_operator_p4(
+    const CartesianJcpMoments &moments,
+    const CartesianJcpM2lOperatorP4 &operator_p4) {
+  CartesianJcpLocalP4 local;
+  if (moments.order != kCartesianLocalSourceOrder ||
+      moments.term_count != kCartesianLocalTermMax) {
+    local.finite_outputs = false;
+    return local;
+  }
+  translate_moments_compact(
+      moments.phin, operator_p4.jets[0],
+      local.fields[static_cast<std::size_t>(JcpLocalField::K1)]);
+  translate_moments_compact(
+      moments.phin, operator_p4.jets[1],
+      local.fields[static_cast<std::size_t>(JcpLocalField::K3Potential)]);
+  for (int component = 0; component < 3; ++component) {
+    translate_moments_compact(
         moments.phi_normal[static_cast<std::size_t>(component)],
-        subtract(scale(sourcek, safe_eps), source0),
+        operator_p4.jets[2 + static_cast<std::size_t>(component)],
         local.fields[static_cast<std::size_t>(JcpLocalField::K2)]);
-    translate_moments(
+    translate_moments_compact(
         moments.phi_normal[static_cast<std::size_t>(component)],
-        subtract(source0, sourcek),
+        operator_p4.jets[5 + static_cast<std::size_t>(component)],
         local.fields[static_cast<std::size_t>(JcpLocalField::K4Potential)]);
   }
+  local.finite_outputs = operator_p4.finite_outputs;
   for (const auto &field : local.fields) {
     for (const double value : field)
       local.finite_outputs = local.finite_outputs && std::isfinite(value);
