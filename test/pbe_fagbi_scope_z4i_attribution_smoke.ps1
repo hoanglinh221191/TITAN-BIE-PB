@@ -17,6 +17,7 @@ $sources = @(
     'src\tabi\tabi_fmm_m2l_cartesian.cpp',
     'src\tabi\tabi_fmm_m2l_local.cpp',
     'src\tabi\tabi_fmm_m2l_prototype.cpp',
+    'src\tabi\tabi_fmm_m2l_fallback.cpp',
     'src\titan_executor.cpp',
     'src\tabi\tabi_near.cpp',
     'src\tabi\tabi_treecode.cpp',

@@ -33,6 +33,7 @@ $ExePath = Join-Path $WorkRoot 'titan_fmm_m2l_scope_h_probe.exe'
 $Sources = @(
     'test\titan_fmm_m2l_scope_h_probe.cpp',
     'src\tabi\tabi_fmm_m2l_prototype.cpp',
+    'src\tabi\tabi_fmm_m2l_fallback.cpp',
     'src\tabi\tabi_fmm_m2l_cartesian.cpp',
     'src\tabi\tabi_fmm_m2l_local.cpp',
     'src\tabi\tabi_surface.cpp',

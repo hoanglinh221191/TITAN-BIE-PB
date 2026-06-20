@@ -331,6 +331,11 @@ test/
 !/test/pbe_fagbi_scope_z4m_parser_smoke.ps1
 !/test/pbe_fagbi_scope_z4m_static_cached_local_gate.ps1
 !/test/titan_fmm_m2l_scope_z4m_static_cache_smoke.cpp
+!/TITAN_FMM_M2L_SCOPE_Z4M1_PACKED_FALLBACK_REPORT.txt
+!/test/pbe_fagbi_scope_z4m1_packed_fallback_smoke.ps1
+!/test/pbe_fagbi_scope_z4m1_parser_smoke.ps1
+!/test/pbe_fagbi_scope_z4m1_packed_fallback_gate.ps1
+!/test/titan_fmm_m2l_scope_z4m1_packed_fallback_smoke.cpp
 !/test/pbe_inputs_public/
 !/test/pbe_inputs_public/*.pdb
 !/test/pbe_inputs_public/*.pqr

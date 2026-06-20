@@ -1740,6 +1740,14 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.tabi_fmm_local_cache_budget_mb = stoi(common_value);
       continue;
     }
+    if (consume_option_value(arg, {"-pbe-tabi-fmm-local-fallback",
+                                   "--pbe-tabi-fmm-local-fallback"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local_fallback =
+          require_choice(common_value, {"scalar", "packed-avx2"},
+                         "-pbe-tabi-fmm-local-fallback");
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",
                                    "--pbe-tabi-interaction-mode"},
                              common_value, i)) {

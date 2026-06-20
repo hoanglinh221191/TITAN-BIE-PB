@@ -1235,3 +1235,11 @@ Decision:
   The plan still retained 15,996,854 direct-fallback panel pairs, so it missed
   the required `3x` speed gate. Do not plan Z4N guarded GMRES yet; first reduce
   or accelerate deterministic fallback work. Grid remains the PB default.
+- Scope Z4M.1 adds a static packed fallback worklist, source-panel SoA refresh,
+  and a shared four-target AVX2 kernel. Full 1SH1 retained audit RMS
+  `1.03558e-4`, delivered `5.87x` fallback speedup and `8.57x` total candidate
+  apply speedup, with `7.63 MB` worklist metadata and `62.50 MB` peak RSS.
+  Barnase and 1A63 full sampled-detail rows timed out at 3600 seconds for all
+  variants, so the measured full decision is `z4m1_runtime_limited`. Keep
+  `gmres-p4` fail-closed; isolate the candidate from full-solve/direct-reference
+  runtime before considering Z4N. Grid remains the PB default.

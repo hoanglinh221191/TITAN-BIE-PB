@@ -6409,3 +6409,11 @@ Decision:
   speedup rather than the required `3x`. Direct fallback still covered
   15,996,854 panel pairs. `gmres-p4` remains fail-closed and no TABI or grid
   production policy changes follow from this result.
+- Scope Z4M.1 accelerates diagnostic p4 direct fallback through a deterministic
+  packed worklist and the shared AVX2 near primitive. The full-1SH1 quick gate
+  preserved audit RMS `1.03558e-4`, improved fallback by `5.87x`, and improved
+  total candidate apply by `8.57x`, while using `7.63 MB` task metadata and
+  `62.50 MB` peak RSS. Barnase and 1A63 full sampled-detail cases remained
+  runtime-limited at the 3600-second process gate, including packed rows.
+  Therefore `gmres-p4` remains fail-closed and no TABI/grid default changes
+  follow from Z4M.1.

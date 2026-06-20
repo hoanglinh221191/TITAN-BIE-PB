@@ -23,6 +23,7 @@ $Args = @(
     '-Isrc',
     'test\titan_fmm_m2l_prototype_smoke.cpp',
     'src\tabi\tabi_fmm_m2l_prototype.cpp',
+    'src\tabi\tabi_fmm_m2l_fallback.cpp',
     'src\tabi\tabi_fmm_m2l_cartesian.cpp',
     'src\tabi\tabi_fmm_m2l_local.cpp',
     'src\tabi\tabi_near.cpp',

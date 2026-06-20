@@ -38,6 +38,7 @@ $BuildArgs = @(
     '-Isrc',
     'test\titan_fmm_m2l_prototype_smoke.cpp',
     'src\tabi\tabi_fmm_m2l_prototype.cpp',
+    'src\tabi\tabi_fmm_m2l_fallback.cpp',
     'src\titan_executor.cpp',
     '-o',
     $ExePath

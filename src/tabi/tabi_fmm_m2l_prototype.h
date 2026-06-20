@@ -189,6 +189,18 @@ struct JcpOperatorAttributionResult {
   std::size_t local_candidate_repeat_count{1};
   double local_candidate_median_apply_seconds{0.0};
   double local_candidate_direct_reference_seconds{0.0};
+  std::string local_fallback_requested{"scalar"};
+  std::string local_fallback_effective{"scalar"};
+  std::uint64_t local_fallback_worklist_hash{0};
+  std::size_t local_fallback_worklist_build_count{0};
+  std::size_t local_fallback_tasks{0};
+  std::size_t local_fallback_metadata_bytes{0};
+  std::size_t local_fallback_base_near_pairs{0};
+  std::size_t local_fallback_refined_pairs{0};
+  std::size_t local_fallback_vectorized_sources{0};
+  std::size_t local_fallback_vectorized_lanes{0};
+  std::size_t local_fallback_scalar_self_pairs{0};
+  double local_fallback_seconds{0.0};
   bool finite_outputs{true};
 };
 
@@ -218,6 +230,17 @@ struct JcpLocalP4CandidateResult {
   double direct_fallback_seconds{0.0};
   double l2p_seconds{0.0};
   double apply_seconds{0.0};
+  std::string fallback_requested{"scalar"};
+  std::string fallback_effective{"scalar"};
+  std::uint64_t fallback_worklist_hash{0};
+  std::size_t fallback_worklist_build_count{0};
+  std::size_t fallback_tasks{0};
+  std::size_t fallback_metadata_bytes{0};
+  std::size_t fallback_base_near_pairs{0};
+  std::size_t fallback_refined_pairs{0};
+  std::size_t fallback_vectorized_sources{0};
+  std::size_t fallback_vectorized_lanes{0};
+  std::size_t fallback_scalar_self_pairs{0};
   bool finite_outputs{true};
 };
 
@@ -346,7 +369,8 @@ public:
       const std::string &refine_mode = "operator-tail-static",
       double refine_tolerance = 2.0e-3,
       const std::string &cache_mode = "kernel-jet",
-      std::size_t cache_budget_mb = 256) const;
+      std::size_t cache_budget_mb = 256,
+      const std::string &fallback_mode = "scalar") const;
 
   JcpOperatorAttributionResult attribute_local_p4_candidate(
       const std::vector<double> &phi, const std::vector<double> &phin,
@@ -358,7 +382,8 @@ public:
       double refine_tolerance = 2.0e-3,
       const std::string &cache_mode = "kernel-jet",
       std::size_t cache_budget_mb = 256,
-      std::size_t repeat_count = 1) const;
+      std::size_t repeat_count = 1,
+      const std::string &fallback_mode = "scalar") const;
 
 private:
   JcpOperatorAttributionResult attribute_impl(

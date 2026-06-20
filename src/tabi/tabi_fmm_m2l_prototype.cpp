@@ -1,6 +1,7 @@
 #include "tabi/tabi_fmm_m2l_prototype.h"
 #include "tabi/tabi_fmm_m2l_cartesian.h"
 #include "tabi/tabi_fmm_m2l_local.h"
+#include "tabi/tabi_fmm_m2l_fallback.h"
 #include "tabi/tabi_near.h"
 #include "tabi/tabi_types.h"
 
@@ -824,6 +825,8 @@ struct StaticLocalP4Plan {
   std::vector<int> target_nodes;
   std::vector<TargetLeafWork> work;
   std::vector<std::vector<CartesianJcpM2lOperatorP4>> cached_operators;
+  std::vector<std::vector<int>> refined_fallback_sources;
+  std::unique_ptr<PackedJcpFallbackPlan> packed_fallback_plan;
   std::uint64_t hash{0};
   std::size_t probe_count{4};
   std::size_t refined_cells{0};
@@ -1304,7 +1307,8 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
     const std::string &quad_buffer,
     const std::vector<TitanPBE::Tabi::Panel> *production_panels,
     const std::string &refine_mode, double refine_tolerance,
-    const std::string &cache_mode, std::size_t cache_budget_mb) const {
+    const std::string &cache_mode, std::size_t cache_budget_mb,
+    const std::string &fallback_mode) const {
   if (impl_ == nullptr)
     throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
   const std::size_t n = impl_->panels.size();
@@ -1324,6 +1328,9 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
         "JCP local p4 static tolerance must be in [1e-4, 5e-2]");
   if (cache_mode != "off" && cache_mode != "kernel-jet")
     throw std::invalid_argument("JCP local p4 cache must be off or kernel-jet");
+  if (fallback_mode != "scalar" && fallback_mode != "packed-avx2")
+    throw std::invalid_argument(
+        "JCP local p4 fallback must be scalar or packed-avx2");
 
   const auto build_plan = [&]() {
     const auto plan_begin = Clock::now();
@@ -1331,6 +1338,7 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
     plan->tolerance = refine_tolerance;
     plan->target_nodes = impl_->target_tree.target_leaf_nodes;
     plan->work.reserve(plan->target_nodes.size());
+    plan->refined_fallback_sources.resize(plan->target_nodes.size());
     for (const int target_node : plan->target_nodes)
       plan->work.push_back(
           impl_->target_tree.work[static_cast<std::size_t>(target_node)]);
@@ -1468,6 +1476,7 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
         ++plan->refined_cells;
         if (selected_cell.is_leaf()) {
           work.near_sources.push_back(selected);
+          plan->refined_fallback_sources[target_index].push_back(selected);
           plan->direct_fallback_panels += selected_cell.count();
           plan->direct_fallback_pairs +=
               target_cell.count() * selected_cell.count();
@@ -1503,6 +1512,34 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
       !same_double(impl_->static_local_plan->tolerance, refine_tolerance))
     build_plan();
   StaticLocalP4Plan &plan = *impl_->static_local_plan;
+
+  if (fallback_mode == "packed-avx2" && !plan.packed_fallback_plan) {
+    std::vector<PackedFallbackLeafInput> leaves;
+    leaves.reserve(plan.target_nodes.size());
+    for (std::size_t target_index = 0;
+         target_index < plan.target_nodes.size(); ++target_index) {
+      const Cell &target_cell = impl_->target_tree.cells[
+          static_cast<std::size_t>(plan.target_nodes[target_index])];
+      PackedFallbackLeafInput input;
+      input.target_panels.reserve(target_cell.count());
+      for (std::size_t pos = target_cell.begin; pos < target_cell.end; ++pos)
+        input.target_panels.push_back(impl_->target_tree.order[pos]);
+      for (const int source_node : plan.work[target_index].near_sources) {
+        const Cell &source_cell = impl_->source_tree.cells[
+            static_cast<std::size_t>(source_node)];
+        const auto &refined = plan.refined_fallback_sources[target_index];
+        input.source_spans.push_back(
+            {source_cell.begin, source_cell.count(),
+             std::find(refined.begin(), refined.end(), source_node) !=
+                 refined.end()});
+      }
+      leaves.push_back(std::move(input));
+    }
+    plan.packed_fallback_plan = std::make_unique<PackedJcpFallbackPlan>(
+        build_packed_jcp_fallback_plan(*production_panels,
+                                       impl_->source_tree.order, leaves, 4,
+                                       32));
+  }
 
   const std::size_t budget_bytes =
       cache_budget_mb * std::size_t{1024} * std::size_t{1024};
@@ -1552,6 +1589,18 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   result.cache_operator_count = plan.cache_ready ? plan.far_pairs : 0;
   result.cache_bytes = plan.cache_ready ? plan.cache_bytes : 0;
   result.cache_build_count = impl_->local_cache_build_count;
+  result.fallback_requested = fallback_mode;
+  result.fallback_effective = fallback_mode;
+  if (plan.packed_fallback_plan) {
+    const PackedFallbackPlanMetrics metrics =
+        plan.packed_fallback_plan->metrics();
+    result.fallback_worklist_hash = metrics.worklist_hash;
+    result.fallback_worklist_build_count = metrics.build_count;
+    result.fallback_tasks = metrics.task_count;
+    result.fallback_metadata_bytes = metrics.metadata_bytes;
+    result.fallback_base_near_pairs = metrics.base_near_pairs;
+    result.fallback_refined_pairs = metrics.refined_fallback_pairs;
+  }
   result.plan_seconds = plan.plan_seconds;
   result.cache_seconds = plan.cache_seconds;
   result.phi.assign(n, 0.0);
@@ -1625,45 +1674,65 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
       });
   result.l2p_seconds = elapsed_seconds(l2p_begin, Clock::now());
 
-  const auto direct_begin = Clock::now();
-  executor.parallel_for(
-      plan.work.size(), workers, 1,
-      [&](std::size_t, std::size_t begin, std::size_t end) {
-        for (std::size_t target_index = begin; target_index < end;
-             ++target_index) {
-          const Cell &target_cell = impl_->target_tree.cells[
-              static_cast<std::size_t>(plan.target_nodes[target_index])];
-          for (std::size_t pos = target_cell.begin; pos < target_cell.end;
-               ++pos) {
-            const std::size_t target_panel = impl_->target_tree.order[pos];
-            JcpChannelValues direct{};
-            for (const int source_node : plan.work[target_index].near_sources) {
-              const Cell &source_cell = impl_->source_tree.cells[
-                  static_cast<std::size_t>(source_node)];
-              for (std::size_t source_pos = source_cell.begin;
-                   source_pos < source_cell.end; ++source_pos) {
-                const std::size_t source_panel =
-                    impl_->source_tree.order[source_pos];
-                add_channels(
-                    direct,
-                    jcp_near_kernel_pair_channels(
-                        (*production_panels)[target_panel], target_panel,
-                        (*production_panels)[source_panel], source_panel,
-                        phi_values[source_panel], phin_values[source_panel],
-                        impl_->eps_ratio, impl_->kappa, coupled,
-                        near_integration, quad_buffer, nullptr));
+  if (fallback_mode == "packed-avx2") {
+    PackedFallbackApplyResult fallback = apply_packed_jcp_fallback(
+        *plan.packed_fallback_plan, *production_panels, phi_values,
+        phin_values, impl_->eps_ratio, impl_->kappa, coupled,
+        near_integration, quad_buffer, fallback_mode, executor);
+    for (std::size_t panel = 0; panel < n; ++panel) {
+      result.phi[panel] += fallback.phi[panel];
+      if (coupled)
+        result.phin[panel] += fallback.phin[panel];
+    }
+    result.direct_fallback_seconds = fallback.apply_seconds;
+    result.fallback_effective = fallback.effective_kernel;
+    result.fallback_vectorized_sources = fallback.vectorized_sources;
+    result.fallback_vectorized_lanes = fallback.vectorized_lanes;
+    result.fallback_scalar_self_pairs = fallback.scalar_self_pairs;
+    result.finite_outputs = result.finite_outputs && fallback.finite_outputs;
+  } else {
+    const auto direct_begin = Clock::now();
+    executor.parallel_for(
+        plan.work.size(), workers, 1,
+        [&](std::size_t, std::size_t begin, std::size_t end) {
+          for (std::size_t target_index = begin; target_index < end;
+               ++target_index) {
+            const Cell &target_cell = impl_->target_tree.cells[
+                static_cast<std::size_t>(plan.target_nodes[target_index])];
+            for (std::size_t pos = target_cell.begin; pos < target_cell.end;
+                 ++pos) {
+              const std::size_t target_panel = impl_->target_tree.order[pos];
+              JcpChannelValues direct{};
+              for (const int source_node :
+                   plan.work[target_index].near_sources) {
+                const Cell &source_cell = impl_->source_tree.cells[
+                    static_cast<std::size_t>(source_node)];
+                for (std::size_t source_pos = source_cell.begin;
+                     source_pos < source_cell.end; ++source_pos) {
+                  const std::size_t source_panel =
+                      impl_->source_tree.order[source_pos];
+                  add_channels(
+                      direct,
+                      jcp_near_kernel_pair_channels(
+                          (*production_panels)[target_panel], target_panel,
+                          (*production_panels)[source_panel], source_panel,
+                          phi_values[source_panel], phin_values[source_panel],
+                          impl_->eps_ratio, impl_->kappa, coupled,
+                          near_integration, quad_buffer, nullptr));
+                }
               }
+              result.phi[target_panel] += channel_phi(direct);
+              if (coupled)
+                result.phin[target_panel] += channel_phin(direct);
             }
-            result.phi[target_panel] += channel_phi(direct);
-            if (coupled)
-              result.phin[target_panel] += channel_phin(direct);
           }
-        }
-      });
-  result.direct_fallback_seconds =
-      elapsed_seconds(direct_begin, Clock::now());
+        });
+    result.direct_fallback_seconds =
+        elapsed_seconds(direct_begin, Clock::now());
+  }
   result.apply_seconds = elapsed_seconds(apply_begin, Clock::now());
   result.finite_outputs =
+      result.finite_outputs &&
       std::all_of(result.phi.begin(), result.phi.end(),
                   [](double value) { return std::isfinite(value); }) &&
       std::all_of(result.phin.begin(), result.phin.end(),
@@ -1681,7 +1750,8 @@ FmmM2lAnalyticContext::attribute_local_p4_candidate(
     const std::string &near_integration, const std::string &quad_buffer,
     const std::vector<TitanPBE::Tabi::Panel> *production_panels,
     double refine_tolerance, const std::string &cache_mode,
-    std::size_t cache_budget_mb, std::size_t repeat_count) const {
+    std::size_t cache_budget_mb, std::size_t repeat_count,
+    const std::string &fallback_mode) const {
   repeat_count = std::max<std::size_t>(1, repeat_count);
   JcpLocalP4CandidateResult candidate;
   std::vector<double> apply_times;
@@ -1690,7 +1760,7 @@ FmmM2lAnalyticContext::attribute_local_p4_candidate(
     candidate = apply_local_p4_candidate(
         phi_values, phin_values, executor, coupled, near_integration,
         quad_buffer, production_panels, "operator-tail-static",
-        refine_tolerance, cache_mode, cache_budget_mb);
+        refine_tolerance, cache_mode, cache_budget_mb, fallback_mode);
     apply_times.push_back(candidate.apply_seconds);
   }
   std::sort(apply_times.begin(), apply_times.end());
@@ -1725,6 +1795,21 @@ FmmM2lAnalyticContext::attribute_local_p4_candidate(
   result.local_candidate_apply_seconds = candidate.apply_seconds;
   result.local_candidate_repeat_count = repeat_count;
   result.local_candidate_median_apply_seconds = median_apply;
+  result.local_fallback_requested = candidate.fallback_requested;
+  result.local_fallback_effective = candidate.fallback_effective;
+  result.local_fallback_worklist_hash = candidate.fallback_worklist_hash;
+  result.local_fallback_worklist_build_count =
+      candidate.fallback_worklist_build_count;
+  result.local_fallback_tasks = candidate.fallback_tasks;
+  result.local_fallback_metadata_bytes = candidate.fallback_metadata_bytes;
+  result.local_fallback_base_near_pairs = candidate.fallback_base_near_pairs;
+  result.local_fallback_refined_pairs = candidate.fallback_refined_pairs;
+  result.local_fallback_vectorized_sources =
+      candidate.fallback_vectorized_sources;
+  result.local_fallback_vectorized_lanes = candidate.fallback_vectorized_lanes;
+  result.local_fallback_scalar_self_pairs =
+      candidate.fallback_scalar_self_pairs;
+  result.local_fallback_seconds = candidate.direct_fallback_seconds;
   result.finite_outputs = candidate.finite_outputs;
 
   const std::size_t n = impl_->panels.size();

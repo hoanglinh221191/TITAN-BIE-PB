@@ -229,7 +229,17 @@ void write_operator_attribution_outputs(
              "fmm_local_candidate_apply_seconds,"
              "fmm_local_candidate_repeat_count,"
              "fmm_local_candidate_median_apply_seconds,"
-             "fmm_local_candidate_direct_reference_seconds\n";
+             "fmm_local_candidate_direct_reference_seconds,"
+             "fmm_local_fallback_requested,fmm_local_fallback_effective,"
+             "fmm_local_fallback_worklist_hash,"
+             "fmm_local_fallback_worklist_build_count,"
+             "fmm_local_fallback_tasks,fmm_local_fallback_metadata_bytes,"
+             "fmm_local_fallback_base_near_pairs,"
+             "fmm_local_fallback_refined_pairs,"
+             "fmm_local_fallback_vectorized_sources,"
+             "fmm_local_fallback_vectorized_lanes,"
+             "fmm_local_fallback_scalar_self_pairs,"
+             "fmm_local_fallback_seconds\n";
   for (const auto &[key, aggregate] : aggregates) {
     const auto *result =
         result_by_probe.at({key.approximation_mode, key.probe});
@@ -259,6 +269,8 @@ void write_operator_attribution_outputs(
                 key.approximation_mode == "legacy_degree1"
             ? std::abs(attribution_audit_rel - aggregate_audit_rel)
             : 0.0;
+    const bool local_p4 =
+        result->approximation_mode.find("local_m2l_p4") == 0;
     summary << result->approximation_mode << ','
             << result->configured_expansion_order << ','
             << result->implemented_far_moment_degree << ',' << key.probe << ','
@@ -272,12 +284,10 @@ void write_operator_attribution_outputs(
             << result->m2l_seconds << ',' << result->l2p_seconds << ','
             << result->local_target_leaves << ',' << result->local_m2l_pairs
             << ','
-            << (result->approximation_mode == "local_m2l_p4" ? "audit-p4"
-                                                               : "off")
+            << (local_p4 ? "audit-p4" : "off")
             << ','
-            << (result->approximation_mode == "local_m2l_p4" ? 4 : 0) << ','
-            << (result->approximation_mode == "local_m2l_p4" ? 4 : 0) << ','
-            << (result->approximation_mode == "local_m2l_p4" ? 8 : 0) << ','
+            << (local_p4 ? 4 : 0) << ',' << (local_p4 ? 4 : 0) << ','
+            << (local_p4 ? 8 : 0) << ','
             << result->local_target_leaves << ',' << result->local_m2l_pairs
             << ',' << result->moment_build_seconds << ','
             << result->m2l_seconds << ',' << result->l2p_seconds << ','
@@ -306,7 +316,19 @@ void write_operator_attribution_outputs(
             << result->local_candidate_apply_seconds << ','
             << result->local_candidate_repeat_count << ','
             << result->local_candidate_median_apply_seconds << ','
-            << result->local_candidate_direct_reference_seconds
+            << result->local_candidate_direct_reference_seconds << ','
+            << result->local_fallback_requested << ','
+            << result->local_fallback_effective << ','
+            << result->local_fallback_worklist_hash << ','
+            << result->local_fallback_worklist_build_count << ','
+            << result->local_fallback_tasks << ','
+            << result->local_fallback_metadata_bytes << ','
+            << result->local_fallback_base_near_pairs << ','
+            << result->local_fallback_refined_pairs << ','
+            << result->local_fallback_vectorized_sources << ','
+            << result->local_fallback_vectorized_lanes << ','
+            << result->local_fallback_scalar_self_pairs << ','
+            << result->local_fallback_seconds
             << '\n';
   }
 
@@ -4828,19 +4850,22 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                   static_cast<std::size_t>(options.matvec_audit_sample_count),
                   "solution", executor, coupled, result.near_integration,
                   result.quad_buffer, &panels, options.fmm_local_refine_tol,
-                  options.fmm_local_cache, cache_budget_mb));
+                  options.fmm_local_cache, cache_budget_mb, 1,
+                  options.fmm_local_fallback));
               attribution.push_back(context->attribute_local_p4_candidate(
                   phi_probe, zeros,
                   static_cast<std::size_t>(options.matvec_audit_sample_count),
                   "phi_only", executor, coupled, result.near_integration,
                   result.quad_buffer, &panels, options.fmm_local_refine_tol,
-                  options.fmm_local_cache, cache_budget_mb));
+                  options.fmm_local_cache, cache_budget_mb, 1,
+                  options.fmm_local_fallback));
               attribution.push_back(context->attribute_local_p4_candidate(
                   zeros, phin_probe,
                   static_cast<std::size_t>(options.matvec_audit_sample_count),
                   "phin_only", executor, coupled, result.near_integration,
                   result.quad_buffer, &panels, options.fmm_local_refine_tol,
-                  options.fmm_local_cache, cache_budget_mb));
+                  options.fmm_local_cache, cache_budget_mb, 1,
+                  options.fmm_local_fallback));
             } else {
               attribution.push_back(context->attribute_local_p4(
                   solution_phi, solution_phin,
@@ -4870,19 +4895,22 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                 static_cast<std::size_t>(options.matvec_audit_sample_count),
                 "solution", executor, coupled, result.near_integration,
                 result.quad_buffer, &panels, options.fmm_local_refine_tol,
-                options.fmm_local_cache, cache_budget_mb, 5));
+                options.fmm_local_cache, cache_budget_mb, 5,
+                options.fmm_local_fallback));
             attribution.push_back(context->attribute_local_p4_candidate(
                 phi_probe, zeros,
                 static_cast<std::size_t>(options.matvec_audit_sample_count),
                 "phi_only", executor, coupled, result.near_integration,
                 result.quad_buffer, &panels, options.fmm_local_refine_tol,
-                options.fmm_local_cache, cache_budget_mb));
+                options.fmm_local_cache, cache_budget_mb, 1,
+                options.fmm_local_fallback));
             attribution.push_back(context->attribute_local_p4_candidate(
                 zeros, phin_probe,
                 static_cast<std::size_t>(options.matvec_audit_sample_count),
                 "phin_only", executor, coupled, result.near_integration,
                 result.quad_buffer, &panels, options.fmm_local_refine_tol,
-                options.fmm_local_cache, cache_budget_mb));
+                options.fmm_local_cache, cache_budget_mb, 1,
+                options.fmm_local_fallback));
           }
           write_operator_attribution_outputs(
               attribution, result.tree_vs_direct_matvec_rel, direct_sq);

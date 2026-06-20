@@ -612,3 +612,20 @@ The static plan refined 8,846 cells and left 15,996,854 direct-fallback panel
 pairs. The remaining cost is therefore fallback work rather than repeated
 kernel-jet construction. Full three-protein verification remains pending,
 `gmres-p4` stays fail-closed, and Z4N is not justified by Z4M quick evidence.
+
+## Scope Z4M.1 Packed AVX2 Direct-Fallback Acceleration
+
+Z4M.1 retained the static refinement plan and p4 far operator while packing
+direct fallback work into deterministic four-target by 32-source tasks. On
+the full 1SH1 quick gate, packed AVX2 preserved the sampled audit RMS
+(`1.03558e-4`) and zero recomposition/reference gap. The fallback phase fell
+from `0.814163 s` to `0.138782 s` (`5.87x`), while median candidate apply fell
+from the same-run uncached `1.35455 s` to `0.157966 s` (`8.57x`). Worklist
+metadata used `7.63 MB` and peak RSS remained `62.50 MB`.
+
+The full gate is classified `z4m1_runtime_limited`: Barnase and 1A63 scalar,
+uncached, and packed CLI rows all reached the 3600-second process timeout
+before sampled-detail attribution completed. This does not invalidate the
+1SH1 kernel result, but it blocks Z4N guarded GMRES planning. The next work
+must separate candidate-apply timing from the expensive full-solve/direct-
+reference envelope or reduce that diagnostic cost without relaxing accuracy.

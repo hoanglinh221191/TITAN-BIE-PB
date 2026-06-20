@@ -1738,6 +1738,42 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-fmm-local-cache-budget-mb must be between 64 and 1024.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.tabi_fmm_local_fallback != "scalar" &&
+        pbe.tabi_fmm_local_fallback != "packed-avx2") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-fallback must be scalar or packed-avx2.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_fallback == "packed-avx2" &&
+        pbe.tabi_fmm_local != "single-matvec-p4") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-fallback=packed-avx2 requires -pbe-tabi-fmm-local=single-matvec-p4.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_fallback == "packed-avx2" &&
+        pbe.tabi_fmm_local_refine != "operator-tail-static") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-fallback=packed-avx2 requires operator-tail-static refinement.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_fallback == "packed-avx2" &&
+        pbe.tabi_fmm_local_cache != "kernel-jet") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-fallback=packed-avx2 requires kernel-jet cache.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_fallback == "packed-avx2" &&
+        pbe.tabi_near_integration != "analytic_singular") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-fallback=packed-avx2 requires -pbe-tabi-near-integration=analytic_singular.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_fallback == "packed-avx2" &&
+        pbe.tabi_quad_buffer != "off") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-fallback=packed-avx2 requires -pbe-tabi-quad-buffer=off.");
+      exit(EXIT_FAILURE);
+    }
     if (!std::isfinite(pbe.tabi_fmm_local_refine_tol) ||
         pbe.tabi_fmm_local_refine_tol < 1.0e-4 ||
         pbe.tabi_fmm_local_refine_tol > 5.0e-2) {

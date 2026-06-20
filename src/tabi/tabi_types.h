@@ -269,6 +269,7 @@ struct Options {
   double fmm_local_refine_tol{4.0e-3};
   std::string fmm_local_cache{"off"};
   int fmm_local_cache_budget_mb{256};
+  std::string fmm_local_fallback{"scalar"};
   std::string progress{"off"};
   int progress_interval_seconds{5};
   std::string true_residual_probe{"restart"};
