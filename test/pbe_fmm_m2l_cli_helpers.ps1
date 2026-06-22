@@ -292,7 +292,8 @@ function Write-FmmCliArgFile(
     [ValidateSet('off','audit-p4','single-matvec-p4','gmres-p4')][string]$FmmLocal = 'off',
     [ValidateSet('off','p3-p4-tail','operator-tail-static')][string]$FmmLocalRefine = 'off',
     [double]$FmmLocalRefineTolerance = 4.0e-3,
-    [ValidateSet('off','kernel-jet')][string]$FmmLocalCache = 'off',
+    [ValidateSet('off','kernel-jet','green-jet-compressed')]
+    [string]$FmmLocalCache = 'off',
     [ValidateRange(64,1024)][int]$FmmLocalCacheBudgetMb = 256,
     [ValidateSet('scalar','packed-avx2')][string]$FmmLocalFallback = 'scalar',
     [ValidateSet('legacy-rescan','metric-cache')]

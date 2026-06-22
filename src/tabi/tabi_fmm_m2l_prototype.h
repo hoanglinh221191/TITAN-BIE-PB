@@ -179,8 +179,13 @@ struct JcpOperatorAttributionResult {
   std::size_t local_plan_build_count{0};
   std::size_t local_static_probe_count{0};
   std::string local_cache_mode{"off"};
+  std::string local_cache_layout{"off"};
   std::size_t local_cache_operators{0};
   std::size_t local_cache_bytes{0};
+  std::size_t local_cache_operator_bytes{0};
+  std::size_t local_cache_uncompressed_estimated_bytes{0};
+  double local_cache_compression_ratio{1.0};
+  std::size_t local_cache_far_pair_offsets{0};
   std::size_t local_cache_build_count{0};
   std::size_t local_cache_hits{0};
   double local_plan_seconds{0.0};
@@ -219,6 +224,7 @@ struct JcpLocalP4CandidateResult {
   std::string refine_mode{"off"};
   double refine_tolerance{2.0e-3};
   std::string cache_mode{"off"};
+  std::string cache_layout{"off"};
   std::string status{"ok"};
   std::uint64_t plan_hash{0};
   std::size_t plan_build_count{0};
@@ -230,6 +236,10 @@ struct JcpLocalP4CandidateResult {
   std::size_t far_pairs{0};
   std::size_t cache_operator_count{0};
   std::size_t cache_bytes{0};
+  std::size_t cache_operator_bytes{0};
+  std::size_t cache_uncompressed_estimated_bytes{0};
+  double cache_compression_ratio{1.0};
+  std::size_t cache_far_pair_offsets{0};
   std::size_t cache_build_count{0};
   std::size_t cache_hits{0};
   double plan_seconds{0.0};

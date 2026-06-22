@@ -1709,15 +1709,22 @@ int arguments::post_process() {
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_fmm_local_cache != "off" &&
-        pbe.tabi_fmm_local_cache != "kernel-jet") {
+        pbe.tabi_fmm_local_cache != "kernel-jet" &&
+        pbe.tabi_fmm_local_cache != "green-jet-compressed") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-fmm-local-cache must be off or kernel-jet.");
+          "PBE: -pbe-tabi-fmm-local-cache must be off, kernel-jet, or green-jet-compressed.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_fmm_local_cache == "kernel-jet" &&
         pbe.tabi_fmm_local_refine != "operator-tail-static") {
       TitanUI::print_error(
           "PBE: -pbe-tabi-fmm-local-cache=kernel-jet requires operator-tail-static refinement.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_cache == "green-jet-compressed" &&
+        pbe.tabi_fmm_local_refine != "operator-tail-static") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-cache=green-jet-compressed requires operator-tail-static refinement.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_fmm_local == "single-matvec-p4" &&
@@ -1727,9 +1734,10 @@ int arguments::post_process() {
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_fmm_local == "single-matvec-p4" &&
-        pbe.tabi_fmm_local_cache != "kernel-jet") {
+        pbe.tabi_fmm_local_cache != "kernel-jet" &&
+        pbe.tabi_fmm_local_cache != "green-jet-compressed") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-fmm-local=single-matvec-p4 requires kernel-jet cache.");
+          "PBE: -pbe-tabi-fmm-local=single-matvec-p4 requires kernel-jet or green-jet-compressed cache.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_fmm_local_cache_budget_mb < 64 ||
@@ -1757,9 +1765,10 @@ int arguments::post_process() {
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_fmm_local_fallback == "packed-avx2" &&
-        pbe.tabi_fmm_local_cache != "kernel-jet") {
+        pbe.tabi_fmm_local_cache != "kernel-jet" &&
+        pbe.tabi_fmm_local_cache != "green-jet-compressed") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-fmm-local-fallback=packed-avx2 requires kernel-jet cache.");
+          "PBE: -pbe-tabi-fmm-local-fallback=packed-avx2 requires kernel-jet or green-jet-compressed cache.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_fmm_local_fallback == "packed-avx2" &&

@@ -1730,7 +1730,8 @@ int arguments::parse_arguments(int argc, char **argv) {
                                    "--pbe-tabi-fmm-local-cache"},
                              common_value, i)) {
       pbe.tabi_fmm_local_cache =
-          require_choice(common_value, {"off", "kernel-jet"},
+          require_choice(common_value,
+                         {"off", "kernel-jet", "green-jet-compressed"},
                          "-pbe-tabi-fmm-local-cache");
       continue;
     }

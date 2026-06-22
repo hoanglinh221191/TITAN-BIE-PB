@@ -6426,3 +6426,12 @@ Decision:
   exceeded the `256 MB` diagnostic budget. The measured decision is
   `z4m2_memory_limited`; `gmres-p4` remains fail-closed and production TABI/
   grid policies remain unchanged.
+- Scope Z4M.3 removes that measured cache blocker with two double-precision
+  degree-9 Green jets per far pair. The quick decision is
+  `z4m3_compressed_cache_pass`: 1SH1 achieved `3.00176x` cache reduction and
+  a faster `0.155283 s` median apply while preserving audit `1.4925e-4`;
+  1A63 fit in `118.16 MB` and preserved audit `6.46481e-3`; Barnase used
+  `32.49 MB`, peaked at `137.89 MB` RSS, and retained audit `1.27916e-3`.
+  The full decision is `z4m3_compressed_cache_pass`. This remains diagnostic;
+  `gmres-p4` is fail-closed until a guarded integration scope, and grid remains
+  default.

@@ -1253,3 +1253,11 @@ Decision:
   required `354.73 MB`, exceeding the `256 MB` gate. Keep `gmres-p4`
   fail-closed and address kernel-jet storage before Z4N. Grid remains the PB
   default.
+- Scope Z4M.3 stores two lossless degree-9 Green jets per far pair in a flat,
+  deterministic cache and derives source-normal coefficients during fused
+  contraction. The quick decision is `z4m3_compressed_cache_pass`: full 1SH1
+  cache storage fell from `18.09 MB` to `6.03 MB`, median apply improved from
+  `0.192654 s` to `0.155283 s`, and audit remained `1.4925e-4`. Full 1A63 fit
+  at `118.16 MB` with audit `6.46481e-3`; Barnase used `32.49 MB`, stayed at
+  `137.89 MB` peak RSS, and retained audit `1.27916e-3`. The full decision is
+  `z4m3_compressed_cache_pass`, permitting a guarded GMRES integration plan.

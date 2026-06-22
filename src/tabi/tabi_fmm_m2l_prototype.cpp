@@ -826,6 +826,9 @@ struct StaticLocalP4Plan {
   std::vector<int> target_nodes;
   std::vector<TargetLeafWork> work;
   std::vector<std::vector<CartesianJcpM2lOperatorP4>> cached_operators;
+  std::vector<CartesianJcpCompressedGreenOperatorP4>
+      compressed_cached_operators;
+  std::vector<std::size_t> compressed_cache_offsets;
   std::vector<std::vector<int>> refined_fallback_sources;
   std::unique_ptr<PackedJcpFallbackPlan> packed_fallback_plan;
   std::uint64_t hash{0};
@@ -836,6 +839,10 @@ struct StaticLocalP4Plan {
   std::size_t direct_fallback_pairs{0};
   std::size_t far_pairs{0};
   std::size_t cache_bytes{0};
+  std::size_t cache_operator_bytes{0};
+  std::size_t cache_uncompressed_estimated_bytes{0};
+  double cache_compression_ratio{1.0};
+  std::string cache_layout{"off"};
   double plan_seconds{0.0};
   std::string plan_builder{"legacy-rescan"};
   double probe_moment_seconds{0.0};
@@ -1337,8 +1344,10 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
       refine_tolerance > 5.0e-2)
     throw std::invalid_argument(
         "JCP local p4 static tolerance must be in [1e-4, 5e-2]");
-  if (cache_mode != "off" && cache_mode != "kernel-jet")
-    throw std::invalid_argument("JCP local p4 cache must be off or kernel-jet");
+  if (cache_mode != "off" && cache_mode != "kernel-jet" &&
+      cache_mode != "green-jet-compressed")
+    throw std::invalid_argument(
+        "JCP local p4 cache must be off, kernel-jet, or green-jet-compressed");
   if (fallback_mode != "scalar" && fallback_mode != "packed-avx2")
     throw std::invalid_argument(
         "JCP local p4 fallback must be scalar or packed-avx2");
@@ -1664,41 +1673,99 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
 
   const std::size_t budget_bytes =
       cache_budget_mb * std::size_t{1024} * std::size_t{1024};
-  if (cache_mode == "kernel-jet" && !plan.cache_ready) {
+  const bool cache_requested = cache_mode == "kernel-jet" ||
+                               cache_mode == "green-jet-compressed";
+  if (cache_requested && plan.cache_ready && plan.cache_layout != cache_mode) {
+    plan.cached_operators.clear();
+    plan.compressed_cached_operators.clear();
+    plan.compressed_cache_offsets.clear();
+    plan.cache_ready = false;
+    plan.cache_bytes = 0;
+    plan.cache_operator_bytes = 0;
+    plan.cache_uncompressed_estimated_bytes = 0;
+    plan.cache_compression_ratio = 1.0;
+    plan.cache_layout = "off";
+  }
+  if (cache_requested && !plan.cache_ready) {
+    const std::size_t operator_bytes =
+        cache_mode == "green-jet-compressed"
+            ? sizeof(CartesianJcpCompressedGreenOperatorP4)
+            : sizeof(CartesianJcpM2lOperatorP4);
+    const std::size_t offset_bytes =
+        cache_mode == "green-jet-compressed" && plan.far_pairs > 0
+            ? (plan.work.size() + 1) * sizeof(std::size_t)
+            : 0;
     const std::size_t required_bytes =
-        plan.far_pairs * sizeof(CartesianJcpM2lOperatorP4);
+        plan.far_pairs * operator_bytes + offset_bytes;
     if (required_bytes > budget_bytes)
       throw std::runtime_error("cache_budget_exceeded: required=" +
                                std::to_string(required_bytes) +
                                " budget=" + std::to_string(budget_bytes));
     const auto cache_begin = Clock::now();
-    plan.cached_operators.resize(plan.work.size());
-    for (std::size_t target_index = 0; target_index < plan.work.size();
-         ++target_index) {
-      const Cell &target_cell = impl_->target_tree.cells[
-          static_cast<std::size_t>(plan.target_nodes[target_index])];
-      auto &operators = plan.cached_operators[target_index];
-      operators.reserve(plan.work[target_index].far_sources.size());
-      for (const int source_node : plan.work[target_index].far_sources) {
-        const Cell &source_cell = impl_->source_tree.cells[
-            static_cast<std::size_t>(source_node)];
-        operators.push_back(build_cartesian_jcp_m2l_operator_p4(
-            source_cell.qx, source_cell.qy, source_cell.qz, target_cell.qx,
-            target_cell.qy, target_cell.qz, impl_->eps_ratio, impl_->kappa));
+    if (cache_mode == "green-jet-compressed") {
+      if (plan.far_pairs > 0) {
+        plan.compressed_cache_offsets.assign(plan.work.size() + 1, 0);
+        plan.compressed_cached_operators.reserve(plan.far_pairs);
+        for (std::size_t target_index = 0; target_index < plan.work.size();
+             ++target_index) {
+          plan.compressed_cache_offsets[target_index] =
+              plan.compressed_cached_operators.size();
+          const Cell &target_cell = impl_->target_tree.cells[
+              static_cast<std::size_t>(plan.target_nodes[target_index])];
+          for (const int source_node : plan.work[target_index].far_sources) {
+            const Cell &source_cell = impl_->source_tree.cells[
+                static_cast<std::size_t>(source_node)];
+            plan.compressed_cached_operators.push_back(
+                build_cartesian_jcp_compressed_green_operator_p4(
+                    source_cell.qx, source_cell.qy, source_cell.qz,
+                    target_cell.qx, target_cell.qy, target_cell.qz,
+                    impl_->kappa));
+          }
+        }
+        plan.compressed_cache_offsets.back() =
+            plan.compressed_cached_operators.size();
+      }
+    } else {
+      plan.cached_operators.resize(plan.work.size());
+      for (std::size_t target_index = 0; target_index < plan.work.size();
+           ++target_index) {
+        const Cell &target_cell = impl_->target_tree.cells[
+            static_cast<std::size_t>(plan.target_nodes[target_index])];
+        auto &operators = plan.cached_operators[target_index];
+        operators.reserve(plan.work[target_index].far_sources.size());
+        for (const int source_node : plan.work[target_index].far_sources) {
+          const Cell &source_cell = impl_->source_tree.cells[
+              static_cast<std::size_t>(source_node)];
+          operators.push_back(build_cartesian_jcp_m2l_operator_p4(
+              source_cell.qx, source_cell.qy, source_cell.qz, target_cell.qx,
+              target_cell.qy, target_cell.qz, impl_->eps_ratio,
+              impl_->kappa));
+        }
       }
     }
     plan.cache_bytes = required_bytes;
+    plan.cache_operator_bytes = operator_bytes;
+    plan.cache_uncompressed_estimated_bytes =
+        plan.far_pairs * sizeof(CartesianJcpM2lOperatorP4);
+    plan.cache_compression_ratio =
+        required_bytes > 0
+            ? static_cast<double>(plan.cache_uncompressed_estimated_bytes) /
+                  static_cast<double>(required_bytes)
+            : 1.0;
+    plan.cache_layout = cache_mode;
     plan.cache_ready = true;
     plan.cache_seconds = elapsed_seconds(cache_begin, Clock::now());
     ++impl_->local_cache_build_count;
   }
-  if (cache_mode == "kernel-jet" && plan.cache_bytes > budget_bytes)
+  if (cache_requested && plan.cache_layout == cache_mode &&
+      plan.cache_bytes > budget_bytes)
     throw std::runtime_error("cache_budget_exceeded: existing cache exceeds budget");
 
   JcpLocalP4CandidateResult result;
   result.refine_mode = refine_mode;
   result.refine_tolerance = refine_tolerance;
   result.cache_mode = cache_mode;
+  result.cache_layout = cache_requested ? plan.cache_layout : "off";
   result.plan_hash = plan.hash;
   result.plan_build_count = impl_->static_plan_build_count;
   result.static_probe_count = plan.probe_count;
@@ -1707,8 +1774,20 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   result.direct_fallback_panels = plan.direct_fallback_panels;
   result.direct_fallback_pairs = plan.direct_fallback_pairs;
   result.far_pairs = plan.far_pairs;
-  result.cache_operator_count = plan.cache_ready ? plan.far_pairs : 0;
-  result.cache_bytes = plan.cache_ready ? plan.cache_bytes : 0;
+  result.cache_operator_count =
+      cache_requested && plan.cache_ready ? plan.far_pairs : 0;
+  result.cache_bytes =
+      cache_requested && plan.cache_ready ? plan.cache_bytes : 0;
+  result.cache_operator_bytes =
+      cache_requested ? plan.cache_operator_bytes : 0;
+  result.cache_uncompressed_estimated_bytes =
+      cache_requested ? plan.cache_uncompressed_estimated_bytes : 0;
+  result.cache_compression_ratio =
+      cache_requested ? plan.cache_compression_ratio : 1.0;
+  result.cache_far_pair_offsets =
+      cache_mode == "green-jet-compressed"
+          ? plan.compressed_cache_offsets.size()
+          : 0;
   result.cache_build_count = impl_->local_cache_build_count;
   result.fallback_requested = fallback_mode;
   result.fallback_effective = fallback_mode;
@@ -1764,6 +1843,14 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
               translated = apply_cartesian_jcp_m2l_operator_p4(
                   moments[static_cast<std::size_t>(source_node)],
                   plan.cached_operators[target_index][far_index]);
+            } else if (cache_mode == "green-jet-compressed") {
+              const std::size_t offset =
+                  plan.compressed_cache_offsets[target_index] + far_index;
+              translated =
+                  apply_cartesian_jcp_compressed_green_operator_p4(
+                      moments[static_cast<std::size_t>(source_node)],
+                      plan.compressed_cached_operators[offset],
+                      impl_->eps_ratio);
             } else {
               const Cell &source_cell = impl_->source_tree.cells[
                   static_cast<std::size_t>(source_node)];
@@ -1779,7 +1866,7 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
         }
       });
   result.m2l_seconds = elapsed_seconds(m2l_begin, Clock::now());
-  if (cache_mode == "kernel-jet")
+  if (cache_requested)
     impl_->local_cache_hits += plan.far_pairs;
   result.cache_hits = impl_->local_cache_hits;
 
@@ -1898,9 +1985,11 @@ FmmM2lAnalyticContext::attribute_local_p4_candidate(
   std::sort(apply_times.begin(), apply_times.end());
   const double median_apply = apply_times[apply_times.size() / 2];
   JcpOperatorAttributionResult result;
-  result.approximation_mode = cache_mode == "kernel-jet"
-                                  ? "local_m2l_p4_static_cached"
-                                  : "local_m2l_p4_static";
+  result.approximation_mode =
+      cache_mode == "green-jet-compressed"
+          ? "local_m2l_p4_static_green_cached"
+          : (cache_mode == "kernel-jet" ? "local_m2l_p4_static_cached"
+                                         : "local_m2l_p4_static");
   result.probe = probe;
   result.configured_expansion_order = impl_->config.expansion_order;
   result.implemented_far_moment_degree = 4;
@@ -1915,8 +2004,14 @@ FmmM2lAnalyticContext::attribute_local_p4_candidate(
   result.local_plan_build_count = candidate.plan_build_count;
   result.local_static_probe_count = candidate.static_probe_count;
   result.local_cache_mode = candidate.cache_mode;
+  result.local_cache_layout = candidate.cache_layout;
   result.local_cache_operators = candidate.cache_operator_count;
   result.local_cache_bytes = candidate.cache_bytes;
+  result.local_cache_operator_bytes = candidate.cache_operator_bytes;
+  result.local_cache_uncompressed_estimated_bytes =
+      candidate.cache_uncompressed_estimated_bytes;
+  result.local_cache_compression_ratio = candidate.cache_compression_ratio;
+  result.local_cache_far_pair_offsets = candidate.cache_far_pair_offsets;
   result.local_cache_build_count = candidate.cache_build_count;
   result.local_cache_hits = candidate.cache_hits;
   result.local_plan_seconds = candidate.plan_seconds;

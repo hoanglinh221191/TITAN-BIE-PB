@@ -223,8 +223,13 @@ void write_operator_attribution_outputs(
              "fmm_local_far_pairs_after,fmm_local_refinement_seconds,"
              "fmm_local_plan_hash,fmm_local_plan_build_count,"
              "fmm_local_static_probe_count,fmm_local_cache_mode,"
+             "fmm_local_cache_layout,fmm_local_cache_operator_bytes,"
+             "fmm_local_cache_uncompressed_estimated_bytes,"
+             "fmm_local_cache_compression_ratio,"
+             "fmm_local_cache_far_pair_offsets,"
              "fmm_local_cache_operators,fmm_local_cache_bytes,"
              "fmm_local_cache_build_count,fmm_local_cache_hits,"
+             "fmm_local_cache_build_seconds,"
              "fmm_local_plan_seconds,fmm_local_plan_builder,"
              "fmm_local_plan_probe_moment_seconds,"
              "fmm_local_plan_pair_metric_seconds,"
@@ -316,10 +321,16 @@ void write_operator_attribution_outputs(
             << result->local_plan_build_count << ','
             << result->local_static_probe_count << ','
             << result->local_cache_mode << ','
+            << result->local_cache_layout << ','
+            << result->local_cache_operator_bytes << ','
+            << result->local_cache_uncompressed_estimated_bytes << ','
+            << result->local_cache_compression_ratio << ','
+            << result->local_cache_far_pair_offsets << ','
             << result->local_cache_operators << ','
             << result->local_cache_bytes << ','
             << result->local_cache_build_count << ','
             << result->local_cache_hits << ','
+            << result->local_cache_seconds << ','
             << result->local_plan_seconds << ','
             << result->local_plan_builder << ','
             << result->local_plan_probe_moment_seconds << ','

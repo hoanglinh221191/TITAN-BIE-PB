@@ -647,3 +647,21 @@ The full decision is nevertheless `z4m2_memory_limited`: 1A63 required
 `256 MB` budget. This is not a metric-cache regression. `gmres-p4` remains
 fail-closed; the next performance slice should compress or tile kernel-jet
 storage before Z4N is reconsidered.
+
+## Scope Z4M.3 Lossless Compressed Green-Jet Cache
+
+Z4M.3 replaces the eight degree-8 JCP jets cached per accepted far pair with
+two double-precision degree-9 Green jets. Source-normal coefficients are
+derived during contraction, so the p4 source moments, static refinement plan,
+packed AVX2 fallback, and direct-reference audit are unchanged.
+
+The measured quick gate passed. On full 1SH1, cache storage fell from
+`18,092,416` bytes to `6,027,272` bytes (`3.00176x`), while median candidate
+apply improved from `0.192654 s` to `0.155283 s` and audit RMS remained
+`1.4925e-4`. Full 1A63 used `123,897,544` bytes (`118.16 MB`) within the
+existing `256 MB` budget and retained audit RMS `6.46481e-3`. Barnase also
+passed with a `34,068,616`-byte cache, `137.89 MB` peak RSS, audit RMS
+`1.27916e-3`, and `0.646233 s` median apply. The full three-protein decision
+is `z4m3_compressed_cache_pass`. No FP32, partial cache, disk cache, or tiled
+recomputation was introduced; guarded GMRES stays fail-closed and grid
+remains the production PB default.
