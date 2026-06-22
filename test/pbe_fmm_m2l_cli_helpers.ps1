@@ -294,7 +294,9 @@ function Write-FmmCliArgFile(
     [double]$FmmLocalRefineTolerance = 4.0e-3,
     [ValidateSet('off','kernel-jet')][string]$FmmLocalCache = 'off',
     [ValidateRange(64,1024)][int]$FmmLocalCacheBudgetMb = 256,
-    [ValidateSet('scalar','packed-avx2')][string]$FmmLocalFallback = 'scalar'
+    [ValidateSet('scalar','packed-avx2')][string]$FmmLocalFallback = 'scalar',
+    [ValidateSet('legacy-rescan','metric-cache')]
+    [string]$FmmLocalPlanBuilder = 'legacy-rescan'
 ) {
     $pdbPath = Join-Path $RunDir 'driver.pdb'
     Write-FmmCliDummyPdb $pdbPath
@@ -336,6 +338,7 @@ function Write-FmmCliArgFile(
         "-pbe-tabi-fmm-local-cache=$FmmLocalCache",
         "-pbe-tabi-fmm-local-cache-budget-mb=$FmmLocalCacheBudgetMb",
         "-pbe-tabi-fmm-local-fallback=$FmmLocalFallback",
+        "-pbe-tabi-fmm-local-plan-builder=$FmmLocalPlanBuilder",
         "-pbe-tabi-surface-points=$SurfacePoints",
         '-pbe-tabi-tree-leaf-size=64',
         "-pbe-tabi-opening-theta=$(& $format $OpeningTheta)",

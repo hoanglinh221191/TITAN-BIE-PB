@@ -1774,6 +1774,37 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-fmm-local-fallback=packed-avx2 requires -pbe-tabi-quad-buffer=off.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.tabi_fmm_local_plan_builder != "legacy-rescan" &&
+        pbe.tabi_fmm_local_plan_builder != "metric-cache") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-plan-builder must be legacy-rescan or metric-cache.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_plan_builder == "metric-cache" &&
+        pbe.tabi_fmm_local_refine != "operator-tail-static") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-plan-builder=metric-cache requires operator-tail-static refinement.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_plan_builder == "metric-cache" &&
+        pbe.tabi_fmm_local != "audit-p4" &&
+        pbe.tabi_fmm_local != "single-matvec-p4") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-plan-builder=metric-cache requires audit-p4 or single-matvec-p4.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_plan_builder == "metric-cache" &&
+        pbe.tabi_matvec_audit != "sampled-detail") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-plan-builder=metric-cache requires sampled-detail audit.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_plan_builder == "metric-cache" &&
+        pbe.tabi_taylor_order != 4) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-plan-builder=metric-cache requires Taylor order 4.");
+      exit(EXIT_FAILURE);
+    }
     if (!std::isfinite(pbe.tabi_fmm_local_refine_tol) ||
         pbe.tabi_fmm_local_refine_tol < 1.0e-4 ||
         pbe.tabi_fmm_local_refine_tol > 5.0e-2) {

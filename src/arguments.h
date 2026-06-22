@@ -239,6 +239,7 @@ struct PbeArgs {
   std::string tabi_fmm_local_cache{"off"};
   int tabi_fmm_local_cache_budget_mb{256};
   std::string tabi_fmm_local_fallback{"scalar"};
+  std::string tabi_fmm_local_plan_builder{"legacy-rescan"};
   std::string tabi_interaction_mode{"auto"};
   std::string tabi_node_bounds{"moment"};
   std::string tabi_tree_builder{"grouped-morton"};

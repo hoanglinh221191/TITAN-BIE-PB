@@ -629,3 +629,21 @@ before sampled-detail attribution completed. This does not invalidate the
 1SH1 kernel result, but it blocks Z4N guarded GMRES planning. The next work
 must separate candidate-apply timing from the expensive full-solve/direct-
 reference envelope or reduce that diagnostic cost without relaxing accuracy.
+
+## Scope Z4M.2 Static Refinement Plan Build Acceleration
+
+Z4M.2 caches deterministic p3/p4 pair metrics and evaluates target leaves in
+parallel without changing the four probes, refinement ordering, tie breaks, or
+final worklist. On full 1SH1, the metric-cache builder reproduced the legacy
+plan hash, 8,846 refined cells, 5,918 split children, 15,996,854 direct-
+fallback pairs, and sampled audit RMS `1.4925e-4`. Plan construction fell from
+`770.073 s` to `9.83224 s` (`78.32x`). Pair evaluations fell from 211,413 to
+10,558, with 200,855 cache hits and only `0.08 MB` peak metric storage.
+
+Barnase completed with plan time `48.8339 s`, audit RMS `0.00127916`, 40,544
+metric evaluations, 1,481,616 cache hits, and `0.16 MB` peak metric storage.
+The full decision is nevertheless `z4m2_memory_limited`: 1A63 required
+`354.73 MB` for the existing order-8 kernel-jet cache, above the diagnostic
+`256 MB` budget. This is not a metric-cache regression. `gmres-p4` remains
+fail-closed; the next performance slice should compress or tile kernel-jet
+storage before Z4N is reconsidered.

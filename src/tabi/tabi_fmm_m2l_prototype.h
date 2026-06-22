@@ -184,6 +184,15 @@ struct JcpOperatorAttributionResult {
   std::size_t local_cache_build_count{0};
   std::size_t local_cache_hits{0};
   double local_plan_seconds{0.0};
+  std::string local_plan_builder{"legacy-rescan"};
+  double local_plan_probe_moment_seconds{0.0};
+  double local_plan_pair_metric_seconds{0.0};
+  double local_plan_refinement_seconds{0.0};
+  std::size_t local_plan_pair_metric_evaluations{0};
+  std::size_t local_plan_pair_metric_cache_hits{0};
+  std::size_t local_plan_refinement_iterations{0};
+  std::size_t local_plan_metric_cache_peak_bytes{0};
+  std::size_t local_plan_parallel_target_leaves{0};
   double local_cache_seconds{0.0};
   double local_candidate_apply_seconds{0.0};
   std::size_t local_candidate_repeat_count{1};
@@ -224,6 +233,15 @@ struct JcpLocalP4CandidateResult {
   std::size_t cache_build_count{0};
   std::size_t cache_hits{0};
   double plan_seconds{0.0};
+  std::string plan_builder{"legacy-rescan"};
+  double plan_probe_moment_seconds{0.0};
+  double plan_pair_metric_seconds{0.0};
+  double plan_refinement_seconds{0.0};
+  std::size_t plan_pair_metric_evaluations{0};
+  std::size_t plan_pair_metric_cache_hits{0};
+  std::size_t plan_refinement_iterations{0};
+  std::size_t plan_metric_cache_peak_bytes{0};
+  std::size_t plan_parallel_target_leaves{0};
   double cache_seconds{0.0};
   double moment_seconds{0.0};
   double m2l_seconds{0.0};
@@ -370,7 +388,8 @@ public:
       double refine_tolerance = 2.0e-3,
       const std::string &cache_mode = "kernel-jet",
       std::size_t cache_budget_mb = 256,
-      const std::string &fallback_mode = "scalar") const;
+      const std::string &fallback_mode = "scalar",
+      const std::string &plan_builder = "legacy-rescan") const;
 
   JcpOperatorAttributionResult attribute_local_p4_candidate(
       const std::vector<double> &phi, const std::vector<double> &phin,
@@ -383,7 +402,8 @@ public:
       const std::string &cache_mode = "kernel-jet",
       std::size_t cache_budget_mb = 256,
       std::size_t repeat_count = 1,
-      const std::string &fallback_mode = "scalar") const;
+      const std::string &fallback_mode = "scalar",
+      const std::string &plan_builder = "legacy-rescan") const;
 
 private:
   JcpOperatorAttributionResult attribute_impl(

@@ -1748,6 +1748,14 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-pbe-tabi-fmm-local-fallback");
       continue;
     }
+    if (consume_option_value(arg, {"-pbe-tabi-fmm-local-plan-builder",
+                                   "--pbe-tabi-fmm-local-plan-builder"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local_plan_builder =
+          require_choice(common_value, {"legacy-rescan", "metric-cache"},
+                         "-pbe-tabi-fmm-local-plan-builder");
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",
                                    "--pbe-tabi-interaction-mode"},
                              common_value, i)) {

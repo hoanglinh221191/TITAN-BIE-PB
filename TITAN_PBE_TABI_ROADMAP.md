@@ -6417,3 +6417,12 @@ Decision:
   runtime-limited at the 3600-second process gate, including packed rows.
   Therefore `gmres-p4` remains fail-closed and no TABI/grid default changes
   follow from Z4M.1.
+- Scope Z4M.2 caches static-refinement p3/p4 pair metrics while preserving
+  deterministic summation, tie breaks, plan hash, and output. On full 1SH1,
+  plan build improved from `770.073 s` to `9.83224 s` (`78.32x`) with exact
+  plan parity and audit RMS `1.4925e-4`. Barnase completed with a `48.8339 s`
+  plan and audit RMS `0.00127916`. Metric storage remained below `0.16 MB`,
+  but 1A63 required `354.73 MB` for the separate order-8 kernel-jet cache and
+  exceeded the `256 MB` diagnostic budget. The measured decision is
+  `z4m2_memory_limited`; `gmres-p4` remains fail-closed and production TABI/
+  grid policies remain unchanged.

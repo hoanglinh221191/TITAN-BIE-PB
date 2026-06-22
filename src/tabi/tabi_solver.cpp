@@ -225,7 +225,16 @@ void write_operator_attribution_outputs(
              "fmm_local_static_probe_count,fmm_local_cache_mode,"
              "fmm_local_cache_operators,fmm_local_cache_bytes,"
              "fmm_local_cache_build_count,fmm_local_cache_hits,"
-             "fmm_local_plan_seconds,fmm_local_cache_seconds,"
+             "fmm_local_plan_seconds,fmm_local_plan_builder,"
+             "fmm_local_plan_probe_moment_seconds,"
+             "fmm_local_plan_pair_metric_seconds,"
+             "fmm_local_plan_refinement_seconds,"
+             "fmm_local_plan_pair_metric_evaluations,"
+             "fmm_local_plan_pair_metric_cache_hits,"
+             "fmm_local_plan_refinement_iterations,"
+             "fmm_local_plan_metric_cache_peak_bytes,"
+             "fmm_local_plan_parallel_target_leaves,"
+             "fmm_local_cache_seconds,"
              "fmm_local_candidate_apply_seconds,"
              "fmm_local_candidate_repeat_count,"
              "fmm_local_candidate_median_apply_seconds,"
@@ -312,6 +321,15 @@ void write_operator_attribution_outputs(
             << result->local_cache_build_count << ','
             << result->local_cache_hits << ','
             << result->local_plan_seconds << ','
+            << result->local_plan_builder << ','
+            << result->local_plan_probe_moment_seconds << ','
+            << result->local_plan_pair_metric_seconds << ','
+            << result->local_plan_refinement_seconds << ','
+            << result->local_plan_pair_metric_evaluations << ','
+            << result->local_plan_pair_metric_cache_hits << ','
+            << result->local_plan_refinement_iterations << ','
+            << result->local_plan_metric_cache_peak_bytes << ','
+            << result->local_plan_parallel_target_leaves << ','
             << result->local_cache_seconds << ','
             << result->local_candidate_apply_seconds << ','
             << result->local_candidate_repeat_count << ','
@@ -4851,21 +4869,24 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                   "solution", executor, coupled, result.near_integration,
                   result.quad_buffer, &panels, options.fmm_local_refine_tol,
                   options.fmm_local_cache, cache_budget_mb, 1,
-                  options.fmm_local_fallback));
+                  options.fmm_local_fallback,
+                  options.fmm_local_plan_builder));
               attribution.push_back(context->attribute_local_p4_candidate(
                   phi_probe, zeros,
                   static_cast<std::size_t>(options.matvec_audit_sample_count),
                   "phi_only", executor, coupled, result.near_integration,
                   result.quad_buffer, &panels, options.fmm_local_refine_tol,
                   options.fmm_local_cache, cache_budget_mb, 1,
-                  options.fmm_local_fallback));
+                  options.fmm_local_fallback,
+                  options.fmm_local_plan_builder));
               attribution.push_back(context->attribute_local_p4_candidate(
                   zeros, phin_probe,
                   static_cast<std::size_t>(options.matvec_audit_sample_count),
                   "phin_only", executor, coupled, result.near_integration,
                   result.quad_buffer, &panels, options.fmm_local_refine_tol,
                   options.fmm_local_cache, cache_budget_mb, 1,
-                  options.fmm_local_fallback));
+                  options.fmm_local_fallback,
+                  options.fmm_local_plan_builder));
             } else {
               attribution.push_back(context->attribute_local_p4(
                   solution_phi, solution_phin,
@@ -4896,21 +4917,24 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                 "solution", executor, coupled, result.near_integration,
                 result.quad_buffer, &panels, options.fmm_local_refine_tol,
                 options.fmm_local_cache, cache_budget_mb, 5,
-                options.fmm_local_fallback));
+                options.fmm_local_fallback,
+                options.fmm_local_plan_builder));
             attribution.push_back(context->attribute_local_p4_candidate(
                 phi_probe, zeros,
                 static_cast<std::size_t>(options.matvec_audit_sample_count),
                 "phi_only", executor, coupled, result.near_integration,
                 result.quad_buffer, &panels, options.fmm_local_refine_tol,
                 options.fmm_local_cache, cache_budget_mb, 1,
-                options.fmm_local_fallback));
+                options.fmm_local_fallback,
+                options.fmm_local_plan_builder));
             attribution.push_back(context->attribute_local_p4_candidate(
                 zeros, phin_probe,
                 static_cast<std::size_t>(options.matvec_audit_sample_count),
                 "phin_only", executor, coupled, result.near_integration,
                 result.quad_buffer, &panels, options.fmm_local_refine_tol,
                 options.fmm_local_cache, cache_budget_mb, 1,
-                options.fmm_local_fallback));
+                options.fmm_local_fallback,
+                options.fmm_local_plan_builder));
           }
           write_operator_attribution_outputs(
               attribution, result.tree_vs_direct_matvec_rel, direct_sq);

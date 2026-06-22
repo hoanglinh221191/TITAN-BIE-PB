@@ -1243,3 +1243,13 @@ Decision:
   variants, so the measured full decision is `z4m1_runtime_limited`. Keep
   `gmres-p4` fail-closed; isolate the candidate from full-solve/direct-reference
   runtime before considering Z4N. Grid remains the PB default.
+- Scope Z4M.2 replaces repeated p3/p4 pair rescans with a deterministic metric
+  cache and parallel target-leaf planning. Full 1SH1 preserved the exact plan
+  hash/work counts and audit RMS `1.4925e-4`, while plan time fell from
+  `770.073 s` to `9.83224 s` (`78.32x`). The metric cache itself peaked at
+  only `0.08 MB`; Barnase completed in `48.8339 s` with audit RMS
+  `0.00127916` and `0.16 MB` metric storage. The full decision is
+  `z4m2_memory_limited` because 1A63's existing order-8 kernel-jet cache
+  required `354.73 MB`, exceeding the `256 MB` gate. Keep `gmres-p4`
+  fail-closed and address kernel-jet storage before Z4N. Grid remains the PB
+  default.
