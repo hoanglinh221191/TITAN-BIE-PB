@@ -2,11 +2,17 @@
 #define TITAN_TABI_FMM_M2L_PROTOTYPE_H
 
 #include <cstddef>
+#include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
 class TitanExecutor;
+
+namespace TitanPBE::Tabi {
+struct Panel;
+}
 
 namespace titan::tabi::fmm_m2l {
 
@@ -111,6 +117,14 @@ struct JcpAnalyticOperatorResult {
   std::size_t panels = 0;
   std::size_t near_pairs = 0;
   std::size_t far_pairs = 0;
+  std::size_t near_self_pairs = 0;
+  std::size_t near_one_ring_pairs = 0;
+  std::size_t near_duffy_pairs = 0;
+  std::size_t near_centroid_pairs = 0;
+  std::size_t near_fallbacks = 0;
+  std::size_t duffy_subdivisions_max = 0;
+  double duffy_subdivisions_mean = 0.0;
+  std::string near_kernel_policy = "centroid";
   double setup_seconds = 0.0;
   double apply_seconds = 0.0;
   std::size_t context_nodes = 0;
@@ -118,6 +132,144 @@ struct JcpAnalyticOperatorResult {
   std::vector<double> phi;
   std::vector<double> phin;
   bool finite_outputs = true;
+};
+
+struct JcpOperatorAttributionRecord {
+  std::string probe;
+  std::size_t target_panel{0};
+  std::string region;
+  int source_node{-1};
+  int source_depth{-1};
+  std::size_t source_panels{0};
+  double distance{0.0};
+  double source_radius{0.0};
+  double mac_ratio{0.0};
+  std::array<double, 4> approximate{};
+  std::array<double, 4> direct{};
+};
+
+struct JcpOperatorAttributionResult {
+  std::string approximation_mode{"legacy_degree1"};
+  std::string probe;
+  std::vector<std::size_t> sampled_targets;
+  std::vector<JcpOperatorAttributionRecord> records;
+  int configured_expansion_order{0};
+  int implemented_far_moment_degree{1};
+  std::size_t near_records{0};
+  std::size_t far_records{0};
+  double recomposition_rel_error{0.0};
+  double moment_build_seconds{0.0};
+  double far_evaluation_seconds{0.0};
+  double m2l_seconds{0.0};
+  double l2p_seconds{0.0};
+  std::size_t local_target_leaves{0};
+  std::size_t local_m2l_pairs{0};
+  std::string local_refine_mode{"off"};
+  double local_refine_tolerance{4.0e-3};
+  double local_tail_ratio_before{0.0};
+  double local_tail_ratio_after{0.0};
+  std::size_t local_refined_cells{0};
+  std::size_t local_split_children{0};
+  std::size_t local_direct_fallback_panels{0};
+  std::size_t local_direct_fallback_pairs{0};
+  std::size_t local_far_pairs_before{0};
+  std::size_t local_far_pairs_after{0};
+  double local_refinement_seconds{0.0};
+  std::uint64_t local_plan_hash{0};
+  std::size_t local_plan_build_count{0};
+  std::size_t local_static_probe_count{0};
+  std::string local_cache_mode{"off"};
+  std::string local_cache_layout{"off"};
+  std::size_t local_cache_operators{0};
+  std::size_t local_cache_bytes{0};
+  std::size_t local_cache_operator_bytes{0};
+  std::size_t local_cache_uncompressed_estimated_bytes{0};
+  double local_cache_compression_ratio{1.0};
+  std::size_t local_cache_far_pair_offsets{0};
+  std::size_t local_cache_build_count{0};
+  std::size_t local_cache_hits{0};
+  double local_plan_seconds{0.0};
+  std::string local_plan_builder{"legacy-rescan"};
+  double local_plan_probe_moment_seconds{0.0};
+  double local_plan_pair_metric_seconds{0.0};
+  double local_plan_refinement_seconds{0.0};
+  std::size_t local_plan_pair_metric_evaluations{0};
+  std::size_t local_plan_pair_metric_cache_hits{0};
+  std::size_t local_plan_refinement_iterations{0};
+  std::size_t local_plan_metric_cache_peak_bytes{0};
+  std::size_t local_plan_parallel_target_leaves{0};
+  double local_cache_seconds{0.0};
+  double local_candidate_apply_seconds{0.0};
+  std::size_t local_candidate_repeat_count{1};
+  double local_candidate_median_apply_seconds{0.0};
+  double local_candidate_direct_reference_seconds{0.0};
+  std::string local_fallback_requested{"scalar"};
+  std::string local_fallback_effective{"scalar"};
+  std::uint64_t local_fallback_worklist_hash{0};
+  std::size_t local_fallback_worklist_build_count{0};
+  std::size_t local_fallback_tasks{0};
+  std::size_t local_fallback_metadata_bytes{0};
+  std::size_t local_fallback_base_near_pairs{0};
+  std::size_t local_fallback_refined_pairs{0};
+  std::size_t local_fallback_vectorized_sources{0};
+  std::size_t local_fallback_vectorized_lanes{0};
+  std::size_t local_fallback_scalar_self_pairs{0};
+  double local_fallback_seconds{0.0};
+  bool finite_outputs{true};
+};
+
+struct JcpLocalP4CandidateResult {
+  std::vector<double> phi;
+  std::vector<double> phin;
+  std::string refine_mode{"off"};
+  double refine_tolerance{2.0e-3};
+  std::string cache_mode{"off"};
+  std::string cache_layout{"off"};
+  std::string status{"ok"};
+  std::uint64_t plan_hash{0};
+  std::size_t plan_build_count{0};
+  std::size_t static_probe_count{0};
+  std::size_t refined_cells{0};
+  std::size_t split_children{0};
+  std::size_t direct_fallback_panels{0};
+  std::size_t direct_fallback_pairs{0};
+  std::size_t far_pairs{0};
+  std::size_t cache_operator_count{0};
+  std::size_t cache_bytes{0};
+  std::size_t cache_operator_bytes{0};
+  std::size_t cache_uncompressed_estimated_bytes{0};
+  double cache_compression_ratio{1.0};
+  std::size_t cache_far_pair_offsets{0};
+  std::size_t cache_build_count{0};
+  std::size_t cache_hits{0};
+  double plan_seconds{0.0};
+  std::string plan_builder{"legacy-rescan"};
+  double plan_probe_moment_seconds{0.0};
+  double plan_pair_metric_seconds{0.0};
+  double plan_refinement_seconds{0.0};
+  std::size_t plan_pair_metric_evaluations{0};
+  std::size_t plan_pair_metric_cache_hits{0};
+  std::size_t plan_refinement_iterations{0};
+  std::size_t plan_metric_cache_peak_bytes{0};
+  std::size_t plan_parallel_target_leaves{0};
+  double cache_seconds{0.0};
+  double moment_seconds{0.0};
+  double m2l_seconds{0.0};
+  double direct_fallback_seconds{0.0};
+  double l2p_seconds{0.0};
+  double apply_seconds{0.0};
+  std::string fallback_requested{"scalar"};
+  std::string fallback_effective{"scalar"};
+  std::uint64_t fallback_worklist_hash{0};
+  std::size_t fallback_worklist_build_count{0};
+  std::size_t fallback_tasks{0};
+  std::size_t fallback_metadata_bytes{0};
+  std::size_t fallback_base_near_pairs{0};
+  std::size_t fallback_refined_pairs{0};
+  std::size_t fallback_vectorized_sources{0};
+  std::size_t fallback_vectorized_lanes{0};
+  std::size_t fallback_scalar_self_pairs{0};
+  bool finite_outputs{true};
 };
 
 struct JcpGuardedGmresMetrics {
@@ -199,9 +351,79 @@ public:
 
   JcpAnalyticOperatorResult apply(const std::vector<double> &phi,
                                   const std::vector<double> &phin,
-                                  TitanExecutor &executor) const;
+                                  TitanExecutor &executor,
+                                  bool coupled = true,
+                                  const std::string &near_integration =
+                                      "centroid",
+                                  const std::string &quad_buffer = "off",
+                                  const std::vector<TitanPBE::Tabi::Panel>
+                                      *production_panels = nullptr) const;
+
+  JcpOperatorAttributionResult attribute(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      std::size_t sample_count, const std::string &probe,
+      TitanExecutor &executor, bool coupled = true,
+      const std::string &near_integration = "centroid",
+      const std::string &quad_buffer = "off",
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr)
+      const;
+
+  JcpOperatorAttributionResult attribute_cartesian(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      std::size_t sample_count, const std::string &probe,
+      TitanExecutor &executor, bool coupled = true,
+      const std::string &near_integration = "centroid",
+      const std::string &quad_buffer = "off",
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr)
+      const;
+
+  JcpOperatorAttributionResult attribute_local_p4(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      std::size_t sample_count, const std::string &probe,
+      TitanExecutor &executor, bool coupled = true,
+      const std::string &near_integration = "centroid",
+      const std::string &quad_buffer = "off",
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr,
+      const std::string &refine_mode = "off",
+      double refine_tolerance = 4.0e-3)
+      const;
+
+  JcpLocalP4CandidateResult apply_local_p4_candidate(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      TitanExecutor &executor, bool coupled = true,
+      const std::string &near_integration = "centroid",
+      const std::string &quad_buffer = "off",
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr,
+      const std::string &refine_mode = "operator-tail-static",
+      double refine_tolerance = 2.0e-3,
+      const std::string &cache_mode = "kernel-jet",
+      std::size_t cache_budget_mb = 256,
+      const std::string &fallback_mode = "scalar",
+      const std::string &plan_builder = "legacy-rescan") const;
+
+  JcpOperatorAttributionResult attribute_local_p4_candidate(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      std::size_t sample_count, const std::string &probe,
+      TitanExecutor &executor, bool coupled = true,
+      const std::string &near_integration = "centroid",
+      const std::string &quad_buffer = "off",
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr,
+      double refine_tolerance = 2.0e-3,
+      const std::string &cache_mode = "kernel-jet",
+      std::size_t cache_budget_mb = 256,
+      std::size_t repeat_count = 1,
+      const std::string &fallback_mode = "scalar",
+      const std::string &plan_builder = "legacy-rescan") const;
 
 private:
+  JcpOperatorAttributionResult attribute_impl(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      std::size_t sample_count, const std::string &probe,
+      TitanExecutor &executor, bool coupled,
+      const std::string &near_integration, const std::string &quad_buffer,
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels,
+      int approximation_mode, const std::string &refine_mode,
+      double refine_tolerance) const;
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

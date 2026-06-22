@@ -1,0 +1,25 @@
+# TITAN FMM/M2L Scope Z3C Opening-Theta Policy Report
+
+Decision: z3c_theta06_safe_default
+
+Z3C isolates opening-theta policy after Z3B showed theta dominates the FMM audit/runtime tradeoff.
+
+Artifacts:
+- Matrix: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3c\fagbi_scope_z3c_matrix.csv
+- Decision: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3c\fagbi_scope_z3c_decision.csv
+- Summary: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3c\fagbi_scope_z3c_summary.dat
+- Plot: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3c\fagbi_scope_z3c_theta_plot.svg
+
+Rows:
+- barnase_theta0p45: fixture=barnase, cap=128, theta=0.45, status=ok, audit=0.000929718, warning=, matvec_s=1.10751, true_residual=2.62652E-15, precond=fmm_nearfield_ilu0
+- barnase_theta0p6: fixture=barnase, cap=128, theta=0.6, status=ok, audit=0.0026758, warning=, matvec_s=0.579119, true_residual=1.04048E-14, precond=fmm_nearfield_ilu0
+- barnase_theta0p7: fixture=barnase, cap=128, theta=0.7, status=ok, audit=0.00403924, warning=, matvec_s=0.435918, true_residual=7.24113E-15, precond=fmm_nearfield_ilu0
+- barnase_theta0p8: fixture=barnase, cap=128, theta=0.8, status=ok, audit=0.00641036, warning=, matvec_s=0.294406, true_residual=3.50211E-15, precond=fmm_nearfield_ilu0
+- research-medium_theta0p45: fixture=research-medium, cap=128, theta=0.45, status=ok, audit=0.00131724, warning=, matvec_s=0.92054, true_residual=1.11931E-14, precond=fmm_nearfield_ilu0
+- research-medium_theta0p6: fixture=research-medium, cap=128, theta=0.6, status=ok, audit=0.00323059, warning=, matvec_s=0.538061, true_residual=1.10675E-14, precond=fmm_nearfield_ilu0
+- research-medium_theta0p7: fixture=research-medium, cap=128, theta=0.7, status=ok, audit=0.0048152, warning=, matvec_s=0.408833, true_residual=1.63219E-14, precond=fmm_nearfield_ilu0
+- research-medium_theta0p8: fixture=research-medium, cap=128, theta=0.8, status=ok, audit=0.00801111, warning=audit_gt_8e-3, matvec_s=0.289004, true_residual=8.65294E-14, precond=fmm_nearfield_ilu0
+- research-alt_theta0p45: fixture=research-alt, cap=128, theta=0.45, status=ok, audit=0.00225283, warning=, matvec_s=0.822015, true_residual=1.06005E-14, precond=fmm_nearfield_ilu0
+- research-alt_theta0p6: fixture=research-alt, cap=128, theta=0.6, status=ok, audit=0.00499984, warning=, matvec_s=0.510341, true_residual=2.96005E-15, precond=fmm_nearfield_ilu0
+- research-alt_theta0p7: fixture=research-alt, cap=128, theta=0.7, status=ok, audit=0.00901184, warning=audit_gt_8e-3, matvec_s=0.409828, true_residual=1.16257E-14, precond=fmm_nearfield_ilu0
+- research-alt_theta0p8: fixture=research-alt, cap=128, theta=0.8, status=ok, audit=0.0137388, warning=audit_gt_8e-3, matvec_s=0.495306, true_residual=1.41713E-14, precond=fmm_nearfield_ilu0

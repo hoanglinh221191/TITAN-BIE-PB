@@ -1489,6 +1489,48 @@ void direct_jcp_target_batch_soa_avx2(
 }
 #endif
 
+bool packed_jcp_avx2_available() noexcept {
+#if TITAN_SIMD_X86 && TITAN_RUNTIME_TARGET_ATTRS
+  return titan_simd_dispatch::runtime_has_avx2();
+#else
+  return false;
+#endif
+}
+
+void direct_jcp_packed_target_source_span_avx2(
+    const std::vector<Panel> &panels,
+    const std::vector<std::size_t> &target_indices,
+    const TreePanelCache &panel_cache, const TreeUnknownCache &unknown_cache,
+    double eps_ratio, double kappa, bool coupled, std::size_t source_first,
+    std::size_t source_count, std::vector<JcpAccum> &accum,
+    std::size_t &near_count, std::size_t &vectorized_sources,
+    std::size_t &vector_lanes) noexcept {
+#if TITAN_SIMD_X86 && TITAN_RUNTIME_TARGET_ATTRS
+  if (titan_simd_dispatch::runtime_has_avx2()) {
+    TreeNode span;
+    span.first_panel = source_first;
+    span.panel_count = source_count;
+    direct_jcp_target_source_tile_sum_avx2_4x4(
+        panels, target_indices, panel_cache, unknown_cache, eps_ratio, kappa,
+        coupled, span, accum, near_count, vectorized_sources, vector_lanes);
+    return;
+  }
+#else
+  (void)panels;
+  (void)panel_cache;
+  (void)unknown_cache;
+  (void)eps_ratio;
+  (void)kappa;
+  (void)coupled;
+  (void)source_first;
+  (void)source_count;
+  (void)near_count;
+  (void)vectorized_sources;
+  (void)vector_lanes;
+#endif
+  accum.assign(target_indices.size(), JcpAccum{});
+}
+
 void direct_jcp_target_batch_tile_sum(
     const std::vector<Panel> &panels,
     const std::vector<std::size_t> &target_indices,

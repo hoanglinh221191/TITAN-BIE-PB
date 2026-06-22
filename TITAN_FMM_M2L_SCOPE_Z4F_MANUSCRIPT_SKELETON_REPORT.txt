@@ -1,0 +1,25 @@
+# TITAN FMM/M2L Scope Z4F Manuscript Skeleton Report
+
+Decision: z4f_manuscript_skeleton_ready
+
+Z4F converts the validated Z4D manuscript assets and Z4E evidence manifest into a journal-neutral Word manuscript skeleton.
+
+Artifacts:
+- DOCX: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4f\titan_fagbi_manuscript_skeleton.docx
+- Markdown source: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4f\fagbi_scope_z4f_manuscript_source.md
+- Claim trace: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4f\fagbi_scope_z4f_claim_trace.csv
+- Citation gaps: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4f\fagbi_scope_z4f_citation_gaps.csv
+- DOCX QA: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4f\fagbi_scope_z4f_docx_qa.csv
+- PDF render: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4f\render_qa\titan_fagbi_manuscript_skeleton.pdf
+- Decision: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4f\fagbi_scope_z4f_decision.csv
+- Summary: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4f\fagbi_scope_z4f_summary.dat
+
+Policy:
+- Grid remains the production PBE default.
+- Cap-128 rows cite full direct TABI energy.
+- Cap-256 rows cite sampled direct-operator audit.
+- Duffy remains explicit-only; the paper policy uses theta 0.6 and Taylor order 4.
+- The Barnase money plot is framed as dense/high-coupling evidence, not broad generalization.
+
+Citation status:
+- Bibliographic gaps remain explicit in the separate citation-gaps CSV; no references were invented.

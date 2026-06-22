@@ -665,6 +665,15 @@ void direct_jcp_target_batch_tile_sum(
     std::size_t &near_count, std::size_t &vectorized_sources,
     std::size_t &vector_lanes, bool clean_source_span,
     std::size_t &soa_sources) noexcept;
+bool packed_jcp_avx2_available() noexcept;
+void direct_jcp_packed_target_source_span_avx2(
+    const std::vector<Panel> &panels,
+    const std::vector<std::size_t> &target_indices,
+    const TreePanelCache &panel_cache, const TreeUnknownCache &unknown_cache,
+    double eps_ratio, double kappa, bool coupled, std::size_t source_first,
+    std::size_t source_count, std::vector<JcpAccum> &accum,
+    std::size_t &near_count, std::size_t &vectorized_sources,
+    std::size_t &vector_lanes) noexcept;
 JcpAccum direct_jcp_ordered_tile_sum(
     const Panel &target, std::size_t target_index,
     const TreePanelCache &panel_cache, const TreeUnknownCache &unknown_cache,

@@ -1072,6 +1072,130 @@ Decision:
   `1750.93 s`, final residual `6.12512e-15`, and zero near fallbacks. Treat
   Z1D as high-resolution converged after targeted verification; the remaining
   constraint is direct-runtime cost, not missing surface-convergence evidence.
+- Scope Z2A enables analytic-singular near-field parity for the FMM/M2L path:
+  `test/pbe_fagbi_scope_z2a_fmm_near_parity.ps1` verifies that
+  `-pbe-tabi-fmm-m2l=single-matvec-analytic` now accepts
+  `-pbe-tabi-near-integration=analytic_singular` and uses the shared
+  production near kernel. The full smoke passed Born, off-center Kirkwood, and
+  sampled protein cap-128 rows; the protein row reported near pairs
+  `13,815,687`, far pairs `23,798,002`, and sampled audit RMS `0.00344495`.
+  Scope Z2B enables explicit `duffy_adaptive` for the same FMM/M2L near-source
+  path with `quad_buffer=adaptive`: Born and off-center Kirkwood direct/FMM
+  Duffy rows reported `one_ring_cpv`, zero fallbacks, and finite output; the
+  sampled protein cap-128 FMM row reported Duffy pairs `4,777,175`, near pairs
+  `13,815,687`, far pairs `23,798,002`, and sampled audit RMS `0.00338017`.
+  `near=auto` remains conservative; Duffy is supported explicitly but not
+  promoted into the default policy by Z2B.
+- Scope Z3A wires `-pbe-tabi-taylor-order=3|4` into the FMM/M2L context instead
+  of hard-coding expansion order `4`, and adds
+  `fmm_m2l_expansion_order` to `pbe_tabi_profile.csv`. The new harness
+  `test/pbe_fagbi_scope_z3a_fmm_order_matrix.ps1` writes matrix, decision,
+  summary, report, and SVG artifacts under `test/tmp/fagbi_scope_z3a/`.
+  The quick analytic Born/Kirkwood gate passed and confirmed effective FMM
+  orders `3` and `4`; the quick decision was `z3a_order3_sufficient` because
+  the low-resolution analytic rows showed identical sampled audit and runtime
+  within noise. Treat this as order-plumbing evidence, not a final adaptive
+  order policy. Full protein/order/theta validation remains the next Z3 step.
+- Scope Z3B adds `test/pbe_fagbi_scope_z3b_fmm_order_theta_matrix.ps1` for the
+  required fixed-order/theta matrix. The full Born/Kirkwood plus
+  Barnase/research-medium cap-128 sweep completed 24/24 rows, wrote
+  `TITAN_FMM_M2L_SCOPE_Z3B_FMM_ORDER_THETA_MATRIX_REPORT.txt`. The latest
+  rerun classified `z3b_adaptive_order_justified`, but the matrix still shows
+  theta `0.45 -> 0.8` changing sampled audit/runtime substantially while fixed
+  orders `3|4` produce matching FMM order telemetry and similar accuracy.
+  Prefer theta-policy gates before implementing adaptive-by-level order.
+- Scope Z3C adds `test/pbe_fagbi_scope_z3c_theta_policy_gate.ps1` and the
+  report `TITAN_FMM_M2L_SCOPE_Z3C_THETA_POLICY_REPORT.txt`. The full
+  Barnase/research-medium/research-alt cap-128 gate completed 12/12 rows and
+  classified `z3c_theta06_safe_default`: theta `0.8` gave median speedup
+  `2.23x` versus theta `0.6`, but research-alt audit was `0.0137388` and
+  exceeded the `1e-2` gate. Theta `0.7` remained marginal on research-alt
+  (`0.00901184`), so theta `0.6` is the conservative policy for now.
+- Scope Z3D adds `test/pbe_fagbi_scope_z3d_theta_cap256_repeatability.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z3D_THETA_CAP256_REPEATABILITY_REPORT.txt`. The full
+  cap-256 gate completed 15/15 rows and classified
+  `z3d_theta06_confirmed`: theta `0.6` repeated cleanly three times on
+  Barnase, research-medium, and research-alt with audit maxima
+  `0.00748955`, `0.00502011`, and `0.00531705`, respectively. Diagnostic
+  theta `0.8` was rejected (`0.0154722`, `0.0106041`, `0.0142016`), while
+  theta `0.7` was still marginal on Barnase/research-alt. Keep theta `0.6`
+  for Z4 paper-style protein panels; do not loosen the default policy yet.
+- Scope Z4A adds `test/pbe_fagbi_scope_z4a_protein_panel_benchmark.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z4A_PROTEIN_PANEL_BENCHMARK_REPORT.txt`. The full
+  Barnase/research-medium/research-alt cap `128/256` protein panel completed
+  with decision `z4a_direct_limited_fmm_pass`: all FMM/ILU0 rows passed status,
+  finite output, and sampled audit (`max=0.00748955`), direct TABI completed
+  for cap-128 references, and direct cap-256 rows were intentionally classified
+  as skipped under the runtime budget. Grid comparator rows were fast but
+  `not_converged` on some research fixtures, so Z4B should focus on reference
+  policy rather than changing the FMM treecode default.
+- Scope Z4B adds `test/pbe_fagbi_scope_z4b_reference_policy_gate.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z4B_REFERENCE_POLICY_REPORT.txt`. The full 15-row
+  Barnase/research-medium/research-alt cap `128/256` gate classified
+  `z4b_reference_policy_pass`: cap-128 FMM rows cite full direct TABI energy
+  (`relative_delta=0.000216675/0.000230417/0.000728069`), cap-256 FMM rows
+  cite sampled direct-operator audit, and every FMM reference row is marked
+  paper-usable. The maximum sampled audit stayed `0.00748955`; three grid
+  context rows were warnings, confirming grid should remain context-only for
+  this paper panel when not converged.
+- Scope Z4C adds `test/pbe_fagbi_scope_z4c_paper_packaging.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z4C_PAPER_PACKAGE_REPORT.txt`. The package classified
+  `z4c_paper_package_ready` from the full Z4B artifacts, writing a six-row FMM
+  main table, nine-row supplement/context table, reference-policy table, and
+  runtime/memory SVG. It is intentionally packaging-only: no solver rows are
+  run unless `-RefreshZ4B` is passed, and the grid production default is not
+  changed.
+- Scope Z4D adds `test/pbe_fagbi_scope_z4d_manuscript_export.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z4D_MANUSCRIPT_EXPORT_REPORT.txt`. The export classified
+  `z4d_manuscript_assets_ready`, writing manuscript-ready CSV/Markdown main
+  tables, a supplement CSV, methods text, and a figure caption from the Z4C
+  package. It preserves the Z4B policy: cap-128 FMM rows cite full direct TABI
+  energy, cap-256 rows cite sampled direct-operator audit, and grid remains
+  production default/context-only for this paper panel.
+- Scope Z4E adds `test/pbe_fagbi_scope_z4e_evidence_manifest.ps1` and
+  `TITAN_FMM_M2L_SCOPE_Z4E_EVIDENCE_MANIFEST_REPORT.txt`. The manifest
+  classified `z4e_evidence_bundle_ready`: it hashes `37` required artifacts,
+  writes claim/limitation maps, records command provenance, and resolves the
+  older Z5 money-plot artifacts via report pointers when they live in the
+  source checkout rather than this worktree. It is packaging/audit-only and
+  does not rerun solver gates.
+- Scope Z4F adds an evidence-backed Word manuscript skeleton generated from
+  Z4D/Z4E and the Z5 figure artifacts. The final decision is
+  `z4f_manuscript_skeleton_ready`: all Z4E hashes matched, the six claims and
+  five limitations were covered, six protein rows and two figures were
+  embedded, and all nine Word-rendered pages passed visual inspection. The
+  separate citation-gap CSV keeps unresolved literature work visible without
+  fabricating references. Grid remains the production PBE default.
+- Scope Z4G adds reproducible complete-protein preparation and benchmark
+  harnesses for Barnase, 1A63, and 1SH1, plus an external-language manuscript
+  builder with the sparse near-field block-ILU(0) formulation. PDB2PQR 3.7.1
+  AMBER fixtures retain every atom; non-positive hydrogen radii are floored to
+  0.6 A with explicit provenance. The quick full-1SH1 FMM/ILU0 row converged
+  (`true_residual=4.36458e-14`) but failed the operator-audit gate
+  (`2.05699e-2 > 8e-3`). Decision: `z4g_operator_accuracy_gap`. Do not run the
+  expensive full matrix or call the external manuscript ready until a safer
+  full-protein FMM policy passes this fixture.
+- Scope Z4H adds `test/pbe_fagbi_scope_z4h_full_protein_theta_recovery.ps1`
+  and `TITAN_FMM_M2L_SCOPE_Z4H_FULL_PROTEIN_ACCURACY_REPORT.txt`. The 1SH1
+  sweep selected `theta=0.45` (`audit=6.38179e-3`), but full confirmation
+  classified `z4h_fixture_specific_policy`: candidate audit RMS was
+  `9.72521e-2` on Barnase and `1.00216` on 1A63, versus `6.52454e-3` on 1SH1.
+  Small GMRES residuals on all rows do not rescue failed operator parity.
+  Keep Z4G fail-closed and investigate full-protein FMM geometry/expansion
+  behavior before any policy or manuscript promotion.
+- Scope Z4I adds channel-aware full-protein operator attribution through
+  `-pbe-tabi-matvec-audit=sampled-detail` and the harness
+  `test/pbe_fagbi_scope_z4i_operator_attribution.ps1`. The full nine-row
+  Barnase/1A63/1SH1 theta matrix classified
+  `z4i_far_order_implementation_gap`: near error was zero, far error accounted
+  for the complete sampled channel error, K2 dominated every row, attribution
+  recomposition was below `5.4e-15`, and direct-audit reference gaps stayed
+  below `4.3e-14`. Telemetry now makes the structural mismatch explicit:
+  configured expansion order is `4`, while the current far-cell evaluator
+  implements moment degree `1`. Theta tightening rescued 1SH1 but left
+  Barnase at `2.16504e-2` and 1A63 at `8.60231e-1` even at theta `0.35`.
+  Next: Z4J genuine higher-order analytical moments/M2L, starting with K2;
+  do not change TABI or grid defaults from this diagnostic evidence.
 - Next step is broader controlled-treecode validation, not grid promotion.
   Scope Q removed the Barnase cap-128 convergence blocker, Scope S removed the
   hidden FMM/M2L memory regression, Scope U/V/W eliminated dense local
@@ -1079,3 +1203,61 @@ Decision:
   treecode default preconditioner. Keep `-pbe=grid` as production default until
   repeatability, broader fixtures, and a robust verification oracle are all
   demonstrated.
+- Scope Z4J implements a diagnostic-only full Cartesian p4 M2P candidate for
+  K1-K4. The full Barnase/1A63/1SH1 theta `0.6/0.45` matrix classified
+  `z4j_p4_tight_theta_pass`. At theta `0.6`, audit RMS changed from
+  `0.288126` to `0.00366315` on Barnase, `0.967063` to `0.00853174` on 1A63,
+  and `0.0205699` to `0.000339393` on 1SH1. Theta `0.45` brought all three
+  below `8e-3`, including 1A63 at `0.00291735`. Production GMRES remains on
+  the degree-one operator. Next: Z4K true target-local M2L/L2P integration;
+  retain grid as production default.
+- Scope Z4K adds target-leaf p4 M2L/L2P using a dedicated order-8 kernel-jet
+  engine without enlarging legacy treecode series storage. The full candidate
+  matrix classified `z4k_local_theta06_accuracy_gap`: translation parity
+  versus p4 M2P was `1.0e-6` to `1.15e-4`, but 1A63 theta `0.6` audit was
+  `0.00961167` and exceeded the `8e-3` gate. M2L construction dominated cost;
+  speedup versus p4 M2P ranged only `0.42x–1.64x`, below the required `4x`.
+  `gmres-p4` remains fail-closed. Next work, if pursued, must optimize cached
+  or recurrence-based translation operators before solver integration.
+- Scope Z4L adds diagnostic p3/p4 tail-driven far-cell refinement at fixed
+  theta `0.6`. The full decision is `z4l_accuracy_pass_costly`: tolerance
+  `0.002` reduced 1A63 audit from `0.00961167` to `0.00734897`, while Barnase
+  and 1SH1 reached `0.00333376` and `0.00034668`. The 1A63 row took
+  `1954.01 s` versus `261.35 s` without refinement and moved 15,551 source
+  panels to direct attribution. Keep GMRES-p4 fail-closed. A future Z4M must
+  compress/refactor refined work and optimize order-8 translations before
+  solver integration; no default changes follow from Z4L.
+- Scope Z4M adds a density-independent four-probe refinement plan, compact
+  order-8 kernel-jet caching, and a diagnostic full-vector p4 apply. The quick
+  full-1SH1 decision is `z4m_accuracy_pass_cache_limited`: audit RMS was
+  `1.03558e-4`, cache parity/reference checks were clean, cache storage was
+  `17.25 MB`, and median apply improved from `0.760 s` to `0.587 s` (`1.29x`).
+  The plan still retained 15,996,854 direct-fallback panel pairs, so it missed
+  the required `3x` speed gate. Do not plan Z4N guarded GMRES yet; first reduce
+  or accelerate deterministic fallback work. Grid remains the PB default.
+- Scope Z4M.1 adds a static packed fallback worklist, source-panel SoA refresh,
+  and a shared four-target AVX2 kernel. Full 1SH1 retained audit RMS
+  `1.03558e-4`, delivered `5.87x` fallback speedup and `8.57x` total candidate
+  apply speedup, with `7.63 MB` worklist metadata and `62.50 MB` peak RSS.
+  Barnase and 1A63 full sampled-detail rows timed out at 3600 seconds for all
+  variants, so the measured full decision is `z4m1_runtime_limited`. Keep
+  `gmres-p4` fail-closed; isolate the candidate from full-solve/direct-reference
+  runtime before considering Z4N. Grid remains the PB default.
+- Scope Z4M.2 replaces repeated p3/p4 pair rescans with a deterministic metric
+  cache and parallel target-leaf planning. Full 1SH1 preserved the exact plan
+  hash/work counts and audit RMS `1.4925e-4`, while plan time fell from
+  `770.073 s` to `9.83224 s` (`78.32x`). The metric cache itself peaked at
+  only `0.08 MB`; Barnase completed in `48.8339 s` with audit RMS
+  `0.00127916` and `0.16 MB` metric storage. The full decision is
+  `z4m2_memory_limited` because 1A63's existing order-8 kernel-jet cache
+  required `354.73 MB`, exceeding the `256 MB` gate. Keep `gmres-p4`
+  fail-closed and address kernel-jet storage before Z4N. Grid remains the PB
+  default.
+- Scope Z4M.3 stores two lossless degree-9 Green jets per far pair in a flat,
+  deterministic cache and derives source-normal coefficients during fused
+  contraction. The quick decision is `z4m3_compressed_cache_pass`: full 1SH1
+  cache storage fell from `18.09 MB` to `6.03 MB`, median apply improved from
+  `0.192654 s` to `0.155283 s`, and audit remained `1.4925e-4`. Full 1A63 fit
+  at `118.16 MB` with audit `6.46481e-3`; Barnase used `32.49 MB`, stayed at
+  `137.89 MB` peak RSS, and retained audit `1.27916e-3`. The full decision is
+  `z4m3_compressed_cache_pass`, permitting a guarded GMRES integration plan.

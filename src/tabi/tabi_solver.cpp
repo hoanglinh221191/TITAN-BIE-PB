@@ -1,4 +1,5 @@
 #include "tabi_types.h"
+#include "tabi_fmm_m2l_prototype.h"
 #include "tabi_fmm_m2l_preconditioner.h"
 #include "tabi_preconditioner.h"
 #if defined(_WIN32)
@@ -19,6 +20,7 @@
 #include "../titan_executor.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -27,9 +29,11 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <map>
 #include <numeric>
 #include <stdexcept>
 #include <sstream>
+#include <tuple>
 #include <vector>
 
 namespace TitanPBE::Tabi {
@@ -40,6 +44,346 @@ constexpr double kCoulombKcalPerMol = 332.063713299;
 constexpr double kKcalToKJ = 4.184;
 constexpr double kKBKJPerMolK = 0.00831446261815324;
 constexpr std::size_t kParallelVectorThreshold = 32768;
+
+struct AttributionAggregate {
+  double error_sq{0.0};
+  double reference_sq{0.0};
+  double max_abs_error{0.0};
+  std::size_t count{0};
+};
+
+struct AttributionSummaryKey {
+  std::string approximation_mode;
+  std::string probe;
+  std::string component;
+  std::string region;
+  std::string channel;
+
+  bool operator<(const AttributionSummaryKey &other) const noexcept {
+    return std::tie(approximation_mode, probe, component, region, channel) <
+           std::tie(other.approximation_mode, other.probe, other.component,
+                    other.region, other.channel);
+  }
+};
+
+struct AttributionLevelKey {
+  std::string approximation_mode;
+  std::string probe;
+  std::string component;
+  std::string channel;
+  int source_depth{0};
+  std::string mac_bin;
+
+  bool operator<(const AttributionLevelKey &other) const noexcept {
+    return std::tie(approximation_mode, probe, component, channel,
+                    source_depth, mac_bin) <
+           std::tie(other.approximation_mode, other.probe, other.component,
+                    other.channel, other.source_depth, other.mac_bin);
+  }
+};
+
+void add_attribution_value(AttributionAggregate &aggregate, double approximate,
+                           double direct) noexcept {
+  const double error = approximate - direct;
+  aggregate.error_sq += error * error;
+  aggregate.reference_sq += direct * direct;
+  aggregate.max_abs_error =
+      std::max(aggregate.max_abs_error, std::abs(error));
+  ++aggregate.count;
+}
+
+double attribution_rel_rms(const AttributionAggregate &aggregate) noexcept {
+  return std::sqrt(std::max(0.0, aggregate.error_sq)) /
+         std::max(1.0e-300,
+                  std::sqrt(std::max(0.0, aggregate.reference_sq)));
+}
+
+std::string attribution_mac_bin(double rho) {
+  if (rho < 0.2)
+    return "[0.0;0.2)";
+  if (rho < 0.3)
+    return "[0.2;0.3)";
+  if (rho < 0.4)
+    return "[0.3;0.4)";
+  if (rho < 0.5)
+    return "[0.4;0.5)";
+  if (rho < 0.6)
+    return "[0.5;0.6)";
+  return "[0.6;inf)";
+}
+
+void write_operator_attribution_outputs(
+    const std::vector<titan::tabi::fmm_m2l::JcpOperatorAttributionResult>
+        &results,
+    double aggregate_audit_rel, double aggregate_direct_sq) {
+  static constexpr std::array<const char *, 4> channel_names{
+      "K1", "K2", "K3", "K4"};
+  std::ofstream samples("pbe_tabi_operator_attribution_samples.csv",
+                        std::ios::out | std::ios::trunc);
+  std::ofstream summary("pbe_tabi_operator_attribution_summary.csv",
+                        std::ios::out | std::ios::trunc);
+  std::ofstream levels("pbe_tabi_operator_attribution_levels.csv",
+                       std::ios::out | std::ios::trunc);
+  if (!samples.is_open() || !summary.is_open() || !levels.is_open()) {
+    throw std::runtime_error(
+        "PBE TABI: failed to open sampled-detail attribution outputs.");
+  }
+  samples << "approximation_mode,configured_expansion_order,implemented_far_moment_degree,probe,"
+             "target_panel,row_component,region,channel,source_node,"
+             "source_depth,source_panels,distance_A,source_radius_A,mac_ratio,"
+             "approximate,direct,error,relative_error\n";
+
+  std::map<AttributionSummaryKey, AttributionAggregate> aggregates;
+  std::map<AttributionLevelKey, AttributionAggregate> level_aggregates;
+  std::map<std::pair<std::string, std::string>, double> probe_error_sq;
+  std::map<std::tuple<std::string, std::string, std::size_t>,
+           std::pair<std::array<double, 4>, std::array<double, 4>>>
+      target_totals;
+  std::map<std::pair<std::string, std::string>,
+           const titan::tabi::fmm_m2l::JcpOperatorAttributionResult *>
+      result_by_probe;
+
+  for (const auto &result : results) {
+    result_by_probe[{result.approximation_mode, result.probe}] = &result;
+    for (const auto &record : result.records) {
+      auto &target_total = target_totals[{result.approximation_mode,
+                                          record.probe,
+                                          record.target_panel}];
+      for (std::size_t channel = 0; channel < channel_names.size(); ++channel) {
+        const std::string component = channel < 2 ? "phi" : "phin";
+        const double approximate = record.approximate[channel];
+        const double direct = record.direct[channel];
+        const double error = approximate - direct;
+        const double relative =
+            std::abs(error) / std::max(1.0e-300, std::abs(direct));
+        samples << result.approximation_mode << ','
+                << result.configured_expansion_order << ','
+                << result.implemented_far_moment_degree << ',' << record.probe
+                << ',' << record.target_panel << ',' << component << ','
+                << record.region << ',' << channel_names[channel] << ','
+                << record.source_node << ',' << record.source_depth << ','
+                << record.source_panels << ',' << record.distance << ','
+                << record.source_radius << ',' << record.mac_ratio << ','
+                << approximate << ',' << direct << ',' << error << ','
+                << relative << '\n';
+        AttributionSummaryKey key{result.approximation_mode, record.probe,
+                                  component, record.region,
+                                  channel_names[channel]};
+        add_attribution_value(aggregates[key], approximate, direct);
+        probe_error_sq[{result.approximation_mode, record.probe}] +=
+            error * error;
+        target_total.first[channel] += approximate;
+        target_total.second[channel] += direct;
+        if (record.region == "far") {
+          AttributionLevelKey level_key{
+              result.approximation_mode, record.probe, component,
+              channel_names[channel],
+              record.source_depth, attribution_mac_bin(record.mac_ratio)};
+          add_attribution_value(level_aggregates[level_key], approximate,
+                                direct);
+        }
+      }
+    }
+  }
+
+  for (const auto &[target_key, values] : target_totals) {
+    const auto &[approximation_mode, probe, target_panel] = target_key;
+    (void)target_panel;
+    for (std::size_t component_index = 0; component_index < 2;
+         ++component_index) {
+      const std::size_t first = component_index == 0 ? 0 : 2;
+      const double approximate =
+          values.first[first] + values.first[first + 1];
+      const double direct = values.second[first] + values.second[first + 1];
+      add_attribution_value(
+          aggregates[{approximation_mode, probe,
+                      component_index == 0 ? "phi" : "phin",
+                      "total", "aggregate"}],
+          approximate, direct);
+      add_attribution_value(aggregates[{approximation_mode, probe, "both",
+                                        "total", "aggregate"}],
+                            approximate, direct);
+    }
+  }
+
+  summary << "approximation_mode,configured_expansion_order,implemented_far_moment_degree,probe,"
+             "row_component,region,channel,samples,error_rms,reference_rms,"
+             "relative_rms,max_abs_error,error_fraction,recomposition_rel_error,"
+             "aggregate_audit_rel,reference_gap,moment_build_seconds,far_evaluation_seconds,"
+             "m2l_seconds,l2p_seconds,local_target_leaves,local_m2l_pairs,"
+             "fmm_local_mode,fmm_local_source_order,fmm_local_target_order,"
+             "fmm_local_kernel_derivative_order,fmm_local_target_leaves,"
+             "fmm_local_m2l_pairs,fmm_local_moment_seconds,fmm_local_m2l_seconds,"
+             "fmm_local_l2p_seconds,fmm_local_finite_outputs,"
+             "fmm_local_refine_mode,fmm_local_refine_tolerance,"
+             "fmm_local_tail_ratio_before,fmm_local_tail_ratio_after,"
+             "fmm_local_refined_cells,fmm_local_split_children,"
+             "fmm_local_direct_fallback_panels,fmm_local_direct_fallback_pairs,"
+             "fmm_local_far_pairs_before,"
+             "fmm_local_far_pairs_after,fmm_local_refinement_seconds,"
+             "fmm_local_plan_hash,fmm_local_plan_build_count,"
+             "fmm_local_static_probe_count,fmm_local_cache_mode,"
+             "fmm_local_cache_layout,fmm_local_cache_operator_bytes,"
+             "fmm_local_cache_uncompressed_estimated_bytes,"
+             "fmm_local_cache_compression_ratio,"
+             "fmm_local_cache_far_pair_offsets,"
+             "fmm_local_cache_operators,fmm_local_cache_bytes,"
+             "fmm_local_cache_build_count,fmm_local_cache_hits,"
+             "fmm_local_cache_build_seconds,"
+             "fmm_local_plan_seconds,fmm_local_plan_builder,"
+             "fmm_local_plan_probe_moment_seconds,"
+             "fmm_local_plan_pair_metric_seconds,"
+             "fmm_local_plan_refinement_seconds,"
+             "fmm_local_plan_pair_metric_evaluations,"
+             "fmm_local_plan_pair_metric_cache_hits,"
+             "fmm_local_plan_refinement_iterations,"
+             "fmm_local_plan_metric_cache_peak_bytes,"
+             "fmm_local_plan_parallel_target_leaves,"
+             "fmm_local_cache_seconds,"
+             "fmm_local_candidate_apply_seconds,"
+             "fmm_local_candidate_repeat_count,"
+             "fmm_local_candidate_median_apply_seconds,"
+             "fmm_local_candidate_direct_reference_seconds,"
+             "fmm_local_fallback_requested,fmm_local_fallback_effective,"
+             "fmm_local_fallback_worklist_hash,"
+             "fmm_local_fallback_worklist_build_count,"
+             "fmm_local_fallback_tasks,fmm_local_fallback_metadata_bytes,"
+             "fmm_local_fallback_base_near_pairs,"
+             "fmm_local_fallback_refined_pairs,"
+             "fmm_local_fallback_vectorized_sources,"
+             "fmm_local_fallback_vectorized_lanes,"
+             "fmm_local_fallback_scalar_self_pairs,"
+             "fmm_local_fallback_seconds\n";
+  for (const auto &[key, aggregate] : aggregates) {
+    const auto *result =
+        result_by_probe.at({key.approximation_mode, key.probe});
+    const double error_rms =
+        aggregate.count > 0
+            ? std::sqrt(aggregate.error_sq / static_cast<double>(aggregate.count))
+            : 0.0;
+    const double reference_rms =
+        aggregate.count > 0 ? std::sqrt(aggregate.reference_sq /
+                                        static_cast<double>(aggregate.count))
+                            : 0.0;
+    const double fraction =
+        probe_error_sq[{key.approximation_mode, key.probe}] > 0.0
+            ? aggregate.error_sq /
+                  probe_error_sq[{key.approximation_mode, key.probe}]
+            : 0.0;
+    const double attribution_audit_rel =
+        key.probe == "solution" && key.component == "both" &&
+                key.region == "total" && key.channel == "aggregate"
+            ? std::sqrt(std::max(0.0, aggregate.error_sq)) /
+                  std::max(1.0e-300,
+                           std::sqrt(std::max(0.0, aggregate_direct_sq)))
+            : 0.0;
+    const double reference_gap =
+        key.probe == "solution" && key.component == "both" &&
+                key.region == "total" && key.channel == "aggregate" &&
+                key.approximation_mode == "legacy_degree1"
+            ? std::abs(attribution_audit_rel - aggregate_audit_rel)
+            : 0.0;
+    const bool local_p4 =
+        result->approximation_mode.find("local_m2l_p4") == 0;
+    summary << result->approximation_mode << ','
+            << result->configured_expansion_order << ','
+            << result->implemented_far_moment_degree << ',' << key.probe << ','
+            << key.component << ',' << key.region << ',' << key.channel << ','
+            << aggregate.count << ',' << error_rms << ',' << reference_rms
+            << ',' << attribution_rel_rms(aggregate) << ','
+            << aggregate.max_abs_error << ',' << fraction << ','
+            << result->recomposition_rel_error << ',' << attribution_audit_rel
+            << ',' << reference_gap << ',' << result->moment_build_seconds
+            << ',' << result->far_evaluation_seconds << ','
+            << result->m2l_seconds << ',' << result->l2p_seconds << ','
+            << result->local_target_leaves << ',' << result->local_m2l_pairs
+            << ','
+            << (local_p4 ? "audit-p4" : "off")
+            << ','
+            << (local_p4 ? 4 : 0) << ',' << (local_p4 ? 4 : 0) << ','
+            << (local_p4 ? 8 : 0) << ','
+            << result->local_target_leaves << ',' << result->local_m2l_pairs
+            << ',' << result->moment_build_seconds << ','
+            << result->m2l_seconds << ',' << result->l2p_seconds << ','
+            << (result->finite_outputs ? "true" : "false")
+            << ',' << result->local_refine_mode << ','
+            << result->local_refine_tolerance << ','
+            << result->local_tail_ratio_before << ','
+            << result->local_tail_ratio_after << ','
+            << result->local_refined_cells << ','
+            << result->local_split_children << ','
+            << result->local_direct_fallback_panels << ','
+            << result->local_direct_fallback_pairs << ','
+            << result->local_far_pairs_before << ','
+            << result->local_far_pairs_after << ','
+            << result->local_refinement_seconds << ','
+            << result->local_plan_hash << ','
+            << result->local_plan_build_count << ','
+            << result->local_static_probe_count << ','
+            << result->local_cache_mode << ','
+            << result->local_cache_layout << ','
+            << result->local_cache_operator_bytes << ','
+            << result->local_cache_uncompressed_estimated_bytes << ','
+            << result->local_cache_compression_ratio << ','
+            << result->local_cache_far_pair_offsets << ','
+            << result->local_cache_operators << ','
+            << result->local_cache_bytes << ','
+            << result->local_cache_build_count << ','
+            << result->local_cache_hits << ','
+            << result->local_cache_seconds << ','
+            << result->local_plan_seconds << ','
+            << result->local_plan_builder << ','
+            << result->local_plan_probe_moment_seconds << ','
+            << result->local_plan_pair_metric_seconds << ','
+            << result->local_plan_refinement_seconds << ','
+            << result->local_plan_pair_metric_evaluations << ','
+            << result->local_plan_pair_metric_cache_hits << ','
+            << result->local_plan_refinement_iterations << ','
+            << result->local_plan_metric_cache_peak_bytes << ','
+            << result->local_plan_parallel_target_leaves << ','
+            << result->local_cache_seconds << ','
+            << result->local_candidate_apply_seconds << ','
+            << result->local_candidate_repeat_count << ','
+            << result->local_candidate_median_apply_seconds << ','
+            << result->local_candidate_direct_reference_seconds << ','
+            << result->local_fallback_requested << ','
+            << result->local_fallback_effective << ','
+            << result->local_fallback_worklist_hash << ','
+            << result->local_fallback_worklist_build_count << ','
+            << result->local_fallback_tasks << ','
+            << result->local_fallback_metadata_bytes << ','
+            << result->local_fallback_base_near_pairs << ','
+            << result->local_fallback_refined_pairs << ','
+            << result->local_fallback_vectorized_sources << ','
+            << result->local_fallback_vectorized_lanes << ','
+            << result->local_fallback_scalar_self_pairs << ','
+            << result->local_fallback_seconds
+            << '\n';
+  }
+
+  levels << "approximation_mode,configured_expansion_order,implemented_far_moment_degree,probe,"
+            "row_component,channel,source_depth,mac_bin,samples,error_rms,"
+            "reference_rms,relative_rms,max_abs_error\n";
+  for (const auto &[key, aggregate] : level_aggregates) {
+    const auto *result =
+        result_by_probe.at({key.approximation_mode, key.probe});
+    const double error_rms =
+        aggregate.count > 0
+            ? std::sqrt(aggregate.error_sq / static_cast<double>(aggregate.count))
+            : 0.0;
+    const double reference_rms =
+        aggregate.count > 0 ? std::sqrt(aggregate.reference_sq /
+                                        static_cast<double>(aggregate.count))
+                            : 0.0;
+    levels << result->approximation_mode << ','
+           << result->configured_expansion_order << ','
+           << result->implemented_far_moment_degree << ',' << key.probe << ','
+           << key.component << ',' << key.channel << ',' << key.source_depth
+           << ',' << key.mac_bin << ',' << aggregate.count << ',' << error_rms
+           << ',' << reference_rms << ',' << attribution_rel_rms(aggregate)
+           << ',' << aggregate.max_abs_error << '\n';
+  }
+}
 
 struct FormulationConfig {
   std::string formulation{"jcp2013"};
@@ -3870,7 +4214,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       const auto fmm_context = ensure_jcp_fmm_m2l_context(
           panels, eps_ratio, kappa,
           static_cast<std::size_t>(std::max(8, options.tree_leaf_size)),
-          options.tree_opening_theta, executor, &jcp_tree.fmm_m2l_context);
+          options.tree_opening_theta, result.taylor_order, executor,
+          &jcp_tree.fmm_m2l_context);
       if (fmm_nearfield_ilu0) {
         result.preconditioner_estimated_bytes =
             estimate_fmm_m2l_nearfield_ilu0_bytes(
@@ -4378,9 +4723,21 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       const auto audit_begin = std::chrono::steady_clock::now();
       const std::vector<double> &audit_x =
           !linear.best_x.empty() ? linear.best_x : linear.x;
-      const std::vector<std::size_t> audit_rows = build_audit_rows(
-          audit_x.size(), options.matvec_audit,
-          options.matvec_audit_sample_count);
+      std::vector<std::size_t> audit_rows;
+      if (options.matvec_audit == "sampled-detail") {
+        const std::vector<std::size_t> audit_targets = build_audit_rows(
+            panels.size(), "sampled", options.matvec_audit_sample_count);
+        audit_rows.reserve(audit_targets.size() * (coupled ? 2u : 1u));
+        audit_rows.insert(audit_rows.end(), audit_targets.begin(),
+                          audit_targets.end());
+        if (coupled) {
+          for (const std::size_t target : audit_targets)
+            audit_rows.push_back(panels.size() + target);
+        }
+      } else {
+        audit_rows = build_audit_rows(audit_x.size(), options.matvec_audit,
+                                      options.matvec_audit_sample_count);
+      }
       if (!audit_x.empty() && !audit_rows.empty()) {
         std::vector<double> tree_ax;
         apply_jcp_treecode_operator(panels, audit_x, eps_ratio, kappa, lhs_phi,
@@ -4460,6 +4817,139 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
             std::sqrt(std::max(0.0, diff_sq)) /
             std::max(1.0e-300, std::sqrt(std::max(0.0, direct_sq)));
         result.matvec_audit_rows = audit_rows.size();
+        if (options.matvec_audit == "sampled-detail") {
+          const auto context = ensure_jcp_fmm_m2l_context(
+              panels, eps_ratio, kappa, jcp_tree.leaf_size,
+              jcp_tree.opening_theta, jcp_tree.taylor_order, executor,
+              &jcp_tree.fmm_m2l_context);
+          std::vector<double> solution_phi(panels.size(), 0.0);
+          std::vector<double> solution_phin(panels.size(), 0.0);
+          std::vector<double> phi_probe(panels.size(), 0.0);
+          std::vector<double> phin_probe(panels.size(), 0.0);
+          for (std::size_t panel = 0; panel < panels.size(); ++panel) {
+            solution_phi[panel] = audit_x[panel];
+            solution_phin[panel] =
+                coupled ? audit_x[panels.size() + panel] : 0.0;
+            const double t = static_cast<double>(panel + 1);
+            phi_probe[panel] = 0.5 * std::sin(0.013 * t) + 0.25;
+            phin_probe[panel] = 0.5 * std::cos(0.017 * t) - 0.15;
+          }
+          const std::vector<double> zeros(panels.size(), 0.0);
+          std::vector<titan::tabi::fmm_m2l::JcpOperatorAttributionResult>
+              attribution;
+          attribution.reserve(9);
+          attribution.push_back(context->attribute(
+              solution_phi, solution_phin,
+              static_cast<std::size_t>(options.matvec_audit_sample_count),
+              "solution", executor, coupled, result.near_integration,
+              result.quad_buffer, &panels));
+          attribution.push_back(context->attribute(
+              phi_probe, zeros,
+              static_cast<std::size_t>(options.matvec_audit_sample_count),
+              "phi_only", executor, coupled, result.near_integration,
+              result.quad_buffer, &panels));
+          attribution.push_back(context->attribute(
+              zeros, phin_probe,
+              static_cast<std::size_t>(options.matvec_audit_sample_count),
+              "phin_only", executor, coupled, result.near_integration,
+              result.quad_buffer, &panels));
+          if (options.fmm_cartesian_audit == "on") {
+            attribution.push_back(context->attribute_cartesian(
+                solution_phi, solution_phin,
+                static_cast<std::size_t>(options.matvec_audit_sample_count),
+                "solution", executor, coupled, result.near_integration,
+                result.quad_buffer, &panels));
+            attribution.push_back(context->attribute_cartesian(
+                phi_probe, zeros,
+                static_cast<std::size_t>(options.matvec_audit_sample_count),
+                "phi_only", executor, coupled, result.near_integration,
+                result.quad_buffer, &panels));
+            attribution.push_back(context->attribute_cartesian(
+                zeros, phin_probe,
+                static_cast<std::size_t>(options.matvec_audit_sample_count),
+                "phin_only", executor, coupled, result.near_integration,
+                result.quad_buffer, &panels));
+          }
+          if (options.fmm_local == "audit-p4") {
+            if (options.fmm_local_refine == "operator-tail-static") {
+              const std::size_t cache_budget_mb = static_cast<std::size_t>(
+                  std::max(0, options.fmm_local_cache_budget_mb));
+              attribution.push_back(context->attribute_local_p4_candidate(
+                  solution_phi, solution_phin,
+                  static_cast<std::size_t>(options.matvec_audit_sample_count),
+                  "solution", executor, coupled, result.near_integration,
+                  result.quad_buffer, &panels, options.fmm_local_refine_tol,
+                  options.fmm_local_cache, cache_budget_mb, 1,
+                  options.fmm_local_fallback,
+                  options.fmm_local_plan_builder));
+              attribution.push_back(context->attribute_local_p4_candidate(
+                  phi_probe, zeros,
+                  static_cast<std::size_t>(options.matvec_audit_sample_count),
+                  "phi_only", executor, coupled, result.near_integration,
+                  result.quad_buffer, &panels, options.fmm_local_refine_tol,
+                  options.fmm_local_cache, cache_budget_mb, 1,
+                  options.fmm_local_fallback,
+                  options.fmm_local_plan_builder));
+              attribution.push_back(context->attribute_local_p4_candidate(
+                  zeros, phin_probe,
+                  static_cast<std::size_t>(options.matvec_audit_sample_count),
+                  "phin_only", executor, coupled, result.near_integration,
+                  result.quad_buffer, &panels, options.fmm_local_refine_tol,
+                  options.fmm_local_cache, cache_budget_mb, 1,
+                  options.fmm_local_fallback,
+                  options.fmm_local_plan_builder));
+            } else {
+              attribution.push_back(context->attribute_local_p4(
+                  solution_phi, solution_phin,
+                  static_cast<std::size_t>(options.matvec_audit_sample_count),
+                  "solution", executor, coupled, result.near_integration,
+                  result.quad_buffer, &panels, options.fmm_local_refine,
+                  options.fmm_local_refine_tol));
+              attribution.push_back(context->attribute_local_p4(
+                  phi_probe, zeros,
+                  static_cast<std::size_t>(options.matvec_audit_sample_count),
+                  "phi_only", executor, coupled, result.near_integration,
+                  result.quad_buffer, &panels, options.fmm_local_refine,
+                  options.fmm_local_refine_tol));
+              attribution.push_back(context->attribute_local_p4(
+                  zeros, phin_probe,
+                  static_cast<std::size_t>(options.matvec_audit_sample_count),
+                  "phin_only", executor, coupled, result.near_integration,
+                  result.quad_buffer, &panels, options.fmm_local_refine,
+                  options.fmm_local_refine_tol));
+            }
+          }
+          if (options.fmm_local == "single-matvec-p4") {
+            const std::size_t cache_budget_mb = static_cast<std::size_t>(
+                std::max(0, options.fmm_local_cache_budget_mb));
+            attribution.push_back(context->attribute_local_p4_candidate(
+                solution_phi, solution_phin,
+                static_cast<std::size_t>(options.matvec_audit_sample_count),
+                "solution", executor, coupled, result.near_integration,
+                result.quad_buffer, &panels, options.fmm_local_refine_tol,
+                options.fmm_local_cache, cache_budget_mb, 5,
+                options.fmm_local_fallback,
+                options.fmm_local_plan_builder));
+            attribution.push_back(context->attribute_local_p4_candidate(
+                phi_probe, zeros,
+                static_cast<std::size_t>(options.matvec_audit_sample_count),
+                "phi_only", executor, coupled, result.near_integration,
+                result.quad_buffer, &panels, options.fmm_local_refine_tol,
+                options.fmm_local_cache, cache_budget_mb, 1,
+                options.fmm_local_fallback,
+                options.fmm_local_plan_builder));
+            attribution.push_back(context->attribute_local_p4_candidate(
+                zeros, phin_probe,
+                static_cast<std::size_t>(options.matvec_audit_sample_count),
+                "phin_only", executor, coupled, result.near_integration,
+                result.quad_buffer, &panels, options.fmm_local_refine_tol,
+                options.fmm_local_cache, cache_budget_mb, 1,
+                options.fmm_local_fallback,
+                options.fmm_local_plan_builder));
+          }
+          write_operator_attribution_outputs(
+              attribution, result.tree_vs_direct_matvec_rel, direct_sq);
+        }
       }
       result.matvec_audit_ms =
           elapsed_ms(audit_begin, std::chrono::steady_clock::now());
@@ -4506,6 +4996,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.leaf_mac_direct_panels_saved_estimate =
           jcp_tree_stats.leaf_mac_direct_panels_saved_estimate;
       result.fmm_m2l_mode = jcp_tree_stats.fmm_m2l_mode;
+      result.fmm_m2l_expansion_order =
+          jcp_tree_stats.fmm_m2l_expansion_order;
       result.fmm_m2l_near_pairs = jcp_tree_stats.fmm_m2l_near_pairs;
       result.fmm_m2l_far_pairs = jcp_tree_stats.fmm_m2l_far_pairs;
       result.fmm_m2l_setup_ms = jcp_tree_stats.fmm_m2l_setup_ms;

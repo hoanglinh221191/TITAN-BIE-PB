@@ -1,0 +1,35 @@
+# TITAN FMM/M2L Scope Z3D Theta Cap-256 Repeatability Report
+
+Decision: z3d_theta06_confirmed
+Theta 0.8 status: z3d_theta08_rejected
+
+Z3D validates the cap-128 Z3C theta policy on cap-256 sampled protein fixtures with theta 0.6 repeats and diagnostic theta 0.7/0.8 rows.
+
+Artifacts:
+- Matrix: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3d\fagbi_scope_z3d_matrix.csv
+- Repeatability: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3d\fagbi_scope_z3d_repeatability.csv
+- Decision: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3d\fagbi_scope_z3d_decision.csv
+- Summary: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3d\fagbi_scope_z3d_summary.dat
+- Plot: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z3d\fagbi_scope_z3d_theta_cap256_plot.svg
+
+Repeatability:
+- barnase: repeats=3, ok=3, audit_max=0.00748955, matvec_median=1.80267, status=ok
+- research-medium: repeats=3, ok=3, audit_max=0.00502011, matvec_median=2.64453, status=ok
+- research-alt: repeats=3, ok=3, audit_max=0.00531705, matvec_median=3.95557, status=ok
+
+Rows:
+- barnase_cap256_theta0p6_rep1: fixture=barnase, cap=256, repeat=1, theta=0.6, status=ok, audit=0.00748955, warning=, matvec_s=1.80267, true_residual=1.79292E-14, precond=fmm_nearfield_ilu0, fmm_order=4
+- barnase_cap256_theta0p6_rep2: fixture=barnase, cap=256, repeat=2, theta=0.6, status=ok, audit=0.00748955, warning=, matvec_s=1.54948, true_residual=1.79292E-14, precond=fmm_nearfield_ilu0, fmm_order=4
+- barnase_cap256_theta0p6_rep3: fixture=barnase, cap=256, repeat=3, theta=0.6, status=ok, audit=0.00748955, warning=, matvec_s=1.72548, true_residual=1.79292E-14, precond=fmm_nearfield_ilu0, fmm_order=4
+- barnase_cap256_theta0p7_rep1: fixture=barnase, cap=256, repeat=1, theta=0.7, status=ok, audit=0.0111838, warning=audit_gt_1e-2, matvec_s=1.08266, true_residual=1.63969E-14, precond=fmm_nearfield_ilu0, fmm_order=4
+- barnase_cap256_theta0p8_rep1: fixture=barnase, cap=256, repeat=1, theta=0.8, status=ok, audit=0.0154722, warning=audit_gt_1e-2, matvec_s=0.754363, true_residual=7.94256E-14, precond=fmm_nearfield_ilu0, fmm_order=4
+- research-medium_cap256_theta0p6_rep1: fixture=research-medium, cap=256, repeat=1, theta=0.6, status=ok, audit=0.00502011, warning=, matvec_s=2.64453, true_residual=5.87767E-15, precond=fmm_nearfield_ilu0, fmm_order=4
+- research-medium_cap256_theta0p6_rep2: fixture=research-medium, cap=256, repeat=2, theta=0.6, status=ok, audit=0.00502011, warning=, matvec_s=2.56692, true_residual=5.87767E-15, precond=fmm_nearfield_ilu0, fmm_order=4
+- research-medium_cap256_theta0p6_rep3: fixture=research-medium, cap=256, repeat=3, theta=0.6, status=ok, audit=0.00502011, warning=, matvec_s=1.69457, true_residual=5.87767E-15, precond=fmm_nearfield_ilu0, fmm_order=4
+- research-medium_cap256_theta0p7_rep1: fixture=research-medium, cap=256, repeat=1, theta=0.7, status=ok, audit=0.00695116, warning=, matvec_s=2.00113, true_residual=3.32384E-14, precond=fmm_nearfield_ilu0, fmm_order=4
+- research-medium_cap256_theta0p8_rep1: fixture=research-medium, cap=256, repeat=1, theta=0.8, status=ok, audit=0.0106041, warning=audit_gt_1e-2, matvec_s=1.43175, true_residual=4.6043E-14, precond=fmm_nearfield_ilu0, fmm_order=4
+- research-alt_cap256_theta0p6_rep1: fixture=research-alt, cap=256, repeat=1, theta=0.6, status=ok, audit=0.00531705, warning=, matvec_s=3.95557, true_residual=2.36387E-14, precond=fmm_nearfield_ilu0, fmm_order=4
+- research-alt_cap256_theta0p6_rep2: fixture=research-alt, cap=256, repeat=2, theta=0.6, status=ok, audit=0.00531705, warning=, matvec_s=2.75958, true_residual=2.36387E-14, precond=fmm_nearfield_ilu0, fmm_order=4
+- research-alt_cap256_theta0p6_rep3: fixture=research-alt, cap=256, repeat=3, theta=0.6, status=ok, audit=0.00531705, warning=, matvec_s=2.87713, true_residual=2.36387E-14, precond=fmm_nearfield_ilu0, fmm_order=4
+- research-alt_cap256_theta0p7_rep1: fixture=research-alt, cap=256, repeat=1, theta=0.7, status=ok, audit=0.00943463, warning=audit_gt_8e-3, matvec_s=1.77082, true_residual=3.40731E-15, precond=fmm_nearfield_ilu0, fmm_order=4
+- research-alt_cap256_theta0p8_rep1: fixture=research-alt, cap=256, repeat=1, theta=0.8, status=ok, audit=0.0142016, warning=audit_gt_1e-2, matvec_s=0.53104, true_residual=8.45184E-15, precond=fmm_nearfield_ilu0, fmm_order=4

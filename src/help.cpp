@@ -303,7 +303,7 @@ IMPORTANT NOTES
         -pbe-tabi-expansion-audit=off|sampled|full-small,
         -pbe-tabi-expansion-audit-sample-count=<64..2048>,
         -pbe-tabi-expansion-audit-max-panels=<128..8192>,
-        -pbe-tabi-matvec-audit=off|sampled|full-small,
+        -pbe-tabi-matvec-audit=off|sampled|sampled-detail|full-small,
         -pbe-tabi-matvec-audit-sample-count=<128..4096>,
       -pbe-tabi-progress=off|auto|detail,
       -pbe-tabi-progress-interval=<1..300>,

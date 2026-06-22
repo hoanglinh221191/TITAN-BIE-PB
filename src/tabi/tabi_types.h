@@ -263,6 +263,14 @@ struct Options {
   int expansion_audit_max_panels{2048};
   std::string matvec_audit{"off"};
   int matvec_audit_sample_count{1024};
+  std::string fmm_cartesian_audit{"off"};
+  std::string fmm_local{"off"};
+  std::string fmm_local_refine{"off"};
+  double fmm_local_refine_tol{4.0e-3};
+  std::string fmm_local_cache{"off"};
+  int fmm_local_cache_budget_mb{256};
+  std::string fmm_local_fallback{"scalar"};
+  std::string fmm_local_plan_builder{"legacy-rescan"};
   std::string progress{"off"};
   int progress_interval_seconds{5};
   std::string true_residual_probe{"restart"};
@@ -486,6 +494,7 @@ struct Result {
   std::string leaf_block_verify{"off"};
   std::string leaf_mac{"off"};
   std::string fmm_m2l_mode{"off"};
+  int fmm_m2l_expansion_order{0};
   std::size_t fmm_m2l_near_pairs{0};
   std::size_t fmm_m2l_far_pairs{0};
   double fmm_m2l_setup_ms{0.0};
@@ -962,6 +971,7 @@ struct TreecodeStats {
   std::string leaf_block_verify{"off"};
   std::string leaf_mac{"off"};
   std::string fmm_m2l_mode{"off"};
+  int fmm_m2l_expansion_order{0};
   std::size_t fmm_m2l_near_pairs{0};
   std::size_t fmm_m2l_far_pairs{0};
   double fmm_m2l_setup_ms{0.0};
@@ -1741,6 +1751,15 @@ TreeWorkspace build_tree_workspace(const std::vector<Panel> &panels,
 struct FmmM2lSingleMatvecStats {
   std::size_t near_pairs{0};
   std::size_t far_pairs{0};
+  std::size_t near_self_pairs{0};
+  std::size_t near_one_ring_pairs{0};
+  std::size_t near_duffy_pairs{0};
+  std::size_t near_centroid_pairs{0};
+  std::size_t near_fallbacks{0};
+  std::size_t duffy_subdivisions_max{0};
+  double duffy_subdivisions_mean{0.0};
+  std::string near_kernel_policy{"centroid"};
+  int expansion_order{0};
   double setup_ms{0.0};
   double apply_ms{0.0};
   bool cached{false};
@@ -1752,18 +1771,22 @@ struct FmmM2lSingleMatvecStats {
 std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
 ensure_jcp_fmm_m2l_context(
     const std::vector<Panel> &panels, double eps_ratio, double kappa,
-    std::size_t leaf_size, double opening_theta, TitanExecutor &executor,
+    std::size_t leaf_size, double opening_theta, int expansion_order,
+    TitanExecutor &executor,
     std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
         *context_cache = nullptr);
 
 void apply_jcp_fmm_m2l_single_matvec(
     const std::vector<Panel> &panels, const std::vector<double> &unknowns,
     double eps_ratio, double kappa, double lhs_phi, double lhs_phin,
-    std::size_t leaf_size, double opening_theta, TitanExecutor &executor,
+    std::size_t leaf_size, double opening_theta, int expansion_order,
+    TitanExecutor &executor,
     std::vector<double> &out, FmmM2lSingleMatvecStats *stats = nullptr,
     bool coupled = true,
     std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
-        *context_cache = nullptr);
+        *context_cache = nullptr,
+    const std::string &near_integration = "centroid",
+    const std::string &quad_buffer = "off");
 
 void apply_treecode_operator(const std::vector<Panel> &panels,
                              const std::vector<double> &density,

@@ -278,11 +278,26 @@ function Write-FmmCliArgFile(
     [double]$TemperatureK,
     [double]$OpeningTheta = 0.8,
     [int]$AuditSampleCount = 0,
+    [ValidateSet('auto','off','sampled','sampled-detail')]
+    [string]$AuditMode = 'auto',
     [string]$Preconditioner = 'diagonal',
     [int]$PreconditionerBlockPanelCap = 32,
     [int]$PreconditionerOverlapPanelCap = 64,
     [int]$PreconditionerIluNeighborCap = 192,
-    [double]$PreconditionerIluDropTol = 0.0
+    [double]$PreconditionerIluDropTol = 0.0,
+    [ValidateSet('centroid','analytic_singular','duffy_adaptive')]
+    [string]$NearIntegration = 'centroid',
+    [ValidateSet(3,4)][int]$TaylorOrder = 4,
+    [ValidateSet('off','on')][string]$FmmCartesianAudit = 'off',
+    [ValidateSet('off','audit-p4','single-matvec-p4','gmres-p4')][string]$FmmLocal = 'off',
+    [ValidateSet('off','p3-p4-tail','operator-tail-static')][string]$FmmLocalRefine = 'off',
+    [double]$FmmLocalRefineTolerance = 4.0e-3,
+    [ValidateSet('off','kernel-jet','green-jet-compressed')]
+    [string]$FmmLocalCache = 'off',
+    [ValidateRange(64,1024)][int]$FmmLocalCacheBudgetMb = 256,
+    [ValidateSet('scalar','packed-avx2')][string]$FmmLocalFallback = 'scalar',
+    [ValidateSet('legacy-rescan','metric-cache')]
+    [string]$FmmLocalPlanBuilder = 'legacy-rescan'
 ) {
     $pdbPath = Join-Path $RunDir 'driver.pdb'
     Write-FmmCliDummyPdb $pdbPath
@@ -317,11 +332,20 @@ function Write-FmmCliArgFile(
         "-pbe-tabi-sum=$Mode",
         '-pbe-tabi-formulation=jcp2013-treecode',
         "-pbe-tabi-fmm-m2l=$FmmMode",
+        "-pbe-tabi-fmm-cartesian-audit=$FmmCartesianAudit",
+        "-pbe-tabi-fmm-local=$FmmLocal",
+        "-pbe-tabi-fmm-local-refine=$FmmLocalRefine",
+        "-pbe-tabi-fmm-local-refine-tol=$(& $format $FmmLocalRefineTolerance)",
+        "-pbe-tabi-fmm-local-cache=$FmmLocalCache",
+        "-pbe-tabi-fmm-local-cache-budget-mb=$FmmLocalCacheBudgetMb",
+        "-pbe-tabi-fmm-local-fallback=$FmmLocalFallback",
+        "-pbe-tabi-fmm-local-plan-builder=$FmmLocalPlanBuilder",
         "-pbe-tabi-surface-points=$SurfacePoints",
         '-pbe-tabi-tree-leaf-size=64',
         "-pbe-tabi-opening-theta=$(& $format $OpeningTheta)",
-        '-pbe-tabi-near-integration=centroid',
+        "-pbe-tabi-near-integration=$NearIntegration",
         '-pbe-tabi-quad-buffer=off',
+        "-pbe-tabi-taylor-order=$TaylorOrder",
         "-pbe-tabi-precond=$Preconditioner",
         "-pbe-tabi-precond-block-panel-cap=$PreconditionerBlockPanelCap",
         "-pbe-tabi-precond-overlap-panel-cap=$PreconditionerOverlapPanelCap",
@@ -332,8 +356,14 @@ function Write-FmmCliArgFile(
         '-pbe-tabi-true-residual-probe-scope=sampled',
         '-pbe-tabi-true-residual-sample-count=512'
         )
-        if ($AuditSampleCount -gt 0) {
-            $argLines += '-pbe-tabi-matvec-audit=sampled'
+        $resolvedAuditMode = if ($AuditMode -eq 'auto') {
+            if ($AuditSampleCount -gt 0) { 'sampled' } else { 'off' }
+        } else { $AuditMode }
+        if ($resolvedAuditMode -ne 'off') {
+            if ($AuditSampleCount -le 0) {
+                throw "Audit mode $resolvedAuditMode requires AuditSampleCount > 0"
+            }
+            $argLines += "-pbe-tabi-matvec-audit=$resolvedAuditMode"
             $argLines += "-pbe-tabi-matvec-audit-sample-count=$AuditSampleCount"
         } else {
             $argLines += '-pbe-tabi-matvec-audit=off'

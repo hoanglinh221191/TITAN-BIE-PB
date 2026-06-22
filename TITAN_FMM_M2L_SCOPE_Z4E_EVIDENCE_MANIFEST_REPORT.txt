@@ -1,0 +1,28 @@
+# TITAN FMM/M2L Scope Z4E Evidence Manifest Report
+
+Decision: z4e_evidence_bundle_ready
+
+Artifacts:
+- Artifact manifest: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4e\fagbi_scope_z4e_artifact_manifest.csv
+- Command provenance: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4e\fagbi_scope_z4e_command_provenance.csv
+- Claim map: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4e\fagbi_scope_z4e_claim_map.csv
+- Limitations map: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4e\fagbi_scope_z4e_limitations_map.csv
+- Checksums: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4e\fagbi_scope_z4e_checksums.csv
+- Evidence bundle: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4e\fagbi_scope_z4e_evidence_bundle.md
+- Decision: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4e\fagbi_scope_z4e_decision.csv
+- Summary: C:\tmp\elec_vdw-fagbi-z2a\test\tmp\fagbi_scope_z4e\fagbi_scope_z4e_summary.dat
+
+Claims:
+- high_resolution_analytic_convergence: Direct TABI analytic Born/Kirkwood high-resolution error falls below the Z1D threshold on the verified rows.
+- fmm_analytic_singular_near_parity: FMM/M2L can use analytic-singular near integration with finite parity/audit behavior.
+- duffy_explicit_only: Duffy-adaptive FMM near-field rows are safe enough to document as explicit, but not promoted to near=auto.
+- theta06_order4_policy: The paper protein panel uses fixed Taylor order 4 and opening theta 0.6.
+- protein_panel_reference_policy: Cap-128 protein rows use full direct TABI energy; cap-256 rows use sampled direct-operator audit.
+- preconditioner_money_plot: Sparse near-field ILU(0) breaks through the Barnase dense/high-coupling cap-256 case where block-diagonal stalls.
+
+Limitations:
+- grid_default: Grid remains the production PBE default.
+- cap256_direct_energy_absent: Cap-256 direct TABI energy is not used as the paper oracle.
+- z5_barnase_framing: The Z5 money plot is Barnase dense/high-coupling evidence, not broad protein-generalization evidence.
+- duffy_explicit_only: Duffy-adaptive is explicit-only and not promoted to near=auto.
+- z4e_no_new_numerics: Z4E is packaging and audit only, not new numerical evidence.

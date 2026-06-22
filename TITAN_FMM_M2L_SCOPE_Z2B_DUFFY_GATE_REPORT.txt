@@ -1,0 +1,12 @@
+# TITAN FMM/M2L Scope Z2B Duffy Gate Report
+
+Z2B verifies that explicit duffy_adaptive near integration can run through the FMM/M2L near-source path while keeping auto/default policies unchanged.
+
+Decision: z2b_duffy_explicit_pass
+
+## Rows
+
+- born_direct_duffy_adaptive: status=ok, near=duffy_adaptive, quad=adaptive, policy=one_ring_cpv, fmm=off, duffy_pairs=37440, fallback=0, audit=0
+- born_fmm_duffy_adaptive: status=ok, near=duffy_adaptive, quad=adaptive, policy=one_ring_cpv, fmm=single-matvec-analytic, duffy_pairs=37440, fallback=0, audit=0
+- kirkwood_direct_duffy_adaptive: status=ok, near=duffy_adaptive, quad=adaptive, policy=one_ring_cpv, fmm=off, duffy_pairs=37440, fallback=0, audit=0
+- kirkwood_fmm_duffy_adaptive: status=ok, near=duffy_adaptive, quad=adaptive, policy=one_ring_cpv, fmm=single-matvec-analytic, duffy_pairs=37440, fallback=0, audit=0

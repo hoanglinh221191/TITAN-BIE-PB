@@ -6,8 +6,8 @@ Grid remains the production PBE default. The legacy TABI treecode remains availa
 
 ## Smoke Matrix
 
-- explicit_fmm_ilu_reference: mode=single-matvec-analytic, preconditioner=fmm_nearfield_ilu0, ilu_cap=64, far_pairs=20128577
-- default_treecode_auto_fmm_ilu: mode=single-matvec-analytic, preconditioner=fmm_nearfield_ilu0, ilu_cap=64, far_pairs=20128577
+- explicit_fmm_ilu_reference: mode=single-matvec-analytic, preconditioner=fmm_nearfield_ilu0, ilu_cap=64, far_pairs=23798002
+- default_treecode_auto_fmm_ilu: mode=single-matvec-analytic, preconditioner=fmm_nearfield_ilu0, ilu_cap=64, far_pairs=23798002
 - legacy_treecode_escape_off: mode=off, preconditioner=diagonal, ilu_cap=192, far_pairs=0
-- explicit_diagonal_keeps_override: mode=single-matvec-analytic, preconditioner=diagonal, ilu_cap=192, far_pairs=20128577
+- explicit_diagonal_keeps_override: mode=single-matvec-analytic, preconditioner=diagonal, ilu_cap=192, far_pairs=23798002
 - direct_tabi_no_auto_fmm: mode=off, preconditioner=diagonal, ilu_cap=192, far_pairs=0
