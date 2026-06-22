@@ -954,10 +954,17 @@ void LLPSPaperAccumulator::process_frame(
   contact.rr_interface = choose2(interface_r);
   contact_rows_.push_back(contact);
 
+  // A slab coexistence profile must include the empty/dilute plateau all the
+  // way to half the periodic box. Truncating at the outermost solute bead
+  // biases dilute concentrations upward and makes binodal fitting impossible
+  // when no protein chain leaves the slab in a finite system.
+  const double profile_limit_nm =
+      (geometry == "slab")
+          ? 0.5 * box_nm[axis]
+          : std::max(radius_nm, max_profile_distance_nm);
   const std::size_t needed_bins =
-      static_cast<std::size_t>(std::floor(
-          std::max(radius_nm, max_profile_distance_nm) /
-          config_.profile_bin_nm)) +
+      static_cast<std::size_t>(
+          std::floor(profile_limit_nm / config_.profile_bin_nm)) +
       2;
   if (profile_bins_.size() < needed_bins)
     profile_bins_.resize(needed_bins);
