@@ -4049,9 +4049,92 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       progress.write("tree_build_end", result, &jcp_tree_stats, matvec_calls,
                      0, 0, 0.0, "running", true);
     }
+    const bool gmres_p4 = options.fmm_local == "gmres-p4";
+    std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
+        gmres_p4_context;
+    if (gmres_p4) {
+      gmres_p4_context = ensure_jcp_fmm_m2l_context(
+          panels, eps_ratio, kappa, jcp_tree.leaf_size,
+          jcp_tree.opening_theta, jcp_tree.taylor_order, executor,
+          &jcp_tree.fmm_m2l_context);
+      titan::tabi::fmm_m2l::JcpLocalP4OperatorOptions p4_options;
+      p4_options.near_integration = result.near_integration;
+      p4_options.quad_buffer = result.quad_buffer;
+      p4_options.refine_tolerance = options.fmm_local_refine_tol;
+      p4_options.cache_mode = options.fmm_local_cache;
+      p4_options.cache_budget_mb = static_cast<std::size_t>(
+          std::max(0, options.fmm_local_cache_budget_mb));
+      p4_options.fallback_mode = options.fmm_local_fallback;
+      p4_options.plan_builder = options.fmm_local_plan_builder;
+      const auto prepare_begin = std::chrono::steady_clock::now();
+      const auto prepared = gmres_p4_context->prepare_local_p4_operator(
+          panels, executor, p4_options);
+      result.fmm_local_gmres_active = true;
+      result.fmm_local_prepare_seconds =
+          elapsed_ms(prepare_begin, std::chrono::steady_clock::now()) / 1000.0;
+      result.fmm_local_plan_build_count = prepared.plan_build_count;
+      result.fmm_local_cache_build_count = prepared.cache_build_count;
+      result.fmm_local_operator_finite = prepared.finite_outputs;
+      result.memory_bytes += prepared.cache_bytes +
+                             prepared.fallback_metadata_bytes +
+                             prepared.plan_metric_cache_peak_bytes;
+      jcp_tree_stats.matvec_mode = "jcp2013_fmm_m2l_gmres_p4";
+      jcp_tree_stats.fmm_m2l_mode = "single-matvec-analytic";
+      jcp_tree_stats.fmm_m2l_expansion_order = 4;
+      jcp_tree_stats.fmm_m2l_near_pairs =
+          prepared.fallback_base_near_pairs + prepared.direct_fallback_pairs;
+      jcp_tree_stats.fmm_m2l_far_pairs = prepared.far_pairs;
+      jcp_tree_stats.fmm_m2l_setup_ms =
+          1000.0 * result.fmm_local_prepare_seconds;
+      jcp_tree_stats.fmm_m2l_finite_outputs = prepared.finite_outputs;
+      if (!prepared.finite_outputs)
+        throw std::runtime_error("gmres_p4_prepare_non_finite");
+    }
+
+    auto apply_p4_operator = [&](const std::vector<double> &x,
+                                 std::vector<double> &out,
+                                 bool count_gmres_matvec) {
+      if (!gmres_p4_context)
+        throw std::logic_error("gmres_p4_context_not_prepared");
+      const std::size_t n = panels.size();
+      if (x.size() < (coupled ? 2 * n : n))
+        throw std::invalid_argument("gmres_p4_incomplete_unknown_vector");
+      std::vector<double> phi(n, 0.0);
+      std::vector<double> phin(n, 0.0);
+      for (std::size_t panel = 0; panel < n; ++panel) {
+        phi[panel] = x[panel];
+        phin[panel] = coupled ? x[n + panel] : 0.0;
+      }
+      const auto applied =
+          gmres_p4_context->apply_prepared_local_p4_operator(
+              phi, phin, executor, coupled);
+      if (!applied.finite_outputs)
+        throw std::runtime_error("gmres_p4_apply_non_finite");
+      titan::tabi::fmm_m2l::assemble_jcp_local_p4_system_matvec(
+          applied, x, lhs_phi, lhs_phin, coupled, out);
+      result.fmm_local_operator_finite =
+          result.fmm_local_operator_finite && applied.finite_outputs;
+      result.fmm_local_plan_build_count = applied.plan_build_count;
+      result.fmm_local_cache_build_count = applied.cache_build_count;
+      if (count_gmres_matvec) {
+        ++result.fmm_local_gmres_matvec_calls;
+        result.fmm_local_gmres_apply_seconds_total += applied.apply_seconds;
+        result.fmm_local_moment_seconds_total += applied.moment_seconds;
+        result.fmm_local_m2l_seconds_total += applied.m2l_seconds;
+        result.fmm_local_fallback_seconds_total +=
+            applied.direct_fallback_seconds;
+        result.fmm_local_l2p_seconds_total += applied.l2p_seconds;
+        result.fmm_local_gmres_apply_seconds_mean =
+            result.fmm_local_gmres_apply_seconds_total /
+            static_cast<double>(result.fmm_local_gmres_matvec_calls);
+      }
+    };
+
     auto matvec = [&](const std::vector<double> &x, std::vector<double> &out) {
       const auto begin = std::chrono::steady_clock::now();
-      if (experimental_treecode) {
+      if (gmres_p4) {
+        apply_p4_operator(x, out, true);
+      } else if (experimental_treecode) {
         apply_jcp_treecode_operator(panels, x, eps_ratio, kappa, lhs_phi,
                                     lhs_phin, coupled, jcp_tree,
                                     result.near_integration,
@@ -4740,16 +4823,21 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       }
       if (!audit_x.empty() && !audit_rows.empty()) {
         std::vector<double> tree_ax;
-        apply_jcp_treecode_operator(panels, audit_x, eps_ratio, kappa, lhs_phi,
-                                    lhs_phin, coupled, jcp_tree,
-                                    result.near_integration,
-                                    result.quad_buffer, executor, tree_ax,
-                                    nullptr);
+        if (gmres_p4) {
+          apply_p4_operator(audit_x, tree_ax, false);
+        } else {
+          apply_jcp_treecode_operator(
+              panels, audit_x, eps_ratio, kappa, lhs_phi, lhs_phin, coupled,
+              jcp_tree, result.near_integration, result.quad_buffer, executor,
+              tree_ax, nullptr);
+        }
         const bool full =
             options.matvec_audit == "full-small" &&
             audit_rows.size() == audit_x.size();
         double diff_sq = 0.0;
         double direct_sq = 0.0;
+        double direct_residual_sq = 0.0;
+        double rhs_sq = 0.0;
         if (full) {
           std::vector<double> direct_ax;
           if (coupled) {
@@ -4768,6 +4856,9 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
             const double delta = tree_ax[row] - direct_ax[row];
             diff_sq += delta * delta;
             direct_sq += direct_ax[row] * direct_ax[row];
+            const double residual_value = rhs[row] - direct_ax[row];
+            direct_residual_sq += residual_value * residual_value;
+            rhs_sq += rhs[row] * rhs[row];
           }
         } else {
           const std::size_t unknown_count = audit_x.size();
@@ -4775,11 +4866,15 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           const std::size_t workers = solver_workers(executor, audit_rows.size());
           std::vector<double> partial_diff_sq(workers, 0.0);
           std::vector<double> partial_direct_sq(workers, 0.0);
+          std::vector<double> partial_direct_residual_sq(workers, 0.0);
+          std::vector<double> partial_rhs_sq(workers, 0.0);
           executor.parallel_for(
               audit_rows.size(), workers, 1,
               [&](std::size_t worker, std::size_t begin, std::size_t end) {
                 double local_diff_sq = 0.0;
                 double local_direct_sq = 0.0;
+                double local_direct_residual_sq = 0.0;
+                double local_rhs_sq = 0.0;
                 for (std::size_t pos = begin; pos < end; ++pos) {
                   const std::size_t row = audit_rows[pos];
                   if (row >= unknown_count || row >= tree_ax.size())
@@ -4804,19 +4899,35 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                   const double delta = tree_ax[row] - direct_row;
                   local_diff_sq += delta * delta;
                   local_direct_sq += direct_row * direct_row;
+                  const double residual_value = rhs[row] - direct_row;
+                  local_direct_residual_sq += residual_value * residual_value;
+                  local_rhs_sq += rhs[row] * rhs[row];
                 }
                 partial_diff_sq[worker] = local_diff_sq;
                 partial_direct_sq[worker] = local_direct_sq;
+                partial_direct_residual_sq[worker] =
+                    local_direct_residual_sq;
+                partial_rhs_sq[worker] = local_rhs_sq;
               });
           diff_sq = std::accumulate(partial_diff_sq.begin(),
                                     partial_diff_sq.end(), 0.0);
           direct_sq = std::accumulate(partial_direct_sq.begin(),
                                       partial_direct_sq.end(), 0.0);
+          direct_residual_sq = std::accumulate(
+              partial_direct_residual_sq.begin(),
+              partial_direct_residual_sq.end(), 0.0);
+          rhs_sq =
+              std::accumulate(partial_rhs_sq.begin(), partial_rhs_sq.end(), 0.0);
         }
         result.tree_vs_direct_matvec_rel =
             std::sqrt(std::max(0.0, diff_sq)) /
             std::max(1.0e-300, std::sqrt(std::max(0.0, direct_sq)));
         result.matvec_audit_rows = audit_rows.size();
+        if (gmres_p4) {
+          result.fmm_local_sampled_direct_true_residual =
+              std::sqrt(std::max(0.0, direct_residual_sq)) /
+              std::max(1.0e-300, std::sqrt(std::max(0.0, rhs_sq)));
+        }
         if (options.matvec_audit == "sampled-detail") {
           const auto context = ensure_jcp_fmm_m2l_context(
               panels, eps_ratio, kappa, jcp_tree.leaf_size,
@@ -4919,7 +5030,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                   options.fmm_local_refine_tol));
             }
           }
-          if (options.fmm_local == "single-matvec-p4") {
+          if (options.fmm_local == "single-matvec-p4" ||
+              options.fmm_local == "gmres-p4") {
             const std::size_t cache_budget_mb = static_cast<std::size_t>(
                 std::max(0, options.fmm_local_cache_budget_mb));
             attribution.push_back(context->attribute_local_p4_candidate(
@@ -4927,7 +5039,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                 static_cast<std::size_t>(options.matvec_audit_sample_count),
                 "solution", executor, coupled, result.near_integration,
                 result.quad_buffer, &panels, options.fmm_local_refine_tol,
-                options.fmm_local_cache, cache_budget_mb, 5,
+                options.fmm_local_cache, cache_budget_mb,
+                options.fmm_local == "single-matvec-p4" ? 5u : 1u,
                 options.fmm_local_fallback,
                 options.fmm_local_plan_builder));
             attribution.push_back(context->attribute_local_p4_candidate(
@@ -4953,6 +5066,12 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       }
       result.matvec_audit_ms =
           elapsed_ms(audit_begin, std::chrono::steady_clock::now());
+    }
+    if (gmres_p4) {
+      jcp_tree_stats.fmm_m2l_apply_ms =
+          1000.0 * result.fmm_local_gmres_apply_seconds_total;
+      jcp_tree_stats.fmm_m2l_finite_outputs =
+          result.fmm_local_operator_finite;
     }
     if (experimental_treecode) {
       result.matvec_mode = jcp_tree_stats.matvec_mode;

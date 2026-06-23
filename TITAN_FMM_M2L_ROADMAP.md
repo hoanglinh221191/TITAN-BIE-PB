@@ -1261,3 +1261,16 @@ Decision:
   at `118.16 MB` with audit `6.46481e-3`; Barnase used `32.49 MB`, stayed at
   `137.89 MB` peak RSS, and retained audit `1.27916e-3`. The full decision is
   `z4m3_compressed_cache_pass`, permitting a guarded GMRES integration plan.
+- Scope Z4N wires the prepared p4 operator into explicit hidden GMRES while
+  preserving the degree-one TABI treecode default. Static planning, compressed
+  cache construction, and packed fallback worklists are built exactly once;
+  all three full proteins converged internally in 128 iterations and p4
+  matvecs were faster than the degree-one baseline. Barnase and 1SH1 passed
+  direct sampled verification at `0.00135936` and `0.000149168`, respectively.
+  Full 1A63 exposed a solution-subspace accuracy gap: sampled operator RMS was
+  `0.0595872` and sampled direct true residual was `0.0598425`, despite an
+  internal residual of `7.78252e-12` and clean recomposition/reference parity.
+  The full decision is `z4n_operator_accuracy_gap`. Keep `gmres-p4` explicit,
+  do not plan promotion/repeatability yet, and investigate why the four-probe
+  static refinement plan under-resolves the converged 1A63 density. Grid
+  remains the production PB default.

@@ -68,8 +68,8 @@ Invoke-Case 'bad_mode' ($baseArgs +
     'fmm-local-cache.*green-jet-compressed'
 $gmres = ($baseArgs -replace '^-pbe-tabi-fmm-local=single-matvec-p4$',
     '-pbe-tabi-fmm-local=gmres-p4')
-Invoke-Case 'gmres_rejected' ($gmres +
+Invoke-Case 'gmres_incomplete_guard' ($gmres +
     '-pbe-tabi-fmm-local-cache=green-jet-compressed') $false `
-    'gmres-p4.*fail-closed'
+    'gmres-p4.*requires'
 
 Write-Host 'PASS pbe_fagbi_scope_z4m3_parser_smoke'

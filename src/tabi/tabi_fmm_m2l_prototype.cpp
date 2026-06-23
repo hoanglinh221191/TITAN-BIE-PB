@@ -879,6 +879,9 @@ struct FmmM2lAnalyticContext::Impl {
   mutable std::size_t static_plan_build_count{0};
   mutable std::size_t local_cache_build_count{0};
   mutable std::size_t local_cache_hits{0};
+  bool local_p4_prepared{false};
+  JcpLocalP4OperatorOptions local_p4_options;
+  std::vector<TitanPBE::Tabi::Panel> local_p4_production_panels;
 };
 
 FmmM2lAnalyticContext::FmmM2lAnalyticContext(
@@ -1957,6 +1960,59 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   if (!result.finite_outputs)
     result.status = "non_finite_output";
   return result;
+}
+
+JcpLocalP4CandidateResult FmmM2lAnalyticContext::prepare_local_p4_operator(
+    const std::vector<TitanPBE::Tabi::Panel> &production_panels,
+    TitanExecutor &executor, const JcpLocalP4OperatorOptions &options) {
+  if (impl_ == nullptr)
+    throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
+  if (production_panels.size() != impl_->panels.size())
+    throw std::invalid_argument(
+        "JCP local p4 prepared geometry must match panels");
+
+  impl_->local_p4_prepared = false;
+  impl_->local_p4_options = options;
+  impl_->local_p4_production_panels = production_panels;
+  const std::vector<double> zero(impl_->panels.size(), 0.0);
+  JcpLocalP4CandidateResult result = apply_local_p4_candidate(
+      zero, zero, executor, true, options.near_integration,
+      options.quad_buffer, &impl_->local_p4_production_panels,
+      "operator-tail-static", options.refine_tolerance, options.cache_mode,
+      options.cache_budget_mb, options.fallback_mode, options.plan_builder);
+  impl_->local_p4_prepared = true;
+  return result;
+}
+
+JcpLocalP4CandidateResult
+FmmM2lAnalyticContext::apply_prepared_local_p4_operator(
+    const std::vector<double> &phi, const std::vector<double> &phin,
+    TitanExecutor &executor, bool coupled) const {
+  if (impl_ == nullptr || !impl_->local_p4_prepared)
+    throw std::logic_error("local_p4_operator_not_prepared");
+  const JcpLocalP4OperatorOptions &options = impl_->local_p4_options;
+  return apply_local_p4_candidate(
+      phi, phin, executor, coupled, options.near_integration,
+      options.quad_buffer, &impl_->local_p4_production_panels,
+      "operator-tail-static", options.refine_tolerance, options.cache_mode,
+      options.cache_budget_mb, options.fallback_mode, options.plan_builder);
+}
+
+void assemble_jcp_local_p4_system_matvec(
+    const JcpLocalP4CandidateResult &interaction,
+    const std::vector<double> &unknowns, double lhs_phi, double lhs_phin,
+    bool coupled, std::vector<double> &out) {
+  const std::size_t n = interaction.phi.size();
+  if (interaction.phin.size() != n ||
+      unknowns.size() < (coupled ? 2 * n : n))
+    throw std::invalid_argument("gmres_p4_incomplete_unknown_vector");
+  out.assign(coupled ? 2 * n : n, 0.0);
+  for (std::size_t panel = 0; panel < n; ++panel) {
+    out[panel] = lhs_phi * unknowns[panel] - interaction.phi[panel];
+    if (coupled)
+      out[n + panel] =
+          lhs_phin * unknowns[n + panel] - interaction.phin[panel];
+  }
 }
 
 JcpOperatorAttributionResult

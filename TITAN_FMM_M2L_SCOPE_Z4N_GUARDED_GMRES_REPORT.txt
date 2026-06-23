@@ -1,0 +1,14 @@
+# TITAN FMM/M2L Scope Z4N Guarded p4 GMRES Report
+
+Decision: z4n_operator_accuracy_gap
+
+The p4 operator is explicit-only. Static refinement, compressed Green-jet cache, packed AVX2 fallback, and FMM-native ILU(0) are prepared once before GMRES.
+
+- barnase degree1_baseline: status=ok, internal_residual=1.31901E-12, direct_sampled_residual=0, audit=0.288126, matvec=2.29555s, wall=320.3602415s, RSS=87.24609375 MB
+- barnase p4_gmres: status=ok, internal_residual=4.32037E-12, direct_sampled_residual=0.00135949, audit=0.00135936, matvec=0.8141s, wall=219.7731808s, RSS=153.0625 MB
+- 1a63 degree1_baseline: status=ok, internal_residual=1.86941E-11, direct_sampled_residual=0, audit=0.967063, matvec=1.412s, wall=202.385526s, RSS=99.83984375 MB
+- 1a63 p4_gmres: status=ok, internal_residual=7.78252E-12, direct_sampled_residual=0.0598425, audit=0.0595872, matvec=0.587432s, wall=288.5277287s, RSS=258.953125 MB
+- 1sh1 degree1_baseline: status=ok, internal_residual=4.06518E-14, direct_sampled_residual=0, audit=0.0205699, matvec=0.72288s, wall=101.3245354s, RSS=44.1953125 MB
+- 1sh1 p4_gmres: status=ok, internal_residual=1.17566E-14, direct_sampled_residual=0.000149173, audit=0.000149168, matvec=0.224856s, wall=54.1207528s, RSS=61.79296875 MB
+
+Grid remains the production PBE default. TABI treecode remains degree-1 unless gmres-p4 is explicitly selected.

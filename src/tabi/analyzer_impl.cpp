@@ -8150,6 +8150,15 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "fmm_m2l_near_pairs,"
            "fmm_m2l_far_pairs,fmm_m2l_setup_seconds,"
            "fmm_m2l_apply_seconds,fmm_m2l_finite_outputs,"
+           "fmm_local_gmres_active,fmm_local_prepare_seconds,"
+           "fmm_local_plan_build_count,fmm_local_cache_build_count,"
+           "fmm_local_gmres_matvec_calls,"
+           "fmm_local_gmres_apply_seconds_total,"
+           "fmm_local_gmres_apply_seconds_mean,"
+           "fmm_local_moment_seconds_total,fmm_local_m2l_seconds_total,"
+           "fmm_local_fallback_seconds_total,fmm_local_l2p_seconds_total,"
+           "fmm_local_sampled_direct_true_residual,"
+           "fmm_local_operator_finite,"
            "status,convergence_reason,reaction_energy_source,"
            "iterations,residual,residual_history,gmres_restart_requested,"
            "gmres_restart_effective,best_residual,best_residual_iter,"
@@ -8580,6 +8589,19 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << seconds(result.tabi_fmm_m2l_setup_ms) << ','
       << seconds(result.tabi_fmm_m2l_apply_ms) << ','
       << (result.tabi_fmm_m2l_finite_outputs ? "true" : "false") << ','
+      << (result.tabi_fmm_local_gmres_active ? "true" : "false") << ','
+      << result.tabi_fmm_local_prepare_seconds << ','
+      << result.tabi_fmm_local_plan_build_count << ','
+      << result.tabi_fmm_local_cache_build_count << ','
+      << result.tabi_fmm_local_gmres_matvec_calls << ','
+      << result.tabi_fmm_local_gmres_apply_seconds_total << ','
+      << result.tabi_fmm_local_gmres_apply_seconds_mean << ','
+      << result.tabi_fmm_local_moment_seconds_total << ','
+      << result.tabi_fmm_local_m2l_seconds_total << ','
+      << result.tabi_fmm_local_fallback_seconds_total << ','
+      << result.tabi_fmm_local_l2p_seconds_total << ','
+      << result.tabi_fmm_local_sampled_direct_true_residual << ','
+      << (result.tabi_fmm_local_operator_finite ? "true" : "false") << ','
       << csv_escape(result.tabi_status) << ','
       << csv_escape(result.tabi_convergence_reason) << ','
       << csv_escape(result.tabi_reaction_energy_source) << ','
@@ -11788,6 +11810,27 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_fmm_m2l_setup_ms = tabi.fmm_m2l_setup_ms;
   solve.tabi_fmm_m2l_apply_ms = tabi.fmm_m2l_apply_ms;
   solve.tabi_fmm_m2l_finite_outputs = tabi.fmm_m2l_finite_outputs;
+  solve.tabi_fmm_local_gmres_active = tabi.fmm_local_gmres_active;
+  solve.tabi_fmm_local_prepare_seconds = tabi.fmm_local_prepare_seconds;
+  solve.tabi_fmm_local_plan_build_count = tabi.fmm_local_plan_build_count;
+  solve.tabi_fmm_local_cache_build_count = tabi.fmm_local_cache_build_count;
+  solve.tabi_fmm_local_gmres_matvec_calls =
+      tabi.fmm_local_gmres_matvec_calls;
+  solve.tabi_fmm_local_gmres_apply_seconds_total =
+      tabi.fmm_local_gmres_apply_seconds_total;
+  solve.tabi_fmm_local_gmres_apply_seconds_mean =
+      tabi.fmm_local_gmres_apply_seconds_mean;
+  solve.tabi_fmm_local_moment_seconds_total =
+      tabi.fmm_local_moment_seconds_total;
+  solve.tabi_fmm_local_m2l_seconds_total =
+      tabi.fmm_local_m2l_seconds_total;
+  solve.tabi_fmm_local_fallback_seconds_total =
+      tabi.fmm_local_fallback_seconds_total;
+  solve.tabi_fmm_local_l2p_seconds_total =
+      tabi.fmm_local_l2p_seconds_total;
+  solve.tabi_fmm_local_sampled_direct_true_residual =
+      tabi.fmm_local_sampled_direct_true_residual;
+  solve.tabi_fmm_local_operator_finite = tabi.fmm_local_operator_finite;
   solve.tabi_status = tabi.status;
   solve.tabi_convergence_reason = tabi.convergence_reason;
   solve.tabi_residual_history = tabi.residual_history;
@@ -12850,6 +12893,32 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
     result.tabi_fmm_m2l_apply_ms = tabi_solve.tabi_fmm_m2l_apply_ms;
     result.tabi_fmm_m2l_finite_outputs =
         tabi_solve.tabi_fmm_m2l_finite_outputs;
+    result.tabi_fmm_local_gmres_active =
+        tabi_solve.tabi_fmm_local_gmres_active;
+    result.tabi_fmm_local_prepare_seconds =
+        tabi_solve.tabi_fmm_local_prepare_seconds;
+    result.tabi_fmm_local_plan_build_count =
+        tabi_solve.tabi_fmm_local_plan_build_count;
+    result.tabi_fmm_local_cache_build_count =
+        tabi_solve.tabi_fmm_local_cache_build_count;
+    result.tabi_fmm_local_gmres_matvec_calls =
+        tabi_solve.tabi_fmm_local_gmres_matvec_calls;
+    result.tabi_fmm_local_gmres_apply_seconds_total =
+        tabi_solve.tabi_fmm_local_gmres_apply_seconds_total;
+    result.tabi_fmm_local_gmres_apply_seconds_mean =
+        tabi_solve.tabi_fmm_local_gmres_apply_seconds_mean;
+    result.tabi_fmm_local_moment_seconds_total =
+        tabi_solve.tabi_fmm_local_moment_seconds_total;
+    result.tabi_fmm_local_m2l_seconds_total =
+        tabi_solve.tabi_fmm_local_m2l_seconds_total;
+    result.tabi_fmm_local_fallback_seconds_total =
+        tabi_solve.tabi_fmm_local_fallback_seconds_total;
+    result.tabi_fmm_local_l2p_seconds_total =
+        tabi_solve.tabi_fmm_local_l2p_seconds_total;
+    result.tabi_fmm_local_sampled_direct_true_residual =
+        tabi_solve.tabi_fmm_local_sampled_direct_true_residual;
+    result.tabi_fmm_local_operator_finite =
+        tabi_solve.tabi_fmm_local_operator_finite;
     result.tabi_status = tabi_solve.tabi_status;
     result.tabi_convergence_reason = tabi_solve.tabi_convergence_reason;
     result.tabi_residual_history = tabi_solve.tabi_residual_history;

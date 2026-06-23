@@ -272,6 +272,21 @@ struct JcpLocalP4CandidateResult {
   bool finite_outputs{true};
 };
 
+struct JcpLocalP4OperatorOptions {
+  std::string near_integration{"analytic_singular"};
+  std::string quad_buffer{"off"};
+  double refine_tolerance{2.0e-3};
+  std::string cache_mode{"green-jet-compressed"};
+  std::size_t cache_budget_mb{256};
+  std::string fallback_mode{"packed-avx2"};
+  std::string plan_builder{"metric-cache"};
+};
+
+void assemble_jcp_local_p4_system_matvec(
+    const JcpLocalP4CandidateResult &interaction,
+    const std::vector<double> &unknowns, double lhs_phi, double lhs_phin,
+    bool coupled, std::vector<double> &out);
+
 struct JcpGuardedGmresMetrics {
   std::size_t panels = 0;
   std::size_t near_pairs = 0;
@@ -400,6 +415,14 @@ public:
       std::size_t cache_budget_mb = 256,
       const std::string &fallback_mode = "scalar",
       const std::string &plan_builder = "legacy-rescan") const;
+
+  JcpLocalP4CandidateResult prepare_local_p4_operator(
+      const std::vector<TitanPBE::Tabi::Panel> &production_panels,
+      TitanExecutor &executor, const JcpLocalP4OperatorOptions &options);
+
+  JcpLocalP4CandidateResult apply_prepared_local_p4_operator(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      TitanExecutor &executor, bool coupled = true) const;
 
   JcpOperatorAttributionResult attribute_local_p4_candidate(
       const std::vector<double> &phi, const std::vector<double> &phin,

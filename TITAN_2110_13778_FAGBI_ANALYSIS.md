@@ -665,3 +665,21 @@ passed with a `34,068,616`-byte cache, `137.89 MB` peak RSS, audit RMS
 is `z4m3_compressed_cache_pass`. No FP32, partial cache, disk cache, or tiled
 recomputation was introduced; guarded GMRES stays fail-closed and grid
 remains the production PB default.
+
+## Scope Z4N Guarded p4 GMRES Integration
+
+Z4N prepared the density-independent refinement plan, compressed Green-jet
+cache, and packed direct-fallback worklist once before GMRES. The hidden p4
+operator then reused this state for every Krylov matvec with the existing
+FMM-native sparse near-field ILU(0) preconditioner. All full Barnase, 1A63,
+and 1SH1 solves converged internally in 128 iterations; plan and cache build
+counts remained one and peak process memory stayed below 259 MB.
+
+The direct sampled verification is mixed. Barnase and 1SH1 passed with audit
+RMS `0.00135936` and `0.000149168`. For 1A63, however, the p4 solution had
+audit RMS `0.0595872` and sampled direct true residual `0.0598425`, even though
+the internal p4 residual was `7.78252e-12`. Independent attribution reproduced
+the same value with zero recomposition/reference gap. The decision is therefore
+`z4n_operator_accuracy_gap`: guarded integration works mechanically, but the
+static four-probe refinement plan does not yet control error over the 1A63
+solution subspace. No manuscript or default-policy claim follows from Z4N.

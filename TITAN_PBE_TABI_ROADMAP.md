@@ -6435,3 +6435,13 @@ Decision:
   The full decision is `z4m3_compressed_cache_pass`. This remains diagnostic;
   `gmres-p4` is fail-closed until a guarded integration scope, and grid remains
   default.
+- Scope Z4N enables `gmres-p4` only for the exact hidden static/refined,
+  metric-cache, compressed-Green-jet, packed-AVX2 and FMM-ILU0 configuration.
+  Lifecycle and performance gates passed: plan/cache build counts remained
+  one, all full proteins converged internally, peak RSS stayed below 259 MB,
+  and p4 matvecs were faster than degree-one FMM. Scientific promotion remains
+  blocked by full 1A63, where sampled operator RMS rose to `0.0595872` on the
+  p4 solution and sampled direct true residual reached `0.0598425`. Barnase
+  (`0.00135936`) and 1SH1 (`0.000149168`) passed. Decision:
+  `z4n_operator_accuracy_gap`; TABI treecode stays degree-one by default and
+  grid remains the production PBE default.

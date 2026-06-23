@@ -91,11 +91,11 @@ $gmresProcess = Start-Process -FilePath $TitanExe -ArgumentList @('-a',$gmresArg
     -WorkingDirectory $gmres -RedirectStandardOutput $gmresOut `
     -RedirectStandardError $gmresErr -Wait -PassThru -NoNewWindow
 if ($gmresProcess.ExitCode -eq 0) {
-    throw 'gmres-p4 unexpectedly bypassed the fail-closed gate'
+    throw 'gmres-p4 unexpectedly bypassed the guarded configuration gate'
 }
 if (((Get-Content -Raw $gmresOut) + (Get-Content -Raw $gmresErr)) -notmatch
-    'gmres-p4.*fail-closed') {
-    throw 'gmres-p4 fail-closed error was unclear'
+    'gmres-p4.*operator-tail-static') {
+    throw 'gmres-p4 guarded-configuration error was unclear'
 }
 
 Write-Host 'PASS pbe_fagbi_scope_z4k_parser_smoke'
