@@ -273,6 +273,8 @@ struct Options {
   std::string fmm_local_plan_builder{"legacy-rescan"};
   int fmm_local_refine_probe_count{4};
   std::string fmm_local_refine_probe_mode{"rademacher"};
+  std::string fmm_local_geometry_guard{"off"};
+  double fmm_local_geometry_theta{0.0};
   std::string progress{"off"};
   int progress_interval_seconds{5};
   std::string true_residual_probe{"restart"};
@@ -518,6 +520,15 @@ struct Result {
   std::string fmm_local_refine_probe_mode{"rademacher"};
   std::size_t fmm_local_refine_probe_count{4};
   bool fmm_local_solution_probe_used{false};
+  double fmm_local_linf_max_abs_tail{0.0};
+  double fmm_local_linf_max_relative_tail{0.0};
+  std::size_t fmm_local_linf_outlier_panels{0};
+  std::string fmm_local_geometry_guard{"off"};
+  double fmm_local_geometry_theta{0.0};
+  std::size_t fmm_local_geometry_guard_rejected_cells{0};
+  std::size_t fmm_local_geometry_guard_direct_fallback_pairs{0};
+  double fmm_local_geometry_gap_min{0.0};
+  double fmm_local_geometry_ratio_max{0.0};
   std::size_t leaf_block_target_leaves{0};
   std::size_t leaf_block_targets{0};
   std::size_t leaf_block_source_groups{0};

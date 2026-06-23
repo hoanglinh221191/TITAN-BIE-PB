@@ -145,6 +145,15 @@ struct FrameResult {
   std::string tabi_fmm_local_refine_probe_mode{"rademacher"};
   std::size_t tabi_fmm_local_refine_probe_count{4};
   bool tabi_fmm_local_solution_probe_used{false};
+  double tabi_fmm_local_linf_max_abs_tail{0.0};
+  double tabi_fmm_local_linf_max_relative_tail{0.0};
+  std::size_t tabi_fmm_local_linf_outlier_panels{0};
+  std::string tabi_fmm_local_geometry_guard{"off"};
+  double tabi_fmm_local_geometry_theta{0.0};
+  std::size_t tabi_fmm_local_geometry_guard_rejected_cells{0};
+  std::size_t tabi_fmm_local_geometry_guard_direct_fallback_pairs{0};
+  double tabi_fmm_local_geometry_gap_min{0.0};
+  double tabi_fmm_local_geometry_ratio_max{0.0};
   std::string tabi_status{"off"};
   std::string tabi_convergence_reason{"off"};
   std::string tabi_residual_history{};

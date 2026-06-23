@@ -290,7 +290,7 @@ function Write-FmmCliArgFile(
     [ValidateSet(3,4)][int]$TaylorOrder = 4,
     [ValidateSet('off','on')][string]$FmmCartesianAudit = 'off',
     [ValidateSet('off','audit-p4','single-matvec-p4','gmres-p4')][string]$FmmLocal = 'off',
-    [ValidateSet('off','p3-p4-tail','operator-tail-static')][string]$FmmLocalRefine = 'off',
+    [ValidateSet('off','p3-p4-tail','operator-tail-static','operator-tail-linf')][string]$FmmLocalRefine = 'off',
     [double]$FmmLocalRefineTolerance = 4.0e-3,
     [ValidateSet('off','kernel-jet','green-jet-compressed')]
     [string]$FmmLocalCache = 'off',
@@ -300,7 +300,10 @@ function Write-FmmCliArgFile(
     [string]$FmmLocalPlanBuilder = 'legacy-rescan',
     [ValidateSet(4,8,16)][int]$FmmLocalRefineProbeCount = 4,
     [ValidateSet('rademacher','solution','mixed')]
-    [string]$FmmLocalRefineProbeMode = 'rademacher'
+    [string]$FmmLocalRefineProbeMode = 'rademacher',
+    [ValidateSet('off','strict-geometry-mac')]
+    [string]$FmmLocalGeometryGuard = 'off',
+    [double]$FmmLocalGeometryTheta = 0.0
 ) {
     $pdbPath = Join-Path $RunDir 'driver.pdb'
     Write-FmmCliDummyPdb $pdbPath
@@ -345,6 +348,8 @@ function Write-FmmCliArgFile(
         "-pbe-tabi-fmm-local-plan-builder=$FmmLocalPlanBuilder",
         "-pbe-tabi-fmm-local-refine-probe-count=$FmmLocalRefineProbeCount",
         "-pbe-tabi-fmm-local-refine-probe-mode=$FmmLocalRefineProbeMode",
+        "-pbe-tabi-fmm-local-geometry-guard=$FmmLocalGeometryGuard",
+        "-pbe-tabi-fmm-local-geometry-theta=$(& $format $FmmLocalGeometryTheta)",
         "-pbe-tabi-surface-points=$SurfacePoints",
         '-pbe-tabi-tree-leaf-size=64',
         "-pbe-tabi-opening-theta=$(& $format $OpeningTheta)",

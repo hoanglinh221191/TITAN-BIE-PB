@@ -8161,6 +8161,13 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "fmm_local_operator_finite,"
            "fmm_local_refine_probe_mode,fmm_local_refine_probe_count,"
            "fmm_local_solution_probe_used,"
+           "fmm_local_linf_max_abs_tail,"
+           "fmm_local_linf_max_relative_tail,"
+           "fmm_local_linf_outlier_panels,"
+           "fmm_local_geometry_guard,fmm_local_geometry_theta,"
+           "fmm_local_geometry_guard_rejected_cells,"
+           "fmm_local_geometry_guard_direct_fallback_pairs,"
+           "fmm_local_geometry_gap_min,fmm_local_geometry_ratio_max,"
            "status,convergence_reason,reaction_energy_source,"
            "iterations,residual,residual_history,gmres_restart_requested,"
            "gmres_restart_effective,best_residual,best_residual_iter,"
@@ -8607,6 +8614,15 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << csv_escape(result.tabi_fmm_local_refine_probe_mode) << ','
       << result.tabi_fmm_local_refine_probe_count << ','
       << (result.tabi_fmm_local_solution_probe_used ? "true" : "false")
+      << ',' << result.tabi_fmm_local_linf_max_abs_tail
+      << ',' << result.tabi_fmm_local_linf_max_relative_tail
+      << ',' << result.tabi_fmm_local_linf_outlier_panels
+      << ',' << csv_escape(result.tabi_fmm_local_geometry_guard)
+      << ',' << result.tabi_fmm_local_geometry_theta
+      << ',' << result.tabi_fmm_local_geometry_guard_rejected_cells
+      << ',' << result.tabi_fmm_local_geometry_guard_direct_fallback_pairs
+      << ',' << result.tabi_fmm_local_geometry_gap_min
+      << ',' << result.tabi_fmm_local_geometry_ratio_max
       << ','
       << csv_escape(result.tabi_status) << ','
       << csv_escape(result.tabi_convergence_reason) << ','
@@ -11785,6 +11801,8 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
       args_.tabi_fmm_local_refine_probe_count;
   options.fmm_local_refine_probe_mode =
       args_.tabi_fmm_local_refine_probe_mode;
+  options.fmm_local_geometry_guard = args_.tabi_fmm_local_geometry_guard;
+  options.fmm_local_geometry_theta = args_.tabi_fmm_local_geometry_theta;
   options.true_residual_probe = args_.tabi_true_residual_probe;
   options.true_residual_probe_scope = args_.tabi_true_residual_probe_scope;
   options.true_residual_probe_interval =
@@ -11847,6 +11865,24 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
       tabi.fmm_local_refine_probe_count;
   solve.tabi_fmm_local_solution_probe_used =
       tabi.fmm_local_solution_probe_used;
+  solve.tabi_fmm_local_linf_max_abs_tail =
+      tabi.fmm_local_linf_max_abs_tail;
+  solve.tabi_fmm_local_linf_max_relative_tail =
+      tabi.fmm_local_linf_max_relative_tail;
+  solve.tabi_fmm_local_linf_outlier_panels =
+      tabi.fmm_local_linf_outlier_panels;
+  solve.tabi_fmm_local_geometry_guard =
+      tabi.fmm_local_geometry_guard;
+  solve.tabi_fmm_local_geometry_theta =
+      tabi.fmm_local_geometry_theta;
+  solve.tabi_fmm_local_geometry_guard_rejected_cells =
+      tabi.fmm_local_geometry_guard_rejected_cells;
+  solve.tabi_fmm_local_geometry_guard_direct_fallback_pairs =
+      tabi.fmm_local_geometry_guard_direct_fallback_pairs;
+  solve.tabi_fmm_local_geometry_gap_min =
+      tabi.fmm_local_geometry_gap_min;
+  solve.tabi_fmm_local_geometry_ratio_max =
+      tabi.fmm_local_geometry_ratio_max;
   solve.tabi_status = tabi.status;
   solve.tabi_convergence_reason = tabi.convergence_reason;
   solve.tabi_residual_history = tabi.residual_history;
@@ -12941,6 +12977,24 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_fmm_local_refine_probe_count;
     result.tabi_fmm_local_solution_probe_used =
         tabi_solve.tabi_fmm_local_solution_probe_used;
+    result.tabi_fmm_local_linf_max_abs_tail =
+        tabi_solve.tabi_fmm_local_linf_max_abs_tail;
+    result.tabi_fmm_local_linf_max_relative_tail =
+        tabi_solve.tabi_fmm_local_linf_max_relative_tail;
+    result.tabi_fmm_local_linf_outlier_panels =
+        tabi_solve.tabi_fmm_local_linf_outlier_panels;
+    result.tabi_fmm_local_geometry_guard =
+        tabi_solve.tabi_fmm_local_geometry_guard;
+    result.tabi_fmm_local_geometry_theta =
+        tabi_solve.tabi_fmm_local_geometry_theta;
+    result.tabi_fmm_local_geometry_guard_rejected_cells =
+        tabi_solve.tabi_fmm_local_geometry_guard_rejected_cells;
+    result.tabi_fmm_local_geometry_guard_direct_fallback_pairs =
+        tabi_solve.tabi_fmm_local_geometry_guard_direct_fallback_pairs;
+    result.tabi_fmm_local_geometry_gap_min =
+        tabi_solve.tabi_fmm_local_geometry_gap_min;
+    result.tabi_fmm_local_geometry_ratio_max =
+        tabi_solve.tabi_fmm_local_geometry_ratio_max;
     result.tabi_status = tabi_solve.tabi_status;
     result.tabi_convergence_reason = tabi_solve.tabi_convergence_reason;
     result.tabi_residual_history = tabi_solve.tabi_residual_history;
