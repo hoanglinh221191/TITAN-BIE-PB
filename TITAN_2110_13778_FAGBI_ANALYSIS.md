@@ -697,3 +697,35 @@ than recovering the error. The decision is `z4n1_estimator_gap`, so the full
 three-protein Z4N.1 gate is intentionally not run. Next work should replace or
 strengthen the truncation/error estimator rather than increasing probe count
 or promoting `gmres-p4`.
+
+## Scope Z4N.2/Z4N.3 Outlier Refinement Budget Recovery
+
+Z4N.2 tested two stronger deterministic guards for the 1A63 p4 solution:
+panel-wise `L-infinity` outlier refinement and a strict geometric MAC. Both
+recovered the 1A63 sampled direct verification, but the best combined row used
+`260,458,975` direct-fallback pairs (`5.90x` the baseline). This classified
+the diagnostic as refinement-cost excessive rather than promotion-ready.
+
+Z4N.3 then swept weaker outlier budgets. The selected policy is
+`operator-tail-static` with tolerance `0.002` plus `strict-geometry-mac` at
+theta `0.5`. It passed the confirm gate on full 1A63, Barnase, and 1SH1:
+sampled audit RMS values were `0.00235702`, `6.38294e-5`, and `4.89439e-6`,
+respectively, with fallback ratios `1.84x`, `2.18x`, and `0.47x`. Peak RSS
+remained below `370 MB` and plan/cache build counts stayed one. This result
+justified a guarded GMRES policy gate but did not change any default.
+
+## Scope Z4N.4 Guarded p4 GMRES Policy Gate
+
+Z4N.4 ran full GMRES using the Z4N.3 policy above and compared each protein
+against same-run degree-one FMM baselines. The full decision is
+`z4n4_guarded_p4_policy_pass`. Barnase, 1A63, and 1SH1 all reported `status=ok`,
+internal residuals below `1e-6`, sampled audits below `8e-3`, sampled direct
+true residuals below `8e-3`, finite energies, RSS below `512 MB`, and exactly
+one plan/cache build.
+
+The p4 guarded matvec was also faster than the degree-one baseline on all
+three full proteins: Barnase `0.64557 s` versus `1.41899 s`, 1A63 `0.585506 s`
+versus `0.890086 s`, and 1SH1 `0.166431 s` versus `0.434363 s`. This permits a
+Z4O repeatability and promotion-readiness plan for the explicit guarded p4
+diagnostic path. It does not make p4 automatic, and grid remains the
+production PB default.

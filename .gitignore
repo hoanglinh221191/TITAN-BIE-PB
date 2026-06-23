@@ -365,6 +365,8 @@ test/
 !/test/titan_fmm_m2l_scope_z4n2_outlier_smoke.cpp
 !/TITAN_FMM_M2L_SCOPE_Z4N3_OUTLIER_BUDGET_REPORT.txt
 !/test/pbe_fagbi_scope_z4n3_outlier_budget_sweep.ps1
+!/TITAN_FMM_M2L_SCOPE_Z4N4_GUARDED_P4_POLICY_REPORT.txt
+!/test/pbe_fagbi_scope_z4n4_guarded_p4_policy_gate.ps1
 !/test/pbe_inputs_public/
 !/test/pbe_inputs_public/*.pdb
 !/test/pbe_inputs_public/*.pqr

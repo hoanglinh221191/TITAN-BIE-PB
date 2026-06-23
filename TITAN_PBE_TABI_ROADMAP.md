@@ -6452,3 +6452,15 @@ Decision:
   corresponding Rademacher work. The measured decision is
   `z4n1_estimator_gap`, so the full Z4N.1 gate is skipped and `gmres-p4`
   remains explicit diagnostic only.
+- Scope Z4N.2/Z4N.3 confirms that 1A63 needs an outlier guard, not more
+  density probes. The confirmed budgeted policy is `operator-tail-static`
+  tolerance `0.002` plus `strict-geometry-mac` theta `0.5`. Full 1A63,
+  Barnase, and 1SH1 passed sampled audit/direct-residual gates with fallback
+  ratios `1.84x`, `2.18x`, and `0.47x`, RSS below `370 MB`, and one plan/cache
+  build.
+- Scope Z4N.4 runs that policy inside full hidden `gmres-p4`. The decision is
+  `z4n4_guarded_p4_policy_pass`: all three full proteins converged and passed
+  sampled verification, while p4 matvecs were faster than same-run degree-one
+  baselines. This supports planning Z4O repeatability/promotion-readiness for
+  the explicit guarded p4 path only. TABI treecode default remains degree-one
+  and `-pbe=grid` remains the production PBE default.
