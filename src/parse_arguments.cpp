@@ -1757,6 +1757,22 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-pbe-tabi-fmm-local-plan-builder");
       continue;
     }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-fmm-local-refine-probe-count",
+                              "--pbe-tabi-fmm-local-refine-probe-count"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local_refine_probe_count = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-fmm-local-refine-probe-mode",
+                              "--pbe-tabi-fmm-local-refine-probe-mode"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local_refine_probe_mode =
+          require_choice(common_value, {"rademacher", "solution", "mixed"},
+                         "-pbe-tabi-fmm-local-refine-probe-mode");
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",
                                    "--pbe-tabi-interaction-mode"},
                              common_value, i)) {

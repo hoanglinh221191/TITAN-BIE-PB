@@ -271,6 +271,8 @@ struct Options {
   int fmm_local_cache_budget_mb{256};
   std::string fmm_local_fallback{"scalar"};
   std::string fmm_local_plan_builder{"legacy-rescan"};
+  int fmm_local_refine_probe_count{4};
+  std::string fmm_local_refine_probe_mode{"rademacher"};
   std::string progress{"off"};
   int progress_interval_seconds{5};
   std::string true_residual_probe{"restart"};
@@ -513,6 +515,9 @@ struct Result {
   double fmm_local_l2p_seconds_total{0.0};
   double fmm_local_sampled_direct_true_residual{0.0};
   bool fmm_local_operator_finite{true};
+  std::string fmm_local_refine_probe_mode{"rademacher"};
+  std::size_t fmm_local_refine_probe_count{4};
+  bool fmm_local_solution_probe_used{false};
   std::size_t leaf_block_target_leaves{0};
   std::size_t leaf_block_targets{0};
   std::size_t leaf_block_source_groups{0};

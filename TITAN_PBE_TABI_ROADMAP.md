@@ -6445,3 +6445,10 @@ Decision:
   (`0.00135936`) and 1SH1 (`0.000149168`) passed. Decision:
   `z4n_operator_accuracy_gap`; TABI treecode stays degree-one by default and
   grid remains the production PBE default.
+- Scope Z4N.1 confirms that the 1A63 gap is not fixed by simply adding static
+  refinement probes. Full-1A63 quick rows gave `0.0595872` audit for the
+  baseline `4/rademacher` plan, `0.0526377` for `8/rademacher`, and
+  `0.0509292` for `16/rademacher`; solution and mixed probe modes matched the
+  corresponding Rademacher work. The measured decision is
+  `z4n1_estimator_gap`, so the full Z4N.1 gate is skipped and `gmres-p4`
+  remains explicit diagnostic only.

@@ -179,6 +179,33 @@ int main() {
   expect(last.cache_hits > prepared.cache_hits,
          "prepared cache hits must grow across repeated matvecs");
 
+  auto expanded_options = options();
+  expanded_options.refine_probe_count = 8;
+  fmm::FmmM2lAnalyticContext expanded_context(
+      config, panels, 1.0 / 80.0, 0.17);
+  const auto expanded_prepare = expanded_context.prepare_local_p4_operator(
+      production, executor, expanded_options);
+  expect(expanded_prepare.static_probe_count == 8,
+         "expanded rademacher plan must report requested probe count");
+  expect(expanded_prepare.plan_hash != prepare.plan_hash,
+         "changing the static probe count must rebuild a distinct plan");
+
+  auto mixed_options = options();
+  mixed_options.refine_probe_count = 8;
+  mixed_options.refine_probe_mode = "mixed";
+  fmm::FmmM2lAnalyticContext mixed_context(
+      config, panels, 1.0 / 80.0, 0.17);
+  const auto mixed_prepare = mixed_context.prepare_local_p4_operator(
+      production, executor, mixed_options);
+  expect(mixed_prepare.refine_probe_mode == "mixed" &&
+             mixed_prepare.static_probe_count == 8 &&
+             mixed_prepare.solution_probe_used,
+         "mixed mode must report solution-probe diagnostics");
+  const auto mixed_apply = mixed_context.apply_prepared_local_p4_operator(
+      phi, phin, executor, true);
+  expect(mixed_apply.plan_build_count == 1 && mixed_apply.cache_build_count == 1,
+         "mixed prepared operator must reuse its plan and cache");
+
   std::cout << "titan_fmm_m2l_scope_z4n_prepared_operator_smoke ok\n";
   return 0;
 }

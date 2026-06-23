@@ -1833,6 +1833,34 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-fmm-local-plan-builder=metric-cache requires Taylor order 4.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.tabi_fmm_local_refine_probe_count != 4 &&
+        pbe.tabi_fmm_local_refine_probe_count != 8 &&
+        pbe.tabi_fmm_local_refine_probe_count != 16) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-refine-probe-count must be 4, 8, or 16.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local_refine_probe_mode != "rademacher" &&
+        pbe.tabi_fmm_local_refine_probe_mode != "solution" &&
+        pbe.tabi_fmm_local_refine_probe_mode != "mixed") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local-refine-probe-mode must be rademacher, solution, or mixed.");
+      exit(EXIT_FAILURE);
+    }
+    if ((pbe.tabi_fmm_local_refine_probe_count != 4 ||
+         pbe.tabi_fmm_local_refine_probe_mode != "rademacher") &&
+        pbe.tabi_fmm_local_refine != "operator-tail-static") {
+      TitanUI::print_error(
+          "PBE: FMM local refine probe controls require operator-tail-static refinement.");
+      exit(EXIT_FAILURE);
+    }
+    if ((pbe.tabi_fmm_local_refine_probe_count != 4 ||
+         pbe.tabi_fmm_local_refine_probe_mode != "rademacher") &&
+        pbe.tabi_matvec_audit != "sampled-detail") {
+      TitanUI::print_error(
+          "PBE: FMM local refine probe controls require sampled-detail audit.");
+      exit(EXIT_FAILURE);
+    }
     if (!std::isfinite(pbe.tabi_fmm_local_refine_tol) ||
         pbe.tabi_fmm_local_refine_tol < 1.0e-4 ||
         pbe.tabi_fmm_local_refine_tol > 5.0e-2) {

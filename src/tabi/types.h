@@ -142,6 +142,9 @@ struct FrameResult {
   double tabi_fmm_local_l2p_seconds_total{0.0};
   double tabi_fmm_local_sampled_direct_true_residual{0.0};
   bool tabi_fmm_local_operator_finite{true};
+  std::string tabi_fmm_local_refine_probe_mode{"rademacher"};
+  std::size_t tabi_fmm_local_refine_probe_count{4};
+  bool tabi_fmm_local_solution_probe_used{false};
   std::string tabi_status{"off"};
   std::string tabi_convergence_reason{"off"};
   std::string tabi_residual_history{};

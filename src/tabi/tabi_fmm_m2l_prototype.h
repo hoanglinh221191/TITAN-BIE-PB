@@ -178,6 +178,8 @@ struct JcpOperatorAttributionResult {
   std::uint64_t local_plan_hash{0};
   std::size_t local_plan_build_count{0};
   std::size_t local_static_probe_count{0};
+  std::string local_refine_probe_mode{"rademacher"};
+  bool local_solution_probe_used{false};
   std::string local_cache_mode{"off"};
   std::string local_cache_layout{"off"};
   std::size_t local_cache_operators{0};
@@ -229,6 +231,8 @@ struct JcpLocalP4CandidateResult {
   std::uint64_t plan_hash{0};
   std::size_t plan_build_count{0};
   std::size_t static_probe_count{0};
+  std::string refine_probe_mode{"rademacher"};
+  bool solution_probe_used{false};
   std::size_t refined_cells{0};
   std::size_t split_children{0};
   std::size_t direct_fallback_panels{0};
@@ -280,6 +284,8 @@ struct JcpLocalP4OperatorOptions {
   std::size_t cache_budget_mb{256};
   std::string fallback_mode{"packed-avx2"};
   std::string plan_builder{"metric-cache"};
+  std::size_t refine_probe_count{4};
+  std::string refine_probe_mode{"rademacher"};
 };
 
 void assemble_jcp_local_p4_system_matvec(
@@ -414,7 +420,9 @@ public:
       const std::string &cache_mode = "kernel-jet",
       std::size_t cache_budget_mb = 256,
       const std::string &fallback_mode = "scalar",
-      const std::string &plan_builder = "legacy-rescan") const;
+      const std::string &plan_builder = "legacy-rescan",
+      std::size_t refine_probe_count = 4,
+      const std::string &refine_probe_mode = "rademacher") const;
 
   JcpLocalP4CandidateResult prepare_local_p4_operator(
       const std::vector<TitanPBE::Tabi::Panel> &production_panels,
@@ -436,7 +444,9 @@ public:
       std::size_t cache_budget_mb = 256,
       std::size_t repeat_count = 1,
       const std::string &fallback_mode = "scalar",
-      const std::string &plan_builder = "legacy-rescan") const;
+      const std::string &plan_builder = "legacy-rescan",
+      std::size_t refine_probe_count = 4,
+      const std::string &refine_probe_mode = "rademacher") const;
 
 private:
   JcpOperatorAttributionResult attribute_impl(

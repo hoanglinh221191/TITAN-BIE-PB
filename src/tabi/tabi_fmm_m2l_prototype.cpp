@@ -833,6 +833,8 @@ struct StaticLocalP4Plan {
   std::unique_ptr<PackedJcpFallbackPlan> packed_fallback_plan;
   std::uint64_t hash{0};
   std::size_t probe_count{4};
+  std::string probe_mode{"rademacher"};
+  bool solution_probe_used{false};
   std::size_t refined_cells{0};
   std::size_t split_children{0};
   std::size_t direct_fallback_panels{0};
@@ -1329,7 +1331,8 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
     const std::string &refine_mode, double refine_tolerance,
     const std::string &cache_mode, std::size_t cache_budget_mb,
     const std::string &fallback_mode,
-    const std::string &plan_builder) const {
+    const std::string &plan_builder, std::size_t refine_probe_count,
+    const std::string &refine_probe_mode) const {
   if (impl_ == nullptr)
     throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
   const std::size_t n = impl_->panels.size();
@@ -1357,12 +1360,23 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   if (plan_builder != "legacy-rescan" && plan_builder != "metric-cache")
     throw std::invalid_argument(
         "JCP local p4 plan builder must be legacy-rescan or metric-cache");
+  if (refine_probe_count != 4 && refine_probe_count != 8 &&
+      refine_probe_count != 16)
+    throw std::invalid_argument(
+        "JCP local p4 refine probe count must be 4, 8, or 16");
+  if (refine_probe_mode != "rademacher" &&
+      refine_probe_mode != "solution" && refine_probe_mode != "mixed")
+    throw std::invalid_argument(
+        "JCP local p4 refine probe mode must be rademacher, solution, or mixed");
 
   const auto build_plan = [&]() {
     const auto plan_begin = Clock::now();
     auto plan = std::make_unique<StaticLocalP4Plan>();
     plan->tolerance = refine_tolerance;
     plan->plan_builder = plan_builder;
+    plan->probe_count = refine_probe_count;
+    plan->probe_mode = refine_probe_mode;
+    plan->solution_probe_used = refine_probe_mode != "rademacher";
     plan->target_nodes = impl_->target_tree.target_leaf_nodes;
     plan->work.reserve(plan->target_nodes.size());
     plan->refined_fallback_sources.resize(plan->target_nodes.size());
@@ -1371,22 +1385,63 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
           impl_->target_tree.work[static_cast<std::size_t>(target_node)]);
 
     const auto probe_moment_begin = Clock::now();
-    std::array<std::vector<CartesianJcpMoments>, 4> probe_moments;
-    const std::array<std::uint64_t, 4> seeds{17, 29, 43, 71};
+    std::vector<std::vector<CartesianJcpMoments>> probe_moments(
+        refine_probe_count);
+    const std::array<std::uint64_t, 16> seeds{
+        17,  29,  43,  71,  83,  97,  113, 131,
+        149, 167, 181, 197, 211, 229, 241, 263};
     const double normalization = 1.0 / std::sqrt(static_cast<double>(n));
-    for (std::size_t probe = 0; probe < seeds.size(); ++probe) {
+    const auto normalized_density_probe = [&](std::size_t probe,
+                                              std::vector<double> &probe_phi,
+                                              std::vector<double> &probe_phin) {
+      double phi_norm_sq = 0.0;
+      double phin_norm_sq = 0.0;
+      for (std::size_t panel = 0; panel < n; ++panel) {
+        phi_norm_sq += phi_values[panel] * phi_values[panel];
+        phin_norm_sq += phin_values[panel] * phin_values[panel];
+      }
+      const double phi_norm = std::sqrt(std::max(0.0, phi_norm_sq));
+      const double phin_norm = std::sqrt(std::max(0.0, phin_norm_sq));
+      const double combined =
+          std::sqrt(std::max(0.0, phi_norm_sq + phin_norm_sq));
+      if (probe == 0 && combined > 0.0) {
+        for (std::size_t panel = 0; panel < n; ++panel) {
+          probe_phi[panel] = phi_values[panel] / combined;
+          probe_phin[panel] = phin_values[panel] / combined;
+        }
+      } else if (probe == 1 && phi_norm > 0.0) {
+        for (std::size_t panel = 0; panel < n; ++panel)
+          probe_phi[panel] = phi_values[panel] / phi_norm;
+      } else if (probe == 2 && phin_norm > 0.0) {
+        for (std::size_t panel = 0; panel < n; ++panel)
+          probe_phin[panel] = phin_values[panel] / phin_norm;
+      }
+    };
+    for (std::size_t probe = 0; probe < probe_moments.size(); ++probe) {
       std::vector<double> probe_phi(n, 0.0);
       std::vector<double> probe_phin(n, 0.0);
-      for (std::size_t panel = 0; panel < n; ++panel) {
-        const std::size_t panel_id = impl_->points.panel_id[panel];
-        const double sign =
-            (rademacher_hash(panel_id, seeds[probe]) & 1ULL) != 0
-                ? normalization
-                : -normalization;
-        if (probe < 2)
-          probe_phi[panel] = sign;
-        else
-          probe_phin[panel] = sign;
+      const bool solution_slot =
+          refine_probe_mode == "solution" ||
+          (refine_probe_mode == "mixed" && probe < 3);
+      if (solution_slot) {
+        normalized_density_probe(probe, probe_phi, probe_phin);
+      }
+      if (!solution_slot ||
+          (std::all_of(probe_phi.begin(), probe_phi.end(),
+                       [](double value) { return value == 0.0; }) &&
+           std::all_of(probe_phin.begin(), probe_phin.end(),
+                       [](double value) { return value == 0.0; }))) {
+        for (std::size_t panel = 0; panel < n; ++panel) {
+          const std::size_t panel_id = impl_->points.panel_id[panel];
+          const double sign =
+              (rademacher_hash(panel_id, seeds[probe]) & 1ULL) != 0
+                  ? normalization
+                  : -normalization;
+          if (probe < refine_probe_count / 2)
+            probe_phi[panel] = sign;
+          else
+            probe_phin[panel] = sign;
+        }
       }
       probe_moments[probe] = build_cartesian_node_moments(
           impl_->source_tree, impl_->panels, probe_phi, probe_phin, 4,
@@ -1397,8 +1452,8 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
 
     struct PairMetric {
       int source_node{-1};
-      std::array<double, 4> tail_sq_by_probe{};
-      std::array<double, 4> signal_sq_by_probe{};
+      std::vector<double> tail_sq_by_probe;
+      std::vector<double> signal_sq_by_probe;
       double tail_sq{0.0};
     };
 
@@ -1481,6 +1536,8 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
         const Cell &source_cell = impl_->source_tree.cells[source_index];
         PairMetric metric;
         metric.source_node = source_node;
+        metric.tail_sq_by_probe.assign(probe_moments.size(), 0.0);
+        metric.signal_sq_by_probe.assign(probe_moments.size(), 0.0);
         for (std::size_t probe = 0; probe < probe_moments.size(); ++probe) {
           const CartesianJcpLocalP4 translated =
               translate_cartesian_jcp_m2l_p4(
@@ -1525,8 +1582,8 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
         ++leaf.refinement_iterations;
         std::vector<PairMetric> metrics;
         metrics.reserve(work.far_sources.size());
-        std::array<double, 4> total_tail_sq{};
-        std::array<double, 4> total_signal_sq{};
+        std::vector<double> total_tail_sq(probe_moments.size(), 0.0);
+        std::vector<double> total_signal_sq(probe_moments.size(), 0.0);
         for (const int source_node : work.far_sources) {
           const PairMetric metric = compute_metric(source_node);
           for (std::size_t probe = 0; probe < probe_moments.size(); ++probe) {
@@ -1627,6 +1684,10 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
     static_assert(sizeof(tolerance_bits) == sizeof(refine_tolerance));
     std::memcpy(&tolerance_bits, &refine_tolerance, sizeof(tolerance_bits));
     hash_mix(hash, tolerance_bits);
+    hash_mix(hash, static_cast<std::uint64_t>(refine_probe_count));
+    for (const char ch : refine_probe_mode)
+      hash_mix(hash, static_cast<std::uint64_t>(
+                         static_cast<unsigned char>(ch)));
     for (std::size_t i = 0; i < plan->target_nodes.size(); ++i) {
       hash_mix(hash, static_cast<std::uint64_t>(plan->target_nodes[i]));
       for (const int node : plan->work[i].near_sources)
@@ -1642,7 +1703,9 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
 
   if (!impl_->static_local_plan ||
       !same_double(impl_->static_local_plan->tolerance, refine_tolerance) ||
-      impl_->static_local_plan->plan_builder != plan_builder)
+      impl_->static_local_plan->plan_builder != plan_builder ||
+      impl_->static_local_plan->probe_count != refine_probe_count ||
+      impl_->static_local_plan->probe_mode != refine_probe_mode)
     build_plan();
   StaticLocalP4Plan &plan = *impl_->static_local_plan;
 
@@ -1772,6 +1835,8 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   result.plan_hash = plan.hash;
   result.plan_build_count = impl_->static_plan_build_count;
   result.static_probe_count = plan.probe_count;
+  result.refine_probe_mode = plan.probe_mode;
+  result.solution_probe_used = plan.solution_probe_used;
   result.refined_cells = plan.refined_cells;
   result.split_children = plan.split_children;
   result.direct_fallback_panels = plan.direct_fallback_panels;
@@ -1979,7 +2044,8 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::prepare_local_p4_operator(
       zero, zero, executor, true, options.near_integration,
       options.quad_buffer, &impl_->local_p4_production_panels,
       "operator-tail-static", options.refine_tolerance, options.cache_mode,
-      options.cache_budget_mb, options.fallback_mode, options.plan_builder);
+      options.cache_budget_mb, options.fallback_mode, options.plan_builder,
+      options.refine_probe_count, options.refine_probe_mode);
   impl_->local_p4_prepared = true;
   return result;
 }
@@ -1995,7 +2061,8 @@ FmmM2lAnalyticContext::apply_prepared_local_p4_operator(
       phi, phin, executor, coupled, options.near_integration,
       options.quad_buffer, &impl_->local_p4_production_panels,
       "operator-tail-static", options.refine_tolerance, options.cache_mode,
-      options.cache_budget_mb, options.fallback_mode, options.plan_builder);
+      options.cache_budget_mb, options.fallback_mode, options.plan_builder,
+      options.refine_probe_count, options.refine_probe_mode);
 }
 
 void assemble_jcp_local_p4_system_matvec(
@@ -2025,7 +2092,8 @@ FmmM2lAnalyticContext::attribute_local_p4_candidate(
     double refine_tolerance, const std::string &cache_mode,
     std::size_t cache_budget_mb, std::size_t repeat_count,
     const std::string &fallback_mode,
-    const std::string &plan_builder) const {
+    const std::string &plan_builder, std::size_t refine_probe_count,
+    const std::string &refine_probe_mode) const {
   repeat_count = std::max<std::size_t>(1, repeat_count);
   JcpLocalP4CandidateResult candidate;
   std::vector<double> apply_times;
@@ -2035,7 +2103,7 @@ FmmM2lAnalyticContext::attribute_local_p4_candidate(
         phi_values, phin_values, executor, coupled, near_integration,
         quad_buffer, production_panels, "operator-tail-static",
         refine_tolerance, cache_mode, cache_budget_mb, fallback_mode,
-        plan_builder);
+        plan_builder, refine_probe_count, refine_probe_mode);
     apply_times.push_back(candidate.apply_seconds);
   }
   std::sort(apply_times.begin(), apply_times.end());
@@ -2059,6 +2127,8 @@ FmmM2lAnalyticContext::attribute_local_p4_candidate(
   result.local_plan_hash = candidate.plan_hash;
   result.local_plan_build_count = candidate.plan_build_count;
   result.local_static_probe_count = candidate.static_probe_count;
+  result.local_refine_probe_mode = candidate.refine_probe_mode;
+  result.local_solution_probe_used = candidate.solution_probe_used;
   result.local_cache_mode = candidate.cache_mode;
   result.local_cache_layout = candidate.cache_layout;
   result.local_cache_operators = candidate.cache_operator_count;

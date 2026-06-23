@@ -8159,6 +8159,8 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "fmm_local_fallback_seconds_total,fmm_local_l2p_seconds_total,"
            "fmm_local_sampled_direct_true_residual,"
            "fmm_local_operator_finite,"
+           "fmm_local_refine_probe_mode,fmm_local_refine_probe_count,"
+           "fmm_local_solution_probe_used,"
            "status,convergence_reason,reaction_energy_source,"
            "iterations,residual,residual_history,gmres_restart_requested,"
            "gmres_restart_effective,best_residual,best_residual_iter,"
@@ -8602,6 +8604,10 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << result.tabi_fmm_local_l2p_seconds_total << ','
       << result.tabi_fmm_local_sampled_direct_true_residual << ','
       << (result.tabi_fmm_local_operator_finite ? "true" : "false") << ','
+      << csv_escape(result.tabi_fmm_local_refine_probe_mode) << ','
+      << result.tabi_fmm_local_refine_probe_count << ','
+      << (result.tabi_fmm_local_solution_probe_used ? "true" : "false")
+      << ','
       << csv_escape(result.tabi_status) << ','
       << csv_escape(result.tabi_convergence_reason) << ','
       << csv_escape(result.tabi_reaction_energy_source) << ','
@@ -11775,6 +11781,10 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   options.fmm_local_cache_budget_mb = args_.tabi_fmm_local_cache_budget_mb;
   options.fmm_local_fallback = args_.tabi_fmm_local_fallback;
   options.fmm_local_plan_builder = args_.tabi_fmm_local_plan_builder;
+  options.fmm_local_refine_probe_count =
+      args_.tabi_fmm_local_refine_probe_count;
+  options.fmm_local_refine_probe_mode =
+      args_.tabi_fmm_local_refine_probe_mode;
   options.true_residual_probe = args_.tabi_true_residual_probe;
   options.true_residual_probe_scope = args_.tabi_true_residual_probe_scope;
   options.true_residual_probe_interval =
@@ -11831,6 +11841,12 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_fmm_local_sampled_direct_true_residual =
       tabi.fmm_local_sampled_direct_true_residual;
   solve.tabi_fmm_local_operator_finite = tabi.fmm_local_operator_finite;
+  solve.tabi_fmm_local_refine_probe_mode =
+      tabi.fmm_local_refine_probe_mode;
+  solve.tabi_fmm_local_refine_probe_count =
+      tabi.fmm_local_refine_probe_count;
+  solve.tabi_fmm_local_solution_probe_used =
+      tabi.fmm_local_solution_probe_used;
   solve.tabi_status = tabi.status;
   solve.tabi_convergence_reason = tabi.convergence_reason;
   solve.tabi_residual_history = tabi.residual_history;
@@ -12919,6 +12935,12 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         tabi_solve.tabi_fmm_local_sampled_direct_true_residual;
     result.tabi_fmm_local_operator_finite =
         tabi_solve.tabi_fmm_local_operator_finite;
+    result.tabi_fmm_local_refine_probe_mode =
+        tabi_solve.tabi_fmm_local_refine_probe_mode;
+    result.tabi_fmm_local_refine_probe_count =
+        tabi_solve.tabi_fmm_local_refine_probe_count;
+    result.tabi_fmm_local_solution_probe_used =
+        tabi_solve.tabi_fmm_local_solution_probe_used;
     result.tabi_status = tabi_solve.tabi_status;
     result.tabi_convergence_reason = tabi_solve.tabi_convergence_reason;
     result.tabi_residual_history = tabi_solve.tabi_residual_history;

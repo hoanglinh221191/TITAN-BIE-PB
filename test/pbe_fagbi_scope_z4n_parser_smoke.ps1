@@ -73,7 +73,9 @@ foreach ($column in @('fmm_local_gmres_active','fmm_local_prepare_seconds',
         'fmm_local_gmres_apply_seconds_mean','fmm_local_moment_seconds_total',
         'fmm_local_m2l_seconds_total','fmm_local_fallback_seconds_total',
         'fmm_local_l2p_seconds_total',
-        'fmm_local_sampled_direct_true_residual','fmm_local_operator_finite')) {
+        'fmm_local_sampled_direct_true_residual','fmm_local_operator_finite',
+        'fmm_local_refine_probe_mode','fmm_local_refine_probe_count',
+        'fmm_local_solution_probe_used')) {
     if (-not ($profile.PSObject.Properties.Name -contains $column)) {
         throw "accepted profile is missing Z4N column $column"
     }
@@ -103,6 +105,27 @@ $wrongPreconditioner = $accepted -replace
     '-pbe-tabi-precond=diagonal'
 Invoke-Z4nParserCase 'wrong_preconditioner' $wrongPreconditioner $false `
     'gmres-p4.*fmm-nearfield-ilu0'
+
+$mixedProbe = $accepted + @(
+    '-pbe-tabi-fmm-local-refine-probe-count=8',
+    '-pbe-tabi-fmm-local-refine-probe-mode=mixed'
+)
+Invoke-Z4nParserCase 'mixed_probe' $mixedProbe $true
+$mixedProfile = @(Import-Csv -LiteralPath (Join-Path $WorkRoot `
+    'mixed_probe\pbe_tabi_profile.csv'))[0]
+if ($mixedProfile.fmm_local_refine_probe_mode -ne 'mixed' -or
+    [int]$mixedProfile.fmm_local_refine_probe_count -ne 8 -or
+    $mixedProfile.fmm_local_solution_probe_used -ne 'true') {
+    throw 'mixed probe row did not report requested Z4N.1 probe telemetry'
+}
+
+$badProbeCount = $accepted + '-pbe-tabi-fmm-local-refine-probe-count=12'
+Invoke-Z4nParserCase 'bad_probe_count' $badProbeCount $false `
+    'fmm-local-refine-probe-count.*4.*8.*16'
+
+$badProbeMode = $accepted + '-pbe-tabi-fmm-local-refine-probe-mode=adaptive'
+Invoke-Z4nParserCase 'bad_probe_mode' $badProbeMode $false `
+    'fmm-local-refine-probe-mode.*rademacher.*solution.*mixed'
 
 $bareOptions = @($accepted | Where-Object { $_ -match '^-[A-Za-z0-9-]+$' })
 if ($bareOptions.Count) { throw "generated arg.in contains bare options" }

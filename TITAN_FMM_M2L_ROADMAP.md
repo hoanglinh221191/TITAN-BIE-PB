@@ -1274,3 +1274,12 @@ Decision:
   do not plan promotion/repeatability yet, and investigate why the four-probe
   static refinement plan under-resolves the converged 1A63 density. Grid
   remains the production PB default.
+- Scope Z4N.1 runs the targeted 1A63 solution-subspace refinement diagnostic.
+  Increasing static Rademacher probes from `4` to `16` improved candidate audit
+  only `1.17x` (`0.0595872` to `0.0509292`) while raising fallback work to
+  `50,841,082` panel pairs and wall time to `620.45 s`. Solution and mixed
+  probe plans did not recover the error. The decision is
+  `z4n1_estimator_gap`; the full three-protein Z4N.1 gate is skipped by policy
+  because quick did not reach `8e-3` audit or a `4x` improvement. Keep
+  `gmres-p4` explicit and replace the refinement estimator before any further
+  promotion planning.
