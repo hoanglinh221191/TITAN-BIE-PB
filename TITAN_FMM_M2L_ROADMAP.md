@@ -1299,3 +1299,12 @@ Decision:
   on Barnase, `0.585506/0.890086 s` on 1A63, and `0.166431/0.434363 s` on
   1SH1. Next: Z4O repeatability and promotion-readiness for the explicit
   guarded p4 diagnostic path; grid remains the production PB default.
+- Scope Z4O repeats the explicit guarded p4 path on full Barnase, 1A63, and
+  1SH1. The measured decision is `z4o_repeatability_pass`: every p4 repeat
+  converged, sampled audit and sampled direct true residual stayed below the
+  `8e-3` gate, energy spread was zero for all three fixtures, and plan/cache
+  build counts stayed one. Median p4 matvec ratios versus same-run degree-one
+  baselines were `0.601` on Barnase, `0.824` on 1A63, and `0.300` on 1SH1;
+  peak RSS stayed below `370 MB`. This is sufficient evidence to plan Z4P
+  advanced-option documentation and a cautious user-facing smoke, but not to
+  change the degree-one TABI treecode default or the grid PB default.

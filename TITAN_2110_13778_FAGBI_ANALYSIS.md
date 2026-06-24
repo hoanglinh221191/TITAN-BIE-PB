@@ -729,3 +729,21 @@ versus `0.890086 s`, and 1SH1 `0.166431 s` versus `0.434363 s`. This permits a
 Z4O repeatability and promotion-readiness plan for the explicit guarded p4
 diagnostic path. It does not make p4 automatic, and grid remains the
 production PB default.
+
+## Scope Z4O Guarded p4 Repeatability And Promotion-Readiness
+
+Z4O repeated the explicit guarded p4 path three times on each full protein
+while running a same-fixture degree-one FMM baseline once for runtime context.
+The policy was unchanged from Z4N.4: `gmres-p4`, static tail tolerance
+`0.002`, `strict-geometry-mac` theta `0.5`, compressed Green-jet cache,
+packed AVX2 fallback, analytic-singular near field, order `4`, and
+near-field ILU(0) cap `64`.
+
+The measured decision is `z4o_repeatability_pass`. Barnase, 1A63, and 1SH1
+all had three passing p4 repeats, zero energy spread across repeats, sampled
+audit/direct-residual maxima of `6.38294e-5`, `0.00235702`, and `4.89439e-6`,
+and peak RSS values of `172.71 MB`, `369.92 MB`, and `63.47 MB`,
+respectively. Median p4 matvec ratios versus same-run degree-one baselines
+were `0.601`, `0.824`, and `0.300`. This supports documenting guarded p4 as
+an advanced explicit TABI treecode option, but it still does not change the
+degree-one TABI treecode default or the grid production default.

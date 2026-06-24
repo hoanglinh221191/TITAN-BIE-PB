@@ -6464,3 +6464,12 @@ Decision:
   baselines. This supports planning Z4O repeatability/promotion-readiness for
   the explicit guarded p4 path only. TABI treecode default remains degree-one
   and `-pbe=grid` remains the production PBE default.
+- Scope Z4O verifies repeatability for that same explicit guarded p4 path.
+  Barnase, 1A63, and 1SH1 each passed three p4 repeats with zero energy
+  spread, sampled audit maxima of `6.38294e-5`, `0.00235702`, and
+  `4.89439e-6`, sampled direct true-residual maxima below `8e-3`, peak RSS
+  below `370 MB`, and one plan/cache build per solve. Median p4 matvec ratios
+  versus same-run degree-one baselines were `0.601`, `0.824`, and `0.300`.
+  Decision: `z4o_repeatability_pass`. This permits a Z4P plan for advanced
+  explicit-option documentation/preset smoke only; TABI treecode default
+  remains degree-one and `-pbe=grid` remains production default.
