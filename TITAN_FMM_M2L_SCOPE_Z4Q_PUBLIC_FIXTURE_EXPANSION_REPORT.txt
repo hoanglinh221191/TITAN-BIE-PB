@@ -1,0 +1,15 @@
+# TITAN FMM/M2L Scope Z4Q Public Fixture Expansion Report
+
+Decision: z4q_expansion_pass
+
+Z4Q prepares additional public full-protein fixtures and tests guarded p4 repeatability as supplement-first evidence.
+
+- Manifest: C:\tmp\elec_vdw-fagbi-z4n\test\pbe_inputs_public_z4q\public_fixture_expansion_manifest.csv
+- Matrix: C:\tmp\elec_vdw-fagbi-z4n\test\tmp\fagbi_scope_z4q\fagbi_scope_z4q_matrix.csv
+- Repeatability: C:\tmp\elec_vdw-fagbi-z4n\test\tmp\fagbi_scope_z4q\fagbi_scope_z4q_repeatability.csv
+- Plot: C:\tmp\elec_vdw-fagbi-z4n\test\tmp\fagbi_scope_z4q\fagbi_scope_z4q_repeatability_plot.svg
+
+Policy:
+- Passing Z4Q rows may be added to supplement tables.
+- Main manuscript guarded p4 claim remains based on Z4O unless all required Z4Q rows pass.
+- Grid remains production default and guarded p4 remains explicit.

@@ -747,3 +747,22 @@ respectively. Median p4 matvec ratios versus same-run degree-one baselines
 were `0.601`, `0.824`, and `0.300`. This supports documenting guarded p4 as
 an advanced explicit TABI treecode option, but it still does not change the
 degree-one TABI treecode default or the grid production default.
+
+## Scope Z4P/Z4Q Manuscript Refresh And Fixture Expansion
+
+Z4P refreshes the external manuscript package around the Z4O result. The
+decision is `z4p_manuscript_ready`: the generated DOCX has a guarded-p4
+methods description, the Barnase/1A63/1SH1 repeatability table, explicit
+limitations about sampled direct-operator verification, and visual render QA
+over six pages. The manuscript language now frames guarded p4 as a repeatable
+advanced explicit TABI treecode path, not as a default solver.
+
+Z4Q adds a supplement-first public fixture expansion harness and prepares
+Ubiquitin (1UBQ), Chymotrypsin inhibitor 2 (2CI2), and Villin headpiece
+subdomain (1VII) with the same pinned PDB2PQR 3.7.1 AMBER pH-7 policy used in
+Z4G. The quick 1UBQ gate passed: full 1UBQ had `11242` panels, degree-one audit
+RMS `0.0602172`, guarded p4 audit/direct-residual `1.46754e-5`, energy
+`-4038.457354 kJ/mol`, and one plan/cache build. The quick decision is
+`z4q_expansion_pass`; 2CI2 and 1VII are prepared but their full guarded-p4 rows
+remain pending for a later full Z4Q run. The main manuscript claim therefore
+remains based on Z4O, with 1UBQ usable as preliminary supplement evidence.
