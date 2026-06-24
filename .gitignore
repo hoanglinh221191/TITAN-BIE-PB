@@ -377,8 +377,11 @@ test/
 !/test/pbe_fagbi_scope_z4p_z4o_snapshot_decision.csv
 !/TITAN_FMM_M2L_SCOPE_Z4Q_PUBLIC_FIXTURE_EXPANSION_REPORT.txt
 !/TITAN_FMM_M2L_SCOPE_Z4S_PAPER_PACKAGE_REPORT.txt
+!/TITAN_FMM_M2L_SCOPE_Z4T_SUBMISSION_POLISH_REPORT.txt
 !/test/pbe_fagbi_scope_z4q_public_fixture_expansion_gate.ps1
 !/test/pbe_fagbi_scope_z4s_paper_package.ps1
+!/test/pbe_fagbi_scope_z4t_build_docx.py
+!/test/pbe_fagbi_scope_z4t_submission_polish.ps1
 !/test/pbe_inputs_public/
 !/test/pbe_inputs_public/*.pdb
 !/test/pbe_inputs_public/*.pqr

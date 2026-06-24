@@ -1,0 +1,6 @@
+section,claim,evidence
+Methods,guarded_p4_explicit_policy,C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\tables\fagbi_scope_z4p_z4o_snapshot_matrix.csv
+Results,z4o_primary_repeatability,C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\tables\fagbi_scope_z4p_z4o_snapshot_repeatability.csv
+Results,z4q_supplement_expansion,C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\tables\fagbi_scope_z4q_repeatability.csv
+Results,z5_barnase_preconditioner_contrast,C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission\figures\fagbi_scope_z5_preconditioner_profile.png
+Limitations,no_default_promotion,C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\tables\fagbi_scope_z4p_z4o_snapshot_decision.csv
