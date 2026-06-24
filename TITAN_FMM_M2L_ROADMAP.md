@@ -1309,12 +1309,14 @@ Decision:
   advanced-option documentation and a cautious user-facing smoke, but not to
   change the degree-one TABI treecode default or the grid PB default.
 - Scope Z4P turns the Z4O evidence into an external manuscript refresh. The
-  generated DOCX passed render QA over six pages, removed internal development
+  generated DOCX passed render QA over seven pages, removed internal development
   labels from the manuscript body, and states guarded p4 as an advanced
   explicit TABI treecode option only. Scope Z4Q adds the supplement-first
   fixture expansion harness. It prepared cached public fixtures for 1UBQ, 2CI2,
-  and 1VII using pinned PDB2PQR 3.7.1/AMBER/pH 7.0 settings. The quick 1UBQ
-  row passed with guarded-p4 audit/direct residual `1.46754e-5` on `11242`
-  panels and one plan/cache build. Full 2CI2/1VII validation remains pending;
-  do not broaden the main manuscript claim beyond the Z4O three-protein panel
-  until full Z4Q passes. Grid remains the production PB default.
+  and 1VII using pinned PDB2PQR 3.7.1/AMBER/pH 7.0 settings. The full decision
+  is `z4q_expansion_pass`: 1UBQ, 2CI2, and 1VII passed two guarded-p4 repeats
+  with zero energy spread, one plan/cache build, and audit/direct residuals of
+  `1.46754e-5`, `7.98251e-6`, and `5.87085e-6`/`5.87084e-6`, respectively.
+  The refreshed Z4P DOCX includes them as supplement rows, while the main claim
+  remains anchored on the Z4O Barnase/1A63/1SH1 panel. Grid remains the
+  production PB default.

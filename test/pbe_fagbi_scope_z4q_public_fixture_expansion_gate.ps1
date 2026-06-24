@@ -256,6 +256,8 @@ foreach ($name in $wanted) {
     $energies = @($set | ForEach-Object { [double]$_.energy_kj_mol } | Where-Object { Test-FmmCliFinite $_ })
     $audits = @($set | ForEach-Object { [double]$_.audit_rms } | Where-Object { Test-FmmCliFinite $_ })
     $directs = @($set | ForEach-Object { [double]$_.sampled_direct_true_residual } | Where-Object { Test-FmmCliFinite $_ })
+    $ratios = @($set | ForEach-Object { [double]$_.p4_vs_degree1_matvec_ratio } |
+        Where-Object { Test-FmmCliFinite $_ } | Sort-Object)
     $mean = if ($energies.Count) { ($energies | Measure-Object -Average).Average } else { [double]::NaN }
     $spread = if ($energies.Count) { ($energies | Measure-Object -Maximum).Maximum - ($energies | Measure-Object -Minimum).Minimum } else { [double]::NaN }
     $rowPasses = @($set | Where-Object {
@@ -267,6 +269,7 @@ foreach ($name in $wanted) {
         fixture=$name; repeats=$set.Count; row_passes=$rowPasses; mean_energy=$mean; energy_spread=$spread;
         audit_max=if($audits.Count){($audits | Measure-Object -Maximum).Maximum}else{[double]::NaN};
         sampled_direct_true_residual_max=if($directs.Count){($directs | Measure-Object -Maximum).Maximum}else{[double]::NaN};
+        median_matvec_ratio=if($ratios.Count){$ratios[[int][Math]::Floor($ratios.Count / 2)]}else{[double]::NaN};
         repeatability_pass=($rowPasses -eq $set.Count -and $set.Count -gt 0 -and (Test-FmmCliFinite $spread) -and $spread -le [Math]::Max(0.5,1e-4*[Math]::Abs($mean)))
     }) | Out-Null
 }
@@ -314,7 +317,7 @@ Set-Content -LiteralPath $plotPath -Value $svg -Encoding ASCII
     "repeatability_passes: $passCount",
     'policy: supplement-first evidence; no default change'
 ) | Set-Content -LiteralPath $summaryPath -Encoding ASCII
-@(
+$reportLines = @(
     '# TITAN FMM/M2L Scope Z4Q Public Fixture Expansion Report',
     '',
     "Decision: $decision",
@@ -325,11 +328,28 @@ Set-Content -LiteralPath $plotPath -Value $svg -Encoding ASCII
     "- Matrix: $matrixCsv",
     "- Repeatability: $repeatCsv",
     "- Plot: $plotPath",
-    '',
+    ''
+)
+if ($repeatArray.Count -gt 0) {
+    $reportLines += 'Measured rows:'
+    foreach ($row in $repeatArray) {
+        $fixtureRows = @($rowArray | Where-Object { $_.fixture -eq $row.fixture -and $_.variant -eq 'p4_guarded' })
+        $first = $fixtureRows | Select-Object -First 1
+        $panels = if ($null -ne $first) { $first.panels } else { 'NA' }
+        $direct = $row.sampled_direct_true_residual_max
+        $reportLines += ('- {0}: panels={1}, repeats={2}, guarded-p4 audit={3}, direct residual={4}, energy={5} kJ/mol, energy spread={6}, median p4/degree-one matvec ratio={7}.' -f `
+            $row.fixture.ToUpperInvariant(),$panels,$row.repeats,$row.audit_max,$direct,$row.mean_energy,$row.energy_spread,$row.median_matvec_ratio)
+    }
+    $reportLines += ''
+}
+$reportLines += @(
     'Policy:',
     '- Passing Z4Q rows may be added to supplement tables.',
-    '- Main manuscript guarded p4 claim remains based on Z4O unless all required Z4Q rows pass.',
+    '- Main manuscript guarded p4 claim remains based on Z4O; Z4Q rows are supplement evidence.',
     '- Grid remains production default and guarded p4 remains explicit.'
+)
+@(
+$reportLines
 ) | Set-Content -LiteralPath $rootReport -Encoding ASCII
 
 if ($decision -notin @('z4q_expansion_pass','z4q_partial_expansion') -and -not $AllowFailedDecision) {

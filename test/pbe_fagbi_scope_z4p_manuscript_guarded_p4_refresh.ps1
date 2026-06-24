@@ -19,6 +19,11 @@ $snapshotRepeatCsv = Join-Path $PSScriptRoot 'pbe_fagbi_scope_z4p_z4o_snapshot_r
 $snapshotDecisionCsv = Join-Path $PSScriptRoot 'pbe_fagbi_scope_z4p_z4o_snapshot_decision.csv'
 $z4oPlot = Join-Path $Z4oWorkRoot 'fagbi_scope_z4o_repeatability_plot.png'
 $z4oSvg = Join-Path $Z4oWorkRoot 'fagbi_scope_z4o_repeatability_plot.svg'
+$z4qWorkRoot = Join-Path $PSScriptRoot 'tmp\fagbi_scope_z4q'
+$z4qMatrixCsv = Join-Path $z4qWorkRoot 'fagbi_scope_z4q_matrix.csv'
+$z4qRepeatCsv = Join-Path $z4qWorkRoot 'fagbi_scope_z4q_repeatability.csv'
+$z4qDecisionCsv = Join-Path $z4qWorkRoot 'fagbi_scope_z4q_decision.csv'
+$z4qManifestCsv = Join-Path $PSScriptRoot 'pbe_inputs_public_z4q\public_fixture_expansion_manifest.csv'
 $manifestCsv = Join-Path $FixtureRoot 'public_fixture_manifest.csv'
 $docxPath = Join-Path $WorkRoot 'titan_fagbi_guarded_p4_manuscript.docx'
 $sourcePath = Join-Path $WorkRoot 'fagbi_scope_z4p_manuscript_source.md'
@@ -61,6 +66,27 @@ if (-not (Test-Z4pFullZ4oArtifact $matrixCsv $repeatCsv $z4oDecisionCsv)) {
     $evidenceSource = 'z4o_full_snapshot'
 }
 
+function Test-Z4pZ4qExpansionPass([string]$MatrixPath,[string]$RepeatPath,[string]$DecisionPath,[string]$ManifestPath) {
+    if (-not ((Test-Path -LiteralPath $MatrixPath) -and
+            (Test-Path -LiteralPath $RepeatPath) -and
+            (Test-Path -LiteralPath $DecisionPath) -and
+            (Test-Path -LiteralPath $ManifestPath))) {
+        return $false
+    }
+    $decisionRows = @(Import-Csv -LiteralPath $DecisionPath)
+    if ($decisionRows.Count -ne 1 -or $decisionRows[0].decision -ne 'z4q_expansion_pass') { return $false }
+    $matrixRows = @(Import-Csv -LiteralPath $MatrixPath)
+    $repeatRows = @(Import-Csv -LiteralPath $RepeatPath)
+    $fixtures = @($matrixRows | Where-Object { $_.variant -eq 'p4_guarded' } |
+        Select-Object -ExpandProperty fixture -Unique)
+    return ($fixtures.Count -ge 3 -and $repeatRows.Count -ge 3)
+}
+
+$z4qSupplementSource = 'none'
+if (Test-Z4pZ4qExpansionPass $z4qMatrixCsv $z4qRepeatCsv $z4qDecisionCsv $z4qManifestCsv) {
+    $z4qSupplementSource = 'z4q_full_artifacts'
+}
+
 $workFull = [IO.Path]::GetFullPath($WorkRoot)
 $tmpRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'tmp')).TrimEnd('\') + '\'
 if (-not $workFull.StartsWith($tmpRoot, [StringComparison]::OrdinalIgnoreCase)) {
@@ -99,6 +125,14 @@ $builderArgs = @(
     '--claim-trace', $claimTraceCsv,
     '--qa', $qaCsv
 )
+if ($z4qSupplementSource -eq 'z4q_full_artifacts') {
+    $builderArgs += @(
+        '--z4q-matrix', $z4qMatrixCsv,
+        '--z4q-repeatability', $z4qRepeatCsv,
+        '--z4q-decision', $z4qDecisionCsv,
+        '--z4q-provenance', $z4qManifestCsv
+    )
+}
 if (-not [string]::IsNullOrWhiteSpace($plotArg)) {
     $builderArgs += @('--repeatability-plot', $plotArg)
 }
@@ -175,12 +209,14 @@ $decisionValue = if (@($qaRows | Where-Object status -eq 'fail').Count -gt 0) {
 
 [pscustomobject]@{
     decision=$decisionValue; docx=$docxPath; pages=$pageCount; render_status=$renderStatus;
-    evidence_source=$evidenceSource; source=$sourcePath; claim_trace=$claimTraceCsv; qa=$qaCsv
+    evidence_source=$evidenceSource; z4q_supplement_source=$z4qSupplementSource;
+    source=$sourcePath; claim_trace=$claimTraceCsv; qa=$qaCsv
 } | Export-Csv -LiteralPath $decisionCsv -NoTypeInformation
 @(
     'scope: Z4P guarded p4 manuscript refresh',
     "decision: $decisionValue",
     "evidence_source: $evidenceSource",
+    "z4q_supplement_source: $z4qSupplementSource",
     "docx: $docxPath",
     "pages: $pageCount",
     "render_status: $renderStatus",
@@ -194,6 +230,7 @@ $decisionValue = if (@($qaRows | Where-Object status -eq 'fail').Count -gt 0) {
     '',
     'Z4P refreshes the external manuscript with Scope Z4O repeatability evidence.',
     "Evidence source: $evidenceSource.",
+    "Z4Q supplement source: $z4qSupplementSource.",
     '',
     "- DOCX: $docxPath",
     "- Source: $sourcePath",

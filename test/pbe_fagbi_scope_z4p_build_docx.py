@@ -109,6 +109,30 @@ def representative_rows(matrix: list[dict[str, str]], repeatability: list[dict[s
     return selected
 
 
+def supplement_rows(matrix: list[dict[str, str]], repeatability: list[dict[str, str]]) -> list[dict[str, str]]:
+    repeat_by_fixture = {row["fixture"]: row for row in repeatability}
+    selected: list[dict[str, str]] = []
+    for fixture, data in group_by_fixture(matrix).items():
+        p4_rows = sorted(data["p4"], key=lambda row: as_int(row.get("repeat")))
+        baseline = data["baseline"]
+        if baseline is None or not p4_rows or fixture not in repeat_by_fixture:
+            raise ValueError(f"Incomplete Z4Q rows for {fixture}")
+        ratios = [as_float(row.get("p4_vs_degree1_matvec_ratio")) for row in p4_rows]
+        ratios = sorted(value for value in ratios if value == value)
+        median_ratio = ratios[len(ratios) // 2] if ratios else float("nan")
+        rep = repeat_by_fixture[fixture]
+        first = dict(p4_rows[0])
+        first["degree1_matvec_seconds"] = baseline.get("matvec_seconds_avg", "NaN")
+        first["audit_max"] = rep.get("audit_max", "NaN")
+        first["sampled_direct_true_residual_max"] = rep.get("sampled_direct_true_residual_max", "NaN")
+        first["energy_spread"] = rep.get("energy_spread", "NaN")
+        first["median_matvec_ratio"] = str(median_ratio)
+        first["repeats"] = rep.get("repeats", str(len(p4_rows)))
+        selected.append(first)
+    selected.sort(key=lambda row: row["fixture"])
+    return selected
+
+
 def provenance_by_fixture(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
     return {row["fixture"]: row for row in rows}
 
@@ -116,6 +140,13 @@ def provenance_by_fixture(rows: list[dict[str, str]]) -> dict[str, dict[str, str
 def require_z4o_pass(decision_rows: list[dict[str, str]]) -> None:
     if len(decision_rows) != 1 or decision_rows[0].get("decision") != "z4o_repeatability_pass":
         raise ValueError("Z4O decision is not z4o_repeatability_pass")
+
+
+def z4q_passed(path: Path | None) -> bool:
+    if path is None or not path.exists():
+        return False
+    rows = read_csv(path)
+    return len(rows) == 1 and rows[0].get("decision") == "z4q_expansion_pass"
 
 
 def source_text(rows: list[dict[str, str]], prov: dict[str, dict[str, str]]) -> str:
@@ -224,7 +255,24 @@ def build_docx(args: argparse.Namespace) -> None:
     prov = provenance_by_fixture(provenance_rows)
     if len(rows) != 3:
         raise ValueError(f"Expected three Z4O representative rows, got {len(rows)}")
+    z4q_rows: list[dict[str, str]] = []
+    z4q_prov: dict[str, dict[str, str]] = {}
+    if z4q_passed(args.z4q_decision):
+        if args.z4q_matrix is None or args.z4q_repeatability is None or args.z4q_provenance is None:
+            raise ValueError("Z4Q decision passed but one or more Z4Q inputs are missing")
+        z4q_rows = supplement_rows(read_csv(args.z4q_matrix), read_csv(args.z4q_repeatability))
+        if len(z4q_rows) != 3:
+            raise ValueError(f"Expected three Z4Q supplement rows, got {len(z4q_rows)}")
+        z4q_prov = provenance_by_fixture(read_csv(args.z4q_provenance))
     manuscript = source_text(rows, prov)
+    if z4q_rows:
+        names = ", ".join(f"{row['protein_name']} ({row['pdb_id']})" for row in z4q_rows)
+        manuscript += (
+            "\n\n## Supplementary public-protein expansion\n\n"
+            f"The same guarded p4 gate was repeated on {names}. "
+            "These rows are treated as supplement evidence because they were added after "
+            "the primary three-protein panel was locked.\n"
+        )
 
     doc = Document()
     configure_styles(doc)
@@ -338,13 +386,47 @@ def build_docx(args: argparse.Namespace) -> None:
     for limitation in [
         "Guarded p4 must be requested explicitly; it is not enabled by auto or default policy.",
         "Large-system references use sampled direct-operator verification rather than full direct TABI energy.",
-        "Additional public proteins are reported as supplement evidence only after they pass the same repeatability gate.",
+        "Additional public proteins are reported as supplement evidence after passing the same repeatability gate.",
     ]:
         add_body(doc, limitation)
 
     landscape = doc.add_section(WD_SECTION.NEW_PAGE)
     configure_section(landscape, landscape=True)
     set_header_footer(doc)
+    if z4q_rows:
+        add_heading(doc, "Supplementary Public-Protein Expansion")
+        add_body(
+            doc,
+            (
+                "Table S1 reports additional full-protein systems that passed the same "
+                "guarded p4 repeatability gate. These rows broaden the benchmark panel "
+                "as supplement evidence while the main claim remains anchored on Table 1."
+            ),
+        )
+        supplement_body: list[list[str]] = []
+        for row in z4q_rows:
+            p = z4q_prov.get(row["fixture"], {})
+            supplement_body.append(
+                [
+                    row["protein_name"],
+                    row["pdb_id"],
+                    str(p.get("atom_count", row.get("atom_count", "NA"))),
+                    str(row.get("panels", "NA")),
+                    fmt_float(as_float(row.get("energy_kj_mol")), 2),
+                    fmt_sci(as_float(row.get("audit_max"))),
+                    fmt_sci(as_float(row.get("sampled_direct_true_residual_max"))),
+                    fmt_float(as_float(row.get("energy_spread")), 3),
+                    fmt_float(as_float(row.get("median_matvec_ratio")), 3),
+                ]
+            )
+        add_table(
+            doc,
+            ["Protein", "PDB", "N_atoms", "N_panels", "E_rxn", "Audit max", "Direct residual max", "Energy spread", "p4/deg1"],
+            supplement_body,
+            [2350, 850, 750, 800, 950, 1050, 1300, 950, 850],
+            7.2,
+        )
+        doc.add_page_break()
     add_heading(doc, "Supplementary Provenance")
     prov_body = [
         [
@@ -376,6 +458,7 @@ def build_docx(args: argparse.Namespace) -> None:
             [
                 {"section": "Methods", "claim": "guarded_p4_explicit_policy", "evidence": str(args.matrix)},
                 {"section": "Results", "claim": "z4o_repeatability_pass", "evidence": str(args.repeatability)},
+                {"section": "Supplement", "claim": "z4q_public_expansion", "evidence": str(args.z4q_repeatability) if z4q_rows else "not_included"},
                 {"section": "Limitations", "claim": "no_default_promotion", "evidence": str(args.decision)},
             ]
         )
@@ -386,6 +469,7 @@ def build_docx(args: argparse.Namespace) -> None:
             [
                 {"check": "representative_rows", "status": "pass", "value": len(rows)},
                 {"check": "z4o_decision", "status": "pass", "value": "z4o_repeatability_pass"},
+                {"check": "z4q_supplement_rows", "status": "pass", "value": len(z4q_rows)},
                 {"check": "forbidden_terms_absent", "status": "pass", "value": len(FORBIDDEN)},
                 {"check": "limitations_present", "status": "pass", "value": 3},
             ]
@@ -398,6 +482,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeatability", type=Path, required=True)
     parser.add_argument("--decision", type=Path, required=True)
     parser.add_argument("--provenance", type=Path, required=True)
+    parser.add_argument("--z4q-matrix", type=Path)
+    parser.add_argument("--z4q-repeatability", type=Path)
+    parser.add_argument("--z4q-decision", type=Path)
+    parser.add_argument("--z4q-provenance", type=Path)
     parser.add_argument("--repeatability-plot", type=Path)
     parser.add_argument("--output-docx", type=Path, required=True)
     parser.add_argument("--output-source", type=Path, required=True)

@@ -753,16 +753,18 @@ degree-one TABI treecode default or the grid production default.
 Z4P refreshes the external manuscript package around the Z4O result. The
 decision is `z4p_manuscript_ready`: the generated DOCX has a guarded-p4
 methods description, the Barnase/1A63/1SH1 repeatability table, explicit
-limitations about sampled direct-operator verification, and visual render QA
-over six pages. The manuscript language now frames guarded p4 as a repeatable
+limitations about sampled direct-operator verification, Z4Q supplement rows,
+and visual render QA over seven pages. The manuscript language now frames
+guarded p4 as a repeatable
 advanced explicit TABI treecode path, not as a default solver.
 
 Z4Q adds a supplement-first public fixture expansion harness and prepares
 Ubiquitin (1UBQ), Chymotrypsin inhibitor 2 (2CI2), and Villin headpiece
 subdomain (1VII) with the same pinned PDB2PQR 3.7.1 AMBER pH-7 policy used in
-Z4G. The quick 1UBQ gate passed: full 1UBQ had `11242` panels, degree-one audit
-RMS `0.0602172`, guarded p4 audit/direct-residual `1.46754e-5`, energy
-`-4038.457354 kJ/mol`, and one plan/cache build. The quick decision is
-`z4q_expansion_pass`; 2CI2 and 1VII are prepared but their full guarded-p4 rows
-remain pending for a later full Z4Q run. The main manuscript claim therefore
-remains based on Z4O, with 1UBQ usable as preliminary supplement evidence.
+Z4G. The full decision is `z4q_expansion_pass`: all three fixtures passed two
+guarded-p4 repeats with zero energy spread, one plan/cache build per solve, and
+sampled audit/direct residuals of `1.46754e-5` (1UBQ), `7.98251e-6` (2CI2),
+and `5.87085e-6`/`5.87084e-6` (1VII). The refreshed Z4P DOCX now includes
+these systems as supplement evidence. The main manuscript claim remains based
+on the locked Z4O Barnase/1A63/1SH1 panel, while Z4Q broadens the supplementary
+public-protein benchmark context.
