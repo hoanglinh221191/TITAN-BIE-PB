@@ -47,6 +47,12 @@ struct Cell {
   double cy = 0.0;
   double cz = 0.0;
   double radius = 0.0;
+  double min_x = 0.0;
+  double min_y = 0.0;
+  double min_z = 0.0;
+  double max_x = 0.0;
+  double max_y = 0.0;
+  double max_z = 0.0;
   double charge = 0.0;
   double qx = 0.0;
   double qy = 0.0;
@@ -196,6 +202,12 @@ void compute_cell_geometry(Tree &tree, const PointSoA &points, int node_index) {
   cell.cx = sx * inv_count;
   cell.cy = sy * inv_count;
   cell.cz = sz * inv_count;
+  cell.min_x = min_x;
+  cell.min_y = min_y;
+  cell.min_z = min_z;
+  cell.max_x = max_x;
+  cell.max_y = max_y;
+  cell.max_z = max_z;
   cell.radius = 0.0;
   for (std::size_t pos = cell.begin; pos < cell.end; ++pos) {
     const std::size_t idx = tree.order[pos];
@@ -323,6 +335,31 @@ bool accept_far(const Tree &target_tree, const Tree &source_tree, int target_nod
     return false;
   }
   return (t.radius + s.radius) / dist <= theta;
+}
+
+double axis_gap(double lhs_min, double lhs_max, double rhs_min,
+                double rhs_max) noexcept {
+  if (lhs_max < rhs_min)
+    return rhs_min - lhs_max;
+  if (rhs_max < lhs_min)
+    return lhs_min - rhs_max;
+  return 0.0;
+}
+
+double aabb_gap(const Cell &target, const Cell &source) noexcept {
+  const double dx = axis_gap(target.min_x, target.max_x, source.min_x,
+                             source.max_x);
+  const double dy = axis_gap(target.min_y, target.max_y, source.min_y,
+                             source.max_y);
+  const double dz = axis_gap(target.min_z, target.max_z, source.min_z,
+                             source.max_z);
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+double strict_geometry_ratio(const Cell &target, const Cell &source) noexcept {
+  const double gap = aabb_gap(target, source);
+  const double effective_radius = target.radius + source.radius;
+  return effective_radius / std::max(1.0e-12, gap);
 }
 
 void build_work(Tree &target_tree, const Tree &source_tree, int target_node,
@@ -832,7 +869,19 @@ struct StaticLocalP4Plan {
   std::vector<std::vector<int>> refined_fallback_sources;
   std::unique_ptr<PackedJcpFallbackPlan> packed_fallback_plan;
   std::uint64_t hash{0};
+  std::string refine_mode{"operator-tail-static"};
   std::size_t probe_count{4};
+  std::string probe_mode{"rademacher"};
+  bool solution_probe_used{false};
+  double linf_max_abs_tail{0.0};
+  double linf_max_relative_tail{0.0};
+  std::size_t linf_outlier_panels{0};
+  std::string geometry_guard{"off"};
+  double geometry_theta{0.0};
+  std::size_t geometry_guard_rejected_cells{0};
+  std::size_t geometry_guard_direct_fallback_pairs{0};
+  double geometry_gap_min{0.0};
+  double geometry_ratio_max{0.0};
   std::size_t refined_cells{0};
   std::size_t split_children{0};
   std::size_t direct_fallback_panels{0};
@@ -879,6 +928,9 @@ struct FmmM2lAnalyticContext::Impl {
   mutable std::size_t static_plan_build_count{0};
   mutable std::size_t local_cache_build_count{0};
   mutable std::size_t local_cache_hits{0};
+  bool local_p4_prepared{false};
+  JcpLocalP4OperatorOptions local_p4_options;
+  std::vector<TitanPBE::Tabi::Panel> local_p4_production_panels;
 };
 
 FmmM2lAnalyticContext::FmmM2lAnalyticContext(
@@ -1326,7 +1378,9 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
     const std::string &refine_mode, double refine_tolerance,
     const std::string &cache_mode, std::size_t cache_budget_mb,
     const std::string &fallback_mode,
-    const std::string &plan_builder) const {
+    const std::string &plan_builder, std::size_t refine_probe_count,
+    const std::string &refine_probe_mode,
+    const std::string &geometry_guard, double geometry_theta) const {
   if (impl_ == nullptr)
     throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
   const std::size_t n = impl_->panels.size();
@@ -1337,9 +1391,10 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
         "JCP local p4 candidate requires production panel geometry");
   if (impl_->config.expansion_order != 4)
     throw std::invalid_argument("JCP local p4 candidate requires order 4");
-  if (refine_mode != "operator-tail-static")
+  if (refine_mode != "operator-tail-static" &&
+      refine_mode != "operator-tail-linf")
     throw std::invalid_argument(
-        "JCP local p4 candidate requires operator-tail-static refinement");
+        "JCP local p4 candidate requires operator-tail-static or operator-tail-linf refinement");
   if (!std::isfinite(refine_tolerance) || refine_tolerance < 1.0e-4 ||
       refine_tolerance > 5.0e-2)
     throw std::invalid_argument(
@@ -1354,12 +1409,35 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   if (plan_builder != "legacy-rescan" && plan_builder != "metric-cache")
     throw std::invalid_argument(
         "JCP local p4 plan builder must be legacy-rescan or metric-cache");
+  if (refine_probe_count != 4 && refine_probe_count != 8 &&
+      refine_probe_count != 16)
+    throw std::invalid_argument(
+        "JCP local p4 refine probe count must be 4, 8, or 16");
+  if (refine_probe_mode != "rademacher" &&
+      refine_probe_mode != "solution" && refine_probe_mode != "mixed")
+    throw std::invalid_argument(
+        "JCP local p4 refine probe mode must be rademacher, solution, or mixed");
+  if (geometry_guard != "off" && geometry_guard != "strict-geometry-mac")
+    throw std::invalid_argument(
+        "JCP local p4 geometry guard must be off or strict-geometry-mac");
+  if (geometry_guard == "strict-geometry-mac" &&
+      (!(geometry_theta > 0.0) || !std::isfinite(geometry_theta)))
+    throw std::invalid_argument(
+        "JCP local p4 strict geometry theta must be positive and finite");
 
   const auto build_plan = [&]() {
     const auto plan_begin = Clock::now();
     auto plan = std::make_unique<StaticLocalP4Plan>();
     plan->tolerance = refine_tolerance;
+    plan->refine_mode = refine_mode;
     plan->plan_builder = plan_builder;
+    plan->probe_count = refine_probe_count;
+    plan->probe_mode = refine_probe_mode;
+    plan->solution_probe_used = refine_probe_mode != "rademacher";
+    plan->geometry_guard = geometry_guard;
+    plan->geometry_theta =
+        geometry_guard == "strict-geometry-mac" ? geometry_theta : 0.0;
+    plan->geometry_gap_min = std::numeric_limits<double>::infinity();
     plan->target_nodes = impl_->target_tree.target_leaf_nodes;
     plan->work.reserve(plan->target_nodes.size());
     plan->refined_fallback_sources.resize(plan->target_nodes.size());
@@ -1368,22 +1446,63 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
           impl_->target_tree.work[static_cast<std::size_t>(target_node)]);
 
     const auto probe_moment_begin = Clock::now();
-    std::array<std::vector<CartesianJcpMoments>, 4> probe_moments;
-    const std::array<std::uint64_t, 4> seeds{17, 29, 43, 71};
+    std::vector<std::vector<CartesianJcpMoments>> probe_moments(
+        refine_probe_count);
+    const std::array<std::uint64_t, 16> seeds{
+        17,  29,  43,  71,  83,  97,  113, 131,
+        149, 167, 181, 197, 211, 229, 241, 263};
     const double normalization = 1.0 / std::sqrt(static_cast<double>(n));
-    for (std::size_t probe = 0; probe < seeds.size(); ++probe) {
+    const auto normalized_density_probe = [&](std::size_t probe,
+                                              std::vector<double> &probe_phi,
+                                              std::vector<double> &probe_phin) {
+      double phi_norm_sq = 0.0;
+      double phin_norm_sq = 0.0;
+      for (std::size_t panel = 0; panel < n; ++panel) {
+        phi_norm_sq += phi_values[panel] * phi_values[panel];
+        phin_norm_sq += phin_values[panel] * phin_values[panel];
+      }
+      const double phi_norm = std::sqrt(std::max(0.0, phi_norm_sq));
+      const double phin_norm = std::sqrt(std::max(0.0, phin_norm_sq));
+      const double combined =
+          std::sqrt(std::max(0.0, phi_norm_sq + phin_norm_sq));
+      if (probe == 0 && combined > 0.0) {
+        for (std::size_t panel = 0; panel < n; ++panel) {
+          probe_phi[panel] = phi_values[panel] / combined;
+          probe_phin[panel] = phin_values[panel] / combined;
+        }
+      } else if (probe == 1 && phi_norm > 0.0) {
+        for (std::size_t panel = 0; panel < n; ++panel)
+          probe_phi[panel] = phi_values[panel] / phi_norm;
+      } else if (probe == 2 && phin_norm > 0.0) {
+        for (std::size_t panel = 0; panel < n; ++panel)
+          probe_phin[panel] = phin_values[panel] / phin_norm;
+      }
+    };
+    for (std::size_t probe = 0; probe < probe_moments.size(); ++probe) {
       std::vector<double> probe_phi(n, 0.0);
       std::vector<double> probe_phin(n, 0.0);
-      for (std::size_t panel = 0; panel < n; ++panel) {
-        const std::size_t panel_id = impl_->points.panel_id[panel];
-        const double sign =
-            (rademacher_hash(panel_id, seeds[probe]) & 1ULL) != 0
-                ? normalization
-                : -normalization;
-        if (probe < 2)
-          probe_phi[panel] = sign;
-        else
-          probe_phin[panel] = sign;
+      const bool solution_slot =
+          refine_probe_mode == "solution" ||
+          (refine_probe_mode == "mixed" && probe < 3);
+      if (solution_slot) {
+        normalized_density_probe(probe, probe_phi, probe_phin);
+      }
+      if (!solution_slot ||
+          (std::all_of(probe_phi.begin(), probe_phi.end(),
+                       [](double value) { return value == 0.0; }) &&
+           std::all_of(probe_phin.begin(), probe_phin.end(),
+                       [](double value) { return value == 0.0; }))) {
+        for (std::size_t panel = 0; panel < n; ++panel) {
+          const std::size_t panel_id = impl_->points.panel_id[panel];
+          const double sign =
+              (rademacher_hash(panel_id, seeds[probe]) & 1ULL) != 0
+                  ? normalization
+                  : -normalization;
+          if (probe < refine_probe_count / 2)
+            probe_phi[panel] = sign;
+          else
+            probe_phin[panel] = sign;
+        }
       }
       probe_moments[probe] = build_cartesian_node_moments(
           impl_->source_tree, impl_->panels, probe_phi, probe_phin, 4,
@@ -1394,9 +1513,12 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
 
     struct PairMetric {
       int source_node{-1};
-      std::array<double, 4> tail_sq_by_probe{};
-      std::array<double, 4> signal_sq_by_probe{};
+      std::vector<double> tail_sq_by_probe;
+      std::vector<double> signal_sq_by_probe;
       double tail_sq{0.0};
+      double max_abs_tail{0.0};
+      double max_relative_tail{0.0};
+      std::size_t outlier_panels{0};
     };
 
     struct LeafPlanResult {
@@ -1410,6 +1532,13 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
       std::size_t pair_metric_evaluations{0};
       std::size_t pair_metric_cache_hits{0};
       std::size_t refinement_iterations{0};
+      std::size_t geometry_guard_rejected_cells{0};
+      std::size_t geometry_guard_direct_fallback_pairs{0};
+      double geometry_gap_min{std::numeric_limits<double>::infinity()};
+      double geometry_ratio_max{0.0};
+      double linf_max_abs_tail{0.0};
+      double linf_max_relative_tail{0.0};
+      std::size_t linf_outlier_panels{0};
       double pair_metric_seconds{0.0};
     };
 
@@ -1466,6 +1595,50 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
         }
       };
 
+      auto force_direct_source = [&](int source_node) {
+        const Cell &source = impl_->source_tree.cells[
+            static_cast<std::size_t>(source_node)];
+        work.near_sources.push_back(source_node);
+        leaf.refined_fallback_sources.push_back(source_node);
+        leaf.direct_fallback_panels += source.count();
+        leaf.direct_fallback_pairs += target_cell.count() * source.count();
+      };
+
+      if (geometry_guard == "strict-geometry-mac") {
+        bool changed = true;
+        while (changed) {
+          changed = false;
+          std::vector<int> far_snapshot = work.far_sources;
+          for (const int source_node : far_snapshot) {
+            const Cell &source = impl_->source_tree.cells[
+                static_cast<std::size_t>(source_node)];
+            const double gap = aabb_gap(target_cell, source);
+            const double ratio = strict_geometry_ratio(target_cell, source);
+            leaf.geometry_gap_min = std::min(leaf.geometry_gap_min, gap);
+            leaf.geometry_ratio_max =
+                std::max(leaf.geometry_ratio_max, ratio);
+            if (!(ratio > geometry_theta))
+              continue;
+            work.far_sources.erase(
+                std::remove(work.far_sources.begin(), work.far_sources.end(),
+                            source_node),
+                work.far_sources.end());
+            ++leaf.geometry_guard_rejected_cells;
+            changed = true;
+            if (source.is_leaf()) {
+              force_direct_source(source_node);
+              leaf.geometry_guard_direct_fallback_pairs +=
+                  target_cell.count() * source.count();
+            } else {
+              append_source(source.left);
+              append_source(source.right);
+            }
+            sort_leaf_work();
+            break;
+          }
+        }
+      }
+
       const auto compute_metric = [&](int source_node) {
         const std::size_t source_index =
             static_cast<std::size_t>(source_node);
@@ -1478,6 +1651,8 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
         const Cell &source_cell = impl_->source_tree.cells[source_index];
         PairMetric metric;
         metric.source_node = source_node;
+        metric.tail_sq_by_probe.assign(probe_moments.size(), 0.0);
+        metric.signal_sq_by_probe.assign(probe_moments.size(), 0.0);
         for (std::size_t probe = 0; probe < probe_moments.size(); ++probe) {
           const CartesianJcpLocalP4 translated =
               translate_cartesian_jcp_m2l_p4(
@@ -1502,8 +1677,17 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
               const double p4_row = p4[range.first] + p4[range.first + 1];
               const double p3_row = p3[range.first] + p3[range.first + 1];
               const double tail = p4_row - p3_row;
+              const double abs_tail = std::abs(tail);
+              const double relative_tail =
+                  abs_tail / std::max(1.0e-300, std::abs(p4_row));
               pair_tail_sq += tail * tail;
               pair_signal_sq += p4_row * p4_row;
+              metric.max_abs_tail =
+                  std::max(metric.max_abs_tail, abs_tail);
+              metric.max_relative_tail =
+                  std::max(metric.max_relative_tail, relative_tail);
+              if (relative_tail > refine_tolerance)
+                ++metric.outlier_panels;
             }
           }
           metric.tail_sq_by_probe[probe] = pair_tail_sq;
@@ -1522,28 +1706,46 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
         ++leaf.refinement_iterations;
         std::vector<PairMetric> metrics;
         metrics.reserve(work.far_sources.size());
-        std::array<double, 4> total_tail_sq{};
-        std::array<double, 4> total_signal_sq{};
+        std::vector<double> total_tail_sq(probe_moments.size(), 0.0);
+        std::vector<double> total_signal_sq(probe_moments.size(), 0.0);
         for (const int source_node : work.far_sources) {
           const PairMetric metric = compute_metric(source_node);
           for (std::size_t probe = 0; probe < probe_moments.size(); ++probe) {
             total_tail_sq[probe] += metric.tail_sq_by_probe[probe];
             total_signal_sq[probe] += metric.signal_sq_by_probe[probe];
           }
+          leaf.linf_max_abs_tail =
+              std::max(leaf.linf_max_abs_tail, metric.max_abs_tail);
+          leaf.linf_max_relative_tail =
+              std::max(leaf.linf_max_relative_tail,
+                       metric.max_relative_tail);
+          leaf.linf_outlier_panels += metric.outlier_panels;
           metrics.push_back(metric);
         }
         double tail_ratio = 0.0;
-        for (std::size_t probe = 0; probe < total_tail_sq.size(); ++probe) {
-          tail_ratio = std::max(
-              tail_ratio,
-              std::sqrt(std::max(0.0, total_tail_sq[probe])) /
-                  std::max(1.0e-300,
-                           std::sqrt(std::max(0.0, total_signal_sq[probe]))));
+        if (refine_mode == "operator-tail-linf") {
+          for (const PairMetric &metric : metrics)
+            tail_ratio = std::max(tail_ratio, metric.max_relative_tail);
+        } else {
+          for (std::size_t probe = 0; probe < total_tail_sq.size(); ++probe) {
+            tail_ratio = std::max(
+                tail_ratio,
+                std::sqrt(std::max(0.0, total_tail_sq[probe])) /
+                    std::max(
+                        1.0e-300,
+                        std::sqrt(std::max(0.0, total_signal_sq[probe]))));
+          }
         }
         if (tail_ratio <= refine_tolerance || metrics.empty())
           break;
         std::sort(metrics.begin(), metrics.end(),
                   [&](const PairMetric &lhs, const PairMetric &rhs) {
+                    if (refine_mode == "operator-tail-linf") {
+                      if (lhs.max_relative_tail != rhs.max_relative_tail)
+                        return lhs.max_relative_tail > rhs.max_relative_tail;
+                      if (lhs.max_abs_tail != rhs.max_abs_tail)
+                        return lhs.max_abs_tail > rhs.max_abs_tail;
+                    }
                     if (lhs.tail_sq != rhs.tail_sq)
                       return lhs.tail_sq > rhs.tail_sq;
                     const int lhs_depth = impl_->source_tree.cells[
@@ -1563,11 +1765,7 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
             static_cast<std::size_t>(selected)];
         ++leaf.refined_cells;
         if (selected_cell.is_leaf()) {
-          work.near_sources.push_back(selected);
-          leaf.refined_fallback_sources.push_back(selected);
-          leaf.direct_fallback_panels += selected_cell.count();
-          leaf.direct_fallback_pairs +=
-              target_cell.count() * selected_cell.count();
+          force_direct_source(selected);
         } else {
           append_source(selected_cell.left);
           append_source(selected_cell.right);
@@ -1616,14 +1814,44 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
       plan->pair_metric_evaluations += leaf.pair_metric_evaluations;
       plan->pair_metric_cache_hits += leaf.pair_metric_cache_hits;
       plan->refinement_iterations += leaf.refinement_iterations;
+      plan->linf_max_abs_tail =
+          std::max(plan->linf_max_abs_tail, leaf.linf_max_abs_tail);
+      plan->linf_max_relative_tail =
+          std::max(plan->linf_max_relative_tail,
+                   leaf.linf_max_relative_tail);
+      plan->linf_outlier_panels += leaf.linf_outlier_panels;
+      plan->geometry_guard_rejected_cells +=
+          leaf.geometry_guard_rejected_cells;
+      plan->geometry_guard_direct_fallback_pairs +=
+          leaf.geometry_guard_direct_fallback_pairs;
+      plan->geometry_gap_min =
+          std::min(plan->geometry_gap_min, leaf.geometry_gap_min);
+      plan->geometry_ratio_max =
+          std::max(plan->geometry_ratio_max, leaf.geometry_ratio_max);
       plan->pair_metric_seconds += leaf.pair_metric_seconds;
     }
+    if (!std::isfinite(plan->geometry_gap_min))
+      plan->geometry_gap_min = 0.0;
 
     std::uint64_t hash = 0xcbf29ce484222325ULL;
     std::uint64_t tolerance_bits = 0;
     static_assert(sizeof(tolerance_bits) == sizeof(refine_tolerance));
     std::memcpy(&tolerance_bits, &refine_tolerance, sizeof(tolerance_bits));
     hash_mix(hash, tolerance_bits);
+    hash_mix(hash, static_cast<std::uint64_t>(refine_probe_count));
+    for (const char ch : refine_probe_mode)
+      hash_mix(hash, static_cast<std::uint64_t>(
+                         static_cast<unsigned char>(ch)));
+    for (const char ch : refine_mode)
+      hash_mix(hash, static_cast<std::uint64_t>(
+                         static_cast<unsigned char>(ch)));
+    for (const char ch : geometry_guard)
+      hash_mix(hash, static_cast<std::uint64_t>(
+                         static_cast<unsigned char>(ch)));
+    std::uint64_t geometry_bits = 0;
+    static_assert(sizeof(geometry_bits) == sizeof(geometry_theta));
+    std::memcpy(&geometry_bits, &geometry_theta, sizeof(geometry_bits));
+    hash_mix(hash, geometry_bits);
     for (std::size_t i = 0; i < plan->target_nodes.size(); ++i) {
       hash_mix(hash, static_cast<std::uint64_t>(plan->target_nodes[i]));
       for (const int node : plan->work[i].near_sources)
@@ -1639,7 +1867,14 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
 
   if (!impl_->static_local_plan ||
       !same_double(impl_->static_local_plan->tolerance, refine_tolerance) ||
-      impl_->static_local_plan->plan_builder != plan_builder)
+      impl_->static_local_plan->refine_mode != refine_mode ||
+      impl_->static_local_plan->plan_builder != plan_builder ||
+      impl_->static_local_plan->probe_count != refine_probe_count ||
+      impl_->static_local_plan->probe_mode != refine_probe_mode ||
+      impl_->static_local_plan->geometry_guard != geometry_guard ||
+      !same_double(impl_->static_local_plan->geometry_theta,
+                   geometry_guard == "strict-geometry-mac" ? geometry_theta
+                                                            : 0.0))
     build_plan();
   StaticLocalP4Plan &plan = *impl_->static_local_plan;
 
@@ -1769,6 +2004,18 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   result.plan_hash = plan.hash;
   result.plan_build_count = impl_->static_plan_build_count;
   result.static_probe_count = plan.probe_count;
+  result.refine_probe_mode = plan.probe_mode;
+  result.solution_probe_used = plan.solution_probe_used;
+  result.linf_max_abs_tail = plan.linf_max_abs_tail;
+  result.linf_max_relative_tail = plan.linf_max_relative_tail;
+  result.linf_outlier_panels = plan.linf_outlier_panels;
+  result.geometry_guard = plan.geometry_guard;
+  result.geometry_theta = plan.geometry_theta;
+  result.geometry_guard_rejected_cells = plan.geometry_guard_rejected_cells;
+  result.geometry_guard_direct_fallback_pairs =
+      plan.geometry_guard_direct_fallback_pairs;
+  result.geometry_gap_min = plan.geometry_gap_min;
+  result.geometry_ratio_max = plan.geometry_ratio_max;
   result.refined_cells = plan.refined_cells;
   result.split_children = plan.split_children;
   result.direct_fallback_panels = plan.direct_fallback_panels;
@@ -1959,6 +2206,63 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   return result;
 }
 
+JcpLocalP4CandidateResult FmmM2lAnalyticContext::prepare_local_p4_operator(
+    const std::vector<TitanPBE::Tabi::Panel> &production_panels,
+    TitanExecutor &executor, const JcpLocalP4OperatorOptions &options) {
+  if (impl_ == nullptr)
+    throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
+  if (production_panels.size() != impl_->panels.size())
+    throw std::invalid_argument(
+        "JCP local p4 prepared geometry must match panels");
+
+  impl_->local_p4_prepared = false;
+  impl_->local_p4_options = options;
+  impl_->local_p4_production_panels = production_panels;
+  const std::vector<double> zero(impl_->panels.size(), 0.0);
+  JcpLocalP4CandidateResult result = apply_local_p4_candidate(
+      zero, zero, executor, true, options.near_integration,
+      options.quad_buffer, &impl_->local_p4_production_panels,
+      options.refine_mode, options.refine_tolerance, options.cache_mode,
+      options.cache_budget_mb, options.fallback_mode, options.plan_builder,
+      options.refine_probe_count, options.refine_probe_mode,
+      options.geometry_guard, options.geometry_theta);
+  impl_->local_p4_prepared = true;
+  return result;
+}
+
+JcpLocalP4CandidateResult
+FmmM2lAnalyticContext::apply_prepared_local_p4_operator(
+    const std::vector<double> &phi, const std::vector<double> &phin,
+    TitanExecutor &executor, bool coupled) const {
+  if (impl_ == nullptr || !impl_->local_p4_prepared)
+    throw std::logic_error("local_p4_operator_not_prepared");
+  const JcpLocalP4OperatorOptions &options = impl_->local_p4_options;
+  return apply_local_p4_candidate(
+      phi, phin, executor, coupled, options.near_integration,
+      options.quad_buffer, &impl_->local_p4_production_panels,
+      options.refine_mode, options.refine_tolerance, options.cache_mode,
+      options.cache_budget_mb, options.fallback_mode, options.plan_builder,
+      options.refine_probe_count, options.refine_probe_mode,
+      options.geometry_guard, options.geometry_theta);
+}
+
+void assemble_jcp_local_p4_system_matvec(
+    const JcpLocalP4CandidateResult &interaction,
+    const std::vector<double> &unknowns, double lhs_phi, double lhs_phin,
+    bool coupled, std::vector<double> &out) {
+  const std::size_t n = interaction.phi.size();
+  if (interaction.phin.size() != n ||
+      unknowns.size() < (coupled ? 2 * n : n))
+    throw std::invalid_argument("gmres_p4_incomplete_unknown_vector");
+  out.assign(coupled ? 2 * n : n, 0.0);
+  for (std::size_t panel = 0; panel < n; ++panel) {
+    out[panel] = lhs_phi * unknowns[panel] - interaction.phi[panel];
+    if (coupled)
+      out[n + panel] =
+          lhs_phin * unknowns[n + panel] - interaction.phin[panel];
+  }
+}
+
 JcpOperatorAttributionResult
 FmmM2lAnalyticContext::attribute_local_p4_candidate(
     const std::vector<double> &phi_values,
@@ -1966,10 +2270,13 @@ FmmM2lAnalyticContext::attribute_local_p4_candidate(
     const std::string &probe, TitanExecutor &executor, bool coupled,
     const std::string &near_integration, const std::string &quad_buffer,
     const std::vector<TitanPBE::Tabi::Panel> *production_panels,
-    double refine_tolerance, const std::string &cache_mode,
-    std::size_t cache_budget_mb, std::size_t repeat_count,
+    const std::string &refine_mode, double refine_tolerance,
+    const std::string &cache_mode, std::size_t cache_budget_mb,
+    std::size_t repeat_count,
     const std::string &fallback_mode,
-    const std::string &plan_builder) const {
+    const std::string &plan_builder, std::size_t refine_probe_count,
+    const std::string &refine_probe_mode, const std::string &geometry_guard,
+    double geometry_theta) const {
   repeat_count = std::max<std::size_t>(1, repeat_count);
   JcpLocalP4CandidateResult candidate;
   std::vector<double> apply_times;
@@ -1977,9 +2284,9 @@ FmmM2lAnalyticContext::attribute_local_p4_candidate(
   for (std::size_t repeat = 0; repeat < repeat_count; ++repeat) {
     candidate = apply_local_p4_candidate(
         phi_values, phin_values, executor, coupled, near_integration,
-        quad_buffer, production_panels, "operator-tail-static",
-        refine_tolerance, cache_mode, cache_budget_mb, fallback_mode,
-        plan_builder);
+        quad_buffer, production_panels, refine_mode, refine_tolerance,
+        cache_mode, cache_budget_mb, fallback_mode, plan_builder,
+        refine_probe_count, refine_probe_mode, geometry_guard, geometry_theta);
     apply_times.push_back(candidate.apply_seconds);
   }
   std::sort(apply_times.begin(), apply_times.end());
@@ -2003,6 +2310,19 @@ FmmM2lAnalyticContext::attribute_local_p4_candidate(
   result.local_plan_hash = candidate.plan_hash;
   result.local_plan_build_count = candidate.plan_build_count;
   result.local_static_probe_count = candidate.static_probe_count;
+  result.local_refine_probe_mode = candidate.refine_probe_mode;
+  result.local_solution_probe_used = candidate.solution_probe_used;
+  result.local_linf_max_abs_tail = candidate.linf_max_abs_tail;
+  result.local_linf_max_relative_tail = candidate.linf_max_relative_tail;
+  result.local_linf_outlier_panels = candidate.linf_outlier_panels;
+  result.local_geometry_guard = candidate.geometry_guard;
+  result.local_geometry_theta = candidate.geometry_theta;
+  result.local_geometry_guard_rejected_cells =
+      candidate.geometry_guard_rejected_cells;
+  result.local_geometry_guard_direct_fallback_pairs =
+      candidate.geometry_guard_direct_fallback_pairs;
+  result.local_geometry_gap_min = candidate.geometry_gap_min;
+  result.local_geometry_ratio_max = candidate.geometry_ratio_max;
   result.local_cache_mode = candidate.cache_mode;
   result.local_cache_layout = candidate.cache_layout;
   result.local_cache_operators = candidate.cache_operator_count;

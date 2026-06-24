@@ -1261,3 +1261,62 @@ Decision:
   at `118.16 MB` with audit `6.46481e-3`; Barnase used `32.49 MB`, stayed at
   `137.89 MB` peak RSS, and retained audit `1.27916e-3`. The full decision is
   `z4m3_compressed_cache_pass`, permitting a guarded GMRES integration plan.
+- Scope Z4N wires the prepared p4 operator into explicit hidden GMRES while
+  preserving the degree-one TABI treecode default. Static planning, compressed
+  cache construction, and packed fallback worklists are built exactly once;
+  all three full proteins converged internally in 128 iterations and p4
+  matvecs were faster than the degree-one baseline. Barnase and 1SH1 passed
+  direct sampled verification at `0.00135936` and `0.000149168`, respectively.
+  Full 1A63 exposed a solution-subspace accuracy gap: sampled operator RMS was
+  `0.0595872` and sampled direct true residual was `0.0598425`, despite an
+  internal residual of `7.78252e-12` and clean recomposition/reference parity.
+  The full decision is `z4n_operator_accuracy_gap`. Keep `gmres-p4` explicit,
+  do not plan promotion/repeatability yet, and investigate why the four-probe
+  static refinement plan under-resolves the converged 1A63 density. Grid
+  remains the production PB default.
+- Scope Z4N.1 runs the targeted 1A63 solution-subspace refinement diagnostic.
+  Increasing static Rademacher probes from `4` to `16` improved candidate audit
+  only `1.17x` (`0.0595872` to `0.0509292`) while raising fallback work to
+  `50,841,082` panel pairs and wall time to `620.45 s`. Solution and mixed
+  probe plans did not recover the error. The decision is
+  `z4n1_estimator_gap`; the full three-protein Z4N.1 gate is skipped by policy
+  because quick did not reach `8e-3` audit or a `4x` improvement. Keep
+  `gmres-p4` explicit and replace the refinement estimator before any further
+  promotion planning.
+- Scope Z4N.2/Z4N.3 replaced additional probe-count tuning with deterministic
+  outlier guards. `operator-tail-linf` and strict geometry both recovered 1A63
+  accuracy, but the strongest rows exceeded the direct-fallback budget. The
+  selected policy is `operator-tail-static` at tolerance `0.002` plus
+  `strict-geometry-mac` theta `0.5`: the three-protein confirm gate passed with
+  audit RMS `0.00235702` on 1A63, `6.38294e-5` on Barnase, and `4.89439e-6` on
+  1SH1. Fallback ratios stayed below `3x`, RSS stayed below `370 MB`, and
+  plan/cache build counts remained one.
+- Scope Z4N.4 validates that policy inside full hidden `gmres-p4`. The full
+  decision is `z4n4_guarded_p4_policy_pass`: Barnase, 1A63, and 1SH1 all
+  converged, passed sampled audit and sampled direct true-residual gates, kept
+  RSS below `512 MB`, and built plan/cache exactly once. Guarded p4 matvecs
+  were faster than same-run degree-one FMM baselines: `0.64557/1.41899 s`
+  on Barnase, `0.585506/0.890086 s` on 1A63, and `0.166431/0.434363 s` on
+  1SH1. Next: Z4O repeatability and promotion-readiness for the explicit
+  guarded p4 diagnostic path; grid remains the production PB default.
+- Scope Z4O repeats the explicit guarded p4 path on full Barnase, 1A63, and
+  1SH1. The measured decision is `z4o_repeatability_pass`: every p4 repeat
+  converged, sampled audit and sampled direct true residual stayed below the
+  `8e-3` gate, energy spread was zero for all three fixtures, and plan/cache
+  build counts stayed one. Median p4 matvec ratios versus same-run degree-one
+  baselines were `0.601` on Barnase, `0.824` on 1A63, and `0.300` on 1SH1;
+  peak RSS stayed below `370 MB`. This is sufficient evidence to plan Z4P
+  advanced-option documentation and a cautious user-facing smoke, but not to
+  change the degree-one TABI treecode default or the grid PB default.
+- Scope Z4P turns the Z4O evidence into an external manuscript refresh. The
+  generated DOCX passed render QA over seven pages, removed internal development
+  labels from the manuscript body, and states guarded p4 as an advanced
+  explicit TABI treecode option only. Scope Z4Q adds the supplement-first
+  fixture expansion harness. It prepared cached public fixtures for 1UBQ, 2CI2,
+  and 1VII using pinned PDB2PQR 3.7.1/AMBER/pH 7.0 settings. The full decision
+  is `z4q_expansion_pass`: 1UBQ, 2CI2, and 1VII passed two guarded-p4 repeats
+  with zero energy spread, one plan/cache build, and audit/direct residuals of
+  `1.46754e-5`, `7.98251e-6`, and `5.87085e-6`/`5.87084e-6`, respectively.
+  The refreshed Z4P DOCX includes them as supplement rows, while the main claim
+  remains anchored on the Z4O Barnase/1A63/1SH1 panel. Grid remains the
+  production PB default.

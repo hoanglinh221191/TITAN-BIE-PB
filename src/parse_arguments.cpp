@@ -1716,7 +1716,8 @@ int arguments::parse_arguments(int argc, char **argv) {
                              common_value, i)) {
       pbe.tabi_fmm_local_refine =
           require_choice(common_value,
-                         {"off", "p3-p4-tail", "operator-tail-static"},
+                         {"off", "p3-p4-tail", "operator-tail-static",
+                          "operator-tail-linf"},
                          "-pbe-tabi-fmm-local-refine");
       continue;
     }
@@ -1755,6 +1756,38 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.tabi_fmm_local_plan_builder =
           require_choice(common_value, {"legacy-rescan", "metric-cache"},
                          "-pbe-tabi-fmm-local-plan-builder");
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-fmm-local-refine-probe-count",
+                              "--pbe-tabi-fmm-local-refine-probe-count"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local_refine_probe_count = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-fmm-local-refine-probe-mode",
+                              "--pbe-tabi-fmm-local-refine-probe-mode"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local_refine_probe_mode =
+          require_choice(common_value, {"rademacher", "solution", "mixed"},
+                         "-pbe-tabi-fmm-local-refine-probe-mode");
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-fmm-local-geometry-guard",
+                              "--pbe-tabi-fmm-local-geometry-guard"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local_geometry_guard =
+          require_choice(common_value, {"off", "strict-geometry-mac"},
+                         "-pbe-tabi-fmm-local-geometry-guard");
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-fmm-local-geometry-theta",
+                              "--pbe-tabi-fmm-local-geometry-theta"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local_geometry_theta = stod(common_value);
       continue;
     }
     if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",

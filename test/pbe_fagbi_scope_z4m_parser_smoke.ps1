@@ -84,6 +84,6 @@ Invoke-Case -Name 'bad_budget' -Lines ($accepted -replace `
 Invoke-Case -Name 'gmres_closed' -Lines ($accepted -replace `
         '^-pbe-tabi-fmm-local=single-matvec-p4$',
         '-pbe-tabi-fmm-local=gmres-p4') -ExpectSuccess $false `
-    -ExpectedMessage 'gmres-p4.*fail-closed'
+    -ExpectedMessage 'gmres-p4.*green-jet-compressed'
 
 Write-Host 'PASS pbe_fagbi_scope_z4m_parser_smoke'

@@ -178,6 +178,17 @@ struct JcpOperatorAttributionResult {
   std::uint64_t local_plan_hash{0};
   std::size_t local_plan_build_count{0};
   std::size_t local_static_probe_count{0};
+  std::string local_refine_probe_mode{"rademacher"};
+  bool local_solution_probe_used{false};
+  double local_linf_max_abs_tail{0.0};
+  double local_linf_max_relative_tail{0.0};
+  std::size_t local_linf_outlier_panels{0};
+  std::string local_geometry_guard{"off"};
+  double local_geometry_theta{0.0};
+  std::size_t local_geometry_guard_rejected_cells{0};
+  std::size_t local_geometry_guard_direct_fallback_pairs{0};
+  double local_geometry_gap_min{0.0};
+  double local_geometry_ratio_max{0.0};
   std::string local_cache_mode{"off"};
   std::string local_cache_layout{"off"};
   std::size_t local_cache_operators{0};
@@ -229,6 +240,17 @@ struct JcpLocalP4CandidateResult {
   std::uint64_t plan_hash{0};
   std::size_t plan_build_count{0};
   std::size_t static_probe_count{0};
+  std::string refine_probe_mode{"rademacher"};
+  bool solution_probe_used{false};
+  double linf_max_abs_tail{0.0};
+  double linf_max_relative_tail{0.0};
+  std::size_t linf_outlier_panels{0};
+  std::string geometry_guard{"off"};
+  double geometry_theta{0.0};
+  std::size_t geometry_guard_rejected_cells{0};
+  std::size_t geometry_guard_direct_fallback_pairs{0};
+  double geometry_gap_min{0.0};
+  double geometry_ratio_max{0.0};
   std::size_t refined_cells{0};
   std::size_t split_children{0};
   std::size_t direct_fallback_panels{0};
@@ -269,8 +291,29 @@ struct JcpLocalP4CandidateResult {
   std::size_t fallback_vectorized_sources{0};
   std::size_t fallback_vectorized_lanes{0};
   std::size_t fallback_scalar_self_pairs{0};
+  double recomposition_rel_error{0.0};
   bool finite_outputs{true};
 };
+
+struct JcpLocalP4OperatorOptions {
+  std::string near_integration{"analytic_singular"};
+  std::string quad_buffer{"off"};
+  std::string refine_mode{"operator-tail-static"};
+  double refine_tolerance{2.0e-3};
+  std::string cache_mode{"green-jet-compressed"};
+  std::size_t cache_budget_mb{256};
+  std::string fallback_mode{"packed-avx2"};
+  std::string plan_builder{"metric-cache"};
+  std::size_t refine_probe_count{4};
+  std::string refine_probe_mode{"rademacher"};
+  std::string geometry_guard{"off"};
+  double geometry_theta{0.0};
+};
+
+void assemble_jcp_local_p4_system_matvec(
+    const JcpLocalP4CandidateResult &interaction,
+    const std::vector<double> &unknowns, double lhs_phi, double lhs_phin,
+    bool coupled, std::vector<double> &out);
 
 struct JcpGuardedGmresMetrics {
   std::size_t panels = 0;
@@ -399,7 +442,19 @@ public:
       const std::string &cache_mode = "kernel-jet",
       std::size_t cache_budget_mb = 256,
       const std::string &fallback_mode = "scalar",
-      const std::string &plan_builder = "legacy-rescan") const;
+      const std::string &plan_builder = "legacy-rescan",
+      std::size_t refine_probe_count = 4,
+      const std::string &refine_probe_mode = "rademacher",
+      const std::string &geometry_guard = "off",
+      double geometry_theta = 0.0) const;
+
+  JcpLocalP4CandidateResult prepare_local_p4_operator(
+      const std::vector<TitanPBE::Tabi::Panel> &production_panels,
+      TitanExecutor &executor, const JcpLocalP4OperatorOptions &options);
+
+  JcpLocalP4CandidateResult apply_prepared_local_p4_operator(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      TitanExecutor &executor, bool coupled = true) const;
 
   JcpOperatorAttributionResult attribute_local_p4_candidate(
       const std::vector<double> &phi, const std::vector<double> &phin,
@@ -408,12 +463,17 @@ public:
       const std::string &near_integration = "centroid",
       const std::string &quad_buffer = "off",
       const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr,
+      const std::string &refine_mode = "operator-tail-static",
       double refine_tolerance = 2.0e-3,
       const std::string &cache_mode = "kernel-jet",
       std::size_t cache_budget_mb = 256,
       std::size_t repeat_count = 1,
       const std::string &fallback_mode = "scalar",
-      const std::string &plan_builder = "legacy-rescan") const;
+      const std::string &plan_builder = "legacy-rescan",
+      std::size_t refine_probe_count = 4,
+      const std::string &refine_probe_mode = "rademacher",
+      const std::string &geometry_guard = "off",
+      double geometry_theta = 0.0) const;
 
 private:
   JcpOperatorAttributionResult attribute_impl(

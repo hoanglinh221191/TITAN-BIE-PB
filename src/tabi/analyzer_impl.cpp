@@ -8150,6 +8150,24 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "fmm_m2l_near_pairs,"
            "fmm_m2l_far_pairs,fmm_m2l_setup_seconds,"
            "fmm_m2l_apply_seconds,fmm_m2l_finite_outputs,"
+           "fmm_local_gmres_active,fmm_local_prepare_seconds,"
+           "fmm_local_plan_build_count,fmm_local_cache_build_count,"
+           "fmm_local_gmres_matvec_calls,"
+           "fmm_local_gmres_apply_seconds_total,"
+           "fmm_local_gmres_apply_seconds_mean,"
+           "fmm_local_moment_seconds_total,fmm_local_m2l_seconds_total,"
+           "fmm_local_fallback_seconds_total,fmm_local_l2p_seconds_total,"
+           "fmm_local_sampled_direct_true_residual,"
+           "fmm_local_operator_finite,"
+           "fmm_local_refine_probe_mode,fmm_local_refine_probe_count,"
+           "fmm_local_solution_probe_used,"
+           "fmm_local_linf_max_abs_tail,"
+           "fmm_local_linf_max_relative_tail,"
+           "fmm_local_linf_outlier_panels,"
+           "fmm_local_geometry_guard,fmm_local_geometry_theta,"
+           "fmm_local_geometry_guard_rejected_cells,"
+           "fmm_local_geometry_guard_direct_fallback_pairs,"
+           "fmm_local_geometry_gap_min,fmm_local_geometry_ratio_max,"
            "status,convergence_reason,reaction_energy_source,"
            "iterations,residual,residual_history,gmres_restart_requested,"
            "gmres_restart_effective,best_residual,best_residual_iter,"
@@ -8580,6 +8598,32 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << seconds(result.tabi_fmm_m2l_setup_ms) << ','
       << seconds(result.tabi_fmm_m2l_apply_ms) << ','
       << (result.tabi_fmm_m2l_finite_outputs ? "true" : "false") << ','
+      << (result.tabi_fmm_local_gmres_active ? "true" : "false") << ','
+      << result.tabi_fmm_local_prepare_seconds << ','
+      << result.tabi_fmm_local_plan_build_count << ','
+      << result.tabi_fmm_local_cache_build_count << ','
+      << result.tabi_fmm_local_gmres_matvec_calls << ','
+      << result.tabi_fmm_local_gmres_apply_seconds_total << ','
+      << result.tabi_fmm_local_gmres_apply_seconds_mean << ','
+      << result.tabi_fmm_local_moment_seconds_total << ','
+      << result.tabi_fmm_local_m2l_seconds_total << ','
+      << result.tabi_fmm_local_fallback_seconds_total << ','
+      << result.tabi_fmm_local_l2p_seconds_total << ','
+      << result.tabi_fmm_local_sampled_direct_true_residual << ','
+      << (result.tabi_fmm_local_operator_finite ? "true" : "false") << ','
+      << csv_escape(result.tabi_fmm_local_refine_probe_mode) << ','
+      << result.tabi_fmm_local_refine_probe_count << ','
+      << (result.tabi_fmm_local_solution_probe_used ? "true" : "false")
+      << ',' << result.tabi_fmm_local_linf_max_abs_tail
+      << ',' << result.tabi_fmm_local_linf_max_relative_tail
+      << ',' << result.tabi_fmm_local_linf_outlier_panels
+      << ',' << csv_escape(result.tabi_fmm_local_geometry_guard)
+      << ',' << result.tabi_fmm_local_geometry_theta
+      << ',' << result.tabi_fmm_local_geometry_guard_rejected_cells
+      << ',' << result.tabi_fmm_local_geometry_guard_direct_fallback_pairs
+      << ',' << result.tabi_fmm_local_geometry_gap_min
+      << ',' << result.tabi_fmm_local_geometry_ratio_max
+      << ','
       << csv_escape(result.tabi_status) << ','
       << csv_escape(result.tabi_convergence_reason) << ','
       << csv_escape(result.tabi_reaction_energy_source) << ','
@@ -11753,6 +11797,12 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   options.fmm_local_cache_budget_mb = args_.tabi_fmm_local_cache_budget_mb;
   options.fmm_local_fallback = args_.tabi_fmm_local_fallback;
   options.fmm_local_plan_builder = args_.tabi_fmm_local_plan_builder;
+  options.fmm_local_refine_probe_count =
+      args_.tabi_fmm_local_refine_probe_count;
+  options.fmm_local_refine_probe_mode =
+      args_.tabi_fmm_local_refine_probe_mode;
+  options.fmm_local_geometry_guard = args_.tabi_fmm_local_geometry_guard;
+  options.fmm_local_geometry_theta = args_.tabi_fmm_local_geometry_theta;
   options.true_residual_probe = args_.tabi_true_residual_probe;
   options.true_residual_probe_scope = args_.tabi_true_residual_probe_scope;
   options.true_residual_probe_interval =
@@ -11788,6 +11838,51 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   solve.tabi_fmm_m2l_setup_ms = tabi.fmm_m2l_setup_ms;
   solve.tabi_fmm_m2l_apply_ms = tabi.fmm_m2l_apply_ms;
   solve.tabi_fmm_m2l_finite_outputs = tabi.fmm_m2l_finite_outputs;
+  solve.tabi_fmm_local_gmres_active = tabi.fmm_local_gmres_active;
+  solve.tabi_fmm_local_prepare_seconds = tabi.fmm_local_prepare_seconds;
+  solve.tabi_fmm_local_plan_build_count = tabi.fmm_local_plan_build_count;
+  solve.tabi_fmm_local_cache_build_count = tabi.fmm_local_cache_build_count;
+  solve.tabi_fmm_local_gmres_matvec_calls =
+      tabi.fmm_local_gmres_matvec_calls;
+  solve.tabi_fmm_local_gmres_apply_seconds_total =
+      tabi.fmm_local_gmres_apply_seconds_total;
+  solve.tabi_fmm_local_gmres_apply_seconds_mean =
+      tabi.fmm_local_gmres_apply_seconds_mean;
+  solve.tabi_fmm_local_moment_seconds_total =
+      tabi.fmm_local_moment_seconds_total;
+  solve.tabi_fmm_local_m2l_seconds_total =
+      tabi.fmm_local_m2l_seconds_total;
+  solve.tabi_fmm_local_fallback_seconds_total =
+      tabi.fmm_local_fallback_seconds_total;
+  solve.tabi_fmm_local_l2p_seconds_total =
+      tabi.fmm_local_l2p_seconds_total;
+  solve.tabi_fmm_local_sampled_direct_true_residual =
+      tabi.fmm_local_sampled_direct_true_residual;
+  solve.tabi_fmm_local_operator_finite = tabi.fmm_local_operator_finite;
+  solve.tabi_fmm_local_refine_probe_mode =
+      tabi.fmm_local_refine_probe_mode;
+  solve.tabi_fmm_local_refine_probe_count =
+      tabi.fmm_local_refine_probe_count;
+  solve.tabi_fmm_local_solution_probe_used =
+      tabi.fmm_local_solution_probe_used;
+  solve.tabi_fmm_local_linf_max_abs_tail =
+      tabi.fmm_local_linf_max_abs_tail;
+  solve.tabi_fmm_local_linf_max_relative_tail =
+      tabi.fmm_local_linf_max_relative_tail;
+  solve.tabi_fmm_local_linf_outlier_panels =
+      tabi.fmm_local_linf_outlier_panels;
+  solve.tabi_fmm_local_geometry_guard =
+      tabi.fmm_local_geometry_guard;
+  solve.tabi_fmm_local_geometry_theta =
+      tabi.fmm_local_geometry_theta;
+  solve.tabi_fmm_local_geometry_guard_rejected_cells =
+      tabi.fmm_local_geometry_guard_rejected_cells;
+  solve.tabi_fmm_local_geometry_guard_direct_fallback_pairs =
+      tabi.fmm_local_geometry_guard_direct_fallback_pairs;
+  solve.tabi_fmm_local_geometry_gap_min =
+      tabi.fmm_local_geometry_gap_min;
+  solve.tabi_fmm_local_geometry_ratio_max =
+      tabi.fmm_local_geometry_ratio_max;
   solve.tabi_status = tabi.status;
   solve.tabi_convergence_reason = tabi.convergence_reason;
   solve.tabi_residual_history = tabi.residual_history;
@@ -12850,6 +12945,56 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
     result.tabi_fmm_m2l_apply_ms = tabi_solve.tabi_fmm_m2l_apply_ms;
     result.tabi_fmm_m2l_finite_outputs =
         tabi_solve.tabi_fmm_m2l_finite_outputs;
+    result.tabi_fmm_local_gmres_active =
+        tabi_solve.tabi_fmm_local_gmres_active;
+    result.tabi_fmm_local_prepare_seconds =
+        tabi_solve.tabi_fmm_local_prepare_seconds;
+    result.tabi_fmm_local_plan_build_count =
+        tabi_solve.tabi_fmm_local_plan_build_count;
+    result.tabi_fmm_local_cache_build_count =
+        tabi_solve.tabi_fmm_local_cache_build_count;
+    result.tabi_fmm_local_gmres_matvec_calls =
+        tabi_solve.tabi_fmm_local_gmres_matvec_calls;
+    result.tabi_fmm_local_gmres_apply_seconds_total =
+        tabi_solve.tabi_fmm_local_gmres_apply_seconds_total;
+    result.tabi_fmm_local_gmres_apply_seconds_mean =
+        tabi_solve.tabi_fmm_local_gmres_apply_seconds_mean;
+    result.tabi_fmm_local_moment_seconds_total =
+        tabi_solve.tabi_fmm_local_moment_seconds_total;
+    result.tabi_fmm_local_m2l_seconds_total =
+        tabi_solve.tabi_fmm_local_m2l_seconds_total;
+    result.tabi_fmm_local_fallback_seconds_total =
+        tabi_solve.tabi_fmm_local_fallback_seconds_total;
+    result.tabi_fmm_local_l2p_seconds_total =
+        tabi_solve.tabi_fmm_local_l2p_seconds_total;
+    result.tabi_fmm_local_sampled_direct_true_residual =
+        tabi_solve.tabi_fmm_local_sampled_direct_true_residual;
+    result.tabi_fmm_local_operator_finite =
+        tabi_solve.tabi_fmm_local_operator_finite;
+    result.tabi_fmm_local_refine_probe_mode =
+        tabi_solve.tabi_fmm_local_refine_probe_mode;
+    result.tabi_fmm_local_refine_probe_count =
+        tabi_solve.tabi_fmm_local_refine_probe_count;
+    result.tabi_fmm_local_solution_probe_used =
+        tabi_solve.tabi_fmm_local_solution_probe_used;
+    result.tabi_fmm_local_linf_max_abs_tail =
+        tabi_solve.tabi_fmm_local_linf_max_abs_tail;
+    result.tabi_fmm_local_linf_max_relative_tail =
+        tabi_solve.tabi_fmm_local_linf_max_relative_tail;
+    result.tabi_fmm_local_linf_outlier_panels =
+        tabi_solve.tabi_fmm_local_linf_outlier_panels;
+    result.tabi_fmm_local_geometry_guard =
+        tabi_solve.tabi_fmm_local_geometry_guard;
+    result.tabi_fmm_local_geometry_theta =
+        tabi_solve.tabi_fmm_local_geometry_theta;
+    result.tabi_fmm_local_geometry_guard_rejected_cells =
+        tabi_solve.tabi_fmm_local_geometry_guard_rejected_cells;
+    result.tabi_fmm_local_geometry_guard_direct_fallback_pairs =
+        tabi_solve.tabi_fmm_local_geometry_guard_direct_fallback_pairs;
+    result.tabi_fmm_local_geometry_gap_min =
+        tabi_solve.tabi_fmm_local_geometry_gap_min;
+    result.tabi_fmm_local_geometry_ratio_max =
+        tabi_solve.tabi_fmm_local_geometry_ratio_max;
     result.tabi_status = tabi_solve.tabi_status;
     result.tabi_convergence_reason = tabi_solve.tabi_convergence_reason;
     result.tabi_residual_history = tabi_solve.tabi_residual_history;

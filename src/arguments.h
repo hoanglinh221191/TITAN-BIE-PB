@@ -240,6 +240,10 @@ struct PbeArgs {
   int tabi_fmm_local_cache_budget_mb{256};
   std::string tabi_fmm_local_fallback{"scalar"};
   std::string tabi_fmm_local_plan_builder{"legacy-rescan"};
+  int tabi_fmm_local_refine_probe_count{4};
+  std::string tabi_fmm_local_refine_probe_mode{"rademacher"};
+  std::string tabi_fmm_local_geometry_guard{"off"};
+  double tabi_fmm_local_geometry_theta{0.0};
   std::string tabi_interaction_mode{"auto"};
   std::string tabi_node_bounds{"moment"};
   std::string tabi_tree_builder{"grouped-morton"};

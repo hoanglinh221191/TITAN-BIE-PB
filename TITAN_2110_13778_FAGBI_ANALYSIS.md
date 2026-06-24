@@ -665,3 +665,106 @@ passed with a `34,068,616`-byte cache, `137.89 MB` peak RSS, audit RMS
 is `z4m3_compressed_cache_pass`. No FP32, partial cache, disk cache, or tiled
 recomputation was introduced; guarded GMRES stays fail-closed and grid
 remains the production PB default.
+
+## Scope Z4N Guarded p4 GMRES Integration
+
+Z4N prepared the density-independent refinement plan, compressed Green-jet
+cache, and packed direct-fallback worklist once before GMRES. The hidden p4
+operator then reused this state for every Krylov matvec with the existing
+FMM-native sparse near-field ILU(0) preconditioner. All full Barnase, 1A63,
+and 1SH1 solves converged internally in 128 iterations; plan and cache build
+counts remained one and peak process memory stayed below 259 MB.
+
+The direct sampled verification is mixed. Barnase and 1SH1 passed with audit
+RMS `0.00135936` and `0.000149168`. For 1A63, however, the p4 solution had
+audit RMS `0.0595872` and sampled direct true residual `0.0598425`, even though
+the internal p4 residual was `7.78252e-12`. Independent attribution reproduced
+the same value with zero recomposition/reference gap. The decision is therefore
+`z4n_operator_accuracy_gap`: guarded integration works mechanically, but the
+static four-probe refinement plan does not yet control error over the 1A63
+solution subspace. No manuscript or default-policy claim follows from Z4N.
+
+## Scope Z4N.1 Solution-Subspace Refinement Diagnostic
+
+Z4N.1 tested whether the 1A63 gap is simply under-sampling by the static
+refinement probes. The quick full-1A63 diagnostic compared `4/8/16`
+Rademacher probes plus solution-oriented and mixed probe plans. The best row
+was `16/rademacher`, improving candidate sampled audit only from `0.0595872`
+to `0.0509292` (`1.17x`) while increasing fallback work from `44,118,179` to
+`50,841,082` panel pairs and wall time from `219.51 s` to `620.45 s`.
+Solution and mixed modes reproduced the corresponding Rademacher plans rather
+than recovering the error. The decision is `z4n1_estimator_gap`, so the full
+three-protein Z4N.1 gate is intentionally not run. Next work should replace or
+strengthen the truncation/error estimator rather than increasing probe count
+or promoting `gmres-p4`.
+
+## Scope Z4N.2/Z4N.3 Outlier Refinement Budget Recovery
+
+Z4N.2 tested two stronger deterministic guards for the 1A63 p4 solution:
+panel-wise `L-infinity` outlier refinement and a strict geometric MAC. Both
+recovered the 1A63 sampled direct verification, but the best combined row used
+`260,458,975` direct-fallback pairs (`5.90x` the baseline). This classified
+the diagnostic as refinement-cost excessive rather than promotion-ready.
+
+Z4N.3 then swept weaker outlier budgets. The selected policy is
+`operator-tail-static` with tolerance `0.002` plus `strict-geometry-mac` at
+theta `0.5`. It passed the confirm gate on full 1A63, Barnase, and 1SH1:
+sampled audit RMS values were `0.00235702`, `6.38294e-5`, and `4.89439e-6`,
+respectively, with fallback ratios `1.84x`, `2.18x`, and `0.47x`. Peak RSS
+remained below `370 MB` and plan/cache build counts stayed one. This result
+justified a guarded GMRES policy gate but did not change any default.
+
+## Scope Z4N.4 Guarded p4 GMRES Policy Gate
+
+Z4N.4 ran full GMRES using the Z4N.3 policy above and compared each protein
+against same-run degree-one FMM baselines. The full decision is
+`z4n4_guarded_p4_policy_pass`. Barnase, 1A63, and 1SH1 all reported `status=ok`,
+internal residuals below `1e-6`, sampled audits below `8e-3`, sampled direct
+true residuals below `8e-3`, finite energies, RSS below `512 MB`, and exactly
+one plan/cache build.
+
+The p4 guarded matvec was also faster than the degree-one baseline on all
+three full proteins: Barnase `0.64557 s` versus `1.41899 s`, 1A63 `0.585506 s`
+versus `0.890086 s`, and 1SH1 `0.166431 s` versus `0.434363 s`. This permits a
+Z4O repeatability and promotion-readiness plan for the explicit guarded p4
+diagnostic path. It does not make p4 automatic, and grid remains the
+production PB default.
+
+## Scope Z4O Guarded p4 Repeatability And Promotion-Readiness
+
+Z4O repeated the explicit guarded p4 path three times on each full protein
+while running a same-fixture degree-one FMM baseline once for runtime context.
+The policy was unchanged from Z4N.4: `gmres-p4`, static tail tolerance
+`0.002`, `strict-geometry-mac` theta `0.5`, compressed Green-jet cache,
+packed AVX2 fallback, analytic-singular near field, order `4`, and
+near-field ILU(0) cap `64`.
+
+The measured decision is `z4o_repeatability_pass`. Barnase, 1A63, and 1SH1
+all had three passing p4 repeats, zero energy spread across repeats, sampled
+audit/direct-residual maxima of `6.38294e-5`, `0.00235702`, and `4.89439e-6`,
+and peak RSS values of `172.71 MB`, `369.92 MB`, and `63.47 MB`,
+respectively. Median p4 matvec ratios versus same-run degree-one baselines
+were `0.601`, `0.824`, and `0.300`. This supports documenting guarded p4 as
+an advanced explicit TABI treecode option, but it still does not change the
+degree-one TABI treecode default or the grid production default.
+
+## Scope Z4P/Z4Q Manuscript Refresh And Fixture Expansion
+
+Z4P refreshes the external manuscript package around the Z4O result. The
+decision is `z4p_manuscript_ready`: the generated DOCX has a guarded-p4
+methods description, the Barnase/1A63/1SH1 repeatability table, explicit
+limitations about sampled direct-operator verification, Z4Q supplement rows,
+and visual render QA over seven pages. The manuscript language now frames
+guarded p4 as a repeatable
+advanced explicit TABI treecode path, not as a default solver.
+
+Z4Q adds a supplement-first public fixture expansion harness and prepares
+Ubiquitin (1UBQ), Chymotrypsin inhibitor 2 (2CI2), and Villin headpiece
+subdomain (1VII) with the same pinned PDB2PQR 3.7.1 AMBER pH-7 policy used in
+Z4G. The full decision is `z4q_expansion_pass`: all three fixtures passed two
+guarded-p4 repeats with zero energy spread, one plan/cache build per solve, and
+sampled audit/direct residuals of `1.46754e-5` (1UBQ), `7.98251e-6` (2CI2),
+and `5.87085e-6`/`5.87084e-6` (1VII). The refreshed Z4P DOCX now includes
+these systems as supplement evidence. The main manuscript claim remains based
+on the locked Z4O Barnase/1A63/1SH1 panel, while Z4Q broadens the supplementary
+public-protein benchmark context.
