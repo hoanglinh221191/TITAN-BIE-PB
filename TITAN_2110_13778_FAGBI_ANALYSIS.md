@@ -768,3 +768,17 @@ and `5.87085e-6`/`5.87084e-6` (1VII). The refreshed Z4P DOCX now includes
 these systems as supplement evidence. The main manuscript claim remains based
 on the locked Z4O Barnase/1A63/1SH1 panel, while Z4Q broadens the supplementary
 public-protein benchmark context.
+
+## Scope Z4S Paper Package Closeout
+
+Z4S collects the manuscript-facing artifacts into
+`docs/fagbi_guarded_p4_package/`: the refreshed DOCX, rendered PDF, source
+Markdown, Z4O snapshot tables, full Z4Q supplement tables, public fixture
+provenance, copied Z4O/Z4P/Z4Q reports, checksums, and a compact supplement
+repeatability SVG. The package decision is `z4s_paper_package_ready`.
+
+This scope adds no numerical evidence and changes no solver policy. It exists
+to make the evidence auditable outside `test/tmp`, while preserving the main
+claim boundaries: Z4O is the primary guarded-p4 protein panel, Z4Q is
+supplement-first expansion evidence, grid remains the production PB default,
+and guarded p4 remains an advanced explicit TABI treecode path.

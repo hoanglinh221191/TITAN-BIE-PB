@@ -1,0 +1,9 @@
+scope: Z4P guarded p4 manuscript refresh
+decision: z4p_manuscript_ready
+evidence_source: z4o_current_artifacts
+z4q_supplement_source: z4q_full_artifacts
+docx: C:\tmp\elec_vdw-fagbi-z4n\test\tmp\fagbi_scope_z4p\titan_fagbi_guarded_p4_manuscript.docx
+pages: 7
+render_status: pass
+policy: guarded p4 is advanced explicit option only
+default_policy: grid remains production default; TABI treecode default remains degree-one

@@ -1,0 +1,20 @@
+# TITAN FMM/M2L Scope Z4Q Public Fixture Expansion Report
+
+Decision: z4q_expansion_pass
+
+Z4Q prepares additional public full-protein fixtures and tests guarded p4 repeatability as supplement-first evidence.
+
+- Manifest: C:\tmp\elec_vdw-fagbi-z4n\test\pbe_inputs_public_z4q\public_fixture_expansion_manifest.csv
+- Matrix: C:\tmp\elec_vdw-fagbi-z4n\test\tmp\fagbi_scope_z4q\fagbi_scope_z4q_matrix.csv
+- Repeatability: C:\tmp\elec_vdw-fagbi-z4n\test\tmp\fagbi_scope_z4q\fagbi_scope_z4q_repeatability.csv
+- Plot: C:\tmp\elec_vdw-fagbi-z4n\test\tmp\fagbi_scope_z4q\fagbi_scope_z4q_repeatability_plot.svg
+
+Measured full rows:
+- 1UBQ: panels=11242, repeats=2, guarded-p4 audit/direct residual=1.46754e-5, energy=-4038.457354 kJ/mol, energy spread=0, median p4/degree-one matvec ratio=0.499.
+- 2CI2: panels=9889, repeats=2, guarded-p4 audit/direct residual=7.98251e-6, energy=-4891.152563 kJ/mol, energy spread=0, median p4/degree-one matvec ratio=0.547.
+- 1VII: panels=5032, repeats=2, guarded-p4 audit=5.87085e-6, direct residual=5.87084e-6, energy=-2355.701733 kJ/mol, energy spread=0, median p4/degree-one matvec ratio=0.412.
+
+Policy:
+- Passing Z4Q rows may be added to supplement tables.
+- Main manuscript guarded p4 claim remains based on Z4O; Z4Q rows are supplement evidence.
+- Grid remains production default and guarded p4 remains explicit.

@@ -1320,3 +1320,10 @@ Decision:
   The refreshed Z4P DOCX includes them as supplement rows, while the main claim
   remains anchored on the Z4O Barnase/1A63/1SH1 panel. Grid remains the
   production PB default.
+- Scope Z4S packages the paper-facing evidence into
+  `docs/fagbi_guarded_p4_package/`, including the refreshed DOCX/PDF, Z4O
+  snapshot tables, Z4Q supplement matrix/repeatability tables, fixture
+  provenance, checksums, copied root reports, and a small supplement SVG. The
+  package decision is `z4s_paper_package_ready`. This is packaging only:
+  `-pbe=grid` remains the production PB default and TABI treecode remains
+  degree-one by default; guarded p4 remains an advanced explicit path.

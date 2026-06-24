@@ -6484,3 +6484,9 @@ Decision:
   of `1.46754e-5`, `7.98251e-6`, and `5.87085e-6`/`5.87084e-6`, respectively.
   The refreshed DOCX includes these as supplement rows. Keep the main paper
   claim scoped to the locked Z4O Barnase/1A63/1SH1 panel.
+- Scope Z4S closes out the current paper package by copying the refreshed
+  manuscript, rendered PDF, Z4O/Z4Q tables, fixture provenance, checksums, and
+  reports into `docs/fagbi_guarded_p4_package/`. The package decision is
+  `z4s_paper_package_ready`. This is an evidence-bundle/package step only:
+  grid remains production default, TABI treecode remains degree-one by default,
+  and guarded p4 remains explicit.
