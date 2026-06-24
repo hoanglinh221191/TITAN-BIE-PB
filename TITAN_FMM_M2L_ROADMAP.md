@@ -1329,7 +1329,8 @@ Decision:
   degree-one by default; guarded p4 remains an advanced explicit path.
 - Scope Z4T adds the submission-polished manuscript package in
   `docs/fagbi_guarded_p4_package/submission/`. The decision is
-  `z4t_submission_polish_ready`: the DOCX/PDF pair rendered to eight checked
-  pages, citation gaps are closed, eight references and BibTeX are locked, and
-  claim/limitation trace artifacts are present. This remains package polish
-  only; no numerical method, CLI default, or TABI treecode policy changes.
+  `z4t_submission_polish_ready`: the DOCX/PDF pair now contains a `3058`-word
+  full manuscript draft rendered to `15` checked pages, citation gaps are
+  closed, eight references and BibTeX are locked, and claim/limitation trace
+  artifacts are present. This remains package polish only; no numerical method,
+  CLI default, or TABI treecode policy changes.

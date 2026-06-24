@@ -26,8 +26,8 @@ The package was generated from tracked evidence artifacts and keeps generated sc
 
 ## Submission Polish
 
-Scope Z4T adds a journal-neutral submission skeleton in `submission/` with eight locked references,
-closed citation gaps, a rendered PDF, eight page PNGs for layout QA, and the decision
+Scope Z4T adds a journal-neutral full manuscript draft in `submission/` with eight locked references,
+closed citation gaps, a rendered PDF, fifteen page PNGs for layout QA, and the decision
 `z4t_submission_polish_ready`. It does not add new numerical evidence or change solver policy:
 `-pbe=grid` remains the production default, TABI treecode remains degree-one by default, and guarded
 p4 remains an advanced explicit path.

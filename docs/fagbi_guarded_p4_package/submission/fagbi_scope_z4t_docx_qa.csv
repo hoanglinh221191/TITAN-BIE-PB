@@ -3,6 +3,7 @@
 "citation_gaps","pass","closed"
 "primary_rows","pass","3"
 "supplement_rows","pass","3"
+"word_count","pass","3058"
 "forbidden_terms","pass",""
 "default_policy_limitation","pass","grid default unchanged"
-"render_pages","pass","8"
+"render_pages","pass","15"

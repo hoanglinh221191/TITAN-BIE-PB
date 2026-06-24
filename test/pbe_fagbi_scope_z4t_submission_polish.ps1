@@ -137,8 +137,10 @@ $qa | Export-Csv -LiteralPath (Join-Path $outPath "fagbi_scope_z4t_docx_qa.csv")
 
 $refs = Import-Csv (Join-Path $outPath "fagbi_scope_z4t_references.csv")
 $gaps = Import-Csv (Join-Path $outPath "fagbi_scope_z4t_citation_gaps.csv")
+$wordRow = @($qa | Where-Object { $_.check -eq "word_count" })[0]
 $decision = if ((@($qa | Where-Object { $_.status -eq "fail" }).Count -eq 0) -and
-    $refs.Count -ge 8 -and $gaps[0].status -eq "closed") {
+    $refs.Count -ge 8 -and $gaps[0].status -eq "closed" -and
+    ($null -eq $wordRow -or [int]$wordRow.value -ge 3000)) {
   "z4t_submission_polish_ready"
 } else {
   "z4t_submission_polish_gap"
@@ -149,6 +151,7 @@ $decision = if ((@($qa | Where-Object { $_.status -eq "fail" }).Count -eq 0) -an
   docx = $docx
   pdf = $pdf
   pages = $pageCount
+  word_count = if ($null -ne $wordRow) { $wordRow.value } else { "NA" }
   references = $refs.Count
   citation_gaps = $gaps[0].status
   render_status = $renderStatus
@@ -162,6 +165,7 @@ $decision = if ((@($qa | Where-Object { $_.status -eq "fail" }).Count -eq 0) -an
   "docx: $docx",
   "pdf: $pdf",
   "pages: $pageCount",
+  "word_count: $(if ($null -ne $wordRow) { $wordRow.value } else { 'NA' })",
   "references: $($refs.Count)",
   "citation_gaps: $($gaps[0].status)",
   "policy: grid remains production default; guarded p4 remains explicit advanced path"
@@ -173,6 +177,7 @@ $decision = if ((@($qa | Where-Object { $_.status -eq "fail" }).Count -eq 0) -an
   "DOCX: $docx",
   "PDF: $pdf",
   "Pages: $pageCount",
+  "Word count: $(if ($null -ne $wordRow) { $wordRow.value } else { 'NA' })",
   "References locked: $($refs.Count)",
   "Citation gaps: $($gaps[0].status)",
   "Render status: $renderStatus",

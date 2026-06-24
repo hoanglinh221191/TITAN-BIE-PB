@@ -786,11 +786,15 @@ and guarded p4 remains an advanced explicit TABI treecode path.
 ## Scope Z4T Submission Polish
 
 Z4T turns the tracked Z4S package into a submission-polished, journal-neutral
-manuscript skeleton under `docs/fagbi_guarded_p4_package/submission/`. The
+full manuscript draft under `docs/fagbi_guarded_p4_package/submission/`. The
 decision is `z4t_submission_polish_ready`: the package contains a polished
 DOCX/PDF pair, Markdown source, eight locked references plus BibTeX, a closed
-citation-gap table, claim trace, QA CSV, converted figure PNGs, and eight
-rendered page PNGs inspected for clipping and table/figure overlap.
+citation-gap table, claim trace, QA CSV, converted figure PNGs, and `15`
+rendered page PNGs inspected for clipping and table/figure overlap. After
+review, the body was expanded from a short skeleton to `3058` manuscript words
+covering introduction, analytical validation, operator lifecycle,
+preconditioner formulation, results, discussion, reproducibility, limitations,
+and conclusion.
 
 This scope adds no solver evidence and changes no policy. The manuscript keeps
 the public claim boundaries from Z4S: the primary full-protein panel is
