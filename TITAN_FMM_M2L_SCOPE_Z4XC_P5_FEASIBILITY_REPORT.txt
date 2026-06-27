@@ -1,0 +1,20 @@
+# TITAN FMM/M2L Scope Z4X-C p5 Feasibility Report
+
+Decision: z4xc_p5_memory_limited
+
+Rows
+- 1a63 single_p4: status=ok, failure=pass, p=4/4, residual=1.86941E-11, audit=0.97433, direct_residual=0, local_audit=0.000326278, fallback_pairs=81226933, matvec=1.72416s, wall=511.6234243s, rss=358.015625 MB
+- 1a63 single_p5: status=failed, failure=memory_limited, p=5/5, residual=NaN, audit=NaN, direct_residual=NaN, local_audit=NaN, fallback_pairs=0, matvec=NaNs, wall=437.9798946s, rss=147.12890625 MB
+- 1a63 gmres_p4: status=ok, failure=pass, p=4/4, residual=1.33702E-11, audit=0.00253435, direct_residual=0.00253478, local_audit=0.00253435, fallback_pairs=81226933, matvec=1.1229s, wall=421.7843783s, rss=372.11328125 MB
+- 1a63 gmres_p5: status=failed, failure=memory_limited, p=5/5, residual=NaN, audit=NaN, direct_residual=NaN, local_audit=NaN, fallback_pairs=0, matvec=NaNs, wall=283.3238189s, rss=81.11328125 MB
+- 1sh1 single_p4: status=ok, failure=pass, p=4/4, residual=4.06518E-14, audit=0.0240253, direct_residual=0, local_audit=5.52224E-06, fallback_pairs=20764867, matvec=0.775541s, wall=126.9127307s, rss=63.734375 MB
+- 1sh1 single_p5: status=ok, failure=pass, p=5/5, residual=4.06518E-14, audit=0.0240253, direct_residual=0, local_audit=1.09331E-06, fallback_pairs=20253184, matvec=0.756447s, wall=124.8005868s, rss=64.578125 MB
+- 1sh1 gmres_p4: status=ok, failure=pass, p=4/4, residual=1.16354E-14, audit=5.51948E-06, direct_residual=5.51948E-06, local_audit=5.51948E-06, fallback_pairs=20764867, matvec=0.273568s, wall=57.2502762s, rss=68.47265625 MB
+- 1sh1 gmres_p5: status=ok, failure=pass, p=5/5, residual=2.66975E-14, audit=1.09168E-06, direct_residual=1.09168E-06, local_audit=1.09168E-06, fallback_pairs=20253184, matvec=0.273394s, wall=57.1759044s, rss=69.51171875 MB
+
+Artifacts
+Matrix: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xc\fagbi_scope_z4xc_matrix.csv
+Fallback summary: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xc\fagbi_scope_z4xc_fallback_work.csv
+Cache summary: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xc\fagbi_scope_z4xc_cache.csv
+Decision: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xc\fagbi_scope_z4xc_decision.csv
+Plot: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xc\fagbi_scope_z4xc_p5_feasibility.svg

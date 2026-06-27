@@ -238,6 +238,8 @@ void write_operator_attribution_outputs(
              "fmm_local_cache_far_pair_offsets,"
              "fmm_local_cache_operators,fmm_local_cache_bytes,"
              "fmm_local_cache_build_count,fmm_local_cache_hits,"
+             "fmm_local_cache_tile_bytes,fmm_local_cache_tile_count,"
+             "fmm_local_cache_tile_builds,fmm_local_cache_tile_seconds,"
              "fmm_local_cache_build_seconds,"
              "fmm_local_plan_seconds,fmm_local_plan_builder,"
              "fmm_local_plan_probe_moment_seconds,"
@@ -309,8 +311,9 @@ void write_operator_attribution_outputs(
             << ','
             << (local_p4 ? "audit-p4" : "off")
             << ','
-            << (local_p4 ? 4 : 0) << ',' << (local_p4 ? 4 : 0) << ','
-            << (local_p4 ? 8 : 0) << ','
+            << (local_p4 ? result->local_source_order : 0) << ','
+            << (local_p4 ? result->local_target_order : 0) << ','
+            << (local_p4 ? result->local_kernel_derivative_order : 0) << ','
             << result->local_target_leaves << ',' << result->local_m2l_pairs
             << ',' << result->moment_build_seconds << ','
             << result->m2l_seconds << ',' << result->l2p_seconds << ','
@@ -350,6 +353,10 @@ void write_operator_attribution_outputs(
             << result->local_cache_bytes << ','
             << result->local_cache_build_count << ','
             << result->local_cache_hits << ','
+            << result->local_cache_tile_bytes << ','
+            << result->local_cache_tile_count << ','
+            << result->local_cache_tile_builds << ','
+            << result->local_cache_tile_seconds << ','
             << result->local_cache_seconds << ','
             << result->local_plan_seconds << ','
             << result->local_plan_builder << ','
@@ -3570,7 +3577,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   }
   progress.write("surface_end", result, nullptr, 0, 0, 0, 0.0, "running",
                  true);
-  result.taylor_order = std::clamp(options.taylor_order, 3, 4);
+  result.taylor_order = std::clamp(options.taylor_order, 2, 5);
   result.near_integration =
       resolve_near_integration_mode(options.near_integration, panels);
   result.quad_buffer = resolve_quad_buffer_mode(
@@ -3629,7 +3636,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.matvec_mode = experimental_treecode ? "jcp2013_treecode" : "direct";
     result.sum_mode_effective = experimental_treecode ? "treecode" : "direct";
     result.taylor_order =
-        experimental_treecode ? std::clamp(options.taylor_order, 3, 4) : 0;
+        experimental_treecode ? std::clamp(options.taylor_order, 2, 5) : 0;
     if (result.preconditioner_requested == "none")
       result.preconditioner_effective = "none";
     else if (result.preconditioner_requested == "block" ||
@@ -4120,8 +4127,9 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                              prepared.fallback_metadata_bytes +
                              prepared.plan_metric_cache_peak_bytes;
       jcp_tree_stats.matvec_mode = "jcp2013_fmm_m2l_gmres_p4";
+      jcp_tree_stats.taylor_order = prepared.local_source_order;
       jcp_tree_stats.fmm_m2l_mode = "single-matvec-analytic";
-      jcp_tree_stats.fmm_m2l_expansion_order = 4;
+      jcp_tree_stats.fmm_m2l_expansion_order = prepared.local_source_order;
       jcp_tree_stats.fmm_m2l_near_pairs =
           prepared.fallback_base_near_pairs + prepared.direct_fallback_pairs;
       jcp_tree_stats.fmm_m2l_far_pairs = prepared.far_pairs;
@@ -7004,7 +7012,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.matvec_mode = matvec_stats.matvec_mode;
   result.taylor_order =
       mode == "treecode" ? matvec_stats.taylor_order
-                         : std::clamp(options.taylor_order, 3, 4);
+                         : std::clamp(options.taylor_order, 2, 5);
   result.derivative_mode = mode == "treecode" ? matvec_stats.derivative_mode
                                               : std::string("none");
   result.interaction_build_ms = matvec_stats.interaction_build_ms;

@@ -10,7 +10,7 @@
 
 namespace titan::tabi::fmm_m2l {
 
-inline constexpr std::size_t kCartesianJcpMomentMax = 35;
+inline constexpr std::size_t kCartesianJcpMomentMax = 56;
 
 struct CartesianJcpMoments {
   int order{1};

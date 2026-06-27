@@ -1,9 +1,15 @@
-"check","status","value"
-"references","pass","8"
-"citation_gaps","pass","closed"
-"primary_rows","pass","3"
-"supplement_rows","pass","3"
-"word_count","pass","3058"
-"forbidden_terms","pass",""
-"default_policy_limitation","pass","grid default unchanged"
-"render_pages","pass","15"
+check,status,value
+references,pass,9
+citation_gaps,pass,closed
+primary_rows,pass,3
+supplement_rows,pass,3
+performance_system_rows,pass,6
+performance_ladder_stages,pass,5
+performance_p4_rows,pass,6
+word_count,pass,5322
+algorithm_comparison_table,pass,tabi2_fagbi_titan
+methods_equations,pass,Aij;moments;Lbeta;ILU0
+titan_vs_tabi2_positioning,pass,present
+forbidden_terms,pass,
+default_policy_limitation,pass,grid default unchanged
+render_pages,not_rerun,renderer unavailable after direct DOCX patch

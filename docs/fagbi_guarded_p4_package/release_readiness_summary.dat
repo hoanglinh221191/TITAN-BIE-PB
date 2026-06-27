@@ -1,0 +1,9 @@
+release_status=pre_submission_doi_pending
+license=MIT
+public_repository_url=pending
+archive_doi=pending
+git_commit=506e049c628ad4ef108ab9d31d4e16243cd32d6c
+entry_count=728
+missing_count=0
+manifest_csv=docs/fagbi_guarded_p4_package/release_artifact_manifest.csv
+manifest_json=docs/fagbi_guarded_p4_package/release_artifact_manifest.json

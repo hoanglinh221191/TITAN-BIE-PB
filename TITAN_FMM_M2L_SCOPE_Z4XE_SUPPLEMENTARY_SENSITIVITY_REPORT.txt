@@ -1,0 +1,13 @@
+# TITAN FMM/M2L Scope Z4X-E Supplementary Sensitivity Report
+
+Decision: z4xe_supplement_ready_with_z4xf_cap_sweep
+
+Supplement DOCX: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission_preview_synced\titan_fagbi_supplement_z4xe_sensitivity.docx
+Paired P2 supplement DOCX: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission_preview_synced\titan_fagbi_paper_standard_revised_p2_coverage_supplement.docx
+Summary CSV: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xe\fagbi_scope_z4xe_theta_guard_tail_summary.csv
+Detail CSV: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xe\fagbi_scope_z4xe_theta_guard_tail_detail.csv
+Neighbor-cap CSV: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xe\fagbi_scope_z4xe_neighbor_cap_boundary.csv
+Neighbor-cap real sweep CSV: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xe\fagbi_scope_z4xf_neighbor_cap_real_sweep.csv
+Neighbor-cap figure: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission_preview_synced\figures\fagbi_scope_z4xf_ilu_neighbor_cap_sweep.png
+
+Interpretation: theta/guard/tail rows are measured Z4W sensitivity evidence. When Z4X-F artifacts are available, ILU neighbor cap 32/64/128 rows are a real three-protein sweep; cap 64 remains the balanced reported protocol value.

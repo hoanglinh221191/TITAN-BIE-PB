@@ -1,0 +1,14 @@
+# TITAN FMM/M2L Scope Z4X-F ILU Neighbor-Cap Sweep Report
+
+Decision: z4xf_cap_alternative_candidate
+
+Matrix: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xf\fagbi_scope_z4xf_matrix.csv
+Neighbor-cap summary: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xf\fagbi_scope_z4xf_neighbor_cap_summary.csv
+Plot: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xf\fagbi_scope_z4xf_neighbor_cap_plot.svg
+
+Fixtures: barnase, 1a63, 1sh1
+ILU caps: 32, 64, 128
+
+This gate uses an explicit diagnostic flag so gmres-p4 remains guarded at ILU cap 64 outside the reviewer-facing neighbor-cap sweep.
+
+Resume: rerun the same command to continue missing rows; use -RerunFailed for failed/timeout rows, -RerunStages ilu_cap32, or -Force for all rows.

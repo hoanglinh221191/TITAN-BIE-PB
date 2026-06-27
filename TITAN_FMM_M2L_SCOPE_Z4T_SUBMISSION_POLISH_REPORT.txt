@@ -1,10 +1,12 @@
 TITAN FMM/M2L Scope Z4T Submission Polish Report
 Decision: z4t_submission_polish_ready
-DOCX: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission\titan_fagbi_submission_polished.docx
-PDF: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission\titan_fagbi_submission_polished.pdf
-Pages: 15
-Word count: 3058
-References locked: 8
+DOCX: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission_fig_refresh\titan_fagbi_submission_polished.docx
+PDF: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission_fig_refresh\titan_fagbi_submission_polished.pdf
+Pages: 0
+Word count: 5781
+References locked: 9
 Citation gaps: closed
-Render status: pass
+Performance ladder: Z4V full-protein matrix included
+Runtime composition: 1A63 component-fraction figure included
+Render status: skipped
 Policy: grid remains production default; guarded p4 remains explicit advanced path

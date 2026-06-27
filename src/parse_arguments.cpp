@@ -1732,7 +1732,8 @@ int arguments::parse_arguments(int argc, char **argv) {
                              common_value, i)) {
       pbe.tabi_fmm_local_cache =
           require_choice(common_value,
-                         {"off", "kernel-jet", "green-jet-compressed"},
+                         {"off", "kernel-jet", "green-jet-compressed",
+                          "green-jet-tiled"},
                          "-pbe-tabi-fmm-local-cache");
       continue;
     }
@@ -1788,6 +1789,12 @@ int arguments::parse_arguments(int argc, char **argv) {
                               "--pbe-tabi-fmm-local-geometry-theta"},
                              common_value, i)) {
       pbe.tabi_fmm_local_geometry_theta = stod(common_value);
+      continue;
+    }
+    if (consume_bool_option(arg,
+                            {"-pbe-tabi-fmm-local-ilu-cap-sweep",
+                             "--pbe-tabi-fmm-local-ilu-cap-sweep"},
+                            pbe.tabi_fmm_local_ilu_cap_sweep, i)) {
       continue;
     }
     if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",

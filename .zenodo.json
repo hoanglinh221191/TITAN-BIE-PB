@@ -1,0 +1,22 @@
+{
+  "title": "TITAN: Analytical FMM/M2L Boundary-Integral Poisson-Boltzmann Solves with Sparse Near-Field ILU(0) Preconditioning",
+  "upload_type": "software",
+  "description": "Pre-submission release metadata for the TITAN guarded FMM/M2L boundary-integral Poisson-Boltzmann benchmark package. The public repository URL, final authorship metadata, semantic version, and persistent DOI must be finalized before manuscript submission.",
+  "creators": [
+    {
+      "name": "TITAN contributors"
+    }
+  ],
+  "license": "MIT",
+  "access_right": "open",
+  "keywords": [
+    "Poisson-Boltzmann",
+    "boundary integral equation",
+    "fast multipole method",
+    "preconditioning",
+    "ILU(0)",
+    "TABI",
+    "FAGBI"
+  ],
+  "notes": "DOI pending. This metadata is a release-preparation template, not the final archived record."
+}

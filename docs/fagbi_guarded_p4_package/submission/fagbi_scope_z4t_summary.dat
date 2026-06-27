@@ -1,9 +1,13 @@
 scope: Z4T submission polish
-decision: z4t_submission_polish_ready
+decision: z4t_submission_polish_ready_structural_patch
 docx: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission\titan_fagbi_submission_polished.docx
 pdf: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission\titan_fagbi_submission_polished.pdf
-pages: 15
-word_count: 3058
-references: 8
+pages: not_rerendered_after_direct_docx_patch
+word_count: 5322
+references: 9
 citation_gaps: closed
+performance_ladder: Z4V full-protein matrix included
+algorithm_positioning: TABI-PB 2.0 vs FAGBI vs TITAN table added
+methods_equations: coupled block operator, Cartesian moments, local M2L, ILU0 no-fill update added
+render_status: not_rerun_renderer_unavailable
 policy: grid remains production default; guarded p4 remains explicit advanced path

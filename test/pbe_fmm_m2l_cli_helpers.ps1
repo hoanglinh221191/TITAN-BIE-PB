@@ -287,14 +287,14 @@ function Write-FmmCliArgFile(
     [double]$PreconditionerIluDropTol = 0.0,
     [ValidateSet('centroid','analytic_singular','duffy_adaptive')]
     [string]$NearIntegration = 'centroid',
-    [ValidateSet(3,4)][int]$TaylorOrder = 4,
+    [ValidateSet(2,3,4,5)][int]$TaylorOrder = 4,
     [ValidateSet('off','on')][string]$FmmCartesianAudit = 'off',
     [ValidateSet('off','audit-p4','single-matvec-p4','gmres-p4')][string]$FmmLocal = 'off',
     [ValidateSet('off','p3-p4-tail','operator-tail-static','operator-tail-linf')][string]$FmmLocalRefine = 'off',
     [double]$FmmLocalRefineTolerance = 4.0e-3,
-    [ValidateSet('off','kernel-jet','green-jet-compressed')]
+    [ValidateSet('off','kernel-jet','green-jet-compressed','green-jet-tiled')]
     [string]$FmmLocalCache = 'off',
-    [ValidateRange(64,1024)][int]$FmmLocalCacheBudgetMb = 256,
+    [ValidateRange(64,8192)][int]$FmmLocalCacheBudgetMb = 256,
     [ValidateSet('scalar','packed-avx2')][string]$FmmLocalFallback = 'scalar',
     [ValidateSet('legacy-rescan','metric-cache')]
     [string]$FmmLocalPlanBuilder = 'legacy-rescan',
@@ -303,7 +303,8 @@ function Write-FmmCliArgFile(
     [string]$FmmLocalRefineProbeMode = 'rademacher',
     [ValidateSet('off','strict-geometry-mac')]
     [string]$FmmLocalGeometryGuard = 'off',
-    [double]$FmmLocalGeometryTheta = 0.0
+    [double]$FmmLocalGeometryTheta = 0.0,
+    [bool]$FmmLocalIluCapSweep = $false
 ) {
     $pdbPath = Join-Path $RunDir 'driver.pdb'
     Write-FmmCliDummyPdb $pdbPath
@@ -350,6 +351,7 @@ function Write-FmmCliArgFile(
         "-pbe-tabi-fmm-local-refine-probe-mode=$FmmLocalRefineProbeMode",
         "-pbe-tabi-fmm-local-geometry-guard=$FmmLocalGeometryGuard",
         "-pbe-tabi-fmm-local-geometry-theta=$(& $format $FmmLocalGeometryTheta)",
+        "-pbe-tabi-fmm-local-ilu-cap-sweep=$($FmmLocalIluCapSweep.ToString().ToLowerInvariant())",
         "-pbe-tabi-surface-points=$SurfacePoints",
         '-pbe-tabi-tree-leaf-size=64',
         "-pbe-tabi-opening-theta=$(& $format $OpeningTheta)",

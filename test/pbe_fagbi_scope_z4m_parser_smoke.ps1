@@ -80,7 +80,7 @@ Invoke-Case -Name 'bad_cache' -Lines ($accepted -replace `
 Invoke-Case -Name 'bad_budget' -Lines ($accepted -replace `
         '^-pbe-tabi-fmm-local-cache-budget-mb=256$',
         '-pbe-tabi-fmm-local-cache-budget-mb=32') -ExpectSuccess $false `
-    -ExpectedMessage 'cache-budget-mb.*64.*1024'
+    -ExpectedMessage 'cache-budget-mb.*64.*8192'
 Invoke-Case -Name 'gmres_closed' -Lines ($accepted -replace `
         '^-pbe-tabi-fmm-local=single-matvec-p4$',
         '-pbe-tabi-fmm-local=gmres-p4') -ExpectSuccess $false `

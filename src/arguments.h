@@ -244,6 +244,7 @@ struct PbeArgs {
   std::string tabi_fmm_local_refine_probe_mode{"rademacher"};
   std::string tabi_fmm_local_geometry_guard{"off"};
   double tabi_fmm_local_geometry_theta{0.0};
+  bool tabi_fmm_local_ilu_cap_sweep{false};
   std::string tabi_interaction_mode{"auto"};
   std::string tabi_node_bounds{"moment"};
   std::string tabi_tree_builder{"grouped-morton"};

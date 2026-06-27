@@ -164,6 +164,9 @@ struct JcpOperatorAttributionResult {
   double l2p_seconds{0.0};
   std::size_t local_target_leaves{0};
   std::size_t local_m2l_pairs{0};
+  int local_source_order{4};
+  int local_target_order{4};
+  int local_kernel_derivative_order{8};
   std::string local_refine_mode{"off"};
   double local_refine_tolerance{4.0e-3};
   double local_tail_ratio_before{0.0};
@@ -199,6 +202,10 @@ struct JcpOperatorAttributionResult {
   std::size_t local_cache_far_pair_offsets{0};
   std::size_t local_cache_build_count{0};
   std::size_t local_cache_hits{0};
+  std::size_t local_cache_tile_bytes{0};
+  std::size_t local_cache_tile_count{0};
+  std::size_t local_cache_tile_builds{0};
+  double local_cache_tile_seconds{0.0};
   double local_plan_seconds{0.0};
   std::string local_plan_builder{"legacy-rescan"};
   double local_plan_probe_moment_seconds{0.0};
@@ -264,6 +271,10 @@ struct JcpLocalP4CandidateResult {
   std::size_t cache_far_pair_offsets{0};
   std::size_t cache_build_count{0};
   std::size_t cache_hits{0};
+  std::size_t cache_tile_bytes{0};
+  std::size_t cache_tile_count{0};
+  std::size_t cache_tile_builds{0};
+  double cache_tile_seconds{0.0};
   double plan_seconds{0.0};
   std::string plan_builder{"legacy-rescan"};
   double plan_probe_moment_seconds{0.0};
@@ -280,6 +291,9 @@ struct JcpLocalP4CandidateResult {
   double direct_fallback_seconds{0.0};
   double l2p_seconds{0.0};
   double apply_seconds{0.0};
+  int local_source_order{4};
+  int local_target_order{4};
+  int local_kernel_derivative_order{8};
   std::string fallback_requested{"scalar"};
   std::string fallback_effective{"scalar"};
   std::uint64_t fallback_worklist_hash{0};
