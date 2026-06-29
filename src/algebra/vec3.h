@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <cmath>
 
 namespace titan::algebra {
@@ -14,10 +15,12 @@ struct Vec3 {
       : x(x_in), y(y_in), z(z_in) {}
 
   [[nodiscard]] constexpr double operator[](int idx) const noexcept {
+    assert(idx >= 0 && idx < 3);
     return idx == 0 ? x : (idx == 1 ? y : z);
   }
 
   [[nodiscard]] constexpr double &operator[](int idx) noexcept {
+    assert(idx >= 0 && idx < 3);
     return idx == 0 ? x : (idx == 1 ? y : z);
   }
 };
