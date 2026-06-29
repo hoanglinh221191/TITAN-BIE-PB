@@ -46,6 +46,23 @@ int main() {
   near(R_out.determinant(), 1.0, 1.0e-8);
   check_aligned(mobile, ref);
 
+  Eigen::MatrixXd mobile_for_kabsch;
+  fill_column_major_fixture(ref, mobile_for_kabsch);
+  Eigen::Matrix3d kabsch_R =
+      TitanAlignment::kabsch_rotation(ref, mobile_for_kabsch);
+  near(kabsch_R.determinant(), 1.0, 1.0e-8);
+
+  Eigen::MatrixXd mobile_for_result;
+  fill_column_major_fixture(ref, mobile_for_result);
+  const auto result2 = TitanAlignment::align_frame(ref, mobile_for_result);
+  Eigen::Matrix3d result_R = result2.R;
+  Eigen::RowVector3d mob_centroid = result2.mob_centroid;
+  near(result_R.determinant(), 1.0, 1.0e-8);
+  near(mob_centroid(0), 0.0, 1.0e-8);
+  near(mob_centroid(1), 0.0, 1.0e-8);
+  near(mob_centroid(2), 0.0, 1.0e-8);
+  check_aligned(mobile_for_result, ref);
+
   using RowMajorMatrix = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
   RowMajorMatrix ref_rm(4, 3);
   RowMajorMatrix mobile_rm(4, 3);

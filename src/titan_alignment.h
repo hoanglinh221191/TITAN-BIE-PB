@@ -91,6 +91,15 @@ void assign_mat3(Matrix &out, const titan::algebra::Mat3 &in) {
 template <typename RefMatrix, typename MobileMatrix>
   requires detail::StridedMatrixLike<RefMatrix> &&
            detail::StridedMatrixLike<MobileMatrix>
+titan::algebra::Mat3 kabsch_rotation(const RefMatrix &ref_centered,
+                                     const MobileMatrix &mobile_centered) {
+  return kabsch_rotation(detail::matrix3_const_view(ref_centered),
+                         detail::matrix3_const_view(mobile_centered));
+}
+
+template <typename RefMatrix, typename MobileMatrix>
+  requires detail::StridedMatrixLike<RefMatrix> &&
+           detail::StridedMatrixLike<MobileMatrix>
 AlignResult align_frame(const RefMatrix &ref_centered, MobileMatrix &mobile) {
   return align_frame(detail::matrix3_const_view(ref_centered),
                      detail::matrix3_view(mobile));

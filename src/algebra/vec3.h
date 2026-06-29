@@ -1,9 +1,27 @@
 #pragma once
 
 #include <cassert>
+#include <concepts>
 #include <cmath>
+#include <type_traits>
+#include <utility>
 
 namespace titan::algebra {
+
+namespace detail {
+
+template <typename T>
+using remove_cvref_t = std::remove_cvref_t<T>;
+
+template <typename Vector>
+concept WritableDense3Vector =
+    std::default_initializable<remove_cvref_t<Vector>> &&
+    requires(remove_cvref_t<Vector> v) {
+      typename remove_cvref_t<Vector>::Index;
+      { v(static_cast<typename remove_cvref_t<Vector>::Index>(0)) };
+    };
+
+} // namespace detail
 
 struct Vec3 {
   double x{0.0};
@@ -22,6 +40,21 @@ struct Vec3 {
   [[nodiscard]] constexpr double &operator[](int idx) noexcept {
     assert(idx >= 0 && idx < 3);
     return idx == 0 ? x : (idx == 1 ? y : z);
+  }
+
+  template <typename Vector>
+    requires detail::WritableDense3Vector<Vector>
+  [[nodiscard]] operator Vector() const {
+    Vector out{};
+    using V = detail::remove_cvref_t<Vector>;
+    using Index = typename V::Index;
+    if constexpr (requires(Vector &v, Index n) { v.resize(n); }) {
+      out.resize(static_cast<Index>(3));
+    }
+    out(static_cast<Index>(0)) = x;
+    out(static_cast<Index>(1)) = y;
+    out(static_cast<Index>(2)) = z;
+    return out;
   }
 };
 

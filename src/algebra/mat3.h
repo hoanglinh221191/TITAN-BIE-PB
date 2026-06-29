@@ -3,9 +3,25 @@
 #include "algebra/vec3.h"
 
 #include <array>
+#include <concepts>
 #include <cstddef>
+#include <type_traits>
+#include <utility>
 
 namespace titan::algebra {
+
+namespace detail {
+
+template <typename Matrix>
+concept WritableDense3x3 =
+    std::default_initializable<remove_cvref_t<Matrix>> &&
+    requires(remove_cvref_t<Matrix> m) {
+      typename remove_cvref_t<Matrix>::Index;
+      { m(static_cast<typename remove_cvref_t<Matrix>::Index>(0),
+          static_cast<typename remove_cvref_t<Matrix>::Index>(0)) };
+    };
+
+} // namespace detail
 
 struct Mat3 {
   std::array<double, 9> v{};
@@ -26,6 +42,23 @@ struct Mat3 {
     m(1, 1) = 1.0;
     m(2, 2) = 1.0;
     return m;
+  }
+
+  template <typename Matrix>
+    requires detail::WritableDense3x3<Matrix>
+  [[nodiscard]] operator Matrix() const {
+    Matrix out{};
+    using M = detail::remove_cvref_t<Matrix>;
+    using Index = typename M::Index;
+    if constexpr (requires(Matrix &m, Index rows, Index cols) {
+                    m.resize(rows, cols);
+                  }) {
+      out.resize(static_cast<Index>(3), static_cast<Index>(3));
+    }
+    for (std::size_t r = 0; r < 3; ++r)
+      for (std::size_t c = 0; c < 3; ++c)
+        out(static_cast<Index>(r), static_cast<Index>(c)) = (*this)(r, c);
+    return out;
   }
 };
 
