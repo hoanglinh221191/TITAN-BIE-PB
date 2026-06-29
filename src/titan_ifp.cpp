@@ -263,30 +263,30 @@ TitanIFP::get_ring_atoms(const std::string &res_name,
 
 bool TitanIFP::compute_ring_geometry(const MOL &mol,
                                      const RingAtoms &ring_indices,
-                                     Eigen::Vector3d &com,
-                                     Eigen::Vector3d &normal) {
+                                     titan::algebra::Vec3 &com,
+                                     titan::algebra::Vec3 &normal) {
+  using titan::algebra::Vec3;
+
   if (ring_indices.size() < 3)
     return false;
 
-  com = Eigen::Vector3d::Zero();
+  com = {};
   for (auto idx : ring_indices) {
-    com += Eigen::Vector3d(mol.pos.x[idx], mol.pos.y[idx], mol.pos.z[idx]);
+    com += Vec3{mol.pos.x[idx], mol.pos.y[idx], mol.pos.z[idx]};
   }
-  com /= static_cast<double>(ring_indices.size());
+  com = com / static_cast<double>(ring_indices.size());
 
-  const Eigen::Vector3d p0(mol.pos.x[ring_indices.idx[0]],
-                           mol.pos.y[ring_indices.idx[0]],
-                           mol.pos.z[ring_indices.idx[0]]);
-  const Eigen::Vector3d p1(mol.pos.x[ring_indices.idx[1]],
-                           mol.pos.y[ring_indices.idx[1]],
-                           mol.pos.z[ring_indices.idx[1]]);
-  const Eigen::Vector3d p2(mol.pos.x[ring_indices.idx[2]],
-                           mol.pos.y[ring_indices.idx[2]],
-                           mol.pos.z[ring_indices.idx[2]]);
-  const Eigen::Vector3d v1 = p1 - p0;
-  const Eigen::Vector3d v2 = p2 - p0;
-  const Eigen::Vector3d n = v1.cross(v2);
-  const double n_norm = n.norm();
+  const Vec3 p0{mol.pos.x[ring_indices.idx[0]],
+                mol.pos.y[ring_indices.idx[0]],
+                mol.pos.z[ring_indices.idx[0]]};
+  const Vec3 p1{mol.pos.x[ring_indices.idx[1]],
+                mol.pos.y[ring_indices.idx[1]],
+                mol.pos.z[ring_indices.idx[1]]};
+  const Vec3 p2{mol.pos.x[ring_indices.idx[2]],
+                mol.pos.y[ring_indices.idx[2]],
+                mol.pos.z[ring_indices.idx[2]]};
+  const Vec3 n = titan::algebra::cross(p1 - p0, p2 - p0);
+  const double n_norm = titan::algebra::norm(n);
   if (n_norm < 1e-10)
     return false;
   normal = n / n_norm;
@@ -410,7 +410,9 @@ bool TitanIFP::check_pi_pi(const MOL &rec_mol, const MOL &lig_mol,
   const bool rec_aromatic = !rec_ring.empty();
   const bool lig_aromatic = !lig_ring.empty();
 
-  Eigen::Vector3d rec_com, rec_normal, lig_com, lig_normal;
+  using titan::algebra::Vec3;
+
+  Vec3 rec_com, rec_normal, lig_com, lig_normal;
   const bool rec_geom_ok =
       rec_aromatic && compute_ring_geometry(rec_mol, rec_ring, rec_com, rec_normal);
   const bool lig_geom_ok =
@@ -418,9 +420,10 @@ bool TitanIFP::check_pi_pi(const MOL &rec_mol, const MOL &lig_mol,
 
   bool pi_pi_detected = false;
   if (rec_geom_ok && lig_geom_ok) {
-    const double com_dist = (rec_com - lig_com).norm();
+    const double com_dist = titan::algebra::norm(rec_com - lig_com);
     if (com_dist < cutoff) {
-      const double cos_angle = std::abs(rec_normal.dot(lig_normal));
+      const double cos_angle =
+          std::abs(titan::algebra::dot(rec_normal, lig_normal));
       if (cos_angle > 0.866 || (cos_angle >= 0.0 && cos_angle < 0.643))
         pi_pi_detected = true;
     }
@@ -429,9 +432,9 @@ bool TitanIFP::check_pi_pi(const MOL &rec_mol, const MOL &lig_mol,
   if (rec_geom_ok) {
     for (size_t al = lig_start; al < lig_end; ++al) {
       if (is_cation_atom(lig_info[al].get_atom(), lig_info[al].get_res_name())) {
-        const Eigen::Vector3d cat_pos(
-            lig_mol.pos.x[al], lig_mol.pos.y[al], lig_mol.pos.z[al]);
-        if ((rec_com - cat_pos).norm() < cutoff_cation_pi) {
+        const Vec3 cat_pos{lig_mol.pos.x[al], lig_mol.pos.y[al],
+                           lig_mol.pos.z[al]};
+        if (titan::algebra::norm(rec_com - cat_pos) < cutoff_cation_pi) {
           is_cation_pi = true;
           break;
         }
@@ -442,9 +445,9 @@ bool TitanIFP::check_pi_pi(const MOL &rec_mol, const MOL &lig_mol,
   if (lig_geom_ok && !is_cation_pi) {
     for (size_t ar = rec_start; ar < rec_end; ++ar) {
       if (is_cation_atom(rec_info[ar].get_atom(), rec_info[ar].get_res_name())) {
-        const Eigen::Vector3d cat_pos(
-            rec_mol.pos.x[ar], rec_mol.pos.y[ar], rec_mol.pos.z[ar]);
-        if ((lig_com - cat_pos).norm() < cutoff_cation_pi) {
+        const Vec3 cat_pos{rec_mol.pos.x[ar], rec_mol.pos.y[ar],
+                           rec_mol.pos.z[ar]};
+        if (titan::algebra::norm(lig_com - cat_pos) < cutoff_cation_pi) {
           is_cation_pi = true;
           break;
         }

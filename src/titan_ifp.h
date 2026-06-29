@@ -3,11 +3,10 @@
 
 #include "MOL.h"
 #include "MOL_info.h"
+#include "algebra/vec3.h"
 #include "arguments.h"
 #include "distance_v2.h"
 #include "index_v2.h"
-
-#include <Eigen/Dense>
 
 #include <array>
 #include <bitset>
@@ -273,11 +272,11 @@ private:
   get_ring_atoms(const std::string &res_name,
                  const std::vector<mol_info> &info, size_t start, size_t end);
 
-  /// Compute ring centroid and normal via Eigen.
+  /// Compute ring centroid and normal.
   static bool compute_ring_geometry(const MOL &mol,
                                     const RingAtoms &ring_indices,
-                                    Eigen::Vector3d &com,
-                                    Eigen::Vector3d &normal);
+                                    titan::algebra::Vec3 &com,
+                                    titan::algebra::Vec3 &normal);
 
   /// Find hydrogen bonded to a donor atom (distance < 1.2 Å), returns SIZE_MAX
   /// if not found.
