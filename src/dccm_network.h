@@ -5,8 +5,8 @@
 #include "aligned_allocator.h"
 #include "arguments.h"
 #include "titan_sparse_graph.h"
-#include <Eigen/Dense>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <tuple>
 #include <vector>

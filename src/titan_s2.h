@@ -2,9 +2,9 @@
 #define TITAN_S2_H
 
 #include "Multi_MOL.h"
+#include "algebra/mat3.h"
+#include "algebra/matrix3_buffer.h"
 #include "titan_s2_kernels.h"
-
-#include <Eigen/Dense>
 
 #include <array>
 #include <cstddef>
@@ -285,9 +285,10 @@ private:
   AlignedDoubleVector scratch_to_z_;
   titan_s2_kernel::BondVectorsSoA scratch_frame_vectors_;
   std::array<double, 9> scratch_rotation_{};
-  Eigen::MatrixXd alignment_reference_matrix_;
-  Eigen::MatrixXd alignment_mobile_matrix_;
-  Eigen::Matrix3d alignment_rotation_{Eigen::Matrix3d::Identity()};
+  titan::algebra::Matrix3Buffer alignment_reference_matrix_;
+  titan::algebra::Matrix3Buffer alignment_mobile_matrix_;
+  titan::algebra::Mat3 alignment_rotation_{
+      titan::algebra::Mat3::identity()};
   std::vector<mol_info> reference_info_;
   MOL first_snapshot_;
   bool have_first_snapshot_{false};

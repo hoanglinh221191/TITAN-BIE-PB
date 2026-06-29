@@ -2,14 +2,14 @@
 #define TITAN_RMS_H
 
 #include "Multi_MOL.h"
+#include "algebra/mat3.h"
+#include "algebra/matrix3_buffer.h"
 #include "aligned_allocator.h"
 #include "arguments.h"
 #include "titan_selection_utils.h"
 
-#include <Eigen/Dense>
-
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <string>
 #include <thread>
@@ -113,9 +113,9 @@ private:
   std::vector<double> time_series_ps_;
   std::vector<TrajectorySeries> trajectory_series_;
 
-  Eigen::MatrixXd ref_centered_;
-  Eigen::MatrixXd mobile_;
-  Eigen::Matrix3d rotation_ = Eigen::Matrix3d::Identity();
+  titan::algebra::Matrix3Buffer ref_centered_;
+  titan::algebra::Matrix3Buffer mobile_;
+  titan::algebra::Mat3 rotation_{titan::algebra::Mat3::identity()};
   bool ref_initialized_{false};
   std::size_t current_traj_frames_{0};
 };

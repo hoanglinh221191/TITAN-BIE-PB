@@ -77,8 +77,8 @@ void TitanRMSAnalyzer::reset_runtime_buffers() {
   m2_x_.assign(total_trace_count_, 0.0);
   m2_y_.assign(total_trace_count_, 0.0);
   m2_z_.assign(total_trace_count_, 0.0);
-  ref_centered_.resize(static_cast<Eigen::Index>(total_trace_count_), 3);
-  mobile_.resize(static_cast<Eigen::Index>(total_trace_count_), 3);
+  ref_centered_.resize(total_trace_count_);
+  mobile_.resize(total_trace_count_);
   reset_trajectory_state();
 }
 
@@ -91,7 +91,7 @@ void TitanRMSAnalyzer::reset_trajectory_state() {
   std::fill(m2_z_.begin(), m2_z_.end(), 0.0);
   rmsd_series_.clear();
   time_series_ps_.clear();
-  rotation_.setIdentity();
+  rotation_ = titan::algebra::Mat3::identity();
   ref_initialized_ = false;
   current_traj_frames_ = 0;
 }
@@ -213,9 +213,9 @@ void TitanRMSAnalyzer::update_welford(TitanExecutor &executor) {
   const double sample_count = static_cast<double>(current_traj_frames_);
   auto update_range = [&](std::size_t begin, std::size_t end) {
     for (std::size_t i = begin; i < end; ++i) {
-      const double x = mobile_(static_cast<Eigen::Index>(i), 0);
-      const double y = mobile_(static_cast<Eigen::Index>(i), 1);
-      const double z = mobile_(static_cast<Eigen::Index>(i), 2);
+      const double x = mobile_(i, 0);
+      const double y = mobile_(i, 1);
+      const double z = mobile_(i, 2);
 
       const double dx = x - mean_x_[i];
       mean_x_[i] += dx / sample_count;
@@ -264,9 +264,9 @@ void TitanRMSAnalyzer::process_frame(const Multi_MOL &mol1, const Multi_MOL &mol
 
   auto fill_mobile_range = [&](std::size_t begin, std::size_t end) {
     for (std::size_t i = begin; i < end; ++i) {
-      mobile_(static_cast<Eigen::Index>(i), 0) = raw_x_[i] - centroid_x;
-      mobile_(static_cast<Eigen::Index>(i), 1) = raw_y_[i] - centroid_y;
-      mobile_(static_cast<Eigen::Index>(i), 2) = raw_z_[i] - centroid_z;
+      mobile_(i, 0) = raw_x_[i] - centroid_x;
+      mobile_(i, 1) = raw_y_[i] - centroid_y;
+      mobile_(i, 2) = raw_z_[i] - centroid_z;
     }
   };
 
@@ -287,7 +287,8 @@ void TitanRMSAnalyzer::process_frame(const Multi_MOL &mol1, const Multi_MOL &mol
     ref_centered_ = mobile_;
     ref_initialized_ = true;
   } else {
-    TitanAlignment::align_frame_inplace(ref_centered_, mobile_, rotation_);
+    TitanAlignment::align_frame_inplace(ref_centered_.const_view(),
+                                        mobile_.view(), rotation_);
     const double sq_sum =
         squared_diff_sum_avx2(mobile_.data(), ref_centered_.data(),
                               total_trace_count_ * 3);

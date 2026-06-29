@@ -1,4 +1,6 @@
 #include "dccm_network.h"
+#include "algebra/matrix3_buffer.h"
+#include "algebra/symmetric_eigen.h"
 #include "titan_alignment.h"
 #include "titan_corr_knn_shared.h"
 #include "titan_executor.h"
@@ -72,6 +74,55 @@ private:
 };
 
 using FlatAlignedMatrix = FlatAlignedMatrixT<double>;
+
+using titan::algebra::Mat3;
+using titan::algebra::Matrix3Buffer;
+using titan::algebra::Vec3;
+
+Vec3 centroid_of(const Matrix3Buffer &points) {
+  Vec3 centroid{};
+  for (size_t row = 0; row < points.rows(); ++row)
+    centroid += {points(row, 0), points(row, 1), points(row, 2)};
+  if (points.rows() != 0)
+    centroid = centroid / static_cast<double>(points.rows());
+  return centroid;
+}
+
+void subtract_centroid(Matrix3Buffer &points, Vec3 centroid) {
+  for (size_t row = 0; row < points.rows(); ++row) {
+    points(row, 0) -= centroid.x;
+    points(row, 1) -= centroid.y;
+    points(row, 2) -= centroid.z;
+  }
+}
+
+void fill_centered_reference(Matrix3Buffer &ref,
+                             const DCCMNetwork::TrajectoryRows &traj_x,
+                             const DCCMNetwork::TrajectoryRows &traj_y,
+                             const DCCMNetwork::TrajectoryRows &traj_z,
+                             size_t num_ca) {
+  ref.resize(num_ca);
+  for (size_t a = 0; a < num_ca; ++a) {
+    ref(a, 0) = traj_x[0][a];
+    ref(a, 1) = traj_y[0][a];
+    ref(a, 2) = traj_z[0][a];
+  }
+  subtract_centroid(ref, centroid_of(ref));
+}
+
+Vec3 fill_mobile_frame(Matrix3Buffer &mobile,
+                       const DCCMNetwork::TrajectoryRows &traj_x,
+                       const DCCMNetwork::TrajectoryRows &traj_y,
+                       const DCCMNetwork::TrajectoryRows &traj_z, size_t frame,
+                       size_t num_ca) {
+  mobile.resize(num_ca);
+  for (size_t a = 0; a < num_ca; ++a) {
+    mobile(a, 0) = traj_x[frame][a];
+    mobile(a, 1) = traj_y[frame][a];
+    mobile(a, 2) = traj_z[frame][a];
+  }
+  return centroid_of(mobile);
+}
 
 inline int resolve_allostery_bin_count(size_t total_frames, int num_bins) {
   if (num_bins > 0)
@@ -193,7 +244,7 @@ bool should_skip_dense_dccm_postproc(size_t num_nodes, size_t num_frames,
                                 static_cast<long double>(node_stride) *
                                 sizeof(double);
   constexpr long double safety_bytes =
-      512.0L * 1024.0L * 1024.0L; // Eigen scratch, CSV buffers, graph edges.
+      512.0L * 1024.0L * 1024.0L; // Alignment scratch, CSV buffers, graph edges.
   estimated_extra_bytes = dev_bytes + cov_bytes + safety_bytes;
 
   budget_bytes = resolve_memory_budget_bytes(cfg);
@@ -1346,15 +1397,22 @@ size_t calculate_allostery_information_flat_impl(
           c_zz += dz * dz;
         }
 
-        Eigen::Matrix3d cov3;
-        cov3 << c_xx, c_xy, c_xz, c_xy, c_yy, c_yz, c_xz, c_yz, c_zz;
-        cov3 /= static_cast<double>(total_frames);
+        Mat3 cov3{};
+        const double inv_frames = 1.0 / static_cast<double>(total_frames);
+        cov3(0, 0) = c_xx * inv_frames;
+        cov3(0, 1) = c_xy * inv_frames;
+        cov3(0, 2) = c_xz * inv_frames;
+        cov3(1, 0) = cov3(0, 1);
+        cov3(1, 1) = c_yy * inv_frames;
+        cov3(1, 2) = c_yz * inv_frames;
+        cov3(2, 0) = cov3(0, 2);
+        cov3(2, 1) = cov3(1, 2);
+        cov3(2, 2) = c_zz * inv_frames;
 
-        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(cov3);
-        const Eigen::Vector3d e1 = es.eigenvectors().col(2);
-        const double ex = e1(0);
-        const double ey = e1(1);
-        const double ez = e1(2);
+        const auto es = titan::algebra::symmetric_eigen3(cov3);
+        const double ex = es.vectors(0, 2);
+        const double ey = es.vectors(1, 2);
+        const double ez = es.vectors(2, 2);
 
         double p_min = std::numeric_limits<double>::max();
         double p_max = std::numeric_limits<double>::lowest();
@@ -1903,24 +1961,15 @@ void DCCMNetwork::calculate_and_export(TitanExecutor &executor,
 
   // ── STEP 0: Kabsch align (guarded — skip if already aligned) ───────────────
   if (!kabsch_aligned_) {
-    Eigen::MatrixXd ref(num_ca, 3);
-    for (size_t a = 0; a < num_ca; ++a) {
-      ref(a, 0) = traj_x[0][a];
-      ref(a, 1) = traj_y[0][a];
-      ref(a, 2) = traj_z[0][a];
-    }
-    ref.rowwise() -= ref.colwise().mean().eval();
+    Matrix3Buffer ref;
+    fill_centered_reference(ref, traj_x, traj_y, traj_z, num_ca);
 
-    Eigen::MatrixXd mobile(num_ca, 3);
-    Eigen::Matrix3d R;
+    Matrix3Buffer mobile;
+    Mat3 R;
     for (size_t f = 0; f < total_frames; ++f) {
-      for (size_t a = 0; a < num_ca; ++a) {
-        mobile(a, 0) = traj_x[f][a];
-        mobile(a, 1) = traj_y[f][a];
-        mobile(a, 2) = traj_z[f][a];
-      }
-      Eigen::RowVector3d ca_centroid = mobile.colwise().mean();
-      TitanAlignment::align_frame_inplace(ref, mobile, R);
+      const Vec3 ca_centroid =
+          fill_mobile_frame(mobile, traj_x, traj_y, traj_z, f, num_ca);
+      TitanAlignment::align_frame_inplace(ref.const_view(), mobile.view(), R);
       for (size_t a = 0; a < num_ca; ++a) {
         traj_x[f][a] = mobile(a, 0);
         traj_y[f][a] = mobile(a, 1);
@@ -1928,13 +1977,13 @@ void DCCMNetwork::calculate_and_export(TitanExecutor &executor,
       }
       if (!traj_cbx.empty()) {
         for (size_t a = 0; a < num_ca; ++a) {
-          Eigen::RowVector3d cb(traj_cbx[f][a], traj_cby[f][a],
-                                traj_cbz[f][a]);
-          cb -= ca_centroid;
-          cb = (R * cb.transpose()).transpose();
-          traj_cbx[f][a] = cb(0);
-          traj_cby[f][a] = cb(1);
-          traj_cbz[f][a] = cb(2);
+          const Vec3 cb = titan::algebra::mul_row(
+              Vec3{traj_cbx[f][a], traj_cby[f][a], traj_cbz[f][a]} -
+                  ca_centroid,
+              R);
+          traj_cbx[f][a] = cb.x;
+          traj_cby[f][a] = cb.y;
+          traj_cbz[f][a] = cb.z;
         }
       }
     }
@@ -2522,24 +2571,15 @@ void DCCMNetwork::calculate_lspmd(TitanExecutor &executor,
 
   // ── STEP 0: Kabsch alignment (guarded — skip if already aligned) ───────────
   if (!kabsch_aligned_) {
-    Eigen::MatrixXd ref(num_ca, 3);
-    for (size_t a = 0; a < num_ca; ++a) {
-      ref(a, 0) = traj_x[0][a];
-      ref(a, 1) = traj_y[0][a];
-      ref(a, 2) = traj_z[0][a];
-    }
-    ref.rowwise() -= ref.colwise().mean().eval();
+    Matrix3Buffer ref;
+    fill_centered_reference(ref, traj_x, traj_y, traj_z, num_ca);
 
-    Eigen::MatrixXd mobile(num_ca, 3);
-    Eigen::Matrix3d R;
+    Matrix3Buffer mobile;
+    Mat3 R;
     for (size_t f = 0; f < total_frames; ++f) {
-      for (size_t a = 0; a < num_ca; ++a) {
-        mobile(a, 0) = traj_x[f][a];
-        mobile(a, 1) = traj_y[f][a];
-        mobile(a, 2) = traj_z[f][a];
-      }
-      Eigen::RowVector3d ca_centroid = mobile.colwise().mean();
-      TitanAlignment::align_frame_inplace(ref, mobile, R);
+      const Vec3 ca_centroid =
+          fill_mobile_frame(mobile, traj_x, traj_y, traj_z, f, num_ca);
+      TitanAlignment::align_frame_inplace(ref.const_view(), mobile.view(), R);
       for (size_t a = 0; a < num_ca; ++a) {
         traj_x[f][a] = mobile(a, 0);
         traj_y[f][a] = mobile(a, 1);
@@ -2547,13 +2587,13 @@ void DCCMNetwork::calculate_lspmd(TitanExecutor &executor,
       }
       if (!traj_cbx.empty()) {
         for (size_t a = 0; a < num_ca; ++a) {
-          Eigen::RowVector3d cb(traj_cbx[f][a], traj_cby[f][a],
-                                traj_cbz[f][a]);
-          cb -= ca_centroid;
-          cb = (R * cb.transpose()).transpose();
-          traj_cbx[f][a] = cb(0);
-          traj_cby[f][a] = cb(1);
-          traj_cbz[f][a] = cb(2);
+          const Vec3 cb = titan::algebra::mul_row(
+              Vec3{traj_cbx[f][a], traj_cby[f][a], traj_cbz[f][a]} -
+                  ca_centroid,
+              R);
+          traj_cbx[f][a] = cb.x;
+          traj_cby[f][a] = cb.y;
+          traj_cbz[f][a] = cb.z;
         }
       }
     }

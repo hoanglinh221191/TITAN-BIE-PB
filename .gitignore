@@ -141,6 +141,12 @@ test/
 !/test/titan_alignment_firewall_smoke.cpp
 !/test/titan_alignment_adapter_smoke.cpp
 !/test/alignment_firewall_smoke.ps1
+!/test/titan_eigen_p1_header_smoke.cpp
+!/test/eigen_p1_header_smoke.ps1
+!/test/titan_algebra_eigen3_smoke.cpp
+!/test/algebra_eigen3_smoke.ps1
+!/test/titan_alignment_parity_smoke.cpp
+!/test/alignment_parity_smoke.ps1
 !/test/dihedral_smoke.ps1
 !/test/titan_dihedral_smoke.cpp
 !/test/titan_dihedral_kernels_smoke.cpp

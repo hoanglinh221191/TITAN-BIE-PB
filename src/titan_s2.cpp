@@ -5,8 +5,6 @@
 #include "titan_executor.h"
 #include "titan_selection_utils.h"
 
-#include <Eigen/Dense>
-
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -60,6 +58,26 @@ std::pair<double, double> parse_fit_window(const std::string &raw) {
     throw std::invalid_argument(
         "S2: -s2-fit-window requires finite 0 <= tmin < tmax.");
   return {tmin, tmax};
+}
+
+bool has_non_collinear_rows(titan::algebra::Matrix3ConstView rows,
+                            double eps = 1.0e-12) noexcept {
+  const double eps2 = eps * eps;
+  titan::algebra::Vec3 base{};
+  bool have_base = false;
+  for (std::size_t r = 0; r < rows.rows; ++r) {
+    const titan::algebra::Vec3 current{rows(r, 0), rows(r, 1), rows(r, 2)};
+    if (titan::algebra::norm2(current) <= eps2)
+      continue;
+    if (!have_base) {
+      base = current;
+      have_base = true;
+      continue;
+    }
+    if (titan::algebra::norm2(titan::algebra::cross(base, current)) > eps2)
+      return true;
+  }
+  return false;
 }
 
 } // namespace
@@ -265,10 +283,8 @@ void TitanS2Analyzer::build_alignment_trace() {
     if (ca != residue.atom_by_name.end())
       alignment_atoms_.push_back(ca->second);
   }
-  alignment_reference_matrix_.resize(
-      static_cast<Eigen::Index>(alignment_atoms_.size()), 3);
-  alignment_mobile_matrix_.resize(
-      static_cast<Eigen::Index>(alignment_atoms_.size()), 3);
+  alignment_reference_matrix_.resize(alignment_atoms_.size());
+  alignment_mobile_matrix_.resize(alignment_atoms_.size());
 }
 
 void TitanS2Analyzer::ensure_alignment_reference(const MOL &frame) {
@@ -281,38 +297,42 @@ void TitanS2Analyzer::ensure_alignment_reference(const MOL &frame) {
     const std::size_t atom = static_cast<std::size_t>(alignment_atoms_[i]);
     if (atom >= frame.size())
       throw std::runtime_error("S2: CA alignment atom exceeds frame size.");
-    alignment_reference_matrix_(static_cast<Eigen::Index>(i), 0) =
-        frame.pos.x[atom];
-    alignment_reference_matrix_(static_cast<Eigen::Index>(i), 1) =
-        frame.pos.y[atom];
-    alignment_reference_matrix_(static_cast<Eigen::Index>(i), 2) =
-        frame.pos.z[atom];
+    alignment_reference_matrix_(i, 0) = frame.pos.x[atom];
+    alignment_reference_matrix_(i, 1) = frame.pos.y[atom];
+    alignment_reference_matrix_(i, 2) = frame.pos.z[atom];
   }
-  alignment_reference_matrix_.rowwise() -=
-      alignment_reference_matrix_.colwise().mean().eval();
-  if (alignment_reference_matrix_.colPivHouseholderQr().rank() < 2)
+  titan::algebra::Vec3 centroid{};
+  for (std::size_t i = 0; i < alignment_reference_matrix_.rows(); ++i) {
+    centroid.x += alignment_reference_matrix_(i, 0);
+    centroid.y += alignment_reference_matrix_(i, 1);
+    centroid.z += alignment_reference_matrix_(i, 2);
+  }
+  centroid = centroid / static_cast<double>(alignment_reference_matrix_.rows());
+  for (std::size_t i = 0; i < alignment_reference_matrix_.rows(); ++i) {
+    alignment_reference_matrix_(i, 0) -= centroid.x;
+    alignment_reference_matrix_(i, 1) -= centroid.y;
+    alignment_reference_matrix_(i, 2) -= centroid.z;
+  }
+  if (!has_non_collinear_rows(alignment_reference_matrix_.const_view()))
     throw std::runtime_error(
         "S2: rms alignment CA trace must contain non-collinear atoms.");
   have_alignment_reference_ = true;
 }
 
 void TitanS2Analyzer::append_vectors(const MOL &frame) {
-  alignment_rotation_.setIdentity();
+  alignment_rotation_ = titan::algebra::Mat3::identity();
   if (args_.align == "rms") {
     ensure_alignment_reference(frame);
     for (std::size_t i = 0; i < alignment_atoms_.size(); ++i) {
       const std::size_t atom = static_cast<std::size_t>(alignment_atoms_[i]);
       if (atom >= frame.size())
         throw std::runtime_error("S2: CA alignment atom exceeds frame size.");
-      alignment_mobile_matrix_(static_cast<Eigen::Index>(i), 0) =
-          frame.pos.x[atom];
-      alignment_mobile_matrix_(static_cast<Eigen::Index>(i), 1) =
-          frame.pos.y[atom];
-      alignment_mobile_matrix_(static_cast<Eigen::Index>(i), 2) =
-          frame.pos.z[atom];
+      alignment_mobile_matrix_(i, 0) = frame.pos.x[atom];
+      alignment_mobile_matrix_(i, 1) = frame.pos.y[atom];
+      alignment_mobile_matrix_(i, 2) = frame.pos.z[atom];
     }
-    TitanAlignment::align_frame_inplace(alignment_reference_matrix_,
-                                        alignment_mobile_matrix_,
+    TitanAlignment::align_frame_inplace(alignment_reference_matrix_.const_view(),
+                                        alignment_mobile_matrix_.view(),
                                         alignment_rotation_);
   }
 

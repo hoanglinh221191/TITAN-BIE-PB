@@ -22,6 +22,11 @@ $eigenLeak = Select-String -LiteralPath $alignmentHeader -Pattern "Eigen" -Simpl
 if ($eigenLeak) {
   throw "alignment_firewall_smoke: titan_alignment.h leaked Eigen token"
 }
+$alignmentSourceLeak = Select-String -LiteralPath $alignmentSource `
+  -Pattern "Eigen", "JacobiSVD", "Matrix3d" -SimpleMatch
+if ($alignmentSourceLeak) {
+  throw "alignment_firewall_smoke: titan_alignment.cpp leaked Eigen-backed implementation token"
+}
 
 $exe = Join-Path $WorkRoot "titan_alignment_firewall_smoke.exe"
 
@@ -31,7 +36,7 @@ if ($LASTEXITCODE -ne 0) {
   throw "alignment_firewall_smoke: header firewall compile failed"
 }
 
-& $Compiler -std=c++23 -O2 -mavx2 "-I$srcDir" "-I$eigenDir" `
+& $Compiler -std=c++23 -O2 -mavx2 "-I$srcDir" `
   $smokeSource `
   $alignmentSource `
   -o $exe

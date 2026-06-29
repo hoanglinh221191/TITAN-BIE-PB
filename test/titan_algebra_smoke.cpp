@@ -1,4 +1,5 @@
 #include "algebra/mat3.h"
+#include "algebra/matrix3_buffer.h"
 #include "algebra/matrix_view.h"
 #include "algebra/vec3.h"
 
@@ -14,6 +15,7 @@ void near(double actual, double expected, double eps = 1.0e-12) {
 
 int main() {
   using titan::algebra::Mat3;
+  using titan::algebra::Matrix3Buffer;
   using titan::algebra::Matrix3ConstView;
   using titan::algebra::Matrix3View;
   using titan::algebra::Vec3;
@@ -66,6 +68,32 @@ int main() {
   near(column_major_view(1, 0), 4.0);
   near(column_major_view(0, 2), 3.0);
   near(column_major_view(1, 2), 6.0);
+
+  Matrix3Buffer buffer;
+  buffer.resize(2);
+  assert(buffer.rows() == 2);
+  for (std::size_t i = 0; i < 6; ++i)
+    near(buffer.data()[i], 0.0);
+  buffer(0, 0) = 1.0;
+  buffer(0, 1) = 2.0;
+  buffer(0, 2) = 3.0;
+  buffer(1, 0) = 4.0;
+  buffer(1, 1) = 5.0;
+  buffer(1, 2) = 6.0;
+  Matrix3View buffer_view = buffer.view();
+  buffer_view(1, 2) = 7.0;
+  Matrix3ConstView buffer_const_view = buffer.const_view();
+  near(buffer.data()[0], 1.0);
+  near(buffer.data()[1], 2.0);
+  near(buffer.data()[2], 3.0);
+  near(buffer.data()[3], 4.0);
+  near(buffer.data()[4], 5.0);
+  near(buffer.data()[5], 7.0);
+  near(buffer_const_view(1, 2), 7.0);
+  Matrix3Buffer copied = buffer;
+  copied(0, 0) = 8.0;
+  near(buffer(0, 0), 1.0);
+  near(copied(0, 0), 8.0);
 
   return 0;
 }
