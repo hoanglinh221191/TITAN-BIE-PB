@@ -34,8 +34,8 @@ void check_aligned(const Matrix &actual, const Matrix &expected) {
 } // namespace
 
 int main() {
-  static_assert(TitanAlignment::detail::EigenLikeMatrix<Eigen::MatrixXd>);
-  static_assert(!TitanAlignment::detail::EigenLikeMatrix<int>);
+  static_assert(TitanAlignment::detail::StridedMatrixLike<Eigen::MatrixXd>);
+  static_assert(!TitanAlignment::detail::StridedMatrixLike<int>);
 
   Eigen::MatrixXd ref;
   Eigen::MatrixXd mobile;

@@ -11,10 +11,16 @@ $eigenDir = Join-Path $repo "src\eigen"
 $smokeSource = Join-Path $repo "test\titan_alignment_firewall_smoke.cpp"
 $adapterSource = Join-Path $repo "test\titan_alignment_adapter_smoke.cpp"
 $alignmentSource = Join-Path $repo "src\titan_alignment.cpp"
+$alignmentHeader = Join-Path $repo "src\titan_alignment.h"
 New-Item -ItemType Directory -Force -Path $WorkRoot | Out-Null
 
 if (-not (Test-Path -LiteralPath $Compiler)) {
   throw "Missing clang++ compiler: $Compiler"
+}
+
+$eigenLeak = Select-String -LiteralPath $alignmentHeader -Pattern "Eigen" -SimpleMatch
+if ($eigenLeak) {
+  throw "alignment_firewall_smoke: titan_alignment.h leaked Eigen token"
 }
 
 $exe = Join-Path $WorkRoot "titan_alignment_firewall_smoke.exe"

@@ -43,7 +43,7 @@ concept Matrix3ViewLike =
     std::same_as<remove_cvref_t<T>, titan::algebra::Matrix3View>;
 
 template <typename Matrix>
-concept EigenLikeMatrix = requires(Matrix &m, const Matrix &cm) {
+concept StridedMatrixLike = requires(Matrix &m, const Matrix &cm) {
   typename remove_cvref_t<Matrix>::Index;
   { remove_cvref_t<Matrix>::IsRowMajor } -> std::convertible_to<int>;
   { cm.data() };
@@ -56,7 +56,7 @@ concept EigenLikeMatrix = requires(Matrix &m, const Matrix &cm) {
 };
 
 template <typename Matrix>
-  requires EigenLikeMatrix<Matrix>
+  requires StridedMatrixLike<Matrix>
 titan::algebra::Matrix3ConstView matrix3_const_view(const Matrix &m) {
   using M = remove_cvref_t<Matrix>;
   const auto row_stride = M::IsRowMajor ? m.outerStride() : m.innerStride();
@@ -67,7 +67,7 @@ titan::algebra::Matrix3ConstView matrix3_const_view(const Matrix &m) {
 }
 
 template <typename Matrix>
-  requires EigenLikeMatrix<Matrix>
+  requires StridedMatrixLike<Matrix>
 titan::algebra::Matrix3View matrix3_view(Matrix &m) {
   using M = remove_cvref_t<Matrix>;
   const auto row_stride = M::IsRowMajor ? m.outerStride() : m.innerStride();
@@ -78,7 +78,7 @@ titan::algebra::Matrix3View matrix3_view(Matrix &m) {
 }
 
 template <typename Matrix>
-  requires EigenLikeMatrix<Matrix>
+  requires StridedMatrixLike<Matrix>
 void assign_mat3(Matrix &out, const titan::algebra::Mat3 &in) {
   for (std::size_t r = 0; r < 3; ++r)
     for (std::size_t c = 0; c < 3; ++c)
@@ -89,17 +89,17 @@ void assign_mat3(Matrix &out, const titan::algebra::Mat3 &in) {
 } // namespace detail
 
 template <typename RefMatrix, typename MobileMatrix>
-  requires detail::EigenLikeMatrix<RefMatrix> &&
-           detail::EigenLikeMatrix<MobileMatrix>
+  requires detail::StridedMatrixLike<RefMatrix> &&
+           detail::StridedMatrixLike<MobileMatrix>
 AlignResult align_frame(const RefMatrix &ref_centered, MobileMatrix &mobile) {
   return align_frame(detail::matrix3_const_view(ref_centered),
                      detail::matrix3_view(mobile));
 }
 
 template <typename RefMatrix, typename MobileMatrix, typename RotationMatrix>
-  requires detail::EigenLikeMatrix<RefMatrix> &&
-           detail::EigenLikeMatrix<MobileMatrix> &&
-           detail::EigenLikeMatrix<RotationMatrix>
+  requires detail::StridedMatrixLike<RefMatrix> &&
+           detail::StridedMatrixLike<MobileMatrix> &&
+           detail::StridedMatrixLike<RotationMatrix>
 void align_frame_inplace(const RefMatrix &ref_centered, MobileMatrix &mobile,
                          RotationMatrix &R_out) {
   titan::algebra::Mat3 R{};
