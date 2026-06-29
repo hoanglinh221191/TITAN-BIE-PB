@@ -1,0 +1,45 @@
+#include "algebra/mat3.h"
+#include "algebra/matrix_view.h"
+#include "algebra/vec3.h"
+
+#include <cassert>
+#include <cmath>
+#include <vector>
+
+namespace {
+void near(double actual, double expected, double eps = 1.0e-12) {
+  assert(std::abs(actual - expected) <= eps);
+}
+} // namespace
+
+int main() {
+  using titan::algebra::Mat3;
+  using titan::algebra::Matrix3ConstView;
+  using titan::algebra::Matrix3View;
+  using titan::algebra::Vec3;
+
+  const Vec3 x{1.0, 0.0, 0.0};
+  const Vec3 y{0.0, 1.0, 0.0};
+  const Vec3 z = titan::algebra::cross(x, y);
+  near(z.x, 0.0);
+  near(z.y, 0.0);
+  near(z.z, 1.0);
+  near(titan::algebra::dot(z, x), 0.0);
+  near(titan::algebra::norm(Vec3{3.0, 4.0, 0.0}), 5.0);
+
+  const Mat3 identity = Mat3::identity();
+  near(titan::algebra::determinant(identity), 1.0);
+  const Vec3 moved = titan::algebra::mul(identity, Vec3{2.0, 3.0, 4.0});
+  near(moved.x, 2.0);
+  near(moved.y, 3.0);
+  near(moved.z, 4.0);
+
+  std::vector<double> rows = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
+  Matrix3View view{rows.data(), 2, 3};
+  view(1, 2) = 7.0;
+  Matrix3ConstView const_view{rows.data(), 2, 3};
+  near(const_view(0, 1), 2.0);
+  near(const_view(1, 2), 7.0);
+
+  return 0;
+}

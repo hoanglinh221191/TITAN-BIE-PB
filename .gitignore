@@ -136,6 +136,8 @@ test/
 !/test/pbe_snapshot_stability_scan.ps1
 !/test/qnative_smoke.ps1
 !/test/titan_qnative_smoke.cpp
+!/test/titan_algebra_smoke.cpp
+!/test/algebra_smoke.ps1
 !/test/dihedral_smoke.ps1
 !/test/titan_dihedral_smoke.cpp
 !/test/titan_dihedral_kernels_smoke.cpp
