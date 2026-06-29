@@ -60,5 +60,12 @@ int main() {
   near(const_view(0, 1), 2.0);
   near(const_view(1, 2), 7.0);
 
+  std::vector<double> columns = {1.0, 4.0, 2.0, 5.0, 3.0, 6.0};
+  Matrix3ConstView column_major_view{columns.data(), 2, 1, 2};
+  near(column_major_view(0, 0), 1.0);
+  near(column_major_view(1, 0), 4.0);
+  near(column_major_view(0, 2), 3.0);
+  near(column_major_view(1, 2), 6.0);
+
   return 0;
 }

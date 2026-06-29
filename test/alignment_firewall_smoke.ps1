@@ -17,6 +17,13 @@ if (-not (Test-Path -LiteralPath $Compiler)) {
 }
 
 $exe = Join-Path $WorkRoot "titan_alignment_firewall_smoke.exe"
+
+$headerProbeObj = Join-Path $WorkRoot "titan_alignment_header_probe.o"
+& $Compiler -std=c++23 -O2 -mavx2 "-I$srcDir" -c $smokeSource -o $headerProbeObj
+if ($LASTEXITCODE -ne 0) {
+  throw "alignment_firewall_smoke: header firewall compile failed"
+}
+
 & $Compiler -std=c++23 -O2 -mavx2 "-I$srcDir" "-I$eigenDir" `
   $smokeSource `
   $alignmentSource `
