@@ -10,6 +10,7 @@
 #include <fstream>
 #include <map>
 #include <set>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -177,8 +178,7 @@ private:
   void update_order_parameters(const MOL &frame, const box &active_box,
                                const std::array<double, 3> &normal,
                                const std::vector<int> *leaflets = nullptr,
-                               const std::set<std::size_t> *near_lipids =
-                                   nullptr);
+                               std::span<const std::uint8_t> near_lipids = {});
   void update_flipflop(const std::vector<int> &leaflets, std::size_t frame,
                        double time_ps);
   void compute_interdigitation(const MOL &frame,
@@ -203,7 +203,7 @@ private:
                                      const std::vector<int> &leaflets,
                                      std::size_t snap_idx, double time_ps,
                                      TitanExecutor &executor,
-                                     std::set<std::size_t> &near_lipids);
+                                     std::span<std::uint8_t> near_lipids);
   void update_curvature_grid(const std::array<double, 3> &normal,
                              const std::vector<int> &leaflets,
                              const box &active_box,
@@ -214,7 +214,7 @@ private:
       const std::vector<double> &per_lipid_thickness,
       const std::vector<double> &per_lipid_curvature,
       const std::vector<int> &leaflets,
-      const std::set<std::size_t> &near_lipids);
+      std::span<const std::uint8_t> near_lipids);
   void record_proximity_value(const std::string &observable,
                               const std::string &group,
                               const std::string &leaflet,

@@ -92,7 +92,7 @@ void StreamingKinetics::reset(std::size_t maxlag) {
   current_run_lengths_.clear();
   previous_active_ids_.clear();
   history_.clear();
-  lifetime_histogram_.clear();
+  lifetime_histogram_.assign(1, 0);
 }
 
 void StreamingKinetics::ensure_id(std::size_t id) {
@@ -111,7 +111,10 @@ void StreamingKinetics::finalize_run(int id) {
   const std::uint64_t run = current_run_lengths_[idx];
   if (run == 0)
     return;
-  lifetime_histogram_[static_cast<std::size_t>(run)]++;
+  const auto lifetime = static_cast<std::size_t>(run);
+  if (lifetime >= lifetime_histogram_.size())
+    lifetime_histogram_.resize(lifetime + 1, 0);
+  ++lifetime_histogram_[lifetime];
   key_stats_[idx].total_lifetime_frames += run;
   key_stats_[idx].max_lifetime_frames =
       std::max(key_stats_[idx].max_lifetime_frames, run);
@@ -1342,7 +1345,11 @@ void TitanHBondKineticsAnalyzer::export_lifetime_file(
     for (const auto &series : series_vec) {
       if (!series.enabled)
         continue;
-      for (const auto &[lifetime, count] : series.kinetics.lifetime_histogram()) {
+      const auto &histogram = series.kinetics.lifetime_histogram();
+      for (std::size_t lifetime = 1; lifetime < histogram.size(); ++lifetime) {
+        const std::uint64_t count = histogram[lifetime];
+        if (count == 0)
+          continue;
         out << series.scope_label << " " << lifetime << " "
             << lifetime * frame_dt_ps() << " " << count << "\n";
       }

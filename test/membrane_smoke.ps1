@@ -7,7 +7,9 @@ $env:TITAN_NO_PAUSE = "1"
 
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $work = Join-Path $repo "test\membrane_inputs_local"
+$outputRoot = Join-Path $repo "test\membrane_outputs_local"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
+New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $titanPath = $TitanExe
 if (-not [System.IO.Path]::IsPathRooted($titanPath)) {
   $titanPath = Join-Path $repo $titanPath
@@ -34,11 +36,12 @@ $outputs = $trajectoryOutputs + $aggregateOutputs
 
 function Clear-MembraneOutputs {
   foreach ($file in $outputs) {
-    if (Test-Path -LiteralPath (Join-Path $repo $file)) {
-      Remove-Item -LiteralPath (Join-Path $repo $file) -Force
+    $path = Join-Path $outputRoot $file
+    if (Test-Path -LiteralPath $path) {
+      Remove-Item -LiteralPath $path -Force
     }
   }
-  Get-ChildItem -LiteralPath $repo -Filter "membrane_*_[0-9]*.*" -ErrorAction SilentlyContinue |
+  Get-ChildItem -LiteralPath $outputRoot -Filter "membrane_*_[0-9]*.*" -ErrorAction SilentlyContinue |
     Remove-Item -Force
 }
 
@@ -46,9 +49,15 @@ function Run-TitanCase([string]$Name, [string]$ArgText) {
   $arg = Join-Path $work ("arg_" + $Name + ".in")
   [System.IO.File]::WriteAllText($arg, $ArgText, [System.Text.Encoding]::ASCII)
   Clear-MembraneOutputs
-  & $titanPath -a $arg
-  if ($LASTEXITCODE -ne 0) {
-    throw "${Name}: TITAN exited with code $LASTEXITCODE"
+  Push-Location $outputRoot
+  try {
+    & $titanPath -a $arg
+    if ($LASTEXITCODE -ne 0) {
+      throw "${Name}: TITAN exited with code $LASTEXITCODE"
+    }
+  }
+  finally {
+    Pop-Location
   }
 }
 
@@ -70,19 +79,19 @@ try {
 -membrane-grid=2,2
 "@)
   foreach ($file in $trajectoryOutputs) {
-    if (-not (Test-Path -LiteralPath $file)) {
+    if (-not (Test-Path -LiteralPath (Join-Path $outputRoot $file))) {
       throw "default: missing expected output $file"
     }
   }
-  if (-not (Select-String -Path "membrane_summary.dat" -Pattern "reference_note:" -Quiet) -or
-      -not (Select-String -Path "membrane_summary.dat" -Pattern "lipids: 8" -Quiet) -or
-      -not (Select-String -Path "membrane_apl_timeseries.csv" -Pattern "mean_apl_A2" -Quiet)) {
+  if (-not (Select-String -Path (Join-Path $outputRoot "membrane_summary.dat") -Pattern "reference_note:" -Quiet) -or
+      -not (Select-String -Path (Join-Path $outputRoot "membrane_summary.dat") -Pattern "lipids: 8" -Quiet) -or
+      -not (Select-String -Path (Join-Path $outputRoot "membrane_apl_timeseries.csv") -Pattern "mean_apl_A2" -Quiet)) {
     throw "default: membrane output does not match geometry contract"
   }
 
   Run-TitanCase "disabled" $base
   foreach ($file in $outputs) {
-    if (Test-Path -LiteralPath $file) {
+    if (Test-Path -LiteralPath (Join-Path $outputRoot $file)) {
       throw "disabled: membrane output generated without -membrane=true: $file"
     }
   }
@@ -114,12 +123,12 @@ try {
       "membrane_summary_average.dat",
       "membrane_thickness_map_average.csv",
       "membrane_order_parameters_average.csv")) {
-    if (-not (Test-Path -LiteralPath $file)) {
+    if (-not (Test-Path -LiteralPath (Join-Path $outputRoot $file))) {
       throw "multi: missing indexed or aggregate output $file"
     }
   }
-  if (-not (Select-String -Path "membrane_summary_average.dat" -Pattern "replicates: 2" -Quiet) -or
-      -not (Select-String -Path "membrane_thickness_map_average.csv" -Pattern "sem_thickness_A" -Quiet)) {
+  if (-not (Select-String -Path (Join-Path $outputRoot "membrane_summary_average.dat") -Pattern "replicates: 2" -Quiet) -or
+      -not (Select-String -Path (Join-Path $outputRoot "membrane_thickness_map_average.csv") -Pattern "sem_thickness_A" -Quiet)) {
     throw "multi: aggregate outputs do not record replicate SEM"
   }
 

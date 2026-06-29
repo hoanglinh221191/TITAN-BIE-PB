@@ -106,6 +106,11 @@ bool supported_martini_lipid(const std::string &resname) {
   return supported.contains(uppercase_copy(resname));
 }
 
+bool is_near_lipid(std::span<const std::uint8_t> near_lipids,
+                   std::size_t lipid_idx) noexcept {
+  return lipid_idx < near_lipids.size() && near_lipids[lipid_idx] != 0;
+}
+
 double polygon_area(const std::vector<Point2D> &polygon) {
   if (polygon.size() < 3)
     return 0.0;
@@ -636,7 +641,7 @@ void TitanMembraneAnalyzer::update_order_parameters(
     const MOL &frame, const box &active_box,
     const std::array<double, 3> &normal,
     const std::vector<int> *leaflets,
-    const std::set<std::size_t> *near_lipids) {
+    std::span<const std::uint8_t> near_lipids) {
   for (std::size_t lipid_idx = 0; lipid_idx < lipid_plans_.size();
        ++lipid_idx) {
     const LipidPlan &lipid = lipid_plans_[lipid_idx];
@@ -660,14 +665,14 @@ void TitanMembraneAnalyzer::update_order_parameters(
         acc.sum += value;
         acc.sum_sq += value * value;
         ++acc.count;
-        if (leaflets != nullptr && near_lipids != nullptr &&
+        if (leaflets != nullptr && !near_lipids.empty() &&
             lipid_idx < leaflets->size()) {
           record_proximity_value(
               "order_S",
               "tail" + std::to_string(tail_idx + 1) + ":bond" +
                   std::to_string(bond),
               leaflet_name((*leaflets)[lipid_idx]), lipid.resname, value,
-              near_lipids->contains(lipid_idx));
+              is_near_lipid(near_lipids, lipid_idx));
         }
       }
     }
@@ -897,7 +902,7 @@ void TitanMembraneAnalyzer::update_protein_lipid_contacts(
     const Multi_MOL *protein, const Multi_MOL &lipids, const MOL &lipid_frame,
     const box &active_box, const std::array<double, 3> &,
     const std::vector<int> &leaflets, std::size_t snap_idx, double time_ps,
-    TitanExecutor &executor, std::set<std::size_t> &near_lipids_out) {
+    TitanExecutor &executor, std::span<std::uint8_t> near_lipids_out) {
   if (!args_.protein_contacts && !args_.enrichment)
     return;
   ++contact_frames_;
@@ -994,7 +999,6 @@ void TitanMembraneAnalyzer::update_protein_lipid_contacts(
         }
       });
 
-  std::set<std::string> near_lipids;
   for (auto &rows : worker_rows) {
     for (const ContactRow &row : rows) {
       contact_rows_.push_back(row);
@@ -1002,19 +1006,19 @@ void TitanMembraneAnalyzer::update_protein_lipid_contacts(
       ++lipid_contact_counts_[row.lipid_id + "," + row.lipid_resname + "," +
                               row.leaflet];
       near_lipid_ids_.insert(row.lipid_id);
-      near_lipids_out.insert(row.lipid_index);
-      near_lipids.insert(row.lipid_id + "|" + row.lipid_resname + "|" +
-                         row.leaflet);
+      if (row.lipid_index < near_lipids_out.size())
+        near_lipids_out[row.lipid_index] = 1;
     }
   }
   if (args_.enrichment) {
-    for (const std::string &entry : near_lipids) {
-      const auto first = entry.find('|');
-      const auto second = entry.find('|', first + 1);
-      if (first == std::string::npos || second == std::string::npos)
+    const std::size_t limit =
+        std::min(lipid_plans_.size(), near_lipids_out.size());
+    for (std::size_t lipid_idx = 0; lipid_idx < limit; ++lipid_idx) {
+      if (!is_near_lipid(near_lipids_out, lipid_idx) ||
+          lipid_idx >= leaflets.size())
         continue;
-      const std::string key = entry.substr(first + 1, second - first - 1) +
-                              "," + entry.substr(second + 1);
+      const std::string key = lipid_plans_[lipid_idx].resname + "," +
+                              leaflet_name(leaflets[lipid_idx]);
       ++enrichment_counts_[key].near_count;
     }
   }
@@ -1142,7 +1146,7 @@ void TitanMembraneAnalyzer::update_proximity_coupling(
     const std::vector<double> &per_lipid_thickness,
     const std::vector<double> &per_lipid_curvature,
     const std::vector<int> &leaflets,
-    const std::set<std::size_t> &near_lipids) {
+    std::span<const std::uint8_t> near_lipids) {
   if (!args_.protein_contacts && !args_.enrichment)
     return;
 
@@ -1157,7 +1161,7 @@ void TitanMembraneAnalyzer::update_proximity_coupling(
   for (std::size_t i = 0; i < lipid_plans_.size(); ++i) {
     const std::string leaflet = leaflet_name(leaflets[i]);
     const std::string &resname = lipid_plans_[i].resname;
-    const bool near = near_lipids.contains(i);
+    const bool near = is_near_lipid(near_lipids, i);
     if (i < apl.size())
       record_proximity_value("apl_A2", "per_lipid", leaflet, resname, apl[i],
                              near);
@@ -1257,15 +1261,20 @@ void TitanMembraneAnalyzer::process_frame(const Multi_MOL &lipids,
   double interdigitation = 0.0;
   double penetration = 0.0;
   compute_interdigitation(frame, normal, leaflets, interdigitation, penetration);
-  std::set<std::size_t> near_lipids;
+  std::vector<std::uint8_t> near_lipids(lipid_plans_.size(), 0);
+  auto near_lipid_span =
+      std::span<std::uint8_t>(near_lipids.data(), near_lipids.size());
+  auto near_lipid_const_span =
+      std::span<const std::uint8_t>(near_lipids.data(), near_lipids.size());
   update_protein_lipid_contacts(protein, lipids, frame, *active_box, normal,
                                 leaflets, snap_idx, frame.get_time(),
-                                executor, near_lipids);
+                                executor, near_lipid_span);
   std::vector<double> per_lipid_curvature;
   update_curvature_grid(normal, leaflets, *active_box, &per_lipid_curvature);
-  update_order_parameters(frame, *active_box, normal, &leaflets, &near_lipids);
+  update_order_parameters(frame, *active_box, normal, &leaflets,
+                          near_lipid_const_span);
   update_proximity_coupling(apl, per_lipid_thickness, per_lipid_curvature,
-                            leaflets, near_lipids);
+                            leaflets, near_lipid_const_span);
   update_flipflop(leaflets, snap_idx, frame.get_time());
 
   frame_summaries_.push_back({snap_idx, frame.get_time(), mean_apl, thickness,

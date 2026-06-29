@@ -61,11 +61,19 @@ int main() {
   }
 
   const auto &hist = kinetics.lifetime_histogram();
-  auto one_it = hist.find(1);
-  auto two_it = hist.find(2);
-  if (one_it == hist.end() || one_it->second != 2 || two_it == hist.end() ||
-      two_it->second != 1) {
+  if (hist.size() <= 2 || hist[0] != 0 || hist[1] != 2 || hist[2] != 1) {
     fail("lifetime histogram contents mismatch");
+  }
+
+  StreamingKinetics long_run(1);
+  long_run.process_active_ids({7});
+  long_run.process_active_ids({7});
+  long_run.process_active_ids({7});
+  long_run.process_active_ids({7});
+  long_run.finalize();
+  const auto &long_hist = long_run.lifetime_histogram();
+  if (long_hist.size() <= 4 || long_hist[4] != 1) {
+    fail("lifetime histogram should grow beyond maxlag");
   }
 
   std::cout << "titan_hbond_kinetics_smoke PASS\n";

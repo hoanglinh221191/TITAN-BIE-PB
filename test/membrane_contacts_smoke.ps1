@@ -7,7 +7,9 @@ $env:TITAN_NO_PAUSE = "1"
 
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $work = Join-Path $repo "test\membrane_contacts_inputs_local"
+$outputRoot = Join-Path $repo "test\membrane_contacts_outputs_local"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
+New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $titanPath = $TitanExe
 if (-not [System.IO.Path]::IsPathRooted($titanPath)) {
   $titanPath = Join-Path $repo $titanPath
@@ -28,20 +30,20 @@ $outputs = @(
 
 function Clear-Outputs {
   foreach ($file in $outputs) {
-    $path = Join-Path $repo $file
+    $path = Join-Path $outputRoot $file
     if (Test-Path -LiteralPath $path) {
       Remove-Item -LiteralPath $path -Force
     }
   }
-  Get-ChildItem -LiteralPath $repo -Filter "membrane_protein_lipid_contacts_[0-9]*.csv" -ErrorAction SilentlyContinue |
+  Get-ChildItem -LiteralPath $outputRoot -Filter "membrane_protein_lipid_contacts_[0-9]*.csv" -ErrorAction SilentlyContinue |
     Remove-Item -Force
-  Get-ChildItem -LiteralPath $repo -Filter "membrane_lipid_enrichment_[0-9]*.csv" -ErrorAction SilentlyContinue |
+  Get-ChildItem -LiteralPath $outputRoot -Filter "membrane_lipid_enrichment_[0-9]*.csv" -ErrorAction SilentlyContinue |
     Remove-Item -Force
-  Get-ChildItem -LiteralPath $repo -Filter "membrane_coupling_summary_[0-9]*.dat" -ErrorAction SilentlyContinue |
+  Get-ChildItem -LiteralPath $outputRoot -Filter "membrane_coupling_summary_[0-9]*.dat" -ErrorAction SilentlyContinue |
     Remove-Item -Force
-  Get-ChildItem -LiteralPath $repo -Filter "membrane_curvature_map_[0-9]*.csv" -ErrorAction SilentlyContinue |
+  Get-ChildItem -LiteralPath $outputRoot -Filter "membrane_curvature_map_[0-9]*.csv" -ErrorAction SilentlyContinue |
     Remove-Item -Force
-  Get-ChildItem -LiteralPath $repo -Filter "membrane_proximity_coupling_[0-9]*.csv" -ErrorAction SilentlyContinue |
+  Get-ChildItem -LiteralPath $outputRoot -Filter "membrane_proximity_coupling_[0-9]*.csv" -ErrorAction SilentlyContinue |
     Remove-Item -Force
 }
 
@@ -106,7 +108,7 @@ function Run-TitanCase([string]$Name, [string]$ArgText) {
   $arg = Join-Path $work ("arg_" + $Name + ".in")
   [System.IO.File]::WriteAllText($arg, $ArgText, [System.Text.Encoding]::ASCII)
   Clear-Outputs
-  Push-Location $repo
+  Push-Location $outputRoot
   try {
     & $titanPath -a $arg
     if ($LASTEXITCODE -ne 0) {
@@ -118,19 +120,19 @@ function Run-TitanCase([string]$Name, [string]$ArgText) {
 }
 
 function Assert-Exists([string]$File) {
-  if (-not (Test-Path -LiteralPath (Join-Path $repo $File))) {
+  if (-not (Test-Path -LiteralPath (Join-Path $outputRoot $File))) {
     throw "missing expected output $File"
   }
 }
 
 function Assert-NotExists([string]$File) {
-  if (Test-Path -LiteralPath (Join-Path $repo $File)) {
+  if (Test-Path -LiteralPath (Join-Path $outputRoot $File)) {
     throw "unexpected output $File"
   }
 }
 
 function Assert-Contains([string]$File, [string]$Pattern) {
-  if (-not (Select-String -Path (Join-Path $repo $File) -Pattern $Pattern -Quiet)) {
+  if (-not (Select-String -Path (Join-Path $outputRoot $File) -Pattern $Pattern -Quiet)) {
     throw "$File does not contain pattern $Pattern"
   }
 }

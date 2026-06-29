@@ -114,3 +114,16 @@ Remaining larger refactor:
 
 - The current randomized backend still writes and rereads the full `n_frames x D` feature spool for sketch, compression, reduced solve, and projection replay.
 - A true streaming-sketch backend should remain opt-in until measured. The next target is to compute reduced sketch rows during feature construction or in larger blocks, so TITAN can avoid keeping/replaying the full raw feature matrix when downstream only needs low-dimensional TICA projections.
+
+## 8. TICA P0 Auto Backend Policy Update (2026-06-29)
+
+Implemented the P0 guard for large high-dimensional TICA runs:
+
+- `src/titan_tica_backend_policy.h` centralizes the auto-backend decision used by `impl_engine.cpp`.
+- Auto mode now computes `raw_feature_values = estimated_frames * feature_dim`.
+- If `raw_feature_values >= 250000000`, auto mode selects `randomized` before considering RAM-fit `exact_dense` or `exact_dual`.
+- Explicit user requests such as `-tica-backend exact_dual` are still honored, but the log reports that the large-matrix limit was exceeded.
+- The 48-replica case `174720 x 4656 = 813496320` therefore auto-selects `randomized`.
+- `impl_engine.cpp` logs `TICA Raw Feature Values`, `TICA Large-Matrix Limit`, and `TICA Large-Matrix Policy` so reruns of job 13/14 show exactly why the backend was selected.
+
+Next priority after this update is to rerun the 48-replica job with the new binary and inspect the timing instrumentation. If randomized is still dominated by spool read/write or projection replay, the next structural refactor remains the streaming-sketch/reduced-spool backend from section 7.

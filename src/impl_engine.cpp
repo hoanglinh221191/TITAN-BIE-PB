@@ -49,6 +49,7 @@
 #include "titan_sparse_graph_module.h"
 #include "titan_sg_streaming.h"
 #include "titan_sq.h"
+#include "titan_tica_backend_policy.h"
 #include "titan_tica_estimator.h"
 #include "titan_uncertainty.h"
 #include "titan_umap.h"
@@ -2207,29 +2208,19 @@ int engine(arguments &Arguments) {
            static_cast<long double>(tica_feature_dim) *
                static_cast<long double>(2 * (sketch_rank + 8))) *
           static_cast<long double>(sizeof(double));
-      const long double ram_budget =
-          available_ram_bytes > 0
-              ? static_cast<long double>(available_ram_bytes) * 0.30L
-              : 0.0L;
-
-      TicaBackend selected_backend = requested_backend;
-      if (requested_backend == TicaBackend::Auto) {
-        if (available_ram_bytes > 0 && dense_memory_estimate <= ram_budget) {
-          selected_backend = TicaBackend::ExactDense;
-        } else if (available_ram_bytes == 0 ||
-                   dual_memory_estimate <= ram_budget) {
-          selected_backend = TicaBackend::ExactDual;
-        } else {
-          selected_backend = TicaBackend::Randomized;
-        }
-      }
-      // Projection-cache workflows need a backend that can replay per-frame
-      // coordinates. arguments::post_process() already rewrites explicit
-      // exact_dense requests, but keep this runtime guard as a safety net.
-      if (need_tica_projection_cache &&
-          selected_backend == TicaBackend::ExactDense) {
-        selected_backend = TicaBackend::ExactDual;
-      }
+      TitanTicaBackendPolicyConfig backend_policy_config;
+      backend_policy_config.requested_backend = requested_backend;
+      backend_policy_config.available_ram_bytes =
+          static_cast<long double>(available_ram_bytes);
+      backend_policy_config.ram_budget_fraction = 0.30L;
+      backend_policy_config.dense_memory_estimate = dense_memory_estimate;
+      backend_policy_config.dual_memory_estimate = dual_memory_estimate;
+      backend_policy_config.estimated_frames = estimated_frames;
+      backend_policy_config.feature_dim = tica_feature_dim;
+      backend_policy_config.need_projection_cache = need_tica_projection_cache;
+      const TitanTicaBackendPolicyDecision backend_decision =
+          select_tica_backend_for_policy(backend_policy_config);
+      const TicaBackend selected_backend = backend_decision.selected_backend;
 
       tica_analyzer = std::make_unique<TitanKinetics>(
           tica_feature_dim, Arguments.msm.tica_lag,
@@ -2286,12 +2277,27 @@ int engine(arguments &Arguments) {
                       tica_backend_to_string(requested_backend));
       TitanUI::log_kv(log, "TICA Backend Selected",
                       tica_backend_to_string(selected_backend));
+      if (backend_decision.large_matrix_limit_exceeded) {
+        TitanUI::log_kv(
+            log, "TICA Large-Matrix Policy",
+            backend_decision.selected_by_large_matrix_limit
+                ? "auto -> randomized"
+                : "limit exceeded; explicit backend honored");
+      }
       TitanUI::log_kv(log, "TICA Rank",
                       std::to_string(Arguments.msm.tica_rank));
       TitanUI::log_kv(log, "TICA Estimated Frames",
                       std::to_string(static_cast<int64_t>(estimated_frames)));
       TitanUI::log_kv(log, "TICA Frame Estimate Source",
                       frame_estimate.source);
+      TitanUI::log_kv(
+          log, "TICA Raw Feature Values",
+          std::to_string(static_cast<int64_t>(
+              std::ceil(backend_decision.raw_feature_values))));
+      TitanUI::log_kv(
+          log, "TICA Large-Matrix Limit",
+          std::to_string(static_cast<int64_t>(
+              std::ceil(backend_decision.large_matrix_value_limit))));
       TitanUI::log_kv(log, "TICA Dense Memory Est",
                       bytes_to_mb_string(dense_memory_estimate));
       TitanUI::log_kv(log, "TICA Dual Cache Est",

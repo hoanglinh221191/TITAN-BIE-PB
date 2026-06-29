@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <deque>
 #include <fstream>
-#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -51,7 +50,7 @@ public:
   [[nodiscard]] const std::vector<KeyAggregate> &key_stats() const noexcept {
     return key_stats_;
   }
-  [[nodiscard]] const std::map<std::size_t, std::uint64_t> &
+  [[nodiscard]] const std::vector<std::uint64_t> &
   lifetime_histogram() const noexcept {
     return lifetime_histogram_;
   }
@@ -68,7 +67,7 @@ private:
   std::vector<std::uint64_t> current_run_lengths_;
   std::vector<int> previous_active_ids_;
   std::deque<std::vector<int>> history_;
-  std::map<std::size_t, std::uint64_t> lifetime_histogram_;
+  std::vector<std::uint64_t> lifetime_histogram_;
 };
 
 } // namespace titan_hbond_kinetics

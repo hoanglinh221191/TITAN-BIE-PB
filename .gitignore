@@ -148,6 +148,8 @@ test/
 !/test/mbar_tica_metadata_smoke.ps1
 !/test/titan_tica_timing_smoke.cpp
 !/test/tica_timing_smoke.ps1
+!/test/titan_tica_backend_policy_smoke.cpp
+!/test/tica_backend_policy_smoke.ps1
 !/test/edecomp_args_smoke.ps1
 !/test/edecomp_smoke.ps1
 !/test/cas_smoke.ps1
@@ -440,6 +442,7 @@ test/
 !/test/titan_membrane_smoke.cpp
 !/test/membrane_smoke.ps1
 !/test/membrane_contacts_smoke.ps1
+!/test/hbond_kinetics_smoke.ps1
 !/test/fixtures/
 !/test/fixtures/membrane_synthetic.pdb
 !/test/fixtures/membrane_synthetic.ndx
