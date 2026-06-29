@@ -12,9 +12,11 @@ if (-not (Test-Path -LiteralPath $Compiler)) {
   throw "Missing clang++ compiler: $Compiler"
 }
 
+$srcDir = Join-Path $repo "src"
+$smokeSource = Join-Path $repo "test\titan_algebra_smoke.cpp"
 $exe = Join-Path $WorkRoot "titan_algebra_smoke.exe"
-& $Compiler -std=c++23 -O2 -mavx2 -Isrc `
-  test\titan_algebra_smoke.cpp `
+& $Compiler -std=c++23 -O2 -mavx2 -I $srcDir `
+  $smokeSource `
   -o $exe
 if ($LASTEXITCODE -ne 0) {
   throw "algebra_smoke: failed to compile"

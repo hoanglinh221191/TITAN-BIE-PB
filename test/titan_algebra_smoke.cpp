@@ -34,6 +34,25 @@ int main() {
   near(moved.y, 3.0);
   near(moved.z, 4.0);
 
+  Mat3 non_identity{};
+  non_identity(0, 0) = 1.0;
+  non_identity(0, 1) = 2.0;
+  non_identity(0, 2) = 3.0;
+  non_identity(1, 0) = 0.0;
+  non_identity(1, 1) = 1.0;
+  non_identity(1, 2) = 4.0;
+  non_identity(2, 0) = 5.0;
+  non_identity(2, 1) = 6.0;
+  non_identity(2, 2) = 0.0;
+  near(titan::algebra::determinant(non_identity), 1.0);
+  const Vec3 mixed = titan::algebra::mul(non_identity, Vec3{1.0, 2.0, 3.0});
+  near(mixed.x, 14.0);
+  near(mixed.y, 14.0);
+  near(mixed.z, 17.0);
+  const Mat3 transposed = titan::algebra::transpose(non_identity);
+  near(transposed(0, 2), 5.0);
+  near(transposed(2, 1), 4.0);
+
   std::vector<double> rows = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
   Matrix3View view{rows.data(), 2, 3};
   view(1, 2) = 7.0;
