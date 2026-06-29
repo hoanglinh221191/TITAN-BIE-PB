@@ -9,6 +9,7 @@ $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $srcDir = Join-Path $repo "src"
 $eigenDir = Join-Path $repo "src\eigen"
 $smokeSource = Join-Path $repo "test\titan_alignment_firewall_smoke.cpp"
+$adapterSource = Join-Path $repo "test\titan_alignment_adapter_smoke.cpp"
 $alignmentSource = Join-Path $repo "src\titan_alignment.cpp"
 New-Item -ItemType Directory -Force -Path $WorkRoot | Out-Null
 
@@ -35,6 +36,20 @@ if ($LASTEXITCODE -ne 0) {
 & $exe
 if ($LASTEXITCODE -ne 0) {
   throw "alignment_firewall_smoke: smoke executable failed"
+}
+
+$adapterExe = Join-Path $WorkRoot "titan_alignment_adapter_smoke.exe"
+& $Compiler -std=c++23 -O2 -mavx2 "-I$srcDir" "-I$eigenDir" `
+  $adapterSource `
+  $alignmentSource `
+  -o $adapterExe
+if ($LASTEXITCODE -ne 0) {
+  throw "alignment_firewall_smoke: adapter smoke failed to compile"
+}
+
+& $adapterExe
+if ($LASTEXITCODE -ne 0) {
+  throw "alignment_firewall_smoke: adapter smoke executable failed"
 }
 
 Write-Host "PASS alignment_firewall_smoke"

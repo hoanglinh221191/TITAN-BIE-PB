@@ -3,6 +3,8 @@
 #include <Eigen/Dense>
 #include <Eigen/SVD>
 
+#include <cassert>
+
 namespace {
 
 titan::algebra::Mat3 to_mat3(const Eigen::Matrix3d &m) {
@@ -20,6 +22,8 @@ namespace TitanAlignment {
 titan::algebra::Mat3
 kabsch_rotation(titan::algebra::Matrix3ConstView ref_centered,
                 titan::algebra::Matrix3ConstView mobile_centered) {
+  assert(ref_centered.rows == mobile_centered.rows);
+
   Eigen::Matrix3d H = Eigen::Matrix3d::Zero();
   for (std::size_t r = 0; r < ref_centered.rows; ++r) {
     for (std::size_t i = 0; i < 3; ++i)
@@ -39,7 +43,9 @@ kabsch_rotation(titan::algebra::Matrix3ConstView ref_centered,
 
 AlignResult align_frame(titan::algebra::Matrix3ConstView ref_centered,
                         titan::algebra::Matrix3View mobile) {
-  AlignResult result;
+  assert(ref_centered.rows == mobile.rows);
+
+  AlignResult result{};
 
   for (std::size_t r = 0; r < mobile.rows; ++r) {
     result.mob_centroid.x += mobile(r, 0);
