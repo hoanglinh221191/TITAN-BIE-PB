@@ -95,11 +95,24 @@ foreach ($pattern in @(
         'component_graph_shift_descriptors=\d+',
         'component_graph_shift_materialized=\d+',
         'component_graph_bbox_only_scores=\d+',
-        'component_graph_lazy_materialize=([0-9.]+) s'
+        'component_graph_lazy_materialize=([0-9.]+) s',
+        'component_graph_refine_trial_build_incremental=\d+',
+        'component_graph_refine_trial_build_full=\d+',
+        'component_graph_refine_trial_build_global_rebase=\d+',
+        'component_graph_refine_stats_cached=\d+',
+        'component_graph_refine_stats_full=\d+',
+        'component_graph_refine_stats=([0-9.]+) s'
     )) {
     if ($logText -notmatch $pattern) {
         throw "Missing expected pbctopo lazy-graph log pattern: $pattern"
     }
+}
+
+$incrementalMatch = [regex]::Match(
+    $logText, 'component_graph_refine_trial_build_incremental=(\d+)')
+if (-not $incrementalMatch.Success -or
+    [int]$incrementalMatch.Groups[1].Value -le 0) {
+    throw 'component_graph_refine_trial_build_incremental did not record any incremental refine trials'
 }
 
 Write-Host 'PASS pbctopo_component_graph_lazy_smoke'

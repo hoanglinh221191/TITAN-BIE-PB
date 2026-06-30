@@ -1,0 +1,6 @@
+"run","component_graph_s","component_graph_refine_s","component_graph_refine_coarse_s","component_graph_refine_stage1_build_s","component_graph_refine_stage2_build_s","component_graph_refine_build_s","component_graph_refine_stats_s","component_graph_refine_anchor_s","component_graph_refine_ultraclash_s","incremental_trials","full_trials","global_rebase_trials","stats_cached","stats_full","pbci_fallback_frames","component_graph_failed"
+"1","0.048584","0.039748","0.013176","0.001175","0.000256","0.000866","0.000425","0.010571","0.010294","105","0","0","105","1","0","0"
+"2","0.041758","0.033615","0.01132","0.000939","0.000139","0.000731","0.000339","0.00955","0.007832","105","0","0","105","1","0","0"
+"3","0.04318","0.0351","0.012072","0.001008","0.000264","0.000744","0.000387","0.009675","0.008111","105","0","0","105","1","0","0"
+"4","0.046342","0.037948","0.013556","0.001118","0.000253","0.000886","0.000309","0.010537","0.008313","105","0","0","105","1","0","0"
+"5","0.047197","0.038585","0.013193","0.001193","0.000187","0.000894","0.000391","0.010847","0.008767","105","0","0","105","1","0","0"

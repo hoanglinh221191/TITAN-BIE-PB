@@ -434,6 +434,11 @@ struct PbctopoTimingStats {
   size_t pbci_fallback_frames = 0;
   size_t component_graph_refine_score_calls = 0;
   size_t component_graph_refine_preclash_prunes = 0;
+  size_t component_graph_refine_trial_build_incremental = 0;
+  size_t component_graph_refine_trial_build_full = 0;
+  size_t component_graph_refine_trial_build_global_rebase = 0;
+  size_t component_graph_refine_stats_cached = 0;
+  size_t component_graph_refine_stats_full = 0;
   size_t component_graph_refine_anchor_spatial_calls = 0;
   size_t component_graph_refine_anchor_spatial_fallbacks = 0;
   size_t component_graph_refine_anchor_spatial_disconnects = 0;
@@ -483,6 +488,7 @@ struct PbctopoTimingStats {
   double component_graph_refine_anchor_dense_fallback_s = 0.0;
   double component_graph_refine_cut_score_s = 0.0;
   double component_graph_refine_ultraclash_s = 0.0;
+  double component_graph_refine_stats_s = 0.0;
   double early_projection_s = 0.0;
   double warm_component_s = 0.0;
   double component_partial_s = 0.0;
@@ -2450,6 +2456,347 @@ void build_component_points_from_offsets(
   }
 }
 
+struct PbctopoBoxBasis {
+  Vec3 v1{};
+  Vec3 v2{};
+  Vec3 v3{};
+};
+
+PbctopoBoxBasis build_box_basis(box Box) {
+  double v1[3]{}, v2[3]{}, v3[3]{};
+  Box.get_v1(v1);
+  Box.get_v2(v2);
+  Box.get_v3(v3);
+  return {{v1[0], v1[1], v1[2]},
+          {v2[0], v2[1], v2[2]},
+          {v3[0], v3[1], v3[2]}};
+}
+
+Vec3 component_translation(const PbctopoBoxBasis &basis, const Int3 &offset) {
+  return {offset.x * basis.v1.x + offset.y * basis.v2.x +
+              offset.z * basis.v3.x,
+          offset.x * basis.v1.y + offset.y * basis.v2.y +
+              offset.z * basis.v3.y,
+          offset.x * basis.v1.z + offset.y * basis.v2.z +
+              offset.z * basis.v3.z};
+}
+
+PointStats translate_point_stats(const PointStats &base, const Vec3 &delta) {
+  if (base.count == 0)
+    return {};
+  PointStats translated = base;
+  const double n = static_cast<double>(base.count);
+  translated.sum_x = base.sum_x + n * delta.x;
+  translated.sum_y = base.sum_y + n * delta.y;
+  translated.sum_z = base.sum_z + n * delta.z;
+  translated.sum_x2 =
+      base.sum_x2 + 2.0 * delta.x * base.sum_x + n * delta.x * delta.x;
+  translated.sum_y2 =
+      base.sum_y2 + 2.0 * delta.y * base.sum_y + n * delta.y * delta.y;
+  translated.sum_z2 =
+      base.sum_z2 + 2.0 * delta.z * base.sum_z + n * delta.z * delta.z;
+  translated.sum_xy = base.sum_xy + delta.x * base.sum_y +
+                      delta.y * base.sum_x + n * delta.x * delta.y;
+  translated.sum_xz = base.sum_xz + delta.x * base.sum_z +
+                      delta.z * base.sum_x + n * delta.x * delta.z;
+  translated.sum_yz = base.sum_yz + delta.y * base.sum_z +
+                      delta.z * base.sum_y + n * delta.y * delta.z;
+  translated.sum_sq =
+      translated.sum_x2 + translated.sum_y2 + translated.sum_z2;
+  translated.min_x = base.min_x + delta.x;
+  translated.min_y = base.min_y + delta.y;
+  translated.min_z = base.min_z + delta.z;
+  translated.max_x = base.max_x + delta.x;
+  translated.max_y = base.max_y + delta.y;
+  translated.max_z = base.max_z + delta.z;
+  return translated;
+}
+
+void merge_point_stats(PointStats &dst, const PointStats &src) {
+  if (src.count == 0)
+    return;
+  if (dst.count == 0) {
+    dst = src;
+    return;
+  }
+  dst.count += src.count;
+  dst.sum_x += src.sum_x;
+  dst.sum_y += src.sum_y;
+  dst.sum_z += src.sum_z;
+  dst.sum_sq += src.sum_sq;
+  dst.sum_x2 += src.sum_x2;
+  dst.sum_y2 += src.sum_y2;
+  dst.sum_z2 += src.sum_z2;
+  dst.sum_xy += src.sum_xy;
+  dst.sum_xz += src.sum_xz;
+  dst.sum_yz += src.sum_yz;
+  dst.min_x = min(dst.min_x, src.min_x);
+  dst.min_y = min(dst.min_y, src.min_y);
+  dst.min_z = min(dst.min_z, src.min_z);
+  dst.max_x = max(dst.max_x, src.max_x);
+  dst.max_y = max(dst.max_y, src.max_y);
+  dst.max_z = max(dst.max_z, src.max_z);
+}
+
+double compute_shift_norm2_from_offsets(
+    const vector<vector<size_t>> &components, const vector<Int3> &offsets) {
+  double shift_norm2 = 0.0;
+  const size_t count = min(components.size(), offsets.size());
+  for (size_t comp_idx = 0; comp_idx < count; ++comp_idx) {
+    const auto &offset = offsets[comp_idx];
+    const double comp_shift_norm2 =
+        static_cast<double>(offset.x * offset.x + offset.y * offset.y +
+                            offset.z * offset.z);
+    shift_norm2 +=
+        comp_shift_norm2 * static_cast<double>(components[comp_idx].size());
+  }
+  return shift_norm2;
+}
+
+void accumulate_component_graph_refine_build_points(
+    PbctopoTimingStats *timing, PbctopoRefineScorePhase phase, double delta) {
+  if (timing == nullptr)
+    return;
+  switch (phase) {
+  case PbctopoRefineScorePhase::Exact:
+    timing->component_graph_refine_build_points_s += delta;
+    break;
+  case PbctopoRefineScorePhase::CoarseStage1:
+    timing->component_graph_refine_coarse_s += delta;
+    timing->component_graph_refine_coarse_stage1_s += delta;
+    timing->component_graph_refine_coarse_stage1_build_points_s += delta;
+    break;
+  case PbctopoRefineScorePhase::CoarseStage2:
+    timing->component_graph_refine_coarse_s += delta;
+    timing->component_graph_refine_coarse_stage2_s += delta;
+    timing->component_graph_refine_coarse_stage2_build_points_s += delta;
+    break;
+  }
+}
+
+struct PbctopoRefineScratchState {
+  vector<Vec3> *points = nullptr;
+  size_t generation = 0;
+  size_t component = numeric_limits<size_t>::max();
+  bool valid = false;
+};
+
+struct PbctopoRefinePlacementWorkspace {
+  const vector<PbctopoAtom> *atoms = nullptr;
+  const vector<vector<size_t>> *components = nullptr;
+  box source_box{};
+  PbctopoBoxBasis basis{};
+  vector<PointStats> base_component_stats;
+  vector<Int3> baseline_offsets;
+  vector<Vec3> baseline_points;
+  vector<PbctopoRefineScratchState> scratch_states;
+  size_t generation = 0;
+  bool initialized = false;
+
+  void initialize(const vector<PbctopoAtom> &atoms_ref,
+                  const vector<vector<size_t>> &components_ref, box Box) {
+    atoms = &atoms_ref;
+    components = &components_ref;
+    source_box = Box;
+    basis = build_box_basis(Box);
+    base_component_stats.assign(components_ref.size(), {});
+    for (size_t comp_idx = 0; comp_idx < components_ref.size(); ++comp_idx) {
+      PointStats stats;
+      for (size_t atom_idx : components_ref[comp_idx]) {
+        if (atom_idx >= atoms_ref.size())
+          continue;
+        const auto &atom = atoms_ref[atom_idx];
+        stats.add(atom.x, atom.y, atom.z);
+      }
+      base_component_stats[comp_idx] = stats;
+    }
+    initialized = true;
+  }
+
+  void reset_baseline(const vector<Int3> &offsets,
+                      const vector<Vec3> &placed_points) {
+    vector<size_t> changed_components;
+    const bool can_update_scratch =
+        (initialized && atoms != nullptr && components != nullptr &&
+         placed_points.size() == atoms->size() &&
+         baseline_points.size() == atoms->size() &&
+         baseline_offsets.size() == offsets.size() &&
+         offsets.size() == components->size());
+    if (can_update_scratch) {
+      for (size_t comp_idx = 0; comp_idx < offsets.size(); ++comp_idx) {
+        if (!same_delta(offsets[comp_idx], baseline_offsets[comp_idx]))
+          changed_components.push_back(comp_idx);
+      }
+      for (auto &state : scratch_states) {
+        if (!state.valid || state.points == nullptr ||
+            state.generation != generation ||
+            state.points->size() != atoms->size()) {
+          state.valid = false;
+          continue;
+        }
+        if (state.component != numeric_limits<size_t>::max()) {
+          if (state.component >= components->size()) {
+            state.valid = false;
+            continue;
+          }
+          for (size_t atom_idx : (*components)[state.component]) {
+            if (atom_idx < baseline_points.size() &&
+                atom_idx < state.points->size()) {
+              (*state.points)[atom_idx] = baseline_points[atom_idx];
+            }
+          }
+        }
+        for (size_t comp_idx : changed_components) {
+          for (size_t atom_idx : (*components)[comp_idx]) {
+            if (atom_idx < placed_points.size() &&
+                atom_idx < state.points->size()) {
+              (*state.points)[atom_idx] = placed_points[atom_idx];
+            }
+          }
+        }
+        state.component = numeric_limits<size_t>::max();
+      }
+    } else {
+      for (auto &state : scratch_states)
+        state.valid = false;
+    }
+    baseline_offsets = offsets;
+    baseline_points = placed_points;
+    ++generation;
+    if (can_update_scratch) {
+      for (auto &state : scratch_states) {
+        if (state.valid)
+          state.generation = generation;
+      }
+    }
+  }
+
+  PbctopoRefineScratchState &scratch_state(vector<Vec3> &points) {
+    for (auto &state : scratch_states) {
+      if (state.points == &points)
+        return state;
+    }
+    scratch_states.push_back({&points, 0, numeric_limits<size_t>::max(), false});
+    return scratch_states.back();
+  }
+
+  bool single_component_delta(size_t comp_idx, const vector<Int3> &offsets,
+                              bool &global_rebase) const {
+    global_rebase = false;
+    if (!initialized || components == nullptr || atoms == nullptr ||
+        offsets.size() != baseline_offsets.size() ||
+        baseline_offsets.size() != components->size() ||
+        baseline_points.size() != atoms->size() || comp_idx >= components->size()) {
+      global_rebase = true;
+      return false;
+    }
+    size_t changed_count = 0;
+    size_t changed_idx = numeric_limits<size_t>::max();
+    for (size_t idx = 0; idx < offsets.size(); ++idx) {
+      if (same_delta(offsets[idx], baseline_offsets[idx]))
+        continue;
+      ++changed_count;
+      changed_idx = idx;
+      if (changed_count > 1) {
+        global_rebase = true;
+        return false;
+      }
+    }
+    if (changed_count == 0)
+      return true;
+    if (changed_idx == comp_idx)
+      return true;
+    global_rebase = true;
+    return false;
+  }
+
+  PointStats stats_from_offsets(const vector<Int3> &offsets) const {
+    PointStats merged;
+    if (components == nullptr)
+      return merged;
+    const size_t count =
+        min({components->size(), offsets.size(), base_component_stats.size()});
+    for (size_t comp_idx = 0; comp_idx < count; ++comp_idx) {
+      const Vec3 translation = component_translation(basis, offsets[comp_idx]);
+      merge_point_stats(
+          merged, translate_point_stats(base_component_stats[comp_idx],
+                                        translation));
+    }
+    return merged;
+  }
+
+  bool prepare_trial(size_t comp_idx, const vector<Int3> &offsets,
+                     vector<Vec3> &out_points, PointStats &out_stats,
+                     double &shift_norm2, PbctopoTimingStats *timing,
+                     PbctopoRefineScorePhase phase) {
+    bool global_rebase = false;
+    const bool incremental = single_component_delta(comp_idx, offsets,
+                                                    global_rebase);
+    auto build_started = chrono::steady_clock::now();
+    if (incremental) {
+      auto &state = scratch_state(out_points);
+      if (!state.valid || state.generation != generation ||
+          (state.component != comp_idx &&
+           state.component != numeric_limits<size_t>::max())) {
+        out_points = baseline_points;
+        state.valid = true;
+        state.generation = generation;
+      }
+      state.component = comp_idx;
+      const Vec3 translation = component_translation(basis, offsets[comp_idx]);
+      for (size_t atom_idx : (*components)[comp_idx]) {
+        if (atom_idx >= atoms->size() || atom_idx >= out_points.size())
+          continue;
+        const auto &atom = (*atoms)[atom_idx];
+        out_points[atom_idx] = {atom.x + translation.x, atom.y + translation.y,
+                                atom.z + translation.z};
+      }
+      if (timing != nullptr) {
+        ++timing->component_graph_refine_trial_build_incremental;
+        accumulate_component_graph_refine_build_points(
+            timing, phase,
+            chrono::duration<double>(chrono::steady_clock::now() -
+                                     build_started)
+                .count());
+      }
+      auto stats_started = chrono::steady_clock::now();
+      out_stats = stats_from_offsets(offsets);
+      shift_norm2 = compute_shift_norm2_from_offsets(*components, offsets);
+      if (timing != nullptr) {
+        ++timing->component_graph_refine_stats_cached;
+        timing->component_graph_refine_stats_s +=
+            chrono::duration<double>(chrono::steady_clock::now() -
+                                     stats_started)
+                .count();
+      }
+      return true;
+    }
+
+    if (timing != nullptr && global_rebase)
+      ++timing->component_graph_refine_trial_build_global_rebase;
+    build_component_points_from_offsets(*atoms, *components, source_box, offsets,
+                                        out_points, shift_norm2);
+    scratch_state(out_points).valid = false;
+    if (timing != nullptr) {
+      ++timing->component_graph_refine_trial_build_full;
+      accumulate_component_graph_refine_build_points(
+          timing, phase,
+          chrono::duration<double>(chrono::steady_clock::now() - build_started)
+              .count());
+    }
+    auto stats_started = chrono::steady_clock::now();
+    out_stats = build_point_stats(out_points);
+    if (timing != nullptr) {
+      ++timing->component_graph_refine_stats_full;
+      timing->component_graph_refine_stats_s +=
+          chrono::duration<double>(chrono::steady_clock::now() -
+                                   stats_started)
+              .count();
+    }
+    return false;
+  }
+};
+
 bool scaled_span_fits_unit_box(box Box, const vector<Vec3> &placed_points,
                                double tolerance) {
   if (placed_points.empty())
@@ -3521,7 +3868,8 @@ PbctopoCutCandidate score_component_placed_points_solution(
     const PbctopoStage1EdgeContext *stage1_edge_context = nullptr,
     const PbctopoEdgeScanSoA *edge_scan_soa = nullptr,
     const PbctopoCutCandidate *edge_prune_threshold = nullptr,
-    PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto) {
+    PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
+    const PointStats *precomputed_stats = nullptr) {
   if (timing != nullptr) {
     switch (phase) {
     case PbctopoRefineScorePhase::Exact:
@@ -3632,7 +3980,21 @@ PbctopoCutCandidate score_component_placed_points_solution(
             .count());
     stage_started = chrono::steady_clock::now();
   }
-  const PointStats stats = build_point_stats(placed_points);
+  PointStats stats_storage;
+  const PointStats *stats_ptr = precomputed_stats;
+  if (stats_ptr == nullptr) {
+    const auto stats_started = chrono::steady_clock::now();
+    stats_storage = build_point_stats(placed_points);
+    stats_ptr = &stats_storage;
+    if (timing != nullptr) {
+      ++timing->component_graph_refine_stats_full;
+      timing->component_graph_refine_stats_s +=
+          chrono::duration<double>(chrono::steady_clock::now() -
+                                   stats_started)
+              .count();
+    }
+  }
+  const PointStats &stats = *stats_ptr;
   PbctopoCutCandidate candidate;
   PbctopoCutScoreBreakdown cut_breakdown;
   PbctopoCutCandidate pre_edge_seed;
@@ -3776,6 +4138,8 @@ PbctopoCutCandidate improve_component_offsets_locally(
       clear_component_trial_hints(*warm_state);
     return best;
   }
+  PbctopoRefinePlacementWorkspace refine_workspace;
+  refine_workspace.initialize(atoms, components, Box);
 
   const vector<size_t> half_anchor_indices =
       build_coarse_anchor_subset(atoms, anchor_indices);
@@ -3849,9 +4213,29 @@ PbctopoCutCandidate improve_component_offsets_locally(
          top_trials.insert(insert_pos, std::move(entry));
          if (top_trials.size() > max_keep)
            top_trials.resize(max_keep);
-       };
+      };
   vector<vector<Int3>> stage1_absolute_hint_offsets(offsets.size());
   vector<vector<Int3>> stage2_absolute_hint_offsets(offsets.size());
+  auto score_refine_trial =
+      [&](size_t trial_comp_idx, const vector<Int3> &trial_offsets_ref,
+          const vector<size_t> &trial_anchor_indices, vector<Vec3> &trial_points,
+          const PbctopoCutCandidate *incumbent, bool run_ultraclash,
+          PbctopoRefineScorePhase phase,
+          const PbctopoStage1EdgeContext *stage1_edge_context,
+          const PbctopoEdgeScanSoA *edge_scan_soa,
+          const PbctopoCutCandidate *edge_prune_threshold) {
+        PointStats trial_stats;
+        double trial_shift_norm2 = 0.0;
+        refine_workspace.prepare_trial(trial_comp_idx, trial_offsets_ref,
+                                       trial_points, trial_stats,
+                                       trial_shift_norm2, timing, phase);
+        return score_component_placed_points_solution(
+            trial_points, trial_shift_norm2, local_edges, edge_set,
+            clash_cutoff, continuity_pairs, trial_anchor_indices,
+            continuity_cutoff, incumbent, timing, run_ultraclash, phase,
+            stage1_edge_context, edge_scan_soa, edge_prune_threshold,
+            anchor_backend, &trial_stats);
+      };
   auto capture_component_hint_offsets =
       [](const vector<PbctopoRefineTrialCandidate> &source_trials,
          size_t comp_idx, vector<vector<Int3>> &target_offsets) {
@@ -3873,6 +4257,7 @@ PbctopoCutCandidate improve_component_offsets_locally(
     vector<Vec3> coarse_points;
     coarse_points.reserve(atoms.size());
     for (size_t comp_idx = 1; comp_idx < offsets.size(); ++comp_idx) {
+      refine_workspace.reset_baseline(offsets, placed_points);
       vector<Int3> best_offsets = offsets;
       PbctopoCutCandidate best_local = best;
       PbctopoStage1EdgeContext stage1_edge_context;
@@ -3917,12 +4302,10 @@ PbctopoCutCandidate improve_component_offsets_locally(
           } else {
             rebase_component_offsets(trial_offsets, components);
           }
-          PbctopoCutCandidate trial = score_component_offset_solution(
-              atoms, components, Box, trial_offsets, local_edges, edge_set,
-              clash_cutoff, continuity_pairs, exact_anchor_indices, continuity_cutoff,
-              local_points, &best_local, timing, true,
-              PbctopoRefineScorePhase::Exact, nullptr, nullptr, nullptr,
-              anchor_backend);
+          PbctopoCutCandidate trial = score_refine_trial(
+              comp_idx, trial_offsets, exact_anchor_indices, local_points,
+              &best_local, true, PbctopoRefineScorePhase::Exact, nullptr,
+              nullptr, nullptr);
           if (better_cut_candidate(trial, best_local)) {
             best_local = trial;
             best_offsets = trial_offsets;
@@ -3950,12 +4333,10 @@ PbctopoCutCandidate improve_component_offsets_locally(
           const PbctopoCutCandidate *stage2_prune_threshold =
               (top_trials.size() >= stage2_keep) ? &top_trials.back().candidate
                                                  : nullptr;
-          PbctopoCutCandidate coarse_trial = score_component_offset_solution(
-              atoms, components, Box, trial_offsets, local_edges, edge_set,
-              clash_cutoff, continuity_pairs, half_anchor_indices,
-              continuity_cutoff, coarse_points, nullptr, timing, false,
-              PbctopoRefineScorePhase::CoarseStage2, &stage1_edge_context,
-              &edge_scan_soa, stage2_prune_threshold, anchor_backend);
+          PbctopoCutCandidate coarse_trial = score_refine_trial(
+              comp_idx, trial_offsets, half_anchor_indices, coarse_points,
+              nullptr, false, PbctopoRefineScorePhase::CoarseStage2,
+              &stage1_edge_context, &edge_scan_soa, stage2_prune_threshold);
           push_top_refine_trial(top_trials, trial_offsets, coarse_trial,
                                 stage2_keep,
                                 better_preclash_cut_candidate);
@@ -3968,12 +4349,10 @@ PbctopoCutCandidate improve_component_offsets_locally(
           const auto &shortlisted = top_trials[shortlist_idx];
           if (timing != nullptr)
             ++timing->component_graph_refine_exact_rescore_calls;
-          PbctopoCutCandidate trial = score_component_offset_solution(
-              atoms, components, Box, shortlisted.offsets, local_edges,
-              edge_set, clash_cutoff, continuity_pairs, exact_anchor_indices,
-              continuity_cutoff, local_points, &best_local, timing, true,
-              PbctopoRefineScorePhase::Exact, nullptr, nullptr, nullptr,
-              anchor_backend);
+          PbctopoCutCandidate trial = score_refine_trial(
+              comp_idx, shortlisted.offsets, exact_anchor_indices, local_points,
+              &best_local, true, PbctopoRefineScorePhase::Exact, nullptr,
+              nullptr, nullptr);
           if (better_cut_candidate(trial, best_local)) {
             best_local = trial;
             best_offsets = shortlisted.offsets;
@@ -4002,12 +4381,11 @@ PbctopoCutCandidate improve_component_offsets_locally(
               (sparse_top_trials.size() >= stage1_keep)
                   ? &sparse_top_trials.back().candidate
                   : nullptr;
-          PbctopoCutCandidate sparse_trial = score_component_offset_solution(
-              atoms, components, Box, trial_offsets, local_edges, edge_set,
-              clash_cutoff, continuity_pairs, tapered_stage1_anchor_indices,
-              continuity_cutoff, coarse_points, nullptr, timing, false,
+          PbctopoCutCandidate sparse_trial = score_refine_trial(
+              comp_idx, trial_offsets, tapered_stage1_anchor_indices,
+              coarse_points, nullptr, false,
               PbctopoRefineScorePhase::CoarseStage1, &stage1_edge_context,
-              &edge_scan_soa, stage1_prune_threshold, anchor_backend);
+              &edge_scan_soa, stage1_prune_threshold);
           push_top_refine_trial(sparse_top_trials, trial_offsets, sparse_trial,
                                 stage1_keep,
                                 better_stage1_cut_candidate);
@@ -4022,12 +4400,11 @@ PbctopoCutCandidate improve_component_offsets_locally(
               (top_trials.size() >= stage2_keep)
                   ? &top_trials.back().candidate
                   : nullptr;
-          PbctopoCutCandidate coarse_trial = score_component_offset_solution(
-              atoms, components, Box, shortlisted.offsets, local_edges, edge_set,
-              clash_cutoff, continuity_pairs, third_anchor_indices,
-              continuity_cutoff, coarse_points, nullptr, timing, false,
+          PbctopoCutCandidate coarse_trial = score_refine_trial(
+              comp_idx, shortlisted.offsets, third_anchor_indices,
+              coarse_points, nullptr, false,
               PbctopoRefineScorePhase::CoarseStage2, &stage1_edge_context,
-              &edge_scan_soa, stage2_prune_threshold, anchor_backend);
+              &edge_scan_soa, stage2_prune_threshold);
           push_top_refine_trial(top_trials, shortlisted.offsets, coarse_trial,
                                 stage2_keep,
                                 better_preclash_cut_candidate);
@@ -4041,12 +4418,10 @@ PbctopoCutCandidate improve_component_offsets_locally(
           const auto &shortlisted = top_trials[shortlist_idx];
           if (timing != nullptr)
             ++timing->component_graph_refine_exact_rescore_calls;
-          PbctopoCutCandidate trial = score_component_offset_solution(
-              atoms, components, Box, shortlisted.offsets, local_edges,
-              edge_set, clash_cutoff, continuity_pairs, exact_anchor_indices,
-              continuity_cutoff, local_points, &best_local, timing, true,
-              PbctopoRefineScorePhase::Exact, nullptr, nullptr, nullptr,
-              anchor_backend);
+          PbctopoCutCandidate trial = score_refine_trial(
+              comp_idx, shortlisted.offsets, exact_anchor_indices, local_points,
+              &best_local, true, PbctopoRefineScorePhase::Exact, nullptr,
+              nullptr, nullptr);
           if (better_cut_candidate(trial, best_local)) {
             best_local = trial;
             best_offsets = shortlisted.offsets;
@@ -10539,6 +10914,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.component_graph_refine_cut_score_s) +
       " s, component_graph_refine_ultraclash=" +
       to_string(timing.component_graph_refine_ultraclash_s) +
+      " s, component_graph_refine_stats=" +
+      to_string(timing.component_graph_refine_stats_s) +
       " s, component_search=" + to_string(timing.component_search_s) +
       " s, offset_extract=" + to_string(timing.component_offset_extract_s) +
       " s, apply=" + to_string(timing.apply_s) + " s");
@@ -10599,6 +10976,16 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.component_graph_refine_exact_rescore_calls) +
       ", component_graph_refine_preclash_prunes=" +
       to_string(timing.component_graph_refine_preclash_prunes) +
+      ", component_graph_refine_trial_build_incremental=" +
+      to_string(timing.component_graph_refine_trial_build_incremental) +
+      ", component_graph_refine_trial_build_full=" +
+      to_string(timing.component_graph_refine_trial_build_full) +
+      ", component_graph_refine_trial_build_global_rebase=" +
+      to_string(timing.component_graph_refine_trial_build_global_rebase) +
+      ", component_graph_refine_stats_cached=" +
+      to_string(timing.component_graph_refine_stats_cached) +
+      ", component_graph_refine_stats_full=" +
+      to_string(timing.component_graph_refine_stats_full) +
       ", component_graph_refine_anchor_spatial_calls=" +
       to_string(timing.component_graph_refine_anchor_spatial_calls) +
       ", component_graph_refine_anchor_spatial_fallbacks=" +

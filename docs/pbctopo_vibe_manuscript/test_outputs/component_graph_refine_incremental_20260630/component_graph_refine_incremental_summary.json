@@ -1,0 +1,13 @@
+{
+    "baseline_component_graph_refine_s":  0.050987,
+    "baseline_component_graph_s":  0.059685,
+    "median_component_graph_s":  0.046342,
+    "median_component_graph_refine_s":  0.037948,
+    "refine_reduction_percent":  25.57,
+    "median_build_plus_stats_s":  0.0025659999999999997,
+    "median_anchor_s":  0.010537,
+    "median_ultraclash_s":  0.008313,
+    "median_incremental_trials":  105,
+    "median_full_trials":  0,
+    "median_global_rebase_trials":  0
+}
