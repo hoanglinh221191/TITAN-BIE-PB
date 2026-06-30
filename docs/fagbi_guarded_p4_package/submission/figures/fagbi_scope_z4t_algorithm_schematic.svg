@@ -16,8 +16,6 @@
       <path d="M0,0 L10,5 L0,10 z" fill="#15803d"/>
     </marker>
     <style>
-      .title { font: 700 23px Arial, sans-serif; fill: #111827; }
-      .subtitle { font: 13px Arial, sans-serif; fill: #374151; }
       .section { font: 700 16px Arial, sans-serif; fill: #111827; }
       .label { font: 700 13px Arial, sans-serif; fill: #111827; }
       .small { font: 12px Arial, sans-serif; fill: #374151; }
@@ -31,12 +29,9 @@
     </style>
   </defs>
   <rect width="1000" height="650" fill="white"/>
-  <text x="500" y="34" class="title" text-anchor="middle">Guarded p4 FMM/M2L operator and sparse near-field ILU(0)</text>
-  <text x="500" y="57" class="subtitle" text-anchor="middle">Analytical far-field translation is combined with direct fallback and graph-based Krylov preconditioning.</text>
 
   <rect x="70" y="145" width="250" height="250" class="cellBlue"/>
   <text x="195" y="174" class="section" text-anchor="middle" fill="#2563eb">Target leaf</text>
-  <text x="195" y="194" class="small" text-anchor="middle">local expansion and L2P</text>
   <circle cx="195" cy="285" r="86" fill="none" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="7 5" opacity="0.65"/>
   <circle cx="195" cy="285" r="6" fill="#2563eb"/>
   <text x="210" y="300" class="label" fill="#2563eb">c_L</text>
@@ -52,7 +47,6 @@
   <circle cx="263" cy="346" r="5" fill="#2563eb"/>
   <rect x="680" y="145" width="250" height="250" class="cellRed"/>
   <text x="805" y="174" class="section" text-anchor="middle" fill="#dc2626">Far source cell</text>
-  <text x="805" y="194" class="small" text-anchor="middle">Cartesian p = 4 moments</text>
   <circle cx="805" cy="285" r="86" fill="none" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="7 5" opacity="0.65"/>
   <circle cx="805" cy="285" r="6" fill="#dc2626"/>
   <text x="820" y="300" class="label" fill="#dc2626">c_M</text>
@@ -70,19 +64,14 @@
   <circle cx="890" cy="285" r="5" fill="#dc2626"/>
   <line x1="785" y1="285" x2="215" y2="285" stroke="#7c3aed" stroke-width="4" stroke-dasharray="9 6" marker-end="url(#arrowPurple)"/>
   <text x="500" y="256" class="section" text-anchor="middle" fill="#7c3aed">M2L: multipole-to-local translation</text>
-  <text x="500" y="309" class="small" text-anchor="middle">compressed degree-9 Green jets</text>
-  <text x="500" y="328" class="small" text-anchor="middle">analytical Cartesian Taylor coefficients</text>
 
   <rect x="330" y="82" width="340" height="82" class="guard"/>
   <text x="500" y="109" class="label" text-anchor="middle" fill="#6d28d9">Far-cell accept / guard</text>
-  <text x="500" y="130" class="small" text-anchor="middle">accept only when tail and geometry tests pass</text>
-  <text x="500" y="149" class="tiny" text-anchor="middle">(R_L + R_M) / r &lt; theta, with theta guard = 0.5</text>
   <line x1="500" y1="164" x2="500" y2="239" stroke="#7c3aed" stroke-width="1.8" marker-end="url(#arrowPurple)"/>
   <line x1="500" y1="338" x2="500" y2="382" stroke="#7c3aed" stroke-width="1.8" marker-end="url(#arrowPurple)"/>
 
   <rect x="250" y="382" width="500" height="118" class="near"/>
   <text x="500" y="410" class="section" text-anchor="middle" fill="#15803d">Near-field and guarded fallback</text>
-  <text x="500" y="432" class="small" text-anchor="middle">MAC-rejected or guard-rejected pairs use direct P2P</text>
   <rect x="292" y="448" width="184" height="38" class="muted"/>
   <text x="384" y="472" class="label" text-anchor="middle">packed AVX2 P2P</text>
   <rect x="524" y="448" width="184" height="38" class="muted"/>
@@ -91,7 +80,6 @@
   <line x1="750" y1="432" x2="680" y2="432" stroke="#15803d" stroke-width="2" marker-end="url(#arrowGreen)"/>
 
   <rect x="250" y="528" width="500" height="58" class="box"/>
-  <text x="500" y="552" class="label" text-anchor="middle">Near-source graph -> block-CSR sparse ILU(0)</text>
-  <text x="500" y="573" class="tiny" text-anchor="middle">2 x 2 coupled blocks, no fill beyond graph, reused by GMRES</text>
+  <text x="500" y="562" class="label" text-anchor="middle">Near-source graph -> sparse ILU(0)</text>
   <line x1="500" y1="500" x2="500" y2="528" stroke="#15803d" stroke-width="2" marker-end="url(#arrowGreen)"/>
 </svg>

@@ -8131,6 +8131,67 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
               << result.nl_blocks << ',' << csv_escape(result.status) << '\n';
 }
 
+void AnalyzerImpl::write_tabi_audit_profile_header_if_needed() {
+  if (args_.tabi_diagnostics == "off")
+    return;
+  if (!tabi_audit_profile_out_.is_open()) {
+    tabi_audit_profile_out_.open("pbe_tabi_audit_profile.csv",
+                                 std::ios::out | std::ios::trunc);
+    if (!tabi_audit_profile_out_.is_open()) {
+      throw std::runtime_error(
+          "PBE: failed to open pbe_tabi_audit_profile.csv.");
+    }
+  }
+  if (!tabi_audit_profile_header_written_) {
+    tabi_audit_profile_out_
+        << "trajectory_id,frame_index,global_index,fixture,atom_count,panels,energy_kJmol,iterations,internal_residual,sampled_direct_residual,audit_rows,wall_seconds,rss_mb,p_order,theta,guard,tail_tol,ilu_cap,far_pairs,fallback_pairs,status\n";
+    tabi_audit_profile_header_written_ = true;
+  }
+}
+
+void AnalyzerImpl::append_tabi_audit_profile_row(
+    const FrameResult &result, const TimingBuckets &timing) {
+  if (args_.tabi_diagnostics == "off" || result.pbe_backend != "tabi")
+    return;
+  write_tabi_audit_profile_header_if_needed();
+
+  const double sampled_direct_residual =
+      result.tabi_fmm_local_sampled_direct_true_residual > 0.0
+          ? result.tabi_fmm_local_sampled_direct_true_residual
+          : (result.tabi_sampled_true_residual_rel > 0.0
+                 ? result.tabi_sampled_true_residual_rel
+                 : result.tabi_tree_vs_direct_matvec_rel);
+  const std::size_t audit_rows =
+      result.tabi_matvec_audit_rows > 0 ? result.tabi_matvec_audit_rows
+                                        : result.tabi_sampled_true_residual_rows;
+  const double internal_residual =
+      result.tabi_final_residual > 0.0 ? result.tabi_final_residual
+                                       : result.linear_residual;
+  const std::size_t far_pairs =
+      result.tabi_fmm_m2l_far_pairs > 0 ? result.tabi_fmm_m2l_far_pairs
+                                        : result.tabi_far_interactions;
+  const std::size_t fallback_pairs =
+      result.tabi_fmm_local_geometry_guard_direct_fallback_pairs;
+  const double rss_mb =
+      static_cast<double>(std::max(result.memory_peak_working_set_bytes,
+                                   result.memory_bytes)) /
+      (1024.0 * 1024.0);
+
+  tabi_audit_profile_out_
+      << result.trajectory_id << ',' << result.frame_index << ','
+      << result.global_index << ',' << csv_escape(current_source_label_) << ','
+      << result.atom_count << ',' << result.tabi_surface_panels << ','
+      << std::setprecision(12) << result.energy_kj_mol << ','
+      << result.solvent_iterations << ',' << internal_residual << ','
+      << sampled_direct_residual << ',' << audit_rows << ','
+      << timing.total_ms / 1000.0 << ',' << rss_mb << ','
+      << result.tabi_taylor_order << ',' << args_.tabi_tree_opening_theta
+      << ',' << csv_escape(args_.tabi_fmm_local_geometry_guard) << ','
+      << args_.tabi_fmm_local_refine_tol << ','
+      << args_.tabi_precond_ilu_neighbor_cap << ',' << far_pairs << ','
+      << fallback_pairs << ',' << csv_escape(result.tabi_status) << '\n';
+}
+
 void AnalyzerImpl::write_tabi_profile_header_if_needed() {
   if (args_.timing != "detail")
     return;
@@ -13943,6 +14004,7 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         elapsed_ms(frame_time_begin, std::chrono::steady_clock::now());
     append_timing_row(result, frame_timing);
     append_memory_profile_row(result, frame_timing);
+    append_tabi_audit_profile_row(result, frame_timing);
     append_tabi_profile_row(result, frame_timing);
     append_tabi_formulation_audit_row(result);
     append_tabi_near_block_audit_rows(result);
@@ -14582,6 +14644,8 @@ void AnalyzerImpl::finalize(std::fstream &log) {
     timing_out_.flush();
   if (tabi_profile_out_.is_open())
     tabi_profile_out_.flush();
+  if (tabi_audit_profile_out_.is_open())
+    tabi_audit_profile_out_.flush();
   if (memory_profile_out_.is_open())
     memory_profile_out_.flush();
   if (tabi_formulation_audit_out_.is_open())
@@ -14700,6 +14764,12 @@ void AnalyzerImpl::finalize(std::fstream &log) {
             << args_.tabi_expansion_audit_sample_count << "\n";
     summary << "tabi_expansion_audit_max_panels "
             << args_.tabi_expansion_audit_max_panels << "\n";
+    summary << "tabi_diagnostics " << args_.tabi_diagnostics << "\n";
+    summary << "tabi_audit_profile_csv "
+            << (args_.tabi_diagnostics == "off"
+                    ? "off"
+                    : "pbe_tabi_audit_profile.csv")
+            << "\n";
     summary << "tabi_matvec_audit " << args_.tabi_matvec_audit << "\n";
     summary << "tabi_matvec_audit_sample_count "
             << args_.tabi_matvec_audit_sample_count << "\n";
@@ -15016,6 +15086,11 @@ void AnalyzerImpl::finalize(std::fstream &log) {
                       args_.tabi_convergence_calibration);
       TitanUI::log_kv(log, "TABI Expansion Audit",
                       args_.tabi_expansion_audit);
+      TitanUI::log_kv(log, "TABI Diagnostics", args_.tabi_diagnostics);
+      TitanUI::log_kv(log, "TABI Audit Profile CSV",
+                      args_.tabi_diagnostics == "off"
+                          ? "off"
+                          : "pbe_tabi_audit_profile.csv");
       TitanUI::log_kv(log, "TABI True Residual Probe",
                       args_.tabi_true_residual_probe);
       TitanUI::log_kv(log, "TABI True Residual Probe Scope",

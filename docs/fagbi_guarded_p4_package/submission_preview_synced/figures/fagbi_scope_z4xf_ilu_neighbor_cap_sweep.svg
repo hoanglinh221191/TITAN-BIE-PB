@@ -77,5 +77,4 @@
 <text x="1531.2" y="419.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#333">128</text>
 <text x="1117.0" y="98.0" font-family="Arial" font-size="18" font-weight="normal" text-anchor="start" fill="#333">peak RSS (MB)</text>
 <text x="1389.5" y="426.0" font-family="Arial" font-size="18" font-weight="normal" text-anchor="middle" fill="#333">ILU neighbor cap</text>
-<text x="42.0" y="490.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="start" fill="#555">Points/bars summarize Barnase, 1A63, and 1SH1; error bars show sample standard deviation.</text>
 </svg>

@@ -71,12 +71,34 @@ print(len(pdf))
   return $count
 }
 
-function Convert-SvgToPng([string]$SvgPath, [string]$PngPath) {
+function Find-Inkscape {
+  $cmd = Get-Command "inkscape.exe" -ErrorAction SilentlyContinue
+  if ($null -ne $cmd) { return $cmd.Source }
+  foreach ($candidate in @(
+      "C:\Program Files\Inkscape\bin\inkscape.exe",
+      "C:\Program Files\Inkscape\inkscape.exe",
+      "C:\Program Files (x86)\Inkscape\bin\inkscape.exe",
+      "C:\Program Files (x86)\Inkscape\inkscape.exe"
+    )) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+  }
+  return $null
+}
+
+function Convert-SvgToPng([string]$SvgPath, [string]$PngPath, [int]$PixelScale = 3) {
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PngPath) | Out-Null
+  $inkscape = Find-Inkscape
+  if ($null -ne $inkscape) {
+    & $inkscape --export-type=png --export-filename="$PngPath" --export-dpi=600 `
+      --export-background=white --export-background-opacity=1 "$SvgPath" | Out-Null
+    if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $PngPath -PathType Leaf)) {
+      return
+    }
+  }
   $edge = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
   if (-not (Test-Path -LiteralPath $edge -PathType Leaf)) {
     throw "z4t_render_gap: Microsoft Edge headless renderer is unavailable"
   }
-  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PngPath) | Out-Null
   $head = Get-Content -LiteralPath $SvgPath -TotalCount 1
   $window = if ($head -match "width=['""](\d+)['""]\s+height=['""](\d+)['""]") { "$($Matches[1]),$($Matches[2])" } else { "1200,700" }
   $profile = Join-Path ([IO.Path]::GetTempPath()) ("z4t_edge_" + [Guid]::NewGuid().ToString("N"))
@@ -84,7 +106,8 @@ function Convert-SvgToPng([string]$SvgPath, [string]$PngPath) {
   $uri = ([Uri]([IO.Path]::GetFullPath($SvgPath))).AbsoluteUri
   try {
     & $edge "--headless=new" "--disable-gpu" "--disable-sync" "--hide-scrollbars" "--no-first-run" `
-      "--user-data-dir=$profile" "--window-size=$window" "--screenshot=$PngPath" $uri | Out-Null
+      "--force-device-scale-factor=$PixelScale" "--user-data-dir=$profile" "--window-size=$window" `
+      "--screenshot=$PngPath" $uri | Out-Null
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $PngPath -PathType Leaf)) {
       throw "z4t_render_gap: SVG conversion failed for $SvgPath"
     }
@@ -355,7 +378,7 @@ function Write-Z4tPerformanceLadderSvg([string]$MatrixCsv, [string]$SvgPath) {
     }
   }
   [void]$sb.AppendLine("</svg>")
-  Set-Content -LiteralPath $SvgPath -Value $sb.ToString() -Encoding ASCII
+  [IO.File]::WriteAllText((Resolve-Path -LiteralPath (Split-Path -Parent $SvgPath)).Path + [IO.Path]::DirectorySeparatorChar + (Split-Path -Leaf $SvgPath), $sb.ToString().TrimEnd() + [Environment]::NewLine, [Text.Encoding]::ASCII)
 }
 
 function Write-Z4tRuntimeCompositionSvg([string]$MatrixCsv, [string]$Z4vRoot, [string]$SvgPath, [string]$CompositionCsv) {
@@ -733,6 +756,11 @@ $inputs = @{
   } else {
     $null
   }
+  apbsMatrix = if (Test-Path -LiteralPath "test/tmp/fagbi_scope_z4z_apbs/fagbi_scope_z4z_apbs_matrix.csv") {
+    (Resolve-Path -LiteralPath "test/tmp/fagbi_scope_z4z_apbs/fagbi_scope_z4z_apbs_matrix.csv").Path
+  } else {
+    $null
+  }
 }
 
 if (Test-Path -LiteralPath $outPath) {
@@ -794,6 +822,9 @@ if ($null -ne $inputs.pOrderPlot) {
 }
 if ($null -ne $inputs.pOrderCoverage) {
   $builderArgs += @("--p-order-coverage", $pOrderCoverage)
+}
+if ($null -ne $inputs.apbsMatrix) {
+  $builderArgs += @("--apbs-matrix", $inputs.apbsMatrix)
 }
 
 & $PythonExe @builderArgs

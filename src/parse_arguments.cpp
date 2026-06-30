@@ -271,6 +271,21 @@ int arguments::parse_arguments(int argc, char **argv) {
         }
         return false;
       };
+  auto consume_required_option_value =
+      [&](const std::string &arg, std::initializer_list<const char *> flags,
+          std::string &value_out, int &arg_index) {
+        const bool consumed =
+            consume_option_value(arg, flags, value_out, arg_index);
+        if (consumed)
+          return true;
+        for (const char *flag : flags) {
+          if (arg == std::string(flag)) {
+            TitanUI::print_error(std::string(flag) + " requires a value.");
+            exit(EXIT_FAILURE);
+          }
+        }
+        return false;
+      };
   auto consume_bool_option =
       [&](const std::string &arg, std::initializer_list<const char *> flags,
           bool &value_out, int &arg_index) {
@@ -330,8 +345,8 @@ int arguments::parse_arguments(int argc, char **argv) {
     exit(EXIT_FAILURE);
   };
   auto parse_double_range = [&](const std::string &value,
-                                const char *flag_name, double min_value,
-                                double max_value) {
+                                 const char *flag_name, double min_value,
+                                 double max_value) {
     double parsed = 0.0;
     try {
       parsed = std::stod(value);
@@ -346,6 +361,38 @@ int arguments::parse_arguments(int argc, char **argv) {
       msg << flag_name << " must be in [" << min_value << ", " << max_value
           << "].";
       TitanUI::print_error(msg.str());
+      exit(EXIT_FAILURE);
+    }
+    return parsed;
+  };
+  auto parse_numeric_option = [&](const std::string &value,
+                                  const char *flag_name) {
+    double parsed = 0.0;
+    std::size_t parsed_chars = 0;
+    try {
+      parsed = std::stod(value, &parsed_chars);
+    } catch (...) {
+      TitanUI::print_error(std::string(flag_name) + " must be numeric.");
+      exit(EXIT_FAILURE);
+    }
+    if (parsed_chars != value.size() || !std::isfinite(parsed)) {
+      TitanUI::print_error(std::string(flag_name) + " must be numeric.");
+      exit(EXIT_FAILURE);
+    }
+    return parsed;
+  };
+  auto parse_integer_option = [&](const std::string &value,
+                                  const char *flag_name) {
+    int parsed = 0;
+    std::size_t parsed_chars = 0;
+    try {
+      parsed = std::stoi(value, &parsed_chars);
+    } catch (...) {
+      TitanUI::print_error(std::string(flag_name) + " must be an integer.");
+      exit(EXIT_FAILURE);
+    }
+    if (parsed_chars != value.size()) {
+      TitanUI::print_error(std::string(flag_name) + " must be an integer.");
       exit(EXIT_FAILURE);
     }
     return parsed;
@@ -2191,6 +2238,15 @@ int arguments::parse_arguments(int argc, char **argv) {
                                    "--pbe-tabi-matvec-audit-sample-count"},
                              common_value, i)) {
       pbe.tabi_matvec_audit_sample_count = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-diagnostics",
+                                   "--pbe-tabi-diagnostics",
+                                   "--diagnostics"},
+                             common_value, i)) {
+      pbe.tabi_diagnostics =
+          require_choice(common_value, {"off", "audit", "full"},
+                         "-pbe-tabi-diagnostics");
       continue;
     }
     if (consume_option_value(arg, {"-pbe-tabi-progress",
@@ -4260,9 +4316,52 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (string(argv[i]) == "-pbctopo") {
       pbc.solv_pbctopo = true;
     }
-    if (string(argv[i]).find("-pbctopo-anchor-backend=") == 0) {
-      pbc.pbctopo_anchor_backend =
-          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+    if (consume_required_option_value(arg, {"-pbctopo-anchor-backend",
+                                            "--pbctopo-anchor-backend"},
+                                      common_value, i)) {
+      pbc.pbctopo_anchor_backend = common_value;
+    }
+    if (consume_required_option_value(arg, {"-pbctopo-bond-cutoff",
+                                            "--pbctopo-bond-cutoff"},
+                                      common_value, i)) {
+      pbc.pbctopo_bond_cutoff =
+          parse_numeric_option(common_value, "-pbctopo-bond-cutoff");
+      pbc.pbctopo_bond_cutoff_set = true;
+    }
+    if (consume_required_option_value(arg, {"-pbctopo-clash-cutoff",
+                                            "--pbctopo-clash-cutoff"},
+                                      common_value, i)) {
+      pbc.pbctopo_clash_cutoff =
+          parse_numeric_option(common_value, "-pbctopo-clash-cutoff");
+      pbc.pbctopo_clash_cutoff_set = true;
+    }
+    if (consume_required_option_value(arg, {"-pbctopo-contact-cutoff",
+                                            "--pbctopo-contact-cutoff"},
+                                      common_value, i)) {
+      pbc.pbctopo_contact_cutoff =
+          parse_numeric_option(common_value, "-pbctopo-contact-cutoff");
+      pbc.pbctopo_contact_cutoff_set = true;
+    }
+    if (consume_required_option_value(arg, {"-pbctopo-continuity-cutoff",
+                                            "--pbctopo-continuity-cutoff"},
+                                      common_value, i)) {
+      pbc.pbctopo_continuity_cutoff =
+          parse_numeric_option(common_value, "-pbctopo-continuity-cutoff");
+      pbc.pbctopo_continuity_cutoff_set = true;
+    }
+    if (consume_required_option_value(arg, {"-pbctopo-exact-component-limit",
+                                            "--pbctopo-exact-component-limit"},
+                                      common_value, i)) {
+      pbc.pbctopo_exact_component_limit =
+          parse_integer_option(common_value, "-pbctopo-exact-component-limit");
+      pbc.pbctopo_exact_component_limit_set = true;
+    }
+    if (consume_required_option_value(arg, {"-pbctopo-beam-width",
+                                            "--pbctopo-beam-width"},
+                                      common_value, i)) {
+      pbc.pbctopo_beam_width =
+          parse_integer_option(common_value, "-pbctopo-beam-width");
+      pbc.pbctopo_beam_width_set = true;
     }
     if (string(argv[i]) == "-pbci2") {
       pbc.solv_pbc_int = 1;

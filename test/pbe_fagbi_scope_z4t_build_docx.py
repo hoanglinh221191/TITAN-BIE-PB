@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 from docx import Document
+from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.oxml import OxmlElement
 from docx.shared import Inches
@@ -86,10 +87,18 @@ Z4V_STAGE_LABELS = {
     "fmm_p4_ilu0": "Guarded p4 FMM + sparse ILU(0)",
 }
 
+APBS_MATRIX_DEFAULT = Path("test/tmp/fagbi_scope_z4z_apbs/fagbi_scope_z4z_apbs_matrix.csv")
+
 
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8-sig") as handle:
         return list(csv.DictReader(handle))
+
+
+def read_csv_if_exists(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    return read_csv(path)
 
 
 def write_csv(path: Path, rows: list[dict[str, object]], fields: list[str]) -> None:
@@ -140,6 +149,52 @@ def fmt_seconds(value: float) -> str:
     if value >= 1000:
         return f"{value / 60.0:.1f} min"
     return f"{value:.1f} s"
+
+
+def apbs_context_rows(rows: list[dict[str, str]]) -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    fixtures = sorted({row.get("fixture", "") for row in rows if row.get("fixture")})
+    for fixture in fixtures:
+        titan = [
+            row for row in rows
+            if row.get("fixture") == fixture and row.get("backend") == "titan_guarded_p4" and row.get("status") == "ok"
+        ]
+        apbs = [
+            row for row in rows
+            if row.get("fixture") == fixture and row.get("backend") == "apbs" and row.get("status") == "ok"
+        ]
+        if not titan or not apbs:
+            continue
+        apbs.sort(key=lambda row: int(row.get("dime", "0") or 0))
+        finest = apbs[-1]
+        previous = apbs[-2] if len(apbs) >= 2 else None
+        titan_row = titan[-1]
+        finest_energy = as_float(finest.get("apbs_energy_kj_mol"))
+        previous_energy = as_float(previous.get("apbs_energy_kj_mol")) if previous else math.nan
+        delta = finest_energy - previous_energy if math.isfinite(finest_energy) and math.isfinite(previous_energy) else math.nan
+        rel = abs(delta) / abs(finest_energy) if math.isfinite(delta) and abs(finest_energy) > 1e-12 else math.nan
+        titan_rss = as_float(titan_row.get("peak_rss_mb"))
+        apbs_rss = as_float(finest.get("peak_rss_mb"))
+        ratio = apbs_rss / titan_rss if math.isfinite(apbs_rss) and math.isfinite(titan_rss) and titan_rss > 0 else math.nan
+        out.append(
+            {
+                "fixture": fixture.upper(),
+                "protein": titan_row.get("protein_name") or fixture.upper(),
+                "pdb": titan_row.get("pdb_id") or fixture.upper(),
+                "apbs_grid_range": f"{apbs[0].get('dime')}-{finest.get('dime')}",
+                "apbs_finest_energy": finest_energy,
+                "titan_energy": as_float(titan_row.get("titan_energy_kj_mol") or titan_row.get("energy_kj_mol")),
+                "apbs_previous_to_finest_delta": delta,
+                "apbs_previous_to_finest_relative": rel,
+                "titan_rss_mb": titan_rss,
+                "apbs_finest_rss_mb": apbs_rss,
+                "rss_ratio": ratio,
+                "titan_wall_seconds": as_float(titan_row.get("wall_seconds")),
+                "apbs_finest_wall_seconds": as_float(finest.get("wall_seconds")),
+                "titan_audit": as_float(titan_row.get("sampled_audit_rms")),
+            }
+        )
+    return out
 
 
 def load_reference_rows() -> list[dict[str, str]]:
@@ -407,6 +462,24 @@ def add_caption(doc: Document, text: str) -> None:
     paragraph.paragraph_format.keep_with_next = True
 
 
+def add_figure(doc: Document, path: Path, caption: str, width_inches: float = 6.25) -> None:
+    paragraph = doc.add_paragraph()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.paragraph_format.keep_with_next = True
+    paragraph.add_run().add_picture(str(path), width=Inches(width_inches))
+    cap = doc.add_paragraph(caption, style="Caption")
+    cap.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+
+def start_section(doc: Document, *, landscape: bool) -> None:
+    section = doc.add_section(WD_SECTION.NEW_PAGE)
+    configure_section(section, landscape=landscape)
+    if not landscape:
+        section.orientation = WD_ORIENT.PORTRAIT
+        section.page_width = Inches(8.5)
+        section.page_height = Inches(11)
+
+
 def add_table(doc: Document, headers: list[str], body: list[list[str]], widths: list[int], size: float) -> None:
     table = doc.add_table(rows=1, cols=len(headers))
     table.style = "Table Grid"
@@ -431,7 +504,8 @@ def add_reference_list(doc: Document, refs: list[dict[str, str]]) -> None:
         paragraph.paragraph_format.space_after = 3
 
 
-def build_manuscript_source(main_rows, main_rep, supp_rows, supp_rep, z4v_rows, refs) -> str:
+def build_manuscript_source(main_rows, main_rep, supp_rows, supp_rep, z4v_rows, refs, apbs_rows=None) -> str:
+    apbs_rows = apbs_rows or []
     p4_rows = z4v_p4_rows(z4v_rows)
     p4_audits = finite_values(p4_rows, "sampled_audit_rms")
     p4_direct_residuals = finite_values(p4_rows, "sampled_direct_true_residual")
@@ -462,6 +536,25 @@ def build_manuscript_source(main_rows, main_rep, supp_rows, supp_rep, z4v_rows, 
     barnase_diag_iter = as_float(barnase_by_stage.get("fmm_degree1_diagonal", {}).get("iterations"))
     barnase_block_iter = as_float(barnase_by_stage.get("fmm_degree1_block", {}).get("iterations"))
     barnase_ilu_iter = as_float(barnase_by_stage.get("fmm_degree1_ilu0", {}).get("iterations"))
+    apbs_note = ""
+    if apbs_rows:
+        max_rss_ratio = max((as_float(str(row.get("rss_ratio"))) for row in apbs_rows), default=math.nan)
+        min_titan_rss = min((as_float(str(row.get("titan_rss_mb"))) for row in apbs_rows), default=math.nan)
+        max_titan_rss = max((as_float(str(row.get("titan_rss_mb"))) for row in apbs_rows), default=math.nan)
+        min_apbs_rss = min((as_float(str(row.get("apbs_finest_rss_mb"))) for row in apbs_rows), default=math.nan)
+        max_apbs_rss = max((as_float(str(row.get("apbs_finest_rss_mb"))) for row in apbs_rows), default=math.nan)
+        max_rel = max((as_float(str(row.get("apbs_previous_to_finest_relative"))) for row in apbs_rows), default=math.nan)
+        apbs_note = (
+            f"\n\nAs an external grid-solver context check, we also swept APBS grid dimensions on 1VII, 1UBQ, "
+            f"and 2CI2 using the same PQR inputs. APBS is not used here as the boundary-integral oracle, because "
+            f"its reaction energies remained visibly grid-sensitive over the tested range: the final d225-to-d257 "
+            f"change reached {100.0 * max_rel:.2f}% across the three systems. The comparison is nevertheless useful "
+            f"for computational footprint. At d257, APBS required {fmt_float(min_apbs_rss, 1)}-{fmt_float(max_apbs_rss, 1)} MB "
+            f"peak RSS, whereas the corresponding TITAN guarded p4 rows used {fmt_float(min_titan_rss, 1)}-{fmt_float(max_titan_rss, 1)} MB; "
+            f"the largest APBS/TITAN RSS ratio was {fmt_float(max_rss_ratio, 1)}x. CPU wall times at the finest APBS grid "
+            f"were of the same order as the TITAN guarded rows for these small proteins, but the memory scaling and "
+            f"grid sensitivity reinforce why APBS is reported in the Supplement as context rather than as a validation oracle."
+        )
     text = f"""# {TITLE}
 
 {AUTHOR_BLOCK}
@@ -529,6 +622,18 @@ Before the full-protein guarded p4 rows were accepted, TITAN used controlled ana
 
 The high-resolution direct TABI checks showed that the remaining analytic error could be reduced below the manuscript threshold on the controlled sphere cases. Those tests do not prove full-protein energy accuracy by themselves, because protein surfaces are more irregular and do not have closed-form reaction-energy oracles. They do establish that the panel basis, normals, diagonal terms, and analytic-singular near path are not the dominant explanation for the later full-protein operator gaps. This allowed the later debugging to focus on far-field truncation, refinement, and preconditioning rather than on the direct near-field kernel.
 
+To anchor the sampled full-protein audits to a regime where the dense boundary-integral operator can still be solved explicitly, we also ran small public-protein calibration subsets derived from 1VII, 1UBQ, and 2CI2. These 64-atom subsets are not used as full-protein energy claims. Their purpose is narrower: they verify that the guarded p4 path reproduces full dense TABI solves when the dense solve is computationally feasible. Requested surface settings 8 and 12 produced the same realized panel counts for these mini calibration rows, so the table is treated as dense-operator calibration rather than mesh-refinement evidence. Across all six mini dense rows, the maximum absolute p4-versus-dense energy difference was \(6.30\times10^{-4}\) kJ/mol, the maximum relative energy error was \(1.79\times10^{-7}\), and the maximum sampled direct-operator residual was \(1.27\times10^{-6}\).
+
+Dense-direct calibration summary.
+
+| Case | Requested surface settings | Panels | Dense TABI energy (kJ/mol) | Guarded p4 energy (kJ/mol) | Max absolute energy error (kJ/mol) | Max operator residual |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Centered Born sphere | 8 | 48 | -242.9284565 | -242.9284565 | 0 | 1.12e-16 |
+| Off-center Kirkwood sphere | 8 | 48 | -79.60482942 | -79.60482942 | 0 | 1.81e-16 |
+| 1VII calibration subset, 64 atoms | 8, 12 | 2534 | -3810.764920 | -3810.764758 | 1.62e-4 | 1.27e-6 |
+| 1UBQ calibration subset, 64 atoms | 8, 12 | 2992 | -3511.081114 | -3511.081744 | 6.30e-4 | 7.02e-7 |
+| 2CI2 calibration subset, 64 atoms | 8, 12 | 3030 | -2242.834792 | -2242.834936 | 1.44e-4 | 1.23e-6 |
+
 The operator attribution sequence then separated near and far contributions on full proteins. The key observation was that a nominal fourth-order configuration could still fail on 1A63 if the refinement plan was driven only by an averaged tail estimate. The outlier was not a sign-convention error, a near-kernel regression, or a cache lifecycle bug. It was a far-cell acceptance problem: a small number of geometrically risky accepted cells could dominate the sampled direct residual. The final strict-geometry guard is the direct response to that attribution.
 
 ## Lifecycle And Reproducibility Controls
@@ -583,7 +688,7 @@ The guarded policy creates more direct fallback work than a looser FMM acceptanc
 
 The direct fallback path is part of the algorithm, not an exceptional slow path. Once a risky far cell is demoted, TITAN packs target panels into four-lane AVX2 batches and streams source tiles through a deterministic structure-of-arrays layout. Self interactions remain routed through the exact analytic near kernel and are masked out of vector lanes, so the packed primitive accelerates non-self fallback work without dropping or double-counting singular terms. This hardware-aware fallback is what makes the strict geometry guard usable in a full GMRES solve.
 
-The memory footprint remains modest for the manuscript-facing p4 rows. Table 4 reports {fmt_float(barnase_p4_rss, 1)} MB peak resident memory for Barnase and {fmt_float(a63_p4_rss, 1)} MB for 1A63, with the maximum full-protein p4 row at {fmt_float(p4_max_rss, 1)} MB. This comparison is architectural rather than a matched APBS memory benchmark: volumetric grid PB memory grows with the three-dimensional grid required to resolve the dielectric interface, whereas the BIE path concentrates unknowns on the molecular surface and caches only the guarded operator structures needed for the solve.
+The memory footprint remains modest for the manuscript-facing p4 rows. Table 4 reports {fmt_float(barnase_p4_rss, 1)} MB peak resident memory for Barnase and {fmt_float(a63_p4_rss, 1)} MB for 1A63, with the maximum full-protein p4 row at {fmt_float(p4_max_rss, 1)} MB. This comparison is architectural rather than a matched APBS memory benchmark: volumetric grid PB memory grows with the three-dimensional grid required to resolve the dielectric interface, whereas the BIE path concentrates unknowns on the molecular surface and caches only the guarded operator structures needed for the solve.{apbs_note}
 
 Repeatability is the final practical check. Table 5 shows zero energy spread at reported precision, one plan/cache build per accepted row, and sampled direct residuals below the manuscript gate. These observations indicate that the multithreaded implementation is not relying on race-sensitive accumulation, changing refinement plans, or accidental cache state. The supplementary public-protein expansion further broadens this observation: Ubiquitin, Chymotrypsin inhibitor 2, and Villin headpiece subdomain passed the same guarded p4 repeatability gate as supplement evidence.
 
@@ -601,9 +706,9 @@ The manuscript also does not claim a general production promotion. Guarded p4 re
 
 ## Reproducibility And Data Availability
 
-The manuscript package is designed to be auditable from tracked artifacts rather than from undocumented local state. The tables, figure inputs, reference list, BibTeX file, claim trace, citation-gap closure, and rendered page checks are written into the paper package. The public-protein fixtures are identified by biological name and PDB identifier, and the preparation workflow records the PDB2PQR/APBS-family provenance used for the supplementary systems. The package therefore separates numerical evidence from manuscript formatting: rebuilding the document does not rerun the solver, and rerunning the solver gates produces new matrix artifacts that can be compared with the frozen paper package.
+The manuscript package is designed to be auditable from archived release materials rather than from undocumented local state. The tables, figure inputs, reference list, BibTeX file, claim trace, citation-gap closure, and rendered page checks are written into the paper package. The public-protein fixtures are identified by biological name and PDB identifier, and the preparation workflow records the PDB2PQR/APBS-family provenance used for the supplementary systems. The release separates numerical evidence from manuscript formatting: solver outputs, figure inputs, and manuscript files are checksummed so that later reruns can be compared with the archived table and figure sources.
 
-The TITAN source code, benchmark manifests, scripts, and reference outputs corresponding to the reported tables will be released under the MIT License at a versioned public repository and archived with a persistent DOI before submission. The repository URL and archive DOI will be inserted after the public release is finalized. The release package includes license metadata, citation metadata, Zenodo archive metadata, and a SHA-256 artifact manifest for the manuscript, scripts, fixtures, figures, and tabulated reference outputs.
+The TITAN source code corresponding to this manuscript has been prepared for release under the MIT License as the local snapshot tag fagbi-submission-v0.1 on branch fagbi-submission-2026. Before submission, this paragraph must be updated with the public GitHub release URL and the Zenodo DOI minted from that tagged release. The archived release should include source code, build instructions, benchmark manifests, input metadata, scripts, figures, and reference outputs for Tables 3-6 and Supplementary Tables S1-S4. Public protein structures are identified by their RCSB PDB accession codes; derived surface metadata, run manifests, and tabulated outputs corresponding to the manuscript tables are included in the release-readiness manifest. A SHA-256 artifact manifest records the manuscript, benchmark scripts, public-fixture manifests, figures, and tabulated reference outputs intended for the archived release.
 
 All large-protein accuracy statements in the manuscript are tied to sampled direct-operator verification rather than to unreported full direct solves. This is a limitation, but it is also a reproducibility choice. The sampled audit rows are deterministic, and the manuscript records the policy boundary explicitly so that future work can replace the sampled reference with full direct energy checks when practical. The current package should therefore be read as a reproducible evidence-backed draft, not as a final journal submission with independent external-code validation.
 
@@ -624,6 +729,7 @@ def build_docx(args: argparse.Namespace) -> None:
     z4q_rep = repeatability_by_fixture(read_csv(args.z4q_repeatability))
     z4q_manifest = manifest_by_fixture(read_csv(args.z4q_manifest))
     z4v_matrix = read_csv(args.z4v_matrix)
+    apbs_rows = apbs_context_rows(read_csv_if_exists(args.apbs_matrix))
     z4o_rows = representative_main(z4o_matrix)
     z4q_rows = supplement_rows(z4q_matrix)
     refs = load_reference_rows()
@@ -649,7 +755,29 @@ def build_docx(args: argparse.Namespace) -> None:
         ["stage", "outcome", "median_wall", "median_iterations", "operator_audit", "interpretation"],
     )
 
-    source = build_manuscript_source(z4o_rows, z4o_rep, z4q_rows, z4q_rep, z4v_matrix, refs)
+    if apbs_rows:
+        write_csv(
+            args.output_dir / "fagbi_scope_z4t_apbs_context_table.csv",
+            apbs_rows,
+            [
+                "fixture",
+                "protein",
+                "pdb",
+                "apbs_grid_range",
+                "apbs_finest_energy",
+                "titan_energy",
+                "apbs_previous_to_finest_delta",
+                "apbs_previous_to_finest_relative",
+                "titan_rss_mb",
+                "apbs_finest_rss_mb",
+                "rss_ratio",
+                "titan_wall_seconds",
+                "apbs_finest_wall_seconds",
+                "titan_audit",
+            ],
+        )
+
+    source = build_manuscript_source(z4o_rows, z4o_rep, z4q_rows, z4q_rep, z4v_matrix, refs, apbs_rows)
     source_path = args.output_dir / "fagbi_scope_z4t_manuscript_source.md"
     source_path.write_text(source, encoding="utf-8")
 
@@ -677,67 +805,91 @@ def build_docx(args: argparse.Namespace) -> None:
         for paragraph in [p.strip() for p in rest.strip().split("\n\n") if p.strip()]:
             if paragraph.startswith("Table 1. Algorithmic positioning") or paragraph.startswith("| Aspect | TABI-PB 2.0 |"):
                 continue
+            if (paragraph.startswith("Dense-direct calibration summary.") or
+                    paragraph.startswith("| Case | Requested surface settings |")):
+                continue
             if paragraph.startswith("### "):
                 add_heading(doc, paragraph[4:].strip(), level=2)
                 continue
             add_body(doc, paragraph)
         if heading.strip() == "Methods" and args.workflow_plot.exists() and args.algorithm_plot.exists():
+            start_section(doc, landscape=True)
             add_caption(doc, "Table 1. Algorithmic positioning of TABI-PB 2.0, FAGBI, and TITAN.")
             add_table(
                 doc,
                 ["Aspect", "TABI-PB 2.0", "FAGBI / Cartesian Galerkin FMM", "TITAN guarded p4 path"],
                 algorithm_positioning_rows(),
-                [1200, 2720, 2720, 2720],
-                6.0,
+                [1350, 3900, 3900, 3900],
+                7.0,
             )
             add_figure(
                 doc,
                 args.workflow_plot,
                 "Figure 1 | Boundary-integral Poisson-Boltzmann workflow and contribution map. The six-stage pipeline starts from molecular preparation and surface discretization, forms the coupled K1-K4 boundary-integral operator, evaluates matrix-vector products, solves the Krylov system, and verifies the accelerated operator. The dashed green region marks the contribution of this work: guarded analytical p4 FMM/M2L, packed direct fallback, graph-derived sparse ILU(0), and sampled direct-operator verification.",
+                width_inches=9.1,
             )
             add_figure(
                 doc,
                 args.algorithm_plot,
                 "Figure 2 | Guarded p4 FMM/M2L boundary-integral operator. Blue denotes target-leaf local evaluation, red denotes source-cell Cartesian moments, purple denotes analytical far-field M2L, and green denotes guarded direct fallback and sparse preconditioning. Source panels are compressed into Cartesian p4 moments, accepted far cells are translated to target-local expansions, and near or geometrically risky interactions are evaluated by packed direct P2P fallback; the same near-source graph defines the sparse block ILU(0) preconditioner used by GMRES.",
+                width_inches=7.6,
+            )
+            start_section(doc, landscape=False)
+        if heading.strip() == "Analytical Validation Protocol":
+            add_caption(doc, "Dense-direct calibration summary for analytic systems and a small public-protein subset.")
+            add_table(
+                doc,
+                ["Case", "Requested surface", "Panels", "Dense TABI energy", "Guarded p4 energy", "Max abs. error", "Max operator residual"],
+                [
+                    ["Centered Born sphere", "8", "48", "-242.9284565", "-242.9284565", "0", "1.12e-16"],
+                    ["Off-center Kirkwood sphere", "8", "48", "-79.60482942", "-79.60482942", "0", "1.81e-16"],
+                    ["1VII calibration subset, 64 atoms", "8, 12", "2534", "-3810.764920", "-3810.764758", "1.62e-4", "1.27e-6"],
+                    ["1UBQ calibration subset, 64 atoms", "8, 12", "2992", "-3511.081114", "-3511.081744", "6.30e-4", "7.02e-7"],
+                    ["2CI2 calibration subset, 64 atoms", "8, 12", "3030", "-2242.834792", "-2242.834936", "1.44e-4", "1.23e-6"],
+                ],
+                [1900, 900, 650, 1250, 1250, 950, 1050],
+                6.2,
             )
 
-    doc.add_page_break()
+    start_section(doc, landscape=True)
     add_heading(doc, "Algorithmic Performance Ladder")
     if args.z4v_plot.exists():
         add_figure(
             doc,
             args.z4v_plot,
             "Figure 3 | Full-protein performance ladder. Colors identify backend stages from direct TABI through guarded p4 FMM/M2L with sparse ILU(0); each cell reports status and wall time. The ladder separates three effects: dense direct TABI is not practical at full-protein panel counts, degree-one FMM accelerates matrix-vector products but still stalls with weak preconditioning, and guarded p4 plus sparse near-field ILU(0) passes sampled direct-operator verification on all six full proteins.",
+            width_inches=9.2,
         )
     if args.runtime_composition_plot.exists():
         add_figure(
             doc,
             args.runtime_composition_plot,
             "Figure 4 | Runtime composition for the 1A63 performance ladder. Direct TABI timed out and is shown as a wall-time context row without a component breakdown. The remaining rows show the fraction of measured wall time assigned to matrix-vector evaluation, preconditioning, Krylov overhead, setup, and verification or other overhead. Degree-one FMM reduces the cost of individual matrix-vector products but still spends almost all runtime in stalled 720-iteration solves; sparse near-field ILU(0) reduces the Krylov budget to 128 iterations, while the guarded p4 row adds preparation and direct-operator verification cost to recover sampled dense-operator agreement. Convergence in this figure denotes internal GMRES true residual below 10^-6; paper-facing acceptance additionally requires sampled direct-operator residual below 8 x 10^-3.",
+            width_inches=9.2,
         )
     add_caption(doc, "Table 2. Full-protein benchmark systems used in the performance ladder.")
     add_table(
         doc,
         ["Protein", "PDB/source", "Atoms", "Panels", "Role"],
         z4v_system_table_rows(z4v_matrix),
-        [3500, 1500, 850, 850, 950],
-        7.4,
+        [4300, 1700, 1000, 1000, 1800],
+        8.0,
     )
     add_caption(doc, "Table 3. Full-protein algorithmic ladder across six matched protein fixtures.")
     add_table(
         doc,
         ["Stage", "Outcome", "Median wall", "Median iter.", "Operator audit", "Interpretation"],
         z4v_stage_summary_rows(z4v_matrix),
-        [1600, 1350, 950, 800, 1400, 3260],
-        7.0,
+        [1900, 1500, 1100, 950, 1600, 6200],
+        7.6,
     )
     add_caption(doc, "Table 4. Guarded p4 + sparse ILU(0) full-protein rows from the performance ladder.")
     add_table(
         doc,
-        ["Protein", "PDB/source", "Panels", "Iter.", "Internal residual", "Audit RMS", "Direct residual", "Wall", "RSS MB"],
+        ["Protein", "PDB/source", "Panels", "Iter.", "Internal residual", "Sampled audit RMS", "Sampled direct true residual", "Wall", "RSS MB"],
         z4v_p4_table_rows(z4v_matrix),
-        [1800, 1100, 700, 600, 1200, 1050, 1200, 700, 650],
-        6.7,
+        [2400, 1300, 850, 700, 1550, 1450, 1650, 900, 800],
+        7.2,
     )
 
     doc.add_page_break()
@@ -754,18 +906,17 @@ def build_docx(args: argparse.Namespace) -> None:
             fmt_sci(as_float(rep["audit_max"])),
             fmt_sci(as_float(rep["sampled_direct_true_residual_max"])),
             fmt_float(as_float(rep["energy_spread"]), 3),
-            fmt_float(as_float(rep["median_matvec_ratio"]), 3),
         ])
     add_table(
         doc,
-        ["Protein", "PDB/source", "Panels", "Energy", "Audit max", "Direct residual max", "Energy spread", "p4/deg1"],
+        ["Protein", "PDB/source", "Panels", "Energy", "Sampled audit max", "Sampled direct true residual max", "Energy spread"],
         main_body,
-        [2400, 1100, 900, 1100, 1050, 1450, 1150, 900],
-        7.3,
+        [3300, 1300, 950, 1300, 1450, 2100, 1500],
+        7.8,
     )
 
     if args.z5_plot.exists():
-        doc.add_page_break()
+        start_section(doc, landscape=False)
         add_heading(doc, "Preconditioner Convergence Profile")
         add_figure(doc, args.z5_plot, "Figure 5 | Barnase GMRES residual decay under three preconditioning choices. All curves use the same full-protein degree-one FMM operator. The diagonal baseline and local block-diagonal preconditioner reached the iteration budget, whereas sparse near-field ILU(0) drove the preconditioned residual to the 1e-12 range and produced a converged solve. This contrast isolates Krylov stiffness from raw matrix-vector-product cost.")
 
@@ -813,6 +964,7 @@ def build_docx(args: argparse.Namespace) -> None:
         {"check": "runtime_composition_plot", "status": "pass" if args.runtime_composition_plot.exists() else "fail", "value": str(args.runtime_composition_plot)},
         {"check": "p_order_plot", "status": "pass" if args.p_order_plot is not None and args.p_order_plot.exists() else "warn", "value": str(args.p_order_plot) if args.p_order_plot is not None else "not_provided"},
         {"check": "p_order_coverage", "status": "pass" if args.p_order_coverage is not None and args.p_order_coverage.exists() else "warn", "value": str(args.p_order_coverage) if args.p_order_coverage is not None else "not_provided"},
+        {"check": "apbs_context_rows", "status": "pass" if apbs_rows else "warn", "value": len(apbs_rows)},
         {"check": "word_count", "status": "pass" if word_count >= 3000 else "fail", "value": word_count},
         {"check": "forbidden_terms", "status": "pass" if not leaked else "fail", "value": ";".join(leaked)},
         {"check": "default_policy_limitation", "status": "pass", "value": "grid default unchanged"},
@@ -841,6 +993,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--z5-plot", type=Path, required=True)
     parser.add_argument("--p-order-plot", type=Path, default=None)
     parser.add_argument("--p-order-coverage", type=Path, default=None)
+    parser.add_argument("--apbs-matrix", type=Path, default=APBS_MATRIX_DEFAULT)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args()
 

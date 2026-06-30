@@ -1,9 +1,9 @@
 TITAN FMM/M2L Scope Z4T Submission Polish Report
 Decision: z4t_submission_polish_ready
-DOCX: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission_fig_refresh\titan_fagbi_submission_polished.docx
-PDF: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission_fig_refresh\titan_fagbi_submission_polished.pdf
+DOCX: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission\titan_fagbi_submission_polished.docx
+PDF: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission\titan_fagbi_submission_polished.pdf
 Pages: 0
-Word count: 5781
+Word count: 6221
 References locked: 9
 Citation gaps: closed
 Performance ladder: Z4V full-protein matrix included

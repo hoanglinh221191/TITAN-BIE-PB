@@ -21,6 +21,7 @@ Z4XF_MATRIX = ROOT / "test/tmp/fagbi_scope_z4xf/fagbi_scope_z4xf_matrix.csv"
 Z4Q_MATRIX = ROOT / "docs/fagbi_guarded_p4_package/tables/fagbi_scope_z4q_matrix.csv"
 Z4Q_REPEATABILITY = ROOT / "docs/fagbi_guarded_p4_package/tables/fagbi_scope_z4q_repeatability.csv"
 Z4Q_MANIFEST = ROOT / "docs/fagbi_guarded_p4_package/provenance/public_fixture_expansion_manifest.csv"
+Z4Z_APBS_MATRIX = ROOT / "test/tmp/fagbi_scope_z4z_apbs/fagbi_scope_z4z_apbs_matrix.csv"
 OUT_DIR = ROOT / "test/tmp/fagbi_scope_z4xe"
 PREVIEW_DIR = ROOT / "docs/fagbi_guarded_p4_package/submission_preview_synced"
 FIGURE_DIR = PREVIEW_DIR / "figures"
@@ -65,6 +66,13 @@ def read_z4xf_rows() -> list[dict[str, str]]:
     if not Z4XF_MATRIX.exists():
         return []
     with Z4XF_MATRIX.open(newline="", encoding="utf-8-sig") as handle:
+        return list(csv.DictReader(handle))
+
+
+def read_z4z_apbs_rows() -> list[dict[str, str]]:
+    if not Z4Z_APBS_MATRIX.exists():
+        return []
+    with Z4Z_APBS_MATRIX.open(newline="", encoding="utf-8-sig") as handle:
         return list(csv.DictReader(handle))
 
 
@@ -113,6 +121,52 @@ def public_protein_rows() -> list[dict[str, object]]:
                 "audit_max": fmt(as_float(rep.get("audit_max") or row.get("audit_rms")), 3),
                 "direct_residual_max": fmt(as_float(rep.get("sampled_direct_true_residual_max") or row.get("sampled_direct_true_residual")), 3),
                 "energy_spread": fmt(as_float(rep.get("energy_spread")), 3),
+            }
+        )
+    return out
+
+
+def apbs_context_rows(rows: list[dict[str, str]]) -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    fixtures = sorted({row.get("fixture", "") for row in rows if row.get("fixture")})
+    for fixture in fixtures:
+        titan = [
+            row for row in rows
+            if row.get("fixture") == fixture and row.get("backend") == "titan_guarded_p4" and row.get("status") == "ok"
+        ]
+        apbs = [
+            row for row in rows
+            if row.get("fixture") == fixture and row.get("backend") == "apbs" and row.get("status") == "ok"
+        ]
+        if not titan or not apbs:
+            continue
+        apbs.sort(key=lambda row: int(row.get("dime", "0") or 0))
+        titan_row = titan[-1]
+        finest = apbs[-1]
+        previous = apbs[-2] if len(apbs) >= 2 else None
+        finest_energy = as_float(finest.get("apbs_energy_kj_mol"))
+        previous_energy = as_float(previous.get("apbs_energy_kj_mol")) if previous else None
+        delta = finest_energy - previous_energy if finest_energy is not None and previous_energy is not None else None
+        rel = abs(delta) / abs(finest_energy) if delta is not None and finest_energy not in (None, 0) else None
+        titan_rss = as_float(titan_row.get("peak_rss_mb"))
+        apbs_rss = as_float(finest.get("peak_rss_mb"))
+        ratio = apbs_rss / titan_rss if titan_rss not in (None, 0) and apbs_rss is not None else None
+        out.append(
+            {
+                "protein": titan_row.get("protein_name") or fixture.upper(),
+                "pdb": titan_row.get("pdb_id") or fixture.upper(),
+                "apbs_grid_range": f"{apbs[0].get('dime')}-{finest.get('dime')}",
+                "titan_energy": fmt(as_float(titan_row.get("titan_energy_kj_mol") or titan_row.get("energy_kj_mol")), 2),
+                "apbs_finest_energy": fmt(finest_energy, 2),
+                "apbs_last_step_change": fmt(delta, 2),
+                "apbs_last_step_relative": fmt(100.0 * rel if rel is not None else None, 2),
+                "titan_rss_mb": fmt(titan_rss, 1),
+                "apbs_finest_rss_mb": fmt(apbs_rss, 1),
+                "apbs_over_titan_rss": fmt(ratio, 1),
+                "titan_wall_seconds": fmt(as_float(titan_row.get("wall_seconds")), 1),
+                "apbs_finest_wall_seconds": fmt(as_float(finest.get("wall_seconds")), 1),
+                "titan_sampled_audit": fmt(as_float(titan_row.get("sampled_audit_rms")), 3),
+                "interpretation": "Grid-solver context; APBS is not used as the dense boundary-integral oracle.",
             }
         )
     return out
@@ -361,9 +415,9 @@ def draw_bar_panel(
     color: tuple[int, int, int],
     y_max: float | None = None,
 ) -> None:
-    font_label = load_font(24, True)
-    font_axis = load_font(18)
-    font_tick = load_font(16)
+    font_label = load_font(30, True)
+    font_axis = load_font(23)
+    font_tick = load_font(20)
     draw.text((x0, y0 - 35), label, font=font_label, fill=(20, 20, 20))
     left = x0 + 62
     right = x0 + w - 18
@@ -406,9 +460,9 @@ def draw_log_panel(
     h: int,
     values: dict[int, float],
 ) -> None:
-    font_label = load_font(24, True)
-    font_axis = load_font(18)
-    font_tick = load_font(16)
+    font_label = load_font(30, True)
+    font_axis = load_font(23)
+    font_tick = load_font(20)
     draw.text((x0, y0 - 35), "A", font=font_label, fill=(20, 20, 20))
     left = x0 + 70
     right = x0 + w - 18
@@ -446,16 +500,16 @@ def write_z4xf_figure(rows: list[dict[str, str]]) -> bool:
     if len(stats) != 3:
         return False
     FIGURE_DIR.mkdir(parents=True, exist_ok=True)
-    width, height = 1650, 520
+    width, height = 2100, 620
     img = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(img)
-    panel_w = 505
-    y0 = 105
-    h = 340
-    draw_log_panel(draw, 35, y0, panel_w, h, {cap: stats[cap]["max_residual"] for cap in stats})
+    panel_w = 640
+    y0 = 120
+    h = 420
+    draw_log_panel(draw, 45, y0, panel_w, h, {cap: stats[cap]["max_residual"] for cap in stats})
     draw_bar_panel(
         draw,
-        575,
+        730,
         y0,
         panel_w,
         h,
@@ -466,7 +520,7 @@ def write_z4xf_figure(rows: list[dict[str, str]]) -> bool:
     )
     draw_bar_panel(
         draw,
-        1115,
+        1415,
         y0,
         panel_w,
         h,
@@ -475,9 +529,7 @@ def write_z4xf_figure(rows: list[dict[str, str]]) -> bool:
         {cap: (stats[cap]["rss_mean"], stats[cap]["rss_sd"]) for cap in stats},
         (204, 121, 57),
     )
-    note_font = load_font(16)
-    draw.text((42, 482), "Points/bars summarize Barnase, 1A63, and 1SH1; error bars show sample standard deviation.", font=note_font, fill=(70, 70, 70))
-    img.save(Z4XF_FIGURE_PNG, dpi=(300, 300))
+    img.save(Z4XF_FIGURE_PNG, dpi=(600, 600))
 
     def svg_text(x: float, y: float, text: str, size: int = 16, weight: str = "normal",
                  anchor: str = "start", fill: str = "#333") -> str:
@@ -557,7 +609,6 @@ def write_z4xf_figure(rows: list[dict[str, str]]) -> bool:
     add_svg_log_panel(35, "A")
     add_svg_bar_panel(575, "B", "matvec time (s)", "matvec_mean", "matvec_sd", "#4477AA")
     add_svg_bar_panel(1115, "C", "peak RSS (MB)", "rss_mean", "rss_sd", "#CC7939")
-    svg_lines.append(svg_text(42, 490, "Points/bars summarize Barnase, 1A63, and 1SH1; error bars show sample standard deviation.", 16, fill="#555"))
     svg_lines.append("</svg>")
     Z4XF_FIGURE_SVG.write_text("\n".join(svg_lines), encoding="utf-8")
     return True
@@ -640,6 +691,7 @@ def build_docx(
     caps: list[dict[str, object]],
     *,
     public_rows: list[dict[str, object]],
+    apbs_rows: list[dict[str, object]],
     cap_source: str,
     z4xf_figure_ready: bool,
 ) -> None:
@@ -647,27 +699,31 @@ def build_docx(
     configure_styles(doc)
     title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = title.add_run("Supplementary Tables and Sensitivity Figures for the Guarded p4 TABI Treecode")
+    run = title.add_run(
+        "Supplementary Information for TITAN Guarded Cartesian FMM/M2L\n"
+        "Boundary-Integral Poisson-Boltzmann Solves"
+    )
     run.bold = True
     run.font.name = "Calibri"
-    run.font.size = Pt(17)
+    run.font.size = Pt(15)
     run.font.color.rgb = RGBColor(11, 37, 69)
 
     subtitle = doc.add_paragraph()
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    subtitle.add_run("Public-protein expansion, theta/guard/tail sensitivity, and ILU neighbor-cap sensitivity").italic = True
+    subtitle.add_run("Public-protein expansion, guarded-operator sensitivity, ILU neighbor-cap sensitivity, and APBS grid context").italic = True
 
     doc.add_paragraph(
-        "This supplement is generated from the completed public-protein, ablation, and ILU neighbor-cap artifacts. "
-        "It does not rerun the solver. The purpose is to keep supplementary evidence out of the main manuscript "
-        "while preserving reviewer-auditable tables and figures."
+        "This Supplementary Information reports additional public-protein rows, guarded-operator sensitivity, "
+        "ILU neighbor-cap sensitivity, and APBS grid-solver context used to support the bounded claims in the "
+        "main manuscript. The tables summarize solver outputs generated under the archived TITAN manuscript "
+        "release."
     )
     if cap_source == "z4xf_real_sweep":
         doc.add_paragraph(
-            "ILU neighbor-cap evidence is taken from the Z4X-F real sweep on Barnase, 1A63, and 1SH1. "
-            "All three tested caps preserve the direct-operator verification gates; cap 64 is retained in the "
-            "reported guarded-p4 protocol because it gives the best average matvec time while avoiding the larger "
-            "sparse graph and RSS of cap 128."
+            "For the ILU near-field graph, neighbor caps 32, 64, and 128 were tested on Barnase, 1A63, and 1SH1. "
+            "All three caps preserved the sampled direct-operator verification gates. Cap 64 is retained in the "
+            "reported guarded-p4 protocol because it gave the lowest mean matvec time in this sweep while avoiding "
+            "the larger sparse graph and RSS of cap 128. No global cap optimum is claimed."
         )
     else:
         doc.add_paragraph(
@@ -776,6 +832,35 @@ def build_docx(
             "pass accuracy; cap 64 is a balanced protocol value rather than an accuracy-only optimum."
         )
 
+    if apbs_rows:
+        add_table(
+            doc,
+            f"Table S{4 + sensitivity_offset}. APBS grid-solver context for matched public PQR inputs.",
+            apbs_rows,
+            [
+                ("protein", "Protein"),
+                ("pdb", "PDB"),
+                ("apbs_grid_range", "APBS grid"),
+                ("titan_energy", "TITAN energy"),
+                ("apbs_finest_energy", "APBS finest energy"),
+                ("apbs_last_step_change", "APBS last-step change"),
+                ("apbs_last_step_relative", "Last-step change (%)"),
+                ("titan_rss_mb", "TITAN RSS MB"),
+                ("apbs_finest_rss_mb", "APBS RSS MB"),
+                ("apbs_over_titan_rss", "APBS/TITAN RSS"),
+                ("titan_wall_seconds", "TITAN wall (s)"),
+                ("apbs_finest_wall_seconds", "APBS wall (s)"),
+                ("interpretation", "Interpretation"),
+            ],
+            [1.35, 0.65, 0.7, 0.85, 0.9, 0.9, 0.85, 0.75, 0.75, 0.8, 0.75, 0.75, 2.2],
+        )
+        doc.add_paragraph(
+            "APBS is included as an independent grid-solver sanity/context check, not as the dense "
+            "boundary-integral oracle. The APBS rows use the same PQR inputs as TITAN but a volumetric grid "
+            "discretization; the highest tested APBS grids required substantially more peak RSS than the "
+            "corresponding guarded p4 rows and still showed measurable grid sensitivity for some systems."
+        )
+
     if cap_source == "z4xf_real_sweep":
         doc.add_paragraph(
             "Conclusion. The measured theta/guard/tail rows support the manuscript statement that the guarded p4 policy is not "
@@ -803,6 +888,7 @@ def main() -> None:
     summary = aggregate(rows)
     details = detail_rows(rows)
     public_rows = public_protein_rows()
+    apbs_rows = apbs_context_rows(read_z4z_apbs_rows())
     real_caps = cap_real_sweep(z4xf_rows) if z4xf_rows else []
     cap_source = "z4xf_real_sweep" if real_caps else "z4w_validator_boundary"
     caps = real_caps if real_caps else cap_boundary(rows)
@@ -811,6 +897,7 @@ def main() -> None:
     detail_csv = OUT_DIR / "fagbi_scope_z4xe_theta_guard_tail_detail.csv"
     cap_csv = OUT_DIR / "fagbi_scope_z4xe_neighbor_cap_boundary.csv"
     real_cap_csv = OUT_DIR / "fagbi_scope_z4xf_neighbor_cap_real_sweep.csv"
+    apbs_csv = OUT_DIR / "fagbi_scope_z4z_apbs_context_table.csv"
     decision_csv = OUT_DIR / "fagbi_scope_z4xe_decision.csv"
     summary_dat = OUT_DIR / "fagbi_scope_z4xe_summary.dat"
 
@@ -819,6 +906,8 @@ def main() -> None:
     write_csv(cap_csv, caps, list(caps[0].keys()))
     if real_caps:
         write_csv(real_cap_csv, real_caps, list(real_caps[0].keys()))
+    if apbs_rows:
+        write_csv(apbs_csv, apbs_rows, list(apbs_rows[0].keys()))
 
     decision = "z4xe_supplement_ready_with_z4xf_cap_sweep" if real_caps else "z4xe_supplement_ready"
     write_csv(
@@ -832,10 +921,11 @@ def main() -> None:
                 "paired_docx": str(P2_SUPPLEMENT_OUT),
                 "public_protein_rows": len(public_rows),
                 "neighbor_cap_policy": "real_sweep_cap32_64_128" if real_caps else "cap64_validated_boundary_only",
+                "apbs_context_rows": len(apbs_rows),
                 "figure": str(Z4XF_FIGURE_PNG) if z4xf_figure_ready else "",
             }
         ],
-        ["decision", "theta_guard_tail_source", "neighbor_cap_source", "docx", "paired_docx", "public_protein_rows", "neighbor_cap_policy", "figure"],
+        ["decision", "theta_guard_tail_source", "neighbor_cap_source", "docx", "paired_docx", "public_protein_rows", "neighbor_cap_policy", "apbs_context_rows", "figure"],
     )
     summary_dat.write_text(
         "\n".join(
@@ -851,6 +941,7 @@ def main() -> None:
                 f"detail_csv: {detail_csv}",
                 f"neighbor_cap_csv: {cap_csv}",
                 f"neighbor_cap_real_sweep_csv: {real_cap_csv if real_caps else 'NA'}",
+                f"apbs_context_csv: {apbs_csv if apbs_rows else 'NA'}",
                 f"neighbor_cap_figure_png: {Z4XF_FIGURE_PNG if z4xf_figure_ready else 'NA'}",
                 "note: Z4X-F real sweep supersedes the older validator-boundary wording when present",
                 "",
@@ -859,7 +950,7 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    build_docx(summary, details, caps, public_rows=public_rows, cap_source=cap_source, z4xf_figure_ready=z4xf_figure_ready)
+    build_docx(summary, details, caps, public_rows=public_rows, apbs_rows=apbs_rows, cap_source=cap_source, z4xf_figure_ready=z4xf_figure_ready)
     ROOT_REPORT.write_text(
         "\n".join(
             [
@@ -873,6 +964,7 @@ def main() -> None:
                 f"Detail CSV: {detail_csv}",
                 f"Neighbor-cap CSV: {cap_csv}",
                 f"Neighbor-cap real sweep CSV: {real_cap_csv if real_caps else 'NA'}",
+                f"APBS context CSV: {apbs_csv if apbs_rows else 'NA'}",
                 f"Neighbor-cap figure: {Z4XF_FIGURE_PNG if z4xf_figure_ready else 'NA'}",
                 "",
                 "Interpretation: theta/guard/tail rows are measured Z4W sensitivity evidence. When Z4X-F artifacts are available, ILU neighbor cap 32/64/128 rows are a real three-protein sweep; cap 64 remains the balanced reported protocol value.",
@@ -889,6 +981,8 @@ def main() -> None:
     print(f"Neighbor cap CSV: {cap_csv}")
     if real_caps:
         print(f"Neighbor cap real sweep CSV: {real_cap_csv}")
+    if apbs_rows:
+        print(f"APBS context CSV: {apbs_csv}")
     if z4xf_figure_ready:
         print(f"Neighbor cap figure: {Z4XF_FIGURE_PNG}")
 

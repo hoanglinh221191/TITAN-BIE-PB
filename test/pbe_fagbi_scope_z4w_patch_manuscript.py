@@ -122,7 +122,7 @@ def add_methods_table(doc: Document):
         ("Surface", "Boundary surface", "van der Waals molecular surface", "arg.in: -pbe-surface=vdw"),
         ("Surface", "Panel generation", "TABI sphere-patch triangular surface, surface-points request = 8", "Actual panel counts reported per protein in the system table"),
         ("Surface", "Collocation/discretization", "centroid panel collocation with analytic-singular near integration", "profile: discretization=centroid, near_integration=analytic_singular"),
-        ("Linear solver", "Operator", "JCP2013 coupled two-row TABI boundary-integral system", "profile: bie_system=linear_pb_2x2"),
+        ("Linear solver", "Operator", "TABI 2013 coupled two-row boundary-integral formulation", "profile: bie_system=linear_pb_2x2"),
         ("Linear solver", "Direct TABI reference meaning", "direct summation of the dense panel-panel boundary-integral operator", "No grid or FMM acceleration in direct TABI rows"),
         ("Linear solver", "GMRES controls", "relative tolerance 1e-6, dphi 1e-6, restart 128, max iterations 720", "arg.in: -pbe-rms, -pbe-dphi, -pbe-tabi-gmres-restart, -pbe-max-iter"),
         ("Preconditioning", "Guarded p4 preconditioner", "sparse near-field ILU(0), neighbor cap 64, drop tolerance 0", "arg.in: -pbe-tabi-precond=fmm-nearfield-ilu0"),

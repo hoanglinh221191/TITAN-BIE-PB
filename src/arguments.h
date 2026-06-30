@@ -25,6 +25,18 @@ struct PbcArgs {
   bool flag_pbc_ref{false};
   string ref_pdb_name{};
   string pbctopo_anchor_backend{"auto"};
+  double pbctopo_bond_cutoff{0.0};
+  bool pbctopo_bond_cutoff_set{false};
+  double pbctopo_clash_cutoff{0.0};
+  bool pbctopo_clash_cutoff_set{false};
+  double pbctopo_contact_cutoff{0.0};
+  bool pbctopo_contact_cutoff_set{false};
+  double pbctopo_continuity_cutoff{0.0};
+  bool pbctopo_continuity_cutoff_set{false};
+  int pbctopo_exact_component_limit{0};
+  bool pbctopo_exact_component_limit_set{false};
+  int pbctopo_beam_width{0};
+  bool pbctopo_beam_width_set{false};
 };
 
 struct MsmArgs {
@@ -182,6 +194,7 @@ struct PbeArgs {
   std::string pbsa_perf{"summary"};
   std::string pbsa_grid_reuse{"auto"};
   std::string timing{"off"};
+  std::string tabi_diagnostics{"off"};
   std::string tabi_tree_preset{"off"};
   std::string tabi_sum{"auto"};
   std::string tabi_geometry{"triangle"};

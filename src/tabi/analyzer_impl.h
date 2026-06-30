@@ -1819,6 +1819,9 @@ private:
   void write_tabi_profile_header_if_needed();
   void append_tabi_profile_row(const FrameResult &result,
                                const TimingBuckets &timing);
+  void write_tabi_audit_profile_header_if_needed();
+  void append_tabi_audit_profile_row(const FrameResult &result,
+                                     const TimingBuckets &timing);
   void write_memory_profile_header_if_needed();
   void append_memory_profile_row(const FrameResult &result,
                                  const TimingBuckets &timing);
@@ -1927,6 +1930,7 @@ private:
   std::ofstream energy_out_;
   std::ofstream timing_out_;
   std::ofstream tabi_profile_out_;
+  std::ofstream tabi_audit_profile_out_;
   std::ofstream memory_profile_out_;
   mutable std::ofstream tabi_formulation_audit_out_;
   std::ofstream tabi_near_block_audit_out_;
@@ -1959,6 +1963,7 @@ private:
   mutable bool nwt_trace_header_written_{false};
   bool timing_header_written_{false};
   bool tabi_profile_header_written_{false};
+  bool tabi_audit_profile_header_written_{false};
   bool memory_profile_header_written_{false};
   mutable bool tabi_formulation_audit_header_written_{false};
   bool tabi_near_block_audit_header_written_{false};

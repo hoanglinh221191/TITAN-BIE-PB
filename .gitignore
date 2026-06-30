@@ -385,6 +385,7 @@ test/
 !/TITAN_FMM_M2L_SCOPE_Z4XC_P5_FEASIBILITY_REPORT.txt
 !/TITAN_FMM_M2L_SCOPE_Z4XD_P5_TILED_CACHE_REPORT.txt
 !/TITAN_FMM_M2L_SCOPE_Z4XF_ILU_NEIGHBOR_CAP_SWEEP_REPORT.txt
+!/TITAN_FMM_M2L_SCOPE_Z4Y_REVIEWER_HARDENING_REPORT.txt
 !/TITAN_FAGBI_RELEASE_READINESS_REPORT.txt
 !/test/pbe_fagbi_scope_z4q_public_fixture_expansion_gate.ps1
 !/test/pbe_fagbi_scope_z4s_paper_package.ps1
@@ -405,6 +406,14 @@ test/
 !/test/pbe_fagbi_scope_z4xe_supplementary_sensitivity_package.ps1
 !/test/pbe_fagbi_scope_z4xf_neighbor_cap_parser_smoke.ps1
 !/test/pbe_fagbi_scope_z4xf_ilu_neighbor_cap_sweep.ps1
+!/test/pbe_fagbi_scope_z4y_contract_smoke.ps1
+!/test/pbe_fagbi_scope_z4y_mini_dense_contract_smoke.ps1
+!/test/pbe_fagbi_scope_z4y_mini_dense_oracle.ps1
+!/test/pbe_fagbi_scope_z4y_reviewer_hardening_matrix.ps1
+!/test/pbe_fagbi_scope_z4z_apbs_grid_sweep.ps1
+!/TITAN_FMM_M2L_SCOPE_Z4Z_APBS_GRID_SWEEP_REPORT.txt
+!/test/pbe_fagbi_p1a_diagnostics_contract_smoke.ps1
+!/test/pbe_fagbi_p1a_diagnostics_runtime_smoke.ps1
 !/test/pbe_fagbi_release_readiness_manifest.ps1
 !/test/titan_fmm_m2l_scope_z4xd_tiled_cache_smoke.cpp
 !/test/pbe_inputs_public/
@@ -417,6 +426,7 @@ test/
 !/test/pbe_inputs_public_z4q/public_fixture_expansion_manifest.csv
 !/docs/fagbi_guarded_p4_package/
 !/docs/fagbi_guarded_p4_package/**
+!/docs/developer_diagnostics.md
 !/test/pbe_tabi_channel_expansion_audit_smoke.ps1
 !/test/pbe_tabi_channel_estimator_smoke.ps1
 !/test/pbe_tabi_presolver_progress_smoke.ps1
@@ -476,5 +486,10 @@ test/
 !/test/titan_s2_args_smoke.cpp
 !/test/s2_smoke.ps1
 !/test/nocal_two_mol_pbc_smoke.ps1
+!/test/pbctopo_cli_config_parser_smoke.ps1
+!/test/pbctopo_logging_smoke.ps1
+!/test/pbctopo_component_graph_lazy_smoke.ps1
+!/docs/pbctopo_vibe_manuscript/test_outputs/
+!/docs/pbctopo_vibe_manuscript/test_outputs/**
 !/test/fixtures/s2_synthetic.pdb
 !/test/fixtures/s2_synthetic.ndx

@@ -28,24 +28,29 @@ std::size_t cube_index(int x, int y, int z) noexcept {
 }
 
 const std::vector<MultiIndex> &indices_through(int order) {
-  static const std::vector<MultiIndex> all = [] {
-    std::vector<MultiIndex> result;
-    result.reserve(kCartesianCompressedGreenJetTermCount);
-    for (int degree = 0; degree <= kCartesianCompressedGreenOrder; ++degree) {
-      for (int x = degree; x >= 0; --x) {
-        for (int y = degree - x; y >= 0; --y)
-          result.push_back({x, y, degree - x - y});
-      }
-    }
-    return result;
-  }();
-  static thread_local std::vector<MultiIndex> active;
-  active.clear();
-  for (const MultiIndex &index : all) {
-    if (index.x + index.y + index.z <= order)
-      active.push_back(index);
-  }
-  return active;
+  static const std::array<std::vector<MultiIndex>,
+                          kCartesianCompressedGreenOrder + 1>
+      tables = [] {
+        std::array<std::vector<MultiIndex>,
+                   kCartesianCompressedGreenOrder + 1>
+            result{};
+        for (int order_index = 0; order_index <= kCartesianCompressedGreenOrder;
+             ++order_index) {
+          result[static_cast<std::size_t>(order_index)].reserve(
+              kCartesianCompressedGreenJetTermCount);
+          for (int degree = 0; degree <= order_index; ++degree) {
+            for (int x = degree; x >= 0; --x) {
+              for (int y = degree - x; y >= 0; --y)
+                result[static_cast<std::size_t>(order_index)].push_back(
+                    {x, y, degree - x - y});
+            }
+          }
+        }
+        return result;
+      }();
+  const int clamped_order =
+      std::clamp(order, 0, kCartesianCompressedGreenOrder);
+  return tables[static_cast<std::size_t>(clamped_order)];
 }
 
 double binomial(int n, int k) noexcept {

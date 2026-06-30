@@ -131,6 +131,8 @@ void write_operator_attribution_outputs(
   samples << "approximation_mode,configured_expansion_order,implemented_far_moment_degree,probe,"
              "target_panel,row_component,region,channel,source_node,"
              "source_depth,source_panels,distance_A,source_radius_A,mac_ratio,"
+             "expansion_distance_A,target_expansion_radius_A,source_expansion_radius_A,"
+             "target_center_offset_A,source_center_offset_A,expansion_mac_ratio,"
              "approximate,direct,error,relative_error\n";
 
   std::map<AttributionSummaryKey, AttributionAggregate> aggregates;
@@ -164,6 +166,12 @@ void write_operator_attribution_outputs(
                 << record.source_node << ',' << record.source_depth << ','
                 << record.source_panels << ',' << record.distance << ','
                 << record.source_radius << ',' << record.mac_ratio << ','
+                << record.expansion_distance << ','
+                << record.target_expansion_radius << ','
+                << record.source_expansion_radius << ','
+                << record.target_center_offset << ','
+                << record.source_center_offset << ','
+                << record.expansion_mac_ratio << ','
                 << approximate << ',' << direct << ',' << error << ','
                 << relative << '\n';
         AttributionSummaryKey key{result.approximation_mode, record.probe,

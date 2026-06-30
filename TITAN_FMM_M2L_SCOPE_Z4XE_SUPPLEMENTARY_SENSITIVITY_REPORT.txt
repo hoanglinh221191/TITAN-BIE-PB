@@ -8,6 +8,7 @@ Summary CSV: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fag
 Detail CSV: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xe\fagbi_scope_z4xe_theta_guard_tail_detail.csv
 Neighbor-cap CSV: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xe\fagbi_scope_z4xe_neighbor_cap_boundary.csv
 Neighbor-cap real sweep CSV: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xe\fagbi_scope_z4xf_neighbor_cap_real_sweep.csv
+APBS context CSV: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4xe\fagbi_scope_z4z_apbs_context_table.csv
 Neighbor-cap figure: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\docs\fagbi_guarded_p4_package\submission_preview_synced\figures\fagbi_scope_z4xf_ilu_neighbor_cap_sweep.png
 
 Interpretation: theta/guard/tail rows are measured Z4W sensitivity evidence. When Z4X-F artifacts are available, ILU neighbor cap 32/64/128 rows are a real three-protein sweep; cap 64 remains the balanced reported protocol value.

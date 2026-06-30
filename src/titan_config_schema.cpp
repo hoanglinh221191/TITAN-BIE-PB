@@ -110,7 +110,30 @@ std::vector<OptionSchema> schemas() {
       {"-gbsa", "bool", "false", "true,false",
        "Enable GBSA implicit-solvent analysis.", "-nocal=true"},
       {"-pbsa", "bool", "false", "true,false",
-       "Enable production MM/PBSA path.", "-nocal=true"}};
+       "Enable production MM/PBSA path.", "-nocal=true"},
+      {"-pbctopo", "bool", "false", "true,false",
+       "Enable pbctopo/VIBE PBC correction.", ""},
+      {"-pbctopo-anchor-backend", "enum", "auto",
+       "auto,prim,spatial-all",
+       "Select VIBE anchor-scoring backend.", ""},
+      {"-pbctopo-bond-cutoff", "float", "auto",
+       "positive",
+       "Override VIBE local-topology bond cutoff in Angstrom.", ""},
+      {"-pbctopo-clash-cutoff", "float", "auto",
+       "positive",
+       "Override VIBE clash cutoff in Angstrom.", ""},
+      {"-pbctopo-contact-cutoff", "float", "auto",
+       "positive",
+       "Override VIBE owner/contact cutoff in Angstrom.", ""},
+      {"-pbctopo-continuity-cutoff", "float", "auto",
+       "positive",
+       "Override VIBE continuity cutoff in Angstrom.", ""},
+      {"-pbctopo-exact-component-limit", "int", "6",
+       "1..16",
+       "Max raw/effective components for VIBE exact component search.", ""},
+      {"-pbctopo-beam-width", "int", "12",
+       "1..4096",
+       "Large-component VIBE beam-search width.", ""}};
 }
 
 } // namespace

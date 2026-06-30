@@ -144,6 +144,12 @@ struct JcpOperatorAttributionRecord {
   double distance{0.0};
   double source_radius{0.0};
   double mac_ratio{0.0};
+  double expansion_distance{0.0};
+  double target_expansion_radius{0.0};
+  double source_expansion_radius{0.0};
+  double target_center_offset{0.0};
+  double source_center_offset{0.0};
+  double expansion_mac_ratio{0.0};
   std::array<double, 4> approximate{};
   std::array<double, 4> direct{};
 };

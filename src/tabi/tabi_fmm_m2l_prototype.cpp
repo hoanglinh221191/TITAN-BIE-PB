@@ -57,6 +57,8 @@ struct Cell {
   double qx = 0.0;
   double qy = 0.0;
   double qz = 0.0;
+  double expansion_radius = 0.0;
+  double center_offset = 0.0;
   double px = 0.0;
   double py = 0.0;
   double pz = 0.0;
@@ -220,8 +222,21 @@ void compute_cell_geometry(Tree &tree, const PointSoA &points, int node_index) {
   cell.qx = 0.5 * (min_x + max_x);
   cell.qy = 0.5 * (min_y + max_y);
   cell.qz = 0.5 * (min_z + max_z);
+  const double center_dx = cell.qx - cell.cx;
+  const double center_dy = cell.qy - cell.cy;
+  const double center_dz = cell.qz - cell.cz;
+  cell.center_offset =
+      std::sqrt(center_dx * center_dx + center_dy * center_dy +
+                center_dz * center_dz);
+  cell.expansion_radius = 0.0;
   for (std::size_t pos = cell.begin; pos < cell.end; ++pos) {
     const std::size_t idx = tree.order[pos];
+    const double edx = points.x[idx] - cell.qx;
+    const double edy = points.y[idx] - cell.qy;
+    const double edz = points.z[idx] - cell.qz;
+    cell.expansion_radius =
+        std::max(cell.expansion_radius,
+                 std::sqrt(edx * edx + edy * edy + edz * edz));
     cell.px += points.q[idx] * (points.x[idx] - cell.qx);
     cell.py += points.q[idx] * (points.y[idx] - cell.qy);
     cell.pz += points.q[idx] * (points.z[idx] - cell.qz);
@@ -2983,6 +2998,19 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
           record.distance > 1.0e-12
               ? (target_cell.radius + source_cell.radius) / record.distance
               : std::numeric_limits<double>::infinity();
+      const double eqx = target_cell.qx - source_cell.qx;
+      const double eqy = target_cell.qy - source_cell.qy;
+      const double eqz = target_cell.qz - source_cell.qz;
+      record.expansion_distance = std::sqrt(eqx * eqx + eqy * eqy + eqz * eqz);
+      record.target_expansion_radius = target_cell.expansion_radius;
+      record.source_expansion_radius = source_cell.expansion_radius;
+      record.target_center_offset = target_cell.center_offset;
+      record.source_center_offset = source_cell.center_offset;
+      record.expansion_mac_ratio =
+          record.expansion_distance > 1.0e-12
+              ? (target_cell.expansion_radius + source_cell.expansion_radius) /
+                    record.expansion_distance
+              : std::numeric_limits<double>::infinity();
       const auto far_begin = Clock::now();
       record.approximate =
           cartesian
@@ -3033,7 +3061,13 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
   for (const JcpOperatorAttributionRecord &record : result.records) {
     result.finite_outputs =
         result.finite_outputs && std::isfinite(record.distance) &&
-        std::isfinite(record.source_radius) && std::isfinite(record.mac_ratio);
+        std::isfinite(record.source_radius) && std::isfinite(record.mac_ratio) &&
+        std::isfinite(record.expansion_distance) &&
+        std::isfinite(record.target_expansion_radius) &&
+        std::isfinite(record.source_expansion_radius) &&
+        std::isfinite(record.target_center_offset) &&
+        std::isfinite(record.source_center_offset) &&
+        std::isfinite(record.expansion_mac_ratio);
     for (std::size_t channel = 0; channel < 4; ++channel) {
       result.finite_outputs =
           result.finite_outputs && std::isfinite(record.approximate[channel]) &&
