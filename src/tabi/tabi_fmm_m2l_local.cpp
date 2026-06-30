@@ -28,24 +28,29 @@ std::size_t cube_index(int x, int y, int z) noexcept {
 }
 
 const std::vector<MultiIndex> &indices_through(int order) {
-  static const std::vector<MultiIndex> all = [] {
-    std::vector<MultiIndex> result;
-    result.reserve(kCartesianCompressedGreenJetTermCount);
-    for (int degree = 0; degree <= kCartesianCompressedGreenOrder; ++degree) {
-      for (int x = degree; x >= 0; --x) {
-        for (int y = degree - x; y >= 0; --y)
-          result.push_back({x, y, degree - x - y});
-      }
-    }
-    return result;
-  }();
-  static thread_local std::vector<MultiIndex> active;
-  active.clear();
-  for (const MultiIndex &index : all) {
-    if (index.x + index.y + index.z <= order)
-      active.push_back(index);
-  }
-  return active;
+  static const std::array<std::vector<MultiIndex>,
+                          kCartesianCompressedGreenOrder + 1>
+      tables = [] {
+        std::array<std::vector<MultiIndex>,
+                   kCartesianCompressedGreenOrder + 1>
+            result{};
+        for (int order_index = 0; order_index <= kCartesianCompressedGreenOrder;
+             ++order_index) {
+          result[static_cast<std::size_t>(order_index)].reserve(
+              kCartesianCompressedGreenJetTermCount);
+          for (int degree = 0; degree <= order_index; ++degree) {
+            for (int x = degree; x >= 0; --x) {
+              for (int y = degree - x; y >= 0; --y)
+                result[static_cast<std::size_t>(order_index)].push_back(
+                    {x, y, degree - x - y});
+            }
+          }
+        }
+        return result;
+      }();
+  const int clamped_order =
+      std::clamp(order, 0, kCartesianCompressedGreenOrder);
+  return tables[static_cast<std::size_t>(clamped_order)];
 }
 
 double binomial(int n, int k) noexcept {
@@ -286,6 +291,19 @@ compact_green_jet(const Jet8 &jet) noexcept {
   return compact;
 }
 
+void compact_green_jet_order(const Jet8 &jet, int local_order,
+                             std::span<double> compact) noexcept {
+  const int order = std::clamp(2 * local_order + 1, 0,
+                               kCartesianCompressedGreenOrder);
+  const std::vector<MultiIndex> &indices = indices_through(order);
+  if (compact.size() < indices.size())
+    return;
+  for (std::size_t i = 0; i < indices.size(); ++i) {
+    const MultiIndex &index = indices[i];
+    compact[i] = jet.coeff[cube_index(index.x, index.y, index.z)];
+  }
+}
+
 std::size_t compact_index(int x, int y, int z) noexcept {
   static const std::array<std::size_t, kJetSize> lookup = [] {
     std::array<std::size_t, kJetSize> result{};
@@ -362,14 +380,19 @@ compressed_translation_stencils() {
   return stencils;
 }
 
+bool valid_local_order(int order) noexcept {
+  return order >= 1 && order <= kCartesianLocalSourceOrder;
+}
+
 void translate_moments_compact(
     const std::array<double, kCartesianJcpMomentMax> &moments,
     const std::array<double, kCartesianKernelJetTermCount> &kernel,
-    std::array<double, kCartesianLocalTermMax> &local) {
+    std::array<double, kCartesianLocalTermMax> &local, int source_order,
+    int target_order) {
   const std::vector<MultiIndex> &source =
-      indices_through(kCartesianLocalSourceOrder);
+      indices_through(std::clamp(source_order, 0, kCartesianLocalSourceOrder));
   const std::vector<MultiIndex> &target =
-      indices_through(kCartesianLocalTargetOrder);
+      indices_through(std::clamp(target_order, 0, kCartesianLocalTargetOrder));
   for (std::size_t b = 0; b < target.size(); ++b) {
     const MultiIndex &beta = target[b];
     const double sign = ((beta.x + beta.y + beta.z) % 2) == 0 ? 1.0 : -1.0;
@@ -430,13 +453,30 @@ evaluate_gradient(const std::array<double, kCartesianLocalTermMax> &local,
 
 } // namespace
 
-std::size_t cartesian_local_kernel_term_count() noexcept { return 165; }
+std::size_t cartesian_local_kernel_term_count() noexcept {
+  return kCartesianKernelJetTermCount;
+}
 
 std::size_t cartesian_compressed_green_jet_term_count() noexcept {
   return kCartesianCompressedGreenJetTermCount;
 }
 
-std::size_t cartesian_local_term_count() noexcept { return 35; }
+std::size_t
+cartesian_compressed_green_jet_term_count_order(int local_order) noexcept {
+  const int order = std::clamp(2 * local_order + 1, 0,
+                               kCartesianCompressedGreenOrder);
+  return indices_through(order).size();
+}
+
+std::size_t
+cartesian_compressed_green_operator_bytes_order(int local_order) noexcept {
+  return 2 * cartesian_compressed_green_jet_term_count_order(local_order) *
+         sizeof(double);
+}
+
+std::size_t cartesian_local_term_count() noexcept {
+  return kCartesianLocalTermMax;
+}
 
 CartesianJcpLocalP4 translate_cartesian_jcp_m2l_p4(
     const CartesianJcpMoments &moments, double source_center_x,
@@ -487,27 +527,39 @@ CartesianJcpM2lOperatorP4 build_cartesian_jcp_m2l_operator_p4(
 CartesianJcpLocalP4 apply_cartesian_jcp_m2l_operator_p4(
     const CartesianJcpMoments &moments,
     const CartesianJcpM2lOperatorP4 &operator_p4) {
+  return apply_cartesian_jcp_m2l_operator_p4_order(
+      moments, operator_p4, kCartesianLocalSourceOrder);
+}
+
+CartesianJcpLocalP4 apply_cartesian_jcp_m2l_operator_p4_order(
+    const CartesianJcpMoments &moments,
+    const CartesianJcpM2lOperatorP4 &operator_p4, int local_order) {
   CartesianJcpLocalP4 local;
-  if (moments.order != kCartesianLocalSourceOrder ||
-      moments.term_count != kCartesianLocalTermMax) {
+  const int order = std::clamp(local_order, 1, kCartesianLocalSourceOrder);
+  if (!valid_local_order(local_order) || moments.order != order ||
+      moments.term_count != cartesian_moment_term_count(order)) {
     local.finite_outputs = false;
     return local;
   }
   translate_moments_compact(
       moments.phin, operator_p4.jets[0],
-      local.fields[static_cast<std::size_t>(JcpLocalField::K1)]);
+      local.fields[static_cast<std::size_t>(JcpLocalField::K1)], order,
+      order);
   translate_moments_compact(
       moments.phin, operator_p4.jets[1],
-      local.fields[static_cast<std::size_t>(JcpLocalField::K3Potential)]);
+      local.fields[static_cast<std::size_t>(JcpLocalField::K3Potential)],
+      order, order);
   for (int component = 0; component < 3; ++component) {
     translate_moments_compact(
         moments.phi_normal[static_cast<std::size_t>(component)],
         operator_p4.jets[2 + static_cast<std::size_t>(component)],
-        local.fields[static_cast<std::size_t>(JcpLocalField::K2)]);
+        local.fields[static_cast<std::size_t>(JcpLocalField::K2)], order,
+        order);
     translate_moments_compact(
         moments.phi_normal[static_cast<std::size_t>(component)],
         operator_p4.jets[5 + static_cast<std::size_t>(component)],
-        local.fields[static_cast<std::size_t>(JcpLocalField::K4Potential)]);
+        local.fields[static_cast<std::size_t>(JcpLocalField::K4Potential)],
+        order, order);
   }
   local.finite_outputs = operator_p4.finite_outputs;
   for (const auto &field : local.fields) {
@@ -532,38 +584,77 @@ build_cartesian_jcp_compressed_green_operator_p4(
   return result;
 }
 
+void build_cartesian_jcp_compressed_green_operator_p4_order(
+    double source_center_x, double source_center_y, double source_center_z,
+    double target_center_x, double target_center_y, double target_center_z,
+    double kappa, int local_order, std::span<double> coulomb,
+    std::span<double> yukawa) {
+  compact_green_jet_order(
+      green_jet(target_center_x, target_center_y, target_center_z,
+                source_center_x, source_center_y, source_center_z, 0.0),
+      local_order, coulomb);
+  compact_green_jet_order(
+      green_jet(target_center_x, target_center_y, target_center_z,
+                source_center_x, source_center_y, source_center_z, kappa),
+      local_order, yukawa);
+}
+
 CartesianJcpLocalP4 apply_cartesian_jcp_compressed_green_operator_p4(
     const CartesianJcpMoments &moments,
     const CartesianJcpCompressedGreenOperatorP4 &operator_p4,
     double eps_ratio) {
+  return apply_cartesian_jcp_compressed_green_operator_p4_order(
+      moments, operator_p4, eps_ratio, kCartesianLocalSourceOrder);
+}
+
+CartesianJcpLocalP4 apply_cartesian_jcp_compressed_green_operator_p4_order(
+    const CartesianJcpMoments &moments,
+    const CartesianJcpCompressedGreenOperatorP4 &operator_p4,
+    double eps_ratio, int local_order) {
+  const std::size_t term_count =
+      cartesian_compressed_green_jet_term_count_order(local_order);
+  return apply_cartesian_jcp_compressed_green_operator_p4_order(
+      moments, std::span<const double>(operator_p4.coulomb.data(), term_count),
+      std::span<const double>(operator_p4.yukawa.data(), term_count),
+      eps_ratio, local_order);
+}
+
+CartesianJcpLocalP4 apply_cartesian_jcp_compressed_green_operator_p4_order(
+    const CartesianJcpMoments &moments, std::span<const double> coulomb,
+    std::span<const double> yukawa, double eps_ratio, int local_order) {
   CartesianJcpLocalP4 local;
-  if (moments.order != kCartesianLocalSourceOrder ||
-      moments.term_count != kCartesianLocalTermMax) {
+  const int order = std::clamp(local_order, 1, kCartesianLocalSourceOrder);
+  const std::size_t green_term_count =
+      cartesian_compressed_green_jet_term_count_order(order);
+  if (!valid_local_order(local_order) || moments.order != order ||
+      moments.term_count != cartesian_moment_term_count(order) ||
+      coulomb.size() < green_term_count || yukawa.size() < green_term_count) {
     local.finite_outputs = false;
     return local;
   }
   const double safe_eps = std::max(1.0e-12, eps_ratio);
   const auto &stencils = compressed_translation_stencils();
-  for (std::size_t b = 0; b < kCartesianLocalTermMax; ++b) {
+  const std::size_t term_count = cartesian_moment_term_count(order);
+  for (std::size_t b = 0; b < term_count; ++b) {
     double k1 = 0.0;
     double k3 = 0.0;
     std::array<double, 3> k2{};
     std::array<double, 3> k4{};
-    for (std::size_t a = 0; a < kCartesianLocalTermMax; ++a) {
+    for (std::size_t a = 0; a < term_count; ++a) {
       const auto &stencil =
           stencils[b * kCartesianLocalTermMax + a];
-      const double green0 = operator_p4.coulomb[stencil.green_index];
-      const double greenk = operator_p4.yukawa[stencil.green_index];
+      const double green0 = coulomb[stencil.green_index];
+      const double greenk = yukawa[stencil.green_index];
       k1 += moments.phin[a] * stencil.factor * (green0 - greenk);
       k3 += moments.phin[a] * stencil.factor *
             (green0 - greenk / safe_eps);
       for (std::size_t component = 0; component < 3; ++component) {
         const double source0 =
             stencil.derivative_degree[component] *
-            operator_p4.coulomb[stencil.derivative_index[component]];
+            coulomb[stencil.derivative_index[component]];
         const double sourcek =
             stencil.derivative_degree[component] *
-            operator_p4.yukawa[stencil.derivative_index[component]];
+            yukawa[stencil.derivative_index[component]];
         const double moment = moments.phi_normal[component][a];
         k2[component] +=
             moment * stencil.factor * (safe_eps * sourcek - source0);
@@ -579,10 +670,10 @@ CartesianJcpLocalP4 apply_cartesian_jcp_compressed_green_operator_p4(
         (k4[0] + k4[1]) + k4[2];
   }
 
-  for (const auto &jet : {&operator_p4.coulomb, &operator_p4.yukawa}) {
-    for (const double value : *jet)
-      local.finite_outputs = local.finite_outputs && std::isfinite(value);
-  }
+  for (const double value : coulomb)
+    local.finite_outputs = local.finite_outputs && std::isfinite(value);
+  for (const double value : yukawa)
+    local.finite_outputs = local.finite_outputs && std::isfinite(value);
   for (const auto &field : local.fields) {
     for (const double value : field)
       local.finite_outputs = local.finite_outputs && std::isfinite(value);

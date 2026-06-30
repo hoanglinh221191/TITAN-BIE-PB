@@ -149,6 +149,12 @@ void test_far_attribution_reports_current_moment_degree() {
              "far record must report finite MAC ratio");
       expect(record.mac_ratio <= cfg.separation_theta + 1.0e-12,
              "far record MAC ratio must match the accepted interaction metric");
+      expect(std::isfinite(record.expansion_mac_ratio),
+             "far record must report finite expansion-center MAC ratio");
+      expect(record.source_expansion_radius + record.source_center_offset +
+                     1.0e-12 >=
+                 record.source_radius,
+             "expansion radius plus center offset must enclose source panels");
     }
   }
 }

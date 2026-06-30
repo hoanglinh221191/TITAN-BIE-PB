@@ -40,10 +40,14 @@ double relative_rms(const fmm::CartesianJcpLocalP4 &lhs,
 } // namespace
 
 int main() {
-  expect(fmm::cartesian_compressed_green_jet_term_count() == 220,
-         "degree-9 compact jet must contain 220 coefficients");
-  expect(sizeof(fmm::CartesianJcpCompressedGreenOperatorP4) == 3520,
-         "compressed operator must contain exactly two 220-double jets");
+  expect(fmm::cartesian_compressed_green_jet_term_count() == 364,
+         "max degree-11 compact jet storage must contain 364 coefficients");
+  expect(fmm::cartesian_compressed_green_jet_term_count_order(4) == 220,
+         "p4 compressed Green jet must contain 220 active coefficients");
+  expect(fmm::cartesian_compressed_green_operator_bytes_order(4) == 3520,
+         "p4 compressed cache operator byte count must remain 3520");
+  expect(sizeof(fmm::CartesianJcpCompressedGreenOperatorP4) == 5824,
+         "max compressed operator wrapper must contain two 364-double jets");
 
   auto panels = fmm::make_tabi_panel_like_fixture(96, 29);
   for (std::size_t i = 0; i < panels.size(); ++i)
@@ -64,10 +68,10 @@ int main() {
       0.1, -0.2, 0.05, 4.2, 1.4, -2.1, 0.17);
 
   const auto legacy_local =
-      fmm::apply_cartesian_jcp_m2l_operator_p4(moments, legacy);
+      fmm::apply_cartesian_jcp_m2l_operator_p4_order(moments, legacy, 4);
   const auto compressed_local =
-      fmm::apply_cartesian_jcp_compressed_green_operator_p4(
-          moments, compressed, 1.0 / 80.0);
+      fmm::apply_cartesian_jcp_compressed_green_operator_p4_order(
+          moments, compressed, 1.0 / 80.0, 4);
   expect(legacy.finite_outputs && compressed_local.finite_outputs,
          "operators and local fields must be finite");
   expect(relative_rms(compressed_local, legacy_local) <= 1.0e-12,

@@ -1,0 +1,13 @@
+TITAN FAGBI release-readiness manifest
+======================================
+
+Status: pre-submission; public repository URL and DOI pending.
+License: MIT.
+Git commit: 506e049c628ad4ef108ab9d31d4e16243cd32d6c
+Manifest CSV: docs/fagbi_guarded_p4_package/release_artifact_manifest.csv
+Manifest JSON: docs/fagbi_guarded_p4_package/release_artifact_manifest.json
+Entries: 728
+Missing required artifacts: 0
+
+Manuscript statement prepared:
+The TITAN source code, benchmark manifests, scripts, and reference outputs corresponding to the reported tables will be released under the MIT License at a versioned public repository and archived with a persistent DOI before submission.

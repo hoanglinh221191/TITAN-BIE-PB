@@ -2312,6 +2312,19 @@ IMPORTANT NOTES
   -pbctopo              pbctopo (VIBE): Virtual Intact Block Extraction PBC mode
   -pbctopo-anchor-backend=<name>
                         auto | prim | spatial-all. Default: auto
+  -pbctopo-bond-cutoff=<A>
+                        Local topology bond cutoff. Default: 2.15 A; MARTINI: 5.5 A
+  -pbctopo-clash-cutoff=<A>
+                        Clash cutoff for VIBE candidate rejection. Default: 1.05 A; MARTINI: 3.5 A
+  -pbctopo-contact-cutoff=<A>
+                        Owner/contact cutoff for split guards. Default: 4.5 A; MARTINI: 8.0 A
+  -pbctopo-continuity-cutoff=<A>
+                        Continuity graph cutoff. Default: 20.0 A
+  -pbctopo-exact-component-limit=<N>
+                        Max raw/effective components for exact search.
+                        Range: 1..16. Default: 6
+  -pbctopo-beam-width=<N>
+                        Large-component beam width. Range: 1..4096. Default: 12
   -pbcclust <axes>      Clustered PBC mode; axes like x, xy, xyz
   -pbcm [chain_ref]     Membrane-oriented PBC mode
   -refpbc <file>        Separate reference PDB for PBC correction

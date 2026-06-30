@@ -57,6 +57,8 @@ struct Cell {
   double qx = 0.0;
   double qy = 0.0;
   double qz = 0.0;
+  double expansion_radius = 0.0;
+  double center_offset = 0.0;
   double px = 0.0;
   double py = 0.0;
   double pz = 0.0;
@@ -220,8 +222,21 @@ void compute_cell_geometry(Tree &tree, const PointSoA &points, int node_index) {
   cell.qx = 0.5 * (min_x + max_x);
   cell.qy = 0.5 * (min_y + max_y);
   cell.qz = 0.5 * (min_z + max_z);
+  const double center_dx = cell.qx - cell.cx;
+  const double center_dy = cell.qy - cell.cy;
+  const double center_dz = cell.qz - cell.cz;
+  cell.center_offset =
+      std::sqrt(center_dx * center_dx + center_dy * center_dy +
+                center_dz * center_dz);
+  cell.expansion_radius = 0.0;
   for (std::size_t pos = cell.begin; pos < cell.end; ++pos) {
     const std::size_t idx = tree.order[pos];
+    const double edx = points.x[idx] - cell.qx;
+    const double edy = points.y[idx] - cell.qy;
+    const double edz = points.z[idx] - cell.qz;
+    cell.expansion_radius =
+        std::max(cell.expansion_radius,
+                 std::sqrt(edx * edx + edy * edy + edz * edz));
     cell.px += points.q[idx] * (points.x[idx] - cell.qx);
     cell.py += points.q[idx] * (points.y[idx] - cell.qy);
     cell.pz += points.q[idx] * (points.z[idx] - cell.qz);
@@ -859,13 +874,14 @@ std::uint64_t rademacher_hash(std::size_t panel_id,
 }
 
 struct StaticLocalP4Plan {
+  int local_order{4};
   double tolerance{2.0e-3};
   std::vector<int> target_nodes;
   std::vector<TargetLeafWork> work;
   std::vector<std::vector<CartesianJcpM2lOperatorP4>> cached_operators;
-  std::vector<CartesianJcpCompressedGreenOperatorP4>
-      compressed_cached_operators;
+  std::vector<double> compressed_cached_green_coefficients;
   std::vector<std::size_t> compressed_cache_offsets;
+  std::size_t compressed_green_term_count{0};
   std::vector<std::vector<int>> refined_fallback_sources;
   std::unique_ptr<PackedJcpFallbackPlan> packed_fallback_plan;
   std::uint64_t hash{0};
@@ -903,6 +919,9 @@ struct StaticLocalP4Plan {
   std::size_t metric_cache_peak_bytes{0};
   std::size_t parallel_target_leaves{0};
   double cache_seconds{0.0};
+  std::size_t tiled_green_term_count{0};
+  std::size_t tiled_operator_bytes{0};
+  std::size_t tiled_peak_bytes{0};
   bool cache_ready{false};
 };
 
@@ -1389,8 +1408,10 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   if (production_panels == nullptr || production_panels->size() != n)
     throw std::invalid_argument(
         "JCP local p4 candidate requires production panel geometry");
-  if (impl_->config.expansion_order != 4)
-    throw std::invalid_argument("JCP local p4 candidate requires order 4");
+  const int local_order = impl_->config.expansion_order;
+  if (local_order < 2 || local_order > 5)
+    throw std::invalid_argument(
+        "JCP local p4 candidate requires Taylor order 2, 3, 4, or 5");
   if (refine_mode != "operator-tail-static" &&
       refine_mode != "operator-tail-linf")
     throw std::invalid_argument(
@@ -1400,9 +1421,10 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
     throw std::invalid_argument(
         "JCP local p4 static tolerance must be in [1e-4, 5e-2]");
   if (cache_mode != "off" && cache_mode != "kernel-jet" &&
-      cache_mode != "green-jet-compressed")
+      cache_mode != "green-jet-compressed" &&
+      cache_mode != "green-jet-tiled")
     throw std::invalid_argument(
-        "JCP local p4 cache must be off, kernel-jet, or green-jet-compressed");
+        "JCP local p4 cache must be off, kernel-jet, green-jet-compressed, or green-jet-tiled");
   if (fallback_mode != "scalar" && fallback_mode != "packed-avx2")
     throw std::invalid_argument(
         "JCP local p4 fallback must be scalar or packed-avx2");
@@ -1428,6 +1450,7 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   const auto build_plan = [&]() {
     const auto plan_begin = Clock::now();
     auto plan = std::make_unique<StaticLocalP4Plan>();
+    plan->local_order = local_order;
     plan->tolerance = refine_tolerance;
     plan->refine_mode = refine_mode;
     plan->plan_builder = plan_builder;
@@ -1505,7 +1528,8 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
         }
       }
       probe_moments[probe] = build_cartesian_node_moments(
-          impl_->source_tree, impl_->panels, probe_phi, probe_phin, 4,
+          impl_->source_tree, impl_->panels, probe_phi, probe_phin,
+          local_order,
           executor);
     }
     plan->probe_moment_seconds =
@@ -1655,33 +1679,38 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
         metric.signal_sq_by_probe.assign(probe_moments.size(), 0.0);
         for (std::size_t probe = 0; probe < probe_moments.size(); ++probe) {
           const CartesianJcpLocalP4 translated =
-              translate_cartesian_jcp_m2l_p4(
-                  probe_moments[probe][source_index], source_cell.qx,
-                  source_cell.qy, source_cell.qz, target_cell.qx,
-                  target_cell.qy, target_cell.qz, impl_->eps_ratio,
-                  impl_->kappa);
+              apply_cartesian_jcp_m2l_operator_p4_order(
+                  probe_moments[probe][source_index],
+                  build_cartesian_jcp_m2l_operator_p4(
+                      source_cell.qx, source_cell.qy, source_cell.qz,
+                      target_cell.qx, target_cell.qy, target_cell.qz,
+                      impl_->eps_ratio, impl_->kappa),
+                  local_order);
           double pair_tail_sq = 0.0;
           double pair_signal_sq = 0.0;
+          const int tail_low_order = std::max(1, local_order - 1);
           for (std::size_t pos = target_cell.begin; pos < target_cell.end;
                ++pos) {
             const PrototypePanel &target =
                 impl_->panels[impl_->target_tree.order[pos]];
-            const auto p4 = evaluate_cartesian_jcp_l2p_order(
+            const auto p_high = evaluate_cartesian_jcp_l2p_order(
                 target, target_cell.qx, target_cell.qy, target_cell.qz,
-                translated, 4);
-            const auto p3 = evaluate_cartesian_jcp_l2p_order(
+                translated, local_order);
+            const auto p_low = evaluate_cartesian_jcp_l2p_order(
                 target, target_cell.qx, target_cell.qy, target_cell.qz,
-                translated, 3);
+                translated, tail_low_order);
             for (const std::pair<int, int> range :
                  {std::pair<int, int>{0, 2}, {2, 4}}) {
-              const double p4_row = p4[range.first] + p4[range.first + 1];
-              const double p3_row = p3[range.first] + p3[range.first + 1];
-              const double tail = p4_row - p3_row;
+              const double high_row =
+                  p_high[range.first] + p_high[range.first + 1];
+              const double low_row =
+                  p_low[range.first] + p_low[range.first + 1];
+              const double tail = high_row - low_row;
               const double abs_tail = std::abs(tail);
               const double relative_tail =
-                  abs_tail / std::max(1.0e-300, std::abs(p4_row));
+                  abs_tail / std::max(1.0e-300, std::abs(high_row));
               pair_tail_sq += tail * tail;
-              pair_signal_sq += p4_row * p4_row;
+              pair_signal_sq += high_row * high_row;
               metric.max_abs_tail =
                   std::max(metric.max_abs_tail, abs_tail);
               metric.max_relative_tail =
@@ -1837,6 +1866,7 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
     std::uint64_t tolerance_bits = 0;
     static_assert(sizeof(tolerance_bits) == sizeof(refine_tolerance));
     std::memcpy(&tolerance_bits, &refine_tolerance, sizeof(tolerance_bits));
+    hash_mix(hash, static_cast<std::uint64_t>(local_order));
     hash_mix(hash, tolerance_bits);
     hash_mix(hash, static_cast<std::uint64_t>(refine_probe_count));
     for (const char ch : refine_probe_mode)
@@ -1866,6 +1896,7 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   };
 
   if (!impl_->static_local_plan ||
+      impl_->static_local_plan->local_order != local_order ||
       !same_double(impl_->static_local_plan->tolerance, refine_tolerance) ||
       impl_->static_local_plan->refine_mode != refine_mode ||
       impl_->static_local_plan->plan_builder != plan_builder ||
@@ -1908,12 +1939,16 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
 
   const std::size_t budget_bytes =
       cache_budget_mb * std::size_t{1024} * std::size_t{1024};
-  const bool cache_requested = cache_mode == "kernel-jet" ||
-                               cache_mode == "green-jet-compressed";
-  if (cache_requested && plan.cache_ready && plan.cache_layout != cache_mode) {
+  const bool tiled_cache = cache_mode == "green-jet-tiled";
+  const bool global_cache_requested = cache_mode == "kernel-jet" ||
+                                      cache_mode == "green-jet-compressed";
+  const bool cache_requested = global_cache_requested || tiled_cache;
+  if (global_cache_requested && plan.cache_ready &&
+      plan.cache_layout != cache_mode) {
     plan.cached_operators.clear();
-    plan.compressed_cached_operators.clear();
+    plan.compressed_cached_green_coefficients.clear();
     plan.compressed_cache_offsets.clear();
+    plan.compressed_green_term_count = 0;
     plan.cache_ready = false;
     plan.cache_bytes = 0;
     plan.cache_operator_bytes = 0;
@@ -1921,10 +1956,10 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
     plan.cache_compression_ratio = 1.0;
     plan.cache_layout = "off";
   }
-  if (cache_requested && !plan.cache_ready) {
+  if (global_cache_requested && !plan.cache_ready) {
     const std::size_t operator_bytes =
         cache_mode == "green-jet-compressed"
-            ? sizeof(CartesianJcpCompressedGreenOperatorP4)
+            ? cartesian_compressed_green_operator_bytes_order(local_order)
             : sizeof(CartesianJcpM2lOperatorP4);
     const std::size_t offset_bytes =
         cache_mode == "green-jet-compressed" && plan.far_pairs > 0
@@ -1938,27 +1973,38 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
                                " budget=" + std::to_string(budget_bytes));
     const auto cache_begin = Clock::now();
     if (cache_mode == "green-jet-compressed") {
+      const std::size_t green_terms =
+          cartesian_compressed_green_jet_term_count_order(local_order);
+      plan.compressed_green_term_count = green_terms;
       if (plan.far_pairs > 0) {
         plan.compressed_cache_offsets.assign(plan.work.size() + 1, 0);
-        plan.compressed_cached_operators.reserve(plan.far_pairs);
+        plan.compressed_cached_green_coefficients.assign(
+            plan.far_pairs * 2 * green_terms, 0.0);
+        std::size_t far_pair_index = 0;
         for (std::size_t target_index = 0; target_index < plan.work.size();
              ++target_index) {
-          plan.compressed_cache_offsets[target_index] =
-              plan.compressed_cached_operators.size();
+          plan.compressed_cache_offsets[target_index] = far_pair_index;
           const Cell &target_cell = impl_->target_tree.cells[
               static_cast<std::size_t>(plan.target_nodes[target_index])];
           for (const int source_node : plan.work[target_index].far_sources) {
             const Cell &source_cell = impl_->source_tree.cells[
                 static_cast<std::size_t>(source_node)];
-            plan.compressed_cached_operators.push_back(
-                build_cartesian_jcp_compressed_green_operator_p4(
-                    source_cell.qx, source_cell.qy, source_cell.qz,
-                    target_cell.qx, target_cell.qy, target_cell.qz,
-                    impl_->kappa));
+            const std::size_t base = far_pair_index * 2 * green_terms;
+            build_cartesian_jcp_compressed_green_operator_p4_order(
+                source_cell.qx, source_cell.qy, source_cell.qz,
+                target_cell.qx, target_cell.qy, target_cell.qz, impl_->kappa,
+                local_order,
+                std::span<double>(
+                    plan.compressed_cached_green_coefficients.data() + base,
+                    green_terms),
+                std::span<double>(
+                    plan.compressed_cached_green_coefficients.data() + base +
+                        green_terms,
+                    green_terms));
+            ++far_pair_index;
           }
         }
-        plan.compressed_cache_offsets.back() =
-            plan.compressed_cached_operators.size();
+        plan.compressed_cache_offsets.back() = far_pair_index;
       }
     } else {
       plan.cached_operators.resize(plan.work.size());
@@ -1992,15 +2038,38 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
     plan.cache_seconds = elapsed_seconds(cache_begin, Clock::now());
     ++impl_->local_cache_build_count;
   }
-  if (cache_requested && plan.cache_layout == cache_mode &&
+  if (global_cache_requested && plan.cache_layout == cache_mode &&
       plan.cache_bytes > budget_bytes)
     throw std::runtime_error("cache_budget_exceeded: existing cache exceeds budget");
 
+  const std::size_t workers = std::max<std::size_t>(1, executor.capacity());
+  const std::size_t tiled_operator_bytes =
+      tiled_cache ? cartesian_compressed_green_operator_bytes_order(local_order)
+                  : 0;
+  const std::size_t tiled_cache_bytes =
+      tiled_cache ? workers * tiled_operator_bytes : 0;
+  if (tiled_cache && tiled_cache_bytes > budget_bytes)
+    throw std::runtime_error("cache_budget_exceeded: required=" +
+                             std::to_string(tiled_cache_bytes) +
+                             " budget=" + std::to_string(budget_bytes));
+  if (tiled_cache) {
+    plan.tiled_green_term_count =
+        cartesian_compressed_green_jet_term_count_order(local_order);
+    plan.tiled_operator_bytes = tiled_operator_bytes;
+    plan.tiled_peak_bytes = tiled_cache_bytes;
+  }
+
   JcpLocalP4CandidateResult result;
   result.refine_mode = refine_mode;
+  result.local_source_order = local_order;
+  result.local_target_order = local_order;
+  result.local_kernel_derivative_order = 2 * local_order;
   result.refine_tolerance = refine_tolerance;
   result.cache_mode = cache_mode;
-  result.cache_layout = cache_requested ? plan.cache_layout : "off";
+  result.cache_layout = tiled_cache
+                            ? "green-jet-tiled"
+                            : (global_cache_requested ? plan.cache_layout
+                                                      : "off");
   result.plan_hash = plan.hash;
   result.plan_build_count = impl_->static_plan_build_count;
   result.static_probe_count = plan.probe_count;
@@ -2022,20 +2091,34 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   result.direct_fallback_pairs = plan.direct_fallback_pairs;
   result.far_pairs = plan.far_pairs;
   result.cache_operator_count =
-      cache_requested && plan.cache_ready ? plan.far_pairs : 0;
+      tiled_cache ? workers
+                  : (global_cache_requested && plan.cache_ready
+                         ? plan.far_pairs
+                         : 0);
   result.cache_bytes =
-      cache_requested && plan.cache_ready ? plan.cache_bytes : 0;
+      tiled_cache ? tiled_cache_bytes
+                  : (global_cache_requested && plan.cache_ready
+                         ? plan.cache_bytes
+                         : 0);
   result.cache_operator_bytes =
-      cache_requested ? plan.cache_operator_bytes : 0;
+      tiled_cache ? tiled_operator_bytes
+                  : (global_cache_requested ? plan.cache_operator_bytes : 0);
   result.cache_uncompressed_estimated_bytes =
-      cache_requested ? plan.cache_uncompressed_estimated_bytes : 0;
+      cache_requested ? plan.far_pairs * sizeof(CartesianJcpM2lOperatorP4)
+                      : 0;
   result.cache_compression_ratio =
-      cache_requested ? plan.cache_compression_ratio : 1.0;
+      result.cache_bytes > 0
+          ? static_cast<double>(result.cache_uncompressed_estimated_bytes) /
+                static_cast<double>(result.cache_bytes)
+          : 1.0;
   result.cache_far_pair_offsets =
       cache_mode == "green-jet-compressed"
           ? plan.compressed_cache_offsets.size()
           : 0;
-  result.cache_build_count = impl_->local_cache_build_count;
+  result.cache_build_count = tiled_cache ? 1 : impl_->local_cache_build_count;
+  result.cache_tile_bytes = tiled_cache ? tiled_operator_bytes : 0;
+  result.cache_tile_count = tiled_cache ? workers : 0;
+  result.cache_tile_builds = tiled_cache ? plan.far_pairs : 0;
   result.fallback_requested = fallback_mode;
   result.fallback_effective = fallback_mode;
   if (plan.packed_fallback_plan) {
@@ -2058,7 +2141,7 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   result.plan_refinement_iterations = plan.refinement_iterations;
   result.plan_metric_cache_peak_bytes = plan.metric_cache_peak_bytes;
   result.plan_parallel_target_leaves = plan.parallel_target_leaves;
-  result.cache_seconds = plan.cache_seconds;
+  result.cache_seconds = tiled_cache ? 0.0 : plan.cache_seconds;
   result.phi.assign(n, 0.0);
   result.phin.assign(n, 0.0);
 
@@ -2066,15 +2149,35 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
   const auto moment_begin = Clock::now();
   const std::vector<CartesianJcpMoments> moments =
       build_cartesian_node_moments(impl_->source_tree, impl_->panels,
-                                   phi_values, phin_values, 4, executor);
+                                   phi_values, phin_values, local_order,
+                                   executor);
   result.moment_seconds = elapsed_seconds(moment_begin, Clock::now());
 
   std::vector<CartesianJcpLocalP4> locals(plan.work.size());
   const auto m2l_begin = Clock::now();
-  const std::size_t workers = std::max<std::size_t>(1, executor.capacity());
+  const std::size_t tiled_green_terms =
+      tiled_cache ? plan.tiled_green_term_count : 0;
+  std::vector<std::vector<double>> worker_coulomb;
+  std::vector<std::vector<double>> worker_yukawa;
+  if (tiled_cache) {
+    worker_coulomb.resize(workers);
+    worker_yukawa.resize(workers);
+    for (std::size_t worker = 0; worker < workers; ++worker) {
+      worker_coulomb[worker].assign(tiled_green_terms, 0.0);
+      worker_yukawa[worker].assign(tiled_green_terms, 0.0);
+    }
+  }
   executor.parallel_for(
       plan.work.size(), workers, 1,
-      [&](std::size_t, std::size_t begin, std::size_t end) {
+      [&](std::size_t worker_id, std::size_t begin, std::size_t end) {
+        std::vector<double> *tiled_coulomb =
+            tiled_cache && !worker_coulomb.empty()
+                ? &worker_coulomb[worker_id % worker_coulomb.size()]
+                : nullptr;
+        std::vector<double> *tiled_yukawa =
+            tiled_cache && !worker_yukawa.empty()
+                ? &worker_yukawa[worker_id % worker_yukawa.size()]
+                : nullptr;
         for (std::size_t target_index = begin; target_index < end;
              ++target_index) {
           const Cell &target_cell = impl_->target_tree.cells[
@@ -2087,25 +2190,57 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
                 plan.work[target_index].far_sources[far_index];
             CartesianJcpLocalP4 translated;
             if (cache_mode == "kernel-jet") {
-              translated = apply_cartesian_jcp_m2l_operator_p4(
+              translated = apply_cartesian_jcp_m2l_operator_p4_order(
                   moments[static_cast<std::size_t>(source_node)],
-                  plan.cached_operators[target_index][far_index]);
+                  plan.cached_operators[target_index][far_index],
+                  local_order);
             } else if (cache_mode == "green-jet-compressed") {
-              const std::size_t offset =
+              const std::size_t far_pair_offset =
                   plan.compressed_cache_offsets[target_index] + far_index;
+              const std::size_t green_terms =
+                  plan.compressed_green_term_count;
+              const std::size_t offset = far_pair_offset * 2 * green_terms;
               translated =
-                  apply_cartesian_jcp_compressed_green_operator_p4(
+                  apply_cartesian_jcp_compressed_green_operator_p4_order(
                       moments[static_cast<std::size_t>(source_node)],
-                      plan.compressed_cached_operators[offset],
-                      impl_->eps_ratio);
+                      std::span<const double>(
+                          plan.compressed_cached_green_coefficients.data() +
+                              offset,
+                          green_terms),
+                      std::span<const double>(
+                          plan.compressed_cached_green_coefficients.data() +
+                              offset + green_terms,
+                          green_terms),
+                      impl_->eps_ratio, local_order);
+            } else if (cache_mode == "green-jet-tiled") {
+              const Cell &source_cell = impl_->source_tree.cells[
+                  static_cast<std::size_t>(source_node)];
+              build_cartesian_jcp_compressed_green_operator_p4_order(
+                  source_cell.qx, source_cell.qy, source_cell.qz,
+                  target_cell.qx, target_cell.qy, target_cell.qz,
+                  impl_->kappa, local_order,
+                  std::span<double>(tiled_coulomb->data(),
+                                    tiled_coulomb->size()),
+                  std::span<double>(tiled_yukawa->data(),
+                                    tiled_yukawa->size()));
+              translated =
+                  apply_cartesian_jcp_compressed_green_operator_p4_order(
+                      moments[static_cast<std::size_t>(source_node)],
+                      std::span<const double>(tiled_coulomb->data(),
+                                              tiled_coulomb->size()),
+                      std::span<const double>(tiled_yukawa->data(),
+                                              tiled_yukawa->size()),
+                      impl_->eps_ratio, local_order);
             } else {
               const Cell &source_cell = impl_->source_tree.cells[
                   static_cast<std::size_t>(source_node)];
-              translated = translate_cartesian_jcp_m2l_p4(
+              translated = apply_cartesian_jcp_m2l_operator_p4_order(
                   moments[static_cast<std::size_t>(source_node)],
-                  source_cell.qx, source_cell.qy, source_cell.qz,
-                  target_cell.qx, target_cell.qy, target_cell.qz,
-                  impl_->eps_ratio, impl_->kappa);
+                  build_cartesian_jcp_m2l_operator_p4(
+                      source_cell.qx, source_cell.qy, source_cell.qz,
+                      target_cell.qx, target_cell.qy, target_cell.qz,
+                      impl_->eps_ratio, impl_->kappa),
+                  local_order);
             }
             accumulate_cartesian_jcp_local(accumulated, translated);
           }
@@ -2113,9 +2248,11 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
         }
       });
   result.m2l_seconds = elapsed_seconds(m2l_begin, Clock::now());
-  if (cache_requested)
+  if (global_cache_requested)
     impl_->local_cache_hits += plan.far_pairs;
   result.cache_hits = impl_->local_cache_hits;
+  if (tiled_cache)
+    result.cache_tile_seconds = result.m2l_seconds;
 
   const auto l2p_begin = Clock::now();
   executor.parallel_for(
@@ -2128,9 +2265,9 @@ JcpLocalP4CandidateResult FmmM2lAnalyticContext::apply_local_p4_candidate(
           for (std::size_t pos = target_cell.begin; pos < target_cell.end;
                ++pos) {
             const std::size_t target_panel = impl_->target_tree.order[pos];
-            const auto channels = evaluate_cartesian_jcp_l2p(
+            const auto channels = evaluate_cartesian_jcp_l2p_order(
                 impl_->panels[target_panel], target_cell.qx, target_cell.qy,
-                target_cell.qz, locals[target_index]);
+                target_cell.qz, locals[target_index], local_order);
             result.phi[target_panel] = channel_phi(channels);
             result.phin[target_panel] = coupled ? channel_phin(channels) : 0.0;
           }
@@ -2299,7 +2436,11 @@ FmmM2lAnalyticContext::attribute_local_p4_candidate(
                                          : "local_m2l_p4_static");
   result.probe = probe;
   result.configured_expansion_order = impl_->config.expansion_order;
-  result.implemented_far_moment_degree = 4;
+  result.implemented_far_moment_degree = candidate.local_source_order;
+  result.local_source_order = candidate.local_source_order;
+  result.local_target_order = candidate.local_target_order;
+  result.local_kernel_derivative_order =
+      candidate.local_kernel_derivative_order;
   result.local_refine_mode = candidate.refine_mode;
   result.local_refine_tolerance = candidate.refine_tolerance;
   result.local_refined_cells = candidate.refined_cells;
@@ -2334,6 +2475,10 @@ FmmM2lAnalyticContext::attribute_local_p4_candidate(
   result.local_cache_far_pair_offsets = candidate.cache_far_pair_offsets;
   result.local_cache_build_count = candidate.cache_build_count;
   result.local_cache_hits = candidate.cache_hits;
+  result.local_cache_tile_bytes = candidate.cache_tile_bytes;
+  result.local_cache_tile_count = candidate.cache_tile_count;
+  result.local_cache_tile_builds = candidate.cache_tile_builds;
+  result.local_cache_tile_seconds = candidate.cache_tile_seconds;
   result.local_plan_seconds = candidate.plan_seconds;
   result.local_plan_builder = candidate.plan_builder;
   result.local_plan_probe_moment_seconds =
@@ -2853,6 +2998,19 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
           record.distance > 1.0e-12
               ? (target_cell.radius + source_cell.radius) / record.distance
               : std::numeric_limits<double>::infinity();
+      const double eqx = target_cell.qx - source_cell.qx;
+      const double eqy = target_cell.qy - source_cell.qy;
+      const double eqz = target_cell.qz - source_cell.qz;
+      record.expansion_distance = std::sqrt(eqx * eqx + eqy * eqy + eqz * eqz);
+      record.target_expansion_radius = target_cell.expansion_radius;
+      record.source_expansion_radius = source_cell.expansion_radius;
+      record.target_center_offset = target_cell.center_offset;
+      record.source_center_offset = source_cell.center_offset;
+      record.expansion_mac_ratio =
+          record.expansion_distance > 1.0e-12
+              ? (target_cell.expansion_radius + source_cell.expansion_radius) /
+                    record.expansion_distance
+              : std::numeric_limits<double>::infinity();
       const auto far_begin = Clock::now();
       record.approximate =
           cartesian
@@ -2903,7 +3061,13 @@ JcpOperatorAttributionResult FmmM2lAnalyticContext::attribute_impl(
   for (const JcpOperatorAttributionRecord &record : result.records) {
     result.finite_outputs =
         result.finite_outputs && std::isfinite(record.distance) &&
-        std::isfinite(record.source_radius) && std::isfinite(record.mac_ratio);
+        std::isfinite(record.source_radius) && std::isfinite(record.mac_ratio) &&
+        std::isfinite(record.expansion_distance) &&
+        std::isfinite(record.target_expansion_radius) &&
+        std::isfinite(record.source_expansion_radius) &&
+        std::isfinite(record.target_center_offset) &&
+        std::isfinite(record.source_center_offset) &&
+        std::isfinite(record.expansion_mac_ratio);
     for (std::size_t channel = 0; channel < 4; ++channel) {
       result.finite_outputs =
           result.finite_outputs && std::isfinite(record.approximate[channel]) &&
@@ -4193,7 +4357,7 @@ ensure_jcp_fmm_m2l_context(
   config.max_leaf_size =
       static_cast<int>(std::clamp<std::size_t>(leaf_size == 0 ? 64 : leaf_size,
                                                8, 512));
-  config.expansion_order = std::clamp(expansion_order, 3, 4);
+  config.expansion_order = std::clamp(expansion_order, 2, 5);
   config.separation_theta =
       std::clamp(std::isfinite(opening_theta) && opening_theta > 0.0
                      ? opening_theta
@@ -4287,7 +4451,7 @@ void apply_jcp_fmm_m2l_single_matvec(
     stats->duffy_subdivisions_max = result.duffy_subdivisions_max;
     stats->duffy_subdivisions_mean = result.duffy_subdivisions_mean;
     stats->near_kernel_policy = result.near_kernel_policy;
-    stats->expansion_order = std::clamp(expansion_order, 3, 4);
+    stats->expansion_order = std::clamp(expansion_order, 2, 5);
     stats->setup_ms = 1000.0 * result.setup_seconds;
     stats->apply_ms = 1000.0 * result.apply_seconds;
     stats->cached = context_cache != nullptr;

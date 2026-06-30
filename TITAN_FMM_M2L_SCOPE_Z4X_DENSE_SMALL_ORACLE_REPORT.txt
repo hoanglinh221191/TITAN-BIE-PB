@@ -1,0 +1,35 @@
+# TITAN FMM/M2L Scope Z4X-A Dense Small-System Oracle Report
+
+Decision: z4x_surface_oracle_gap
+
+Purpose
+Calibrate the guarded p4 FMM/M2L path against full dense TABI direct solves on analytic small systems where a full dense oracle is feasible.
+
+Decision counts
+required_rows: 12
+timeout_rows: 0
+direct_oracle_gap_rows: 5
+p4_gap_rows: 0
+
+Required rows
+- born_centered sp=8 tabi_direct_dense: status=ok, failure=direct_oracle_fail, oracle_rel=0.0586721, p4_delta=0, audit=0, direct_residual=0, plan/cache=0/0
+- born_centered sp=8 fmm_p4_guarded: status=ok, failure=pass, oracle_rel=0.0586721, p4_delta=0, audit=1.12205E-16, direct_residual=1.35308E-15, plan/cache=1/1
+- kirkwood_offcenter sp=8 tabi_direct_dense: status=ok, failure=pass, oracle_rel=0.049377, p4_delta=0, audit=0, direct_residual=0, plan/cache=0/0
+- kirkwood_offcenter sp=8 fmm_p4_guarded: status=ok, failure=pass, oracle_rel=0.049377, p4_delta=0, audit=1.81329E-16, direct_residual=6.82715E-16, plan/cache=1/1
+- born_centered sp=12 tabi_direct_dense: status=ok, failure=direct_oracle_fail, oracle_rel=0.0586721, p4_delta=0, audit=0, direct_residual=0, plan/cache=0/0
+- born_centered sp=12 fmm_p4_guarded: status=ok, failure=pass, oracle_rel=0.0586721, p4_delta=0, audit=1.12205E-16, direct_residual=1.35308E-15, plan/cache=1/1
+- kirkwood_offcenter sp=12 tabi_direct_dense: status=ok, failure=direct_oracle_fail, oracle_rel=0.049377, p4_delta=0, audit=0, direct_residual=0, plan/cache=0/0
+- kirkwood_offcenter sp=12 fmm_p4_guarded: status=ok, failure=pass, oracle_rel=0.049377, p4_delta=0, audit=1.81329E-16, direct_residual=6.82715E-16, plan/cache=1/1
+- born_centered sp=24 tabi_direct_dense: status=ok, failure=direct_oracle_fail, oracle_rel=0.036559, p4_delta=0, audit=0, direct_residual=0, plan/cache=0/0
+- born_centered sp=24 fmm_p4_guarded: status=ok, failure=pass, oracle_rel=0.036559, p4_delta=0, audit=2.17367E-16, direct_residual=7.74215E-16, plan/cache=1/1
+- kirkwood_offcenter sp=24 tabi_direct_dense: status=ok, failure=direct_oracle_fail, oracle_rel=0.031095, p4_delta=0, audit=0, direct_residual=0, plan/cache=0/0
+- kirkwood_offcenter sp=24 fmm_p4_guarded: status=ok, failure=pass, oracle_rel=0.031095, p4_delta=0, audit=2.36543E-16, direct_residual=5.58402E-16, plan/cache=1/1
+
+Artifacts
+Matrix: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4x\fagbi_scope_z4x_dense_oracle_matrix.csv
+Energy parity: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4x\fagbi_scope_z4x_energy_parity.csv
+Operator audit: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4x\fagbi_scope_z4x_operator_audit.csv
+Decision: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4x\fagbi_scope_z4x_decision.csv
+Plot: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\tmp\fagbi_scope_z4x\fagbi_scope_z4x_dense_oracle_plot.svg
+
+No production defaults are changed by this gate. Grid remains the production PBE default; guarded p4 remains explicit.

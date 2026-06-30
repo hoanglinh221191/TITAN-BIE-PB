@@ -126,7 +126,8 @@ endif
 # ─── Tệp nguồn (Sources) ───
 ROOT_SRCS = $(wildcard $(SRC_ROOT)/*.cpp)
 PBE_SRCS  = $(wildcard $(SRC_ROOT)/tabi/*.cpp)
-SRCS  = $(ROOT_SRCS) $(PBE_SRCS)
+PBCTOPO_SRCS = $(wildcard $(SRC_ROOT)/pbctopo/*.cpp)
+SRCS  = $(ROOT_SRCS) $(PBE_SRCS) $(PBCTOPO_SRCS)
 OBJS  = $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(SRCS))
 DEPS  = $(OBJS:.o=.d)
 

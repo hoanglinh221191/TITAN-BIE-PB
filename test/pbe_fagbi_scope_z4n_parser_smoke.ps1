@@ -110,14 +110,12 @@ $mixedProbe = $accepted + @(
     '-pbe-tabi-fmm-local-refine-probe-count=8',
     '-pbe-tabi-fmm-local-refine-probe-mode=mixed'
 )
-Invoke-Z4nParserCase 'mixed_probe' $mixedProbe $true
-$mixedProfile = @(Import-Csv -LiteralPath (Join-Path $WorkRoot `
-    'mixed_probe\pbe_tabi_profile.csv'))[0]
-if ($mixedProfile.fmm_local_refine_probe_mode -ne 'mixed' -or
-    [int]$mixedProfile.fmm_local_refine_probe_count -ne 8 -or
-    $mixedProfile.fmm_local_solution_probe_used -ne 'true') {
-    throw 'mixed probe row did not report requested Z4N.1 probe telemetry'
-}
+Invoke-Z4nParserCase 'mixed_probe_rejected' $mixedProbe $false `
+    'gmres-p4.*rademacher'
+
+$solutionProbe = $accepted + '-pbe-tabi-fmm-local-refine-probe-mode=solution'
+Invoke-Z4nParserCase 'solution_probe_rejected' $solutionProbe $false `
+    'gmres-p4.*rademacher'
 
 $badProbeCount = $accepted + '-pbe-tabi-fmm-local-refine-probe-count=12'
 Invoke-Z4nParserCase 'bad_probe_count' $badProbeCount $false `
