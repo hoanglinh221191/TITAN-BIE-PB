@@ -3,6 +3,7 @@
 #include "aligned_allocator.h"
 #include "pbctopo/config.h"
 #include "pbctopo/logging.h"
+#include "pbctopo/report.h"
 #include "pbctopo_hull.h"
 #include "titan_gyration.h"
 #include "titan_simd_dispatch.h"
@@ -48,6 +49,14 @@ using titan_gyration::GyrationShapeMetrics;
 using titan_gyration::PointStats;
 using PbctopoAnchorBackend = titan_pbctopo::AnchorBackend;
 using PbctopoRuntimeCutoffs = titan_pbctopo::RuntimeCutoffs;
+using PbctopoAnchorGraphScore = titan_pbctopo::PbctopoAnchorGraphScore;
+using PbctopoFailureReason = titan_pbctopo::PbctopoFailureReason;
+using PbctopoFrameMode = titan_pbctopo::PbctopoFrameMode;
+using PbctopoFrameReport = titan_pbctopo::PbctopoFrameReport;
+using PbctopoFrameStatus = titan_pbctopo::PbctopoFrameStatus;
+using PbctopoScoreVector = titan_pbctopo::PbctopoScoreVector;
+using titan_pbctopo::write_pbctopo_frame_report_header;
+using titan_pbctopo::write_pbctopo_frame_report_row;
 
 constexpr int kTopoImageCoeff[27][3] = {
     {1, 0, 0},   {-1, 0, 0},  {0, 1, 0},   {0, -1, 0},  {0, 0, 1},
@@ -194,16 +203,6 @@ struct PbctopoCandidate {
   bool valid = false;
 };
 
-struct PbctopoAnchorGraphScore {
-  double order_max_d2 = numeric_limits<double>::infinity();
-  double order_path_d2 = numeric_limits<double>::infinity();
-  double endpoint_image_gap = numeric_limits<double>::infinity();
-  size_t residue_order_violations = 0;
-  size_t contact_map_lost = 0;
-  double contact_map_max_d2 = numeric_limits<double>::infinity();
-  size_t ambiguity_count = 0;
-};
-
 struct PbctopoCutOption {
   double cut = 0.0;
   double gap = 0.0;
@@ -257,80 +256,6 @@ struct PbctopoCutCandidate {
   size_t clash_atom_b = numeric_limits<size_t>::max();
   bool ultra_clash = false;
   bool valid = false;
-};
-
-enum class PbctopoFrameStatus { Certified, Rescued, Fallback };
-
-enum class PbctopoFrameMode {
-  None,
-  Virtual,
-  EarlyProjection,
-  ComponentGraph,
-  ComponentSearchExact,
-  ComponentSearchBeam,
-  Warm,
-  HullRescue,
-  DistanceRescue,
-  Pbci,
-};
-
-enum class PbctopoFailureReason {
-  None,
-  NoSeed,
-  ProjectionInvalid,
-  FullVerifyClash,
-  ContinuityReject,
-  AnchorReject,
-  SplitOwnerReject,
-  ComponentGraphFailed,
-  BeamEmpty,
-  NotBetterThanIncumbent,
-  FallbackPbci,
-};
-
-struct PbctopoScoreVector {
-  bool valid = false;
-  bool ultra_clash = false;
-  size_t broken_edges = 0;
-  double continuity_max_d2 = numeric_limits<double>::quiet_NaN();
-  double continuity_path = numeric_limits<double>::quiet_NaN();
-  double anchor_max_d2 = numeric_limits<double>::quiet_NaN();
-  double anchor_mst2 = numeric_limits<double>::quiet_NaN();
-  PbctopoAnchorGraphScore anchor_graph;
-  double principal_rg2_max = numeric_limits<double>::quiet_NaN();
-  double principal_rg2_mid = numeric_limits<double>::quiet_NaN();
-  double principal_rg2_min = numeric_limits<double>::quiet_NaN();
-  double shape_kappa2 = numeric_limits<double>::quiet_NaN();
-  double shape_asphericity = numeric_limits<double>::quiet_NaN();
-  double shape_acylindricity = numeric_limits<double>::quiet_NaN();
-  double edge_stretch = numeric_limits<double>::quiet_NaN();
-  double shift_norm2 = numeric_limits<double>::quiet_NaN();
-  double gap_score = numeric_limits<double>::quiet_NaN();
-};
-
-struct PbctopoFrameReport {
-  size_t frame = 0;
-  double time_ps = 0.0;
-  PbctopoFrameStatus status = PbctopoFrameStatus::Fallback;
-  PbctopoFrameMode mode = PbctopoFrameMode::None;
-  size_t component_count = 0;
-  size_t safe_candidate_count = 0;
-  PbctopoScoreVector best_score;
-  PbctopoScoreVector second_score;
-  double score_gap = numeric_limits<double>::quiet_NaN();
-  double clash_margin = numeric_limits<double>::quiet_NaN();
-  double continuity_margin = numeric_limits<double>::quiet_NaN();
-  double anchor_margin = numeric_limits<double>::quiet_NaN();
-  double split_owner_margin = numeric_limits<double>::quiet_NaN();
-  PbctopoAnchorGraphScore anchor_graph;
-  PbctopoFailureReason fallback_reason = PbctopoFailureReason::None;
-  double time_total_ms = 0.0;
-  double time_graph_ms = 0.0;
-  double time_virtual_ms = 0.0;
-  double time_component_ms = 0.0;
-  size_t cycle_support = 0;
-  double cycle_mismatch = 0.0;
-  size_t inconsistent_edge_count = 0;
 };
 
 struct PbctopoLocalEdge {
@@ -2371,81 +2296,6 @@ string pbctopo_topology_source_label(const PbctopoTimingStats &timing) {
              : "geometry_cutoff";
 }
 
-string pbctopo_frame_status_name(PbctopoFrameStatus status) {
-  switch (status) {
-  case PbctopoFrameStatus::Certified:
-    return "certified";
-  case PbctopoFrameStatus::Rescued:
-    return "rescued";
-  case PbctopoFrameStatus::Fallback:
-    return "fallback";
-  }
-  return "fallback";
-}
-
-string pbctopo_frame_mode_name(PbctopoFrameMode mode) {
-  switch (mode) {
-  case PbctopoFrameMode::None:
-    return "none";
-  case PbctopoFrameMode::Virtual:
-    return "virtual";
-  case PbctopoFrameMode::EarlyProjection:
-    return "early_projection";
-  case PbctopoFrameMode::ComponentGraph:
-    return "exact";
-  case PbctopoFrameMode::ComponentSearchExact:
-    return "component_exact";
-  case PbctopoFrameMode::ComponentSearchBeam:
-    return "beam";
-  case PbctopoFrameMode::Warm:
-    return "warm";
-  case PbctopoFrameMode::HullRescue:
-    return "hull_rescue";
-  case PbctopoFrameMode::DistanceRescue:
-    return "distance_rescue";
-  case PbctopoFrameMode::Pbci:
-    return "pbci";
-  }
-  return "none";
-}
-
-string pbctopo_failure_reason_name(PbctopoFailureReason reason) {
-  switch (reason) {
-  case PbctopoFailureReason::None:
-    return "none";
-  case PbctopoFailureReason::NoSeed:
-    return "no_seed";
-  case PbctopoFailureReason::ProjectionInvalid:
-    return "projection_invalid";
-  case PbctopoFailureReason::FullVerifyClash:
-    return "full_verify_clash";
-  case PbctopoFailureReason::ContinuityReject:
-    return "continuity_reject";
-  case PbctopoFailureReason::AnchorReject:
-    return "anchor_reject";
-  case PbctopoFailureReason::SplitOwnerReject:
-    return "split_owner_reject";
-  case PbctopoFailureReason::ComponentGraphFailed:
-    return "component_graph_failed";
-  case PbctopoFailureReason::BeamEmpty:
-    return "beam_empty";
-  case PbctopoFailureReason::NotBetterThanIncumbent:
-    return "not_better_than_incumbent";
-  case PbctopoFailureReason::FallbackPbci:
-    return "fallback_pbci";
-  }
-  return "none";
-}
-
-string format_pbctopo_report_double(double value) {
-  return isfinite(value) ? to_string(value) : "na";
-}
-
-string format_pbctopo_report_size(size_t value) {
-  return value == numeric_limits<size_t>::max() ? string("na")
-                                                : to_string(value);
-}
-
 PbctopoScoreVector make_score_vector(const PbctopoCutCandidate &candidate) {
   PbctopoScoreVector score;
   score.valid = candidate.valid;
@@ -2466,105 +2316,6 @@ PbctopoScoreVector make_score_vector(const PbctopoCutCandidate &candidate) {
   score.shift_norm2 = candidate.shift_norm2;
   score.gap_score = candidate.gap_score;
   return score;
-}
-
-string format_pbctopo_score_vector(const PbctopoScoreVector &score) {
-  return "valid=" + string(score.valid ? "1" : "0") +
-         ";ultra=" + string(score.ultra_clash ? "1" : "0") +
-         ";broken=" + format_pbctopo_report_size(score.broken_edges) +
-         ";cont_max=" + format_pbctopo_report_double(score.continuity_max_d2) +
-         ";cont_path=" + format_pbctopo_report_double(score.continuity_path) +
-         ";anchor_max=" + format_pbctopo_report_double(score.anchor_max_d2) +
-         ";anchor_mst=" + format_pbctopo_report_double(score.anchor_mst2) +
-         ";anchor_order_max=" +
-         format_pbctopo_report_double(score.anchor_graph.order_max_d2) +
-         ";anchor_order_path=" +
-         format_pbctopo_report_double(score.anchor_graph.order_path_d2) +
-         ";anchor_endpoint_gap=" +
-         format_pbctopo_report_double(score.anchor_graph.endpoint_image_gap) +
-         ";anchor_residue_violations=" +
-         format_pbctopo_report_size(
-             score.anchor_graph.residue_order_violations) +
-         ";anchor_contact_lost=" +
-         format_pbctopo_report_size(score.anchor_graph.contact_map_lost) +
-         ";anchor_contact_max=" +
-         format_pbctopo_report_double(score.anchor_graph.contact_map_max_d2) +
-         ";anchor_ambiguity=" +
-         format_pbctopo_report_size(score.anchor_graph.ambiguity_count) +
-         ";rg2=" + format_pbctopo_report_double(score.principal_rg2_max) +
-         "/" + format_pbctopo_report_double(score.principal_rg2_mid) + "/" +
-         format_pbctopo_report_double(score.principal_rg2_min) +
-         ";shape=" + format_pbctopo_report_double(score.shape_kappa2) +
-         "/" + format_pbctopo_report_double(score.shape_asphericity) + "/" +
-         format_pbctopo_report_double(score.shape_acylindricity) +
-         ";edge=" + format_pbctopo_report_double(score.edge_stretch) +
-         ";shift=" + format_pbctopo_report_double(score.shift_norm2) +
-         ";gap=" + format_pbctopo_report_double(score.gap_score);
-}
-
-string csv_escape(string value) {
-  const bool needs_quotes = value.find_first_of(",\"\r\n") != string::npos;
-  if (!needs_quotes)
-    return value;
-  string escaped = "\"";
-  for (char ch : value) {
-    if (ch == '"')
-      escaped += "\"\"";
-    else
-      escaped += ch;
-  }
-  escaped += '"';
-  return escaped;
-}
-
-void write_pbctopo_frame_report_header(ostream &out) {
-  out << "frame,time_ps,status,mode,component_count,safe_candidate_count,"
-         "best_score_vector,second_score_vector,score_gap,clash_margin,"
-         "continuity_margin,anchor_margin,split_owner_margin,"
-         "anchor_order_max_d2,anchor_order_path_d2,"
-         "anchor_endpoint_image_gap,anchor_residue_order_violations,"
-         "anchor_contact_map_lost,anchor_contact_map_max_d2,"
-         "anchor_ambiguity_count,fallback_reason,"
-         "time_total_ms,time_graph_ms,time_virtual_ms,time_component_ms,"
-         "cycle_support,cycle_mismatch,inconsistent_edge_count\n";
-}
-
-void write_pbctopo_frame_report_row(ostream &out,
-                                    const PbctopoFrameReport &report) {
-  out << report.frame << ','
-      << format_pbctopo_report_double(report.time_ps) << ','
-      << pbctopo_frame_status_name(report.status) << ','
-      << pbctopo_frame_mode_name(report.mode) << ','
-      << report.component_count << ',' << report.safe_candidate_count << ','
-      << csv_escape(format_pbctopo_score_vector(report.best_score)) << ','
-      << csv_escape(format_pbctopo_score_vector(report.second_score)) << ','
-      << format_pbctopo_report_double(report.score_gap) << ','
-      << format_pbctopo_report_double(report.clash_margin) << ','
-      << format_pbctopo_report_double(report.continuity_margin) << ','
-      << format_pbctopo_report_double(report.anchor_margin) << ','
-      << format_pbctopo_report_double(report.split_owner_margin) << ','
-      << format_pbctopo_report_double(report.anchor_graph.order_max_d2) << ','
-      << format_pbctopo_report_double(report.anchor_graph.order_path_d2)
-      << ','
-      << format_pbctopo_report_double(report.anchor_graph.endpoint_image_gap)
-      << ','
-      << format_pbctopo_report_size(
-             report.anchor_graph.residue_order_violations)
-      << ','
-      << format_pbctopo_report_size(report.anchor_graph.contact_map_lost)
-      << ','
-      << format_pbctopo_report_double(report.anchor_graph.contact_map_max_d2)
-      << ','
-      << format_pbctopo_report_size(report.anchor_graph.ambiguity_count)
-      << ','
-      << pbctopo_failure_reason_name(report.fallback_reason) << ','
-      << format_pbctopo_report_double(report.time_total_ms) << ','
-      << format_pbctopo_report_double(report.time_graph_ms) << ','
-      << format_pbctopo_report_double(report.time_virtual_ms) << ','
-      << format_pbctopo_report_double(report.time_component_ms) << ','
-      << report.cycle_support << ','
-      << format_pbctopo_report_double(report.cycle_mismatch) << ','
-      << report.inconsistent_edge_count << '\n';
 }
 
 bool partial_component_ultraclash(
