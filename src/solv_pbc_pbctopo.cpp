@@ -194,6 +194,16 @@ struct PbctopoCandidate {
   bool valid = false;
 };
 
+struct PbctopoAnchorGraphScore {
+  double order_max_d2 = numeric_limits<double>::infinity();
+  double order_path_d2 = numeric_limits<double>::infinity();
+  double endpoint_image_gap = numeric_limits<double>::infinity();
+  size_t residue_order_violations = 0;
+  size_t contact_map_lost = 0;
+  double contact_map_max_d2 = numeric_limits<double>::infinity();
+  size_t ambiguity_count = 0;
+};
+
 struct PbctopoCutOption {
   double cut = 0.0;
   double gap = 0.0;
@@ -235,6 +245,7 @@ struct PbctopoCutCandidate {
   double continuity_max_d2 = numeric_limits<double>::infinity();
   double anchor_mst2 = numeric_limits<double>::infinity();
   double anchor_max_d2 = numeric_limits<double>::infinity();
+  PbctopoAnchorGraphScore anchor_graph;
   double principal_rg2_max = numeric_limits<double>::infinity();
   double principal_rg2_mid = numeric_limits<double>::infinity();
   double principal_rg2_min = numeric_limits<double>::infinity();
@@ -285,6 +296,7 @@ struct PbctopoScoreVector {
   double continuity_path = numeric_limits<double>::quiet_NaN();
   double anchor_max_d2 = numeric_limits<double>::quiet_NaN();
   double anchor_mst2 = numeric_limits<double>::quiet_NaN();
+  PbctopoAnchorGraphScore anchor_graph;
   double principal_rg2_max = numeric_limits<double>::quiet_NaN();
   double principal_rg2_mid = numeric_limits<double>::quiet_NaN();
   double principal_rg2_min = numeric_limits<double>::quiet_NaN();
@@ -310,6 +322,7 @@ struct PbctopoFrameReport {
   double continuity_margin = numeric_limits<double>::quiet_NaN();
   double anchor_margin = numeric_limits<double>::quiet_NaN();
   double split_owner_margin = numeric_limits<double>::quiet_NaN();
+  PbctopoAnchorGraphScore anchor_graph;
   PbctopoFailureReason fallback_reason = PbctopoFailureReason::None;
   double time_total_ms = 0.0;
   double time_graph_ms = 0.0;
@@ -338,6 +351,7 @@ struct PbctopoComponentCandidate {
   double continuity_max_d2 = numeric_limits<double>::infinity();
   double anchor_mst2 = numeric_limits<double>::infinity();
   double anchor_max_d2 = numeric_limits<double>::infinity();
+  PbctopoAnchorGraphScore anchor_graph;
   double principal_rg2_max = numeric_limits<double>::infinity();
   double principal_rg2_mid = numeric_limits<double>::infinity();
   double principal_rg2_min = numeric_limits<double>::infinity();
@@ -515,6 +529,11 @@ struct PbctopoTimingStats {
   size_t component_graph_refine_anchor_spatial_calls = 0;
   size_t component_graph_refine_anchor_spatial_fallbacks = 0;
   size_t component_graph_refine_anchor_spatial_disconnects = 0;
+  size_t pbctopo_anchor_order_edges = 0;
+  size_t pbctopo_anchor_endpoint_edges = 0;
+  size_t pbctopo_anchor_contact_pairs = 0;
+  size_t pbctopo_anchor_residue_order_violations = 0;
+  size_t pbctopo_anchor_ambiguous_frames = 0;
   size_t component_cycle_sync_attempts = 0;
   size_t component_cycle_sync_used = 0;
   size_t component_cycle_sync_pair_candidates = 0;
@@ -568,6 +587,9 @@ struct PbctopoTimingStats {
   double component_graph_refine_anchor_spatial_build_s = 0.0;
   double component_graph_refine_anchor_spatial_query_s = 0.0;
   double component_graph_refine_anchor_dense_fallback_s = 0.0;
+  double pbctopo_anchor_context_build_s = 0.0;
+  double component_graph_refine_anchor_order_s = 0.0;
+  double component_graph_refine_anchor_contact_s = 0.0;
   double component_graph_refine_cut_score_s = 0.0;
   double component_graph_refine_ultraclash_s = 0.0;
   double component_graph_refine_stats_s = 0.0;
@@ -622,6 +644,23 @@ struct PbctopoSparseAnchorEdge {
   size_t a = 0;
   size_t b = 0;
   double d2 = numeric_limits<double>::infinity();
+};
+
+struct PbctopoAnchorContactEdge {
+  size_t a = 0;
+  size_t b = 0;
+  double cutoff_d2 = numeric_limits<double>::infinity();
+};
+
+struct PbctopoAnchorGraphContext {
+  vector<PbctopoContinuityPair> ordered_edges;
+  vector<PbctopoContinuityPair> endpoint_edges;
+  vector<PbctopoAnchorContactEdge> contact_edges;
+  size_t anchor_count = 0;
+  size_t residue_order_violations = 0;
+  double box_m[3][3]{};
+  double box_inv[3][3]{};
+  bool has_box = false;
 };
 
 struct PbctopoComponentPairShiftEntry {
@@ -714,6 +753,7 @@ struct PbctopoGraphSeedQuickScore {
   double continuity_path = numeric_limits<double>::infinity();
   double anchor_max_d2 = numeric_limits<double>::infinity();
   double anchor_mst2 = numeric_limits<double>::infinity();
+  PbctopoAnchorGraphScore anchor_graph;
   double principal_rg2_max = numeric_limits<double>::infinity();
   double principal_rg2_mid = numeric_limits<double>::infinity();
   double principal_rg2_min = numeric_limits<double>::infinity();
@@ -1290,6 +1330,13 @@ bool anchor_graph_metrics_spatial_or_dense(
     double &max_d2, const PbctopoCutCandidate *incumbent,
     PbctopoRefineScorePhase phase, PbctopoAnchorBackend backend,
     PbctopoTimingStats *timing = nullptr);
+bool anchor_graph_metrics_enhanced(
+    const vector<Vec3> &placed_points, const vector<size_t> &anchor_indices,
+    const vector<PbctopoContinuityPair> &continuity_pairs, double &mst2,
+    double &max_d2, PbctopoAnchorGraphScore &anchor_graph,
+    const PbctopoCutCandidate *incumbent, PbctopoRefineScorePhase phase,
+    PbctopoAnchorBackend backend, PbctopoTimingStats *timing = nullptr,
+    const PbctopoAnchorGraphContext *anchor_context = nullptr);
 void analyze_cut_candidate_ultraclash(const vector<Vec3> &placed_points,
                                       const unordered_set<uint64_t> &edge_set,
                                       PbctopoCutCandidate &candidate,
@@ -1315,7 +1362,8 @@ PbctopoCutCandidate evaluate_virtual_box_candidate(
     const PbctopoCutCandidate *incumbent = nullptr,
     bool skip_clash = false,
     double frame_time_ps = numeric_limits<double>::quiet_NaN(),
-    const char *reject_context = nullptr);
+    const char *reject_context = nullptr,
+    const PbctopoAnchorGraphContext *anchor_context = nullptr);
 vector<size_t> build_atom_component_index(
     size_t atom_count, const vector<vector<size_t>> &components);
 void append_interface_anchor_edges(
@@ -1780,6 +1828,214 @@ void build_projection_anchor_subset(const vector<PbctopoAtom> &base_atoms,
   }
 }
 
+uint64_t pbctopo_owner_pair_key(int owner_a, int owner_b) {
+  const int lo = min(owner_a, owner_b);
+  const int hi = max(owner_a, owner_b);
+  return (static_cast<uint64_t>(static_cast<uint32_t>(lo)) << 32) |
+         static_cast<uint32_t>(hi);
+}
+
+PbctopoAnchorGraphContext build_anchor_graph_context(
+    const vector<PbctopoAtom> &atoms, box Box,
+    const vector<PbctopoContinuityPair> &continuity_pairs,
+    const vector<size_t> &anchor_indices, double contact_cutoff,
+    PbctopoTimingStats *timing) {
+  const auto build_started = chrono::steady_clock::now();
+  PbctopoAnchorGraphContext context;
+  context.anchor_count = anchor_indices.size();
+  const BoxMatrix box_matrix(Box);
+  for (size_t row = 0; row < 3; ++row) {
+    for (size_t col = 0; col < 3; ++col) {
+      context.box_m[row][col] = box_matrix.m[row][col];
+      context.box_inv[row][col] = box_matrix.inv[row][col];
+    }
+  }
+  context.has_box = true;
+
+  if (atoms.empty() || anchor_indices.empty()) {
+    if (timing != nullptr) {
+      timing->pbctopo_anchor_context_build_s +=
+          chrono::duration<double>(chrono::steady_clock::now() - build_started)
+              .count();
+    }
+    return context;
+  }
+
+  vector<char> is_anchor(atoms.size(), 0);
+  for (size_t anchor_idx : anchor_indices) {
+    if (anchor_idx < atoms.size())
+      is_anchor[anchor_idx] = 1;
+  }
+
+  context.ordered_edges.reserve(continuity_pairs.size());
+  for (const auto &pair : continuity_pairs) {
+    if (pair.a < atoms.size() && pair.b < atoms.size() &&
+        is_anchor[pair.a] != 0 && is_anchor[pair.b] != 0) {
+      context.ordered_edges.push_back(pair);
+    }
+  }
+
+  size_t chain_begin = 0;
+  while (chain_begin < anchor_indices.size()) {
+    const size_t first_anchor = anchor_indices[chain_begin];
+    const bool first_valid = first_anchor < atoms.size();
+    const int owner = first_valid ? atoms[first_anchor].owner : 0;
+    const uint64_t chain_key = first_valid ? atoms[first_anchor].chain_key : 0;
+    size_t chain_end = chain_begin + 1;
+    while (chain_end < anchor_indices.size()) {
+      const size_t anchor_idx = anchor_indices[chain_end];
+      if (anchor_idx >= atoms.size() || atoms[anchor_idx].owner != owner ||
+          atoms[anchor_idx].chain_key != chain_key) {
+        break;
+      }
+      ++chain_end;
+    }
+
+    bool chain_has_metadata = true;
+    int previous_residue = numeric_limits<int>::min();
+    bool has_previous = false;
+    for (size_t idx = chain_begin; idx < chain_end; ++idx) {
+      const size_t anchor_idx = anchor_indices[idx];
+      if (anchor_idx >= atoms.size() || !atoms[anchor_idx].has_topology_key) {
+        chain_has_metadata = false;
+        continue;
+      }
+      const int residue_id = atoms[anchor_idx].residue_id;
+      if (has_previous && residue_id <= previous_residue)
+        ++context.residue_order_violations;
+      previous_residue = residue_id;
+      has_previous = true;
+    }
+
+    if (chain_has_metadata && chain_end > chain_begin + 1) {
+      context.endpoint_edges.push_back(
+          {anchor_indices[chain_begin], anchor_indices[chain_end - 1]});
+    }
+    chain_begin = chain_end;
+  }
+
+  if (atoms.size() >= 2 && contact_cutoff > kDistanceEps) {
+    struct AnchorContactCandidate {
+      size_t a = 0;
+      size_t b = 0;
+      double d2 = numeric_limits<double>::infinity();
+    };
+    unordered_map<uint64_t, vector<AnchorContactCandidate>> contacts_by_owner;
+    contacts_by_owner.reserve(16);
+    unordered_map<ClashCellKey, vector<size_t>, ClashCellKeyHash> contact_grid;
+    contact_grid.reserve(max<size_t>(64, atoms.size() / 2));
+
+    const double cutoff2 = contact_cutoff * contact_cutoff;
+    const double sx_bound = min(
+        0.5, contact_cutoff *
+                 sqrt(box_matrix.inv[0][0] * box_matrix.inv[0][0] +
+                      box_matrix.inv[0][1] * box_matrix.inv[0][1] +
+                      box_matrix.inv[0][2] * box_matrix.inv[0][2]) +
+                 1.0e-9);
+    const double sy_bound = min(
+        0.5, contact_cutoff *
+                 sqrt(box_matrix.inv[1][0] * box_matrix.inv[1][0] +
+                      box_matrix.inv[1][1] * box_matrix.inv[1][1] +
+                      box_matrix.inv[1][2] * box_matrix.inv[1][2]) +
+                 1.0e-9);
+    const double sz_bound = min(
+        0.5, contact_cutoff *
+                 sqrt(box_matrix.inv[2][0] * box_matrix.inv[2][0] +
+                      box_matrix.inv[2][1] * box_matrix.inv[2][1] +
+                      box_matrix.inv[2][2] * box_matrix.inv[2][2]) +
+                 1.0e-9);
+    const int nx = max(1, static_cast<int>(floor(1.0 / max(sx_bound, 1.0e-6))));
+    const int ny = max(1, static_cast<int>(floor(1.0 / max(sy_bound, 1.0e-6))));
+    const int nz = max(1, static_cast<int>(floor(1.0 / max(sz_bound, 1.0e-6))));
+    const double cell_sx = 1.0 / static_cast<double>(nx);
+    const double cell_sy = 1.0 / static_cast<double>(ny);
+    const double cell_sz = 1.0 / static_cast<double>(nz);
+    auto wrap_index = [](int value, int mod) {
+      int wrapped = value % mod;
+      if (wrapped < 0)
+        wrapped += mod;
+      return wrapped;
+    };
+    auto insert_contact = [&](uint64_t owner_key, size_t a, size_t b,
+                              double d2) {
+      auto &contacts = contacts_by_owner[owner_key];
+      const uint64_t pair_key = atom_pair_key(a, b);
+      for (const auto &existing : contacts) {
+        if (atom_pair_key(existing.a, existing.b) == pair_key)
+          return;
+      }
+      contacts.push_back({a, b, d2});
+      sort(contacts.begin(), contacts.end(),
+           [](const AnchorContactCandidate &lhs,
+              const AnchorContactCandidate &rhs) {
+             if (fabs(lhs.d2 - rhs.d2) > 1.0e-9)
+               return lhs.d2 < rhs.d2;
+             if (lhs.a != rhs.a)
+               return lhs.a < rhs.a;
+             return lhs.b < rhs.b;
+           });
+      constexpr size_t kMaxAnchorContactsPerOwnerPair = 8;
+      if (contacts.size() > kMaxAnchorContactsPerOwnerPair)
+        contacts.resize(kMaxAnchorContactsPerOwnerPair);
+    };
+
+    for (size_t atom_idx = 0; atom_idx < atoms.size(); ++atom_idx) {
+      const auto &atom = atoms[atom_idx];
+      if (!atom.is_heavy)
+        continue;
+      const int cx = min(nx - 1, static_cast<int>(floor(atom.sx / cell_sx)));
+      const int cy = min(ny - 1, static_cast<int>(floor(atom.sy / cell_sy)));
+      const int cz = min(nz - 1, static_cast<int>(floor(atom.sz / cell_sz)));
+      for (int dx = -1; dx <= 1; ++dx) {
+        for (int dy = -1; dy <= 1; ++dy) {
+          for (int dz = -1; dz <= 1; ++dz) {
+            const ClashCellKey key{wrap_index(cx + dx, nx),
+                                   wrap_index(cy + dy, ny),
+                                   wrap_index(cz + dz, nz)};
+            const auto it = contact_grid.find(key);
+            if (it == contact_grid.end())
+              continue;
+            for (size_t other_idx : it->second) {
+              const auto &other = atoms[other_idx];
+              if (atom.owner == other.owner)
+                continue;
+              double dx_cart = other.x - atom.x;
+              double dy_cart = other.y - atom.y;
+              double dz_cart = other.z - atom.z;
+              box_matrix.apply_mic(dx_cart, dy_cart, dz_cart);
+              const double d2 = dx_cart * dx_cart + dy_cart * dy_cart +
+                                dz_cart * dz_cart;
+              if (d2 > cutoff2)
+                continue;
+              insert_contact(pbctopo_owner_pair_key(atom.owner, other.owner),
+                             other_idx, atom_idx, d2);
+            }
+          }
+        }
+      }
+      contact_grid[{cx, cy, cz}].push_back(atom_idx);
+    }
+
+    for (const auto &[_, contacts] : contacts_by_owner) {
+      for (const auto &contact : contacts) {
+        context.contact_edges.push_back({contact.a, contact.b, cutoff2});
+      }
+    }
+  }
+
+  if (timing != nullptr) {
+    timing->pbctopo_anchor_order_edges += context.ordered_edges.size();
+    timing->pbctopo_anchor_endpoint_edges += context.endpoint_edges.size();
+    timing->pbctopo_anchor_contact_pairs += context.contact_edges.size();
+    timing->pbctopo_anchor_residue_order_violations +=
+        context.residue_order_violations;
+    timing->pbctopo_anchor_context_build_s +=
+        chrono::duration<double>(chrono::steady_clock::now() - build_started)
+            .count();
+  }
+  return context;
+}
+
 vector<size_t> build_sampled_anchor_subset(const vector<PbctopoAtom> &atoms,
                                            const vector<size_t> &anchor_indices,
                                            size_t interior_step,
@@ -2199,6 +2455,7 @@ PbctopoScoreVector make_score_vector(const PbctopoCutCandidate &candidate) {
   score.continuity_path = candidate.continuity_path;
   score.anchor_max_d2 = candidate.anchor_max_d2;
   score.anchor_mst2 = candidate.anchor_mst2;
+  score.anchor_graph = candidate.anchor_graph;
   score.principal_rg2_max = candidate.principal_rg2_max;
   score.principal_rg2_mid = candidate.principal_rg2_mid;
   score.principal_rg2_min = candidate.principal_rg2_min;
@@ -2219,6 +2476,21 @@ string format_pbctopo_score_vector(const PbctopoScoreVector &score) {
          ";cont_path=" + format_pbctopo_report_double(score.continuity_path) +
          ";anchor_max=" + format_pbctopo_report_double(score.anchor_max_d2) +
          ";anchor_mst=" + format_pbctopo_report_double(score.anchor_mst2) +
+         ";anchor_order_max=" +
+         format_pbctopo_report_double(score.anchor_graph.order_max_d2) +
+         ";anchor_order_path=" +
+         format_pbctopo_report_double(score.anchor_graph.order_path_d2) +
+         ";anchor_endpoint_gap=" +
+         format_pbctopo_report_double(score.anchor_graph.endpoint_image_gap) +
+         ";anchor_residue_violations=" +
+         format_pbctopo_report_size(
+             score.anchor_graph.residue_order_violations) +
+         ";anchor_contact_lost=" +
+         format_pbctopo_report_size(score.anchor_graph.contact_map_lost) +
+         ";anchor_contact_max=" +
+         format_pbctopo_report_double(score.anchor_graph.contact_map_max_d2) +
+         ";anchor_ambiguity=" +
+         format_pbctopo_report_size(score.anchor_graph.ambiguity_count) +
          ";rg2=" + format_pbctopo_report_double(score.principal_rg2_max) +
          "/" + format_pbctopo_report_double(score.principal_rg2_mid) + "/" +
          format_pbctopo_report_double(score.principal_rg2_min) +
@@ -2248,7 +2520,11 @@ string csv_escape(string value) {
 void write_pbctopo_frame_report_header(ostream &out) {
   out << "frame,time_ps,status,mode,component_count,safe_candidate_count,"
          "best_score_vector,second_score_vector,score_gap,clash_margin,"
-         "continuity_margin,anchor_margin,split_owner_margin,fallback_reason,"
+         "continuity_margin,anchor_margin,split_owner_margin,"
+         "anchor_order_max_d2,anchor_order_path_d2,"
+         "anchor_endpoint_image_gap,anchor_residue_order_violations,"
+         "anchor_contact_map_lost,anchor_contact_map_max_d2,"
+         "anchor_ambiguity_count,fallback_reason,"
          "time_total_ms,time_graph_ms,time_virtual_ms,time_component_ms,"
          "cycle_support,cycle_mismatch,inconsistent_edge_count\n";
 }
@@ -2267,6 +2543,20 @@ void write_pbctopo_frame_report_row(ostream &out,
       << format_pbctopo_report_double(report.continuity_margin) << ','
       << format_pbctopo_report_double(report.anchor_margin) << ','
       << format_pbctopo_report_double(report.split_owner_margin) << ','
+      << format_pbctopo_report_double(report.anchor_graph.order_max_d2) << ','
+      << format_pbctopo_report_double(report.anchor_graph.order_path_d2)
+      << ','
+      << format_pbctopo_report_double(report.anchor_graph.endpoint_image_gap)
+      << ','
+      << format_pbctopo_report_size(
+             report.anchor_graph.residue_order_violations)
+      << ','
+      << format_pbctopo_report_size(report.anchor_graph.contact_map_lost)
+      << ','
+      << format_pbctopo_report_double(report.anchor_graph.contact_map_max_d2)
+      << ','
+      << format_pbctopo_report_size(report.anchor_graph.ambiguity_count)
+      << ','
       << pbctopo_failure_reason_name(report.fallback_reason) << ','
       << format_pbctopo_report_double(report.time_total_ms) << ','
       << format_pbctopo_report_double(report.time_graph_ms) << ','
@@ -4240,6 +4530,108 @@ bool anchor_graph_metrics_spatial_or_dense(
   return dense_ok;
 }
 
+double anchor_context_distance2(const vector<Vec3> &placed_points, size_t a,
+                                size_t b) {
+  if (a >= placed_points.size() || b >= placed_points.size())
+    return numeric_limits<double>::infinity();
+  const Vec3 delta = placed_points[a] - placed_points[b];
+  return norm2(delta);
+}
+
+double anchor_endpoint_image_gap(const vector<Vec3> &placed_points,
+                                 const PbctopoAnchorGraphContext &context,
+                                 size_t a, size_t b) {
+  if (!context.has_box || a >= placed_points.size() || b >= placed_points.size())
+    return numeric_limits<double>::infinity();
+  const Vec3 delta = placed_points[b] - placed_points[a];
+  const double raw_sx = context.box_inv[0][0] * delta.x +
+                        context.box_inv[0][1] * delta.y +
+                        context.box_inv[0][2] * delta.z;
+  const double raw_sy = context.box_inv[1][0] * delta.x +
+                        context.box_inv[1][1] * delta.y +
+                        context.box_inv[1][2] * delta.z;
+  const double raw_sz = context.box_inv[2][0] * delta.x +
+                        context.box_inv[2][1] * delta.y +
+                        context.box_inv[2][2] * delta.z;
+  const double mic_sx = raw_sx - round(raw_sx);
+  const double mic_sy = raw_sy - round(raw_sy);
+  const double mic_sz = raw_sz - round(raw_sz);
+  const double raw_norm =
+      sqrt(raw_sx * raw_sx + raw_sy * raw_sy + raw_sz * raw_sz);
+  const double mic_norm =
+      sqrt(mic_sx * mic_sx + mic_sy * mic_sy + mic_sz * mic_sz);
+  return max(0.0, raw_norm - mic_norm);
+}
+
+bool anchor_graph_metrics_enhanced(
+    const vector<Vec3> &placed_points, const vector<size_t> &anchor_indices,
+    const vector<PbctopoContinuityPair> &continuity_pairs, double &mst2,
+    double &max_d2, PbctopoAnchorGraphScore &anchor_graph,
+    const PbctopoCutCandidate *incumbent, PbctopoRefineScorePhase phase,
+    PbctopoAnchorBackend backend, PbctopoTimingStats *timing,
+    const PbctopoAnchorGraphContext *anchor_context) {
+  anchor_graph = {};
+  if (!anchor_graph_metrics_spatial_or_dense(
+          placed_points, anchor_indices, continuity_pairs, mst2, max_d2,
+          incumbent, phase, backend, timing)) {
+    return false;
+  }
+
+  if (anchor_context == nullptr)
+    return true;
+
+  anchor_graph.residue_order_violations =
+      anchor_context->residue_order_violations;
+  const auto order_started = chrono::steady_clock::now();
+  if (!anchor_context->ordered_edges.empty()) {
+    anchor_graph.order_max_d2 = 0.0;
+    anchor_graph.order_path_d2 = 0.0;
+    for (const auto &edge : anchor_context->ordered_edges) {
+      const double d2 = anchor_context_distance2(placed_points, edge.a, edge.b);
+      if (!isfinite(d2))
+        continue;
+      anchor_graph.order_max_d2 = max(anchor_graph.order_max_d2, d2);
+      anchor_graph.order_path_d2 += d2;
+    }
+  }
+  if (!anchor_context->endpoint_edges.empty()) {
+    anchor_graph.endpoint_image_gap = 0.0;
+    for (const auto &edge : anchor_context->endpoint_edges) {
+      const double gap =
+          anchor_endpoint_image_gap(placed_points, *anchor_context, edge.a, edge.b);
+      if (isfinite(gap))
+        anchor_graph.endpoint_image_gap =
+            max(anchor_graph.endpoint_image_gap, gap);
+    }
+  }
+  if (timing != nullptr) {
+    timing->component_graph_refine_anchor_order_s +=
+        chrono::duration<double>(chrono::steady_clock::now() - order_started)
+            .count();
+  }
+
+  const auto contact_started = chrono::steady_clock::now();
+  if (!anchor_context->contact_edges.empty()) {
+    anchor_graph.contact_map_lost = 0;
+    anchor_graph.contact_map_max_d2 = 0.0;
+    for (const auto &edge : anchor_context->contact_edges) {
+      const double d2 = anchor_context_distance2(placed_points, edge.a, edge.b);
+      if (!isfinite(d2))
+        continue;
+      anchor_graph.contact_map_max_d2 =
+          max(anchor_graph.contact_map_max_d2, d2);
+      if (d2 > edge.cutoff_d2 + 1.0e-6)
+        ++anchor_graph.contact_map_lost;
+    }
+  }
+  if (timing != nullptr) {
+    timing->component_graph_refine_anchor_contact_s +=
+        chrono::duration<double>(chrono::steady_clock::now() - contact_started)
+            .count();
+  }
+  return true;
+}
+
 PbctopoCutCandidate score_component_placed_points_solution(
     const vector<Vec3> &placed_points, double shift_norm2,
     const vector<PbctopoLocalEdge> &local_edges,
@@ -4253,7 +4645,8 @@ PbctopoCutCandidate score_component_placed_points_solution(
     const PbctopoEdgeScanSoA *edge_scan_soa = nullptr,
     const PbctopoCutCandidate *edge_prune_threshold = nullptr,
     PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
-    const PointStats *precomputed_stats = nullptr) {
+    const PointStats *precomputed_stats = nullptr,
+    const PbctopoAnchorGraphContext *anchor_context = nullptr) {
   if (timing != nullptr) {
     switch (phase) {
     case PbctopoRefineScorePhase::Exact:
@@ -4348,9 +4741,11 @@ PbctopoCutCandidate score_component_placed_points_solution(
   }
   double anchor_mst2 = numeric_limits<double>::infinity();
   double anchor_max_d2 = numeric_limits<double>::infinity();
-  if (!anchor_graph_metrics_spatial_or_dense(
+  PbctopoAnchorGraphScore anchor_graph_score;
+  if (!anchor_graph_metrics_enhanced(
           placed_points, anchor_indices, continuity_pairs, anchor_mst2,
-          anchor_max_d2, incumbent, phase, anchor_backend, timing)) {
+          anchor_max_d2, anchor_graph_score, incumbent, phase, anchor_backend,
+          timing, anchor_context)) {
     if (timing != nullptr) {
       accumulate_anchor(
           chrono::duration<double>(chrono::steady_clock::now() - stage_started)
@@ -4386,6 +4781,7 @@ PbctopoCutCandidate score_component_placed_points_solution(
   pre_edge_seed.continuity_max_d2 = continuity_max_d2;
   pre_edge_seed.anchor_mst2 = anchor_mst2;
   pre_edge_seed.anchor_max_d2 = anchor_max_d2;
+  pre_edge_seed.anchor_graph = anchor_graph_score;
   if (phase == PbctopoRefineScorePhase::CoarseStage1) {
     candidate = score_cut_candidate_principal_only(
         local_edges, placed_points, 1.5, 1.5, 1.5, 0.0, stats, shift_norm2,
@@ -4419,6 +4815,7 @@ PbctopoCutCandidate score_component_placed_points_solution(
   candidate.continuity_max_d2 = continuity_max_d2;
   candidate.anchor_mst2 = anchor_mst2;
   candidate.anchor_max_d2 = anchor_max_d2;
+  candidate.anchor_graph = anchor_graph_score;
   if (cut_candidate_cannot_beat_incumbent(candidate, incumbent)) {
     if (timing != nullptr) {
       accumulate_cut_score(
@@ -4462,7 +4859,8 @@ PbctopoCutCandidate score_component_offset_solution(
     const PbctopoStage1EdgeContext *stage1_edge_context = nullptr,
     const PbctopoEdgeScanSoA *edge_scan_soa = nullptr,
     const PbctopoCutCandidate *edge_prune_threshold = nullptr,
-    PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto) {
+    PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
+    const PbctopoAnchorGraphContext *anchor_context = nullptr) {
   auto accumulate_build_points = [&](double delta) {
     if (timing == nullptr)
       return;
@@ -4497,7 +4895,7 @@ PbctopoCutCandidate score_component_offset_solution(
       placed_points, shift_norm2, local_edges, edge_set, clash_cutoff,
       continuity_pairs, anchor_indices, continuity_cutoff, incumbent, timing,
       run_ultraclash, phase, stage1_edge_context, edge_scan_soa,
-      edge_prune_threshold, anchor_backend);
+      edge_prune_threshold, anchor_backend, nullptr, anchor_context);
 }
 
 PbctopoCutCandidate improve_component_offsets_locally(
@@ -4510,13 +4908,14 @@ PbctopoCutCandidate improve_component_offsets_locally(
     double clash_cutoff, double continuity_cutoff, vector<Vec3> &placed_points,
     PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
     PbctopoTimingStats *timing = nullptr, PbctopoWarmState *warm_state = nullptr,
-    const PbctopoCutCandidate *warm_reference_candidate = nullptr) {
+    const PbctopoCutCandidate *warm_reference_candidate = nullptr,
+    const PbctopoAnchorGraphContext *anchor_context = nullptr) {
   const vector<size_t> &exact_anchor_indices = anchor_indices;
   PbctopoCutCandidate best = score_component_offset_solution(
       atoms, components, Box, offsets, local_edges, edge_set, clash_cutoff,
       continuity_pairs, exact_anchor_indices, continuity_cutoff, placed_points,
       nullptr, timing, true, PbctopoRefineScorePhase::Exact, nullptr, nullptr,
-      nullptr, anchor_backend);
+      nullptr, anchor_backend, anchor_context);
   if (!best.valid || offsets.size() < 2) {
     if (warm_state != nullptr && (!best.valid || best.ultra_clash))
       clear_component_trial_hints(*warm_state);
@@ -4618,7 +5017,9 @@ PbctopoCutCandidate improve_component_offsets_locally(
             clash_cutoff, continuity_pairs, trial_anchor_indices,
             continuity_cutoff, incumbent, timing, run_ultraclash, phase,
             stage1_edge_context, edge_scan_soa, edge_prune_threshold,
-            anchor_backend, &trial_stats);
+            anchor_backend, &trial_stats,
+            (&trial_anchor_indices == &exact_anchor_indices) ? anchor_context
+                                                             : nullptr);
       };
   auto capture_component_hint_offsets =
       [](const vector<PbctopoRefineTrialCandidate> &source_trials,
@@ -5103,6 +5504,12 @@ bool derive_merged_warm_offsets(const vector<Int3> &raw_offsets,
 }
 
 int compare_principal_rg2(double lhs, double rhs);
+int compare_anchor_graph_score(const PbctopoAnchorGraphScore &lhs,
+                               const PbctopoAnchorGraphScore &rhs);
+int compare_pbctopo_double_metric(double lhs, double rhs, double eps);
+template <typename Candidate>
+int compare_candidate_anchor_prefix(const Candidate &lhs,
+                                    const Candidate &rhs);
 
 bool graph_seed_quick_score_better(const PbctopoGraphSeedQuickScore &lhs,
                                    const PbctopoGraphSeedQuickScore &rhs) {
@@ -5114,10 +5521,18 @@ bool graph_seed_quick_score_better(const PbctopoGraphSeedQuickScore &lhs,
     return lhs.continuity_max_d2 < rhs.continuity_max_d2;
   if (fabs(lhs.continuity_path - rhs.continuity_path) > 1.0e-6)
     return lhs.continuity_path < rhs.continuity_path;
-  if (fabs(lhs.anchor_max_d2 - rhs.anchor_max_d2) > 1.0e-6)
-    return lhs.anchor_max_d2 < rhs.anchor_max_d2;
-  if (fabs(lhs.anchor_mst2 - rhs.anchor_mst2) > 1.0e-6)
-    return lhs.anchor_mst2 < rhs.anchor_mst2;
+  int anchor_cmp = compare_anchor_graph_score(lhs.anchor_graph,
+                                              rhs.anchor_graph);
+  if (anchor_cmp == 0) {
+    anchor_cmp = compare_pbctopo_double_metric(lhs.anchor_max_d2,
+                                               rhs.anchor_max_d2, 1.0e-6);
+  }
+  if (anchor_cmp == 0) {
+    anchor_cmp = compare_pbctopo_double_metric(lhs.anchor_mst2,
+                                               rhs.anchor_mst2, 1.0e-6);
+  }
+  if (anchor_cmp != 0)
+    return anchor_cmp < 0;
   const int principal_max_cmp =
       compare_principal_rg2(lhs.principal_rg2_max, rhs.principal_rg2_max);
   if (principal_max_cmp != 0)
@@ -5139,7 +5554,9 @@ PbctopoGraphSeedQuickScore score_component_graph_seed_quick(
     const vector<PbctopoAtom> &atoms, const vector<vector<size_t>> &components,
     const vector<Vec3> &placed_points, const vector<PbctopoContinuityPair> &continuity_pairs,
     const vector<size_t> &anchor_indices, double continuity_cutoff,
-    double shift_norm2) {
+    double shift_norm2,
+    PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
+    const PbctopoAnchorGraphContext *anchor_context = nullptr) {
   PbctopoGraphSeedQuickScore score;
   if (placed_points.size() != atoms.size())
     return score;
@@ -5158,8 +5575,11 @@ PbctopoGraphSeedQuickScore score_component_graph_seed_quick(
   } else if (half_anchor_indices.size() >= 2) {
     quick_anchor_indices = &half_anchor_indices;
   }
-  if (!anchor_graph_metrics_ok(placed_points, *quick_anchor_indices, score.anchor_mst2,
-                               score.anchor_max_d2, nullptr)) {
+  if (!anchor_graph_metrics_enhanced(
+          placed_points, *quick_anchor_indices, continuity_pairs,
+          score.anchor_mst2, score.anchor_max_d2, score.anchor_graph, nullptr,
+          PbctopoRefineScorePhase::Exact, anchor_backend, nullptr,
+          anchor_context)) {
     return score;
   }
   const PointStats stats = build_point_stats(placed_points);
@@ -5253,6 +5673,84 @@ int compare_shape_moment(double lhs, double rhs) {
   return 0;
 }
 
+int compare_pbctopo_size_metric(size_t lhs, size_t rhs) {
+  if (lhs == rhs)
+    return 0;
+  return lhs < rhs ? -1 : 1;
+}
+
+int compare_pbctopo_double_metric(double lhs, double rhs,
+                                  double eps = 1.0e-6) {
+  const bool lhs_valid = isfinite(lhs);
+  const bool rhs_valid = isfinite(rhs);
+  if (lhs_valid != rhs_valid)
+    return lhs_valid ? -1 : 1;
+  if (!lhs_valid)
+    return 0;
+  if (fabs(lhs - rhs) <= eps)
+    return 0;
+  return lhs < rhs ? -1 : 1;
+}
+
+int compare_anchor_graph_score(const PbctopoAnchorGraphScore &lhs,
+                               const PbctopoAnchorGraphScore &rhs) {
+  int cmp = compare_pbctopo_size_metric(lhs.residue_order_violations,
+                                        rhs.residue_order_violations);
+  if (cmp != 0)
+    return cmp;
+  cmp = compare_pbctopo_double_metric(lhs.endpoint_image_gap,
+                                      rhs.endpoint_image_gap);
+  if (cmp != 0)
+    return cmp;
+  cmp =
+      compare_pbctopo_size_metric(lhs.contact_map_lost, rhs.contact_map_lost);
+  if (cmp != 0)
+    return cmp;
+  cmp = compare_pbctopo_double_metric(lhs.contact_map_max_d2,
+                                      rhs.contact_map_max_d2);
+  if (cmp != 0)
+    return cmp;
+  cmp = compare_pbctopo_double_metric(lhs.order_max_d2, rhs.order_max_d2);
+  if (cmp != 0)
+    return cmp;
+  return compare_pbctopo_double_metric(lhs.order_path_d2, rhs.order_path_d2);
+}
+
+template <typename Candidate>
+int compare_candidate_anchor_prefix(const Candidate &lhs,
+                                    const Candidate &rhs) {
+  const int graph_cmp = compare_anchor_graph_score(lhs.anchor_graph,
+                                                   rhs.anchor_graph);
+  if (graph_cmp != 0)
+    return graph_cmp;
+  const bool lhs_has_anchor =
+      isfinite(lhs.anchor_max_d2) && isfinite(lhs.anchor_mst2);
+  const bool rhs_has_anchor =
+      isfinite(rhs.anchor_max_d2) && isfinite(rhs.anchor_mst2);
+  if (lhs_has_anchor != rhs_has_anchor)
+    return lhs_has_anchor ? -1 : 1;
+  if (!lhs_has_anchor)
+    return 0;
+  int cmp = compare_pbctopo_double_metric(lhs.anchor_max_d2, rhs.anchor_max_d2);
+  if (cmp != 0)
+    return cmp;
+  return compare_pbctopo_double_metric(lhs.anchor_mst2, rhs.anchor_mst2);
+}
+
+template <typename Candidate>
+bool candidate_anchor_prefix_equivalent(const Candidate &lhs,
+                                        const Candidate &rhs) {
+  if (lhs.broken_edges != rhs.broken_edges)
+    return false;
+  if (compare_pbctopo_double_metric(lhs.continuity_max_d2,
+                                    rhs.continuity_max_d2) != 0)
+    return false;
+  if (compare_pbctopo_double_metric(lhs.continuity_path,
+                                    rhs.continuity_path) != 0)
+    return false;
+  return compare_candidate_anchor_prefix(lhs, rhs) == 0;
+}
+
 bool component_candidate_is_outlier(const PbctopoCutCandidate &candidate,
                                     const PbctopoCutCandidate *reference) {
   if (!candidate.valid || candidate.ultra_clash || reference == nullptr ||
@@ -5288,6 +5786,38 @@ const char *candidate_skip_search_reject_reason(
           max(reference.continuity_path * 1.05,
               reference.continuity_path + 20.0)) {
     return "continuity_path";
+  }
+  if (candidate.anchor_graph.residue_order_violations >
+      reference.anchor_graph.residue_order_violations) {
+    return "anchor_residue_order_violations";
+  }
+  if (isfinite(candidate.anchor_graph.endpoint_image_gap) &&
+      isfinite(reference.anchor_graph.endpoint_image_gap) &&
+      candidate.anchor_graph.endpoint_image_gap >
+          reference.anchor_graph.endpoint_image_gap + 1.0e-6) {
+    return "anchor_endpoint_image_gap";
+  }
+  if (candidate.anchor_graph.contact_map_lost >
+      reference.anchor_graph.contact_map_lost) {
+    return "anchor_contact_map_lost";
+  }
+  if (isfinite(candidate.anchor_graph.contact_map_max_d2) &&
+      isfinite(reference.anchor_graph.contact_map_max_d2) &&
+      candidate.anchor_graph.contact_map_max_d2 >
+          reference.anchor_graph.contact_map_max_d2 + 1.0e-6) {
+    return "anchor_contact_map_max_d2";
+  }
+  if (isfinite(candidate.anchor_graph.order_max_d2) &&
+      isfinite(reference.anchor_graph.order_max_d2) &&
+      candidate.anchor_graph.order_max_d2 >
+          reference.anchor_graph.order_max_d2 + 1.0e-6) {
+    return "anchor_order_max_d2";
+  }
+  if (isfinite(candidate.anchor_graph.order_path_d2) &&
+      isfinite(reference.anchor_graph.order_path_d2) &&
+      candidate.anchor_graph.order_path_d2 >
+          reference.anchor_graph.order_path_d2 + 1.0e-6) {
+    return "anchor_order_path_d2";
   }
   if (isfinite(candidate.anchor_max_d2) &&
       isfinite(reference.anchor_max_d2) &&
@@ -5762,7 +6292,8 @@ bool solve_component_offsets_via_pair_graph(
     vector<Int3> *tree_offsets_out = nullptr,
     vector<Int3> *refined_offsets_out = nullptr,
     vector<PbctopoGraphEdge> *tree_edges_out = nullptr,
-    PbctopoCycleSyncMetrics *cycle_metrics_out = nullptr) {
+    PbctopoCycleSyncMetrics *cycle_metrics_out = nullptr,
+    const PbctopoAnchorGraphContext *anchor_context = nullptr) {
   if (components.empty())
     return false;
 
@@ -5801,7 +6332,8 @@ bool solve_component_offsets_via_pair_graph(
                                                cutoffs.continuity_cutoff,
                                                placed_points, anchor_backend,
                                                timing, warm_state,
-                                               warm_reference_candidate);
+                                               warm_reference_candidate,
+                                               anchor_context);
   if (timing != nullptr) {
     timing->component_graph_refine_s +=
         chrono::duration<double>(chrono::steady_clock::now() - refine_started)
@@ -5843,7 +6375,7 @@ bool solve_component_offsets_via_pair_graph(
         atoms, components, Box, shifts, local_edges, edge_set, continuity_pairs,
         anchor_indices, cycle_offsets, cutoffs.clash_cutoff,
         cutoffs.continuity_cutoff, cycle_points, anchor_backend, timing,
-        warm_state, warm_reference_candidate);
+        warm_state, warm_reference_candidate, anchor_context);
     if (timing != nullptr) {
       timing->component_graph_refine_s +=
           chrono::duration<double>(chrono::steady_clock::now() -
@@ -5897,7 +6429,9 @@ vector<PbctopoGraphSeedSolveResult> build_large_component_graph_seed_candidates(
     const vector<vector<size_t>> &components, const vector<PbctopoShift> &shifts,
     const vector<PbctopoContinuityPair> &continuity_pairs,
     const vector<size_t> &anchor_indices, const PbctopoRuntimeCutoffs &cutoffs,
-    const vector<Int3> *warm_component_offsets, PbctopoTimingStats *timing) {
+    const vector<Int3> *warm_component_offsets, PbctopoTimingStats *timing,
+    PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
+    const PbctopoAnchorGraphContext *anchor_context = nullptr) {
   const vector<PbctopoGraphEdge> base_edges = build_component_graph_edge_candidates(
       atoms, components, shifts, cutoffs, timing, warm_component_offsets);
   vector<PbctopoGraphSeedSolveResult> results;
@@ -5925,7 +6459,8 @@ vector<PbctopoGraphSeedSolveResult> build_large_component_graph_seed_candidates(
     result.offsets = offsets;
     result.quick_score = score_component_graph_seed_quick(
         atoms, components, seed_points, continuity_pairs, anchor_indices,
-        cutoffs.continuity_cutoff, seed_shift_norm2);
+        cutoffs.continuity_cutoff, seed_shift_norm2, anchor_backend,
+        anchor_context);
     result.valid = result.quick_score.valid;
     results.push_back(std::move(result));
   };
@@ -6390,16 +6925,9 @@ int compare_candidate_prefix_before_edge_stretch(
       fabs(lhs.continuity_path - rhs.continuity_path) > 1.0e-6) {
     return (lhs.continuity_path < rhs.continuity_path) ? -1 : 1;
   }
-  const bool lhs_has_anchor =
-      isfinite(lhs.anchor_max_d2) && isfinite(lhs.anchor_mst2);
-  const bool rhs_has_anchor =
-      isfinite(rhs.anchor_max_d2) && isfinite(rhs.anchor_mst2);
-  if (lhs_has_anchor != rhs_has_anchor)
-    return lhs_has_anchor ? -1 : 1;
-  if (lhs_has_anchor && fabs(lhs.anchor_max_d2 - rhs.anchor_max_d2) > 1.0e-6)
-    return (lhs.anchor_max_d2 < rhs.anchor_max_d2) ? -1 : 1;
-  if (lhs_has_anchor && fabs(lhs.anchor_mst2 - rhs.anchor_mst2) > 1.0e-6)
-    return (lhs.anchor_mst2 < rhs.anchor_mst2) ? -1 : 1;
+  const int anchor_cmp = compare_candidate_anchor_prefix(lhs, rhs);
+  if (anchor_cmp != 0)
+    return anchor_cmp;
   const int principal_max_cmp =
       compare_principal_rg2(lhs.principal_rg2_max, rhs.principal_rg2_max);
   if (principal_max_cmp != 0)
@@ -6542,6 +7070,11 @@ PbctopoCutCandidate rescore_cut_candidate(
   rescored.min_pair_d2 = source.min_pair_d2;
   rescored.clash_atom_a = source.clash_atom_a;
   rescored.clash_atom_b = source.clash_atom_b;
+  rescored.continuity_path = source.continuity_path;
+  rescored.continuity_max_d2 = source.continuity_max_d2;
+  rescored.anchor_mst2 = source.anchor_mst2;
+  rescored.anchor_max_d2 = source.anchor_max_d2;
+  rescored.anchor_graph = source.anchor_graph;
   rescored.ultra_clash = source.ultra_clash;
   rescored.valid = source.valid;
   return rescored;
@@ -6607,6 +7140,7 @@ component_candidate_to_cut_candidate(const PbctopoComponentCandidate &candidate)
   cut.continuity_max_d2 = candidate.continuity_max_d2;
   cut.anchor_mst2 = candidate.anchor_mst2;
   cut.anchor_max_d2 = candidate.anchor_max_d2;
+  cut.anchor_graph = candidate.anchor_graph;
   cut.principal_rg2_max = candidate.principal_rg2_max;
   cut.principal_rg2_mid = candidate.principal_rg2_mid;
   cut.principal_rg2_min = candidate.principal_rg2_min;
@@ -6634,6 +7168,7 @@ PbctopoComponentCandidate build_component_candidate_seed(
   seed.continuity_max_d2 = source.continuity_max_d2;
   seed.anchor_mst2 = source.anchor_mst2;
   seed.anchor_max_d2 = source.anchor_max_d2;
+  seed.anchor_graph = source.anchor_graph;
   seed.principal_rg2_max = source.principal_rg2_max;
   seed.principal_rg2_mid = source.principal_rg2_mid;
   seed.principal_rg2_min = source.principal_rg2_min;
@@ -6873,22 +7408,11 @@ bool component_candidate_cannot_beat_incumbent_prefix(
   if (stage == PbctopoComponentCandidatePrefixStage::Continuity)
     return false;
 
-  const bool candidate_has_anchor =
-      isfinite(candidate.anchor_max_d2) && isfinite(candidate.anchor_mst2);
-  const bool incumbent_has_anchor =
-      isfinite(incumbent->anchor_max_d2) && isfinite(incumbent->anchor_mst2);
-  if (candidate_has_anchor != incumbent_has_anchor)
-    return !candidate_has_anchor;
-  if (candidate_has_anchor) {
-    if (candidate.anchor_max_d2 > incumbent->anchor_max_d2 + 1.0e-6)
-      return true;
-    if (candidate.anchor_max_d2 + 1.0e-6 < incumbent->anchor_max_d2)
-      return false;
-    if (candidate.anchor_mst2 > incumbent->anchor_mst2 + 1.0e-6)
-      return true;
-    if (candidate.anchor_mst2 + 1.0e-6 < incumbent->anchor_mst2)
-      return false;
-  }
+  const int anchor_cmp = compare_candidate_anchor_prefix(candidate, *incumbent);
+  if (anchor_cmp > 0)
+    return true;
+  if (anchor_cmp < 0)
+    return false;
   if (stage == PbctopoComponentCandidatePrefixStage::Anchor)
     return false;
 
@@ -6977,7 +7501,9 @@ PbctopoComponentCandidate score_component_assignment(
     const vector<PbctopoContinuityPair> &continuity_pairs,
     const vector<size_t> &anchor_indices, double continuity_cutoff,
     double shift_norm2, const PbctopoComponentCandidate *incumbent = nullptr,
-    PbctopoTimingStats *timing = nullptr) {
+    PbctopoTimingStats *timing = nullptr,
+    PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
+    const PbctopoAnchorGraphContext *anchor_context = nullptr) {
   using clock = chrono::steady_clock;
   const auto started = clock::now();
   auto finish = [&](PbctopoComponentCandidate candidate) {
@@ -7032,9 +7558,11 @@ PbctopoComponentCandidate score_component_assignment(
   }
 
   stage_started = clock::now();
-  if (!anchor_graph_metrics_ok(placed_points, anchor_indices,
-                               candidate.anchor_mst2,
-                               candidate.anchor_max_d2, incumbent_cut)) {
+  if (!anchor_graph_metrics_enhanced(
+          placed_points, anchor_indices, continuity_pairs, candidate.anchor_mst2,
+          candidate.anchor_max_d2, candidate.anchor_graph, incumbent_cut,
+          PbctopoRefineScorePhase::Exact, anchor_backend, nullptr,
+          anchor_context)) {
     if (timing != nullptr) {
       ++timing->component_score_anchor_rejects;
       timing->component_score_anchor_s +=
@@ -7158,16 +7686,9 @@ bool better_component_candidate(const PbctopoComponentCandidate &lhs,
   if (lhs_has_cont &&
       fabs(lhs.continuity_path - rhs.continuity_path) > 1.0e-6)
     return lhs.continuity_path < rhs.continuity_path;
-  const bool lhs_has_anchor =
-      isfinite(lhs.anchor_max_d2) && isfinite(lhs.anchor_mst2);
-  const bool rhs_has_anchor =
-      isfinite(rhs.anchor_max_d2) && isfinite(rhs.anchor_mst2);
-  if (lhs_has_anchor != rhs_has_anchor)
-    return lhs_has_anchor;
-  if (lhs_has_anchor && fabs(lhs.anchor_max_d2 - rhs.anchor_max_d2) > 1.0e-6)
-    return lhs.anchor_max_d2 < rhs.anchor_max_d2;
-  if (lhs_has_anchor && fabs(lhs.anchor_mst2 - rhs.anchor_mst2) > 1.0e-6)
-    return lhs.anchor_mst2 < rhs.anchor_mst2;
+  const int anchor_cmp = compare_candidate_anchor_prefix(lhs, rhs);
+  if (anchor_cmp != 0)
+    return anchor_cmp < 0;
   const int principal_max_cmp =
       compare_principal_rg2(lhs.principal_rg2_max, rhs.principal_rg2_max);
   if (principal_max_cmp != 0)
@@ -7408,7 +7929,9 @@ PbctopoComponentCandidate search_component_shift_candidate_beam(
     const vector<Int3> *warm_component_offsets = nullptr,
     const PbctopoCutCandidate *incumbent_cut = nullptr,
     const vector<Vec3> *incumbent_points = nullptr,
-    PbctopoTimingStats *timing = nullptr) {
+    PbctopoTimingStats *timing = nullptr,
+    PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
+    const PbctopoAnchorGraphContext *anchor_context = nullptr) {
   (void)Box;
   beam_width = max<size_t>(1, min(beam_width, kPbctopoBeamWidthMax));
   PbctopoComponentCandidate best;
@@ -7565,7 +8088,8 @@ PbctopoComponentCandidate search_component_shift_candidate_beam(
         atoms, placed_points, components, beam_states[state_idx].min_pair_d2,
         beam_states[state_idx].clash_atom_a, beam_states[state_idx].clash_atom_b,
         continuity_pairs, anchor_indices, cutoffs.continuity_cutoff,
-        candidate_shift_norm2, best.valid ? &best : nullptr, timing);
+        candidate_shift_norm2, best.valid ? &best : nullptr, timing,
+        anchor_backend, anchor_context);
     if (better_component_candidate(candidate, best)) {
       best = candidate;
       best_points_out = placed_points;
@@ -7584,7 +8108,9 @@ PbctopoComponentCandidate search_component_shift_candidate(
     const vector<Int3> *warm_component_offsets = nullptr,
     const PbctopoCutCandidate *incumbent_cut = nullptr,
     const vector<Vec3> *incumbent_points = nullptr,
-    PbctopoTimingStats *timing = nullptr) {
+    PbctopoTimingStats *timing = nullptr,
+    PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
+    const PbctopoAnchorGraphContext *anchor_context = nullptr) {
   (void)Box;
   PbctopoComponentCandidate best;
   if (components.empty())
@@ -7669,7 +8195,8 @@ PbctopoComponentCandidate search_component_shift_candidate(
               atoms, placed_points, components, min_pair_d2, clash_atom_a,
               clash_atom_b, continuity_pairs, anchor_indices,
               cutoffs.continuity_cutoff, shift_norm2,
-              best.valid ? &best : nullptr, timing);
+              best.valid ? &best : nullptr, timing, anchor_backend,
+              anchor_context);
           if (better_component_candidate(candidate, best)) {
             best = candidate;
             best_points_out = placed_points;
@@ -7745,7 +8272,8 @@ bool solve_large_component_merge_mode(
     PbctopoWarmState *warm_state,
     const PbctopoCutCandidate *warm_reference_candidate,
     bool allow_exact_search_on_merged,
-    vector<Int3> *best_raw_offsets_out = nullptr) {
+    vector<Int3> *best_raw_offsets_out = nullptr,
+    const PbctopoAnchorGraphContext *anchor_context = nullptr) {
   best_cut = {};
   shift_norm2 = 0.0;
   placed_points.clear();
@@ -7769,7 +8297,7 @@ bool solve_large_component_merge_mode(
         atoms, raw_components, Box, shifts, local_edges, edge_set,
         continuity_pairs, anchor_indices, refine_offsets, cutoffs.clash_cutoff,
         cutoffs.continuity_cutoff, refine_points, anchor_backend, timing,
-        warm_state, warm_reference_candidate);
+        warm_state, warm_reference_candidate, anchor_context);
     if (candidate.valid && !candidate.ultra_clash &&
         refine_points.size() == atoms.size() &&
         (!best_cut.valid || better_cut_candidate(candidate, best_cut))) {
@@ -7782,7 +8310,8 @@ bool solve_large_component_merge_mode(
   const vector<PbctopoGraphSeedSolveResult> graph_seed_results =
       build_large_component_graph_seed_candidates(
           atoms, Box, merge_plan.merged_components, shifts, continuity_pairs,
-          anchor_indices, cutoffs, merged_warm_offsets_ptr, timing);
+          anchor_indices, cutoffs, merged_warm_offsets_ptr, timing,
+          anchor_backend, anchor_context);
   if (timing != nullptr)
     timing->component_large_mode_graph_seed_count += graph_seed_results.size();
 
@@ -7824,7 +8353,8 @@ bool solve_large_component_merge_mode(
     PbctopoComponentCandidate merged_candidate = search_component_shift_candidate(
         atoms, Box, merge_plan.merged_components, shifts, continuity_pairs,
         anchor_indices, cutoffs, merged_search_points, merged_warm_offsets_ptr,
-        search_incumbent, search_incumbent_points, timing);
+        search_incumbent, search_incumbent_points, timing, anchor_backend,
+        anchor_context);
     if (merged_candidate.valid && !merged_candidate.ultra_clash &&
         merged_search_points.size() == atoms.size()) {
       const vector<Int3> merged_search_offsets = extract_component_offsets_from_points(
@@ -8497,7 +9027,8 @@ PbctopoCutCandidate evaluate_virtual_box_candidate(
     const vector<size_t> *anchor_indices,
     const vector<pair<int, int>> *contacting_owner_pairs,
     double continuity_cutoff, const PbctopoCutCandidate *incumbent,
-    bool skip_clash, double frame_time_ps, const char *reject_context) {
+    bool skip_clash, double frame_time_ps, const char *reject_context,
+    const PbctopoAnchorGraphContext *anchor_context) {
   PbctopoCutCandidate candidate;
   candidate.cut_x = clamp_virtual_box_center(cut_x);
   candidate.cut_y = clamp_virtual_box_center(cut_y);
@@ -8589,12 +9120,21 @@ PbctopoCutCandidate evaluate_virtual_box_candidate(
   if (anchor_indices != nullptr) {
     double anchor_mst2 = numeric_limits<double>::infinity();
     double anchor_max_d2 = numeric_limits<double>::infinity();
-    if (!anchor_graph_metrics_ok(placed_points, *anchor_indices, anchor_mst2,
-                                 anchor_max_d2, metric_incumbent)) {
+    PbctopoAnchorGraphScore anchor_graph_score;
+    const vector<PbctopoContinuityPair> empty_continuity_pairs;
+    const vector<PbctopoContinuityPair> &anchor_continuity_pairs =
+        (continuity_pairs != nullptr) ? *continuity_pairs
+                                      : empty_continuity_pairs;
+    if (!anchor_graph_metrics_enhanced(
+            placed_points, *anchor_indices, anchor_continuity_pairs,
+            anchor_mst2, anchor_max_d2, anchor_graph_score, metric_incumbent,
+            PbctopoRefineScorePhase::Exact, PbctopoAnchorBackend::Prim,
+            nullptr, anchor_context)) {
       return PbctopoCutCandidate{};
     }
     candidate.anchor_mst2 = anchor_mst2;
     candidate.anchor_max_d2 = anchor_max_d2;
+    candidate.anchor_graph = anchor_graph_score;
   }
 
   candidate.bbox_volume = compute_bbox_volume(stats);
@@ -8876,16 +9416,9 @@ bool better_stage1_cut_candidate(const PbctopoCutCandidate &lhs,
   if (lhs_has_cont &&
       fabs(lhs.continuity_path - rhs.continuity_path) > 1.0e-6)
     return lhs.continuity_path < rhs.continuity_path;
-  const bool lhs_has_anchor =
-      isfinite(lhs.anchor_max_d2) && isfinite(lhs.anchor_mst2);
-  const bool rhs_has_anchor =
-      isfinite(rhs.anchor_max_d2) && isfinite(rhs.anchor_mst2);
-  if (lhs_has_anchor != rhs_has_anchor)
-    return lhs_has_anchor;
-  if (lhs_has_anchor && fabs(lhs.anchor_max_d2 - rhs.anchor_max_d2) > 1.0e-6)
-    return lhs.anchor_max_d2 < rhs.anchor_max_d2;
-  if (lhs_has_anchor && fabs(lhs.anchor_mst2 - rhs.anchor_mst2) > 1.0e-6)
-    return lhs.anchor_mst2 < rhs.anchor_mst2;
+  const int anchor_cmp = compare_candidate_anchor_prefix(lhs, rhs);
+  if (anchor_cmp != 0)
+    return anchor_cmp < 0;
   const int principal_max_cmp =
       compare_principal_rg2(lhs.principal_rg2_max, rhs.principal_rg2_max);
   if (principal_max_cmp != 0)
@@ -8936,16 +9469,9 @@ bool better_preclash_cut_candidate(const PbctopoCutCandidate &lhs,
   if (lhs_has_cont &&
       fabs(lhs.continuity_path - rhs.continuity_path) > 1.0e-6)
     return lhs.continuity_path < rhs.continuity_path;
-  const bool lhs_has_anchor =
-      isfinite(lhs.anchor_max_d2) && isfinite(lhs.anchor_mst2);
-  const bool rhs_has_anchor =
-      isfinite(rhs.anchor_max_d2) && isfinite(rhs.anchor_mst2);
-  if (lhs_has_anchor != rhs_has_anchor)
-    return lhs_has_anchor;
-  if (lhs_has_anchor && fabs(lhs.anchor_max_d2 - rhs.anchor_max_d2) > 1.0e-6)
-    return lhs.anchor_max_d2 < rhs.anchor_max_d2;
-  if (lhs_has_anchor && fabs(lhs.anchor_mst2 - rhs.anchor_mst2) > 1.0e-6)
-    return lhs.anchor_mst2 < rhs.anchor_mst2;
+  const int anchor_cmp = compare_candidate_anchor_prefix(lhs, rhs);
+  if (anchor_cmp != 0)
+    return anchor_cmp < 0;
   const int principal_max_cmp =
       compare_principal_rg2(lhs.principal_rg2_max, rhs.principal_rg2_max);
   if (principal_max_cmp != 0)
@@ -9000,16 +9526,9 @@ bool better_cut_candidate(const PbctopoCutCandidate &lhs,
   if (lhs_has_cont &&
       fabs(lhs.continuity_path - rhs.continuity_path) > 1.0e-6)
     return lhs.continuity_path < rhs.continuity_path;
-  const bool lhs_has_anchor =
-      isfinite(lhs.anchor_max_d2) && isfinite(lhs.anchor_mst2);
-  const bool rhs_has_anchor =
-      isfinite(rhs.anchor_max_d2) && isfinite(rhs.anchor_mst2);
-  if (lhs_has_anchor != rhs_has_anchor)
-    return lhs_has_anchor;
-  if (lhs_has_anchor && fabs(lhs.anchor_max_d2 - rhs.anchor_max_d2) > 1.0e-6)
-    return lhs.anchor_max_d2 < rhs.anchor_max_d2;
-  if (lhs_has_anchor && fabs(lhs.anchor_mst2 - rhs.anchor_mst2) > 1.0e-6)
-    return lhs.anchor_mst2 < rhs.anchor_mst2;
+  const int anchor_cmp = compare_candidate_anchor_prefix(lhs, rhs);
+  if (anchor_cmp != 0)
+    return anchor_cmp < 0;
   const int principal_max_cmp =
       compare_principal_rg2(lhs.principal_rg2_max, rhs.principal_rg2_max);
   if (principal_max_cmp != 0)
@@ -9069,7 +9588,9 @@ bool cut_candidate_cannot_beat_incumbent(const PbctopoCutCandidate &partial,
       partial.continuity_path > incumbent->continuity_path + 1.0e-6) {
     return true;
   }
-  if (isfinite(partial.anchor_max_d2) && isfinite(incumbent->anchor_max_d2) &&
+  if (compare_anchor_graph_score(partial.anchor_graph,
+                                 incumbent->anchor_graph) > 0 &&
+      isfinite(partial.anchor_max_d2) && isfinite(incumbent->anchor_max_d2) &&
       partial.anchor_max_d2 > incumbent->anchor_max_d2 + 1.0e-6 &&
       partial.anchor_mst2 > incumbent->anchor_mst2 + 1.0e-6) {
     return true;
@@ -10372,6 +10893,19 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     timing.projection_edge_s +=
         chrono::duration<double>(clock::now() - stage_started).count();
 
+    const PbctopoAnchorGraphContext base_anchor_context =
+        build_anchor_graph_context(base_atoms, this->m_mol[frame_idx].Box,
+                                   trajectory_context.continuity_pairs,
+                                   trajectory_context.continuity_anchor_indices,
+                                   runtime_cutoffs.pair_contact_cutoff,
+                                   &timing);
+    const PbctopoAnchorGraphContext projection_anchor_context =
+        build_anchor_graph_context(projection_atoms, this->m_mol[frame_idx].Box,
+                                   projection_continuity_pairs,
+                                   projection_anchor_indices,
+                                   runtime_cutoffs.pair_contact_cutoff,
+                                   &timing);
+
     stage_started = clock::now();
     components = build_connected_components_from_local_edges(base_atoms.size(), local_edges);
     timing.component_split_s +=
@@ -10533,6 +11067,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           double continuity_max_d2 = numeric_limits<double>::infinity();
           double anchor_mst2 = numeric_limits<double>::infinity();
           double anchor_max_d2 = numeric_limits<double>::infinity();
+          PbctopoAnchorGraphScore anchor_graph_score;
           const bool rescue_ok =
               candidate_out.valid &&
               continuity_metrics_ok(candidate_points,
@@ -10540,9 +11075,12 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                                     runtime_cutoffs.continuity_cutoff,
                                     continuity_path, continuity_max_d2,
                                     incumbent_cut) &&
-              anchor_graph_metrics_ok(
+              anchor_graph_metrics_enhanced(
                   candidate_points, trajectory_context.continuity_anchor_indices,
-                  anchor_mst2, anchor_max_d2, incumbent_cut);
+                  trajectory_context.continuity_pairs, anchor_mst2,
+                  anchor_max_d2, anchor_graph_score, incumbent_cut,
+                  PbctopoRefineScorePhase::Exact, anchor_backend, nullptr,
+                  &base_anchor_context);
           if (!rescue_ok)
             return false;
 
@@ -10550,6 +11088,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           candidate_out.continuity_max_d2 = continuity_max_d2;
           candidate_out.anchor_mst2 = anchor_mst2;
           candidate_out.anchor_max_d2 = anchor_max_d2;
+          candidate_out.anchor_graph = anchor_graph_score;
           analyze_cut_candidate_ultraclash(candidate_points, local_edge_set,
                                            candidate_out,
                                            runtime_cutoffs.clash_cutoff);
@@ -10568,7 +11107,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           &projection_anchor_indices, &projection_contacting_owner_pairs,
           runtime_cutoffs.continuity_cutoff, nullptr,
           skip_projection_candidate_clash, numeric_limits<double>::quiet_NaN(),
-          nullptr);
+          nullptr, &projection_anchor_context);
       if (skip_projection_candidate_clash)
         ++timing.projection_clash_skip_evals;
       if (early_projection_coarse.valid && !early_projection_coarse.ultra_clash) {
@@ -10583,7 +11122,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             &trajectory_context.continuity_anchor_indices,
             &local_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
             nullptr, false, this->m_mol[frame_idx].time_of_snap,
-            "warm_projection");
+            "warm_projection", &base_anchor_context);
         if (early_projection.valid && !early_projection.ultra_clash &&
           candidate_close_enough_to_skip_search(
               early_projection, warm_state.previous_projection_candidate)) {
@@ -10618,7 +11157,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           runtime_cutoffs.continuity_cutoff, warm_points,
           &warm_state.previous_projection_candidate, nullptr, true,
           PbctopoRefineScorePhase::Exact, nullptr, nullptr, nullptr,
-          anchor_backend);
+          anchor_backend, &base_anchor_context);
       PbctopoOwnerPairSplitDetail early_component_split_detail;
       size_t early_component_split_owner_pairs = 0;
       double early_component_split_gap = 0.0;
@@ -10698,6 +11237,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     size_t safe_candidates = 0;
     PbctopoCutCandidate report_best_candidate;
     PbctopoCutCandidate report_second_candidate;
+    bool frame_anchor_ambiguity_counted = false;
     auto record_report_safe_candidate = [&](const PbctopoCutCandidate &candidate) {
       if (!candidate.valid)
         return;
@@ -10733,10 +11273,30 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           const PbctopoCutCandidate *best_for_report =
               report_best_candidate.valid ? &report_best_candidate
                                           : selected_candidate;
-          if (best_for_report != nullptr && best_for_report->valid)
+          if (best_for_report != nullptr && best_for_report->valid) {
+            frame_report.anchor_graph = best_for_report->anchor_graph;
+            if (report_second_candidate.valid &&
+                candidate_anchor_prefix_equivalent(
+                    *best_for_report, report_second_candidate) &&
+                (better_cut_candidate(*best_for_report,
+                                      report_second_candidate) ||
+                 better_cut_candidate(report_second_candidate,
+                                      *best_for_report))) {
+              frame_report.anchor_graph.ambiguity_count = 1;
+              if (!frame_anchor_ambiguity_counted) {
+                ++timing.pbctopo_anchor_ambiguous_frames;
+                frame_anchor_ambiguity_counted = true;
+              }
+            }
             frame_report.best_score = make_score_vector(*best_for_report);
-          if (report_second_candidate.valid)
+            frame_report.best_score.anchor_graph.ambiguity_count =
+                frame_report.anchor_graph.ambiguity_count;
+          }
+          if (report_second_candidate.valid) {
             frame_report.second_score = make_score_vector(report_second_candidate);
+            frame_report.second_score.anchor_graph.ambiguity_count =
+                frame_report.anchor_graph.ambiguity_count;
+          }
           frame_report.score_gap =
               report_best_candidate.valid && report_second_candidate.valid
                   ? report_best_candidate.gap_score -
@@ -10746,6 +11306,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             frame_report.clash_margin = best_for_report->min_pair_d2;
             frame_report.continuity_margin = best_for_report->continuity_max_d2;
             frame_report.anchor_margin = best_for_report->anchor_max_d2;
+            frame_report.anchor_graph.ambiguity_count =
+                frame_report.best_score.anchor_graph.ambiguity_count;
             frame_report.split_owner_margin =
                 best_for_report->max_owner_raw_minus_minimg_delta;
           }
@@ -10834,7 +11396,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                   &projection_contacting_owner_pairs,
                   runtime_cutoffs.continuity_cutoff, nullptr,
                   skip_projection_candidate_clash,
-                  numeric_limits<double>::quiet_NaN(), nullptr);
+                  numeric_limits<double>::quiet_NaN(), nullptr,
+                  &projection_anchor_context);
               if (skip_projection_candidate_clash)
                 coarse_projection_skip_evals.fetch_add(
                     1, memory_order_relaxed);
@@ -10865,7 +11428,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                 &projection_contacting_owner_pairs,
                 runtime_cutoffs.continuity_cutoff, nullptr,
                 skip_projection_candidate_clash,
-                numeric_limits<double>::quiet_NaN(), nullptr);
+                numeric_limits<double>::quiet_NaN(), nullptr,
+                &projection_anchor_context);
             if (skip_projection_candidate_clash)
               coarse_projection_skip_evals.fetch_add(
                   1, memory_order_relaxed);
@@ -10884,7 +11448,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             &projection_continuity_pairs, &projection_anchor_indices,
             &projection_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
             nullptr, skip_projection_candidate_clash,
-            numeric_limits<double>::quiet_NaN(), nullptr);
+            numeric_limits<double>::quiet_NaN(), nullptr,
+            &projection_anchor_context);
         if (skip_projection_candidate_clash)
           coarse_projection_skip_evals.fetch_add(1, memory_order_relaxed);
       }
@@ -10917,7 +11482,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             &projection_continuity_pairs, &projection_anchor_indices,
             &projection_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
             incumbent, skip_projection_candidate_clash,
-            numeric_limits<double>::quiet_NaN(), nullptr);
+            numeric_limits<double>::quiet_NaN(), nullptr,
+            &projection_anchor_context);
         if (skip_projection_candidate_clash)
           ++timing.projection_clash_skip_evals;
         ++timing.refine_candidates;
@@ -11007,7 +11573,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           &trajectory_context.continuity_anchor_indices,
           &local_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
           verify_incumbent, false, this->m_mol[frame_idx].time_of_snap,
-          "verified_candidate");
+          "verified_candidate", &base_anchor_context);
       if (!verified_candidate.valid)
         continue;
       if (!verified_candidate.ultra_clash) {
@@ -11159,6 +11725,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             component_as_cut.continuity_max_d2 = continuity_max_d2;
             component_as_cut.anchor_mst2 = component_candidate.anchor_mst2;
             component_as_cut.anchor_max_d2 = component_candidate.anchor_max_d2;
+            component_as_cut.anchor_graph = component_candidate.anchor_graph;
             component_as_cut.clash_atom_a = component_candidate.clash_atom_a;
             component_as_cut.clash_atom_b = component_candidate.clash_atom_b;
             component_as_cut.ultra_clash = component_candidate.ultra_clash;
@@ -11177,7 +11744,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             runtime_cutoffs.clash_cutoff,
             runtime_cutoffs.continuity_cutoff, component_points, anchor_backend,
             &timing,
-            &warm_state, component_warm_reference);
+            &warm_state, component_warm_reference, &base_anchor_context);
         PbctopoOwnerPairSplitDetail warm_cut_split_detail;
         size_t warm_cut_split_owner_pairs = 0;
         double warm_cut_split_gap = 0.0;
@@ -11242,7 +11809,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
               same_component_warm_layout ? &warm_state.previous_component_offsets
                                          : nullptr,
               &warm_state, component_warm_reference, &graph_tree_offsets,
-              &graph_refined_offsets, &graph_tree_edges, &graph_cycle_metrics);
+              &graph_refined_offsets, &graph_tree_edges, &graph_cycle_metrics,
+              &base_anchor_context);
           timing.component_graph_s +=
               chrono::duration<double>(clock::now() - component_graph_started)
                   .count();
@@ -11334,7 +11902,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                    best_safe_points.size() == base_atoms.size())
                       ? &best_safe_points
                       : nullptr,
-                  &timing);
+                  &timing, anchor_backend, &base_anchor_context);
           timing.component_search_s +=
               chrono::duration<double>(clock::now() - component_search_started)
                   .count();
@@ -11389,7 +11957,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             same_component_warm_layout ? &warm_state.previous_component_offsets
                                        : nullptr,
             &warm_state, component_warm_reference, allow_exact_search_on_merged,
-            &merged_mode_raw_offsets);
+            &merged_mode_raw_offsets, &base_anchor_context);
         timing.component_graph_s +=
             chrono::duration<double>(clock::now() - merge_mode_started).count();
         if (merge_ok &&
@@ -11442,7 +12010,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                  best_safe_points.size() == base_atoms.size())
                     ? &best_safe_points
                     : nullptr,
-                &timing);
+                &timing, anchor_backend, &base_anchor_context);
         timing.component_search_s +=
             chrono::duration<double>(clock::now() - beam_started).count();
         if (!accept_component_candidate(beam_candidate, component_points, nullptr,
@@ -11724,6 +12292,12 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.component_graph_refine_anchor_spatial_query_s) +
       " s, component_graph_refine_anchor_dense_fallback=" +
       to_string(timing.component_graph_refine_anchor_dense_fallback_s) +
+      " s, pbctopo_anchor_context_build=" +
+      to_string(timing.pbctopo_anchor_context_build_s) +
+      " s, component_graph_refine_anchor_order=" +
+      to_string(timing.component_graph_refine_anchor_order_s) +
+      " s, component_graph_refine_anchor_contact=" +
+      to_string(timing.component_graph_refine_anchor_contact_s) +
       " s, component_graph_refine_cut_score=" +
       to_string(timing.component_graph_refine_cut_score_s) +
       " s, component_graph_refine_ultraclash=" +
@@ -11832,6 +12406,16 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       string(timing.pbctopo_topology_bond_edges_added > 0
                  ? "topology+geometry"
                  : "geometry") +
+      ", pbctopo_anchor_order_edges=" +
+      to_string(timing.pbctopo_anchor_order_edges) +
+      ", pbctopo_anchor_endpoint_edges=" +
+      to_string(timing.pbctopo_anchor_endpoint_edges) +
+      ", pbctopo_anchor_contact_pairs=" +
+      to_string(timing.pbctopo_anchor_contact_pairs) +
+      ", pbctopo_anchor_residue_order_violations=" +
+      to_string(timing.pbctopo_anchor_residue_order_violations) +
+      ", pbctopo_anchor_ambiguous_frames=" +
+      to_string(timing.pbctopo_anchor_ambiguous_frames) +
       ", component_context_builds=" +
       to_string(timing.component_context_builds) +
       ", component_offset_extracts=" +

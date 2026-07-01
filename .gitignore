@@ -506,6 +506,7 @@ test/
 !/test/pbctopo_component_graph_lazy_smoke.ps1
 !/test/pbctopo_confidence_report_smoke.ps1
 !/test/pbctopo_cycle_sync_smoke.ps1
+!/test/pbctopo_anchor_graph_upgrade_smoke.ps1
 !/test/pbctopo_topology_bonds_smoke.ps1
 !/test/pbctopo_topology_continuity_ranges_smoke.ps1
 !/docs/pbctopo_vibe_manuscript/test_outputs/
