@@ -515,6 +515,12 @@ struct PbctopoTimingStats {
   size_t component_graph_refine_anchor_spatial_calls = 0;
   size_t component_graph_refine_anchor_spatial_fallbacks = 0;
   size_t component_graph_refine_anchor_spatial_disconnects = 0;
+  size_t component_cycle_sync_attempts = 0;
+  size_t component_cycle_sync_used = 0;
+  size_t component_cycle_sync_pair_candidates = 0;
+  size_t component_cycle_sync_cycle_support = 0;
+  double component_cycle_sync_cycle_mismatch = 0.0;
+  size_t component_cycle_sync_inconsistent_edges = 0;
   size_t pbctopo_topology_bonds_available = 0;
   size_t pbctopo_topology_bond_edges_added = 0;
   size_t pbctopo_topology_bond_edges_skipped = 0;
@@ -565,6 +571,7 @@ struct PbctopoTimingStats {
   double component_graph_refine_cut_score_s = 0.0;
   double component_graph_refine_ultraclash_s = 0.0;
   double component_graph_refine_stats_s = 0.0;
+  double component_cycle_sync_s = 0.0;
   double early_projection_s = 0.0;
   double warm_component_s = 0.0;
   double component_partial_s = 0.0;
@@ -623,6 +630,30 @@ struct PbctopoComponentPairShiftEntry {
   size_t clash_atom_a = numeric_limits<size_t>::max();
   size_t clash_atom_b = numeric_limits<size_t>::max();
   bool hard_clash = false;
+};
+
+struct PbctopoPairShiftCandidate {
+  Int3 delta;
+  PbctopoPairShiftScore score;
+  double weight = 0.0;
+};
+
+struct PbctopoPairShiftCandidateSet {
+  size_t a = 0;
+  size_t b = 0;
+  vector<PbctopoPairShiftCandidate> candidates;
+};
+
+struct PbctopoCycleSyncMetrics {
+  size_t cycle_support = 0;
+  double cycle_mismatch = 0.0;
+  size_t inconsistent_edge_count = 0;
+};
+
+struct PbctopoCycleSyncResult {
+  bool valid = false;
+  vector<Int3> offsets;
+  PbctopoCycleSyncMetrics metrics;
 };
 
 struct PbctopoComponentPairShiftTable {
@@ -2589,6 +2620,32 @@ bool better_pair_shift_score(const PbctopoPairShiftScore &lhs,
   if (lhs.iy != rhs.iy)
     return lhs.iy < rhs.iy;
   return lhs.iz < rhs.iz;
+}
+
+double pair_shift_candidate_weight(const PbctopoPairShiftScore &score) {
+  if (!score.valid || score.ultra_clash)
+    return 0.0;
+  const double contact_weight = log1p(static_cast<double>(score.contact_atoms));
+  const double confidence_weight =
+      isfinite(score.quality_score) ? max(0.0, score.quality_score) : 0.0;
+  const double distance_weight =
+      isfinite(score.min_pair_d2) ? 1.0 / (1.0 + score.min_pair_d2) : 0.0;
+  return 1.0 + contact_weight + confidence_weight + distance_weight;
+}
+
+void insert_pair_shift_candidate(vector<PbctopoPairShiftCandidate> &top,
+                                 const PbctopoPairShiftCandidate &candidate,
+                                 size_t keep) {
+  if (!candidate.score.valid)
+    return;
+  auto pos = top.begin();
+  while (pos != top.end() &&
+         better_pair_shift_score(pos->score, candidate.score)) {
+    ++pos;
+  }
+  top.insert(pos, candidate);
+  if (top.size() > keep)
+    top.resize(keep);
 }
 
 bool pair_shift_cannot_beat_incumbent(
@@ -5377,6 +5434,191 @@ bool solve_component_offsets_from_tree(
   return find(seen.begin(), seen.end(), 0) == seen.end();
 }
 
+bool compare_int3_lexicographic(const Int3 &lhs, const Int3 &rhs) {
+  if (lhs.x != rhs.x)
+    return lhs.x < rhs.x;
+  if (lhs.y != rhs.y)
+    return lhs.y < rhs.y;
+  return lhs.z < rhs.z;
+}
+
+bool same_int3(const Int3 &lhs, const Int3 &rhs) {
+  return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z;
+}
+
+bool same_int3_offsets(const vector<Int3> &lhs, const vector<Int3> &rhs) {
+  if (lhs.size() != rhs.size())
+    return false;
+  for (size_t idx = 0; idx < lhs.size(); ++idx) {
+    if (!same_int3(lhs[idx], rhs[idx]))
+      return false;
+  }
+  return true;
+}
+
+Int3 oriented_pair_delta(const PbctopoPairShiftCandidateSet &set,
+                         const PbctopoPairShiftCandidate &candidate,
+                         size_t from, size_t to) {
+  if (from == set.a && to == set.b)
+    return candidate.delta;
+  if (from == set.b && to == set.a)
+    return {-candidate.delta.x, -candidate.delta.y, -candidate.delta.z};
+  return {0, 0, 0};
+}
+
+int int3_l1_norm(Int3 value) {
+  return abs(value.x) + abs(value.y) + abs(value.z);
+}
+
+double robust_cycle_penalty(int mismatch_l1) {
+  return static_cast<double>(min(mismatch_l1, 2));
+}
+
+struct PbctopoCycleSyncBeamState {
+  vector<Int3> offsets;
+  vector<char> assigned;
+  double cost = 0.0;
+  double support = 0.0;
+  size_t inconsistent_edges = 0;
+};
+
+PbctopoCycleSyncResult solve_component_offsets_cycle_consistent(
+    size_t component_count, const vector<vector<size_t>> &components,
+    const vector<PbctopoPairShiftCandidateSet> &pair_candidates,
+    size_t beam_width) {
+  PbctopoCycleSyncResult result;
+  if (component_count == 0)
+    return result;
+  if (component_count == 1) {
+    result.valid = true;
+    result.offsets.assign(1, {0, 0, 0});
+    return result;
+  }
+
+  vector<vector<size_t>> incident(component_count);
+  for (size_t edge_idx = 0; edge_idx < pair_candidates.size(); ++edge_idx) {
+    const auto &set = pair_candidates[edge_idx];
+    if (set.a < component_count && set.b < component_count &&
+        !set.candidates.empty()) {
+      incident[set.a].push_back(edge_idx);
+      incident[set.b].push_back(edge_idx);
+    }
+  }
+
+  vector<size_t> order;
+  order.reserve(component_count);
+  vector<char> in_order(component_count, 0);
+  order.push_back(0);
+  in_order[0] = 1;
+  while (order.size() < component_count) {
+    size_t best = numeric_limits<size_t>::max();
+    size_t best_links = 0;
+    for (size_t comp = 0; comp < component_count; ++comp) {
+      if (in_order[comp])
+        continue;
+      size_t links = 0;
+      for (size_t edge_idx : incident[comp]) {
+        const auto &set = pair_candidates[edge_idx];
+        const size_t other = set.a == comp ? set.b : set.a;
+        if (other < in_order.size() && in_order[other])
+          ++links;
+      }
+      if (links > best_links ||
+          (links == best_links && best == numeric_limits<size_t>::max())) {
+        best = comp;
+        best_links = links;
+      }
+    }
+    if (best == numeric_limits<size_t>::max() || best_links == 0)
+      return result;
+    in_order[best] = 1;
+    order.push_back(best);
+  }
+
+  vector<PbctopoCycleSyncBeamState> beam(1);
+  beam[0].offsets.assign(component_count, {0, 0, 0});
+  beam[0].assigned.assign(component_count, 0);
+  beam[0].assigned[0] = 1;
+
+  const size_t keep = max<size_t>(1, min<size_t>(beam_width, 256));
+  for (size_t order_pos = 1; order_pos < order.size(); ++order_pos) {
+    const size_t comp = order[order_pos];
+    vector<PbctopoCycleSyncBeamState> next;
+    for (const auto &state : beam) {
+      vector<Int3> proposed_offsets;
+      for (size_t edge_idx : incident[comp]) {
+        const auto &set = pair_candidates[edge_idx];
+        const size_t other = set.a == comp ? set.b : set.a;
+        if (other >= state.assigned.size() || !state.assigned[other])
+          continue;
+        for (const auto &candidate : set.candidates) {
+          const Int3 delta_other_to_comp =
+              oriented_pair_delta(set, candidate, other, comp);
+          proposed_offsets.push_back(state.offsets[other] + delta_other_to_comp);
+        }
+      }
+      sort(proposed_offsets.begin(), proposed_offsets.end(),
+           compare_int3_lexicographic);
+      proposed_offsets.erase(unique(proposed_offsets.begin(),
+                                    proposed_offsets.end(), same_int3),
+                             proposed_offsets.end());
+      for (const Int3 &offset : proposed_offsets) {
+        PbctopoCycleSyncBeamState trial = state;
+        trial.offsets[comp] = offset;
+        trial.assigned[comp] = 1;
+        for (size_t edge_idx : incident[comp]) {
+          const auto &set = pair_candidates[edge_idx];
+          const size_t other = set.a == comp ? set.b : set.a;
+          if (other >= trial.assigned.size() || !trial.assigned[other])
+            continue;
+          double best_edge_penalty = numeric_limits<double>::infinity();
+          double best_edge_weight = 0.0;
+          for (const auto &candidate : set.candidates) {
+            const Int3 expected = oriented_pair_delta(set, candidate, other, comp);
+            const Int3 observed = trial.offsets[comp] - trial.offsets[other];
+            const int mismatch = int3_l1_norm(observed - expected);
+            const double penalty =
+                robust_cycle_penalty(mismatch) * max(1.0, candidate.weight);
+            if (penalty < best_edge_penalty) {
+              best_edge_penalty = penalty;
+              best_edge_weight = max(1.0, candidate.weight);
+            }
+          }
+          if (isfinite(best_edge_penalty)) {
+            trial.cost += best_edge_penalty;
+            trial.support += best_edge_weight;
+            if (best_edge_penalty > 1.0e-9)
+              ++trial.inconsistent_edges;
+          }
+        }
+        next.push_back(std::move(trial));
+      }
+    }
+    sort(next.begin(), next.end(), [](const auto &lhs, const auto &rhs) {
+      if (fabs(lhs.cost - rhs.cost) > 1.0e-9)
+        return lhs.cost < rhs.cost;
+      if (fabs(lhs.support - rhs.support) > 1.0e-9)
+        return lhs.support > rhs.support;
+      return lhs.inconsistent_edges < rhs.inconsistent_edges;
+    });
+    if (next.size() > keep)
+      next.resize(keep);
+    beam = std::move(next);
+    if (beam.empty())
+      return result;
+  }
+
+  const auto &best = beam.front();
+  result.valid = true;
+  result.offsets = best.offsets;
+  rebase_component_offsets(result.offsets, components);
+  result.metrics.cycle_support =
+      static_cast<size_t>(llround(max(0.0, best.support)));
+  result.metrics.cycle_mismatch = best.cost;
+  result.metrics.inconsistent_edge_count = best.inconsistent_edges;
+  return result;
+}
+
 bool graph_edge_has_zero_shift(const PbctopoGraphEdge &edge) {
   return edge.dx == 0 && edge.dy == 0 && edge.dz == 0;
 }
@@ -5389,7 +5631,8 @@ vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
     const vector<PbctopoAtom> &atoms,
     const vector<vector<size_t>> &components, const vector<PbctopoShift> &shifts,
     const PbctopoRuntimeCutoffs &cutoffs, PbctopoTimingStats *timing,
-    const vector<Int3> *warm_component_offsets) {
+    const vector<Int3> *warm_component_offsets,
+    vector<PbctopoPairShiftCandidateSet> *pair_candidates_out = nullptr) {
   size_t identity_shift_pos = 0;
   for (size_t shift_idx = 0; shift_idx < shifts.size(); ++shift_idx) {
     if (shifts[shift_idx].ix == 0 && shifts[shift_idx].iy == 0 &&
@@ -5420,6 +5663,9 @@ vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
     for (size_t rhs = lhs + 1; rhs < components.size(); ++rhs) {
       PbctopoPairShiftScore best_score;
       PbctopoPairShiftScore second_score;
+      vector<PbctopoPairShiftCandidate> top_pair_candidates;
+      if (pair_candidates_out != nullptr)
+        top_pair_candidates.reserve(3);
       Int3 expected_delta;
       const Int3 *expected_delta_ptr = nullptr;
       if (warm_component_offsets != nullptr &&
@@ -5447,6 +5693,13 @@ vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
               shifted_components.materialize(rhs, shift_idx), shift,
               cutoffs.clash_cutoff, cutoffs.pair_contact_cutoff, incumbent);
         }
+        if (pair_candidates_out != nullptr) {
+          insert_pair_shift_candidate(
+              top_pair_candidates,
+              PbctopoPairShiftCandidate{{shift.ix, shift.iy, shift.iz}, score,
+                                        pair_shift_candidate_weight(score)},
+              3);
+        }
         if (better_pair_shift_score(score, best_score)) {
           second_score = best_score;
           best_score = score;
@@ -5471,6 +5724,12 @@ vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
       edge.ultra_clash = best_score.ultra_clash;
       edge.valid = best_score.valid;
       ranked_edges.push_back(edge);
+      if (pair_candidates_out != nullptr && !top_pair_candidates.empty()) {
+        pair_candidates_out->push_back({lhs, rhs, top_pair_candidates});
+        if (timing != nullptr)
+          timing->component_cycle_sync_pair_candidates +=
+              top_pair_candidates.size();
+      }
     }
   }
   if (timing != nullptr) {
@@ -5494,19 +5753,25 @@ bool solve_component_offsets_via_pair_graph(
     const vector<PbctopoContinuityPair> &continuity_pairs,
     const vector<size_t> &anchor_indices,
     const PbctopoRuntimeCutoffs &cutoffs, PbctopoCutCandidate &best_cut,
-    double &shift_norm2, PbctopoTimingStats *timing,
+    double &shift_norm2, size_t component_beam_width,
+    PbctopoTimingStats *timing,
     PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
     const vector<Int3> *warm_component_offsets = nullptr,
     PbctopoWarmState *warm_state = nullptr,
     const PbctopoCutCandidate *warm_reference_candidate = nullptr,
     vector<Int3> *tree_offsets_out = nullptr,
     vector<Int3> *refined_offsets_out = nullptr,
-    vector<PbctopoGraphEdge> *tree_edges_out = nullptr) {
+    vector<PbctopoGraphEdge> *tree_edges_out = nullptr,
+    PbctopoCycleSyncMetrics *cycle_metrics_out = nullptr) {
   if (components.empty())
     return false;
 
+  if (cycle_metrics_out != nullptr)
+    *cycle_metrics_out = {};
+  vector<PbctopoPairShiftCandidateSet> pair_candidates;
   vector<PbctopoGraphEdge> ranked_edges = build_component_graph_edge_candidates(
-      atoms, components, shifts, cutoffs, timing, warm_component_offsets);
+      atoms, components, shifts, cutoffs, timing, warm_component_offsets,
+      &pair_candidates);
   const auto tree_started = chrono::steady_clock::now();
   sort(ranked_edges.begin(), ranked_edges.end(), better_component_graph_edge);
   vector<PbctopoGraphEdge> tree_edges;
@@ -5542,6 +5807,65 @@ bool solve_component_offsets_via_pair_graph(
         chrono::duration<double>(chrono::steady_clock::now() - refine_started)
             .count();
   }
+  PbctopoCutCandidate tree_cut = best_cut;
+  vector<Vec3> tree_points = placed_points;
+  vector<Int3> tree_refined_offsets = offsets;
+  PbctopoWarmState tree_warm_state;
+  if (warm_state != nullptr)
+    tree_warm_state = *warm_state;
+
+  const auto cycle_started = chrono::steady_clock::now();
+  if (timing != nullptr)
+    ++timing->component_cycle_sync_attempts;
+  PbctopoCycleSyncResult cycle_result = solve_component_offsets_cycle_consistent(
+      components.size(), components, pair_candidates,
+      max<size_t>(64, component_beam_width));
+  if (timing != nullptr) {
+    timing->component_cycle_sync_s +=
+        chrono::duration<double>(chrono::steady_clock::now() - cycle_started)
+            .count();
+    timing->component_cycle_sync_cycle_support +=
+        cycle_result.metrics.cycle_support;
+    timing->component_cycle_sync_cycle_mismatch +=
+        cycle_result.metrics.cycle_mismatch;
+    timing->component_cycle_sync_inconsistent_edges +=
+        cycle_result.metrics.inconsistent_edge_count;
+  }
+  if (cycle_metrics_out != nullptr)
+    *cycle_metrics_out = cycle_result.metrics;
+
+  if (cycle_result.valid &&
+      !same_int3_offsets(cycle_result.offsets, tree_refined_offsets)) {
+    vector<Vec3> cycle_points;
+    vector<Int3> cycle_offsets = cycle_result.offsets;
+    const auto cycle_refine_started = chrono::steady_clock::now();
+    PbctopoCutCandidate cycle_cut = improve_component_offsets_locally(
+        atoms, components, Box, shifts, local_edges, edge_set, continuity_pairs,
+        anchor_indices, cycle_offsets, cutoffs.clash_cutoff,
+        cutoffs.continuity_cutoff, cycle_points, anchor_backend, timing,
+        warm_state, warm_reference_candidate);
+    if (timing != nullptr) {
+      timing->component_graph_refine_s +=
+          chrono::duration<double>(chrono::steady_clock::now() -
+                                   cycle_refine_started)
+              .count();
+    }
+    if (cycle_cut.valid && cycle_points.size() == atoms.size() &&
+        better_cut_candidate(cycle_cut, tree_cut)) {
+      best_cut = cycle_cut;
+      placed_points = std::move(cycle_points);
+      offsets = std::move(cycle_offsets);
+      if (timing != nullptr)
+        ++timing->component_cycle_sync_used;
+    } else {
+      best_cut = tree_cut;
+      placed_points = std::move(tree_points);
+      offsets = std::move(tree_refined_offsets);
+      if (warm_state != nullptr)
+        *warm_state = tree_warm_state;
+    }
+  }
+
   if (refined_offsets_out != nullptr)
     *refined_offsets_out = offsets;
   shift_norm2 = best_cut.shift_norm2;
@@ -10905,6 +11229,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
         vector<Int3> graph_tree_offsets;
         vector<Int3> graph_refined_offsets;
         vector<PbctopoGraphEdge> graph_tree_edges;
+        PbctopoCycleSyncMetrics graph_cycle_metrics;
         if (!component_search_used) {
           const auto component_graph_started = clock::now();
           const bool graph_ok = solve_component_offsets_via_pair_graph(
@@ -10912,14 +11237,19 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
               component_scoring_edges, local_edge_set, component_points,
               trajectory_context.continuity_pairs,
               trajectory_context.continuity_anchor_indices, runtime_cutoffs,
-              graph_as_cut, component_shift_norm2, &timing, anchor_backend,
+              graph_as_cut, component_shift_norm2, beam_width, &timing,
+              anchor_backend,
               same_component_warm_layout ? &warm_state.previous_component_offsets
                                          : nullptr,
               &warm_state, component_warm_reference, &graph_tree_offsets,
-              &graph_refined_offsets, &graph_tree_edges);
+              &graph_refined_offsets, &graph_tree_edges, &graph_cycle_metrics);
           timing.component_graph_s +=
               chrono::duration<double>(clock::now() - component_graph_started)
                   .count();
+          frame_report.cycle_support = graph_cycle_metrics.cycle_support;
+          frame_report.cycle_mismatch = graph_cycle_metrics.cycle_mismatch;
+          frame_report.inconsistent_edge_count =
+              graph_cycle_metrics.inconsistent_edge_count;
           if (!graph_ok) {
             ++timing.component_graph_failed;
             component_graph_fallthrough_reason = "graph_fail";
@@ -11400,6 +11730,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.component_graph_refine_ultraclash_s) +
       " s, component_graph_refine_stats=" +
       to_string(timing.component_graph_refine_stats_s) +
+      " s, component_cycle_sync=" +
+      to_string(timing.component_cycle_sync_s) +
       " s, component_search=" + to_string(timing.component_search_s) +
       " s, offset_extract=" + to_string(timing.component_offset_extract_s) +
       " s, apply=" + to_string(timing.apply_s) + " s");
@@ -11476,6 +11808,18 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.component_graph_refine_anchor_spatial_fallbacks) +
       ", component_graph_refine_anchor_spatial_disconnects=" +
       to_string(timing.component_graph_refine_anchor_spatial_disconnects) +
+      ", component_cycle_sync_attempts=" +
+      to_string(timing.component_cycle_sync_attempts) +
+      ", component_cycle_sync_used=" +
+      to_string(timing.component_cycle_sync_used) +
+      ", component_cycle_sync_pair_candidates=" +
+      to_string(timing.component_cycle_sync_pair_candidates) +
+      ", component_cycle_sync_cycle_support=" +
+      to_string(timing.component_cycle_sync_cycle_support) +
+      ", component_cycle_sync_cycle_mismatch=" +
+      to_string(timing.component_cycle_sync_cycle_mismatch) +
+      ", component_cycle_sync_inconsistent_edges=" +
+      to_string(timing.component_cycle_sync_inconsistent_edges) +
       ", pbctopo_topology_bonds_available=" +
       to_string(timing.pbctopo_topology_bonds_available) +
       ", pbctopo_topology_bond_edges_added=" +
