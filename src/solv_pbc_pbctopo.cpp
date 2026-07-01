@@ -442,6 +442,9 @@ struct PbctopoTimingStats {
   size_t component_graph_refine_anchor_spatial_calls = 0;
   size_t component_graph_refine_anchor_spatial_fallbacks = 0;
   size_t component_graph_refine_anchor_spatial_disconnects = 0;
+  size_t pbctopo_topology_bonds_available = 0;
+  size_t pbctopo_topology_bond_edges_added = 0;
+  size_t pbctopo_topology_bond_edges_skipped = 0;
   size_t component_context_builds = 0;
   size_t component_offset_extracts = 0;
   size_t apply_calls = 0;
@@ -1333,6 +1336,19 @@ vector<PbctopoRange> build_ranges_from_info(const vector<mol_info> &info,
   return ranges;
 }
 
+vector<PbctopoRange> build_ranges_from_topology(const MolTopology &topology,
+                                                size_t atom_count) {
+  vector<PbctopoRange> ranges;
+  const auto &molecule_ranges = topology.molecule_ranges();
+  ranges.reserve(molecule_ranges.size());
+  for (const MolTopologyMoleculeRange &range : molecule_ranges) {
+    if (range.begin >= range.end || range.end > atom_count)
+      continue;
+    ranges.push_back({range.begin, range.end, ranges.size(), true});
+  }
+  return ranges;
+}
+
 vector<PbctopoRange> build_ranges_for_system(const Multi_MOL &system,
                                              const MOL &mol) {
   vector<PbctopoRange> ranges =
@@ -1397,7 +1413,10 @@ build_pbctopo_system_static_data(const Multi_MOL &system, const MOL &mol) {
     data.heavy_count = data.atom_count;
   }
   PbctopoSystemStaticData continuity_data = data;
-  continuity_data.ranges = build_ranges_from_info(system.info, mol.pos.x.size());
+  continuity_data.ranges =
+      build_ranges_from_topology(system.topology, mol.pos.x.size());
+  if (continuity_data.ranges.empty())
+    continuity_data.ranges = build_ranges_from_info(system.info, mol.pos.x.size());
   if (continuity_data.ranges.empty())
     continuity_data.ranges = data.ranges;
   data.continuity_pairs_local =
@@ -1508,43 +1527,55 @@ build_local_continuity_pairs(const Multi_MOL &system,
       return 4;
     };
 
-    size_t prev_anchor = numeric_limits<size_t>::max();
-    string prev_chain;
-    size_t prev_chainnum = numeric_limits<size_t>::max();
-    size_t i = 0;
-    while (i < static_data.atom_count) {
-      const auto &start_info = system.info[i];
-      const size_t chainnum = start_info.get_chainnum();
-      const string chain = start_info.get_chain();
-      const size_t resnr = start_info.get_resnr();
-      size_t j = i + 1;
-      while (j < static_data.atom_count &&
-             system.info[j].get_chainnum() == chainnum &&
-             system.info[j].get_chain() == chain &&
-             system.info[j].get_resnr() == resnr) {
-        ++j;
-      }
+    auto append_range_pairs = [&](size_t begin, size_t end) {
+      if (begin >= end || begin >= static_data.atom_count)
+        return;
+      end = min(end, static_data.atom_count);
 
-      size_t anchor = numeric_limits<size_t>::max();
-      int best_priority = numeric_limits<int>::max();
-      for (size_t atom_idx = i; atom_idx < j; ++atom_idx) {
-        const int priority = atom_priority(atom_idx);
-        if (priority < best_priority) {
-          best_priority = priority;
-          anchor = atom_idx;
+      size_t prev_anchor = numeric_limits<size_t>::max();
+      string prev_chain;
+      size_t prev_chainnum = numeric_limits<size_t>::max();
+      size_t i = begin;
+      while (i < end) {
+        const auto &start_info = system.info[i];
+        const size_t chainnum = start_info.get_chainnum();
+        const string chain = start_info.get_chain();
+        const size_t resnr = start_info.get_resnr();
+        size_t j = i + 1;
+        while (j < end && system.info[j].get_chainnum() == chainnum &&
+               system.info[j].get_chain() == chain &&
+               system.info[j].get_resnr() == resnr) {
+          ++j;
         }
-      }
 
-      if (anchor != numeric_limits<size_t>::max()) {
-        if (prev_anchor != numeric_limits<size_t>::max() &&
-            chainnum == prev_chainnum && chain == prev_chain) {
-          continuity_pairs.push_back({prev_anchor, anchor});
+        size_t anchor = numeric_limits<size_t>::max();
+        int best_priority = numeric_limits<int>::max();
+        for (size_t atom_idx = i; atom_idx < j; ++atom_idx) {
+          const int priority = atom_priority(atom_idx);
+          if (priority < best_priority) {
+            best_priority = priority;
+            anchor = atom_idx;
+          }
         }
-        prev_anchor = anchor;
-        prev_chainnum = chainnum;
-        prev_chain = chain;
+
+        if (anchor != numeric_limits<size_t>::max()) {
+          if (prev_anchor != numeric_limits<size_t>::max() &&
+              chainnum == prev_chainnum && chain == prev_chain) {
+            continuity_pairs.push_back({prev_anchor, anchor});
+          }
+          prev_anchor = anchor;
+          prev_chainnum = chainnum;
+          prev_chain = chain;
+        }
+        i = j;
       }
-      i = j;
+    };
+
+    if (static_data.ranges.empty()) {
+      append_range_pairs(0, static_data.atom_count);
+    } else {
+      for (const auto &range : static_data.ranges)
+        append_range_pairs(range.begin, range.end);
     }
 
     if (!continuity_pairs.empty())
@@ -1917,6 +1948,67 @@ void build_local_neighborhood_graph(
     }
     bond_grid[{cx, cy, cz}].push_back(i);
   }
+}
+
+void append_topology_bond_edges_for_system(
+    const Multi_MOL &system, int owner, const vector<PbctopoAtom> &atoms,
+    box Box, vector<PbctopoLocalEdge> &edges, unordered_set<uint64_t> &edge_set,
+    PbctopoTimingStats &timing) {
+  if (!system.topology.has_bonds())
+    return;
+
+  const auto &topology_bonds = system.topology.bonds();
+  timing.pbctopo_topology_bonds_available += topology_bonds.size();
+  if (system.info.empty())
+    return;
+
+  vector<size_t> local_to_atom(system.info.size(),
+                               numeric_limits<size_t>::max());
+  for (size_t atom_idx = 0; atom_idx < atoms.size(); ++atom_idx) {
+    const auto &atom = atoms[atom_idx];
+    if (atom.owner != owner)
+      continue;
+    if (atom.local_atom_index >= local_to_atom.size())
+      continue;
+    local_to_atom[atom.local_atom_index] = atom_idx;
+  }
+
+  for (const MolTopologyBond &bond : topology_bonds) {
+    if (bond.a >= local_to_atom.size() || bond.b >= local_to_atom.size()) {
+      ++timing.pbctopo_topology_bond_edges_skipped;
+      continue;
+    }
+    const size_t a = local_to_atom[bond.a];
+    const size_t b = local_to_atom[bond.b];
+    if (a == numeric_limits<size_t>::max() ||
+        b == numeric_limits<size_t>::max() || a == b) {
+      ++timing.pbctopo_topology_bond_edges_skipped;
+      continue;
+    }
+
+    const uint64_t pair_key = atom_pair_key(a, b);
+    if (!edge_set.insert(pair_key).second) {
+      ++timing.pbctopo_topology_bond_edges_skipped;
+      continue;
+    }
+
+    double dsx = atoms[b].sx - atoms[a].sx;
+    double dsy = atoms[b].sy - atoms[a].sy;
+    double dsz = atoms[b].sz - atoms[a].sz;
+    dsx -= round(dsx);
+    dsy -= round(dsy);
+    dsz -= round(dsz);
+    const double d2 = cart_dist_sq_from_scaled_delta(Box, dsx, dsy, dsz);
+    const double ref_d2 = max(d2, 1.0e-6);
+    edges.push_back({a, b, d2, 1.0 / ref_d2, max(9.0, ref_d2 * 4.0)});
+    ++timing.pbctopo_topology_bond_edges_added;
+  }
+}
+
+string pbctopo_topology_source_label(const PbctopoTimingStats &timing) {
+  return timing.pbctopo_topology_bonds_available > 0
+             ? "gromacs_topology+geometry_cutoff"
+             : "geometry_cutoff";
 }
 
 bool partial_component_ultraclash(
@@ -9666,6 +9758,14 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     build_local_neighborhood_graph(base_atoms, this->m_mol[frame_idx].Box,
                                    local_edges, local_edge_set,
                                    runtime_cutoffs.bond_cutoff);
+    append_topology_bond_edges_for_system(*this, 0, base_atoms,
+                                          this->m_mol[frame_idx].Box,
+                                          local_edges, local_edge_set, timing);
+    if (frame_idx < mol2.m_mol.size() && mol2.topology.has_bonds()) {
+      append_topology_bond_edges_for_system(
+          mol2, 1, base_atoms, this->m_mol[frame_idx].Box, local_edges,
+          local_edge_set, timing);
+    }
     timing.graph_s += chrono::duration<double>(clock::now() - stage_started).count();
 
     stage_started = clock::now();
@@ -10992,6 +11092,18 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.component_graph_refine_anchor_spatial_fallbacks) +
       ", component_graph_refine_anchor_spatial_disconnects=" +
       to_string(timing.component_graph_refine_anchor_spatial_disconnects) +
+      ", pbctopo_topology_bonds_available=" +
+      to_string(timing.pbctopo_topology_bonds_available) +
+      ", pbctopo_topology_bond_edges_added=" +
+      to_string(timing.pbctopo_topology_bond_edges_added) +
+      ", pbctopo_topology_bond_edges_skipped=" +
+      to_string(timing.pbctopo_topology_bond_edges_skipped) +
+      ", pbctopo_topology_source=" +
+      pbctopo_topology_source_label(timing) +
+      ", pbctopo_topology_component_source=" +
+      string(timing.pbctopo_topology_bond_edges_added > 0
+                 ? "topology+geometry"
+                 : "geometry") +
       ", component_context_builds=" +
       to_string(timing.component_context_builds) +
       ", component_offset_extracts=" +

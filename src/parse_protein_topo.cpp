@@ -302,6 +302,8 @@ int Multi_MOL::topo_protein(std::string_view input_topo,
     info_topo = info_topo_total_temp;
   }
 
+  attach_gromacs_mol_topology_graph(*this, input_topo);
+
   // BUG 5 FIX: If we have multiple copies added to info_topo_total_temp,
   // we must also initialize original_atom_ids if the sizes match exactly
   // to avoid subset array bounds crashes.

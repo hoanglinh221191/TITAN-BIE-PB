@@ -87,6 +87,7 @@ void Multi_MOL::topo_lg(std::string_view input_topo, std::string_view force_f,
       //<< info_topo.size() << ". Calling post_process.\n";
 
       this->post_process_atom_from_topo(info_topo);
+      attach_gromacs_mol_topology_graph(*this, input_topo);
     } else if (input_topo.substr(input_topo.length() - 6) == ".parm7") {
       helper_topo_lg_parm_format(input_topo, force_f, parameter,
                                  input_topo_protein, lig_name);

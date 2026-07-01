@@ -48,8 +48,8 @@ $argsText = @"
 -1pdb=true
 -nocal=true
 -opdb=nocal_two_mol_pbc_output.pdb
--path-a=..\..\lib_ff
--path-n=..\..\lib_ff
+-path-a=..\..\example\2\lib_ff
+-path-n=..\..\example\2\lib_ff
 "@
 
 [System.IO.File]::WriteAllText($arg, $argsText, [System.Text.Encoding]::ASCII)

@@ -101,7 +101,12 @@ foreach ($pattern in @(
         'component_graph_refine_trial_build_global_rebase=\d+',
         'component_graph_refine_stats_cached=\d+',
         'component_graph_refine_stats_full=\d+',
-        'component_graph_refine_stats=([0-9.]+) s'
+        'component_graph_refine_stats=([0-9.]+) s',
+        'pbctopo_topology_bonds_available=\d+',
+        'pbctopo_topology_bond_edges_added=\d+',
+        'pbctopo_topology_bond_edges_skipped=\d+',
+        'pbctopo_topology_source=(gromacs_topology\+geometry_cutoff|geometry_cutoff)',
+        'pbctopo_topology_component_source=(topology\+geometry|geometry)'
     )) {
     if ($logText -notmatch $pattern) {
         throw "Missing expected pbctopo lazy-graph log pattern: $pattern"

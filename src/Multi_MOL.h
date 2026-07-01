@@ -9,6 +9,7 @@
 #include "c6c12.h"
 #include "index_v2.h"
 #include "info.h"
+#include "mol_topology.h"
 #include <cstdint>
 #include <expected>
 #include <fstream>
@@ -119,6 +120,7 @@ public:
   vector<double> lcpo_p4;
   vector<class index> Index;
   vector<mol_info> info;
+  MolTopology topology;
   string mol_type{"protein"};
   string force_f{"AMBER99SB"};
 

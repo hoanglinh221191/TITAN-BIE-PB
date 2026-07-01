@@ -500,9 +500,12 @@ test/
 !/test/titan_s2_args_smoke.cpp
 !/test/s2_smoke.ps1
 !/test/nocal_two_mol_pbc_smoke.ps1
+!/test/mol_topology_smoke.ps1
 !/test/pbctopo_cli_config_parser_smoke.ps1
 !/test/pbctopo_logging_smoke.ps1
 !/test/pbctopo_component_graph_lazy_smoke.ps1
+!/test/pbctopo_topology_bonds_smoke.ps1
+!/test/pbctopo_topology_continuity_ranges_smoke.ps1
 !/docs/pbctopo_vibe_manuscript/test_outputs/
 !/docs/pbctopo_vibe_manuscript/test_outputs/**
 !/test/fixtures/s2_synthetic.pdb
