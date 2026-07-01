@@ -6,17 +6,9 @@
 #include <limits>
 #include <string>
 
-namespace titan_pbctopo {
+#include "types.h"
 
-struct PbctopoAnchorGraphScore {
-  double order_max_d2 = std::numeric_limits<double>::infinity();
-  double order_path_d2 = std::numeric_limits<double>::infinity();
-  double endpoint_image_gap = std::numeric_limits<double>::infinity();
-  std::size_t residue_order_violations = 0;
-  std::size_t contact_map_lost = 0;
-  double contact_map_max_d2 = std::numeric_limits<double>::infinity();
-  std::size_t ambiguity_count = 0;
-};
+namespace titan_pbctopo {
 
 enum class PbctopoFrameStatus { Certified, Rescued, Fallback };
 
