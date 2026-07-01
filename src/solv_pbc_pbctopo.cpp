@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <numeric>
@@ -245,6 +246,78 @@ struct PbctopoCutCandidate {
   size_t clash_atom_b = numeric_limits<size_t>::max();
   bool ultra_clash = false;
   bool valid = false;
+};
+
+enum class PbctopoFrameStatus { Certified, Rescued, Fallback };
+
+enum class PbctopoFrameMode {
+  None,
+  Virtual,
+  EarlyProjection,
+  ComponentGraph,
+  ComponentSearchExact,
+  ComponentSearchBeam,
+  Warm,
+  HullRescue,
+  DistanceRescue,
+  Pbci,
+};
+
+enum class PbctopoFailureReason {
+  None,
+  NoSeed,
+  ProjectionInvalid,
+  FullVerifyClash,
+  ContinuityReject,
+  AnchorReject,
+  SplitOwnerReject,
+  ComponentGraphFailed,
+  BeamEmpty,
+  NotBetterThanIncumbent,
+  FallbackPbci,
+};
+
+struct PbctopoScoreVector {
+  bool valid = false;
+  bool ultra_clash = false;
+  size_t broken_edges = 0;
+  double continuity_max_d2 = numeric_limits<double>::quiet_NaN();
+  double continuity_path = numeric_limits<double>::quiet_NaN();
+  double anchor_max_d2 = numeric_limits<double>::quiet_NaN();
+  double anchor_mst2 = numeric_limits<double>::quiet_NaN();
+  double principal_rg2_max = numeric_limits<double>::quiet_NaN();
+  double principal_rg2_mid = numeric_limits<double>::quiet_NaN();
+  double principal_rg2_min = numeric_limits<double>::quiet_NaN();
+  double shape_kappa2 = numeric_limits<double>::quiet_NaN();
+  double shape_asphericity = numeric_limits<double>::quiet_NaN();
+  double shape_acylindricity = numeric_limits<double>::quiet_NaN();
+  double edge_stretch = numeric_limits<double>::quiet_NaN();
+  double shift_norm2 = numeric_limits<double>::quiet_NaN();
+  double gap_score = numeric_limits<double>::quiet_NaN();
+};
+
+struct PbctopoFrameReport {
+  size_t frame = 0;
+  double time_ps = 0.0;
+  PbctopoFrameStatus status = PbctopoFrameStatus::Fallback;
+  PbctopoFrameMode mode = PbctopoFrameMode::None;
+  size_t component_count = 0;
+  size_t safe_candidate_count = 0;
+  PbctopoScoreVector best_score;
+  PbctopoScoreVector second_score;
+  double score_gap = numeric_limits<double>::quiet_NaN();
+  double clash_margin = numeric_limits<double>::quiet_NaN();
+  double continuity_margin = numeric_limits<double>::quiet_NaN();
+  double anchor_margin = numeric_limits<double>::quiet_NaN();
+  double split_owner_margin = numeric_limits<double>::quiet_NaN();
+  PbctopoFailureReason fallback_reason = PbctopoFailureReason::None;
+  double time_total_ms = 0.0;
+  double time_graph_ms = 0.0;
+  double time_virtual_ms = 0.0;
+  double time_component_ms = 0.0;
+  size_t cycle_support = 0;
+  double cycle_mismatch = 0.0;
+  size_t inconsistent_edge_count = 0;
 };
 
 struct PbctopoLocalEdge {
@@ -2009,6 +2082,168 @@ string pbctopo_topology_source_label(const PbctopoTimingStats &timing) {
   return timing.pbctopo_topology_bonds_available > 0
              ? "gromacs_topology+geometry_cutoff"
              : "geometry_cutoff";
+}
+
+string pbctopo_frame_status_name(PbctopoFrameStatus status) {
+  switch (status) {
+  case PbctopoFrameStatus::Certified:
+    return "certified";
+  case PbctopoFrameStatus::Rescued:
+    return "rescued";
+  case PbctopoFrameStatus::Fallback:
+    return "fallback";
+  }
+  return "fallback";
+}
+
+string pbctopo_frame_mode_name(PbctopoFrameMode mode) {
+  switch (mode) {
+  case PbctopoFrameMode::None:
+    return "none";
+  case PbctopoFrameMode::Virtual:
+    return "virtual";
+  case PbctopoFrameMode::EarlyProjection:
+    return "early_projection";
+  case PbctopoFrameMode::ComponentGraph:
+    return "exact";
+  case PbctopoFrameMode::ComponentSearchExact:
+    return "component_exact";
+  case PbctopoFrameMode::ComponentSearchBeam:
+    return "beam";
+  case PbctopoFrameMode::Warm:
+    return "warm";
+  case PbctopoFrameMode::HullRescue:
+    return "hull_rescue";
+  case PbctopoFrameMode::DistanceRescue:
+    return "distance_rescue";
+  case PbctopoFrameMode::Pbci:
+    return "pbci";
+  }
+  return "none";
+}
+
+string pbctopo_failure_reason_name(PbctopoFailureReason reason) {
+  switch (reason) {
+  case PbctopoFailureReason::None:
+    return "none";
+  case PbctopoFailureReason::NoSeed:
+    return "no_seed";
+  case PbctopoFailureReason::ProjectionInvalid:
+    return "projection_invalid";
+  case PbctopoFailureReason::FullVerifyClash:
+    return "full_verify_clash";
+  case PbctopoFailureReason::ContinuityReject:
+    return "continuity_reject";
+  case PbctopoFailureReason::AnchorReject:
+    return "anchor_reject";
+  case PbctopoFailureReason::SplitOwnerReject:
+    return "split_owner_reject";
+  case PbctopoFailureReason::ComponentGraphFailed:
+    return "component_graph_failed";
+  case PbctopoFailureReason::BeamEmpty:
+    return "beam_empty";
+  case PbctopoFailureReason::NotBetterThanIncumbent:
+    return "not_better_than_incumbent";
+  case PbctopoFailureReason::FallbackPbci:
+    return "fallback_pbci";
+  }
+  return "none";
+}
+
+string format_pbctopo_report_double(double value) {
+  return isfinite(value) ? to_string(value) : "na";
+}
+
+string format_pbctopo_report_size(size_t value) {
+  return value == numeric_limits<size_t>::max() ? string("na")
+                                                : to_string(value);
+}
+
+PbctopoScoreVector make_score_vector(const PbctopoCutCandidate &candidate) {
+  PbctopoScoreVector score;
+  score.valid = candidate.valid;
+  score.ultra_clash = candidate.ultra_clash;
+  score.broken_edges = candidate.broken_edges;
+  score.continuity_max_d2 = candidate.continuity_max_d2;
+  score.continuity_path = candidate.continuity_path;
+  score.anchor_max_d2 = candidate.anchor_max_d2;
+  score.anchor_mst2 = candidate.anchor_mst2;
+  score.principal_rg2_max = candidate.principal_rg2_max;
+  score.principal_rg2_mid = candidate.principal_rg2_mid;
+  score.principal_rg2_min = candidate.principal_rg2_min;
+  score.shape_kappa2 = candidate.shape_kappa2;
+  score.shape_asphericity = candidate.shape_asphericity;
+  score.shape_acylindricity = candidate.shape_acylindricity;
+  score.edge_stretch = candidate.edge_stretch;
+  score.shift_norm2 = candidate.shift_norm2;
+  score.gap_score = candidate.gap_score;
+  return score;
+}
+
+string format_pbctopo_score_vector(const PbctopoScoreVector &score) {
+  return "valid=" + string(score.valid ? "1" : "0") +
+         ";ultra=" + string(score.ultra_clash ? "1" : "0") +
+         ";broken=" + format_pbctopo_report_size(score.broken_edges) +
+         ";cont_max=" + format_pbctopo_report_double(score.continuity_max_d2) +
+         ";cont_path=" + format_pbctopo_report_double(score.continuity_path) +
+         ";anchor_max=" + format_pbctopo_report_double(score.anchor_max_d2) +
+         ";anchor_mst=" + format_pbctopo_report_double(score.anchor_mst2) +
+         ";rg2=" + format_pbctopo_report_double(score.principal_rg2_max) +
+         "/" + format_pbctopo_report_double(score.principal_rg2_mid) + "/" +
+         format_pbctopo_report_double(score.principal_rg2_min) +
+         ";shape=" + format_pbctopo_report_double(score.shape_kappa2) +
+         "/" + format_pbctopo_report_double(score.shape_asphericity) + "/" +
+         format_pbctopo_report_double(score.shape_acylindricity) +
+         ";edge=" + format_pbctopo_report_double(score.edge_stretch) +
+         ";shift=" + format_pbctopo_report_double(score.shift_norm2) +
+         ";gap=" + format_pbctopo_report_double(score.gap_score);
+}
+
+string csv_escape(string value) {
+  const bool needs_quotes = value.find_first_of(",\"\r\n") != string::npos;
+  if (!needs_quotes)
+    return value;
+  string escaped = "\"";
+  for (char ch : value) {
+    if (ch == '"')
+      escaped += "\"\"";
+    else
+      escaped += ch;
+  }
+  escaped += '"';
+  return escaped;
+}
+
+void write_pbctopo_frame_report_header(ostream &out) {
+  out << "frame,time_ps,status,mode,component_count,safe_candidate_count,"
+         "best_score_vector,second_score_vector,score_gap,clash_margin,"
+         "continuity_margin,anchor_margin,split_owner_margin,fallback_reason,"
+         "time_total_ms,time_graph_ms,time_virtual_ms,time_component_ms,"
+         "cycle_support,cycle_mismatch,inconsistent_edge_count\n";
+}
+
+void write_pbctopo_frame_report_row(ostream &out,
+                                    const PbctopoFrameReport &report) {
+  out << report.frame << ','
+      << format_pbctopo_report_double(report.time_ps) << ','
+      << pbctopo_frame_status_name(report.status) << ','
+      << pbctopo_frame_mode_name(report.mode) << ','
+      << report.component_count << ',' << report.safe_candidate_count << ','
+      << csv_escape(format_pbctopo_score_vector(report.best_score)) << ','
+      << csv_escape(format_pbctopo_score_vector(report.second_score)) << ','
+      << format_pbctopo_report_double(report.score_gap) << ','
+      << format_pbctopo_report_double(report.clash_margin) << ','
+      << format_pbctopo_report_double(report.continuity_margin) << ','
+      << format_pbctopo_report_double(report.anchor_margin) << ','
+      << format_pbctopo_report_double(report.split_owner_margin) << ','
+      << pbctopo_failure_reason_name(report.fallback_reason) << ','
+      << format_pbctopo_report_double(report.time_total_ms) << ','
+      << format_pbctopo_report_double(report.time_graph_ms) << ','
+      << format_pbctopo_report_double(report.time_virtual_ms) << ','
+      << format_pbctopo_report_double(report.time_component_ms) << ','
+      << report.cycle_support << ','
+      << format_pbctopo_report_double(report.cycle_mismatch) << ','
+      << report.inconsistent_edge_count << '\n';
 }
 
 bool partial_component_ultraclash(
@@ -9594,6 +9829,10 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     return 0;
 
   reset_pbctopo_log_file();
+  ofstream pbctopo_frame_report("pbctopo_frame_report.csv",
+                                ios::out | ios::trunc);
+  if (pbctopo_frame_report.is_open())
+    write_pbctopo_frame_report_header(pbctopo_frame_report);
   size_t fallback_frames = 0;
   size_t partial_components = 0;
   size_t valid_candidates = 0;
@@ -9728,6 +9967,16 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
 
   for (size_t frame_idx = 0; frame_idx < frame_count; ++frame_idx) {
     ++timing.frames;
+    PbctopoFrameReport frame_report;
+    frame_report.frame = frame_idx;
+    frame_report.time_ps = this->m_mol[frame_idx].time_of_snap;
+    const auto frame_report_started = clock::now();
+    const double frame_graph_s_before = timing.graph_s + timing.component_graph_s;
+    const double frame_virtual_s_before =
+        timing.coarse_s + timing.refine_s + timing.early_projection_s;
+    const double frame_component_s_before =
+        timing.component_prep_s + timing.component_graph_s +
+        timing.component_search_s + timing.warm_component_s;
     const bool skip_projection_candidate_clash = projection_clash_skip_active;
     if (skip_projection_candidate_clash)
       ++timing.projection_clash_skip_frames;
@@ -9741,8 +9990,17 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     }
     timing.append_s += chrono::duration<double>(clock::now() - stage_started).count();
 
-    if (base_atoms.empty())
+    if (base_atoms.empty()) {
+      frame_report.status = PbctopoFrameStatus::Fallback;
+      frame_report.mode = PbctopoFrameMode::Pbci;
+      frame_report.fallback_reason = PbctopoFailureReason::NoSeed;
+      frame_report.time_total_ms =
+          chrono::duration<double, milli>(clock::now() - frame_report_started)
+              .count();
+      if (pbctopo_frame_report.is_open())
+        write_pbctopo_frame_report_row(pbctopo_frame_report, frame_report);
       continue;
+    }
 
     stage_started = clock::now();
     build_heavy_atom_subset(base_atoms, projection_atoms);
@@ -10011,6 +10269,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           if (better_cut_candidate(early_projection, prefetched_safe_candidate)) {
             prefetched_safe_candidate = early_projection;
             prefetched_safe_points = warm_points;
+            frame_report.mode = PbctopoFrameMode::EarlyProjection;
           }
           timing.early_projection_s +=
               chrono::duration<double>(clock::now() - early_projection_started)
@@ -10073,6 +10332,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
         if (better_cut_candidate(early_component, prefetched_safe_candidate)) {
           prefetched_safe_candidate = early_component;
           prefetched_safe_points = warm_points;
+          frame_report.mode = PbctopoFrameMode::Warm;
         }
         timing.warm_component_s +=
             chrono::duration<double>(clock::now() - warm_component_started)
@@ -10112,9 +10372,82 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     PbctopoCutCandidate best_candidate;
     PbctopoCutCandidate best_safe_candidate;
     size_t safe_candidates = 0;
+    PbctopoCutCandidate report_best_candidate;
+    PbctopoCutCandidate report_second_candidate;
+    auto record_report_safe_candidate = [&](const PbctopoCutCandidate &candidate) {
+      if (!candidate.valid)
+        return;
+      ++frame_report.safe_candidate_count;
+      if (better_cut_candidate(candidate, report_best_candidate)) {
+        report_second_candidate = report_best_candidate;
+        report_best_candidate = candidate;
+      } else if (better_cut_candidate(candidate, report_second_candidate)) {
+        report_second_candidate = candidate;
+      }
+    };
+    auto record_frame_failure = [&](PbctopoFailureReason reason) {
+      if (frame_report.fallback_reason == PbctopoFailureReason::None)
+        frame_report.fallback_reason = reason;
+    };
+    auto finalize_frame_report =
+        [&](PbctopoFrameStatus status, PbctopoFrameMode mode,
+            PbctopoFailureReason reason,
+            const PbctopoCutCandidate *selected_candidate) {
+          frame_report.status = status;
+          if (frame_report.mode == PbctopoFrameMode::None ||
+              status != PbctopoFrameStatus::Certified) {
+            frame_report.mode = mode;
+          }
+          if (reason != PbctopoFailureReason::None)
+            frame_report.fallback_reason = reason;
+          else if (status != PbctopoFrameStatus::Fallback)
+            frame_report.fallback_reason = PbctopoFailureReason::None;
+          frame_report.component_count = components.size();
+          frame_report.safe_candidate_count =
+              max(frame_report.safe_candidate_count, safe_candidates);
+
+          const PbctopoCutCandidate *best_for_report =
+              report_best_candidate.valid ? &report_best_candidate
+                                          : selected_candidate;
+          if (best_for_report != nullptr && best_for_report->valid)
+            frame_report.best_score = make_score_vector(*best_for_report);
+          if (report_second_candidate.valid)
+            frame_report.second_score = make_score_vector(report_second_candidate);
+          frame_report.score_gap =
+              report_best_candidate.valid && report_second_candidate.valid
+                  ? report_best_candidate.gap_score -
+                        report_second_candidate.gap_score
+                  : numeric_limits<double>::quiet_NaN();
+          if (best_for_report != nullptr && best_for_report->valid) {
+            frame_report.clash_margin = best_for_report->min_pair_d2;
+            frame_report.continuity_margin = best_for_report->continuity_max_d2;
+            frame_report.anchor_margin = best_for_report->anchor_max_d2;
+            frame_report.split_owner_margin =
+                best_for_report->max_owner_raw_minus_minimg_delta;
+          }
+          frame_report.time_graph_ms =
+              max(0.0, (timing.graph_s + timing.component_graph_s -
+                        frame_graph_s_before) *
+                           1000.0);
+          frame_report.time_virtual_ms =
+              max(0.0, (timing.coarse_s + timing.refine_s +
+                        timing.early_projection_s - frame_virtual_s_before) *
+                           1000.0);
+          frame_report.time_component_ms =
+              max(0.0, (timing.component_prep_s + timing.component_graph_s +
+                        timing.component_search_s + timing.warm_component_s -
+                        frame_component_s_before) *
+                           1000.0);
+          frame_report.time_total_ms =
+              chrono::duration<double, milli>(clock::now() - frame_report_started)
+                  .count();
+          if (pbctopo_frame_report.is_open())
+            write_pbctopo_frame_report_row(pbctopo_frame_report, frame_report);
+        };
     auto accept_rescue_candidate =
         [&](const vector<Vec3> &candidate_points,
             const PbctopoCutCandidate &candidate) {
+          record_report_safe_candidate(candidate);
           best_safe_candidate = candidate;
           best_candidate = candidate;
           best_safe_points = candidate_points;
@@ -10139,6 +10472,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       best_points = prefetched_safe_points;
       best_safe_points = prefetched_safe_points;
       safe_candidates = 1;
+      record_report_safe_candidate(prefetched_safe_candidate);
     }
 
     stage_started = clock::now();
@@ -10354,9 +10688,11 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
         continue;
       if (!verified_candidate.ultra_clash) {
         ++safe_candidates;
+        record_report_safe_candidate(verified_candidate);
         if (better_cut_candidate(verified_candidate, best_safe_candidate)) {
           best_safe_candidate = verified_candidate;
           best_safe_points = verify_points;
+          frame_report.mode = PbctopoFrameMode::Virtual;
         }
       }
       if (better_cut_candidate(verified_candidate, best_candidate)) {
@@ -10405,6 +10741,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                 candidate_points, base_atoms, this->m_mol[frame_idx].Box,
                 local_contacting_owner_pairs, split_owner_pairs,
                 max_owner_raw_minus_minimg_delta, &split_detail)) {
+          record_frame_failure(PbctopoFailureReason::SplitOwnerReject);
           if (split_detail.valid) {
             record_split_rescue_seed(candidate, candidate_points, split_detail,
                                      source_label);
@@ -10436,6 +10773,16 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
         }
         if (!accepted)
           return false;
+        record_report_safe_candidate(candidate);
+        if (source_label.find("beam") != string::npos) {
+          frame_report.mode = PbctopoFrameMode::ComponentSearchBeam;
+        } else if (source_label.find("search") != string::npos) {
+          frame_report.mode = PbctopoFrameMode::ComponentSearchExact;
+        } else if (source_label.find("warm") != string::npos) {
+          frame_report.mode = PbctopoFrameMode::Warm;
+        } else {
+          frame_report.mode = PbctopoFrameMode::ComponentGraph;
+        }
         component_search_used = true;
         if (accepted_offsets != nullptr &&
             accepted_offsets->size() == components.size()) {
@@ -10476,6 +10823,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                                        runtime_cutoffs.continuity_cutoff,
                                        continuity_path, continuity_max_d2,
                                        &best_safe_candidate)) {
+              record_frame_failure(PbctopoFailureReason::ContinuityReject);
               return false;
             }
             PbctopoCutCandidate component_as_cut =
@@ -10516,6 +10864,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                 local_contacting_owner_pairs, warm_cut_split_owner_pairs,
                 warm_cut_split_gap, &warm_cut_split_detail);
         if (warm_cut_split && warm_cut_split_detail.valid) {
+          record_frame_failure(PbctopoFailureReason::SplitOwnerReject);
           record_split_rescue_seed(warm_cut, component_points,
                                    warm_cut_split_detail,
                                    "warm_component_local_improve");
@@ -10538,6 +10887,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             best_safe_candidate = warm_cut;
             best_safe_points = component_points;
             warm_accepted = true;
+            frame_report.mode = PbctopoFrameMode::Warm;
+            record_report_safe_candidate(warm_cut);
           } else if (candidate_close_enough_to_skip_search(
                          warm_cut, best_safe_candidate)) {
             warm_accepted = true;
@@ -10572,6 +10923,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           if (!graph_ok) {
             ++timing.component_graph_failed;
             component_graph_fallthrough_reason = "graph_fail";
+            record_frame_failure(PbctopoFailureReason::ComponentGraphFailed);
             clear_component_trial_hints(warm_state);
           }
           if (graph_ok && component_points.size() != base_atoms.size()) {
@@ -10585,11 +10937,14 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             } else if (!graph_as_cut.valid) {
               ++timing.component_graph_invalid;
               component_graph_fallthrough_reason = "invalid";
+              record_frame_failure(PbctopoFailureReason::ProjectionInvalid);
             } else if (graph_as_cut.ultra_clash) {
               ++timing.component_graph_ultraclash;
               component_graph_fallthrough_reason = "ultra_clash";
+              record_frame_failure(PbctopoFailureReason::FullVerifyClash);
             } else {
               ++timing.component_graph_not_better_not_close;
+              record_frame_failure(PbctopoFailureReason::NotBetterThanIncumbent);
               const char *close_reject_reason =
                   candidate_skip_search_reject_reason(graph_as_cut,
                                                       best_safe_candidate);
@@ -10714,6 +11069,9 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           ++timing.component_graph_used;
         } else {
           ++timing.component_large_mode_fallback_frames;
+          record_frame_failure(!merge_ok
+                                   ? PbctopoFailureReason::ComponentGraphFailed
+                                   : PbctopoFailureReason::NotBetterThanIncumbent);
           const char *merge_reject_reason =
               merge_ok ? candidate_skip_search_reject_reason(
                              merged_mode_cut, best_safe_candidate)
@@ -10760,6 +11118,9 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
         if (!accept_component_candidate(beam_candidate, component_points, nullptr,
                                         "component beam solve")) {
           ++timing.component_large_mode_fallback_frames;
+          record_frame_failure(beam_candidate.valid && !beam_candidate.ultra_clash
+                                   ? PbctopoFailureReason::NotBetterThanIncumbent
+                                   : PbctopoFailureReason::BeamEmpty);
           PbctopoCutCandidate beam_as_cut =
               component_candidate_to_cut_candidate(beam_candidate);
           const char *beam_reject_reason =
@@ -10808,6 +11169,12 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       warm_state.previous_projection_candidate = best_safe_candidate;
       warm_state.has_projection_candidate = true;
       apply_cut_candidate_timed(best_safe_points);
+      finalize_frame_report(PbctopoFrameStatus::Certified,
+                            frame_report.mode == PbctopoFrameMode::None
+                                ? PbctopoFrameMode::Virtual
+                                : frame_report.mode,
+                            PbctopoFailureReason::None,
+                            &best_safe_candidate);
       continue;
     }
 
@@ -10880,6 +11247,10 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             to_string(hull_valid_candidates) + ", avx2=" +
             string(pbctopo_hull::avx2_available() ? "on" : "off"));
         accept_rescue_candidate(best_hull_points, best_hull_candidate);
+        finalize_frame_report(PbctopoFrameStatus::Rescued,
+                              PbctopoFrameMode::HullRescue,
+                              PbctopoFailureReason::None,
+                              &best_hull_candidate);
         continue;
       }
 
@@ -10904,6 +11275,10 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
               format_int3(rescue_shift) + ", rescued_raw_delta_norm=" +
               to_string(rescue_raw_delta_norm));
           accept_rescue_candidate(rescued_points, rescued_candidate);
+          finalize_frame_report(PbctopoFrameStatus::Rescued,
+                                PbctopoFrameMode::DistanceRescue,
+                                PbctopoFailureReason::None,
+                                &rescued_candidate);
           continue;
         }
       }
@@ -10926,6 +11301,10 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       projection_clash_skip_active = false;
       clear_component_trial_hints(warm_state);
       fallback_pbci_frame(frame_idx);
+      finalize_frame_report(PbctopoFrameStatus::Fallback,
+                            PbctopoFrameMode::Pbci,
+                            PbctopoFailureReason::FallbackPbci,
+                            best_candidate.valid ? &best_candidate : nullptr);
       continue;
     }
 
@@ -10935,6 +11314,11 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     warm_state.previous_projection_candidate = best_candidate;
     warm_state.has_projection_candidate = best_candidate.valid;
     apply_cut_candidate_timed(best_points);
+    finalize_frame_report(PbctopoFrameStatus::Certified,
+                          frame_report.mode == PbctopoFrameMode::None
+                              ? PbctopoFrameMode::Virtual
+                              : frame_report.mode,
+                          PbctopoFailureReason::None, &best_candidate);
   }
 
   if (fallback_frames > 0) {
