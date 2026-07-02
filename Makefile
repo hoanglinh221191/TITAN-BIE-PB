@@ -159,6 +159,7 @@ $(BUILD_DIR)/$(SRC_ROOT)/pbctopo/component_refine.o: CXXFLAGS := $(LOWMEM_CXXFLA
 $(BUILD_DIR)/$(SRC_ROOT)/pbctopo/component_search.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
 $(BUILD_DIR)/$(SRC_ROOT)/pbctopo/component_search_pair_table.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
 $(BUILD_DIR)/$(SRC_ROOT)/pbctopo/llps_local.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
+$(BUILD_DIR)/$(SRC_ROOT)/pbctopo/local_graph.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
 $(BUILD_DIR)/$(SRC_ROOT)/engine_postproc.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
 $(BUILD_DIR)/$(SRC_ROOT)/impl_engine.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
 $(BUILD_DIR)/$(SRC_ROOT)/solv_pbc_new_al.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
