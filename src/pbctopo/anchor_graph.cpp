@@ -27,18 +27,18 @@ constexpr double kDistanceEps = 1.0e-12;
 constexpr size_t kPbctopoSpatialAnchorThreshold = 512;
 constexpr size_t kPbctopoSpatialAnchorK = 12;
 
-struct ClashCellKey {
+struct AnchorContactCellKey {
   int x = 0;
   int y = 0;
   int z = 0;
 
-  bool operator==(const ClashCellKey &rhs) const {
+  bool operator==(const AnchorContactCellKey &rhs) const {
     return x == rhs.x && y == rhs.y && z == rhs.z;
   }
 };
 
-struct ClashCellKeyHash {
-  size_t operator()(const ClashCellKey &key) const noexcept {
+struct AnchorContactCellKeyHash {
+  size_t operator()(const AnchorContactCellKey &key) const noexcept {
     const uint64_t ux = static_cast<uint32_t>(key.x + (1 << 20));
     const uint64_t uy = static_cast<uint32_t>(key.y + (1 << 20));
     const uint64_t uz = static_cast<uint32_t>(key.z + (1 << 20));
@@ -186,7 +186,9 @@ PbctopoAnchorGraphContext build_anchor_graph_context(
     };
     unordered_map<uint64_t, vector<AnchorContactCandidate>> contacts_by_owner;
     contacts_by_owner.reserve(16);
-    unordered_map<ClashCellKey, vector<size_t>, ClashCellKeyHash> contact_grid;
+    unordered_map<AnchorContactCellKey, vector<size_t>,
+                  AnchorContactCellKeyHash>
+        contact_grid;
     contact_grid.reserve(max<size_t>(64, atoms.size() / 2));
 
     const double cutoff2 = contact_cutoff * contact_cutoff;
@@ -253,9 +255,9 @@ PbctopoAnchorGraphContext build_anchor_graph_context(
       for (int dx = -1; dx <= 1; ++dx) {
         for (int dy = -1; dy <= 1; ++dy) {
           for (int dz = -1; dz <= 1; ++dz) {
-            const ClashCellKey key{wrap_index(cx + dx, nx),
-                                   wrap_index(cy + dy, ny),
-                                   wrap_index(cz + dz, nz)};
+            const AnchorContactCellKey key{wrap_index(cx + dx, nx),
+                                           wrap_index(cy + dy, ny),
+                                           wrap_index(cz + dz, nz)};
             const auto it = contact_grid.find(key);
             if (it == contact_grid.end())
               continue;

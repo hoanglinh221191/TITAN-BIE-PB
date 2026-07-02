@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <unordered_map>
 #include <vector>
 
 namespace titan_pbctopo {
@@ -114,6 +115,187 @@ struct Int3 {
   int x = 0;
   int y = 0;
   int z = 0;
+};
+
+inline Int3 operator+(const Int3 &lhs, const Int3 &rhs) {
+  return {lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z};
+}
+
+inline Int3 operator-(const Int3 &lhs, const Int3 &rhs) {
+  return {lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z};
+}
+
+inline bool is_zero_delta(const Int3 &delta) {
+  return delta.x == 0 && delta.y == 0 && delta.z == 0;
+}
+
+inline bool same_delta(const Int3 &lhs, const Int3 &rhs) {
+  return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z;
+}
+
+struct PbctopoShift {
+  std::size_t shift_index = 26;
+  int ix = 0;
+  int iy = 0;
+  int iz = 0;
+  double tx = 0.0;
+  double ty = 0.0;
+  double tz = 0.0;
+};
+
+struct PbctopoPairShiftScore {
+  std::size_t shift_index = 0;
+  int ix = 0;
+  int iy = 0;
+  int iz = 0;
+  std::size_t contact_atoms = 0;
+  double soft_penalty = 0.0;
+  double min_pair_d2 = std::numeric_limits<double>::infinity();
+  double bbox_d2 = std::numeric_limits<double>::infinity();
+  double shift_norm2 = std::numeric_limits<double>::infinity();
+  double quality_score = -std::numeric_limits<double>::infinity();
+  bool ultra_clash = false;
+  bool valid = false;
+};
+
+struct PbctopoGraphEdge {
+  std::size_t a = 0;
+  std::size_t b = 0;
+  int dx = 0;
+  int dy = 0;
+  int dz = 0;
+  std::size_t option_rank = 0;
+  std::size_t contact_atoms = 0;
+  double soft_penalty = 0.0;
+  double min_pair_d2 = std::numeric_limits<double>::infinity();
+  double bbox_d2 = std::numeric_limits<double>::infinity();
+  double shift_norm2 = std::numeric_limits<double>::infinity();
+  double confidence = 0.0;
+  int cycle_support = 0;
+  int cycle_mismatch = 0;
+  bool ultra_clash = false;
+  bool valid = false;
+};
+
+struct PbctopoCutScoreBreakdown {
+  double principal_s = 0.0;
+  double edge_scan_s = 0.0;
+};
+
+struct PbctopoStage1EdgeContext {
+  std::size_t fixed_broken_edges = 0;
+  double fixed_edge_stretch = 0.0;
+  std::vector<std::size_t> variable_edge_indices;
+};
+
+struct PbctopoEdgeScanSoA {
+  std::vector<std::size_t> a;
+  std::vector<std::size_t> b;
+  std::vector<double> ref_d2;
+  std::vector<double> inv_ref_d2;
+  std::vector<double> break_cutoff_d2;
+};
+
+struct PbctopoComponentPairShiftEntry {
+  double min_pair_d2 = std::numeric_limits<double>::infinity();
+  double bbox_d2 = std::numeric_limits<double>::infinity();
+  std::size_t clash_atom_a = std::numeric_limits<std::size_t>::max();
+  std::size_t clash_atom_b = std::numeric_limits<std::size_t>::max();
+  bool hard_clash = false;
+};
+
+struct PbctopoPairShiftCandidate {
+  Int3 delta;
+  PbctopoPairShiftScore score;
+  double weight = 0.0;
+};
+
+struct PbctopoPairShiftCandidateSet {
+  std::size_t a = 0;
+  std::size_t b = 0;
+  std::vector<PbctopoPairShiftCandidate> candidates;
+};
+
+struct PbctopoCycleSyncMetrics {
+  std::size_t cycle_support = 0;
+  double cycle_mismatch = 0.0;
+  std::size_t inconsistent_edge_count = 0;
+};
+
+struct PbctopoCycleSyncResult {
+  bool valid = false;
+  std::vector<Int3> offsets;
+  PbctopoCycleSyncMetrics metrics;
+};
+
+struct PbctopoWarmState {
+  PbctopoCutCandidate previous_projection_candidate;
+  std::vector<std::size_t> previous_component_sizes;
+  std::vector<Int3> previous_component_offsets;
+  std::vector<std::vector<Int3>> previous_stage1_delta_hints_by_component;
+  std::vector<std::vector<Int3>> previous_stage2_delta_hints_by_component;
+  bool has_projection_candidate = false;
+  bool has_component_offsets = false;
+  bool has_component_trial_hints = false;
+};
+
+struct ClashCellKey {
+  int x = 0;
+  int y = 0;
+  int z = 0;
+
+  bool operator==(const ClashCellKey &rhs) const {
+    return x == rhs.x && y == rhs.y && z == rhs.z;
+  }
+};
+
+struct ClashCellKeyHash {
+  std::size_t operator()(const ClashCellKey &key) const noexcept {
+    const std::uint64_t ux = static_cast<std::uint32_t>(key.x + (1 << 20));
+    const std::uint64_t uy = static_cast<std::uint32_t>(key.y + (1 << 20));
+    const std::uint64_t uz = static_cast<std::uint32_t>(key.z + (1 << 20));
+    return static_cast<std::size_t>((ux << 42) ^ (uy << 21) ^ uz);
+  }
+};
+
+struct PbctopoShiftedComponent {
+  std::vector<Vec3> points;
+  std::vector<ClashCellKey> clash_keys;
+  std::vector<ClashCellKey> contact_keys;
+  std::unordered_map<std::uint64_t, std::vector<std::size_t>> clash_grid;
+  std::unordered_map<std::uint64_t, std::vector<std::size_t>> contact_grid;
+  Vec3 center{};
+  double min_x = std::numeric_limits<double>::infinity();
+  double min_y = std::numeric_limits<double>::infinity();
+  double min_z = std::numeric_limits<double>::infinity();
+  double max_x = -std::numeric_limits<double>::infinity();
+  double max_y = -std::numeric_limits<double>::infinity();
+  double max_z = -std::numeric_limits<double>::infinity();
+  double weighted_shift_norm2 = 0.0;
+};
+
+struct PbctopoShiftedComponentDescriptor {
+  Vec3 center{};
+  double min_x = std::numeric_limits<double>::infinity();
+  double min_y = std::numeric_limits<double>::infinity();
+  double min_z = std::numeric_limits<double>::infinity();
+  double max_x = -std::numeric_limits<double>::infinity();
+  double max_y = -std::numeric_limits<double>::infinity();
+  double max_z = -std::numeric_limits<double>::infinity();
+  double weighted_shift_norm2 = 0.0;
+};
+
+struct PbctopoComponentBaseGeometry {
+  std::vector<double> x;
+  std::vector<double> y;
+  std::vector<double> z;
+  Vec3 center{};
+  double min_x = std::numeric_limits<double>::infinity();
+  double min_y = std::numeric_limits<double>::infinity();
+  double min_z = std::numeric_limits<double>::infinity();
+  double max_x = -std::numeric_limits<double>::infinity();
+  double max_y = -std::numeric_limits<double>::infinity();
+  double max_z = -std::numeric_limits<double>::infinity();
 };
 
 struct PbctopoTimingStats {
