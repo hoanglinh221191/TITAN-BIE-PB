@@ -201,6 +201,7 @@ struct PbeArgs {
   std::string tabi_geometry{"triangle"};
   std::string tabi_diagonal{"solid-angle"};
   int tabi_surface_points{96};
+  std::string tabi_surface_output{"off"};
   bool tabi_highres_surface{false};
   std::string tabi_sphere_mesh{"auto"};
   int tabi_tree_leaf_size{32};

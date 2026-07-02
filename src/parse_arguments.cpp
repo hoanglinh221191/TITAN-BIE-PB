@@ -2476,6 +2476,14 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-pbe-map-frames");
       continue;
     }
+    if (consume_option_value(arg, {"-pbe-tabi-surface-output",
+                                   "--pbe-tabi-surface-output"},
+                             common_value, i)) {
+      pbe.tabi_surface_output =
+          require_choice(common_value, {"off", "csv", "vtk", "all"},
+                         "-pbe-tabi-surface-output");
+      continue;
+    }
     if (consume_option_value(arg, {"-pbe-kernel", "--pbe-kernel"},
                              common_value, i)) {
       pbe.kernel = require_choice(common_value, {"auto", "scalar", "avx2"},

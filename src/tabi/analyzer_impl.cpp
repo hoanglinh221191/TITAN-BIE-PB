@@ -9562,6 +9562,100 @@ void AnalyzerImpl::append_tabi_surface_quality_row(const FrameResult &result) {
       << ',' << result.tabi_surface_quality_triangle_area_cv << '\n';
 }
 
+void AnalyzerImpl::maybe_write_tabi_surface_solution(
+    const FrameResult &result, const ReactionSolve &solve) const {
+  if (args_.backend != "tabi" || args_.tabi_surface_output == "off")
+    return;
+  const std::size_t panel_count = solve.tabi_output_panels.size();
+  if (panel_count == 0)
+    throw std::runtime_error(
+        "PBE: TABI surface output requested but no panels were retained.");
+  if (solve.tabi_output_solution.size() < panel_count)
+    throw std::runtime_error(
+        "PBE: TABI surface output requested but no solution vector was retained.");
+  const bool coupled = solve.tabi_output_solution.size() >= 2 * panel_count;
+  const bool write_csv =
+      args_.tabi_surface_output == "csv" || args_.tabi_surface_output == "all";
+  const bool write_vtk =
+      args_.tabi_surface_output == "vtk" || args_.tabi_surface_output == "all";
+  const auto begin = std::chrono::steady_clock::now();
+  auto value_at = [&](std::size_t panel, bool phin) {
+    if (phin)
+      return coupled ? solve.tabi_output_solution[panel_count + panel] : 0.0;
+    return solve.tabi_output_solution[panel];
+  };
+  if (write_csv) {
+    std::ofstream out("pbe_tabi_surface_solution.csv",
+                      std::ios::out | std::ios::trunc);
+    if (!out.is_open())
+      throw std::runtime_error(
+          "PBE: failed to open pbe_tabi_surface_solution.csv.");
+    out << std::setprecision(17);
+    out << "trajectory_id,frame_index,global_index,fixture,panel_id,atom_index,"
+           "x_A,y_A,z_A,nx,ny,nz,area_A2,diagonal,solid_angle,phi,phin,"
+           "normal_flux_proxy,"
+           "v0x_A,v0y_A,v0z_A,v1x_A,v1y_A,v1z_A,v2x_A,v2y_A,v2z_A,"
+           "has_triangle_geometry\n";
+    for (std::size_t i = 0; i < panel_count; ++i) {
+      const Tabi::Panel &panel = solve.tabi_output_panels[i];
+      out << result.trajectory_id << ',' << result.frame_index << ','
+          << result.global_index << ',' << csv_escape(current_source_label_)
+          << ',' << i << ',' << panel.atom_index << ',' << panel.x << ','
+          << panel.y << ',' << panel.z << ',' << panel.nx << ','
+          << panel.ny << ',' << panel.nz << ',' << panel.area << ','
+          << panel.diagonal << ',' << panel.solid_angle << ','
+          << value_at(i, false) << ',' << value_at(i, true) << ','
+          << value_at(i, true) << ',' << panel.v0x << ',' << panel.v0y
+          << ',' << panel.v0z << ',' << panel.v1x << ',' << panel.v1y << ','
+          << panel.v1z << ',' << panel.v2x << ',' << panel.v2y << ','
+          << panel.v2z << ','
+          << (panel.has_triangle_geometry ? "true" : "false") << '\n';
+    }
+  }
+  if (write_vtk) {
+    std::ofstream out("pbe_tabi_surface_solution.vtk",
+                      std::ios::out | std::ios::trunc);
+    if (!out.is_open())
+      throw std::runtime_error(
+          "PBE: failed to open pbe_tabi_surface_solution.vtk.");
+    out << std::setprecision(17);
+    out << "# vtk DataFile Version 3.0\n";
+    out << "TITAN TABI surface solution\n";
+    out << "ASCII\n";
+    out << "DATASET POLYDATA\n";
+    out << "POINTS " << (panel_count * 3u) << " double\n";
+    for (const Tabi::Panel &panel : solve.tabi_output_panels) {
+      out << panel.v0x << ' ' << panel.v0y << ' ' << panel.v0z << '\n';
+      out << panel.v1x << ' ' << panel.v1y << ' ' << panel.v1z << '\n';
+      out << panel.v2x << ' ' << panel.v2y << ' ' << panel.v2z << '\n';
+    }
+    out << "POLYGONS " << panel_count << ' ' << (panel_count * 4u) << "\n";
+    for (std::size_t i = 0; i < panel_count; ++i) {
+      const std::size_t base = 3u * i;
+      out << "3 " << base << ' ' << (base + 1u) << ' ' << (base + 2u)
+          << '\n';
+    }
+    out << "CELL_DATA " << panel_count << "\n";
+    out << "SCALARS phi double 1\nLOOKUP_TABLE default\n";
+    for (std::size_t i = 0; i < panel_count; ++i)
+      out << value_at(i, false) << '\n';
+    out << "SCALARS phin double 1\nLOOKUP_TABLE default\n";
+    for (std::size_t i = 0; i < panel_count; ++i)
+      out << value_at(i, true) << '\n';
+    out << "SCALARS normal_flux_proxy double 1\nLOOKUP_TABLE default\n";
+    for (std::size_t i = 0; i < panel_count; ++i)
+      out << value_at(i, true) << '\n';
+    out << "SCALARS area_A2 double 1\nLOOKUP_TABLE default\n";
+    for (const Tabi::Panel &panel : solve.tabi_output_panels)
+      out << panel.area << '\n';
+    out << "VECTORS normal double\n";
+    for (const Tabi::Panel &panel : solve.tabi_output_panels)
+      out << panel.nx << ' ' << panel.ny << ' ' << panel.nz << '\n';
+  }
+  add_timing_ms(TimingBucket::MapIo,
+                elapsed_ms(begin, std::chrono::steady_clock::now()));
+}
+
 void AnalyzerImpl::write_memory_profile_header_if_needed() {
   if (!pbe_timing_enabled())
     return;
@@ -11723,6 +11817,7 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
   options.surface_geometry = args_.tabi_geometry;
   options.diagonal_mode = args_.tabi_diagonal;
   options.surface_point_count = args_.tabi_surface_points;
+  options.surface_output = args_.tabi_surface_output;
   options.highres_surface = args_.tabi_highres_surface;
   options.sphere_mesh_mode = args_.tabi_sphere_mesh;
   options.tree_leaf_size = args_.tabi_tree_leaf_size;
@@ -12740,6 +12835,10 @@ AnalyzerImpl::ReactionSolve AnalyzerImpl::solve_tabi_reaction_field(
       tabi.reference_energy_kcal_mol * kKcalToKJ;
   solve.tabi_selected_energy_scale = tabi.selected_energy_scale;
   solve.tabi_fallback_used = tabi.fallback_used;
+  if (args_.tabi_surface_output != "off") {
+    solve.tabi_output_panels = tabi.output_panels;
+    solve.tabi_output_solution = tabi.output_solution;
+  }
   solve.shape.n = tabi.panel_count;
   solve.shape.nx = std::max<std::size_t>(1, tabi.panel_count);
   solve.shape.ny = 1;
@@ -13999,6 +14098,7 @@ FrameResult AnalyzerImpl::consume_frame(const MOL &mol1,
         static_cast<std::int64_t>(frame_memory_before.working_set_bytes);
     result.memory_peak_working_set_bytes =
         frame_memory_after.peak_working_set_bytes;
+    maybe_write_tabi_surface_solution(result, tabi_solve);
     append_energy_row(result);
     frame_timing.total_ms =
         elapsed_ms(frame_time_begin, std::chrono::steady_clock::now());
@@ -14714,6 +14814,21 @@ void AnalyzerImpl::finalize(std::fstream &log) {
     summary << "tabi_tree_preset " << args_.tabi_tree_preset << "\n";
     summary << "tabi_surface_geometry " << args_.tabi_geometry << "\n";
     summary << "tabi_sphere_mesh " << args_.tabi_sphere_mesh << "\n";
+    summary << "tabi_surface_output " << args_.tabi_surface_output << "\n";
+    summary << "tabi_surface_solution_csv "
+            << ((args_.backend == "tabi" &&
+                 (args_.tabi_surface_output == "csv" ||
+                  args_.tabi_surface_output == "all"))
+                    ? "pbe_tabi_surface_solution.csv"
+                    : "off")
+            << "\n";
+    summary << "tabi_surface_solution_vtk "
+            << ((args_.backend == "tabi" &&
+                 (args_.tabi_surface_output == "vtk" ||
+                  args_.tabi_surface_output == "all"))
+                    ? "pbe_tabi_surface_solution.vtk"
+                    : "off")
+            << "\n";
     summary << "tabi_diagonal " << args_.tabi_diagonal << "\n";
     summary << "tabi_taylor_order " << args_.tabi_taylor_order << "\n";
     summary << "tabi_formulation " << args_.tabi_formulation << "\n";

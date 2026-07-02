@@ -7,6 +7,7 @@
 #include "../arguments.h"
 #include "../titan_pbe.h"
 #include "types.h"
+#include "tabi_types.h"
 
 #include <array>
 #include <cstddef>
@@ -1014,6 +1015,8 @@ private:
     double tabi_reference_energy_kj_mol{0.0};
     double tabi_selected_energy_scale{1.0};
     bool tabi_fallback_used{false};
+    std::vector<Tabi::Panel> tabi_output_panels;
+    std::vector<double> tabi_output_solution;
     std::string pbe_model_effective{"linear"};
     std::string linear_seed_solver{"none"};
     std::string nl_solver{"picard"};
@@ -1837,6 +1840,8 @@ private:
   void append_tabi_moment_audit_row(const FrameResult &result);
   void write_tabi_surface_quality_header_if_needed();
   void append_tabi_surface_quality_row(const FrameResult &result);
+  void maybe_write_tabi_surface_solution(const FrameResult &result,
+                                         const ReactionSolve &solve) const;
   [[nodiscard]] bool stability_audit_enabled() const noexcept;
   [[nodiscard]] bool stability_detail_enabled() const noexcept;
   [[nodiscard]] std::string effective_grid_anchor() const;

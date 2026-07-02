@@ -171,6 +171,7 @@ struct Options {
   std::string surface_geometry{"triangle"};
   std::string diagonal_mode{"solid-angle"};
   int surface_point_count{96};
+  std::string surface_output{"off"};
   bool highres_surface{false};
   std::string sphere_mesh_mode{"auto"};
   int tree_leaf_size{32};
@@ -861,6 +862,8 @@ struct Result {
   double reference_energy_kcal_mol{0.0};
   double selected_energy_scale{1.0};
   bool fallback_used{false};
+  std::vector<Panel> output_panels;
+  std::vector<double> output_solution;
 };
 
 struct TreecodeStats {

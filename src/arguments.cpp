@@ -2747,6 +2747,11 @@ int arguments::post_process() {
           "must be > 0.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.backend != "tabi" && pbe.tabi_surface_output != "off") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-surface-output requires -pbe=tabi.");
+      exit(EXIT_FAILURE);
+    }
     if (pbe.backend == "tabi") {
       if (pbe.model != "linear") {
         TitanUI::print_error(

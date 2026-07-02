@@ -2117,6 +2117,11 @@ IMPORTANT NOTES
   -pbe-max-grid <N>     Maximum grid points before preflight rejection
   -pbe-map <mode>       off, phi, epsilon, ion, or all. Default: off
   -pbe-map-frames <m>   none, first, last, or all. Default: none
+  -pbe-tabi-surface-output <m>
+                        off, csv, vtk, or all. Default: off. For -pbe=tabi,
+                        writes per-panel centroids, normals, area, phi, and
+                        phin/normal-flux proxy as
+                        pbe_tabi_surface_solution.csv/.vtk.
   -pbe-kernel <mode>    auto, scalar, or avx2. Default: auto
                         v1 records the request but uses scalar-threaded SOR
                         Arg file form: -pbe-kernel=auto

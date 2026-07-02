@@ -6025,6 +6025,10 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         (kKBKJPerMolK * std::max(1.0, options.temperature_k));
     result.peak_memory_bytes = result.memory_bytes;
     refresh_matvec_cost_summary(result);
+    if (options.surface_output != "off") {
+      result.output_panels = panels;
+      result.output_solution = linear.x;
+    }
     progress.write("solve_done", result, &jcp_tree_stats, result.matvec_calls,
                    result.iterations, 0, result.residual, result.status, true);
     return result;
@@ -7085,6 +7089,10 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       (kKBKJPerMolK * std::max(1.0, options.temperature_k));
   result.peak_memory_bytes = result.memory_bytes;
   refresh_matvec_cost_summary(result);
+  if (options.surface_output != "off") {
+    result.output_panels = panels;
+    result.output_solution = linear.x;
+  }
   progress.write("solve_done", result, &matvec_stats, result.matvec_calls,
                  result.iterations, 0, result.residual, result.status, true);
   return result;
