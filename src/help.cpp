@@ -2310,6 +2310,8 @@ IMPORTANT NOTES
   -pbca <chain_ref>     Aggressive PBC mode
   -pbcn                 FixBox-style PBC mode
   -pbctopo              pbctopo (VIBE): Virtual Intact Block Extraction PBC mode
+  -pbctopo-mode=<name>  vibe | llps-local. Default: vibe
+  -pbctopo-llps-local   Alias for -pbctopo -pbctopo-mode=llps-local
   -pbctopo-anchor-backend=<name>
                         auto | prim | spatial-all. Default: auto
   -pbctopo-bond-cutoff=<A>

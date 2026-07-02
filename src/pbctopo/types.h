@@ -316,6 +316,13 @@ struct PbctopoTimingStats {
   std::size_t component_score_calls = 0;
   std::size_t component_pair_table_builds = 0;
   std::size_t component_pair_table_prunes = 0;
+  std::size_t component_pair_table_component_count = 0;
+  std::size_t component_pair_table_shift_count = 0;
+  std::size_t component_pair_table_dense_entries_equivalent = 0;
+  std::size_t component_pair_table_materialized_entries = 0;
+  std::size_t component_pair_table_bbox_prefiltered = 0;
+  std::size_t component_pair_table_sparse_rows = 0;
+  std::size_t component_pair_table_peak_bytes_estimate = 0;
   std::size_t component_search_zero_current_mask_prunes = 0;
   std::size_t component_search_zero_future_mask_prunes = 0;
   std::size_t component_search_fixed_minor_components = 0;
@@ -324,6 +331,9 @@ struct PbctopoTimingStats {
   std::size_t component_search_seed_warm = 0;
   std::size_t component_search_seed_graph = 0;
   std::size_t component_search_seed_none = 0;
+  std::size_t component_search_prefix_continuity_checks = 0;
+  std::size_t component_search_prefix_continuity_prunes = 0;
+  std::size_t component_search_prefix_continuity_hard_rejects = 0;
   std::size_t component_large_mode_merge_frames = 0;
   std::size_t component_large_mode_pair_only_frames = 0;
   std::size_t component_large_mode_beam_frames = 0;
@@ -367,6 +377,11 @@ struct PbctopoTimingStats {
   std::size_t distance_rescue_attempts = 0;
   std::size_t distance_rescue_successes = 0;
   std::size_t pbci_fallback_frames = 0;
+  std::size_t pbctopo_llps_local_frames = 0;
+  std::size_t pbctopo_llps_local_units = 0;
+  std::size_t pbctopo_llps_local_edges_used = 0;
+  std::size_t pbctopo_llps_local_edges_skipped_cross_unit = 0;
+  std::size_t pbctopo_llps_local_disconnected_units = 0;
   std::size_t component_graph_refine_score_calls = 0;
   std::size_t component_graph_refine_preclash_prunes = 0;
   std::size_t component_graph_refine_trial_build_incremental = 0;
@@ -448,6 +463,7 @@ struct PbctopoTimingStats {
   double component_score_s = 0.0;
   double component_pair_table_s = 0.0;
   double component_score_continuity_s = 0.0;
+  double component_search_prefix_continuity_s = 0.0;
   double component_score_anchor_s = 0.0;
   double component_score_stats_principal_s = 0.0;
   double component_score_component_metrics_s = 0.0;

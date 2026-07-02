@@ -1082,7 +1082,9 @@ int engine(arguments &Arguments) {
     // PBC algorithm in use
     if (Arguments.pbc.solv_pbctopo)
       TitanUI::log_kv(log, "PBC Algorithm",
-                      "pbctopo (VIBE: Virtual Intact Block Extraction)");
+                      Arguments.pbc.pbctopo_mode == "llps-local"
+                          ? "pbctopo (LLPS local molecule unwrap)"
+                          : "pbctopo (VIBE: Virtual Intact Block Extraction)");
     else if (Arguments.pbc.solv_pbcn)
       TitanUI::log_kv(log, "PBC Algorithm",
                       Arguments.pbc.auto_enabled_pbcn
@@ -2911,7 +2913,8 @@ int engine(arguments &Arguments) {
           align_complex(pro_in, lig, 0, 0);
       };
       if (Arguments.pbc.solv_pbctopo) {
-        pro_in.solve_pbc_pbctopo(lig, Arguments, &executor);
+        pro_in.solve_pbc_pbctopo(
+            lig, Arguments, &executor, tot_snap_allfiles + global_frame_counter);
       } else if (Arguments.pbc.solv_pbcn) {
         pro_in.solv_pbc_pbcn(lig, Arguments);
         align_loaded_complex();

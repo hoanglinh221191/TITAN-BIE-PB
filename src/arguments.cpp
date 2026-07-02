@@ -3118,6 +3118,15 @@ int arguments::post_process() {
                  pbc.pbctopo_anchor_backend.begin(), [](unsigned char c) {
                    return static_cast<char>(std::tolower(c));
                  });
+  std::transform(pbc.pbctopo_mode.begin(), pbc.pbctopo_mode.end(),
+                 pbc.pbctopo_mode.begin(), [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  if (pbc.pbctopo_mode != "vibe" && pbc.pbctopo_mode != "llps-local") {
+    TitanUI::print_error(
+        "PBCTOPO: -pbctopo-mode must be one of vibe, llps-local.");
+    exit(EXIT_FAILURE);
+  }
   if (pbc.pbctopo_anchor_backend != "auto" &&
       pbc.pbctopo_anchor_backend != "prim" &&
       pbc.pbctopo_anchor_backend != "spatial-all") {

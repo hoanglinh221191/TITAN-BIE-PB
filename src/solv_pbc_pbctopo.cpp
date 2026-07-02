@@ -5,6 +5,8 @@
 #include "pbctopo/anchor_graph.h"
 #include "pbctopo/component_graph.h"
 #include "pbctopo/component_refine.h"
+#include "pbctopo/component_search.h"
+#include "pbctopo/llps_local.h"
 #include "pbctopo/logging.h"
 #include "pbctopo/report.h"
 #include "pbctopo/types.h"
@@ -21,6 +23,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <limits>
@@ -53,13 +56,15 @@ using titan_gyration::GyrationShapeMetrics;
 using titan_gyration::PointStats;
 using PbctopoAnchorBackend = titan_pbctopo::AnchorBackend;
 using PbctopoRuntimeCutoffs = titan_pbctopo::RuntimeCutoffs;
+using PbctopoSolveMode = titan_pbctopo::SolveMode;
 using PbctopoAnchorContactEdge = titan_pbctopo::PbctopoAnchorContactEdge;
 using PbctopoAnchorGraphContext = titan_pbctopo::PbctopoAnchorGraphContext;
 using PbctopoAnchorGraphScore = titan_pbctopo::PbctopoAnchorGraphScore;
 using PbctopoAtom = titan_pbctopo::PbctopoAtom;
 using PbctopoComponentCandidate = titan_pbctopo::PbctopoComponentCandidate;
 using PbctopoComponentBaseGeometry = titan_pbctopo::PbctopoComponentBaseGeometry;
-using PbctopoComponentPairShiftEntry = titan_pbctopo::PbctopoComponentPairShiftEntry;
+using PbctopoComponentSearchCallbacks =
+    titan_pbctopo::PbctopoComponentSearchCallbacks;
 using PbctopoContinuityPair = titan_pbctopo::PbctopoContinuityPair;
 using PbctopoCutScoreBreakdown = titan_pbctopo::PbctopoCutScoreBreakdown;
 using PbctopoCutCandidate = titan_pbctopo::PbctopoCutCandidate;
@@ -72,6 +77,7 @@ using PbctopoFrameReport = titan_pbctopo::PbctopoFrameReport;
 using PbctopoFrameStatus = titan_pbctopo::PbctopoFrameStatus;
 using PbctopoGraphEdge = titan_pbctopo::PbctopoGraphEdge;
 using PbctopoLocalEdge = titan_pbctopo::PbctopoLocalEdge;
+using PbctopoLlpsLocalUnits = titan_pbctopo::PbctopoLlpsLocalUnits;
 using PbctopoPairShiftCandidate = titan_pbctopo::PbctopoPairShiftCandidate;
 using PbctopoPairShiftCandidateSet = titan_pbctopo::PbctopoPairShiftCandidateSet;
 using PbctopoPairShiftScore = titan_pbctopo::PbctopoPairShiftScore;
@@ -104,19 +110,21 @@ using titan_pbctopo::build_third_anchor_subset;
 using titan_pbctopo::clear_component_trial_hints;
 using titan_pbctopo::compare_anchor_graph_score;
 using titan_pbctopo::component_trial_hints_compatible;
-using titan_pbctopo::component_bbox_may_clash;
 using titan_pbctopo::better_component_graph_edge;
 using titan_pbctopo::graph_edge_has_zero_shift;
 using titan_pbctopo::graph_edge_matches_delta;
+using titan_pbctopo::build_pbctopo_llps_local_units;
 using titan_pbctopo::improve_component_offsets_locally;
-using titan_pbctopo::precompute_shifted_components;
+using titan_pbctopo::merge_pbctopo_llps_unit_source;
 using titan_pbctopo::rebase_component_offsets;
 using titan_pbctopo::same_component_layout;
 using titan_pbctopo::score_component_offset_solution;
 using titan_pbctopo::score_component_placed_points_solution;
-using titan_pbctopo::shifted_component_bbox_distance2;
+using titan_pbctopo::search_component_shift_candidate;
+using titan_pbctopo::search_component_shift_candidate_beam;
 using titan_pbctopo::solve_component_offsets_from_ranked_edges;
 using titan_pbctopo::solve_component_offsets_via_pair_graph;
+using titan_pbctopo::unwrap_pbctopo_llps_local_points;
 using titan_pbctopo::write_pbctopo_frame_report_header;
 using titan_pbctopo::write_pbctopo_frame_report_row;
 
@@ -141,7 +149,6 @@ constexpr size_t kPbctopoBeamWidth = titan_pbctopo::kDefaultBeamWidth;
 constexpr size_t kPbctopoExactComponentLimitMax =
     titan_pbctopo::kMaxExactComponentLimit;
 constexpr size_t kPbctopoBeamWidthMax = titan_pbctopo::kMaxBeamWidth;
-constexpr size_t kPbctopoBeamFinalRescore = 4;
 
 void reset_pbctopo_log_file() {
   titan_pbctopo::reset_log_file();
@@ -149,6 +156,26 @@ void reset_pbctopo_log_file() {
 
 void append_pbctopo_log_line(const string &message) {
   titan_pbctopo::append_log_line(message);
+}
+
+ofstream open_pbctopo_frame_report() {
+  namespace fs = std::filesystem;
+  static bool initialized = false;
+  static fs::path initialized_cwd;
+
+  std::error_code ec;
+  const fs::path cwd = fs::current_path(ec);
+  const bool reset_report =
+      !initialized || ec || initialized_cwd.empty() || initialized_cwd != cwd;
+
+  ofstream out("pbctopo_frame_report.csv",
+               ios::out | (reset_report ? ios::trunc : ios::app));
+  if (out.is_open() && reset_report)
+    write_pbctopo_frame_report_header(out);
+
+  initialized = true;
+  initialized_cwd = cwd;
+  return out;
 }
 
 struct PbctopoRange {
@@ -303,52 +330,6 @@ enum class PbctopoComponentMode {
   Exact,
   MergeThenGraph,
   Beam,
-};
-
-struct PbctopoComponentPairShiftTable {
-  size_t component_count = 0;
-  size_t shift_count = 0;
-  vector<PbctopoComponentPairShiftEntry> entries;
-  vector<uint32_t> compat_masks;
-
-  void reset(size_t new_component_count, size_t new_shift_count) {
-    component_count = new_component_count;
-    shift_count = new_shift_count;
-    entries.assign(component_count * component_count * shift_count * shift_count,
-                   {});
-    compat_masks.assign(component_count * component_count * shift_count, 0u);
-  }
-
-  size_t index(size_t lhs_comp, size_t lhs_shift, size_t rhs_comp,
-               size_t rhs_shift) const {
-    return ((((lhs_comp * component_count) + rhs_comp) * shift_count) +
-            lhs_shift) *
-               shift_count +
-           rhs_shift;
-  }
-
-  size_t compat_index(size_t lhs_comp, size_t lhs_shift, size_t rhs_comp) const {
-    return (((lhs_comp * component_count) + rhs_comp) * shift_count) + lhs_shift;
-  }
-
-  PbctopoComponentPairShiftEntry &at(size_t lhs_comp, size_t lhs_shift,
-                                     size_t rhs_comp, size_t rhs_shift) {
-    return entries[index(lhs_comp, lhs_shift, rhs_comp, rhs_shift)];
-  }
-
-  const PbctopoComponentPairShiftEntry &
-  at(size_t lhs_comp, size_t lhs_shift, size_t rhs_comp,
-     size_t rhs_shift) const {
-    return entries[index(lhs_comp, lhs_shift, rhs_comp, rhs_shift)];
-  }
-
-  uint32_t &compat_mask(size_t lhs_comp, size_t lhs_shift, size_t rhs_comp) {
-    return compat_masks[compat_index(lhs_comp, lhs_shift, rhs_comp)];
-  }
-
-  uint32_t compat_mask(size_t lhs_comp, size_t lhs_shift, size_t rhs_comp) const {
-    return compat_masks[compat_index(lhs_comp, lhs_shift, rhs_comp)];
-  }
 };
 
 struct PbctopoMergedComponentPlan {
@@ -716,6 +697,8 @@ uint64_t virtual_box_state_key(const vector<double> &x_planes,
                                double cut_y, double cut_z);
 PbctopoAnchorBackend resolve_pbctopo_anchor_backend(const arguments &Arguments);
 const char *pbctopo_anchor_backend_name(PbctopoAnchorBackend backend);
+PbctopoSolveMode resolve_pbctopo_solve_mode(const arguments &Arguments);
+const char *pbctopo_solve_mode_name(PbctopoSolveMode mode);
 PbctopoCutCandidate evaluate_virtual_box_candidate(
     const vector<PbctopoAtom> &atoms, const vector<PbctopoLocalEdge> &local_edges,
     const unordered_set<uint64_t> &edge_set,
@@ -782,6 +765,14 @@ PbctopoAnchorBackend resolve_pbctopo_anchor_backend(const arguments &Arguments) 
 
 const char *pbctopo_anchor_backend_name(PbctopoAnchorBackend backend) {
   return titan_pbctopo::anchor_backend_name(backend);
+}
+
+PbctopoSolveMode resolve_pbctopo_solve_mode(const arguments &Arguments) {
+  return titan_pbctopo::resolve_solve_mode(Arguments);
+}
+
+const char *pbctopo_solve_mode_name(PbctopoSolveMode mode) {
+  return titan_pbctopo::solve_mode_name(mode);
 }
 
 uint64_t atom_pair_key(size_t a, size_t b) {
@@ -3324,180 +3315,6 @@ PbctopoComponentCandidate build_component_candidate_seed(
   return seed;
 }
 
-PbctopoComponentPairShiftEntry compute_component_pair_shift_entry(
-    const vector<size_t> &lhs_component, const PbctopoShiftedComponent &lhs,
-    const vector<size_t> &rhs_component, const PbctopoShiftedComponent &rhs,
-    double clash_cutoff) {
-  PbctopoComponentPairShiftEntry entry;
-  entry.bbox_d2 = shifted_component_bbox_distance2(lhs, rhs);
-  if (!component_bbox_may_clash(lhs, rhs, clash_cutoff))
-    return entry;
-
-  const double cutoff2 = clash_cutoff * clash_cutoff;
-  const vector<size_t> *scan_component = &lhs_component;
-  const vector<size_t> *grid_component = &rhs_component;
-  const PbctopoShiftedComponent *scan_shifted = &lhs;
-  const PbctopoShiftedComponent *grid_shifted = &rhs;
-  if (lhs_component.size() > rhs_component.size()) {
-    scan_component = &rhs_component;
-    grid_component = &lhs_component;
-    scan_shifted = &rhs;
-    grid_shifted = &lhs;
-  }
-
-  for (size_t local_idx = 0; local_idx < scan_component->size(); ++local_idx) {
-    const size_t atom_idx = (*scan_component)[local_idx];
-    const auto &point = scan_shifted->points[local_idx];
-    const auto &key = scan_shifted->clash_keys[local_idx];
-    const int cx = key.x;
-    const int cy = key.y;
-    const int cz = key.z;
-    for (int dx = -1; dx <= 1; ++dx) {
-      for (int dy = -1; dy <= 1; ++dy) {
-        for (int dz = -1; dz <= 1; ++dz) {
-          const auto it =
-              grid_shifted->clash_grid.find(pack_cell_key(cx + dx, cy + dy, cz + dz));
-          if (it == grid_shifted->clash_grid.end())
-            continue;
-          for (size_t other_local_idx : it->second) {
-            const size_t other_idx = (*grid_component)[other_local_idx];
-            const auto &other = grid_shifted->points[other_local_idx];
-            const double ddx = point.x - other.x;
-            const double ddy = point.y - other.y;
-            const double ddz = point.z - other.z;
-            const double d2 = ddx * ddx + ddy * ddy + ddz * ddz;
-            if (d2 < entry.min_pair_d2) {
-              entry.min_pair_d2 = d2;
-              entry.clash_atom_a = atom_idx;
-              entry.clash_atom_b = other_idx;
-            }
-            if (d2 + kDistanceEps < cutoff2) {
-              entry.hard_clash = true;
-              return entry;
-            }
-          }
-        }
-      }
-    }
-  }
-  return entry;
-}
-
-PbctopoComponentPairShiftTable build_component_pair_shift_table(
-    const vector<vector<size_t>> &components,
-    const vector<vector<PbctopoShiftedComponent>> &shifted_components,
-    double clash_cutoff, PbctopoTimingStats *timing = nullptr) {
-  using clock = chrono::steady_clock;
-  const auto started = clock::now();
-  PbctopoComponentPairShiftTable table;
-  const size_t component_count = components.size();
-  const size_t shift_count =
-      shifted_components.empty() ? 0 : shifted_components.front().size();
-  table.reset(component_count, shift_count);
-
-  for (size_t lhs_comp = 0; lhs_comp < component_count; ++lhs_comp) {
-    for (size_t rhs_comp = lhs_comp + 1; rhs_comp < component_count; ++rhs_comp) {
-      for (size_t lhs_shift = 0; lhs_shift < shift_count; ++lhs_shift) {
-        for (size_t rhs_shift = 0; rhs_shift < shift_count; ++rhs_shift) {
-          const auto entry = compute_component_pair_shift_entry(
-              components[lhs_comp], shifted_components[lhs_comp][lhs_shift],
-              components[rhs_comp], shifted_components[rhs_comp][rhs_shift], clash_cutoff);
-          table.at(lhs_comp, lhs_shift, rhs_comp, rhs_shift) = entry;
-          table.at(rhs_comp, rhs_shift, lhs_comp, lhs_shift) = entry;
-          if (!entry.hard_clash) {
-            table.compat_mask(lhs_comp, lhs_shift, rhs_comp) |=
-                (1u << rhs_shift);
-            table.compat_mask(rhs_comp, rhs_shift, lhs_comp) |=
-                (1u << lhs_shift);
-          }
-        }
-      }
-    }
-  }
-
-  if (timing != nullptr) {
-    ++timing->component_pair_table_builds;
-    timing->component_pair_table_s +=
-        chrono::duration<double>(clock::now() - started).count();
-  }
-  return table;
-}
-
-uint32_t component_search_full_shift_mask(size_t shift_count) {
-  if (shift_count >= 32)
-    return numeric_limits<uint32_t>::max();
-  return shift_count == 0 ? 0u : ((1u << shift_count) - 1u);
-}
-
-size_t find_component_search_shift_index(const vector<PbctopoShift> &shifts,
-                                         const Int3 &offset) {
-  for (size_t shift_idx = 0; shift_idx < shifts.size(); ++shift_idx) {
-    if (shifts[shift_idx].ix == offset.x && shifts[shift_idx].iy == offset.y &&
-        shifts[shift_idx].iz == offset.z) {
-      return shift_idx;
-    }
-  }
-  return shifts.size();
-}
-
-vector<size_t> build_component_search_order(
-    const vector<vector<size_t>> &components, const vector<size_t> &anchor_indices,
-    const vector<size_t> &atom_component_index,
-    const PbctopoComponentPairShiftTable &pair_table, size_t identity_shift_pos) {
-  vector<size_t> order;
-  if (components.empty())
-    return order;
-  order.reserve(components.size());
-  order.push_back(0);
-  if (components.size() == 1)
-    return order;
-
-  vector<size_t> anchor_counts(components.size(), 0);
-  for (size_t anchor_idx : anchor_indices) {
-    if (anchor_idx < atom_component_index.size()) {
-      const size_t comp_idx = atom_component_index[anchor_idx];
-      if (comp_idx < anchor_counts.size())
-        ++anchor_counts[comp_idx];
-    }
-  }
-
-  vector<size_t> remaining;
-  remaining.reserve(components.size() - 1);
-  for (size_t comp_idx = 1; comp_idx < components.size(); ++comp_idx)
-    remaining.push_back(comp_idx);
-
-  stable_sort(remaining.begin(), remaining.end(),
-              [&](size_t lhs, size_t rhs) {
-                if (components[lhs].size() != components[rhs].size())
-                  return components[lhs].size() > components[rhs].size();
-                if (anchor_counts[lhs] != anchor_counts[rhs])
-                  return anchor_counts[lhs] > anchor_counts[rhs];
-
-                const size_t lhs_compatible_shifts = static_cast<size_t>(popcount(
-                    pair_table.compat_mask(0, identity_shift_pos, lhs)));
-                const size_t rhs_compatible_shifts = static_cast<size_t>(popcount(
-                    pair_table.compat_mask(0, identity_shift_pos, rhs)));
-                double lhs_best_min_pair = numeric_limits<double>::infinity();
-                double rhs_best_min_pair = numeric_limits<double>::infinity();
-                for (size_t shift_idx = 0; shift_idx < pair_table.shift_count; ++shift_idx) {
-                  const auto &lhs_entry =
-                      pair_table.at(0, identity_shift_pos, lhs, shift_idx);
-                  const auto &rhs_entry =
-                      pair_table.at(0, identity_shift_pos, rhs, shift_idx);
-                  lhs_best_min_pair = min(lhs_best_min_pair, lhs_entry.min_pair_d2);
-                  rhs_best_min_pair = min(rhs_best_min_pair, rhs_entry.min_pair_d2);
-                }
-                if (lhs_compatible_shifts != rhs_compatible_shifts)
-                  return lhs_compatible_shifts < rhs_compatible_shifts;
-                if (fabs(lhs_best_min_pair - rhs_best_min_pair) > 1.0e-9)
-                  return lhs_best_min_pair < rhs_best_min_pair;
-                return lhs < rhs;
-              });
-
-  order.insert(order.end(), remaining.begin(), remaining.end());
-  return order;
-}
-
 bool component_candidate_cannot_beat_incumbent_prefix(
     const PbctopoComponentCandidate &candidate,
     const PbctopoComponentCandidate *incumbent,
@@ -3852,526 +3669,12 @@ bool better_component_candidate(const PbctopoComponentCandidate &lhs,
   return false;
 }
 
-struct PbctopoComponentSearchShiftOption {
-  size_t shift_idx = 0;
-  double next_min_pair_d2 = numeric_limits<double>::infinity();
-  double ordering_min_pair_d2 = numeric_limits<double>::infinity();
-  double shift_norm2 = numeric_limits<double>::infinity();
-  size_t future_remaining_shifts = numeric_limits<size_t>::max();
-  size_t clash_atom_a = numeric_limits<size_t>::max();
-  size_t clash_atom_b = numeric_limits<size_t>::max();
-  bool warm_priority = false;
-};
-
-struct PbctopoBeamState {
-  vector<size_t> selected_shift;
-  vector<uint32_t> allowed_masks;
-  double shift_norm2 = 0.0;
-  double min_pair_d2 = numeric_limits<double>::infinity();
-  size_t clash_atom_a = numeric_limits<size_t>::max();
-  size_t clash_atom_b = numeric_limits<size_t>::max();
-  size_t future_remaining_shifts = numeric_limits<size_t>::max();
-  size_t warm_hits = 0;
-};
-
-vector<Int3> normalize_search_warm_offsets(
-    const vector<Int3> &warm_offsets, const vector<vector<size_t>> &components) {
-  if (warm_offsets.empty())
-    return {};
-  vector<Int3> rebased = warm_offsets;
-  rebase_component_offsets(rebased, components);
-  vector<Int3> normalized;
-  normalized.reserve(rebased.size());
-  const Int3 root = rebased.front();
-  for (const auto &offset : rebased) {
-    normalized.push_back(
-        {offset.x - root.x, offset.y - root.y, offset.z - root.z});
-  }
-  return normalized;
-}
-
-vector<PbctopoComponentSearchShiftOption> build_component_search_shift_order(
-    const vector<PbctopoShift> &shifts, size_t actual_comp_idx, size_t depth,
-    const vector<size_t> &search_order, const vector<size_t> &selected_shift,
-    const vector<uint32_t> &allowed_masks,
-    const PbctopoComponentPairShiftTable &pair_table, double current_min_pair_d2,
-    size_t clash_atom_a, size_t clash_atom_b,
-    const vector<Int3> *normalized_warm_offsets = nullptr,
-    PbctopoTimingStats *timing = nullptr) {
-  vector<PbctopoComponentSearchShiftOption> ordered;
-  if (actual_comp_idx >= allowed_masks.size())
-    return ordered;
-  uint32_t current_mask = allowed_masks[actual_comp_idx];
-  if (current_mask == 0u) {
-    if (timing != nullptr) {
-      ++timing->component_pair_table_prunes;
-      ++timing->component_search_zero_current_mask_prunes;
-    }
-    return ordered;
-  }
-  ordered.reserve(static_cast<size_t>(popcount(current_mask)));
-
-  Int3 warm_delta;
-  const bool has_warm_delta =
-      (depth > 0 && normalized_warm_offsets != nullptr &&
-       actual_comp_idx < normalized_warm_offsets->size())
-          ? (warm_delta = (*normalized_warm_offsets)[actual_comp_idx], true)
-          : false;
-
-  while (current_mask != 0u) {
-    const size_t shift_idx = static_cast<size_t>(countr_zero(current_mask));
-    current_mask &= (current_mask - 1u);
-    if (shift_idx >= shifts.size())
-      continue;
-    PbctopoComponentSearchShiftOption option;
-    option.shift_idx = shift_idx;
-    option.next_min_pair_d2 = current_min_pair_d2;
-    option.ordering_min_pair_d2 = numeric_limits<double>::infinity();
-    option.future_remaining_shifts = 0;
-    option.shift_norm2 = static_cast<double>(shifts[shift_idx].ix * shifts[shift_idx].ix +
-                                             shifts[shift_idx].iy * shifts[shift_idx].iy +
-                                             shifts[shift_idx].iz * shifts[shift_idx].iz);
-    option.clash_atom_a = clash_atom_a;
-    option.clash_atom_b = clash_atom_b;
-    option.warm_priority =
-        has_warm_delta && shifts[shift_idx].ix == warm_delta.x &&
-        shifts[shift_idx].iy == warm_delta.y && shifts[shift_idx].iz == warm_delta.z;
-
-    for (size_t prev_depth = 0; prev_depth < depth; ++prev_depth) {
-      const size_t prev_comp_idx = search_order[prev_depth];
-      const size_t prev_shift_idx = selected_shift[prev_comp_idx];
-      if (prev_shift_idx >= pair_table.shift_count)
-        continue;
-      const auto &entry =
-          pair_table.at(actual_comp_idx, shift_idx, prev_comp_idx, prev_shift_idx);
-      option.ordering_min_pair_d2 =
-          min(option.ordering_min_pair_d2, entry.min_pair_d2);
-      if (entry.min_pair_d2 < option.next_min_pair_d2) {
-        option.next_min_pair_d2 = entry.min_pair_d2;
-        option.clash_atom_a = entry.clash_atom_a;
-        option.clash_atom_b = entry.clash_atom_b;
-      }
-    }
-
-    bool future_zero_mask = false;
-    for (size_t future_depth = depth + 1; future_depth < search_order.size();
-         ++future_depth) {
-      const size_t future_comp_idx = search_order[future_depth];
-      if (future_comp_idx >= allowed_masks.size())
-        continue;
-      const uint32_t next_mask =
-          allowed_masks[future_comp_idx] &
-          pair_table.compat_mask(actual_comp_idx, shift_idx, future_comp_idx);
-      if (next_mask == 0u) {
-        future_zero_mask = true;
-        break;
-      }
-      option.future_remaining_shifts += static_cast<size_t>(popcount(next_mask));
-    }
-    if (future_zero_mask) {
-      if (timing != nullptr)
-        ++timing->component_pair_table_prunes;
-      if (timing != nullptr)
-        ++timing->component_search_zero_future_mask_prunes;
-      continue;
-    }
-    ordered.push_back(option);
-  }
-
-  sort(ordered.begin(), ordered.end(),
-       [](const PbctopoComponentSearchShiftOption &lhs,
-          const PbctopoComponentSearchShiftOption &rhs) {
-         if (lhs.warm_priority != rhs.warm_priority)
-           return lhs.warm_priority;
-         if (lhs.future_remaining_shifts != rhs.future_remaining_shifts)
-           return lhs.future_remaining_shifts < rhs.future_remaining_shifts;
-         if (fabs(lhs.ordering_min_pair_d2 - rhs.ordering_min_pair_d2) > 1.0e-9)
-           return lhs.ordering_min_pair_d2 > rhs.ordering_min_pair_d2;
-         if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-9)
-           return lhs.shift_norm2 < rhs.shift_norm2;
-         return lhs.shift_idx < rhs.shift_idx;
-       });
-  if (!ordered.empty() && ordered.front().warm_priority && timing != nullptr)
-    ++timing->component_search_shift_warm_hits;
-  return ordered;
-}
-
-bool better_component_beam_state(const PbctopoBeamState &lhs,
-                                 const PbctopoBeamState &rhs) {
-  const bool lhs_has_pair = isfinite(lhs.min_pair_d2);
-  const bool rhs_has_pair = isfinite(rhs.min_pair_d2);
-  if (lhs_has_pair != rhs_has_pair)
-    return lhs_has_pair;
-  if (lhs_has_pair && fabs(lhs.min_pair_d2 - rhs.min_pair_d2) > 1.0e-9)
-    return lhs.min_pair_d2 > rhs.min_pair_d2;
-  if (lhs.warm_hits != rhs.warm_hits)
-    return lhs.warm_hits > rhs.warm_hits;
-  if (lhs.future_remaining_shifts != rhs.future_remaining_shifts)
-    return lhs.future_remaining_shifts < rhs.future_remaining_shifts;
-  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-9)
-    return lhs.shift_norm2 < rhs.shift_norm2;
-  return lhs.selected_shift < rhs.selected_shift;
-}
-
-bool build_component_points_from_selected_shifts(
-    const vector<PbctopoAtom> &atoms, const vector<vector<size_t>> &components,
-    const vector<vector<PbctopoShiftedComponent>> &shifted_components,
-    const vector<size_t> &selected_shift, vector<Vec3> &placed_points,
-    double &shift_norm2) {
-  if (components.size() != selected_shift.size())
-    return false;
-  placed_points.resize(atoms.size());
-  shift_norm2 = 0.0;
-  for (size_t comp_idx = 0; comp_idx < components.size(); ++comp_idx) {
-    const size_t shift_idx = selected_shift[comp_idx];
-    if (shift_idx >= shifted_components[comp_idx].size())
-      return false;
-    const auto &component = components[comp_idx];
-    const auto &shifted = shifted_components[comp_idx][shift_idx];
-    if (shifted.points.size() != component.size())
-      return false;
-    shift_norm2 += shifted.weighted_shift_norm2;
-    for (size_t local_idx = 0; local_idx < component.size(); ++local_idx)
-      placed_points[component[local_idx]] = shifted.points[local_idx];
-  }
-  return true;
-}
-
-PbctopoComponentCandidate search_component_shift_candidate_beam(
-    const vector<PbctopoAtom> &atoms, box Box,
-    const vector<vector<size_t>> &components, const vector<PbctopoShift> &shifts,
-    const vector<PbctopoContinuityPair> &continuity_pairs,
-    const vector<size_t> &anchor_indices,
-    const PbctopoRuntimeCutoffs &cutoffs, vector<Vec3> &best_points_out,
-    size_t beam_width,
-    const vector<Int3> *warm_component_offsets = nullptr,
-    const PbctopoCutCandidate *incumbent_cut = nullptr,
-    const vector<Vec3> *incumbent_points = nullptr,
-    PbctopoTimingStats *timing = nullptr,
-    PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
-    const PbctopoAnchorGraphContext *anchor_context = nullptr) {
-  (void)Box;
-  beam_width = max<size_t>(1, min(beam_width, kPbctopoBeamWidthMax));
-  PbctopoComponentCandidate best;
-  if (components.empty())
-    return best;
-
-  vector<Vec3> placed_points(atoms.size());
-  best_points_out.clear();
-  best_points_out.reserve(atoms.size());
-
-  const auto shifted_components =
-      precompute_shifted_components(atoms, components, shifts,
-                                    cutoffs.clash_cutoff,
-                                    cutoffs.pair_contact_cutoff);
-
-  size_t identity_shift_pos = 0;
-  for (size_t shift_idx = 0; shift_idx < shifts.size(); ++shift_idx) {
-    if (shifts[shift_idx].ix == 0 && shifts[shift_idx].iy == 0 &&
-        shifts[shift_idx].iz == 0) {
-      identity_shift_pos = shift_idx;
-      break;
-    }
-  }
-
-  if (incumbent_cut != nullptr && incumbent_cut->valid &&
-      !incumbent_cut->ultra_clash && incumbent_points != nullptr &&
-      incumbent_points->size() == atoms.size()) {
-    best = build_component_candidate_seed(*incumbent_cut, components, *incumbent_points);
-    if (timing != nullptr)
-      ++timing->component_search_seed_graph;
-  } else if (timing != nullptr) {
-    ++timing->component_search_seed_none;
-  }
-
-  const PbctopoComponentPairShiftTable pair_table =
-      build_component_pair_shift_table(components, shifted_components,
-                                       cutoffs.clash_cutoff, timing);
-  const vector<size_t> atom_component_index =
-      build_atom_component_index(atoms.size(), components);
-  const vector<size_t> search_order = build_component_search_order(
-      components, anchor_indices, atom_component_index, pair_table, identity_shift_pos);
-  const vector<Int3> normalized_warm_offsets =
-      (warm_component_offsets != nullptr &&
-       warm_component_offsets->size() == components.size())
-          ? normalize_search_warm_offsets(*warm_component_offsets, components)
-          : vector<Int3>{};
-  const vector<Int3> *normalized_warm_offsets_ptr =
-      normalized_warm_offsets.empty() ? nullptr : &normalized_warm_offsets;
-
-  const uint32_t full_shift_mask = component_search_full_shift_mask(shifts.size());
-  vector<uint32_t> initial_allowed_masks(components.size(), full_shift_mask);
-  vector<size_t> initial_selected_shift(components.size(), shifts.size());
-  if (!search_order.empty() && identity_shift_pos < 32) {
-    const size_t root_comp_idx = search_order.front();
-    initial_allowed_masks[root_comp_idx] = (1u << identity_shift_pos);
-    initial_selected_shift[root_comp_idx] = identity_shift_pos;
-    for (size_t depth = 1; depth < search_order.size(); ++depth) {
-      const size_t future_comp_idx = search_order[depth];
-      initial_allowed_masks[future_comp_idx] &=
-          pair_table.compat_mask(root_comp_idx, identity_shift_pos, future_comp_idx);
-      if (initial_allowed_masks[future_comp_idx] == 0u && timing != nullptr) {
-        ++timing->component_pair_table_prunes;
-        ++timing->component_search_zero_future_mask_prunes;
-      }
-    }
-  }
-
-  vector<PbctopoBeamState> beam_states;
-  PbctopoBeamState root_state;
-  root_state.selected_shift = initial_selected_shift;
-  root_state.allowed_masks = initial_allowed_masks;
-  root_state.future_remaining_shifts = 0;
-  beam_states.push_back(std::move(root_state));
-  if (timing != nullptr)
-    ++timing->component_search_depth_visits[0];
-
-  for (size_t depth = search_order.empty() ? 0 : 1; depth < search_order.size();
-       ++depth) {
-    vector<PbctopoBeamState> next_states;
-    next_states.reserve(beam_states.size() * min<size_t>(beam_width,
-                                                         shifts.size()));
-    const size_t actual_comp_idx = search_order[depth];
-    for (const auto &state : beam_states) {
-      if (timing != nullptr &&
-          depth < timing->component_search_depth_visits.size()) {
-        ++timing->component_search_depth_visits[depth];
-      }
-      const vector<PbctopoComponentSearchShiftOption> ordered_shifts =
-          build_component_search_shift_order(
-              shifts, actual_comp_idx, depth, search_order, state.selected_shift,
-              state.allowed_masks, pair_table, state.min_pair_d2, state.clash_atom_a,
-              state.clash_atom_b, normalized_warm_offsets_ptr, timing);
-      for (const auto &option : ordered_shifts) {
-        if (timing != nullptr) {
-          ++timing->component_shift_trials;
-          ++timing->component_large_mode_beam_expanded;
-        }
-        PbctopoBeamState next_state = state;
-        next_state.selected_shift[actual_comp_idx] = option.shift_idx;
-        if (actual_comp_idx < next_state.allowed_masks.size() && option.shift_idx < 32)
-          next_state.allowed_masks[actual_comp_idx] = (1u << option.shift_idx);
-        for (size_t future_depth = depth + 1; future_depth < search_order.size();
-             ++future_depth) {
-          const size_t future_comp_idx = search_order[future_depth];
-          next_state.allowed_masks[future_comp_idx] &=
-              pair_table.compat_mask(actual_comp_idx, option.shift_idx, future_comp_idx);
-        }
-        next_state.shift_norm2 +=
-            shifted_components[actual_comp_idx][option.shift_idx].weighted_shift_norm2;
-        next_state.min_pair_d2 = option.next_min_pair_d2;
-        next_state.clash_atom_a = option.clash_atom_a;
-        next_state.clash_atom_b = option.clash_atom_b;
-        next_state.future_remaining_shifts = option.future_remaining_shifts;
-        next_state.warm_hits += option.warm_priority ? 1u : 0u;
-        next_states.push_back(std::move(next_state));
-      }
-    }
-    if (next_states.empty())
-      return best;
-    if (next_states.size() > beam_width) {
-      partial_sort(next_states.begin(),
-                   next_states.begin() + static_cast<ptrdiff_t>(beam_width),
-                   next_states.end(), better_component_beam_state);
-      next_states.resize(beam_width);
-    } else {
-      sort(next_states.begin(), next_states.end(), better_component_beam_state);
-    }
-    if (timing != nullptr)
-      timing->component_large_mode_beam_kept += next_states.size();
-    beam_states = std::move(next_states);
-  }
-
-  if (timing != nullptr)
-    timing->component_large_mode_beam_complete_assignments += beam_states.size();
-  const size_t exact_rescore_count =
-      min(kPbctopoBeamFinalRescore, beam_states.size());
-  if (beam_states.size() > exact_rescore_count) {
-    partial_sort(beam_states.begin(),
-                 beam_states.begin() + static_cast<ptrdiff_t>(exact_rescore_count),
-                 beam_states.end(), better_component_beam_state);
-  } else {
-    sort(beam_states.begin(), beam_states.end(), better_component_beam_state);
-  }
-  if (timing != nullptr)
-    timing->component_large_mode_beam_final_rescored += exact_rescore_count;
-  for (size_t state_idx = 0; state_idx < exact_rescore_count; ++state_idx) {
-    double candidate_shift_norm2 = 0.0;
-    if (!build_component_points_from_selected_shifts(
-            atoms, components, shifted_components, beam_states[state_idx].selected_shift,
-            placed_points, candidate_shift_norm2)) {
-      continue;
-    }
-    PbctopoComponentCandidate candidate = score_component_assignment(
-        atoms, placed_points, components, beam_states[state_idx].min_pair_d2,
-        beam_states[state_idx].clash_atom_a, beam_states[state_idx].clash_atom_b,
-        continuity_pairs, anchor_indices, cutoffs.continuity_cutoff,
-        candidate_shift_norm2, best.valid ? &best : nullptr, timing,
-        anchor_backend, anchor_context);
-    if (better_component_candidate(candidate, best)) {
-      best = candidate;
-      best_points_out = placed_points;
-    }
-  }
-
-  return best;
-}
-
-PbctopoComponentCandidate search_component_shift_candidate(
-    const vector<PbctopoAtom> &atoms, box Box,
-    const vector<vector<size_t>> &components, const vector<PbctopoShift> &shifts,
-    const vector<PbctopoContinuityPair> &continuity_pairs,
-    const vector<size_t> &anchor_indices,
-    const PbctopoRuntimeCutoffs &cutoffs, vector<Vec3> &best_points_out,
-    const vector<Int3> *warm_component_offsets = nullptr,
-    const PbctopoCutCandidate *incumbent_cut = nullptr,
-    const vector<Vec3> *incumbent_points = nullptr,
-    PbctopoTimingStats *timing = nullptr,
-    PbctopoAnchorBackend anchor_backend = PbctopoAnchorBackend::Auto,
-    const PbctopoAnchorGraphContext *anchor_context = nullptr) {
-  (void)Box;
-  PbctopoComponentCandidate best;
-  if (components.empty())
-    return best;
-
-  vector<Vec3> placed_points(atoms.size());
-  best_points_out.clear();
-  best_points_out.reserve(atoms.size());
-  vector<size_t> selected_shift(components.size(), shifts.size());
-  const auto shifted_components =
-      precompute_shifted_components(atoms, components, shifts,
-                                    cutoffs.clash_cutoff,
-                                    cutoffs.pair_contact_cutoff);
-
-  size_t identity_shift_pos = 0;
-  for (size_t shift_idx = 0; shift_idx < shifts.size(); ++shift_idx) {
-    if (shifts[shift_idx].ix == 0 && shifts[shift_idx].iy == 0 &&
-        shifts[shift_idx].iz == 0) {
-      identity_shift_pos = shift_idx;
-      break;
-    }
-  }
-
-  for (const auto &component : components) {
-    for (size_t atom_idx : component) {
-      placed_points[atom_idx] = {atoms[atom_idx].x, atoms[atom_idx].y,
-                                 atoms[atom_idx].z};
-    }
-  }
-
-  if (incumbent_cut != nullptr && incumbent_cut->valid && !incumbent_cut->ultra_clash &&
-      incumbent_points != nullptr && incumbent_points->size() == atoms.size()) {
-    best = build_component_candidate_seed(*incumbent_cut, components, *incumbent_points);
-    if (timing != nullptr)
-      ++timing->component_search_seed_graph;
-  } else if (timing != nullptr) {
-    ++timing->component_search_seed_none;
-  }
-
-  const PbctopoComponentPairShiftTable pair_table =
-      build_component_pair_shift_table(components, shifted_components,
-                                       cutoffs.clash_cutoff, timing);
-  const vector<size_t> atom_component_index =
-      build_atom_component_index(atoms.size(), components);
-  const vector<size_t> search_order = build_component_search_order(
-      components, anchor_indices, atom_component_index, pair_table, identity_shift_pos);
-  const vector<Int3> normalized_warm_offsets =
-      (warm_component_offsets != nullptr &&
-       warm_component_offsets->size() == components.size())
-          ? normalize_search_warm_offsets(*warm_component_offsets, components)
-          : vector<Int3>{};
-  const vector<Int3> *normalized_warm_offsets_ptr =
-      normalized_warm_offsets.empty() ? nullptr : &normalized_warm_offsets;
-
-  const uint32_t full_shift_mask = component_search_full_shift_mask(shifts.size());
-  vector<uint32_t> initial_allowed_masks(components.size(), full_shift_mask);
-  if (!search_order.empty() && identity_shift_pos < 32) {
-    const size_t root_comp_idx = search_order.front();
-    initial_allowed_masks[root_comp_idx] = (1u << identity_shift_pos);
-    selected_shift[root_comp_idx] = identity_shift_pos;
-    for (size_t depth = 1; depth < search_order.size(); ++depth) {
-      const size_t future_comp_idx = search_order[depth];
-      initial_allowed_masks[future_comp_idx] &=
-          pair_table.compat_mask(root_comp_idx, identity_shift_pos, future_comp_idx);
-      if (initial_allowed_masks[future_comp_idx] == 0u && timing != nullptr) {
-        ++timing->component_pair_table_prunes;
-        ++timing->component_search_zero_future_mask_prunes;
-      }
-    }
-  }
-
-  function<void(size_t, double, double, size_t, size_t, vector<uint32_t> &)> dfs =
-      [&](size_t depth, double shift_norm2, double min_pair_d2,
-          size_t clash_atom_a, size_t clash_atom_b,
-          vector<uint32_t> &allowed_masks) {
-        if (timing != nullptr &&
-            depth < timing->component_search_depth_visits.size()) {
-          ++timing->component_search_depth_visits[depth];
-        }
-        if (depth >= search_order.size()) {
-          PbctopoComponentCandidate candidate = score_component_assignment(
-              atoms, placed_points, components, min_pair_d2, clash_atom_a,
-              clash_atom_b, continuity_pairs, anchor_indices,
-              cutoffs.continuity_cutoff, shift_norm2,
-              best.valid ? &best : nullptr, timing, anchor_backend,
-              anchor_context);
-          if (better_component_candidate(candidate, best)) {
-            best = candidate;
-            best_points_out = placed_points;
-          }
-          return;
-        }
-
-        const size_t actual_comp_idx = search_order[depth];
-        const vector<PbctopoComponentSearchShiftOption> ordered_shifts =
-            build_component_search_shift_order(
-                shifts, actual_comp_idx, depth, search_order, selected_shift,
-                allowed_masks, pair_table, min_pair_d2, clash_atom_a, clash_atom_b,
-                normalized_warm_offsets_ptr, timing);
-        for (const auto &option : ordered_shifts) {
-          const size_t shift_idx = option.shift_idx;
-          if (timing != nullptr)
-            ++timing->component_shift_trials;
-          const auto &component = components[actual_comp_idx];
-          const auto &shifted = shifted_components[actual_comp_idx][shift_idx];
-          for (size_t local_idx = 0; local_idx < component.size(); ++local_idx) {
-            placed_points[component[local_idx]] = shifted.points[local_idx];
-          }
-          selected_shift[actual_comp_idx] = shift_idx;
-          vector<pair<size_t, uint32_t>> allowed_mask_restore;
-          allowed_mask_restore.reserve(search_order.size() - depth);
-          if (actual_comp_idx < allowed_masks.size() && shift_idx < 32) {
-            allowed_mask_restore.push_back(
-                {actual_comp_idx, allowed_masks[actual_comp_idx]});
-            allowed_masks[actual_comp_idx] = (1u << shift_idx);
-          }
-          for (size_t future_depth = depth + 1; future_depth < search_order.size();
-               ++future_depth) {
-            const size_t future_comp_idx = search_order[future_depth];
-            const uint32_t previous_mask = allowed_masks[future_comp_idx];
-            const uint32_t updated_mask =
-                previous_mask &
-                pair_table.compat_mask(actual_comp_idx, shift_idx, future_comp_idx);
-            if (updated_mask != previous_mask) {
-              allowed_mask_restore.push_back({future_comp_idx, previous_mask});
-              allowed_masks[future_comp_idx] = updated_mask;
-            }
-          }
-          dfs(depth + 1, shift_norm2 + shifted.weighted_shift_norm2,
-              option.next_min_pair_d2, option.clash_atom_a,
-              option.clash_atom_b, allowed_masks);
-          for (auto restore_it = allowed_mask_restore.rbegin();
-               restore_it != allowed_mask_restore.rend(); ++restore_it) {
-            allowed_masks[restore_it->first] = restore_it->second;
-          }
-          selected_shift[actual_comp_idx] = shifts.size();
-        }
-      };
-
-  dfs(search_order.empty() ? 0 : 1, 0.0, numeric_limits<double>::infinity(),
-      numeric_limits<size_t>::max(), numeric_limits<size_t>::max(),
-      initial_allowed_masks);
-  return best;
+PbctopoComponentSearchCallbacks make_component_search_callbacks() {
+  PbctopoComponentSearchCallbacks callbacks;
+  callbacks.build_seed = build_component_candidate_seed;
+  callbacks.score_assignment = score_component_assignment;
+  callbacks.better_candidate = better_component_candidate;
+  return callbacks;
 }
 
 bool solve_large_component_merge_mode(
@@ -4471,7 +3774,8 @@ bool solve_large_component_merge_mode(
       ++timing->component_search_frames;
     PbctopoComponentCandidate merged_candidate = search_component_shift_candidate(
         atoms, Box, merge_plan.merged_components, shifts, continuity_pairs,
-        anchor_indices, cutoffs, merged_search_points, merged_warm_offsets_ptr,
+        anchor_indices, cutoffs, merged_search_points,
+        make_component_search_callbacks(), merged_warm_offsets_ptr,
         search_incumbent, search_incumbent_points, timing, anchor_backend,
         anchor_context);
     if (merged_candidate.valid && !merged_candidate.ultra_clash &&
@@ -5949,6 +5253,29 @@ void apply_cut_candidate(const vector<PbctopoAtom> &atoms,
   }
 }
 
+void apply_pbctopo_points_direct(const vector<PbctopoAtom> &atoms,
+                                 const vector<Vec3> &placed_points,
+                                 Multi_MOL &mol1_system,
+                                 Multi_MOL &mol2_system,
+                                 size_t frame_index) {
+  if (atoms.empty() || placed_points.size() != atoms.size())
+    return;
+
+  for (size_t idx = 0; idx < atoms.size(); ++idx) {
+    const auto &atom = atoms[idx];
+    const Vec3 &point = placed_points[idx];
+    if (atom.owner == 0) {
+      mol1_system.m_mol[frame_index].pos.x[atom.local_atom_index] = point.x;
+      mol1_system.m_mol[frame_index].pos.y[atom.local_atom_index] = point.y;
+      mol1_system.m_mol[frame_index].pos.z[atom.local_atom_index] = point.z;
+    } else if (frame_index < mol2_system.m_mol.size()) {
+      mol2_system.m_mol[frame_index].pos.x[atom.local_atom_index] = point.x;
+      mol2_system.m_mol[frame_index].pos.y[atom.local_atom_index] = point.y;
+      mol2_system.m_mol[frame_index].pos.z[atom.local_atom_index] = point.z;
+    }
+  }
+}
+
 [[maybe_unused]] void
 append_fragments_for_system(const Multi_MOL &system, const MOL &mol, int owner,
                             vector<PbctopoFragment> &fragments,
@@ -6784,7 +6111,8 @@ apply_pbctopo_candidate(Multi_MOL &mol1_system, Multi_MOL &mol2_system,
 } // namespace
 
 int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
-                                 TitanExecutor *executor) {
+                                 TitanExecutor *executor,
+                                 size_t frame_report_offset) {
   using clock = chrono::steady_clock;
   const size_t frame_count =
       mol2.m_mol.empty() ? this->m_mol.size()
@@ -6793,10 +6121,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     return 0;
 
   reset_pbctopo_log_file();
-  ofstream pbctopo_frame_report("pbctopo_frame_report.csv",
-                                ios::out | ios::trunc);
-  if (pbctopo_frame_report.is_open())
-    write_pbctopo_frame_report_header(pbctopo_frame_report);
+  ofstream pbctopo_frame_report = open_pbctopo_frame_report();
   size_t fallback_frames = 0;
   size_t partial_components = 0;
   size_t valid_candidates = 0;
@@ -6805,6 +6130,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
   PbctopoWarmState warm_state;
   const PbctopoRuntimeCutoffs runtime_cutoffs =
       resolve_pbctopo_cutoffs(Arguments);
+  const PbctopoSolveMode solve_mode = resolve_pbctopo_solve_mode(Arguments);
   const PbctopoAnchorBackend anchor_backend =
       resolve_pbctopo_anchor_backend(Arguments);
   const size_t requested_exact_component_limit =
@@ -6820,7 +6146,9 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
   const size_t beam_width =
       max<size_t>(1, min(requested_beam_width, kPbctopoBeamWidthMax));
   append_pbctopo_log_line("[pbctopo] begin run: frames=" +
-                          to_string(frame_count) + ", anchor_backend=" +
+                          to_string(frame_count) + ", pbctopo_mode=" +
+                          pbctopo_solve_mode_name(solve_mode) +
+                          ", anchor_backend=" +
                           pbctopo_anchor_backend_name(anchor_backend) +
                           ", bond_cutoff=" +
                           to_string(runtime_cutoffs.bond_cutoff) +
@@ -6875,6 +6203,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
   vector<Vec3> hull_rescue_points;
   hull_rescue_points.reserve(trajectory_context.total_atoms_hint);
   bool projection_clash_skip_active = false;
+  string llps_local_unit_source = "none";
   auto fallback_pbci_frame = [&](size_t frame_index) {
     int chain_ref = Arguments.pbc.chain_ref;
     const size_t chain_count = this->Index.empty() ? 0 : this->Index.size() - 1;
@@ -6932,7 +6261,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
   for (size_t frame_idx = 0; frame_idx < frame_count; ++frame_idx) {
     ++timing.frames;
     PbctopoFrameReport frame_report;
-    frame_report.frame = frame_idx;
+    frame_report.frame = frame_report_offset + frame_idx;
     frame_report.time_ps = this->m_mol[frame_idx].time_of_snap;
     const auto frame_report_started = clock::now();
     const double frame_graph_s_before = timing.graph_s + timing.component_graph_s;
@@ -6989,6 +6318,51 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           local_edge_set, timing);
     }
     timing.graph_s += chrono::duration<double>(clock::now() - stage_started).count();
+
+    if (solve_mode == PbctopoSolveMode::LlpsLocal) {
+      const PbctopoLlpsLocalUnits llps_units =
+          build_pbctopo_llps_local_units(*this, mol2, base_atoms, local_edges);
+      llps_local_unit_source =
+          merge_pbctopo_llps_unit_source(llps_local_unit_source,
+                                         llps_units.source);
+      vector<Vec3> llps_points = unwrap_pbctopo_llps_local_points(
+          base_atoms, local_edges, this->m_mol[frame_idx].Box, llps_units,
+          timing);
+      stage_started = clock::now();
+      apply_pbctopo_points_direct(base_atoms, llps_points, *this, mol2,
+                                  frame_idx);
+      timing.apply_s +=
+          chrono::duration<double>(clock::now() - stage_started).count();
+      ++timing.apply_calls;
+      ++timing.pbctopo_llps_local_frames;
+      timing.pbctopo_llps_local_units += llps_units.units.size();
+      ++valid_candidates;
+
+      frame_report.status = PbctopoFrameStatus::Certified;
+      frame_report.mode = PbctopoFrameMode::LlpsLocal;
+      frame_report.component_count = llps_units.units.size();
+      frame_report.safe_candidate_count = 1;
+      frame_report.fallback_reason = PbctopoFailureReason::None;
+      frame_report.time_graph_ms =
+          max(0.0, (timing.graph_s + timing.component_graph_s -
+                    frame_graph_s_before) *
+                       1000.0);
+      frame_report.time_virtual_ms =
+          max(0.0, (timing.coarse_s + timing.refine_s +
+                    timing.early_projection_s - frame_virtual_s_before) *
+                       1000.0);
+      frame_report.time_component_ms =
+          max(0.0, (timing.component_prep_s + timing.component_graph_s +
+                    timing.component_search_s + timing.warm_component_s -
+                    frame_component_s_before) *
+                       1000.0);
+      frame_report.time_total_ms =
+          chrono::duration<double, milli>(clock::now() - frame_report_started)
+              .count();
+      if (pbctopo_frame_report.is_open())
+        write_pbctopo_frame_report_row(pbctopo_frame_report, frame_report);
+      continue;
+    }
 
     stage_started = clock::now();
     build_projection_edge_subset(base_atoms, projection_atoms, local_edges,
@@ -8011,7 +7385,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                   component_atoms, this->m_mol[frame_idx].Box, components, shifts,
                   trajectory_context.continuity_pairs,
                   trajectory_context.continuity_anchor_indices, runtime_cutoffs,
-                  component_points,
+                  component_points, make_component_search_callbacks(),
                   same_component_warm_layout
                       ? &warm_state.previous_component_offsets
                       : nullptr,
@@ -8119,7 +7493,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                 component_atoms, this->m_mol[frame_idx].Box, components, shifts,
                 trajectory_context.continuity_pairs,
                 trajectory_context.continuity_anchor_indices, runtime_cutoffs,
-                component_points, beam_width,
+                component_points, beam_width, make_component_search_callbacks(),
                 same_component_warm_layout
                     ? &warm_state.previous_component_offsets
                     : nullptr,
@@ -8445,6 +7819,17 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       ", distance_rescue_successes=" +
       to_string(timing.distance_rescue_successes) +
       ", pbci_fallback_frames=" + to_string(timing.pbci_fallback_frames) +
+      ", pbctopo_llps_local_frames=" +
+      to_string(timing.pbctopo_llps_local_frames) +
+      ", pbctopo_llps_local_units=" +
+      to_string(timing.pbctopo_llps_local_units) +
+      ", pbctopo_llps_local_unit_source=" + llps_local_unit_source +
+      ", pbctopo_llps_local_edges_used=" +
+      to_string(timing.pbctopo_llps_local_edges_used) +
+      ", pbctopo_llps_local_edges_skipped_cross_unit=" +
+      to_string(timing.pbctopo_llps_local_edges_skipped_cross_unit) +
+      ", pbctopo_llps_local_disconnected_units=" +
+      to_string(timing.pbctopo_llps_local_disconnected_units) +
       ", early_projection_used=" + to_string(timing.early_projection_used) +
       ", previous_seed_used=" + to_string(timing.previous_seed_used) +
        ", component_graph_edges=" + to_string(timing.component_graph_edges) +
@@ -8557,6 +7942,20 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.component_pair_table_s) +
       " s, component_pair_table_prunes=" +
       to_string(timing.component_pair_table_prunes) +
+      ", component_pair_table_component_count=" +
+      to_string(timing.component_pair_table_component_count) +
+      ", component_pair_table_shift_count=" +
+      to_string(timing.component_pair_table_shift_count) +
+      ", component_pair_table_dense_entries_equivalent=" +
+      to_string(timing.component_pair_table_dense_entries_equivalent) +
+      ", component_pair_table_materialized_entries=" +
+      to_string(timing.component_pair_table_materialized_entries) +
+      ", component_pair_table_bbox_prefiltered=" +
+      to_string(timing.component_pair_table_bbox_prefiltered) +
+      ", component_pair_table_sparse_rows=" +
+      to_string(timing.component_pair_table_sparse_rows) +
+      ", component_pair_table_peak_bytes_estimate=" +
+      to_string(timing.component_pair_table_peak_bytes_estimate) +
       ", component_search_zero_current_mask_prunes=" +
       to_string(timing.component_search_zero_current_mask_prunes) +
       ", component_search_zero_future_mask_prunes=" +
@@ -8571,6 +7970,15 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.component_search_seed_graph) +
       ", component_search_seed_none=" +
       to_string(timing.component_search_seed_none) +
+      ", component_search_prefix_continuity_checks=" +
+      to_string(timing.component_search_prefix_continuity_checks) +
+      ", component_search_prefix_continuity_prunes=" +
+      to_string(timing.component_search_prefix_continuity_prunes) +
+      ", component_search_prefix_continuity_hard_rejects=" +
+      to_string(timing.component_search_prefix_continuity_hard_rejects) +
+      ", component_search_prefix_continuity_time=" +
+      to_string(timing.component_search_prefix_continuity_s) +
+      " s" +
       ", component_large_mode_merge_frames=" +
       to_string(timing.component_large_mode_merge_frames) +
       ", component_large_mode_pair_only_frames=" +

@@ -4316,6 +4316,17 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (string(argv[i]) == "-pbctopo") {
       pbc.solv_pbctopo = true;
     }
+    if (string(argv[i]) == "-pbctopo-llps-local" ||
+        string(argv[i]) == "--pbctopo-llps-local") {
+      pbc.solv_pbctopo = true;
+      pbc.pbctopo_mode = "llps-local";
+    }
+    if (consume_required_option_value(arg, {"-pbctopo-mode",
+                                            "--pbctopo-mode"},
+                                      common_value, i)) {
+      pbc.solv_pbctopo = true;
+      pbc.pbctopo_mode = common_value;
+    }
     if (consume_required_option_value(arg, {"-pbctopo-anchor-backend",
                                             "--pbctopo-anchor-backend"},
                                       common_value, i)) {

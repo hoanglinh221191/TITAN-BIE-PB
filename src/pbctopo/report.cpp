@@ -56,6 +56,9 @@ const char *pbctopo_frame_mode_name(PbctopoFrameMode mode) {
   case PbctopoFrameMode::DistanceRescue:
     return "distance_rescue";
   case PbctopoFrameMode::Pbci:
+    return "pbci";
+  case PbctopoFrameMode::LlpsLocal:
+    return "llps-local";
   default:
     return "pbci";
   }

@@ -63,6 +63,12 @@ Invoke-PbctopoParserCase 'bad_beam_width_too_high' `
 Invoke-PbctopoParserCase 'bad_anchor_backend' `
     @('-pbctopo', '-pbctopo-anchor-backend=bad') `
     'pbctopo-anchor-backend.*auto.*prim.*spatial-all'
+Invoke-PbctopoParserCase 'bad_pbctopo_mode' `
+    @('-pbctopo', '-pbctopo-mode=bad') `
+    'pbctopo-mode.*vibe.*llps-local'
+Invoke-PbctopoParserCase 'missing_pbctopo_mode' `
+    @('-pbctopo', '-pbctopo-mode') `
+    'pbctopo-mode.*requires a value'
 Invoke-PbctopoParserCase 'missing_bond_cutoff' `
     @('-pbctopo', '-pbctopo-bond-cutoff') `
     'pbctopo-bond-cutoff.*requires a value'

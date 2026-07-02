@@ -25,6 +25,22 @@ RuntimeCutoffs resolve_runtime_cutoffs(const arguments &Arguments) {
   return cutoffs;
 }
 
+SolveMode resolve_solve_mode(const arguments &Arguments) {
+  if (Arguments.pbc.pbctopo_mode == "llps-local")
+    return SolveMode::LlpsLocal;
+  return SolveMode::Vibe;
+}
+
+const char *solve_mode_name(SolveMode mode) {
+  switch (mode) {
+  case SolveMode::LlpsLocal:
+    return "llps-local";
+  case SolveMode::Vibe:
+  default:
+    return "vibe";
+  }
+}
+
 AnchorBackend resolve_anchor_backend(const arguments &Arguments) {
   const std::string &backend = Arguments.pbc.pbctopo_anchor_backend;
   if (backend == "prim")

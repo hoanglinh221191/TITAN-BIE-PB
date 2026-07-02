@@ -24,6 +24,7 @@ struct PbcArgs {
   int pbc_mol2_aggressive{0};
   bool flag_pbc_ref{false};
   string ref_pdb_name{};
+  string pbctopo_mode{"vibe"};
   string pbctopo_anchor_backend{"auto"};
   double pbctopo_bond_cutoff{0.0};
   bool pbctopo_bond_cutoff_set{false};

@@ -23,6 +23,7 @@ enum class PbctopoFrameMode {
   HullRescue,
   DistanceRescue,
   Pbci,
+  LlpsLocal,
 };
 
 enum class PbctopoFailureReason {

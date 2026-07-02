@@ -11,6 +11,11 @@ enum class AnchorBackend {
   SpatialAll,
 };
 
+enum class SolveMode {
+  Vibe,
+  LlpsLocal,
+};
+
 constexpr int kDefaultExactComponentLimit = 6;
 constexpr int kMaxExactComponentLimit = 16;
 constexpr int kDefaultBeamWidth = 12;
@@ -24,6 +29,8 @@ struct RuntimeCutoffs {
 };
 
 RuntimeCutoffs resolve_runtime_cutoffs(const arguments &Arguments);
+SolveMode resolve_solve_mode(const arguments &Arguments);
+const char *solve_mode_name(SolveMode mode);
 AnchorBackend resolve_anchor_backend(const arguments &Arguments);
 const char *anchor_backend_name(AnchorBackend backend);
 
