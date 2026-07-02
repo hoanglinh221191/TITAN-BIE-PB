@@ -154,6 +154,7 @@ $(BUILD_DIR)/$(SRC_ROOT)/titan_rf_model.o: CXXFLAGS := $(filter-out -O3,$(CXXFLA
 ifneq ($(OS),Windows_NT)
 $(BUILD_DIR)/$(SRC_ROOT)/solv_pbc_pbctopo.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
 $(BUILD_DIR)/$(SRC_ROOT)/pbctopo/anchor_graph.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
+$(BUILD_DIR)/$(SRC_ROOT)/pbctopo/component_graph.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
 $(BUILD_DIR)/$(SRC_ROOT)/pbctopo/component_refine.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
 $(BUILD_DIR)/$(SRC_ROOT)/engine_postproc.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
 $(BUILD_DIR)/$(SRC_ROOT)/impl_engine.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)

@@ -16,6 +16,8 @@ using pbctopo_hull::norm2;
 using titan_gyration::build_point_stats;
 using titan_gyration::PointStats;
 
+namespace {
+
 size_t find_shift_index(const vector<PbctopoShift> &shifts, const Int3 &delta) {
   for (size_t idx = 0; idx < shifts.size(); ++idx) {
     if (shifts[idx].ix == delta.x && shifts[idx].iy == delta.y &&
@@ -41,6 +43,8 @@ bool append_shift_index_if_present(const vector<PbctopoShift> &shifts,
   ordered_indices.push_back(shift_idx);
   return true;
 }
+
+} // namespace
 
 void clear_component_trial_hints(PbctopoWarmState &warm_state) {
   warm_state.previous_stage1_delta_hints_by_component.clear();
