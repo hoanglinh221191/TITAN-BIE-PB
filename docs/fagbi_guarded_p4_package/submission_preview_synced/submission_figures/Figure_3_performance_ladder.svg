@@ -1,0 +1,142 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1320' height='520' viewBox='0 0 1320 520'>
+<rect width='1320' height='520' fill='white'/>
+<style>.head{font:700 13px Arial,sans-serif;fill:#111827}.sys{font:700 15px Arial,sans-serif;fill:#111827}.panel{font:12px Arial,sans-serif;fill:#4b5563}.cellStatus{font:700 14px Arial,sans-serif;fill:white}.cellText{font:13px Arial,sans-serif;fill:white}.cellSmall{font:12px Arial,sans-serif;fill:white}</style>
+<text x='36' y='38' class='head'>System</text>
+<text x='192' y='38' class='head'>Direct TABI</text>
+<text x='417' y='38' class='head'>FMM deg1 + diag</text>
+<text x='642' y='38' class='head'>FMM deg1 + block</text>
+<text x='867' y='38' class='head'>FMM deg1 + ILU0</text>
+<text x='1092' y='38' class='head'>Guarded p4 + ILU0</text>
+<text x='36' y='85' class='sys'>Barnase</text>
+<text x='36' y='106' class='panel'>14942 panels</text>
+<rect x='186' y='62' width='213' height='56' rx='7' fill='#6b7280' opacity='0.92'/>
+<text x='196' y='80' class='cellStatus'>timeout</text>
+<text x='196' y='98' class='cellText'>60.0 min</text>
+<text x='196' y='114' class='cellSmall'>iter 0</text>
+<rect x='411' y='62' width='213' height='56' rx='7' fill='#60a5fa' opacity='0.92'/>
+<text x='421' y='80' class='cellStatus'>not converged</text>
+<text x='421' y='98' class='cellText'>24.2 min</text>
+<text x='421' y='114' class='cellSmall'>audit 1.01E-002</text>
+<rect x='636' y='62' width='213' height='56' rx='7' fill='#f59e0b' opacity='0.92'/>
+<text x='646' y='80' class='cellStatus'>not converged</text>
+<text x='646' y='98' class='cellText'>22.5 min</text>
+<text x='646' y='114' class='cellSmall'>audit 1.00E-002</text>
+<rect x='861' y='62' width='213' height='56' rx='7' fill='#16a34a' opacity='0.92'/>
+<text x='871' y='80' class='cellStatus'>ok</text>
+<text x='871' y='98' class='cellText'>319.0 s</text>
+<text x='871' y='114' class='cellSmall'>audit 2.88E-001</text>
+<rect x='1086' y='62' width='213' height='56' rx='7' fill='#7c3aed' opacity='0.92'/>
+<text x='1096' y='80' class='cellStatus'>ok</text>
+<text x='1096' y='98' class='cellText'>245.0 s</text>
+<text x='1096' y='114' class='cellSmall'>audit 7.65E-005</text>
+<text x='36' y='157' class='sys'>1A63</text>
+<text x='36' y='178' class='panel'>17250 panels</text>
+<rect x='186' y='134' width='213' height='56' rx='7' fill='#6b7280' opacity='0.92'/>
+<text x='196' y='152' class='cellStatus'>timeout</text>
+<text x='196' y='170' class='cellText'>60.0 min</text>
+<text x='196' y='186' class='cellSmall'>iter 0</text>
+<rect x='411' y='134' width='213' height='56' rx='7' fill='#60a5fa' opacity='0.92'/>
+<text x='421' y='152' class='cellStatus'>not converged</text>
+<text x='421' y='170' class='cellText'>18.9 min</text>
+<text x='421' y='186' class='cellSmall'>audit 1.63E-002</text>
+<rect x='636' y='134' width='213' height='56' rx='7' fill='#f59e0b' opacity='0.92'/>
+<text x='646' y='152' class='cellStatus'>not converged</text>
+<text x='646' y='170' class='cellText'>18.9 min</text>
+<text x='646' y='186' class='cellSmall'>audit 1.63E-002</text>
+<rect x='861' y='134' width='213' height='56' rx='7' fill='#16a34a' opacity='0.92'/>
+<text x='871' y='152' class='cellStatus'>ok</text>
+<text x='871' y='170' class='cellText'>207.7 s</text>
+<text x='871' y='186' class='cellSmall'>audit 9.67E-001</text>
+<rect x='1086' y='134' width='213' height='56' rx='7' fill='#7c3aed' opacity='0.92'/>
+<text x='1096' y='152' class='cellStatus'>ok</text>
+<text x='1096' y='170' class='cellText'>312.6 s</text>
+<text x='1096' y='186' class='cellSmall'>audit 2.53E-003</text>
+<text x='36' y='229' class='sys'>1SH1</text>
+<text x='36' y='250' class='panel'>6673 panels</text>
+<rect x='186' y='206' width='213' height='56' rx='7' fill='#6b7280' opacity='0.92'/>
+<text x='196' y='224' class='cellStatus'>not converged</text>
+<text x='196' y='242' class='cellText'>21.1 min</text>
+<text x='196' y='258' class='cellSmall'>iter 720</text>
+<rect x='411' y='206' width='213' height='56' rx='7' fill='#60a5fa' opacity='0.92'/>
+<text x='421' y='224' class='cellStatus'>timeout</text>
+<text x='421' y='242' class='cellText'>60.7 min</text>
+<text x='421' y='258' class='cellSmall'>iter 0</text>
+<rect x='636' y='206' width='213' height='56' rx='7' fill='#f59e0b' opacity='0.92'/>
+<text x='646' y='224' class='cellStatus'>not converged</text>
+<text x='646' y='242' class='cellText'>283.7 s</text>
+<text x='646' y='258' class='cellSmall'>audit 1.30E-002</text>
+<rect x='861' y='206' width='213' height='56' rx='7' fill='#16a34a' opacity='0.92'/>
+<text x='871' y='224' class='cellStatus'>ok</text>
+<text x='871' y='242' class='cellText'>61.4 s</text>
+<text x='871' y='258' class='cellSmall'>audit 2.06E-002</text>
+<rect x='1086' y='206' width='213' height='56' rx='7' fill='#7c3aed' opacity='0.92'/>
+<text x='1096' y='224' class='cellStatus'>ok</text>
+<text x='1096' y='242' class='cellText'>57.0 s</text>
+<text x='1096' y='258' class='cellSmall'>audit 5.52E-006</text>
+<text x='36' y='301' class='sys'>1UBQ</text>
+<text x='36' y='322' class='panel'>11242 panels</text>
+<rect x='186' y='278' width='213' height='56' rx='7' fill='#6b7280' opacity='0.92'/>
+<text x='196' y='296' class='cellStatus'>not converged</text>
+<text x='196' y='314' class='cellText'>40.0 min</text>
+<text x='196' y='330' class='cellSmall'>iter 720</text>
+<rect x='411' y='278' width='213' height='56' rx='7' fill='#60a5fa' opacity='0.92'/>
+<text x='421' y='296' class='cellStatus'>not converged</text>
+<text x='421' y='314' class='cellText'>12.6 min</text>
+<text x='421' y='330' class='cellSmall'>audit 1.36E-002</text>
+<rect x='636' y='278' width='213' height='56' rx='7' fill='#f59e0b' opacity='0.92'/>
+<text x='646' y='296' class='cellStatus'>not converged</text>
+<text x='646' y='314' class='cellText'>12.3 min</text>
+<text x='646' y='330' class='cellSmall'>audit 1.37E-002</text>
+<rect x='861' y='278' width='213' height='56' rx='7' fill='#16a34a' opacity='0.92'/>
+<text x='871' y='296' class='cellStatus'>ok</text>
+<text x='871' y='314' class='cellText'>143.0 s</text>
+<text x='871' y='330' class='cellSmall'>audit 6.02E-002</text>
+<rect x='1086' y='278' width='213' height='56' rx='7' fill='#7c3aed' opacity='0.92'/>
+<text x='1096' y='296' class='cellStatus'>ok</text>
+<text x='1096' y='314' class='cellText'>154.9 s</text>
+<text x='1096' y='330' class='cellSmall'>audit 1.44E-005</text>
+<text x='36' y='373' class='sys'>2CI2</text>
+<text x='36' y='394' class='panel'>9889 panels</text>
+<rect x='186' y='350' width='213' height='56' rx='7' fill='#6b7280' opacity='0.92'/>
+<text x='196' y='368' class='cellStatus'>not converged</text>
+<text x='196' y='386' class='cellText'>22.2 min</text>
+<text x='196' y='402' class='cellSmall'>iter 512</text>
+<rect x='411' y='350' width='213' height='56' rx='7' fill='#60a5fa' opacity='0.92'/>
+<text x='421' y='368' class='cellStatus'>not converged</text>
+<text x='421' y='386' class='cellText'>427.4 s</text>
+<text x='421' y='402' class='cellSmall'>audit 1.21E-002</text>
+<rect x='636' y='350' width='213' height='56' rx='7' fill='#f59e0b' opacity='0.92'/>
+<text x='646' y='368' class='cellStatus'>not converged</text>
+<text x='646' y='386' class='cellText'>11.0 min</text>
+<text x='646' y='402' class='cellSmall'>audit 1.22E-002</text>
+<rect x='861' y='350' width='213' height='56' rx='7' fill='#16a34a' opacity='0.92'/>
+<text x='871' y='368' class='cellStatus'>ok</text>
+<text x='871' y='386' class='cellText'>123.6 s</text>
+<text x='871' y='402' class='cellSmall'>audit 2.08E-002</text>
+<rect x='1086' y='350' width='213' height='56' rx='7' fill='#7c3aed' opacity='0.92'/>
+<text x='1096' y='368' class='cellStatus'>ok</text>
+<text x='1096' y='386' class='cellText'>126.3 s</text>
+<text x='1096' y='402' class='cellSmall'>audit 8.02E-006</text>
+<text x='36' y='445' class='sys'>1VII</text>
+<text x='36' y='466' class='panel'>5032 panels</text>
+<rect x='186' y='422' width='213' height='56' rx='7' fill='#6b7280' opacity='0.92'/>
+<text x='196' y='440' class='cellStatus'>not converged</text>
+<text x='196' y='458' class='cellText'>10.4 min</text>
+<text x='196' y='474' class='cellSmall'>iter 640</text>
+<rect x='411' y='422' width='213' height='56' rx='7' fill='#60a5fa' opacity='0.92'/>
+<text x='421' y='440' class='cellStatus'>not converged</text>
+<text x='421' y='458' class='cellText'>266.7 s</text>
+<text x='421' y='474' class='cellSmall'>audit 6.75E-003</text>
+<rect x='636' y='422' width='213' height='56' rx='7' fill='#f59e0b' opacity='0.92'/>
+<text x='646' y='440' class='cellStatus'>not converged</text>
+<text x='646' y='458' class='cellText'>256.0 s</text>
+<text x='646' y='474' class='cellSmall'>audit 6.58E-003</text>
+<rect x='861' y='422' width='213' height='56' rx='7' fill='#16a34a' opacity='0.92'/>
+<text x='871' y='440' class='cellStatus'>ok</text>
+<text x='871' y='458' class='cellText'>41.4 s</text>
+<text x='871' y='474' class='cellSmall'>audit 1.63E-002</text>
+<rect x='1086' y='422' width='213' height='56' rx='7' fill='#7c3aed' opacity='0.92'/>
+<text x='1096' y='440' class='cellStatus'>ok</text>
+<text x='1096' y='458' class='cellText'>37.4 s</text>
+<text x='1096' y='474' class='cellSmall'>audit 5.36E-006</text>
+</svg>

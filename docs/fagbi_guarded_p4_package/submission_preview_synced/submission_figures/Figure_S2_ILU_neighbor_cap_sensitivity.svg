@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1650" height="520" viewBox="0 0 1650 520">
+<rect width="100%" height="100%" fill="white"/>
+<text x="35.0" y="70.0" font-family="Arial" font-size="24" font-weight="bold" text-anchor="start" fill="#000000">A</text>
+<line x1="105" y1="393" x2="522" y2="393" stroke="#333" stroke-width="2"/>
+<line x1="105" y1="123" x2="105" y2="393" stroke="#333" stroke-width="2"/>
+<line x1="100" y1="393.0" x2="522" y2="393.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="66.0" y="398.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">1e-6</text>
+<line x1="100" y1="325.5" x2="522" y2="325.5" stroke="#e5e5e5" stroke-width="1"/>
+<text x="66.0" y="330.5" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">1e-5</text>
+<line x1="100" y1="258.0" x2="522" y2="258.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="66.0" y="263.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">1e-4</text>
+<line x1="100" y1="190.5" x2="522" y2="190.5" stroke="#e5e5e5" stroke-width="1"/>
+<text x="66.0" y="195.5" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">1e-3</text>
+<line x1="100" y1="123.0" x2="522" y2="123.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="66.0" y="128.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">1e-2</text>
+<line x1="105" y1="129.5" x2="522" y2="129.5" stroke="#963232" stroke-width="2"/>
+<text x="417.0" y="121.5" font-family="Arial" font-size="16" font-weight="normal" text-anchor="start" fill="#000000">8e-3 gate</text>
+<circle cx="174.5" cy="163.2" r="7" fill="#4477AA" stroke="#222" stroke-width="1"/>
+<text x="174.5" y="419.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">32</text>
+<circle cx="313.5" cy="163.2" r="7" fill="#4477AA" stroke="#222" stroke-width="1"/>
+<text x="313.5" y="419.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">64</text>
+<circle cx="452.5" cy="163.2" r="7" fill="#4477AA" stroke="#222" stroke-width="1"/>
+<text x="452.5" y="419.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">128</text>
+<line x1="174.5" y1="163.2" x2="313.5" y2="163.2" stroke="#4477AA" stroke-width="3"/>
+<line x1="313.5" y1="163.2" x2="452.5" y2="163.2" stroke="#4477AA" stroke-width="3"/>
+<text x="37.0" y="98.0" font-family="Arial" font-size="18" font-weight="normal" text-anchor="start" fill="#000000">max sampled direct residual</text>
+<text x="313.5" y="426.0" font-family="Arial" font-size="18" font-weight="normal" text-anchor="middle" fill="#000000">ILU neighbor cap</text>
+<text x="575.0" y="70.0" font-family="Arial" font-size="24" font-weight="bold" text-anchor="start" fill="#000000">B</text>
+<line x1="637" y1="393" x2="1062" y2="393" stroke="#333" stroke-width="2"/>
+<line x1="637" y1="123" x2="637" y2="393" stroke="#333" stroke-width="2"/>
+<line x1="632" y1="393.0" x2="1062" y2="393.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="604.0" y="398.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">0</text>
+<line x1="632" y1="258.0" x2="1062" y2="258.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="604.0" y="263.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">0.58</text>
+<line x1="632" y1="123.0" x2="1062" y2="123.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="604.0" y="128.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">1.15</text>
+<rect x="684.8" y="253.9" width="46" height="139.1" fill="#4477AA" stroke="#222" stroke-width="1"/>
+<line x1="707.8" y1="172.5" x2="707.8" y2="335.3" stroke="#222" stroke-width="2"/>
+<line x1="697.8" y1="172.5" x2="717.8" y2="172.5" stroke="#222" stroke-width="2"/>
+<line x1="697.8" y1="335.3" x2="717.8" y2="335.3" stroke="#222" stroke-width="2"/>
+<text x="707.8" y="419.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">32</text>
+<rect x="826.5" y="277.9" width="46" height="115.1" fill="#4477AA" stroke="#222" stroke-width="1"/>
+<line x1="849.5" y1="216.1" x2="849.5" y2="339.6" stroke="#222" stroke-width="2"/>
+<line x1="839.5" y1="216.1" x2="859.5" y2="216.1" stroke="#222" stroke-width="2"/>
+<line x1="839.5" y1="339.6" x2="859.5" y2="339.6" stroke="#222" stroke-width="2"/>
+<text x="849.5" y="419.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">64</text>
+<rect x="968.2" y="248.4" width="46" height="144.6" fill="#4477AA" stroke="#222" stroke-width="1"/>
+<line x1="991.2" y1="158.2" x2="991.2" y2="338.6" stroke="#222" stroke-width="2"/>
+<line x1="981.2" y1="158.2" x2="1001.2" y2="158.2" stroke="#222" stroke-width="2"/>
+<line x1="981.2" y1="338.6" x2="1001.2" y2="338.6" stroke="#222" stroke-width="2"/>
+<text x="991.2" y="419.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">128</text>
+<text x="577.0" y="98.0" font-family="Arial" font-size="18" font-weight="normal" text-anchor="start" fill="#000000">matvec time (s)</text>
+<text x="849.5" y="426.0" font-family="Arial" font-size="18" font-weight="normal" text-anchor="middle" fill="#000000">ILU neighbor cap</text>
+<text x="1115.0" y="70.0" font-family="Arial" font-size="24" font-weight="bold" text-anchor="start" fill="#000000">C</text>
+<line x1="1177" y1="393" x2="1602" y2="393" stroke="#333" stroke-width="2"/>
+<line x1="1177" y1="123" x2="1177" y2="393" stroke="#333" stroke-width="2"/>
+<line x1="1172" y1="393.0" x2="1602" y2="393.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="1144.0" y="398.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">0</text>
+<line x1="1172" y1="258.0" x2="1602" y2="258.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="1144.0" y="263.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">231.69</text>
+<line x1="1172" y1="123.0" x2="1602" y2="123.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="1144.0" y="128.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">463.38</text>
+<rect x="1224.8" y="283.5" width="46" height="109.5" fill="#CC7939" stroke="#222" stroke-width="1"/>
+<line x1="1247.8" y1="196.4" x2="1247.8" y2="370.6" stroke="#222" stroke-width="2"/>
+<line x1="1237.8" y1="196.4" x2="1257.8" y2="196.4" stroke="#222" stroke-width="2"/>
+<line x1="1237.8" y1="370.6" x2="1257.8" y2="370.6" stroke="#222" stroke-width="2"/>
+<text x="1247.8" y="419.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">32</text>
+<rect x="1366.5" y="274.5" width="46" height="118.5" fill="#CC7939" stroke="#222" stroke-width="1"/>
+<line x1="1389.5" y1="183.8" x2="1389.5" y2="365.2" stroke="#222" stroke-width="2"/>
+<line x1="1379.5" y1="183.8" x2="1399.5" y2="183.8" stroke="#222" stroke-width="2"/>
+<line x1="1379.5" y1="365.2" x2="1399.5" y2="365.2" stroke="#222" stroke-width="2"/>
+<text x="1389.5" y="419.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">64</text>
+<rect x="1508.2" y="255.7" width="46" height="137.3" fill="#CC7939" stroke="#222" stroke-width="1"/>
+<line x1="1531.2" y1="158.2" x2="1531.2" y2="353.3" stroke="#222" stroke-width="2"/>
+<line x1="1521.2" y1="158.2" x2="1541.2" y2="158.2" stroke="#222" stroke-width="2"/>
+<line x1="1521.2" y1="353.3" x2="1541.2" y2="353.3" stroke="#222" stroke-width="2"/>
+<text x="1531.2" y="419.0" font-family="Arial" font-size="16" font-weight="normal" text-anchor="middle" fill="#000000">128</text>
+<text x="1117.0" y="98.0" font-family="Arial" font-size="18" font-weight="normal" text-anchor="start" fill="#000000">peak RSS (MB)</text>
+<text x="1389.5" y="426.0" font-family="Arial" font-size="18" font-weight="normal" text-anchor="middle" fill="#000000">ILU neighbor cap</text>
+</svg>

@@ -1,0 +1,6 @@
+"stage","requested_taylor_order","requested_cache_layout","requested_cache_budget_mb","cache_variant","context_only","rows","pass_rows","max_audit","max_sampled_direct_true_residual","median_matvec_seconds","median_cache_bytes","median_peak_rss_mb","max_fallback_pairs"
+"p_order2","2","green-jet-compressed","256","global","False","2","2","2.44675E-12","1.70311E-11","2.10703","0","231.50390625","260608082"
+"p_order3","3","green-jet-compressed","256","global","False","2","2","0.00220465","0.00220501","2.20931","16243464","231.4765625","234643930"
+"p_order4","4","green-jet-compressed","256","global","False","2","2","0.00253435","0.00253478","1.22877","225590344","371.93359375","81226933"
+"p_order5_global","5","green-jet-compressed","4096","global","True","6","5","1.33353E-05","1.33353E-05","0.689341","81951560","173.42578125","92170315"
+"p_order5","5","green-jet-tiled","256","tiled","False","6","6","0.000502271","0.000502262","3.53247","23296","99.82421875","92170315"

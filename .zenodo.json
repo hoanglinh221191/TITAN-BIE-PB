@@ -1,12 +1,19 @@
 {
-  "title": "TITAN: Analytical FMM/M2L Boundary-Integral Poisson-Boltzmann Solves with Sparse Near-Field ILU(0) Preconditioning",
+  "title": "TITAN: Guarded Cartesian FMM/M2L Boundary-Integral Poisson-Boltzmann Solves",
   "upload_type": "software",
-  "description": "Pre-submission release metadata for the TITAN guarded FMM/M2L boundary-integral Poisson-Boltzmann benchmark package. The public repository URL, final authorship metadata, semantic version, and persistent DOI must be finalized before manuscript submission.",
+  "description": "Manuscript-associated TITAN release containing source code, benchmark manifests, public-protein input metadata, APBS context files, figures, scripts, and reference outputs for guarded Cartesian FMM/M2L boundary-integral Poisson-Boltzmann validation.",
   "creators": [
     {
-      "name": "TITAN contributors"
+      "name": "O, My Na",
+      "affiliation": "Faculty of Applied Science, Ho Chi Minh City University of Technology, Vietnam National University Ho Chi Minh City"
+    },
+    {
+      "name": "Nguyen, Hoang Linh",
+      "affiliation": "Institute of Fundamental and Applied Sciences, Duy Tan University"
     }
   ],
+  "version": "fagbi-submission-v0.1",
+  "publication_date": "2026-07-06",
   "license": "MIT",
   "access_right": "open",
   "keywords": [
@@ -18,5 +25,5 @@
     "TABI",
     "FAGBI"
   ],
-  "notes": "DOI pending. This metadata is a release-preparation template, not the final archived record."
+  "notes": "Prepared for the tagged release fagbi-submission-v0.1 at https://github.com/hoanglinh221191/TITAN. The persistent Zenodo DOI will be inserted into the manuscript after deposition. Funding: Vietnam National Foundation for Science and Technology Development (NAFOSTED), grant 103.01-2025.110."
 }

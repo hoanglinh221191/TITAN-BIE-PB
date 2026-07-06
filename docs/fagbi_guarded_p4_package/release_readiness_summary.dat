@@ -1,9 +1,12 @@
-release_status=pre_submission_doi_pending
+release_status=ready_for_tag_and_deposition
 license=MIT
-public_repository_url=pending
+release_tag=fagbi-submission-v0.1
+public_repository_url=https://github.com/hoanglinh221191/TITAN
 archive_doi=pending
-git_commit=506e049c628ad4ef108ab9d31d4e16243cd32d6c
-entry_count=728
+git_commit=eebf1b84cab28c743f73a67a0f6fc6cd44d858b8
+entry_count=882
 missing_count=0
 manifest_csv=docs/fagbi_guarded_p4_package/release_artifact_manifest.csv
 manifest_json=docs/fagbi_guarded_p4_package/release_artifact_manifest.json
+traceability_csv=docs/fagbi_guarded_p4_package/release_payload/table_figure_traceability.csv
+checksums_csv=docs/fagbi_guarded_p4_package/release_payload/checksums_sha256.csv

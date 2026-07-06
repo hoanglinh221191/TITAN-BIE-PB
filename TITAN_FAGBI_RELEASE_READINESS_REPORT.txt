@@ -1,13 +1,18 @@
 TITAN FAGBI release-readiness manifest
 ======================================
 
-Status: pre-submission; public repository URL and DOI pending.
-License: MIT.
-Git commit: 506e049c628ad4ef108ab9d31d4e16243cd32d6c
+Status: ready_for_tag_and_deposition
+License: MIT
+Release tag: fagbi-submission-v0.1
+Public repository URL: https://github.com/hoanglinh221191/TITAN
+Archive DOI: pending
+Git commit: eebf1b84cab28c743f73a67a0f6fc6cd44d858b8
 Manifest CSV: docs/fagbi_guarded_p4_package/release_artifact_manifest.csv
 Manifest JSON: docs/fagbi_guarded_p4_package/release_artifact_manifest.json
-Entries: 728
+Traceability CSV: docs/fagbi_guarded_p4_package/release_payload/table_figure_traceability.csv
+Checksums CSV: docs/fagbi_guarded_p4_package/release_payload/checksums_sha256.csv
+Entries: 882
 Missing required artifacts: 0
 
-Manuscript statement prepared:
-The TITAN source code, benchmark manifests, scripts, and reference outputs corresponding to the reported tables will be released under the MIT License at a versioned public repository and archived with a persistent DOI before submission.
+Prepared Code and Data Availability text:
+The TITAN source code corresponding to this manuscript has been prepared for release under the MIT License as the tagged release fagbi-submission-v0.1 at https://github.com/hoanglinh221191/TITAN. The persistent Zenodo DOI will be inserted after deposition of the tagged release and before journal submission. The archived release will include source code, build instructions, benchmark manifests, input metadata, scripts, figures, APBS input files, APBS logs, APBS grid-size settings used for Supplementary Figure S1, and reference outputs for Tables 3-6 and Supplementary Tables S1-S6. Public protein structures are identified by their RCSB PDB accession codes; derived surface metadata, run manifests, and tabulated outputs corresponding to the manuscript tables are included in the release manifest.

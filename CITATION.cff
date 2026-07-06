@@ -1,13 +1,19 @@
 cff-version: 1.2.0
 message: "If you use TITAN or the FAGBI/TABI benchmark package, please cite the archived release DOI and the associated manuscript."
 type: software
-title: "TITAN: Analytical FMM/M2L Boundary-Integral Poisson-Boltzmann Solves with Sparse Near-Field ILU(0) Preconditioning"
-version: "pre-submission"
-date-released: "2026-06-27"
+title: "TITAN: Guarded Cartesian FMM/M2L Boundary-Integral Poisson-Boltzmann Solves"
+version: "fagbi-submission-v0.1"
+date-released: "2026-07-06"
 license: "MIT"
 authors:
-  - name: "TITAN contributors"
-abstract: "TITAN is a C++ scientific computing engine. This release metadata is prepared for the manuscript-associated guarded FMM/M2L boundary-integral Poisson-Boltzmann benchmark package. Replace the version, repository URL, authorship metadata, and DOI after the public release archive is minted."
+  - family-names: "O"
+    given-names: "My Na"
+    affiliation: "Faculty of Applied Science, Ho Chi Minh City University of Technology, Vietnam National University Ho Chi Minh City"
+  - family-names: "Nguyen"
+    given-names: "Hoang Linh"
+    affiliation: "Institute of Fundamental and Applied Sciences, Duy Tan University"
+repository-code: "https://github.com/hoanglinh221191/TITAN"
+abstract: "TITAN is a C++ scientific computing engine. This manuscript-associated release contains source code, benchmark manifests, public-protein input metadata, APBS context files, figures, scripts, and reference outputs for guarded Cartesian FMM/M2L boundary-integral Poisson-Boltzmann validation."
 keywords:
   - Poisson-Boltzmann
   - boundary integral equation
