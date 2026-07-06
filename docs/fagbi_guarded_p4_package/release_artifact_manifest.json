@@ -1,10 +1,10 @@
 ﻿{
     "release_status":  "ready_for_tag_and_deposition",
-    "generated_utc":  "2026-07-06T04:57:54.7106748Z",
-    "git_commit":  "eebf1b84cab28c743f73a67a0f6fc6cd44d858b8",
+    "generated_utc":  "2026-07-06T05:34:29.4816488Z",
+    "git_commit":  "a9e94d2624f558f4cb238ea4f9d6f8ad54a93281",
     "release_tag":  "fagbi-submission-v0.1",
     "license":  "MIT",
-    "public_repository_url":  "https://github.com/hoanglinh221191/TITAN",
+    "public_repository_url":  "https://github.com/hoanglinh221191/TITAN-fagbi-submission",
     "archive_doi":  "pending",
     "entry_count":  882,
     "missing_count":  0,
@@ -1009,7 +1009,7 @@
                         "status":  "present",
                         "bytes":  6427,
                         "sha256":  "e1c9f7992c560a52138e5d4af4edbde39a1a113952b88c224422857eafc871af",
-                        "last_write_utc":  "2026-07-06T04:57:51.6812583Z",
+                        "last_write_utc":  "2026-07-06T05:34:27.6649989Z",
                         "source_command":  ""
                     },
                     {
@@ -1018,9 +1018,9 @@
                         "release_role":  "Zenodo metadata template for DOI minting",
                         "relative_path":  ".zenodo.json",
                         "status":  "present",
-                        "bytes":  1323,
-                        "sha256":  "db74888cf44a9f193d2172e266b649c2d32e0f56ecd5c793b02c302e9b641ff7",
-                        "last_write_utc":  "2026-07-06T04:57:43.8681031Z",
+                        "bytes":  1369,
+                        "sha256":  "7ca548f2100b4012bb489eec081fdf21fdc464dad7ee1f52f48fc48bf5881a34",
+                        "last_write_utc":  "2026-07-06T05:34:21.3572049Z",
                         "source_command":  ""
                     },
                     {
@@ -1163,7 +1163,7 @@
                         "status":  "present",
                         "bytes":  1477,
                         "sha256":  "b4e4090690ce9776b2cf4b263540e118754159d7d5969152158eb58e9a858dbb",
-                        "last_write_utc":  "2026-07-06T04:57:54.5979753Z",
+                        "last_write_utc":  "2026-07-06T05:34:29.3988309Z",
                         "source_command":  ""
                     },
                     {
@@ -1172,9 +1172,9 @@
                         "release_role":  "citation metadata template for the archived release",
                         "relative_path":  "CITATION.cff",
                         "status":  "present",
-                        "bytes":  1144,
-                        "sha256":  "2bc5b65b804202c45ac591916f7d5672a9aaf165d12dfaec21b525cac2d70582",
-                        "last_write_utc":  "2026-07-06T04:57:43.8691058Z",
+                        "bytes":  1183,
+                        "sha256":  "5b80565f69caef18780eafc9792783e6711280ea5a0a1ef215d30f8335440b49",
+                        "last_write_utc":  "2026-07-06T05:34:21.3582095Z",
                         "source_command":  ""
                     },
                     {
@@ -1194,9 +1194,9 @@
                         "release_role":  "paper package overview and release-payload map",
                         "relative_path":  "docs/fagbi_guarded_p4_package/README_PAPER_PACKAGE.md",
                         "status":  "present",
-                        "bytes":  2323,
-                        "sha256":  "47cf3be57844983beb95b692f4a6879dfbae90a2a7a871544b336b2b4d3a1790",
-                        "last_write_utc":  "2026-07-06T04:45:52.4451091Z",
+                        "bytes":  2385,
+                        "sha256":  "5bc7e7aa4613de14581c168285c14e05cfe7a402f95ad2c26b216a8242985781",
+                        "last_write_utc":  "2026-07-06T05:34:21.3582095Z",
                         "source_command":  ""
                     },
                     {
@@ -1799,9 +1799,9 @@
                         "release_role":  "release payload README and Code/Data statement",
                         "relative_path":  "docs/fagbi_guarded_p4_package/release_payload/README_RELEASE_ARCHIVE.md",
                         "status":  "present",
-                        "bytes":  1691,
-                        "sha256":  "7d32e30bc4f04cdf8413667c1859683242232e3248b387b35ce9ff46e198488d",
-                        "last_write_utc":  "2026-07-06T04:57:54.5959608Z",
+                        "bytes":  1708,
+                        "sha256":  "441b2af8e5413479d45a01aae6943e4e2a0598bd7762221e5ea6eb1f344cf485",
+                        "last_write_utc":  "2026-07-06T05:34:29.3988309Z",
                         "source_command":  ""
                     },
                     {
@@ -1810,9 +1810,9 @@
                         "release_role":  "release manifest builder",
                         "relative_path":  "test/pbe_fagbi_release_readiness_manifest.ps1",
                         "status":  "present",
-                        "bytes":  23238,
-                        "sha256":  "d12bc076f543a1ca21b667d23e2bef3a7ea2140183b74b778ab12dc0910a990c",
-                        "last_write_utc":  "2026-07-06T04:46:00.9516427Z",
+                        "bytes":  25860,
+                        "sha256":  "45c5df697d3245ce91ad0b044073d397ed9fa423cc7c138ec2a1c5db34b2e234",
+                        "last_write_utc":  "2026-07-06T05:34:21.3592087Z",
                         "source_command":  ""
                     },
                     {

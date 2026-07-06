@@ -21,7 +21,7 @@ This package is a tracked, paper-facing bundle for the guarded p4 TABI treecode 
 
 ## Public Release Preparation
 
-The release manifest has been prepared for the MIT-licensed tagged release `fagbi-submission-v0.1` at `https://github.com/hoanglinh221191/TITAN`. The Zenodo DOI remains pending until the public tagged release is deposited. The top-level audit files are:
+The release manifest has been prepared for the MIT-licensed tagged release `fagbi-submission-v0.1` at `https://github.com/hoanglinh221191/TITAN-fagbi-submission`. The Zenodo DOI remains pending until the public tagged release is deposited. The top-level audit files are:
 
 - `release_artifact_manifest.csv`
 - `release_artifact_manifest.json`

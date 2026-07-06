@@ -12,7 +12,7 @@ authors:
   - family-names: "Nguyen"
     given-names: "Hoang Linh"
     affiliation: "Institute of Fundamental and Applied Sciences, Duy Tan University"
-repository-code: "https://github.com/hoanglinh221191/TITAN"
+repository-code: "https://github.com/hoanglinh221191/TITAN-fagbi-submission"
 abstract: "TITAN is a C++ scientific computing engine. This manuscript-associated release contains source code, benchmark manifests, public-protein input metadata, APBS context files, figures, scripts, and reference outputs for guarded Cartesian FMM/M2L boundary-integral Poisson-Boltzmann validation."
 keywords:
   - Poisson-Boltzmann

@@ -4,7 +4,7 @@ This directory prepares the manuscript-associated release payload for the tagged
 
 ## Code and data availability statement
 
-The TITAN source code corresponding to this manuscript has been prepared for release under the MIT License as the tagged release fagbi-submission-v0.1 at https://github.com/hoanglinh221191/TITAN. The persistent Zenodo DOI will be inserted after deposition of the tagged release and before journal submission. The archived release will include source code, build instructions, benchmark manifests, input metadata, scripts, figures, APBS input files, APBS logs, APBS grid-size settings used for Supplementary Figure S1, and reference outputs for Tables 3-6 and Supplementary Tables S1-S6. Public protein structures are identified by their RCSB PDB accession codes; derived surface metadata, run manifests, and tabulated outputs corresponding to the manuscript tables are included in the release manifest.
+The TITAN source code corresponding to this manuscript has been prepared for release under the MIT License as the tagged release fagbi-submission-v0.1 at https://github.com/hoanglinh221191/TITAN-fagbi-submission. The persistent Zenodo DOI will be inserted after deposition of the tagged release and before journal submission. The archived release will include source code, build instructions, benchmark manifests, input metadata, scripts, figures, APBS input files, APBS logs, APBS grid-size settings used for Supplementary Figure S1, and reference outputs for Tables 3-6 and Supplementary Tables S1-S6. Public protein structures are identified by their RCSB PDB accession codes; derived surface metadata, run manifests, and tabulated outputs corresponding to the manuscript tables are included in the release manifest.
 
 ## Payload contents
 

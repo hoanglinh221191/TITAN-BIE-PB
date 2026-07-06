@@ -1,6 +1,6 @@
 param(
     [string]$OutputRoot = "docs\fagbi_guarded_p4_package",
-    [string]$PublicRepositoryUrl = "https://github.com/hoanglinh221191/TITAN",
+    [string]$PublicRepositoryUrl = "https://github.com/hoanglinh221191/TITAN-fagbi-submission",
     [string]$ReleaseTag = "fagbi-submission-v0.1",
     [string]$ZenodoDoi = "pending"
 )
@@ -54,6 +54,71 @@ function Copy-IfPresent {
     return $true
 }
 
+function Get-FileSha256Shared {
+    param([string]$Path)
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    try {
+        $stream = [System.IO.File]::Open(
+            $resolved,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::ReadWrite
+        )
+        try {
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                $bytes = $sha.ComputeHash($stream)
+                return ([System.BitConverter]::ToString($bytes) -replace "-", "").ToLowerInvariant()
+            } finally {
+                $sha.Dispose()
+            }
+        } finally {
+            $stream.Dispose()
+        }
+    } catch [System.IO.IOException] {
+        return Get-GitBlobSha256 -Path $Path
+    }
+}
+
+function Get-GitBlobSha256 {
+    param([string]$Path)
+    $relative = Get-RelativePath -Path $Path
+    $ls = (& git ls-files -s -- $relative)
+    if (-not $ls) {
+        throw "Cannot read locked file and no Git blob is available: $relative"
+    }
+    $parts = $ls -split "\s+"
+    if ($parts.Count -lt 2) {
+        throw "Unexpected git ls-files output for ${relative}: $ls"
+    }
+    $blob = $parts[1]
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = "git"
+    $psi.ArgumentList.Add("cat-file")
+    $psi.ArgumentList.Add("blob")
+    $psi.ArgumentList.Add($blob)
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $bytes = $sha.ComputeHash($proc.StandardOutput.BaseStream)
+            $proc.WaitForExit()
+            if ($proc.ExitCode -ne 0) {
+                $err = $proc.StandardError.ReadToEnd()
+                throw "git cat-file failed for ${relative}: $err"
+            }
+            return ([System.BitConverter]::ToString($bytes) -replace "-", "").ToLowerInvariant()
+        } finally {
+            $sha.Dispose()
+        }
+    } finally {
+        $proc.Dispose()
+    }
+}
+
 function Add-ManifestEntry {
     param(
         [System.Collections.Generic.List[object]]$Entries,
@@ -66,7 +131,7 @@ function Add-ManifestEntry {
     $relative = Convert-ToRepoSlash -Path $Path
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
         $item = Get-Item -LiteralPath $Path
-        $hash = Get-FileHash -LiteralPath $Path -Algorithm SHA256
+        $hash = Get-FileSha256Shared -Path $Path
         $Entries.Add([pscustomobject]@{
             category = $Category
             manuscript_target = $ManuscriptTarget
@@ -74,7 +139,7 @@ function Add-ManifestEntry {
             relative_path = Get-RelativePath -Path $Path
             status = "present"
             bytes = [int64]$item.Length
-            sha256 = $hash.Hash.ToLowerInvariant()
+            sha256 = $hash
             last_write_utc = $item.LastWriteTimeUtc.ToString("o")
             source_command = $SourceCommand
         })
