@@ -93,6 +93,7 @@ private:
   // ── XDR state ──
   // Using opaque pointer + float arrays to avoid xdrfile.h in header
   XDRFILE *xdr_handle_ = nullptr;
+  std::string xdr_path_;
   int xdr_natoms_ = 0;
   float (*xdr_pos_buf_)[3] = nullptr; // rvec = float[3], allocated as array
   float xdr_box_[3][3]{};             // matrix = float[3][3]
