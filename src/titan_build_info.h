@@ -60,8 +60,8 @@ inline constexpr const char *build_profile_name() noexcept {
 }
 
 inline constexpr const char *cxx23_floor_name() noexcept {
-#ifdef TITAN_CXX23_FLOOR_GXX13
-  return "g++13/libstdc++13 subset";
+#ifdef TITAN_CXX23_FLOOR_CLANG20_GXX13
+  return "Clang 20+/GCC 13+ C++23 subset";
 #else
   return "unspecified";
 #endif

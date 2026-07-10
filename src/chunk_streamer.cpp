@@ -7,6 +7,7 @@
 #include <immintrin.h> // AVX2 intrinsics
 #include <iostream>
 #include <thread>
+#include <vector>
 
 // XDR headers included HERE (not in .h) to avoid `matrix` typedef clash with
 // Eigen
@@ -59,10 +60,6 @@ std::string xdr_status_message(int rc) {
     return std::string(exdr_message[rc]);
   }
   return "unknown XDR status";
-}
-
-int64_t pad_xdr_opaque_bytes(int64_t byte_count) {
-  return (byte_count + 3LL) & ~3LL;
 }
 
 template <typename T>
@@ -283,7 +280,32 @@ int probe_xdr_frame(XDRFILE *xdr_handle, const std::string &xdr_type,
   return exdrOK;
 }
 
+int read_xdr_opaque_discard(XDRFILE *xdr_handle, int64_t byte_count,
+                            std::string &error) {
+  if (byte_count < 0) {
+    error = "XDR: invalid negative opaque byte count while skipping.";
+    return exdrINT;
+  }
+
+  static thread_local std::vector<char> scratch;
+  constexpr int64_t kChunkBytes = 1024LL * 1024LL;
+  scratch.resize(static_cast<size_t>(kChunkBytes));
+
+  int64_t remaining = byte_count;
+  while (remaining > 0) {
+    const int chunk =
+        static_cast<int>(std::min<int64_t>(remaining, kChunkBytes));
+    if (xdrfile_read_opaque(scratch.data(), chunk, xdr_handle) != chunk) {
+      error = "XDR: failed to read compressed XTC payload while skipping.";
+      return exdr3DX;
+    }
+    remaining -= chunk;
+  }
+  return exdrOK;
+}
+
 int skip_xtc_frame_payload_after_header(XDRFILE *xdr_handle,
+                                        int expected_natoms,
                                         std::string &error) {
   error.clear();
 
@@ -302,23 +324,29 @@ int skip_xtc_frame_payload_after_header(XDRFILE *xdr_handle,
     error = "XDR: invalid negative XTC coordinate count while skipping.";
     return exdrINT;
   }
+  if (coord_count != expected_natoms) {
+    error = "XDR: XTC coordinate count changed while skipping (expected " +
+            std::to_string(expected_natoms) + ", got " +
+            std::to_string(coord_count) + ").";
+    return exdr3DX;
+  }
 
   if (coord_count <= 9) {
-    const int64_t raw_coord_bytes =
-        static_cast<int64_t>(coord_count) * DIM * sizeof(float);
-    const int rc = xdr_seek(xdr_handle, raw_coord_bytes, SEEK_CUR);
-    if (rc != exdrOK) {
-      error = "XDR: failed to seek across uncompressed XTC coordinates (rc=" +
-              std::to_string(rc) + ", " + xdr_status_message(rc) + ")";
+    float raw_coords[9 * DIM]{};
+    const int raw_value_count = coord_count * DIM;
+    if (xdrfile_read_float(raw_coords, raw_value_count, xdr_handle) !=
+        raw_value_count) {
+      error = "XDR: failed to read uncompressed XTC coordinates while skipping.";
+      return exdrFLOAT;
     }
-    return rc;
+    return exdrOK;
   }
 
   float precision = 0.0f;
   int minint[DIM]{};
   int maxint[DIM]{};
   int smallidx = 0;
-  int opaque_bytes = 0;
+  int64_t opaque_bytes = 0;
 
   if (xdrfile_read_float(&precision, 1, xdr_handle) != 1) {
     error = "XDR: failed to read XTC precision while skipping.";
@@ -326,23 +354,40 @@ int skip_xtc_frame_payload_after_header(XDRFILE *xdr_handle,
   }
   if (xdrfile_read_int(minint, DIM, xdr_handle) != DIM ||
       xdrfile_read_int(maxint, DIM, xdr_handle) != DIM ||
-      xdrfile_read_int(&smallidx, 1, xdr_handle) != 1 ||
-      xdrfile_read_int(&opaque_bytes, 1, xdr_handle) != 1) {
+      xdrfile_read_int(&smallidx, 1, xdr_handle) != 1) {
     error = "XDR: failed to read XTC compressed block header while skipping.";
     return exdrINT;
+  }
+  if (xdrfile_get_xtc_magic(xdr_handle) == XTC_NEW_MAGIC) {
+    if (xdrfile_read_int64(&opaque_bytes, 1, xdr_handle) != 1) {
+      error =
+          "XDR: failed to read 64-bit XTC opaque byte count while skipping.";
+      return exdrINT;
+    }
+  } else {
+    int legacy_opaque_bytes = 0;
+    if (xdrfile_read_int(&legacy_opaque_bytes, 1, xdr_handle) != 1) {
+      error = "XDR: failed to read XTC opaque byte count while skipping.";
+      return exdrINT;
+    }
+    opaque_bytes = legacy_opaque_bytes;
   }
   if (opaque_bytes < 0) {
     error = "XDR: invalid negative XTC opaque byte count while skipping.";
     return exdrINT;
   }
 
-  const int rc =
-      xdr_seek(xdr_handle, pad_xdr_opaque_bytes(opaque_bytes), SEEK_CUR);
-  if (rc != exdrOK) {
-    error = "XDR: failed to seek across compressed XTC payload (rc=" +
-            std::to_string(rc) + ", " + xdr_status_message(rc) + ")";
+  const int64_t raw_coord_bytes =
+      static_cast<int64_t>(expected_natoms) * DIM * sizeof(float);
+  const int64_t max_reasonable_opaque_bytes =
+      std::max<int64_t>(128LL * 1024LL * 1024LL, raw_coord_bytes * 8LL);
+  if (opaque_bytes > max_reasonable_opaque_bytes) {
+    error = "XDR: unreasonable XTC opaque byte count while skipping (" +
+            std::to_string(opaque_bytes) + " bytes).";
+    return exdr3DX;
   }
-  return rc;
+
+  return read_xdr_opaque_discard(xdr_handle, opaque_bytes, error);
 }
 
 int skip_trr_frame_payload_after_header(XDRFILE *xdr_handle,
@@ -380,7 +425,7 @@ int skip_xdr_frame_payload_after_probe(XDRFILE *xdr_handle,
                                        const XdrFrameProbe &probe,
                                        std::string &error) {
   if (xdr_type == "xtc") {
-    return skip_xtc_frame_payload_after_header(xdr_handle, error);
+    return skip_xtc_frame_payload_after_header(xdr_handle, probe.natoms, error);
   }
   return skip_trr_frame_payload_after_header(xdr_handle, probe.trr_header,
                                              error);

@@ -6,7 +6,7 @@
 
 PROFILE ?= native
 TOOLCHAIN ?= auto
-TITAN_CXX23_FLOOR ?= gxx13
+TITAN_CXX23_FLOOR ?= clang20-gxx13
 LLVM_VERSION ?= 22
 LLVM_PREFIX ?= /usr/lib/llvm-$(LLVM_VERSION)
 BUILD_ROOT = build
@@ -14,7 +14,7 @@ BUILD_DIR = $(BUILD_ROOT)/$(PROFILE)
 SRC_ROOT = src
 INCLUDE_DIRS = -I$(SRC_ROOT) -I$(SRC_ROOT)/gmxtraj/include -I$(SRC_ROOT)/eigen
 
-COMMON_CXX_DEFINES = -DTITAN_CXX23_FLOOR_GXX13=1 -DTITAN_RUNTIME_DISPATCH_HOTSPOTS=1
+COMMON_CXX_DEFINES = -DTITAN_CXX23_FLOOR_CLANG20_GXX13=1 -DTITAN_RUNTIME_DISPATCH_HOTSPOTS=1
 ifeq ($(PROFILE),native)
     COMMON_CXX_DEFINES += -DTITAN_BUILD_PROFILE_TOKEN=native
 else ifeq ($(PROFILE),portable)
@@ -37,7 +37,6 @@ ifeq ($(OS),Windows_NT)
     # ─── CẤU HÌNH CHO WINDOWS (CLANG) ───
     MSYS2_UCRT64_BIN ?= C:/msys64/ucrt64/bin
     CXX  = $(MSYS2_UCRT64_BIN)/clang++.exe
-    CC   = $(MSYS2_UCRT64_BIN)/clang.exe
     RM   = del /Q /F
     TARGET = titan.exe
     PIPE_FLAG = -pipe
@@ -47,7 +46,6 @@ ifeq ($(OS),Windows_NT)
     # Force Eigen to use its own aligned allocator on Windows.
     # This avoids AVX-aligned loads/stores from touching only 16-byte-aligned buffers.
     CXXFLAGS = $(INCLUDE_DIRS) -O3 $(ARCH_FLAGS) -fopenmp $(PIPE_FLAG) $(STACK_NOTE_FLAG) -std=c++23 -Wall -Wno-unused-command-line-argument -MMD -MP $(COMMON_CXX_DEFINES)
-    CFLAGS   = $(INCLUDE_DIRS) -O3 $(ARCH_FLAGS) -ffast-math $(PIPE_FLAG) $(STACK_NOTE_FLAG) -w -Wno-incompatible-pointer-types -Wno-unused-command-line-argument -MMD -MP
     
     # Ép dùng LLD linker siêu tốc của LLVM
     LDFLAGS = -fuse-ld=lld -static -static-libgcc -static-libstdc++ -fopenmp
@@ -74,7 +72,6 @@ else
             CXX = clang++-22
         endif
         ifeq ($(origin CC),default)
-            CC = clang-22
         endif
         OPENMP_FLAG = -fopenmp=libomp
         CXX_STDLIB_FLAG = -stdlib=libc++
@@ -89,7 +86,6 @@ else
             CXX = g++
         endif
         ifeq ($(origin CC),default)
-            CC = gcc
         endif
         OPENMP_FLAG = -fopenmp
         CXX_STDLIB_FLAG =
@@ -110,7 +106,6 @@ else
     # GCC Flags: Chuẩn C++23, loại bỏ các cờ đặc thù của Clang
     # Keep Eigen on its own aligned-allocation path across Linux builds too.
     CXXFLAGS = $(INCLUDE_DIRS) -O3 $(ARCH_FLAGS) $(OPENMP_FLAG) $(CXX_STDLIB_FLAG) $(CLANG_STDLIB_INCLUDE_FLAGS) $(CLANG_OMP_INCLUDE_FLAGS) $(PIPE_FLAG) $(STACK_NOTE_FLAG) -std=c++23 -Wall -MMD -MP $(COMMON_CXX_DEFINES)
-    CFLAGS   = $(INCLUDE_DIRS) -O3 $(ARCH_FLAGS) -ffast-math $(OPENMP_FLAG) $(CLANG_OMP_INCLUDE_FLAGS) $(PIPE_FLAG) $(STACK_NOTE_FLAG) -w -MMD -MP
     
     # Linker mặc định của GCC (ld)
     LDFLAGS = $(STDLIB_LINK_FLAGS) $(CLANG_STDLIB_LINK_FLAGS) $(OPENMP_FLAG) $(CXX_STDLIB_FLAG) $(CLANG_STDLIB_LIBS)
@@ -127,13 +122,10 @@ endif
 ROOT_SRCS = $(wildcard $(SRC_ROOT)/*.cpp)
 PBE_SRCS  = $(wildcard $(SRC_ROOT)/tabi/*.cpp)
 PBCTOPO_SRCS = $(wildcard $(SRC_ROOT)/pbctopo/*.cpp)
-SRCS  = $(ROOT_SRCS) $(PBE_SRCS) $(PBCTOPO_SRCS)
+GMXTRAJ_SRCS = $(wildcard $(SRC_ROOT)/gmxtraj/*.cpp)
+SRCS  = $(ROOT_SRCS) $(PBE_SRCS) $(PBCTOPO_SRCS) $(GMXTRAJ_SRCS)
 OBJS  = $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(SRCS))
 DEPS  = $(OBJS:.o=.d)
-
-CSRCS = $(SRC_ROOT)/gmxtraj/xdrfile.c $(SRC_ROOT)/gmxtraj/xdrfile_xtc.c $(SRC_ROOT)/gmxtraj/xdrfile_trr.c
-COBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(CSRCS))
-CDEPS = $(COBJS:.o=.d)
 
 # ==========================================
 # BUILD RULES
@@ -144,7 +136,7 @@ CDEPS = $(COBJS:.o=.d)
 
 all: $(TARGET)
 
-$(TARGET): $(OBJS) $(COBJS)
+$(TARGET): $(OBJS)
 	@echo Linking $(TARGET) [$(PROFILE)]...
 	@$(CXX) -o $@ $^ $(LDFLAGS)
 	@echo Build successful!
@@ -176,15 +168,6 @@ else
 	@mkdir -p $(@D)
 endif
 	@$(CXX) $(CXXFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/%.o: %.c
-	@echo Compiling $<...
-ifeq ($(OS),Windows_NT)
-	@if not exist "$(subst /,\,$(@D))" mkdir "$(subst /,\,$(@D))"
-else
-	@mkdir -p $(@D)
-endif
-	@$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
 	@echo Cleaning up...
@@ -224,7 +207,6 @@ print-config:
 	@echo LLVM_VERSION=$(LLVM_VERSION)
 	@echo LLVM_PREFIX=$(LLVM_PREFIX)
 	@echo CXX=$(CXX)
-	@echo CC=$(CC)
 	@echo TITAN_CXX23_FLOOR=$(TITAN_CXX23_FLOOR)
 	@echo BUILD_DIR=$(BUILD_DIR)
 	@echo ARCH_FLAGS=$(ARCH_FLAGS)
@@ -236,8 +218,7 @@ print-config:
 	@echo CLANG_STDLIB_LINK_FLAGS=$(CLANG_STDLIB_LINK_FLAGS)
 	@echo CLANG_STDLIB_LIBS=$(CLANG_STDLIB_LIBS)
 	@echo CXXFLAGS=$(CXXFLAGS)
-	@echo CFLAGS=$(CFLAGS)
 	@echo LDFLAGS=$(LDFLAGS)
 
 # Nạp cây phụ thuộc (Dependency Tracking)
--include $(DEPS) $(CDEPS)
+-include $(DEPS)

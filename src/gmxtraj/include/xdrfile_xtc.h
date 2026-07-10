@@ -34,6 +34,10 @@ extern "C" {
 
 #include "xdrfile.h"
 
+#define XTC_MAGIC 1995
+#define XTC_NEW_MAGIC 2023
+#define XTC_1995_MAX_NATOMS 298261617
+
 /* All functions return exdrOK if succesfull.
  * (error codes defined in xdrfile.h).
  */
@@ -52,6 +56,12 @@ extern int write_xtc(XDRFILE * xd, int natoms, int step, float time,
 /* Read Header information of the current frame */
 extern int xtc_header(XDRFILE *xd, int *natoms, int *step, float *time,
                       mybool bRead);
+
+/* Internal state used to keep the public XTC API compatible while letting
+ * payload readers distinguish old XTC magic 1995 from modern magic 2023.
+ */
+extern void xdrfile_set_xtc_magic(XDRFILE *xd, int magic);
+extern int xdrfile_get_xtc_magic(XDRFILE *xd);
 #ifdef __cplusplus
 }
 #endif

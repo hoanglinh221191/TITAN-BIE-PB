@@ -83,7 +83,7 @@ extern "C"
 	 *  The actual contents is hidden in the implementation, so you can only
 	 *  define pointers to it, for use with the xdrfile routines.
 	 *
-	 *  If you \a really need to see the definition it is in xdrfile.c, but you
+	 *  If you \a really need to see the definition it is in xdrfile.cpp, but you
 	 *  cannot access elements of the structure outside that file.
 	 *
 	 *  \warning The implementation is completely different from the C standard
@@ -266,11 +266,7 @@ extern "C"
 	 *
 	 *  The integer data type is assumed to be less than or equal to 32 bits.
 	 *
-	 *  We do not provide any routines for reading/writing 64-bit integers, since
-	 *  - Not all XDR implementations support it
-	 *  - Not all machines have 64-bit integers
-	 *
-	 *  Split your 64-bit data into two 32-bit integers for portability!
+	 *  TITAN also exposes 64-bit integer helpers below for modern XTC files.
 	 */
 	int
 	xdrfile_read_int(int *         ptr,
@@ -289,16 +285,28 @@ extern "C"
 	 *
 	 *  The integer data type is assumed to be less than or equal to 32 bits.
 	 *
-	 *  We do not provide any routines for reading/writing 64-bit integers, since
-	 *  - Not all XDR implementations support it
-	 *  - Not all machines have 64-bit integers
-	 *
-	 *  Split your 64-bit data into two 32-bit integers for portability!
+	 *  TITAN also exposes 64-bit integer helpers below for modern XTC files.
 	 */
 	int
 	xdrfile_write_int(int *        ptr,
 					  int          ndata,
 					  XDRFILE *    xfp);
+
+	/*! \brief Read one or more XDR int64 variables.
+	 *
+	 *  This is used by modern XTC frames with magic 2023, where the
+	 *  compressed payload byte count is stored as a 64-bit value.
+	 */
+	int
+	xdrfile_read_int64(int64_t *   ptr,
+					   int         ndata,
+					   XDRFILE *   xfp);
+
+	/*! \brief Write one or more XDR int64 variables. */
+	int
+	xdrfile_write_int64(int64_t *  ptr,
+						int        ndata,
+						XDRFILE *  xfp);
 
 	/*! \brief Read one or more \a unsigned \a integers type variable(s)
 	 *

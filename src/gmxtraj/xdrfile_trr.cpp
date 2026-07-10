@@ -66,7 +66,7 @@ static int nFloatSize(t_trnheader *sh, int *nflsz) {
 int do_trnheader(XDRFILE *xd, mybool bRead, t_trnheader *sh) {
   int magic = GROMACS_MAGIC;
   int nflsz, slen, result;
-  char *version = "GMX_trn_file";
+  static char version[] = "GMX_trn_file";
   char buf[BUFSIZE];
 
   if (xdrfile_read_int(&magic, 1, xd) != 1)
@@ -403,9 +403,9 @@ int read_trr_natoms(char *fn, int *natoms) {
 
 
 int write_trr(XDRFILE *xd, int natoms, int step, float t, float lambda,
-              matrix box, rvec *x, rvec *v, rvec *f) {
-  int *plcholder;
-  return do_trn(xd, 0, &step, &t, &lambda, box, &natoms, x, v, f, plcholder);
+               matrix box, rvec *x, rvec *v, rvec *f) {
+  int placeholder = 0;
+  return do_trn(xd, 0, &step, &t, &lambda, box, &natoms, x, v, f, &placeholder);
 }
 
 int read_trr(XDRFILE *xd, int natoms, int *step, float *t, float *lambda,

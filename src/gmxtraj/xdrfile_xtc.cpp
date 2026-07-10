@@ -32,8 +32,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define MAGIC 1995
-
 enum { FALSE, TRUE };
 
 int xtc_header(XDRFILE *xd, int *natoms, int *step, float *time,
@@ -41,15 +39,18 @@ int xtc_header(XDRFILE *xd, int *natoms, int *step, float *time,
   int result, magic, n = 1;
 
   /* Note: read is same as write. He he he */
-  magic = MAGIC;
+  magic = xdrfile_get_xtc_magic(xd);
+  if (magic != XTC_MAGIC && magic != XTC_NEW_MAGIC)
+    magic = XTC_MAGIC;
   if ((result = xdrfile_write_int(&magic, n, xd)) != n) {
     if (bRead)
       return exdrENDOFFILE;
     else
       return exdrINT;
   }
-  if (magic != MAGIC)
+  if (magic != XTC_MAGIC && magic != XTC_NEW_MAGIC)
     return exdrMAGIC;
+  xdrfile_set_xtc_magic(xd, magic);
   if ((result = xdrfile_write_int(natoms, n, xd)) != n)
     return exdrINT;
   if ((result = xdrfile_write_int(step, n, xd)) != n)
@@ -117,6 +118,11 @@ int write_xtc(XDRFILE *xd, int natoms, int step, float time, matrix box,
 /* Write a frame to xtc file */
 {
   int result;
+
+  if (natoms > XTC_1995_MAX_NATOMS)
+    xdrfile_set_xtc_magic(xd, XTC_NEW_MAGIC);
+  else if (xdrfile_get_xtc_magic(xd) != XTC_NEW_MAGIC)
+    xdrfile_set_xtc_magic(xd, XTC_MAGIC);
 
   if ((result = xtc_header(xd, &natoms, &step, &time, FALSE)) != exdrOK)
     return result;
