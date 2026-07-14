@@ -23,11 +23,30 @@ struct PbctopoRange {
   bool topo_backed = false;
 };
 
+struct PbctopoProjectedTopologyBond {
+  std::size_t a = 0;
+  std::size_t b = 0;
+};
+
+struct PbctopoProjectedMetadataEdge {
+  std::size_t a = 0;
+  std::size_t b = 0;
+  bool inter_residue = false;
+};
+
 struct PbctopoSystemStaticData {
   std::size_t atom_count = 0;
   std::size_t heavy_count = 0;
   std::vector<char> heavy_mask;
   std::vector<PbctopoRange> ranges;
+  bool topology_graph_available = false;
+  std::size_t topology_bonds_available = 0;
+  std::vector<PbctopoProjectedTopologyBond> projected_topology_bonds;
+  bool metadata_graph_available = false;
+  std::size_t metadata_residue_groups = 0;
+  std::size_t metadata_intra_edges = 0;
+  std::size_t metadata_inter_edges = 0;
+  std::vector<PbctopoProjectedMetadataEdge> projected_metadata_edges;
   std::vector<PbctopoContinuityPair> continuity_pairs_local;
   std::vector<std::size_t> continuity_anchor_local;
 };
@@ -96,8 +115,15 @@ void build_local_neighborhood_graph(
     std::unordered_set<std::uint64_t> &edge_set, double bond_cutoff);
 
 void append_topology_bond_edges_for_system(
-    const Multi_MOL &system, int owner, const std::vector<PbctopoAtom> &atoms,
+    const PbctopoSystemStaticData &static_data, std::size_t atom_offset,
+    const std::vector<PbctopoAtom> &atoms,
     box Box, std::vector<PbctopoLocalEdge> &edges,
+    std::unordered_set<std::uint64_t> &edge_set, PbctopoTimingStats &timing);
+
+void append_metadata_graph_edges_for_system(
+    const PbctopoSystemStaticData &static_data, std::size_t atom_offset,
+    const std::vector<PbctopoAtom> &atoms,
+    std::vector<PbctopoLocalEdge> &edges,
     std::unordered_set<std::uint64_t> &edge_set, PbctopoTimingStats &timing);
 
 std::string pbctopo_topology_source_label(const PbctopoTimingStats &timing);

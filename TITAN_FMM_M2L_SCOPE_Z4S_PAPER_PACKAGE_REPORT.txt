@@ -1,8 +1,0 @@
-﻿Scope Z4S: Paper package closeout
-decision: z4s_paper_package_ready
-package_root: docs/fagbi_guarded_p4_package
-artifact_root: C:\tmp\elec_vdw-fagbi-z4n\test\tmp
-z4q_decision: z4q_expansion_pass
-supplement_fixtures: 1ubq,2ci2,1vii
-default_policy: grid remains production default; TABI treecode remains degree-one default; guarded p4 is explicit advanced path
-checksums: docs\fagbi_guarded_p4_package\provenance\package_checksums.csv

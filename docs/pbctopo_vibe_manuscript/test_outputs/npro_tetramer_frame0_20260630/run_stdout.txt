@@ -1,29 +1,0 @@
-
-[1;33m  ████████╗██╗████████╗ █████╗ ███╗   ██╗        [1;36m██████╗  ██████╗ ██████╗  ██████╗
-[1;33m  ╚══██╔══╝██║╚══██╔══╝██╔══██╗████╗  ██║        [1;36m╚════██╗██╔═████╗╚════██╗██╔════╝
-[1;31m     ██║   ██║   ██║   ███████║██╔██╗ ██║        [1;36m █████╔╝██║██╔██║ █████╔╝███████╗
-[1;31m     ██║   ██║   ██║   ██╔══██║██║╚██╗██║        [1;36m██╔═══╝ ████╔╝██║██╔═══╝ ██╔═══██╗
-[0;31m     ██║   ██║   ██║   ██║  ██║██║ ╚████║        [1;36m███████╗╚██████╔╝███████╗╚██████╔╝
-[0;31m     ╚═╝   ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═══╝        [1;36m╚══════╝ ╚═════╝ ╚══════╝ ╚═════╝
-[0m  [1;33mThermodynamic & Interaction Trajectory ANalyzer[0m
-  [1;32m===============================================[0m
-
-The number of threads is invalid. Will use 16 threads!
-[1;36m[TITAN][0m [1;33m>> Auto-Detect Mode:[0m Scanning for input trajectories (no list file provided)...
-[1;36m[TITAN][0m [1;33mmd1_snap0.pdb     [0m [[1;32m>[0m                           ]   0% | Loading PDB[K[1;36m[TITAN][0m [1;33mmd1_snap0.pdb     [0m [[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m[1;32m=[0m] 100% | Loading PDB[K
-Parsing topo from file D:\Data_MD\Npro\tetramer_conf0_unphos\topol.top
-Parsing topo from file D:\Data_MD\Npro\tetramer_conf0_unphos\topol.top
-XDR will stream 271669 atoms/frame and subset 25504 selected atoms on-the-fly.
-
-[1;36m[TITAN Runtime][0m
-  [1;32mActive   [0m : None
-  [1;36mStreaming[0m : I/O
-
-[1;36m[TITAN][0m [1;33mtetramer_conf0_...[0m [1;32mFrame 1 | Traj 1 | Frame 1 | Global 1[0m | Active: I/O[K
-
-[K[3mFinalizing module calculations and aggregating data...[0m
-
-[1;35m>>> Final Results Analysis & Summary <<<[0m
-DEBUG: E_e is empty in out()
-
-[1;32mTITAN ENGINE TERMINATED SUCCESSFULLY[0m

@@ -1,6 +1,0 @@
-scope: Z4Q public fixture expansion gate
-decision: z4q_expansion_pass
-quick: False
-fixtures: 1ubq,2ci2,1vii
-repeatability_passes: 3
-policy: supplement-first evidence; no default change

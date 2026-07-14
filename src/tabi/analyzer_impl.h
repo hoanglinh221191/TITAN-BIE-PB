@@ -6,6 +6,8 @@
 #include "../aligned_allocator.h"
 #include "../arguments.h"
 #include "../titan_pbe.h"
+#include "pbe/grid/grid_solver.h"
+#include "pbe/grid/grid_workspace.h"
 #include "types.h"
 #include "tabi_types.h"
 
@@ -59,6 +61,7 @@ private:
     std::string resname;
     int resnr{0};
     std::string chain;
+    int serial{0};
   };
 
   struct GridShape {
@@ -946,6 +949,25 @@ private:
     double tabi_surface_quality_enclosed_volume_a3{0.0};
     double tabi_surface_quality_enclosed_volume_rel_error_vs_4piR3_over3{0.0};
     double tabi_surface_quality_triangle_area_cv{0.0};
+    std::string tabi_calderon_trace_space_status{"off"};
+    std::size_t tabi_calderon_trace_vertices{0};
+    std::size_t tabi_calderon_trace_edges{0};
+    std::size_t tabi_calderon_trace_boundary_edges{0};
+    std::size_t tabi_calderon_trace_orientation_mismatches{0};
+    std::size_t tabi_calderon_trace_nonmanifold_edges{0};
+    std::size_t tabi_calderon_trace_unreferenced_vertices{0};
+    std::string tabi_calderon_aux_surface_mode{"off"};
+    std::string tabi_calderon_aux_trace_status{"off"};
+    std::size_t tabi_calderon_aux_panels{0};
+    std::size_t tabi_calderon_aux_vertices{0};
+    std::size_t tabi_calderon_aux_edges{0};
+    std::size_t tabi_calderon_aux_boundary_edges{0};
+    std::size_t tabi_calderon_aux_orientation_mismatches{0};
+    std::size_t tabi_calderon_aux_nonmanifold_edges{0};
+    std::size_t tabi_calderon_aux_unreferenced_vertices{0};
+    std::size_t tabi_calderon_aux_grid_vertices{0};
+    double tabi_calderon_aux_area_a2{0.0};
+    double tabi_calderon_aux_build_ms{0.0};
     std::size_t tabi_mesh_vertices{0};
     std::size_t tabi_mesh_triangles{0};
     std::size_t tabi_boundary_nodes{0};
@@ -960,6 +982,8 @@ private:
     double tabi_tree_eval_ms{0.0};
     std::string tabi_formulation{"off"};
     std::string tabi_energy_projection{"off"};
+    double tabi_energy_projection_ms{0.0};
+    std::string tabi_energy_projection_kernel{"off"};
     std::string tabi_preconditioner_requested{"off"};
     std::string tabi_preconditioner_effective{"off"};
     std::string tabi_preconditioner_block_near{"off"};
@@ -967,6 +991,14 @@ private:
     int tabi_preconditioner_overlap_panel_cap{64};
     int tabi_preconditioner_ilu_neighbor_cap{192};
     double tabi_preconditioner_ilu_drop_tol{0.0};
+    std::string tabi_preconditioner_ilu_regularization{"off"};
+    double tabi_preconditioner_ilu_regularization_max{1.0e-2};
+    double tabi_preconditioner_ilu_regularization_selected{0.0};
+    double tabi_preconditioner_ilu_regularization_absolute_max{0.0};
+    std::size_t tabi_preconditioner_ilu_regularization_attempts{0};
+    std::size_t tabi_preconditioner_ilu_regularization_rejected_attempts{0};
+    std::size_t tabi_preconditioner_ilu_regularization_shifted_rows{0};
+    std::string tabi_preconditioner_ilu_unshifted_failure_stage{"off"};
     std::size_t tabi_preconditioner_memory_budget_bytes{0};
     std::size_t tabi_preconditioner_estimated_bytes{0};
     std::size_t tabi_preconditioner_valid_blocks{0};
@@ -974,6 +1006,19 @@ private:
     std::size_t tabi_preconditioner_ill_conditioned_blocks{0};
     std::size_t tabi_preconditioner_quality_rejected_blocks{0};
     double tabi_preconditioner_quality_probe_max_gain{0.0};
+    double tabi_preconditioner_quality_probe_rel_residual{0.0};
+    double tabi_preconditioner_pivot_ratio_min{0.0};
+    double tabi_preconditioner_factor_growth_max{0.0};
+    std::int64_t tabi_preconditioner_pivot_ratio_min_row{-1};
+    std::int64_t tabi_preconditioner_pivot_ratio_min_column{-1};
+    std::int64_t tabi_preconditioner_factor_growth_row{-1};
+    std::int64_t tabi_preconditioner_factor_growth_column{-1};
+    std::string tabi_preconditioner_quality_failure_stage{"off"};
+    std::int64_t tabi_preconditioner_quality_failure_row{-1};
+    std::int64_t tabi_preconditioner_quality_failure_column{-1};
+    std::int64_t tabi_preconditioner_quality_failure_probe{-1};
+    double tabi_preconditioner_quality_failure_probe_gain{0.0};
+    double tabi_preconditioner_quality_failure_probe_rel_residual{0.0};
     std::string tabi_preconditioner_quality_status{"off"};
     double tabi_preconditioner_setup_ms{0.0};
     double tabi_preconditioner_apply_ms{0.0};
@@ -1017,6 +1062,7 @@ private:
     bool tabi_fallback_used{false};
     std::vector<Tabi::Panel> tabi_output_panels;
     std::vector<double> tabi_output_solution;
+    std::vector<double> tabi_output_rhs;
     std::string pbe_model_effective{"linear"};
     std::string linear_seed_solver{"none"};
     std::string nl_solver{"picard"};
@@ -1137,7 +1183,12 @@ private:
     double coulomb_energy_kt{0.0};
     std::string reaction_energy_source{"atom"};
     ParityAudit parity{};
+    std::vector<double> atom_solvent_potential_kj_mol_e;
+    std::vector<double> atom_vacuum_potential_kj_mol_e;
+    std::vector<double> atom_reaction_potential_kj_mol_e;
     std::vector<double> atom_reaction_kj_mol;
+    double atom_reaction_energy_closure_kj_mol{0.0};
+    double atom_reaction_energy_closure_error_kj_mol{0.0};
     double probe_energy_kj_mol{0.0};
     double probe_energy_kcal_mol{0.0};
     double probe_energy_kt{0.0};
@@ -1472,9 +1523,16 @@ private:
 
   struct MultigridLevel {
     GridShape shape{};
-    AlignedDoubleVector phi;
-    AlignedDoubleVector rho;
+    GridWorkspace workspace;
     AlignedDoubleVector rhs;
+    ChargeDiagnostics charge_diag{};
+    BoundaryDiagnostics boundary_diag{};
+  };
+
+  struct GridMediumOperatorCache {
+    bool valid{false};
+    std::uint64_t key{0};
+    GridShape shape{};
     AlignedDoubleVector eps_x;
     AlignedDoubleVector eps_y;
     AlignedDoubleVector eps_z;
@@ -1482,8 +1540,14 @@ private:
     AlignedDoubleVector screen;
     std::vector<unsigned char> inside;
     std::vector<unsigned char> ion_accessible;
-    ChargeDiagnostics charge_diag{};
-    BoundaryDiagnostics boundary_diag{};
+  };
+
+  struct GridReuseStats {
+    std::uint64_t workspace_reuse_hits{0};
+    std::uint64_t workspace_reallocations{0};
+    std::uint64_t medium_cache_hits{0};
+    std::uint64_t medium_cache_misses{0};
+    std::uint64_t medium_cache_stores{0};
   };
 
   struct NewtonCorrectionLevel {
@@ -1502,6 +1566,19 @@ private:
   void collect_atoms(const MOL &mol, const Multi_MOL_parameters &params,
                      std::vector<Atom> &atoms, const char *label) const;
   void collect_test_pqr_atoms(std::vector<Atom> &atoms) const;
+  void collect_pqr_atoms(const std::string &pqr_path,
+                         std::vector<Atom> &atoms) const;
+  [[nodiscard]] std::string
+  pqr_path_for_component(const std::string &component) const;
+  [[nodiscard]] std::string
+  pqr_sha256_for_component(const std::string &component) const;
+  void validate_binding_component_union(
+      const std::vector<Atom> &complex_atoms,
+      const std::vector<Atom> &receptor_atoms,
+      const std::vector<Atom> &ligand_atoms) const;
+  [[nodiscard]] double intercomponent_coulomb_energy_kcal(
+      const std::vector<Atom> &receptor_atoms,
+      const std::vector<Atom> &ligand_atoms, double eps) const;
   [[nodiscard]] std::string inferred_element_symbol(const Atom &atom) const;
   [[nodiscard]] double effective_surface_radius(const Atom &atom) const;
   [[nodiscard]] std::string radius_media_source(const Atom &atom) const;
@@ -1520,6 +1597,18 @@ private:
   GridShape build_shape(const std::vector<Atom> &atoms, double scale,
                         double margin) const;
   void ensure_workspace(const GridShape &shape);
+  [[nodiscard]] bool pbsa_grid_reuse_gate() const;
+  [[nodiscard]] bool grid_medium_operator_cache_allowed(
+      const GridShape &shape, const std::vector<Atom> &atoms, double eps_in,
+      double eps_out, double kappa, const FrameResult *map_result,
+      bool reuse_homogeneous_vacuum) const;
+  [[nodiscard]] std::uint64_t grid_medium_operator_cache_key(
+      const GridShape &shape, const std::vector<Atom> &atoms, double eps_in,
+      double eps_out, double kappa) const;
+  bool restore_grid_medium_operator_cache(std::uint64_t key,
+                                          const GridShape &shape);
+  void store_grid_medium_operator_cache(std::uint64_t key,
+                                        const GridShape &shape);
   void classify_surface(const GridShape &shape, const std::vector<Atom> &atoms,
                         TitanExecutor &executor);
   void classify_ion_accessibility(const GridShape &shape,
@@ -1664,6 +1753,9 @@ private:
                                   double eps_in, double eps_out, double kappa,
                                   TitanExecutor &executor,
                                   const FrameResult *map_result);
+  FieldSolve solve_grid_field(const std::vector<Atom> &atoms,
+                              const GridSolveRequest &request,
+                              TitanExecutor &executor);
   void prepare_multigrid_level(MultigridLevel &level, const GridShape &shape,
                                const std::vector<Atom> &atoms, double eps_in,
                                double eps_out, double kappa,
@@ -1877,6 +1969,16 @@ private:
                                   const FieldSolve &solvent,
                                   const FieldSolve &vacuum,
                                   const ReactionSolve &solve) const;
+  void maybe_write_atom_reaction_potentials(
+      const FrameResult &result, const std::vector<Atom> &atoms,
+      const ReactionSolve &solve, const std::string &component) const;
+  void maybe_write_binding_electrostatics(
+      const FrameResult &result, const std::vector<Atom> &complex_atoms,
+      const std::vector<Atom> &receptor_atoms,
+      const std::vector<Atom> &ligand_atoms,
+      const ReactionSolve &complex_solve,
+      const ReactionSolve &receptor_solve,
+      const ReactionSolve &ligand_solve) const;
   void maybe_write_linear_forensic_points(
       const FrameResult &result, const std::vector<Atom> &atoms,
       const FieldSolve &solvent, const FieldSolve &vacuum,
@@ -1953,6 +2055,11 @@ private:
   mutable bool forensic_operator_header_written_{false};
   mutable bool radius_media_audit_header_written_{false};
   mutable bool atom_phi_audit_header_written_{false};
+  mutable bool atom_reaction_potential_header_written_{false};
+  mutable bool residue_electrostatics_header_written_{false};
+  mutable bool component_electrostatics_header_written_{false};
+  mutable bool binding_electrostatics_header_written_{false};
+  mutable std::map<std::string, std::string> pqr_sha256_cache_;
   mutable bool iscm_surface_samples_header_written_{false};
   mutable bool iscm_energy_terms_header_written_{false};
   mutable bool field_samples_header_written_{false};
@@ -1982,6 +2089,8 @@ private:
   mutable TimingBuckets *active_timing_{nullptr};
   bool pbsa_reuse_vacuum_active_{false};
   GridShape pbsa_reuse_shape_{};
+  GridMediumOperatorCache grid_medium_operator_cache_{};
+  GridReuseStats grid_reuse_stats_{};
   EDecompSink edecomp_sink_{};
   mutable std::map<std::string, GridShape> grid_anchor_shapes_;
   StabilityFrameState last_stability_state_{};
@@ -1992,21 +2101,13 @@ private:
   bool stability_probe_solve_active_{false};
 
   std::vector<Atom> atoms_;
-  AlignedDoubleVector phi_;
-  AlignedDoubleVector rho_;
-  AlignedDoubleVector eps_x_;
-  AlignedDoubleVector eps_y_;
-  AlignedDoubleVector eps_z_;
-  AlignedDoubleVector denom_;
-  AlignedDoubleVector screen_;
+  GridWorkspace grid_;
   NwtHalfWorkspace nwt_half_workspace_;
   AlignedDoubleVector last_gaussian_density_center_;
   AlignedDoubleVector last_gaussian_density_midpoints_;
   AlignedDoubleVector last_gaussian_eps_center_;
   AlignedDoubleVector last_gaussian_surface_;
   AlignedDoubleVector last_gaussian_grad_surface_;
-  std::vector<unsigned char> inside_;
-  std::vector<unsigned char> ion_accessible_;
   std::vector<unsigned char> last_iscm_surface_valid_;
   std::vector<std::array<double, 3>> last_iscm_surface_positions_;
   double last_gaussian_density_sum_{0.0};

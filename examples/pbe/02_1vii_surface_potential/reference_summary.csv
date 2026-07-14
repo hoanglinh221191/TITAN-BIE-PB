@@ -1,0 +1,2 @@
+status,surface_generator,discretization,panels,iterations,true_residual_rel,sampled_operator_audit_rms,reaction_energy_kJmol,surface_csv_rows,surface_vtk_bytes
+ok,titan_analytic_patch_ray_ses,node_patch,6439,10,1.56768e-05,0.00208633,-3789.092573,6439,2573392

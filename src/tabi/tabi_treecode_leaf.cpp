@@ -42,9 +42,12 @@ TreePanelCache build_tree_panel_cache(const std::vector<Panel> &panels,
   cache.ordered_original_index.resize(n);
   for (std::size_t i = 0; i < n; ++i) {
     const Panel &panel = panels[i];
-    cache.x[i] = panel.x;
-    cache.y[i] = panel.y;
-    cache.z[i] = panel.z;
+    cache.x[i] =
+        panel.has_source_quadrature_center ? panel.source_x : panel.x;
+    cache.y[i] =
+        panel.has_source_quadrature_center ? panel.source_y : panel.y;
+    cache.z[i] =
+        panel.has_source_quadrature_center ? panel.source_z : panel.z;
     cache.nx[i] = panel.nx;
     cache.ny[i] = panel.ny;
     cache.nz[i] = panel.nz;
@@ -53,9 +56,12 @@ TreePanelCache build_tree_panel_cache(const std::vector<Panel> &panels,
   for (std::size_t pos = 0; pos < n; ++pos) {
     const std::size_t original = pos < order.size() ? order[pos] : pos;
     const Panel &panel = panels[original];
-    cache.ordered_x[pos] = panel.x;
-    cache.ordered_y[pos] = panel.y;
-    cache.ordered_z[pos] = panel.z;
+    cache.ordered_x[pos] =
+        panel.has_source_quadrature_center ? panel.source_x : panel.x;
+    cache.ordered_y[pos] =
+        panel.has_source_quadrature_center ? panel.source_y : panel.y;
+    cache.ordered_z[pos] =
+        panel.has_source_quadrature_center ? panel.source_z : panel.z;
     cache.ordered_nx[pos] = panel.nx;
     cache.ordered_ny[pos] = panel.ny;
     cache.ordered_nz[pos] = panel.nz;

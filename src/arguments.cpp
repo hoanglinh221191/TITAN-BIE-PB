@@ -1374,6 +1374,71 @@ int arguments::post_process() {
         exit(EXIT_FAILURE);
       }
     }
+    if (pbe.tabi_surface_only && pbe.backend != "tabi") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-surface-only=true requires -pbe=tabi.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_calderon_trace_audit && pbe.backend != "tabi") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-calderon-trace-audit=true requires -pbe=tabi.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_calderon_aux_surface != "off" &&
+        pbe.tabi_calderon_aux_surface != "implicit-vdw") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-calderon-aux-surface must be off or implicit-vdw.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(pbe.tabi_calderon_aux_grid_spacing) ||
+        pbe.tabi_calderon_aux_grid_spacing < 0.5 ||
+        pbe.tabi_calderon_aux_grid_spacing > 2.5) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-calderon-aux-grid-spacing must be between 0.5 and 2.5 Angstrom.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_calderon_aux_surface != "off" &&
+        (pbe.backend != "tabi" || !pbe.tabi_calderon_trace_audit)) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-calderon-aux-surface=implicit-vdw requires -pbe=tabi and -pbe-tabi-calderon-trace-audit=true.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_primary_surface != "sphere-patch" &&
+        pbe.tabi_primary_surface != "grid-ses" &&
+        pbe.tabi_primary_surface != "analytic-ses") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-primary-surface must be sphere-patch, grid-ses, or analytic-ses.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(pbe.tabi_ses_grid_spacing) ||
+        pbe.tabi_ses_grid_spacing < 0.25 ||
+        pbe.tabi_ses_grid_spacing > 4.0) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-ses-grid-spacing must be between 0.25 and 4.0 Angstrom.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_ses_max_grid_vertices < 4000000u ||
+        pbe.tabi_ses_max_grid_vertices > 100000000u) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-ses-max-grid-vertices must be between 4000000 and 100000000.");
+      exit(EXIT_FAILURE);
+    }
+    if ((pbe.tabi_primary_surface == "grid-ses" ||
+         pbe.tabi_primary_surface == "analytic-ses") &&
+        (pbe.backend != "tabi" || pbe.tabi_geometry != "triangle")) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-primary-surface=" + pbe.tabi_primary_surface +
+          " requires triangle TABI.");
+      exit(EXIT_FAILURE);
+    }
+    if ((pbe.tabi_primary_surface == "grid-ses" ||
+         pbe.tabi_primary_surface == "analytic-ses") &&
+        (!(pbe.probe_radius > 0.0) || !std::isfinite(pbe.probe_radius))) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-primary-surface=" + pbe.tabi_primary_surface +
+          " requires a positive -pbe-probe radius.");
+      exit(EXIT_FAILURE);
+    }
     const int tabi_surface_point_max =
         pbe.tabi_highres_surface ? 65536 : 4096;
     if (pbe.tabi_surface_points < 8 ||
@@ -1412,21 +1477,41 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-formulation must be titan-v1, jcp2013, jcp2013-centroid, jcp2013-treecode, tabi2-nodepatch, or calibrated-debug.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.tabi_discretization != "centroid" &&
+        pbe.tabi_discretization != "node-patch") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-discretization must be centroid or node-patch.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_formulation == "tabi2-nodepatch") {
+      if (pbe.tabi_discretization_explicit &&
+          pbe.tabi_discretization != "node-patch") {
+        TitanUI::print_error(
+            "PBE: -pbe-tabi-formulation=tabi2-nodepatch conflicts with "
+            "-pbe-tabi-discretization=centroid.");
+        exit(EXIT_FAILURE);
+      }
+      pbe.tabi_discretization = "node-patch";
+    }
     if (pbe.tabi_precond != "auto" && pbe.tabi_precond != "none" &&
         pbe.tabi_precond != "diagonal" && pbe.tabi_precond != "block" &&
         pbe.tabi_precond != "block-budgeted" &&
         pbe.tabi_precond != "coarse-galerkin-probe" &&
         pbe.tabi_precond != "fmm-block-jacobi" &&
         pbe.tabi_precond != "fmm-overlap-schwarz" &&
-        pbe.tabi_precond != "fmm-nearfield-ilu0") {
+        pbe.tabi_precond != "fmm-nearfield-ilu0" &&
+        pbe.tabi_precond != "distance-knn-overlap-schwarz" &&
+        pbe.tabi_precond != "distance-knn-ilu0") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-precond must be auto, none, diagonal, block, block-budgeted, coarse-galerkin-probe, fmm-block-jacobi, fmm-overlap-schwarz, or fmm-nearfield-ilu0.");
+          "PBE: -pbe-tabi-precond must be auto, none, diagonal, block, block-budgeted, coarse-galerkin-probe, fmm-block-jacobi, fmm-overlap-schwarz, fmm-nearfield-ilu0, distance-knn-overlap-schwarz, or distance-knn-ilu0.");
       exit(EXIT_FAILURE);
     }
     const bool fmm_native_preconditioner =
         pbe.tabi_precond == "fmm-block-jacobi" ||
         pbe.tabi_precond == "fmm-overlap-schwarz" ||
-        pbe.tabi_precond == "fmm-nearfield-ilu0";
+        pbe.tabi_precond == "fmm-nearfield-ilu0" ||
+        pbe.tabi_precond == "distance-knn-overlap-schwarz" ||
+        pbe.tabi_precond == "distance-knn-ilu0";
     if (fmm_native_preconditioner &&
         pbe.tabi_fmm_m2l != "single-matvec-analytic") {
       TitanUI::print_error(
@@ -1470,9 +1555,9 @@ int arguments::post_process() {
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_precond_memory_budget_mb < 16 ||
-        pbe.tabi_precond_memory_budget_mb > 512) {
+        pbe.tabi_precond_memory_budget_mb > 4096) {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-precond-memory-budget-mb must be between 16 and 512.");
+          "PBE: -pbe-tabi-precond-memory-budget-mb must be between 16 and 4096.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_precond_coarse_aggregate_cap < 4 ||
@@ -1655,6 +1740,272 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-fmm-m2l must be auto, off, or single-matvec-analytic.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.tabi_fmm_engine != "cartesian" &&
+        pbe.tabi_fmm_engine != "kifmm-lite" &&
+        pbe.tabi_fmm_engine != "kifmm-local" &&
+        pbe.tabi_fmm_engine != "kifmm-lite-experimental" &&
+        pbe.tabi_fmm_engine != "kifmm-channel-hybrid-experimental") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-engine must be cartesian, kifmm-lite, kifmm-local, kifmm-lite-experimental, or kifmm-channel-hybrid-experimental.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_order < 2 || pbe.tabi_kifmm_order > 16 ||
+        (pbe.tabi_kifmm_order % 2) != 0) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-order must be an even integer between 2 and 16.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(pbe.tabi_kifmm_equiv_scale) ||
+        !std::isfinite(pbe.tabi_kifmm_check_scale) ||
+        pbe.tabi_kifmm_equiv_scale <= 1.0 ||
+        pbe.tabi_kifmm_check_scale <= pbe.tabi_kifmm_equiv_scale) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-equiv-scale and -pbe-tabi-kifmm-check-scale require 1.0 < equiv-scale < check-scale.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_solver != "qr" && pbe.tabi_kifmm_solver != "svd" &&
+        pbe.tabi_kifmm_solver != "normal-tikhonov") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-solver must be qr, svd, or normal-tikhonov.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_profile != "off" &&
+        pbe.tabi_kifmm_profile != "summary" &&
+        pbe.tabi_kifmm_profile != "full") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-profile must be off, summary, or full.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_full_apply != "serial" &&
+        pbe.tabi_kifmm_full_apply != "target-node-parallel") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-full-apply must be serial or target-node-parallel.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_ilu_graph != "cartesian-near" &&
+        pbe.tabi_kifmm_ilu_graph != "kifmm-fallback-capped") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-ilu-graph must be cartesian-near or kifmm-fallback-capped.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_hierarchy_order < 2 ||
+        pbe.tabi_kifmm_hierarchy_order > 16 ||
+        (pbe.tabi_kifmm_hierarchy_order % 2) != 0) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-hierarchy-order must be an even integer between 2 and 16.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(pbe.tabi_kifmm_hierarchy_theta) ||
+        pbe.tabi_kifmm_hierarchy_theta < 0.05 ||
+        pbe.tabi_kifmm_hierarchy_theta > 2.0) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-hierarchy-theta must be between 0.05 and 2.0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_hierarchy_real_panel_guard !=
+        "strict-local-check") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-hierarchy-real-panel-guard must be strict-local-check.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(pbe.tabi_kifmm_hierarchy_guard_margin_factor) ||
+        pbe.tabi_kifmm_hierarchy_guard_margin_factor < 0.0 ||
+        pbe.tabi_kifmm_hierarchy_guard_margin_factor > 1.0) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-hierarchy-guard-margin-factor must be between 0.0 and 1.0.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_hierarchy_tree_stop_policy !=
+        "panel-radius-occupancy") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-hierarchy-tree-stop-policy must be panel-radius-occupancy.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(
+            pbe.tabi_kifmm_hierarchy_tree_panel_radius_factor) ||
+        pbe.tabi_kifmm_hierarchy_tree_panel_radius_factor <= 0.0 ||
+        pbe.tabi_kifmm_hierarchy_tree_panel_radius_factor > 8.0) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-hierarchy-tree-panel-radius-factor must be in (0, 8].");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_hierarchy_tree_occupancy_stop < 1 ||
+        pbe.tabi_kifmm_hierarchy_tree_occupancy_stop > 512) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-hierarchy-tree-occupancy-stop must be between 1 and 512.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_hierarchy_m2l_eval_policy !=
+        "target-check-batched") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-hierarchy-m2l-eval-policy must be target-check-batched.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_hierarchy_matrix_cache_policy !=
+            "canonical-offset-cache" &&
+        pbe.tabi_kifmm_hierarchy_matrix_cache_policy !=
+            "static-translation-table-cache" &&
+        pbe.tabi_kifmm_hierarchy_matrix_cache_policy !=
+            "target-node-streaming-cache" &&
+        pbe.tabi_kifmm_hierarchy_matrix_cache_policy !=
+            "bounded-lru-cache") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-hierarchy-matrix-cache-policy must be canonical-offset-cache, static-translation-table-cache, target-node-streaming-cache, or bounded-lru-cache.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(
+            pbe.tabi_kifmm_hierarchy_matrix_cache_limit_mb) ||
+        pbe.tabi_kifmm_hierarchy_matrix_cache_limit_mb < 0.0 ||
+        (pbe.tabi_kifmm_hierarchy_matrix_cache_policy ==
+             "bounded-lru-cache" &&
+         pbe.tabi_kifmm_hierarchy_matrix_cache_limit_mb <= 0.0)) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-hierarchy-matrix-cache-limit-mb must be positive for bounded-lru-cache and non-negative otherwise.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_hierarchy_gemm_batch_policy != "per-pair") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-hierarchy-gemm-batch-policy must be per-pair.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_hierarchy_m2l_parallel_policy != "serial" &&
+        pbe.tabi_kifmm_hierarchy_m2l_parallel_policy !=
+            "target-node-key-group") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-hierarchy-m2l-parallel-policy must be serial or target-node-key-group.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_kifmm_hierarchy_m2l_parallel_workers < 1 ||
+        pbe.tabi_kifmm_hierarchy_m2l_parallel_workers > 64) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-hierarchy-m2l-parallel-workers must be between 1 and 64.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_cartesian_k4_order < 2 ||
+        pbe.tabi_cartesian_k4_order > 8) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-cartesian-k4-order must be between 2 and 8.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(pbe.tabi_cartesian_k4_theta) ||
+        pbe.tabi_cartesian_k4_theta < 0.05 ||
+        pbe.tabi_cartesian_k4_theta > 2.0) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-cartesian-k4-theta must be between 0.05 and 2.0.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(pbe.tabi_cartesian_k4_geometry_theta) ||
+        pbe.tabi_cartesian_k4_geometry_theta <= 0.0 ||
+        pbe.tabi_cartesian_k4_geometry_theta > 2.0) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-cartesian-k4-geometry-theta must be in (0, 2].");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(pbe.tabi_cartesian_k4_tail_tol) ||
+        pbe.tabi_cartesian_k4_tail_tol < 0.0 ||
+        pbe.tabi_cartesian_k4_tail_tol > 1.0) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-cartesian-k4-tail-tol must be between 0.0 and 1.0.");
+      exit(EXIT_FAILURE);
+    }
+    const bool kifmm_experimental =
+        pbe.tabi_fmm_engine == "kifmm-lite-experimental";
+    const bool kifmm_channel_hybrid_experimental =
+        pbe.tabi_fmm_engine == "kifmm-channel-hybrid-experimental";
+    if (pbe.flag_pbe && pbe.tabi_kifmm_full_apply != "serial" &&
+        !kifmm_experimental) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-full-apply=target-node-parallel requires -pbe-tabi-fmm-engine=kifmm-lite-experimental.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.flag_pbe && pbe.tabi_kifmm_ilu_graph != "cartesian-near" &&
+        !kifmm_experimental) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-kifmm-ilu-graph=kifmm-fallback-capped requires -pbe-tabi-fmm-engine=kifmm-lite-experimental.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.flag_pbe &&
+        (pbe.tabi_fmm_engine == "kifmm-lite" ||
+         pbe.tabi_fmm_engine == "kifmm-local")) {
+      TitanUI::print_error(
+          "PBE: KIFMM engine skeleton only; matvec not implemented in FMM-E1.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.flag_pbe && kifmm_experimental) {
+      const bool kifmm_theta_allowed =
+          std::abs(pbe.tabi_tree_opening_theta - 0.6) <= 1.0e-12 ||
+          std::abs(pbe.tabi_tree_opening_theta - 0.7) <= 1.0e-12 ||
+          std::abs(pbe.tabi_tree_opening_theta - 0.75) <= 1.0e-12 ||
+          std::abs(pbe.tabi_tree_opening_theta - 0.8) <= 1.0e-12;
+      if (!(pbe.backend == "tabi" && pbe.tabi_sum == "treecode" &&
+            pbe.tabi_fmm_m2l == "single-matvec-analytic" &&
+            pbe.tabi_matvec_audit == "sampled-detail" &&
+            pbe.tabi_kifmm_order == 6 &&
+            pbe.tabi_kifmm_solver == "qr" &&
+            pbe.tabi_kifmm_full_apply == "target-node-parallel" &&
+            kifmm_theta_allowed &&
+            std::abs(pbe.tabi_kifmm_equiv_scale - 1.05) <= 1.0e-12 &&
+            std::abs(pbe.tabi_kifmm_check_scale - 2.40) <= 1.0e-12 &&
+            pbe.tabi_near_integration == "analytic_singular" &&
+            pbe.tabi_quad_buffer == "off" &&
+            pbe.tabi_precond == "fmm-nearfield-ilu0" &&
+            pbe.tabi_precond_ilu_neighbor_cap == 64 &&
+            pbe.tabi_precond_ilu_drop_tol == 0.0)) {
+        TitanUI::print_error(
+            "PBE: -pbe-tabi-fmm-engine=kifmm-lite-experimental requires TABI treecode with analytical FMM/M2L, sampled-detail audit, KIFMM order 6, theta 0.6/0.7/0.75/0.8, equiv-scale 1.05, check-scale 2.40, QR solver, target-node-parallel full apply, analytic_singular near integration, quad-buffer=off, and fmm-nearfield-ilu0 with neighbor cap 64 and drop tolerance 0.");
+        exit(EXIT_FAILURE);
+      }
+    }
+    if (pbe.flag_pbe && kifmm_channel_hybrid_experimental) {
+      if (!(pbe.backend == "tabi" && pbe.tabi_sum == "treecode" &&
+            pbe.tabi_fmm_m2l == "single-matvec-analytic" &&
+            pbe.tabi_matvec_audit == "sampled-detail" &&
+            pbe.tabi_near_integration == "analytic_singular" &&
+            pbe.tabi_quad_buffer == "off" &&
+            pbe.tabi_precond == "fmm-nearfield-ilu0" &&
+            pbe.tabi_precond_ilu_neighbor_cap == 64 &&
+            pbe.tabi_precond_ilu_drop_tol == 0.0 &&
+            pbe.tabi_kifmm_hierarchy_order == 8 &&
+            std::abs(pbe.tabi_kifmm_hierarchy_theta - 0.6) <=
+                1.0e-12 &&
+            pbe.tabi_kifmm_hierarchy_real_panel_guard ==
+                "strict-local-check" &&
+            pbe.tabi_kifmm_hierarchy_guard_margin_factor == 0.0 &&
+            pbe.tabi_kifmm_hierarchy_tree_stop_policy ==
+                "panel-radius-occupancy" &&
+            std::abs(
+                pbe.tabi_kifmm_hierarchy_tree_panel_radius_factor -
+                1.5) <= 1.0e-12 &&
+            pbe.tabi_kifmm_hierarchy_tree_occupancy_stop == 32 &&
+            pbe.tabi_kifmm_hierarchy_m2l_eval_policy ==
+                "target-check-batched" &&
+            (pbe.tabi_kifmm_hierarchy_matrix_cache_policy ==
+                 "canonical-offset-cache" ||
+             pbe.tabi_kifmm_hierarchy_matrix_cache_policy ==
+                 "static-translation-table-cache" ||
+             pbe.tabi_kifmm_hierarchy_matrix_cache_policy ==
+                 "target-node-streaming-cache" ||
+             pbe.tabi_kifmm_hierarchy_matrix_cache_policy ==
+                 "bounded-lru-cache") &&
+            (pbe.tabi_kifmm_hierarchy_matrix_cache_policy !=
+                 "bounded-lru-cache" ||
+             pbe.tabi_kifmm_hierarchy_matrix_cache_limit_mb > 0.0) &&
+            pbe.tabi_kifmm_hierarchy_gemm_batch_policy == "per-pair" &&
+            (pbe.tabi_kifmm_hierarchy_m2l_parallel_policy == "serial" ||
+             pbe.tabi_kifmm_hierarchy_m2l_parallel_policy ==
+                 "target-node-key-group") &&
+            pbe.tabi_kifmm_hierarchy_m2l_parallel_workers >= 1 &&
+            pbe.tabi_cartesian_k4_order == 5 &&
+            std::abs(pbe.tabi_cartesian_k4_theta - 0.6) <= 1.0e-12 &&
+            std::abs(pbe.tabi_cartesian_k4_geometry_theta - 0.4) <=
+                1.0e-12 &&
+            std::abs(pbe.tabi_cartesian_k4_tail_tol - 0.002) <=
+                1.0e-12)) {
+        TitanUI::print_error(
+            "PBE: -pbe-tabi-fmm-engine=kifmm-channel-hybrid-experimental requires TABI treecode with analytical FMM/M2L, sampled-detail audit, analytic_singular near integration, quad-buffer=off, fmm-nearfield-ilu0 with neighbor cap 64 and drop tolerance 0, hierarchy order 8, hierarchy theta 0.6, strict-local-check real-panel guard, guard margin 0, panel-radius-occupancy tree stop with radius factor 1.5 and occupancy stop 32, target-check-batched M2L, canonical-offset-cache, static-translation-table-cache, target-node-streaming-cache, or bounded-lru-cache with a positive cache limit, per-pair GEMM, serial or target-node-key-group M2L parallel policy, Cartesian K4 order 5, theta 0.6, geometry theta 0.4, and tail tolerance 0.002.");
+        exit(EXIT_FAILURE);
+      }
+    }
     if (pbe.tabi_matvec_audit == "sampled-detail" &&
         !(pbe.backend == "tabi" && pbe.tabi_sum == "treecode" &&
           pbe.tabi_fmm_m2l == "single-matvec-analytic")) {
@@ -1677,6 +2028,27 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-fmm-cartesian-audit=on requires analytical FMM/M2L TABI treecode with -pbe-tabi-matvec-audit=sampled-detail and Taylor order 2, 3, 4, or 5.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.tabi_precond_ilu_regularization != "off" &&
+        pbe.tabi_precond_ilu_regularization != "adaptive") {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-precond-ilu-regularization must be off or adaptive.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(pbe.tabi_precond_ilu_regularization_max) ||
+        pbe.tabi_precond_ilu_regularization_max < 0.0 ||
+        pbe.tabi_precond_ilu_regularization_max > 1.0e-2) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-precond-ilu-regularization-max must be finite and between 0 and 1e-2.");
+      exit(EXIT_FAILURE);
+    }
+    const bool sparse_ilu_preconditioner =
+        pbe.tabi_precond == "fmm-nearfield-ilu0" ||
+        pbe.tabi_precond == "distance-knn-ilu0";
+    // Adaptive is the default for sparse ILU. Other preconditioners do not use
+    // this setting; keep their audit state unambiguous instead of rejecting a
+    // default that is irrelevant to them.
+    if (!sparse_ilu_preconditioner)
+      pbe.tabi_precond_ilu_regularization = "off";
     if (pbe.tabi_fmm_local != "off" &&
         pbe.tabi_fmm_local != "audit-p4" &&
         pbe.tabi_fmm_local != "single-matvec-p4" &&
@@ -1888,10 +2260,22 @@ int arguments::post_process() {
           "PBE: -pbe-tabi-fmm-local-fallback=packed-avx2 requires -pbe-tabi-quad-buffer=off.");
       exit(EXIT_FAILURE);
     }
+    if (pbe.tabi_fmm_local_plan_builder == "rescan") {
+      pbe.tabi_fmm_local_plan_builder = "legacy-rescan";
+    } else if (pbe.tabi_fmm_local_plan_builder == "cached-metrics") {
+      pbe.tabi_fmm_local_plan_builder = "metric-cache";
+    }
+    if (pbe.tabi_convergence_calibration == "calibrated-tail-v1") {
+      pbe.tabi_convergence_calibration = "stage3j";
+    }
+    if (pbe.tabi_convergence_estimator_model ==
+        "calibrated-estimator-v1") {
+      pbe.tabi_convergence_estimator_model = "stage3l";
+    }
     if (pbe.tabi_fmm_local_plan_builder != "legacy-rescan" &&
         pbe.tabi_fmm_local_plan_builder != "metric-cache") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-fmm-local-plan-builder must be legacy-rescan or metric-cache.");
+          "PBE: -pbe-tabi-fmm-local-plan-builder must be rescan, cached-metrics, legacy-rescan, or metric-cache.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_fmm_local_plan_builder == "metric-cache" &&
@@ -1969,6 +2353,13 @@ int arguments::post_process() {
         pbe.tabi_fmm_local_geometry_theta != 0.0) {
       TitanUI::print_error(
           "PBE: -pbe-tabi-fmm-local-geometry-theta requires -pbe-tabi-fmm-local-geometry-guard=strict-geometry-mac.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_local == "gmres-p4" &&
+        (pbe.tabi_fmm_local_geometry_guard != "strict-geometry-mac" ||
+         std::abs(pbe.tabi_fmm_local_geometry_theta - 0.5) > 1.0e-15)) {
+      TitanUI::print_error(
+          "PBE: -pbe-tabi-fmm-local=gmres-p4 requires -pbe-tabi-fmm-local-geometry-guard=strict-geometry-mac and -pbe-tabi-fmm-local-geometry-theta=0.5.");
       exit(EXIT_FAILURE);
     }
     if (!std::isfinite(pbe.tabi_fmm_local_refine_tol) ||
@@ -2063,7 +2454,7 @@ int arguments::post_process() {
         pbe.tabi_convergence_estimator_model != "channel-tail" &&
         pbe.tabi_convergence_estimator_model != "channel-tail-eps") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-convergence-estimator-model must be stage3l, channel-tail, or channel-tail-eps.");
+          "PBE: -pbe-tabi-convergence-estimator-model must be calibrated-estimator-v1, stage3l, channel-tail, or channel-tail-eps.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_convergence_channel_calibration != "stage3m" &&
@@ -2287,6 +2678,19 @@ int arguments::post_process() {
     }
     if (pbe.salt < 0.0) {
       TitanUI::print_error("PBE: -pbe-salt must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    const bool fmm_native_coupled_preconditioner =
+        pbe.backend == "tabi" && pbe.tabi_sum == "treecode" &&
+        pbe.tabi_fmm_m2l == "single-matvec-analytic" &&
+        (pbe.tabi_precond == "fmm-block-jacobi" ||
+         pbe.tabi_precond == "fmm-overlap-schwarz" ||
+         pbe.tabi_precond == "fmm-nearfield-ilu0" ||
+         pbe.tabi_precond == "distance-knn-overlap-schwarz" ||
+         pbe.tabi_precond == "distance-knn-ilu0");
+    if (fmm_native_coupled_preconditioner && pbe.salt <= 0.0) {
+      TitanUI::print_error(
+          "PBE: FMM-native TABI preconditioners require positive ionic strength because they operate on the coupled JCP system; use -pbe-salt>0 or select a Poisson-compatible non-FMM preconditioner.");
       exit(EXIT_FAILURE);
     }
     if (pbe.temp <= 0.0) {
@@ -2612,16 +3016,46 @@ int arguments::post_process() {
           "PBE: hidden parity diagnostics require -pbe-test-pqr.");
       exit(EXIT_FAILURE);
     }
-    if (pbe.dgsolv && !pbe.test_pqr.empty()) {
+    if (pbe.dgsolv && !pbe.test_pqr.empty() && pbe.backend != "tabi") {
       TitanUI::print_error(
           "PBE: -pbe-dgsolv is not compatible with the hidden PQR fixture "
-          "adapter; run it on a native two-molecule TITAN input.");
+          "adapter for grid solves; use TABI for a single-system reaction-field "
+          "solvation energy or run a native two-molecule TITAN input.");
       exit(EXIT_FAILURE);
     }
     if (pbe.pbsa && !pbe.test_pqr.empty()) {
       TitanUI::print_error(
           "PBSA: -pbsa is not compatible with the hidden PQR fixture adapter; "
           "run it on a native two-molecule TITAN input.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.binding_cycle == "pqr-components") {
+      if (pbe.test_pqr.empty() || pbe.binding_receptor_pqr.empty() ||
+          pbe.binding_ligand_pqr.empty()) {
+        TitanUI::print_error(
+            "PBE: -pbe-binding-cycle=pqr-components requires "
+            "-pbe-test-pqr, -pbe-binding-receptor-pqr, and "
+            "-pbe-binding-ligand-pqr.");
+        exit(EXIT_FAILURE);
+      }
+      if (pbe.model != "linear" || pbe.biomodel != "pbe" ||
+          pbe.dielectric_model != "two-dielectric") {
+        TitanUI::print_error(
+            "PBE: pqr-components binding cycle requires linear PBE with the "
+            "two-dielectric model.");
+        exit(EXIT_FAILURE);
+      }
+      if (pbe.dgsolv || pbe.pbsa) {
+        TitanUI::print_error(
+            "PBE: pqr-components binding cycle cannot be combined with "
+            "native -pbe-dgsolv or -pbsa endpoints.");
+        exit(EXIT_FAILURE);
+      }
+    } else if (!pbe.binding_receptor_pqr.empty() ||
+               !pbe.binding_ligand_pqr.empty()) {
+      TitanUI::print_error(
+          "PBE: binding component PQR options require "
+          "-pbe-binding-cycle=pqr-components.");
       exit(EXIT_FAILURE);
     }
     if (pbe.pbsa_components != "auto" &&
@@ -2783,9 +3217,10 @@ int arguments::post_process() {
             "PBE: -pbe=tabi v1 does not support focus or multigrid options.");
         exit(EXIT_FAILURE);
       }
-      if (pbe.dgsolv || pbe.pbsa) {
+      if (pbe.pbsa) {
         TitanUI::print_error(
-            "PBE: -pbe=tabi v1 does not support PBSA, decomposition, or deltaG_solv.");
+            "PBE: -pbe=tabi v1 does not support PBSA or decomposition; "
+            "single-system -pbe-dgsolv uses the TABI reaction-field energy.");
         exit(EXIT_FAILURE);
       }
       if (pbe.map != "off") {

@@ -11,6 +11,8 @@
 #include "pbctopo/logging.h"
 #include "pbctopo/report.h"
 #include "pbctopo/types.h"
+#include "pbctopo/virtual_seed.h"
+#include "pbctopo/virtual_planes.h"
 #include "pbctopo_hull.h"
 #include "titan_gyration.h"
 #include "titan_simd_dispatch.h"
@@ -35,6 +37,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 using namespace std;
@@ -95,6 +98,14 @@ using PbctopoRange = titan_pbctopo::PbctopoRange;
 using PbctopoSystemStaticData = titan_pbctopo::PbctopoSystemStaticData;
 using PbctopoTrajectoryContext = titan_pbctopo::PbctopoTrajectoryContext;
 using PbctopoTimingStats = titan_pbctopo::PbctopoTimingStats;
+using PbctopoVirtualSeedCenter = titan_pbctopo::PbctopoVirtualSeedCenter;
+using PbctopoVirtualSeedSource = titan_pbctopo::PbctopoVirtualSeedSource;
+using PbctopoVirtualPlaneBuildOptions =
+    titan_pbctopo::PbctopoVirtualPlaneBuildOptions;
+using PbctopoVirtualPlaneSet = titan_pbctopo::PbctopoVirtualPlaneSet;
+using PbctopoVirtualStateTracker = titan_pbctopo::PbctopoVirtualStateTracker;
+using PbctopoVirtualAssignmentSignatureTable =
+    titan_pbctopo::PbctopoVirtualAssignmentSignatureTable;
 using PbctopoWarmState = titan_pbctopo::PbctopoWarmState;
 using ClashCellKey = titan_pbctopo::ClashCellKey;
 using ClashCellKeyHash = titan_pbctopo::ClashCellKeyHash;
@@ -118,6 +129,7 @@ using titan_pbctopo::better_component_graph_edge;
 using titan_pbctopo::graph_edge_has_zero_shift;
 using titan_pbctopo::graph_edge_matches_delta;
 using titan_pbctopo::append_atoms_for_system;
+using titan_pbctopo::append_metadata_graph_edges_for_system;
 using titan_pbctopo::append_topology_bond_edges_for_system;
 using titan_pbctopo::build_pbctopo_llps_local_units;
 using titan_pbctopo::build_pbctopo_trajectory_context;
@@ -141,6 +153,8 @@ using titan_pbctopo::solve_component_offsets_via_pair_graph;
 using titan_pbctopo::unwrap_pbctopo_llps_local_points;
 using titan_pbctopo::write_pbctopo_frame_report_header;
 using titan_pbctopo::write_pbctopo_frame_report_row;
+using titan_pbctopo::extrapolate_virtual_seed_center;
+using titan_pbctopo::build_density_cut_plane_shortlist_or_dense_fallback;
 
 constexpr int kTopoImageCoeff[27][3] = {
     {1, 0, 0},   {-1, 0, 0},  {0, 1, 0},   {0, -1, 0},  {0, 0, 1},
@@ -291,6 +305,7 @@ struct PbctopoSeed3D {
   size_t ix = 0;
   size_t iy = 0;
   size_t iz = 0;
+  PbctopoVirtualSeedSource source = PbctopoVirtualSeedSource::Density;
 };
 
 using PbctopoGyrationShapeMetrics = GyrationShapeMetrics;
@@ -387,7 +402,7 @@ struct PbctopoFrameScratch {
   vector<size_t> component_sizes;
   vector<PbctopoShift> shifts;
   vector<PbctopoSeed3D> volume_seeds;
-  unordered_set<uint64_t> seen_virtual_states;
+  PbctopoVirtualStateTracker virtual_state_tracker;
   vector<Vec3> warm_points;
   vector<Vec3> coarse_warm_points;
   vector<Vec3> placed_points;
@@ -421,7 +436,7 @@ struct PbctopoFrameScratch {
     component_sizes.reserve(context.component_hint);
     shifts.reserve(27);
     volume_seeds.reserve(context.coarse_seed_hint);
-    seen_virtual_states.reserve(context.virtual_state_hint);
+    virtual_state_tracker.reserve(context.virtual_state_hint);
     warm_points.reserve(context.total_atoms_hint);
     coarse_warm_points.reserve(context.heavy_atoms_hint);
     placed_points.reserve(context.heavy_atoms_hint);
@@ -456,7 +471,7 @@ struct PbctopoFrameScratch {
     component_sizes.clear();
     shifts.clear();
     volume_seeds.clear();
-    seen_virtual_states.clear();
+    virtual_state_tracker.clear();
     warm_points.clear();
     coarse_warm_points.clear();
     placed_points.clear();
@@ -599,12 +614,6 @@ void analyze_cut_candidate_ultraclash(const vector<Vec3> &placed_points,
                                       const unordered_set<uint64_t> &edge_set,
                                       PbctopoCutCandidate &candidate,
                                       double cutoff);
-vector<double> build_virtual_box_event_planes(const vector<PbctopoAtom> &atoms,
-                                              char axis);
-uint64_t virtual_box_state_key(const vector<double> &x_planes,
-                               const vector<double> &y_planes,
-                               const vector<double> &z_planes, double cut_x,
-                               double cut_y, double cut_z);
 PbctopoAnchorBackend resolve_pbctopo_anchor_backend(const arguments &Arguments);
 const char *pbctopo_anchor_backend_name(PbctopoAnchorBackend backend);
 PbctopoSolveMode resolve_pbctopo_solve_mode(const arguments &Arguments);
@@ -623,7 +632,8 @@ PbctopoCutCandidate evaluate_virtual_box_candidate(
     bool skip_clash = false,
     double frame_time_ps = numeric_limits<double>::quiet_NaN(),
     const char *reject_context = nullptr,
-    const PbctopoAnchorGraphContext *anchor_context = nullptr);
+    const PbctopoAnchorGraphContext *anchor_context = nullptr,
+    PbctopoVirtualSeedSource seed_source = PbctopoVirtualSeedSource::None);
 void append_interface_anchor_edges(
     const vector<PbctopoAtom> &atoms, const vector<Vec3> &placed_points,
     const vector<size_t> &atom_component_index,
@@ -1908,6 +1918,73 @@ bool candidate_has_projection_clash_margin(const PbctopoCutCandidate &candidate,
   return candidate.min_pair_d2 >= margin_distance * margin_distance;
 }
 
+PbctopoVirtualSeedCenter
+virtual_seed_center_from_candidate(const PbctopoCutCandidate &candidate) {
+  return {candidate.cut_x, candidate.cut_y, candidate.cut_z};
+}
+
+bool kinematic_virtual_candidate_usable(
+    const PbctopoCutCandidate &candidate) {
+  return candidate.valid && !candidate.ultra_clash &&
+         isfinite(candidate.cut_x) && isfinite(candidate.cut_y) &&
+         isfinite(candidate.cut_z);
+}
+
+bool has_consecutive_kinematic_seed_history(const PbctopoWarmState &warm_state,
+                                            size_t frame_idx) {
+  return warm_state.has_kinematic_previous_virtual_candidate &&
+         warm_state.has_kinematic_latest_virtual_candidate &&
+         warm_state.kinematic_previous_virtual_frame + 1 ==
+             warm_state.kinematic_latest_virtual_frame &&
+         warm_state.kinematic_latest_virtual_frame + 1 == frame_idx &&
+         kinematic_virtual_candidate_usable(
+             warm_state.kinematic_previous_virtual_candidate) &&
+         kinematic_virtual_candidate_usable(
+             warm_state.kinematic_latest_virtual_candidate);
+}
+
+void reset_kinematic_seed_history(PbctopoWarmState &warm_state,
+                                  PbctopoTimingStats &timing) {
+  if (warm_state.has_kinematic_previous_virtual_candidate ||
+      warm_state.has_kinematic_latest_virtual_candidate) {
+    ++timing.pbctopo_kinematic_seed_history_resets;
+  }
+  warm_state.kinematic_previous_virtual_candidate = PbctopoCutCandidate{};
+  warm_state.kinematic_latest_virtual_candidate = PbctopoCutCandidate{};
+  warm_state.kinematic_previous_virtual_frame =
+      numeric_limits<size_t>::max();
+  warm_state.kinematic_latest_virtual_frame =
+      numeric_limits<size_t>::max();
+  warm_state.has_kinematic_previous_virtual_candidate = false;
+  warm_state.has_kinematic_latest_virtual_candidate = false;
+}
+
+void update_kinematic_seed_history(PbctopoWarmState &warm_state,
+                                   const PbctopoCutCandidate &candidate,
+                                   size_t frame_idx,
+                                   PbctopoTimingStats &timing) {
+  if (!kinematic_virtual_candidate_usable(candidate)) {
+    reset_kinematic_seed_history(warm_state, timing);
+    return;
+  }
+
+  if (warm_state.has_kinematic_latest_virtual_candidate &&
+      warm_state.kinematic_latest_virtual_frame + 1 == frame_idx) {
+    warm_state.kinematic_previous_virtual_candidate =
+        warm_state.kinematic_latest_virtual_candidate;
+    warm_state.kinematic_previous_virtual_frame =
+        warm_state.kinematic_latest_virtual_frame;
+    warm_state.has_kinematic_previous_virtual_candidate = true;
+  } else if (warm_state.has_kinematic_latest_virtual_candidate ||
+             warm_state.has_kinematic_previous_virtual_candidate) {
+    reset_kinematic_seed_history(warm_state, timing);
+  }
+
+  warm_state.kinematic_latest_virtual_candidate = candidate;
+  warm_state.kinematic_latest_virtual_frame = frame_idx;
+  warm_state.has_kinematic_latest_virtual_candidate = true;
+}
+
 struct PbctopoGraphSeedSolveResult {
   const char *seed_name = "baseline";
   vector<Int3> offsets;
@@ -3148,65 +3225,6 @@ bool find_virtual_box_shift(double wrapped_coord, double center, int &shift_idx)
   return true;
 }
 
-vector<double> build_virtual_box_event_planes(const vector<PbctopoAtom> &atoms,
-                                              char axis) {
-  vector<double> planes;
-  planes.reserve(atoms.size() * 2 + 2);
-  planes.push_back(0.5);
-  planes.push_back(2.5);
-  for (const auto &atom : atoms) {
-    const double coord =
-        (axis == 'x') ? atom.sx : ((axis == 'y') ? atom.sy : atom.sz);
-    planes.push_back(coord + 0.5);
-    planes.push_back(coord + 1.5);
-  }
-  sort(planes.begin(), planes.end());
-  vector<double> unique_planes;
-  unique_planes.reserve(planes.size());
-  for (double value : planes) {
-    if (value + 1.0e-9 < 0.5 || value - 1.0e-9 > 2.5)
-      continue;
-    if (!unique_planes.empty() &&
-        fabs(unique_planes.back() - value) <= 1.0e-9) {
-      continue;
-    }
-    unique_planes.push_back(value);
-  }
-  if (unique_planes.size() < 2) {
-    unique_planes = {0.5, 2.5};
-  } else {
-    if (fabs(unique_planes.front() - 0.5) > 1.0e-9)
-      unique_planes.insert(unique_planes.begin(), 0.5);
-    if (fabs(unique_planes.back() - 2.5) > 1.0e-9)
-      unique_planes.push_back(2.5);
-  }
-  return unique_planes;
-}
-
-size_t virtual_box_interval_index(const vector<double> &planes, double center) {
-  if (planes.size() < 2)
-    return 0;
-  const double clamped = clamp_virtual_box_center(center);
-  auto it = upper_bound(planes.begin(), planes.end(), clamped + 1.0e-9);
-  if (it == planes.begin())
-    return 0;
-  const size_t idx = static_cast<size_t>(distance(planes.begin(), it) - 1);
-  return min(idx, planes.size() - 2);
-}
-
-uint64_t virtual_box_state_key(const vector<double> &x_planes,
-                               const vector<double> &y_planes,
-                               const vector<double> &z_planes, double cut_x,
-                               double cut_y, double cut_z) {
-  const uint64_t ix = static_cast<uint64_t>(
-      virtual_box_interval_index(x_planes, cut_x));
-  const uint64_t iy = static_cast<uint64_t>(
-      virtual_box_interval_index(y_planes, cut_y));
-  const uint64_t iz = static_cast<uint64_t>(
-      virtual_box_interval_index(z_planes, cut_z));
-  return (ix << 42) ^ (iy << 21) ^ iz;
-}
-
 void push_unique_xy_seed(vector<PbctopoSeed2D> &best, const PbctopoSeed2D &seed,
                          size_t max_keep) {
   for (const auto &existing : best) {
@@ -3768,12 +3786,14 @@ PbctopoCutCandidate evaluate_virtual_box_candidate(
     const vector<pair<int, int>> *contacting_owner_pairs,
     double continuity_cutoff, const PbctopoCutCandidate *incumbent,
     bool skip_clash, double frame_time_ps, const char *reject_context,
-    const PbctopoAnchorGraphContext *anchor_context) {
+    const PbctopoAnchorGraphContext *anchor_context,
+    PbctopoVirtualSeedSource seed_source) {
   PbctopoCutCandidate candidate;
   candidate.cut_x = clamp_virtual_box_center(cut_x);
   candidate.cut_y = clamp_virtual_box_center(cut_y);
   candidate.cut_z = clamp_virtual_box_center(cut_z);
   candidate.gap_score = gap_score;
+  candidate.virtual_seed_source = seed_source;
   candidate.broken_edges = 0;
   candidate.edge_stretch = 0.0;
   const PbctopoCutCandidate *active_incumbent =
@@ -5498,7 +5518,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
   auto &component_sizes = scratch.component_sizes;
   auto &shifts = scratch.shifts;
   auto &volume_seeds = scratch.volume_seeds;
-  auto &seen_virtual_states = scratch.seen_virtual_states;
+  auto &virtual_state_tracker = scratch.virtual_state_tracker;
   auto &warm_points = scratch.warm_points;
   auto &coarse_warm_points = scratch.coarse_warm_points;
   auto &placed_points = scratch.placed_points;
@@ -5577,6 +5597,12 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
 
   for (size_t frame_idx = 0; frame_idx < frame_count; ++frame_idx) {
     ++timing.frames;
+    const bool kinematic_seed_history_ready =
+        has_consecutive_kinematic_seed_history(warm_state, frame_idx);
+    const PbctopoCutCandidate kinematic_seed_previous =
+        warm_state.kinematic_previous_virtual_candidate;
+    const PbctopoCutCandidate kinematic_seed_latest =
+        warm_state.kinematic_latest_virtual_candidate;
     PbctopoFrameReport frame_report;
     frame_report.frame = frame_report_offset + frame_idx;
     frame_report.time_ps = this->m_mol[frame_idx].time_of_snap;
@@ -5609,6 +5635,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
               .count();
       if (pbctopo_frame_report.is_open())
         write_pbctopo_frame_report_row(pbctopo_frame_report, frame_report);
+      reset_kinematic_seed_history(warm_state, timing);
       continue;
     }
 
@@ -5623,17 +5650,86 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
         chrono::duration<double>(clock::now() - stage_started).count();
 
     stage_started = clock::now();
-    build_local_neighborhood_graph(base_atoms, this->m_mol[frame_idx].Box,
-                                   local_edges, local_edge_set,
-                                   runtime_cutoffs.bond_cutoff);
-    append_topology_bond_edges_for_system(*this, 0, base_atoms,
-                                          this->m_mol[frame_idx].Box,
-                                          local_edges, local_edge_set, timing);
-    if (frame_idx < mol2.m_mol.size() && mol2.topology.has_bonds()) {
-      append_topology_bond_edges_for_system(
-          mol2, 1, base_atoms, this->m_mol[frame_idx].Box, local_edges,
-          local_edge_set, timing);
+    const bool has_ligand_frame =
+        frame_idx < mol2.m_mol.size() && !mol2.m_mol[frame_idx].pos.x.empty();
+    const bool rec_topology_graph_ready =
+        trajectory_context.rec_static.topology_graph_available;
+    const bool lig_topology_graph_ready =
+        !has_ligand_frame ||
+        trajectory_context.lig_static.topology_graph_available;
+    const bool use_static_topology_graph =
+        rec_topology_graph_ready && lig_topology_graph_ready;
+    const bool any_topology_graph =
+        rec_topology_graph_ready ||
+        (has_ligand_frame &&
+         trajectory_context.lig_static.topology_graph_available);
+    const bool rec_metadata_graph_ready =
+        !rec_topology_graph_ready &&
+        trajectory_context.rec_static.metadata_graph_available;
+    const bool lig_metadata_graph_ready =
+        !has_ligand_frame ||
+        (!trajectory_context.lig_static.topology_graph_available &&
+         trajectory_context.lig_static.metadata_graph_available);
+    const bool use_static_metadata_graph =
+        !any_topology_graph && rec_metadata_graph_ready &&
+        lig_metadata_graph_ready;
+    if (use_static_topology_graph) {
+      local_edges.clear();
+      local_edge_set.clear();
+      const size_t projected_topology_bonds =
+          trajectory_context.rec_static.projected_topology_bonds.size() +
+          (has_ligand_frame
+               ? trajectory_context.lig_static.projected_topology_bonds.size()
+               : 0);
+      local_edges.reserve(projected_topology_bonds);
+      local_edge_set.reserve(projected_topology_bonds * 2 + 1);
+      ++timing.pbctopo_topology_static_graph_frames;
+    } else if (use_static_metadata_graph) {
+      local_edges.clear();
+      local_edge_set.clear();
+      const size_t projected_metadata_edges =
+          trajectory_context.rec_static.projected_metadata_edges.size() +
+          (has_ligand_frame
+               ? trajectory_context.lig_static.projected_metadata_edges.size()
+               : 0);
+      local_edges.reserve(projected_metadata_edges);
+      local_edge_set.reserve(projected_metadata_edges * 2 + 1);
+      ++timing.pbctopo_metadata_graph_frames;
+    } else {
+      build_local_neighborhood_graph(base_atoms, this->m_mol[frame_idx].Box,
+                                     local_edges, local_edge_set,
+                                     runtime_cutoffs.bond_cutoff);
+      timing.pbctopo_geometry_edges_added += local_edges.size();
+      ++timing.pbctopo_geometry_fallback_frames;
     }
+    const auto geometry_done = clock::now();
+    timing.pbctopo_local_graph_geometry_s +=
+        chrono::duration<double>(geometry_done - stage_started).count();
+    if (use_static_metadata_graph) {
+      append_metadata_graph_edges_for_system(trajectory_context.rec_static, 0,
+                                             base_atoms, local_edges,
+                                             local_edge_set, timing);
+      if (has_ligand_frame) {
+        append_metadata_graph_edges_for_system(
+            trajectory_context.lig_static,
+            trajectory_context.rec_static.atom_count, base_atoms, local_edges,
+            local_edge_set, timing);
+      }
+    } else {
+      append_topology_bond_edges_for_system(trajectory_context.rec_static, 0,
+                                            base_atoms,
+                                            this->m_mol[frame_idx].Box,
+                                            local_edges, local_edge_set,
+                                            timing);
+      if (has_ligand_frame) {
+        append_topology_bond_edges_for_system(
+            trajectory_context.lig_static,
+            trajectory_context.rec_static.atom_count, base_atoms,
+            this->m_mol[frame_idx].Box, local_edges, local_edge_set, timing);
+      }
+    }
+    timing.pbctopo_topology_edge_append_s +=
+        chrono::duration<double>(clock::now() - geometry_done).count();
     timing.graph_s += chrono::duration<double>(clock::now() - stage_started).count();
 
     if (solve_mode == PbctopoSolveMode::LlpsLocal) {
@@ -5678,6 +5774,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
               .count();
       if (pbctopo_frame_report.is_open())
         write_pbctopo_frame_report_row(pbctopo_frame_report, frame_report);
+      reset_kinematic_seed_history(warm_state, timing);
       continue;
     }
 
@@ -5771,6 +5868,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     vector<Vec3> prefetched_safe_points;
     prefetched_safe_points.reserve(base_atoms.size());
     PbctopoCutCandidate prefetched_safe_candidate;
+    PbctopoCutCandidate best_verified_virtual_candidate;
     vector<Vec3> split_rescue_points;
     split_rescue_points.reserve(base_atoms.size());
     PbctopoCutCandidate split_rescue_candidate;
@@ -5917,7 +6015,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           &projection_anchor_indices, &projection_contacting_owner_pairs,
           runtime_cutoffs.continuity_cutoff, nullptr,
           skip_projection_candidate_clash, numeric_limits<double>::quiet_NaN(),
-          nullptr, &projection_anchor_context);
+          nullptr, &projection_anchor_context,
+          PbctopoVirtualSeedSource::Previous);
       if (skip_projection_candidate_clash)
         ++timing.projection_clash_skip_evals;
       if (early_projection_coarse.valid && !early_projection_coarse.ultra_clash) {
@@ -5932,13 +6031,18 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             &trajectory_context.continuity_anchor_indices,
             &local_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
             nullptr, false, this->m_mol[frame_idx].time_of_snap,
-            "warm_projection", &base_anchor_context);
+            "warm_projection", &base_anchor_context,
+            PbctopoVirtualSeedSource::Previous);
         if (early_projection.valid && !early_projection.ultra_clash &&
           candidate_close_enough_to_skip_search(
               early_projection, warm_state.previous_projection_candidate)) {
           ++timing.early_projection_used;
           warm_state.previous_projection_candidate = early_projection;
           warm_state.has_projection_candidate = true;
+          if (better_cut_candidate(early_projection,
+                                   best_verified_virtual_candidate)) {
+            best_verified_virtual_candidate = early_projection;
+          }
           if (better_cut_candidate(early_projection, prefetched_safe_candidate)) {
             prefetched_safe_candidate = early_projection;
             prefetched_safe_points = warm_points;
@@ -6030,18 +6134,59 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           clamp_virtual_box_center(warm_state.previous_projection_candidate.cut_z);
       previous_seed.score =
           max(1.0, warm_state.previous_projection_candidate.gap_score + 1.0);
+      previous_seed.source = PbctopoVirtualSeedSource::Previous;
       volume_seeds.push_back(previous_seed);
       ++timing.previous_seed_used;
+    }
+    if (kinematic_seed_history_ready) {
+      const PbctopoVirtualSeedCenter predicted_center =
+          extrapolate_virtual_seed_center(
+              virtual_seed_center_from_candidate(kinematic_seed_previous),
+              virtual_seed_center_from_candidate(kinematic_seed_latest));
+      PbctopoSeed3D kinematic_seed;
+      kinematic_seed.cx = predicted_center.cx;
+      kinematic_seed.cy = predicted_center.cy;
+      kinematic_seed.cz = predicted_center.cz;
+      kinematic_seed.score =
+          max(1.0, kinematic_seed_latest.gap_score + 0.5);
+      kinematic_seed.source = PbctopoVirtualSeedSource::Kinematic;
+      volume_seeds.push_back(kinematic_seed);
+      ++timing.pbctopo_kinematic_seed_candidates;
     }
     timing.seed_s += chrono::duration<double>(clock::now() - stage_started).count();
     const double coarse_step = 2.0 / 15.0;
     stage_started = clock::now();
-    x_planes = build_virtual_box_event_planes(projection_atoms, 'x');
-    y_planes = build_virtual_box_event_planes(projection_atoms, 'y');
-    z_planes = build_virtual_box_event_planes(projection_atoms, 'z');
-    timing.event_planes_s +=
+    PbctopoVirtualPlaneBuildOptions plane_options;
+    plane_options.histogram_bins = 64;
+    plane_options.max_sparse_planes_per_axis = 3;
+    PbctopoVirtualPlaneSet plane_set =
+        build_density_cut_plane_shortlist_or_dense_fallback(projection_atoms,
+                                                            plane_options);
+    PbctopoVirtualAssignmentSignatureTable virtual_signature_table;
+    virtual_signature_table.build(projection_atoms);
+    x_planes = std::move(plane_set.x);
+    y_planes = std::move(plane_set.y);
+    z_planes = std::move(plane_set.z);
+    if (plane_set.used_dense_fallback) {
+      ++timing.pbctopo_density_cut_plane_dense_fallbacks;
+    } else {
+      ++timing.pbctopo_density_cut_planes_frames;
+    }
+    timing.pbctopo_density_cut_planes_x += x_planes.size();
+    timing.pbctopo_density_cut_planes_y += y_planes.size();
+    timing.pbctopo_density_cut_planes_z += z_planes.size();
+    timing.pbctopo_density_cut_planes_dense_equiv_x +=
+        plane_set.dense_equivalent_x;
+    timing.pbctopo_density_cut_planes_dense_equiv_y +=
+        plane_set.dense_equivalent_y;
+    timing.pbctopo_density_cut_planes_dense_equiv_z +=
+        plane_set.dense_equivalent_z;
+    const double plane_build_s =
         chrono::duration<double>(clock::now() - stage_started).count();
-    seen_virtual_states.reserve(512);
+    timing.pbctopo_density_cut_plane_build_s += plane_build_s;
+    timing.event_planes_s += plane_build_s;
+    virtual_state_tracker.reset(x_planes, y_planes, z_planes);
+    virtual_state_tracker.reserve(512);
 
     PbctopoCutCandidate best_candidate;
     PbctopoCutCandidate best_safe_candidate;
@@ -6063,6 +6208,16 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     auto record_frame_failure = [&](PbctopoFailureReason reason) {
       if (frame_report.fallback_reason == PbctopoFailureReason::None)
         frame_report.fallback_reason = reason;
+    };
+    auto update_kinematic_history_for_frame = [&]() {
+      if (best_verified_virtual_candidate.valid &&
+          !best_verified_virtual_candidate.ultra_clash) {
+        update_kinematic_seed_history(warm_state,
+                                      best_verified_virtual_candidate,
+                                      frame_idx, timing);
+      } else {
+        reset_kinematic_seed_history(warm_state, timing);
+      }
     };
     auto finalize_frame_report =
         [&](PbctopoFrameStatus status, PbctopoFrameMode mode,
@@ -6155,6 +6310,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                                                     runtime_cutoffs.clash_cutoff);
           warm_state.previous_projection_candidate = best_safe_candidate;
           warm_state.has_projection_candidate = true;
+          update_kinematic_history_for_frame();
           apply_cut_candidate_timed(best_safe_points);
         };
     placed_points.reserve(projection_atoms.size());
@@ -6174,11 +6330,17 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
 
     stage_started = clock::now();
     for (const auto &seed : volume_seeds) {
-      const uint64_t state_key = virtual_box_state_key(x_planes, y_planes, z_planes,
-                                                       seed.cx, seed.cy, seed.cz);
-      if (!seen_virtual_states.insert(state_key).second)
+      const uint64_t shift_signature =
+          virtual_signature_table.state_signature(seed.cx, seed.cy, seed.cz);
+      if (!virtual_state_tracker.try_insert(seed.cx, seed.cy, seed.cz,
+                                            shift_signature)) {
+        if (seed.source == PbctopoVirtualSeedSource::Kinematic)
+          ++timing.pbctopo_kinematic_seed_deduped;
         continue;
-      coarse_seed_options.push_back({state_key, seed});
+      }
+      if (seed.source == PbctopoVirtualSeedSource::Kinematic)
+        ++timing.pbctopo_kinematic_seed_evaluated;
+      coarse_seed_options.push_back({0, seed});
     }
     timing.coarse_candidates += coarse_seed_options.size();
     const size_t requested_threads =
@@ -6208,7 +6370,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                   runtime_cutoffs.continuity_cutoff, nullptr,
                   skip_projection_candidate_clash,
                   numeric_limits<double>::quiet_NaN(), nullptr,
-                  &projection_anchor_context);
+                  &projection_anchor_context, seed.source);
               if (skip_projection_candidate_clash)
                 coarse_projection_skip_evals.fetch_add(
                     1, memory_order_relaxed);
@@ -6240,7 +6402,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                 runtime_cutoffs.continuity_cutoff, nullptr,
                 skip_projection_candidate_clash,
                 numeric_limits<double>::quiet_NaN(), nullptr,
-                &projection_anchor_context);
+                &projection_anchor_context, seed.source);
             if (skip_projection_candidate_clash)
               coarse_projection_skip_evals.fetch_add(
                   1, memory_order_relaxed);
@@ -6260,7 +6422,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             &projection_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
             nullptr, skip_projection_candidate_clash,
             numeric_limits<double>::quiet_NaN(), nullptr,
-            &projection_anchor_context);
+            &projection_anchor_context, seed.source);
         if (skip_projection_candidate_clash)
           coarse_projection_skip_evals.fetch_add(1, memory_order_relaxed);
       }
@@ -6276,30 +6438,30 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     auto evaluate_refine_center = [&](double center_x, double center_y,
                                       double center_z, double gap_score,
                                       vector<Vec3> &scratch_points,
-                                      const PbctopoCutCandidate *incumbent) {
+                                      const PbctopoCutCandidate *incumbent,
+                                      PbctopoVirtualSeedSource seed_source) {
       const double clamped_x = clamp_virtual_box_center(center_x);
       const double clamped_y = clamp_virtual_box_center(center_y);
       const double clamped_z = clamp_virtual_box_center(center_z);
-      const uint64_t state_key = virtual_box_state_key(x_planes, y_planes, z_planes,
-                                                       clamped_x, clamped_y,
-                                                       clamped_z);
-       if (!seen_virtual_states.insert(state_key).second)
-         return PbctopoCutCandidate{};
-        PbctopoCutCandidate candidate = evaluate_virtual_box_candidate(
-            projection_atoms, projection_edges, projection_edge_set,
-            translation_cache, this->m_mol[frame_idx].Box, clamped_x, clamped_y,
-            clamped_z, gap_score,
-            scratch_points, runtime_cutoffs.clash_cutoff,
-            &projection_continuity_pairs, &projection_anchor_indices,
-            &projection_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
-            incumbent, skip_projection_candidate_clash,
-            numeric_limits<double>::quiet_NaN(), nullptr,
-            &projection_anchor_context);
-        if (skip_projection_candidate_clash)
-          ++timing.projection_clash_skip_evals;
-        ++timing.refine_candidates;
-        ++valid_candidates;
-        return candidate;
+      const uint64_t shift_signature = virtual_signature_table.state_signature(
+          clamped_x, clamped_y, clamped_z);
+      if (!virtual_state_tracker.try_insert(clamped_x, clamped_y, clamped_z,
+                                            shift_signature))
+        return PbctopoCutCandidate{};
+      PbctopoCutCandidate candidate = evaluate_virtual_box_candidate(
+          projection_atoms, projection_edges, projection_edge_set,
+          translation_cache, this->m_mol[frame_idx].Box, clamped_x, clamped_y,
+          clamped_z, gap_score, scratch_points, runtime_cutoffs.clash_cutoff,
+          &projection_continuity_pairs, &projection_anchor_indices,
+          &projection_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
+          incumbent, skip_projection_candidate_clash,
+          numeric_limits<double>::quiet_NaN(), nullptr,
+          &projection_anchor_context, seed_source);
+      if (skip_projection_candidate_clash)
+        ++timing.projection_clash_skip_evals;
+      ++timing.refine_candidates;
+      ++valid_candidates;
+      return candidate;
      };
 
     stage_started = clock::now();
@@ -6343,7 +6505,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       double center_y = coarse.cut_y;
       double center_z = coarse.cut_z;
       PbctopoCutCandidate local_best = evaluate_refine_center(
-          center_x, center_y, center_z, coarse.gap_score, refine_points, nullptr);
+          center_x, center_y, center_z, coarse.gap_score, refine_points, nullptr,
+          coarse.virtual_seed_source);
       double step = 0.5 * coarse_step;
       for (int pass = 0; pass < 4 && step >= (coarse_step / 16.0); ++pass) {
         bool improved = false;
@@ -6357,7 +6520,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
               (local_best.valid && !local_best.ultra_clash) ? &local_best : nullptr;
           PbctopoCutCandidate trial = evaluate_refine_center(
               center_x + dir[0], center_y + dir[1], center_z + dir[2],
-              coarse.gap_score, trial_points, local_incumbent);
+              coarse.gap_score, trial_points, local_incumbent,
+              coarse.virtual_seed_source);
           if (better_cut_candidate(trial, local_best)) {
             local_best = trial;
             center_x = trial.cut_x;
@@ -6384,12 +6548,17 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           &trajectory_context.continuity_anchor_indices,
           &local_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
           verify_incumbent, false, this->m_mol[frame_idx].time_of_snap,
-          "verified_candidate", &base_anchor_context);
+          "verified_candidate", &base_anchor_context,
+          coarse.virtual_seed_source);
       if (!verified_candidate.valid)
         continue;
       if (!verified_candidate.ultra_clash) {
         ++safe_candidates;
         record_report_safe_candidate(verified_candidate);
+        if (better_cut_candidate(verified_candidate,
+                                 best_verified_virtual_candidate)) {
+          best_verified_virtual_candidate = verified_candidate;
+        }
         if (better_cut_candidate(verified_candidate, best_safe_candidate)) {
           best_safe_candidate = verified_candidate;
           best_safe_points = verify_points;
@@ -6402,6 +6571,14 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       }
     }
     timing.refine_s += chrono::duration<double>(clock::now() - stage_started).count();
+    timing.pbctopo_density_cut_plane_collisions +=
+        virtual_state_tracker.collision_count();
+    if (best_verified_virtual_candidate.valid &&
+        !best_verified_virtual_candidate.ultra_clash &&
+        best_verified_virtual_candidate.virtual_seed_source ==
+            PbctopoVirtualSeedSource::Kinematic) {
+      ++timing.pbctopo_kinematic_seed_best;
+    }
 
     component_scoring_edges = local_edges;
     // Keep component scoring aligned with the original virtual-box local graph.
@@ -6877,6 +7054,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                                                 runtime_cutoffs.clash_cutoff);
       warm_state.previous_projection_candidate = best_safe_candidate;
       warm_state.has_projection_candidate = true;
+      update_kinematic_history_for_frame();
       apply_cut_candidate_timed(best_safe_points);
       finalize_frame_report(PbctopoFrameStatus::Certified,
                             frame_report.mode == PbctopoFrameMode::None
@@ -7009,6 +7187,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       ++fallback_frames;
       projection_clash_skip_active = false;
       clear_component_trial_hints(warm_state);
+      reset_kinematic_seed_history(warm_state, timing);
       fallback_pbci_frame(frame_idx);
       finalize_frame_report(PbctopoFrameStatus::Fallback,
                             PbctopoFrameMode::Pbci,
@@ -7022,6 +7201,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                                               runtime_cutoffs.clash_cutoff);
     warm_state.previous_projection_candidate = best_candidate;
     warm_state.has_projection_candidate = best_candidate.valid;
+    update_kinematic_history_for_frame();
     apply_cut_candidate_timed(best_points);
     finalize_frame_report(PbctopoFrameStatus::Certified,
                           frame_report.mode == PbctopoFrameMode::None
@@ -7041,11 +7221,17 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       ", append=" + to_string(timing.append_s) + " s, heavy_subset=" +
       to_string(timing.heavy_subset_s) + " s, translation_cache=" +
       to_string(timing.translation_cache_s) + " s, graph=" +
-      to_string(timing.graph_s) + " s, projection_edges=" +
+      to_string(timing.graph_s) + " s, pbctopo_local_graph_geometry_s=" +
+      to_string(timing.pbctopo_local_graph_geometry_s) +
+      " s, pbctopo_topology_edge_append_s=" +
+      to_string(timing.pbctopo_topology_edge_append_s) +
+      " s, projection_edges=" +
       to_string(timing.projection_edge_s) + " s, component_split=" +
       to_string(timing.component_split_s) + " s, seeds=" +
       to_string(timing.seed_s) + " s, event_planes=" +
-      to_string(timing.event_planes_s) + " s, coarse=" +
+      to_string(timing.event_planes_s) +
+      " s, pbctopo_density_cut_plane_build=" +
+      to_string(timing.pbctopo_density_cut_plane_build_s) + " s, coarse=" +
       to_string(timing.coarse_s) + " s, refine=" +
       to_string(timing.refine_s) + " s, early_projection=" +
       to_string(timing.early_projection_s) + " s, warm_component=" +
@@ -7149,6 +7335,34 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.pbctopo_llps_local_disconnected_units) +
       ", early_projection_used=" + to_string(timing.early_projection_used) +
       ", previous_seed_used=" + to_string(timing.previous_seed_used) +
+      ", pbctopo_kinematic_seed_candidates=" +
+      to_string(timing.pbctopo_kinematic_seed_candidates) +
+      ", pbctopo_kinematic_seed_evaluated=" +
+      to_string(timing.pbctopo_kinematic_seed_evaluated) +
+      ", pbctopo_kinematic_seed_deduped=" +
+      to_string(timing.pbctopo_kinematic_seed_deduped) +
+      ", pbctopo_kinematic_seed_best=" +
+      to_string(timing.pbctopo_kinematic_seed_best) +
+      ", pbctopo_kinematic_seed_history_resets=" +
+      to_string(timing.pbctopo_kinematic_seed_history_resets) +
+      ", pbctopo_density_cut_planes_frames=" +
+      to_string(timing.pbctopo_density_cut_planes_frames) +
+      ", pbctopo_density_cut_planes_x=" +
+      to_string(timing.pbctopo_density_cut_planes_x) +
+      ", pbctopo_density_cut_planes_y=" +
+      to_string(timing.pbctopo_density_cut_planes_y) +
+      ", pbctopo_density_cut_planes_z=" +
+      to_string(timing.pbctopo_density_cut_planes_z) +
+      ", pbctopo_density_cut_planes_dense_equiv_x=" +
+      to_string(timing.pbctopo_density_cut_planes_dense_equiv_x) +
+      ", pbctopo_density_cut_planes_dense_equiv_y=" +
+      to_string(timing.pbctopo_density_cut_planes_dense_equiv_y) +
+      ", pbctopo_density_cut_planes_dense_equiv_z=" +
+      to_string(timing.pbctopo_density_cut_planes_dense_equiv_z) +
+      ", pbctopo_density_cut_plane_collisions=" +
+      to_string(timing.pbctopo_density_cut_plane_collisions) +
+      ", pbctopo_density_cut_plane_dense_fallbacks=" +
+      to_string(timing.pbctopo_density_cut_plane_dense_fallbacks) +
        ", component_graph_edges=" + to_string(timing.component_graph_edges) +
        ", component_graph_shift_descriptors=" +
        to_string(timing.component_graph_shift_descriptors) +
@@ -7222,12 +7436,37 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.pbctopo_topology_bond_edges_added) +
       ", pbctopo_topology_bond_edges_skipped=" +
       to_string(timing.pbctopo_topology_bond_edges_skipped) +
+      ", pbctopo_geometry_edges_added=" +
+      to_string(timing.pbctopo_geometry_edges_added) +
+      ", pbctopo_topology_duplicate_edges=" +
+      to_string(timing.pbctopo_topology_duplicate_edges) +
+      ", pbctopo_topology_projected_bonds=" +
+      to_string(timing.pbctopo_topology_projected_bonds) +
+      ", pbctopo_topology_static_graph_frames=" +
+      to_string(timing.pbctopo_topology_static_graph_frames) +
+      ", pbctopo_metadata_graph_frames=" +
+      to_string(timing.pbctopo_metadata_graph_frames) +
+      ", pbctopo_metadata_residue_groups=" +
+      to_string(timing.pbctopo_metadata_residue_groups) +
+      ", pbctopo_metadata_intra_edges=" +
+      to_string(timing.pbctopo_metadata_intra_edges) +
+      ", pbctopo_metadata_inter_edges=" +
+      to_string(timing.pbctopo_metadata_inter_edges) +
+      ", pbctopo_geometry_fallback_frames=" +
+      to_string(timing.pbctopo_geometry_fallback_frames) +
       ", pbctopo_topology_source=" +
       pbctopo_topology_source_label(timing) +
       ", pbctopo_topology_component_source=" +
-      string(timing.pbctopo_topology_bond_edges_added > 0
-                 ? "topology+geometry"
-                 : "geometry") +
+      string((timing.frames > 0 &&
+              timing.pbctopo_topology_static_graph_frames == timing.frames)
+                 ? "topology"
+                 : ((timing.frames > 0 &&
+                     timing.pbctopo_metadata_graph_frames == timing.frames)
+                        ? "metadata"
+                        : ((timing.pbctopo_topology_bond_edges_added > 0 ||
+                            timing.pbctopo_metadata_graph_frames > 0)
+                               ? "mixed"
+                               : "geometry"))) +
       ", pbctopo_anchor_order_edges=" +
       to_string(timing.pbctopo_anchor_order_edges) +
       ", pbctopo_anchor_endpoint_edges=" +

@@ -1,5 +1,0 @@
-section,claim,evidence
-Methods,guarded_p4_explicit_policy,C:\tmp\elec_vdw-fagbi-z4n\test\tmp\fagbi_scope_z4o\fagbi_scope_z4o_matrix.csv
-Results,z4o_repeatability_pass,C:\tmp\elec_vdw-fagbi-z4n\test\tmp\fagbi_scope_z4o\fagbi_scope_z4o_repeatability.csv
-Supplement,z4q_public_expansion,C:\tmp\elec_vdw-fagbi-z4n\test\tmp\fagbi_scope_z4q\fagbi_scope_z4q_repeatability.csv
-Limitations,no_default_promotion,C:\tmp\elec_vdw-fagbi-z4n\test\tmp\fagbi_scope_z4o\fagbi_scope_z4o_decision.csv

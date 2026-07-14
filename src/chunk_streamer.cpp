@@ -2,6 +2,7 @@
 #include "titan_executor.h"
 #include "titan_ui.h"
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <immintrin.h> // AVX2 intrinsics
@@ -144,7 +145,8 @@ int read_xtc_frame_payload_after_header(XDRFILE *xdr_handle, int natoms,
     error = "XDR: failed to decode XTC coordinates after header (decoder_rc=" +
             std::to_string(rc) + ", coord_count=" +
             std::to_string(coord_count) + ", expected=" +
-            std::to_string(natoms) + ").";
+            std::to_string(natoms) + ", detail=" +
+            xdrfile_last_coord_error() + ").";
     return exdr3DX;
   }
 
@@ -693,6 +695,17 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
 
     // 4. Pre-allocate position buffer ONCE
     xdr_pos_buf_ = new rvec[xdr_natoms_];
+    constexpr int64_t kXtcReserveBytes = 1024LL * 1024LL;
+    if (args_ref.xdr_type == "xtc" &&
+        xdrfile_reserve_coord_buffers(xdr_handle_, xdr_natoms_,
+                                      kXtcReserveBytes) != exdrOK) {
+      xdrfile_close(xdr_handle_);
+      xdr_handle_ = nullptr;
+      delete[] xdr_pos_buf_;
+      xdr_pos_buf_ = nullptr;
+      return std::unexpected("XDR: cannot reserve XTC decoder buffers for " +
+                             tf);
+    }
     xdr_eof_ = false;
     xdr_next_target_time_ = -1e18;
 
@@ -1155,36 +1168,41 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
             warn_xtc_fallback_once(xtc_error);
             // The failed fast decoder has consumed part of the frame. Recover
             // from a fresh XDR/stdio state instead of rewinding that handle.
-            XDRFILE *recovery_handle = xdrfile_open(xdr_path_.c_str(), "r");
-            if (!recovery_handle) {
-              xdr_eof_ = true;
-              return std::unexpected(
-                  "XDR: failed to open a fresh handle for selected XTC frame "
-                  "recovery (offset=" +
-                  std::to_string(selected_probe.frame_start) + ").");
-            }
+            constexpr int kRecoveryAttempts = 3;
+            std::string recovery_detail;
+            for (int attempt = 1; attempt <= kRecoveryAttempts; ++attempt) {
+              XDRFILE *recovery_handle = xdrfile_open(xdr_path_.c_str(), "r");
+              if (!recovery_handle) {
+                recovery_detail = "failed to open fresh handle";
+                continue;
+              }
+              if (xdrfile_reserve_coord_buffers(recovery_handle, xdr_natoms_,
+                                                1024LL * 1024LL) != exdrOK) {
+                recovery_detail = "failed to reserve fresh decoder buffers";
+                xdrfile_close(recovery_handle);
+                continue;
+              }
+              const int seek_rc = xdr_seek(recovery_handle,
+                                           selected_probe.frame_start, SEEK_SET);
+              if (seek_rc != exdrOK) {
+                recovery_detail = "failed to seek fresh handle (rc=" +
+                                  std::to_string(seek_rc) + ")";
+                xdrfile_close(recovery_handle);
+                continue;
+              }
 
-            const int seek_rc = xdr_seek(recovery_handle,
-                                         selected_probe.frame_start, SEEK_SET);
-            if (seek_rc != exdrOK) {
+              int step = 0;
+              rc = read_xtc(recovery_handle, xdr_natoms_, &step, &time_ps,
+                            xdr_box_, xdr_pos_buf_, &xdr_prec_);
+              if (rc == exdrOK) {
+                xdrfile_close(xdr_handle_);
+                xdr_handle_ = recovery_handle;
+                break;
+              }
+              recovery_detail = xdrfile_last_coord_error();
               xdrfile_close(recovery_handle);
-              xdr_eof_ = true;
-              return std::unexpected(
-                  "XDR: failed to seek a fresh handle to selected XTC frame "
-                  "(offset=" + std::to_string(selected_probe.frame_start) +
-                  ", rc=" + std::to_string(seek_rc) + ", " +
-                  xdr_status_message(seek_rc) + ")");
-            }
-
-            int step = 0;
-            rc = read_xtc(recovery_handle, xdr_natoms_, &step, &time_ps,
-                          xdr_box_,
-                          xdr_pos_buf_, &xdr_prec_);
-            if (rc == exdrOK) {
-              xdrfile_close(xdr_handle_);
-              xdr_handle_ = recovery_handle;
-            } else {
-              xdrfile_close(recovery_handle);
+              if (attempt < kRecoveryAttempts)
+                std::this_thread::sleep_for(std::chrono::milliseconds(25 * attempt));
             }
             if (rc == exdrENDOFFILE) {
               xdr_eof_ = true;
@@ -1198,7 +1216,8 @@ ChunkStreamer::read_next_chunk(size_t chunk_size, Multi_MOL &pro_in,
                   std::to_string(selected_probe.frame_start) + ", time_ps=" +
                   std::to_string(selected_probe.time_ps) + ", rc=" +
                   std::to_string(rc) + ", " + xdr_status_message(rc) +
-                  "; first pass: " + xtc_error + ")");
+                  "; first pass: " + xtc_error + "; recovery detail: " +
+                  recovery_detail + ")");
             }
           }
 

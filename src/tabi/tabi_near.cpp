@@ -437,9 +437,14 @@ bool finite_kernel_values(const KernelValues &kernel) noexcept {
 
 KernelValues centroid_integral(const Panel &target, const Panel &source,
                                double eps_ratio, double kappa) noexcept {
-  KernelValues kernel =
-      point_kernel(target, source, source.x, source.y, source.z, eps_ratio,
-                   kappa);
+  const double sx = source.has_source_quadrature_center ? source.source_x
+                                                        : source.x;
+  const double sy = source.has_source_quadrature_center ? source.source_y
+                                                        : source.y;
+  const double sz = source.has_source_quadrature_center ? source.source_z
+                                                        : source.z;
+  KernelValues kernel = point_kernel(target, source, sx, sy, sz, eps_ratio,
+                                     kappa);
   kernel.k1 *= source.area;
   kernel.k2 *= source.area;
   kernel.k3 *= source.area;
@@ -620,6 +625,99 @@ KernelValues duffy_cpv_integral(const Panel &target, const Panel &source,
   return {raw.g0_minus_gk, eps_ratio * dk_src - d0_src,
           raw.d0_tgt - inv_eps_ratio * raw.dk_tgt,
           raw.mixedk_minus_mixed0};
+}
+
+Panel make_subtriangle_panel(const Panel &source, const Vec3 &a, const Vec3 &b,
+                             const Vec3 &c) noexcept;
+KernelValues triangle_gauss_subdivided_integral(const Panel &target,
+                                                const Panel &source,
+                                                double eps_ratio,
+                                                double kappa) noexcept;
+
+bool is_node_patch_panel(const Panel &panel) noexcept {
+  return panel.node_patch_geometry != nullptr &&
+         panel.node_patch_index != static_cast<std::size_t>(-1);
+}
+
+bool node_patch_adjacent(const Panel &target, const Panel &source) noexcept {
+  if (!is_node_patch_panel(target) || !is_node_patch_panel(source) ||
+      target.node_patch_geometry.get() != source.node_patch_geometry.get())
+    return false;
+  const NodePatchGeometry &geometry = *source.node_patch_geometry;
+  const std::size_t source_node = source.node_patch_index;
+  if (source_node + 1 >= geometry.adjacent_offsets.size())
+    return false;
+  const auto begin = geometry.adjacent_nodes.begin() +
+                     geometry.adjacent_offsets[source_node];
+  const auto end = geometry.adjacent_nodes.begin() +
+                   geometry.adjacent_offsets[source_node + 1];
+  return std::binary_search(begin, end, target.node_patch_index);
+}
+
+Vec3 node_patch_triangle_vertex(const NodePatchGeometry &geometry,
+                                const NodePatchTriangle &triangle,
+                                int local) noexcept {
+  const auto &xyz = geometry.vertex_xyz[
+      triangle.vertices[static_cast<std::size_t>(local)]];
+  return Vec3{xyz[0], xyz[1], xyz[2]};
+}
+
+KernelValues node_patch_near_integral(const Panel &target,
+                                      const Panel &source, double eps_ratio,
+                                      double kappa, bool self_pair) {
+  const NodePatchGeometry &geometry = *source.node_patch_geometry;
+  const std::size_t node = source.node_patch_index;
+  if (node + 1 >= geometry.incident_offsets.size())
+    throw std::runtime_error(
+        "PBE TABI: invalid node-patch incident-triangle topology.");
+  KernelValues out;
+  const std::size_t begin = geometry.incident_offsets[node];
+  const std::size_t end = geometry.incident_offsets[node + 1];
+  for (std::size_t pos = begin; pos < end; ++pos) {
+    const NodePatchTriangle &triangle =
+        geometry.triangles[geometry.incident_triangles[pos]];
+    int local = -1;
+    for (int k = 0; k < 3; ++k) {
+      if (triangle.vertices[static_cast<std::size_t>(k)] == node) {
+        local = k;
+        break;
+      }
+    }
+    if (local < 0)
+      throw std::runtime_error(
+          "PBE TABI: node-patch incidence does not reference its node.");
+    const Vec3 vertex =
+        node_patch_triangle_vertex(geometry, triangle, local);
+    const Vec3 next =
+        node_patch_triangle_vertex(geometry, triangle, (local + 1) % 3);
+    const Vec3 previous =
+        node_patch_triangle_vertex(geometry, triangle, (local + 2) % 3);
+    const Vec3 midpoint_next = 0.5 * (vertex + next);
+    const Vec3 midpoint_previous = 0.5 * (previous + vertex);
+    const Vec3 centroid = (1.0 / 3.0) * (vertex + next + previous);
+    Panel triangle_source = source;
+    triangle_source.nx = triangle.nx;
+    triangle_source.ny = triangle.ny;
+    triangle_source.nz = triangle.nz;
+    triangle_source.node_patch_geometry.reset();
+    triangle_source.node_patch_index = static_cast<std::size_t>(-1);
+    const std::array<Panel, 2> pieces = {
+        make_subtriangle_panel(triangle_source, vertex, midpoint_next,
+                               centroid),
+        make_subtriangle_panel(triangle_source, vertex, centroid,
+                               midpoint_previous)};
+    for (const Panel &piece : pieces) {
+      const KernelValues value =
+          self_pair ? duffy_cpv_integral(target, piece, eps_ratio, kappa, true)
+                    : triangle_gauss_subdivided_integral(target, piece,
+                                                         eps_ratio, kappa);
+      out.k1 += value.k1;
+      out.k2 += value.k2;
+      out.k3 += value.k3;
+      out.k4 += value.k4;
+    }
+  }
+  return out;
 }
 
 [[maybe_unused]] KernelValues
@@ -1173,7 +1271,11 @@ AcceptedKernelValues guarded_one_ring_cpv_integral_decision(
 std::string resolve_near_integration_mode(const std::string &requested,
                                           const std::vector<Panel> &panels) {
   const std::string mode = requested.empty() ? std::string("auto") : requested;
-  const bool triangle_ready = has_all_triangle_geometry(panels);
+  const bool node_patch_ready =
+      !panels.empty() &&
+      std::all_of(panels.begin(), panels.end(), is_node_patch_panel);
+  const bool triangle_ready =
+      has_all_triangle_geometry(panels) || node_patch_ready;
   if (mode == "auto")
     return "centroid";
   if (mode == "centroid")
@@ -1204,7 +1306,10 @@ std::string resolve_quad_buffer_mode(const std::string &requested,
     throw std::runtime_error(
         "PBE TABI: invalid quad-buffer mode; expected auto, off, gauss7, "
         "or adaptive.");
-  if (!has_all_triangle_geometry(panels)) {
+  const bool node_patch_ready =
+      !panels.empty() &&
+      std::all_of(panels.begin(), panels.end(), is_node_patch_panel);
+  if (!has_all_triangle_geometry(panels) && !node_patch_ready) {
     throw std::runtime_error(
         "PBE TABI: -pbe-tabi-quad-buffer requires triangle surface geometry; "
         "use -pbe-tabi-geometry=triangle or quad-buffer=auto/off.");
@@ -1255,9 +1360,14 @@ JcpNearPairKernel evaluate_jcp_near_pair_kernel(
     TreecodeStats *stats) {
   JcpNearPairKernel selected;
   selected.self_pair = source_index == target_index;
+  const bool node_patch_pair =
+      is_node_patch_panel(target) && is_node_patch_panel(source);
   const int shared_vertices =
       selected.self_pair ? 3 : shared_vertex_count(target, source);
-  selected.one_ring = !selected.self_pair && shared_vertices > 0;
+  selected.one_ring =
+      !selected.self_pair &&
+      (node_patch_pair ? node_patch_adjacent(target, source)
+                       : shared_vertices > 0);
   KernelValues kernel;
   bool used_duffy = false;
   bool used_centroid = false;
@@ -1268,7 +1378,21 @@ JcpNearPairKernel evaluate_jcp_near_pair_kernel(
   AcceptedKernelValues block_decision;
   bool has_block_decision = false;
 
-  if (!coupled) {
+  if (node_patch_pair && !coupled) {
+    if (selected.self_pair)
+      return selected;
+    kernel = selected.one_ring
+                 ? node_patch_near_integral(target, source, eps_ratio, 0.0,
+                                            false)
+                 : centroid_integral(target, source, eps_ratio, 0.0);
+    used_duffy = selected.one_ring;
+    used_centroid = !selected.one_ring;
+    subdivisions = selected.one_ring ? 32 : 0;
+  } else if (node_patch_pair && selected.self_pair) {
+    kernel = self_singular_integral(source, kappa);
+    used_duffy = true;
+    subdivisions = 1;
+  } else if (!coupled) {
     if (selected.self_pair)
       return selected;
     kernel = centroid_integral(target, source, eps_ratio, 0.0);

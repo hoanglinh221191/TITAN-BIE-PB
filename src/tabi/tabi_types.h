@@ -28,10 +28,37 @@ struct Atom {
   double radius{0.0};
 };
 
+struct NodePatchTriangle {
+  std::array<std::size_t, 3> vertices{};
+  double nx{0.0};
+  double ny{0.0};
+  double nz{0.0};
+  double area{0.0};
+  std::size_t atom_index{0};
+};
+
+struct NodePatchGeometry {
+  std::vector<std::array<double, 3>> vertex_xyz;
+  std::vector<NodePatchTriangle> triangles;
+  std::vector<std::size_t> incident_offsets;
+  std::vector<std::size_t> incident_triangles;
+  std::vector<std::size_t> adjacent_offsets;
+  std::vector<std::size_t> adjacent_nodes;
+  std::size_t solid_angle_fallbacks{0};
+};
+
 struct Panel {
   double x{0.0};
   double y{0.0};
   double z{0.0};
+  // Optional quadrature center for source integration.  Ordinary triangle
+  // panels use the collocation point above for both roles.  A node-centered
+  // dual patch is collocated at the mesh vertex but its area centroid is the
+  // consistent zeroth/first-moment source location.
+  double source_x{0.0};
+  double source_y{0.0};
+  double source_z{0.0};
+  bool has_source_quadrature_center{false};
   double nx{0.0};
   double ny{0.0};
   double nz{0.0};
@@ -52,7 +79,26 @@ struct Panel {
   std::size_t v1_index{static_cast<std::size_t>(-1)};
   std::size_t v2_index{static_cast<std::size_t>(-1)};
   bool has_triangle_geometry{false};
+  std::shared_ptr<const NodePatchGeometry> node_patch_geometry;
+  std::size_t node_patch_index{static_cast<std::size_t>(-1)};
 };
+
+inline double jcp_lhs_phi_for_panel(const Panel &panel, double eps_ratio,
+                                    double flat_lhs) noexcept {
+  (void)panel;
+  (void)eps_ratio;
+  // The SES is a smooth interface; the analytical trace jump is one half.
+  // A polyhedral vertex solid angle is retained as a mesh-quality audit but
+  // must not replace that smooth-surface jump coefficient.
+  return flat_lhs;
+}
+
+inline double jcp_lhs_phin_for_panel(const Panel &panel, double eps_ratio,
+                                     double flat_lhs) noexcept {
+  (void)panel;
+  (void)eps_ratio;
+  return flat_lhs;
+}
 
 struct Vertex {
   double x{0.0};
@@ -172,13 +218,21 @@ struct Options {
   std::string diagonal_mode{"solid-angle"};
   int surface_point_count{96};
   std::string surface_output{"off"};
+  bool surface_only{false};
   bool highres_surface{false};
+  bool calderon_trace_audit{false};
+  std::string calderon_aux_surface{"off"};
+  double calderon_aux_grid_spacing{1.25};
+  std::string primary_surface{"sphere-patch"};
+  double ses_grid_spacing{0.75};
+  std::size_t ses_max_grid_vertices{4000000};
   std::string sphere_mesh_mode{"auto"};
   int tree_leaf_size{32};
   double tree_opening_theta{0.45};
   int taylor_order{3};
   std::string derivative_mode{"analytic"};
   std::string formulation{"jcp2013"};
+  std::string discretization{"centroid"};
   std::string energy_projection{"boundary"};
   std::string preconditioner{"auto"};
   std::string preconditioner_block_near{"singular"};
@@ -186,6 +240,8 @@ struct Options {
   int preconditioner_overlap_panel_cap{64};
   int preconditioner_ilu_neighbor_cap{192};
   double preconditioner_ilu_drop_tol{0.0};
+  std::string preconditioner_ilu_regularization{"adaptive"};
+  double preconditioner_ilu_regularization_max{1.0e-2};
   int preconditioner_memory_budget_mb{256};
   int preconditioner_coarse_aggregate_cap{16};
   std::string preconditioner_coarse_base{"diagonal"};
@@ -213,6 +269,31 @@ struct Options {
   std::string leaf_block_verify{"off"};
   std::string leaf_mac{"off"};
   std::string fmm_m2l{"off"};
+  std::string fmm_engine{"cartesian"};
+  int kifmm_order{6};
+  double kifmm_equiv_scale{1.05};
+  double kifmm_check_scale{1.60};
+  std::string kifmm_solver{"qr"};
+  std::string kifmm_profile{"off"};
+  std::string kifmm_full_apply{"serial"};
+  std::string kifmm_ilu_graph{"cartesian-near"};
+  int kifmm_hierarchy_order{8};
+  double kifmm_hierarchy_theta{0.6};
+  std::string kifmm_hierarchy_real_panel_guard{"strict-local-check"};
+  double kifmm_hierarchy_guard_margin_factor{0.0};
+  std::string kifmm_hierarchy_tree_stop_policy{"panel-radius-occupancy"};
+  double kifmm_hierarchy_tree_panel_radius_factor{1.5};
+  int kifmm_hierarchy_tree_occupancy_stop{32};
+  std::string kifmm_hierarchy_m2l_eval_policy{"target-check-batched"};
+  std::string kifmm_hierarchy_matrix_cache_policy{"canonical-offset-cache"};
+  double kifmm_hierarchy_matrix_cache_limit_mb{0.0};
+  std::string kifmm_hierarchy_gemm_batch_policy{"per-pair"};
+  std::string kifmm_hierarchy_m2l_parallel_policy{"serial"};
+  int kifmm_hierarchy_m2l_parallel_workers{1};
+  int cartesian_k4_order{5};
+  double cartesian_k4_theta{0.6};
+  double cartesian_k4_geometry_theta{0.4};
+  double cartesian_k4_tail_tol{0.002};
   std::string interaction_mode{"auto"};
   std::string node_bounds{"moment"};
   std::string tree_builder{"grouped-morton"};
@@ -286,6 +367,7 @@ struct Options {
 
 struct Result {
   std::string status{"ok"};
+  bool surface_only{false};
   std::string reaction_energy_source{"tabi_boundary_integral"};
   std::string convergence_reason{"not_started"};
   std::string residual_history{};
@@ -316,6 +398,25 @@ struct Result {
   double surface_quality_enclosed_volume_a3{0.0};
   double surface_quality_enclosed_volume_rel_error_vs_4piR3_over3{0.0};
   double surface_quality_triangle_area_cv{0.0};
+  std::string calderon_trace_space_status{"off"};
+  std::size_t calderon_trace_vertices{0};
+  std::size_t calderon_trace_edges{0};
+  std::size_t calderon_trace_boundary_edges{0};
+  std::size_t calderon_trace_orientation_mismatches{0};
+  std::size_t calderon_trace_nonmanifold_edges{0};
+  std::size_t calderon_trace_unreferenced_vertices{0};
+  std::string calderon_aux_surface_mode{"off"};
+  std::string calderon_aux_trace_status{"off"};
+  std::size_t calderon_aux_panels{0};
+  std::size_t calderon_aux_vertices{0};
+  std::size_t calderon_aux_edges{0};
+  std::size_t calderon_aux_boundary_edges{0};
+  std::size_t calderon_aux_orientation_mismatches{0};
+  std::size_t calderon_aux_nonmanifold_edges{0};
+  std::size_t calderon_aux_unreferenced_vertices{0};
+  std::size_t calderon_aux_grid_vertices{0};
+  double calderon_aux_area_a2{0.0};
+  double calderon_aux_build_ms{0.0};
   std::size_t exposed_points{0};
   std::size_t buried_points{0};
   double total_charge{0.0};
@@ -713,12 +814,10 @@ struct Result {
       accepted_miss_channel_count{};
   std::array<std::size_t, kJcpExpansionChannelCount>
       accepted_miss_channel_panels{};
-  std::array<double, kJcpExpansionChannelCount>
-      accepted_miss_channel_rho_min{};
+  std::array<double, kJcpExpansionChannelCount> accepted_miss_channel_rho_min{};
   std::array<double, kJcpExpansionChannelCount>
       accepted_miss_channel_rho_mean{};
-  std::array<double, kJcpExpansionChannelCount>
-      accepted_miss_channel_rho_max{};
+  std::array<double, kJcpExpansionChannelCount> accepted_miss_channel_rho_max{};
   std::array<double, kJcpExpansionChannelCount>
       accepted_miss_channel_tail_ratio_mean{};
   std::array<double, kJcpExpansionChannelCount>
@@ -807,6 +906,8 @@ struct Result {
   double energy_kt{0.0};
   std::string formulation{"jcp2013"};
   std::string energy_projection{"boundary"};
+  double energy_projection_ms{0.0};
+  std::string energy_projection_kernel{"scalar"};
   std::string preconditioner_requested{"auto"};
   std::string preconditioner_effective{"diagonal"};
   std::string preconditioner_block_near{"singular"};
@@ -814,6 +915,14 @@ struct Result {
   int preconditioner_overlap_panel_cap{64};
   int preconditioner_ilu_neighbor_cap{192};
   double preconditioner_ilu_drop_tol{0.0};
+  std::string preconditioner_ilu_regularization{"adaptive"};
+  double preconditioner_ilu_regularization_max{1.0e-2};
+  double preconditioner_ilu_regularization_selected{0.0};
+  double preconditioner_ilu_regularization_absolute_max{0.0};
+  std::size_t preconditioner_ilu_regularization_attempts{0};
+  std::size_t preconditioner_ilu_regularization_rejected_attempts{0};
+  std::size_t preconditioner_ilu_regularization_shifted_rows{0};
+  std::string preconditioner_ilu_unshifted_failure_stage{"off"};
   std::size_t preconditioner_memory_budget_bytes{0};
   std::size_t preconditioner_estimated_bytes{0};
   std::size_t preconditioner_valid_blocks{0};
@@ -821,6 +930,19 @@ struct Result {
   std::size_t preconditioner_ill_conditioned_blocks{0};
   std::size_t preconditioner_quality_rejected_blocks{0};
   double preconditioner_quality_probe_max_gain{0.0};
+  double preconditioner_quality_probe_rel_residual{0.0};
+  double preconditioner_pivot_ratio_min{0.0};
+  double preconditioner_factor_growth_max{0.0};
+  std::int64_t preconditioner_pivot_ratio_min_row{-1};
+  std::int64_t preconditioner_pivot_ratio_min_column{-1};
+  std::int64_t preconditioner_factor_growth_row{-1};
+  std::int64_t preconditioner_factor_growth_column{-1};
+  std::string preconditioner_quality_failure_stage{"off"};
+  std::int64_t preconditioner_quality_failure_row{-1};
+  std::int64_t preconditioner_quality_failure_column{-1};
+  std::int64_t preconditioner_quality_failure_probe{-1};
+  double preconditioner_quality_failure_probe_gain{0.0};
+  double preconditioner_quality_failure_probe_rel_residual{0.0};
   std::string preconditioner_quality_status{"off"};
   double preconditioner_setup_ms{0.0};
   double preconditioner_apply_ms{0.0};
@@ -862,8 +984,13 @@ struct Result {
   double reference_energy_kcal_mol{0.0};
   double selected_energy_scale{1.0};
   bool fallback_used{false};
+  std::vector<double> atom_reaction_potential_kj_mol_e;
+  std::vector<double> atom_reaction_energy_kj_mol;
+  double atom_reaction_energy_closure_kj_mol{0.0};
+  double atom_reaction_energy_closure_error_kj_mol{0.0};
   std::vector<Panel> output_panels;
   std::vector<double> output_solution;
+  std::vector<double> output_rhs;
 };
 
 struct TreecodeStats {
@@ -1198,12 +1325,10 @@ struct TreecodeStats {
       accepted_miss_channel_count{};
   std::array<std::size_t, kJcpExpansionChannelCount>
       accepted_miss_channel_panels{};
-  std::array<double, kJcpExpansionChannelCount>
-      accepted_miss_channel_rho_min{};
+  std::array<double, kJcpExpansionChannelCount> accepted_miss_channel_rho_min{};
   std::array<double, kJcpExpansionChannelCount>
       accepted_miss_channel_rho_mean{};
-  std::array<double, kJcpExpansionChannelCount>
-      accepted_miss_channel_rho_max{};
+  std::array<double, kJcpExpansionChannelCount> accepted_miss_channel_rho_max{};
   std::array<double, kJcpExpansionChannelCount>
       accepted_miss_channel_tail_ratio_mean{};
   std::array<double, kJcpExpansionChannelCount>
@@ -1294,9 +1419,8 @@ struct TreecodeStats {
 
 inline void merge_near_kernel_block_stats(TreecodeStats &dst,
                                           const TreecodeStats &src) noexcept {
-  auto merge_geometric_means = [](std::size_t old_count,
-                                  std::size_t add_count, double old_value,
-                                  double add_value) noexcept {
+  auto merge_geometric_means = [](std::size_t old_count, std::size_t add_count,
+                                  double old_value, double add_value) noexcept {
     const std::size_t total = old_count + add_count;
     if (total == 0)
       return 0.0;
@@ -1314,12 +1438,10 @@ inline void merge_near_kernel_block_stats(TreecodeStats &dst,
       src.near_geometric_buffer_centroid_pairs;
   if (src.near_geometric_buffer_pairs > 0) {
     if (old_geometric_count == 0 || dst.near_geometric_buffer_min_gap <= 0.0) {
-      dst.near_geometric_buffer_min_gap =
-          src.near_geometric_buffer_min_gap;
+      dst.near_geometric_buffer_min_gap = src.near_geometric_buffer_min_gap;
     } else if (src.near_geometric_buffer_min_gap > 0.0) {
-      dst.near_geometric_buffer_min_gap =
-          std::min(dst.near_geometric_buffer_min_gap,
-                   src.near_geometric_buffer_min_gap);
+      dst.near_geometric_buffer_min_gap = std::min(
+          dst.near_geometric_buffer_min_gap, src.near_geometric_buffer_min_gap);
     }
     dst.near_geometric_buffer_mean_gap_ratio = merge_geometric_means(
         old_geometric_count, src.near_geometric_buffer_pairs,
@@ -1361,14 +1483,14 @@ inline void merge_near_kernel_block_stats(TreecodeStats &dst,
       dst_policy = "centroid_guarded";
     }
   };
-  merge_policy(dst.near_k1_accepted, dst.near_k1_rejected,
-               dst.near_k1_policy, src.near_k1_policy);
-  merge_policy(dst.near_k2_accepted, dst.near_k2_rejected,
-               dst.near_k2_policy, src.near_k2_policy);
-  merge_policy(dst.near_k3_accepted, dst.near_k3_rejected,
-               dst.near_k3_policy, src.near_k3_policy);
-  merge_policy(dst.near_k4_accepted, dst.near_k4_rejected,
-               dst.near_k4_policy, src.near_k4_policy);
+  merge_policy(dst.near_k1_accepted, dst.near_k1_rejected, dst.near_k1_policy,
+               src.near_k1_policy);
+  merge_policy(dst.near_k2_accepted, dst.near_k2_rejected, dst.near_k2_policy,
+               src.near_k2_policy);
+  merge_policy(dst.near_k3_accepted, dst.near_k3_rejected, dst.near_k3_policy,
+               src.near_k3_policy);
+  merge_policy(dst.near_k4_accepted, dst.near_k4_rejected, dst.near_k4_policy,
+               src.near_k4_policy);
   for (std::size_t i = 0; i < dst.near_block_audit.size(); ++i) {
     auto &d = dst.near_block_audit[i];
     const auto &s = src.near_block_audit[i];
@@ -1384,14 +1506,10 @@ inline void merge_near_kernel_block_stats(TreecodeStats &dst,
     if (s.max_centroid_ref_rel > d.max_centroid_ref_rel)
       d.max_centroid_ref_rel = s.max_centroid_ref_rel;
     d.k2_laplace_sign_ok += s.k2_laplace_sign_ok;
-    if (s.max_k2_yukawa_smooth_ref_rel >
-        d.max_k2_yukawa_smooth_ref_rel)
-      d.max_k2_yukawa_smooth_ref_rel =
-          s.max_k2_yukawa_smooth_ref_rel;
-    if (s.max_k2_orientation_pair_ref_rel >
-        d.max_k2_orientation_pair_ref_rel)
-      d.max_k2_orientation_pair_ref_rel =
-          s.max_k2_orientation_pair_ref_rel;
+    if (s.max_k2_yukawa_smooth_ref_rel > d.max_k2_yukawa_smooth_ref_rel)
+      d.max_k2_yukawa_smooth_ref_rel = s.max_k2_yukawa_smooth_ref_rel;
+    if (s.max_k2_orientation_pair_ref_rel > d.max_k2_orientation_pair_ref_rel)
+      d.max_k2_orientation_pair_ref_rel = s.max_k2_orientation_pair_ref_rel;
     d.sample_count += s.sample_count;
   }
   for (std::size_t i = 0; i < dst.geometric_near_audit.size(); ++i) {
@@ -1500,8 +1618,7 @@ struct TreeInteractionLists {
            leaf_tile_offsets.size() == panel_count + 1 &&
            leaf_tile_exclusion_offsets.size() ==
                leaf_tile_node_indices.size() + 1 &&
-           leaf_tile_span_offsets.size() ==
-               leaf_tile_node_indices.size() + 1 &&
+           leaf_tile_span_offsets.size() == leaf_tile_node_indices.size() + 1 &&
            smooth_leaf_offsets.size() == panel_count + 1 &&
            far_offsets.size() == panel_count + 1;
   }
@@ -1528,10 +1645,8 @@ struct TreePanelCache {
     return x.size() == panel_count && y.size() == panel_count &&
            z.size() == panel_count && nx.size() == panel_count &&
            ny.size() == panel_count && nz.size() == panel_count &&
-           area.size() == panel_count &&
-           ordered_x.size() == panel_count &&
-           ordered_y.size() == panel_count &&
-           ordered_z.size() == panel_count &&
+           area.size() == panel_count && ordered_x.size() == panel_count &&
+           ordered_y.size() == panel_count && ordered_z.size() == panel_count &&
            ordered_nx.size() == panel_count &&
            ordered_ny.size() == panel_count &&
            ordered_nz.size() == panel_count &&
@@ -1645,140 +1760,80 @@ std::vector<Panel> build_surface(const std::vector<Atom> &atoms,
                                  TitanExecutor *executor = nullptr);
 
 void apply_direct_operator(const std::vector<Panel> &panels,
-                           const std::vector<double> &density,
-                           double contrast, double kappa,
-                           TitanExecutor &executor,
+                           const std::vector<double> &density, double contrast,
+                           double kappa, TitanExecutor &executor,
                            std::vector<double> &out,
                            TreecodeStats *stats = nullptr);
 
-TreeWorkspace build_tree_workspace(const std::vector<Panel> &panels,
-                                   TitanExecutor &executor,
-                                   std::size_t leaf_size = 32,
-                                   double opening_theta = 0.45,
-                                   const std::string &leaf_near_policy =
-                                       "auto",
-                                   const std::string &leaf_panel_kernel =
-                                       "auto",
-                                   const std::string &adaptive_level =
-                                       "strict",
-                                   const std::string &quad_buffer = "off",
-                                   const std::string &interaction_mode =
-                                       "cached",
-                                   const std::string &node_bounds_mode =
-                                       "moment",
-                                   const std::string &tree_builder =
-                                       "grouped-morton",
-                                   const std::string &mac_safety = "off",
-                                   double mac_gap_factor = 1.5,
-                                   const std::string &moment_audit = "off",
-                                   const std::string &expansion_center =
-                                       "legacy",
-                                   const std::string &fragmentation_safety =
-                                       "off",
-                                   const std::string &expansion_audit = "off",
-                                   int expansion_audit_sample_count = 512,
-                                   int expansion_audit_max_panels = 2048,
-                                   const std::string &moment_construction =
-                                       "translated",
-                                   const std::string &moment_sum = "naive",
-                                   const std::string &convergence_audit =
-                                       "off",
-                                   const std::string &convergence_safety =
-                                       "off",
-                                   double convergence_rho_cap = 0.0,
-                                   double mac_aspect_cap = 0.0,
-                                   const std::string &convergence_estimator =
-                                       "off",
-                                   double convergence_tail_threshold = 1.0e4,
-                                   double convergence_estimator_error_cap =
-                                       1.0e-3,
-                                   double convergence_unstable_rho_cap = 0.25,
-                                   const std::string &convergence_calibration =
-                                       "stage3j",
-                                   const std::string &cluster_policy = "off",
-                                   const std::string
-                                       &convergence_dielectric_amp = "off",
-                                   int target_batch_size = 1,
-                                   int leaf_pair_min_source_panels = 64,
-                                   int leaf_pair_min_targets = 4,
-                                   const std::string
-                                       &convergence_estimator_model =
-                                           "stage3l",
-                                   const std::string
-                                       &expansion_audit_channel = "off",
-                                   const std::string
-                                       &convergence_channel_calibration =
-                                           "stage3m",
-                                   const std::string
-                                       &channel_missed_semantics = "legacy",
-                                   const std::string
-                                       &convergence_split_policy = "global",
-                                   const std::string
-                                       &accepted_miss_diagnostics = "off",
-                                   double convergence_k3_accepted_rho_cap =
-                                       0.0,
-                                   const std::string
-                                       &mac_distance_policy = "center",
-                                   double mac_surface_margin_factor = 0.25,
-                                   const std::string
-                                       &mac_surface_margin_policy = "all",
-                                   double mac_surface_margin_aspect_threshold =
-                                       3.0,
-                                   double mac_surface_margin_rho_trigger =
-                                       0.55,
-                                   double accepted_miss_absolute_floor =
-                                       1.0e-7,
-                                   const std::string &leaf_pair_kernel =
-                                       "auto",
-                                   const std::string &leaf_kernel_profile =
-                                       "off",
-                                   const std::string &leaf_work_profile =
-                                       "off",
-                                   const std::string &jcp_direct_kernel =
-                                       "baseline",
-                                   const std::string
-                                       &leaf_pair_selection_profile = "off",
-                                   const std::string &leaf_pair_probe_cache =
-                                       "off",
-                                   const std::string &leaf_pair_target_group =
-                                       "scan",
-                                   int leaf_pair_max_lookahead = 32,
-                                   const std::string
-                                       &leaf_pair_directness_probe =
-                                           "full-traversal",
-                                   const std::string
-                                       &leaf_pair_directness_cache = "off",
-                                   const std::string
-                                       &leaf_pair_directness_verify = "off",
-                                   const std::string &leaf_pair_scheduler =
-                                       "inline-select",
-                                   int leaf_pair_worklist_max_active = 2048,
-                                   const std::string
-                                       &leaf_pair_worklist_verify = "off",
-                                   const std::string &leaf_block_verify =
-                                       "off",
-                                   double mac_surface_margin_soft_aspect_threshold =
-                                       0.0,
-                                   double mac_surface_margin_soft_rho_trigger =
-                                       0.0,
-                                   double mac_surface_margin_soft_factor =
-                                       0.10,
-                                   const std::string
-                                       &convergence_split_selectivity =
-                                           "legacy",
-                                   double convergence_split_absolute_floor =
-                                       0.0,
-                                   const std::string
-                                       &convergence_overreject_audit = "off",
-                                   const std::string
-                                       &convergence_overreject_detail = "off",
-                                   const std::string
-                                       &convergence_shape_audit = "off",
-                                   const std::string
-                                       &convergence_kernel_response_audit =
-                                           "off",
-                                   const std::string &leaf_mac = "off",
-                                   const std::string &fmm_m2l = "off");
+TreeWorkspace build_tree_workspace(
+    const std::vector<Panel> &panels, TitanExecutor &executor,
+    std::size_t leaf_size = 32, double opening_theta = 0.45,
+    const std::string &leaf_near_policy = "auto",
+    const std::string &leaf_panel_kernel = "auto",
+    const std::string &adaptive_level = "strict",
+    const std::string &quad_buffer = "off",
+    const std::string &interaction_mode = "cached",
+    const std::string &node_bounds_mode = "moment",
+    const std::string &tree_builder = "grouped-morton",
+    const std::string &mac_safety = "off", double mac_gap_factor = 1.5,
+    const std::string &moment_audit = "off",
+    const std::string &expansion_center = "legacy",
+    const std::string &fragmentation_safety = "off",
+    const std::string &expansion_audit = "off",
+    int expansion_audit_sample_count = 512,
+    int expansion_audit_max_panels = 2048,
+    const std::string &moment_construction = "translated",
+    const std::string &moment_sum = "naive",
+    const std::string &convergence_audit = "off",
+    const std::string &convergence_safety = "off",
+    double convergence_rho_cap = 0.0, double mac_aspect_cap = 0.0,
+    const std::string &convergence_estimator = "off",
+    double convergence_tail_threshold = 1.0e4,
+    double convergence_estimator_error_cap = 1.0e-3,
+    double convergence_unstable_rho_cap = 0.25,
+    const std::string &convergence_calibration = "stage3j",
+    const std::string &cluster_policy = "off",
+    const std::string &convergence_dielectric_amp = "off",
+    int target_batch_size = 1, int leaf_pair_min_source_panels = 64,
+    int leaf_pair_min_targets = 4,
+    const std::string &convergence_estimator_model = "stage3l",
+    const std::string &expansion_audit_channel = "off",
+    const std::string &convergence_channel_calibration = "stage3m",
+    const std::string &channel_missed_semantics = "legacy",
+    const std::string &convergence_split_policy = "global",
+    const std::string &accepted_miss_diagnostics = "off",
+    double convergence_k3_accepted_rho_cap = 0.0,
+    const std::string &mac_distance_policy = "center",
+    double mac_surface_margin_factor = 0.25,
+    const std::string &mac_surface_margin_policy = "all",
+    double mac_surface_margin_aspect_threshold = 3.0,
+    double mac_surface_margin_rho_trigger = 0.55,
+    double accepted_miss_absolute_floor = 1.0e-7,
+    const std::string &leaf_pair_kernel = "auto",
+    const std::string &leaf_kernel_profile = "off",
+    const std::string &leaf_work_profile = "off",
+    const std::string &jcp_direct_kernel = "baseline",
+    const std::string &leaf_pair_selection_profile = "off",
+    const std::string &leaf_pair_probe_cache = "off",
+    const std::string &leaf_pair_target_group = "scan",
+    int leaf_pair_max_lookahead = 32,
+    const std::string &leaf_pair_directness_probe = "full-traversal",
+    const std::string &leaf_pair_directness_cache = "off",
+    const std::string &leaf_pair_directness_verify = "off",
+    const std::string &leaf_pair_scheduler = "inline-select",
+    int leaf_pair_worklist_max_active = 2048,
+    const std::string &leaf_pair_worklist_verify = "off",
+    const std::string &leaf_block_verify = "off",
+    double mac_surface_margin_soft_aspect_threshold = 0.0,
+    double mac_surface_margin_soft_rho_trigger = 0.0,
+    double mac_surface_margin_soft_factor = 0.10,
+    const std::string &convergence_split_selectivity = "legacy",
+    double convergence_split_absolute_floor = 0.0,
+    const std::string &convergence_overreject_audit = "off",
+    const std::string &convergence_overreject_detail = "off",
+    const std::string &convergence_shape_audit = "off",
+    const std::string &convergence_kernel_response_audit = "off",
+    const std::string &leaf_mac = "off", const std::string &fmm_m2l = "off");
 
 struct FmmM2lSingleMatvecStats {
   std::size_t near_pairs{0};
@@ -1812,9 +1867,8 @@ void apply_jcp_fmm_m2l_single_matvec(
     const std::vector<Panel> &panels, const std::vector<double> &unknowns,
     double eps_ratio, double kappa, double lhs_phi, double lhs_phin,
     std::size_t leaf_size, double opening_theta, int expansion_order,
-    TitanExecutor &executor,
-    std::vector<double> &out, FmmM2lSingleMatvecStats *stats = nullptr,
-    bool coupled = true,
+    TitanExecutor &executor, std::vector<double> &out,
+    FmmM2lSingleMatvecStats *stats = nullptr, bool coupled = true,
     std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
         *context_cache = nullptr,
     const std::string &near_integration = "centroid",
@@ -1823,21 +1877,17 @@ void apply_jcp_fmm_m2l_single_matvec(
 void apply_treecode_operator(const std::vector<Panel> &panels,
                              const std::vector<double> &density,
                              double contrast, double kappa,
-                             const TreeWorkspace &tree,
-                             TitanExecutor &executor,
+                             const TreeWorkspace &tree, TitanExecutor &executor,
                              std::vector<double> &out,
                              TreecodeStats *stats = nullptr);
 
-void apply_jcp_treecode_operator(const std::vector<Panel> &panels,
-                                 const std::vector<double> &unknowns,
-                                 double eps_ratio, double kappa,
-                                 double lhs_phi, double lhs_phin,
-                                 bool coupled, const TreeWorkspace &tree,
-                                 const std::string &near_integration,
-                                 const std::string &quad_buffer,
-                                 TitanExecutor &executor,
-                                 std::vector<double> &out,
-                                 TreecodeStats *stats = nullptr);
+void apply_jcp_treecode_operator(
+    const std::vector<Panel> &panels, const std::vector<double> &unknowns,
+    double eps_ratio, double kappa, double lhs_phi, double lhs_phin,
+    bool coupled, const TreeWorkspace &tree,
+    const std::string &near_integration, const std::string &quad_buffer,
+    TitanExecutor &executor, std::vector<double> &out,
+    TreecodeStats *stats = nullptr);
 
 Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                        TitanExecutor &executor);

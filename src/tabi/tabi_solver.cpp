@@ -1,7 +1,9 @@
-#include "tabi_types.h"
-#include "tabi_fmm_m2l_prototype.h"
+#include "tabi_fmm_kifmm_channel_hybrid_operator.h"
+#include "tabi_fmm_kifmm_full_panel_matvec.h"
 #include "tabi_fmm_m2l_preconditioner.h"
+#include "tabi_fmm_m2l_prototype.h"
 #include "tabi_preconditioner.h"
+#include "tabi_types.h"
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -16,23 +18,27 @@
 #endif
 
 #include "tabi_near.h"
+#include "tabi_node_patch.h"
 
+#include "../aligned_allocator.h"
 #include "../titan_executor.h"
+#include "../titan_simd_dispatch.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <functional>
 #include <iomanip>
 #include <limits>
-#include <memory>
 #include <map>
+#include <memory>
 #include <numeric>
-#include <stdexcept>
 #include <sstream>
+#include <stdexcept>
 #include <tuple>
 #include <vector>
 
@@ -75,10 +81,10 @@ struct AttributionLevelKey {
   std::string mac_bin;
 
   bool operator<(const AttributionLevelKey &other) const noexcept {
-    return std::tie(approximation_mode, probe, component, channel,
-                    source_depth, mac_bin) <
-           std::tie(other.approximation_mode, other.probe, other.component,
-                    other.channel, other.source_depth, other.mac_bin);
+    return std::tie(approximation_mode, probe, component, channel, source_depth,
+                    mac_bin) < std::tie(other.approximation_mode, other.probe,
+                                        other.component, other.channel,
+                                        other.source_depth, other.mac_bin);
   }
 };
 
@@ -87,15 +93,13 @@ void add_attribution_value(AttributionAggregate &aggregate, double approximate,
   const double error = approximate - direct;
   aggregate.error_sq += error * error;
   aggregate.reference_sq += direct * direct;
-  aggregate.max_abs_error =
-      std::max(aggregate.max_abs_error, std::abs(error));
+  aggregate.max_abs_error = std::max(aggregate.max_abs_error, std::abs(error));
   ++aggregate.count;
 }
 
 double attribution_rel_rms(const AttributionAggregate &aggregate) noexcept {
   return std::sqrt(std::max(0.0, aggregate.error_sq)) /
-         std::max(1.0e-300,
-                  std::sqrt(std::max(0.0, aggregate.reference_sq)));
+         std::max(1.0e-300, std::sqrt(std::max(0.0, aggregate.reference_sq)));
 }
 
 std::string attribution_mac_bin(double rho) {
@@ -116,8 +120,8 @@ void write_operator_attribution_outputs(
     const std::vector<titan::tabi::fmm_m2l::JcpOperatorAttributionResult>
         &results,
     double aggregate_audit_rel, double aggregate_direct_sq) {
-  static constexpr std::array<const char *, 4> channel_names{
-      "K1", "K2", "K3", "K4"};
+  static constexpr std::array<const char *, 4> channel_names{"K1", "K2", "K3",
+                                                             "K4"};
   std::ofstream samples("pbe_tabi_operator_attribution_samples.csv",
                         std::ios::out | std::ios::trunc);
   std::ofstream summary("pbe_tabi_operator_attribution_summary.csv",
@@ -128,12 +132,15 @@ void write_operator_attribution_outputs(
     throw std::runtime_error(
         "PBE TABI: failed to open sampled-detail attribution outputs.");
   }
-  samples << "approximation_mode,configured_expansion_order,implemented_far_moment_degree,probe,"
-             "target_panel,row_component,region,channel,source_node,"
-             "source_depth,source_panels,distance_A,source_radius_A,mac_ratio,"
-             "expansion_distance_A,target_expansion_radius_A,source_expansion_radius_A,"
-             "target_center_offset_A,source_center_offset_A,expansion_mac_ratio,"
-             "approximate,direct,error,relative_error\n";
+  samples
+      << "approximation_mode,configured_expansion_order,implemented_far_moment_"
+         "degree,probe,"
+         "target_panel,row_component,region,channel,source_node,"
+         "source_depth,source_panels,distance_A,source_radius_A,mac_ratio,"
+         "expansion_distance_A,target_expansion_radius_A,source_expansion_"
+         "radius_A,"
+         "target_center_offset_A,source_center_offset_A,expansion_mac_ratio,"
+         "approximate,direct,error,relative_error\n";
 
   std::map<AttributionSummaryKey, AttributionAggregate> aggregates;
   std::map<AttributionLevelKey, AttributionAggregate> level_aggregates;
@@ -149,8 +156,7 @@ void write_operator_attribution_outputs(
     result_by_probe[{result.approximation_mode, result.probe}] = &result;
     for (const auto &record : result.records) {
       auto &target_total = target_totals[{result.approximation_mode,
-                                          record.probe,
-                                          record.target_panel}];
+                                          record.probe, record.target_panel}];
       for (std::size_t channel = 0; channel < channel_names.size(); ++channel) {
         const std::string component = channel < 2 ? "phi" : "phin";
         const double approximate = record.approximate[channel];
@@ -171,9 +177,8 @@ void write_operator_attribution_outputs(
                 << record.source_expansion_radius << ','
                 << record.target_center_offset << ','
                 << record.source_center_offset << ','
-                << record.expansion_mac_ratio << ','
-                << approximate << ',' << direct << ',' << error << ','
-                << relative << '\n';
+                << record.expansion_mac_ratio << ',' << approximate << ','
+                << direct << ',' << error << ',' << relative << '\n';
         AttributionSummaryKey key{result.approximation_mode, record.probe,
                                   component, record.region,
                                   channel_names[channel]};
@@ -183,10 +188,12 @@ void write_operator_attribution_outputs(
         target_total.first[channel] += approximate;
         target_total.second[channel] += direct;
         if (record.region == "far") {
-          AttributionLevelKey level_key{
-              result.approximation_mode, record.probe, component,
-              channel_names[channel],
-              record.source_depth, attribution_mac_bin(record.mac_ratio)};
+          AttributionLevelKey level_key{result.approximation_mode,
+                                        record.probe,
+                                        component,
+                                        channel_names[channel],
+                                        record.source_depth,
+                                        attribution_mac_bin(record.mac_ratio)};
           add_attribution_value(level_aggregates[level_key], approximate,
                                 direct);
         }
@@ -200,86 +207,87 @@ void write_operator_attribution_outputs(
     for (std::size_t component_index = 0; component_index < 2;
          ++component_index) {
       const std::size_t first = component_index == 0 ? 0 : 2;
-      const double approximate =
-          values.first[first] + values.first[first + 1];
+      const double approximate = values.first[first] + values.first[first + 1];
       const double direct = values.second[first] + values.second[first + 1];
-      add_attribution_value(
-          aggregates[{approximation_mode, probe,
-                      component_index == 0 ? "phi" : "phin",
-                      "total", "aggregate"}],
-          approximate, direct);
-      add_attribution_value(aggregates[{approximation_mode, probe, "both",
+      add_attribution_value(aggregates[{approximation_mode, probe,
+                                        component_index == 0 ? "phi" : "phin",
                                         "total", "aggregate"}],
                             approximate, direct);
+      add_attribution_value(
+          aggregates[{approximation_mode, probe, "both", "total", "aggregate"}],
+          approximate, direct);
     }
   }
 
-  summary << "approximation_mode,configured_expansion_order,implemented_far_moment_degree,probe,"
-             "row_component,region,channel,samples,error_rms,reference_rms,"
-             "relative_rms,max_abs_error,error_fraction,recomposition_rel_error,"
-             "aggregate_audit_rel,reference_gap,moment_build_seconds,far_evaluation_seconds,"
-             "m2l_seconds,l2p_seconds,local_target_leaves,local_m2l_pairs,"
-             "fmm_local_mode,fmm_local_source_order,fmm_local_target_order,"
-             "fmm_local_kernel_derivative_order,fmm_local_target_leaves,"
-             "fmm_local_m2l_pairs,fmm_local_moment_seconds,fmm_local_m2l_seconds,"
-             "fmm_local_l2p_seconds,fmm_local_finite_outputs,"
-             "fmm_local_refine_mode,fmm_local_refine_tolerance,"
-             "fmm_local_tail_ratio_before,fmm_local_tail_ratio_after,"
-             "fmm_local_refined_cells,fmm_local_split_children,"
-             "fmm_local_direct_fallback_panels,fmm_local_direct_fallback_pairs,"
-             "fmm_local_far_pairs_before,"
-             "fmm_local_far_pairs_after,fmm_local_refinement_seconds,"
-             "fmm_local_plan_hash,fmm_local_plan_build_count,"
-             "fmm_local_static_probe_count,fmm_local_refine_probe_mode,"
-             "fmm_local_solution_probe_used,"
-             "fmm_local_linf_max_abs_tail,"
-             "fmm_local_linf_max_relative_tail,"
-             "fmm_local_linf_outlier_panels,"
-             "fmm_local_geometry_guard,fmm_local_geometry_theta,"
-             "fmm_local_geometry_guard_rejected_cells,"
-             "fmm_local_geometry_guard_direct_fallback_pairs,"
-             "fmm_local_geometry_gap_min,fmm_local_geometry_ratio_max,"
-             "fmm_local_cache_mode,"
-             "fmm_local_cache_layout,fmm_local_cache_operator_bytes,"
-             "fmm_local_cache_uncompressed_estimated_bytes,"
-             "fmm_local_cache_compression_ratio,"
-             "fmm_local_cache_far_pair_offsets,"
-             "fmm_local_cache_operators,fmm_local_cache_bytes,"
-             "fmm_local_cache_build_count,fmm_local_cache_hits,"
-             "fmm_local_cache_tile_bytes,fmm_local_cache_tile_count,"
-             "fmm_local_cache_tile_builds,fmm_local_cache_tile_seconds,"
-             "fmm_local_cache_build_seconds,"
-             "fmm_local_plan_seconds,fmm_local_plan_builder,"
-             "fmm_local_plan_probe_moment_seconds,"
-             "fmm_local_plan_pair_metric_seconds,"
-             "fmm_local_plan_refinement_seconds,"
-             "fmm_local_plan_pair_metric_evaluations,"
-             "fmm_local_plan_pair_metric_cache_hits,"
-             "fmm_local_plan_refinement_iterations,"
-             "fmm_local_plan_metric_cache_peak_bytes,"
-             "fmm_local_plan_parallel_target_leaves,"
-             "fmm_local_cache_seconds,"
-             "fmm_local_candidate_apply_seconds,"
-             "fmm_local_candidate_repeat_count,"
-             "fmm_local_candidate_median_apply_seconds,"
-             "fmm_local_candidate_direct_reference_seconds,"
-             "fmm_local_fallback_requested,fmm_local_fallback_effective,"
-             "fmm_local_fallback_worklist_hash,"
-             "fmm_local_fallback_worklist_build_count,"
-             "fmm_local_fallback_tasks,fmm_local_fallback_metadata_bytes,"
-             "fmm_local_fallback_base_near_pairs,"
-             "fmm_local_fallback_refined_pairs,"
-             "fmm_local_fallback_vectorized_sources,"
-             "fmm_local_fallback_vectorized_lanes,"
-             "fmm_local_fallback_scalar_self_pairs,"
-             "fmm_local_fallback_seconds\n";
+  summary
+      << "approximation_mode,configured_expansion_order,implemented_far_moment_"
+         "degree,probe,"
+         "row_component,region,channel,samples,error_rms,reference_rms,"
+         "relative_rms,max_abs_error,error_fraction,recomposition_rel_error,"
+         "aggregate_audit_rel,reference_gap,moment_build_seconds,far_"
+         "evaluation_seconds,"
+         "m2l_seconds,l2p_seconds,local_target_leaves,local_m2l_pairs,"
+         "fmm_local_mode,fmm_local_source_order,fmm_local_target_order,"
+         "fmm_local_kernel_derivative_order,fmm_local_target_leaves,"
+         "fmm_local_m2l_pairs,fmm_local_moment_seconds,fmm_local_m2l_seconds,"
+         "fmm_local_l2p_seconds,fmm_local_finite_outputs,"
+         "fmm_local_refine_mode,fmm_local_refine_tolerance,"
+         "fmm_local_tail_ratio_before,fmm_local_tail_ratio_after,"
+         "fmm_local_refined_cells,fmm_local_split_children,"
+         "fmm_local_direct_fallback_panels,fmm_local_direct_fallback_pairs,"
+         "fmm_local_far_pairs_before,"
+         "fmm_local_far_pairs_after,fmm_local_refinement_seconds,"
+         "fmm_local_plan_hash,fmm_local_plan_build_count,"
+         "fmm_local_static_probe_count,fmm_local_refine_probe_mode,"
+         "fmm_local_solution_probe_used,"
+         "fmm_local_linf_max_abs_tail,"
+         "fmm_local_linf_max_relative_tail,"
+         "fmm_local_linf_outlier_panels,"
+         "fmm_local_geometry_guard,fmm_local_geometry_theta,"
+         "fmm_local_geometry_guard_rejected_cells,"
+         "fmm_local_geometry_guard_direct_fallback_pairs,"
+         "fmm_local_geometry_gap_min,fmm_local_geometry_ratio_max,"
+         "fmm_local_cache_mode,"
+         "fmm_local_cache_layout,fmm_local_cache_operator_bytes,"
+         "fmm_local_cache_uncompressed_estimated_bytes,"
+         "fmm_local_cache_compression_ratio,"
+         "fmm_local_cache_far_pair_offsets,"
+         "fmm_local_cache_operators,fmm_local_cache_bytes,"
+         "fmm_local_cache_build_count,fmm_local_cache_hits,"
+         "fmm_local_cache_tile_bytes,fmm_local_cache_tile_count,"
+         "fmm_local_cache_tile_builds,fmm_local_cache_tile_seconds,"
+         "fmm_local_cache_build_seconds,"
+         "fmm_local_plan_seconds,fmm_local_plan_builder,"
+         "fmm_local_plan_probe_moment_seconds,"
+         "fmm_local_plan_pair_metric_seconds,"
+         "fmm_local_plan_refinement_seconds,"
+         "fmm_local_plan_pair_metric_evaluations,"
+         "fmm_local_plan_pair_metric_cache_hits,"
+         "fmm_local_plan_refinement_iterations,"
+         "fmm_local_plan_metric_cache_peak_bytes,"
+         "fmm_local_plan_parallel_target_leaves,"
+         "fmm_local_cache_seconds,"
+         "fmm_local_candidate_apply_seconds,"
+         "fmm_local_candidate_repeat_count,"
+         "fmm_local_candidate_median_apply_seconds,"
+         "fmm_local_candidate_direct_reference_seconds,"
+         "fmm_local_fallback_requested,fmm_local_fallback_effective,"
+         "fmm_local_fallback_worklist_hash,"
+         "fmm_local_fallback_worklist_build_count,"
+         "fmm_local_fallback_tasks,fmm_local_fallback_metadata_bytes,"
+         "fmm_local_fallback_base_near_pairs,"
+         "fmm_local_fallback_refined_pairs,"
+         "fmm_local_fallback_vectorized_sources,"
+         "fmm_local_fallback_vectorized_lanes,"
+         "fmm_local_fallback_scalar_self_pairs,"
+         "fmm_local_fallback_seconds\n";
   for (const auto &[key, aggregate] : aggregates) {
     const auto *result =
         result_by_probe.at({key.approximation_mode, key.probe});
     const double error_rms =
-        aggregate.count > 0
-            ? std::sqrt(aggregate.error_sq / static_cast<double>(aggregate.count))
-            : 0.0;
+        aggregate.count > 0 ? std::sqrt(aggregate.error_sq /
+                                        static_cast<double>(aggregate.count))
+                            : 0.0;
     const double reference_rms =
         aggregate.count > 0 ? std::sqrt(aggregate.reference_sq /
                                         static_cast<double>(aggregate.count))
@@ -302,8 +310,7 @@ void write_operator_attribution_outputs(
                 key.approximation_mode == "legacy_degree1"
             ? std::abs(attribution_audit_rel - aggregate_audit_rel)
             : 0.0;
-    const bool local_p4 =
-        result->approximation_mode.find("local_m2l_p4") == 0;
+    const bool local_p4 = result->approximation_mode.find("local_m2l_p4") == 0;
     summary << result->approximation_mode << ','
             << result->configured_expansion_order << ','
             << result->implemented_far_moment_degree << ',' << key.probe << ','
@@ -316,17 +323,15 @@ void write_operator_attribution_outputs(
             << ',' << result->far_evaluation_seconds << ','
             << result->m2l_seconds << ',' << result->l2p_seconds << ','
             << result->local_target_leaves << ',' << result->local_m2l_pairs
-            << ','
-            << (local_p4 ? "audit-p4" : "off")
-            << ','
+            << ',' << (local_p4 ? "audit-p4" : "off") << ','
             << (local_p4 ? result->local_source_order : 0) << ','
             << (local_p4 ? result->local_target_order : 0) << ','
             << (local_p4 ? result->local_kernel_derivative_order : 0) << ','
             << result->local_target_leaves << ',' << result->local_m2l_pairs
-            << ',' << result->moment_build_seconds << ','
-            << result->m2l_seconds << ',' << result->l2p_seconds << ','
-            << (result->finite_outputs ? "true" : "false")
-            << ',' << result->local_refine_mode << ','
+            << ',' << result->moment_build_seconds << ',' << result->m2l_seconds
+            << ',' << result->l2p_seconds << ','
+            << (result->finite_outputs ? "true" : "false") << ','
+            << result->local_refine_mode << ','
             << result->local_refine_tolerance << ','
             << result->local_tail_ratio_before << ','
             << result->local_tail_ratio_after << ','
@@ -337,9 +342,8 @@ void write_operator_attribution_outputs(
             << result->local_far_pairs_before << ','
             << result->local_far_pairs_after << ','
             << result->local_refinement_seconds << ','
-            << result->local_plan_hash << ','
-            << result->local_plan_build_count << ','
-            << result->local_static_probe_count << ','
+            << result->local_plan_hash << ',' << result->local_plan_build_count
+            << ',' << result->local_static_probe_count << ','
             << result->local_refine_probe_mode << ','
             << (result->local_solution_probe_used ? "true" : "false") << ','
             << result->local_linf_max_abs_tail << ','
@@ -351,23 +355,19 @@ void write_operator_attribution_outputs(
             << result->local_geometry_guard_direct_fallback_pairs << ','
             << result->local_geometry_gap_min << ','
             << result->local_geometry_ratio_max << ','
-            << result->local_cache_mode << ','
-            << result->local_cache_layout << ','
-            << result->local_cache_operator_bytes << ','
+            << result->local_cache_mode << ',' << result->local_cache_layout
+            << ',' << result->local_cache_operator_bytes << ','
             << result->local_cache_uncompressed_estimated_bytes << ','
             << result->local_cache_compression_ratio << ','
             << result->local_cache_far_pair_offsets << ','
-            << result->local_cache_operators << ','
-            << result->local_cache_bytes << ','
-            << result->local_cache_build_count << ','
-            << result->local_cache_hits << ','
-            << result->local_cache_tile_bytes << ','
-            << result->local_cache_tile_count << ','
+            << result->local_cache_operators << ',' << result->local_cache_bytes
+            << ',' << result->local_cache_build_count << ','
+            << result->local_cache_hits << ',' << result->local_cache_tile_bytes
+            << ',' << result->local_cache_tile_count << ','
             << result->local_cache_tile_builds << ','
             << result->local_cache_tile_seconds << ','
-            << result->local_cache_seconds << ','
-            << result->local_plan_seconds << ','
-            << result->local_plan_builder << ','
+            << result->local_cache_seconds << ',' << result->local_plan_seconds
+            << ',' << result->local_plan_builder << ','
             << result->local_plan_probe_moment_seconds << ','
             << result->local_plan_pair_metric_seconds << ','
             << result->local_plan_refinement_seconds << ','
@@ -392,20 +392,20 @@ void write_operator_attribution_outputs(
             << result->local_fallback_vectorized_sources << ','
             << result->local_fallback_vectorized_lanes << ','
             << result->local_fallback_scalar_self_pairs << ','
-            << result->local_fallback_seconds
-            << '\n';
+            << result->local_fallback_seconds << '\n';
   }
 
-  levels << "approximation_mode,configured_expansion_order,implemented_far_moment_degree,probe,"
+  levels << "approximation_mode,configured_expansion_order,implemented_far_"
+            "moment_degree,probe,"
             "row_component,channel,source_depth,mac_bin,samples,error_rms,"
             "reference_rms,relative_rms,max_abs_error\n";
   for (const auto &[key, aggregate] : level_aggregates) {
     const auto *result =
         result_by_probe.at({key.approximation_mode, key.probe});
     const double error_rms =
-        aggregate.count > 0
-            ? std::sqrt(aggregate.error_sq / static_cast<double>(aggregate.count))
-            : 0.0;
+        aggregate.count > 0 ? std::sqrt(aggregate.error_sq /
+                                        static_cast<double>(aggregate.count))
+                            : 0.0;
     const double reference_rms =
         aggregate.count > 0 ? std::sqrt(aggregate.reference_sq /
                                         static_cast<double>(aggregate.count))
@@ -491,12 +491,11 @@ void parallel_for_each_index(std::size_t n, TitanExecutor &executor,
     return;
   }
   const std::size_t workers = solver_workers(executor, n);
-  executor.parallel_for(
-      n, workers, kParallelVectorThreshold,
-      [&](std::size_t, std::size_t begin, std::size_t end) {
-        for (std::size_t i = begin; i < end; ++i)
-          fn(i);
-      });
+  executor.parallel_for(n, workers, kParallelVectorThreshold,
+                        [&](std::size_t, std::size_t begin, std::size_t end) {
+                          for (std::size_t i = begin; i < end; ++i)
+                            fn(i);
+                        });
 }
 
 double elapsed_ms(std::chrono::steady_clock::time_point begin,
@@ -529,8 +528,7 @@ std::size_t current_working_set_bytes() noexcept {
 #if defined(_WIN32)
   PROCESS_MEMORY_COUNTERS counters{};
   counters.cb = sizeof(counters);
-  if (K32GetProcessMemoryInfo(GetCurrentProcess(), &counters,
-                              sizeof(counters)))
+  if (K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)))
     return static_cast<std::size_t>(counters.WorkingSetSize);
 #else
   FILE *file = std::fopen("/proc/self/status", "r");
@@ -580,12 +578,10 @@ public:
         interval_(std::chrono::seconds(
             std::clamp(options.progress_interval_seconds, 1, 300))),
         start_(std::chrono::steady_clock::now()),
-        last_write_(start_ - interval_),
-        threads_(threads) {
+        last_write_(start_ - interval_), threads_(threads) {
     if (!enabled_)
       return;
-    out_.open("pbe_tabi_longrun_progress.csv",
-              std::ios::out | std::ios::trunc);
+    out_.open("pbe_tabi_longrun_progress.csv", std::ios::out | std::ios::trunc);
     if (!out_.is_open()) {
       enabled_ = false;
       return;
@@ -922,12 +918,33 @@ public:
             "preconditioner_overlap_panel_cap,"
             "preconditioner_ilu_neighbor_cap,"
             "preconditioner_ilu_drop_tol,"
+            "preconditioner_ilu_regularization,"
+            "preconditioner_ilu_regularization_max,"
+            "preconditioner_ilu_regularization_selected,"
+            "preconditioner_ilu_regularization_absolute_max,"
+            "preconditioner_ilu_regularization_attempts,"
+            "preconditioner_ilu_regularization_rejected_attempts,"
+            "preconditioner_ilu_regularization_shifted_rows,"
+            "preconditioner_ilu_unshifted_failure_stage,"
             "preconditioner_memory_budget_bytes,"
             "preconditioner_estimated_bytes,"
             "preconditioner_valid_blocks,preconditioner_valid_panels,"
             "preconditioner_ill_conditioned_blocks,"
             "preconditioner_quality_rejected_blocks,"
             "preconditioner_quality_probe_max_gain,"
+            "preconditioner_quality_probe_rel_residual,"
+            "preconditioner_pivot_ratio_min,"
+            "preconditioner_factor_growth_max,"
+            "preconditioner_pivot_ratio_min_row,"
+            "preconditioner_pivot_ratio_min_column,"
+            "preconditioner_factor_growth_row,"
+            "preconditioner_factor_growth_column,"
+            "preconditioner_quality_failure_stage,"
+            "preconditioner_quality_failure_row,"
+            "preconditioner_quality_failure_column,"
+            "preconditioner_quality_failure_probe,"
+            "preconditioner_quality_failure_probe_gain,"
+            "preconditioner_quality_failure_probe_rel_residual,"
             "preconditioner_quality_status,"
             "preconditioner_setup_seconds,preconditioner_apply_seconds,"
             "preconditioner_apply_calls,"
@@ -947,6 +964,12 @@ public:
             "preconditioner_coarse_apply_calls,"
             "preconditioner_coarse_rp_identity_error_max,"
             "preconditioner_coarse_verify_rel_error_max,"
+            "gmres_orthogonalization_seconds,gmres_preconditioner_seconds,"
+            "fmm_local_gmres_active,fmm_local_gmres_matvec_calls,"
+            "fmm_local_gmres_apply_seconds_total,"
+            "fmm_local_gmres_apply_seconds_mean,"
+            "fmm_local_moment_seconds_total,fmm_local_m2l_seconds_total,"
+            "fmm_local_fallback_seconds_total,fmm_local_l2p_seconds_total,"
             "threads,"
             "rss_bytes,status\n";
     out_.flush();
@@ -965,33 +988,31 @@ public:
       return;
     last_write_ = now;
 
-    const std::size_t tree_nodes =
-        stats != nullptr && stats->tree_nodes > 0 ? stats->tree_nodes
-                                                  : result.tree_nodes;
-    const std::size_t leaf_panel =
-        stats != nullptr ? stats->leaf_panel_interactions
-                         : result.leaf_panel_interactions;
+    const std::size_t tree_nodes = stats != nullptr && stats->tree_nodes > 0
+                                       ? stats->tree_nodes
+                                       : result.tree_nodes;
+    const std::size_t leaf_panel = stats != nullptr
+                                       ? stats->leaf_panel_interactions
+                                       : result.leaf_panel_interactions;
     const std::size_t leaf_tile_panel =
         stats != nullptr ? stats->leaf_tile_panel_interactions
                          : result.leaf_tile_panel_interactions;
     const std::size_t leaf_residual =
         stats != nullptr ? stats->leaf_residual_panel_interactions
                          : result.leaf_residual_panel_interactions;
-    const std::size_t far_nodes =
-        stats != nullptr ? stats->far_node_interactions
-                         : result.far_node_interactions;
-    const std::size_t leaf_mac_candidates =
-        stats != nullptr ? stats->leaf_mac_candidates
-                         : result.leaf_mac_candidates;
+    const std::size_t far_nodes = stats != nullptr
+                                      ? stats->far_node_interactions
+                                      : result.far_node_interactions;
+    const std::size_t leaf_mac_candidates = stats != nullptr
+                                                ? stats->leaf_mac_candidates
+                                                : result.leaf_mac_candidates;
     const std::size_t leaf_mac_accepted =
-        stats != nullptr ? stats->leaf_mac_accepted
-                         : result.leaf_mac_accepted;
+        stats != nullptr ? stats->leaf_mac_accepted : result.leaf_mac_accepted;
     const std::size_t leaf_mac_rejected =
-        stats != nullptr ? stats->leaf_mac_rejected
-                         : result.leaf_mac_rejected;
-    const std::size_t leaf_mac_far_panels =
-        stats != nullptr ? stats->leaf_mac_far_panels
-                         : result.leaf_mac_far_panels;
+        stats != nullptr ? stats->leaf_mac_rejected : result.leaf_mac_rejected;
+    const std::size_t leaf_mac_far_panels = stats != nullptr
+                                                ? stats->leaf_mac_far_panels
+                                                : result.leaf_mac_far_panels;
     const std::size_t leaf_mac_direct_panels_saved_estimate =
         stats != nullptr ? stats->leaf_mac_direct_panels_saved_estimate
                          : result.leaf_mac_direct_panels_saved_estimate;
@@ -1005,9 +1026,9 @@ public:
     const double tree_traversal_fraction =
         result.matvec_ms_total > 0.0 ? traversal_ms / result.matvec_ms_total
                                      : result.tree_traversal_fraction;
-    const std::size_t singular =
-        stats != nullptr ? stats->singular_near_interactions
-                         : result.singular_near_interactions;
+    const std::size_t singular = stats != nullptr
+                                     ? stats->singular_near_interactions
+                                     : result.singular_near_interactions;
     const std::string tree_builder =
         stats != nullptr ? stats->tree_builder : result.tree_builder;
     const std::string interaction_mode =
@@ -1018,31 +1039,31 @@ public:
         stats != nullptr ? stats->mac_safety : result.mac_safety;
     const std::string expansion_center =
         stats != nullptr ? stats->expansion_center : result.expansion_center;
-    const std::string fragmentation_safety =
-        stats != nullptr ? stats->fragmentation_safety
-                         : result.fragmentation_safety;
+    const std::string fragmentation_safety = stats != nullptr
+                                                 ? stats->fragmentation_safety
+                                                 : result.fragmentation_safety;
     const std::string expansion_audit =
         stats != nullptr ? stats->expansion_audit : result.expansion_audit;
     const double mac_gap_factor =
         stats != nullptr ? stats->mac_gap_factor : result.mac_gap_factor;
-    const std::size_t unsafe_count =
-        stats != nullptr ? stats->far_geometric_unsafe_count
-                         : result.far_geometric_unsafe_count;
-    const std::size_t unsafe_panels =
-        stats != nullptr ? stats->far_geometric_unsafe_panels
-                         : result.far_geometric_unsafe_panels;
-    const std::size_t gap_samples =
-        stats != nullptr ? stats->far_geometric_audit_samples
-                         : result.far_geometric_audit_samples;
-    const std::size_t gap_rejects =
-        stats != nullptr ? stats->mac_physical_gap_rejects
-                         : result.mac_physical_gap_rejects;
-    const std::size_t fragmented_count =
-        stats != nullptr ? stats->fragmented_far_count
-                         : result.fragmented_far_count;
-    const std::size_t fragmented_panels =
-        stats != nullptr ? stats->fragmented_far_panels
-                         : result.fragmented_far_panels;
+    const std::size_t unsafe_count = stats != nullptr
+                                         ? stats->far_geometric_unsafe_count
+                                         : result.far_geometric_unsafe_count;
+    const std::size_t unsafe_panels = stats != nullptr
+                                          ? stats->far_geometric_unsafe_panels
+                                          : result.far_geometric_unsafe_panels;
+    const std::size_t gap_samples = stats != nullptr
+                                        ? stats->far_geometric_audit_samples
+                                        : result.far_geometric_audit_samples;
+    const std::size_t gap_rejects = stats != nullptr
+                                        ? stats->mac_physical_gap_rejects
+                                        : result.mac_physical_gap_rejects;
+    const std::size_t fragmented_count = stats != nullptr
+                                             ? stats->fragmented_far_count
+                                             : result.fragmented_far_count;
+    const std::size_t fragmented_panels = stats != nullptr
+                                              ? stats->fragmented_far_panels
+                                              : result.fragmented_far_panels;
     const std::size_t fragmented_rejects =
         stats != nullptr ? stats->fragmented_split_rejects
                          : result.fragmented_split_rejects;
@@ -1054,20 +1075,19 @@ public:
                          : result.fragmentation_center_gap_ratio_mean;
     const std::string moment_audit =
         stats != nullptr ? stats->moment_audit : result.moment_audit;
-    const std::string moment_construction =
-        stats != nullptr ? stats->moment_construction
-                         : result.moment_construction;
+    const std::string moment_construction = stats != nullptr
+                                                ? stats->moment_construction
+                                                : result.moment_construction;
     const std::string moment_sum =
         stats != nullptr ? stats->moment_sum : result.moment_sum;
     const std::string convergence_audit =
-        stats != nullptr ? stats->convergence_audit
-                         : result.convergence_audit;
-    const std::string convergence_safety =
-        stats != nullptr ? stats->convergence_safety
-                         : result.convergence_safety;
-    const double convergence_rho_cap =
-        stats != nullptr ? stats->convergence_rho_cap
-                         : result.convergence_rho_cap;
+        stats != nullptr ? stats->convergence_audit : result.convergence_audit;
+    const std::string convergence_safety = stats != nullptr
+                                               ? stats->convergence_safety
+                                               : result.convergence_safety;
+    const double convergence_rho_cap = stats != nullptr
+                                           ? stats->convergence_rho_cap
+                                           : result.convergence_rho_cap;
     const double mac_aspect_cap =
         stats != nullptr ? stats->mac_aspect_cap : result.mac_aspect_cap;
     const std::string convergence_estimator =
@@ -1127,9 +1147,9 @@ public:
     const double convergence_k3_accepted_rho_cap =
         stats != nullptr ? stats->convergence_k3_accepted_rho_cap
                          : result.convergence_k3_accepted_rho_cap;
-    const std::string mac_distance_policy =
-        stats != nullptr ? stats->mac_distance_policy
-                         : result.mac_distance_policy;
+    const std::string mac_distance_policy = stats != nullptr
+                                                ? stats->mac_distance_policy
+                                                : result.mac_distance_policy;
     const double mac_surface_margin_factor =
         stats != nullptr ? stats->mac_surface_margin_factor
                          : result.mac_surface_margin_factor;
@@ -1294,11 +1314,13 @@ public:
         stats != nullptr ? stats->convergence_overreject_abs_error_p99
                          : result.convergence_overreject_abs_error_p99;
     const double convergence_overreject_estimated_abs_error_max =
-        stats != nullptr ? stats->convergence_overreject_estimated_abs_error_max
-                         : result.convergence_overreject_estimated_abs_error_max;
+        stats != nullptr
+            ? stats->convergence_overreject_estimated_abs_error_max
+            : result.convergence_overreject_estimated_abs_error_max;
     const double convergence_overreject_estimated_abs_error_mean =
-        stats != nullptr ? stats->convergence_overreject_estimated_abs_error_mean
-                         : result.convergence_overreject_estimated_abs_error_mean;
+        stats != nullptr
+            ? stats->convergence_overreject_estimated_abs_error_mean
+            : result.convergence_overreject_estimated_abs_error_mean;
     const double convergence_overreject_required_scale_max =
         stats != nullptr ? stats->convergence_overreject_required_scale_max
                          : result.convergence_overreject_required_scale_max;
@@ -1324,23 +1346,25 @@ public:
         stats != nullptr ? stats->convergence_channel_overreject_abs_error_mean
                          : result.convergence_channel_overreject_abs_error_mean;
     const auto convergence_channel_overreject_required_scale_max =
-        stats != nullptr ? stats->convergence_channel_overreject_required_scale_max
-                         : result.convergence_channel_overreject_required_scale_max;
+        stats != nullptr
+            ? stats->convergence_channel_overreject_required_scale_max
+            : result.convergence_channel_overreject_required_scale_max;
     const auto convergence_channel_overreject_required_scale_p99 =
-        stats != nullptr ? stats->convergence_channel_overreject_required_scale_p99
-                         : result.convergence_channel_overreject_required_scale_p99;
+        stats != nullptr
+            ? stats->convergence_channel_overreject_required_scale_p99
+            : result.convergence_channel_overreject_required_scale_p99;
     const auto phantom_high_error_count =
         stats != nullptr ? stats->phantom_high_error_channel_count
                          : result.phantom_high_error_channel_count;
     const auto phantom_high_error_abs_max =
         stats != nullptr ? stats->phantom_high_error_channel_abs_max
                          : result.phantom_high_error_channel_abs_max;
-    const auto accepted_miss_count =
-        stats != nullptr ? stats->accepted_miss_channel_count
-                         : result.accepted_miss_channel_count;
-    const auto accepted_miss_panels =
-        stats != nullptr ? stats->accepted_miss_channel_panels
-                         : result.accepted_miss_channel_panels;
+    const auto accepted_miss_count = stats != nullptr
+                                         ? stats->accepted_miss_channel_count
+                                         : result.accepted_miss_channel_count;
+    const auto accepted_miss_panels = stats != nullptr
+                                          ? stats->accepted_miss_channel_panels
+                                          : result.accepted_miss_channel_panels;
     const auto accepted_miss_rho_min =
         stats != nullptr ? stats->accepted_miss_channel_rho_min
                          : result.accepted_miss_channel_rho_min;
@@ -1357,13 +1381,11 @@ public:
         stats != nullptr ? stats->accepted_miss_channel_tail_ratio_max
                          : result.accepted_miss_channel_tail_ratio_max;
     const auto accepted_miss_estimated_error_mean =
-        stats != nullptr
-            ? stats->accepted_miss_channel_estimated_error_mean
-            : result.accepted_miss_channel_estimated_error_mean;
+        stats != nullptr ? stats->accepted_miss_channel_estimated_error_mean
+                         : result.accepted_miss_channel_estimated_error_mean;
     const auto accepted_miss_estimated_error_max =
-        stats != nullptr
-            ? stats->accepted_miss_channel_estimated_error_max
-            : result.accepted_miss_channel_estimated_error_max;
+        stats != nullptr ? stats->accepted_miss_channel_estimated_error_max
+                         : result.accepted_miss_channel_estimated_error_max;
     const std::string accepted_miss_worst_channel =
         stats != nullptr ? stats->accepted_miss_worst_channel
                          : result.accepted_miss_worst_channel;
@@ -1373,54 +1395,54 @@ public:
     const std::size_t convergence_k3_rho_cap_reject_panels =
         stats != nullptr ? stats->convergence_k3_rho_cap_reject_panels
                          : result.convergence_k3_rho_cap_reject_panels;
-    const std::size_t moment_nodes =
-        stats != nullptr ? stats->moment_audit_nodes
-                         : result.moment_audit_nodes;
-    const double moment_rel_max =
-        stats != nullptr ? stats->moment_translation_rel_error_max
-                         : result.moment_translation_rel_error_max;
+    const std::size_t moment_nodes = stats != nullptr
+                                         ? stats->moment_audit_nodes
+                                         : result.moment_audit_nodes;
+    const double moment_rel_max = stats != nullptr
+                                      ? stats->moment_translation_rel_error_max
+                                      : result.moment_translation_rel_error_max;
     const double moment_rel_mean =
         stats != nullptr ? stats->moment_translation_rel_error_mean
                          : result.moment_translation_rel_error_mean;
-    const double moment_offset_max =
-        stats != nullptr ? stats->moment_translation_offset_max
-                         : result.moment_translation_offset_max;
+    const double moment_offset_max = stats != nullptr
+                                         ? stats->moment_translation_offset_max
+                                         : result.moment_translation_offset_max;
     const double moment_offset_mean =
         stats != nullptr ? stats->moment_translation_offset_mean
                          : result.moment_translation_offset_mean;
-    const double moment_cancel_max =
-        stats != nullptr ? stats->moment_cancellation_ratio_max
-                         : result.moment_cancellation_ratio_max;
+    const double moment_cancel_max = stats != nullptr
+                                         ? stats->moment_cancellation_ratio_max
+                                         : result.moment_cancellation_ratio_max;
     const double moment_cancel_mean =
         stats != nullptr ? stats->moment_cancellation_ratio_mean
                          : result.moment_cancellation_ratio_mean;
-    const double moment_dynamic_range =
-        stats != nullptr ? stats->moment_dynamic_range_max
-                         : result.moment_dynamic_range_max;
-    const std::size_t expansion_pairs =
-        stats != nullptr ? stats->far_expansion_audit_pairs
-                         : result.far_expansion_audit_pairs;
+    const double moment_dynamic_range = stats != nullptr
+                                            ? stats->moment_dynamic_range_max
+                                            : result.moment_dynamic_range_max;
+    const std::size_t expansion_pairs = stats != nullptr
+                                            ? stats->far_expansion_audit_pairs
+                                            : result.far_expansion_audit_pairs;
     const std::size_t expansion_panels =
         stats != nullptr ? stats->far_expansion_audit_panels
                          : result.far_expansion_audit_panels;
     const std::string expansion_audit_channel =
         stats != nullptr ? stats->expansion_audit_channel
                          : result.expansion_audit_channel;
-    const double expansion_direct_ms =
-        stats != nullptr ? stats->far_expansion_direct_ms
-                         : result.far_expansion_direct_ms;
-    const double expansion_rel_max =
-        stats != nullptr ? stats->far_expansion_rel_error_max
-                         : result.far_expansion_rel_error_max;
-    const double expansion_rel_mean =
-        stats != nullptr ? stats->far_expansion_rel_error_mean
-                         : result.far_expansion_rel_error_mean;
-    const double expansion_rel_p95 =
-        stats != nullptr ? stats->far_expansion_rel_error_p95
-                         : result.far_expansion_rel_error_p95;
-    const double expansion_rel_p99 =
-        stats != nullptr ? stats->far_expansion_rel_error_p99
-                         : result.far_expansion_rel_error_p99;
+    const double expansion_direct_ms = stats != nullptr
+                                           ? stats->far_expansion_direct_ms
+                                           : result.far_expansion_direct_ms;
+    const double expansion_rel_max = stats != nullptr
+                                         ? stats->far_expansion_rel_error_max
+                                         : result.far_expansion_rel_error_max;
+    const double expansion_rel_mean = stats != nullptr
+                                          ? stats->far_expansion_rel_error_mean
+                                          : result.far_expansion_rel_error_mean;
+    const double expansion_rel_p95 = stats != nullptr
+                                         ? stats->far_expansion_rel_error_p95
+                                         : result.far_expansion_rel_error_p95;
+    const double expansion_rel_p99 = stats != nullptr
+                                         ? stats->far_expansion_rel_error_p99
+                                         : result.far_expansion_rel_error_p99;
     const std::string expansion_worst_channel =
         stats != nullptr ? stats->far_expansion_worst_channel
                          : result.far_expansion_worst_channel;
@@ -1436,18 +1458,18 @@ public:
     const bool expansion_mean_gate_pass =
         stats != nullptr ? stats->far_expansion_mean_gate_pass
                          : result.far_expansion_mean_gate_pass;
-    const double convergence_rho_max =
-        stats != nullptr ? stats->far_convergence_rho_max
-                         : result.far_convergence_rho_max;
-    const double convergence_rho_mean =
-        stats != nullptr ? stats->far_convergence_rho_mean
-                         : result.far_convergence_rho_mean;
-    const double node_aspect_max =
-        stats != nullptr ? stats->node_aspect_ratio_max
-                         : result.node_aspect_ratio_max;
-    const double node_aspect_mean =
-        stats != nullptr ? stats->node_aspect_ratio_mean
-                         : result.node_aspect_ratio_mean;
+    const double convergence_rho_max = stats != nullptr
+                                           ? stats->far_convergence_rho_max
+                                           : result.far_convergence_rho_max;
+    const double convergence_rho_mean = stats != nullptr
+                                            ? stats->far_convergence_rho_mean
+                                            : result.far_convergence_rho_mean;
+    const double node_aspect_max = stats != nullptr
+                                       ? stats->node_aspect_ratio_max
+                                       : result.node_aspect_ratio_max;
+    const double node_aspect_mean = stats != nullptr
+                                        ? stats->node_aspect_ratio_mean
+                                        : result.node_aspect_ratio_mean;
     const double accepted_aspect_max =
         stats != nullptr ? stats->accepted_far_aspect_ratio_max
                          : result.accepted_far_aspect_ratio_max;
@@ -1571,9 +1593,9 @@ public:
     const int leaf_pair_min_source_panels =
         stats != nullptr ? stats->leaf_pair_min_source_panels
                          : result.leaf_pair_min_source_panels;
-    const int leaf_pair_min_targets =
-        stats != nullptr ? stats->leaf_pair_min_targets
-                         : result.leaf_pair_min_targets;
+    const int leaf_pair_min_targets = stats != nullptr
+                                          ? stats->leaf_pair_min_targets
+                                          : result.leaf_pair_min_targets;
     const std::size_t leaf_pair_batch_interactions =
         stats != nullptr ? stats->leaf_pair_batch_interactions
                          : result.leaf_pair_batch_interactions;
@@ -1589,9 +1611,9 @@ public:
     const std::size_t leaf_pair_batch_fallbacks =
         stats != nullptr ? stats->leaf_pair_batch_fallbacks
                          : result.leaf_pair_batch_fallbacks;
-    const double leaf_pair_batch_ms =
-        stats != nullptr ? stats->leaf_pair_batch_ms
-                         : result.leaf_pair_batch_ms;
+    const double leaf_pair_batch_ms = stats != nullptr
+                                          ? stats->leaf_pair_batch_ms
+                                          : result.leaf_pair_batch_ms;
     const std::string leaf_pair_batch_kernel =
         stats != nullptr ? stats->leaf_pair_batch_kernel
                          : result.leaf_pair_batch_kernel;
@@ -1604,12 +1626,11 @@ public:
     const double leaf_pair_batch_pairs_per_second =
         stats != nullptr ? stats->leaf_pair_batch_pairs_per_second
                          : result.leaf_pair_batch_pairs_per_second;
-    const std::string leaf_kernel_profile =
-        stats != nullptr ? stats->leaf_kernel_profile
-                         : result.leaf_kernel_profile;
+    const std::string leaf_kernel_profile = stats != nullptr
+                                                ? stats->leaf_kernel_profile
+                                                : result.leaf_kernel_profile;
     const std::string jcp_direct_kernel =
-        stats != nullptr ? stats->jcp_direct_kernel
-                         : result.jcp_direct_kernel;
+        stats != nullptr ? stats->jcp_direct_kernel : result.jcp_direct_kernel;
     const std::size_t leaf_kernel_scalar_tasks =
         stats != nullptr ? stats->leaf_kernel_scalar_tasks
                          : result.leaf_kernel_scalar_tasks;
@@ -1619,21 +1640,21 @@ public:
     const std::size_t leaf_kernel_source_panel_evals =
         stats != nullptr ? stats->leaf_kernel_source_panel_evals
                          : result.leaf_kernel_source_panel_evals;
-    const double leaf_kernel_scalar_ms =
-        stats != nullptr ? stats->leaf_kernel_scalar_ms
-                         : result.leaf_kernel_scalar_ms;
+    const double leaf_kernel_scalar_ms = stats != nullptr
+                                             ? stats->leaf_kernel_scalar_ms
+                                             : result.leaf_kernel_scalar_ms;
     const double leaf_kernel_target_avx2_ms =
         stats != nullptr ? stats->leaf_kernel_target_avx2_ms
                          : result.leaf_kernel_target_avx2_ms;
-    const double leaf_kernel_tail_ms =
-        stats != nullptr ? stats->leaf_kernel_tail_ms
-                         : result.leaf_kernel_tail_ms;
+    const double leaf_kernel_tail_ms = stats != nullptr
+                                           ? stats->leaf_kernel_tail_ms
+                                           : result.leaf_kernel_tail_ms;
     const std::size_t leaf_pair_batch_soa_sources =
         stats != nullptr ? stats->leaf_pair_batch_soa_sources
                          : result.leaf_pair_batch_soa_sources;
-    const double leaf_pair_batch_soa_ms =
-        stats != nullptr ? stats->leaf_pair_batch_soa_ms
-                         : result.leaf_pair_batch_soa_ms;
+    const double leaf_pair_batch_soa_ms = stats != nullptr
+                                              ? stats->leaf_pair_batch_soa_ms
+                                              : result.leaf_pair_batch_soa_ms;
     const double leaf_pair_batch_scalar_tail_ms =
         stats != nullptr ? stats->leaf_pair_batch_scalar_tail_ms
                          : result.leaf_pair_batch_scalar_tail_ms;
@@ -1659,9 +1680,9 @@ public:
     const std::string leaf_pair_directness_verify =
         stats != nullptr ? stats->leaf_pair_directness_verify
                          : result.leaf_pair_directness_verify;
-    const int leaf_pair_max_lookahead =
-        stats != nullptr ? stats->leaf_pair_max_lookahead
-                         : result.leaf_pair_max_lookahead;
+    const int leaf_pair_max_lookahead = stats != nullptr
+                                            ? stats->leaf_pair_max_lookahead
+                                            : result.leaf_pair_max_lookahead;
     const std::size_t leaf_pair_selection_candidate_scans =
         stats != nullptr ? stats->leaf_pair_selection_candidate_scans
                          : result.leaf_pair_selection_candidate_scans;
@@ -1677,9 +1698,9 @@ public:
     const double leaf_pair_selection_probe_ms =
         stats != nullptr ? stats->leaf_pair_selection_probe_ms
                          : result.leaf_pair_selection_probe_ms;
-    const double leaf_pair_selection_ms =
-        stats != nullptr ? stats->leaf_pair_selection_ms
-                         : result.leaf_pair_selection_ms;
+    const double leaf_pair_selection_ms = stats != nullptr
+                                              ? stats->leaf_pair_selection_ms
+                                              : result.leaf_pair_selection_ms;
     const std::size_t leaf_pair_selection_probe_cache_hits =
         stats != nullptr ? stats->leaf_pair_selection_probe_cache_hits
                          : result.leaf_pair_selection_probe_cache_hits;
@@ -1693,9 +1714,8 @@ public:
         stats != nullptr ? stats->leaf_pair_selection_same_target_leaf_rejects
                          : result.leaf_pair_selection_same_target_leaf_rejects;
     const std::size_t leaf_pair_directness_ancestor_probe_calls =
-        stats != nullptr
-            ? stats->leaf_pair_directness_ancestor_probe_calls
-            : result.leaf_pair_directness_ancestor_probe_calls;
+        stats != nullptr ? stats->leaf_pair_directness_ancestor_probe_calls
+                         : result.leaf_pair_directness_ancestor_probe_calls;
     const std::size_t leaf_pair_directness_ancestor_probe_node_visits =
         stats != nullptr
             ? stats->leaf_pair_directness_ancestor_probe_node_visits
@@ -1721,9 +1741,9 @@ public:
     const std::size_t leaf_pair_directness_verify_mismatches =
         stats != nullptr ? stats->leaf_pair_directness_verify_mismatches
                          : result.leaf_pair_directness_verify_mismatches;
-    const std::string leaf_pair_scheduler =
-        stats != nullptr ? stats->leaf_pair_scheduler
-                         : result.leaf_pair_scheduler;
+    const std::string leaf_pair_scheduler = stats != nullptr
+                                                ? stats->leaf_pair_scheduler
+                                                : result.leaf_pair_scheduler;
     const int leaf_pair_worklist_max_active =
         stats != nullptr ? stats->leaf_pair_worklist_max_active
                          : result.leaf_pair_worklist_max_active;
@@ -1748,9 +1768,9 @@ public:
     const std::size_t leaf_pair_worklist_active_groups_max =
         stats != nullptr ? stats->leaf_pair_worklist_active_groups_max
                          : result.leaf_pair_worklist_active_groups_max;
-    const double leaf_pair_worklist_ms =
-        stats != nullptr ? stats->leaf_pair_worklist_ms
-                         : result.leaf_pair_worklist_ms;
+    const double leaf_pair_worklist_ms = stats != nullptr
+                                             ? stats->leaf_pair_worklist_ms
+                                             : result.leaf_pair_worklist_ms;
     const std::size_t leaf_pair_worklist_verify_checks =
         stats != nullptr ? stats->leaf_pair_worklist_verify_checks
                          : result.leaf_pair_worklist_verify_checks;
@@ -1758,14 +1778,13 @@ public:
         stats != nullptr ? stats->leaf_pair_worklist_verify_mismatches
                          : result.leaf_pair_worklist_verify_mismatches;
     const std::string leaf_block_verify =
-        stats != nullptr ? stats->leaf_block_verify
-                         : result.leaf_block_verify;
+        stats != nullptr ? stats->leaf_block_verify : result.leaf_block_verify;
     const std::size_t leaf_block_target_leaves =
         stats != nullptr ? stats->leaf_block_target_leaves
                          : result.leaf_block_target_leaves;
-    const std::size_t leaf_block_targets =
-        stats != nullptr ? stats->leaf_block_targets
-                         : result.leaf_block_targets;
+    const std::size_t leaf_block_targets = stats != nullptr
+                                               ? stats->leaf_block_targets
+                                               : result.leaf_block_targets;
     const std::size_t leaf_block_source_groups =
         stats != nullptr ? stats->leaf_block_source_groups
                          : result.leaf_block_source_groups;
@@ -1775,15 +1794,15 @@ public:
     const std::size_t leaf_block_scalar_tail_tasks =
         stats != nullptr ? stats->leaf_block_scalar_tail_tasks
                          : result.leaf_block_scalar_tail_tasks;
-    const double leaf_block_group_ms =
-        stats != nullptr ? stats->leaf_block_group_ms
-                         : result.leaf_block_group_ms;
-    const double leaf_block_flush_ms =
-        stats != nullptr ? stats->leaf_block_flush_ms
-                         : result.leaf_block_flush_ms;
-    const double leaf_block_writeback_ms =
-        stats != nullptr ? stats->leaf_block_writeback_ms
-                         : result.leaf_block_writeback_ms;
+    const double leaf_block_group_ms = stats != nullptr
+                                           ? stats->leaf_block_group_ms
+                                           : result.leaf_block_group_ms;
+    const double leaf_block_flush_ms = stats != nullptr
+                                           ? stats->leaf_block_flush_ms
+                                           : result.leaf_block_flush_ms;
+    const double leaf_block_writeback_ms = stats != nullptr
+                                               ? stats->leaf_block_writeback_ms
+                                               : result.leaf_block_writeback_ms;
     const std::size_t leaf_block_verify_checks =
         stats != nullptr ? stats->leaf_block_verify_checks
                          : result.leaf_block_verify_checks;
@@ -1797,18 +1816,17 @@ public:
          << restart_iter << ',' << matvec_calls << ',' << std::scientific
          << std::setprecision(12) << residual << ','
          << result.gmres_restart_requested << ','
-         << result.gmres_restart_effective << ','
-         << result.best_residual << ',' << result.best_residual_iter << ','
-         << result.final_residual << ','
+         << result.gmres_restart_effective << ',' << result.best_residual << ','
+         << result.best_residual_iter << ',' << result.final_residual << ','
          << result.best_preconditioned_residual << ','
          << result.final_preconditioned_residual << ','
-         << result.true_residual_abs << ',' << result.true_residual_rel
-         << ',' << csv_escape_progress(result.true_residual_probe_mode)
-         << ',' << result.true_residual_probe_interval << ','
+         << result.true_residual_abs << ',' << result.true_residual_rel << ','
+         << csv_escape_progress(result.true_residual_probe_mode) << ','
+         << result.true_residual_probe_interval << ','
          << result.true_residual_probe_calls << ',' << std::fixed
          << std::setprecision(6) << result.true_residual_probe_ms / 1000.0
-         << ',' << csv_escape_progress(result.true_residual_probe_scope)
-         << ',' << result.true_residual_sample_count << ','
+         << ',' << csv_escape_progress(result.true_residual_probe_scope) << ','
+         << result.true_residual_sample_count << ','
          << result.sampled_true_residual_rel << ','
          << result.sampled_true_residual_rows << ','
          << result.sampled_probe_calls << ',' << std::fixed
@@ -1818,12 +1836,10 @@ public:
          << result.full_true_residual_confirm_ms / 1000.0 << std::fixed
          << std::setprecision(6) << ',' << result.panel_count << ','
          << result.unknown_count << ',' << result.taylor_order << ','
-         << tree_nodes << ','
-         << csv_escape_progress(interaction_mode) << ','
+         << tree_nodes << ',' << csv_escape_progress(interaction_mode) << ','
          << csv_escape_progress(tree_builder) << ','
          << csv_escape_progress(node_bounds) << ','
-         << csv_escape_progress(mac_safety) << ','
-         << mac_gap_factor << ','
+         << csv_escape_progress(mac_safety) << ',' << mac_gap_factor << ','
          << csv_escape_progress(expansion_center) << ','
          << csv_escape_progress(fragmentation_safety) << ','
          << csv_escape_progress(moment_construction) << ','
@@ -1832,9 +1848,8 @@ public:
          << csv_escape_progress(convergence_safety) << ','
          << convergence_rho_cap << ',' << mac_aspect_cap << ','
          << csv_escape_progress(convergence_estimator) << ','
-         << convergence_tail_threshold << ','
-         << convergence_estimator_error_cap << ','
-         << convergence_unstable_rho_cap << ','
+         << convergence_tail_threshold << ',' << convergence_estimator_error_cap
+         << ',' << convergence_unstable_rho_cap << ','
          << csv_escape_progress(convergence_calibration) << ','
          << csv_escape_progress(convergence_dielectric_amp) << ','
          << csv_escape_progress(convergence_estimator_model) << ','
@@ -1871,9 +1886,8 @@ public:
          << convergence_estimator_error_mean << ','
          << convergence_estimator_abs_error_max << ','
          << convergence_estimator_abs_error_mean << ','
-         << convergence_tail_norm_p_max << ','
-         << convergence_tail_norm_p_mean << ','
-         << convergence_tail_norm_pm1_max << ','
+         << convergence_tail_norm_p_max << ',' << convergence_tail_norm_p_mean
+         << ',' << convergence_tail_norm_pm1_max << ','
          << convergence_tail_norm_pm1_mean << ','
          << convergence_effective_jcp_amp_max << ','
          << convergence_effective_jcp_amp_mean << ','
@@ -1932,9 +1946,8 @@ public:
          << convergence_estimator_high_error_caught_by_split << ','
          << convergence_estimator_phantom_high_error_count << ','
          << convergence_estimator_phantom_high_error_abs_max << ','
-         << convergence_overreject_count << ','
-         << convergence_overreject_panels << ','
-         << convergence_overreject_caught_count << ','
+         << convergence_overreject_count << ',' << convergence_overreject_panels
+         << ',' << convergence_overreject_caught_count << ','
          << convergence_overreject_caught_panels << ','
          << convergence_overreject_abs_error_max << ','
          << convergence_overreject_abs_error_mean << ','
@@ -1973,12 +1986,10 @@ public:
          << convergence_channel_overreject_required_scale_p99[1] << ','
          << convergence_channel_overreject_required_scale_p99[2] << ','
          << convergence_channel_overreject_required_scale_p99[3] << ','
-         << phantom_high_error_count[0] << ','
-         << phantom_high_error_count[1] << ','
-         << phantom_high_error_count[2] << ','
-         << phantom_high_error_count[3] << ','
-         << phantom_high_error_abs_max[0] << ','
-         << phantom_high_error_abs_max[1] << ','
+         << phantom_high_error_count[0] << ',' << phantom_high_error_count[1]
+         << ',' << phantom_high_error_count[2] << ','
+         << phantom_high_error_count[3] << ',' << phantom_high_error_abs_max[0]
+         << ',' << phantom_high_error_abs_max[1] << ','
          << phantom_high_error_abs_max[2] << ','
          << phantom_high_error_abs_max[3] << ','
          << csv_escape_progress(accepted_miss_worst_channel) << ','
@@ -1986,15 +1997,13 @@ public:
          << accepted_miss_count[2] << ',' << accepted_miss_count[3] << ','
          << accepted_miss_panels[0] << ',' << accepted_miss_panels[1] << ','
          << accepted_miss_panels[2] << ',' << accepted_miss_panels[3] << ','
-         << accepted_miss_rho_min[0] << ',' << accepted_miss_rho_min[1]
-         << ',' << accepted_miss_rho_min[2] << ','
-         << accepted_miss_rho_min[3] << ',' << accepted_miss_rho_mean[0]
-         << ',' << accepted_miss_rho_mean[1] << ','
-         << accepted_miss_rho_mean[2] << ','
-         << accepted_miss_rho_mean[3] << ',' << accepted_miss_rho_max[0]
-         << ',' << accepted_miss_rho_max[1] << ','
-         << accepted_miss_rho_max[2] << ',' << accepted_miss_rho_max[3]
-         << ',' << accepted_miss_tail_ratio_mean[0] << ','
+         << accepted_miss_rho_min[0] << ',' << accepted_miss_rho_min[1] << ','
+         << accepted_miss_rho_min[2] << ',' << accepted_miss_rho_min[3] << ','
+         << accepted_miss_rho_mean[0] << ',' << accepted_miss_rho_mean[1] << ','
+         << accepted_miss_rho_mean[2] << ',' << accepted_miss_rho_mean[3] << ','
+         << accepted_miss_rho_max[0] << ',' << accepted_miss_rho_max[1] << ','
+         << accepted_miss_rho_max[2] << ',' << accepted_miss_rho_max[3] << ','
+         << accepted_miss_tail_ratio_mean[0] << ','
          << accepted_miss_tail_ratio_mean[1] << ','
          << accepted_miss_tail_ratio_mean[2] << ','
          << accepted_miss_tail_ratio_mean[3] << ','
@@ -2013,18 +2022,16 @@ public:
          << convergence_k3_rho_cap_rejects << ','
          << convergence_k3_rho_cap_reject_panels << ','
          << csv_escape_progress(expansion_audit) << ','
-         << csv_escape_progress(expansion_audit_channel) << ','
-         << unsafe_count << ','
-         << unsafe_panels << ',' << gap_samples << ',' << gap_rejects << ','
-         << mac_convergence_rho_rejects << ','
+         << csv_escape_progress(expansion_audit_channel) << ',' << unsafe_count
+         << ',' << unsafe_panels << ',' << gap_samples << ',' << gap_rejects
+         << ',' << mac_convergence_rho_rejects << ','
          << mac_convergence_aspect_rejects << ','
          << mac_convergence_rho_reject_panels << ','
          << mac_convergence_aspect_reject_panels << ','
          << mac_surface_margin_rejects << ','
          << mac_surface_margin_reject_panels << ','
-         << mac_surface_margin_applied << ','
-         << mac_surface_margin_skipped << ','
-         << mac_surface_margin_adaptive_rejects << ','
+         << mac_surface_margin_applied << ',' << mac_surface_margin_skipped
+         << ',' << mac_surface_margin_adaptive_rejects << ','
          << mac_surface_margin_adaptive_reject_panels << ','
          << mac_surface_margin_skipped_accepted_far << ','
          << mac_surface_margin_hard_applied << ','
@@ -2032,40 +2039,33 @@ public:
          << mac_surface_margin_hard_rejects << ','
          << mac_surface_margin_hard_reject_panels << ','
          << mac_surface_margin_soft_rejects << ','
-         << mac_surface_margin_soft_reject_panels << ','
-         << fragmented_count << ',' << fragmented_panels << ','
-         << fragmented_rejects << ',' << fragmentation_gap_max << ','
-         << fragmentation_gap_mean << ','
+         << mac_surface_margin_soft_reject_panels << ',' << fragmented_count
+         << ',' << fragmented_panels << ',' << fragmented_rejects << ','
+         << fragmentation_gap_max << ',' << fragmentation_gap_mean << ','
          << csv_escape_progress(moment_audit) << ',' << moment_nodes << ','
-         << moment_rel_max << ',' << moment_rel_mean << ','
-         << moment_offset_max << ',' << moment_offset_mean << ','
-         << moment_cancel_max << ',' << moment_cancel_mean << ','
-         << moment_dynamic_range << ','
+         << moment_rel_max << ',' << moment_rel_mean << ',' << moment_offset_max
+         << ',' << moment_offset_mean << ',' << moment_cancel_max << ','
+         << moment_cancel_mean << ',' << moment_dynamic_range << ','
          << expansion_pairs << ',' << expansion_panels << ','
          << expansion_direct_ms / 1000.0 << ',' << expansion_rel_max << ','
          << expansion_rel_mean << ',' << expansion_rel_p95 << ','
          << expansion_rel_p99 << ','
          << csv_escape_progress(expansion_worst_channel) << ','
-         << expansion_channel_rel_max[0] << ','
-         << expansion_channel_rel_max[1] << ','
-         << expansion_channel_rel_max[2] << ','
-         << expansion_channel_rel_max[3] << ','
-         << expansion_channel_rel_mean[0] << ','
-         << expansion_channel_rel_mean[1] << ','
+         << expansion_channel_rel_max[0] << ',' << expansion_channel_rel_max[1]
+         << ',' << expansion_channel_rel_max[2] << ','
+         << expansion_channel_rel_max[3] << ',' << expansion_channel_rel_mean[0]
+         << ',' << expansion_channel_rel_mean[1] << ','
          << expansion_channel_rel_mean[2] << ','
-         << expansion_channel_rel_mean[3] << ','
-         << expansion_channel_rel_p99[0] << ','
-         << expansion_channel_rel_p99[1] << ','
-         << expansion_channel_rel_p99[2] << ','
-         << expansion_channel_rel_p99[3] << ','
-         << (expansion_mean_gate_pass ? 1 : 0)
-         << ',' << convergence_rho_max << ','
-         << convergence_rho_mean << ',' << node_aspect_max << ','
-         << node_aspect_mean << ',' << accepted_aspect_max << ','
-         << accepted_aspect_mean << ',' << leaf_panel << ','
-         << leaf_tile_panel << ',' << leaf_residual << ',' << far_nodes << ','
-         << leaf_mac_candidates << ',' << leaf_mac_accepted << ','
-         << leaf_mac_rejected << ',' << leaf_mac_far_panels << ','
+         << expansion_channel_rel_mean[3] << ',' << expansion_channel_rel_p99[0]
+         << ',' << expansion_channel_rel_p99[1] << ','
+         << expansion_channel_rel_p99[2] << ',' << expansion_channel_rel_p99[3]
+         << ',' << (expansion_mean_gate_pass ? 1 : 0) << ','
+         << convergence_rho_max << ',' << convergence_rho_mean << ','
+         << node_aspect_max << ',' << node_aspect_mean << ','
+         << accepted_aspect_max << ',' << accepted_aspect_mean << ','
+         << leaf_panel << ',' << leaf_tile_panel << ',' << leaf_residual << ','
+         << far_nodes << ',' << leaf_mac_candidates << ',' << leaf_mac_accepted
+         << ',' << leaf_mac_rejected << ',' << leaf_mac_far_panels << ','
          << leaf_mac_direct_panels_saved_estimate << ','
          << csv_escape_progress(matvec_cost_profile) << ','
          << leaf_panels_per_second << ','
@@ -2086,34 +2086,31 @@ public:
          << leaf_work_singular_fallback_panels << ','
          << leaf_work_scalar_tail_panels << ','
          << leaf_work_profile_accounted_panels << ','
-         << leaf_work_mac_terminal_frac << ','
-         << leaf_work_convergence_frac << ','
-         << leaf_work_surface_margin_frac << ','
+         << leaf_work_mac_terminal_frac << ',' << leaf_work_convergence_frac
+         << ',' << leaf_work_surface_margin_frac << ','
          << leaf_work_singular_fallback_frac << ','
          << leaf_work_scalar_tail_frac << ','
-         << csv_escape_progress(cluster_policy) << ','
-         << target_batch_size << ',' << leaf_pair_min_source_panels << ','
-         << leaf_pair_min_targets << ',' << leaf_pair_batch_interactions << ','
+         << csv_escape_progress(cluster_policy) << ',' << target_batch_size
+         << ',' << leaf_pair_min_source_panels << ',' << leaf_pair_min_targets
+         << ',' << leaf_pair_batch_interactions << ','
          << leaf_pair_batch_targets << ',' << leaf_pair_batch_source_panels
          << ',' << leaf_pair_batch_residual_panels << ','
          << leaf_pair_batch_fallbacks << ',' << leaf_pair_batch_ms / 1000.0
          << ',' << csv_escape_progress(leaf_pair_batch_kernel) << ','
          << leaf_pair_batch_vectorized_sources << ','
          << leaf_pair_batch_vector_lanes << ','
-         << leaf_pair_batch_pairs_per_second
-         << ',' << csv_escape_progress(leaf_kernel_profile)
-         << ',' << csv_escape_progress(jcp_direct_kernel)
-         << ',' << leaf_kernel_scalar_tasks
-         << ',' << leaf_kernel_batch_tasks
-         << ',' << leaf_kernel_source_panel_evals
-         << ',' << leaf_kernel_scalar_ms / 1000.0
-         << ',' << leaf_kernel_target_avx2_ms / 1000.0
-         << ',' << leaf_kernel_tail_ms / 1000.0
-         << ',' << leaf_pair_batch_soa_sources
-         << ',' << leaf_pair_batch_soa_ms / 1000.0
-         << ',' << leaf_pair_batch_scalar_tail_ms / 1000.0
-         << ',' << leaf_pair_batch_clean_source_panels_per_second
-         << ',' << csv_escape_progress(leaf_pair_selection_profile) << ','
+         << leaf_pair_batch_pairs_per_second << ','
+         << csv_escape_progress(leaf_kernel_profile) << ','
+         << csv_escape_progress(jcp_direct_kernel) << ','
+         << leaf_kernel_scalar_tasks << ',' << leaf_kernel_batch_tasks << ','
+         << leaf_kernel_source_panel_evals << ','
+         << leaf_kernel_scalar_ms / 1000.0 << ','
+         << leaf_kernel_target_avx2_ms / 1000.0 << ','
+         << leaf_kernel_tail_ms / 1000.0 << ',' << leaf_pair_batch_soa_sources
+         << ',' << leaf_pair_batch_soa_ms / 1000.0 << ','
+         << leaf_pair_batch_scalar_tail_ms / 1000.0 << ','
+         << leaf_pair_batch_clean_source_panels_per_second << ','
+         << csv_escape_progress(leaf_pair_selection_profile) << ','
          << csv_escape_progress(leaf_pair_probe_cache) << ','
          << csv_escape_progress(leaf_pair_target_group) << ','
          << leaf_pair_max_lookahead << ','
@@ -2129,8 +2126,8 @@ public:
          << leaf_pair_selection_probe_cache_hits << ','
          << leaf_pair_selection_probe_cache_misses << ','
          << leaf_pair_selection_insufficient_targets << ','
-         << leaf_pair_selection_same_target_leaf_rejects
-         << ',' << leaf_pair_directness_ancestor_probe_calls << ','
+         << leaf_pair_selection_same_target_leaf_rejects << ','
+         << leaf_pair_directness_ancestor_probe_calls << ','
          << leaf_pair_directness_ancestor_probe_node_visits << ','
          << leaf_pair_directness_ancestor_probe_ms / 1000.0 << ','
          << leaf_pair_directness_pair_cache_hits << ','
@@ -2138,41 +2135,59 @@ public:
          << leaf_pair_directness_all_direct_proofs << ','
          << leaf_pair_directness_mixed_fallbacks << ','
          << leaf_pair_directness_verify_checks << ','
-         << leaf_pair_directness_verify_mismatches
-         << ',' << csv_escape_progress(leaf_pair_scheduler) << ','
+         << leaf_pair_directness_verify_mismatches << ','
+         << csv_escape_progress(leaf_pair_scheduler) << ','
          << leaf_pair_worklist_max_active << ','
          << csv_escape_progress(leaf_pair_worklist_verify) << ','
-         << leaf_pair_worklist_tasks << ',' << leaf_pair_worklist_groups
-         << ',' << leaf_pair_worklist_batched_groups << ','
+         << leaf_pair_worklist_tasks << ',' << leaf_pair_worklist_groups << ','
+         << leaf_pair_worklist_batched_groups << ','
          << leaf_pair_worklist_scalar_flush_tasks << ','
          << leaf_pair_worklist_forced_flushes << ','
          << leaf_pair_worklist_active_groups_max << ','
          << leaf_pair_worklist_ms / 1000.0 << ','
          << leaf_pair_worklist_verify_checks << ','
-         << leaf_pair_worklist_verify_mismatches
-         << ',' << csv_escape_progress(leaf_block_verify) << ','
+         << leaf_pair_worklist_verify_mismatches << ','
+         << csv_escape_progress(leaf_block_verify) << ','
          << leaf_block_target_leaves << ',' << leaf_block_targets << ','
-         << leaf_block_source_groups << ',' << leaf_block_batched_groups
-         << ',' << leaf_block_scalar_tail_tasks << ','
-         << leaf_block_group_ms / 1000.0 << ','
-         << leaf_block_flush_ms / 1000.0 << ','
-         << leaf_block_writeback_ms / 1000.0 << ','
-         << leaf_block_verify_checks << ','
-         << leaf_block_verify_mismatches
-         << ','
-         << singular << ','
+         << leaf_block_source_groups << ',' << leaf_block_batched_groups << ','
+         << leaf_block_scalar_tail_tasks << ',' << leaf_block_group_ms / 1000.0
+         << ',' << leaf_block_flush_ms / 1000.0 << ','
+         << leaf_block_writeback_ms / 1000.0 << ',' << leaf_block_verify_checks
+         << ',' << leaf_block_verify_mismatches << ',' << singular << ','
          << csv_escape_progress(result.preconditioner_effective) << ','
          << result.preconditioner_block_panel_cap << ','
          << result.preconditioner_overlap_panel_cap << ','
          << result.preconditioner_ilu_neighbor_cap << ','
          << result.preconditioner_ilu_drop_tol << ','
-         << result.preconditioner_memory_budget_bytes << ','
+         << csv_escape_progress(result.preconditioner_ilu_regularization) << ','
+         << result.preconditioner_ilu_regularization_max << ','
+         << result.preconditioner_ilu_regularization_selected << ','
+         << result.preconditioner_ilu_regularization_absolute_max << ','
+         << result.preconditioner_ilu_regularization_attempts << ','
+         << result.preconditioner_ilu_regularization_rejected_attempts << ','
+         << result.preconditioner_ilu_regularization_shifted_rows << ','
+         << csv_escape_progress(
+                result.preconditioner_ilu_unshifted_failure_stage)
+         << ',' << result.preconditioner_memory_budget_bytes << ','
          << result.preconditioner_estimated_bytes << ','
          << result.preconditioner_valid_blocks << ','
          << result.preconditioner_valid_panels << ','
          << result.preconditioner_ill_conditioned_blocks << ','
          << result.preconditioner_quality_rejected_blocks << ','
          << result.preconditioner_quality_probe_max_gain << ','
+         << result.preconditioner_quality_probe_rel_residual << ','
+         << result.preconditioner_pivot_ratio_min << ','
+         << result.preconditioner_factor_growth_max << ','
+         << result.preconditioner_pivot_ratio_min_row << ','
+         << result.preconditioner_pivot_ratio_min_column << ','
+         << result.preconditioner_factor_growth_row << ','
+         << result.preconditioner_factor_growth_column << ','
+         << csv_escape_progress(result.preconditioner_quality_failure_stage)
+         << ',' << result.preconditioner_quality_failure_row << ','
+         << result.preconditioner_quality_failure_column << ','
+         << result.preconditioner_quality_failure_probe << ','
+         << result.preconditioner_quality_failure_probe_gain << ','
+         << result.preconditioner_quality_failure_probe_rel_residual << ','
          << csv_escape_progress(result.preconditioner_quality_status) << ','
          << result.preconditioner_setup_ms / 1000.0 << ','
          << result.preconditioner_apply_ms / 1000.0 << ','
@@ -2193,8 +2208,18 @@ public:
          << result.preconditioner_coarse_apply_calls << ','
          << result.preconditioner_coarse_rp_identity_error_max << ','
          << result.preconditioner_coarse_verify_rel_error_max << ','
-         << threads_ << ',' << current_working_set_bytes() << ','
-         << csv_escape_progress(status) << '\n';
+         << result.orthogonalization_ms / 1000.0 << ','
+         << result.preconditioner_ms / 1000.0 << ','
+         << (result.fmm_local_gmres_active ? "true" : "false") << ','
+         << result.fmm_local_gmres_matvec_calls << ','
+         << result.fmm_local_gmres_apply_seconds_total << ','
+         << result.fmm_local_gmres_apply_seconds_mean << ','
+         << result.fmm_local_moment_seconds_total << ','
+         << result.fmm_local_m2l_seconds_total << ','
+         << result.fmm_local_fallback_seconds_total << ','
+         << result.fmm_local_l2p_seconds_total << ',' << threads_ << ','
+         << current_working_set_bytes() << ',' << csv_escape_progress(status)
+         << '\n';
     out_.flush();
   }
 
@@ -2281,12 +2306,10 @@ struct LinearSolveResult {
   std::size_t preconditioner_apply_calls{0};
 };
 
-using GmresProgressCallback =
-    std::function<void(int gmres_iter, int restart_iter,
-                       double true_residual_rel,
-                       double preconditioned_residual_rel, bool force,
-                       const std::string &phase,
-                       const LinearSolveResult &state)>;
+using GmresProgressCallback = std::function<void(
+    int gmres_iter, int restart_iter, double true_residual_rel,
+    double preconditioned_residual_rel, bool force, const std::string &phase,
+    const LinearSolveResult &state)>;
 
 struct SampledResidualResult {
   double abs{0.0};
@@ -2295,9 +2318,8 @@ struct SampledResidualResult {
   bool finite{false};
 };
 
-using SampledTrueResidualCallback =
-    std::function<SampledResidualResult(const std::vector<double> &,
-                                        const std::vector<std::size_t> &)>;
+using SampledTrueResidualCallback = std::function<SampledResidualResult(
+    const std::vector<double> &, const std::vector<std::size_t> &)>;
 
 LinearSolveResult gmres_solve(
     const std::function<void(const std::vector<double> &,
@@ -2322,7 +2344,7 @@ LinearSolveResult gmres_solve(
       true_residual_probe_mode == "interval"
           ? std::string("interval")
           : (true_residual_probe_mode == "off" ? std::string("off")
-                                                : std::string("restart"));
+                                               : std::string("restart"));
   result.true_residual_probe_scope =
       true_residual_probe_scope == "sampled"
           ? std::string("sampled")
@@ -2382,9 +2404,8 @@ LinearSolveResult gmres_solve(
       }
     } else {
       out.resize(n);
-      parallel_for_each_index(n, executor, [&](std::size_t i) {
-        out[i] = in[i] * inv_precond[i];
-      });
+      parallel_for_each_index(
+          n, executor, [&](std::size_t i) { out[i] = in[i] * inv_precond[i]; });
     }
     const double apply_ms = elapsed_ms(begin, std::chrono::steady_clock::now());
     result.preconditioner_ms += apply_ms;
@@ -2443,23 +2464,24 @@ LinearSolveResult gmres_solve(
   };
   const std::vector<std::size_t> sampled_rows =
       build_sample_rows(n, result.true_residual_sample_count);
-  auto sampled_relative_from_full_ax = [&](const std::vector<double> &ax_values) {
-    double residual_sq = 0.0;
-    double b_sq = 0.0;
-    for (std::size_t row : sampled_rows) {
-      const double r = b[row] - ax_values[row];
-      residual_sq += r * r;
-      b_sq += b[row] * b[row];
-    }
-    const double abs_value = std::sqrt(std::max(0.0, residual_sq));
-    const double denom = std::max(1.0e-300, std::sqrt(std::max(0.0, b_sq)));
-    SampledResidualResult sample;
-    sample.abs = abs_value;
-    sample.rel = abs_value / denom;
-    sample.rows = sampled_rows.size();
-    sample.finite = std::isfinite(sample.rel);
-    return sample;
-  };
+  auto sampled_relative_from_full_ax =
+      [&](const std::vector<double> &ax_values) {
+        double residual_sq = 0.0;
+        double b_sq = 0.0;
+        for (std::size_t row : sampled_rows) {
+          const double r = b[row] - ax_values[row];
+          residual_sq += r * r;
+          b_sq += b[row] * b[row];
+        }
+        const double abs_value = std::sqrt(std::max(0.0, residual_sq));
+        const double denom = std::max(1.0e-300, std::sqrt(std::max(0.0, b_sq)));
+        SampledResidualResult sample;
+        sample.abs = abs_value;
+        sample.rel = abs_value / denom;
+        sample.rows = sampled_rows.size();
+        sample.finite = std::isfinite(sample.rel);
+        return sample;
+      };
 
   auto [initial_abs, initial_rel] = relative_true_residual(residual);
   result.residual = initial_rel;
@@ -2483,6 +2505,20 @@ LinearSolveResult gmres_solve(
   double best_true_abs = initial_abs;
   int non_improving_restarts = 0;
   bool saw_phantom_preconditioned = false;
+  // Confirm an apparently converged left-preconditioned residual immediately.
+  // If the full residual rejects it, wait for another decade of estimated
+  // reduction before paying for the next confirmation matvec.
+  double next_preconditioned_confirmation = tol;
+  // Retain the Krylov basis and work vectors across restarts. On large p4
+  // solves these buffers are tens of MiB; reallocating them at every restart
+  // adds allocator and page-fault noise without changing GMRES arithmetic.
+  std::vector<std::vector<double>> krylov_basis;
+  std::vector<double> h_workspace;
+  std::vector<double> cs_workspace;
+  std::vector<double> sn_workspace;
+  std::vector<double> g_workspace;
+  std::vector<double> w_workspace(n, 0.0);
+  std::vector<double> precond_w_workspace(n, 0.0);
   while (result.iterations < iter_cap) {
     const double beta = l2_norm_parallel(precond_residual, executor);
     if (!std::isfinite(beta) || beta <= 1.0e-300) {
@@ -2513,17 +2549,28 @@ LinearSolveResult gmres_solve(
       break;
 
     const int window = std::min(restart, iter_cap - result.iterations);
-    std::vector<std::vector<double>> v(
-        static_cast<std::size_t>(window) + 1, std::vector<double>(n, 0.0));
+    if (krylov_basis.size() < static_cast<std::size_t>(window) + 1)
+      krylov_basis.resize(static_cast<std::size_t>(window) + 1);
+    for (int basis = 0; basis <= window; ++basis) {
+      std::vector<double> &vector =
+          krylov_basis[static_cast<std::size_t>(basis)];
+      if (vector.size() != n)
+        vector.assign(n, 0.0);
+    }
+    auto &v = krylov_basis;
     parallel_for_each_index(n, executor, [&](std::size_t i) {
       v[0][i] = precond_residual[i] / beta;
     });
-    std::vector<double> h((static_cast<std::size_t>(window) + 1) *
-                              static_cast<std::size_t>(window),
-                          0.0);
-    std::vector<double> cs(static_cast<std::size_t>(window), 0.0);
-    std::vector<double> sn(static_cast<std::size_t>(window), 0.0);
-    std::vector<double> g(static_cast<std::size_t>(window) + 1, 0.0);
+    h_workspace.assign((static_cast<std::size_t>(window) + 1) *
+                           static_cast<std::size_t>(window),
+                       0.0);
+    cs_workspace.assign(static_cast<std::size_t>(window), 0.0);
+    sn_workspace.assign(static_cast<std::size_t>(window), 0.0);
+    g_workspace.assign(static_cast<std::size_t>(window) + 1, 0.0);
+    auto &h = h_workspace;
+    auto &cs = cs_workspace;
+    auto &sn = sn_workspace;
+    auto &g = g_workspace;
     g[0] = beta;
 
     auto solve_window_y = [&](int cols) {
@@ -2564,13 +2611,13 @@ LinearSolveResult gmres_solve(
     bool preconditioned_requested_check = false;
     bool probe_converged = false;
     for (int j = 0; j < window; ++j) {
-      std::vector<double> w(n, 0.0);
+      std::vector<double> &w = w_workspace;
       matvec(v[static_cast<std::size_t>(j)], w);
       if (!finite_vector(w)) {
         result.convergence_reason = "nan_guard";
         return result;
       }
-      std::vector<double> precond_w(n, 0.0);
+      std::vector<double> &precond_w = precond_w_workspace;
       apply_preconditioner(w, precond_w);
       if (!finite_vector(precond_w)) {
         result.convergence_reason = "preconditioner_breakdown";
@@ -2589,8 +2636,7 @@ LinearSolveResult gmres_solve(
         });
       }
       const double h_next = l2_norm_parallel(w, executor);
-      h[(static_cast<std::size_t>(j) + 1) *
-            static_cast<std::size_t>(window) +
+      h[(static_cast<std::size_t>(j) + 1) * static_cast<std::size_t>(window) +
         static_cast<std::size_t>(j)] = h_next;
       if (h_next > 1.0e-20 && j + 1 < window + 1) {
         parallel_for_each_index(n, executor, [&](std::size_t k) {
@@ -2606,43 +2652,38 @@ LinearSolveResult gmres_solve(
         const double h_i =
             h[static_cast<std::size_t>(i) * static_cast<std::size_t>(window) +
               static_cast<std::size_t>(j)];
-        const double h_next_i =
-            h[(static_cast<std::size_t>(i) + 1) *
-                  static_cast<std::size_t>(window) +
-              static_cast<std::size_t>(j)];
+        const double h_next_i = h[(static_cast<std::size_t>(i) + 1) *
+                                      static_cast<std::size_t>(window) +
+                                  static_cast<std::size_t>(j)];
         h[static_cast<std::size_t>(i) * static_cast<std::size_t>(window) +
-          static_cast<std::size_t>(j)] = cs[static_cast<std::size_t>(i)] * h_i +
-                                         sn[static_cast<std::size_t>(i)] *
-                                             h_next_i;
-        h[(static_cast<std::size_t>(i) + 1) *
-              static_cast<std::size_t>(window) +
-          static_cast<std::size_t>(j)] = -sn[static_cast<std::size_t>(i)] * h_i +
-                                         cs[static_cast<std::size_t>(i)] *
-                                             h_next_i;
+          static_cast<std::size_t>(j)] =
+            cs[static_cast<std::size_t>(i)] * h_i +
+            sn[static_cast<std::size_t>(i)] * h_next_i;
+        h[(static_cast<std::size_t>(i) + 1) * static_cast<std::size_t>(window) +
+          static_cast<std::size_t>(j)] =
+            -sn[static_cast<std::size_t>(i)] * h_i +
+            cs[static_cast<std::size_t>(i)] * h_next_i;
       }
 
       const double h_j =
           h[static_cast<std::size_t>(j) * static_cast<std::size_t>(window) +
             static_cast<std::size_t>(j)];
-      const double h_next_j =
-          h[(static_cast<std::size_t>(j) + 1) *
-                static_cast<std::size_t>(window) +
-            static_cast<std::size_t>(j)];
+      const double h_next_j = h[(static_cast<std::size_t>(j) + 1) *
+                                    static_cast<std::size_t>(window) +
+                                static_cast<std::size_t>(j)];
       const double rho = std::hypot(h_j, h_next_j);
       if (rho <= 1.0e-30 || !std::isfinite(rho)) {
         happy_breakdown = true;
         h[static_cast<std::size_t>(j) * static_cast<std::size_t>(window) +
           static_cast<std::size_t>(j)] = h_j;
-        h[(static_cast<std::size_t>(j) + 1) *
-              static_cast<std::size_t>(window) +
+        h[(static_cast<std::size_t>(j) + 1) * static_cast<std::size_t>(window) +
           static_cast<std::size_t>(j)] = 0.0;
       } else {
         cs[static_cast<std::size_t>(j)] = h_j / rho;
         sn[static_cast<std::size_t>(j)] = h_next_j / rho;
         h[static_cast<std::size_t>(j) * static_cast<std::size_t>(window) +
           static_cast<std::size_t>(j)] = rho;
-        h[(static_cast<std::size_t>(j) + 1) *
-              static_cast<std::size_t>(window) +
+        h[(static_cast<std::size_t>(j) + 1) * static_cast<std::size_t>(window) +
           static_cast<std::size_t>(j)] = 0.0;
         const double g_j = g[static_cast<std::size_t>(j)];
         const double g_next = g[static_cast<std::size_t>(j) + 1];
@@ -2656,8 +2697,7 @@ LinearSolveResult gmres_solve(
 
       ++result.iterations;
       used_cols = j + 1;
-      precond_rel = std::abs(g[static_cast<std::size_t>(j) + 1]) /
-                    precond_norm;
+      precond_rel = std::abs(g[static_cast<std::size_t>(j) + 1]) / precond_norm;
       result.final_preconditioned_residual = precond_rel;
       if (std::isfinite(precond_rel) &&
           precond_rel < result.best_preconditioned_residual) {
@@ -2665,8 +2705,8 @@ LinearSolveResult gmres_solve(
       }
       if (progress_callback)
         progress_callback(result.iterations, j + 1, result.final_residual,
-                          precond_rel, false,
-                          "gmres_iter", result);
+                          precond_rel, false, "gmres_iter", result);
+      bool full_probe_ran_this_iteration = false;
       if (result.true_residual_probe_mode == "interval" &&
           result.true_residual_probe_interval > 0 &&
           (result.iterations % result.true_residual_probe_interval) == 0) {
@@ -2702,15 +2742,15 @@ LinearSolveResult gmres_solve(
             return result;
           }
           if (progress_callback)
-            progress_callback(result.iterations, j + 1, sample.rel,
-                              precond_rel, true,
-                              "gmres_sampled_true_probe", result);
+            progress_callback(result.iterations, j + 1, sample.rel, precond_rel,
+                              true, "gmres_sampled_true_probe", result);
           if (result.true_residual_probe_scope == "adaptive" &&
               sample.rel <= std::max(5.0 * tol, 1.0e-3)) {
             run_full_probe = true;
           }
         }
         if (run_full_probe) {
+          full_probe_ran_this_iteration = true;
           const auto probe_begin = std::chrono::steady_clock::now();
           if (!probe_ax_ready) {
             probe_ax.assign(n, 0.0);
@@ -2725,8 +2765,7 @@ LinearSolveResult gmres_solve(
           parallel_for_each_index(n, executor, [&](std::size_t k) {
             probe_residual[k] = b[k] - probe_ax[k];
           });
-          auto [probe_abs, probe_rel] =
-              relative_true_residual(probe_residual);
+          auto [probe_abs, probe_rel] = relative_true_residual(probe_residual);
           ++result.true_residual_probe_calls;
           ++result.full_true_residual_confirm_calls;
           const double probe_ms =
@@ -2754,7 +2793,62 @@ LinearSolveResult gmres_solve(
             probe_converged = true;
             break;
           }
+          next_preconditioned_confirmation = std::max(
+              1.0e-300, std::min(next_preconditioned_confirmation,
+                                 0.1 * std::max(precond_rel, 1.0e-300)));
         }
+      }
+      if (!probe_converged && !full_probe_ran_this_iteration &&
+          std::isfinite(precond_rel) &&
+          precond_rel <= next_preconditioned_confirmation) {
+        preconditioned_requested_check = true;
+        saw_phantom_preconditioned = true;
+
+        std::vector<double> y_confirm = solve_window_y(used_cols);
+        std::vector<double> confirm_x;
+        build_candidate_x(result.x, y_confirm, used_cols, confirm_x);
+        std::vector<double> confirm_ax(n, 0.0);
+        const auto confirm_begin = std::chrono::steady_clock::now();
+        matvec(confirm_x, confirm_ax);
+        if (!finite_vector(confirm_ax)) {
+          result.convergence_reason = "nan_guard";
+          return result;
+        }
+        std::vector<double> confirm_residual(n, 0.0);
+        parallel_for_each_index(n, executor, [&](std::size_t k) {
+          confirm_residual[k] = b[k] - confirm_ax[k];
+        });
+        auto [confirm_abs, confirm_rel] =
+            relative_true_residual(confirm_residual);
+        ++result.true_residual_probe_calls;
+        ++result.full_true_residual_confirm_calls;
+        const double confirm_ms =
+            elapsed_ms(confirm_begin, std::chrono::steady_clock::now());
+        result.true_residual_probe_ms += confirm_ms;
+        result.full_true_residual_confirm_ms += confirm_ms;
+        result.final_residual = confirm_rel;
+        result.true_residual_abs = confirm_abs;
+        result.true_residual_rel = confirm_rel;
+        if (std::isfinite(confirm_rel) && confirm_rel < result.best_residual) {
+          result.best_residual = confirm_rel;
+          result.best_residual_iter = result.iterations;
+          best_true_abs = confirm_abs;
+          result.best_x = confirm_x;
+        }
+        result.residual_history.push_back(confirm_rel);
+        if (progress_callback)
+          progress_callback(result.iterations, j + 1, confirm_rel, precond_rel,
+                            true, "gmres_early_true_confirmation", result);
+        if (confirm_rel <= tol) {
+          result.x = std::move(confirm_x);
+          result.residual = confirm_rel;
+          result.converged = true;
+          result.convergence_reason = "converged_early_true_residual";
+          probe_converged = true;
+          break;
+        }
+        next_preconditioned_confirmation =
+            std::max(1.0e-300, 0.1 * std::max(precond_rel, 1.0e-300));
       }
       if (precond_rel <= tol) {
         preconditioned_requested_check = true;
@@ -2779,9 +2873,8 @@ LinearSolveResult gmres_solve(
       result.convergence_reason = "nan_guard";
       return result;
     }
-    parallel_for_each_index(n, executor, [&](std::size_t k) {
-      residual[k] = b[k] - ax[k];
-    });
+    parallel_for_each_index(n, executor,
+                            [&](std::size_t k) { residual[k] = b[k] - ax[k]; });
     auto [true_abs, true_rel] = relative_true_residual(residual);
     result.final_residual = true_rel;
     result.true_residual_abs = true_abs;
@@ -2845,11 +2938,10 @@ LinearSolveResult gmres_solve(
                                     : "converged_true_residual_best";
   }
   if (!result.converged && result.convergence_reason == "not_started")
-    result.convergence_reason = saw_phantom_preconditioned
-                                    ? "phantom_preconditioned"
-                                    : (result.iterations >= iter_cap
-                                           ? "max_iter"
-                                           : "stagnated");
+    result.convergence_reason =
+        saw_phantom_preconditioned
+            ? "phantom_preconditioned"
+            : (result.iterations >= iter_cap ? "max_iter" : "stagnated");
   return result;
 }
 
@@ -2858,9 +2950,8 @@ LinearSolveResult gmres_solve(
 // inverse-Angstrom kappa, outward normals, and Coulomb conversion only in the
 // final reaction-field energy projection.
 std::vector<double> build_rhs(const std::vector<Atom> &atoms,
-                              const std::vector<Panel> &panels,
-                              double contrast, double kappa,
-                              double rhs_scale) {
+                              const std::vector<Panel> &panels, double contrast,
+                              double kappa, double rhs_scale) {
   std::vector<double> rhs(panels.size(), 0.0);
   for (std::size_t p = 0; p < panels.size(); ++p) {
     const Panel &panel = panels[p];
@@ -2876,8 +2967,8 @@ std::vector<double> build_rhs(const std::vector<Atom> &atoms,
       const double normal_projection =
           (panel.nx * dx + panel.ny * dy + panel.nz * dz) / r;
       const double screened = std::exp(-kappa * r);
-      normal_field += atom.q * screened * normal_projection /
-                      std::max(1.0e-12, r2);
+      normal_field +=
+          atom.q * screened * normal_projection / std::max(1.0e-12, r2);
     }
     rhs[p] = -rhs_scale * contrast * normal_field / (4.0 * kPi);
   }
@@ -2886,8 +2977,7 @@ std::vector<double> build_rhs(const std::vector<Atom> &atoms,
 
 double boundary_energy_kcal(const std::vector<Atom> &atoms,
                             const std::vector<Panel> &panels,
-                            const std::vector<double> &density,
-                            double kappa) {
+                            const std::vector<double> &density, double kappa) {
   double energy = 0.0;
   for (const Atom &atom : atoms) {
     double phi = 0.0;
@@ -2900,8 +2990,7 @@ double boundary_energy_kcal(const std::vector<Atom> &atoms,
       if (r2 <= 1.0e-16)
         continue;
       const double r = std::sqrt(r2);
-      phi += density[p] * panel.area * std::exp(-kappa * r) /
-             (4.0 * kPi * r);
+      phi += density[p] * panel.area * std::exp(-kappa * r) / (4.0 * kPi * r);
     }
     energy += 0.5 * kCoulombKcalPerMol * atom.q * phi;
   }
@@ -2916,101 +3005,175 @@ double born_reference_kcal(const std::vector<Atom> &atoms, double eps_in,
     const double outside =
         1.0 / (std::max(1.0e-12, eps_out) * (1.0 + kappa * radius));
     const double inside = 1.0 / std::max(1.0e-12, eps_in);
-    energy +=
-        0.5 * kCoulombKcalPerMol * atom.q * atom.q * (outside - inside) /
-        radius;
+    energy += 0.5 * kCoulombKcalPerMol * atom.q * atom.q * (outside - inside) /
+              radius;
   }
   return energy;
-}
-
-double green_kernel(double r, double kappa) noexcept {
-  if (r <= 1.0e-14)
-    return 0.0;
-  return std::exp(-kappa * r) / (4.0 * kPi * r);
-}
-
-double source_normal_derivative_green(double tx, double ty, double tz,
-                                      const Panel &source,
-                                      double kappa) noexcept {
-  const double ux = tx - source.x;
-  const double uy = ty - source.y;
-  const double uz = tz - source.z;
-  const double r2 = ux * ux + uy * uy + uz * uz;
-  if (r2 <= 1.0e-28)
-    return 0.0;
-  const double r = std::sqrt(r2);
-  const double ndotu = source.nx * ux + source.ny * uy + source.nz * uz;
-  return std::exp(-kappa * r) * (1.0 + kappa * r) * ndotu /
-         (4.0 * kPi * r2 * r);
-}
-
-double target_normal_derivative_green(const Panel &target, double sx,
-                                      double sy, double sz,
-                                      double kappa) noexcept {
-  const double ux = target.x - sx;
-  const double uy = target.y - sy;
-  const double uz = target.z - sz;
-  const double r2 = ux * ux + uy * uy + uz * uz;
-  if (r2 <= 1.0e-28)
-    return 0.0;
-  const double r = std::sqrt(r2);
-  const double ndotu = target.nx * ux + target.ny * uy + target.nz * uz;
-  return -std::exp(-kappa * r) * (1.0 + kappa * r) * ndotu /
-         (4.0 * kPi * r2 * r);
 }
 
 std::vector<double> build_jcp_rhs(const std::vector<Atom> &atoms,
                                   const std::vector<Panel> &panels,
                                   double eps_in, bool coupled,
-                                  double *s1_norm, double *s2_norm) {
+                                  TitanExecutor &executor, double *s1_norm,
+                                  double *s2_norm) {
   const std::size_t n = panels.size();
   std::vector<double> rhs(coupled ? 2 * n : n, 0.0);
   const double inv_eps_in = 1.0 / std::max(1.0e-12, eps_in);
-  for (std::size_t i = 0; i < n; ++i) {
-    const Panel &panel = panels[i];
-    double s1 = 0.0;
-    double s2 = 0.0;
-    for (const Atom &atom : atoms) {
-      const double dx = panel.x - atom.x;
-      const double dy = panel.y - atom.y;
-      const double dz = panel.z - atom.z;
-      const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
-      if (r <= 1.0e-14)
+  AlignedDoubleVector atom_x(atoms.size());
+  AlignedDoubleVector atom_y(atoms.size());
+  AlignedDoubleVector atom_z(atoms.size());
+  AlignedDoubleVector atom_q_over_eps(atoms.size());
+  for (std::size_t atom_index = 0; atom_index < atoms.size(); ++atom_index) {
+    atom_x[atom_index] = atoms[atom_index].x;
+    atom_y[atom_index] = atoms[atom_index].y;
+    atom_z[atom_index] = atoms[atom_index].z;
+    atom_q_over_eps[atom_index] = atoms[atom_index].q * inv_eps_in;
+  }
+
+  auto scalar_panel = [&](const Panel &panel, double &s1, double &s2) noexcept {
+    constexpr double inv_four_pi = 1.0 / (4.0 * kPi);
+    s1 = 0.0;
+    s2 = 0.0;
+    for (std::size_t atom_index = 0; atom_index < atom_x.size(); ++atom_index) {
+      const double dx = panel.x - atom_x[atom_index];
+      const double dy = panel.y - atom_y[atom_index];
+      const double dz = panel.z - atom_z[atom_index];
+      const double r2 = dx * dx + dy * dy + dz * dz;
+      if (r2 <= 1.0e-28)
         continue;
-      s1 += atom.q * inv_eps_in * green_kernel(r, 0.0);
-      s2 += atom.q * inv_eps_in *
-            target_normal_derivative_green(panel, atom.x, atom.y, atom.z, 0.0);
+      const double r = std::sqrt(r2);
+      const double weighted_kernel =
+          atom_q_over_eps[atom_index] * inv_four_pi;
+      s1 += weighted_kernel / r;
+      s2 -= weighted_kernel *
+            (panel.nx * dx + panel.ny * dy + panel.nz * dz) / (r2 * r);
     }
-    rhs[i] = s1;
-    if (coupled)
-      rhs[n + i] = s2;
-  }
+  };
+
+#if TITAN_SIMD_X86
+  auto avx2_panel = [&](const Panel &panel, double &s1,
+                        double &s2) TITAN_TARGET_AVX2 noexcept {
+    constexpr double inv_four_pi_scalar = 1.0 / (4.0 * kPi);
+    const __m256d px = _mm256_set1_pd(panel.x);
+    const __m256d py = _mm256_set1_pd(panel.y);
+    const __m256d pz = _mm256_set1_pd(panel.z);
+    const __m256d nx = _mm256_set1_pd(panel.nx);
+    const __m256d ny = _mm256_set1_pd(panel.ny);
+    const __m256d nz = _mm256_set1_pd(panel.nz);
+    const __m256d one = _mm256_set1_pd(1.0);
+    const __m256d tiny = _mm256_set1_pd(1.0e-28);
+    const __m256d inv_four_pi = _mm256_set1_pd(inv_four_pi_scalar);
+    s1 = 0.0;
+    s2 = 0.0;
+    std::size_t atom_index = 0;
+    alignas(32) double s1_lane[4];
+    alignas(32) double s2_lane[4];
+    for (; atom_index + 4 <= atom_x.size(); atom_index += 4) {
+      const __m256d dx =
+          _mm256_sub_pd(px, _mm256_load_pd(atom_x.data() + atom_index));
+      const __m256d dy =
+          _mm256_sub_pd(py, _mm256_load_pd(atom_y.data() + atom_index));
+      const __m256d dz =
+          _mm256_sub_pd(pz, _mm256_load_pd(atom_z.data() + atom_index));
+      const __m256d r2 = _mm256_add_pd(
+          _mm256_add_pd(_mm256_mul_pd(dx, dx), _mm256_mul_pd(dy, dy)),
+          _mm256_mul_pd(dz, dz));
+      const __m256d valid = _mm256_cmp_pd(r2, tiny, _CMP_GT_OQ);
+      const __m256d safe_r2 = _mm256_blendv_pd(one, r2, valid);
+      const __m256d r = _mm256_sqrt_pd(safe_r2);
+      const __m256d weighted_kernel = _mm256_mul_pd(
+          _mm256_load_pd(atom_q_over_eps.data() + atom_index), inv_four_pi);
+      __m256d value_s1 = _mm256_div_pd(weighted_kernel, r);
+      const __m256d normal_dot = _mm256_add_pd(
+          _mm256_add_pd(_mm256_mul_pd(nx, dx), _mm256_mul_pd(ny, dy)),
+          _mm256_mul_pd(nz, dz));
+      __m256d value_s2 = _mm256_div_pd(
+          _mm256_mul_pd(_mm256_set1_pd(-1.0),
+                        _mm256_mul_pd(weighted_kernel, normal_dot)),
+          _mm256_mul_pd(safe_r2, r));
+      value_s1 = _mm256_and_pd(value_s1, valid);
+      value_s2 = _mm256_and_pd(value_s2, valid);
+      _mm256_store_pd(s1_lane, value_s1);
+      _mm256_store_pd(s2_lane, value_s2);
+      for (int lane = 0; lane < 4; ++lane) {
+        s1 += s1_lane[lane];
+        s2 += s2_lane[lane];
+      }
+    }
+    for (; atom_index < atom_x.size(); ++atom_index) {
+      const double dx = panel.x - atom_x[atom_index];
+      const double dy = panel.y - atom_y[atom_index];
+      const double dz = panel.z - atom_z[atom_index];
+      const double r2 = dx * dx + dy * dy + dz * dz;
+      if (r2 <= 1.0e-28)
+        continue;
+      const double r = std::sqrt(r2);
+      const double weighted_kernel =
+          atom_q_over_eps[atom_index] * inv_four_pi_scalar;
+      s1 += weighted_kernel / r;
+      s2 -= weighted_kernel *
+            (panel.nx * dx + panel.ny * dy + panel.nz * dz) / (r2 * r);
+    }
+  };
+#endif
+
+#if TITAN_SIMD_X86 && TITAN_RUNTIME_TARGET_ATTRS
+  const bool use_avx2 = titan_simd_dispatch::runtime_has_avx2();
+#else
+  const bool use_avx2 = false;
+#endif
+  const std::size_t workers = std::max<std::size_t>(
+      1, std::min<std::size_t>(executor.capacity(), panels.size()));
+  constexpr std::size_t panel_tile = 8;
+  std::atomic<std::size_t> next_panel{0};
+  executor.parallel_do(workers, [&](std::size_t) {
+    for (;;) {
+      const std::size_t begin = next_panel.fetch_add(panel_tile);
+      if (begin >= panels.size())
+        break;
+      const std::size_t end = std::min(panels.size(), begin + panel_tile);
+      for (std::size_t i = begin; i < end; ++i) {
+        double s1 = 0.0;
+        double s2 = 0.0;
+#if TITAN_SIMD_X86
+        if (use_avx2)
+          avx2_panel(panels[i], s1, s2);
+        else
+#endif
+          scalar_panel(panels[i], s1, s2);
+        rhs[i] = s1;
+        if (coupled)
+          rhs[n + i] = s2;
+      }
+    }
+  });
+
+  auto rhs_rms = [&](std::size_t begin, std::size_t end) {
+    double sum_sq = 0.0;
+    for (std::size_t i = begin; i < end; ++i)
+      sum_sq += rhs[i] * rhs[i];
+    return begin == end
+               ? 0.0
+               : std::sqrt(sum_sq / static_cast<double>(end - begin));
+  };
   if (s1_norm)
-    *s1_norm = rms_norm(std::vector<double>(rhs.begin(), rhs.begin() + n));
-  if (s2_norm) {
-    if (coupled)
-      *s2_norm = rms_norm(std::vector<double>(rhs.begin() + n, rhs.end()));
-    else
-      *s2_norm = 0.0;
-  }
+    *s1_norm = rhs_rms(0, n);
+  if (s2_norm)
+    *s2_norm = coupled ? rhs_rms(n, 2 * n) : 0.0;
   return rhs;
 }
 
-void apply_jcp_linear_pb_operator(const std::vector<Panel> &panels,
-                                  const std::vector<double> &x,
-                                  double eps_ratio, double kappa,
-                                  double lhs_phi, double lhs_phin,
-                                  const std::string &near_integration,
-                                  const std::string &quad_buffer,
-                                  TitanExecutor &executor,
-                                  std::vector<double> &out,
-                                  TreecodeStats *stats) {
+void apply_jcp_linear_pb_operator(
+    const std::vector<Panel> &panels, const std::vector<double> &x,
+    double eps_ratio, double kappa, double lhs_phi, double lhs_phin,
+    const std::string &near_integration, const std::string &quad_buffer,
+    TitanExecutor &executor, std::vector<double> &out, TreecodeStats *stats) {
   const std::size_t n = panels.size();
   out.assign(2 * n, 0.0);
   std::vector<std::size_t> order(n, 0);
   std::iota(order.begin(), order.end(), std::size_t{0});
-  const std::size_t workers = std::max<std::size_t>(
-      1, std::min<std::size_t>(executor.capacity(), n));
+  const std::size_t workers =
+      std::max<std::size_t>(1, std::min<std::size_t>(executor.capacity(), n));
   std::vector<TreecodeStats> local_stats(workers);
   const auto near_begin = std::chrono::steady_clock::now();
   executor.parallel_for(
@@ -3021,8 +3184,11 @@ void apply_jcp_linear_pb_operator(const std::vector<Panel> &panels,
           const JcpNearAccum sum = accumulate_jcp_near_ordered(
               panels[i], i, panels, x, eps_ratio, kappa, true, order, 0, n,
               near_integration, quad_buffer, &worker_stats);
-          double phi_row = lhs_phi * x[i];
-          double phin_row = lhs_phin * x[n + i];
+          double phi_row =
+              jcp_lhs_phi_for_panel(panels[i], eps_ratio, lhs_phi) * x[i];
+          double phin_row =
+              jcp_lhs_phin_for_panel(panels[i], eps_ratio, lhs_phin) *
+              x[n + i];
           phi_row -= sum.phi;
           phin_row -= sum.phin;
           out[i] = phi_row;
@@ -3051,14 +3217,11 @@ void apply_jcp_linear_pb_operator(const std::vector<Panel> &panels,
       local_centroid += worker_stats.near_centroid_pairs;
       local_duffy += worker_stats.near_duffy_pairs;
       local_geometric += worker_stats.near_geometric_buffer_pairs;
-      stats->duffy_subdivisions_max =
-          std::max(stats->duffy_subdivisions_max,
-                   worker_stats.duffy_subdivisions_max);
+      stats->duffy_subdivisions_max = std::max(
+          stats->duffy_subdivisions_max, worker_stats.duffy_subdivisions_max);
       if (worker_stats.near_duffy_pairs > 0) {
-        const double old_count =
-            static_cast<double>(previous_duffy);
-        const double new_count =
-            static_cast<double>(stats->near_duffy_pairs);
+        const double old_count = static_cast<double>(previous_duffy);
+        const double new_count = static_cast<double>(stats->near_duffy_pairs);
         stats->duffy_subdivisions_mean =
             new_count <= 0.0
                 ? 0.0
@@ -3072,20 +3235,17 @@ void apply_jcp_linear_pb_operator(const std::vector<Panel> &panels,
   }
 }
 
-void apply_jcp_poisson_operator(const std::vector<Panel> &panels,
-                                const std::vector<double> &x,
-                                double eps_ratio, double lhs_phi,
-                                const std::string &near_integration,
-                                const std::string &quad_buffer,
-                                TitanExecutor &executor,
-                                std::vector<double> &out,
-                                TreecodeStats *stats) {
+void apply_jcp_poisson_operator(
+    const std::vector<Panel> &panels, const std::vector<double> &x,
+    double eps_ratio, double lhs_phi, const std::string &near_integration,
+    const std::string &quad_buffer, TitanExecutor &executor,
+    std::vector<double> &out, TreecodeStats *stats) {
   const std::size_t n = panels.size();
   out.assign(n, 0.0);
   std::vector<std::size_t> order(n, 0);
   std::iota(order.begin(), order.end(), std::size_t{0});
-  const std::size_t workers = std::max<std::size_t>(
-      1, std::min<std::size_t>(executor.capacity(), n));
+  const std::size_t workers =
+      std::max<std::size_t>(1, std::min<std::size_t>(executor.capacity(), n));
   std::vector<TreecodeStats> local_stats(workers);
   const auto near_begin = std::chrono::steady_clock::now();
   executor.parallel_for(
@@ -3096,7 +3256,8 @@ void apply_jcp_poisson_operator(const std::vector<Panel> &panels,
           const JcpNearAccum sum = accumulate_jcp_near_ordered(
               panels[i], i, panels, x, eps_ratio, 0.0, false, order, 0, n,
               near_integration, quad_buffer, &worker_stats);
-          double row = lhs_phi * x[i];
+          double row =
+              jcp_lhs_phi_for_panel(panels[i], eps_ratio, lhs_phi) * x[i];
           row -= sum.phi;
           out[i] = row;
         }
@@ -3123,14 +3284,11 @@ void apply_jcp_poisson_operator(const std::vector<Panel> &panels,
       local_centroid += worker_stats.near_centroid_pairs;
       local_duffy += worker_stats.near_duffy_pairs;
       local_geometric += worker_stats.near_geometric_buffer_pairs;
-      stats->duffy_subdivisions_max =
-          std::max(stats->duffy_subdivisions_max,
-                   worker_stats.duffy_subdivisions_max);
+      stats->duffy_subdivisions_max = std::max(
+          stats->duffy_subdivisions_max, worker_stats.duffy_subdivisions_max);
       if (worker_stats.near_duffy_pairs > 0) {
-        const double old_count =
-            static_cast<double>(previous_duffy);
-        const double new_count =
-            static_cast<double>(stats->near_duffy_pairs);
+        const double old_count = static_cast<double>(previous_duffy);
+        const double new_count = static_cast<double>(stats->near_duffy_pairs);
         stats->duffy_subdivisions_mean =
             new_count <= 0.0
                 ? 0.0
@@ -3144,53 +3302,322 @@ void apply_jcp_poisson_operator(const std::vector<Panel> &panels,
   }
 }
 
-double jcp_linear_pb_energy_kcal(const std::vector<Atom> &atoms,
-                                 const std::vector<Panel> &panels,
-                                 const std::vector<double> &x,
-                                 double eps_ratio, double kappa) {
+struct EnergyProjectionSources {
+  AlignedDoubleVector x;
+  AlignedDoubleVector y;
+  AlignedDoubleVector z;
+  AlignedDoubleVector nx;
+  AlignedDoubleVector ny;
+  AlignedDoubleVector nz;
+  AlignedDoubleVector area;
+  AlignedDoubleVector phi;
+  AlignedDoubleVector phin;
+};
+
+EnergyProjectionSources
+build_energy_projection_sources(const std::vector<Panel> &panels,
+                                const std::vector<double> &unknowns,
+                                bool coupled) {
   const std::size_t n = panels.size();
-  double energy = 0.0;
-  for (const Atom &atom : atoms) {
-    double reaction_phi = 0.0;
-    for (std::size_t j = 0; j < n; ++j) {
-      const Panel &source = panels[j];
-      const double dx = atom.x - source.x;
-      const double dy = atom.y - source.y;
-      const double dz = atom.z - source.z;
-      const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
-      if (r <= 1.0e-14)
-        continue;
-      const double k1 = green_kernel(r, 0.0) - green_kernel(r, kappa);
-      const double k2 =
-          eps_ratio *
-              source_normal_derivative_green(atom.x, atom.y, atom.z, source,
-                                             kappa) -
-          source_normal_derivative_green(atom.x, atom.y, atom.z, source, 0.0);
-      reaction_phi += source.area * (k1 * x[n + j] + k2 * x[j]);
+  EnergyProjectionSources sources;
+  sources.x.resize(n);
+  sources.y.resize(n);
+  sources.z.resize(n);
+  sources.nx.resize(n);
+  sources.ny.resize(n);
+  sources.nz.resize(n);
+  sources.area.resize(n);
+  sources.phi.resize(n);
+  if (coupled)
+    sources.phin.resize(n);
+  for (std::size_t j = 0; j < n; ++j) {
+    const Panel &panel = panels[j];
+    sources.x[j] = panel.has_source_quadrature_center ? panel.source_x : panel.x;
+    sources.y[j] = panel.has_source_quadrature_center ? panel.source_y : panel.y;
+    sources.z[j] = panel.has_source_quadrature_center ? panel.source_z : panel.z;
+    sources.nx[j] = panel.nx;
+    sources.ny[j] = panel.ny;
+    sources.nz[j] = panel.nz;
+    sources.area[j] = panel.area;
+    sources.phi[j] = unknowns[j];
+    if (coupled)
+      sources.phin[j] = unknowns[n + j];
+  }
+  return sources;
+}
+
+double linear_pb_reaction_phi_scalar(const Atom &atom,
+                                     const EnergyProjectionSources &sources,
+                                     double eps_ratio, double kappa) noexcept {
+  constexpr double inv_four_pi = 1.0 / (4.0 * kPi);
+  double reaction_phi = 0.0;
+  for (std::size_t j = 0; j < sources.x.size(); ++j) {
+    const double dx = atom.x - sources.x[j];
+    const double dy = atom.y - sources.y[j];
+    const double dz = atom.z - sources.z[j];
+    const double r2 = dx * dx + dy * dy + dz * dz;
+    if (r2 <= 1.0e-28)
+      continue;
+    const double r = std::sqrt(r2);
+    const double screened = std::exp(-kappa * r);
+    const double g0 = inv_four_pi / r;
+    const double normal_dot =
+        sources.nx[j] * dx + sources.ny[j] * dy + sources.nz[j] * dz;
+    const double dg0 = inv_four_pi * normal_dot / (r2 * r);
+    const double k1 = g0 * (1.0 - screened);
+    const double k2 =
+        dg0 * (eps_ratio * screened * (1.0 + kappa * r) - 1.0);
+    reaction_phi += sources.area[j] *
+                    (k1 * sources.phin[j] + k2 * sources.phi[j]);
+  }
+  return reaction_phi;
+}
+
+double poisson_reaction_phi_scalar(const Atom &atom,
+                                   const EnergyProjectionSources &sources,
+                                   double eps_ratio) noexcept {
+  constexpr double inv_four_pi = 1.0 / (4.0 * kPi);
+  const double k2_scale = eps_ratio - 1.0;
+  double reaction_phi = 0.0;
+  for (std::size_t j = 0; j < sources.x.size(); ++j) {
+    const double dx = atom.x - sources.x[j];
+    const double dy = atom.y - sources.y[j];
+    const double dz = atom.z - sources.z[j];
+    const double r2 = dx * dx + dy * dy + dz * dz;
+    if (r2 <= 1.0e-28)
+      continue;
+    const double r = std::sqrt(r2);
+    const double normal_dot =
+        sources.nx[j] * dx + sources.ny[j] * dy + sources.nz[j] * dz;
+    const double k2 = k2_scale * inv_four_pi * normal_dot / (r2 * r);
+    reaction_phi += sources.area[j] * k2 * sources.phi[j];
+  }
+  return reaction_phi;
+}
+
+#if TITAN_SIMD_X86
+TITAN_TARGET_AVX2
+double linear_pb_reaction_phi_avx2(const Atom &atom,
+                                   const EnergyProjectionSources &sources,
+                                   double eps_ratio, double kappa) noexcept {
+  constexpr double inv_four_pi_scalar = 1.0 / (4.0 * kPi);
+  const __m256d tx = _mm256_set1_pd(atom.x);
+  const __m256d ty = _mm256_set1_pd(atom.y);
+  const __m256d tz = _mm256_set1_pd(atom.z);
+  const __m256d one = _mm256_set1_pd(1.0);
+  const __m256d tiny = _mm256_set1_pd(1.0e-28);
+  const __m256d inv_four_pi = _mm256_set1_pd(inv_four_pi_scalar);
+  const __m256d eps = _mm256_set1_pd(eps_ratio);
+  const __m256d kap = _mm256_set1_pd(kappa);
+  double reaction_phi = 0.0;
+  std::size_t j = 0;
+  alignas(32) double exponent[4];
+  alignas(32) double screened_lane[4];
+  alignas(32) double contribution[4];
+  for (; j + 4 <= sources.x.size(); j += 4) {
+    const __m256d dx = _mm256_sub_pd(tx, _mm256_load_pd(sources.x.data() + j));
+    const __m256d dy = _mm256_sub_pd(ty, _mm256_load_pd(sources.y.data() + j));
+    const __m256d dz = _mm256_sub_pd(tz, _mm256_load_pd(sources.z.data() + j));
+    const __m256d r2 = _mm256_add_pd(
+        _mm256_add_pd(_mm256_mul_pd(dx, dx), _mm256_mul_pd(dy, dy)),
+        _mm256_mul_pd(dz, dz));
+    const __m256d valid = _mm256_cmp_pd(r2, tiny, _CMP_GT_OQ);
+    const __m256d safe_r2 = _mm256_blendv_pd(one, r2, valid);
+    const __m256d r = _mm256_sqrt_pd(safe_r2);
+    _mm256_store_pd(exponent, _mm256_mul_pd(_mm256_set1_pd(-kappa), r));
+    for (int lane = 0; lane < 4; ++lane)
+      screened_lane[lane] = std::exp(exponent[lane]);
+    const __m256d screened = _mm256_load_pd(screened_lane);
+    const __m256d g0 = _mm256_div_pd(inv_four_pi, r);
+    const __m256d normal_dot = _mm256_add_pd(
+        _mm256_add_pd(_mm256_mul_pd(_mm256_load_pd(sources.nx.data() + j), dx),
+                      _mm256_mul_pd(_mm256_load_pd(sources.ny.data() + j), dy)),
+        _mm256_mul_pd(_mm256_load_pd(sources.nz.data() + j), dz));
+    const __m256d dg0 = _mm256_div_pd(
+        _mm256_mul_pd(inv_four_pi, normal_dot), _mm256_mul_pd(safe_r2, r));
+    const __m256d k1 = _mm256_mul_pd(g0, _mm256_sub_pd(one, screened));
+    const __m256d k2_factor = _mm256_sub_pd(
+        _mm256_mul_pd(_mm256_mul_pd(eps, screened),
+                      _mm256_add_pd(one, _mm256_mul_pd(kap, r))),
+        one);
+    const __m256d k2 = _mm256_mul_pd(dg0, k2_factor);
+    __m256d value = _mm256_mul_pd(
+        _mm256_load_pd(sources.area.data() + j),
+        _mm256_add_pd(
+            _mm256_mul_pd(k1, _mm256_load_pd(sources.phin.data() + j)),
+            _mm256_mul_pd(k2, _mm256_load_pd(sources.phi.data() + j))));
+    value = _mm256_and_pd(value, valid);
+    _mm256_store_pd(contribution, value);
+    reaction_phi += contribution[0];
+    reaction_phi += contribution[1];
+    reaction_phi += contribution[2];
+    reaction_phi += contribution[3];
+  }
+  for (; j < sources.x.size(); ++j) {
+    const double dx = atom.x - sources.x[j];
+    const double dy = atom.y - sources.y[j];
+    const double dz = atom.z - sources.z[j];
+    const double r2 = dx * dx + dy * dy + dz * dz;
+    if (r2 <= 1.0e-28)
+      continue;
+    const double r = std::sqrt(r2);
+    const double screened = std::exp(-kappa * r);
+    const double g0 = inv_four_pi_scalar / r;
+    const double normal_dot =
+        sources.nx[j] * dx + sources.ny[j] * dy + sources.nz[j] * dz;
+    const double dg0 = inv_four_pi_scalar * normal_dot / (r2 * r);
+    reaction_phi +=
+        sources.area[j] *
+        (g0 * (1.0 - screened) * sources.phin[j] +
+         dg0 * (eps_ratio * screened * (1.0 + kappa * r) - 1.0) *
+             sources.phi[j]);
+  }
+  return reaction_phi;
+}
+
+TITAN_TARGET_AVX2
+double poisson_reaction_phi_avx2(const Atom &atom,
+                                 const EnergyProjectionSources &sources,
+                                 double eps_ratio) noexcept {
+  constexpr double inv_four_pi_scalar = 1.0 / (4.0 * kPi);
+  const __m256d tx = _mm256_set1_pd(atom.x);
+  const __m256d ty = _mm256_set1_pd(atom.y);
+  const __m256d tz = _mm256_set1_pd(atom.z);
+  const __m256d one = _mm256_set1_pd(1.0);
+  const __m256d tiny = _mm256_set1_pd(1.0e-28);
+  const __m256d scale = _mm256_set1_pd((eps_ratio - 1.0) * inv_four_pi_scalar);
+  double reaction_phi = 0.0;
+  std::size_t j = 0;
+  alignas(32) double contribution[4];
+  for (; j + 4 <= sources.x.size(); j += 4) {
+    const __m256d dx = _mm256_sub_pd(tx, _mm256_load_pd(sources.x.data() + j));
+    const __m256d dy = _mm256_sub_pd(ty, _mm256_load_pd(sources.y.data() + j));
+    const __m256d dz = _mm256_sub_pd(tz, _mm256_load_pd(sources.z.data() + j));
+    const __m256d r2 = _mm256_add_pd(
+        _mm256_add_pd(_mm256_mul_pd(dx, dx), _mm256_mul_pd(dy, dy)),
+        _mm256_mul_pd(dz, dz));
+    const __m256d valid = _mm256_cmp_pd(r2, tiny, _CMP_GT_OQ);
+    const __m256d safe_r2 = _mm256_blendv_pd(one, r2, valid);
+    const __m256d r = _mm256_sqrt_pd(safe_r2);
+    const __m256d normal_dot = _mm256_add_pd(
+        _mm256_add_pd(_mm256_mul_pd(_mm256_load_pd(sources.nx.data() + j), dx),
+                      _mm256_mul_pd(_mm256_load_pd(sources.ny.data() + j), dy)),
+        _mm256_mul_pd(_mm256_load_pd(sources.nz.data() + j), dz));
+    __m256d value = _mm256_mul_pd(
+        _mm256_load_pd(sources.area.data() + j),
+        _mm256_mul_pd(_mm256_load_pd(sources.phi.data() + j),
+                      _mm256_div_pd(_mm256_mul_pd(scale, normal_dot),
+                                    _mm256_mul_pd(safe_r2, r))));
+    value = _mm256_and_pd(value, valid);
+    _mm256_store_pd(contribution, value);
+    reaction_phi += contribution[0];
+    reaction_phi += contribution[1];
+    reaction_phi += contribution[2];
+    reaction_phi += contribution[3];
+  }
+  for (; j < sources.x.size(); ++j) {
+    const double dx = atom.x - sources.x[j];
+    const double dy = atom.y - sources.y[j];
+    const double dz = atom.z - sources.z[j];
+    const double r2 = dx * dx + dy * dy + dz * dz;
+    if (r2 <= 1.0e-28)
+      continue;
+    const double r = std::sqrt(r2);
+    const double normal_dot =
+        sources.nx[j] * dx + sources.ny[j] * dy + sources.nz[j] * dz;
+    reaction_phi += sources.area[j] * sources.phi[j] *
+                    ((eps_ratio - 1.0) * inv_four_pi_scalar * normal_dot /
+                     (r2 * r));
+  }
+  return reaction_phi;
+}
+#endif
+
+template <typename ScalarKernel, typename Avx2Kernel>
+double project_reaction_energy(const std::vector<Atom> &atoms,
+                               TitanExecutor &executor,
+                               ScalarKernel scalar_kernel,
+                               Avx2Kernel avx2_kernel,
+                               std::vector<double> *reaction_phi_by_atom,
+                               std::string *kernel_policy) {
+  std::vector<double> reaction_phi(atoms.size(), 0.0);
+#if TITAN_SIMD_X86 && TITAN_RUNTIME_TARGET_ATTRS
+  const bool use_avx2 = titan_simd_dispatch::runtime_has_avx2();
+#else
+  const bool use_avx2 = false;
+#endif
+  const std::size_t workers = std::max<std::size_t>(
+      1, std::min<std::size_t>(executor.capacity(), atoms.size()));
+  constexpr std::size_t atom_tile = 4;
+  std::atomic<std::size_t> next_atom{0};
+  executor.parallel_do(workers, [&](std::size_t) {
+    for (;;) {
+      const std::size_t begin = next_atom.fetch_add(atom_tile);
+      if (begin >= atoms.size())
+        break;
+      const std::size_t end = std::min(atoms.size(), begin + atom_tile);
+      for (std::size_t atom_index = begin; atom_index < end; ++atom_index) {
+        reaction_phi[atom_index] =
+            use_avx2 ? avx2_kernel(atoms[atom_index])
+                     : scalar_kernel(atoms[atom_index]);
+      }
     }
-    energy += 0.5 * kCoulombKcalPerMol * atom.q * reaction_phi;
+  });
+  double energy = 0.0;
+  for (std::size_t atom_index = 0; atom_index < atoms.size(); ++atom_index)
+    energy += 0.5 * kCoulombKcalPerMol * atoms[atom_index].q *
+              reaction_phi[atom_index];
+  if (reaction_phi_by_atom != nullptr)
+    *reaction_phi_by_atom = std::move(reaction_phi);
+  if (kernel_policy != nullptr) {
+    *kernel_policy = use_avx2 ? "dynamic-atom-tile4-avx2-exact-exp"
+                              : "dynamic-atom-tile4-scalar";
   }
   return energy;
 }
 
+double jcp_linear_pb_energy_kcal(const std::vector<Atom> &atoms,
+                                 const std::vector<Panel> &panels,
+                                 const std::vector<double> &x, double eps_ratio,
+                                 double kappa, TitanExecutor &executor,
+                                 std::vector<double> *reaction_phi_by_atom,
+                                 std::string *kernel_policy) {
+  const EnergyProjectionSources sources =
+      build_energy_projection_sources(panels, x, true);
+  const auto scalar = [&](const Atom &atom) {
+    return linear_pb_reaction_phi_scalar(atom, sources, eps_ratio, kappa);
+  };
+  const auto avx2 = [&](const Atom &atom) {
+#if TITAN_SIMD_X86
+    return linear_pb_reaction_phi_avx2(atom, sources, eps_ratio, kappa);
+#else
+    return scalar(atom);
+#endif
+  };
+  return project_reaction_energy(atoms, executor, scalar, avx2,
+                                 reaction_phi_by_atom, kernel_policy);
+}
+
 double jcp_poisson_energy_kcal(const std::vector<Atom> &atoms,
                                const std::vector<Panel> &panels,
-                               const std::vector<double> &phi,
-                               double eps_ratio) {
-  const double k2_scale = eps_ratio - 1.0;
-  double energy = 0.0;
-  for (const Atom &atom : atoms) {
-    double reaction_phi = 0.0;
-    for (std::size_t j = 0; j < panels.size(); ++j) {
-      const Panel &source = panels[j];
-      const double k2 =
-          k2_scale * source_normal_derivative_green(atom.x, atom.y, atom.z,
-                                                    source, 0.0);
-      reaction_phi += source.area * k2 * phi[j];
-    }
-    energy += 0.5 * kCoulombKcalPerMol * atom.q * reaction_phi;
-  }
-  return energy;
+                               const std::vector<double> &phi, double eps_ratio,
+                               TitanExecutor &executor,
+                               std::vector<double> *reaction_phi_by_atom,
+                               std::string *kernel_policy) {
+  const EnergyProjectionSources sources =
+      build_energy_projection_sources(panels, phi, false);
+  const auto scalar = [&](const Atom &atom) {
+    return poisson_reaction_phi_scalar(atom, sources, eps_ratio);
+  };
+  const auto avx2 = [&](const Atom &atom) {
+#if TITAN_SIMD_X86
+    return poisson_reaction_phi_avx2(atom, sources, eps_ratio);
+#else
+    return scalar(atom);
+#endif
+  };
+  return project_reaction_energy(atoms, executor, scalar, avx2,
+                                 reaction_phi_by_atom, kernel_policy);
 }
 
 } // namespace
@@ -3198,18 +3625,17 @@ double jcp_poisson_energy_kcal(const std::vector<Atom> &atoms,
 Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                        TitanExecutor &executor) {
   Result result;
-  result.tree_preset =
-      (options.tree_preset == "stage3u-safe" ||
-       options.tree_preset == "stage3u-perf" ||
-       options.tree_preset == "stage3u-perf2")
-          ? options.tree_preset
-          : std::string("off");
+  result.tree_preset = (options.tree_preset == "stage3u-safe" ||
+                        options.tree_preset == "stage3u-perf" ||
+                        options.tree_preset == "stage3u-perf2")
+                           ? options.tree_preset
+                           : std::string("off");
   const FormulationConfig formulation = make_formulation_config(options);
   result.formulation = formulation.formulation;
   result.energy_projection = formulation.energy_projection;
-  result.preconditioner_requested =
-      options.preconditioner.empty() ? std::string("auto")
-                                     : options.preconditioner;
+  result.preconditioner_requested = options.preconditioner.empty()
+                                        ? std::string("auto")
+                                        : options.preconditioner;
   result.preconditioner_block_near =
       options.preconditioner_block_near == "buffer-aware" ||
               options.preconditioner_block_near == "operator-near"
@@ -3225,9 +3651,22 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       std::clamp(options.preconditioner_ilu_neighbor_cap, 32, 1024);
   result.preconditioner_ilu_drop_tol =
       std::clamp(options.preconditioner_ilu_drop_tol, 0.0, 1.0e-2);
+  const bool sparse_ilu_pipeline =
+      result.preconditioner_requested == "fmm-nearfield-ilu0" ||
+      result.preconditioner_requested == "distance-knn-ilu0";
+  result.preconditioner_ilu_regularization =
+      sparse_ilu_pipeline &&
+              options.preconditioner_ilu_regularization != "off"
+          ? std::string("adaptive")
+          : std::string("off");
+  result.preconditioner_ilu_regularization_max =
+      sparse_ilu_pipeline
+          ? std::clamp(options.preconditioner_ilu_regularization_max, 0.0,
+                       1.0e-2)
+          : 0.0;
   result.preconditioner_memory_budget_bytes =
       static_cast<std::size_t>(
-          std::clamp(options.preconditioner_memory_budget_mb, 16, 512)) *
+          std::clamp(options.preconditioner_memory_budget_mb, 16, 4096)) *
       1024u * 1024u;
   result.preconditioner_coarse_aggregate_cap =
       std::clamp(options.preconditioner_coarse_aggregate_cap, 4, 64);
@@ -3249,7 +3688,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       options.true_residual_probe == "interval"
           ? std::string("interval")
           : (options.true_residual_probe == "off" ? std::string("off")
-                                                   : std::string("restart"));
+                                                  : std::string("restart"));
   result.true_residual_probe_scope =
       options.true_residual_probe_scope == "sampled"
           ? std::string("sampled")
@@ -3268,16 +3707,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.sampled_probe_ms = 0.0;
   result.full_true_residual_confirm_calls = 0;
   result.full_true_residual_confirm_ms = 0.0;
-  result.adaptive_level =
-      options.adaptive_level.empty() ? std::string("strict")
-                                     : options.adaptive_level;
-  result.cluster_policy =
-      (options.cluster_policy == "leaf-pair-strict" ||
-       options.cluster_policy == "leaf-pair-balanced")
-          ? options.cluster_policy
-          : std::string("off");
-  result.target_batch_size =
-      std::clamp(options.target_batch_size, 1, 8);
+  result.adaptive_level = options.adaptive_level.empty()
+                              ? std::string("strict")
+                              : options.adaptive_level;
+  result.cluster_policy = (options.cluster_policy == "leaf-pair-strict" ||
+                           options.cluster_policy == "leaf-pair-balanced")
+                              ? options.cluster_policy
+                              : std::string("off");
+  result.target_batch_size = std::clamp(options.target_batch_size, 1, 8);
   if (result.target_batch_size != 4 && result.target_batch_size != 8)
     result.target_batch_size = 1;
   result.leaf_pair_min_source_panels =
@@ -3297,13 +3734,11 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.leaf_pair_probe_cache =
       options.leaf_pair_probe_cache == "per-matvec" ? "per-matvec" : "off";
   result.leaf_pair_target_group =
-      options.leaf_pair_target_group == "same-target-leaf"
-          ? "same-target-leaf"
-          : "scan";
+      options.leaf_pair_target_group == "same-target-leaf" ? "same-target-leaf"
+                                                           : "scan";
   result.leaf_pair_directness_probe =
-      options.leaf_pair_directness_probe == "ancestor-path"
-          ? "ancestor-path"
-          : "full-traversal";
+      options.leaf_pair_directness_probe == "ancestor-path" ? "ancestor-path"
+                                                            : "full-traversal";
   result.leaf_pair_directness_cache =
       options.leaf_pair_directness_cache == "target-leaf-source-leaf"
           ? "target-leaf-source-leaf"
@@ -3326,76 +3761,62 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
        options.leaf_pair_worklist_verify == "full-small")
           ? options.leaf_pair_worklist_verify
           : "off";
-  result.leaf_block_verify =
-      (options.leaf_block_verify == "sampled" ||
-       options.leaf_block_verify == "full-small")
-          ? options.leaf_block_verify
-          : "off";
-  result.leaf_mac =
-      (options.leaf_mac == "audit" || options.leaf_mac == "on")
-          ? options.leaf_mac
-          : "off";
+  result.leaf_block_verify = (options.leaf_block_verify == "sampled" ||
+                              options.leaf_block_verify == "full-small")
+                                 ? options.leaf_block_verify
+                                 : "off";
+  result.leaf_mac = (options.leaf_mac == "audit" || options.leaf_mac == "on")
+                        ? options.leaf_mac
+                        : "off";
   result.leaf_pair_max_lookahead =
       std::clamp(options.leaf_pair_max_lookahead, 4, 128);
   result.interaction_mode =
       options.interaction_mode == "onthefly" ? "onthefly" : "cached";
-  result.node_bounds_mode =
-      options.node_bounds == "tight-aabb" ? std::string("tight-aabb")
-                                          : std::string("moment");
+  result.node_bounds_mode = options.node_bounds == "tight-aabb"
+                                ? std::string("tight-aabb")
+                                : std::string("moment");
   result.tree_builder = options.tree_builder == "topdown-aabb"
                             ? std::string("topdown-aabb")
                             : std::string("grouped-morton");
-  result.expansion_center =
-      (options.expansion_center == "area-centroid" ||
-       options.expansion_center == "aabb-center")
-          ? options.expansion_center
-          : std::string("legacy");
-  result.fragmentation_safety =
-      (options.fragmentation_safety == "audit" ||
-       options.fragmentation_safety == "split")
-          ? options.fragmentation_safety
-          : std::string("off");
+  result.expansion_center = (options.expansion_center == "area-centroid" ||
+                             options.expansion_center == "aabb-center")
+                                ? options.expansion_center
+                                : std::string("legacy");
+  result.fragmentation_safety = (options.fragmentation_safety == "audit" ||
+                                 options.fragmentation_safety == "split")
+                                    ? options.fragmentation_safety
+                                    : std::string("off");
   result.mac_safety =
       (options.mac_safety == "audit" || options.mac_safety == "physical-gap")
           ? options.mac_safety
           : std::string("off");
-  result.mac_gap_factor =
-      std::clamp(std::isfinite(options.mac_gap_factor)
-                     ? options.mac_gap_factor
-                     : 1.5,
-                 0.5, 4.0);
-  result.moment_audit =
-      (options.moment_audit == "sampled" ||
-       options.moment_audit == "full-small")
-          ? options.moment_audit
-          : std::string("off");
-  result.moment_construction =
-      options.moment_construction == "direct-node"
-          ? std::string("direct-node")
-          : std::string("translated");
-  result.moment_sum =
-      options.moment_sum == "kahan" ? std::string("kahan")
-                                    : std::string("naive");
-  result.convergence_audit =
-      (options.convergence_audit == "sampled" ||
-       options.convergence_audit == "full-small")
-          ? options.convergence_audit
-          : std::string("off");
-  result.convergence_safety =
-      (options.convergence_safety == "audit" ||
-       options.convergence_safety == "split")
-          ? options.convergence_safety
-          : std::string("off");
-  result.convergence_rho_cap =
-      std::clamp(std::isfinite(options.convergence_rho_cap)
-                     ? options.convergence_rho_cap
-                     : 0.0,
-                 0.0, 2.0);
-  result.mac_aspect_cap =
-      std::clamp(std::isfinite(options.mac_aspect_cap)
-                     ? options.mac_aspect_cap
-                     : 0.0,
-                 0.0, 50.0);
+  result.mac_gap_factor = std::clamp(
+      std::isfinite(options.mac_gap_factor) ? options.mac_gap_factor : 1.5, 0.5,
+      4.0);
+  result.moment_audit = (options.moment_audit == "sampled" ||
+                         options.moment_audit == "full-small")
+                            ? options.moment_audit
+                            : std::string("off");
+  result.moment_construction = options.moment_construction == "direct-node"
+                                   ? std::string("direct-node")
+                                   : std::string("translated");
+  result.moment_sum = options.moment_sum == "kahan" ? std::string("kahan")
+                                                    : std::string("naive");
+  result.convergence_audit = (options.convergence_audit == "sampled" ||
+                              options.convergence_audit == "full-small")
+                                 ? options.convergence_audit
+                                 : std::string("off");
+  result.convergence_safety = (options.convergence_safety == "audit" ||
+                               options.convergence_safety == "split")
+                                  ? options.convergence_safety
+                                  : std::string("off");
+  result.convergence_rho_cap = std::clamp(
+      std::isfinite(options.convergence_rho_cap) ? options.convergence_rho_cap
+                                                 : 0.0,
+      0.0, 2.0);
+  result.mac_aspect_cap = std::clamp(
+      std::isfinite(options.mac_aspect_cap) ? options.mac_aspect_cap : 0.0, 0.0,
+      50.0);
   result.convergence_estimator =
       (options.convergence_estimator == "moment-tail" ||
        options.convergence_estimator == "hybrid")
@@ -3422,9 +3843,9 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
        options.convergence_calibration == "consecutive-aspect")
           ? options.convergence_calibration
           : std::string("stage3j");
-  result.convergence_dielectric_amp =
-      options.convergence_dielectric_amp == "on" ? std::string("on")
-                                                 : std::string("off");
+  result.convergence_dielectric_amp = options.convergence_dielectric_amp == "on"
+                                          ? std::string("on")
+                                          : std::string("off");
   result.convergence_estimator_model =
       (options.convergence_estimator_model == "channel-tail" ||
        options.convergence_estimator_model == "channel-tail-eps")
@@ -3435,24 +3856,23 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
        options.convergence_channel_calibration == "k3-eps" ||
        options.convergence_channel_calibration == "k4-sqrt-eps" ||
        options.convergence_channel_calibration == "k4-eps" ||
-       options.convergence_channel_calibration ==
-           "all-derivative-sqrt-eps" ||
+       options.convergence_channel_calibration == "all-derivative-sqrt-eps" ||
        options.convergence_channel_calibration == "polynomial-eps")
           ? options.convergence_channel_calibration
           : std::string("stage3m");
-  result.convergence_split_policy =
-      options.convergence_split_policy == "k3-hot" ? std::string("k3-hot")
-                                                   : std::string("global");
+  result.convergence_split_policy = options.convergence_split_policy == "k3-hot"
+                                        ? std::string("k3-hot")
+                                        : std::string("global");
   result.convergence_split_selectivity =
       (options.convergence_split_selectivity == "absolute-aware" ||
        options.convergence_split_selectivity == "channel-absolute-aware")
           ? options.convergence_split_selectivity
           : std::string("legacy");
-  result.convergence_split_absolute_floor = std::clamp(
-      std::isfinite(options.convergence_split_absolute_floor)
-          ? options.convergence_split_absolute_floor
-          : 0.0,
-      0.0, 1.0e-4);
+  result.convergence_split_absolute_floor =
+      std::clamp(std::isfinite(options.convergence_split_absolute_floor)
+                     ? options.convergence_split_absolute_floor
+                     : 0.0,
+                 0.0, 1.0e-4);
   result.convergence_overreject_audit =
       (options.convergence_overreject_audit == "sampled" ||
        options.convergence_overreject_audit == "full-small")
@@ -3482,60 +3902,58 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
        options.accepted_miss_diagnostics == "sampled-detail")
           ? options.accepted_miss_diagnostics
           : std::string("off");
-  result.accepted_miss_absolute_floor = std::clamp(
-      std::isfinite(options.accepted_miss_absolute_floor)
-          ? options.accepted_miss_absolute_floor
-          : 1.0e-7,
-      0.0, 1.0e-4);
-  result.convergence_k3_accepted_rho_cap = std::clamp(
-      std::isfinite(options.convergence_k3_accepted_rho_cap)
-          ? options.convergence_k3_accepted_rho_cap
-          : 0.0,
-      0.0, 2.0);
-  result.mac_distance_policy =
-      options.mac_distance_policy == "surface-margin"
-          ? std::string("surface-margin")
-          : std::string("center");
-  result.mac_surface_margin_factor = std::clamp(
-      std::isfinite(options.mac_surface_margin_factor)
-          ? options.mac_surface_margin_factor
-          : 0.25,
-      0.0, 0.75);
+  result.accepted_miss_absolute_floor =
+      std::clamp(std::isfinite(options.accepted_miss_absolute_floor)
+                     ? options.accepted_miss_absolute_floor
+                     : 1.0e-7,
+                 0.0, 1.0e-4);
+  result.convergence_k3_accepted_rho_cap =
+      std::clamp(std::isfinite(options.convergence_k3_accepted_rho_cap)
+                     ? options.convergence_k3_accepted_rho_cap
+                     : 0.0,
+                 0.0, 2.0);
+  result.mac_distance_policy = options.mac_distance_policy == "surface-margin"
+                                   ? std::string("surface-margin")
+                                   : std::string("center");
+  result.mac_surface_margin_factor =
+      std::clamp(std::isfinite(options.mac_surface_margin_factor)
+                     ? options.mac_surface_margin_factor
+                     : 0.25,
+                 0.0, 0.75);
   result.mac_surface_margin_policy =
       (options.mac_surface_margin_policy == "adaptive" ||
        options.mac_surface_margin_policy == "risk-scaled")
           ? options.mac_surface_margin_policy
           : "all";
-  result.mac_surface_margin_aspect_threshold = std::clamp(
-      std::isfinite(options.mac_surface_margin_aspect_threshold)
-          ? options.mac_surface_margin_aspect_threshold
-          : 3.0,
-      1.0, 50.0);
-  result.mac_surface_margin_rho_trigger = std::clamp(
-      std::isfinite(options.mac_surface_margin_rho_trigger)
-          ? options.mac_surface_margin_rho_trigger
-          : 0.55,
-      0.0, 2.0);
-  result.mac_surface_margin_soft_aspect_threshold = std::clamp(
-      std::isfinite(options.mac_surface_margin_soft_aspect_threshold)
-          ? options.mac_surface_margin_soft_aspect_threshold
-          : 0.0,
-      0.0, 50.0);
-  result.mac_surface_margin_soft_rho_trigger = std::clamp(
-      std::isfinite(options.mac_surface_margin_soft_rho_trigger)
-          ? options.mac_surface_margin_soft_rho_trigger
-          : 0.0,
-      0.0, 2.0);
-  result.mac_surface_margin_soft_factor = std::clamp(
-      std::isfinite(options.mac_surface_margin_soft_factor)
-          ? options.mac_surface_margin_soft_factor
-          : 0.10,
-      0.0, 0.75);
-  result.expansion_audit =
-      (options.expansion_audit == "sampled" ||
-       options.expansion_audit == "full-small")
-          ? options.expansion_audit
-          : std::string("off");
+  result.mac_surface_margin_aspect_threshold =
+      std::clamp(std::isfinite(options.mac_surface_margin_aspect_threshold)
+                     ? options.mac_surface_margin_aspect_threshold
+                     : 3.0,
+                 1.0, 50.0);
+  result.mac_surface_margin_rho_trigger =
+      std::clamp(std::isfinite(options.mac_surface_margin_rho_trigger)
+                     ? options.mac_surface_margin_rho_trigger
+                     : 0.55,
+                 0.0, 2.0);
+  result.mac_surface_margin_soft_aspect_threshold =
+      std::clamp(std::isfinite(options.mac_surface_margin_soft_aspect_threshold)
+                     ? options.mac_surface_margin_soft_aspect_threshold
+                     : 0.0,
+                 0.0, 50.0);
+  result.mac_surface_margin_soft_rho_trigger =
+      std::clamp(std::isfinite(options.mac_surface_margin_soft_rho_trigger)
+                     ? options.mac_surface_margin_soft_rho_trigger
+                     : 0.0,
+                 0.0, 2.0);
+  result.mac_surface_margin_soft_factor =
+      std::clamp(std::isfinite(options.mac_surface_margin_soft_factor)
+                     ? options.mac_surface_margin_soft_factor
+                     : 0.10,
+                 0.0, 0.75);
+  result.expansion_audit = (options.expansion_audit == "sampled" ||
+                            options.expansion_audit == "full-small")
+                               ? options.expansion_audit
+                               : std::string("off");
   result.expansion_audit_channel =
       (options.expansion_audit_channel == "summary" ||
        options.expansion_audit_channel == "sampled-detail")
@@ -3545,15 +3963,30 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       (options.quad_buffer == "gauss7" || options.quad_buffer == "adaptive")
           ? std::string("explicit")
           : std::string("off");
-  result.derivative_mode =
-      options.derivative_mode.empty() ? std::string("analytic")
-                                      : options.derivative_mode;
+  result.derivative_mode = options.derivative_mode.empty()
+                               ? std::string("analytic")
+                               : options.derivative_mode;
   result.surface_generator = options.surface_geometry == "point-panel"
                                  ? std::string("titan_surface_point_panel")
+                             : options.primary_surface == "grid-ses"
+                                 ? std::string("titan_grid_watertight_ses")
+                             : options.primary_surface == "analytic-ses"
+                                 ? std::string("titan_analytic_patch_ray_ses")
                                  : std::string("titan_sphere_patch");
+  const bool node_patch_discretization =
+      options.discretization == "node-patch" ||
+      formulation.formulation == "tabi2-nodepatch";
+  if (node_patch_discretization &&
+      formulation.formulation != "jcp2013-centroid" &&
+      formulation.formulation != "jcp2013-treecode" &&
+      formulation.formulation != "tabi2-nodepatch") {
+    throw std::runtime_error(
+        "PBE TABI: node-patch discretization is supported only by the JCP "
+        "2013 coupled formulations.");
+  }
   result.discretization =
-      formulation.formulation == "tabi2-nodepatch" ? std::string("node_patch")
-                                                    : std::string("centroid");
+      node_patch_discretization ? std::string("node_patch")
+                                : std::string("centroid");
   result.rhs_scale = formulation.rhs_scale;
   result.coulomb_factor_kcal_mol = kCoulombKcalPerMol;
   result.total_charge = std::accumulate(
@@ -3563,8 +3996,34 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   LongRunProgressWriter progress(options, executor.capacity());
   progress.write("surface_start", result, nullptr, 0, 0, 0, 0.0, "running",
                  true);
-  const std::vector<Panel> panels =
-      build_surface(atoms, options, &result, &executor);
+  std::vector<Panel> panels = build_surface(atoms, options, &result, &executor);
+  std::size_t node_patch_topology_bytes = 0;
+  if (node_patch_discretization) {
+    if (options.surface_geometry != "triangle")
+      throw std::runtime_error(
+          "PBE TABI: node-patch discretization requires "
+          "-pbe-tabi-geometry=triangle.");
+    panels = build_node_patch_panels(panels, options.diagonal_mode);
+    if (!panels.empty() && panels.front().node_patch_geometry != nullptr) {
+      const NodePatchGeometry &geometry = *panels.front().node_patch_geometry;
+      node_patch_topology_bytes =
+          sizeof(NodePatchGeometry) +
+          geometry.vertex_xyz.size() * sizeof(std::array<double, 3>) +
+          geometry.triangles.size() * sizeof(NodePatchTriangle) +
+          (geometry.incident_offsets.size() +
+           geometry.incident_triangles.size() +
+           geometry.adjacent_offsets.size() +
+           geometry.adjacent_nodes.size()) *
+              sizeof(std::size_t);
+      result.solid_angle_fallbacks = geometry.solid_angle_fallbacks;
+      result.diag_min = std::numeric_limits<double>::infinity();
+      result.diag_max = -std::numeric_limits<double>::infinity();
+      for (const Panel &panel : panels) {
+        result.diag_min = std::min(result.diag_min, panel.diagonal);
+        result.diag_max = std::max(result.diag_max, panel.diagonal);
+      }
+    }
+  }
   result.panel_count = panels.size();
   result.boundary_nodes = panels.size();
   const int surface_point_max = options.highres_surface ? 65536 : 4096;
@@ -3583,17 +4042,43 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   } else {
     result.panel_budget_status = "dense";
   }
-  progress.write("surface_end", result, nullptr, 0, 0, 0, 0.0, "running",
-                 true);
+  progress.write("surface_end", result, nullptr, 0, 0, 0, 0.0, "running", true);
   result.taylor_order = std::clamp(options.taylor_order, 2, 5);
-  result.near_integration =
-      resolve_near_integration_mode(options.near_integration, panels);
+  result.near_integration = resolve_near_integration_mode(
+      node_patch_discretization && options.near_integration == "auto"
+          ? std::string("analytic_singular")
+          : options.near_integration,
+      panels);
   result.quad_buffer = resolve_quad_buffer_mode(
       options.quad_buffer, result.near_integration, panels);
   if (options.quad_buffer == "auto")
     result.quad_buffer_auto_candidate = "off";
   result.memory_bytes =
-      panels.size() * sizeof(Panel) + panels.size() * sizeof(double) * 8;
+      panels.size() * sizeof(Panel) + panels.size() * sizeof(double) * 8 +
+      node_patch_topology_bytes;
+
+  if (options.surface_only) {
+    result.surface_only = true;
+    result.converged = true;
+    result.status = "ok";
+    result.reaction_energy_source = "not_computed_surface_only";
+    result.convergence_reason = "surface_only";
+    result.sum_mode_effective = "surface_only";
+    result.matvec_mode = "not_built_surface_only";
+    result.fmm_m2l_mode = "off";
+    result.preconditioner_requested = options.preconditioner;
+    result.preconditioner_effective = "not_built_surface_only";
+    result.preconditioner_quality_status = "not_built_surface_only";
+    result.iterations = 0;
+    result.residual = 0.0;
+    result.final_residual = 0.0;
+    result.unknown_count = 0;
+    result.peak_memory_bytes =
+        std::max(result.memory_bytes, current_working_set_bytes());
+    progress.write("surface_only_done", result, nullptr, 0, 0, 0, 0.0,
+                   result.status, true);
+    return result;
+  }
 
   if (panels.empty()) {
     result.converged = true;
@@ -3606,12 +4091,11 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     return result;
   }
 
-  const double kappa = debye_kappa_inv_a(options.salt_m,
-                                         options.temperature_k);
-  const double contrast =
-      (options.eps_out - options.eps_in) /
-      std::max(1.0e-12, options.eps_out + options.eps_in);
-  const double operator_contrast = contrast * formulation.operator_contrast_scale;
+  const double kappa = debye_kappa_inv_a(options.salt_m, options.temperature_k);
+  const double contrast = (options.eps_out - options.eps_in) /
+                          std::max(1.0e-12, options.eps_out + options.eps_in);
+  const double operator_contrast =
+      contrast * formulation.operator_contrast_scale;
   result.kappa_inv_a = kappa;
   result.dielectric_contrast = contrast;
   result.operator_contrast = operator_contrast;
@@ -3624,8 +4108,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     mode = paper_bie_formulation
                ? "direct"
                : (result.surface_geometry == "triangle"
-               ? "direct"
-               : (panels.size() > 1024 ? "treecode" : "direct"));
+                      ? "direct"
+                      : (panels.size() > 1024 ? "treecode" : "direct"));
   }
   result.sum_mode_effective = mode;
   result.matvec_mode = mode;
@@ -3655,26 +4139,40 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     else
       result.preconditioner_effective = "diagonal";
     const double eps_ratio =
-        std::max(1.0e-12, options.eps_out) /
-        std::max(1.0e-12, options.eps_in);
+        std::max(1.0e-12, options.eps_out) / std::max(1.0e-12, options.eps_in);
     const double lhs_phi = 0.5 * (1.0 + eps_ratio);
     const double lhs_phin = 0.5 * (1.0 + 1.0 / eps_ratio);
     const bool coupled = kappa > 1.0e-14;
+    if (!coupled && (options.preconditioner == "fmm-block-jacobi" ||
+                     options.preconditioner == "fmm-overlap-schwarz" ||
+                     options.preconditioner == "fmm-nearfield-ilu0" ||
+                     options.preconditioner == "distance-knn-overlap-schwarz" ||
+                     options.preconditioner == "distance-knn-ilu0")) {
+      throw std::invalid_argument(
+          "FMM-native TABI preconditioners require positive ionic strength and "
+          "the coupled JCP system");
+    }
+    if (options.fmm_local == "gmres-p4" &&
+        (options.fmm_local_geometry_guard != "strict-geometry-mac" ||
+         std::abs(options.fmm_local_geometry_theta - 0.5) > 1.0e-15)) {
+      throw std::invalid_argument(
+          "gmres-p4 requires strict-geometry-mac with geometry theta 0.5");
+    }
     result.operator_contrast = eps_ratio;
     result.unknown_count = coupled ? 2 * panels.size() : panels.size();
     result.bie_system = coupled ? "linear_pb_2x2" : "poisson";
     result.lhs_diag_phi = lhs_phi;
     result.lhs_diag_phin = coupled ? lhs_phin : 0.0;
     result.energy_equation = coupled ? "jcp2013_eq14" : "jcp2013_eq22";
-    result.kernel_convention =
-        "G0_Gk_source_normal_target_normal_outward_" +
-        result.near_integration + "_near";
+    result.kernel_convention = "G0_Gk_source_normal_target_normal_outward_" +
+                               result.near_integration + "_near";
 
     const auto rhs_begin = std::chrono::steady_clock::now();
     double s1_norm = 0.0;
     double s2_norm = 0.0;
-    const std::vector<double> rhs = build_jcp_rhs(
-        atoms, panels, options.eps_in, coupled, &s1_norm, &s2_norm);
+    const std::vector<double> rhs =
+        build_jcp_rhs(atoms, panels, options.eps_in, coupled, executor,
+                      &s1_norm, &s2_norm);
     result.rhs_ms = elapsed_ms(rhs_begin, std::chrono::steady_clock::now());
     result.source_norm_s1 = s1_norm;
     result.source_norm_s2 = s2_norm;
@@ -3686,10 +4184,11 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     const double tol = std::max(1.0e-12, options.residual_tol);
     std::vector<double> diagonal(result.unknown_count, 1.0);
     if (result.preconditioner_effective != "none") {
-      std::fill(diagonal.begin(), diagonal.end(), lhs_phi);
-      if (coupled) {
-        for (std::size_t i = panels.size(); i < diagonal.size(); ++i)
-          diagonal[i] = lhs_phin;
+      for (std::size_t i = 0; i < panels.size(); ++i) {
+        diagonal[i] = jcp_lhs_phi_for_panel(panels[i], eps_ratio, lhs_phi);
+        if (coupled)
+          diagonal[panels.size() + i] =
+              jcp_lhs_phin_for_panel(panels[i], eps_ratio, lhs_phin);
       }
     }
 
@@ -3720,16 +4219,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         result.convergence_estimator_error_cap;
     jcp_tree_stats.convergence_unstable_rho_cap =
         result.convergence_unstable_rho_cap;
-    jcp_tree_stats.convergence_calibration =
-        result.convergence_calibration;
+    jcp_tree_stats.convergence_calibration = result.convergence_calibration;
     jcp_tree_stats.convergence_dielectric_amp =
         result.convergence_dielectric_amp;
     jcp_tree_stats.convergence_estimator_model =
         result.convergence_estimator_model;
     jcp_tree_stats.convergence_channel_calibration =
         result.convergence_channel_calibration;
-    jcp_tree_stats.convergence_split_policy =
-        result.convergence_split_policy;
+    jcp_tree_stats.convergence_split_policy = result.convergence_split_policy;
     jcp_tree_stats.convergence_split_selectivity =
         result.convergence_split_selectivity;
     jcp_tree_stats.convergence_split_absolute_floor =
@@ -3738,23 +4235,18 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         result.convergence_overreject_audit;
     jcp_tree_stats.convergence_overreject_detail =
         result.convergence_overreject_detail;
-    jcp_tree_stats.convergence_shape_audit =
-        result.convergence_shape_audit;
+    jcp_tree_stats.convergence_shape_audit = result.convergence_shape_audit;
     jcp_tree_stats.convergence_kernel_response_audit =
         result.convergence_kernel_response_audit;
-    jcp_tree_stats.channel_missed_semantics =
-        result.channel_missed_semantics;
-    jcp_tree_stats.accepted_miss_diagnostics =
-        result.accepted_miss_diagnostics;
+    jcp_tree_stats.channel_missed_semantics = result.channel_missed_semantics;
+    jcp_tree_stats.accepted_miss_diagnostics = result.accepted_miss_diagnostics;
     jcp_tree_stats.accepted_miss_absolute_floor =
         result.accepted_miss_absolute_floor;
     jcp_tree_stats.convergence_k3_accepted_rho_cap =
         result.convergence_k3_accepted_rho_cap;
     jcp_tree_stats.mac_distance_policy = result.mac_distance_policy;
-    jcp_tree_stats.mac_surface_margin_factor =
-        result.mac_surface_margin_factor;
-    jcp_tree_stats.mac_surface_margin_policy =
-        result.mac_surface_margin_policy;
+    jcp_tree_stats.mac_surface_margin_factor = result.mac_surface_margin_factor;
+    jcp_tree_stats.mac_surface_margin_policy = result.mac_surface_margin_policy;
     jcp_tree_stats.mac_surface_margin_aspect_threshold =
         result.mac_surface_margin_aspect_threshold;
     jcp_tree_stats.mac_surface_margin_rho_trigger =
@@ -3787,88 +4279,74 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     jcp_tree_stats.leaf_pair_scheduler = result.leaf_pair_scheduler;
     jcp_tree_stats.leaf_pair_worklist_max_active =
         result.leaf_pair_worklist_max_active;
-    jcp_tree_stats.leaf_pair_worklist_verify =
-        result.leaf_pair_worklist_verify;
+    jcp_tree_stats.leaf_pair_worklist_verify = result.leaf_pair_worklist_verify;
     jcp_tree_stats.leaf_block_verify = result.leaf_block_verify;
-    jcp_tree_stats.leaf_pair_max_lookahead =
-        result.leaf_pair_max_lookahead;
+    jcp_tree_stats.leaf_pair_max_lookahead = result.leaf_pair_max_lookahead;
     jcp_tree_stats.expansion_audit = result.expansion_audit;
     jcp_tree_stats.expansion_audit_channel = result.expansion_audit_channel;
     const bool fmm_m2l_single_matvec =
-        experimental_treecode &&
-        options.fmm_m2l == "single-matvec-analytic";
+        experimental_treecode && options.fmm_m2l == "single-matvec-analytic";
     const bool preconditioner_needs_jcp_tree =
         result.preconditioner_requested == "block" ||
         result.preconditioner_requested == "block-budgeted" ||
         result.preconditioner_requested == "coarse-galerkin-probe";
-    const bool needs_jcp_tree = experimental_treecode ||
-                                preconditioner_needs_jcp_tree;
+    const bool needs_jcp_tree =
+        experimental_treecode || preconditioner_needs_jcp_tree;
     if (needs_jcp_tree) {
-      progress.write("tree_build_start", result, &jcp_tree_stats,
-                     matvec_calls, 0, 0, 0.0, "running", true);
+      progress.write("tree_build_start", result, &jcp_tree_stats, matvec_calls,
+                     0, 0, 0.0, "running", true);
       const std::string jcp_tree_interaction_mode =
           fmm_m2l_single_matvec && !preconditioner_needs_jcp_tree
               ? std::string("onthefly")
               : (experimental_treecode ? options.interaction_mode
                                        : std::string("onthefly"));
       jcp_tree = build_tree_workspace(
-          panels, executor, static_cast<std::size_t>(
-                                std::max(8, options.tree_leaf_size)),
+          panels, executor,
+          static_cast<std::size_t>(std::max(8, options.tree_leaf_size)),
           options.tree_opening_theta, options.leaf_near_policy,
-          options.leaf_panel_kernel, options.adaptive_level,
-          result.quad_buffer, jcp_tree_interaction_mode,
-          result.node_bounds_mode, result.tree_builder, options.mac_safety,
-          options.mac_gap_factor, options.moment_audit,
-          result.expansion_center, result.fragmentation_safety,
-          options.expansion_audit, options.expansion_audit_sample_count,
-          options.expansion_audit_max_panels,
-          options.moment_construction, options.moment_sum,
-          options.convergence_audit, options.convergence_safety,
-          options.convergence_rho_cap, options.mac_aspect_cap,
-          options.convergence_estimator,
+          options.leaf_panel_kernel, options.adaptive_level, result.quad_buffer,
+          jcp_tree_interaction_mode, result.node_bounds_mode,
+          result.tree_builder, options.mac_safety, options.mac_gap_factor,
+          options.moment_audit, result.expansion_center,
+          result.fragmentation_safety, options.expansion_audit,
+          options.expansion_audit_sample_count,
+          options.expansion_audit_max_panels, options.moment_construction,
+          options.moment_sum, options.convergence_audit,
+          options.convergence_safety, options.convergence_rho_cap,
+          options.mac_aspect_cap, options.convergence_estimator,
           options.convergence_tail_threshold,
           options.convergence_estimator_error_cap,
-          options.convergence_unstable_rho_cap,
-          options.convergence_calibration,
-          options.cluster_policy,
-          options.convergence_dielectric_amp, options.target_batch_size,
-          options.leaf_pair_min_source_panels,
-          options.leaf_pair_min_targets,
-          options.convergence_estimator_model,
+          options.convergence_unstable_rho_cap, options.convergence_calibration,
+          options.cluster_policy, options.convergence_dielectric_amp,
+          options.target_batch_size, options.leaf_pair_min_source_panels,
+          options.leaf_pair_min_targets, options.convergence_estimator_model,
           options.expansion_audit_channel,
           options.convergence_channel_calibration,
-          options.channel_missed_semantics,
-          options.convergence_split_policy,
+          options.channel_missed_semantics, options.convergence_split_policy,
           options.accepted_miss_diagnostics,
-          options.convergence_k3_accepted_rho_cap,
-          options.mac_distance_policy,
-          options.mac_surface_margin_factor,
-          options.mac_surface_margin_policy,
+          options.convergence_k3_accepted_rho_cap, options.mac_distance_policy,
+          options.mac_surface_margin_factor, options.mac_surface_margin_policy,
           options.mac_surface_margin_aspect_threshold,
           options.mac_surface_margin_rho_trigger,
           options.accepted_miss_absolute_floor, options.leaf_pair_kernel,
           options.leaf_kernel_profile, options.leaf_work_profile,
-          options.jcp_direct_kernel,
-          options.leaf_pair_selection_profile,
-          options.leaf_pair_probe_cache,
-          options.leaf_pair_target_group,
-          options.leaf_pair_max_lookahead,
-          options.leaf_pair_directness_probe,
-            options.leaf_pair_directness_cache,
-            options.leaf_pair_directness_verify,
-            options.leaf_pair_scheduler,
-            options.leaf_pair_worklist_max_active,
-            options.leaf_pair_worklist_verify, options.leaf_block_verify,
-            options.mac_surface_margin_soft_aspect_threshold,
-            options.mac_surface_margin_soft_rho_trigger,
-            options.mac_surface_margin_soft_factor,
-            options.convergence_split_selectivity,
-            options.convergence_split_absolute_floor,
-            options.convergence_overreject_audit,
-            options.convergence_overreject_detail,
-            options.convergence_shape_audit,
-            options.convergence_kernel_response_audit,
-            result.leaf_mac, options.fmm_m2l);
+          options.jcp_direct_kernel, options.leaf_pair_selection_profile,
+          options.leaf_pair_probe_cache, options.leaf_pair_target_group,
+          options.leaf_pair_max_lookahead, options.leaf_pair_directness_probe,
+          options.leaf_pair_directness_cache,
+          options.leaf_pair_directness_verify, options.leaf_pair_scheduler,
+          options.leaf_pair_worklist_max_active,
+          options.leaf_pair_worklist_verify, options.leaf_block_verify,
+          options.mac_surface_margin_soft_aspect_threshold,
+          options.mac_surface_margin_soft_rho_trigger,
+          options.mac_surface_margin_soft_factor,
+          options.convergence_split_selectivity,
+          options.convergence_split_absolute_floor,
+          options.convergence_overreject_audit,
+          options.convergence_overreject_detail,
+          options.convergence_shape_audit,
+          options.convergence_kernel_response_audit, result.leaf_mac,
+          options.fmm_m2l);
       jcp_tree.leaf_mac = result.leaf_mac;
       jcp_tree.taylor_order = result.taylor_order;
       jcp_tree.derivative_mode = result.derivative_mode;
@@ -3887,17 +4365,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.convergence_rho_cap = jcp_tree.convergence_rho_cap;
       result.mac_aspect_cap = jcp_tree.mac_aspect_cap;
       result.convergence_estimator = jcp_tree.convergence_estimator;
-      result.convergence_tail_threshold =
-          jcp_tree.convergence_tail_threshold;
+      result.convergence_tail_threshold = jcp_tree.convergence_tail_threshold;
       result.convergence_estimator_error_cap =
           jcp_tree.convergence_estimator_error_cap;
       result.convergence_unstable_rho_cap =
           jcp_tree.convergence_unstable_rho_cap;
       result.convergence_calibration = jcp_tree.convergence_calibration;
-      result.convergence_dielectric_amp =
-          jcp_tree.convergence_dielectric_amp;
-      result.convergence_estimator_model =
-          jcp_tree.convergence_estimator_model;
+      result.convergence_dielectric_amp = jcp_tree.convergence_dielectric_amp;
+      result.convergence_estimator_model = jcp_tree.convergence_estimator_model;
       result.convergence_channel_calibration =
           jcp_tree.convergence_channel_calibration;
       result.convergence_split_policy = jcp_tree.convergence_split_policy;
@@ -3913,30 +4388,26 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.convergence_kernel_response_audit =
           jcp_tree.convergence_kernel_response_audit;
       result.channel_missed_semantics = jcp_tree.channel_missed_semantics;
-      result.accepted_miss_diagnostics =
-          jcp_tree.accepted_miss_diagnostics;
+      result.accepted_miss_diagnostics = jcp_tree.accepted_miss_diagnostics;
       result.accepted_miss_absolute_floor =
           jcp_tree.accepted_miss_absolute_floor;
       result.convergence_k3_accepted_rho_cap =
           jcp_tree.convergence_k3_accepted_rho_cap;
       result.mac_distance_policy = jcp_tree.mac_distance_policy;
-      result.mac_surface_margin_factor =
-          jcp_tree.mac_surface_margin_factor;
-      result.mac_surface_margin_policy =
-          jcp_tree.mac_surface_margin_policy;
+      result.mac_surface_margin_factor = jcp_tree.mac_surface_margin_factor;
+      result.mac_surface_margin_policy = jcp_tree.mac_surface_margin_policy;
       result.mac_surface_margin_aspect_threshold =
           jcp_tree.mac_surface_margin_aspect_threshold;
-    result.mac_surface_margin_rho_trigger =
-        jcp_tree.mac_surface_margin_rho_trigger;
-    result.mac_surface_margin_soft_aspect_threshold =
-        jcp_tree.mac_surface_margin_soft_aspect_threshold;
-    result.mac_surface_margin_soft_rho_trigger =
-        jcp_tree.mac_surface_margin_soft_rho_trigger;
-    result.mac_surface_margin_soft_factor =
-        jcp_tree.mac_surface_margin_soft_factor;
+      result.mac_surface_margin_rho_trigger =
+          jcp_tree.mac_surface_margin_rho_trigger;
+      result.mac_surface_margin_soft_aspect_threshold =
+          jcp_tree.mac_surface_margin_soft_aspect_threshold;
+      result.mac_surface_margin_soft_rho_trigger =
+          jcp_tree.mac_surface_margin_soft_rho_trigger;
+      result.mac_surface_margin_soft_factor =
+          jcp_tree.mac_surface_margin_soft_factor;
       result.cluster_policy = jcp_tree.cluster_policy;
-      result.target_batch_size =
-          static_cast<int>(jcp_tree.target_batch_size);
+      result.target_batch_size = static_cast<int>(jcp_tree.target_batch_size);
       result.leaf_pair_min_source_panels =
           static_cast<int>(jcp_tree.leaf_pair_min_source_panels);
       result.leaf_pair_min_targets =
@@ -3944,16 +4415,12 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.leaf_kernel_profile = jcp_tree.leaf_kernel_profile;
       result.leaf_work_profile = jcp_tree.leaf_work_profile;
       result.jcp_direct_kernel = jcp_tree.jcp_direct_kernel;
-      result.leaf_pair_selection_profile =
-          jcp_tree.leaf_pair_selection_profile;
+      result.leaf_pair_selection_profile = jcp_tree.leaf_pair_selection_profile;
       result.leaf_pair_probe_cache = jcp_tree.leaf_pair_probe_cache;
       result.leaf_pair_target_group = jcp_tree.leaf_pair_target_group;
-      result.leaf_pair_directness_probe =
-          jcp_tree.leaf_pair_directness_probe;
-      result.leaf_pair_directness_cache =
-          jcp_tree.leaf_pair_directness_cache;
-      result.leaf_pair_directness_verify =
-          jcp_tree.leaf_pair_directness_verify;
+      result.leaf_pair_directness_probe = jcp_tree.leaf_pair_directness_probe;
+      result.leaf_pair_directness_cache = jcp_tree.leaf_pair_directness_cache;
+      result.leaf_pair_directness_verify = jcp_tree.leaf_pair_directness_verify;
       result.leaf_pair_scheduler = jcp_tree.leaf_pair_scheduler;
       result.leaf_pair_worklist_max_active =
           static_cast<int>(jcp_tree.leaf_pair_worklist_max_active);
@@ -3977,16 +4444,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       jcp_tree_stats.convergence_safety = jcp_tree.convergence_safety;
       jcp_tree_stats.convergence_rho_cap = jcp_tree.convergence_rho_cap;
       jcp_tree_stats.mac_aspect_cap = jcp_tree.mac_aspect_cap;
-      jcp_tree_stats.convergence_estimator =
-          jcp_tree.convergence_estimator;
+      jcp_tree_stats.convergence_estimator = jcp_tree.convergence_estimator;
       jcp_tree_stats.convergence_tail_threshold =
           jcp_tree.convergence_tail_threshold;
       jcp_tree_stats.convergence_estimator_error_cap =
           jcp_tree.convergence_estimator_error_cap;
       jcp_tree_stats.convergence_unstable_rho_cap =
           jcp_tree.convergence_unstable_rho_cap;
-      jcp_tree_stats.convergence_calibration =
-          jcp_tree.convergence_calibration;
+      jcp_tree_stats.convergence_calibration = jcp_tree.convergence_calibration;
       jcp_tree_stats.convergence_dielectric_amp =
           jcp_tree.convergence_dielectric_amp;
       jcp_tree_stats.convergence_estimator_model =
@@ -4003,8 +4468,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree.convergence_overreject_audit;
       jcp_tree_stats.convergence_overreject_detail =
           jcp_tree.convergence_overreject_detail;
-      jcp_tree_stats.convergence_shape_audit =
-          jcp_tree.convergence_shape_audit;
+      jcp_tree_stats.convergence_shape_audit = jcp_tree.convergence_shape_audit;
       jcp_tree_stats.convergence_kernel_response_audit =
           jcp_tree.convergence_kernel_response_audit;
       jcp_tree_stats.channel_missed_semantics =
@@ -4060,8 +4524,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       jcp_tree_stats.leaf_pair_max_lookahead =
           static_cast<int>(jcp_tree.leaf_pair_max_lookahead);
       jcp_tree_stats.expansion_audit = jcp_tree.expansion_audit;
-      jcp_tree_stats.expansion_audit_channel =
-          jcp_tree.expansion_audit_channel;
+      jcp_tree_stats.expansion_audit_channel = jcp_tree.expansion_audit_channel;
       jcp_tree_stats.tree_depth_max = jcp_tree.depth_max;
       jcp_tree_stats.node_radius_max = jcp_tree.node_radius_max;
       jcp_tree_stats.node_radius_mean = jcp_tree.node_radius_mean;
@@ -4071,27 +4534,63 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.tree_nodes = jcp_tree.nodes.size();
       result.tree_leaf_count = jcp_tree.leaf_count;
       result.tree_depth_max = jcp_tree.depth_max;
-      result.memory_bytes += jcp_tree.nodes.size() * sizeof(TreeNode) +
-                             jcp_tree.child_indices.size() *
-                                 sizeof(std::size_t) +
-                             jcp_tree.order.size() * sizeof(std::size_t) +
-                             jcp_tree.morton.size() * sizeof(std::uint64_t) +
-                             panels.size() * 14u * sizeof(double) +
-                             panels.size() * sizeof(std::size_t);
+      result.memory_bytes +=
+          jcp_tree.nodes.size() * sizeof(TreeNode) +
+          jcp_tree.child_indices.size() * sizeof(std::size_t) +
+          jcp_tree.order.size() * sizeof(std::size_t) +
+          jcp_tree.morton.size() * sizeof(std::uint64_t) +
+          panels.size() * 14u * sizeof(double) +
+          panels.size() * sizeof(std::size_t);
       jcp_tree_stats.tree_build_ms = result.tree_build_ms;
       jcp_tree_stats.tree_nodes = result.tree_nodes;
       jcp_tree_stats.tree_leaf_count = result.tree_leaf_count;
-      progress.write("tree_build_end", result, &jcp_tree_stats, matvec_calls,
-                     0, 0, 0.0, "running", true);
+      progress.write("tree_build_end", result, &jcp_tree_stats, matvec_calls, 0,
+                     0, 0.0, "running", true);
     }
+    auto build_sampled_target_rows = [](std::size_t row_count, int requested) {
+      std::vector<std::size_t> rows;
+      if (row_count == 0)
+        return rows;
+      const std::size_t m = std::min<std::size_t>(
+          row_count,
+          static_cast<std::size_t>(std::clamp(requested, 128, 4096)));
+      rows.reserve(m);
+      std::size_t previous = std::numeric_limits<std::size_t>::max();
+      for (std::size_t k = 0; k < m; ++k) {
+        std::size_t row =
+            ((2u * k + 1u) * row_count) / std::max<std::size_t>(1, 2u * m);
+        row = std::min(row, row_count - 1u);
+        if (row != previous) {
+          rows.push_back(row);
+          previous = row;
+        }
+      }
+      if (rows.empty())
+        rows.push_back(0);
+      return rows;
+    };
+
     const bool gmres_p4 = options.fmm_local == "gmres-p4";
+    const bool kifmm_gmres = options.fmm_engine == "kifmm-lite-experimental";
+    const bool channel_hybrid_gmres =
+        options.fmm_engine == "kifmm-channel-hybrid-experimental";
+    const bool kifmm_any_gmres = kifmm_gmres || channel_hybrid_gmres;
+    const bool kifmm_fallback_ilu_graph =
+        kifmm_gmres && options.kifmm_ilu_graph == "kifmm-fallback-capped";
+    [[maybe_unused]] const std::string kifmm_ilu0_graph_source =
+        kifmm_fallback_ilu_graph ? "kifmm_fallback_capped_panel_graph"
+                                 : "cartesian_fmm_m2l_near_panel_graph";
     std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
         gmres_p4_context;
+    // The p4 input split is performed for every Krylov matvec. Retain these
+    // panel-sized buffers for the solve instead of allocating two vectors per
+    // apply; the context consumes them synchronously.
+    std::vector<double> gmres_p4_phi_workspace;
+    std::vector<double> gmres_p4_phin_workspace;
     if (gmres_p4) {
       gmres_p4_context = ensure_jcp_fmm_m2l_context(
-          panels, eps_ratio, kappa, jcp_tree.leaf_size,
-          jcp_tree.opening_theta, jcp_tree.taylor_order, executor,
-          &jcp_tree.fmm_m2l_context);
+          panels, eps_ratio, kappa, jcp_tree.leaf_size, jcp_tree.opening_theta,
+          jcp_tree.taylor_order, executor, &jcp_tree.fmm_m2l_context);
       titan::tabi::fmm_m2l::JcpLocalP4OperatorOptions p4_options;
       p4_options.near_integration = result.near_integration;
       p4_options.quad_buffer = result.quad_buffer;
@@ -4102,8 +4601,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           std::max(0, options.fmm_local_cache_budget_mb));
       p4_options.fallback_mode = options.fmm_local_fallback;
       p4_options.plan_builder = options.fmm_local_plan_builder;
-      p4_options.refine_probe_count =
-          static_cast<std::size_t>(std::max(4, options.fmm_local_refine_probe_count));
+      p4_options.refine_probe_count = static_cast<std::size_t>(
+          std::max(4, options.fmm_local_refine_probe_count));
       p4_options.refine_probe_mode = options.fmm_local_refine_probe_mode;
       p4_options.geometry_guard = options.fmm_local_geometry_guard;
       p4_options.geometry_theta = options.fmm_local_geometry_theta;
@@ -4120,8 +4619,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.fmm_local_refine_probe_count = prepared.static_probe_count;
       result.fmm_local_solution_probe_used = prepared.solution_probe_used;
       result.fmm_local_linf_max_abs_tail = prepared.linf_max_abs_tail;
-      result.fmm_local_linf_max_relative_tail =
-          prepared.linf_max_relative_tail;
+      result.fmm_local_linf_max_relative_tail = prepared.linf_max_relative_tail;
       result.fmm_local_linf_outlier_panels = prepared.linf_outlier_panels;
       result.fmm_local_geometry_guard = prepared.geometry_guard;
       result.fmm_local_geometry_theta = prepared.geometry_theta;
@@ -4146,6 +4644,294 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       jcp_tree_stats.fmm_m2l_finite_outputs = prepared.finite_outputs;
       if (!prepared.finite_outputs)
         throw std::runtime_error("gmres_p4_prepare_non_finite");
+      gmres_p4_phi_workspace.assign(panels.size(), 0.0);
+      gmres_p4_phin_workspace.assign(panels.size(), 0.0);
+    }
+
+    titan::tabi::fmm_kifmm::KifmmFullPanelPreparedOperator
+        kifmm_prepared_operator;
+    titan::tabi::fmm_kifmm::DualWorklistChannelHybridPreparedOperator
+        channel_hybrid_prepared_operator;
+    bool kifmm_memory_accounted = false;
+    std::ofstream kifmm_iteration_invariants;
+    std::ofstream kifmm_gmres_progress;
+    std::ofstream kifmm_gmres_convergence_trace;
+    double last_kifmm_apply_seconds = std::numeric_limits<double>::quiet_NaN();
+    std::uint64_t last_kifmm_worklist_hash{0};
+    std::uint64_t last_kifmm_policy_hash{0};
+    std::size_t last_kifmm_cache_entries{0};
+    std::size_t last_kifmm_far_pairs{0};
+    std::size_t last_kifmm_fallback_pairs{0};
+    auto write_kifmm_gmres_phase = [&](const std::string &phase) {
+      if (!kifmm_gmres_progress.is_open())
+        return;
+      kifmm_gmres_progress << phase << ','
+                           << result.fmm_local_gmres_matvec_calls << ','
+                           << matvec_calls << '\n';
+      kifmm_gmres_progress.flush();
+    };
+    auto write_kifmm_convergence_trace = [&](const std::string &stage,
+                                             int gmres_iter,
+                                             double preconditioned_residual,
+                                             double reported_true_residual) {
+      if (!kifmm_gmres_convergence_trace.is_open())
+        return;
+      kifmm_gmres_convergence_trace
+          << stage << ",unknown," << gmres_iter << ','
+          << preconditioned_residual << ',' << reported_true_residual << ','
+          << last_kifmm_apply_seconds << ',' << last_kifmm_worklist_hash << ','
+          << last_kifmm_policy_hash << ',' << last_kifmm_cache_entries << ','
+          << last_kifmm_far_pairs << ',' << last_kifmm_fallback_pairs << '\n';
+      kifmm_gmres_convergence_trace.flush();
+    };
+    if (kifmm_gmres) {
+      if (!coupled) {
+        throw std::runtime_error(
+            "kifmm_lite_experimental_requires_coupled_jcp");
+      }
+      titan::tabi::fmm_kifmm::KifmmRealPanelCloudConfig kifmm_config;
+      kifmm_config.lite.order = options.kifmm_order;
+      kifmm_config.lite.leaf_size =
+          static_cast<int>(std::max(8, options.tree_leaf_size));
+      kifmm_config.lite.opening_theta = options.tree_opening_theta;
+      kifmm_config.lite.equiv_scale = options.kifmm_equiv_scale;
+      kifmm_config.lite.check_scale = options.kifmm_check_scale;
+      kifmm_config.lite.kappa = kappa;
+      kifmm_config.lite.eps_ratio = eps_ratio;
+      kifmm_config.lite.solver = options.kifmm_solver;
+      kifmm_config.lite.condition_policy = "qr-rank-only";
+      kifmm_config.lite.source_box_policy = "level-cube";
+      kifmm_config.lite.max_condition_estimate = 1.0e12;
+      kifmm_config.lite.max_equivalent_relative_residual = 1.0e-10;
+      kifmm_config.lite.max_aggregate_relative_rms = 1.0e-6;
+      kifmm_config.lite.max_channel_relative_rms = 5.0e-6;
+      kifmm_config.lite.min_far_panel_fraction = 0.10;
+      kifmm_config.lite.require_far_work = true;
+      kifmm_config.lite.require_unit_normals = true;
+      kifmm_config.near_integration = result.near_integration;
+      kifmm_config.quad_buffer = result.quad_buffer;
+      kifmm_config.full_apply_policy = options.kifmm_full_apply;
+      const std::vector<std::size_t> sampled_targets =
+          build_sampled_target_rows(panels.size(),
+                                    options.matvec_audit_sample_count);
+      kifmm_gmres_progress.open("pbe_tabi_kifmm_gmres_progress.csv",
+                                std::ios::out | std::ios::trunc);
+      if (kifmm_gmres_progress.is_open()) {
+        kifmm_gmres_progress
+            << "phase,fmm_local_gmres_matvec_calls,matvec_calls\n";
+        kifmm_gmres_progress.flush();
+      }
+      kifmm_gmres_convergence_trace.open(
+          "pbe_tabi_kifmm_gmres_convergence_trace.csv",
+          std::ios::out | std::ios::trunc);
+      if (kifmm_gmres_convergence_trace.is_open()) {
+        kifmm_gmres_convergence_trace
+            << "stage,fixture,iteration,preconditioned_residual,"
+               "reported_true_residual,apply_seconds,worklist_hash,"
+               "policy_hash,cache_entries,far_pairs,fallback_pairs\n";
+        kifmm_gmres_convergence_trace.flush();
+      }
+      write_kifmm_gmres_phase("prepare_start");
+      const auto prepare_begin = std::chrono::steady_clock::now();
+      kifmm_prepared_operator =
+          titan::tabi::fmm_kifmm::prepare_kifmm_lite_full_panel_operator(
+              panels, sampled_targets, kifmm_config);
+      result.fmm_local_gmres_active = true;
+      result.fmm_local_prepare_seconds =
+          elapsed_ms(prepare_begin, std::chrono::steady_clock::now()) / 1000.0;
+      result.fmm_local_plan_build_count =
+          kifmm_prepared_operator.prepare_build_count;
+      result.fmm_local_cache_build_count =
+          kifmm_prepared_operator.frozen_equivalent_system_cache ? 1u : 0u;
+      result.fmm_local_operator_finite =
+          kifmm_prepared_operator.frozen_worklist &&
+          kifmm_prepared_operator.frozen_equivalent_system_cache;
+      jcp_tree_stats.matvec_mode = "jcp2013_kifmm_lite_experimental_gmres";
+      jcp_tree_stats.taylor_order = options.kifmm_order;
+      jcp_tree_stats.fmm_m2l_mode = "kifmm-lite-experimental";
+      jcp_tree_stats.fmm_m2l_expansion_order = options.kifmm_order;
+      jcp_tree_stats.fmm_m2l_setup_ms =
+          1000.0 * result.fmm_local_prepare_seconds;
+      jcp_tree_stats.fmm_m2l_finite_outputs = result.fmm_local_operator_finite;
+      if (!result.fmm_local_operator_finite) {
+        throw std::runtime_error("kifmm_lite_gmres_prepare_incomplete");
+      }
+      kifmm_iteration_invariants.open("pbe_tabi_kifmm_iteration_invariants.csv",
+                                      std::ios::out | std::ios::trunc);
+      if (kifmm_iteration_invariants.is_open()) {
+        kifmm_iteration_invariants
+            << "matvec_call,worklist_hash,policy_hash,panel_geometry_hash,"
+               "sampled_target_hash,cache_entries,far_panel_pairs,"
+               "fallback_panel_pairs,sampled_invalid_pairs,"
+               "nonproduction_fallback_pairs,apply_seconds,status\n";
+        kifmm_iteration_invariants.flush();
+      }
+      write_kifmm_gmres_phase("prepare_done");
+    }
+    if (channel_hybrid_gmres) {
+      if (!coupled) {
+        throw std::runtime_error(
+            "channel_hybrid_experimental_requires_coupled_jcp");
+      }
+      titan::tabi::fmm_kifmm::KifmmHierarchyJcpConfig hybrid_config;
+      hybrid_config.hierarchy.order = options.kifmm_hierarchy_order;
+      hybrid_config.hierarchy.max_depth = 6;
+      hybrid_config.hierarchy.leaf_size =
+          static_cast<int>(std::max(8, options.tree_leaf_size));
+      hybrid_config.hierarchy.theta = options.kifmm_hierarchy_theta;
+      hybrid_config.hierarchy.equiv_scale = 1.05;
+      hybrid_config.hierarchy.upward_check_scale = 3.0;
+      hybrid_config.hierarchy.local_equiv_scale = 3.0;
+      hybrid_config.hierarchy.local_check_scale = 1.05;
+      hybrid_config.hierarchy.condition_policy = "qr-rank-only";
+      hybrid_config.hierarchy.source_box_policy = "strict-octree";
+      hybrid_config.hierarchy.m2l_eval_policy =
+          options.kifmm_hierarchy_m2l_eval_policy;
+      hybrid_config.hierarchy.m2l_matrix_cache_policy =
+          options.kifmm_hierarchy_matrix_cache_policy;
+      hybrid_config.hierarchy.m2l_matrix_cache_limit_mb =
+          options.kifmm_hierarchy_matrix_cache_limit_mb;
+      hybrid_config.hierarchy.m2l_gemm_batch_policy =
+          options.kifmm_hierarchy_gemm_batch_policy;
+      hybrid_config.hierarchy.m2l_parallel_policy =
+          options.kifmm_hierarchy_m2l_parallel_policy;
+      hybrid_config.hierarchy.m2l_parallel_workers =
+          options.kifmm_hierarchy_m2l_parallel_workers;
+      hybrid_config.hierarchy.tree_stop_policy =
+          options.kifmm_hierarchy_tree_stop_policy;
+      hybrid_config.hierarchy.tree_panel_radius_factor =
+          options.kifmm_hierarchy_tree_panel_radius_factor;
+      hybrid_config.hierarchy.tree_occupancy_stop =
+          options.kifmm_hierarchy_tree_occupancy_stop;
+      hybrid_config.hierarchy.jcp_channel_policy = "k123-only";
+      hybrid_config.kappa = kappa;
+      hybrid_config.eps_ratio = eps_ratio;
+      hybrid_config.real_panel_guard = options.kifmm_hierarchy_real_panel_guard;
+      hybrid_config.real_panel_guard_margin_factor =
+          options.kifmm_hierarchy_guard_margin_factor;
+      hybrid_config.hier_debug_mode =
+          "dual-worklist-channel-hybrid-k123-kifmm-k4-cartesian";
+      hybrid_config.build_dense_oracle = false;
+      hybrid_config.include_direct_fallback = true;
+      hybrid_config.aggregate_relative_rms_gate = 1.0e-6;
+      hybrid_config.max_channel_relative_rms_gate = 5.0e-6;
+      const std::vector<std::size_t> sampled_targets =
+          build_sampled_target_rows(panels.size(),
+                                    options.matvec_audit_sample_count);
+      kifmm_gmres_progress.open("pbe_tabi_channel_hybrid_gmres_progress.csv",
+                                std::ios::out | std::ios::trunc);
+      if (kifmm_gmres_progress.is_open()) {
+        kifmm_gmres_progress
+            << "phase,fmm_local_gmres_matvec_calls,matvec_calls\n";
+        kifmm_gmres_progress.flush();
+      }
+      kifmm_gmres_convergence_trace.open(
+          "pbe_tabi_channel_hybrid_gmres_convergence_trace.csv",
+          std::ios::out | std::ios::trunc);
+      if (kifmm_gmres_convergence_trace.is_open()) {
+        kifmm_gmres_convergence_trace
+            << "stage,fixture,iteration,preconditioned_residual,"
+               "reported_true_residual,apply_seconds,worklist_hash,"
+               "policy_hash,cache_entries,far_pairs,fallback_pairs\n";
+        kifmm_gmres_convergence_trace.flush();
+      }
+      write_kifmm_gmres_phase("prepare_start");
+      const auto prepare_begin = std::chrono::steady_clock::now();
+      channel_hybrid_prepared_operator =
+          titan::tabi::fmm_kifmm::prepare_dual_worklist_channel_hybrid_operator(
+              panels, sampled_targets, hybrid_config);
+      result.fmm_local_gmres_active = true;
+      result.fmm_local_prepare_seconds =
+          elapsed_ms(prepare_begin, std::chrono::steady_clock::now()) / 1000.0;
+      result.fmm_local_plan_build_count =
+          channel_hybrid_prepared_operator.prepare_build_count;
+      result.fmm_local_cache_build_count =
+          channel_hybrid_prepared_operator.frozen_equivalent_system_cache ? 1u
+                                                                          : 0u;
+      result.fmm_local_operator_finite =
+          channel_hybrid_prepared_operator.source_panels == panels.size() &&
+          channel_hybrid_prepared_operator.panel_geometry_hash != 0 &&
+          channel_hybrid_prepared_operator.sampled_target_hash != 0 &&
+          channel_hybrid_prepared_operator.frozen_worklist &&
+          channel_hybrid_prepared_operator.frozen_equivalent_system_cache &&
+          channel_hybrid_prepared_operator.prepared_rebuild_status ==
+              "frozen_prepared_apply";
+      jcp_tree_stats.matvec_mode =
+          "jcp2013_kifmm_channel_hybrid_experimental_gmres";
+      jcp_tree_stats.taylor_order = options.kifmm_hierarchy_order;
+      jcp_tree_stats.fmm_m2l_mode = "kifmm-channel-hybrid-experimental";
+      jcp_tree_stats.fmm_m2l_expansion_order = options.kifmm_hierarchy_order;
+      jcp_tree_stats.fmm_m2l_setup_ms =
+          1000.0 * result.fmm_local_prepare_seconds;
+      jcp_tree_stats.fmm_m2l_finite_outputs = result.fmm_local_operator_finite;
+      if (!result.fmm_local_operator_finite) {
+        throw std::runtime_error("channel_hybrid_gmres_prepare_incomplete");
+      }
+      kifmm_iteration_invariants.open(
+          "pbe_tabi_channel_hybrid_iteration_invariants.csv",
+          std::ios::out | std::ios::trunc);
+      if (kifmm_iteration_invariants.is_open()) {
+        kifmm_iteration_invariants
+            << "matvec_call,worklist_hash,policy_hash,panel_geometry_hash,"
+               "sampled_target_hash,cache_entries,far_panel_pairs,"
+               "fallback_panel_pairs,sampled_invalid_pairs,"
+               "nonproduction_fallback_pairs,apply_seconds,status,"
+               "preconditioner_graph_source,frozen_worklist,"
+               "frozen_equivalent_system_cache,prepared_rebuild_status,"
+               "apply_source_build_seconds,apply_hierarchy_seconds,"
+               "apply_guard_audit_seconds,apply_production_fallback_seconds,"
+               "apply_cartesian_k4_seconds,apply_dense_oracle_seconds,"
+               "apply_finalize_seconds,apply_unattributed_seconds,"
+               "apply_rss_start_bytes,apply_rss_after_source_build_bytes,"
+               "apply_rss_after_hierarchy_bytes,"
+               "apply_rss_after_guard_audit_bytes,"
+               "apply_rss_after_fallback_bytes,"
+               "apply_rss_after_cartesian_k4_bytes,"
+               "apply_rss_after_dense_oracle_bytes,"
+               "apply_rss_after_finalize_bytes,"
+               "apply_peak_working_set_start_bytes,"
+               "apply_peak_working_set_after_source_build_bytes,"
+               "apply_peak_working_set_after_hierarchy_bytes,"
+               "apply_peak_working_set_after_guard_audit_bytes,"
+               "apply_peak_working_set_after_fallback_bytes,"
+               "apply_peak_working_set_after_cartesian_k4_bytes,"
+               "apply_peak_working_set_after_dense_oracle_bytes,"
+               "apply_peak_working_set_after_finalize_bytes,"
+               "apply_peak_working_set_delta_bytes,"
+               "runtime_memory_attribution_status,"
+               "hierarchy_p2m_seconds,hierarchy_p2m_rhs_seconds,"
+               "hierarchy_p2m_solve_seconds,hierarchy_m2m_seconds,"
+               "hierarchy_m2l_seconds,hierarchy_local_solve_seconds,"
+               "hierarchy_l2l_seconds,hierarchy_l2p_seconds,"
+               "hierarchy_direct_fallback_seconds,"
+               "hierarchy_dense_oracle_seconds,"
+               "hierarchy_rss_start_bytes,hierarchy_rss_after_p2m_bytes,"
+               "hierarchy_rss_after_m2m_bytes,hierarchy_rss_after_m2l_bytes,"
+               "hierarchy_rss_after_l2l_bytes,hierarchy_rss_after_l2p_bytes,"
+               "hierarchy_rss_after_finalize_bytes,"
+               "hierarchy_peak_start_bytes,hierarchy_peak_after_p2m_bytes,"
+               "hierarchy_peak_after_m2m_bytes,"
+               "hierarchy_peak_after_m2l_bytes,"
+               "hierarchy_peak_after_l2l_bytes,"
+               "hierarchy_peak_after_l2p_bytes,"
+               "hierarchy_peak_after_finalize_bytes,"
+               "hierarchy_peak_delta_bytes,"
+               "k123_upward_equivalent_estimated_bytes,"
+               "k123_local_rhs_estimated_bytes,"
+               "k123_dense_local_rhs_estimated_bytes,"
+               "k123_local_equivalent_estimated_bytes,"
+               "k123_rows_estimated_bytes,"
+               "k123_equivalent_system_cache_estimated_bytes,"
+               "k123_m2l_matrix_cache_limit_bytes,"
+               "k123_m2l_matrix_cache_evictions,"
+               "k123_m2l_matrix_cache_estimated_bytes,"
+               "k123_m2l_matrix_cache_peak_estimated_bytes,"
+               "k123_m2l_matrix_cache_total_built_bytes,"
+               "k123_total_estimated_bytes,"
+               "hierarchy_runtime_memory_attribution_status\n";
+        kifmm_iteration_invariants.flush();
+      }
+      write_kifmm_gmres_phase("prepare_done");
     }
 
     auto apply_p4_operator = [&](const std::vector<double> &x,
@@ -4156,15 +4942,17 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       const std::size_t n = panels.size();
       if (x.size() < (coupled ? 2 * n : n))
         throw std::invalid_argument("gmres_p4_incomplete_unknown_vector");
-      std::vector<double> phi(n, 0.0);
-      std::vector<double> phin(n, 0.0);
+      if (gmres_p4_phi_workspace.size() != n ||
+          gmres_p4_phin_workspace.size() != n)
+        throw std::logic_error("gmres_p4_workspace_shape_mismatch");
+      std::vector<double> &phi = gmres_p4_phi_workspace;
+      std::vector<double> &phin = gmres_p4_phin_workspace;
       for (std::size_t panel = 0; panel < n; ++panel) {
         phi[panel] = x[panel];
         phin[panel] = coupled ? x[n + panel] : 0.0;
       }
-      const auto applied =
-          gmres_p4_context->apply_prepared_local_p4_operator(
-              phi, phin, executor, coupled);
+      const auto applied = gmres_p4_context->apply_prepared_local_p4_operator(
+          phi, phin, executor, coupled);
       if (!applied.finite_outputs)
         throw std::runtime_error("gmres_p4_apply_non_finite");
       titan::tabi::fmm_m2l::assemble_jcp_local_p4_system_matvec(
@@ -4177,8 +4965,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.fmm_local_refine_probe_count = applied.static_probe_count;
       result.fmm_local_solution_probe_used = applied.solution_probe_used;
       result.fmm_local_linf_max_abs_tail = applied.linf_max_abs_tail;
-      result.fmm_local_linf_max_relative_tail =
-          applied.linf_max_relative_tail;
+      result.fmm_local_linf_max_relative_tail = applied.linf_max_relative_tail;
       result.fmm_local_linf_outlier_panels = applied.linf_outlier_panels;
       result.fmm_local_geometry_guard = applied.geometry_guard;
       result.fmm_local_geometry_theta = applied.geometry_theta;
@@ -4202,16 +4989,285 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       }
     };
 
+    auto apply_kifmm_operator = [&](const std::vector<double> &x,
+                                    std::vector<double> &out,
+                                    bool count_gmres_matvec) {
+      if (!kifmm_prepared_operator.state) {
+        throw std::logic_error("kifmm_lite_gmres_context_not_prepared");
+      }
+      const std::size_t n = panels.size();
+      if (x.size() < 2 * n) {
+        throw std::invalid_argument("kifmm_lite_incomplete_unknown_vector");
+      }
+      std::string matvec_phase;
+      if (count_gmres_matvec) {
+        matvec_phase =
+            "matvec_" + std::to_string(result.fmm_local_gmres_matvec_calls + 1);
+        write_kifmm_gmres_phase(matvec_phase + "_start");
+      }
+      const auto applied =
+          titan::tabi::fmm_kifmm::apply_prepared_kifmm_lite_full_panel_operator(
+              kifmm_prepared_operator, x, &executor, false);
+      if (!applied.finite || applied.status != "pass") {
+        throw std::runtime_error("kifmm_lite_gmres_apply_" + applied.status);
+      }
+      if (applied.panel_geometry_hash !=
+              kifmm_prepared_operator.panel_geometry_hash ||
+          applied.sampled_target_hash !=
+              kifmm_prepared_operator.sampled_target_hash ||
+          applied.policy_hash != kifmm_prepared_operator.policy_hash ||
+          applied.lite.worklist_hash != kifmm_prepared_operator.worklist_hash) {
+        throw std::runtime_error("kifmm_lite_gmres_lifecycle_hash_drift");
+      }
+      if (applied.equivalent_factor_cache_misses != 0) {
+        throw std::runtime_error("kifmm_lite_gmres_cache_rebuild");
+      }
+      if (applied.sampled_invalid_pairs != 0 ||
+          applied.nonproduction_fallback_pairs != 0 ||
+          applied.used_nonproduction_fallback) {
+        throw std::runtime_error("kifmm_lite_gmres_fallback_gap");
+      }
+      const std::size_t expected_pairs = n * n;
+      if (applied.full_pair_coverage != expected_pairs) {
+        throw std::runtime_error("kifmm_lite_gmres_full_coverage_gap");
+      }
+      titan::tabi::fmm_kifmm::assemble_kifmm_lite_tabi_system_matvec(
+          applied, x, lhs_phi, lhs_phin, out);
+      result.fmm_local_operator_finite =
+          result.fmm_local_operator_finite && applied.finite;
+      result.fmm_local_plan_build_count =
+          kifmm_prepared_operator.prepare_build_count;
+      result.fmm_local_cache_build_count =
+          kifmm_prepared_operator.frozen_equivalent_system_cache ? 1u : 0u;
+      jcp_tree_stats.fmm_m2l_near_pairs =
+          applied.lite.direct_fallback_panel_pairs;
+      jcp_tree_stats.fmm_m2l_far_pairs = applied.lite.accepted_far_panel_pairs;
+      if (!kifmm_memory_accounted) {
+        result.memory_bytes +=
+            applied.source_tree_bytes + applied.target_tree_bytes +
+            applied.worklist_bytes + applied.equivalent_charge_storage_bytes +
+            applied.cached_channel_object_estimated_bytes;
+        kifmm_memory_accounted = true;
+      }
+      if (count_gmres_matvec) {
+        ++result.fmm_local_gmres_matvec_calls;
+        last_kifmm_apply_seconds = applied.apply_seconds;
+        last_kifmm_worklist_hash = applied.lite.worklist_hash;
+        last_kifmm_policy_hash = applied.policy_hash;
+        last_kifmm_cache_entries = applied.equivalent_system_cache_entries;
+        last_kifmm_far_pairs = applied.lite.accepted_far_panel_pairs;
+        last_kifmm_fallback_pairs = applied.lite.direct_fallback_panel_pairs;
+        result.fmm_local_gmres_apply_seconds_total += applied.apply_seconds;
+        result.fmm_local_m2l_seconds_total +=
+            applied.equivalent_build_solve_seconds +
+            applied.full_far_eval_seconds;
+        result.fmm_local_fallback_seconds_total +=
+            applied.full_fallback_eval_seconds;
+        result.fmm_local_gmres_apply_seconds_mean =
+            result.fmm_local_gmres_apply_seconds_total /
+            static_cast<double>(result.fmm_local_gmres_matvec_calls);
+        if (kifmm_iteration_invariants.is_open()) {
+          kifmm_iteration_invariants
+              << result.fmm_local_gmres_matvec_calls << ','
+              << applied.lite.worklist_hash << ',' << applied.policy_hash << ','
+              << applied.panel_geometry_hash << ','
+              << applied.sampled_target_hash << ','
+              << applied.equivalent_system_cache_entries << ','
+              << applied.lite.accepted_far_panel_pairs << ','
+              << applied.lite.direct_fallback_panel_pairs << ','
+              << applied.sampled_invalid_pairs << ','
+              << applied.nonproduction_fallback_pairs << ','
+              << applied.apply_seconds << ',' << applied.status << '\n';
+          kifmm_iteration_invariants.flush();
+        }
+        write_kifmm_gmres_phase(matvec_phase + "_done");
+      }
+    };
+
+    auto apply_channel_hybrid_operator = [&](const std::vector<double> &x,
+                                             std::vector<double> &out,
+                                             bool count_gmres_matvec) {
+      const std::size_t n = panels.size();
+      if (x.size() < 2 * n) {
+        throw std::invalid_argument("channel_hybrid_incomplete_unknown_vector");
+      }
+      std::string matvec_phase;
+      if (count_gmres_matvec) {
+        matvec_phase =
+            "matvec_" + std::to_string(result.fmm_local_gmres_matvec_calls + 1);
+        write_kifmm_gmres_phase(matvec_phase + "_start");
+      }
+      auto applied = titan::tabi::fmm_kifmm::
+          apply_prepared_dual_worklist_channel_hybrid_operator(
+              channel_hybrid_prepared_operator, x, false);
+      if (applied.execution_status != "pass" || applied.status != "ok") {
+        throw std::runtime_error("channel_hybrid_gmres_apply_" +
+                                 applied.status);
+      }
+      if (applied.panel_geometry_hash !=
+              channel_hybrid_prepared_operator.panel_geometry_hash ||
+          applied.sampled_target_hash !=
+              channel_hybrid_prepared_operator.sampled_target_hash ||
+          applied.worklist_hash !=
+              channel_hybrid_prepared_operator.worklist_hash ||
+          applied.policy_hash != channel_hybrid_prepared_operator.policy_hash ||
+          applied.tree_hash != channel_hybrid_prepared_operator.tree_hash) {
+        throw std::runtime_error("channel_hybrid_gmres_lifecycle_hash_drift");
+      }
+      if (!channel_hybrid_prepared_operator.frozen_worklist ||
+          !channel_hybrid_prepared_operator.frozen_equivalent_system_cache ||
+          channel_hybrid_prepared_operator.prepared_rebuild_status !=
+              "frozen_prepared_apply") {
+        throw std::runtime_error("channel_hybrid_gmres_prepared_freeze_gap");
+      }
+      if (applied.production_invalid_pairs != 0 ||
+          applied.nonproduction_fallback_pairs != 0) {
+        throw std::runtime_error("channel_hybrid_gmres_fallback_gap");
+      }
+      const std::uint64_t expected_pairs =
+          static_cast<std::uint64_t>(n) * static_cast<std::uint64_t>(n);
+      if (applied.exact_pair_coverage != expected_pairs) {
+        throw std::runtime_error("channel_hybrid_gmres_full_coverage_gap");
+      }
+      titan::tabi::fmm_kifmm::
+          assemble_dual_worklist_channel_hybrid_tabi_system_matvec(
+              applied, x, lhs_phi, lhs_phin, out);
+      result.fmm_local_operator_finite = result.fmm_local_operator_finite &&
+                                         applied.execution_status == "pass";
+      result.fmm_local_plan_build_count =
+          channel_hybrid_prepared_operator.prepare_build_count;
+      result.fmm_local_cache_build_count =
+          channel_hybrid_prepared_operator.frozen_equivalent_system_cache ? 1u
+                                                                          : 0u;
+      jcp_tree_stats.fmm_m2l_near_pairs = applied.direct_panel_pairs;
+      jcp_tree_stats.fmm_m2l_far_pairs = applied.far_panel_pairs;
+      if (!kifmm_memory_accounted) {
+        result.memory_bytes += applied.m2l_matrix_cache_estimated_bytes;
+        kifmm_memory_accounted = true;
+      }
+      if (count_gmres_matvec) {
+        ++result.fmm_local_gmres_matvec_calls;
+        last_kifmm_apply_seconds = applied.total_seconds;
+        last_kifmm_worklist_hash = applied.worklist_hash;
+        last_kifmm_policy_hash = applied.policy_hash;
+        last_kifmm_cache_entries =
+            static_cast<std::size_t>(applied.m2l_matrix_cache_entries);
+        last_kifmm_far_pairs =
+            static_cast<std::size_t>(applied.far_panel_pairs);
+        last_kifmm_fallback_pairs =
+            static_cast<std::size_t>(applied.direct_panel_pairs);
+        result.fmm_local_gmres_apply_seconds_total += applied.total_seconds;
+        result.fmm_local_m2l_seconds_total += applied.hierarchy.m2l_seconds;
+        result.fmm_local_fallback_seconds_total +=
+            applied.production_fallback_seconds +
+            applied.cartesian_k4_total_seconds;
+        result.fmm_local_gmres_apply_seconds_mean =
+            result.fmm_local_gmres_apply_seconds_total /
+            static_cast<double>(result.fmm_local_gmres_matvec_calls);
+        if (kifmm_iteration_invariants.is_open()) {
+          kifmm_iteration_invariants
+              << result.fmm_local_gmres_matvec_calls << ','
+              << applied.worklist_hash << ',' << applied.policy_hash << ','
+              << applied.panel_geometry_hash << ','
+              << applied.sampled_target_hash << ','
+              << applied.m2l_matrix_cache_entries << ','
+              << applied.far_panel_pairs << ',' << applied.direct_panel_pairs
+              << ',' << applied.production_invalid_pairs << ','
+              << applied.nonproduction_fallback_pairs << ','
+              << applied.total_seconds << ',' << applied.status << ','
+              << kifmm_ilu0_graph_source << ','
+              << (channel_hybrid_prepared_operator.frozen_worklist ? "true"
+                                                                   : "false")
+              << ','
+              << (channel_hybrid_prepared_operator
+                          .frozen_equivalent_system_cache
+                      ? "true"
+                      : "false")
+              << ',' << channel_hybrid_prepared_operator.prepared_rebuild_status
+              << ',' << applied.apply_source_build_seconds << ','
+              << applied.apply_hierarchy_seconds << ','
+              << applied.apply_guard_audit_seconds << ','
+              << applied.apply_production_fallback_seconds << ','
+              << applied.apply_cartesian_k4_seconds << ','
+              << applied.apply_dense_oracle_seconds << ','
+              << applied.apply_finalize_seconds << ','
+              << applied.apply_unattributed_seconds << ','
+              << applied.apply_rss_start_bytes << ','
+              << applied.apply_rss_after_source_build_bytes << ','
+              << applied.apply_rss_after_hierarchy_bytes << ','
+              << applied.apply_rss_after_guard_audit_bytes << ','
+              << applied.apply_rss_after_fallback_bytes << ','
+              << applied.apply_rss_after_cartesian_k4_bytes << ','
+              << applied.apply_rss_after_dense_oracle_bytes << ','
+              << applied.apply_rss_after_finalize_bytes << ','
+              << applied.apply_peak_working_set_start_bytes << ','
+              << applied.apply_peak_working_set_after_source_build_bytes << ','
+              << applied.apply_peak_working_set_after_hierarchy_bytes << ','
+              << applied.apply_peak_working_set_after_guard_audit_bytes << ','
+              << applied.apply_peak_working_set_after_fallback_bytes << ','
+              << applied.apply_peak_working_set_after_cartesian_k4_bytes << ','
+              << applied.apply_peak_working_set_after_dense_oracle_bytes << ','
+              << applied.apply_peak_working_set_after_finalize_bytes << ','
+              << applied.apply_peak_working_set_delta_bytes << ','
+              << applied.runtime_memory_attribution_status << ','
+              << applied.hierarchy.p2m_seconds << ','
+              << applied.hierarchy.p2m_rhs_seconds << ','
+              << applied.hierarchy.p2m_solve_seconds << ','
+              << applied.hierarchy.m2m_seconds << ','
+              << applied.hierarchy.m2l_seconds << ','
+              << applied.hierarchy.local_solve_seconds << ','
+              << applied.hierarchy.l2l_seconds << ','
+              << applied.hierarchy.l2p_seconds << ','
+              << applied.hierarchy.direct_fallback_seconds << ','
+              << applied.hierarchy.dense_oracle_seconds << ','
+              << applied.hierarchy.hierarchy_rss_start_bytes << ','
+              << applied.hierarchy.hierarchy_rss_after_p2m_bytes << ','
+              << applied.hierarchy.hierarchy_rss_after_m2m_bytes << ','
+              << applied.hierarchy.hierarchy_rss_after_m2l_bytes << ','
+              << applied.hierarchy.hierarchy_rss_after_l2l_bytes << ','
+              << applied.hierarchy.hierarchy_rss_after_l2p_bytes << ','
+              << applied.hierarchy.hierarchy_rss_after_finalize_bytes << ','
+              << applied.hierarchy.hierarchy_peak_start_bytes << ','
+              << applied.hierarchy.hierarchy_peak_after_p2m_bytes << ','
+              << applied.hierarchy.hierarchy_peak_after_m2m_bytes << ','
+              << applied.hierarchy.hierarchy_peak_after_m2l_bytes << ','
+              << applied.hierarchy.hierarchy_peak_after_l2l_bytes << ','
+              << applied.hierarchy.hierarchy_peak_after_l2p_bytes << ','
+              << applied.hierarchy.hierarchy_peak_after_finalize_bytes << ','
+              << applied.hierarchy.hierarchy_peak_delta_bytes << ','
+              << applied.hierarchy.k123_upward_equivalent_estimated_bytes << ','
+              << applied.hierarchy.k123_local_rhs_estimated_bytes << ','
+              << applied.hierarchy.k123_dense_local_rhs_estimated_bytes << ','
+              << applied.hierarchy.k123_local_equivalent_estimated_bytes << ','
+              << applied.hierarchy.k123_rows_estimated_bytes << ','
+              << applied.hierarchy.k123_equivalent_system_cache_estimated_bytes
+              << ',' << applied.hierarchy.m2l_matrix_cache_limit_bytes << ','
+              << applied.hierarchy.m2l_matrix_cache_evictions << ','
+              << applied.hierarchy.m2l_matrix_cache_estimated_bytes << ','
+              << applied.hierarchy.m2l_matrix_cache_peak_estimated_bytes << ','
+              << applied.hierarchy.m2l_matrix_cache_total_built_bytes << ','
+              << applied.hierarchy.k123_total_estimated_bytes << ','
+              << applied.hierarchy.hierarchy_runtime_memory_attribution_status
+              << '\n';
+          kifmm_iteration_invariants.flush();
+        }
+        write_kifmm_gmres_phase(matvec_phase + "_done");
+      }
+    };
+
     auto matvec = [&](const std::vector<double> &x, std::vector<double> &out) {
       const auto begin = std::chrono::steady_clock::now();
-      if (gmres_p4) {
+      if (channel_hybrid_gmres) {
+        apply_channel_hybrid_operator(x, out, true);
+      } else if (kifmm_gmres) {
+        apply_kifmm_operator(x, out, true);
+      } else if (gmres_p4) {
         apply_p4_operator(x, out, true);
       } else if (experimental_treecode) {
         apply_jcp_treecode_operator(panels, x, eps_ratio, kappa, lhs_phi,
                                     lhs_phin, coupled, jcp_tree,
-                                    result.near_integration,
-                                    result.quad_buffer, executor, out,
-                                    &jcp_tree_stats);
+                                    result.near_integration, result.quad_buffer,
+                                    executor, out, &jcp_tree_stats);
       } else if (coupled) {
         apply_jcp_linear_pb_operator(panels, x, eps_ratio, kappa, lhs_phi,
                                      lhs_phin, result.near_integration,
@@ -4219,9 +5275,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                                      &jcp_tree_stats);
       } else {
         apply_jcp_poisson_operator(panels, x, eps_ratio, lhs_phi,
-                                   result.near_integration,
-                                   result.quad_buffer, executor, out,
-                                   &jcp_tree_stats);
+                                   result.near_integration, result.quad_buffer,
+                                   executor, out, &jcp_tree_stats);
       }
       matvec_ms_total += elapsed_ms(begin, std::chrono::steady_clock::now());
       ++matvec_calls;
@@ -4236,10 +5291,9 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       const bool full = mode == "full-small" && row_count <= 4096u;
       const std::size_t m =
           full ? row_count
-               : std::min<std::size_t>(
-                     row_count,
-                     static_cast<std::size_t>(
-                         std::clamp(requested, 128, 4096)));
+               : std::min<std::size_t>(row_count,
+                                       static_cast<std::size_t>(
+                                           std::clamp(requested, 128, 4096)));
       rows.reserve(m);
       if (full) {
         for (std::size_t row = 0; row < row_count; ++row)
@@ -4260,8 +5314,71 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         rows.push_back(0);
       return rows;
     };
+    auto build_spatial_audit_targets =
+        [](const std::vector<Panel> &audit_panels,
+           std::size_t requested) -> std::vector<std::size_t> {
+      std::vector<std::size_t> targets;
+      if (audit_panels.empty() || requested == 0)
+        return targets;
+      double min_x = audit_panels.front().x;
+      double min_y = audit_panels.front().y;
+      double min_z = audit_panels.front().z;
+      double max_x = min_x;
+      double max_y = min_y;
+      double max_z = min_z;
+      for (const Panel &panel : audit_panels) {
+        min_x = std::min(min_x, panel.x);
+        min_y = std::min(min_y, panel.y);
+        min_z = std::min(min_z, panel.z);
+        max_x = std::max(max_x, panel.x);
+        max_y = std::max(max_y, panel.y);
+        max_z = std::max(max_z, panel.z);
+      }
+      const double span_x = std::max(1.0e-12, max_x - min_x);
+      const double span_y = std::max(1.0e-12, max_y - min_y);
+      const double span_z = std::max(1.0e-12, max_z - min_z);
+      auto quantize = [](double value, double lo, double span) {
+        const double unit = std::clamp((value - lo) / span, 0.0, 1.0);
+        return static_cast<std::uint32_t>(unit * 1023.0 + 0.5);
+      };
+      auto morton_key = [](std::uint32_t x, std::uint32_t y,
+                           std::uint32_t z) {
+        std::uint64_t key = 0;
+        for (unsigned bit = 0; bit < 10; ++bit) {
+          key |= static_cast<std::uint64_t>((x >> bit) & 1u) << (3u * bit);
+          key |= static_cast<std::uint64_t>((y >> bit) & 1u)
+                 << (3u * bit + 1u);
+          key |= static_cast<std::uint64_t>((z >> bit) & 1u)
+                 << (3u * bit + 2u);
+        }
+        return key;
+      };
+      std::vector<std::pair<std::uint64_t, std::size_t>> spatial_order;
+      spatial_order.reserve(audit_panels.size());
+      for (std::size_t i = 0; i < audit_panels.size(); ++i) {
+        const Panel &panel = audit_panels[i];
+        spatial_order.emplace_back(
+            morton_key(quantize(panel.x, min_x, span_x),
+                       quantize(panel.y, min_y, span_y),
+                       quantize(panel.z, min_z, span_z)),
+            i);
+      }
+      std::sort(spatial_order.begin(), spatial_order.end());
+      const std::size_t count =
+          std::min<std::size_t>(requested, spatial_order.size());
+      targets.reserve(count);
+      for (std::size_t k = 0; k < count; ++k) {
+        const std::size_t position =
+            ((2u * k + 1u) * spatial_order.size()) /
+            std::max<std::size_t>(1, 2u * count);
+        targets.push_back(
+            spatial_order[std::min(position, spatial_order.size() - 1u)]
+                .second);
+      }
+      return targets;
+    };
     SampledTrueResidualCallback sampled_true_residual;
-    if (!experimental_treecode) {
+    if (!experimental_treecode || kifmm_any_gmres) {
       sampled_true_residual =
           [&](const std::vector<double> &x,
               const std::vector<std::size_t> &rows) -> SampledResidualResult {
@@ -4295,12 +5412,21 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                 double ax_row = 0.0;
                 if (coupled) {
                   if (row < panel_count) {
-                    ax_row = lhs_phi * x[target] - sum.phi;
+                    ax_row = jcp_lhs_phi_for_panel(
+                                 panels[target], eps_ratio, lhs_phi) *
+                                 x[target] -
+                             sum.phi;
                   } else {
-                    ax_row = lhs_phin * x[panel_count + target] - sum.phin;
+                    ax_row = jcp_lhs_phin_for_panel(
+                                 panels[target], eps_ratio, lhs_phin) *
+                                 x[panel_count + target] -
+                             sum.phin;
                   }
                 } else {
-                  ax_row = lhs_phi * x[target] - sum.phi;
+                  ax_row = jcp_lhs_phi_for_panel(
+                               panels[target], eps_ratio, lhs_phi) *
+                               x[target] -
+                           sum.phi;
                 }
                 if (!std::isfinite(ax_row)) {
                   finite.store(false, std::memory_order_relaxed);
@@ -4318,13 +5444,187 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         const double b_sq =
             std::accumulate(partial_b_sq.begin(), partial_b_sq.end(), 0.0);
         sample.abs = std::sqrt(std::max(0.0, residual_sq));
-        const double denom = std::max(1.0e-300,
-                                      std::sqrt(std::max(0.0, b_sq)));
+        const double denom = std::max(1.0e-300, std::sqrt(std::max(0.0, b_sq)));
         sample.rel = sample.abs / denom;
-        sample.finite = finite.load(std::memory_order_relaxed) &&
-                        std::isfinite(sample.rel);
+        sample.finite =
+            finite.load(std::memory_order_relaxed) && std::isfinite(sample.rel);
         return sample;
       };
+    }
+
+    // Node-patch is opt-in and uses a distinct source quadrature center.  Do
+    // not spend hundreds of Krylov iterations on a mismatched near/far
+    // operator: compare one deterministic FMM action against sampled direct
+    // rows before constructing the preconditioner or entering GMRES.
+    if (node_patch_discretization && experimental_treecode) {
+      const auto audit_begin = std::chrono::steady_clock::now();
+      std::vector<double> probe(rhs.size(), 0.0);
+      for (std::size_t i = 0; i < panels.size(); ++i) {
+        const double t = static_cast<double>(i + 1);
+        probe[i] = 0.5 * std::sin(0.013 * t) + 0.25;
+        if (coupled)
+          probe[panels.size() + i] = 0.5 * std::cos(0.017 * t) - 0.15;
+      }
+      std::vector<double> approximate;
+      matvec(probe, approximate);
+      struct AuditMetrics {
+        double diff_sq{0.0};
+        double direct_sq{0.0};
+        double max_stratum_rel{0.0};
+        bool finite{true};
+      };
+      auto audit_targets = [&](const std::vector<std::size_t> &targets) {
+        AuditMetrics metrics;
+        if (targets.empty())
+          return metrics;
+        std::vector<double> target_diff_sq(targets.size(), 0.0);
+        std::vector<double> target_direct_sq(targets.size(), 0.0);
+        std::atomic_bool finite{true};
+        const std::size_t workers = solver_workers(executor, targets.size());
+        executor.parallel_for(
+            targets.size(), workers, 1,
+            [&](std::size_t, std::size_t begin, std::size_t end) {
+              for (std::size_t pos = begin; pos < end; ++pos) {
+                const std::size_t target = targets[pos];
+                const JcpNearAccum sum = accumulate_jcp_near_ordered(
+                    panels[target], target, panels, probe, eps_ratio, kappa,
+                    coupled, direct_order, 0, panels.size(),
+                    result.near_integration, result.quad_buffer, nullptr);
+                const double direct_phi =
+                    jcp_lhs_phi_for_panel(panels[target], eps_ratio, lhs_phi) *
+                        probe[target] -
+                    sum.phi;
+                double local_diff_sq = 0.0;
+                double local_direct_sq = direct_phi * direct_phi;
+                if (target >= approximate.size() ||
+                    !std::isfinite(direct_phi) ||
+                    !std::isfinite(approximate[target])) {
+                  finite.store(false, std::memory_order_relaxed);
+                  continue;
+                }
+                const double delta_phi = approximate[target] - direct_phi;
+                local_diff_sq += delta_phi * delta_phi;
+                if (coupled) {
+                  const std::size_t row = panels.size() + target;
+                  const double direct_phin =
+                      jcp_lhs_phin_for_panel(panels[target], eps_ratio,
+                                             lhs_phin) *
+                              probe[row] -
+                          sum.phin;
+                  if (row >= approximate.size() ||
+                      !std::isfinite(direct_phin) ||
+                      !std::isfinite(approximate[row])) {
+                    finite.store(false, std::memory_order_relaxed);
+                    continue;
+                  }
+                  const double delta_phin = approximate[row] - direct_phin;
+                  local_diff_sq += delta_phin * delta_phin;
+                  local_direct_sq += direct_phin * direct_phin;
+                }
+                target_diff_sq[pos] = local_diff_sq;
+                target_direct_sq[pos] = local_direct_sq;
+              }
+            });
+        metrics.diff_sq =
+            std::accumulate(target_diff_sq.begin(), target_diff_sq.end(), 0.0);
+        metrics.direct_sq = std::accumulate(target_direct_sq.begin(),
+                                            target_direct_sq.end(), 0.0);
+        constexpr std::size_t max_strata = 16;
+        const std::size_t stratum_count =
+            std::min<std::size_t>(max_strata, targets.size());
+        std::vector<double> stratum_diff_sq(stratum_count, 0.0);
+        std::vector<double> stratum_direct_sq(stratum_count, 0.0);
+        for (std::size_t pos = 0; pos < targets.size(); ++pos) {
+          const std::size_t stratum =
+              std::min(stratum_count - 1u,
+                       pos * stratum_count / targets.size());
+          stratum_diff_sq[stratum] += target_diff_sq[pos];
+          stratum_direct_sq[stratum] += target_direct_sq[pos];
+        }
+        for (std::size_t stratum = 0; stratum < stratum_count; ++stratum) {
+          const double rel =
+              std::sqrt(std::max(0.0, stratum_diff_sq[stratum])) /
+              std::max(1.0e-300,
+                       std::sqrt(std::max(0.0, stratum_direct_sq[stratum])));
+          metrics.max_stratum_rel = std::max(metrics.max_stratum_rel, rel);
+        }
+        metrics.finite = finite.load(std::memory_order_relaxed) &&
+                         std::isfinite(metrics.diff_sq) &&
+                         std::isfinite(metrics.direct_sq) &&
+                         std::isfinite(metrics.max_stratum_rel);
+        return metrics;
+      };
+
+      const std::vector<std::size_t> spatial_targets =
+          build_spatial_audit_targets(panels, 512u);
+      const std::size_t stage_one_count =
+          std::min<std::size_t>(256u, spatial_targets.size());
+      std::vector<std::size_t> stage_one_targets;
+      std::vector<std::size_t> stage_two_targets;
+      stage_one_targets.reserve(stage_one_count);
+      stage_two_targets.reserve(spatial_targets.size() - stage_one_count);
+      std::vector<unsigned char> selected(spatial_targets.size(), 0u);
+      for (std::size_t k = 0; k < stage_one_count; ++k) {
+        const std::size_t position =
+            ((2u * k + 1u) * spatial_targets.size()) /
+            std::max<std::size_t>(1, 2u * stage_one_count);
+        const std::size_t bounded =
+            std::min(position, spatial_targets.size() - 1u);
+        selected[bounded] = 1u;
+        stage_one_targets.push_back(spatial_targets[bounded]);
+      }
+      for (std::size_t position = 0; position < spatial_targets.size();
+           ++position) {
+        if (selected[position] == 0u)
+          stage_two_targets.push_back(spatial_targets[position]);
+      }
+      const AuditMetrics stage_one = audit_targets(stage_one_targets);
+      double diff_sq = stage_one.diff_sq;
+      double direct_sq = stage_one.direct_sq;
+      bool finite = stage_one.finite;
+      std::size_t audited_targets = stage_one_targets.size();
+      const double stage_one_rel =
+          std::sqrt(std::max(0.0, stage_one.diff_sq)) /
+          std::max(1.0e-300,
+                   std::sqrt(std::max(0.0, stage_one.direct_sq)));
+      constexpr double kNodePatchAuditExpandGlobal = 5.0e-3;
+      constexpr double kNodePatchAuditExpandStratum = 1.0e-2;
+      const bool expand_audit =
+          !stage_one.finite || !std::isfinite(stage_one_rel) ||
+          stage_one_rel > kNodePatchAuditExpandGlobal ||
+          stage_one.max_stratum_rel > kNodePatchAuditExpandStratum;
+      if (expand_audit && !stage_two_targets.empty()) {
+        const AuditMetrics stage_two = audit_targets(stage_two_targets);
+        diff_sq += stage_two.diff_sq;
+        direct_sq += stage_two.direct_sq;
+        finite = finite && stage_two.finite;
+        audited_targets += stage_two_targets.size();
+      }
+      result.tree_vs_direct_matvec_rel =
+          std::sqrt(std::max(0.0, diff_sq)) /
+          std::max(1.0e-300, std::sqrt(std::max(0.0, direct_sq)));
+      result.matvec_audit_rows = audited_targets * (coupled ? 2u : 1u);
+      result.matvec_audit_ms =
+          elapsed_ms(audit_begin, std::chrono::steady_clock::now());
+      constexpr double kNodePatchOperatorAuditGate = 2.0e-2;
+      if (!finite ||
+          !std::isfinite(result.tree_vs_direct_matvec_rel) ||
+          result.tree_vs_direct_matvec_rel > kNodePatchOperatorAuditGate) {
+        result.status = "failed";
+        result.converged = false;
+        result.convergence_reason = "node_patch_operator_audit_failed";
+        result.reaction_energy_source =
+            "not_computed_node_patch_operator_audit_failed";
+        result.preconditioner_effective =
+            "not_built_node_patch_operator_audit_failed";
+        result.matvec_ms_total = matvec_ms_total;
+        result.matvec_calls = matvec_calls;
+        result.matvec_ms_avg =
+            matvec_calls > 0
+                ? matvec_ms_total / static_cast<double>(matvec_calls)
+                : 0.0;
+        return result;
+      }
     }
 
     std::function<void(const std::vector<double> &, std::vector<double> &)>
@@ -4342,9 +5642,16 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     const bool fmm_block_jacobi =
         result.preconditioner_requested == "fmm-block-jacobi";
     const bool fmm_overlap_schwarz =
-        result.preconditioner_requested == "fmm-overlap-schwarz";
+        result.preconditioner_requested == "fmm-overlap-schwarz" ||
+        result.preconditioner_requested == "distance-knn-overlap-schwarz";
     const bool fmm_nearfield_ilu0 =
-        result.preconditioner_requested == "fmm-nearfield-ilu0";
+        result.preconditioner_requested == "fmm-nearfield-ilu0" ||
+        result.preconditioner_requested == "distance-knn-ilu0";
+    const bool distance_knn_graph =
+        result.preconditioner_requested == "distance-knn-overlap-schwarz" ||
+        result.preconditioner_requested == "distance-knn-ilu0";
+    const std::string preconditioner_graph_source =
+        distance_knn_graph ? "distance-knn" : "fmm-near";
     auto block_effective_label = [&](bool budgeted,
                                      bool partial) -> std::string {
       std::string base = budgeted ? "block_budgeted" : "block";
@@ -4357,8 +5664,11 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       return base;
     };
     if (fmm_block_jacobi || fmm_overlap_schwarz || fmm_nearfield_ilu0) {
-      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls,
-                     0, 0, 0.0, "running", true);
+      if (kifmm_any_gmres) {
+        write_kifmm_gmres_phase("preconditioner_start");
+      }
+      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls, 0,
+                     0, 0.0, "running", true);
       if (!experimental_treecode || !fmm_m2l_single_matvec || !coupled) {
         throw std::invalid_argument(
             "PBE TABI FMM-native preconditioners require coupled "
@@ -4366,17 +5676,35 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       }
       result.preconditioner_block_near = "operator-near";
       const auto precond_begin = std::chrono::steady_clock::now();
-      const auto fmm_context = ensure_jcp_fmm_m2l_context(
-          panels, eps_ratio, kappa,
-          static_cast<std::size_t>(std::max(8, options.tree_leaf_size)),
-          options.tree_opening_theta, result.taylor_order, executor,
-          &jcp_tree.fmm_m2l_context);
+      std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext> fmm_context;
+      if (!(fmm_nearfield_ilu0 && kifmm_fallback_ilu_graph)) {
+        fmm_context = ensure_jcp_fmm_m2l_context(
+            panels, eps_ratio, kappa,
+            static_cast<std::size_t>(std::max(8, options.tree_leaf_size)),
+            options.tree_opening_theta, result.taylor_order, executor,
+            &jcp_tree.fmm_m2l_context);
+      }
+      std::vector<std::vector<std::size_t>> kifmm_fallback_graph;
       if (fmm_nearfield_ilu0) {
-        result.preconditioner_estimated_bytes =
-            estimate_fmm_m2l_nearfield_ilu0_bytes(
-                *fmm_context, diagonal.size(), coupled,
-                static_cast<std::size_t>(
-                    result.preconditioner_ilu_neighbor_cap));
+        if (kifmm_fallback_ilu_graph) {
+          kifmm_fallback_graph =
+              titan::tabi::fmm_kifmm::build_kifmm_lite_fallback_panel_graph(
+                  kifmm_prepared_operator,
+                  static_cast<std::size_t>(
+                      result.preconditioner_ilu_neighbor_cap));
+          result.preconditioner_estimated_bytes =
+              estimate_jcp_sparse_ilu0_graph_bytes(kifmm_fallback_graph,
+                  diagonal.size(),
+                  result.preconditioner_ilu_regularization == "adaptive");
+        } else {
+          result.preconditioner_estimated_bytes =
+              estimate_fmm_m2l_nearfield_ilu0_bytes(
+                  *fmm_context, diagonal.size(), coupled,
+                  static_cast<std::size_t>(
+                      result.preconditioner_ilu_neighbor_cap),
+                  result.preconditioner_ilu_regularization == "adaptive",
+                  preconditioner_graph_source);
+        }
       } else {
         result.preconditioner_estimated_bytes =
             fmm_overlap_schwarz
@@ -4385,35 +5713,47 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                       static_cast<std::size_t>(
                           result.preconditioner_block_panel_cap),
                       static_cast<std::size_t>(
-                          result.preconditioner_overlap_panel_cap))
+                          result.preconditioner_overlap_panel_cap),
+                      preconditioner_graph_source)
                 : estimate_fmm_m2l_block_jacobi_bytes(
                       *fmm_context, diagonal.size(), coupled,
                       static_cast<std::size_t>(
                           result.preconditioner_block_panel_cap));
       }
-      const bool block_budget_cap =
-          result.preconditioner_estimated_bytes >
-          result.preconditioner_memory_budget_bytes;
+      const bool block_budget_cap = result.preconditioner_estimated_bytes >
+                                    result.preconditioner_memory_budget_bytes;
       if (!block_budget_cap) {
         if (fmm_nearfield_ilu0) {
-          sparse_ilu_preconditioner =
-              build_fmm_m2l_nearfield_ilu0_preconditioner(
-                  panels, *fmm_context, coupled, eps_ratio, kappa, lhs_phi,
-                  lhs_phin, diagonal,
-                  static_cast<std::size_t>(
-                      result.preconditioner_ilu_neighbor_cap),
-                  result.preconditioner_ilu_drop_tol, executor,
-                  result.near_integration, result.quad_buffer);
+          if (kifmm_fallback_ilu_graph) {
+            sparse_ilu_preconditioner =
+                build_jcp_sparse_ilu0_preconditioner_from_graph(
+                    panels, kifmm_fallback_graph, coupled, eps_ratio, kappa,
+                    lhs_phi, lhs_phin, diagonal,
+                    result.preconditioner_ilu_drop_tol, result.near_integration,
+                    result.quad_buffer,
+                    result.preconditioner_ilu_regularization,
+                    result.preconditioner_ilu_regularization_max);
+          } else {
+            sparse_ilu_preconditioner =
+                build_fmm_m2l_nearfield_ilu0_preconditioner(
+                    panels, *fmm_context, coupled, eps_ratio, kappa, lhs_phi,
+                    lhs_phin, diagonal,
+                    static_cast<std::size_t>(
+                        result.preconditioner_ilu_neighbor_cap),
+                    result.preconditioner_ilu_drop_tol, executor,
+                    result.near_integration, result.quad_buffer,
+                    result.preconditioner_ilu_regularization,
+                    result.preconditioner_ilu_regularization_max,
+                    preconditioner_graph_source);
+          }
         } else if (fmm_overlap_schwarz) {
-          block_preconditioner =
-              build_fmm_m2l_overlap_schwarz_preconditioner(
-                  panels, *fmm_context, coupled, eps_ratio, kappa, lhs_phi,
-                  lhs_phin, diagonal,
-                  static_cast<std::size_t>(
-                      result.preconditioner_block_panel_cap),
-                  static_cast<std::size_t>(
-                      result.preconditioner_overlap_panel_cap),
-                  executor, result.near_integration, result.quad_buffer);
+          block_preconditioner = build_fmm_m2l_overlap_schwarz_preconditioner(
+              panels, *fmm_context, coupled, eps_ratio, kappa, lhs_phi,
+              lhs_phin, diagonal,
+              static_cast<std::size_t>(result.preconditioner_block_panel_cap),
+              static_cast<std::size_t>(result.preconditioner_overlap_panel_cap),
+              executor, result.near_integration, result.quad_buffer,
+              preconditioner_graph_source);
         } else {
           block_preconditioner = build_fmm_m2l_block_jacobi_preconditioner(
               panels, *fmm_context, coupled, eps_ratio, kappa, lhs_phi,
@@ -4438,11 +5778,95 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
             sparse_ilu_preconditioner != nullptr
                 ? sparse_ilu_preconditioner->ill_conditioned_blocks
                 : 0;
-        result.preconditioner_quality_rejected_blocks = 0;
-        result.preconditioner_quality_probe_max_gain = 0.0;
+        result.preconditioner_quality_rejected_blocks =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->quality_rejected_blocks
+                : 0;
+        result.preconditioner_quality_probe_max_gain =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->quality_probe_max_gain
+                : 0.0;
+        result.preconditioner_quality_probe_rel_residual =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->quality_probe_rel_residual
+                : 0.0;
+        result.preconditioner_pivot_ratio_min =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->pivot_ratio_min
+                : 0.0;
+        result.preconditioner_factor_growth_max =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->factor_growth_max
+                : 0.0;
+        result.preconditioner_pivot_ratio_min_row =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->pivot_ratio_min_row
+                : -1;
+        result.preconditioner_pivot_ratio_min_column =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->pivot_ratio_min_column
+                : -1;
+        result.preconditioner_factor_growth_row =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->factor_growth_row
+                : -1;
+        result.preconditioner_factor_growth_column =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->factor_growth_column
+                : -1;
+        result.preconditioner_quality_failure_stage =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->quality_failure_stage
+                : std::string("off");
+        result.preconditioner_quality_failure_row =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->quality_failure_row
+                : -1;
+        result.preconditioner_quality_failure_column =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->quality_failure_column
+                : -1;
+        result.preconditioner_quality_failure_probe =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->quality_failure_probe
+                : -1;
+        result.preconditioner_quality_failure_probe_gain =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->quality_failure_probe_gain
+                : 0.0;
+        result.preconditioner_quality_failure_probe_rel_residual =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->quality_failure_probe_rel_residual
+                : 0.0;
         result.preconditioner_quality_status =
             sparse_ilu_preconditioner != nullptr
                 ? sparse_ilu_preconditioner->quality_status
+                : std::string("off");
+        result.preconditioner_ilu_regularization_selected =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->regularization_selected_relative
+                : 0.0;
+        result.preconditioner_ilu_regularization_absolute_max =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner
+                      ->regularization_selected_absolute_max
+                : 0.0;
+        result.preconditioner_ilu_regularization_attempts =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->regularization_attempts
+                : 0;
+        result.preconditioner_ilu_regularization_rejected_attempts =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->regularization_rejected_attempts
+                : 0;
+        result.preconditioner_ilu_regularization_shifted_rows =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->regularization_shifted_rows
+                : 0;
+        result.preconditioner_ilu_unshifted_failure_stage =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner
+                      ->regularization_unshifted_failure_stage
                 : std::string("off");
         result.preconditioner_sparse_nnz_blocks =
             sparse_ilu_preconditioner != nullptr
@@ -4487,14 +5911,32 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       const bool ilu_ill_conditioned =
           sparse_ilu_preconditioner != nullptr &&
           sparse_ilu_preconditioner->ill_conditioned_blocks > 0;
-      const std::size_t block_panel_threshold =
-          static_cast<std::size_t>(std::ceil(0.70 * static_cast<double>(
-                                               std::max<std::size_t>(
-                                                   1, panels.size()))));
+      const bool ilu_quality_rejected =
+          sparse_ilu_preconditioner != nullptr &&
+          sparse_ilu_preconditioner->quality_rejected_blocks > 0;
+      const std::size_t block_panel_threshold = static_cast<std::size_t>(
+          std::ceil(0.70 * static_cast<double>(
+                               std::max<std::size_t>(1, panels.size()))));
       if (fmm_nearfield_ilu0 && sparse_ilu_preconditioner != nullptr &&
           sparse_ilu_preconditioner->valid_panel_count == panels.size() &&
-          !ilu_ill_conditioned && !block_budget_cap) {
-        result.preconditioner_effective = "fmm_nearfield_ilu0";
+          !ilu_ill_conditioned && !ilu_quality_rejected && !block_budget_cap) {
+        if (kifmm_fallback_ilu_graph) {
+          result.preconditioner_effective =
+              sparse_ilu_preconditioner->regularization_selected_relative > 0.0
+                  ? "fmm_nearfield_ilu0_kifmm_fallback_capped_regularized"
+                  : "fmm_nearfield_ilu0_kifmm_fallback_capped";
+        } else {
+          result.preconditioner_effective =
+              distance_knn_graph
+                  ? (sparse_ilu_preconditioner
+                                 ->regularization_selected_relative > 0.0
+                         ? "distance_knn_ilu0_regularized"
+                         : "distance_knn_ilu0")
+                  : (sparse_ilu_preconditioner
+                                 ->regularization_selected_relative > 0.0
+                         ? "fmm_nearfield_ilu0_regularized"
+                         : "fmm_nearfield_ilu0");
+        }
         result.memory_bytes += result.preconditioner_estimated_bytes;
         custom_preconditioner =
             [sparse_ilu_preconditioner](const std::vector<double> &in,
@@ -4502,64 +5944,92 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
               sparse_ilu_preconditioner->apply(in, out);
             };
       } else if (!fmm_nearfield_ilu0 && block_preconditioner != nullptr &&
-          block_preconditioner->valid_blocks > 0 &&
-          block_preconditioner->valid_panel_count >= block_panel_threshold &&
-          !block_budget_cap) {
+                 block_preconditioner->valid_blocks > 0 &&
+                 block_preconditioner->valid_panel_count >=
+                     block_panel_threshold &&
+                 !block_budget_cap) {
         const bool partial_block =
             block_ill_conditioned ||
             block_preconditioner->valid_panel_count < panels.size();
         if (fmm_overlap_schwarz) {
           result.preconditioner_effective =
-              partial_block ? "fmm_overlap_schwarz_partial"
-                            : "fmm_overlap_schwarz";
+              distance_knn_graph
+                  ? (partial_block ? "distance_knn_overlap_schwarz_partial"
+                                   : "distance_knn_overlap_schwarz")
+                  : (partial_block ? "fmm_overlap_schwarz_partial"
+                                   : "fmm_overlap_schwarz");
         } else {
           result.preconditioner_effective =
               partial_block ? "fmm_block_jacobi_partial" : "fmm_block_jacobi";
         }
         result.memory_bytes += result.preconditioner_estimated_bytes;
-        custom_preconditioner =
-            [block_preconditioner, &executor](const std::vector<double> &in,
-                                              std::vector<double> &out) {
-              block_preconditioner->apply_parallel(in, out, executor);
-            };
+        custom_preconditioner = [block_preconditioner,
+                                 &executor](const std::vector<double> &in,
+                                            std::vector<double> &out) {
+          block_preconditioner->apply_parallel(in, out, executor);
+        };
       } else if (block_budget_cap) {
         block_preconditioner.reset();
         sparse_ilu_preconditioner.reset();
         if (fmm_nearfield_ilu0) {
-          result.preconditioner_effective = "diagonal_fmm_ilu_budget_cap";
+          result.preconditioner_effective =
+              kifmm_fallback_ilu_graph
+                  ? "diagonal_kifmm_fallback_ilu_budget_cap"
+              : distance_knn_graph ? "diagonal_knn_ilu_budget_cap"
+                                   : "diagonal_fmm_ilu_budget_cap";
         } else {
           result.preconditioner_effective =
-              fmm_overlap_schwarz ? "diagonal_fmm_overlap_budget_cap"
-                                  : "diagonal_fmm_block_budget_cap";
+              fmm_overlap_schwarz
+                  ? (distance_knn_graph ? "diagonal_knn_overlap_budget_cap"
+                                        : "diagonal_fmm_overlap_budget_cap")
+                  : "diagonal_fmm_block_budget_cap";
         }
-      } else if (block_ill_conditioned || ilu_ill_conditioned) {
+      } else if (block_ill_conditioned || ilu_ill_conditioned ||
+                 ilu_quality_rejected) {
         block_preconditioner.reset();
         sparse_ilu_preconditioner.reset();
         if (fmm_nearfield_ilu0) {
-          result.preconditioner_effective = "diagonal_fmm_ilu_factor_fallback";
+          result.preconditioner_effective =
+              kifmm_fallback_ilu_graph
+                  ? "diagonal_kifmm_fallback_ilu_factor_fallback"
+              : distance_knn_graph
+                  ? (ilu_quality_rejected ? "diagonal_knn_ilu_quality_fallback"
+                                          : "diagonal_knn_ilu_factor_fallback")
+                  : (ilu_quality_rejected ? "diagonal_fmm_ilu_quality_fallback"
+                                          : "diagonal_fmm_ilu_factor_fallback");
         } else {
           result.preconditioner_effective =
-              fmm_overlap_schwarz ? "diagonal_fmm_overlap_ill_conditioned"
-                                  : "diagonal_fmm_block_ill_conditioned";
+              fmm_overlap_schwarz
+                  ? (distance_knn_graph
+                         ? "diagonal_knn_overlap_ill_conditioned"
+                         : "diagonal_fmm_overlap_ill_conditioned")
+                  : "diagonal_fmm_block_ill_conditioned";
         }
       } else {
         block_preconditioner.reset();
         sparse_ilu_preconditioner.reset();
         if (fmm_nearfield_ilu0) {
-          result.preconditioner_effective = "diagonal_fmm_ilu_fallback";
+          result.preconditioner_effective =
+              kifmm_fallback_ilu_graph ? "diagonal_kifmm_fallback_ilu_fallback"
+              : distance_knn_graph     ? "diagonal_knn_ilu_fallback"
+                                       : "diagonal_fmm_ilu_fallback";
         } else {
           result.preconditioner_effective =
-              fmm_overlap_schwarz ? "diagonal_fmm_overlap_fallback"
-                                  : "diagonal_fmm_block_fallback";
+              fmm_overlap_schwarz
+                  ? (distance_knn_graph ? "diagonal_knn_overlap_fallback"
+                                        : "diagonal_fmm_overlap_fallback")
+                  : "diagonal_fmm_block_fallback";
         }
       }
-      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0,
+      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0, 0,
+                     0.0, "running", true);
+      if (kifmm_any_gmres) {
+        write_kifmm_gmres_phase("preconditioner_done");
+      }
+    } else if ((legacy_block || budgeted_block) && !jcp_tree.nodes.empty() &&
+               (!legacy_block || panels.size() <= kBlockPanelPrebuildCap)) {
+      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls, 0,
                      0, 0.0, "running", true);
-    } else if ((legacy_block || budgeted_block) &&
-        !jcp_tree.nodes.empty() &&
-        (!legacy_block || panels.size() <= kBlockPanelPrebuildCap)) {
-      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls,
-                     0, 0, 0.0, "running", true);
       const auto precond_begin = std::chrono::steady_clock::now();
       constexpr std::size_t kBlockMemorySoftCapBytes =
           static_cast<std::size_t>(384) * 1024u * 1024u;
@@ -4575,9 +6045,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           estimate_jcp_block_preconditioner_bytes(block_ranges, diagonal.size(),
                                                   coupled);
       const bool block_budget_cap =
-          budgeted_block &&
-          result.preconditioner_estimated_bytes >
-              result.preconditioner_memory_budget_bytes;
+          budgeted_block && result.preconditioner_estimated_bytes >
+                                result.preconditioner_memory_budget_bytes;
       const bool block_prebuild_working_set_cap =
           legacy_block &&
           current_working_set_bytes() > kBlockWorkingSetSoftCapBytes;
@@ -4610,9 +6079,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
               ? block_preconditioner->quality_probe_max_gain
               : 0.0;
       result.preconditioner_quality_status =
-          block_preconditioner != nullptr
-              ? block_preconditioner->quality_status
-              : std::string("off");
+          block_preconditioner != nullptr ? block_preconditioner->quality_status
+                                          : std::string("off");
       const bool block_memory_cap =
           legacy_block &&
           (result.preconditioner_estimated_bytes > kBlockMemorySoftCapBytes ||
@@ -4621,25 +6089,24 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       const bool block_ill_conditioned =
           block_preconditioner != nullptr &&
           block_preconditioner->ill_conditioned_blocks > 0;
-      const std::size_t block_panel_threshold =
-          static_cast<std::size_t>(std::ceil(0.70 * static_cast<double>(
-                                               std::max<std::size_t>(
-                                                   1, panels.size()))));
+      const std::size_t block_panel_threshold = static_cast<std::size_t>(
+          std::ceil(0.70 * static_cast<double>(
+                               std::max<std::size_t>(1, panels.size()))));
       if (block_preconditioner != nullptr &&
-           block_preconditioner->valid_blocks > 0 &&
-           block_preconditioner->valid_panel_count >= block_panel_threshold &&
-           !block_budget_cap && !block_memory_cap) {
+          block_preconditioner->valid_blocks > 0 &&
+          block_preconditioner->valid_panel_count >= block_panel_threshold &&
+          !block_budget_cap && !block_memory_cap) {
         const bool partial_block =
             block_ill_conditioned ||
             block_preconditioner->valid_panel_count < panels.size();
         result.preconditioner_effective =
             block_effective_label(budgeted_block, partial_block);
         result.memory_bytes += result.preconditioner_estimated_bytes;
-        custom_preconditioner =
-            [block_preconditioner, &executor](const std::vector<double> &in,
-                                              std::vector<double> &out) {
-              block_preconditioner->apply_parallel(in, out, executor);
-            };
+        custom_preconditioner = [block_preconditioner,
+                                 &executor](const std::vector<double> &in,
+                                            std::vector<double> &out) {
+          block_preconditioner->apply_parallel(in, out, executor);
+        };
       } else if (block_budget_cap) {
         block_preconditioner.reset();
         result.preconditioner_effective = "diagonal_block_budget_cap";
@@ -4652,28 +6119,29 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       } else {
         result.preconditioner_effective = "diagonal_block_fallback";
       }
-      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0,
-                     0, 0.0, "running", true);
+      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0, 0,
+                     0.0, "running", true);
     } else if (legacy_block || budgeted_block) {
-      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls,
-                     0, 0, 0.0, "running", true);
+      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls, 0,
+                     0, 0.0, "running", true);
       result.preconditioner_effective =
           legacy_block && panels.size() > kBlockPanelPrebuildCap
               ? "diagonal_block_memory_cap"
               : "diagonal_block_fallback";
-      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0,
-                     0, 0.0, "running", true);
+      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0, 0,
+                     0.0, "running", true);
     } else if (coarse_probe && experimental_treecode &&
                !jcp_tree.nodes.empty()) {
-      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls,
-                     0, 0, 0.0, "running", true);
+      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls, 0,
+                     0, 0.0, "running", true);
       const auto precond_begin = std::chrono::steady_clock::now();
       coarse_preconditioner = make_jcp_coarse_structure(
           panels, jcp_tree, coupled, diagonal,
           static_cast<std::size_t>(result.preconditioner_coarse_aggregate_cap));
       result.preconditioner_coarse_aggregates =
           coarse_preconditioner->aggregates.size();
-      result.preconditioner_coarse_dimension = coarse_preconditioner->dimension();
+      result.preconditioner_coarse_dimension =
+          coarse_preconditioner->dimension();
       result.preconditioner_coarse_matrix_bytes =
           coarse_preconditioner->dimension() *
               coarse_preconditioner->dimension() * sizeof(double) +
@@ -4693,9 +6161,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.preconditioner_estimated_bytes =
           coarse_preconditioner->estimated_bytes() +
           coarse_base_estimated_bytes;
-      const bool coarse_budget_cap =
-          result.preconditioner_estimated_bytes >
-          result.preconditioner_memory_budget_bytes;
+      const bool coarse_budget_cap = result.preconditioner_estimated_bytes >
+                                     result.preconditioner_memory_budget_bytes;
       if (coarse_budget_cap) {
         coarse_preconditioner.reset();
         result.preconditioner_coarse_status = "budget_fallback";
@@ -4708,7 +6175,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
               diagonal, result.near_integration, result.quad_buffer,
               result.preconditioner_block_near, coarse_base_ranges, executor);
           const std::size_t threshold = static_cast<std::size_t>(std::ceil(
-              0.70 * static_cast<double>(std::max<std::size_t>(1, panels.size()))));
+              0.70 *
+              static_cast<double>(std::max<std::size_t>(1, panels.size()))));
           block_base_active =
               block_preconditioner != nullptr &&
               block_preconditioner->valid_blocks > 0 &&
@@ -4749,20 +6217,18 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         if (coarse_valid) {
           result.preconditioner_coarse_status = "active";
           result.preconditioner_effective =
-              block_base_active
-                  ? "coarse_galerkin_probe_block_budgeted"
-                  : "coarse_galerkin_probe_diagonal";
+              block_base_active ? "coarse_galerkin_probe_block_budgeted"
+                                : "coarse_galerkin_probe_diagonal";
           result.memory_bytes += result.preconditioner_estimated_bytes;
-          custom_preconditioner =
-              [coarse_preconditioner, &panels, &executor,
-               &result](const std::vector<double> &in,
-                        std::vector<double> &out) {
-                const auto begin = std::chrono::steady_clock::now();
-                coarse_preconditioner->apply(panels, in, out, executor);
-                result.preconditioner_coarse_apply_ms +=
-                    elapsed_ms(begin, std::chrono::steady_clock::now());
-                ++result.preconditioner_coarse_apply_calls;
-              };
+          custom_preconditioner = [coarse_preconditioner, &panels, &executor,
+                                   &result](const std::vector<double> &in,
+                                            std::vector<double> &out) {
+            const auto begin = std::chrono::steady_clock::now();
+            coarse_preconditioner->apply(panels, in, out, executor);
+            result.preconditioner_coarse_apply_ms +=
+                elapsed_ms(begin, std::chrono::steady_clock::now());
+            ++result.preconditioner_coarse_apply_calls;
+          };
         } else {
           coarse_preconditioner.reset();
           result.preconditioner_coarse_status = "factor_fallback";
@@ -4773,18 +6239,21 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           elapsed_ms(precond_begin, std::chrono::steady_clock::now());
       result.preconditioner_setup_ms = preconditioner_setup_ms;
       result.preconditioner_coarse_setup_ms = preconditioner_setup_ms;
-      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0,
-                     0, 0.0, "running", true);
+      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0, 0,
+                     0.0, "running", true);
     } else if (coarse_probe) {
-      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls,
-                     0, 0, 0.0, "running", true);
+      progress.write("precond_start", result, &jcp_tree_stats, matvec_calls, 0,
+                     0, 0.0, "running", true);
       result.preconditioner_coarse_status = "operator_unsupported";
       result.preconditioner_effective = "diagonal_coarse_unsupported";
-      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0,
-                     0, 0.0, "running", true);
+      progress.write("precond_end", result, &jcp_tree_stats, matvec_calls, 0, 0,
+                     0.0, "running", true);
     }
 
     const auto gmres_begin = std::chrono::steady_clock::now();
+    if (kifmm_any_gmres) {
+      write_kifmm_gmres_phase("gmres_start");
+    }
     progress.write("gmres_start", result, &jcp_tree_stats, matvec_calls, 0, 0,
                    0.0, "running", true);
     auto gmres_progress = [&](int gmres_iter, int restart_iter,
@@ -4792,6 +6261,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                               double preconditioned_residual_rel, bool force,
                               const std::string &phase,
                               const LinearSolveResult &state) {
+      result.orthogonalization_ms = state.orthogonalization_ms;
+      result.preconditioner_ms = state.preconditioner_ms;
       result.preconditioner_apply_ms = state.preconditioner_apply_ms;
       result.preconditioner_apply_calls = state.preconditioner_apply_calls;
       result.true_residual_probe_scope = state.true_residual_probe_scope;
@@ -4817,27 +6288,24 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         }
       }
       if (std::isfinite(preconditioned_residual_rel)) {
-        result.final_preconditioned_residual =
-            preconditioned_residual_rel;
+        result.final_preconditioned_residual = preconditioned_residual_rel;
         if (result.best_preconditioned_residual <= 0.0 ||
-            preconditioned_residual_rel <
-                result.best_preconditioned_residual) {
-          result.best_preconditioned_residual =
-              preconditioned_residual_rel;
+            preconditioned_residual_rel < result.best_preconditioned_residual) {
+          result.best_preconditioned_residual = preconditioned_residual_rel;
         }
       }
       progress.write(phase, result, &jcp_tree_stats, matvec_calls, gmres_iter,
                      restart_iter, true_residual_rel, "running", force);
+      if (kifmm_any_gmres) {
+        write_kifmm_convergence_trace(
+            phase, gmres_iter, preconditioned_residual_rel, true_residual_rel);
+      }
     };
-    LinearSolveResult linear =
-        gmres_solve(matvec, rhs, diagonal, max_iter, tol,
-                    options.gmres_restart, executor,
-                    custom_preconditioner, gmres_progress,
-                    result.true_residual_probe_mode,
-                    result.true_residual_probe_interval,
-                    result.true_residual_probe_scope,
-                    result.true_residual_sample_count,
-                    sampled_true_residual);
+    LinearSolveResult linear = gmres_solve(
+        matvec, rhs, diagonal, max_iter, tol, options.gmres_restart, executor,
+        custom_preconditioner, gmres_progress, result.true_residual_probe_mode,
+        result.true_residual_probe_interval, result.true_residual_probe_scope,
+        result.true_residual_sample_count, sampled_true_residual);
     result.gmres_ms = elapsed_ms(gmres_begin, std::chrono::steady_clock::now());
     result.iterations = linear.iterations;
     result.residual = linear.residual;
@@ -4846,10 +6314,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.best_residual = linear.best_residual;
     result.best_residual_iter = linear.best_residual_iter;
     result.final_residual = linear.final_residual;
-    result.best_preconditioned_residual =
-        linear.best_preconditioned_residual;
-    result.final_preconditioned_residual =
-        linear.final_preconditioned_residual;
+    result.best_preconditioned_residual = linear.best_preconditioned_residual;
+    result.final_preconditioned_residual = linear.final_preconditioned_residual;
     result.true_residual_abs = linear.true_residual_abs;
     result.true_residual_rel = linear.true_residual_rel;
     result.true_residual_probe_mode = linear.true_residual_probe_mode;
@@ -4864,8 +6330,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.sampled_probe_ms = linear.sampled_probe_ms;
     result.full_true_residual_confirm_calls =
         linear.full_true_residual_confirm_calls;
-    result.full_true_residual_confirm_ms =
-        linear.full_true_residual_confirm_ms;
+    result.full_true_residual_confirm_ms = linear.full_true_residual_confirm_ms;
     result.converged = linear.converged;
     result.convergence_reason = linear.convergence_reason;
     result.residual_history = residual_history_string(linear.residual_history);
@@ -4874,8 +6339,12 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.matvec_ms_avg =
         matvec_calls > 0 ? matvec_ms_total / static_cast<double>(matvec_calls)
                          : 0.0;
-    if (experimental_treecode && options.matvec_audit != "off") {
+    if (experimental_treecode && options.matvec_audit != "off" &&
+        !node_patch_discretization) {
       const auto audit_begin = std::chrono::steady_clock::now();
+      if (kifmm_any_gmres) {
+        write_kifmm_gmres_phase("post_audit_start");
+      }
       const std::vector<double> &audit_x =
           !linear.best_x.empty() ? linear.best_x : linear.x;
       std::vector<std::size_t> audit_rows;
@@ -4895,7 +6364,11 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       }
       if (!audit_x.empty() && !audit_rows.empty()) {
         std::vector<double> tree_ax;
-        if (gmres_p4) {
+        if (channel_hybrid_gmres) {
+          apply_channel_hybrid_operator(audit_x, tree_ax, false);
+        } else if (kifmm_gmres) {
+          apply_kifmm_operator(audit_x, tree_ax, false);
+        } else if (gmres_p4) {
           apply_p4_operator(audit_x, tree_ax, false);
         } else {
           apply_jcp_treecode_operator(
@@ -4903,9 +6376,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
               jcp_tree, result.near_integration, result.quad_buffer, executor,
               tree_ax, nullptr);
         }
-        const bool full =
-            options.matvec_audit == "full-small" &&
-            audit_rows.size() == audit_x.size();
+        const bool full = options.matvec_audit == "full-small" &&
+                          audit_rows.size() == audit_x.size();
         double diff_sq = 0.0;
         double direct_sq = 0.0;
         double direct_residual_sq = 0.0;
@@ -4935,7 +6407,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         } else {
           const std::size_t unknown_count = audit_x.size();
           const std::size_t panel_count = panels.size();
-          const std::size_t workers = solver_workers(executor, audit_rows.size());
+          const std::size_t workers =
+              solver_workers(executor, audit_rows.size());
           std::vector<double> partial_diff_sq(workers, 0.0);
           std::vector<double> partial_direct_sq(workers, 0.0);
           std::vector<double> partial_direct_residual_sq(workers, 0.0);
@@ -4961,12 +6434,19 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                       result.near_integration, result.quad_buffer, nullptr);
                   double direct_row = 0.0;
                   if (coupled) {
-                    direct_row = row < panel_count
-                                     ? lhs_phi * audit_x[target] - sum.phi
-                                     : lhs_phin * audit_x[panel_count + target] -
-                                           sum.phin;
+                    direct_row =
+                        row < panel_count
+                            ? jcp_lhs_phi_for_panel(
+                                  panels[target], eps_ratio, lhs_phi) *
+                                  audit_x[target] - sum.phi
+                            : jcp_lhs_phin_for_panel(
+                                  panels[target], eps_ratio, lhs_phin) *
+                                  audit_x[panel_count + target] - sum.phin;
                   } else {
-                    direct_row = lhs_phi * audit_x[target] - sum.phi;
+                    direct_row = jcp_lhs_phi_for_panel(
+                                     panels[target], eps_ratio, lhs_phi) *
+                                     audit_x[target] -
+                                 sum.phi;
                   }
                   const double delta = tree_ax[row] - direct_row;
                   local_diff_sq += delta * delta;
@@ -4977,30 +6457,29 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                 }
                 partial_diff_sq[worker] = local_diff_sq;
                 partial_direct_sq[worker] = local_direct_sq;
-                partial_direct_residual_sq[worker] =
-                    local_direct_residual_sq;
+                partial_direct_residual_sq[worker] = local_direct_residual_sq;
                 partial_rhs_sq[worker] = local_rhs_sq;
               });
           diff_sq = std::accumulate(partial_diff_sq.begin(),
                                     partial_diff_sq.end(), 0.0);
           direct_sq = std::accumulate(partial_direct_sq.begin(),
                                       partial_direct_sq.end(), 0.0);
-          direct_residual_sq = std::accumulate(
-              partial_direct_residual_sq.begin(),
-              partial_direct_residual_sq.end(), 0.0);
-          rhs_sq =
-              std::accumulate(partial_rhs_sq.begin(), partial_rhs_sq.end(), 0.0);
+          direct_residual_sq =
+              std::accumulate(partial_direct_residual_sq.begin(),
+                              partial_direct_residual_sq.end(), 0.0);
+          rhs_sq = std::accumulate(partial_rhs_sq.begin(), partial_rhs_sq.end(),
+                                   0.0);
         }
         result.tree_vs_direct_matvec_rel =
             std::sqrt(std::max(0.0, diff_sq)) /
             std::max(1.0e-300, std::sqrt(std::max(0.0, direct_sq)));
         result.matvec_audit_rows = audit_rows.size();
-        if (gmres_p4) {
+        if (gmres_p4 || kifmm_any_gmres) {
           result.fmm_local_sampled_direct_true_residual =
               std::sqrt(std::max(0.0, direct_residual_sq)) /
               std::max(1.0e-300, std::sqrt(std::max(0.0, rhs_sq)));
         }
-        if (options.matvec_audit == "sampled-detail") {
+        if (options.matvec_audit == "sampled-detail" && !kifmm_any_gmres) {
           const auto context = ensure_jcp_fmm_m2l_context(
               panels, eps_ratio, kappa, jcp_tree.leaf_size,
               jcp_tree.opening_theta, jcp_tree.taylor_order, executor,
@@ -5064,8 +6543,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                   "solution", executor, coupled, result.near_integration,
                   result.quad_buffer, &panels, options.fmm_local_refine,
                   options.fmm_local_refine_tol, options.fmm_local_cache,
-                  cache_budget_mb, 1,
-                  options.fmm_local_fallback,
+                  cache_budget_mb, 1, options.fmm_local_fallback,
                   options.fmm_local_plan_builder,
                   static_cast<std::size_t>(
                       options.fmm_local_refine_probe_count),
@@ -5078,8 +6556,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                   "phi_only", executor, coupled, result.near_integration,
                   result.quad_buffer, &panels, options.fmm_local_refine,
                   options.fmm_local_refine_tol, options.fmm_local_cache,
-                  cache_budget_mb, 1,
-                  options.fmm_local_fallback,
+                  cache_budget_mb, 1, options.fmm_local_fallback,
                   options.fmm_local_plan_builder,
                   static_cast<std::size_t>(
                       options.fmm_local_refine_probe_count),
@@ -5092,8 +6569,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                   "phin_only", executor, coupled, result.near_integration,
                   result.quad_buffer, &panels, options.fmm_local_refine,
                   options.fmm_local_refine_tol, options.fmm_local_cache,
-                  cache_budget_mb, 1,
-                  options.fmm_local_fallback,
+                  cache_budget_mb, 1, options.fmm_local_fallback,
                   options.fmm_local_plan_builder,
                   static_cast<std::size_t>(
                       options.fmm_local_refine_probe_count),
@@ -5133,10 +6609,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                 options.fmm_local_refine_tol, options.fmm_local_cache,
                 cache_budget_mb,
                 options.fmm_local == "single-matvec-p4" ? 5u : 1u,
-                options.fmm_local_fallback,
-                options.fmm_local_plan_builder,
-                static_cast<std::size_t>(
-                    options.fmm_local_refine_probe_count),
+                options.fmm_local_fallback, options.fmm_local_plan_builder,
+                static_cast<std::size_t>(options.fmm_local_refine_probe_count),
                 options.fmm_local_refine_probe_mode,
                 options.fmm_local_geometry_guard,
                 options.fmm_local_geometry_theta));
@@ -5146,11 +6620,9 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                 "phi_only", executor, coupled, result.near_integration,
                 result.quad_buffer, &panels, options.fmm_local_refine,
                 options.fmm_local_refine_tol, options.fmm_local_cache,
-                cache_budget_mb, 1,
-                options.fmm_local_fallback,
+                cache_budget_mb, 1, options.fmm_local_fallback,
                 options.fmm_local_plan_builder,
-                static_cast<std::size_t>(
-                    options.fmm_local_refine_probe_count),
+                static_cast<std::size_t>(options.fmm_local_refine_probe_count),
                 options.fmm_local_refine_probe_mode,
                 options.fmm_local_geometry_guard,
                 options.fmm_local_geometry_theta));
@@ -5160,11 +6632,9 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                 "phin_only", executor, coupled, result.near_integration,
                 result.quad_buffer, &panels, options.fmm_local_refine,
                 options.fmm_local_refine_tol, options.fmm_local_cache,
-                cache_budget_mb, 1,
-                options.fmm_local_fallback,
+                cache_budget_mb, 1, options.fmm_local_fallback,
                 options.fmm_local_plan_builder,
-                static_cast<std::size_t>(
-                    options.fmm_local_refine_probe_count),
+                static_cast<std::size_t>(options.fmm_local_refine_probe_count),
                 options.fmm_local_refine_probe_mode,
                 options.fmm_local_geometry_guard,
                 options.fmm_local_geometry_theta));
@@ -5175,12 +6645,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       }
       result.matvec_audit_ms =
           elapsed_ms(audit_begin, std::chrono::steady_clock::now());
+      if (kifmm_any_gmres) {
+        write_kifmm_gmres_phase("post_audit_done");
+      }
     }
-    if (gmres_p4) {
+    if (gmres_p4 || kifmm_any_gmres) {
       jcp_tree_stats.fmm_m2l_apply_ms =
           1000.0 * result.fmm_local_gmres_apply_seconds_total;
-      jcp_tree_stats.fmm_m2l_finite_outputs =
-          result.fmm_local_operator_finite;
+      jcp_tree_stats.fmm_m2l_finite_outputs = result.fmm_local_operator_finite;
     }
     if (experimental_treecode) {
       result.matvec_mode = jcp_tree_stats.matvec_mode;
@@ -5197,26 +6669,22 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.leaf_panel_eval_ms = jcp_tree_stats.leaf_panel_eval_ms;
       result.leaf_tile_eval_ms = jcp_tree_stats.leaf_tile_eval_ms;
       result.leaf_residual_eval_ms = jcp_tree_stats.leaf_residual_eval_ms;
-      result.smooth_leaf_node_eval_ms =
-          jcp_tree_stats.smooth_leaf_node_eval_ms;
+      result.smooth_leaf_node_eval_ms = jcp_tree_stats.smooth_leaf_node_eval_ms;
       result.near_interactions = jcp_tree_stats.near_interactions;
       result.far_interactions = jcp_tree_stats.far_interactions;
       result.singular_near_interactions =
           jcp_tree_stats.singular_near_interactions;
       result.leaf_near_interactions = jcp_tree_stats.leaf_near_interactions;
       result.far_node_interactions = jcp_tree_stats.far_node_interactions;
-      result.leaf_panel_interactions =
-          jcp_tree_stats.leaf_panel_interactions;
-      result.leaf_tile_interactions =
-          jcp_tree_stats.leaf_tile_interactions;
+      result.leaf_panel_interactions = jcp_tree_stats.leaf_panel_interactions;
+      result.leaf_tile_interactions = jcp_tree_stats.leaf_tile_interactions;
       result.leaf_tile_panel_interactions =
           jcp_tree_stats.leaf_tile_panel_interactions;
       result.leaf_residual_panel_interactions =
           jcp_tree_stats.leaf_residual_panel_interactions;
       result.smooth_leaf_node_interactions =
           jcp_tree_stats.smooth_leaf_node_interactions;
-      result.leaf_pruned_interactions =
-          jcp_tree_stats.leaf_pruned_interactions;
+      result.leaf_pruned_interactions = jcp_tree_stats.leaf_pruned_interactions;
       result.leaf_mac_candidates = jcp_tree_stats.leaf_mac_candidates;
       result.leaf_mac_accepted = jcp_tree_stats.leaf_mac_accepted;
       result.leaf_mac_rejected = jcp_tree_stats.leaf_mac_rejected;
@@ -5224,8 +6692,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.leaf_mac_direct_panels_saved_estimate =
           jcp_tree_stats.leaf_mac_direct_panels_saved_estimate;
       result.fmm_m2l_mode = jcp_tree_stats.fmm_m2l_mode;
-      result.fmm_m2l_expansion_order =
-          jcp_tree_stats.fmm_m2l_expansion_order;
+      result.fmm_m2l_expansion_order = jcp_tree_stats.fmm_m2l_expansion_order;
       result.fmm_m2l_near_pairs = jcp_tree_stats.fmm_m2l_near_pairs;
       result.fmm_m2l_far_pairs = jcp_tree_stats.fmm_m2l_far_pairs;
       result.fmm_m2l_setup_ms = jcp_tree_stats.fmm_m2l_setup_ms;
@@ -5295,13 +6762,11 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.target_cluster_targets = jcp_tree_stats.target_cluster_targets;
       result.target_cluster_panels_pruned =
           jcp_tree_stats.target_cluster_panels_pruned;
-      result.target_cluster_rejected =
-          jcp_tree_stats.target_cluster_rejected;
+      result.target_cluster_rejected = jcp_tree_stats.target_cluster_rejected;
       result.target_cluster_eval_ms = jcp_tree_stats.target_cluster_eval_ms;
       result.leaf_pair_batch_interactions =
           jcp_tree_stats.leaf_pair_batch_interactions;
-      result.leaf_pair_batch_targets =
-          jcp_tree_stats.leaf_pair_batch_targets;
+      result.leaf_pair_batch_targets = jcp_tree_stats.leaf_pair_batch_targets;
       result.leaf_pair_batch_source_panels =
           jcp_tree_stats.leaf_pair_batch_source_panels;
       result.leaf_pair_batch_residual_panels =
@@ -5319,10 +6784,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.leaf_kernel_profile = jcp_tree_stats.leaf_kernel_profile;
       result.leaf_work_profile = jcp_tree_stats.leaf_work_profile;
       result.jcp_direct_kernel = jcp_tree_stats.jcp_direct_kernel;
-      result.leaf_kernel_scalar_tasks =
-          jcp_tree_stats.leaf_kernel_scalar_tasks;
-      result.leaf_kernel_batch_tasks =
-          jcp_tree_stats.leaf_kernel_batch_tasks;
+      result.leaf_kernel_scalar_tasks = jcp_tree_stats.leaf_kernel_scalar_tasks;
+      result.leaf_kernel_batch_tasks = jcp_tree_stats.leaf_kernel_batch_tasks;
       result.leaf_kernel_source_panel_evals =
           jcp_tree_stats.leaf_kernel_source_panel_evals;
       result.leaf_kernel_scalar_ms = jcp_tree_stats.leaf_kernel_scalar_ms;
@@ -5331,8 +6794,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.leaf_kernel_tail_ms = jcp_tree_stats.leaf_kernel_tail_ms;
       result.leaf_pair_batch_soa_sources =
           jcp_tree_stats.leaf_pair_batch_soa_sources;
-      result.leaf_pair_batch_soa_ms =
-          jcp_tree_stats.leaf_pair_batch_soa_ms;
+      result.leaf_pair_batch_soa_ms = jcp_tree_stats.leaf_pair_batch_soa_ms;
       result.leaf_pair_batch_scalar_tail_ms =
           jcp_tree_stats.leaf_pair_batch_scalar_tail_ms;
       result.leaf_pair_batch_clean_source_panels_per_second =
@@ -5347,8 +6809,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.leaf_pair_directness_cache;
       result.leaf_pair_directness_verify =
           jcp_tree_stats.leaf_pair_directness_verify;
-      result.leaf_pair_max_lookahead =
-          jcp_tree_stats.leaf_pair_max_lookahead;
+      result.leaf_pair_max_lookahead = jcp_tree_stats.leaf_pair_max_lookahead;
       result.leaf_pair_selection_candidate_scans =
           jcp_tree_stats.leaf_pair_selection_candidate_scans;
       result.leaf_pair_selection_clean_rejects =
@@ -5359,8 +6820,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.leaf_pair_selection_probe_node_visits;
       result.leaf_pair_selection_probe_ms =
           jcp_tree_stats.leaf_pair_selection_probe_ms;
-      result.leaf_pair_selection_ms =
-          jcp_tree_stats.leaf_pair_selection_ms;
+      result.leaf_pair_selection_ms = jcp_tree_stats.leaf_pair_selection_ms;
       result.leaf_pair_selection_probe_cache_hits =
           jcp_tree_stats.leaf_pair_selection_probe_cache_hits;
       result.leaf_pair_selection_probe_cache_misses =
@@ -5392,8 +6852,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.leaf_pair_worklist_max_active;
       result.leaf_pair_worklist_verify =
           jcp_tree_stats.leaf_pair_worklist_verify;
-      result.leaf_pair_worklist_tasks =
-          jcp_tree_stats.leaf_pair_worklist_tasks;
+      result.leaf_pair_worklist_tasks = jcp_tree_stats.leaf_pair_worklist_tasks;
       result.leaf_pair_worklist_groups =
           jcp_tree_stats.leaf_pair_worklist_groups;
       result.leaf_pair_worklist_batched_groups =
@@ -5410,21 +6869,17 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.leaf_pair_worklist_verify_mismatches =
           jcp_tree_stats.leaf_pair_worklist_verify_mismatches;
       result.leaf_block_verify = jcp_tree_stats.leaf_block_verify;
-      result.leaf_block_target_leaves =
-          jcp_tree_stats.leaf_block_target_leaves;
+      result.leaf_block_target_leaves = jcp_tree_stats.leaf_block_target_leaves;
       result.leaf_block_targets = jcp_tree_stats.leaf_block_targets;
-      result.leaf_block_source_groups =
-          jcp_tree_stats.leaf_block_source_groups;
+      result.leaf_block_source_groups = jcp_tree_stats.leaf_block_source_groups;
       result.leaf_block_batched_groups =
           jcp_tree_stats.leaf_block_batched_groups;
       result.leaf_block_scalar_tail_tasks =
           jcp_tree_stats.leaf_block_scalar_tail_tasks;
       result.leaf_block_group_ms = jcp_tree_stats.leaf_block_group_ms;
       result.leaf_block_flush_ms = jcp_tree_stats.leaf_block_flush_ms;
-      result.leaf_block_writeback_ms =
-          jcp_tree_stats.leaf_block_writeback_ms;
-      result.leaf_block_verify_checks =
-          jcp_tree_stats.leaf_block_verify_checks;
+      result.leaf_block_writeback_ms = jcp_tree_stats.leaf_block_writeback_ms;
+      result.leaf_block_verify_checks = jcp_tree_stats.leaf_block_verify_checks;
       result.leaf_block_verify_mismatches =
           jcp_tree_stats.leaf_block_verify_mismatches;
       result.adaptive_level = jcp_tree_stats.adaptive_level;
@@ -5452,8 +6907,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.node_aspect_ratio_mean = jcp_tree_stats.node_aspect_ratio_mean;
       result.leaf_panel_work_per_matvec =
           jcp_tree_stats.leaf_panel_work_per_matvec;
-      result.far_node_work_per_matvec =
-          jcp_tree_stats.far_node_work_per_matvec;
+      result.far_node_work_per_matvec = jcp_tree_stats.far_node_work_per_matvec;
       result.far_geometric_unsafe_count =
           jcp_tree_stats.far_geometric_unsafe_count;
       result.far_geometric_unsafe_panels =
@@ -5465,8 +6919,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.far_geometric_gap_ratio_mean;
       result.far_geometric_audit_samples =
           jcp_tree_stats.far_geometric_audit_samples;
-      result.mac_physical_gap_rejects =
-          jcp_tree_stats.mac_physical_gap_rejects;
+      result.mac_physical_gap_rejects = jcp_tree_stats.mac_physical_gap_rejects;
       result.mac_convergence_rho_rejects =
           jcp_tree_stats.mac_convergence_rho_rejects;
       result.mac_convergence_aspect_rejects =
@@ -5477,8 +6930,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.mac_convergence_aspect_reject_panels;
       result.fragmented_far_count = jcp_tree_stats.fragmented_far_count;
       result.fragmented_far_panels = jcp_tree_stats.fragmented_far_panels;
-      result.fragmented_split_rejects =
-          jcp_tree_stats.fragmented_split_rejects;
+      result.fragmented_split_rejects = jcp_tree_stats.fragmented_split_rejects;
       result.fragmentation_center_gap_ratio_max =
           jcp_tree_stats.fragmentation_center_gap_ratio_max;
       result.fragmentation_center_gap_ratio_mean =
@@ -5497,16 +6949,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.convergence_estimator_error_cap;
       result.convergence_unstable_rho_cap =
           jcp_tree_stats.convergence_unstable_rho_cap;
-      result.convergence_calibration =
-          jcp_tree_stats.convergence_calibration;
+      result.convergence_calibration = jcp_tree_stats.convergence_calibration;
       result.convergence_dielectric_amp =
           jcp_tree_stats.convergence_dielectric_amp;
       result.convergence_estimator_model =
           jcp_tree_stats.convergence_estimator_model;
       result.convergence_channel_calibration =
           jcp_tree_stats.convergence_channel_calibration;
-      result.convergence_split_policy =
-          jcp_tree_stats.convergence_split_policy;
+      result.convergence_split_policy = jcp_tree_stats.convergence_split_policy;
       result.convergence_split_selectivity =
           jcp_tree_stats.convergence_split_selectivity;
       result.convergence_split_absolute_floor =
@@ -5515,12 +6965,10 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.convergence_overreject_audit;
       result.convergence_overreject_detail =
           jcp_tree_stats.convergence_overreject_detail;
-      result.convergence_shape_audit =
-          jcp_tree_stats.convergence_shape_audit;
+      result.convergence_shape_audit = jcp_tree_stats.convergence_shape_audit;
       result.convergence_kernel_response_audit =
           jcp_tree_stats.convergence_kernel_response_audit;
-      result.channel_missed_semantics =
-          jcp_tree_stats.channel_missed_semantics;
+      result.channel_missed_semantics = jcp_tree_stats.channel_missed_semantics;
       result.accepted_miss_diagnostics =
           jcp_tree_stats.accepted_miss_diagnostics;
       result.accepted_miss_absolute_floor =
@@ -5735,17 +7183,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.moment_cancellation_ratio_max;
       result.moment_cancellation_ratio_mean =
           jcp_tree_stats.moment_cancellation_ratio_mean;
-      result.moment_dynamic_range_max =
-          jcp_tree_stats.moment_dynamic_range_max;
+      result.moment_dynamic_range_max = jcp_tree_stats.moment_dynamic_range_max;
       result.expansion_audit = jcp_tree_stats.expansion_audit;
-      result.expansion_audit_channel =
-          jcp_tree_stats.expansion_audit_channel;
+      result.expansion_audit_channel = jcp_tree_stats.expansion_audit_channel;
       result.far_expansion_audit_pairs =
           jcp_tree_stats.far_expansion_audit_pairs;
       result.far_expansion_audit_panels =
           jcp_tree_stats.far_expansion_audit_panels;
-      result.far_expansion_direct_ms =
-          jcp_tree_stats.far_expansion_direct_ms;
+      result.far_expansion_direct_ms = jcp_tree_stats.far_expansion_direct_ms;
       result.far_expansion_rel_error_max =
           jcp_tree_stats.far_expansion_rel_error_max;
       result.far_expansion_rel_error_mean =
@@ -5764,10 +7209,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.far_expansion_worst_channel;
       result.far_expansion_mean_gate_pass =
           jcp_tree_stats.far_expansion_mean_gate_pass;
-      result.far_convergence_rho_max =
-          jcp_tree_stats.far_convergence_rho_max;
-      result.far_convergence_rho_mean =
-          jcp_tree_stats.far_convergence_rho_mean;
+      result.far_convergence_rho_max = jcp_tree_stats.far_convergence_rho_max;
+      result.far_convergence_rho_mean = jcp_tree_stats.far_convergence_rho_mean;
       result.accepted_far_aspect_ratio_max =
           jcp_tree_stats.accepted_far_aspect_ratio_max;
       result.accepted_far_aspect_ratio_mean =
@@ -5797,8 +7240,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.node_aspect_ratio_mean = jcp_tree_stats.node_aspect_ratio_mean;
       result.leaf_panel_work_per_matvec =
           jcp_tree_stats.leaf_panel_work_per_matvec;
-      result.far_node_work_per_matvec =
-          jcp_tree_stats.far_node_work_per_matvec;
+      result.far_node_work_per_matvec = jcp_tree_stats.far_node_work_per_matvec;
       result.far_geometric_unsafe_count =
           jcp_tree_stats.far_geometric_unsafe_count;
       result.far_geometric_unsafe_panels =
@@ -5810,8 +7252,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.far_geometric_gap_ratio_mean;
       result.far_geometric_audit_samples =
           jcp_tree_stats.far_geometric_audit_samples;
-      result.mac_physical_gap_rejects =
-          jcp_tree_stats.mac_physical_gap_rejects;
+      result.mac_physical_gap_rejects = jcp_tree_stats.mac_physical_gap_rejects;
       result.mac_convergence_rho_rejects =
           jcp_tree_stats.mac_convergence_rho_rejects;
       result.mac_convergence_aspect_rejects =
@@ -5822,8 +7263,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.mac_convergence_aspect_reject_panels;
       result.fragmented_far_count = jcp_tree_stats.fragmented_far_count;
       result.fragmented_far_panels = jcp_tree_stats.fragmented_far_panels;
-      result.fragmented_split_rejects =
-          jcp_tree_stats.fragmented_split_rejects;
+      result.fragmented_split_rejects = jcp_tree_stats.fragmented_split_rejects;
       result.fragmentation_center_gap_ratio_max =
           jcp_tree_stats.fragmentation_center_gap_ratio_max;
       result.fragmentation_center_gap_ratio_mean =
@@ -5842,8 +7282,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.convergence_estimator_error_cap;
       result.convergence_unstable_rho_cap =
           jcp_tree_stats.convergence_unstable_rho_cap;
-      result.convergence_calibration =
-          jcp_tree_stats.convergence_calibration;
+      result.convergence_calibration = jcp_tree_stats.convergence_calibration;
       result.convergence_estimator_samples =
           jcp_tree_stats.convergence_estimator_samples;
       result.convergence_estimator_unstable_far_count =
@@ -5893,25 +7332,21 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           jcp_tree_stats.moment_cancellation_ratio_max;
       result.moment_cancellation_ratio_mean =
           jcp_tree_stats.moment_cancellation_ratio_mean;
-      result.moment_dynamic_range_max =
-          jcp_tree_stats.moment_dynamic_range_max;
+      result.moment_dynamic_range_max = jcp_tree_stats.moment_dynamic_range_max;
       result.expansion_audit = jcp_tree_stats.expansion_audit;
       result.far_expansion_audit_pairs =
           jcp_tree_stats.far_expansion_audit_pairs;
       result.far_expansion_audit_panels =
           jcp_tree_stats.far_expansion_audit_panels;
-      result.far_expansion_direct_ms =
-          jcp_tree_stats.far_expansion_direct_ms;
+      result.far_expansion_direct_ms = jcp_tree_stats.far_expansion_direct_ms;
       result.far_expansion_rel_error_max =
           jcp_tree_stats.far_expansion_rel_error_max;
       result.far_expansion_rel_error_mean =
           jcp_tree_stats.far_expansion_rel_error_mean;
       result.far_expansion_mean_gate_pass =
           jcp_tree_stats.far_expansion_mean_gate_pass;
-      result.far_convergence_rho_max =
-          jcp_tree_stats.far_convergence_rho_max;
-      result.far_convergence_rho_mean =
-          jcp_tree_stats.far_convergence_rho_mean;
+      result.far_convergence_rho_max = jcp_tree_stats.far_convergence_rho_max;
+      result.far_convergence_rho_mean = jcp_tree_stats.far_convergence_rho_mean;
       result.accepted_far_aspect_ratio_max =
           jcp_tree_stats.accepted_far_aspect_ratio_max;
       result.accepted_far_aspect_ratio_mean =
@@ -5950,22 +7385,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.near_k3_rejected = jcp_tree_stats.near_k3_rejected;
     result.near_k4_accepted = jcp_tree_stats.near_k4_accepted;
     result.near_k4_rejected = jcp_tree_stats.near_k4_rejected;
-    result.near_one_ring_k1_accepted =
-        jcp_tree_stats.near_one_ring_k1_accepted;
-    result.near_one_ring_k1_rejected =
-        jcp_tree_stats.near_one_ring_k1_rejected;
-    result.near_one_ring_k2_accepted =
-        jcp_tree_stats.near_one_ring_k2_accepted;
-    result.near_one_ring_k2_rejected =
-        jcp_tree_stats.near_one_ring_k2_rejected;
-    result.near_one_ring_k3_accepted =
-        jcp_tree_stats.near_one_ring_k3_accepted;
-    result.near_one_ring_k3_rejected =
-        jcp_tree_stats.near_one_ring_k3_rejected;
-    result.near_one_ring_k4_accepted =
-        jcp_tree_stats.near_one_ring_k4_accepted;
-    result.near_one_ring_k4_rejected =
-        jcp_tree_stats.near_one_ring_k4_rejected;
+    result.near_one_ring_k1_accepted = jcp_tree_stats.near_one_ring_k1_accepted;
+    result.near_one_ring_k1_rejected = jcp_tree_stats.near_one_ring_k1_rejected;
+    result.near_one_ring_k2_accepted = jcp_tree_stats.near_one_ring_k2_accepted;
+    result.near_one_ring_k2_rejected = jcp_tree_stats.near_one_ring_k2_rejected;
+    result.near_one_ring_k3_accepted = jcp_tree_stats.near_one_ring_k3_accepted;
+    result.near_one_ring_k3_rejected = jcp_tree_stats.near_one_ring_k3_rejected;
+    result.near_one_ring_k4_accepted = jcp_tree_stats.near_one_ring_k4_accepted;
+    result.near_one_ring_k4_rejected = jcp_tree_stats.near_one_ring_k4_rejected;
     result.near_k1_policy = jcp_tree_stats.near_k1_policy;
     result.near_k2_policy = jcp_tree_stats.near_k2_policy;
     result.near_k3_policy = jcp_tree_stats.near_k3_policy;
@@ -5988,14 +7415,21 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     }
 
     const double native_energy_scale = 4.0 * kPi;
+    std::vector<double> atom_reaction_phi;
+    const auto energy_projection_begin = std::chrono::steady_clock::now();
     const double boundary_energy =
         native_energy_scale *
-        (coupled ? jcp_linear_pb_energy_kcal(atoms, panels, linear.x,
-                                             eps_ratio, kappa)
-                 : jcp_poisson_energy_kcal(atoms, panels, linear.x,
-                                           eps_ratio));
-    const double born = born_reference_kcal(atoms, options.eps_in,
-                                            options.eps_out, kappa);
+        (coupled ? jcp_linear_pb_energy_kcal(atoms, panels, linear.x, eps_ratio,
+                                             kappa, executor,
+                                             &atom_reaction_phi,
+                                             &result.energy_projection_kernel)
+                 : jcp_poisson_energy_kcal(atoms, panels, linear.x, eps_ratio,
+                                           executor, &atom_reaction_phi,
+                                           &result.energy_projection_kernel));
+    result.energy_projection_ms = elapsed_ms(
+        energy_projection_begin, std::chrono::steady_clock::now());
+    const double born =
+        born_reference_kcal(atoms, options.eps_in, options.eps_out, kappa);
     double energy = boundary_energy;
     std::string source = "tabi_boundary_integral";
     double selected_scale = 1.0;
@@ -6020,14 +7454,32 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     }
     result.energy_kcal_mol = energy;
     result.energy_kj_mol = energy * kKcalToKJ;
-    result.energy_kt =
-        result.energy_kj_mol /
-        (kKBKJPerMolK * std::max(1.0, options.temperature_k));
+    result.energy_kt = result.energy_kj_mol /
+                       (kKBKJPerMolK * std::max(1.0, options.temperature_k));
+    result.atom_reaction_potential_kj_mol_e.resize(atom_reaction_phi.size());
+    result.atom_reaction_energy_kj_mol.resize(atom_reaction_phi.size());
+    double atom_closure_kj = 0.0;
+    const double phi_scale =
+        native_energy_scale * kCoulombKcalPerMol * kKcalToKJ;
+    for (std::size_t atom_index = 0; atom_index < atom_reaction_phi.size();
+         ++atom_index) {
+      const double potential_kj_mol_e =
+          phi_scale * atom_reaction_phi[atom_index];
+      const double contribution_kj =
+          0.5 * atoms[atom_index].q * potential_kj_mol_e;
+      result.atom_reaction_potential_kj_mol_e[atom_index] = potential_kj_mol_e;
+      result.atom_reaction_energy_kj_mol[atom_index] = contribution_kj;
+      atom_closure_kj += contribution_kj;
+    }
+    result.atom_reaction_energy_closure_kj_mol = atom_closure_kj;
+    result.atom_reaction_energy_closure_error_kj_mol =
+        atom_closure_kj - result.boundary_energy_kcal_mol * kKcalToKJ;
     result.peak_memory_bytes = result.memory_bytes;
     refresh_matvec_cost_summary(result);
     if (options.surface_output != "off") {
       result.output_panels = panels;
       result.output_solution = linear.x;
+      result.output_rhs = rhs;
     }
     progress.write("solve_done", result, &jcp_tree_stats, result.matvec_calls,
                    result.iterations, 0, result.residual, result.status, true);
@@ -6054,17 +7506,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   matvec_stats.convergence_rho_cap = result.convergence_rho_cap;
   matvec_stats.mac_aspect_cap = result.mac_aspect_cap;
   matvec_stats.convergence_estimator = result.convergence_estimator;
-  matvec_stats.convergence_tail_threshold =
-      result.convergence_tail_threshold;
+  matvec_stats.convergence_tail_threshold = result.convergence_tail_threshold;
   matvec_stats.convergence_estimator_error_cap =
       result.convergence_estimator_error_cap;
   matvec_stats.convergence_unstable_rho_cap =
       result.convergence_unstable_rho_cap;
   matvec_stats.convergence_calibration = result.convergence_calibration;
-  matvec_stats.convergence_dielectric_amp =
-      result.convergence_dielectric_amp;
-  matvec_stats.convergence_estimator_model =
-      result.convergence_estimator_model;
+  matvec_stats.convergence_dielectric_amp = result.convergence_dielectric_amp;
+  matvec_stats.convergence_estimator_model = result.convergence_estimator_model;
   matvec_stats.convergence_channel_calibration =
       result.convergence_channel_calibration;
   matvec_stats.convergence_split_policy = result.convergence_split_policy;
@@ -6079,19 +7528,15 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   matvec_stats.convergence_shape_audit = result.convergence_shape_audit;
   matvec_stats.convergence_kernel_response_audit =
       result.convergence_kernel_response_audit;
-  matvec_stats.channel_missed_semantics =
-      result.channel_missed_semantics;
-  matvec_stats.accepted_miss_diagnostics =
-      result.accepted_miss_diagnostics;
+  matvec_stats.channel_missed_semantics = result.channel_missed_semantics;
+  matvec_stats.accepted_miss_diagnostics = result.accepted_miss_diagnostics;
   matvec_stats.accepted_miss_absolute_floor =
       result.accepted_miss_absolute_floor;
   matvec_stats.convergence_k3_accepted_rho_cap =
       result.convergence_k3_accepted_rho_cap;
   matvec_stats.mac_distance_policy = result.mac_distance_policy;
-  matvec_stats.mac_surface_margin_factor =
-      result.mac_surface_margin_factor;
-  matvec_stats.mac_surface_margin_policy =
-      result.mac_surface_margin_policy;
+  matvec_stats.mac_surface_margin_factor = result.mac_surface_margin_factor;
+  matvec_stats.mac_surface_margin_policy = result.mac_surface_margin_policy;
   matvec_stats.mac_surface_margin_aspect_threshold =
       result.mac_surface_margin_aspect_threshold;
   matvec_stats.mac_surface_margin_rho_trigger =
@@ -6104,28 +7549,22 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.mac_surface_margin_soft_factor;
   matvec_stats.cluster_policy = result.cluster_policy;
   matvec_stats.target_batch_size = result.target_batch_size;
-  matvec_stats.leaf_pair_min_source_panels =
-      result.leaf_pair_min_source_panels;
+  matvec_stats.leaf_pair_min_source_panels = result.leaf_pair_min_source_panels;
   matvec_stats.leaf_pair_min_targets = result.leaf_pair_min_targets;
   matvec_stats.leaf_kernel_profile = result.leaf_kernel_profile;
   matvec_stats.leaf_work_profile = result.leaf_work_profile;
   matvec_stats.matvec_cost_profile = result.matvec_cost_profile;
   matvec_stats.jcp_direct_kernel = result.jcp_direct_kernel;
-  matvec_stats.leaf_pair_selection_profile =
-      result.leaf_pair_selection_profile;
+  matvec_stats.leaf_pair_selection_profile = result.leaf_pair_selection_profile;
   matvec_stats.leaf_pair_probe_cache = result.leaf_pair_probe_cache;
   matvec_stats.leaf_pair_target_group = result.leaf_pair_target_group;
-  matvec_stats.leaf_pair_directness_probe =
-      result.leaf_pair_directness_probe;
-  matvec_stats.leaf_pair_directness_cache =
-      result.leaf_pair_directness_cache;
-  matvec_stats.leaf_pair_directness_verify =
-      result.leaf_pair_directness_verify;
+  matvec_stats.leaf_pair_directness_probe = result.leaf_pair_directness_probe;
+  matvec_stats.leaf_pair_directness_cache = result.leaf_pair_directness_cache;
+  matvec_stats.leaf_pair_directness_verify = result.leaf_pair_directness_verify;
   matvec_stats.leaf_pair_scheduler = result.leaf_pair_scheduler;
   matvec_stats.leaf_pair_worklist_max_active =
       result.leaf_pair_worklist_max_active;
-  matvec_stats.leaf_pair_worklist_verify =
-      result.leaf_pair_worklist_verify;
+  matvec_stats.leaf_pair_worklist_verify = result.leaf_pair_worklist_verify;
   matvec_stats.leaf_block_verify = result.leaf_block_verify;
   matvec_stats.leaf_pair_max_lookahead = result.leaf_pair_max_lookahead;
   matvec_stats.expansion_audit = result.expansion_audit;
@@ -6138,48 +7577,35 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         static_cast<std::size_t>(std::max(8, options.tree_leaf_size)),
         options.tree_opening_theta, options.leaf_near_policy,
         options.leaf_panel_kernel, options.adaptive_level, "off",
-        options.interaction_mode, result.node_bounds_mode,
-        result.tree_builder, options.mac_safety, options.mac_gap_factor,
-        options.moment_audit, result.expansion_center,
-        result.fragmentation_safety, options.expansion_audit,
-        options.expansion_audit_sample_count,
-        options.expansion_audit_max_panels,
-        options.moment_construction, options.moment_sum,
-        options.convergence_audit, options.convergence_safety,
-        options.convergence_rho_cap, options.mac_aspect_cap,
-        options.convergence_estimator,
+        options.interaction_mode, result.node_bounds_mode, result.tree_builder,
+        options.mac_safety, options.mac_gap_factor, options.moment_audit,
+        result.expansion_center, result.fragmentation_safety,
+        options.expansion_audit, options.expansion_audit_sample_count,
+        options.expansion_audit_max_panels, options.moment_construction,
+        options.moment_sum, options.convergence_audit,
+        options.convergence_safety, options.convergence_rho_cap,
+        options.mac_aspect_cap, options.convergence_estimator,
         options.convergence_tail_threshold,
         options.convergence_estimator_error_cap,
-        options.convergence_unstable_rho_cap,
-        options.convergence_calibration,
-        options.cluster_policy,
-        options.convergence_dielectric_amp, options.target_batch_size,
-        options.leaf_pair_min_source_panels,
-        options.leaf_pair_min_targets,
-          options.convergence_estimator_model,
-          options.expansion_audit_channel,
-          options.convergence_channel_calibration,
-          options.channel_missed_semantics,
-        options.convergence_split_policy,
+        options.convergence_unstable_rho_cap, options.convergence_calibration,
+        options.cluster_policy, options.convergence_dielectric_amp,
+        options.target_batch_size, options.leaf_pair_min_source_panels,
+        options.leaf_pair_min_targets, options.convergence_estimator_model,
+        options.expansion_audit_channel,
+        options.convergence_channel_calibration,
+        options.channel_missed_semantics, options.convergence_split_policy,
         options.accepted_miss_diagnostics,
-        options.convergence_k3_accepted_rho_cap,
-        options.mac_distance_policy,
-        options.mac_surface_margin_factor,
-        options.mac_surface_margin_policy,
+        options.convergence_k3_accepted_rho_cap, options.mac_distance_policy,
+        options.mac_surface_margin_factor, options.mac_surface_margin_policy,
         options.mac_surface_margin_aspect_threshold,
         options.mac_surface_margin_rho_trigger,
         options.accepted_miss_absolute_floor, options.leaf_pair_kernel,
         options.leaf_kernel_profile, options.leaf_work_profile,
-        options.jcp_direct_kernel,
-        options.leaf_pair_selection_profile,
-        options.leaf_pair_probe_cache,
-        options.leaf_pair_target_group,
-        options.leaf_pair_max_lookahead,
-        options.leaf_pair_directness_probe,
-        options.leaf_pair_directness_cache,
-        options.leaf_pair_directness_verify,
-        options.leaf_pair_scheduler,
-        options.leaf_pair_worklist_max_active,
+        options.jcp_direct_kernel, options.leaf_pair_selection_profile,
+        options.leaf_pair_probe_cache, options.leaf_pair_target_group,
+        options.leaf_pair_max_lookahead, options.leaf_pair_directness_probe,
+        options.leaf_pair_directness_cache, options.leaf_pair_directness_verify,
+        options.leaf_pair_scheduler, options.leaf_pair_worklist_max_active,
         options.leaf_pair_worklist_verify, options.leaf_block_verify,
         options.mac_surface_margin_soft_aspect_threshold,
         options.mac_surface_margin_soft_rho_trigger,
@@ -6187,10 +7613,9 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         options.convergence_split_selectivity,
         options.convergence_split_absolute_floor,
         options.convergence_overreject_audit,
-        options.convergence_overreject_detail,
-        options.convergence_shape_audit,
-        options.convergence_kernel_response_audit,
-        result.leaf_mac, options.fmm_m2l);
+        options.convergence_overreject_detail, options.convergence_shape_audit,
+        options.convergence_kernel_response_audit, result.leaf_mac,
+        options.fmm_m2l);
     tree.leaf_mac = result.leaf_mac;
     tree.taylor_order = result.taylor_order;
     tree.derivative_mode = result.derivative_mode;
@@ -6212,16 +7637,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.convergence_tail_threshold = tree.convergence_tail_threshold;
     result.convergence_estimator_error_cap =
         tree.convergence_estimator_error_cap;
-    result.convergence_unstable_rho_cap =
-        tree.convergence_unstable_rho_cap;
+    result.convergence_unstable_rho_cap = tree.convergence_unstable_rho_cap;
     result.convergence_calibration = tree.convergence_calibration;
     result.convergence_dielectric_amp = tree.convergence_dielectric_amp;
     result.convergence_estimator_model = tree.convergence_estimator_model;
     result.convergence_channel_calibration =
         tree.convergence_channel_calibration;
     result.convergence_split_policy = tree.convergence_split_policy;
-    result.convergence_split_selectivity =
-        tree.convergence_split_selectivity;
+    result.convergence_split_selectivity = tree.convergence_split_selectivity;
     result.convergence_split_absolute_floor =
         tree.convergence_split_absolute_floor;
     result.convergence_overreject_audit = tree.convergence_overreject_audit;
@@ -6239,20 +7662,17 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.mac_surface_margin_policy = tree.mac_surface_margin_policy;
     result.mac_surface_margin_aspect_threshold =
         tree.mac_surface_margin_aspect_threshold;
-    result.mac_surface_margin_rho_trigger =
-        tree.mac_surface_margin_rho_trigger;
+    result.mac_surface_margin_rho_trigger = tree.mac_surface_margin_rho_trigger;
     result.mac_surface_margin_soft_aspect_threshold =
         tree.mac_surface_margin_soft_aspect_threshold;
     result.mac_surface_margin_soft_rho_trigger =
         tree.mac_surface_margin_soft_rho_trigger;
-    result.mac_surface_margin_soft_factor =
-        tree.mac_surface_margin_soft_factor;
+    result.mac_surface_margin_soft_factor = tree.mac_surface_margin_soft_factor;
     result.cluster_policy = tree.cluster_policy;
     result.target_batch_size = static_cast<int>(tree.target_batch_size);
     result.leaf_pair_min_source_panels =
         static_cast<int>(tree.leaf_pair_min_source_panels);
-    result.leaf_pair_min_targets =
-        static_cast<int>(tree.leaf_pair_min_targets);
+    result.leaf_pair_min_targets = static_cast<int>(tree.leaf_pair_min_targets);
     result.leaf_kernel_profile = tree.leaf_kernel_profile;
     result.leaf_work_profile = tree.leaf_work_profile;
     result.jcp_direct_kernel = tree.jcp_direct_kernel;
@@ -6286,17 +7706,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     matvec_stats.convergence_rho_cap = tree.convergence_rho_cap;
     matvec_stats.mac_aspect_cap = tree.mac_aspect_cap;
     matvec_stats.convergence_estimator = tree.convergence_estimator;
-    matvec_stats.convergence_tail_threshold =
-        tree.convergence_tail_threshold;
+    matvec_stats.convergence_tail_threshold = tree.convergence_tail_threshold;
     matvec_stats.convergence_estimator_error_cap =
         tree.convergence_estimator_error_cap;
     matvec_stats.convergence_unstable_rho_cap =
         tree.convergence_unstable_rho_cap;
     matvec_stats.convergence_calibration = tree.convergence_calibration;
-    matvec_stats.convergence_dielectric_amp =
-        tree.convergence_dielectric_amp;
-    matvec_stats.convergence_estimator_model =
-        tree.convergence_estimator_model;
+    matvec_stats.convergence_dielectric_amp = tree.convergence_dielectric_amp;
+    matvec_stats.convergence_estimator_model = tree.convergence_estimator_model;
     matvec_stats.convergence_channel_calibration =
         tree.convergence_channel_calibration;
     matvec_stats.convergence_split_policy = tree.convergence_split_policy;
@@ -6312,17 +7729,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     matvec_stats.convergence_kernel_response_audit =
         tree.convergence_kernel_response_audit;
     matvec_stats.channel_missed_semantics = tree.channel_missed_semantics;
-    matvec_stats.accepted_miss_diagnostics =
-        tree.accepted_miss_diagnostics;
+    matvec_stats.accepted_miss_diagnostics = tree.accepted_miss_diagnostics;
     matvec_stats.accepted_miss_absolute_floor =
         tree.accepted_miss_absolute_floor;
     matvec_stats.convergence_k3_accepted_rho_cap =
         tree.convergence_k3_accepted_rho_cap;
     matvec_stats.mac_distance_policy = tree.mac_distance_policy;
-    matvec_stats.mac_surface_margin_factor =
-        tree.mac_surface_margin_factor;
-    matvec_stats.mac_surface_margin_policy =
-        tree.mac_surface_margin_policy;
+    matvec_stats.mac_surface_margin_factor = tree.mac_surface_margin_factor;
+    matvec_stats.mac_surface_margin_policy = tree.mac_surface_margin_policy;
     matvec_stats.mac_surface_margin_aspect_threshold =
         tree.mac_surface_margin_aspect_threshold;
     matvec_stats.mac_surface_margin_rho_trigger =
@@ -6343,16 +7757,12 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     matvec_stats.leaf_work_profile = tree.leaf_work_profile;
     matvec_stats.matvec_cost_profile = result.matvec_cost_profile;
     matvec_stats.jcp_direct_kernel = tree.jcp_direct_kernel;
-    matvec_stats.leaf_pair_selection_profile =
-        tree.leaf_pair_selection_profile;
+    matvec_stats.leaf_pair_selection_profile = tree.leaf_pair_selection_profile;
     matvec_stats.leaf_pair_probe_cache = tree.leaf_pair_probe_cache;
     matvec_stats.leaf_pair_target_group = tree.leaf_pair_target_group;
-    matvec_stats.leaf_pair_directness_probe =
-        tree.leaf_pair_directness_probe;
-    matvec_stats.leaf_pair_directness_cache =
-        tree.leaf_pair_directness_cache;
-    matvec_stats.leaf_pair_directness_verify =
-        tree.leaf_pair_directness_verify;
+    matvec_stats.leaf_pair_directness_probe = tree.leaf_pair_directness_probe;
+    matvec_stats.leaf_pair_directness_cache = tree.leaf_pair_directness_cache;
+    matvec_stats.leaf_pair_directness_verify = tree.leaf_pair_directness_verify;
     matvec_stats.leaf_pair_scheduler = tree.leaf_pair_scheduler;
     matvec_stats.leaf_pair_worklist_max_active =
         static_cast<int>(tree.leaf_pair_worklist_max_active);
@@ -6406,8 +7816,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     ++matvec_calls;
   };
   const auto gmres_begin = std::chrono::steady_clock::now();
-  progress.write("gmres_start", result, &matvec_stats, matvec_calls, 0, 0,
-                 0.0, "running", true);
+  progress.write("gmres_start", result, &matvec_stats, matvec_calls, 0, 0, 0.0,
+                 "running", true);
   auto legacy_progress = [&](int gmres_iter, int restart_iter,
                              double true_residual_rel,
                              double preconditioned_residual_rel, bool force,
@@ -6423,8 +7833,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.sampled_probe_ms = state.sampled_probe_ms;
     result.full_true_residual_confirm_calls =
         state.full_true_residual_confirm_calls;
-    result.full_true_residual_confirm_ms =
-        state.full_true_residual_confirm_ms;
+    result.full_true_residual_confirm_ms = state.full_true_residual_confirm_ms;
     if (phase != "gmres_sampled_true_probe" &&
         std::isfinite(true_residual_rel)) {
       result.final_residual = true_residual_rel;
@@ -6438,8 +7847,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     if (std::isfinite(preconditioned_residual_rel)) {
       result.final_preconditioned_residual = preconditioned_residual_rel;
       if (result.best_preconditioned_residual <= 0.0 ||
-          preconditioned_residual_rel <
-              result.best_preconditioned_residual) {
+          preconditioned_residual_rel < result.best_preconditioned_residual) {
         result.best_preconditioned_residual = preconditioned_residual_rel;
       }
     }
@@ -6449,13 +7857,11 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   std::vector<double> legacy_diagonal(panels.size(), 1.0);
   for (std::size_t i = 0; i < panels.size(); ++i)
     legacy_diagonal[i] = panels[i].diagonal;
-  LinearSolveResult linear =
-      gmres_solve(matvec, rhs, legacy_diagonal, max_iter, tol,
-                  options.gmres_restart, executor, {}, legacy_progress,
-                  result.true_residual_probe_mode,
-                  result.true_residual_probe_interval,
-                  result.true_residual_probe_scope,
-                  result.true_residual_sample_count);
+  LinearSolveResult linear = gmres_solve(
+      matvec, rhs, legacy_diagonal, max_iter, tol, options.gmres_restart,
+      executor, {}, legacy_progress, result.true_residual_probe_mode,
+      result.true_residual_probe_interval, result.true_residual_probe_scope,
+      result.true_residual_sample_count);
   result.gmres_ms = elapsed_ms(gmres_begin, std::chrono::steady_clock::now());
   result.iterations = linear.iterations;
   result.residual = linear.residual;
@@ -6465,8 +7871,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.best_residual_iter = linear.best_residual_iter;
   result.final_residual = linear.final_residual;
   result.best_preconditioned_residual = linear.best_preconditioned_residual;
-  result.final_preconditioned_residual =
-      linear.final_preconditioned_residual;
+  result.final_preconditioned_residual = linear.final_preconditioned_residual;
   result.true_residual_abs = linear.true_residual_abs;
   result.true_residual_rel = linear.true_residual_rel;
   result.true_residual_probe_mode = linear.true_residual_probe_mode;
@@ -6481,8 +7886,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.sampled_probe_ms = linear.sampled_probe_ms;
   result.full_true_residual_confirm_calls =
       linear.full_true_residual_confirm_calls;
-  result.full_true_residual_confirm_ms =
-      linear.full_true_residual_confirm_ms;
+  result.full_true_residual_confirm_ms = linear.full_true_residual_confirm_ms;
   result.converged = linear.converged;
   result.convergence_reason = linear.convergence_reason;
   result.residual_history = residual_history_string(linear.residual_history);
@@ -6537,24 +7941,20 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       matvec_stats.leaf_work_surface_margin_hard_panels;
   result.leaf_work_surface_margin_soft_panels =
       matvec_stats.leaf_work_surface_margin_soft_panels;
-  result.leaf_work_k3_rho_cap_panels =
-      matvec_stats.leaf_work_k3_rho_cap_panels;
+  result.leaf_work_k3_rho_cap_panels = matvec_stats.leaf_work_k3_rho_cap_panels;
   result.leaf_work_singular_fallback_panels =
       matvec_stats.leaf_work_singular_fallback_panels;
   result.leaf_work_scalar_tail_panels =
       matvec_stats.leaf_work_scalar_tail_panels;
   result.leaf_work_profile_accounted_panels =
       matvec_stats.leaf_work_profile_accounted_panels;
-  result.leaf_work_mac_terminal_frac =
-      matvec_stats.leaf_work_mac_terminal_frac;
-  result.leaf_work_convergence_frac =
-      matvec_stats.leaf_work_convergence_frac;
+  result.leaf_work_mac_terminal_frac = matvec_stats.leaf_work_mac_terminal_frac;
+  result.leaf_work_convergence_frac = matvec_stats.leaf_work_convergence_frac;
   result.leaf_work_surface_margin_frac =
       matvec_stats.leaf_work_surface_margin_frac;
   result.leaf_work_singular_fallback_frac =
       matvec_stats.leaf_work_singular_fallback_frac;
-  result.leaf_work_scalar_tail_frac =
-      matvec_stats.leaf_work_scalar_tail_frac;
+  result.leaf_work_scalar_tail_frac = matvec_stats.leaf_work_scalar_tail_frac;
   result.adaptive_smooth_leaf_accepted =
       matvec_stats.adaptive_smooth_leaf_accepted;
   result.adaptive_smooth_leaf_rejected =
@@ -6601,26 +8001,20 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.leaf_kernel_source_panel_evals =
       matvec_stats.leaf_kernel_source_panel_evals;
   result.leaf_kernel_scalar_ms = matvec_stats.leaf_kernel_scalar_ms;
-  result.leaf_kernel_target_avx2_ms =
-      matvec_stats.leaf_kernel_target_avx2_ms;
+  result.leaf_kernel_target_avx2_ms = matvec_stats.leaf_kernel_target_avx2_ms;
   result.leaf_kernel_tail_ms = matvec_stats.leaf_kernel_tail_ms;
-  result.leaf_pair_batch_soa_sources =
-      matvec_stats.leaf_pair_batch_soa_sources;
+  result.leaf_pair_batch_soa_sources = matvec_stats.leaf_pair_batch_soa_sources;
   result.leaf_pair_batch_soa_ms = matvec_stats.leaf_pair_batch_soa_ms;
   result.leaf_pair_batch_scalar_tail_ms =
       matvec_stats.leaf_pair_batch_scalar_tail_ms;
   result.leaf_pair_batch_clean_source_panels_per_second =
       matvec_stats.leaf_pair_batch_clean_source_panels_per_second;
-  result.leaf_pair_selection_profile =
-      matvec_stats.leaf_pair_selection_profile;
+  result.leaf_pair_selection_profile = matvec_stats.leaf_pair_selection_profile;
   result.leaf_pair_probe_cache = matvec_stats.leaf_pair_probe_cache;
   result.leaf_pair_target_group = matvec_stats.leaf_pair_target_group;
-  result.leaf_pair_directness_probe =
-      matvec_stats.leaf_pair_directness_probe;
-  result.leaf_pair_directness_cache =
-      matvec_stats.leaf_pair_directness_cache;
-  result.leaf_pair_directness_verify =
-      matvec_stats.leaf_pair_directness_verify;
+  result.leaf_pair_directness_probe = matvec_stats.leaf_pair_directness_probe;
+  result.leaf_pair_directness_cache = matvec_stats.leaf_pair_directness_cache;
+  result.leaf_pair_directness_verify = matvec_stats.leaf_pair_directness_verify;
   result.leaf_pair_max_lookahead = matvec_stats.leaf_pair_max_lookahead;
   result.leaf_pair_selection_candidate_scans =
       matvec_stats.leaf_pair_selection_candidate_scans;
@@ -6694,8 +8088,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.adaptive_level = matvec_stats.adaptive_level;
   result.cluster_policy = matvec_stats.cluster_policy;
   result.target_batch_size = matvec_stats.target_batch_size;
-  result.leaf_pair_min_source_panels =
-      matvec_stats.leaf_pair_min_source_panels;
+  result.leaf_pair_min_source_panels = matvec_stats.leaf_pair_min_source_panels;
   result.leaf_pair_min_targets = matvec_stats.leaf_pair_min_targets;
   result.leaf_near_policy = matvec_stats.leaf_near_policy;
   result.leaf_panel_kernel = matvec_stats.leaf_panel_kernel;
@@ -6713,25 +8106,17 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.node_radius_mean = matvec_stats.node_radius_mean;
   result.node_aspect_ratio_max = matvec_stats.node_aspect_ratio_max;
   result.node_aspect_ratio_mean = matvec_stats.node_aspect_ratio_mean;
-  result.leaf_panel_work_per_matvec =
-      matvec_stats.leaf_panel_work_per_matvec;
-  result.far_node_work_per_matvec =
-      matvec_stats.far_node_work_per_matvec;
-  result.far_geometric_unsafe_count =
-      matvec_stats.far_geometric_unsafe_count;
-  result.far_geometric_unsafe_panels =
-      matvec_stats.far_geometric_unsafe_panels;
+  result.leaf_panel_work_per_matvec = matvec_stats.leaf_panel_work_per_matvec;
+  result.far_node_work_per_matvec = matvec_stats.far_node_work_per_matvec;
+  result.far_geometric_unsafe_count = matvec_stats.far_geometric_unsafe_count;
+  result.far_geometric_unsafe_panels = matvec_stats.far_geometric_unsafe_panels;
   result.far_geometric_min_gap = matvec_stats.far_geometric_min_gap;
-  result.far_geometric_gap_ratio_min =
-      matvec_stats.far_geometric_gap_ratio_min;
+  result.far_geometric_gap_ratio_min = matvec_stats.far_geometric_gap_ratio_min;
   result.far_geometric_gap_ratio_mean =
       matvec_stats.far_geometric_gap_ratio_mean;
-  result.far_geometric_audit_samples =
-      matvec_stats.far_geometric_audit_samples;
-  result.mac_physical_gap_rejects =
-      matvec_stats.mac_physical_gap_rejects;
-  result.mac_convergence_rho_rejects =
-      matvec_stats.mac_convergence_rho_rejects;
+  result.far_geometric_audit_samples = matvec_stats.far_geometric_audit_samples;
+  result.mac_physical_gap_rejects = matvec_stats.mac_physical_gap_rejects;
+  result.mac_convergence_rho_rejects = matvec_stats.mac_convergence_rho_rejects;
   result.mac_convergence_aspect_rejects =
       matvec_stats.mac_convergence_aspect_rejects;
   result.mac_convergence_rho_reject_panels =
@@ -6753,17 +8138,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.convergence_rho_cap = matvec_stats.convergence_rho_cap;
   result.mac_aspect_cap = matvec_stats.mac_aspect_cap;
   result.convergence_estimator = matvec_stats.convergence_estimator;
-  result.convergence_tail_threshold =
-      matvec_stats.convergence_tail_threshold;
+  result.convergence_tail_threshold = matvec_stats.convergence_tail_threshold;
   result.convergence_estimator_error_cap =
       matvec_stats.convergence_estimator_error_cap;
   result.convergence_unstable_rho_cap =
       matvec_stats.convergence_unstable_rho_cap;
   result.convergence_calibration = matvec_stats.convergence_calibration;
-  result.convergence_dielectric_amp =
-      matvec_stats.convergence_dielectric_amp;
-  result.convergence_estimator_model =
-      matvec_stats.convergence_estimator_model;
+  result.convergence_dielectric_amp = matvec_stats.convergence_dielectric_amp;
+  result.convergence_estimator_model = matvec_stats.convergence_estimator_model;
   result.convergence_channel_calibration =
       matvec_stats.convergence_channel_calibration;
   result.convergence_split_policy = matvec_stats.convergence_split_policy;
@@ -6779,17 +8161,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.convergence_kernel_response_audit =
       matvec_stats.convergence_kernel_response_audit;
   result.channel_missed_semantics = matvec_stats.channel_missed_semantics;
-  result.accepted_miss_diagnostics =
-      matvec_stats.accepted_miss_diagnostics;
+  result.accepted_miss_diagnostics = matvec_stats.accepted_miss_diagnostics;
   result.accepted_miss_absolute_floor =
       matvec_stats.accepted_miss_absolute_floor;
   result.convergence_k3_accepted_rho_cap =
       matvec_stats.convergence_k3_accepted_rho_cap;
   result.mac_distance_policy = matvec_stats.mac_distance_policy;
-  result.mac_surface_margin_factor =
-      matvec_stats.mac_surface_margin_factor;
-  result.mac_surface_margin_policy =
-      matvec_stats.mac_surface_margin_policy;
+  result.mac_surface_margin_factor = matvec_stats.mac_surface_margin_factor;
+  result.mac_surface_margin_policy = matvec_stats.mac_surface_margin_policy;
   result.mac_surface_margin_aspect_threshold =
       matvec_stats.mac_surface_margin_aspect_threshold;
   result.mac_surface_margin_rho_trigger =
@@ -6826,8 +8205,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       matvec_stats.convergence_estimator_abs_error_max;
   result.convergence_estimator_abs_error_mean =
       matvec_stats.convergence_estimator_abs_error_mean;
-  result.convergence_tail_norm_p_max =
-      matvec_stats.convergence_tail_norm_p_max;
+  result.convergence_tail_norm_p_max = matvec_stats.convergence_tail_norm_p_max;
   result.convergence_tail_norm_p_mean =
       matvec_stats.convergence_tail_norm_p_mean;
   result.convergence_tail_norm_pm1_max =
@@ -6922,8 +8300,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       matvec_stats.phantom_high_error_channel_count;
   result.phantom_high_error_channel_abs_max =
       matvec_stats.phantom_high_error_channel_abs_max;
-  result.accepted_miss_channel_count =
-      matvec_stats.accepted_miss_channel_count;
+  result.accepted_miss_channel_count = matvec_stats.accepted_miss_channel_count;
   result.accepted_miss_channel_panels =
       matvec_stats.accepted_miss_channel_panels;
   result.accepted_miss_channel_rho_min =
@@ -6940,20 +8317,16 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       matvec_stats.accepted_miss_channel_estimated_error_mean;
   result.accepted_miss_channel_estimated_error_max =
       matvec_stats.accepted_miss_channel_estimated_error_max;
-  result.accepted_miss_worst_channel =
-      matvec_stats.accepted_miss_worst_channel;
+  result.accepted_miss_worst_channel = matvec_stats.accepted_miss_worst_channel;
   result.convergence_k3_rho_cap_rejects =
       matvec_stats.convergence_k3_rho_cap_rejects;
   result.convergence_k3_rho_cap_reject_panels =
       matvec_stats.convergence_k3_rho_cap_reject_panels;
-  result.mac_surface_margin_rejects =
-      matvec_stats.mac_surface_margin_rejects;
+  result.mac_surface_margin_rejects = matvec_stats.mac_surface_margin_rejects;
   result.mac_surface_margin_reject_panels =
       matvec_stats.mac_surface_margin_reject_panels;
-  result.mac_surface_margin_applied =
-      matvec_stats.mac_surface_margin_applied;
-  result.mac_surface_margin_skipped =
-      matvec_stats.mac_surface_margin_skipped;
+  result.mac_surface_margin_applied = matvec_stats.mac_surface_margin_applied;
+  result.mac_surface_margin_skipped = matvec_stats.mac_surface_margin_skipped;
   result.mac_surface_margin_adaptive_rejects =
       matvec_stats.mac_surface_margin_adaptive_rejects;
   result.mac_surface_margin_adaptive_reject_panels =
@@ -6988,28 +8361,21 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.moment_dynamic_range_max = matvec_stats.moment_dynamic_range_max;
   result.expansion_audit = matvec_stats.expansion_audit;
   result.expansion_audit_channel = matvec_stats.expansion_audit_channel;
-  result.far_expansion_audit_pairs =
-      matvec_stats.far_expansion_audit_pairs;
-  result.far_expansion_audit_panels =
-      matvec_stats.far_expansion_audit_panels;
-  result.far_expansion_direct_ms =
-      matvec_stats.far_expansion_direct_ms;
-  result.far_expansion_rel_error_max =
-      matvec_stats.far_expansion_rel_error_max;
+  result.far_expansion_audit_pairs = matvec_stats.far_expansion_audit_pairs;
+  result.far_expansion_audit_panels = matvec_stats.far_expansion_audit_panels;
+  result.far_expansion_direct_ms = matvec_stats.far_expansion_direct_ms;
+  result.far_expansion_rel_error_max = matvec_stats.far_expansion_rel_error_max;
   result.far_expansion_rel_error_mean =
       matvec_stats.far_expansion_rel_error_mean;
-  result.far_expansion_rel_error_p95 =
-      matvec_stats.far_expansion_rel_error_p95;
-  result.far_expansion_rel_error_p99 =
-      matvec_stats.far_expansion_rel_error_p99;
+  result.far_expansion_rel_error_p95 = matvec_stats.far_expansion_rel_error_p95;
+  result.far_expansion_rel_error_p99 = matvec_stats.far_expansion_rel_error_p99;
   result.far_expansion_channel_rel_error_max =
       matvec_stats.far_expansion_channel_rel_error_max;
   result.far_expansion_channel_rel_error_mean =
       matvec_stats.far_expansion_channel_rel_error_mean;
   result.far_expansion_channel_rel_error_p99 =
       matvec_stats.far_expansion_channel_rel_error_p99;
-  result.far_expansion_worst_channel =
-      matvec_stats.far_expansion_worst_channel;
+  result.far_expansion_worst_channel = matvec_stats.far_expansion_worst_channel;
   result.far_expansion_mean_gate_pass =
       matvec_stats.far_expansion_mean_gate_pass;
   result.far_convergence_rho_max = matvec_stats.far_convergence_rho_max;
@@ -7019,14 +8385,13 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   result.accepted_far_aspect_ratio_mean =
       matvec_stats.accepted_far_aspect_ratio_mean;
   result.leaf_tile_status = matvec_stats.leaf_tile_status;
-  result.leaf_panel_pairs_per_second =
-      matvec_stats.leaf_panel_pairs_per_second;
+  result.leaf_panel_pairs_per_second = matvec_stats.leaf_panel_pairs_per_second;
   result.matvec_mode = matvec_stats.matvec_mode;
-  result.taylor_order =
-      mode == "treecode" ? matvec_stats.taylor_order
-                         : std::clamp(options.taylor_order, 2, 5);
-  result.derivative_mode = mode == "treecode" ? matvec_stats.derivative_mode
-                                              : std::string("none");
+  result.taylor_order = mode == "treecode"
+                            ? matvec_stats.taylor_order
+                            : std::clamp(options.taylor_order, 2, 5);
+  result.derivative_mode =
+      mode == "treecode" ? matvec_stats.derivative_mode : std::string("none");
   result.interaction_build_ms = matvec_stats.interaction_build_ms;
   result.tree_eval_ms = matvec_stats.tree_eval_ms;
   result.tree_moment_ms = matvec_stats.tree_moment_ms;
@@ -7041,8 +8406,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   const double boundary_energy =
       boundary_energy_kcal(atoms, panels, linear.x, kappa) *
       formulation.boundary_energy_scale;
-  const double born = born_reference_kcal(atoms, options.eps_in,
-                                          options.eps_out, kappa);
+  const double born =
+      born_reference_kcal(atoms, options.eps_in, options.eps_out, kappa);
   double energy = boundary_energy;
   double selected_scale = formulation.boundary_energy_scale;
   bool used_fallback = false;
@@ -7053,8 +8418,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     selected_scale = 0.0;
   } else if (formulation.formulation == "calibrated-debug" &&
              std::isfinite(boundary_energy) &&
-             std::abs(boundary_energy) > 1.0e-12 &&
-             std::isfinite(born) && std::abs(born) > 1.0e-12) {
+             std::abs(boundary_energy) > 1.0e-12 && std::isfinite(born) &&
+             std::abs(born) > 1.0e-12) {
     selected_scale = born / boundary_energy;
     energy = boundary_energy * selected_scale;
     source = "tabi_calibrated_debug";
@@ -7084,14 +8449,14 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   }
   result.energy_kcal_mol = energy;
   result.energy_kj_mol = energy * kKcalToKJ;
-  result.energy_kt =
-      result.energy_kj_mol /
-      (kKBKJPerMolK * std::max(1.0, options.temperature_k));
+  result.energy_kt = result.energy_kj_mol /
+                     (kKBKJPerMolK * std::max(1.0, options.temperature_k));
   result.peak_memory_bytes = result.memory_bytes;
   refresh_matvec_cost_summary(result);
   if (options.surface_output != "off") {
     result.output_panels = panels;
     result.output_solution = linear.x;
+    result.output_rhs = rhs;
   }
   progress.write("solve_done", result, &matvec_stats, result.matvec_calls,
                  result.iterations, 0, result.residual, result.status, true);

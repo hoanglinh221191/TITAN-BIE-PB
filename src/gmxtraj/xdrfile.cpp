@@ -641,6 +641,47 @@ xdrfile_ensure_buf2_bytes(XDRFILE *xfp, int64_t payload_bytes)
 	return 1;
 }
 
+static thread_local const char *xdrfile_last_coord_error_detail = "none";
+
+static void
+xdrfile_set_last_coord_error(const char *detail)
+{
+	xdrfile_last_coord_error_detail = detail;
+}
+
+const char *
+xdrfile_last_coord_error(void)
+{
+	return xdrfile_last_coord_error_detail;
+}
+
+int
+xdrfile_reserve_coord_buffers(XDRFILE *xfp, int ncoord,
+						  int64_t opaque_payload_bytes)
+{
+	size_t coord_ints;
+	int *new_buf1;
+
+	if(xfp == NULL || ncoord < 0 || opaque_payload_bytes < 0)
+		return exdrINT;
+	if((size_t)ncoord > SIZE_MAX / 3)
+		return exdrNOMEM;
+	coord_ints = (size_t)ncoord * 3;
+	if(coord_ints > SIZE_MAX / sizeof(*xfp->buf1))
+		return exdrNOMEM;
+	if(coord_ints > xfp->buf1size)
+	{
+		new_buf1 = (int *)realloc(xfp->buf1, sizeof(int) * coord_ints);
+		if(new_buf1 == NULL)
+			return exdrNOMEM;
+		xfp->buf1 = new_buf1;
+		xfp->buf1size = coord_ints;
+	}
+	return xdrfile_ensure_buf2_bytes(xfp, opaque_payload_bytes)
+			? exdrOK
+			: exdrNOMEM;
+}
+
 
 /* Internal support routines for reading/writing compressed coordinates
  * sizeofint - calculate smallest number of bits necessary
@@ -1032,27 +1073,42 @@ xdrfile_decompress_coord_float(float     *ptr,
 	int *new_buf1;
 	XdrCoordBuffer buffer;
 
+	xdrfile_set_last_coord_error("none");
 	if(xfp == NULL || ptr == NULL || size == NULL || precision == NULL)
+	{
+		xdrfile_set_last_coord_error("invalid decoder argument");
 		return -1;
+	}
 	if(xdrfile_read_int(&lsize, 1, xfp) != 1 || lsize < 0)
+	{
+		xdrfile_set_last_coord_error("failed to read coordinate count");
 		return -1;
+	}
 	if(*size < lsize)
 	{
 		fprintf(stderr, "Requested to decompress %d coords, file contains %d\n", *size, lsize);
+		xdrfile_set_last_coord_error("coordinate count exceeds caller buffer");
 		return -1;
 	}
 	*size = lsize;
 	if((size_t)lsize > SIZE_MAX / 3)
+	{
+		xdrfile_set_last_coord_error("coordinate count overflows scratch size");
 		return -1;
+	}
 	size3 = (size_t)lsize * 3;
 	if(size3 > SIZE_MAX / sizeof(*xfp->buf1))
+	{
+		xdrfile_set_last_coord_error("coordinate scratch size overflows allocation");
 		return -1;
+	}
 	if(size3 > xfp->buf1size)
 	{
 		new_buf1 = (int *)realloc(xfp->buf1, sizeof(int) * size3);
 		if(new_buf1 == NULL)
 		{
 			fprintf(stderr, "Cannot allocate memory for decompressing coordinates.\n");
+			xdrfile_set_last_coord_error("coordinate scratch allocation failed");
 			return -1;
 		}
 		xfp->buf1 = new_buf1;
@@ -1063,7 +1119,10 @@ xdrfile_decompress_coord_float(float     *ptr,
 	if(xdrfile_read_float(precision, 1, xfp) != 1
 		|| xdrfile_read_int(minint, 3, xfp) != 3
 		|| xdrfile_read_int(maxint, 3, xfp) != 3)
+	{
+		xdrfile_set_last_coord_error("failed to read compressed coordinate header");
 		return 0;
+	}
 
 	sizeint[0] = maxint[0] - minint[0] + 1;
 	sizeint[1] = maxint[1] - minint[1] + 1;
@@ -1080,17 +1139,26 @@ xdrfile_decompress_coord_float(float     *ptr,
 
 	if(xdrfile_read_int(&smallidx, 1, xfp) != 1
 		|| smallidx < FIRSTIDX || smallidx >= LASTIDX)
+	{
+		xdrfile_set_last_coord_error("invalid initial XTC smallidx");
 		return 0;
+	}
 	smaller = magicints[(smallidx > FIRSTIDX) ? smallidx - 1 : FIRSTIDX] / 2;
 	smallnum = magicints[smallidx] / 2;
 	sizesmall[0] = sizesmall[1] = sizesmall[2] = magicints[smallidx];
 
 	if(xdrfile_read_xtc_payload_length(xfp, &opaque_bytes) == 0
 		|| xdrfile_ensure_buf2_bytes(xfp, opaque_bytes) == 0)
+	{
+		xdrfile_set_last_coord_error("compressed payload length or scratch allocation failed");
 		return 0;
+	}
 	buffer.data = (unsigned char *)(xfp->buf2 + 3);
 	if(xdrfile_read_opaque64((char *)buffer.data, opaque_bytes, xfp) == 0)
+	{
+		xdrfile_set_last_coord_error("failed to read compressed XTC payload");
 		return 0;
+	}
 	buffer.index = 0;
 	buffer.lastbits = 0;
 	buffer.lastbyte = 0;
@@ -1166,8 +1234,20 @@ xdrfile_decompress_coord_float(float     *ptr,
 			*lfp++ = thiscoord[2] * inv_precision;
 		}
 		smallidx += is_smaller;
-		if(smallidx < FIRSTIDX || smallidx >= LASTIDX)
+		/* GROMACS ends the frame here. Do not reject or index a terminal
+		 * smallidx transition after every coordinate has already decoded. */
+		if(i == lsize)
+			return lsize;
+		if(i > lsize)
+		{
+			xdrfile_set_last_coord_error("XTC run length exceeds coordinate count");
 			return 0;
+		}
+		if(smallidx < FIRSTIDX || smallidx >= LASTIDX)
+		{
+			xdrfile_set_last_coord_error("XTC smallidx left valid range before frame end");
+			return 0;
+		}
 		if(is_smaller < 0)
 		{
 			smallnum = smaller;

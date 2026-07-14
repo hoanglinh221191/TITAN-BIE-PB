@@ -950,6 +950,16 @@ void AnalyzerImpl::write_pbsa_performance() const {
       << (pbsa_rows_.empty() ? "off"
                              : pbsa_rows_.front().pbsa_grid_reuse_effective)
       << "\n";
+  out << "grid_workspace_reuse_hits "
+      << grid_reuse_stats_.workspace_reuse_hits << "\n";
+  out << "grid_workspace_reallocations "
+      << grid_reuse_stats_.workspace_reallocations << "\n";
+  out << "grid_medium_cache_hits "
+      << grid_reuse_stats_.medium_cache_hits << "\n";
+  out << "grid_medium_cache_misses "
+      << grid_reuse_stats_.medium_cache_misses << "\n";
+  out << "grid_medium_cache_stores "
+      << grid_reuse_stats_.medium_cache_stores << "\n";
   write_time("complex_solve", complex_t);
   write_time("receptor_solve", receptor_t);
   write_time("ligand_solve", ligand_t);

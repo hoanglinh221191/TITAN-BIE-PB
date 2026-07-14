@@ -89,6 +89,10 @@ PackedFallbackApplyResult apply_packed_jcp_fallback(
     const std::string &near_integration, const std::string &quad_buffer,
     const std::string &kernel, TitanExecutor &executor);
 
+// Lightweight runtime feature query for callers that can use the packed
+// worklist opportunistically without depending on treecode internals.
+bool packed_jcp_fallback_avx2_available() noexcept;
+
 } // namespace titan::tabi::fmm_m2l
 
 #endif

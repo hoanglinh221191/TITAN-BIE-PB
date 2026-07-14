@@ -549,6 +549,15 @@ extern "C"
 								   float *     precision,
 								   XDRFILE *   xfp);
 
+	/* Preallocate XTC coordinate scratch buffers before a long stream. */
+	int
+	xdrfile_reserve_coord_buffers(XDRFILE *xfp, int ncoord,
+								int64_t opaque_payload_bytes);
+
+	/* Detail for the most recent xdrfile_decompress_coord_float() failure. */
+	const char *
+	xdrfile_last_coord_error(void);
+
 
 
 

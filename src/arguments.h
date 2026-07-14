@@ -141,6 +141,10 @@ struct PbeArgs {
   std::size_t max_grid_points{25000000ULL};
   std::string map{"off"};
   std::string map_frames{"none"};
+  std::string atom_potentials{"off"};
+  std::string binding_cycle{"off"};
+  std::string binding_receptor_pqr{};
+  std::string binding_ligand_pqr{};
   std::string kernel{"auto"};
   std::string focus{"off"};
   std::string multigrid{"off"};
@@ -202,7 +206,14 @@ struct PbeArgs {
   std::string tabi_diagonal{"solid-angle"};
   int tabi_surface_points{96};
   std::string tabi_surface_output{"off"};
+  bool tabi_surface_only{false};
   bool tabi_highres_surface{false};
+  bool tabi_calderon_trace_audit{false};
+  std::string tabi_calderon_aux_surface{"off"};
+  double tabi_calderon_aux_grid_spacing{1.25};
+  std::string tabi_primary_surface{"sphere-patch"};
+  double tabi_ses_grid_spacing{0.75};
+  std::size_t tabi_ses_max_grid_vertices{4000000};
   std::string tabi_sphere_mesh{"auto"};
   int tabi_tree_leaf_size{32};
   double tabi_tree_opening_theta{0.45};
@@ -210,6 +221,8 @@ struct PbeArgs {
   std::string tabi_derivatives{"analytic"};
   std::string tabi_formulation{"jcp2013"};
   bool tabi_formulation_explicit{false};
+  std::string tabi_discretization{"centroid"};
+  bool tabi_discretization_explicit{false};
   std::string tabi_energy_projection{"boundary"};
   std::string tabi_precond{"auto"};
   bool tabi_precond_explicit{false};
@@ -219,6 +232,10 @@ struct PbeArgs {
   int tabi_precond_ilu_neighbor_cap{192};
   bool tabi_precond_ilu_neighbor_cap_explicit{false};
   double tabi_precond_ilu_drop_tol{0.0};
+  // Legacy parser field. Sparse ILU always runs the automatic
+  // ILU(0) -> regularized ILU -> diagonal fallback pipeline.
+  std::string tabi_precond_ilu_regularization{"adaptive"};
+  double tabi_precond_ilu_regularization_max{1.0e-2};
   int tabi_precond_memory_budget_mb{256};
   int tabi_precond_coarse_aggregate_cap{16};
   std::string tabi_precond_coarse_base{"diagonal"};
@@ -247,6 +264,32 @@ struct PbeArgs {
   std::string tabi_leaf_mac{"off"};
   std::string tabi_fmm_m2l{"auto"};
   bool tabi_fmm_m2l_explicit{false};
+  std::string tabi_fmm_engine{"cartesian"};
+  int tabi_kifmm_order{6};
+  double tabi_kifmm_equiv_scale{1.05};
+  double tabi_kifmm_check_scale{1.60};
+  std::string tabi_kifmm_solver{"qr"};
+  std::string tabi_kifmm_profile{"off"};
+  std::string tabi_kifmm_full_apply{"serial"};
+  std::string tabi_kifmm_ilu_graph{"cartesian-near"};
+  int tabi_kifmm_hierarchy_order{8};
+  double tabi_kifmm_hierarchy_theta{0.6};
+  std::string tabi_kifmm_hierarchy_real_panel_guard{"strict-local-check"};
+  double tabi_kifmm_hierarchy_guard_margin_factor{0.0};
+  std::string tabi_kifmm_hierarchy_tree_stop_policy{"panel-radius-occupancy"};
+  double tabi_kifmm_hierarchy_tree_panel_radius_factor{1.5};
+  int tabi_kifmm_hierarchy_tree_occupancy_stop{32};
+  std::string tabi_kifmm_hierarchy_m2l_eval_policy{"target-check-batched"};
+  std::string tabi_kifmm_hierarchy_matrix_cache_policy{
+      "canonical-offset-cache"};
+  double tabi_kifmm_hierarchy_matrix_cache_limit_mb{0.0};
+  std::string tabi_kifmm_hierarchy_gemm_batch_policy{"per-pair"};
+  std::string tabi_kifmm_hierarchy_m2l_parallel_policy{"serial"};
+  int tabi_kifmm_hierarchy_m2l_parallel_workers{1};
+  int tabi_cartesian_k4_order{5};
+  double tabi_cartesian_k4_theta{0.6};
+  double tabi_cartesian_k4_geometry_theta{0.4};
+  double tabi_cartesian_k4_tail_tol{0.002};
   std::string tabi_fmm_cartesian_audit{"off"};
   std::string tabi_fmm_local{"off"};
   std::string tabi_fmm_local_refine{"off"};
@@ -420,20 +463,20 @@ struct LlpsArgs {
   std::string llps_paper_geometry{"auto"};
   std::string llps_paper_fractal{"auto"};
   // DBSCAN bead-level morphology parameters (unit: Angstrom)
-  double llps_dbscan_eps{15.0};    // epsilon (Å); default 15 Å ≈ 1.5 nm
-  int    llps_dbscan_minpts{5};    // min neighbours (self excluded)
-  bool   llps_fuzzy{false};        // enable Fuzzy EM refinement after DBSCAN
+  double llps_dbscan_eps{15.0}; // epsilon (Å); default 15 Å ≈ 1.5 nm
+  int llps_dbscan_minpts{5};    // min neighbours (self excluded)
+  bool llps_fuzzy{false};       // enable Fuzzy EM refinement after DBSCAN
 };
 
 struct IfpArgs {
-  bool   flag_ifp             {false};
-  double cutoff_hbond         {3.5};   // D···A distance (Å)
-  double cutoff_salt_bridge   {4.0};   // charged atom pair (Å)
-  double cutoff_hydrophobic   {4.0};   // C···C contact (Å)
-  double cutoff_pi_pi         {5.5};   // ring COM–COM (Å)
-  double cutoff_cation_pi     {6.0};   // cation–ring COM (Å)
-  double cutoff_halogen       {4.0};   // X···acceptor (Å)
-  std::string output_filename {};  // empty → uses info.get_ifp_filename()
+  bool flag_ifp{false};
+  double cutoff_hbond{3.5};       // D···A distance (Å)
+  double cutoff_salt_bridge{4.0}; // charged atom pair (Å)
+  double cutoff_hydrophobic{4.0}; // C···C contact (Å)
+  double cutoff_pi_pi{5.5};       // ring COM–COM (Å)
+  double cutoff_cation_pi{6.0};   // cation–ring COM (Å)
+  double cutoff_halogen{4.0};     // X···acceptor (Å)
+  std::string output_filename{};  // empty → uses info.get_ifp_filename()
 };
 
 struct AwhArgs {
@@ -444,46 +487,46 @@ struct AwhArgs {
   std::string output_prefix{};
 };
 struct DhamArgs {
-  bool   flag_dham       {false};
-  std::string temps_file {};       // file with replica temperatures (K)
-  std::string ener_list_file {};   // file listing paths to .xvg energy files
-  std::string ensemble   {"nvt"};  // nvt | npt
-  std::string window_match {"auto"}; // auto | off | strict
-  double target_temp     {300.0};  // target reweighting temperature (K)
-  double target_pressure_bar {1.0}; // target pressure for NPT reweighting (bar)
-  int    max_iter        {5000};
-  double tolerance       {1e-6};
-  int    n_replicas      {0};      // explicit validation (0 = auto from temps)
-  double dt_energy_ps    {0.0};    // energy .xvg output freq (ps); 0 = auto from file
+  bool flag_dham{false};
+  std::string temps_file{};         // file with replica temperatures (K)
+  std::string ener_list_file{};     // file listing paths to .xvg energy files
+  std::string ensemble{"nvt"};      // nvt | npt
+  std::string window_match{"auto"}; // auto | off | strict
+  double target_temp{300.0};        // target reweighting temperature (K)
+  double target_pressure_bar{1.0};  // target pressure for NPT reweighting (bar)
+  int max_iter{5000};
+  double tolerance{1e-6};
+  int n_replicas{0};        // explicit validation (0 = auto from temps)
+  double dt_energy_ps{0.0}; // energy .xvg output freq (ps); 0 = auto from file
 };
 
 struct MbarArgs {
   bool flag_mbar{false};
-  std::string temps_file{};       // optional ladder temperatures (K)
-  std::string ener_list_file{};   // file listing paths to .xvg energy files
-  std::string domain{"tica"};     // tica | pca | both
-  std::string ensemble{"nvt"};    // nvt | npt
+  std::string temps_file{};         // optional ladder temperatures (K)
+  std::string ener_list_file{};     // file listing paths to .xvg energy files
+  std::string domain{"tica"};       // tica | pca | both
+  std::string ensemble{"nvt"};      // nvt | npt
   std::string window_match{"auto"}; // auto | off | strict
-  std::string temp_mode{"fixed"}; // fixed | per_frame
-  double target_temp{300.0};      // target reweighting temperature (K)
-  double target_pressure_bar{1.0}; // target pressure for NPT reweighting (bar)
-  double dt_energy_ps{0.0};       // energy .xvg output freq (ps); 0 = auto
-  int temp_column{2};             // xvg temperature/state-label column
-  int bootstrap_samples{0};       // 0 = off
-  int scan_points{0};             // 0/1 = no scan output, >1 = write mbar_cv.dat
-  std::string demux_map_file{};   // optional per-frame temperature-state map
+  std::string temp_mode{"fixed"};   // fixed | per_frame
+  double target_temp{300.0};        // target reweighting temperature (K)
+  double target_pressure_bar{1.0};  // target pressure for NPT reweighting (bar)
+  double dt_energy_ps{0.0};         // energy .xvg output freq (ps); 0 = auto
+  int temp_column{2};               // xvg temperature/state-label column
+  int bootstrap_samples{0};         // 0 = off
+  int scan_points{0};           // 0/1 = no scan output, >1 = write mbar_cv.dat
+  std::string demux_map_file{}; // optional per-frame temperature-state map
 };
 
 struct TptArgs {
   bool flag_tpt{false};
-  std::string mode{"ensemble"};   // ensemble | kinetic
-  std::string source_spec{};      // microstate list/range, e.g. micro:0,1-3
-  std::string sink_spec{};        // microstate list/range, e.g. 8-12
+  std::string mode{"ensemble"}; // ensemble | kinetic
+  std::string source_spec{};    // microstate list/range, e.g. micro:0,1-3
+  std::string sink_spec{};      // microstate list/range, e.g. 8-12
   int top_paths{5};
   double flux_cut{0.0};
   bool use_dham{true};
-  std::string demux_map_file{};   // optional demux replica-map for kinetic mode
-  int bootstrap_samples{0};       // 0 = off
+  std::string demux_map_file{}; // optional demux replica-map for kinetic mode
+  int bootstrap_samples{0};     // 0 = off
   unsigned int bootstrap_seed{42};
 };
 
@@ -605,7 +648,8 @@ struct MembraneArgs {
     if (leaflet == "user" && leaflet_file.empty())
       return "-membrane-leaflet=user requires -membrane-leaflet-file.";
     if (leaflet != "user" && !leaflet_file.empty())
-      return "-membrane-leaflet-file is valid only with -membrane-leaflet=user.";
+      return "-membrane-leaflet-file is valid only with "
+             "-membrane-leaflet=user.";
     if (!(contact_cut > 0.0) || !std::isfinite(contact_cut))
       return "-membrane-contact-cut must be a finite positive distance in A.";
     if (curvature != "off" && curvature != "grid")
@@ -659,8 +703,7 @@ struct S2Args {
       if (comma == std::string::npos ||
           fit_window.find(',', comma + 1) != std::string::npos ||
           !parse_double(fit_window.substr(0, comma), tmin) ||
-          !parse_double(fit_window.substr(comma + 1), tmax) ||
-          !(tmax > tmin)) {
+          !parse_double(fit_window.substr(comma + 1), tmax) || !(tmax > tmin)) {
         return "-s2-fit-window must be auto or tmin,tmax with tmax > tmin.";
       }
     }
@@ -819,9 +862,11 @@ struct HotspotReportArgs {
       return "-hotspot-source must be one of cas, edecomp, both.";
     if (rank_by != "cas-ddg" && rank_by != "edecomp-abs-mean" &&
         rank_by != "combined")
-      return "-hotspot-rank-by must be one of cas-ddg, edecomp-abs-mean, combined.";
+      return "-hotspot-rank-by must be one of cas-ddg, edecomp-abs-mean, "
+             "combined.";
     if (source == "cas" && rank_by == "edecomp-abs-mean")
-      return "-hotspot-rank-by=edecomp-abs-mean requires -hotspot-source=edecomp or both.";
+      return "-hotspot-rank-by=edecomp-abs-mean requires "
+             "-hotspot-source=edecomp or both.";
     if (source == "edecomp" && rank_by == "cas-ddg")
       return "-hotspot-rank-by=cas-ddg requires -hotspot-source=cas or both.";
     if (source != "both" && rank_by == "combined")
@@ -835,7 +880,7 @@ private:
   string Buildnumber;
   string set_Buildnumber();
   bool parse_input_file_is_open();
-  std::vector<std::string> tokenize_arg_file(const std::string& filename);
+  std::vector<std::string> tokenize_arg_file(const std::string &filename);
 
 public:
   // Domain sub-structs
@@ -878,9 +923,9 @@ public:
 
   // LSP-MD (Kornev, JCTC 2025) — Local Spatial Pattern network analysis
   struct LSPMDArgs {
-    bool   flag_lspmd    = false;  // -lspmd: enable module
-    double lspmd_cutoff  = 12.0;  // -lspmd_cut: Cα–Cα cutoff (Å)
-    bool   lspmd_use_avg = true;  // use average distance for cutoff check
+    bool flag_lspmd = false;    // -lspmd: enable module
+    double lspmd_cutoff = 12.0; // -lspmd_cut: Cα–Cα cutoff (Å)
+    bool lspmd_use_avg = true;  // use average distance for cutoff check
   };
   LSPMDArgs lspmd;
 
@@ -890,28 +935,24 @@ public:
       flag_index, flag_topo_1, flag_topo_2, flag_1_pdb, flag_listfile,
       flag_use_common_topo, flag_nocal, flag_pattern_input, flag_range_input,
       help, flag_network, flag_network_explicit, flag_pca, flag_tda, flag_ml,
-      flag_cas,
-      flag_allostery;
+      flag_cas, flag_allostery;
   // Transitional engine-facing energy decomposition fields. New CLI input
   // must use EDecompArgs; remove these after the engine migration lands.
   bool flag_all_folders, flag_separation_results, flag_sidechain_hbond,
       flag_cal_force, flag_use_CI, print_force_res, flag_begin_set,
-      flag_end_set, flag_maxforce, self_int, flag_sidechain, flag_print_sidechain,
-      flag_all_respair;
-  bool flag_sub_groups,
-      flag_cal_dis_res_2com, flag_set_type_1, flag_set_type_2,
+      flag_end_set, flag_maxforce, self_int, flag_sidechain,
+      flag_print_sidechain, flag_all_respair;
+  bool flag_sub_groups, flag_cal_dis_res_2com, flag_set_type_1, flag_set_type_2,
       flag_cal_dipole_moment, flag_charged_atom_distance_dis,
       flag_angle_dipole_efield, flag_sep_opdb, heat_capacity_cp, flag_cal_vol,
-      flag_elec_screening, flag_interchain_energy,
-      flag_cal_mindis, mol_1_type_explicit, mol_2_type_explicit,
-      flag_cat_result_multi_infile, opdb_name_explicit, flag_groups_explicit;
+      flag_elec_screening, flag_interchain_energy, flag_cal_mindis,
+      mol_1_type_explicit, mol_2_type_explicit, flag_cat_result_multi_infile,
+      opdb_name_explicit, flag_groups_explicit;
   int igb;
-  int flag_pqr, flag_all_side_chain_ct, begin_mol_2,
-      force_map, argc, group_1, group_2,
-      flag_h_bond, group_entropy_com, group_entropy_rec,
+  int flag_pqr, flag_all_side_chain_ct, begin_mol_2, force_map, argc, group_1,
+      group_2, flag_h_bond, group_entropy_com, group_entropy_rec,
       group_entropy_lg, k_neighbor, dt, b_input, e_input, step_input,
-      flag_cache, com_dis_energy_2mol, com_dis_2mol,
-      n_wat;
+      flag_cache, com_dis_energy_2mol, com_dis_2mol, n_wat;
   int fes_grid;
   int allostery_tau;
   int allostery_bins;
@@ -958,67 +999,54 @@ public:
       salt_concentration, epsilon_in;
   string topo_name, topo_name_2, pdb_name, out_pdb_name, index_name, force_f,
       command, path_amino_acid, path_nonbonded, name_out_cal_dis, arg_filename,
-      list_filename, fmap_type, input_pattern,
-      fmap_level, out_motif, eu, fu, ref_file, tu, input_file_type, mol_1_type,
-      mol_2_type, water_type;
+      list_filename, fmap_type, input_pattern, fmap_level, out_motif, eu, fu,
+      ref_file, tu, input_file_type, mol_1_type, mol_2_type, water_type;
 
   arguments()
       : Buildnumber{set_Buildnumber()},
         // Core bools
-        flag_gbsa{false}, flag_alpb{false},
-        cal_dis_sc_contact{false}, opdb{false}, file_par{false},
-        new_al_1pdb{false}, entropy{false}, entropy_quasi{false},
-        flag_index{false}, flag_topo_1{false}, flag_topo_2{false},
-        flag_1_pdb{false}, flag_listfile{false}, flag_use_common_topo{false},
-        flag_nocal{false}, flag_pattern_input{false}, flag_range_input{false},
-        help{false}, flag_network{false}, flag_network_explicit{false},
-        flag_pca{false},
-        flag_tda{false}, flag_ml{false}, flag_cas{false},
-        flag_allostery{false},
+        flag_gbsa{false}, flag_alpb{false}, cal_dis_sc_contact{false},
+        opdb{false}, file_par{false}, new_al_1pdb{false}, entropy{false},
+        entropy_quasi{false}, flag_index{false}, flag_topo_1{false},
+        flag_topo_2{false}, flag_1_pdb{false}, flag_listfile{false},
+        flag_use_common_topo{false}, flag_nocal{false},
+        flag_pattern_input{false}, flag_range_input{false}, help{false},
+        flag_network{false}, flag_network_explicit{false}, flag_pca{false},
+        flag_tda{false}, flag_ml{false}, flag_cas{false}, flag_allostery{false},
         flag_all_folders{false}, flag_separation_results{false},
         flag_sidechain_hbond{false}, flag_cal_force{false}, flag_use_CI{false},
         print_force_res{false}, flag_begin_set{false}, flag_end_set{false},
-        flag_maxforce{false}, self_int{false},
-        flag_sidechain{true}, flag_print_sidechain{true},
-        flag_all_respair{false},
-        flag_sub_groups{false},
-        flag_cal_dis_res_2com{false}, flag_set_type_1{false},
-        flag_set_type_2{false}, flag_cal_dipole_moment{false},
-        flag_charged_atom_distance_dis{false}, flag_angle_dipole_efield{false},
-        flag_sep_opdb{false}, heat_capacity_cp{false}, flag_cal_vol{false},
+        flag_maxforce{false}, self_int{false}, flag_sidechain{true},
+        flag_print_sidechain{true}, flag_all_respair{false},
+        flag_sub_groups{false}, flag_cal_dis_res_2com{false},
+        flag_set_type_1{false}, flag_set_type_2{false},
+        flag_cal_dipole_moment{false}, flag_charged_atom_distance_dis{false},
+        flag_angle_dipole_efield{false}, flag_sep_opdb{false},
+        heat_capacity_cp{false}, flag_cal_vol{false},
         flag_elec_screening{false}, flag_interchain_energy{false},
         flag_cal_mindis{false}, mol_1_type_explicit{false},
-        mol_2_type_explicit{false},
-        flag_cat_result_multi_infile{false}, opdb_name_explicit{false},
-        flag_groups_explicit{false},
+        mol_2_type_explicit{false}, flag_cat_result_multi_infile{false},
+        opdb_name_explicit{false}, flag_groups_explicit{false},
         // Core ints
-        igb{5},
-        flag_pqr{2}, flag_all_side_chain_ct{1}, begin_mol_2{},
-        force_map{2}, argc{1}, group_1{}, group_2{},
-        flag_h_bond{0},
+        igb{5}, flag_pqr{2}, flag_all_side_chain_ct{1}, begin_mol_2{},
+        force_map{2}, argc{1}, group_1{}, group_2{}, flag_h_bond{0},
         group_entropy_com{-1}, group_entropy_rec{-1}, group_entropy_lg{-1},
-        k_neighbor{4}, dt{0}, b_input{}, e_input{100000000},
-        step_input{1}, flag_cache{1}, com_dis_energy_2mol{4}, com_dis_2mol{0},
-        n_wat{-1},
-        fes_grid{60},
-        allostery_tau{5}, allostery_bins{-1},
-        allostery_knn{0},
+        k_neighbor{4}, dt{0}, b_input{}, e_input{100000000}, step_input{1},
+        flag_cache{1}, com_dis_energy_2mol{4}, com_dis_2mol{0}, n_wat{-1},
+        fes_grid{60}, allostery_tau{5}, allostery_bins{-1}, allostery_knn{0},
         allostery_cutoff{0.0}, allostery_knn_contact_cutoff{8.0},
-        allostery_use_avg_cutoff{true},
-        allostery_knn_use_contact_prior{false},
-        allostery_compute_te{true},
-        allostery_estimator{"hist"},
-        allostery_estimator_k{4},
-        allostery_kde_bandwidth{0.0},
+        allostery_use_avg_cutoff{true}, allostery_knn_use_contact_prior{false},
+        allostery_compute_te{true}, allostery_estimator{"hist"},
+        allostery_estimator_k{4}, allostery_kde_bandwidth{0.0},
         // XDR
         traj_file{}, flag_xdr{false}, xdr_type{},
         // size_t
         number_of_files{1ull}, nt{}, number_charged_distances_bin{400},
         number_bin_angle_dipole_efield{200}, number_mindis_bin{100},
         // doubles
-        ext_diel{78.5}, int_diel{1.0}, saltcon{0.15},
-        d_standard{6.5}, begin_time{0.}, end_time{100000000000.}, angle_h{135.},
-        dis_h{3.5}, limit_dis{10e10}, eu_par{1.0}, fu_par{1.66}, dis_clust{6.5},
+        ext_diel{78.5}, int_diel{1.0}, saltcon{0.15}, d_standard{6.5},
+        begin_time{0.}, end_time{100000000000.}, angle_h{135.}, dis_h{3.5},
+        limit_dis{10e10}, eu_par{1.0}, fu_par{1.66}, dis_clust{6.5},
         d_crit_water{3.5}, distance_energy_cutoff{-1.1}, d_crit_minmax_mol{4.},
         charged_distances_max{50.}, charged_distances_min{0.},
         salt_concentration{0.15}, epsilon_in{1.00000000},
@@ -1028,10 +1056,10 @@ public:
         force_f{"AMBER99SB"}, command{"-"}, path_amino_acid{"lib_ff/"},
         path_nonbonded{"lib_ff/"}, name_out_cal_dis{"out_cal_dis_com_"},
         arg_filename{"arg.in"}, list_filename{"input.txt"},
-        fmap_type{"residue-atom"}, input_pattern{},
-        fmap_level{"per-res"}, out_motif{"*"},
-        eu{"kJ/mol"}, fu{"pN"}, ref_file{}, tu{"ps"}, input_file_type{".pdb"},
-        mol_1_type{"protein"}, mol_2_type{"lig"}, water_type{"surface"} {}
+        fmap_type{"residue-atom"}, input_pattern{}, fmap_level{"per-res"},
+        out_motif{"*"}, eu{"kJ/mol"}, fu{"pN"}, ref_file{}, tu{"ps"},
+        input_file_type{".pdb"}, mol_1_type{"protein"}, mol_2_type{"lig"},
+        water_type{"surface"} {}
 
   int post_process();
   bool needs_mol2_for_cmap_interface() const {
@@ -1043,13 +1071,10 @@ public:
   bool needs_mol2_for_msd() const {
     return msd.flag_msd && msd.selection == "mol2";
   }
-  bool needs_membrane_coordinates() const {
-    return membrane.flag_membrane;
-  }
+  bool needs_membrane_coordinates() const { return membrane.flag_membrane; }
   bool needs_mol2_for_nocal_output() const {
-    return flag_nocal &&
-           ((flag_groups_explicit && group_1 != group_2) ||
-            begin_mol_2 > 0 || com_dis_2mol != 0);
+    return flag_nocal && ((flag_groups_explicit && group_1 != group_2) ||
+                          begin_mol_2 > 0 || com_dis_2mol != 0);
   }
   bool needs_mol2_coordinates() const {
     return !flag_nocal || needs_mol2_for_nocal_output() ||

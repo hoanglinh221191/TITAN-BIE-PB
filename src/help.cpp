@@ -242,6 +242,9 @@ IMPORTANT NOTES
     BIE-formulation, and tree counters; `-pbe-timing=summary|detail` also
     writes `pbe_memory_profile.csv`, while `detail` writes
     `pbe_tabi_profile.csv`.
+    The hidden `-pbe-tabi-surface-only=true` feasibility mode builds and
+    profiles the TABI surface, then exits before RHS, operator,
+    preconditioner, or GMRES construction; it does not report an energy.
 
   Main inputs:
     -pbe[=grid|tabi]
@@ -270,17 +273,24 @@ IMPORTANT NOTES
       -pbe-tabi-geometry=triangle|point-panel,
       -pbe-tabi-diagonal=solid-angle|flat|off,
       -pbe-tabi-surface-points=<8..4096>,
+      -pbe-tabi-surface-only=true|false,
+      -pbe-tabi-ses-max-grid-vertices=<4000000..100000000>,
       -pbe-tabi-taylor-order=3|4,
       -pbe-tabi-derivatives=analytic|finite-diff-debug,
+      -pbe-tabi-discretization=centroid|node-patch,
       -pbe-tabi-formulation=titan-v1|jcp2013|jcp2013-centroid|
         jcp2013-treecode|tabi2-nodepatch|calibrated-debug,
       -pbe-tabi-energy-projection=boundary|born-check|charge-potential-debug,
       -pbe-tabi-fmm-m2l=auto|off|single-matvec-analytic,
       -pbe-tabi-precond=auto|none|diagonal|block|block-budgeted|
         coarse-galerkin-probe|fmm-block-jacobi|fmm-overlap-schwarz|
-        fmm-nearfield-ilu0,
+        fmm-nearfield-ilu0|distance-knn-overlap-schwarz|
+        distance-knn-ilu0,
       -pbe-tabi-precond-ilu-neighbor-cap=<32..1024>,
       -pbe-tabi-precond-ilu-drop-tol=<0..1e-2>,
+      -pbe-tabi-precond-ilu-regularization=adaptive|off (default adaptive),
+      -pbe-tabi-precond-ilu-regularization-max=<0..1e-2>,
+      -pbe-tabi-precond-memory-budget-mb=<16..4096>,
       -pbe-tabi-near-integration=auto|centroid|analytic_singular|
         duffy_adaptive,
       -pbe-tabi-quad-buffer=auto|off|gauss7|adaptive,
@@ -299,7 +309,9 @@ IMPORTANT NOTES
         -pbe-tabi-convergence-tail-threshold=<1..1e12>,
         -pbe-tabi-convergence-estimator-error-cap=<1e-8..1.0>,
         -pbe-tabi-convergence-unstable-rho-cap=<0.05..2.0>,
-        -pbe-tabi-convergence-calibration=stage3j|consecutive|aspect|consecutive-aspect,
+        -pbe-tabi-fmm-local-plan-builder=rescan|cached-metrics,
+        -pbe-tabi-convergence-calibration=calibrated-tail-v1|consecutive|aspect|consecutive-aspect,
+        -pbe-tabi-convergence-estimator-model=calibrated-estimator-v1|channel-tail|channel-tail-eps,
         -pbe-tabi-expansion-audit=off|sampled|full-small,
         -pbe-tabi-expansion-audit-sample-count=<64..2048>,
         -pbe-tabi-expansion-audit-max-panels=<128..8192>,
@@ -310,6 +322,15 @@ IMPORTANT NOTES
       -pbe-tabi-gmres-restart=<8..128>,
       -pbe-tabi-true-residual-probe=restart|interval|off,
       -pbe-tabi-true-residual-probe-interval=<1..128>
+      -pbe-tabi-primary-surface=sphere-patch|grid-ses|analytic-ses,
+      -pbe-tabi-ses-grid-spacing=<0.25..4.0>
+    grid-ses is an opt-in watertight solvent-excluded surface. It applies a
+    probe-radius morphological closing to the VDW volume on a Cartesian grid,
+    extracts a welded triangle mesh, and rejects open/nonmanifold output before
+    the TABI solve. The default remains sphere-patch.
+    analytic-ses independently constructs exact contact, toroidal, and
+    reentrant probe patches from expanded atom spheres, intersects grid rays
+    with those patches, and topology-audits the welded mesh before solving.
     hidden PQR parity only: -pbe-parity-dump, -pbe-parity-map-dump,
     -pbe-test-charge-grid, -pbe-test-charge-grid-diff,
     -pbe-test-surface-map,
@@ -2032,8 +2053,11 @@ IMPORTANT NOTES
                         stern applies Debye screening only in ion-accessible
                         solvent after excluding atom radius + ion radius.
   -pbe-ion-radius <val> Ion probe radius for Stern accessibility (A). Default: 2.0
-  -pbe-dgsolv [bool]    For two-molecule systems, compute deltaG_solv by
-                        six solves: complex, mol1, mol2 each solvent/vacuum.
+  -pbe-dgsolv [bool]    Compute deltaG_solv. For a single TABI system this is
+                        the reaction-field energy 0.5*sum(q_i*phi_reac_i)
+                        from the selected ionic-solvent solve. Native grid
+                        two-molecule systems use six endpoint solves: complex,
+                        mol1, mol2 each solvent/vacuum.
                         Arg file: -pbe-dgsolv=true; CLI: -pbe-dgsolv
   -pbsa [bool]          Enable MM/PBSA summary for two-molecule systems.
                         Implies -pbe and -pbe-dgsolv; writes
@@ -2117,11 +2141,30 @@ IMPORTANT NOTES
   -pbe-max-grid <N>     Maximum grid points before preflight rejection
   -pbe-map <mode>       off, phi, epsilon, ion, or all. Default: off
   -pbe-map-frames <m>   none, first, last, or all. Default: none
+  -pbe-atom-potentials <m>
+                        off or csv. Default: off. csv writes per-atom reaction
+                        potentials in kJ mol^-1 e^-1 and 0.5*q*phi reaction-
+                        energy contributions for grid and TABI.
+  -pbe-binding-cycle <m>
+                        off or pqr-components. The latter solves complex,
+                        receptor, and ligand PQRs in TITAN and writes polar and
+                        total continuum-electrostatic binding contributions.
+                        The intercomponent Coulomb term uses -pbe-int-diel on
+                        the fixed bound geometry; this is not total binding
+                        free energy.
+  -pbe-binding-receptor-pqr <file>
+                        Receptor PQR for pqr-components binding cycle.
+  -pbe-binding-ligand-pqr <file>
+                        Ligand PQR for pqr-components binding cycle.
   -pbe-tabi-surface-output <m>
                         off, csv, vtk, or all. Default: off. For -pbe=tabi,
-                        writes per-panel centroids, normals, area, phi, and
-                        phin/normal-flux proxy as
+                        writes surface coordinates, normals, area, the raw
+                        boundary unknown, and physical total, Coulomb, and
+                        reaction potentials in e/A, kcal/mol/e, and kT/e as
                         pbe_tabi_surface_solution.csv/.vtk.
+                        Node-patch analytic/grid SES output retains connected
+                        triangles and stores solution fields as VTK POINT_DATA;
+                        centroid output remains cell-associated.
   -pbe-kernel <mode>    auto, scalar, or avx2. Default: auto
                         v1 records the request but uses scalar-threaded SOR
                         Arg file form: -pbe-kernel=auto

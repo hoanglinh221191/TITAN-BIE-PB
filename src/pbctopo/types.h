@@ -24,6 +24,13 @@ struct PbctopoAnchorGraphScore {
   std::size_t ambiguity_count = 0;
 };
 
+enum class PbctopoVirtualSeedSource : std::uint8_t {
+  None,
+  Density,
+  Previous,
+  Kinematic
+};
+
 struct PbctopoAtom {
   std::size_t global_atom_id = 0;
   std::size_t fragment_id = 0;
@@ -32,6 +39,7 @@ struct PbctopoAtom {
   std::uint64_t chain_key = 0;
   int residue_id = std::numeric_limits<int>::min();
   bool has_topology_key = false;
+  bool has_topology_graph = false;
   bool is_heavy = true;
   double x = 0.0;
   double y = 0.0;
@@ -67,8 +75,16 @@ struct PbctopoCutCandidate {
   std::size_t split_owner_pairs = 0;
   std::size_t clash_atom_a = std::numeric_limits<std::size_t>::max();
   std::size_t clash_atom_b = std::numeric_limits<std::size_t>::max();
+  PbctopoVirtualSeedSource virtual_seed_source =
+      PbctopoVirtualSeedSource::None;
   bool ultra_clash = false;
   bool valid = false;
+};
+
+enum class PbctopoLocalEdgeKind : std::uint8_t {
+  GeometryHeuristic,
+  TopologyBond,
+  MetadataSkeleton
 };
 
 struct PbctopoLocalEdge {
@@ -77,6 +93,7 @@ struct PbctopoLocalEdge {
   double ref_d2 = 0.0;
   double inv_ref_d2 = 0.0;
   double break_cutoff_d2 = 0.0;
+  PbctopoLocalEdgeKind kind = PbctopoLocalEdgeKind::GeometryHeuristic;
 };
 
 struct PbctopoContinuityPair {
@@ -230,11 +247,19 @@ struct PbctopoCycleSyncResult {
 
 struct PbctopoWarmState {
   PbctopoCutCandidate previous_projection_candidate;
+  PbctopoCutCandidate kinematic_previous_virtual_candidate;
+  PbctopoCutCandidate kinematic_latest_virtual_candidate;
   std::vector<std::size_t> previous_component_sizes;
   std::vector<Int3> previous_component_offsets;
   std::vector<std::vector<Int3>> previous_stage1_delta_hints_by_component;
   std::vector<std::vector<Int3>> previous_stage2_delta_hints_by_component;
+  std::size_t kinematic_previous_virtual_frame =
+      std::numeric_limits<std::size_t>::max();
+  std::size_t kinematic_latest_virtual_frame =
+      std::numeric_limits<std::size_t>::max();
   bool has_projection_candidate = false;
+  bool has_kinematic_previous_virtual_candidate = false;
+  bool has_kinematic_latest_virtual_candidate = false;
   bool has_component_offsets = false;
   bool has_component_trial_hints = false;
 };
@@ -406,19 +431,45 @@ struct PbctopoTimingStats {
   std::size_t pbctopo_topology_bonds_available = 0;
   std::size_t pbctopo_topology_bond_edges_added = 0;
   std::size_t pbctopo_topology_bond_edges_skipped = 0;
+  std::size_t pbctopo_geometry_edges_added = 0;
+  std::size_t pbctopo_topology_duplicate_edges = 0;
+  std::size_t pbctopo_topology_projected_bonds = 0;
+  std::size_t pbctopo_topology_static_graph_frames = 0;
+  std::size_t pbctopo_metadata_graph_frames = 0;
+  std::size_t pbctopo_metadata_residue_groups = 0;
+  std::size_t pbctopo_metadata_intra_edges = 0;
+  std::size_t pbctopo_metadata_inter_edges = 0;
+  std::size_t pbctopo_geometry_fallback_frames = 0;
   std::size_t component_context_builds = 0;
   std::size_t component_offset_extracts = 0;
   std::size_t apply_calls = 0;
   std::size_t early_projection_used = 0;
   std::size_t previous_seed_used = 0;
+  std::size_t pbctopo_kinematic_seed_candidates = 0;
+  std::size_t pbctopo_kinematic_seed_evaluated = 0;
+  std::size_t pbctopo_kinematic_seed_deduped = 0;
+  std::size_t pbctopo_kinematic_seed_best = 0;
+  std::size_t pbctopo_kinematic_seed_history_resets = 0;
+  std::size_t pbctopo_density_cut_planes_frames = 0;
+  std::size_t pbctopo_density_cut_planes_x = 0;
+  std::size_t pbctopo_density_cut_planes_y = 0;
+  std::size_t pbctopo_density_cut_planes_z = 0;
+  std::size_t pbctopo_density_cut_planes_dense_equiv_x = 0;
+  std::size_t pbctopo_density_cut_planes_dense_equiv_y = 0;
+  std::size_t pbctopo_density_cut_planes_dense_equiv_z = 0;
+  std::size_t pbctopo_density_cut_plane_collisions = 0;
+  std::size_t pbctopo_density_cut_plane_dense_fallbacks = 0;
   std::array<std::size_t, 8> component_search_depth_visits{};
   double append_s = 0.0;
   double heavy_subset_s = 0.0;
   double translation_cache_s = 0.0;
   double graph_s = 0.0;
+  double pbctopo_local_graph_geometry_s = 0.0;
+  double pbctopo_topology_edge_append_s = 0.0;
   double projection_edge_s = 0.0;
   double component_split_s = 0.0;
   double event_planes_s = 0.0;
+  double pbctopo_density_cut_plane_build_s = 0.0;
   double seed_s = 0.0;
   double coarse_s = 0.0;
   double refine_s = 0.0;

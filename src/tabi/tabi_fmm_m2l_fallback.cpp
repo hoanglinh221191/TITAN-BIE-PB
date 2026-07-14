@@ -218,16 +218,20 @@ PackedFallbackApplyResult apply_packed_jcp_fallback(
   executor.parallel_for(
       impl.batches.size(), workers, 1,
       [&](std::size_t, std::size_t batch_begin, std::size_t batch_end) {
+        // Each executor worker owns a disjoint target batch range. Keep these
+        // scratch vectors alive across its batches and tasks so AVX2 applies do
+        // not allocate one JcpAccum array for every source tile.
+        std::vector<JcpAccum> total;
+        std::vector<JcpAccum> task_accum;
         for (std::size_t batch_index = batch_begin;
              batch_index < batch_end; ++batch_index) {
           const PackedBatch &batch = impl.batches[batch_index];
-          std::vector<JcpAccum> total(batch.targets.size());
+          total.assign(batch.targets.size(), JcpAccum{});
           if (kernel == "packed-avx2") {
             for (std::size_t task_offset = 0;
                  task_offset < batch.task_count; ++task_offset) {
               const PackedTask &task =
                   impl.tasks[batch.task_begin + task_offset];
-              std::vector<JcpAccum> task_accum;
               std::size_t near_count = 0;
               TitanPBE::Tabi::detail::direct_jcp_packed_target_source_span_avx2(
                   panels, batch.targets, impl.panel_cache,
@@ -300,6 +304,10 @@ PackedFallbackApplyResult apply_packed_jcp_fallback(
       std::all_of(result.phin.begin(), result.phin.end(),
                   [](double value) { return std::isfinite(value); });
   return result;
+}
+
+bool packed_jcp_fallback_avx2_available() noexcept {
+  return TitanPBE::Tabi::detail::packed_jcp_avx2_available();
 }
 
 } // namespace titan::tabi::fmm_m2l

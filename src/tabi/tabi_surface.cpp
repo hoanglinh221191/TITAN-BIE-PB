@@ -1,3 +1,5 @@
+#include "tabi_calderon_aux_surface.h"
+#include "tabi_calderon_trace_space.h"
 #include "tabi_types.h"
 
 #include "../titan_surface.h"
@@ -9,6 +11,7 @@
 #include <cstdint>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -922,6 +925,53 @@ std::vector<Panel> build_point_panel_surface(const std::vector<Atom> &atoms,
   return panels;
 }
 
+void populate_implicit_mesh_quality(SurfaceMesh &mesh) {
+  double area_sum = 0.0;
+  double area_square_sum = 0.0;
+  double area_min = std::numeric_limits<double>::infinity();
+  double area_max = 0.0;
+  double aspect_max = 0.0;
+  double signed_volume = 0.0;
+  for (const Triangle &triangle : mesh.triangles) {
+    area_sum += triangle.area;
+    area_square_sum += triangle.area * triangle.area;
+    area_min = std::min(area_min, triangle.area);
+    area_max = std::max(area_max, triangle.area);
+    const Vertex &a = mesh.vertices[triangle.v0];
+    const Vertex &b = mesh.vertices[triangle.v1];
+    const Vertex &c = mesh.vertices[triangle.v2];
+    const double ab = norm3(a.x - b.x, a.y - b.y, a.z - b.z);
+    const double bc = norm3(b.x - c.x, b.y - c.y, b.z - c.z);
+    const double ca = norm3(c.x - a.x, c.y - a.y, c.z - a.z);
+    const double edge_min = std::min({ab, bc, ca});
+    const double edge_max = std::max({ab, bc, ca});
+    if (edge_min > 1.0e-14) {
+      aspect_max = std::max(aspect_max, edge_max / edge_min);
+    }
+    signed_volume +=
+        (a.x * (b.y * c.z - b.z * c.y) -
+         a.y * (b.x * c.z - b.z * c.x) +
+         a.z * (b.x * c.y - b.y * c.x)) /
+        6.0;
+  }
+  mesh.quality_total_area_a2 = area_sum;
+  mesh.quality_planar_area_a2 = area_sum;
+  mesh.quality_enclosed_volume_a3 = std::abs(signed_volume);
+  mesh.quality_triangle_area_min =
+      std::isfinite(area_min) ? area_min : 0.0;
+  mesh.quality_triangle_area_max = area_max;
+  mesh.quality_triangle_aspect_max = aspect_max;
+  if (!mesh.triangles.empty()) {
+    const double count = static_cast<double>(mesh.triangles.size());
+    const double mean = area_sum / count;
+    const double variance =
+        std::max(0.0, area_square_sum / count - mean * mean);
+    mesh.quality_triangle_area_mean = mean;
+    mesh.quality_triangle_area_cv =
+        mean > 1.0e-14 ? std::sqrt(variance) / mean : 0.0;
+  }
+}
+
 } // namespace
 
 std::vector<Panel> build_surface(const std::vector<Atom> &atoms,
@@ -943,7 +993,66 @@ std::vector<Panel> build_surface(const std::vector<Atom> &atoms,
     original_indices.push_back(i);
   }
 
-  SurfaceMesh mesh = build_triangle_mesh(finite_atoms, original_indices, options);
+  SurfaceMesh mesh;
+  calderon::TraceSpaces calderon_trace;
+  if (options.primary_surface == "grid-ses" ||
+      options.primary_surface == "analytic-ses") {
+    const bool analytic = options.primary_surface == "analytic-ses";
+    calderon::AuxiliarySurfaceResult primary =
+        analytic
+            ? calderon::build_analytic_ses_surface(
+                  finite_atoms, options.ses_grid_spacing, options.probe_radius,
+                  executor, options.ses_max_grid_vertices, true)
+            : calderon::build_implicit_ses_surface(
+                  finite_atoms, options.ses_grid_spacing, options.probe_radius,
+                  executor, options.ses_max_grid_vertices, true);
+    if (primary.status != "pass") {
+      throw std::runtime_error(
+          "TABI " + options.primary_surface +
+          " surface failed watertight topology gate: " + primary.status);
+    }
+    mesh = std::move(primary.mesh);
+    calderon_trace = std::move(primary.trace_spaces);
+    mesh.sphere_mesh_mode = options.primary_surface;
+    mesh.mesh_build_ms = primary.build_ms;
+    for (Vertex &vertex : mesh.vertices) {
+      if (vertex.atom_index < original_indices.size()) {
+        vertex.atom_index = original_indices[vertex.atom_index];
+      }
+    }
+    for (Triangle &triangle : mesh.triangles) {
+      if (triangle.atom_index < original_indices.size()) {
+        triangle.atom_index = original_indices[triangle.atom_index];
+      }
+    }
+    for (Panel &panel : mesh.panels) {
+      if (panel.atom_index < original_indices.size()) {
+        panel.atom_index = original_indices[panel.atom_index];
+      }
+    }
+    populate_implicit_mesh_quality(mesh);
+    if (options.surface_only) {
+      for (Panel &panel : mesh.panels) {
+        panel.diagonal = 0.0;
+        panel.solid_angle = 0.0;
+      }
+      mesh.diag_min = 0.0;
+      mesh.diag_max = 0.0;
+      mesh.solid_angle_ms = 0.0;
+    } else {
+      finalize_solid_angle_diagonal(mesh, options.diagonal_mode);
+    }
+  } else {
+    mesh = build_triangle_mesh(finite_atoms, original_indices, options);
+    if (options.calderon_trace_audit) {
+      calderon_trace = calderon::build_closed_surface_trace_spaces(mesh);
+    }
+  }
+  calderon::AuxiliarySurfaceResult calderon_auxiliary;
+  if (options.calderon_aux_surface == "implicit-vdw") {
+    calderon_auxiliary = calderon::build_implicit_vdw_auxiliary_surface(
+        finite_atoms, options.calderon_aux_grid_spacing);
+  }
   if (result != nullptr) {
     result->surface_geometry = "triangle";
     result->panel_count = mesh.panels.size();
@@ -978,6 +1087,35 @@ std::vector<Panel> build_surface(const std::vector<Atom> &atoms,
         mesh.quality_enclosed_volume_rel_error_vs_4piR3_over3;
     result->surface_quality_triangle_area_cv =
         mesh.quality_triangle_area_cv;
+    result->calderon_trace_space_status = calderon_trace.quality.failure_reason;
+    result->calderon_trace_vertices = calderon_trace.quality.vertex_count;
+    result->calderon_trace_edges = calderon_trace.quality.edge_count;
+    result->calderon_trace_boundary_edges =
+        calderon_trace.quality.boundary_edge_count;
+    result->calderon_trace_orientation_mismatches =
+        calderon_trace.quality.orientation_mismatch_count;
+    result->calderon_trace_nonmanifold_edges =
+        calderon_trace.quality.nonmanifold_edge_count;
+    result->calderon_trace_unreferenced_vertices =
+        calderon_trace.quality.unreferenced_vertex_count;
+    result->calderon_aux_surface_mode = options.calderon_aux_surface;
+    result->calderon_aux_trace_status =
+        options.calderon_aux_surface == "off" ? "off" : calderon_auxiliary.status;
+    result->calderon_aux_panels = calderon_auxiliary.mesh.panels.size();
+    result->calderon_aux_vertices = calderon_auxiliary.trace_spaces.quality.vertex_count;
+    result->calderon_aux_edges = calderon_auxiliary.trace_spaces.quality.edge_count;
+    result->calderon_aux_boundary_edges =
+        calderon_auxiliary.trace_spaces.quality.boundary_edge_count;
+    result->calderon_aux_orientation_mismatches =
+        calderon_auxiliary.trace_spaces.quality.orientation_mismatch_count;
+    result->calderon_aux_nonmanifold_edges =
+        calderon_auxiliary.trace_spaces.quality.nonmanifold_edge_count;
+    result->calderon_aux_unreferenced_vertices =
+        calderon_auxiliary.trace_spaces.quality.unreferenced_vertex_count;
+    result->calderon_aux_grid_vertices = calderon_auxiliary.grid_vertices;
+    result->calderon_aux_area_a2 =
+        calderon_auxiliary.trace_spaces.quality.total_area;
+    result->calderon_aux_build_ms = calderon_auxiliary.build_ms;
     result->surface_build_ms =
         elapsed_ms(surface_begin, std::chrono::steady_clock::now());
     result->surface_neighbor_ms = mesh.neighbor_build_ms;

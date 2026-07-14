@@ -29,16 +29,59 @@ std::uint64_t atom_pair_key(std::size_t a, std::size_t b) {
   return (static_cast<std::uint64_t>(a) << 32) | static_cast<std::uint64_t>(b);
 }
 
-double cart_dist_sq_from_scaled_delta(box Box, double dsx, double dsy,
-                                      double dsz) {
+struct PbctopoLocalBoxBasis {
   double v1[3]{}, v2[3]{}, v3[3]{};
-  Box.get_v1(v1);
-  Box.get_v2(v2);
-  Box.get_v3(v3);
-  const double dx = v1[0] * dsx + v2[0] * dsy + v3[0] * dsz;
-  const double dy = v1[1] * dsx + v2[1] * dsy + v3[1] * dsz;
-  const double dz = v1[2] * dsx + v2[2] * dsy + v3[2] * dsz;
+
+  explicit PbctopoLocalBoxBasis(box Box) {
+    Box.get_v1(v1);
+    Box.get_v2(v2);
+    Box.get_v3(v3);
+  }
+};
+
+struct PbctopoImageDelta {
+  double dsx = 0.0;
+  double dsy = 0.0;
+  double dsz = 0.0;
+  double d2 = std::numeric_limits<double>::infinity();
+};
+
+double cart_dist_sq_from_scaled_delta(const PbctopoLocalBoxBasis &basis,
+                                      double dsx, double dsy, double dsz) {
+  const double dx =
+      basis.v1[0] * dsx + basis.v2[0] * dsy + basis.v3[0] * dsz;
+  const double dy =
+      basis.v1[1] * dsx + basis.v2[1] * dsy + basis.v3[1] * dsz;
+  const double dz =
+      basis.v1[2] * dsx + basis.v2[2] * dsy + basis.v3[2] * dsz;
   return dx * dx + dy * dy + dz * dz;
+}
+
+double fixbox_nearest_integer(double value) {
+  return std::floor(value + 0.5);
+}
+
+PbctopoImageDelta nearest_image_delta_27(const PbctopoLocalBoxBasis &basis,
+                                         double dsx, double dsy, double dsz) {
+  PbctopoImageDelta best;
+  const double mic_sx = dsx - fixbox_nearest_integer(dsx);
+  const double mic_sy = dsy - fixbox_nearest_integer(dsy);
+  const double mic_sz = dsz - fixbox_nearest_integer(dsz);
+  for (int ix = -1; ix <= 1; ++ix) {
+    for (int iy = -1; iy <= 1; ++iy) {
+      for (int iz = -1; iz <= 1; ++iz) {
+        const double trial_sx = mic_sx + static_cast<double>(ix);
+        const double trial_sy = mic_sy + static_cast<double>(iy);
+        const double trial_sz = mic_sz + static_cast<double>(iz);
+        const double d2 =
+            cart_dist_sq_from_scaled_delta(basis, trial_sx, trial_sy, trial_sz);
+        if (d2 + 1.0e-12 < best.d2) {
+          best = {trial_sx, trial_sy, trial_sz, d2};
+        }
+      }
+    }
+  }
+  return best;
 }
 
 void scaled_to_cartesian(box Box, double sx, double sy, double sz, double &x,
@@ -77,8 +120,7 @@ build_ranges_from_info(const std::vector<mol_info> &info,
   std::size_t begin = 0;
   std::size_t source_index = 0;
   for (std::size_t i = 1; i < atom_count; ++i) {
-    if (info[i].get_chainnum() != info[i - 1].get_chainnum() ||
-        info[i].get_chain() != info[i - 1].get_chain()) {
+    if (info[i].get_chainnum() != info[i - 1].get_chainnum()) {
       if (begin < i)
         ranges.push_back({begin, i, source_index++, true});
       begin = i;
@@ -123,147 +165,183 @@ bool detect_heavy_atom(const std::vector<mol_info> *info,
   return atom_symbol != 'H' && type_symbol != 'H';
 }
 
-struct PbctopoResidueChainKey {
-  int owner = 0;
-  std::uint64_t chain_key = 0;
-
-  bool operator==(const PbctopoResidueChainKey &other) const {
-    return owner == other.owner && chain_key == other.chain_key;
+std::string uppercase_atom_name(std::string atom_name) {
+  for (char &ch : atom_name) {
+    ch = static_cast<char>(
+        std::toupper(static_cast<unsigned char>(ch)));
   }
+  return atom_name;
+}
+
+struct PbctopoMetadataResidueGroup {
+  std::size_t begin = 0;
+  std::size_t end = 0;
+  std::size_t chainnum = 0;
+  std::size_t internal_resnr = 0;
+  std::size_t anchor = std::numeric_limits<std::size_t>::max();
 };
 
-struct PbctopoResidueChainKeyHash {
-  std::size_t operator()(const PbctopoResidueChainKey &key) const {
-    const std::uint64_t owner_bits =
-        static_cast<std::uint64_t>(static_cast<std::uint32_t>(key.owner));
-    const std::uint64_t mixed =
-        key.chain_key ^ (owner_bits * 0x9e3779b97f4a7c15ull);
-    return static_cast<std::size_t>(mixed ^ (mixed >> 32));
-  }
-};
+int metadata_anchor_priority(const Multi_MOL &system,
+                             const PbctopoSystemStaticData &static_data,
+                             std::size_t atom_idx) {
+  const std::string atom_name =
+      uppercase_atom_name(system.info[atom_idx].get_atom());
+  if (atom_name == "CA")
+    return 0;
+  if (atom_name == "C4'" || atom_name == "C4*")
+    return 1;
+  if (atom_name == "BB")
+    return 2;
+  const bool is_heavy = atom_idx >= static_data.heavy_mask.size() ||
+                        static_data.heavy_mask[atom_idx] != 0;
+  return is_heavy ? 3 : 4;
+}
 
-std::vector<int>
-build_topology_residue_sequence_indices(const std::vector<PbctopoAtom> &atoms) {
-  std::vector<int> residue_sequence_indices(
-      atoms.size(), std::numeric_limits<int>::min());
-  struct ChainState {
-    int last_residue_id = std::numeric_limits<int>::min();
-    int current_rank = -1;
-    bool initialized = false;
-  };
-  std::unordered_map<PbctopoResidueChainKey, ChainState,
-                     PbctopoResidueChainKeyHash>
-      chain_states;
-  chain_states.reserve(std::max<std::size_t>(8, atoms.size() / 64));
-
-  for (std::size_t atom_idx = 0; atom_idx < atoms.size(); ++atom_idx) {
-    const auto &atom = atoms[atom_idx];
-    if (!atom.has_topology_key)
-      continue;
-    const PbctopoResidueChainKey key{atom.owner, atom.chain_key};
-    auto &state = chain_states[key];
-    if (!state.initialized) {
-      state.initialized = true;
-      state.last_residue_id = atom.residue_id;
-      state.current_rank = 0;
-    } else if (atom.residue_id != state.last_residue_id) {
-      state.last_residue_id = atom.residue_id;
-      ++state.current_rank;
+std::size_t choose_metadata_residue_anchor(
+    const Multi_MOL &system, const PbctopoSystemStaticData &static_data,
+    std::size_t begin, std::size_t end) {
+  std::size_t anchor = begin;
+  int best_priority = std::numeric_limits<int>::max();
+  for (std::size_t atom_idx = begin; atom_idx < end; ++atom_idx) {
+    const int priority =
+        metadata_anchor_priority(system, static_data, atom_idx);
+    if (priority < best_priority) {
+      best_priority = priority;
+      anchor = atom_idx;
     }
-    residue_sequence_indices[atom_idx] = state.current_rank;
+  }
+  return anchor;
+}
+
+bool add_projected_metadata_edge(
+    std::size_t a, std::size_t b, bool inter_residue,
+    std::unordered_set<std::uint64_t> &edge_set,
+    std::vector<PbctopoProjectedMetadataEdge> &edges) {
+  if (a == b)
+    return false;
+  if (!edge_set.insert(atom_pair_key(a, b)).second)
+    return false;
+  edges.push_back({a, b, inter_residue});
+  return true;
+}
+
+void build_projected_metadata_graph(const Multi_MOL &system,
+                                    PbctopoSystemStaticData &data) {
+  data.metadata_graph_available = false;
+  data.metadata_residue_groups = 0;
+  data.metadata_intra_edges = 0;
+  data.metadata_inter_edges = 0;
+  data.projected_metadata_edges.clear();
+  if (system.info.size() != data.atom_count || data.atom_count == 0)
+    return;
+
+  std::vector<PbctopoMetadataResidueGroup> groups;
+  groups.reserve(data.atom_count);
+  std::size_t begin = 0;
+  while (begin < data.atom_count) {
+    const std::size_t chainnum = system.info[begin].get_chainnum();
+    const std::size_t internal_resnr = system.info[begin].get_internal_resnr();
+    std::size_t end = begin + 1;
+    while (end < data.atom_count &&
+           system.info[end].get_chainnum() == chainnum &&
+           system.info[end].get_internal_resnr() == internal_resnr) {
+      ++end;
+    }
+    groups.push_back({begin, end, chainnum, internal_resnr,
+                      choose_metadata_residue_anchor(system, data, begin,
+                                                     end)});
+    begin = end;
+  }
+  data.metadata_residue_groups = groups.size();
+  data.continuity_anchor_local.clear();
+  data.continuity_anchor_local.reserve(groups.size());
+  std::unordered_set<std::uint64_t> metadata_edge_set;
+  metadata_edge_set.reserve(data.atom_count * 2 + 1);
+  data.projected_metadata_edges.reserve(data.atom_count * 2);
+
+  for (const auto &group : groups) {
+    if (group.anchor == std::numeric_limits<std::size_t>::max())
+      continue;
+    data.continuity_anchor_local.push_back(group.anchor);
+    for (std::size_t atom_idx = group.begin; atom_idx < group.end;
+         ++atom_idx) {
+      if (atom_idx == group.anchor)
+        continue;
+      const bool atom_is_heavy =
+          atom_idx >= data.heavy_mask.size() || data.heavy_mask[atom_idx] != 0;
+      if (!atom_is_heavy)
+        continue;
+      if (add_projected_metadata_edge(group.anchor, atom_idx, false,
+                                      metadata_edge_set,
+                                      data.projected_metadata_edges)) {
+        ++data.metadata_intra_edges;
+      }
+    }
   }
 
-  return residue_sequence_indices;
+  for (std::size_t group_idx = 1; group_idx < groups.size(); ++group_idx) {
+    const auto &prev = groups[group_idx - 1];
+    const auto &curr = groups[group_idx];
+    if (prev.chainnum != curr.chainnum)
+      continue;
+    if (prev.anchor == std::numeric_limits<std::size_t>::max() ||
+        curr.anchor == std::numeric_limits<std::size_t>::max())
+      continue;
+    if (add_projected_metadata_edge(prev.anchor, curr.anchor, true,
+                                    metadata_edge_set,
+                                    data.projected_metadata_edges)) {
+      ++data.metadata_inter_edges;
+    }
+  }
+
+  data.metadata_graph_available = true;
 }
 
 std::vector<PbctopoContinuityPair> build_local_continuity_pairs(
     const Multi_MOL &system, const PbctopoSystemStaticData &static_data) {
   std::vector<PbctopoContinuityPair> continuity_pairs;
-  continuity_pairs.reserve(static_data.atom_count);
-  if (system.info.size() == static_data.atom_count &&
-      static_data.atom_count > 0) {
-    auto atom_priority = [&](std::size_t atom_idx) {
-      const std::string atom_name = system.info[atom_idx].get_atom();
-      if (atom_name == "CA")
-        return 0;
-      if (atom_name == "C4'" || atom_name == "C4*")
-        return 1;
-      if (atom_name == "BB")
-        return 2;
-      if (atom_idx < static_data.heavy_mask.size() &&
-          static_data.heavy_mask[atom_idx] != 0)
-        return 3;
-      return 4;
-    };
+  if (static_data.atom_count == 0)
+    return continuity_pairs;
 
-    auto append_range_pairs = [&](std::size_t begin, std::size_t end) {
-      if (begin >= end || begin >= static_data.atom_count)
-        return;
-      end = std::min(end, static_data.atom_count);
-
-      std::size_t prev_anchor = std::numeric_limits<std::size_t>::max();
-      std::string prev_chain;
-      std::size_t prev_chainnum = std::numeric_limits<std::size_t>::max();
-      std::size_t i = begin;
-      while (i < end) {
-        const auto &start_info = system.info[i];
-        const std::size_t chainnum = start_info.get_chainnum();
-        const std::string chain = start_info.get_chain();
-        const std::size_t resnr = start_info.get_resnr();
-        std::size_t j = i + 1;
-        while (j < end && system.info[j].get_chainnum() == chainnum &&
-               system.info[j].get_chain() == chain &&
-               system.info[j].get_resnr() == resnr) {
-          ++j;
-        }
-
-        std::size_t anchor = std::numeric_limits<std::size_t>::max();
-        int best_priority = std::numeric_limits<int>::max();
-        for (std::size_t atom_idx = i; atom_idx < j; ++atom_idx) {
-          const int priority = atom_priority(atom_idx);
-          if (priority < best_priority) {
-            best_priority = priority;
-            anchor = atom_idx;
-          }
-        }
-
-        if (anchor != std::numeric_limits<std::size_t>::max()) {
-          if (prev_anchor != std::numeric_limits<std::size_t>::max() &&
-              chainnum == prev_chainnum && chain == prev_chain) {
-            continuity_pairs.push_back({prev_anchor, anchor});
-          }
-          prev_anchor = anchor;
-          prev_chainnum = chainnum;
-          prev_chain = chain;
-        }
-        i = j;
-      }
-    };
-
-    if (static_data.ranges.empty()) {
-      append_range_pairs(0, static_data.atom_count);
-    } else {
-      for (const auto &range : static_data.ranges)
-        append_range_pairs(range.begin, range.end);
-    }
-
-    if (!continuity_pairs.empty())
+  if (!system.topology.has_bonds()) {
+    if (!static_data.metadata_graph_available)
       return continuity_pairs;
+    continuity_pairs.reserve(static_data.projected_metadata_edges.size());
+    for (const auto &edge : static_data.projected_metadata_edges)
+      continuity_pairs.push_back({edge.a, edge.b});
+    return continuity_pairs;
   }
 
-  for (const auto &range : static_data.ranges) {
-    std::size_t prev = std::numeric_limits<std::size_t>::max();
-    for (std::size_t atom_idx = range.begin; atom_idx < range.end; ++atom_idx) {
-      if (atom_idx < static_data.heavy_mask.size() &&
-          static_data.heavy_mask[atom_idx] == 0) {
-        continue;
-      }
-      if (prev != std::numeric_limits<std::size_t>::max())
-        continuity_pairs.push_back({prev, atom_idx});
-      prev = atom_idx;
+  continuity_pairs.reserve(system.topology.bonds().size());
+  for (const MolTopologyBond &bond : system.topology.bonds()) {
+    if (bond.a >= static_data.atom_count || bond.b >= static_data.atom_count ||
+        bond.a == bond.b) {
+      continue;
     }
+    const bool a_heavy = bond.a >= static_data.heavy_mask.size() ||
+                         static_data.heavy_mask[bond.a] != 0;
+    const bool b_heavy = bond.b >= static_data.heavy_mask.size() ||
+                         static_data.heavy_mask[bond.b] != 0;
+    if (!a_heavy || !b_heavy)
+      continue;
+    continuity_pairs.push_back({bond.a, bond.b});
   }
   return continuity_pairs;
+}
+
+void build_projected_topology_bonds(
+    const MolTopology &topology, std::size_t atom_count,
+    std::vector<PbctopoProjectedTopologyBond> &projected_bonds) {
+  projected_bonds.clear();
+  if (!topology.has_bonds() || atom_count == 0)
+    return;
+
+  projected_bonds.reserve(topology.bonds().size());
+  for (const MolTopologyBond &bond : topology.bonds()) {
+    if (bond.a >= atom_count || bond.b >= atom_count || bond.a == bond.b)
+      continue;
+    projected_bonds.push_back({bond.a, bond.b});
+  }
 }
 
 void append_global_continuity_pairs(
@@ -291,6 +369,50 @@ void build_anchor_index_list(
       seen[pair.b] = 1;
       anchor_indices.push_back(pair.b);
     }
+  }
+}
+
+void build_metadata_anchor_index_list(
+    const Multi_MOL &system, const PbctopoSystemStaticData &static_data,
+    std::vector<std::size_t> &anchor_indices) {
+  anchor_indices.clear();
+  if (system.info.size() != static_data.atom_count ||
+      static_data.atom_count == 0) {
+    return;
+  }
+
+  std::vector<char> seen(static_data.atom_count, 0);
+  auto append_range_anchors = [&](std::size_t begin, std::size_t end) {
+    if (begin >= end || begin >= static_data.atom_count)
+      return;
+    end = std::min(end, static_data.atom_count);
+    std::size_t i = begin;
+    while (i < end) {
+      const auto &start_info = system.info[i];
+      const std::size_t chainnum = start_info.get_chainnum();
+      const std::size_t internal_resnr = start_info.get_internal_resnr();
+      std::size_t j = i + 1;
+      while (j < end && system.info[j].get_chainnum() == chainnum &&
+             system.info[j].get_internal_resnr() == internal_resnr) {
+        ++j;
+      }
+
+      const std::size_t anchor =
+          choose_metadata_residue_anchor(system, static_data, i, j);
+      if (anchor != std::numeric_limits<std::size_t>::max() &&
+          seen[anchor] == 0) {
+        seen[anchor] = 1;
+        anchor_indices.push_back(anchor);
+      }
+      i = j;
+    }
+  };
+
+  if (static_data.ranges.empty()) {
+    append_range_anchors(0, static_data.atom_count);
+  } else {
+    for (const auto &range : static_data.ranges)
+      append_range_anchors(range.begin, range.end);
   }
 }
 
@@ -336,6 +458,11 @@ PbctopoSystemStaticData
 build_pbctopo_system_static_data(const Multi_MOL &system, const MOL &mol) {
   PbctopoSystemStaticData data;
   data.atom_count = mol.pos.x.size();
+  data.topology_graph_available = system.topology.available();
+  data.topology_bonds_available =
+      data.topology_graph_available ? system.topology.bonds().size() : 0;
+  build_projected_topology_bonds(system.topology, data.atom_count,
+                                 data.projected_topology_bonds);
   data.ranges = build_ranges_for_system(system, mol);
   data.heavy_mask.assign(data.atom_count, 1);
   data.heavy_count = 0;
@@ -348,6 +475,8 @@ build_pbctopo_system_static_data(const Multi_MOL &system, const MOL &mol) {
     std::fill(data.heavy_mask.begin(), data.heavy_mask.end(), 1);
     data.heavy_count = data.atom_count;
   }
+  if (!data.topology_graph_available)
+    build_projected_metadata_graph(system, data);
   PbctopoSystemStaticData continuity_data = data;
   continuity_data.ranges =
       build_ranges_from_topology(system.topology, mol.pos.x.size());
@@ -358,8 +487,14 @@ build_pbctopo_system_static_data(const Multi_MOL &system, const MOL &mol) {
     continuity_data.ranges = data.ranges;
   data.continuity_pairs_local =
       build_local_continuity_pairs(system, continuity_data);
-  build_anchor_index_list(data.atom_count, data.continuity_pairs_local,
-                          data.continuity_anchor_local);
+  if (data.continuity_anchor_local.empty()) {
+    build_metadata_anchor_index_list(system, continuity_data,
+                                     data.continuity_anchor_local);
+  }
+  if (data.continuity_anchor_local.empty()) {
+    build_anchor_index_list(data.atom_count, data.continuity_pairs_local,
+                            data.continuity_anchor_local);
+  }
   return data;
 }
 
@@ -445,7 +580,8 @@ void build_projection_edge_subset(
     if (!projection_edge_set.insert(atom_pair_key(mapped_a, mapped_b)).second)
       continue;
     projection_edges.push_back({mapped_a, mapped_b, edge.ref_d2,
-                                edge.inv_ref_d2, edge.break_cutoff_d2});
+                                edge.inv_ref_d2, edge.break_cutoff_d2,
+                                edge.kind});
   }
 }
 
@@ -521,13 +657,13 @@ void append_atoms_for_system(const MOL &mol,
     if (info != nullptr && local < info->size()) {
       const auto &atom_info = (*info)[local];
       const std::uint64_t chainnum =
-          static_cast<std::uint64_t>(atom_info.get_chainnum() & 0xffffffffu);
-      const std::uint64_t chainhash =
-          static_cast<std::uint64_t>(std::hash<std::string>{}(atom_info.get_chain()));
-      atom.chain_key = (chainnum << 32) ^ (chainhash & 0xffffffffu);
-      atom.residue_id = static_cast<int>(atom_info.get_resnr());
+          static_cast<std::uint64_t>(atom_info.get_chainnum());
+      atom.chain_key = chainnum;
+      atom.residue_id = static_cast<int>(atom_info.get_internal_resnr());
       atom.has_topology_key = true;
     }
+    atom.has_topology_graph =
+        static_data != nullptr && static_data->topology_graph_available;
     atom.is_heavy =
         (static_data != nullptr && local < static_data->heavy_mask.size())
             ? (static_data->heavy_mask[local] != 0)
@@ -550,13 +686,32 @@ void build_local_neighborhood_graph(
   edge_set.clear();
   if (atoms.size() < 2)
     return;
-  const std::vector<int> residue_sequence_indices =
-      build_topology_residue_sequence_indices(atoms);
 
   const double kBondCutoff = bond_cutoff;
   const double kBondCutoff2 = bond_cutoff * bond_cutoff;
   edges.reserve(atoms.size() * 2);
   edge_set.reserve(atoms.size() * 2);
+  std::vector<std::size_t> degree(atoms.size(), 0);
+  auto same_local_unit = [](const PbctopoAtom &lhs, const PbctopoAtom &rhs) {
+    if (lhs.owner != rhs.owner)
+      return false;
+    if (lhs.has_topology_key && rhs.has_topology_key)
+      return lhs.chain_key == rhs.chain_key;
+    return true;
+  };
+  auto add_edge = [&](std::size_t a, std::size_t b, double d2) {
+    const std::uint64_t pair_key = atom_pair_key(a, b);
+    if (!edge_set.insert(pair_key).second)
+      return false;
+    const double ref_d2 = std::max(d2, 1.0e-6);
+    edges.push_back({a, b, ref_d2, 1.0 / ref_d2,
+                     std::max(9.0, ref_d2 * 4.0),
+                     PbctopoLocalEdgeKind::GeometryHeuristic});
+    ++degree[a];
+    ++degree[b];
+    return true;
+  };
+  const PbctopoLocalBoxBasis basis(Box);
   const BoxMatrix box_matrix(Box);
   const double sx_bound = std::min(
       0.5, kBondCutoff *
@@ -611,76 +766,77 @@ void build_local_neighborhood_graph(
             continue;
           for (std::size_t j : it->second) {
             const auto &aj = atoms[j];
-            if (ai.owner != aj.owner)
-              continue;
-            if (ai.has_topology_key && aj.has_topology_key) {
-              if (ai.chain_key != aj.chain_key)
+            if (!same_local_unit(ai, aj))
                 continue;
-              const int ai_residue_rank = residue_sequence_indices[i];
-              const int aj_residue_rank = residue_sequence_indices[j];
-              if (ai_residue_rank != std::numeric_limits<int>::min() &&
-                  aj_residue_rank != std::numeric_limits<int>::min()) {
-                if (std::abs(ai_residue_rank - aj_residue_rank) > 1)
-                  continue;
-              } else if (std::abs(ai.residue_id - aj.residue_id) > 1) {
-                continue;
-              }
-            }
             double dsx = aj.sx - ai.sx;
             double dsy = aj.sy - ai.sy;
             double dsz = aj.sz - ai.sz;
-            dsx -= std::round(dsx);
-            dsy -= std::round(dsy);
-            dsz -= std::round(dsz);
-            const double d2 = cart_dist_sq_from_scaled_delta(Box, dsx, dsy, dsz);
+            const double d2 = nearest_image_delta_27(basis, dsx, dsy, dsz).d2;
             if (d2 > kBondCutoff2)
               continue;
-            const std::uint64_t pair_key = atom_pair_key(i, j);
-            if (!edge_set.insert(pair_key).second)
-              continue;
-            const double ref_d2 = std::max(d2, 1.0e-6);
-            edges.push_back(
-                {j, i, d2, 1.0 / ref_d2, std::max(9.0, ref_d2 * 4.0)});
+            add_edge(j, i, d2);
           }
         }
       }
     }
     bond_grid[{cx, cy, cz}].push_back(i);
   }
+
+  for (std::size_t i = 0; i < atoms.size(); ++i) {
+    const auto &ai = atoms[i];
+    if (!ai.is_heavy || ai.has_topology_graph || degree[i] != 0)
+      continue;
+    std::size_t best = std::numeric_limits<std::size_t>::max();
+    double best_d2 = std::numeric_limits<double>::infinity();
+    for (std::size_t j = 0; j < atoms.size(); ++j) {
+      if (i == j)
+        continue;
+      const auto &aj = atoms[j];
+      if (!aj.is_heavy || aj.has_topology_graph || !same_local_unit(ai, aj))
+        continue;
+      double dsx = aj.sx - ai.sx;
+      double dsy = aj.sy - ai.sy;
+      double dsz = aj.sz - ai.sz;
+      const double d2 = nearest_image_delta_27(basis, dsx, dsy, dsz).d2;
+      if (d2 < best_d2) {
+        best_d2 = d2;
+        best = j;
+      }
+    }
+    if (best != std::numeric_limits<std::size_t>::max())
+      add_edge(i, best, best_d2);
+  }
 }
 
 void append_topology_bond_edges_for_system(
-    const Multi_MOL &system, int owner, const std::vector<PbctopoAtom> &atoms,
-    box Box, std::vector<PbctopoLocalEdge> &edges,
+    const PbctopoSystemStaticData &static_data, std::size_t atom_offset,
+    const std::vector<PbctopoAtom> &atoms, box Box,
+    std::vector<PbctopoLocalEdge> &edges,
     std::unordered_set<std::uint64_t> &edge_set, PbctopoTimingStats &timing) {
-  if (!system.topology.has_bonds())
+  if (!static_data.topology_graph_available &&
+      static_data.topology_bonds_available == 0) {
     return;
-
-  const auto &topology_bonds = system.topology.bonds();
-  timing.pbctopo_topology_bonds_available += topology_bonds.size();
-  if (system.info.empty())
-    return;
-
-  std::vector<std::size_t> local_to_atom(
-      system.info.size(), std::numeric_limits<std::size_t>::max());
-  for (std::size_t atom_idx = 0; atom_idx < atoms.size(); ++atom_idx) {
-    const auto &atom = atoms[atom_idx];
-    if (atom.owner != owner)
-      continue;
-    if (atom.local_atom_index >= local_to_atom.size())
-      continue;
-    local_to_atom[atom.local_atom_index] = atom_idx;
   }
 
-  for (const MolTopologyBond &bond : topology_bonds) {
-    if (bond.a >= local_to_atom.size() || bond.b >= local_to_atom.size()) {
-      ++timing.pbctopo_topology_bond_edges_skipped;
-      continue;
-    }
-    const std::size_t a = local_to_atom[bond.a];
-    const std::size_t b = local_to_atom[bond.b];
-    if (a == std::numeric_limits<std::size_t>::max() ||
-        b == std::numeric_limits<std::size_t>::max() || a == b) {
+  timing.pbctopo_topology_bonds_available +=
+      static_data.topology_bonds_available;
+  timing.pbctopo_topology_projected_bonds +=
+      static_data.projected_topology_bonds.size();
+  if (static_data.topology_bonds_available >
+      static_data.projected_topology_bonds.size()) {
+    timing.pbctopo_topology_bond_edges_skipped +=
+        static_data.topology_bonds_available -
+        static_data.projected_topology_bonds.size();
+  }
+  if (static_data.projected_topology_bonds.empty())
+    return;
+
+  const PbctopoLocalBoxBasis basis(Box);
+  for (const PbctopoProjectedTopologyBond &bond :
+       static_data.projected_topology_bonds) {
+    const std::size_t a = atom_offset + bond.a;
+    const std::size_t b = atom_offset + bond.b;
+    if (a >= atoms.size() || b >= atoms.size() || a == b) {
       ++timing.pbctopo_topology_bond_edges_skipped;
       continue;
     }
@@ -688,26 +844,71 @@ void append_topology_bond_edges_for_system(
     const std::uint64_t pair_key = atom_pair_key(a, b);
     if (!edge_set.insert(pair_key).second) {
       ++timing.pbctopo_topology_bond_edges_skipped;
+      ++timing.pbctopo_topology_duplicate_edges;
       continue;
     }
 
     double dsx = atoms[b].sx - atoms[a].sx;
     double dsy = atoms[b].sy - atoms[a].sy;
     double dsz = atoms[b].sz - atoms[a].sz;
-    dsx -= std::round(dsx);
-    dsy -= std::round(dsy);
-    dsz -= std::round(dsz);
-    const double d2 = cart_dist_sq_from_scaled_delta(Box, dsx, dsy, dsz);
+    const double d2 = nearest_image_delta_27(basis, dsx, dsy, dsz).d2;
     const double ref_d2 = std::max(d2, 1.0e-6);
-    edges.push_back({a, b, d2, 1.0 / ref_d2, std::max(9.0, ref_d2 * 4.0)});
+    edges.push_back({a, b, ref_d2, 1.0 / ref_d2,
+                     std::max(9.0, ref_d2 * 4.0),
+                     PbctopoLocalEdgeKind::TopologyBond});
     ++timing.pbctopo_topology_bond_edges_added;
   }
 }
 
+void append_metadata_graph_edges_for_system(
+    const PbctopoSystemStaticData &static_data, std::size_t atom_offset,
+    const std::vector<PbctopoAtom> &atoms,
+    std::vector<PbctopoLocalEdge> &edges,
+    std::unordered_set<std::uint64_t> &edge_set, PbctopoTimingStats &timing) {
+  if (!static_data.metadata_graph_available)
+    return;
+
+  timing.pbctopo_metadata_residue_groups +=
+      static_data.metadata_residue_groups;
+  timing.pbctopo_metadata_intra_edges += static_data.metadata_intra_edges;
+  timing.pbctopo_metadata_inter_edges += static_data.metadata_inter_edges;
+  if (static_data.projected_metadata_edges.empty())
+    return;
+
+  const double neutral_ref = std::numeric_limits<double>::infinity();
+  for (const PbctopoProjectedMetadataEdge &edge :
+       static_data.projected_metadata_edges) {
+    const std::size_t a = atom_offset + edge.a;
+    const std::size_t b = atom_offset + edge.b;
+    if (a >= atoms.size() || b >= atoms.size() || a == b)
+      continue;
+    if (!edge_set.insert(atom_pair_key(a, b)).second)
+      continue;
+    edges.push_back({a, b, neutral_ref, 0.0, neutral_ref,
+                     PbctopoLocalEdgeKind::MetadataSkeleton});
+  }
+}
+
 std::string pbctopo_topology_source_label(const PbctopoTimingStats &timing) {
-  return timing.pbctopo_topology_bonds_available > 0
-             ? "gromacs_topology+geometry_cutoff"
-             : "geometry_cutoff";
+  if (timing.frames > 0 &&
+      timing.pbctopo_topology_static_graph_frames == timing.frames)
+    return "gromacs_topology";
+  if (timing.frames > 0 &&
+      timing.pbctopo_metadata_graph_frames == timing.frames)
+    return "metadata_chain_residue";
+  if (timing.pbctopo_metadata_graph_frames > 0 &&
+      timing.pbctopo_topology_bonds_available > 0)
+    return "mixed";
+  if (timing.pbctopo_metadata_graph_frames > 0 &&
+      timing.pbctopo_geometry_fallback_frames > 0)
+    return "mixed";
+  if (timing.pbctopo_metadata_graph_frames > 0)
+    return "metadata_chain_residue";
+  if (timing.pbctopo_topology_bonds_available == 0)
+    return "geometry_cutoff";
+  if (timing.pbctopo_geometry_fallback_frames > 0)
+    return "mixed";
+  return "gromacs_topology";
 }
 
 } // namespace titan_pbctopo

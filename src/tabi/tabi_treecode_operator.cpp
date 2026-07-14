@@ -412,9 +412,14 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
             const JcpNearAccum coupled_sum = accumulate_jcp_near_ordered(
                 panels[i], i, panels, unknowns, eps_ratio, kappa, coupled,
                 order, 0, n, near_integration, quad_buffer, &worker_stats);
-            out[i] = lhs_phi * unknowns[i] - coupled_sum.phi;
+            out[i] = jcp_lhs_phi_for_panel(panels[i], eps_ratio, lhs_phi) *
+                         unknowns[i] -
+                     coupled_sum.phi;
             if (coupled)
-              out[n + i] = lhs_phin * unknowns[n + i] - coupled_sum.phin;
+              out[n + i] =
+                  jcp_lhs_phin_for_panel(panels[i], eps_ratio, lhs_phin) *
+                      unknowns[n + i] -
+                  coupled_sum.phin;
           }
           local_near[worker] += local_near_stats[worker].near_centroid_pairs +
                                 local_near_stats[worker].near_duffy_pairs +
@@ -1638,9 +1643,14 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
               if (coupled && offset < worklist_sum_phin.size())
                 worklist_sum_phin[offset] += sum_phin_i;
             } else {
-              out[i] = lhs_phi * unknowns[i] - sum_phi_i;
+              out[i] = jcp_lhs_phi_for_panel(panels[i], eps_ratio, lhs_phi) *
+                           unknowns[i] -
+                       sum_phi_i;
               if (coupled)
-                out[n + i] = lhs_phin * unknowns[n + i] - sum_phin_i;
+                out[n + i] =
+                    jcp_lhs_phin_for_panel(panels[i], eps_ratio, lhs_phin) *
+                        unknowns[n + i] -
+                    sum_phin_i;
             }
           }
           if (deferred_batch_active) {
@@ -1660,9 +1670,14 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
                   coupled && offset < worklist_sum_phin.size()
                       ? worklist_sum_phin[offset]
                       : 0.0;
-              out[i] = lhs_phi * unknowns[i] - sum_phi_i;
+              out[i] = jcp_lhs_phi_for_panel(panels[i], eps_ratio, lhs_phi) *
+                           unknowns[i] -
+                       sum_phi_i;
               if (coupled)
-                out[n + i] = lhs_phin * unknowns[n + i] - sum_phin_i;
+                out[n + i] =
+                    jcp_lhs_phin_for_panel(panels[i], eps_ratio, lhs_phin) *
+                        unknowns[n + i] -
+                    sum_phin_i;
             }
             if (target_leaf_block_active || cost_tile_worklist_active) {
               local_leaf_pair_batch[worker].leaf_block_writeback_ms +=
@@ -2434,9 +2449,14 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
               sum_phin[i] += far.phin;
             ++far_count;
           }
-          out[i] = lhs_phi * unknowns[i] - sum_phi[i];
+          out[i] = jcp_lhs_phi_for_panel(panels[i], eps_ratio, lhs_phi) *
+                       unknowns[i] -
+                   sum_phi[i];
           if (coupled)
-            out[n + i] = lhs_phin * unknowns[n + i] - sum_phin[i];
+            out[n + i] =
+                jcp_lhs_phin_for_panel(panels[i], eps_ratio, lhs_phin) *
+                    unknowns[n + i] -
+                sum_phin[i];
         }
         local_far[worker] += far_count;
         });

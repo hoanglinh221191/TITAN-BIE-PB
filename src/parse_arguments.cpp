@@ -18,10 +18,9 @@ using namespace std;
 int arguments::parse_arguments(int argc, char **argv) {
   argc = argc;
   auto normalize_mol_type = [](std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) {
-                     return static_cast<char>(std::tolower(c));
-                   });
+    std::transform(
+        value.begin(), value.end(), value.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (value == "ligand")
       value = "lig";
     return value;
@@ -29,8 +28,8 @@ int arguments::parse_arguments(int argc, char **argv) {
 
   auto assign_mol_type = [&](const std::string &value, bool mol1) {
     const std::string t = normalize_mol_type(value);
-    if (t != "protein" && t != "protein-user" && t != "complex" &&
-        t != "lig" && t != "rna" && t != "dna")
+    if (t != "protein" && t != "protein-user" && t != "complex" && t != "lig" &&
+        t != "rna" && t != "dna")
       return false;
 
     if (mol1) {
@@ -45,10 +44,9 @@ int arguments::parse_arguments(int argc, char **argv) {
     return true;
   };
   auto parse_allostery_prune_window = [&](std::string raw_mode) {
-    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
-                   [](unsigned char c) {
-                     return static_cast<char>(std::tolower(c));
-                   });
+    std::transform(
+        raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (raw_mode == "avg" || raw_mode == "all" || raw_mode == "mean") {
       allostery_use_avg_cutoff = true;
       return;
@@ -57,15 +55,13 @@ int arguments::parse_arguments(int argc, char **argv) {
       allostery_use_avg_cutoff = false;
       return;
     }
-    TitanUI::print_error(
-        "Allostery: prune window must be 'avg' or 'first'.");
+    TitanUI::print_error("Allostery: prune window must be 'avg' or 'first'.");
     exit(EXIT_FAILURE);
   };
   auto parse_allostery_knn_prior = [&](std::string raw_mode) {
-    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
-                   [](unsigned char c) {
-                     return static_cast<char>(std::tolower(c));
-                   });
+    std::transform(
+        raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (raw_mode == "frame" || raw_mode == "nearest" || raw_mode == "vote") {
       allostery_knn_use_contact_prior = false;
       return;
@@ -80,10 +76,9 @@ int arguments::parse_arguments(int argc, char **argv) {
     exit(EXIT_FAILURE);
   };
   auto parse_corr_knn_prune_window = [&](std::string raw_mode) {
-    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
-                   [](unsigned char c) {
-                     return static_cast<char>(std::tolower(c));
-                   });
+    std::transform(
+        raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (raw_mode == "avg" || raw_mode == "all" || raw_mode == "mean") {
       corr_knn.use_avg_cutoff = true;
       return;
@@ -92,15 +87,13 @@ int arguments::parse_arguments(int argc, char **argv) {
       corr_knn.use_avg_cutoff = false;
       return;
     }
-    TitanUI::print_error(
-        "Corr-kNN: prune window must be 'avg' or 'first'.");
+    TitanUI::print_error("Corr-kNN: prune window must be 'avg' or 'first'.");
     exit(EXIT_FAILURE);
   };
   auto parse_corr_knn_pair_prior = [&](std::string raw_mode) {
-    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
-                   [](unsigned char c) {
-                     return static_cast<char>(std::tolower(c));
-                   });
+    std::transform(
+        raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (raw_mode == "frame" || raw_mode == "nearest" || raw_mode == "vote") {
       corr_knn.pair_use_contact_prior = false;
       return;
@@ -111,7 +104,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       return;
     }
     TitanUI::print_error(
-      "Corr-kNN: -corr-knn-pair-prior must be 'frame' or 'contact'.");
+        "Corr-kNN: -corr-knn-pair-prior must be 'frame' or 'contact'.");
     exit(EXIT_FAILURE);
   };
   auto parse_validation_int_list = [&](const std::string &raw_list,
@@ -123,9 +116,8 @@ int arguments::parse_arguments(int argc, char **argv) {
     std::istringstream iss(normalized);
     for (std::string token; std::getline(iss, token, ',');) {
       token.erase(
-          std::remove_if(token.begin(), token.end(), [](unsigned char c) {
-            return std::isspace(c) != 0;
-          }),
+          std::remove_if(token.begin(), token.end(),
+                         [](unsigned char c) { return std::isspace(c) != 0; }),
           token.end());
       if (token.empty())
         continue;
@@ -144,10 +136,9 @@ int arguments::parse_arguments(int argc, char **argv) {
     flag_network = true;
   };
   auto parse_allostery_estimator = [&](std::string raw_mode) {
-    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
-                   [](unsigned char c) {
-                     return static_cast<char>(std::tolower(c));
-                   });
+    std::transform(
+        raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (raw_mode == "hist" || raw_mode == "histogram") {
       allostery_estimator = "hist";
       return;
@@ -165,10 +156,9 @@ int arguments::parse_arguments(int argc, char **argv) {
     exit(EXIT_FAILURE);
   };
   auto parse_msm_its_solver = [&](std::string raw_mode) {
-    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
-                   [](unsigned char c) {
-                     return static_cast<char>(std::tolower(c));
-                   });
+    std::transform(
+        raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (raw_mode == "full") {
       msm.msm_its_solver = MsmArgs::ItsSolverMode::Full;
       return;
@@ -186,12 +176,10 @@ int arguments::parse_arguments(int argc, char **argv) {
     exit(EXIT_FAILURE);
   };
 
-
   auto parse_pca_solver = [&](std::string raw_mode) {
-    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
-                   [](unsigned char c) {
-                     return static_cast<char>(std::tolower(c));
-                   });
+    std::transform(
+        raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (raw_mode == "full") {
       msm.pca_solver = MsmArgs::PcaSolverMode::Full;
       return;
@@ -200,17 +188,15 @@ int arguments::parse_arguments(int argc, char **argv) {
       msm.pca_solver = MsmArgs::PcaSolverMode::Partial;
       return;
     }
-    TitanUI::print_error(
-        "PCA: -pca-solver must be one of full, partial.");
+    TitanUI::print_error("PCA: -pca-solver must be one of full, partial.");
     exit(EXIT_FAILURE);
   };
   auto parse_sq_auto_or_value = [&](const std::string &raw_value, double &out,
                                     bool &auto_flag, const char *label) {
     std::string value = raw_value;
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) {
-                     return static_cast<char>(std::tolower(c));
-                   });
+    std::transform(
+        value.begin(), value.end(), value.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (value == "auto") {
       out = 0.0;
       auto_flag = true;
@@ -226,10 +212,9 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
   };
   auto parse_hbk_domain = [&](std::string raw_mode) {
-    std::transform(raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
-                   [](unsigned char c) {
-                     return static_cast<char>(std::tolower(c));
-                   });
+    std::transform(
+        raw_mode.begin(), raw_mode.end(), raw_mode.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (raw_mode == "inter" || raw_mode == "intra" || raw_mode == "both") {
       hbk.hbk_domain = raw_mode;
       return;
@@ -239,10 +224,9 @@ int arguments::parse_arguments(int argc, char **argv) {
     exit(EXIT_FAILURE);
   };
   auto parse_bool_equals = [&](std::string raw_value, const char *flag_name) {
-    std::transform(raw_value.begin(), raw_value.end(), raw_value.begin(),
-                   [](unsigned char c) {
-                     return static_cast<char>(std::tolower(c));
-                   });
+    std::transform(
+        raw_value.begin(), raw_value.end(), raw_value.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (raw_value.empty() || raw_value == "1" || raw_value == "true" ||
         raw_value == "yes" || raw_value == "on")
       return true;
@@ -253,24 +237,24 @@ int arguments::parse_arguments(int argc, char **argv) {
                          " must be true/false (or 1/0, yes/no, on/off).");
     exit(EXIT_FAILURE);
   };
-  auto consume_option_value =
-      [&](const std::string &arg, std::initializer_list<const char *> flags,
-          std::string &value_out, int &arg_index) {
-        for (const char *flag : flags) {
-          const std::string flag_text(flag);
-          const std::string prefix = flag_text + "=";
-          if (arg.rfind(prefix, 0) == 0) {
-            value_out = arg.substr(prefix.size());
-            return true;
-          }
-          if (arg == flag_text && arg_index + 1 < argc) {
-            value_out = string(argv[arg_index + 1]);
-            ++arg_index;
-            return true;
-          }
-        }
-        return false;
-      };
+  auto consume_option_value = [&](const std::string &arg,
+                                  std::initializer_list<const char *> flags,
+                                  std::string &value_out, int &arg_index) {
+    for (const char *flag : flags) {
+      const std::string flag_text(flag);
+      const std::string prefix = flag_text + "=";
+      if (arg.rfind(prefix, 0) == 0) {
+        value_out = arg.substr(prefix.size());
+        return true;
+      }
+      if (arg == flag_text && arg_index + 1 < argc) {
+        value_out = string(argv[arg_index + 1]);
+        ++arg_index;
+        return true;
+      }
+    }
+    return false;
+  };
   auto consume_required_option_value =
       [&](const std::string &arg, std::initializer_list<const char *> flags,
           std::string &value_out, int &arg_index) {
@@ -286,42 +270,40 @@ int arguments::parse_arguments(int argc, char **argv) {
         }
         return false;
       };
-  auto consume_bool_option =
-      [&](const std::string &arg, std::initializer_list<const char *> flags,
-          bool &value_out, int &arg_index) {
-        for (const char *flag : flags) {
-          const std::string flag_text(flag);
-          const std::string prefix = flag_text + "=";
-          if (arg == flag_text) {
-            if (arg_index + 1 < argc) {
-              std::string next = string(argv[arg_index + 1]);
-              std::transform(next.begin(), next.end(), next.begin(),
-                             [](unsigned char c) {
-                               return static_cast<char>(std::tolower(c));
-                             });
-              if (next == "1" || next == "0" || next == "true" ||
-                  next == "false" || next == "yes" || next == "no" ||
-                  next == "on" || next == "off") {
-                value_out = parse_bool_equals(next, flag);
-                ++arg_index;
-                return true;
-              }
-            }
-            value_out = true;
-            return true;
-          }
-          if (arg.rfind(prefix, 0) == 0) {
-            value_out = parse_bool_equals(arg.substr(prefix.size()), flag);
+  auto consume_bool_option = [&](const std::string &arg,
+                                 std::initializer_list<const char *> flags,
+                                 bool &value_out, int &arg_index) {
+    for (const char *flag : flags) {
+      const std::string flag_text(flag);
+      const std::string prefix = flag_text + "=";
+      if (arg == flag_text) {
+        if (arg_index + 1 < argc) {
+          std::string next = string(argv[arg_index + 1]);
+          std::transform(next.begin(), next.end(), next.begin(),
+                         [](unsigned char c) {
+                           return static_cast<char>(std::tolower(c));
+                         });
+          if (next == "1" || next == "0" || next == "true" || next == "false" ||
+              next == "yes" || next == "no" || next == "on" || next == "off") {
+            value_out = parse_bool_equals(next, flag);
+            ++arg_index;
             return true;
           }
         }
-        return false;
-      };
+        value_out = true;
+        return true;
+      }
+      if (arg.rfind(prefix, 0) == 0) {
+        value_out = parse_bool_equals(arg.substr(prefix.size()), flag);
+        return true;
+      }
+    }
+    return false;
+  };
   auto lowercase_copy = [](std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) {
-                     return static_cast<char>(std::tolower(c));
-                   });
+    std::transform(
+        value.begin(), value.end(), value.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return value;
   };
   auto require_choice = [&](std::string value,
@@ -344,9 +326,8 @@ int arguments::parse_arguments(int argc, char **argv) {
     TitanUI::print_error(msg.str());
     exit(EXIT_FAILURE);
   };
-  auto parse_double_range = [&](const std::string &value,
-                                 const char *flag_name, double min_value,
-                                 double max_value) {
+  auto parse_double_range = [&](const std::string &value, const char *flag_name,
+                                double min_value, double max_value) {
     double parsed = 0.0;
     try {
       parsed = std::stod(value);
@@ -469,8 +450,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.tabi_matvec_audit = "off";
       return;
     }
-    TitanUI::print_error(
-        "PBE: -pbe-tabi-tree-preset must be off, stage3u-safe, stage3u-perf, or stage3u-perf2.");
+    TitanUI::print_error("PBE: -pbe-tabi-tree-preset must be off, "
+                         "stage3u-safe, stage3u-perf, or stage3u-perf2.");
     exit(EXIT_FAILURE);
   };
   auto parse_pbe_test_center = [&](std::string value) {
@@ -485,8 +466,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     double y = 0.0;
     double z = 0.0;
     if (!(iss >> x >> y >> z)) {
-      TitanUI::print_error(
-          "PBE: -pbe-test-center must be auto or x,y,z.");
+      TitanUI::print_error("PBE: -pbe-test-center must be auto or x,y,z.");
       exit(EXIT_FAILURE);
     }
     std::string trailing;
@@ -587,10 +567,10 @@ int arguments::parse_arguments(int argc, char **argv) {
           "decomposition and keep -fmap for force maps.");
       exit(EXIT_FAILURE);
     }
-    if (arg == "-emap" || arg.rfind("-emap=", 0) == 0 ||
-        arg == "-emap-level" || arg.rfind("-emap-level=", 0) == 0 ||
-        arg == "-energy-res" || arg.rfind("-energy-res=", 0) == 0 ||
-        arg == "-new-emap" || arg.rfind("-new-emap=", 0) == 0) {
+    if (arg == "-emap" || arg.rfind("-emap=", 0) == 0 || arg == "-emap-level" ||
+        arg.rfind("-emap-level=", 0) == 0 || arg == "-energy-res" ||
+        arg.rfind("-energy-res=", 0) == 0 || arg == "-new-emap" ||
+        arg.rfind("-new-emap=", 0) == 0) {
       TitanUI::print_error(
           "Energy decomposition: legacy option " + arg +
           " is no longer supported; use -edecomp=true and the -edecomp-* "
@@ -711,20 +691,19 @@ int arguments::parse_arguments(int argc, char **argv) {
       uncertainty.mode = lowercase_copy(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-uncertainty-blocks",
-                                   "--uncertainty-blocks"},
+    if (consume_option_value(arg,
+                             {"-uncertainty-blocks", "--uncertainty-blocks"},
                              common_value, i)) {
       uncertainty.blocks = lowercase_copy(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-uncertainty-bootstrap",
-                                   "--uncertainty-bootstrap"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-uncertainty-bootstrap", "--uncertainty-bootstrap"},
+            common_value, i)) {
       uncertainty.bootstrap_samples = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-uncertainty-seed",
-                                   "--uncertainty-seed"},
+    if (consume_option_value(arg, {"-uncertainty-seed", "--uncertainty-seed"},
                              common_value, i)) {
       uncertainty.seed = static_cast<unsigned int>(stoul(common_value));
       continue;
@@ -789,23 +768,23 @@ int arguments::parse_arguments(int argc, char **argv) {
       cmap.new_option_explicit = true;
       continue;
     }
-    if (consume_option_value(arg, {"-cmap-mode", "--cmap-mode"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-cmap-mode", "--cmap-mode"}, common_value,
+                             i)) {
       cmap.flag_cmap = true;
       cmap.new_option_explicit = true;
       cmap.mode = common_value;
       continue;
     }
-    if (consume_option_value(arg, {"-cmap-cut", "--cmap-cut"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-cmap-cut", "--cmap-cut"}, common_value,
+                             i)) {
       cmap.flag_cmap = true;
       cmap.new_option_explicit = true;
       cmap.cutoff_explicit = true;
       cmap.cutoff_ang = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-cmap-scope", "--cmap-scope"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-cmap-scope", "--cmap-scope"}, common_value,
+                             i)) {
       cmap.flag_cmap = true;
       cmap.new_option_explicit = true;
       cmap.scope = common_value;
@@ -864,8 +843,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       qnative.domain = common_value;
       continue;
     }
-    if (consume_option_value(arg, {"-qnative-min-seqsep",
-                                   "--qnative-min-seqsep"},
+    if (consume_option_value(arg,
+                             {"-qnative-min-seqsep", "--qnative-min-seqsep"},
                              common_value, i)) {
       qnative.flag_qnative = true;
       qnative.min_seqsep_explicit = true;
@@ -896,8 +875,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       dihedral.kind = common_value;
       continue;
     }
-    if (consume_option_value(arg, {"-dihedral-residues",
-                                   "--dihedral-residues"},
+    if (consume_option_value(arg, {"-dihedral-residues", "--dihedral-residues"},
                              common_value, i)) {
       dihedral.flag_dihedral = true;
       dihedral.residues = common_value;
@@ -909,8 +887,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       dihedral.stride = stoi(common_value);
       continue;
     }
-    if (consume_bool_option(arg, {"-dihedral-export-tica",
-                                  "--dihedral-export-tica"},
+    if (consume_bool_option(arg,
+                            {"-dihedral-export-tica", "--dihedral-export-tica"},
                             dihedral.export_tica, i)) {
       dihedral.flag_dihedral = true;
       continue;
@@ -924,8 +902,8 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (consume_bool_option(arg, {"-s2", "--s2"}, s2.flag_s2, i)) {
       continue;
     }
-    if (consume_option_value(arg, {"-s2-vector", "--s2-vector"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-s2-vector", "--s2-vector"}, common_value,
+                             i)) {
       s2.flag_s2 = true;
       s2.vector = lowercase_copy(common_value);
       continue;
@@ -942,8 +920,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       }
       continue;
     }
-    if (consume_option_value(arg, {"-s2-maxlag", "--s2-maxlag"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-s2-maxlag", "--s2-maxlag"}, common_value,
+                             i)) {
       s2.flag_s2 = true;
       s2.maxlag = lowercase_copy(common_value);
       continue;
@@ -980,8 +958,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       msd.mode = common_value;
       continue;
     }
-    if (consume_option_value(arg, {"-msd-maxlag", "--msd-maxlag"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-msd-maxlag", "--msd-maxlag"}, common_value,
+                             i)) {
       msd.flag_msd = true;
       msd.maxlag = common_value;
       continue;
@@ -992,21 +970,19 @@ int arguments::parse_arguments(int argc, char **argv) {
       msd.fit_window = common_value;
       continue;
     }
-    if (consume_option_value(arg, {"-msd-pbc", "--msd-pbc"}, common_value,
-                             i)) {
+    if (consume_option_value(arg, {"-msd-pbc", "--msd-pbc"}, common_value, i)) {
       msd.flag_msd = true;
       msd.pbc = common_value;
       continue;
     }
-    if (consume_option_value(arg, {"-msd-rot", "--msd-rot"}, common_value,
-                             i)) {
+    if (consume_option_value(arg, {"-msd-rot", "--msd-rot"}, common_value, i)) {
       msd.flag_msd = true;
       msd.rot = parse_bool_equals(common_value, "-msd-rot");
       continue;
     }
-    if (consume_option_value(
-            arg, {"-msd-rot-fit-window", "--msd-rot-fit-window"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-msd-rot-fit-window", "--msd-rot-fit-window"},
+                             common_value, i)) {
       msd.flag_msd = true;
       msd.rot = true;
       msd.rot_fit_window = common_value;
@@ -1065,11 +1041,10 @@ int arguments::parse_arguments(int argc, char **argv) {
       membrane.leaflet_file = common_value;
       continue;
     }
-    if (consume_option_value(
-            arg,
-            {"-membrane-flipflop-persistence",
-             "--membrane-flipflop-persistence"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-membrane-flipflop-persistence",
+                              "--membrane-flipflop-persistence"},
+                             common_value, i)) {
       membrane.flag_membrane = true;
       try {
         size_t parsed_chars = 0;
@@ -1077,24 +1052,22 @@ int arguments::parse_arguments(int argc, char **argv) {
         if (parsed_chars != common_value.size())
           throw std::invalid_argument("trailing characters");
       } catch (...) {
-        TitanUI::print_error(
-            "Membrane: -membrane-flipflop-persistence must be an integer >= 1.");
+        TitanUI::print_error("Membrane: -membrane-flipflop-persistence must be "
+                             "an integer >= 1.");
         exit(EXIT_FAILURE);
       }
       continue;
     }
-    if (consume_bool_option(arg,
-                            {"-membrane-protein-contacts",
-                             "--membrane-protein-contacts"},
-                            membrane.protein_contacts, i)) {
+    if (consume_bool_option(
+            arg, {"-membrane-protein-contacts", "--membrane-protein-contacts"},
+            membrane.protein_contacts, i)) {
       if (membrane.protein_contacts)
         membrane.flag_membrane = true;
       continue;
     }
-    if (consume_option_value(arg,
-                             {"-membrane-contact-cut",
-                              "--membrane-contact-cut"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-membrane-contact-cut", "--membrane-contact-cut"},
+            common_value, i)) {
       membrane.flag_membrane = true;
       try {
         size_t parsed_chars = 0;
@@ -1108,8 +1081,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       }
       continue;
     }
-    if (consume_bool_option(arg, {"-membrane-enrichment",
-                                  "--membrane-enrichment"},
+    if (consume_bool_option(arg,
+                            {"-membrane-enrichment", "--membrane-enrichment"},
                             membrane.enrichment, i)) {
       if (membrane.enrichment) {
         membrane.flag_membrane = true;
@@ -1117,8 +1090,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       }
       continue;
     }
-    if (consume_option_value(arg, {"-membrane-curvature",
-                                   "--membrane-curvature"},
+    if (consume_option_value(arg,
+                             {"-membrane-curvature", "--membrane-curvature"},
                              common_value, i)) {
       membrane.curvature = lowercase_copy(common_value);
       if (membrane.curvature == "grid")
@@ -1137,16 +1110,15 @@ int arguments::parse_arguments(int argc, char **argv) {
       graph.community_method = common_value;
       continue;
     }
-    if (consume_option_value(arg, {"-graph-filter-topk",
-                                   "--graph-filter-topk"},
+    if (consume_option_value(arg, {"-graph-filter-topk", "--graph-filter-topk"},
                              common_value, i)) {
       graph.flag_graph = true;
       graph.filter_topk = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-graph-filter-component",
-                                   "--graph-filter-component"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-graph-filter-component", "--graph-filter-component"},
+            common_value, i)) {
       graph.flag_graph = true;
       graph.filter_component = common_value;
       continue;
@@ -1157,16 +1129,15 @@ int arguments::parse_arguments(int argc, char **argv) {
       parse_memory_budget(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-sg-mode", "--sg-mode"},
-                             common_value, i)) {
-      sg_mode = require_choice(common_value, {"auto", "stream", "cache"},
-                               "-sg-mode");
+    if (consume_option_value(arg, {"-sg-mode", "--sg-mode"}, common_value, i)) {
+      sg_mode =
+          require_choice(common_value, {"auto", "stream", "cache"}, "-sg-mode");
       continue;
     }
-    if (consume_option_value(arg, {"-sg-cache", "--sg-cache"},
-                             common_value, i)) {
-      sg_cache = require_choice(common_value, {"auto", "off", "on"},
-                                "-sg-cache");
+    if (consume_option_value(arg, {"-sg-cache", "--sg-cache"}, common_value,
+                             i)) {
+      sg_cache =
+          require_choice(common_value, {"auto", "off", "on"}, "-sg-cache");
       continue;
     }
     if (consume_option_value(arg, {"-sg-memory-gb", "--sg-memory-gb"},
@@ -1176,19 +1147,18 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (consume_option_value(arg, {"-sg-timeseries", "--sg-timeseries"},
                              common_value, i)) {
-      sg_timeseries = require_choice(common_value,
-                                     {"auto", "full", "summary-only"},
-                                     "-sg-timeseries");
+      sg_timeseries = require_choice(
+          common_value, {"auto", "full", "summary-only"}, "-sg-timeseries");
       continue;
     }
-    if (consume_option_value(arg, {"-sg-kernel", "--sg-kernel"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-sg-kernel", "--sg-kernel"}, common_value,
+                             i)) {
       sg_kernel = require_choice(common_value, {"auto", "scalar", "avx2"},
                                  "-sg-kernel");
       continue;
     }
-    if (consume_option_value(arg, {"-sg-cutoff", "--sg-cutoff"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-sg-cutoff", "--sg-cutoff"}, common_value,
+                             i)) {
       parse_sg_cutoff(common_value);
       continue;
     }
@@ -1203,19 +1173,18 @@ int arguments::parse_arguments(int argc, char **argv) {
         continue;
       }
     }
-    if (consume_bool_option(arg, {"-low-memory", "--low-memory"},
-                            low_memory, i)) {
+    if (consume_bool_option(arg, {"-low-memory", "--low-memory"}, low_memory,
+                            i)) {
       continue;
     }
     if (consume_option_value(arg, {"-network-mode", "--network-mode"},
                              common_value, i)) {
-      network_mode =
-          require_choice(common_value, {"auto", "dense", "sparse"},
-                         "-network-mode");
+      network_mode = require_choice(common_value, {"auto", "dense", "sparse"},
+                                    "-network-mode");
       continue;
     }
-    if (consume_option_value(arg, {"-network-sparse-cut",
-                                   "--network-sparse-cut"},
+    if (consume_option_value(arg,
+                             {"-network-sparse-cut", "--network-sparse-cut"},
                              common_value, i)) {
       network_sparse_cut = stod(common_value);
       if (network_sparse_cut <= 0.0) {
@@ -1233,12 +1202,11 @@ int arguments::parse_arguments(int argc, char **argv) {
       }
       continue;
     }
-    if (consume_option_value(arg, {"-network-cache-precision",
-                                   "--network-cache-precision"},
-                             common_value, i)) {
-      network_cache_precision =
-          require_choice(common_value, {"auto", "fp32", "fp64"},
-                         "-network-cache-precision");
+    if (consume_option_value(
+            arg, {"-network-cache-precision", "--network-cache-precision"},
+            common_value, i)) {
+      network_cache_precision = require_choice(
+          common_value, {"auto", "fp32", "fp64"}, "-network-cache-precision");
       continue;
     }
     if (consume_option_value(arg, {"-tda-max-points", "--tda-max-points"},
@@ -1251,8 +1219,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       if (backend == "delphi" || backend == "pydelphi" || backend == "fd")
         backend = "grid";
       if (backend != "grid" && backend != "tabi") {
-        TitanUI::print_error(
-            "PBE: -pbe backend must be grid or tabi (aliases: delphi, pydelphi, fd).");
+        TitanUI::print_error("PBE: -pbe backend must be grid or tabi (aliases: "
+                             "delphi, pydelphi, fd).");
         exit(EXIT_FAILURE);
       }
       pbe.backend = backend;
@@ -1262,8 +1230,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (arg == "-pbe" || arg == "--pbe") {
       if (i + 1 < argc) {
         std::string backend = lowercase_copy(string(argv[i + 1]));
-        if (backend == "delphi" || backend == "pydelphi" ||
-            backend == "fd")
+        if (backend == "delphi" || backend == "pydelphi" || backend == "fd")
           backend = "grid";
         if (backend == "grid" || backend == "tabi") {
           pbe.backend = backend;
@@ -1272,8 +1239,8 @@ int arguments::parse_arguments(int argc, char **argv) {
           continue;
         }
         if (!backend.empty() && backend.front() != '-') {
-          TitanUI::print_error(
-              "PBE: -pbe backend must be grid or tabi (aliases: delphi, pydelphi, fd).");
+          TitanUI::print_error("PBE: -pbe backend must be grid or tabi "
+                               "(aliases: delphi, pydelphi, fd).");
           exit(EXIT_FAILURE);
         }
       }
@@ -1283,9 +1250,8 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (arg == "-pbsa" || arg == "--pbsa") {
       if (i + 1 < argc) {
         std::string next_value = lowercase_copy(string(argv[i + 1]));
-        if (next_value == "1" || next_value == "true" ||
-            next_value == "yes" || next_value == "on" ||
-            next_value == "0" || next_value == "false" ||
+        if (next_value == "1" || next_value == "true" || next_value == "yes" ||
+            next_value == "on" || next_value == "0" || next_value == "false" ||
             next_value == "no" || next_value == "off") {
           pbe.pbsa = parse_bool_equals(next_value, "-pbsa");
           if (pbe.pbsa) {
@@ -1311,30 +1277,27 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (consume_option_value(arg, {"-pbsa-components", "--pbsa-components"},
                              common_value, i)) {
-      pbe.pbsa_components = require_choice(
-          common_value, {"auto", "complex,receptor,ligand"},
-          "-pbsa-components");
+      pbe.pbsa_components =
+          require_choice(common_value, {"auto", "complex,receptor,ligand"},
+                         "-pbsa-components");
       continue;
     }
     if (consume_option_value(arg, {"-pbsa-decomp", "--pbsa-decomp"},
                              common_value, i)) {
-      pbe.pbsa_decomp =
-          require_choice(common_value,
-                         {"off", "molecule", "residue", "hybrid", "auto"},
-                         "-pbsa-decomp");
+      pbe.pbsa_decomp = require_choice(
+          common_value, {"off", "molecule", "residue", "hybrid", "auto"},
+          "-pbsa-decomp");
       continue;
     }
-    if (consume_option_value(arg, {"-pbsa-ie", "--pbsa-ie"}, common_value,
-                             i)) {
+    if (consume_option_value(arg, {"-pbsa-ie", "--pbsa-ie"}, common_value, i)) {
       pbe.pbsa_ie = parse_bool_equals(common_value, "-pbsa-ie");
       continue;
     }
-    if (consume_option_value(arg, {"-pbsa-residue-frames",
-                                   "--pbsa-residue-frames"},
+    if (consume_option_value(arg,
+                             {"-pbsa-residue-frames", "--pbsa-residue-frames"},
                              common_value, i)) {
       pbe.pbsa_residue_frames =
-          require_choice(common_value, {"off", "all"},
-                         "-pbsa-residue-frames");
+          require_choice(common_value, {"off", "all"}, "-pbsa-residue-frames");
       continue;
     }
     if (consume_option_value(arg, {"-pbsa-ie-block", "--pbsa-ie-block"},
@@ -1342,120 +1305,160 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.pbsa_ie_block = lowercase_copy(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbsa-ie-min-samples",
-                                   "--pbsa-ie-min-samples"},
+    if (consume_option_value(arg,
+                             {"-pbsa-ie-min-samples", "--pbsa-ie-min-samples"},
                              common_value, i)) {
       pbe.pbsa_ie_min_samples = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbsa-ie-filter-sigma",
-                                   "--pbsa-ie-filter-sigma"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbsa-ie-filter-sigma", "--pbsa-ie-filter-sigma"},
+            common_value, i)) {
       pbe.pbsa_ie_filter_sigma = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbsa-perf", "--pbsa-perf"},
-                             common_value, i)) {
-      pbe.pbsa_perf =
-          require_choice(common_value, {"off", "summary", "detail"},
-                         "-pbsa-perf");
+    if (consume_option_value(arg, {"-pbsa-perf", "--pbsa-perf"}, common_value,
+                             i)) {
+      pbe.pbsa_perf = require_choice(common_value, {"off", "summary", "detail"},
+                                     "-pbsa-perf");
       continue;
     }
     if (consume_option_value(arg, {"-pbsa-grid-reuse", "--pbsa-grid-reuse"},
                              common_value, i)) {
-      pbe.pbsa_grid_reuse =
-          require_choice(common_value, {"off", "validate", "auto"},
-                         "-pbsa-grid-reuse");
+      pbe.pbsa_grid_reuse = require_choice(
+          common_value, {"off", "validate", "auto"}, "-pbsa-grid-reuse");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-timing", "--pbe-timing"},
-                             common_value, i)) {
-      pbe.timing =
-          require_choice(common_value, {"off", "summary", "detail"},
-                         "-pbe-timing");
+    if (consume_option_value(arg, {"-pbe-timing", "--pbe-timing"}, common_value,
+                             i)) {
+      pbe.timing = require_choice(common_value, {"off", "summary", "detail"},
+                                  "-pbe-timing");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-tree-preset",
-                                   "--pbe-tabi-tree-preset"},
-                             common_value, i)) {
-      pbe.tabi_tree_preset =
-          require_choice(common_value, {"off", "stage3u-safe",
-                                        "stage3u-perf", "stage3u-perf2"},
-                         "-pbe-tabi-tree-preset");
+    if (consume_option_value(
+            arg, {"-pbe-tabi-tree-preset", "--pbe-tabi-tree-preset"},
+            common_value, i)) {
+      pbe.tabi_tree_preset = require_choice(
+          common_value,
+          {"off", "stage3u-safe", "stage3u-perf", "stage3u-perf2"},
+          "-pbe-tabi-tree-preset");
       apply_tabi_tree_preset(pbe.tabi_tree_preset);
       continue;
     }
     if (consume_option_value(arg, {"-pbe-tabi-sum", "--pbe-tabi-sum"},
                              common_value, i)) {
-      pbe.tabi_sum =
-          require_choice(common_value, {"auto", "direct", "treecode"},
-                         "-pbe-tabi-sum");
+      pbe.tabi_sum = require_choice(
+          common_value, {"auto", "direct", "treecode"}, "-pbe-tabi-sum");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-geometry",
-                                   "--pbe-tabi-geometry"},
+    if (consume_option_value(arg, {"-pbe-tabi-geometry", "--pbe-tabi-geometry"},
                              common_value, i)) {
-      pbe.tabi_geometry =
-          require_choice(common_value, {"triangle", "point-panel"},
-                         "-pbe-tabi-geometry");
+      pbe.tabi_geometry = require_choice(
+          common_value, {"triangle", "point-panel"}, "-pbe-tabi-geometry");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-diagonal",
-                                   "--pbe-tabi-diagonal"},
+    if (consume_option_value(arg, {"-pbe-tabi-diagonal", "--pbe-tabi-diagonal"},
                              common_value, i)) {
-      pbe.tabi_diagonal =
-          require_choice(common_value, {"solid-angle", "flat", "off"},
-                         "-pbe-tabi-diagonal");
+      pbe.tabi_diagonal = require_choice(
+          common_value, {"solid-angle", "flat", "off"}, "-pbe-tabi-diagonal");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-taylor-order",
-                                   "--pbe-tabi-taylor-order"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-taylor-order", "--pbe-tabi-taylor-order"},
+            common_value, i)) {
       pbe.tabi_taylor_order = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-derivatives",
-                                   "--pbe-tabi-derivatives"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-derivatives", "--pbe-tabi-derivatives"},
+            common_value, i)) {
       pbe.tabi_derivatives =
           require_choice(common_value, {"analytic", "finite-diff-debug"},
                          "-pbe-tabi-derivatives");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-surface-points",
-                                   "--pbe-tabi-surface-points"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-surface-points", "--pbe-tabi-surface-points"},
+            common_value, i)) {
       pbe.tabi_surface_points = stoi(common_value);
       continue;
     }
-    if (consume_bool_option(arg, {"-pbe-tabi-highres-surface",
-                                  "--pbe-tabi-highres-surface"},
-                            pbe.tabi_highres_surface, i)) {
+    if (consume_bool_option(
+            arg, {"-pbe-tabi-surface-only", "--pbe-tabi-surface-only"},
+            pbe.tabi_surface_only, i)) {
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-sphere-mesh",
-                                   "--pbe-tabi-sphere-mesh"},
+    if (consume_bool_option(
+            arg, {"-pbe-tabi-highres-surface", "--pbe-tabi-highres-surface"},
+            pbe.tabi_highres_surface, i)) {
+      continue;
+    }
+    if (consume_bool_option(arg,
+                            {"-pbe-tabi-calderon-trace-audit",
+                             "--pbe-tabi-calderon-trace-audit"},
+                            pbe.tabi_calderon_trace_audit, i)) {
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-calderon-aux-surface",
+                              "--pbe-tabi-calderon-aux-surface"},
                              common_value, i)) {
+      pbe.tabi_calderon_aux_surface =
+          require_choice(common_value, {"off", "implicit-vdw"},
+                         "-pbe-tabi-calderon-aux-surface");
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-calderon-aux-grid-spacing",
+                              "--pbe-tabi-calderon-aux-grid-spacing"},
+                             common_value, i)) {
+      pbe.tabi_calderon_aux_grid_spacing = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-pbe-tabi-primary-surface", "--pbe-tabi-primary-surface"},
+            common_value, i)) {
+      pbe.tabi_primary_surface = require_choice(
+          common_value, {"sphere-patch", "grid-ses", "analytic-ses"},
+          "-pbe-tabi-primary-surface");
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-pbe-tabi-ses-grid-spacing", "--pbe-tabi-ses-grid-spacing"},
+            common_value, i)) {
+      pbe.tabi_ses_grid_spacing = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-ses-max-grid-vertices",
+                              "--pbe-tabi-ses-max-grid-vertices"},
+                             common_value, i)) {
+      pbe.tabi_ses_max_grid_vertices = stoull(common_value);
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-pbe-tabi-sphere-mesh", "--pbe-tabi-sphere-mesh"},
+            common_value, i)) {
       pbe.tabi_sphere_mesh =
           require_choice(common_value, {"auto", "latlong", "icosphere"},
                          "-pbe-tabi-sphere-mesh");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-tree-leaf-size",
-                                   "--pbe-tabi-tree-leaf-size"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-tree-leaf-size", "--pbe-tabi-tree-leaf-size"},
+            common_value, i)) {
       pbe.tabi_tree_leaf_size = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-opening-theta",
-                                   "--pbe-tabi-opening-theta"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-opening-theta", "--pbe-tabi-opening-theta"},
+            common_value, i)) {
       pbe.tabi_tree_opening_theta = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-formulation",
-                                   "--pbe-tabi-formulation"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-formulation", "--pbe-tabi-formulation"},
+            common_value, i)) {
       pbe.tabi_formulation = require_choice(
           common_value,
           {"titan-v1", "jcp2013", "jcp2013-centroid", "jcp2013-treecode",
@@ -1464,176 +1467,206 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.tabi_formulation_explicit = true;
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-precond",
-                                   "--pbe-tabi-precond"},
+    if (consume_option_value(
+            arg, {"-pbe-tabi-discretization", "--pbe-tabi-discretization"},
+            common_value, i)) {
+      pbe.tabi_discretization =
+          require_choice(common_value, {"centroid", "node-patch"},
+                         "-pbe-tabi-discretization");
+      pbe.tabi_discretization_explicit = true;
+      continue;
+    }
+    if (consume_option_value(arg, {"-pbe-tabi-precond", "--pbe-tabi-precond"},
                              common_value, i)) {
       pbe.tabi_precond =
           require_choice(common_value,
-                         {"auto", "none", "diagonal", "block",
-                          "block-budgeted", "coarse-galerkin-probe",
-                          "fmm-block-jacobi", "fmm-overlap-schwarz",
-                          "fmm-nearfield-ilu0"},
+                         {"auto", "none", "diagonal", "block", "block-budgeted",
+                          "coarse-galerkin-probe", "fmm-block-jacobi",
+                          "fmm-overlap-schwarz", "fmm-nearfield-ilu0",
+                          "distance-knn-overlap-schwarz", "distance-knn-ilu0"},
                          "-pbe-tabi-precond");
       pbe.tabi_precond_explicit = true;
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-precond-block-near",
-                                   "--pbe-tabi-precond-block-near"},
-                             common_value, i)) {
-      pbe.tabi_precond_block_near =
-          require_choice(common_value, {"singular", "buffer-aware",
-                                        "operator-near"},
-                         "-pbe-tabi-precond-block-near");
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-precond-block-near", "--pbe-tabi-precond-block-near"},
+            common_value, i)) {
+      pbe.tabi_precond_block_near = require_choice(
+          common_value, {"singular", "buffer-aware", "operator-near"},
+          "-pbe-tabi-precond-block-near");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-precond-block-panel-cap",
-                                   "--pbe-tabi-precond-block-panel-cap"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-precond-block-panel-cap",
+                              "--pbe-tabi-precond-block-panel-cap"},
                              common_value, i)) {
       pbe.tabi_precond_block_panel_cap = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-precond-overlap-panel-cap",
-                                   "--pbe-tabi-precond-overlap-panel-cap"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-precond-overlap-panel-cap",
+                              "--pbe-tabi-precond-overlap-panel-cap"},
                              common_value, i)) {
       pbe.tabi_precond_overlap_panel_cap = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-precond-ilu-neighbor-cap",
-                                   "--pbe-tabi-precond-ilu-neighbor-cap"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-precond-ilu-neighbor-cap",
+                              "--pbe-tabi-precond-ilu-neighbor-cap"},
                              common_value, i)) {
       pbe.tabi_precond_ilu_neighbor_cap = stoi(common_value);
       pbe.tabi_precond_ilu_neighbor_cap_explicit = true;
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-precond-ilu-drop-tol",
-                                   "--pbe-tabi-precond-ilu-drop-tol"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-precond-ilu-drop-tol",
+                              "--pbe-tabi-precond-ilu-drop-tol"},
                              common_value, i)) {
       pbe.tabi_precond_ilu_drop_tol = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-precond-memory-budget-mb",
-                                   "--pbe-tabi-precond-memory-budget-mb"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-precond-ilu-regularization",
+                              "--pbe-tabi-precond-ilu-regularization"},
+                             common_value, i)) {
+      pbe.tabi_precond_ilu_regularization =
+          require_choice(common_value, {"off", "adaptive"},
+                         "-pbe-tabi-precond-ilu-regularization");
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-precond-ilu-regularization-max",
+                              "--pbe-tabi-precond-ilu-regularization-max"},
+                             common_value, i)) {
+      pbe.tabi_precond_ilu_regularization_max = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-precond-memory-budget-mb",
+                              "--pbe-tabi-precond-memory-budget-mb"},
                              common_value, i)) {
       pbe.tabi_precond_memory_budget_mb = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-precond-coarse-aggregate-cap",
-                                   "--pbe-tabi-precond-coarse-aggregate-cap"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-precond-coarse-aggregate-cap",
+                              "--pbe-tabi-precond-coarse-aggregate-cap"},
                              common_value, i)) {
       pbe.tabi_precond_coarse_aggregate_cap = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-precond-coarse-base",
-                                   "--pbe-tabi-precond-coarse-base"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-precond-coarse-base", "--pbe-tabi-precond-coarse-base"},
+            common_value, i)) {
       pbe.tabi_precond_coarse_base =
           require_choice(common_value, {"diagonal", "block-budgeted"},
                          "-pbe-tabi-precond-coarse-base");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-precond-coarse-verify",
-                                   "--pbe-tabi-precond-coarse-verify"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-precond-coarse-verify",
+                              "--pbe-tabi-precond-coarse-verify"},
                              common_value, i)) {
       pbe.tabi_precond_coarse_verify =
           require_choice(common_value, {"off", "full-small"},
                          "-pbe-tabi-precond-coarse-verify");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-near-integration",
-                                   "--pbe-tabi-near-integration"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-near-integration", "--pbe-tabi-near-integration"},
+            common_value, i)) {
       pbe.tabi_near_integration = require_choice(
           common_value,
           {"auto", "centroid", "analytic_singular", "duffy_adaptive"},
           "-pbe-tabi-near-integration");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-quad-buffer",
-                                   "--pbe-tabi-quad-buffer"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-quad-buffer", "--pbe-tabi-quad-buffer"},
+            common_value, i)) {
       pbe.tabi_quad_buffer =
           require_choice(common_value, {"auto", "off", "gauss7", "adaptive"},
                          "-pbe-tabi-quad-buffer");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-leaf-near-policy",
-                                   "--pbe-tabi-leaf-near-policy"},
-                             common_value, i)) {
-      pbe.tabi_leaf_near_policy =
-          require_choice(common_value,
-                         {"auto", "exact", "smooth-node", "large-protein",
-                          "adaptive-large"},
-                         "-pbe-tabi-leaf-near-policy");
+    if (consume_option_value(
+            arg, {"-pbe-tabi-leaf-near-policy", "--pbe-tabi-leaf-near-policy"},
+            common_value, i)) {
+      pbe.tabi_leaf_near_policy = require_choice(
+          common_value,
+          {"auto", "exact", "smooth-node", "large-protein", "adaptive-large"},
+          "-pbe-tabi-leaf-near-policy");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-leaf-panel-kernel",
-                                   "--pbe-tabi-leaf-panel-kernel"},
-                             common_value, i)) {
-      pbe.tabi_leaf_panel_kernel =
-          require_choice(common_value,
-                         {"auto", "scalar", "avx2-gather", "tile",
-                          "tile-scalar", "tile-avx2"},
-                         "-pbe-tabi-leaf-panel-kernel");
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-leaf-panel-kernel", "--pbe-tabi-leaf-panel-kernel"},
+            common_value, i)) {
+      pbe.tabi_leaf_panel_kernel = require_choice(
+          common_value,
+          {"auto", "scalar", "avx2-gather", "tile", "tile-scalar", "tile-avx2"},
+          "-pbe-tabi-leaf-panel-kernel");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-adaptive-level",
-                                   "--pbe-tabi-adaptive-level"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-adaptive-level", "--pbe-tabi-adaptive-level"},
+            common_value, i)) {
       pbe.tabi_adaptive_level =
           require_choice(common_value, {"strict", "balanced", "aggressive"},
                          "-pbe-tabi-adaptive-level");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-cluster-policy",
-                                   "--pbe-tabi-cluster-policy"},
-                             common_value, i)) {
-      pbe.tabi_cluster_policy =
-          require_choice(common_value,
-                         {"off", "leaf-pair-strict", "leaf-pair-balanced"},
-                         "-pbe-tabi-cluster-policy");
+    if (consume_option_value(
+            arg, {"-pbe-tabi-cluster-policy", "--pbe-tabi-cluster-policy"},
+            common_value, i)) {
+      pbe.tabi_cluster_policy = require_choice(
+          common_value, {"off", "leaf-pair-strict", "leaf-pair-balanced"},
+          "-pbe-tabi-cluster-policy");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-leaf-pair-kernel",
-                                   "--pbe-tabi-leaf-pair-kernel"},
-                            common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-leaf-pair-kernel", "--pbe-tabi-leaf-pair-kernel"},
+            common_value, i)) {
       pbe.tabi_leaf_pair_kernel =
           require_choice(common_value,
-                         {"auto", "scalar", "target-avx2",
-                          "target-avx2-v2", "target-avx2-4x4"},
+                         {"auto", "scalar", "target-avx2", "target-avx2-v2",
+                          "target-avx2-4x4"},
                          "-pbe-tabi-leaf-pair-kernel");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-leaf-kernel-profile",
-                                   "--pbe-tabi-leaf-kernel-profile"},
-                             common_value, i)) {
-      pbe.tabi_leaf_kernel_profile =
-          require_choice(common_value, {"off", "summary"},
-                         "-pbe-tabi-leaf-kernel-profile");
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-leaf-kernel-profile", "--pbe-tabi-leaf-kernel-profile"},
+            common_value, i)) {
+      pbe.tabi_leaf_kernel_profile = require_choice(
+          common_value, {"off", "summary"}, "-pbe-tabi-leaf-kernel-profile");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-leaf-work-profile",
-                                   "--pbe-tabi-leaf-work-profile"},
-                             common_value, i)) {
-      pbe.tabi_leaf_work_profile =
-          require_choice(common_value, {"off", "summary"},
-                         "-pbe-tabi-leaf-work-profile");
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-leaf-work-profile", "--pbe-tabi-leaf-work-profile"},
+            common_value, i)) {
+      pbe.tabi_leaf_work_profile = require_choice(
+          common_value, {"off", "summary"}, "-pbe-tabi-leaf-work-profile");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-matvec-cost-profile",
-                                   "--pbe-tabi-matvec-cost-profile"},
-                             common_value, i)) {
-      pbe.tabi_matvec_cost_profile =
-          require_choice(common_value, {"off", "summary"},
-                         "-pbe-tabi-matvec-cost-profile");
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-matvec-cost-profile", "--pbe-tabi-matvec-cost-profile"},
+            common_value, i)) {
+      pbe.tabi_matvec_cost_profile = require_choice(
+          common_value, {"off", "summary"}, "-pbe-tabi-matvec-cost-profile");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-jcp-direct-kernel",
-                                   "--pbe-tabi-jcp-direct-kernel"},
-                             common_value, i)) {
-      pbe.tabi_jcp_direct_kernel =
-          require_choice(common_value,
-                         {"baseline", "soa-avx2", "fused-soa-avx2"},
-                         "-pbe-tabi-jcp-direct-kernel");
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-jcp-direct-kernel", "--pbe-tabi-jcp-direct-kernel"},
+            common_value, i)) {
+      pbe.tabi_jcp_direct_kernel = require_choice(
+          common_value, {"baseline", "soa-avx2", "fused-soa-avx2"},
+          "-pbe-tabi-jcp-direct-kernel");
       continue;
     }
     if (consume_option_value(arg,
@@ -1645,16 +1678,18 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-pbe-tabi-leaf-pair-selection-profile");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-leaf-pair-probe-cache",
-                                   "--pbe-tabi-leaf-pair-probe-cache"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-leaf-pair-probe-cache",
+                              "--pbe-tabi-leaf-pair-probe-cache"},
                              common_value, i)) {
       pbe.tabi_leaf_pair_probe_cache =
           require_choice(common_value, {"off", "per-matvec"},
                          "-pbe-tabi-leaf-pair-probe-cache");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-leaf-pair-target-group",
-                                   "--pbe-tabi-leaf-pair-target-group"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-leaf-pair-target-group",
+                              "--pbe-tabi-leaf-pair-target-group"},
                              common_value, i)) {
       pbe.tabi_leaf_pair_target_group =
           require_choice(common_value, {"scan", "same-target-leaf"},
@@ -1675,8 +1710,7 @@ int arguments::parse_arguments(int argc, char **argv) {
                               "--pbe-tabi-leaf-pair-directness-cache"},
                              common_value, i)) {
       pbe.tabi_leaf_pair_directness_cache =
-          require_choice(common_value,
-                         {"off", "target-leaf-source-leaf"},
+          require_choice(common_value, {"off", "target-leaf-source-leaf"},
                          "-pbe-tabi-leaf-pair-directness-cache");
       continue;
     }
@@ -1689,9 +1723,10 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-pbe-tabi-leaf-pair-directness-verify");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-leaf-pair-scheduler",
-                                   "--pbe-tabi-leaf-pair-scheduler"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-leaf-pair-scheduler", "--pbe-tabi-leaf-pair-scheduler"},
+            common_value, i)) {
       pbe.tabi_leaf_pair_scheduler =
           require_choice(common_value,
                          {"inline-select", "deferred-worklist",
@@ -1699,10 +1734,10 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-pbe-tabi-leaf-pair-scheduler");
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-leaf-pair-worklist-max-active",
-                  "--pbe-tabi-leaf-pair-worklist-max-active"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-leaf-pair-worklist-max-active",
+                              "--pbe-tabi-leaf-pair-worklist-max-active"},
+                             common_value, i)) {
       pbe.tabi_leaf_pair_worklist_max_active = stoi(common_value);
       continue;
     }
@@ -1715,95 +1750,291 @@ int arguments::parse_arguments(int argc, char **argv) {
                          "-pbe-tabi-leaf-pair-worklist-verify");
       continue;
     }
-    if (consume_option_value(arg,
-                             {"-pbe-tabi-leaf-block-verify",
-                              "--pbe-tabi-leaf-block-verify"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-leaf-block-verify", "--pbe-tabi-leaf-block-verify"},
+            common_value, i)) {
       pbe.tabi_leaf_block_verify =
           require_choice(common_value, {"off", "sampled", "full-small"},
                          "-pbe-tabi-leaf-block-verify");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-leaf-mac",
-                                   "--pbe-tabi-leaf-mac"},
+    if (consume_option_value(arg, {"-pbe-tabi-leaf-mac", "--pbe-tabi-leaf-mac"},
                              common_value, i)) {
-      pbe.tabi_leaf_mac =
-          require_choice(common_value, {"off", "audit", "on"},
-                         "-pbe-tabi-leaf-mac");
+      pbe.tabi_leaf_mac = require_choice(common_value, {"off", "audit", "on"},
+                                         "-pbe-tabi-leaf-mac");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-fmm-m2l",
-                                   "--pbe-tabi-fmm-m2l"},
+    if (consume_option_value(arg, {"-pbe-tabi-fmm-m2l", "--pbe-tabi-fmm-m2l"},
                              common_value, i)) {
-      pbe.tabi_fmm_m2l =
-          require_choice(common_value, {"auto", "off", "single-matvec-analytic"},
-                         "-pbe-tabi-fmm-m2l");
+      pbe.tabi_fmm_m2l = require_choice(
+          common_value, {"auto", "off", "single-matvec-analytic"},
+          "-pbe-tabi-fmm-m2l");
       pbe.tabi_fmm_m2l_explicit = true;
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-fmm-cartesian-audit",
-                                   "--pbe-tabi-fmm-cartesian-audit"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-fmm-engine", "--pbe-tabi-fmm-engine"},
                              common_value, i)) {
-      pbe.tabi_fmm_cartesian_audit =
-          require_choice(common_value, {"off", "on"},
-                         "-pbe-tabi-fmm-cartesian-audit");
+      pbe.tabi_fmm_engine = require_choice(
+          common_value,
+          {"cartesian", "kifmm-lite", "kifmm-local", "kifmm-lite-experimental",
+           "kifmm-channel-hybrid-experimental"},
+          "-pbe-tabi-fmm-engine");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-fmm-local",
-                                   "--pbe-tabi-fmm-local"},
-                             common_value, i)) {
-      pbe.tabi_fmm_local =
-          require_choice(common_value,
-                         {"off", "audit-p4", "single-matvec-p4", "gmres-p4"},
-                         "-pbe-tabi-fmm-local");
+    if (consume_option_value(
+            arg, {"-pbe-tabi-kifmm-order", "--pbe-tabi-kifmm-order"},
+            common_value, i)) {
+      pbe.tabi_kifmm_order = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-fmm-local-refine",
-                                   "--pbe-tabi-fmm-local-refine"},
-                             common_value, i)) {
-      pbe.tabi_fmm_local_refine =
-          require_choice(common_value,
-                         {"off", "p3-p4-tail", "operator-tail-static",
-                          "operator-tail-linf"},
-                         "-pbe-tabi-fmm-local-refine");
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-kifmm-equiv-scale", "--pbe-tabi-kifmm-equiv-scale"},
+            common_value, i)) {
+      pbe.tabi_kifmm_equiv_scale = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-fmm-local-refine-tol",
-                                   "--pbe-tabi-fmm-local-refine-tol"},
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-kifmm-check-scale", "--pbe-tabi-kifmm-check-scale"},
+            common_value, i)) {
+      pbe.tabi_kifmm_check_scale = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-pbe-tabi-kifmm-solver", "--pbe-tabi-kifmm-solver"},
+            common_value, i)) {
+      pbe.tabi_kifmm_solver =
+          require_choice(common_value, {"qr", "svd", "normal-tikhonov"},
+                         "-pbe-tabi-kifmm-solver");
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-pbe-tabi-kifmm-profile", "--pbe-tabi-kifmm-profile"},
+            common_value, i)) {
+      pbe.tabi_kifmm_profile = require_choice(
+          common_value, {"off", "summary", "full"}, "-pbe-tabi-kifmm-profile");
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-pbe-tabi-kifmm-full-apply", "--pbe-tabi-kifmm-full-apply"},
+            common_value, i)) {
+      pbe.tabi_kifmm_full_apply =
+          require_choice(common_value, {"serial", "target-node-parallel"},
+                         "-pbe-tabi-kifmm-full-apply");
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-pbe-tabi-kifmm-ilu-graph", "--pbe-tabi-kifmm-ilu-graph"},
+            common_value, i)) {
+      pbe.tabi_kifmm_ilu_graph = require_choice(
+          common_value, {"cartesian-near", "kifmm-fallback-capped"},
+          "-pbe-tabi-kifmm-ilu-graph");
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-kifmm-hierarchy-order",
+                              "--pbe-tabi-kifmm-hierarchy-order"},
+                             common_value, i)) {
+      pbe.tabi_kifmm_hierarchy_order = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-kifmm-hierarchy-theta",
+                              "--pbe-tabi-kifmm-hierarchy-theta"},
+                             common_value, i)) {
+      pbe.tabi_kifmm_hierarchy_theta = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-kifmm-hierarchy-real-panel-guard",
+                              "--pbe-tabi-kifmm-hierarchy-real-panel-guard"},
+                             common_value, i)) {
+      pbe.tabi_kifmm_hierarchy_real_panel_guard =
+          require_choice(common_value, {"strict-local-check"},
+                         "-pbe-tabi-kifmm-hierarchy-real-panel-guard");
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-kifmm-hierarchy-guard-margin-factor",
+                              "--pbe-tabi-kifmm-hierarchy-guard-margin-factor"},
+                             common_value, i)) {
+      pbe.tabi_kifmm_hierarchy_guard_margin_factor = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-kifmm-hierarchy-tree-stop-policy",
+                              "--pbe-tabi-kifmm-hierarchy-tree-stop-policy"},
+                             common_value, i)) {
+      pbe.tabi_kifmm_hierarchy_tree_stop_policy =
+          require_choice(common_value, {"panel-radius-occupancy"},
+                         "-pbe-tabi-kifmm-hierarchy-tree-stop-policy");
+      continue;
+    }
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-kifmm-hierarchy-tree-panel-radius-factor",
+             "--pbe-tabi-kifmm-hierarchy-tree-panel-radius-factor"},
+            common_value, i)) {
+      pbe.tabi_kifmm_hierarchy_tree_panel_radius_factor = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-kifmm-hierarchy-tree-occupancy-stop",
+                              "--pbe-tabi-kifmm-hierarchy-tree-occupancy-stop"},
+                             common_value, i)) {
+      pbe.tabi_kifmm_hierarchy_tree_occupancy_stop = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-kifmm-hierarchy-m2l-eval-policy",
+                              "--pbe-tabi-kifmm-hierarchy-m2l-eval-policy"},
+                             common_value, i)) {
+      pbe.tabi_kifmm_hierarchy_m2l_eval_policy =
+          require_choice(common_value, {"target-check-batched"},
+                         "-pbe-tabi-kifmm-hierarchy-m2l-eval-policy");
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-kifmm-hierarchy-matrix-cache-policy",
+                              "--pbe-tabi-kifmm-hierarchy-matrix-cache-policy"},
+                             common_value, i)) {
+      pbe.tabi_kifmm_hierarchy_matrix_cache_policy = require_choice(
+          common_value,
+          {"canonical-offset-cache", "static-translation-table-cache",
+           "target-node-streaming-cache", "bounded-lru-cache"},
+          "-pbe-tabi-kifmm-hierarchy-matrix-cache-policy");
+      continue;
+    }
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-kifmm-hierarchy-matrix-cache-limit-mb",
+             "--pbe-tabi-kifmm-hierarchy-matrix-cache-limit-mb"},
+            common_value, i)) {
+      pbe.tabi_kifmm_hierarchy_matrix_cache_limit_mb = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-kifmm-hierarchy-gemm-batch-policy",
+                              "--pbe-tabi-kifmm-hierarchy-gemm-batch-policy"},
+                             common_value, i)) {
+      pbe.tabi_kifmm_hierarchy_gemm_batch_policy =
+          require_choice(common_value, {"per-pair"},
+                         "-pbe-tabi-kifmm-hierarchy-gemm-batch-policy");
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-kifmm-hierarchy-m2l-parallel-policy",
+                              "--pbe-tabi-kifmm-hierarchy-m2l-parallel-policy"},
+                             common_value, i)) {
+      pbe.tabi_kifmm_hierarchy_m2l_parallel_policy =
+          require_choice(common_value, {"serial", "target-node-key-group"},
+                         "-pbe-tabi-kifmm-hierarchy-m2l-parallel-policy");
+      continue;
+    }
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-kifmm-hierarchy-m2l-parallel-workers",
+             "--pbe-tabi-kifmm-hierarchy-m2l-parallel-workers"},
+            common_value, i)) {
+      pbe.tabi_kifmm_hierarchy_m2l_parallel_workers = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-cartesian-k4-order", "--pbe-tabi-cartesian-k4-order"},
+            common_value, i)) {
+      pbe.tabi_cartesian_k4_order = stoi(common_value);
+      continue;
+    }
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-cartesian-k4-theta", "--pbe-tabi-cartesian-k4-theta"},
+            common_value, i)) {
+      pbe.tabi_cartesian_k4_theta = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-cartesian-k4-geometry-theta",
+                              "--pbe-tabi-cartesian-k4-geometry-theta"},
+                             common_value, i)) {
+      pbe.tabi_cartesian_k4_geometry_theta = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-cartesian-k4-tail-tol",
+                              "--pbe-tabi-cartesian-k4-tail-tol"},
+                             common_value, i)) {
+      pbe.tabi_cartesian_k4_tail_tol = stod(common_value);
+      continue;
+    }
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-fmm-cartesian-audit", "--pbe-tabi-fmm-cartesian-audit"},
+            common_value, i)) {
+      pbe.tabi_fmm_cartesian_audit = require_choice(
+          common_value, {"off", "on"}, "-pbe-tabi-fmm-cartesian-audit");
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-fmm-local", "--pbe-tabi-fmm-local"},
+                             common_value, i)) {
+      pbe.tabi_fmm_local = require_choice(
+          common_value, {"off", "audit-p4", "single-matvec-p4", "gmres-p4"},
+          "-pbe-tabi-fmm-local");
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-pbe-tabi-fmm-local-refine", "--pbe-tabi-fmm-local-refine"},
+            common_value, i)) {
+      pbe.tabi_fmm_local_refine = require_choice(
+          common_value,
+          {"off", "p3-p4-tail", "operator-tail-static", "operator-tail-linf"},
+          "-pbe-tabi-fmm-local-refine");
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-fmm-local-refine-tol",
+                              "--pbe-tabi-fmm-local-refine-tol"},
                              common_value, i)) {
       pbe.tabi_fmm_local_refine_tol = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-fmm-local-cache",
-                                   "--pbe-tabi-fmm-local-cache"},
-                             common_value, i)) {
-      pbe.tabi_fmm_local_cache =
-          require_choice(common_value,
-                         {"off", "kernel-jet", "green-jet-compressed",
-                          "green-jet-tiled"},
-                         "-pbe-tabi-fmm-local-cache");
+    if (consume_option_value(
+            arg, {"-pbe-tabi-fmm-local-cache", "--pbe-tabi-fmm-local-cache"},
+            common_value, i)) {
+      pbe.tabi_fmm_local_cache = require_choice(
+          common_value,
+          {"off", "kernel-jet", "green-jet-compressed", "green-jet-tiled"},
+          "-pbe-tabi-fmm-local-cache");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-fmm-local-cache-budget-mb",
-                                   "--pbe-tabi-fmm-local-cache-budget-mb"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-fmm-local-cache-budget-mb",
+                              "--pbe-tabi-fmm-local-cache-budget-mb"},
                              common_value, i)) {
       pbe.tabi_fmm_local_cache_budget_mb = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-fmm-local-fallback",
-                                   "--pbe-tabi-fmm-local-fallback"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-fmm-local-fallback", "--pbe-tabi-fmm-local-fallback"},
+            common_value, i)) {
       pbe.tabi_fmm_local_fallback =
           require_choice(common_value, {"scalar", "packed-avx2"},
                          "-pbe-tabi-fmm-local-fallback");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-fmm-local-plan-builder",
-                                   "--pbe-tabi-fmm-local-plan-builder"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-fmm-local-plan-builder",
+                              "--pbe-tabi-fmm-local-plan-builder"},
                              common_value, i)) {
-      pbe.tabi_fmm_local_plan_builder =
-          require_choice(common_value, {"legacy-rescan", "metric-cache"},
-                         "-pbe-tabi-fmm-local-plan-builder");
+      pbe.tabi_fmm_local_plan_builder = require_choice(
+          common_value,
+          {"legacy-rescan", "metric-cache", "rescan", "cached-metrics"},
+          "-pbe-tabi-fmm-local-plan-builder");
       continue;
     }
     if (consume_option_value(arg,
@@ -1844,169 +2075,179 @@ int arguments::parse_arguments(int argc, char **argv) {
                             pbe.tabi_fmm_local_ilu_cap_sweep, i)) {
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-interaction-mode",
-                                   "--pbe-tabi-interaction-mode"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-interaction-mode", "--pbe-tabi-interaction-mode"},
+            common_value, i)) {
       pbe.tabi_interaction_mode =
           require_choice(common_value, {"auto", "cached", "onthefly"},
                          "-pbe-tabi-interaction-mode");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-node-bounds",
-                                   "--pbe-tabi-node-bounds"},
-                             common_value, i)) {
-      pbe.tabi_node_bounds =
-          require_choice(common_value, {"moment", "tight-aabb"},
-                         "-pbe-tabi-node-bounds");
+    if (consume_option_value(
+            arg, {"-pbe-tabi-node-bounds", "--pbe-tabi-node-bounds"},
+            common_value, i)) {
+      pbe.tabi_node_bounds = require_choice(
+          common_value, {"moment", "tight-aabb"}, "-pbe-tabi-node-bounds");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-tree-builder",
-                                   "--pbe-tabi-tree-builder"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-tree-builder", "--pbe-tabi-tree-builder"},
+            common_value, i)) {
       pbe.tabi_tree_builder =
           require_choice(common_value, {"grouped-morton", "topdown-aabb"},
                          "-pbe-tabi-tree-builder");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-expansion-center",
-                                   "--pbe-tabi-expansion-center"},
-                             common_value, i)) {
-      pbe.tabi_expansion_center =
-          require_choice(common_value,
-                         {"legacy", "area-centroid", "aabb-center"},
-                         "-pbe-tabi-expansion-center");
+    if (consume_option_value(
+            arg, {"-pbe-tabi-expansion-center", "--pbe-tabi-expansion-center"},
+            common_value, i)) {
+      pbe.tabi_expansion_center = require_choice(
+          common_value, {"legacy", "area-centroid", "aabb-center"},
+          "-pbe-tabi-expansion-center");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-fragmentation-safety",
-                                   "--pbe-tabi-fragmentation-safety"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-fragmentation-safety",
+                              "--pbe-tabi-fragmentation-safety"},
                              common_value, i)) {
       pbe.tabi_fragmentation_safety =
           require_choice(common_value, {"off", "audit", "split"},
                          "-pbe-tabi-fragmentation-safety");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-mac-safety",
-                                   "--pbe-tabi-mac-safety"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-mac-safety", "--pbe-tabi-mac-safety"},
                              common_value, i)) {
       pbe.tabi_mac_safety =
           require_choice(common_value, {"off", "audit", "physical-gap"},
                          "-pbe-tabi-mac-safety");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-mac-gap-factor",
-                                   "--pbe-tabi-mac-gap-factor"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-mac-gap-factor", "--pbe-tabi-mac-gap-factor"},
+            common_value, i)) {
       pbe.tabi_mac_gap_factor = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-moment-audit",
-                                   "--pbe-tabi-moment-audit"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-moment-audit", "--pbe-tabi-moment-audit"},
+            common_value, i)) {
       pbe.tabi_moment_audit =
           require_choice(common_value, {"off", "sampled", "full-small"},
                          "-pbe-tabi-moment-audit");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-moment-construction",
-                                   "--pbe-tabi-moment-construction"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-moment-construction", "--pbe-tabi-moment-construction"},
+            common_value, i)) {
       pbe.tabi_moment_construction =
           require_choice(common_value, {"translated", "direct-node"},
                          "-pbe-tabi-moment-construction");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-moment-sum",
-                                   "--pbe-tabi-moment-sum"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-moment-sum", "--pbe-tabi-moment-sum"},
                              common_value, i)) {
-      pbe.tabi_moment_sum =
-          require_choice(common_value, {"naive", "kahan"},
-                         "-pbe-tabi-moment-sum");
+      pbe.tabi_moment_sum = require_choice(common_value, {"naive", "kahan"},
+                                           "-pbe-tabi-moment-sum");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-convergence-audit",
-                                   "--pbe-tabi-convergence-audit"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-convergence-audit", "--pbe-tabi-convergence-audit"},
+            common_value, i)) {
       pbe.tabi_convergence_audit =
           require_choice(common_value, {"off", "sampled", "full-small"},
                          "-pbe-tabi-convergence-audit");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-convergence-safety",
-                                   "--pbe-tabi-convergence-safety"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-convergence-safety", "--pbe-tabi-convergence-safety"},
+            common_value, i)) {
       pbe.tabi_convergence_safety =
           require_choice(common_value, {"off", "audit", "split"},
                          "-pbe-tabi-convergence-safety");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-convergence-rho-cap",
-                                   "--pbe-tabi-convergence-rho-cap"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-convergence-rho-cap", "--pbe-tabi-convergence-rho-cap"},
+            common_value, i)) {
       pbe.tabi_convergence_rho_cap = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-mac-aspect-cap",
-                                   "--pbe-tabi-mac-aspect-cap"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-mac-aspect-cap", "--pbe-tabi-mac-aspect-cap"},
+            common_value, i)) {
       pbe.tabi_mac_aspect_cap = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-convergence-estimator",
-                                   "--pbe-tabi-convergence-estimator"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-estimator",
+                              "--pbe-tabi-convergence-estimator"},
                              common_value, i)) {
       pbe.tabi_convergence_estimator =
           require_choice(common_value, {"off", "moment-tail", "hybrid"},
                          "-pbe-tabi-convergence-estimator");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-convergence-tail-threshold",
-                                   "--pbe-tabi-convergence-tail-threshold"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-tail-threshold",
+                              "--pbe-tabi-convergence-tail-threshold"},
                              common_value, i)) {
       pbe.tabi_convergence_tail_threshold = stod(common_value);
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-convergence-estimator-error-cap",
-                  "--pbe-tabi-convergence-estimator-error-cap"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-estimator-error-cap",
+                              "--pbe-tabi-convergence-estimator-error-cap"},
+                             common_value, i)) {
       pbe.tabi_convergence_estimator_error_cap = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-convergence-unstable-rho-cap",
-                                   "--pbe-tabi-convergence-unstable-rho-cap"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-unstable-rho-cap",
+                              "--pbe-tabi-convergence-unstable-rho-cap"},
                              common_value, i)) {
       pbe.tabi_convergence_unstable_rho_cap = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-convergence-calibration",
-                                   "--pbe-tabi-convergence-calibration"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-calibration",
+                              "--pbe-tabi-convergence-calibration"},
                              common_value, i)) {
-      pbe.tabi_convergence_calibration = require_choice(
-          common_value,
-          {"stage3j", "consecutive", "aspect", "consecutive-aspect"},
-          "-pbe-tabi-convergence-calibration");
+      pbe.tabi_convergence_calibration =
+          require_choice(common_value,
+                         {"stage3j", "calibrated-tail-v1", "consecutive",
+                          "aspect", "consecutive-aspect"},
+                         "-pbe-tabi-convergence-calibration");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-convergence-dielectric-amp",
-                                   "--pbe-tabi-convergence-dielectric-amp"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-dielectric-amp",
+                              "--pbe-tabi-convergence-dielectric-amp"},
                              common_value, i)) {
-      pbe.tabi_convergence_dielectric_amp =
-          require_choice(common_value, {"off", "on"},
-                         "-pbe-tabi-convergence-dielectric-amp");
+      pbe.tabi_convergence_dielectric_amp = require_choice(
+          common_value, {"off", "on"}, "-pbe-tabi-convergence-dielectric-amp");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-convergence-estimator-model",
-                                   "--pbe-tabi-convergence-estimator-model"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-estimator-model",
+                              "--pbe-tabi-convergence-estimator-model"},
                              common_value, i)) {
-      pbe.tabi_convergence_estimator_model = require_choice(
-          common_value, {"stage3l", "channel-tail", "channel-tail-eps"},
-          "-pbe-tabi-convergence-estimator-model");
+      pbe.tabi_convergence_estimator_model =
+          require_choice(common_value,
+                         {"stage3l", "calibrated-estimator-v1", "channel-tail",
+                          "channel-tail-eps"},
+                         "-pbe-tabi-convergence-estimator-model");
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-convergence-channel-calibration",
-                  "--pbe-tabi-convergence-channel-calibration"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-channel-calibration",
+                              "--pbe-tabi-convergence-channel-calibration"},
+                             common_value, i)) {
       pbe.tabi_convergence_channel_calibration = require_choice(
           common_value,
           {"stage3m", "k3-sqrt-eps", "k3-eps", "k4-sqrt-eps", "k4-eps",
@@ -2014,337 +2255,348 @@ int arguments::parse_arguments(int argc, char **argv) {
           "-pbe-tabi-convergence-channel-calibration");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-convergence-split-policy",
-                                   "--pbe-tabi-convergence-split-policy"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-split-policy",
+                              "--pbe-tabi-convergence-split-policy"},
                              common_value, i)) {
       pbe.tabi_convergence_split_policy =
           require_choice(common_value, {"global", "k3-hot"},
                          "-pbe-tabi-convergence-split-policy");
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-convergence-split-selectivity",
-                  "--pbe-tabi-convergence-split-selectivity"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-split-selectivity",
+                              "--pbe-tabi-convergence-split-selectivity"},
+                             common_value, i)) {
       pbe.tabi_convergence_split_selectivity = require_choice(
           common_value, {"legacy", "absolute-aware", "channel-absolute-aware"},
           "-pbe-tabi-convergence-split-selectivity");
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-convergence-split-absolute-floor",
-                  "--pbe-tabi-convergence-split-absolute-floor"},
-            common_value, i)) {
-      pbe.tabi_convergence_split_absolute_floor =
-          parse_double_range(common_value,
-                             "-pbe-tabi-convergence-split-absolute-floor",
-                             0.0, 1.0e-4);
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-split-absolute-floor",
+                              "--pbe-tabi-convergence-split-absolute-floor"},
+                             common_value, i)) {
+      pbe.tabi_convergence_split_absolute_floor = parse_double_range(
+          common_value, "-pbe-tabi-convergence-split-absolute-floor", 0.0,
+          1.0e-4);
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-convergence-overreject-audit",
-                  "--pbe-tabi-convergence-overreject-audit"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-overreject-audit",
+                              "--pbe-tabi-convergence-overreject-audit"},
+                             common_value, i)) {
       pbe.tabi_convergence_overreject_audit =
           require_choice(common_value, {"off", "sampled", "full-small"},
                          "-pbe-tabi-convergence-overreject-audit");
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-convergence-overreject-detail",
-                  "--pbe-tabi-convergence-overreject-detail"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-overreject-detail",
+                              "--pbe-tabi-convergence-overreject-detail"},
+                             common_value, i)) {
       pbe.tabi_convergence_overreject_detail =
           require_choice(common_value, {"off", "summary", "sampled-detail"},
                          "-pbe-tabi-convergence-overreject-detail");
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-convergence-shape-audit",
-                  "--pbe-tabi-convergence-shape-audit"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-shape-audit",
+                              "--pbe-tabi-convergence-shape-audit"},
+                             common_value, i)) {
       pbe.tabi_convergence_shape_audit =
           require_choice(common_value, {"off", "summary", "sampled-detail"},
                          "-pbe-tabi-convergence-shape-audit");
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-convergence-kernel-response-audit",
-                  "--pbe-tabi-convergence-kernel-response-audit"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-kernel-response-audit",
+                              "--pbe-tabi-convergence-kernel-response-audit"},
+                             common_value, i)) {
       pbe.tabi_convergence_kernel_response_audit =
           require_choice(common_value, {"off", "summary", "sampled-detail"},
                          "-pbe-tabi-convergence-kernel-response-audit");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-channel-missed-semantics",
-                                   "--pbe-tabi-channel-missed-semantics"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-channel-missed-semantics",
+                              "--pbe-tabi-channel-missed-semantics"},
                              common_value, i)) {
       pbe.tabi_channel_missed_semantics =
           require_choice(common_value, {"legacy", "accepted-only"},
                          "-pbe-tabi-channel-missed-semantics");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-accepted-miss-diagnostics",
-                                   "--pbe-tabi-accepted-miss-diagnostics"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-accepted-miss-diagnostics",
+                              "--pbe-tabi-accepted-miss-diagnostics"},
                              common_value, i)) {
       pbe.tabi_accepted_miss_diagnostics =
           require_choice(common_value, {"off", "summary", "sampled-detail"},
                          "-pbe-tabi-accepted-miss-diagnostics");
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-accepted-miss-absolute-floor",
-                  "--pbe-tabi-accepted-miss-absolute-floor"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-accepted-miss-absolute-floor",
+                              "--pbe-tabi-accepted-miss-absolute-floor"},
+                             common_value, i)) {
       pbe.tabi_accepted_miss_absolute_floor = stod(common_value);
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-convergence-k3-accepted-rho-cap",
-                  "--pbe-tabi-convergence-k3-accepted-rho-cap"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-convergence-k3-accepted-rho-cap",
+                              "--pbe-tabi-convergence-k3-accepted-rho-cap"},
+                             common_value, i)) {
       pbe.tabi_convergence_k3_accepted_rho_cap = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-mac-distance-policy",
-                                   "--pbe-tabi-mac-distance-policy"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-mac-distance-policy", "--pbe-tabi-mac-distance-policy"},
+            common_value, i)) {
       pbe.tabi_mac_distance_policy =
           require_choice(common_value, {"center", "surface-margin"},
                          "-pbe-tabi-mac-distance-policy");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-mac-surface-margin-factor",
-                                   "--pbe-tabi-mac-surface-margin-factor"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-mac-surface-margin-factor",
+                              "--pbe-tabi-mac-surface-margin-factor"},
                              common_value, i)) {
       pbe.tabi_mac_surface_margin_factor = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-mac-surface-margin-policy",
-                                   "--pbe-tabi-mac-surface-margin-policy"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-mac-surface-margin-policy",
+                              "--pbe-tabi-mac-surface-margin-policy"},
                              common_value, i)) {
       pbe.tabi_mac_surface_margin_policy =
           require_choice(common_value, {"all", "adaptive", "risk-scaled"},
                          "-pbe-tabi-mac-surface-margin-policy");
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-mac-surface-margin-aspect-threshold",
-                  "--pbe-tabi-mac-surface-margin-aspect-threshold"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-mac-surface-margin-aspect-threshold",
+                              "--pbe-tabi-mac-surface-margin-aspect-threshold"},
+                             common_value, i)) {
       pbe.tabi_mac_surface_margin_aspect_threshold = stod(common_value);
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-mac-surface-margin-rho-trigger",
-                  "--pbe-tabi-mac-surface-margin-rho-trigger"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-mac-surface-margin-rho-trigger",
+                              "--pbe-tabi-mac-surface-margin-rho-trigger"},
+                             common_value, i)) {
       pbe.tabi_mac_surface_margin_rho_trigger = stod(common_value);
       continue;
     }
     if (consume_option_value(
-            arg, {"-pbe-tabi-mac-surface-margin-soft-aspect-threshold",
-                  "--pbe-tabi-mac-surface-margin-soft-aspect-threshold"},
+            arg,
+            {"-pbe-tabi-mac-surface-margin-soft-aspect-threshold",
+             "--pbe-tabi-mac-surface-margin-soft-aspect-threshold"},
             common_value, i)) {
       pbe.tabi_mac_surface_margin_soft_aspect_threshold = stod(common_value);
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-mac-surface-margin-soft-rho-trigger",
-                  "--pbe-tabi-mac-surface-margin-soft-rho-trigger"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-mac-surface-margin-soft-rho-trigger",
+                              "--pbe-tabi-mac-surface-margin-soft-rho-trigger"},
+                             common_value, i)) {
       pbe.tabi_mac_surface_margin_soft_rho_trigger = stod(common_value);
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-mac-surface-margin-soft-factor",
-                  "--pbe-tabi-mac-surface-margin-soft-factor"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-mac-surface-margin-soft-factor",
+                              "--pbe-tabi-mac-surface-margin-soft-factor"},
+                             common_value, i)) {
       pbe.tabi_mac_surface_margin_soft_factor = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-target-batch-size",
-                                   "--pbe-tabi-target-batch-size"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-target-batch-size", "--pbe-tabi-target-batch-size"},
+            common_value, i)) {
       pbe.tabi_target_batch_size = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-leaf-pair-min-source-panels",
-                                   "--pbe-tabi-leaf-pair-min-source-panels"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-leaf-pair-min-source-panels",
+                              "--pbe-tabi-leaf-pair-min-source-panels"},
                              common_value, i)) {
       pbe.tabi_leaf_pair_min_source_panels = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-leaf-pair-min-targets",
-                                   "--pbe-tabi-leaf-pair-min-targets"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-leaf-pair-min-targets",
+                              "--pbe-tabi-leaf-pair-min-targets"},
                              common_value, i)) {
       pbe.tabi_leaf_pair_min_targets = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-leaf-pair-max-lookahead",
-                                   "--pbe-tabi-leaf-pair-max-lookahead"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-leaf-pair-max-lookahead",
+                              "--pbe-tabi-leaf-pair-max-lookahead"},
                              common_value, i)) {
       pbe.tabi_leaf_pair_max_lookahead = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-expansion-audit",
-                                   "--pbe-tabi-expansion-audit"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-expansion-audit", "--pbe-tabi-expansion-audit"},
+            common_value, i)) {
       pbe.tabi_expansion_audit =
           require_choice(common_value, {"off", "sampled", "full-small"},
                          "-pbe-tabi-expansion-audit");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-expansion-audit-channel",
-                                   "--pbe-tabi-expansion-audit-channel"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-expansion-audit-channel",
+                              "--pbe-tabi-expansion-audit-channel"},
                              common_value, i)) {
       pbe.tabi_expansion_audit_channel =
           require_choice(common_value, {"off", "summary", "sampled-detail"},
                          "-pbe-tabi-expansion-audit-channel");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-pre-solver-progress",
-                                   "--pbe-tabi-pre-solver-progress"},
-                             common_value, i)) {
-      pbe.tabi_pre_solver_progress =
-          require_choice(common_value, {"off", "on"},
-                         "-pbe-tabi-pre-solver-progress");
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-pre-solver-progress", "--pbe-tabi-pre-solver-progress"},
+            common_value, i)) {
+      pbe.tabi_pre_solver_progress = require_choice(
+          common_value, {"off", "on"}, "-pbe-tabi-pre-solver-progress");
       continue;
     }
-    if (consume_option_value(
-            arg, {"-pbe-tabi-expansion-audit-sample-count",
-                  "--pbe-tabi-expansion-audit-sample-count"},
-            common_value, i)) {
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-expansion-audit-sample-count",
+                              "--pbe-tabi-expansion-audit-sample-count"},
+                             common_value, i)) {
       pbe.tabi_expansion_audit_sample_count = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-expansion-audit-max-panels",
-                                   "--pbe-tabi-expansion-audit-max-panels"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-expansion-audit-max-panels",
+                              "--pbe-tabi-expansion-audit-max-panels"},
                              common_value, i)) {
       pbe.tabi_expansion_audit_max_panels = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-matvec-audit",
-                                   "--pbe-tabi-matvec-audit"},
-                             common_value, i)) {
-      pbe.tabi_matvec_audit =
-          require_choice(common_value,
-                         {"off", "sampled", "sampled-detail", "full-small"},
-                         "-pbe-tabi-matvec-audit");
+    if (consume_option_value(
+            arg, {"-pbe-tabi-matvec-audit", "--pbe-tabi-matvec-audit"},
+            common_value, i)) {
+      pbe.tabi_matvec_audit = require_choice(
+          common_value, {"off", "sampled", "sampled-detail", "full-small"},
+          "-pbe-tabi-matvec-audit");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-matvec-audit-sample-count",
-                                   "--pbe-tabi-matvec-audit-sample-count"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-matvec-audit-sample-count",
+                              "--pbe-tabi-matvec-audit-sample-count"},
                              common_value, i)) {
       pbe.tabi_matvec_audit_sample_count = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-diagnostics",
-                                   "--pbe-tabi-diagnostics",
-                                   "--diagnostics"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-diagnostics", "--pbe-tabi-diagnostics",
+                              "--diagnostics"},
                              common_value, i)) {
-      pbe.tabi_diagnostics =
-          require_choice(common_value, {"off", "audit", "full"},
-                         "-pbe-tabi-diagnostics");
+      pbe.tabi_diagnostics = require_choice(
+          common_value, {"off", "audit", "full"}, "-pbe-tabi-diagnostics");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-progress",
-                                   "--pbe-tabi-progress"},
+    if (consume_option_value(arg, {"-pbe-tabi-progress", "--pbe-tabi-progress"},
                              common_value, i)) {
-      pbe.tabi_progress =
-          require_choice(common_value, {"off", "auto", "detail"},
-                         "-pbe-tabi-progress");
+      pbe.tabi_progress = require_choice(
+          common_value, {"off", "auto", "detail"}, "-pbe-tabi-progress");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-progress-interval",
-                                   "--pbe-tabi-progress-interval"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-progress-interval", "--pbe-tabi-progress-interval"},
+            common_value, i)) {
       pbe.tabi_progress_interval = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-gmres-restart",
-                                   "--pbe-tabi-gmres-restart"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-tabi-gmres-restart", "--pbe-tabi-gmres-restart"},
+            common_value, i)) {
       pbe.tabi_gmres_restart = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-true-residual-probe",
-                                   "--pbe-tabi-true-residual-probe"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-true-residual-probe", "--pbe-tabi-true-residual-probe"},
+            common_value, i)) {
       pbe.tabi_true_residual_probe =
           require_choice(common_value, {"restart", "interval", "off"},
                          "-pbe-tabi-true-residual-probe");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-true-residual-probe-scope",
-                                   "--pbe-tabi-true-residual-probe-scope"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-true-residual-probe-scope",
+                              "--pbe-tabi-true-residual-probe-scope"},
                              common_value, i)) {
       pbe.tabi_true_residual_probe_scope =
           require_choice(common_value, {"full", "sampled", "adaptive"},
                          "-pbe-tabi-true-residual-probe-scope");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-true-residual-probe-interval",
-                                   "--pbe-tabi-true-residual-probe-interval"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-true-residual-probe-interval",
+                              "--pbe-tabi-true-residual-probe-interval"},
                              common_value, i)) {
       pbe.tabi_true_residual_probe_interval = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-true-residual-sample-count",
-                                   "--pbe-tabi-true-residual-sample-count"},
+    if (consume_option_value(arg,
+                             {"-pbe-tabi-true-residual-sample-count",
+                              "--pbe-tabi-true-residual-sample-count"},
                              common_value, i)) {
       pbe.tabi_true_residual_sample_count = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-energy-projection",
-                                   "--pbe-tabi-energy-projection"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-tabi-energy-projection", "--pbe-tabi-energy-projection"},
+            common_value, i)) {
       pbe.tabi_energy_projection = require_choice(
           common_value, {"boundary", "born-check", "charge-potential-debug"},
           "-pbe-tabi-energy-projection");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-stability-audit",
-                                   "--pbe-stability-audit"},
+    if (consume_option_value(arg,
+                             {"-pbe-stability-audit", "--pbe-stability-audit"},
                              common_value, i)) {
-      pbe.stability_audit =
-          require_choice(common_value, {"off", "summary", "detail"},
-                         "-pbe-stability-audit");
+      pbe.stability_audit = require_choice(
+          common_value, {"off", "summary", "detail"}, "-pbe-stability-audit");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-stability-mode",
-                                   "--pbe-stability-mode"},
+    if (consume_option_value(arg,
+                             {"-pbe-stability-mode", "--pbe-stability-mode"},
                              common_value, i)) {
-      pbe.stability_mode =
-          require_choice(common_value,
-                         {"off", "diagnose", "anchor", "hysteresis",
-                          "ensemble"},
-                         "-pbe-stability-mode");
+      pbe.stability_mode = require_choice(
+          common_value, {"off", "diagnose", "anchor", "hysteresis", "ensemble"},
+          "-pbe-stability-mode");
       continue;
     }
     if (consume_option_value(arg, {"-pbe-grid-anchor", "--pbe-grid-anchor"},
                              common_value, i)) {
-      pbe.grid_anchor =
-          require_choice(common_value,
-                         {"auto", "per-frame", "first-frame", "fixed-center"},
-                         "-pbe-grid-anchor");
+      pbe.grid_anchor = require_choice(
+          common_value, {"auto", "per-frame", "first-frame", "fixed-center"},
+          "-pbe-grid-anchor");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-scale", "--pbe-scale"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-pbe-scale", "--pbe-scale"}, common_value,
+                             i)) {
       pbe.scale = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-margin", "--pbe-margin"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-pbe-margin", "--pbe-margin"}, common_value,
+                             i)) {
       pbe.margin = stod(common_value);
       continue;
     }
     if (consume_option_value(arg, {"-pbe-gridbox", "--pbe-gridbox"},
                              common_value, i)) {
-      pbe.gridbox = require_choice(common_value, {"cuboidal", "cubic"},
-                                   "-pbe-gridbox");
+      pbe.gridbox =
+          require_choice(common_value, {"cuboidal", "cubic"}, "-pbe-gridbox");
       continue;
     }
     if (consume_option_value(arg, {"-pbe-int-diel", "--pbe-int-diel"},
@@ -2357,22 +2609,22 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.ext_diel = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-salt", "--pbe-salt"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-pbe-salt", "--pbe-salt"}, common_value,
+                             i)) {
       pbe.salt = stod(common_value);
       saltcon = pbe.salt;
       salt_concentration = pbe.salt;
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-temp", "--pbe-temp"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-pbe-temp", "--pbe-temp"}, common_value,
+                             i)) {
       pbe.temp = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-model", "--pbe-model"},
-                             common_value, i)) {
-      pbe.model = require_choice(common_value, {"linear", "nonlinear"},
-                                 "-pbe-model");
+    if (consume_option_value(arg, {"-pbe-model", "--pbe-model"}, common_value,
+                             i)) {
+      pbe.model =
+          require_choice(common_value, {"linear", "nonlinear"}, "-pbe-model");
       continue;
     }
     if (consume_option_value(arg, {"-pbe-biomodel", "--pbe-biomodel"},
@@ -2389,14 +2641,13 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (consume_option_value(arg, {"-pbe-boundary", "--pbe-boundary"},
                              common_value, i)) {
-      pbe.boundary =
-          require_choice(common_value, {"coulombic", "dipolar", "zero"},
-                         "-pbe-boundary");
+      pbe.boundary = require_choice(
+          common_value, {"coulombic", "dipolar", "zero"}, "-pbe-boundary");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-charge-assignment",
-                                   "--pbe-charge-assignment"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-charge-assignment", "--pbe-charge-assignment"},
+            common_value, i)) {
       pbe.charge_assignment =
           require_choice(common_value, {"trilinear", "delphi", "gaussian"},
                          "-pbe-charge-assignment");
@@ -2404,23 +2655,23 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (consume_option_value(arg, {"-pbe-surface", "--pbe-surface"},
                              common_value, i)) {
-      pbe.surface = require_choice(
-          common_value,
-          {"vdw", "sas", "ses", "delphi-ses", "delphi-vdw", "gaussian",
-           "gaussian-cutoff"},
-          "-pbe-surface");
+      pbe.surface =
+          require_choice(common_value,
+                         {"vdw", "sas", "ses", "delphi-ses", "delphi-vdw",
+                          "gaussian", "gaussian-cutoff"},
+                         "-pbe-surface");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-radius-convention",
-                                   "--pbe-radius-convention"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-radius-convention", "--pbe-radius-convention"},
+            common_value, i)) {
       pbe.radius_convention =
           require_choice(common_value, {"auto", "native", "delphi-bondi"},
                          "-pbe-radius-convention");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-probe", "--pbe-probe"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-pbe-probe", "--pbe-probe"}, common_value,
+                             i)) {
       pbe.probe_radius = stod(common_value);
       continue;
     }
@@ -2440,18 +2691,17 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.max_iter = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-rms", "--pbe-rms"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-pbe-rms", "--pbe-rms"}, common_value, i)) {
       pbe.rms_tol = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-dphi", "--pbe-dphi"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-pbe-dphi", "--pbe-dphi"}, common_value,
+                             i)) {
       pbe.dphi_tol = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-omega", "--pbe-omega"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-pbe-omega", "--pbe-omega"}, common_value,
+                             i)) {
       pbe.omega = lowercase_copy(common_value);
       if (pbe.omega != "auto")
         pbe.omega_value = stod(common_value);
@@ -2462,61 +2712,63 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.max_grid_points = static_cast<std::size_t>(stoull(common_value));
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-map", "--pbe-map"},
-                             common_value, i)) {
-      pbe.map =
-          require_choice(common_value, {"off", "phi", "epsilon", "ion", "all"},
-                         "-pbe-map");
+    if (consume_option_value(arg, {"-pbe-map", "--pbe-map"}, common_value, i)) {
+      pbe.map = require_choice(
+          common_value, {"off", "phi", "epsilon", "ion", "all"}, "-pbe-map");
       continue;
     }
     if (consume_option_value(arg, {"-pbe-map-frames", "--pbe-map-frames"},
                              common_value, i)) {
-      pbe.map_frames =
-          require_choice(common_value, {"none", "first", "last", "all"},
-                         "-pbe-map-frames");
+      pbe.map_frames = require_choice(
+          common_value, {"none", "first", "last", "all"}, "-pbe-map-frames");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-tabi-surface-output",
-                                   "--pbe-tabi-surface-output"},
+    if (consume_option_value(arg,
+                             {"-pbe-atom-potentials", "--pbe-atom-potentials"},
                              common_value, i)) {
+      pbe.atom_potentials =
+          require_choice(common_value, {"off", "csv"}, "-pbe-atom-potentials");
+      if (pbe.atom_potentials != "off")
+        pbe.flag_pbe = true;
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-pbe-tabi-surface-output", "--pbe-tabi-surface-output"},
+            common_value, i)) {
       pbe.tabi_surface_output =
           require_choice(common_value, {"off", "csv", "vtk", "all"},
                          "-pbe-tabi-surface-output");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-kernel", "--pbe-kernel"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-pbe-kernel", "--pbe-kernel"}, common_value,
+                             i)) {
       pbe.kernel = require_choice(common_value, {"auto", "scalar", "avx2"},
                                   "-pbe-kernel");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-focus", "--pbe-focus"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-pbe-focus", "--pbe-focus"}, common_value,
+                             i)) {
       pbe.focus =
-          require_choice(common_value, {"off", "auto", "delphi"},
-                         "-pbe-focus");
+          require_choice(common_value, {"off", "auto", "delphi"}, "-pbe-focus");
       continue;
     }
     if (consume_option_value(arg, {"-pbe-multigrid", "--pbe-multigrid"},
                              common_value, i)) {
-      const std::string multigrid =
-          require_choice(common_value, {"off", "focus", "auto", "vcycle"},
-                         "-pbe-multigrid");
+      const std::string multigrid = require_choice(
+          common_value, {"off", "focus", "auto", "vcycle"}, "-pbe-multigrid");
       pbe.multigrid = multigrid;
       if (multigrid == "focus" || multigrid == "auto")
         pbe.focus = "auto";
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-focus-levels",
-                                   "--pbe-focus-levels"},
+    if (consume_option_value(arg, {"-pbe-focus-levels", "--pbe-focus-levels"},
                              common_value, i)) {
       pbe.focus_levels = stoi(common_value);
       if (pbe.focus_levels > 1 && pbe.focus == "off")
         pbe.focus = "auto";
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-focus-margin",
-                                   "--pbe-focus-margin"},
+    if (consume_option_value(arg, {"-pbe-focus-margin", "--pbe-focus-margin"},
                              common_value, i)) {
       pbe.focus_margin = stod(common_value);
       continue;
@@ -2526,8 +2778,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.mg_levels = lowercase_copy(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-mg-pre", "--pbe-mg-pre"},
-                             common_value, i)) {
+    if (consume_option_value(arg, {"-pbe-mg-pre", "--pbe-mg-pre"}, common_value,
+                             i)) {
       pbe.mg_pre = stoi(common_value);
       continue;
     }
@@ -2536,26 +2788,23 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.mg_post = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-mg-coarse-iter",
-                                   "--pbe-mg-coarse-iter"},
+    if (consume_option_value(arg,
+                             {"-pbe-mg-coarse-iter", "--pbe-mg-coarse-iter"},
                              common_value, i)) {
       pbe.mg_coarse_iter = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-nl-max-iter",
-                                   "--pbe-nl-max-iter"},
+    if (consume_option_value(arg, {"-pbe-nl-max-iter", "--pbe-nl-max-iter"},
                              common_value, i)) {
       pbe.nl_max_iter = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-nl-inner-iter",
-                                   "--pbe-nl-inner-iter"},
+    if (consume_option_value(arg, {"-pbe-nl-inner-iter", "--pbe-nl-inner-iter"},
                              common_value, i)) {
       pbe.nl_inner_iter = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-nl-stagnation",
-                                   "--pbe-nl-stagnation"},
+    if (consume_option_value(arg, {"-pbe-nl-stagnation", "--pbe-nl-stagnation"},
                              common_value, i)) {
       pbe.nl_stagnation = stoi(common_value);
       continue;
@@ -2582,24 +2831,21 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.nl_clip = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-nl-continuation",
-                                   "--pbe-nl-continuation"},
+    if (consume_option_value(arg,
+                             {"-pbe-nl-continuation", "--pbe-nl-continuation"},
                              common_value, i)) {
       pbe.nl_continuation =
-          require_choice(common_value, {"off", "auto"},
-                         "-pbe-nl-continuation");
+          require_choice(common_value, {"off", "auto"}, "-pbe-nl-continuation");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-nl-line-search",
-                                   "--pbe-nl-line-search"},
+    if (consume_option_value(arg,
+                             {"-pbe-nl-line-search", "--pbe-nl-line-search"},
                              common_value, i)) {
       pbe.nl_line_search =
-          require_choice(common_value, {"off", "auto"},
-                         "-pbe-nl-line-search");
+          require_choice(common_value, {"off", "auto"}, "-pbe-nl-line-search");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-nl-residual",
-                                   "--pbe-nl-residual"},
+    if (consume_option_value(arg, {"-pbe-nl-residual", "--pbe-nl-residual"},
                              common_value, i)) {
       pbe.nl_residual = stod(common_value);
       continue;
@@ -2607,78 +2853,68 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (consume_option_value(arg, {"-pbe-nl-solver", "--pbe-nl-solver"},
                              common_value, i)) {
       pbe.nl_solver =
-          require_choice(common_value, {"picard", "newton"},
-                         "-pbe-nl-solver");
+          require_choice(common_value, {"picard", "newton"}, "-pbe-nl-solver");
       continue;
     }
     if (consume_option_value(arg, {"-pbe-nl-inner", "--pbe-nl-inner"},
                              common_value, i)) {
-      pbe.nl_inner =
-          require_choice(common_value, {"auto", "sor", "vcycle"},
-                         "-pbe-nl-inner");
+      pbe.nl_inner = require_choice(common_value, {"auto", "sor", "vcycle"},
+                                    "-pbe-nl-inner");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-nl-multigrid",
-                                   "--pbe-nl-multigrid"},
+    if (consume_option_value(arg, {"-pbe-nl-multigrid", "--pbe-nl-multigrid"},
                              common_value, i)) {
       pbe.nl_multigrid =
           require_choice(common_value, {"off", "fas"}, "-pbe-nl-multigrid");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-nwt-kernel",
-                                   "--pbe-nwt-kernel"},
+    if (consume_option_value(arg, {"-pbe-nwt-kernel", "--pbe-nwt-kernel"},
                              common_value, i)) {
-      pbe.nwt_kernel =
-          require_choice(common_value, {"auto", "legacy", "delphi-half"},
-                         "-pbe-nwt-kernel");
+      pbe.nwt_kernel = require_choice(
+          common_value, {"auto", "legacy", "delphi-half"}, "-pbe-nwt-kernel");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-nwt-homo-kernel",
-                                   "--pbe-nwt-homo-kernel"},
+    if (consume_option_value(arg,
+                             {"-pbe-nwt-homo-kernel", "--pbe-nwt-homo-kernel"},
                              common_value, i)) {
-      pbe.nwt_homo_kernel =
-          require_choice(common_value,
-                         {"auto", "packed-list", "row-span", "avx2",
-                          "salt-tiled"},
-                         "-pbe-nwt-homo-kernel");
+      pbe.nwt_homo_kernel = require_choice(
+          common_value,
+          {"auto", "packed-list", "row-span", "avx2", "salt-tiled"},
+          "-pbe-nwt-homo-kernel");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-nwt-progress",
-                                   "--pbe-nwt-progress"},
+    if (consume_option_value(arg, {"-pbe-nwt-progress", "--pbe-nwt-progress"},
                              common_value, i)) {
-      pbe.nwt_progress =
-          require_choice(common_value, {"auto", "off", "strict"},
-                         "-pbe-nwt-progress");
+      pbe.nwt_progress = require_choice(common_value, {"auto", "off", "strict"},
+                                        "-pbe-nwt-progress");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-linear-kernel",
-                                   "--pbe-linear-kernel"},
+    if (consume_option_value(arg, {"-pbe-linear-kernel", "--pbe-linear-kernel"},
                              common_value, i)) {
       pbe.linear_kernel =
           require_choice(common_value, {"auto", "legacy", "half-packed"},
                          "-pbe-linear-kernel");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-gaussian-exp",
-                                   "--pbe-gaussian-exp"},
+    if (consume_option_value(arg, {"-pbe-gaussian-exp", "--pbe-gaussian-exp"},
                              common_value, i)) {
       pbe.gaussian_exp = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-gaussian-sigma",
-                                   "--pbe-gaussian-sigma"},
+    if (consume_option_value(arg,
+                             {"-pbe-gaussian-sigma", "--pbe-gaussian-sigma"},
                              common_value, i)) {
       pbe.gaussian_sigma = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-density-cutoff",
-                                   "--pbe-density-cutoff"},
+    if (consume_option_value(arg,
+                             {"-pbe-density-cutoff", "--pbe-density-cutoff"},
                              common_value, i)) {
       pbe.density_cutoff = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-surface-cutoff",
-                                   "--pbe-surface-cutoff"},
+    if (consume_option_value(arg,
+                             {"-pbe-surface-cutoff", "--pbe-surface-cutoff"},
                              common_value, i)) {
       pbe.surface_cutoff = lowercase_copy(common_value);
       if (pbe.surface_cutoff != "auto")
@@ -2690,16 +2926,14 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.gap_diel = stod(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-probe-file",
-                                   "--pbe-probe-file",
-                                   "-pbe-test-probe-file",
-                                   "--pbe-test-probe-file"},
+    if (consume_option_value(arg,
+                             {"-pbe-probe-file", "--pbe-probe-file",
+                              "-pbe-test-probe-file", "--pbe-test-probe-file"},
                              common_value, i)) {
       pbe.probe_file = common_value;
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-probe-residue",
-                                   "--pbe-probe-residue"},
+    if (consume_option_value(arg, {"-pbe-probe-residue", "--pbe-probe-residue"},
                              common_value, i)) {
       pbe.probe_residue = common_value;
       continue;
@@ -2709,8 +2943,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.probe_site = common_value;
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-focus-center",
-                                   "--pbe-focus-center"},
+    if (consume_option_value(arg, {"-pbe-focus-center", "--pbe-focus-center"},
                              common_value, i)) {
       parse_pbe_focus_center(common_value);
       continue;
@@ -2718,9 +2951,8 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (arg == "-pbe-dgsolv" || arg == "--pbe-dgsolv") {
       if (i + 1 < argc) {
         std::string next_value = lowercase_copy(string(argv[i + 1]));
-        if (next_value == "1" || next_value == "true" ||
-            next_value == "yes" || next_value == "on" ||
-            next_value == "0" || next_value == "false" ||
+        if (next_value == "1" || next_value == "true" || next_value == "yes" ||
+            next_value == "on" || next_value == "0" || next_value == "false" ||
             next_value == "no" || next_value == "off") {
           pbe.dgsolv = parse_bool_equals(next_value, "-pbe-dgsolv");
           if (pbe.dgsolv)
@@ -2747,143 +2979,150 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbe.test_pqr = common_value;
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-grid-size",
-                                   "--pbe-test-grid-size"},
+    if (consume_option_value(arg, {"-pbe-binding-cycle", "--pbe-binding-cycle"},
+                             common_value, i)) {
+      pbe.binding_cycle = require_choice(
+          common_value, {"off", "pqr-components"}, "-pbe-binding-cycle");
+      if (pbe.binding_cycle != "off")
+        pbe.flag_pbe = true;
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-pbe-binding-receptor-pqr", "--pbe-binding-receptor-pqr"},
+            common_value, i)) {
+      pbe.binding_receptor_pqr = common_value;
+      continue;
+    }
+    if (consume_option_value(
+            arg, {"-pbe-binding-ligand-pqr", "--pbe-binding-ligand-pqr"},
+            common_value, i)) {
+      pbe.binding_ligand_pqr = common_value;
+      continue;
+    }
+    if (consume_option_value(arg,
+                             {"-pbe-test-grid-size", "--pbe-test-grid-size"},
                              common_value, i)) {
       pbe.test_grid_size = stoi(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-center",
-                                   "--pbe-test-center"},
+    if (consume_option_value(arg, {"-pbe-test-center", "--pbe-test-center"},
                              common_value, i)) {
       parse_pbe_test_center(common_value);
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-parity-dump",
-                                   "--pbe-parity-dump"},
+    if (consume_option_value(arg, {"-pbe-parity-dump", "--pbe-parity-dump"},
                              common_value, i)) {
       pbe.parity_dump =
           require_choice(common_value, {"off", "summary", "points", "all"},
                          "-pbe-parity-dump");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-parity-map-dump",
-                                   "--pbe-parity-map-dump"},
+    if (consume_option_value(arg,
+                             {"-pbe-parity-map-dump", "--pbe-parity-map-dump"},
                              common_value, i)) {
-      pbe.parity_map_dump =
-          require_choice(common_value, {"off", "samples", "full"},
-                         "-pbe-parity-map-dump");
+      pbe.parity_map_dump = require_choice(
+          common_value, {"off", "samples", "full"}, "-pbe-parity-map-dump");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-charge-grid",
-                                   "--pbe-test-charge-grid"},
-                             common_value, i)) {
-      pbe.test_charge_grid =
-          require_choice(common_value, {"native", "oracle"},
-                         "-pbe-test-charge-grid");
+    if (consume_option_value(
+            arg, {"-pbe-test-charge-grid", "--pbe-test-charge-grid"},
+            common_value, i)) {
+      pbe.test_charge_grid = require_choice(common_value, {"native", "oracle"},
+                                            "-pbe-test-charge-grid");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-charge-grid-diff",
-                                   "--pbe-test-charge-grid-diff"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-test-charge-grid-diff", "--pbe-test-charge-grid-diff"},
+            common_value, i)) {
       pbe.test_charge_grid_diff =
           require_choice(common_value, {"off", "samples", "full"},
                          "-pbe-test-charge-grid-diff");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-surface-map",
-                                   "--pbe-test-surface-map"},
-                             common_value, i)) {
-      pbe.test_surface_map =
-          require_choice(common_value, {"native", "oracle"},
-                         "-pbe-test-surface-map");
+    if (consume_option_value(
+            arg, {"-pbe-test-surface-map", "--pbe-test-surface-map"},
+            common_value, i)) {
+      pbe.test_surface_map = require_choice(common_value, {"native", "oracle"},
+                                            "-pbe-test-surface-map");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-midpoint-epsilon",
-                                   "--pbe-test-midpoint-epsilon"},
-                             common_value, i)) {
-      pbe.test_midpoint_epsilon =
-          require_choice(common_value, {"native", "oracle"},
-                         "-pbe-test-midpoint-epsilon");
+    if (consume_option_value(
+            arg, {"-pbe-test-midpoint-epsilon", "--pbe-test-midpoint-epsilon"},
+            common_value, i)) {
+      pbe.test_midpoint_epsilon = require_choice(
+          common_value, {"native", "oracle"}, "-pbe-test-midpoint-epsilon");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-midpoint-diff",
-                                   "--pbe-test-midpoint-diff"},
-                             common_value, i)) {
-      pbe.test_midpoint_diff =
-          require_choice(common_value, {"off", "samples", "full"},
-                         "-pbe-test-midpoint-diff");
+    if (consume_option_value(
+            arg, {"-pbe-test-midpoint-diff", "--pbe-test-midpoint-diff"},
+            common_value, i)) {
+      pbe.test_midpoint_diff = require_choice(
+          common_value, {"off", "samples", "full"}, "-pbe-test-midpoint-diff");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-vdwms-remap",
-                                   "--pbe-test-vdwms-remap"},
-                             common_value, i)) {
-      pbe.test_vdwms_remap =
-          require_choice(common_value, {"auto", "off"},
-                         "-pbe-test-vdwms-remap");
+    if (consume_option_value(
+            arg, {"-pbe-test-vdwms-remap", "--pbe-test-vdwms-remap"},
+            common_value, i)) {
+      pbe.test_vdwms_remap = require_choice(common_value, {"auto", "off"},
+                                            "-pbe-test-vdwms-remap");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-boundary-map",
-                                   "--pbe-test-boundary-map"},
-                             common_value, i)) {
-      pbe.test_boundary_map =
-          require_choice(common_value, {"native", "oracle"},
-                         "-pbe-test-boundary-map");
+    if (consume_option_value(
+            arg, {"-pbe-test-boundary-map", "--pbe-test-boundary-map"},
+            common_value, i)) {
+      pbe.test_boundary_map = require_choice(common_value, {"native", "oracle"},
+                                             "-pbe-test-boundary-map");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-boundary-convention",
-                                   "--pbe-test-boundary-convention"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-pbe-test-boundary-convention", "--pbe-test-boundary-convention"},
+            common_value, i)) {
       pbe.test_boundary_convention =
-          require_choice(common_value,
-                         {"native-real", "delphi-grid", "oracle"},
+          require_choice(common_value, {"native-real", "delphi-grid", "oracle"},
                          "-pbe-test-boundary-convention");
       if (pbe.test_boundary_convention == "oracle")
         pbe.test_boundary_map = "oracle";
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-field-units",
-                                   "--pbe-test-field-units"},
-                             common_value, i)) {
+    if (consume_option_value(
+            arg, {"-pbe-test-field-units", "--pbe-test-field-units"},
+            common_value, i)) {
       pbe.test_field_units =
           require_choice(common_value, {"native", "delphi-dimensionless"},
                          "-pbe-test-field-units");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-operator-convention",
-                                   "--pbe-test-operator-convention"},
-                             common_value, i)) {
-      pbe.test_operator_convention =
-          require_choice(common_value, {"native", "delphi"},
-                         "-pbe-test-operator-convention");
+    if (consume_option_value(
+            arg,
+            {"-pbe-test-operator-convention", "--pbe-test-operator-convention"},
+            common_value, i)) {
+      pbe.test_operator_convention = require_choice(
+          common_value, {"native", "delphi"}, "-pbe-test-operator-convention");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-rhs-map",
-                                   "--pbe-test-rhs-map"},
+    if (consume_option_value(arg, {"-pbe-test-rhs-map", "--pbe-test-rhs-map"},
                              common_value, i)) {
-      pbe.test_rhs_map =
-          require_choice(common_value, {"native", "oracle"},
-                         "-pbe-test-rhs-map");
+      pbe.test_rhs_map = require_choice(common_value, {"native", "oracle"},
+                                        "-pbe-test-rhs-map");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-screen-map",
-                                   "--pbe-test-screen-map"},
+    if (consume_option_value(arg,
+                             {"-pbe-test-screen-map", "--pbe-test-screen-map"},
                              common_value, i)) {
-      pbe.test_screen_map =
-          require_choice(common_value, {"native", "oracle"},
-                         "-pbe-test-screen-map");
+      pbe.test_screen_map = require_choice(common_value, {"native", "oracle"},
+                                           "-pbe-test-screen-map");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-denom-map",
-                                   "--pbe-test-denom-map"},
+    if (consume_option_value(arg,
+                             {"-pbe-test-denom-map", "--pbe-test-denom-map"},
                              common_value, i)) {
-      pbe.test_denom_map =
-          require_choice(common_value, {"native", "oracle"},
-                         "-pbe-test-denom-map");
+      pbe.test_denom_map = require_choice(common_value, {"native", "oracle"},
+                                          "-pbe-test-denom-map");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-nl-source",
-                                   "--pbe-test-nl-source"},
+    if (consume_option_value(arg,
+                             {"-pbe-test-nl-source", "--pbe-test-nl-source"},
                              common_value, i)) {
       pbe.test_nl_source =
           require_choice(common_value, {"titan", "delphi-dimensionless"},
@@ -2894,9 +3133,8 @@ int arguments::parse_arguments(int argc, char **argv) {
         arg == "--pbe-test-newton-derivative") {
       if (i + 1 < argc) {
         std::string next_value = lowercase_copy(string(argv[i + 1]));
-        if (next_value == "1" || next_value == "true" ||
-            next_value == "yes" || next_value == "on" ||
-            next_value == "0" || next_value == "false" ||
+        if (next_value == "1" || next_value == "true" || next_value == "yes" ||
+            next_value == "on" || next_value == "0" || next_value == "false" ||
             next_value == "no" || next_value == "off") {
           pbe.test_newton_derivative =
               parse_bool_equals(next_value, "-pbe-test-newton-derivative");
@@ -2909,27 +3147,25 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (arg.rfind("-pbe-test-newton-derivative=", 0) == 0 ||
         arg.rfind("--pbe-test-newton-derivative=", 0) == 0) {
-      pbe.test_newton_derivative =
-          parse_bool_equals(arg.substr(arg.find('=') + 1),
-                            "-pbe-test-newton-derivative");
+      pbe.test_newton_derivative = parse_bool_equals(
+          arg.substr(arg.find('=') + 1), "-pbe-test-newton-derivative");
       continue;
     }
-    if (consume_option_value(arg, {"-pbe-test-energy-convention",
-                                   "--pbe-test-energy-convention"},
-                             common_value, i)) {
-      pbe.test_energy_convention =
-          require_choice(common_value,
-                         {"auto", "atom", "grid", "delphi-corrected",
-                          "delphi-iscm"},
-                         "-pbe-test-energy-convention");
+    if (consume_option_value(
+            arg,
+            {"-pbe-test-energy-convention", "--pbe-test-energy-convention"},
+            common_value, i)) {
+      pbe.test_energy_convention = require_choice(
+          common_value,
+          {"auto", "atom", "grid", "delphi-corrected", "delphi-iscm"},
+          "-pbe-test-energy-convention");
       continue;
     }
 
-    if (consume_option_value(arg, {"-gbsa-perf", "--gbsa-perf"},
-                             common_value, i)) {
-      gbsa_perf =
-          require_choice(common_value, {"off", "summary", "detail"},
-                         "-gbsa-perf");
+    if (consume_option_value(arg, {"-gbsa-perf", "--gbsa-perf"}, common_value,
+                             i)) {
+      gbsa_perf = require_choice(common_value, {"off", "summary", "detail"},
+                                 "-gbsa-perf");
       continue;
     }
     if (arg == "-gbsa") {
@@ -2955,8 +3191,7 @@ int arguments::parse_arguments(int argc, char **argv) {
         arg.rfind("--rg2-hist-bins=", 0) == 0) {
       rg.hist_bins = stoi(arg.substr(arg.find('=') + 1));
     }
-    if ((arg == "-rg2-hist-bins" || arg == "--rg2-hist-bins") &&
-        i + 1 < argc) {
+    if ((arg == "-rg2-hist-bins" || arg == "--rg2-hist-bins") && i + 1 < argc) {
       rg.hist_bins = stoi(string(argv[i + 1]));
       ++i;
     }
@@ -2966,8 +3201,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (arg == "-hbk" || arg == "--hbk") {
       hbk.flag_hbk = true;
     }
-    if (arg.rfind("-hbk-kind=", 0) == 0 ||
-        arg.rfind("--hbk-kind=", 0) == 0) {
+    if (arg.rfind("-hbk-kind=", 0) == 0 || arg.rfind("--hbk-kind=", 0) == 0) {
       hbk.flag_hbk = true;
       hbk.hbk_kinds.push_back(arg.substr(arg.find('=') + 1));
     }
@@ -3009,8 +3243,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       hbk.hbk_hbond_cutoff_explicit = true;
       ++i;
     }
-    if (arg.rfind("-hbk-angle=", 0) == 0 ||
-        arg.rfind("--hbk-angle=", 0) == 0) {
+    if (arg.rfind("-hbk-angle=", 0) == 0 || arg.rfind("--hbk-angle=", 0) == 0) {
       hbk.flag_hbk = true;
       hbk.hbk_angle_deg = stod(arg.substr(arg.find('=') + 1));
       hbk.hbk_angle_explicit = true;
@@ -3045,8 +3278,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       hbk.hbk_water_cutoff_explicit = true;
       ++i;
     }
-    if (arg.rfind("-lj-cut=", 0) == 0 ||
-        arg.rfind("--lj-cut=", 0) == 0) {
+    if (arg.rfind("-lj-cut=", 0) == 0 || arg.rfind("--lj-cut=", 0) == 0) {
       lj.lj_cluster_cutoff = stod(arg.substr(arg.find('=') + 1));
     }
     if ((arg == "-lj-cut" || arg == "--lj-cut") && i + 1 < argc) {
@@ -3066,8 +3298,7 @@ int arguments::parse_arguments(int argc, char **argv) {
         arg.rfind("--lj-rho-bin=", 0) == 0) {
       lj.lj_rho_bin = stod(arg.substr(arg.find('=') + 1));
     }
-    if ((arg == "-lj-rho-bin" || arg == "--lj-rho-bin") &&
-        i + 1 < argc) {
+    if ((arg == "-lj-rho-bin" || arg == "--lj-rho-bin") && i + 1 < argc) {
       lj.lj_rho_bin = stod(string(argv[i + 1]));
       ++i;
     }
@@ -3075,8 +3306,7 @@ int arguments::parse_arguments(int argc, char **argv) {
         arg.rfind("--lj-rho-max=", 0) == 0) {
       lj.lj_rho_max = stod(arg.substr(arg.find('=') + 1));
     }
-    if ((arg == "-lj-rho-max" || arg == "--lj-rho-max") &&
-        i + 1 < argc) {
+    if ((arg == "-lj-rho-max" || arg == "--lj-rho-max") && i + 1 < argc) {
       lj.lj_rho_max = stod(string(argv[i + 1]));
       ++i;
     }
@@ -3139,22 +3369,20 @@ int arguments::parse_arguments(int argc, char **argv) {
                              sq.sq_rdf_max_auto, "-sq-rdf-max");
       ++i;
     }
-    if (arg.rfind("-sq-q-bin=", 0) == 0 ||
-        arg.rfind("--sq-q-bin=", 0) == 0) {
+    if (arg.rfind("-sq-q-bin=", 0) == 0 || arg.rfind("--sq-q-bin=", 0) == 0) {
       sq.sq_q_bin = stod(arg.substr(arg.find('=') + 1));
     }
     if ((arg == "-sq-q-bin" || arg == "--sq-q-bin") && i + 1 < argc) {
       sq.sq_q_bin = stod(string(argv[i + 1]));
       ++i;
     }
-    if (arg.rfind("-sq-q-max=", 0) == 0 ||
-        arg.rfind("--sq-q-max=", 0) == 0) {
+    if (arg.rfind("-sq-q-max=", 0) == 0 || arg.rfind("--sq-q-max=", 0) == 0) {
       parse_sq_auto_or_value(arg.substr(arg.find('=') + 1), sq.sq_q_max,
                              sq.sq_q_max_auto, "-sq-q-max");
     }
     if ((arg == "-sq-q-max" || arg == "--sq-q-max") && i + 1 < argc) {
-      parse_sq_auto_or_value(string(argv[i + 1]), sq.sq_q_max,
-                             sq.sq_q_max_auto, "-sq-q-max");
+      parse_sq_auto_or_value(string(argv[i + 1]), sq.sq_q_max, sq.sq_q_max_auto,
+                             "-sq-q-max");
       ++i;
     }
     if (arg.rfind("-corr-knn-k=", 0) == 0 ||
@@ -3202,8 +3430,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (arg.rfind("-corr-knn-pair-contact-cut=", 0) == 0 ||
         arg.rfind("--corr-knn-pair-contact-cut=", 0) == 0) {
-      corr_knn.pair_contact_cutoff_ang =
-          stod(arg.substr(arg.find('=') + 1));
+      corr_knn.pair_contact_cutoff_ang = stod(arg.substr(arg.find('=') + 1));
     }
     if ((arg == "-corr-knn-pair-contact-cut" ||
          arg == "--corr-knn-pair-contact-cut") &&
@@ -3215,8 +3442,7 @@ int arguments::parse_arguments(int argc, char **argv) {
         arg.rfind("--corr-knn-prune-window=", 0) == 0) {
       parse_corr_knn_prune_window(arg.substr(arg.find('=') + 1));
     }
-    if ((arg == "-corr-knn-prune-window" ||
-         arg == "--corr-knn-prune-window") &&
+    if ((arg == "-corr-knn-prune-window" || arg == "--corr-knn-prune-window") &&
         i + 1 < argc) {
       parse_corr_knn_prune_window(string(argv[i + 1]));
       ++i;
@@ -3253,8 +3479,7 @@ int arguments::parse_arguments(int argc, char **argv) {
          arg == "--validation-vamp-components") &&
         i + 1 < argc) {
       enable_validation();
-      parse_validation_int_list(string(argv[i + 1]),
-                                validation.vamp_components,
+      parse_validation_int_list(string(argv[i + 1]), validation.vamp_components,
                                 "-validation-vamp-components");
       ++i;
     }
@@ -3262,11 +3487,9 @@ int arguments::parse_arguments(int argc, char **argv) {
         arg.rfind("--validation-vamp-lags=", 0) == 0) {
       enable_validation();
       parse_validation_int_list(arg.substr(arg.find('=') + 1),
-                                validation.vamp_lags,
-                                "-validation-vamp-lags");
+                                validation.vamp_lags, "-validation-vamp-lags");
     }
-    if ((arg == "-validation-vamp-lags" ||
-         arg == "--validation-vamp-lags") &&
+    if ((arg == "-validation-vamp-lags" || arg == "--validation-vamp-lags") &&
         i + 1 < argc) {
       enable_validation();
       parse_validation_int_list(string(argv[i + 1]), validation.vamp_lags,
@@ -3293,8 +3516,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       enable_validation();
       validation.vamp_folds = stoi(arg.substr(arg.find('=') + 1));
     }
-    if ((arg == "-validation-vamp-folds" ||
-         arg == "--validation-vamp-folds") &&
+    if ((arg == "-validation-vamp-folds" || arg == "--validation-vamp-folds") &&
         i + 1 < argc) {
       enable_validation();
       validation.vamp_folds = stoi(string(argv[i + 1]));
@@ -3309,8 +3531,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       enable_validation();
       validation.bootstrap_samples = stoi(arg.substr(arg.find('=') + 1));
     }
-    if ((arg == "-validation-bootstrap" ||
-         arg == "--validation-bootstrap") &&
+    if ((arg == "-validation-bootstrap" || arg == "--validation-bootstrap") &&
         i + 1 < argc) {
       enable_validation();
       validation.bootstrap_samples = stoi(string(argv[i + 1]));
@@ -3506,7 +3727,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       zts.zts_images =
           stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
     }
-    if ((string(argv[i]) == "--zts-images" || string(argv[i]) == "-zts-images") &&
+    if ((string(argv[i]) == "--zts-images" ||
+         string(argv[i]) == "-zts-images") &&
         i + 1 < argc) {
       zts.zts_images = stoi(string(argv[i + 1]));
       ++i;
@@ -3533,8 +3755,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]).find("--zts-tol=") == 0 ||
         string(argv[i]).find("-zts-tol=") == 0) {
-      zts.zts_tol =
-          stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+      zts.zts_tol = stod(string(argv[i]).substr(string(argv[i]).find('=') + 1));
     }
     if ((string(argv[i]) == "--zts-tol" || string(argv[i]) == "-zts-tol") &&
         i + 1 < argc) {
@@ -3546,7 +3767,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       zts.zts_source =
           stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
     }
-    if ((string(argv[i]) == "--zts-source" || string(argv[i]) == "-zts-source") &&
+    if ((string(argv[i]) == "--zts-source" ||
+         string(argv[i]) == "-zts-source") &&
         i + 1 < argc) {
       zts.zts_source = stoi(string(argv[i + 1]));
       ++i;
@@ -3577,8 +3799,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]).find("--zts-init=") == 0 ||
         string(argv[i]).find("-zts-init=") == 0) {
-      zts.zts_init_mode =
-          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+      zts.zts_init_mode = string(argv[i]).substr(string(argv[i]).find('=') + 1);
     }
     if ((string(argv[i]) == "--zts-init" || string(argv[i]) == "-zts-init") &&
         i + 1 < argc) {
@@ -3587,11 +3808,11 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]).find("--zts-domain=") == 0 ||
         string(argv[i]).find("-zts-domain=") == 0) {
-      zts.zts_domain =
-          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+      zts.zts_domain = string(argv[i]).substr(string(argv[i]).find('=') + 1);
       zts.zts_domain_explicit = true;
     }
-    if ((string(argv[i]) == "--zts-domain" || string(argv[i]) == "-zts-domain") &&
+    if ((string(argv[i]) == "--zts-domain" ||
+         string(argv[i]) == "-zts-domain") &&
         i + 1 < argc) {
       zts.zts_domain = string(argv[i + 1]);
       zts.zts_domain_explicit = true;
@@ -3620,8 +3841,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]).find("--tica-backend=") == 0 ||
         string(argv[i]).find("-tica-backend=") == 0) {
-      msm.tica_backend =
-          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+      msm.tica_backend = string(argv[i]).substr(string(argv[i]).find('=') + 1);
     }
     if ((string(argv[i]) == "--tica-backend" ||
          string(argv[i]) == "-tica-backend") &&
@@ -3634,8 +3854,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       msm.tica_rank =
           stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
     }
-    if ((string(argv[i]) == "--tica-rank" ||
-         string(argv[i]) == "-tica-rank") &&
+    if ((string(argv[i]) == "--tica-rank" || string(argv[i]) == "-tica-rank") &&
         i + 1 < argc) {
       msm.tica_rank = stoi(string(argv[i + 1]));
       ++i;
@@ -3705,8 +3924,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       umap.umap_seed = static_cast<unsigned int>(
           stoul(string(argv[i]).substr(string(argv[i]).find('=') + 1)));
     }
-    if ((string(argv[i]) == "--umap-seed" ||
-         string(argv[i]) == "-umap-seed") &&
+    if ((string(argv[i]) == "--umap-seed" || string(argv[i]) == "-umap-seed") &&
         i + 1 < argc) {
       umap.umap_seed = static_cast<unsigned int>(stoul(string(argv[i + 1])));
       ++i;
@@ -3733,8 +3951,8 @@ int arguments::parse_arguments(int argc, char **argv) {
     // --- MSM Phase 2 flags ---
     if (string(argv[i]) == "-msm") {
       msm.flag_msm = true;
-      msm.flag_tica = true;    // MSM depends on TICA projection
-      flag_network = true; // TICA depends on CA data from network module
+      msm.flag_tica = true; // MSM depends on TICA projection
+      flag_network = true;  // TICA depends on CA data from network module
     }
     if (string(argv[i]) == "-msm-clusters" && i + 1 < argc) {
       msm.msm_clusters = stoi(string(argv[i + 1]));
@@ -3826,8 +4044,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       msm.pca_topk =
           stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
     }
-    if ((string(argv[i]) == "--pca-topk" ||
-         string(argv[i]) == "-pca-topk") &&
+    if ((string(argv[i]) == "--pca-topk" || string(argv[i]) == "-pca-topk") &&
         i + 1 < argc) {
       msm.pca_topk = stoi(string(argv[i + 1]));
       ++i;
@@ -3878,31 +4095,28 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (consume_option_value(arg, {"-llps-density", "--llps-density"},
                              llps_value, i)) {
-      llps.llps_density =
-          require_choice(llps_value, {"auto", "full", "projection", "off"},
-                         "-llps-density");
+      llps.llps_density = require_choice(
+          llps_value, {"auto", "full", "projection", "off"}, "-llps-density");
     }
-    if (consume_option_value(arg, {"-llps-kernel", "--llps-kernel"},
-                             llps_value, i)) {
-      llps.llps_kernel =
-          require_choice(llps_value, {"auto", "scalar", "avx2"},
-                         "-llps-kernel");
+    if (consume_option_value(arg, {"-llps-kernel", "--llps-kernel"}, llps_value,
+                             i)) {
+      llps.llps_kernel = require_choice(llps_value, {"auto", "scalar", "avx2"},
+                                        "-llps-kernel");
     }
     if (consume_bool_option(arg, {"-llps-dynamics", "--llps-dynamics"},
                             llps.llps_dynamics, i)) {
     }
     bool llps_detailed_flag = llps.llps_dynamics_detailed;
-    if (consume_bool_option(arg,
-                            {"-llps-dynamics-detailed",
-                             "--llps-dynamics-detailed"},
-                            llps_detailed_flag, i)) {
+    if (consume_bool_option(
+            arg, {"-llps-dynamics-detailed", "--llps-dynamics-detailed"},
+            llps_detailed_flag, i)) {
       llps.llps_dynamics_detailed = llps_detailed_flag;
       if (llps_detailed_flag)
         llps.llps_dynamics = true;
     }
-    if (consume_option_value(arg, {"-llps-lineage-overlap",
-                                   "--llps-lineage-overlap"},
-                             llps_value, i)) {
+    if (consume_option_value(
+            arg, {"-llps-lineage-overlap", "--llps-lineage-overlap"},
+            llps_value, i)) {
       llps.llps_dynamics = true;
       llps.llps_lineage_overlap = stod(llps_value);
     }
@@ -3911,10 +4125,9 @@ int arguments::parse_arguments(int argc, char **argv) {
       llps.llps_dynamics = true;
       llps.llps_prna_rcut = stof(llps_value);
     }
-    if (consume_option_value(arg,
-                             {"-llps-msd-fit-start-ns",
-                              "--llps-msd-fit-start-ns"},
-                             llps_value, i)) {
+    if (consume_option_value(
+            arg, {"-llps-msd-fit-start-ns", "--llps-msd-fit-start-ns"},
+            llps_value, i)) {
       llps.llps_dynamics = true;
       if (llps_value == "auto" || llps_value == "AUTO" || llps_value == "Auto")
         llps.llps_msd_fit_start_ns = -1.0;
@@ -3922,8 +4135,7 @@ int arguments::parse_arguments(int argc, char **argv) {
         llps.llps_msd_fit_start_ns = stod(llps_value);
     }
     if (consume_option_value(arg,
-                             {"-llps-msd-fit-end-ns",
-                              "--llps-msd-fit-end-ns"},
+                             {"-llps-msd-fit-end-ns", "--llps-msd-fit-end-ns"},
                              llps_value, i)) {
       llps.llps_dynamics = true;
       if (llps_value == "auto" || llps_value == "AUTO" || llps_value == "Auto")
@@ -3932,47 +4144,40 @@ int arguments::parse_arguments(int argc, char **argv) {
         llps.llps_msd_fit_end_ns = stod(llps_value);
     }
     if (consume_option_value(arg,
-                             {"-llps-rna-compaction",
-                              "--llps-rna-compaction"},
+                             {"-llps-rna-compaction", "--llps-rna-compaction"},
                              llps_value, i)) {
-      llps.llps_rna_compaction =
-          require_choice(llps_value, {"auto", "true", "false", "yes", "no",
-                                      "on", "off", "1", "0"},
-                         "-llps-rna-compaction");
+      llps.llps_rna_compaction = require_choice(
+          llps_value,
+          {"auto", "true", "false", "yes", "no", "on", "off", "1", "0"},
+          "-llps-rna-compaction");
       if (llps.llps_rna_compaction == "true" ||
           llps.llps_rna_compaction == "yes" ||
-          llps.llps_rna_compaction == "on" ||
-          llps.llps_rna_compaction == "1")
-          llps.llps_dynamics = true;
+          llps.llps_rna_compaction == "on" || llps.llps_rna_compaction == "1")
+        llps.llps_dynamics = true;
     }
-    if (consume_option_value(arg,
-                             {"-llps-rna-information",
-                              "--llps-rna-information"},
-                             llps_value, i)) {
-      llps.llps_rna_information =
-          require_choice(llps_value, {"auto", "true", "false", "yes", "no",
-                                      "on", "off", "1", "0"},
-                         "-llps-rna-information");
+    if (consume_option_value(
+            arg, {"-llps-rna-information", "--llps-rna-information"},
+            llps_value, i)) {
+      llps.llps_rna_information = require_choice(
+          llps_value,
+          {"auto", "true", "false", "yes", "no", "on", "off", "1", "0"},
+          "-llps-rna-information");
     }
-    if (consume_option_value(arg,
-                             {"-llps-rna-topology",
-                              "--llps-rna-topology"},
+    if (consume_option_value(arg, {"-llps-rna-topology", "--llps-rna-topology"},
                              llps_value, i)) {
-      llps.llps_rna_topology =
-          require_choice(llps_value, {"auto", "true", "false", "yes", "no",
-                                      "on", "off", "1", "0"},
-                         "-llps-rna-topology");
-      if (llps.llps_rna_topology == "true" ||
-          llps.llps_rna_topology == "yes" ||
-          llps.llps_rna_topology == "on" ||
-          llps.llps_rna_topology == "1")
+      llps.llps_rna_topology = require_choice(
+          llps_value,
+          {"auto", "true", "false", "yes", "no", "on", "off", "1", "0"},
+          "-llps-rna-topology");
+      if (llps.llps_rna_topology == "true" || llps.llps_rna_topology == "yes" ||
+          llps.llps_rna_topology == "on" || llps.llps_rna_topology == "1")
         llps.llps_dynamics = true;
     }
     bool llps_rna_topology_detailed_flag = llps.llps_rna_topology_detailed;
-    if (consume_bool_option(arg,
-                            {"-llps-rna-topology-detailed",
-                             "--llps-rna-topology-detailed"},
-                            llps_rna_topology_detailed_flag, i)) {
+    if (consume_bool_option(
+            arg,
+            {"-llps-rna-topology-detailed", "--llps-rna-topology-detailed"},
+            llps_rna_topology_detailed_flag, i)) {
       llps.llps_rna_topology_detailed = llps_rna_topology_detailed_flag;
       if (llps_rna_topology_detailed_flag) {
         llps.llps_dynamics = true;
@@ -3980,14 +4185,13 @@ int arguments::parse_arguments(int argc, char **argv) {
           llps.llps_rna_topology = "true";
       }
     }
-    if (consume_option_value(arg,
-                             {"-llps-energy-correlation",
-                              "--llps-energy-correlation"},
-                             llps_value, i)) {
-      llps.llps_energy_correlation =
-          require_choice(llps_value, {"auto", "true", "false", "yes", "no",
-                                      "on", "off", "1", "0"},
-                         "-llps-energy-correlation");
+    if (consume_option_value(
+            arg, {"-llps-energy-correlation", "--llps-energy-correlation"},
+            llps_value, i)) {
+      llps.llps_energy_correlation = require_choice(
+          llps_value,
+          {"auto", "true", "false", "yes", "no", "on", "off", "1", "0"},
+          "-llps-energy-correlation");
       if (llps.llps_energy_correlation == "true" ||
           llps.llps_energy_correlation == "yes" ||
           llps.llps_energy_correlation == "on" ||
@@ -3996,8 +4200,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     bool llps_energy_detailed_flag = llps.llps_energy_detailed;
     if (consume_bool_option(arg,
-                            {"-llps-energy-detailed",
-                             "--llps-energy-detailed"},
+                            {"-llps-energy-detailed", "--llps-energy-detailed"},
                             llps_energy_detailed_flag, i)) {
       llps.llps_energy_detailed = llps_energy_detailed_flag;
       if (llps_energy_detailed_flag) {
@@ -4016,16 +4219,12 @@ int arguments::parse_arguments(int argc, char **argv) {
         llps.llps_dynamics = true;
       }
     }
-    if (consume_option_value(arg,
-                             {"-llps-paper-profile-bin",
-                              "--llps-paper-profile-bin"},
-                             llps_value, i)) {
-      llps.llps_paper_profile_bin_nm =
-          std::max(0.01, stod(llps_value));
+    if (consume_option_value(
+            arg, {"-llps-paper-profile-bin", "--llps-paper-profile-bin"},
+            llps_value, i)) {
+      llps.llps_paper_profile_bin_nm = std::max(0.01, stod(llps_value));
     }
-    if (consume_option_value(arg,
-                             {"-llps-paper-blocks",
-                              "--llps-paper-blocks"},
+    if (consume_option_value(arg, {"-llps-paper-blocks", "--llps-paper-blocks"},
                              llps_value, i)) {
       if (llps_value == "auto" || llps_value == "AUTO" ||
           llps_value == "Auto") {
@@ -4035,24 +4234,20 @@ int arguments::parse_arguments(int argc, char **argv) {
       }
     }
     if (consume_option_value(arg,
-                             {"-llps-paper-geometry",
-                              "--llps-paper-geometry"},
+                             {"-llps-paper-geometry", "--llps-paper-geometry"},
                              llps_value, i)) {
-      llps.llps_paper_geometry =
-          require_choice(llps_value, {"auto", "droplet", "slab"},
-                         "-llps-paper-geometry");
+      llps.llps_paper_geometry = require_choice(
+          llps_value, {"auto", "droplet", "slab"}, "-llps-paper-geometry");
     }
     if (consume_option_value(arg,
-                             {"-llps-paper-fractal",
-                              "--llps-paper-fractal"},
+                             {"-llps-paper-fractal", "--llps-paper-fractal"},
                              llps_value, i)) {
-      llps.llps_paper_fractal =
-          require_choice(llps_value, {"auto", "true", "false", "yes", "no",
-                                      "on", "off", "1", "0"},
-                         "-llps-paper-fractal");
+      llps.llps_paper_fractal = require_choice(
+          llps_value,
+          {"auto", "true", "false", "yes", "no", "on", "off", "1", "0"},
+          "-llps-paper-fractal");
       if (llps.llps_paper_fractal == "true" ||
-          llps.llps_paper_fractal == "yes" ||
-          llps.llps_paper_fractal == "on" ||
+          llps.llps_paper_fractal == "yes" || llps.llps_paper_fractal == "on" ||
           llps.llps_paper_fractal == "1") {
         llps.flag_llps = true;
         llps.llps_paper = true;
@@ -4061,50 +4256,44 @@ int arguments::parse_arguments(int argc, char **argv) {
       }
     }
     if (consume_option_value(arg,
-                             {"-llps-rna-intra-rcut",
-                              "--llps-rna-intra-rcut"},
+                             {"-llps-rna-intra-rcut", "--llps-rna-intra-rcut"},
                              llps_value, i)) {
       llps.llps_rna_intra_rcut = stof(llps_value);
     }
-    if (consume_option_value(arg,
-                             {"-llps-rna-longrange-min",
-                              "--llps-rna-longrange-min"},
-                             llps_value, i)) {
+    if (consume_option_value(
+            arg, {"-llps-rna-longrange-min", "--llps-rna-longrange-min"},
+            llps_value, i)) {
       llps.llps_rna_longrange_min = std::max(0, stoi(llps_value));
     }
-    if (consume_option_value(arg,
-                             {"-llps-rna-bridge-geom-min",
-                              "--llps-rna-bridge-geom-min"},
-                             llps_value, i)) {
+    if (consume_option_value(
+            arg, {"-llps-rna-bridge-geom-min", "--llps-rna-bridge-geom-min"},
+            llps_value, i)) {
       if (llps_value == "auto" || llps_value == "AUTO" || llps_value == "Auto")
         llps.llps_rna_bridge_geom_min = -1.0f;
       else
         llps.llps_rna_bridge_geom_min = stof(llps_value);
     }
-    if (consume_option_value(arg,
-                             {"-llps-rna-patch-gap-max",
-                              "--llps-rna-patch-gap-max"},
-                             llps_value, i)) {
+    if (consume_option_value(
+            arg, {"-llps-rna-patch-gap-max", "--llps-rna-patch-gap-max"},
+            llps_value, i)) {
       llps.llps_rna_patch_gap_max = std::max(0, stoi(llps_value));
     }
-    bool llps_rna_clamp_require_loop_flag =
-        llps.llps_rna_clamp_require_loop;
-    if (consume_bool_option(arg,
-                            {"-llps-rna-clamp-require-loop",
-                             "--llps-rna-clamp-require-loop"},
-                            llps_rna_clamp_require_loop_flag, i)) {
+    bool llps_rna_clamp_require_loop_flag = llps.llps_rna_clamp_require_loop;
+    if (consume_bool_option(
+            arg,
+            {"-llps-rna-clamp-require-loop", "--llps-rna-clamp-require-loop"},
+            llps_rna_clamp_require_loop_flag, i)) {
       llps.llps_rna_clamp_require_loop = llps_rna_clamp_require_loop_flag;
     }
-    if (consume_option_value(arg,
-                             {"-llps-rna-info-rg-bins",
-                              "--llps-rna-info-rg-bins"},
-                             llps_value, i)) {
+    if (consume_option_value(
+            arg, {"-llps-rna-info-rg-bins", "--llps-rna-info-rg-bins"},
+            llps_value, i)) {
       llps.llps_rna_info_rg_bins = std::max(1, stoi(llps_value));
     }
-    if (consume_option_value(arg,
-                             {"-llps-rna-info-longrange-bins",
-                              "--llps-rna-info-longrange-bins"},
-                             llps_value, i)) {
+    if (consume_option_value(
+            arg,
+            {"-llps-rna-info-longrange-bins", "--llps-rna-info-longrange-bins"},
+            llps_value, i)) {
       llps.llps_rna_info_longrange_bins = std::max(1, stoi(llps_value));
     }
     if (consume_option_value(arg, {"-llps-dbscan-eps"}, llps_value, i)) {
@@ -4185,8 +4374,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       awh.flag_awh_ifp = true;
       ifp.flag_ifp = true;
     }
-    if ((string(argv[i]) == "-awh-xvg" ||
-         string(argv[i]) == "--awh-xvg") && i + 1 < argc) {
+    if ((string(argv[i]) == "-awh-xvg" || string(argv[i]) == "--awh-xvg") &&
+        i + 1 < argc) {
       awh.xvg_list_file = string(argv[i + 1]);
       ++i;
     }
@@ -4196,22 +4385,23 @@ int arguments::parse_arguments(int argc, char **argv) {
           stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
     }
     if ((string(argv[i]) == "-awh-xvg-col" ||
-         string(argv[i]) == "--awh-xvg-col") && i + 1 < argc) {
+         string(argv[i]) == "--awh-xvg-col") &&
+        i + 1 < argc) {
       awh.xvg_value_column = stoi(string(argv[i + 1]));
       ++i;
     }
     if (string(argv[i]).find("-awh-bins=") == 0 ||
         string(argv[i]).find("--awh-bins=") == 0) {
-      awh.n_bins =
-          stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
+      awh.n_bins = stoi(string(argv[i]).substr(string(argv[i]).find('=') + 1));
     }
-    if ((string(argv[i]) == "-awh-bins" ||
-         string(argv[i]) == "--awh-bins") && i + 1 < argc) {
+    if ((string(argv[i]) == "-awh-bins" || string(argv[i]) == "--awh-bins") &&
+        i + 1 < argc) {
       awh.n_bins = stoi(string(argv[i + 1]));
       ++i;
     }
     if ((string(argv[i]) == "-awh-out-prefix" ||
-         string(argv[i]) == "--awh-out-prefix") && i + 1 < argc) {
+         string(argv[i]) == "--awh-out-prefix") &&
+        i + 1 < argc) {
       awh.output_prefix = string(argv[i + 1]);
       ++i;
     }
@@ -4329,55 +4519,55 @@ int arguments::parse_arguments(int argc, char **argv) {
       pbc.solv_pbctopo = true;
       pbc.pbctopo_mode = "llps-local";
     }
-    if (consume_required_option_value(arg, {"-pbctopo-mode",
-                                            "--pbctopo-mode"},
+    if (consume_required_option_value(arg, {"-pbctopo-mode", "--pbctopo-mode"},
                                       common_value, i)) {
       pbc.solv_pbctopo = true;
       pbc.pbctopo_mode = common_value;
     }
-    if (consume_required_option_value(arg, {"-pbctopo-anchor-backend",
-                                            "--pbctopo-anchor-backend"},
-                                      common_value, i)) {
+    if (consume_required_option_value(
+            arg, {"-pbctopo-anchor-backend", "--pbctopo-anchor-backend"},
+            common_value, i)) {
       pbc.pbctopo_anchor_backend = common_value;
     }
-    if (consume_required_option_value(arg, {"-pbctopo-bond-cutoff",
-                                            "--pbctopo-bond-cutoff"},
-                                      common_value, i)) {
+    if (consume_required_option_value(
+            arg, {"-pbctopo-bond-cutoff", "--pbctopo-bond-cutoff"},
+            common_value, i)) {
       pbc.pbctopo_bond_cutoff =
           parse_numeric_option(common_value, "-pbctopo-bond-cutoff");
       pbc.pbctopo_bond_cutoff_set = true;
     }
-    if (consume_required_option_value(arg, {"-pbctopo-clash-cutoff",
-                                            "--pbctopo-clash-cutoff"},
-                                      common_value, i)) {
+    if (consume_required_option_value(
+            arg, {"-pbctopo-clash-cutoff", "--pbctopo-clash-cutoff"},
+            common_value, i)) {
       pbc.pbctopo_clash_cutoff =
           parse_numeric_option(common_value, "-pbctopo-clash-cutoff");
       pbc.pbctopo_clash_cutoff_set = true;
     }
-    if (consume_required_option_value(arg, {"-pbctopo-contact-cutoff",
-                                            "--pbctopo-contact-cutoff"},
-                                      common_value, i)) {
+    if (consume_required_option_value(
+            arg, {"-pbctopo-contact-cutoff", "--pbctopo-contact-cutoff"},
+            common_value, i)) {
       pbc.pbctopo_contact_cutoff =
           parse_numeric_option(common_value, "-pbctopo-contact-cutoff");
       pbc.pbctopo_contact_cutoff_set = true;
     }
-    if (consume_required_option_value(arg, {"-pbctopo-continuity-cutoff",
-                                            "--pbctopo-continuity-cutoff"},
-                                      common_value, i)) {
+    if (consume_required_option_value(
+            arg, {"-pbctopo-continuity-cutoff", "--pbctopo-continuity-cutoff"},
+            common_value, i)) {
       pbc.pbctopo_continuity_cutoff =
           parse_numeric_option(common_value, "-pbctopo-continuity-cutoff");
       pbc.pbctopo_continuity_cutoff_set = true;
     }
-    if (consume_required_option_value(arg, {"-pbctopo-exact-component-limit",
-                                            "--pbctopo-exact-component-limit"},
+    if (consume_required_option_value(arg,
+                                      {"-pbctopo-exact-component-limit",
+                                       "--pbctopo-exact-component-limit"},
                                       common_value, i)) {
       pbc.pbctopo_exact_component_limit =
           parse_integer_option(common_value, "-pbctopo-exact-component-limit");
       pbc.pbctopo_exact_component_limit_set = true;
     }
-    if (consume_required_option_value(arg, {"-pbctopo-beam-width",
-                                            "--pbctopo-beam-width"},
-                                      common_value, i)) {
+    if (consume_required_option_value(
+            arg, {"-pbctopo-beam-width", "--pbctopo-beam-width"}, common_value,
+            i)) {
       pbc.pbctopo_beam_width =
           parse_integer_option(common_value, "-pbctopo-beam-width");
       pbc.pbctopo_beam_width_set = true;
@@ -4439,9 +4629,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       flag_1_pdb = true;
     }
     if (string(argv[i]).find("-1pdb=") == 0) {
-      flag_1_pdb =
-          parse_bool_equals(string(argv[i]).substr(string("-1pdb=").size()),
-                            "-1pdb");
+      flag_1_pdb = parse_bool_equals(
+          string(argv[i]).substr(string("-1pdb=").size()), "-1pdb");
     }
     if (string(argv[i]) == "-hb") {
       flag_h_bond = 1;
@@ -4456,9 +4645,8 @@ int arguments::parse_arguments(int argc, char **argv) {
       flag_1_pdb = true;
     }
     if (string(argv[i]).find("-nocal=") == 0) {
-      flag_nocal =
-          parse_bool_equals(string(argv[i]).substr(string("-nocal=").size()),
-                            "-nocal");
+      flag_nocal = parse_bool_equals(
+          string(argv[i]).substr(string("-nocal=").size()), "-nocal");
       if (flag_nocal)
         flag_1_pdb = true;
     }
@@ -4684,9 +4872,8 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (consume_option_value(arg, {"-fmap"}, common_value, i)) {
       force_map = 1;
-      if (common_value == "residue-atom" ||
-          common_value == "residue-residue" || common_value == "atom-atom" ||
-          common_value == "atom-residue")
+      if (common_value == "residue-atom" || common_value == "residue-residue" ||
+          common_value == "atom-atom" || common_value == "atom-residue")
         fmap_type = common_value;
       continue;
     }
@@ -4711,8 +4898,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     if ((string(argv[i]) == "-path-a" && i + 1 < argc) ||
         string(argv[i]).find("-path-a=") == 0) {
       if (string(argv[i]).find("-path-a=") == 0)
-        path_amino_acid =
-            string(argv[i]).substr(string("-path-a=").size());
+        path_amino_acid = string(argv[i]).substr(string("-path-a=").size());
       else
         path_amino_acid = argv[i + 1];
       if (path_amino_acid.empty()) {
@@ -4745,11 +4931,8 @@ int arguments::parse_arguments(int argc, char **argv) {
         ++i;
       }
       transform(value.begin(), value.end(), value.begin(),
-                [](unsigned char c) {
-                  return static_cast<char>(tolower(c));
-                });
-      if (value == "on" || value == "yes" || value == "true" ||
-          value == "1")
+                [](unsigned char c) { return static_cast<char>(tolower(c)); });
+      if (value == "on" || value == "yes" || value == "true" || value == "1")
         fflib_auto = true;
       else if (value == "off" || value == "no" || value == "false" ||
                value == "0")
@@ -4767,9 +4950,7 @@ int arguments::parse_arguments(int argc, char **argv) {
         ++i;
       }
       transform(value.begin(), value.end(), value.begin(),
-                [](unsigned char c) {
-                  return static_cast<char>(tolower(c));
-                });
+                [](unsigned char c) { return static_cast<char>(tolower(c)); });
       if (value == "warn" || value == "strict")
         fflib_missing = value;
       else
@@ -4785,9 +4966,7 @@ int arguments::parse_arguments(int argc, char **argv) {
         ++i;
       }
       transform(value.begin(), value.end(), value.begin(),
-                [](unsigned char c) {
-                  return static_cast<char>(tolower(c));
-                });
+                [](unsigned char c) { return static_cast<char>(tolower(c)); });
       if (value == "reference" || value == "none")
         fflib_hydrogens = value;
       else
@@ -5063,8 +5242,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]).find("-eq-weight-source=") == 0 ||
         string(argv[i]).find("--eq-weight-source=") == 0) {
-      eq_weight_source =
-          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+      eq_weight_source = string(argv[i]).substr(string(argv[i]).find('=') + 1);
     }
     if ((string(argv[i]) == "-eq-weight-source" ||
          string(argv[i]) == "--eq-weight-source") &&
@@ -5075,9 +5253,9 @@ int arguments::parse_arguments(int argc, char **argv) {
     // --- DHAM (Dynamic Histogram Analysis Method) flags ---
     if (string(argv[i]) == "-dham") {
       dham.flag_dham = true;
-      msm.flag_msm = true;      // DHAM depends on MSM (K-means + dtrajs)
-      msm.flag_tica = true;     // MSM depends on TICA projection
-      flag_network = true;      // TICA depends on CA data from network module
+      msm.flag_msm = true;  // DHAM depends on MSM (K-means + dtrajs)
+      msm.flag_tica = true; // MSM depends on TICA projection
+      flag_network = true;  // TICA depends on CA data from network module
     }
     if (string(argv[i]).find("-dham-temps=") == 0 ||
         string(argv[i]).find("--dham-temps=") == 0) {
@@ -5115,8 +5293,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]).find("-dham-window-match=") == 0 ||
         string(argv[i]).find("--dham-window-match=") == 0) {
-      dham.window_match =
-          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+      dham.window_match = string(argv[i]).substr(string(argv[i]).find('=') + 1);
     }
     if (string(argv[i]) == "-dham-window-match" && i + 1 < argc) {
       dham.window_match = string(argv[i + 1]);
@@ -5206,8 +5383,7 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]).find("-mbar-window-match=") == 0 ||
         string(argv[i]).find("--mbar-window-match=") == 0) {
-      mbar.window_match =
-          string(argv[i]).substr(string(argv[i]).find('=') + 1);
+      mbar.window_match = string(argv[i]).substr(string(argv[i]).find('=') + 1);
     }
     if (string(argv[i]) == "-mbar-window-match" && i + 1 < argc) {
       mbar.window_match = string(argv[i + 1]);
@@ -5282,7 +5458,7 @@ int arguments::parse_arguments(int argc, char **argv) {
       tpt.flag_tpt = true;
       msm.flag_msm = true;  // TPT depends on MSM microstates / TPM
       msm.flag_tica = true; // MSM depends on TICA projection
-      flag_network = true;  // protein workflows still use network -> TICA -> MSM
+      flag_network = true; // protein workflows still use network -> TICA -> MSM
     }
     if (string(argv[i]).find("--tpt-mode=") == 0 ||
         string(argv[i]).find("-tpt-mode=") == 0) {
@@ -5336,15 +5512,12 @@ int arguments::parse_arguments(int argc, char **argv) {
     }
     if (string(argv[i]).find("--tpt-use-dham=") == 0 ||
         string(argv[i]).find("-tpt-use-dham=") == 0) {
-      std::string value =
-          string(argv[i]).substr(string(argv[i]).find('=') + 1);
-      std::transform(value.begin(), value.end(), value.begin(),
-                     [](unsigned char c) {
-                       return static_cast<char>(std::tolower(c));
-                     });
-      tpt.use_dham =
-          !(value == "no" || value == "false" || value == "0" ||
-            value == "off");
+      std::string value = string(argv[i]).substr(string(argv[i]).find('=') + 1);
+      std::transform(
+          value.begin(), value.end(), value.begin(),
+          [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      tpt.use_dham = !(value == "no" || value == "false" || value == "0" ||
+                       value == "off");
     }
     if (string(argv[i]).find("--tpt-demux-map=") == 0 ||
         string(argv[i]).find("-tpt-demux-map=") == 0) {
@@ -5383,13 +5556,11 @@ int arguments::parse_arguments(int argc, char **argv) {
          string(argv[i]) == "-tpt-use-dham") &&
         i + 1 < argc) {
       std::string value = string(argv[i + 1]);
-      std::transform(value.begin(), value.end(), value.begin(),
-                     [](unsigned char c) {
-                       return static_cast<char>(std::tolower(c));
-                     });
-      tpt.use_dham =
-          !(value == "no" || value == "false" || value == "0" ||
-            value == "off");
+      std::transform(
+          value.begin(), value.end(), value.begin(),
+          [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      tpt.use_dham = !(value == "no" || value == "false" || value == "0" ||
+                       value == "off");
       ++i;
     }
     if (string(argv[i]) == "-no-center") {
@@ -5424,9 +5595,8 @@ int arguments::parse_arguments(int argc, char **argv) {
     if (hotspot.source == "edecomp" || hotspot.source == "both") {
       edecomp.flag_edecomp = true;
       if (edecomp.level == "atom") {
-        TitanUI::print_error(
-            "Hotspot report: EDecomp hotspot ranking requires "
-            "-edecomp-level=residue or -edecomp-level=both.");
+        TitanUI::print_error("Hotspot report: EDecomp hotspot ranking requires "
+                             "-edecomp-level=residue or -edecomp-level=both.");
         exit(EXIT_FAILURE);
       }
     }
@@ -5453,8 +5623,8 @@ int arguments::parse_arguments(int argc, char **argv) {
   if (pbc.solv_pbctopo) {
     const bool conflict_with_reference =
         pbc.solv_pbc == 1 || pbc.solv_pbc_int == 1 || pbc.solv_pbcn ||
-        pbc.pbc_aggressive || pbc.pbc_mem || pbc.flag_pbc_ref ||
-        pbc.pbc_envi || pbc.solv_pbc_clust;
+        pbc.pbc_aggressive || pbc.pbc_mem || pbc.flag_pbc_ref || pbc.pbc_envi ||
+        pbc.solv_pbc_clust;
     if (conflict_with_reference) {
       cout << "ERROR!! The option -pbctopo can not be combined with other "
               "reference/legacy PBC modes.\n";
@@ -5506,11 +5676,11 @@ arguments::tokenize_arg_file(const std::string &filename) {
 
       if (flag == "-pbctopo-anchor-backend" || flag == "-community" ||
           flag == "-edecomp" || flag == "-hotspot-report" ||
-          flag == "-membrane" || flag == "-s2" ||
-          flag == "-s2-bfactor-pdb") {
+          flag == "-membrane" || flag == "-s2" || flag == "-s2-bfactor-pdb") {
         tokens.push_back(flag + "=" + value);
       } else {
-        // Split flag and value into separate tokens (single-dash only in arg.in)
+        // Split flag and value into separate tokens (single-dash only in
+        // arg.in)
         tokens.push_back(flag);
         if (!value.empty()) {
           std::istringstream iss(value);
@@ -5554,8 +5724,8 @@ int arguments::parse_arg_file() {
              flag == "-n" || flag == "-i" || flag == "-traj" ||
              flag == "-dham-temps" || flag == "-dham-ener" ||
              flag == "-mbar-temps" || flag == "-mbar-ener" ||
-             flag == "-mbar-demux-map" ||
-             flag == "-path-a" || flag == "-path-n" || flag == "-pbc-ref" ||
+             flag == "-mbar-demux-map" || flag == "-path-a" ||
+             flag == "-path-n" || flag == "-pbc-ref" ||
              flag == "-membrane-leaflet-file";
     };
 
@@ -5583,8 +5753,8 @@ int arguments::parse_arg_file() {
   for (auto &s : argv_storage)
     argv_ptrs.push_back(const_cast<char *>(s.c_str()));
 
-  int result = parse_arguments(static_cast<int>(argv_ptrs.size()),
-                               argv_ptrs.data());
+  int result =
+      parse_arguments(static_cast<int>(argv_ptrs.size()), argv_ptrs.data());
 
   // Resolve relative paths for file arguments relative to arg file dir
   if (!arg_dir.empty()) {
@@ -5718,7 +5888,7 @@ bool arguments::check_topo(string NameofTopoFile, int Topo) {
       while (!topo_is_open) {
         cout << "Cannot open " << NameofTopoFile
              << ". Please type your lig topo file (no if you don't want to use "
-                 "topo): ";
+                "topo): ";
         cin >> NameofTopoFile;
         cout << NameofTopoFile << "\n";
         assign_topo_name(NameofTopoFile);

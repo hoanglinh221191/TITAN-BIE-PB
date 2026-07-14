@@ -120,7 +120,8 @@ endif
 
 # ─── Tệp nguồn (Sources) ───
 ROOT_SRCS = $(wildcard $(SRC_ROOT)/*.cpp)
-PBE_SRCS  = $(wildcard $(SRC_ROOT)/tabi/*.cpp)
+PBE_GRID_SRCS = $(wildcard $(SRC_ROOT)/pbe/grid/*.cpp)
+PBE_SRCS  = $(wildcard $(SRC_ROOT)/tabi/*.cpp) $(PBE_GRID_SRCS)
 PBCTOPO_SRCS = $(wildcard $(SRC_ROOT)/pbctopo/*.cpp)
 GMXTRAJ_SRCS = $(wildcard $(SRC_ROOT)/gmxtraj/*.cpp)
 SRCS  = $(ROOT_SRCS) $(PBE_SRCS) $(PBCTOPO_SRCS) $(GMXTRAJ_SRCS)

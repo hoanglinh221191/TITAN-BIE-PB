@@ -104,6 +104,11 @@ double evaluate_cartesian_jcp_local_scalar(
     const CartesianJcpLocalP4 &local, JcpLocalField field, double dx,
     double dy, double dz) noexcept;
 
+std::array<double, 3> evaluate_cartesian_jcp_local_gradient(
+    const CartesianJcpLocalP4 &local, JcpLocalField field, double dx,
+    double dy, double dz,
+    int target_order = kCartesianLocalTargetOrder) noexcept;
+
 std::array<double, 4> evaluate_cartesian_jcp_l2p(
     const PrototypePanel &target, double target_center_x,
     double target_center_y, double target_center_z,

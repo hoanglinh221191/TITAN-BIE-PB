@@ -30,6 +30,8 @@ struct PrototypeConfig {
   int threads = 1;
 };
 
+using FmmM2lConfig = PrototypeConfig;
+
 struct PrototypeMetrics {
   std::size_t sources = 0;
   std::size_t targets = 0;
@@ -269,6 +271,7 @@ struct JcpLocalP4CandidateResult {
   std::size_t direct_fallback_panels{0};
   std::size_t direct_fallback_pairs{0};
   std::size_t far_pairs{0};
+  std::size_t far_panel_pairs{0};
   std::size_t cache_operator_count{0};
   std::size_t cache_bytes{0};
   std::size_t cache_operator_bytes{0};
@@ -315,6 +318,8 @@ struct JcpLocalP4CandidateResult {
   bool finite_outputs{true};
 };
 
+using JcpLocalCartesianCandidateResult = JcpLocalP4CandidateResult;
+
 struct JcpLocalP4OperatorOptions {
   std::string near_integration{"analytic_singular"};
   std::string quad_buffer{"off"};
@@ -329,6 +334,8 @@ struct JcpLocalP4OperatorOptions {
   std::string geometry_guard{"off"};
   double geometry_theta{0.0};
 };
+
+using JcpLocalCartesianOperatorOptions = JcpLocalP4OperatorOptions;
 
 void assemble_jcp_local_p4_system_matvec(
     const JcpLocalP4CandidateResult &interaction,
@@ -375,7 +382,16 @@ struct PrototypePanel {
   double nz = 1.0;
   double area = 1.0;
   double scalar_density = 1.0;
+  double source_x = 0.0;
+  double source_y = 0.0;
+  double source_z = 0.0;
+  bool has_source_quadrature_center = false;
 };
+
+// Release-facing aliases. The historical Prototype* names remain available for
+// source compatibility with archived benchmark probes and reports.
+using SurfacePanelView = PrototypePanel;
+using JcpPanel = PrototypePanel;
 
 struct FmmM2lOverlapPanelGroup {
   std::vector<std::size_t> owned_panels;
@@ -409,8 +425,13 @@ public:
   [[nodiscard]] std::vector<FmmM2lOverlapPanelGroup>
   overlap_panel_groups(std::size_t owned_block_size,
                        std::size_t overlap_panel_cap) const;
+  [[nodiscard]] std::vector<FmmM2lOverlapPanelGroup>
+  distance_knn_overlap_panel_groups(std::size_t owned_block_size,
+                                    std::size_t overlap_panel_cap) const;
   [[nodiscard]] std::vector<std::vector<std::size_t>>
   near_panel_graph(std::size_t neighbor_cap) const;
+  [[nodiscard]] std::vector<std::vector<std::size_t>>
+  distance_knn_panel_graph(std::size_t neighbor_cap) const;
 
   JcpAnalyticOperatorResult apply(const std::vector<double> &phi,
                                   const std::vector<double> &phin,
@@ -451,6 +472,24 @@ public:
       double refine_tolerance = 4.0e-3)
       const;
 
+  JcpLocalCartesianCandidateResult apply_local_cartesian_candidate(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      TitanExecutor &executor, bool coupled = true,
+      const std::string &near_integration = "centroid",
+      const std::string &quad_buffer = "off",
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr,
+      const std::string &refine_mode = "operator-tail-static",
+      double refine_tolerance = 2.0e-3,
+      const std::string &cache_mode = "kernel-jet",
+      std::size_t cache_budget_mb = 256,
+      const std::string &fallback_mode = "scalar",
+      const std::string &plan_builder = "legacy-rescan",
+      std::size_t refine_probe_count = 4,
+      const std::string &refine_probe_mode = "rademacher",
+      const std::string &geometry_guard = "off",
+      double geometry_theta = 0.0,
+      const std::vector<std::size_t> *sampled_target_indices = nullptr) const;
+
   JcpLocalP4CandidateResult apply_local_p4_candidate(
       const std::vector<double> &phi, const std::vector<double> &phin,
       TitanExecutor &executor, bool coupled = true,
@@ -466,7 +505,8 @@ public:
       std::size_t refine_probe_count = 4,
       const std::string &refine_probe_mode = "rademacher",
       const std::string &geometry_guard = "off",
-      double geometry_theta = 0.0) const;
+      double geometry_theta = 0.0,
+      const std::vector<std::size_t> *sampled_target_indices = nullptr) const;
 
   JcpLocalP4CandidateResult prepare_local_p4_operator(
       const std::vector<TitanPBE::Tabi::Panel> &production_panels,
@@ -507,6 +547,8 @@ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
+
+using FmmM2lContext = FmmM2lAnalyticContext;
 
 const char *kernel_kind_name(KernelKind kernel) noexcept;
 

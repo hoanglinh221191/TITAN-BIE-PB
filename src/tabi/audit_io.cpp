@@ -565,10 +565,10 @@ void AnalyzerImpl::write_cube(const std::string &filename,
         const std::size_t id = audit_idx3(i, j, k, shape.nx, shape.ny);
         const double value =
             ion_field
-                ? (ion_accessible_[id] ? 1.0 : 0.0)
-                : (epsilon_field ? (inside_[id] ? args_.int_diel
+                ? (grid_.ion_accessible[id] ? 1.0 : 0.0)
+                : (epsilon_field ? (grid_.inside[id] ? args_.int_diel
                                                 : args_.ext_diel)
-                                 : phi_[id]);
+                                 : grid_.phi[id]);
         out << std::setw(13) << value;
         if (++per_line == 6) {
           out << "\n";

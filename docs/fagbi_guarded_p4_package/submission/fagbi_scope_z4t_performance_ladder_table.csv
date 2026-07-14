@@ -1,6 +1,0 @@
-stage,outcome,median_wall,median_iterations,operator_audit,interpretation
-Classical direct TABI,0/6 ok; 4 failed; 2 timeout,31.1 min,576,direct reference,"Valid reference path, but dense direct matvecs dominate runtime at full-protein panel counts."
-Degree-one FMM + diagonal,0/6 ok; 5 failed; 1 timeout,944.5 s,680,median 1.207e-02,Matvec acceleration alone was not enough for robust Krylov convergence.
-Degree-one FMM + local block,0/6 ok; 6 failed; 0 timeout,700.8 s,720,median 1.258e-02,Matvec acceleration alone was not enough for robust Krylov convergence.
-Degree-one FMM + sparse ILU(0),6/6 ok; 0 failed; 0 timeout,133.3 s,128,median 4.052e-02; max 9.671e-01,"Sparse ILU(0) made GMRES robust, but the low-order far operator still failed direct-operator audits."
-Guarded p4 FMM + sparse ILU(0),6/6 ok; 0 failed; 0 timeout,140.6 s,128,median 1.121e-05; max 2.534e-03,High-order guarded FMM/M2L retained ILU(0) convergence and restored sampled direct-operator agreement.
