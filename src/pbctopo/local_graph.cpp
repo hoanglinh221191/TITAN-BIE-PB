@@ -2,6 +2,7 @@
 
 #include "../BoxMatrix.h"
 #include "../Multi_MOL.h"
+#include "lattice_math.h"
 
 #include <algorithm>
 #include <cmath>
@@ -27,61 +28,6 @@ std::uint64_t atom_pair_key(std::size_t a, std::size_t b) {
   if (a > b)
     std::swap(a, b);
   return (static_cast<std::uint64_t>(a) << 32) | static_cast<std::uint64_t>(b);
-}
-
-struct PbctopoLocalBoxBasis {
-  double v1[3]{}, v2[3]{}, v3[3]{};
-
-  explicit PbctopoLocalBoxBasis(box Box) {
-    Box.get_v1(v1);
-    Box.get_v2(v2);
-    Box.get_v3(v3);
-  }
-};
-
-struct PbctopoImageDelta {
-  double dsx = 0.0;
-  double dsy = 0.0;
-  double dsz = 0.0;
-  double d2 = std::numeric_limits<double>::infinity();
-};
-
-double cart_dist_sq_from_scaled_delta(const PbctopoLocalBoxBasis &basis,
-                                      double dsx, double dsy, double dsz) {
-  const double dx =
-      basis.v1[0] * dsx + basis.v2[0] * dsy + basis.v3[0] * dsz;
-  const double dy =
-      basis.v1[1] * dsx + basis.v2[1] * dsy + basis.v3[1] * dsz;
-  const double dz =
-      basis.v1[2] * dsx + basis.v2[2] * dsy + basis.v3[2] * dsz;
-  return dx * dx + dy * dy + dz * dz;
-}
-
-double fixbox_nearest_integer(double value) {
-  return std::floor(value + 0.5);
-}
-
-PbctopoImageDelta nearest_image_delta_27(const PbctopoLocalBoxBasis &basis,
-                                         double dsx, double dsy, double dsz) {
-  PbctopoImageDelta best;
-  const double mic_sx = dsx - fixbox_nearest_integer(dsx);
-  const double mic_sy = dsy - fixbox_nearest_integer(dsy);
-  const double mic_sz = dsz - fixbox_nearest_integer(dsz);
-  for (int ix = -1; ix <= 1; ++ix) {
-    for (int iy = -1; iy <= 1; ++iy) {
-      for (int iz = -1; iz <= 1; ++iz) {
-        const double trial_sx = mic_sx + static_cast<double>(ix);
-        const double trial_sy = mic_sy + static_cast<double>(iy);
-        const double trial_sz = mic_sz + static_cast<double>(iz);
-        const double d2 =
-            cart_dist_sq_from_scaled_delta(basis, trial_sx, trial_sy, trial_sz);
-        if (d2 + 1.0e-12 < best.d2) {
-          best = {trial_sx, trial_sy, trial_sz, d2};
-        }
-      }
-    }
-  }
-  return best;
 }
 
 void scaled_to_cartesian(box Box, double sx, double sy, double sz, double &x,
@@ -163,6 +109,43 @@ bool detect_heavy_atom(const std::vector<mol_info> *info,
   const char atom_symbol = first_alpha_upper(atom_name);
   const char type_symbol = first_alpha_upper(atom_type);
   return atom_symbol != 'H' && type_symbol != 'H';
+}
+
+double infer_bondi_vdw_radius(const std::vector<mol_info> &info,
+                              std::size_t local_atom_index) {
+  if (local_atom_index >= info.size())
+    return 1.70;
+  std::string atom_name = info[local_atom_index].get_atom();
+  std::string atom_type = info[local_atom_index].get_atom_type();
+  for (char &ch : atom_name)
+    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  for (char &ch : atom_type)
+    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  if (atom_name == "CL" || atom_type.starts_with("CL"))
+    return 1.75;
+  if (atom_name == "BR" || atom_type.starts_with("BR"))
+    return 1.85;
+  const char element = first_alpha_upper(atom_name);
+  switch (element) {
+  case 'H':
+    return 1.20;
+  case 'N':
+    return 1.55;
+  case 'O':
+    return 1.52;
+  case 'F':
+    return 1.47;
+  case 'P':
+    return 1.80;
+  case 'S':
+    return 1.80;
+  case 'I':
+    return 1.98;
+  case 'C':
+    return 1.70;
+  default:
+    return 1.70;
+  }
 }
 
 std::string uppercase_atom_name(std::string atom_name) {
@@ -465,11 +448,42 @@ build_pbctopo_system_static_data(const Multi_MOL &system, const MOL &mol) {
                                  data.projected_topology_bonds);
   data.ranges = build_ranges_for_system(system, mol);
   data.heavy_mask.assign(data.atom_count, 1);
+  data.vdw_radii.assign(data.atom_count, 0.0);
+  data.vdw_radius_available.assign(data.atom_count, 0);
   data.heavy_count = 0;
   for (std::size_t atom_idx = 0; atom_idx < data.atom_count; ++atom_idx) {
     const bool is_heavy = detect_heavy_atom(&system.info, atom_idx);
     data.heavy_mask[atom_idx] = is_heavy ? 1 : 0;
     data.heavy_count += is_heavy ? 1u : 0u;
+    if (const auto radius = system.topology.vdw_radius(
+            static_cast<std::uint32_t>(atom_idx));
+        radius.has_value()) {
+      data.vdw_radii[atom_idx] = *radius;
+      data.vdw_radius_available[atom_idx] = 1;
+      if (system.topology.vdw_radius_source(
+              static_cast<std::uint32_t>(atom_idx)) ==
+          MolTopologyVdwRadiusSource::GromacsTopology) {
+        ++data.vdw_topology_count;
+      } else {
+        ++data.vdw_parameter_count;
+      }
+    }
+    if (data.vdw_radius_available[atom_idx] == 0 &&
+        atom_idx < system.parameters.size()) {
+      const double radius = system.parameters[atom_idx].get_radius();
+      if (std::isfinite(radius) && radius > 0.0) {
+        data.vdw_radii[atom_idx] = radius;
+        data.vdw_radius_available[atom_idx] = 1;
+        ++data.vdw_parameter_count;
+      }
+    }
+    if (data.vdw_radius_available[atom_idx] == 0 &&
+        atom_idx < system.info.size()) {
+      data.vdw_radii[atom_idx] =
+          infer_bondi_vdw_radius(system.info, atom_idx);
+      data.vdw_radius_available[atom_idx] = 1;
+      ++data.vdw_inferred_count;
+    }
   }
   if (data.heavy_count == 0 && data.atom_count > 0) {
     std::fill(data.heavy_mask.begin(), data.heavy_mask.end(), 1);
@@ -668,6 +682,12 @@ void append_atoms_for_system(const MOL &mol,
         (static_data != nullptr && local < static_data->heavy_mask.size())
             ? (static_data->heavy_mask[local] != 0)
             : detect_heavy_atom(info, local);
+    if (static_data != nullptr && local < static_data->vdw_radii.size() &&
+        local < static_data->vdw_radius_available.size() &&
+        static_data->vdw_radius_available[local] != 0) {
+      atom.vdw_radius = static_data->vdw_radii[local];
+      atom.has_vdw_radius = true;
+    }
     atom.x = r[0];
     atom.y = r[1];
     atom.z = r[2];
@@ -711,25 +731,25 @@ void build_local_neighborhood_graph(
     ++degree[b];
     return true;
   };
-  const PbctopoLocalBoxBasis basis(Box);
+  const PbctopoLatticeMetric basis(Box);
   const BoxMatrix box_matrix(Box);
   const double sx_bound = std::min(
       0.5, kBondCutoff *
-                   std::sqrt(box_matrix.inv[0][0] * box_matrix.inv[0][0] +
-                             box_matrix.inv[0][1] * box_matrix.inv[0][1] +
-                             box_matrix.inv[0][2] * box_matrix.inv[0][2]) +
+                    std::sqrt(box_matrix.inv[0][0] * box_matrix.inv[0][0] +
+                              box_matrix.inv[1][0] * box_matrix.inv[1][0] +
+                              box_matrix.inv[2][0] * box_matrix.inv[2][0]) +
                1.0e-9);
   const double sy_bound = std::min(
       0.5, kBondCutoff *
-                   std::sqrt(box_matrix.inv[1][0] * box_matrix.inv[1][0] +
-                             box_matrix.inv[1][1] * box_matrix.inv[1][1] +
-                             box_matrix.inv[1][2] * box_matrix.inv[1][2]) +
+                    std::sqrt(box_matrix.inv[0][1] * box_matrix.inv[0][1] +
+                              box_matrix.inv[1][1] * box_matrix.inv[1][1] +
+                              box_matrix.inv[2][1] * box_matrix.inv[2][1]) +
                1.0e-9);
   const double sz_bound = std::min(
       0.5, kBondCutoff *
-                   std::sqrt(box_matrix.inv[2][0] * box_matrix.inv[2][0] +
-                             box_matrix.inv[2][1] * box_matrix.inv[2][1] +
-                             box_matrix.inv[2][2] * box_matrix.inv[2][2]) +
+                    std::sqrt(box_matrix.inv[0][2] * box_matrix.inv[0][2] +
+                              box_matrix.inv[1][2] * box_matrix.inv[1][2] +
+                              box_matrix.inv[2][2] * box_matrix.inv[2][2]) +
                1.0e-9);
   const int nx =
       std::max(1, static_cast<int>(std::floor(1.0 / std::max(sx_bound, 1.0e-6))));
@@ -771,7 +791,7 @@ void build_local_neighborhood_graph(
             double dsx = aj.sx - ai.sx;
             double dsy = aj.sy - ai.sy;
             double dsz = aj.sz - ai.sz;
-            const double d2 = nearest_image_delta_27(basis, dsx, dsy, dsz).d2;
+            const double d2 = basis.nearest_image_scaled(dsx, dsy, dsz).d2;
             if (d2 > kBondCutoff2)
               continue;
             add_edge(j, i, d2);
@@ -797,7 +817,7 @@ void build_local_neighborhood_graph(
       double dsx = aj.sx - ai.sx;
       double dsy = aj.sy - ai.sy;
       double dsz = aj.sz - ai.sz;
-      const double d2 = nearest_image_delta_27(basis, dsx, dsy, dsz).d2;
+      const double d2 = basis.nearest_image_scaled(dsx, dsy, dsz).d2;
       if (d2 < best_d2) {
         best_d2 = d2;
         best = j;
@@ -831,7 +851,7 @@ void append_topology_bond_edges_for_system(
   if (static_data.projected_topology_bonds.empty())
     return;
 
-  const PbctopoLocalBoxBasis basis(Box);
+  const PbctopoLatticeMetric basis(Box);
   for (const PbctopoProjectedTopologyBond &bond :
        static_data.projected_topology_bonds) {
     const std::size_t a = atom_offset + bond.a;
@@ -851,7 +871,7 @@ void append_topology_bond_edges_for_system(
     double dsx = atoms[b].sx - atoms[a].sx;
     double dsy = atoms[b].sy - atoms[a].sy;
     double dsz = atoms[b].sz - atoms[a].sz;
-    const double d2 = nearest_image_delta_27(basis, dsx, dsy, dsz).d2;
+    const double d2 = basis.nearest_image_scaled(dsx, dsy, dsz).d2;
     const double ref_d2 = std::max(d2, 1.0e-6);
     edges.push_back({a, b, ref_d2, 1.0 / ref_d2,
                      std::max(9.0, ref_d2 * 4.0),

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -26,6 +27,48 @@ constexpr double kMaxIluFactorGrowth = 1.0e8;
 constexpr double kMaxIluProbeGain = 1.0e8;
 constexpr double kMaxIluProbeRelativeResidual = 1.0;
 
+using PanelGraph = std::vector<std::vector<std::size_t>>;
+using Block2 = JcpSparseIluPreconditioner::Block2;
+
+std::shared_ptr<const PanelGraph> make_normalized_ilu_graph(
+    const titan::tabi::fmm_m2l::FmmM2lAnalyticContext &context,
+    std::size_t cap, const std::string &graph_source) {
+  auto graph = std::make_shared<PanelGraph>(
+      graph_source == "distance-knn"
+          ? context.distance_knn_panel_graph(cap)
+          : context.near_panel_graph(cap));
+  for (std::size_t row_index = 0; row_index < graph->size(); ++row_index) {
+    auto &row = (*graph)[row_index];
+    if (!std::binary_search(row.begin(), row.end(), row_index))
+      row.insert(std::lower_bound(row.begin(), row.end(), row_index),
+                 row_index);
+    if (row.size() > cap) {
+      row.resize(cap);
+      if (!std::binary_search(row.begin(), row.end(), row_index)) {
+        row.back() = row_index;
+        std::sort(row.begin(), row.end());
+      }
+    }
+  }
+  return graph;
+}
+
+std::size_t estimate_fmm_ilu_bytes_from_graph(
+    const PanelGraph &graph, std::size_t diagonal_size, bool coupled,
+    bool include_regularization_retry) {
+  std::size_t nnz = 0;
+  for (const auto &row : graph)
+    nnz += row.size();
+  const std::size_t panel_count = coupled ? diagonal_size / 2 : diagonal_size;
+  const std::size_t retry_bytes =
+      include_regularization_retry ? nnz * sizeof(Block2) : 0;
+  return diagonal_size * sizeof(double) +
+         (graph.size() + 1) * sizeof(std::size_t) +
+         nnz * (sizeof(std::size_t) + sizeof(Block2)) +
+         graph.size() * sizeof(Block2) + 4 * panel_count * sizeof(double) +
+         2 * graph.size() * sizeof(std::size_t) + retry_bytes;
+}
+
 std::vector<JcpOwnedFactorPanelGroup> to_owned_factor_groups(
     const std::vector<titan::tabi::fmm_m2l::FmmM2lOverlapPanelGroup>
         &overlap_groups) {
@@ -39,8 +82,6 @@ std::vector<JcpOwnedFactorPanelGroup> to_owned_factor_groups(
   }
   return converted;
 }
-
-using Block2 = JcpSparseIluPreconditioner::Block2;
 
 Block2 add(Block2 lhs, const Block2 &rhs) noexcept {
   lhs.a00 += rhs.a00;
@@ -486,20 +527,41 @@ std::size_t estimate_fmm_m2l_nearfield_ilu0_bytes(
     bool include_regularization_retry, const std::string &graph_source) {
   const std::size_t cap = std::clamp<std::size_t>(
       neighbor_cap, kMinFmmIluNeighborCap, kMaxFmmIluNeighborCap);
-  const auto graph = graph_source == "distance-knn"
-                         ? context.distance_knn_panel_graph(cap)
-                         : context.near_panel_graph(cap);
-  std::size_t nnz = 0;
-  for (const auto &row : graph)
-    nnz += row.size();
-  const std::size_t panel_count = coupled ? diagonal_size / 2 : diagonal_size;
-  const std::size_t retry_bytes =
-      include_regularization_retry ? nnz * sizeof(Block2) : 0;
-  return diagonal_size * sizeof(double) +
-         (graph.size() + 1) * sizeof(std::size_t) +
-         nnz * (sizeof(std::size_t) + sizeof(Block2)) +
-         graph.size() * sizeof(Block2) + 4 * panel_count * sizeof(double) +
-         2 * graph.size() * sizeof(std::size_t) + retry_bytes;
+  const auto graph = make_normalized_ilu_graph(context, cap, graph_source);
+  return estimate_fmm_ilu_bytes_from_graph(
+      *graph, diagonal_size, coupled, include_regularization_retry);
+}
+
+FmmIluBudgetSelection select_fmm_m2l_nearfield_ilu0_budget(
+    const titan::tabi::fmm_m2l::FmmM2lAnalyticContext &context,
+    std::size_t diagonal_size, bool coupled, std::size_t neighbor_cap,
+    std::size_t memory_budget_bytes, bool include_regularization_retry,
+    const std::string &graph_source) {
+  FmmIluBudgetSelection selection;
+  selection.requested_neighbor_cap = std::clamp<std::size_t>(
+      neighbor_cap, kMinFmmIluNeighborCap, kMaxFmmIluNeighborCap);
+  selection.effective_neighbor_cap = selection.requested_neighbor_cap;
+
+  while (true) {
+    const auto graph_begin = std::chrono::steady_clock::now();
+    selection.normalized_graph = make_normalized_ilu_graph(
+        context, selection.effective_neighbor_cap, graph_source);
+    selection.graph_build_ms +=
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - graph_begin)
+            .count();
+    selection.estimated_bytes = estimate_fmm_ilu_bytes_from_graph(
+        *selection.normalized_graph, diagonal_size, coupled,
+        include_regularization_retry);
+    if (selection.estimated_bytes <= memory_budget_bytes) {
+      selection.fits_budget = true;
+      return selection;
+    }
+    if (selection.effective_neighbor_cap == kMinFmmIluNeighborCap)
+      return selection;
+    selection.effective_neighbor_cap = std::max<std::size_t>(
+        kMinFmmIluNeighborCap, selection.effective_neighbor_cap / 2);
+  }
 }
 
 std::shared_ptr<JcpSparseIluPreconditioner>
@@ -510,7 +572,9 @@ build_fmm_m2l_nearfield_ilu0_preconditioner(
     const std::vector<double> &diagonal, std::size_t neighbor_cap,
     double drop_tol, TitanExecutor &executor, const std::string &near_integration,
     const std::string &quad_buffer, const std::string &regularization_mode,
-    double regularization_max_relative, const std::string &graph_source) {
+    double regularization_max_relative, const std::string &graph_source,
+    JcpCoarseGalerkinPreconditioner *coarse_near_capture,
+    std::shared_ptr<const PanelGraph> normalized_graph) {
   if (panels.empty())
     return {};
   if (!coupled)
@@ -547,26 +611,24 @@ build_fmm_m2l_nearfield_ilu0_preconditioner(
         std::isfinite(diag) && diag > 1.0e-12 ? 1.0 / diag : 1.0;
   }
 
-  auto graph = graph_source == "distance-knn"
-                   ? context.distance_knn_panel_graph(cap)
-                   : context.near_panel_graph(cap);
+  const auto graph_begin = std::chrono::steady_clock::now();
+  const bool graph_cache_reused =
+      normalized_graph != nullptr && normalized_graph->size() == n &&
+      std::all_of(normalized_graph->begin(), normalized_graph->end(),
+                  [cap](const auto &row) {
+                    return !row.empty() && row.size() <= cap;
+                  });
+  if (!graph_cache_reused)
+    normalized_graph = make_normalized_ilu_graph(context, cap, graph_source);
+  precond->graph_cache_reused = graph_cache_reused;
+  const PanelGraph &graph = *normalized_graph;
   if (graph.size() != n)
     return {};
   precond->row_ptr.assign(n + 1, 0);
   std::size_t nnz = 0;
   std::size_t max_degree = 0;
   for (std::size_t i = 0; i < n; ++i) {
-    auto &row = graph[i];
-    row.push_back(i);
-    std::sort(row.begin(), row.end());
-    row.erase(std::unique(row.begin(), row.end()), row.end());
-    if (row.size() > cap) {
-      row.resize(cap);
-      if (!std::binary_search(row.begin(), row.end(), i)) {
-        row.back() = i;
-        std::sort(row.begin(), row.end());
-      }
-    }
+    const auto &row = graph[i];
     precond->row_ptr[i] = nnz;
     nnz += row.size();
     max_degree = std::max(max_degree, row.size());
@@ -574,6 +636,28 @@ build_fmm_m2l_nearfield_ilu0_preconditioner(
   precond->row_ptr[n] = nnz;
   precond->col_index.resize(nnz);
   precond->values.resize(nnz);
+  precond->graph_setup_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - graph_begin)
+          .count();
+  const auto assembly_begin = std::chrono::steady_clock::now();
+  JcpCoarseGalerkinPreconditioner *capture = coarse_near_capture;
+  std::size_t capture_dim = 0;
+  std::size_t capture_aggregates = 0;
+  if (capture != nullptr) {
+    capture_dim = capture->dimension();
+    capture_aggregates = capture->aggregates.size();
+    const bool compatible =
+        capture->coupled && capture->panel_count == n &&
+        capture->panel_aggregate.size() == n &&
+        capture_dim == 2 * capture_aggregates && capture_dim > 0 &&
+        n <= std::numeric_limits<std::size_t>::max() / 2 / capture_dim;
+    if (compatible) {
+      capture->fine_operator_basis.assign(2 * n * capture_dim, 0.0);
+    } else {
+      capture = nullptr;
+    }
+  }
   const std::size_t assembly_workers =
       std::max<std::size_t>(1, std::min(executor.capacity(), n));
   executor.parallel_for(
@@ -583,22 +667,41 @@ build_fmm_m2l_nearfield_ilu0_preconditioner(
           std::size_t position = precond->row_ptr[i];
           for (const std::size_t col : graph[i]) {
             precond->col_index[position] = col;
-      Block2 block{};
-      if (i == col) {
-        block.a00 += lhs_phi;
-        block.a11 += lhs_phin;
-      }
-      block = add(block,
-                  make_jcp_block(panels[i], i, panels[col], col, eps_ratio,
-                                 kappa, coupled, near_integration,
-                                 quad_buffer));
-      if (i != col && effective_drop > 0.0 && max_abs(block) < effective_drop)
-        block = {};
+            Block2 block{};
+            if (i == col) {
+              block.a00 += lhs_phi;
+              block.a11 += lhs_phin;
+            }
+            block = add(block,
+                        make_jcp_block(panels[i], i, panels[col], col,
+                                       eps_ratio, kappa, coupled,
+                                       near_integration, quad_buffer));
+            if (i != col && effective_drop > 0.0 &&
+                max_abs(block) < effective_drop)
+              block = {};
+            if (capture != nullptr) {
+              const std::size_t aggregate = capture->panel_aggregate[col];
+              if (aggregate < capture_aggregates) {
+                double *const phi_row = capture->fine_operator_basis.data() +
+                                        i * capture_dim;
+                double *const phin_row =
+                    capture->fine_operator_basis.data() +
+                    (n + i) * capture_dim;
+                phi_row[aggregate] += block.a00;
+                phi_row[capture_aggregates + aggregate] += block.a01;
+                phin_row[aggregate] += block.a10;
+                phin_row[capture_aggregates + aggregate] += block.a11;
+              }
+            }
             precond->values[position] = block;
             ++position;
           }
         }
       });
+  precond->near_assembly_setup_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - assembly_begin)
+          .count();
   precond->nnz_blocks = precond->values.size();
   precond->valid_blocks = precond->nnz_blocks;
   precond->valid_panel_count = n;
@@ -608,6 +711,7 @@ build_fmm_m2l_nearfield_ilu0_preconditioner(
             : 0.0;
   precond->diag_inverse.assign(n, {});
   precond->workspace.assign(4 * n, 0.0);
+  const auto factor_begin = std::chrono::steady_clock::now();
   const std::vector<Block2> original_values = precond->values;
   double original_peak = 0.0;
   for (const Block2 &block : original_values)
@@ -783,10 +887,18 @@ build_fmm_m2l_nearfield_ilu0_preconditioner(
     }
     if (pass) {
       precond->regularization_selected_relative = shift;
+      precond->factor_setup_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - factor_begin)
+              .count();
       return precond;
     }
     ++precond->regularization_rejected_attempts;
   }
+  precond->factor_setup_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - factor_begin)
+          .count();
   return precond;
 }
 

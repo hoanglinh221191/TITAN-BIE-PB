@@ -17,21 +17,22 @@ double pbctopo_normalize_virtual_center(double center) {
 
 PbctopoVirtualSeedCenter
 pbctopo_center_delta_mic(PbctopoVirtualSeedCenter latest,
-                         PbctopoVirtualSeedCenter previous) {
+                         PbctopoVirtualSeedCenter previous,
+                         const PbctopoLatticeMetric &lattice) {
   PbctopoVirtualSeedCenter delta{latest.cx - previous.cx,
                                  latest.cy - previous.cy,
                                  latest.cz - previous.cz};
-  delta.cx -= std::round(delta.cx);
-  delta.cy -= std::round(delta.cy);
-  delta.cz -= std::round(delta.cz);
-  return delta;
+  const PbctopoNearestImage mic =
+      lattice.nearest_image_scaled(delta.cx, delta.cy, delta.cz);
+  return {mic.sx, mic.sy, mic.sz};
 }
 
 PbctopoVirtualSeedCenter
 extrapolate_virtual_seed_center(PbctopoVirtualSeedCenter previous,
-                                PbctopoVirtualSeedCenter latest) {
+                                PbctopoVirtualSeedCenter latest,
+                                const PbctopoLatticeMetric &lattice) {
   const PbctopoVirtualSeedCenter delta =
-      pbctopo_center_delta_mic(latest, previous);
+      pbctopo_center_delta_mic(latest, previous, lattice);
   return {pbctopo_normalize_virtual_center(latest.cx + delta.cx),
           pbctopo_normalize_virtual_center(latest.cy + delta.cy),
           pbctopo_normalize_virtual_center(latest.cz + delta.cz)};

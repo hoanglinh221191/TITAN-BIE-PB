@@ -916,6 +916,7 @@ public:
             "singular_near_interactions,preconditioner_effective,"
             "preconditioner_block_panel_cap,"
             "preconditioner_overlap_panel_cap,"
+            "preconditioner_ilu_neighbor_cap_requested,"
             "preconditioner_ilu_neighbor_cap,"
             "preconditioner_ilu_drop_tol,"
             "preconditioner_ilu_regularization,"
@@ -946,7 +947,12 @@ public:
             "preconditioner_quality_failure_probe_gain,"
             "preconditioner_quality_failure_probe_rel_residual,"
             "preconditioner_quality_status,"
-            "preconditioner_setup_seconds,preconditioner_apply_seconds,"
+            "preconditioner_setup_seconds,"
+            "preconditioner_graph_setup_seconds,"
+            "preconditioner_graph_cache_reused,"
+            "preconditioner_near_assembly_setup_seconds,"
+            "preconditioner_ilu_factor_setup_seconds,"
+            "preconditioner_apply_seconds,"
             "preconditioner_apply_calls,"
             "preconditioner_sparse_nnz_blocks,"
             "preconditioner_sparse_avg_degree,"
@@ -960,6 +966,9 @@ public:
             "preconditioner_coarse_status,"
             "preconditioner_coarse_setup_matvec_calls,"
             "preconditioner_coarse_setup_seconds,"
+            "preconditioner_coarse_moments_setup_seconds,"
+            "preconditioner_coarse_far_setup_seconds,"
+            "preconditioner_coarse_audit_setup_seconds,"
             "preconditioner_coarse_apply_seconds,"
             "preconditioner_coarse_apply_calls,"
             "preconditioner_coarse_rp_identity_error_max,"
@@ -2157,6 +2166,7 @@ public:
          << csv_escape_progress(result.preconditioner_effective) << ','
          << result.preconditioner_block_panel_cap << ','
          << result.preconditioner_overlap_panel_cap << ','
+         << result.preconditioner_ilu_neighbor_cap_requested << ','
          << result.preconditioner_ilu_neighbor_cap << ','
          << result.preconditioner_ilu_drop_tol << ','
          << csv_escape_progress(result.preconditioner_ilu_regularization) << ','
@@ -2190,6 +2200,11 @@ public:
          << result.preconditioner_quality_failure_probe_rel_residual << ','
          << csv_escape_progress(result.preconditioner_quality_status) << ','
          << result.preconditioner_setup_ms / 1000.0 << ','
+         << result.preconditioner_graph_setup_ms / 1000.0 << ','
+         << (result.preconditioner_graph_cache_reused ? "true" : "false")
+         << ','
+         << result.preconditioner_near_assembly_setup_ms / 1000.0 << ','
+         << result.preconditioner_ilu_factor_setup_ms / 1000.0 << ','
          << result.preconditioner_apply_ms / 1000.0 << ','
          << result.preconditioner_apply_calls << ','
          << result.preconditioner_sparse_nnz_blocks << ','
@@ -2204,6 +2219,9 @@ public:
          << csv_escape_progress(result.preconditioner_coarse_status) << ','
          << result.preconditioner_coarse_setup_matvec_calls << ','
          << result.preconditioner_coarse_setup_ms / 1000.0 << ','
+         << result.preconditioner_coarse_moments_setup_ms / 1000.0 << ','
+         << result.preconditioner_coarse_far_setup_ms / 1000.0 << ','
+         << result.preconditioner_coarse_audit_setup_ms / 1000.0 << ','
          << result.preconditioner_coarse_apply_ms / 1000.0 << ','
          << result.preconditioner_coarse_apply_calls << ','
          << result.preconditioner_coarse_rp_identity_error_max << ','
@@ -3647,12 +3665,15 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       options.preconditioner_block_panel_cap, 8, preconditioner_block_cap_max);
   result.preconditioner_overlap_panel_cap =
       std::clamp(options.preconditioner_overlap_panel_cap, 0, 128);
-  result.preconditioner_ilu_neighbor_cap =
+  result.preconditioner_ilu_neighbor_cap_requested =
       std::clamp(options.preconditioner_ilu_neighbor_cap, 32, 1024);
+  result.preconditioner_ilu_neighbor_cap =
+      result.preconditioner_ilu_neighbor_cap_requested;
   result.preconditioner_ilu_drop_tol =
       std::clamp(options.preconditioner_ilu_drop_tol, 0.0, 1.0e-2);
   const bool sparse_ilu_pipeline =
       result.preconditioner_requested == "fmm-nearfield-ilu0" ||
+      result.preconditioner_requested == "fmm-nearfield-ilu0-coarse" ||
       result.preconditioner_requested == "distance-knn-ilu0";
   result.preconditioner_ilu_regularization =
       sparse_ilu_pipeline &&
@@ -3666,7 +3687,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           : 0.0;
   result.preconditioner_memory_budget_bytes =
       static_cast<std::size_t>(
-          std::clamp(options.preconditioner_memory_budget_mb, 16, 4096)) *
+          std::clamp(options.preconditioner_memory_budget_mb, 16, 8192)) *
       1024u * 1024u;
   result.preconditioner_coarse_aggregate_cap =
       std::clamp(options.preconditioner_coarse_aggregate_cap, 4, 64);
@@ -4136,6 +4157,9 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.preconditioner_effective = "diagonal_block_pending";
     else if (result.preconditioner_requested == "coarse-galerkin-probe")
       result.preconditioner_effective = "diagonal_coarse_pending";
+    else if (result.preconditioner_requested ==
+             "fmm-nearfield-ilu0-coarse")
+      result.preconditioner_effective = "fmm_ilu0_coarse_pending";
     else
       result.preconditioner_effective = "diagonal";
     const double eps_ratio =
@@ -5639,6 +5663,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         result.preconditioner_requested == "block-budgeted";
     const bool coarse_probe =
         result.preconditioner_requested == "coarse-galerkin-probe";
+    const bool fmm_nearfield_ilu0_coarse =
+        result.preconditioner_requested == "fmm-nearfield-ilu0-coarse";
     const bool fmm_block_jacobi =
         result.preconditioner_requested == "fmm-block-jacobi";
     const bool fmm_overlap_schwarz =
@@ -5646,6 +5672,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         result.preconditioner_requested == "distance-knn-overlap-schwarz";
     const bool fmm_nearfield_ilu0 =
         result.preconditioner_requested == "fmm-nearfield-ilu0" ||
+        fmm_nearfield_ilu0_coarse ||
         result.preconditioner_requested == "distance-knn-ilu0";
     const bool distance_knn_graph =
         result.preconditioner_requested == "distance-knn-overlap-schwarz" ||
@@ -5685,6 +5712,32 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
             &jcp_tree.fmm_m2l_context);
       }
       std::vector<std::vector<std::size_t>> kifmm_fallback_graph;
+      bool ilu_budget_downshifted = false;
+      std::size_t ilu_estimated_bytes = 0;
+      double ilu_graph_build_ms = 0.0;
+      std::shared_ptr<const std::vector<std::vector<std::size_t>>>
+          normalized_ilu_graph;
+      std::size_t coarse_estimated_bytes = 0;
+      if (fmm_nearfield_ilu0_coarse && fmm_context != nullptr &&
+          !jcp_tree.nodes.empty()) {
+        coarse_preconditioner = make_jcp_coarse_structure(
+            panels, jcp_tree, coupled, diagonal,
+            static_cast<std::size_t>(
+                result.preconditioner_coarse_aggregate_cap));
+        result.preconditioner_coarse_base = "fmm-nearfield-ilu0";
+        result.preconditioner_coarse_aggregates =
+            coarse_preconditioner->aggregates.size();
+        result.preconditioner_coarse_dimension =
+            coarse_preconditioner->dimension();
+        result.preconditioner_coarse_matrix_bytes =
+            coarse_preconditioner->dimension() *
+                coarse_preconditioner->dimension() * sizeof(double) +
+            coarse_preconditioner->dimension() * sizeof(int);
+        coarse_estimated_bytes = coarse_preconditioner->estimated_bytes(true);
+        result.preconditioner_coarse_status = "pending";
+      } else if (fmm_nearfield_ilu0_coarse) {
+        result.preconditioner_coarse_status = "operator_unsupported";
+      }
       if (fmm_nearfield_ilu0) {
         if (kifmm_fallback_ilu_graph) {
           kifmm_fallback_graph =
@@ -5696,14 +5749,48 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
               estimate_jcp_sparse_ilu0_graph_bytes(kifmm_fallback_graph,
                   diagonal.size(),
                   result.preconditioner_ilu_regularization == "adaptive");
+          ilu_estimated_bytes = result.preconditioner_estimated_bytes;
         } else {
+          std::size_t ilu_memory_budget =
+              result.preconditioner_memory_budget_bytes;
+          if (coarse_preconditioner != nullptr) {
+            if (coarse_estimated_bytes >= ilu_memory_budget) {
+              coarse_preconditioner.reset();
+              coarse_estimated_bytes = 0;
+              result.preconditioner_coarse_status = "budget_fallback";
+            } else {
+              ilu_memory_budget -= coarse_estimated_bytes;
+            }
+          }
+          auto ilu_budget = select_fmm_m2l_nearfield_ilu0_budget(
+              *fmm_context, diagonal.size(), coupled,
+              static_cast<std::size_t>(
+                  result.preconditioner_ilu_neighbor_cap_requested),
+              ilu_memory_budget,
+              result.preconditioner_ilu_regularization == "adaptive",
+              preconditioner_graph_source);
+          if (coarse_preconditioner != nullptr && !ilu_budget.fits_budget) {
+            coarse_preconditioner.reset();
+            coarse_estimated_bytes = 0;
+            result.preconditioner_coarse_status = "budget_fallback";
+            ilu_budget = select_fmm_m2l_nearfield_ilu0_budget(
+                *fmm_context, diagonal.size(), coupled,
+                static_cast<std::size_t>(
+                    result.preconditioner_ilu_neighbor_cap_requested),
+                result.preconditioner_memory_budget_bytes,
+                result.preconditioner_ilu_regularization == "adaptive",
+                preconditioner_graph_source);
+          }
+          normalized_ilu_graph = ilu_budget.normalized_graph;
+          ilu_graph_build_ms = ilu_budget.graph_build_ms;
+          result.preconditioner_ilu_neighbor_cap =
+              static_cast<int>(ilu_budget.effective_neighbor_cap);
+          ilu_estimated_bytes = ilu_budget.estimated_bytes;
           result.preconditioner_estimated_bytes =
-              estimate_fmm_m2l_nearfield_ilu0_bytes(
-                  *fmm_context, diagonal.size(), coupled,
-                  static_cast<std::size_t>(
-                      result.preconditioner_ilu_neighbor_cap),
-                  result.preconditioner_ilu_regularization == "adaptive",
-                  preconditioner_graph_source);
+              ilu_estimated_bytes + coarse_estimated_bytes;
+          ilu_budget_downshifted =
+              ilu_budget.effective_neighbor_cap <
+              ilu_budget.requested_neighbor_cap;
         }
       } else {
         result.preconditioner_estimated_bytes =
@@ -5744,7 +5831,12 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                     result.near_integration, result.quad_buffer,
                     result.preconditioner_ilu_regularization,
                     result.preconditioner_ilu_regularization_max,
-                    preconditioner_graph_source);
+                    preconditioner_graph_source,
+                    fmm_nearfield_ilu0_coarse
+                        ? coarse_preconditioner.get()
+                        : nullptr,
+                    normalized_ilu_graph);
+            normalized_ilu_graph.reset();
           }
         } else if (fmm_overlap_schwarz) {
           block_preconditioner = build_fmm_m2l_overlap_schwarz_preconditioner(
@@ -5762,10 +5854,104 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
               executor, result.near_integration, result.quad_buffer);
         }
       }
+      const bool ilu_candidate_ready =
+          sparse_ilu_preconditioner != nullptr &&
+          sparse_ilu_preconditioner->valid_panel_count == panels.size() &&
+          sparse_ilu_preconditioner->ill_conditioned_blocks == 0 &&
+          sparse_ilu_preconditioner->quality_rejected_blocks == 0 &&
+          !block_budget_cap;
+      if (fmm_nearfield_ilu0_coarse && coarse_preconditioner != nullptr &&
+          ilu_candidate_ready) {
+        const auto coarse_begin = std::chrono::steady_clock::now();
+        TreeWorkspace setup_tree = jcp_tree;
+        setup_tree.moment_audit = "off";
+        setup_tree.convergence_audit = "off";
+        setup_tree.expansion_audit = "off";
+        setup_tree.expansion_audit_channel = "off";
+        setup_tree.accepted_miss_diagnostics = "off";
+        setup_tree.convergence_overreject_audit = "off";
+        setup_tree.convergence_overreject_detail = "off";
+        setup_tree.convergence_shape_audit = "off";
+        setup_tree.convergence_kernel_response_audit = "off";
+        TreecodeStats setup_stats;
+        auto setup_matvec = [&](const std::vector<double> &x,
+                                std::vector<double> &out) {
+          apply_jcp_treecode_operator(
+              panels, x, eps_ratio, kappa, lhs_phi, lhs_phin, coupled,
+              setup_tree, result.near_integration, result.quad_buffer, executor,
+              out, &setup_stats);
+        };
+        const bool verified =
+            options.preconditioner_coarse_verify == "full-small";
+        constexpr double kHybridCoarseAuditTolerance = 0.35;
+        constexpr double kFullSmallHybridAuditTolerance = 1.0e-12;
+        bool coarse_valid = complete_jcp_hybrid_galerkin_monopole(
+            panels, *coarse_preconditioner,
+            sparse_ilu_preconditioner->row_ptr,
+            sparse_ilu_preconditioner->col_index, eps_ratio, kappa,
+            setup_matvec, verified ? 2 : 1,
+            verified ? kFullSmallHybridAuditTolerance
+                     : kHybridCoarseAuditTolerance,
+            executor);
+        bool exact_fallback = false;
+        if (!coarse_valid) {
+          exact_fallback = true;
+          coarse_valid = build_jcp_exact_galerkin(
+              panels, *coarse_preconditioner, setup_matvec, verified, true);
+        }
+        result.preconditioner_coarse_pivot_ratio =
+            coarse_preconditioner->pivot_ratio;
+        result.preconditioner_coarse_setup_matvec_calls =
+            coarse_preconditioner->setup_matvec_calls;
+        result.preconditioner_coarse_rp_identity_error_max =
+            coarse_preconditioner->rp_identity_error_max;
+        result.preconditioner_coarse_verify_rel_error_max =
+            coarse_preconditioner->verify_rel_error_max;
+        result.preconditioner_coarse_setup_ms =
+            elapsed_ms(coarse_begin, std::chrono::steady_clock::now());
+        result.preconditioner_coarse_moments_setup_ms =
+            coarse_preconditioner->moments_setup_ms;
+        result.preconditioner_coarse_far_setup_ms =
+            coarse_preconditioner->far_setup_ms;
+        result.preconditioner_coarse_audit_setup_ms =
+            coarse_preconditioner->audit_setup_ms;
+        if (coarse_valid) {
+          result.preconditioner_coarse_status =
+              exact_fallback ? "active_balanced_exact_fallback"
+                             : "active_balanced_hybrid_monopole";
+        } else {
+          coarse_preconditioner.reset();
+          coarse_estimated_bytes = 0;
+          result.preconditioner_estimated_bytes = ilu_estimated_bytes;
+          result.preconditioner_coarse_status = "factor_fallback";
+        }
+      } else if (fmm_nearfield_ilu0_coarse &&
+                 coarse_preconditioner != nullptr) {
+        coarse_preconditioner.reset();
+        coarse_estimated_bytes = 0;
+        result.preconditioner_estimated_bytes = ilu_estimated_bytes;
+        result.preconditioner_coarse_status = "base_fallback";
+      }
       preconditioner_setup_ms =
           elapsed_ms(precond_begin, std::chrono::steady_clock::now());
       result.preconditioner_setup_ms = preconditioner_setup_ms;
       if (fmm_nearfield_ilu0) {
+        result.preconditioner_graph_setup_ms =
+            ilu_graph_build_ms +
+            (sparse_ilu_preconditioner != nullptr
+                 ? sparse_ilu_preconditioner->graph_setup_ms
+                 : 0.0);
+        result.preconditioner_graph_cache_reused =
+            sparse_ilu_preconditioner != nullptr &&
+            sparse_ilu_preconditioner->graph_cache_reused;
+        result.preconditioner_near_assembly_setup_ms =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->near_assembly_setup_ms
+                : 0.0;
+        result.preconditioner_ilu_factor_setup_ms =
+            sparse_ilu_preconditioner != nullptr
+                ? sparse_ilu_preconditioner->factor_setup_ms
+                : 0.0;
         result.preconditioner_valid_blocks =
             sparse_ilu_preconditioner != nullptr
                 ? sparse_ilu_preconditioner->valid_blocks
@@ -5922,27 +6108,53 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
           !ilu_ill_conditioned && !ilu_quality_rejected && !block_budget_cap) {
         if (kifmm_fallback_ilu_graph) {
           result.preconditioner_effective =
-              sparse_ilu_preconditioner->regularization_selected_relative > 0.0
-                  ? "fmm_nearfield_ilu0_kifmm_fallback_capped_regularized"
-                  : "fmm_nearfield_ilu0_kifmm_fallback_capped";
+              "fmm_nearfield_ilu0_kifmm_fallback_capped";
+        } else if (fmm_nearfield_ilu0_coarse &&
+                   coarse_preconditioner != nullptr) {
+          result.preconditioner_effective =
+              "fmm_nearfield_ilu0_coarse_galerkin_balanced_" +
+              result.preconditioner_coarse_status;
+        } else if (fmm_nearfield_ilu0_coarse) {
+          result.preconditioner_effective =
+              "fmm_nearfield_ilu0_coarse_" +
+              result.preconditioner_coarse_status + "_to_ilu0";
         } else {
           result.preconditioner_effective =
-              distance_knn_graph
-                  ? (sparse_ilu_preconditioner
-                                 ->regularization_selected_relative > 0.0
-                         ? "distance_knn_ilu0_regularized"
-                         : "distance_knn_ilu0")
-                  : (sparse_ilu_preconditioner
-                                 ->regularization_selected_relative > 0.0
-                         ? "fmm_nearfield_ilu0_regularized"
-                         : "fmm_nearfield_ilu0");
+              distance_knn_graph ? "distance_knn_ilu0"
+                                 : "fmm_nearfield_ilu0";
         }
+        if (sparse_ilu_preconditioner->regularization_selected_relative > 0.0)
+          result.preconditioner_effective += "_regularized";
+        if (ilu_budget_downshifted)
+          result.preconditioner_effective += "_budget_downshift";
         result.memory_bytes += result.preconditioner_estimated_bytes;
-        custom_preconditioner =
-            [sparse_ilu_preconditioner](const std::vector<double> &in,
-                                        std::vector<double> &out) {
-              sparse_ilu_preconditioner->apply(in, out);
-            };
+        if (fmm_nearfield_ilu0_coarse && coarse_preconditioner != nullptr) {
+          std::function<void(const std::vector<double> &,
+                             std::vector<double> &)>
+              balanced_base_apply =
+                  [sparse_ilu_preconditioner](
+                      const std::vector<double> &base_in,
+                      std::vector<double> &base_out) {
+                    sparse_ilu_preconditioner->apply(base_in, base_out);
+                  };
+          custom_preconditioner =
+              [coarse_preconditioner, &panels, &result,
+               balanced_base_apply](const std::vector<double> &in,
+                                    std::vector<double> &out) {
+                const auto begin = std::chrono::steady_clock::now();
+                coarse_preconditioner->apply_balanced(panels, in, out,
+                                                      balanced_base_apply);
+                result.preconditioner_coarse_apply_ms +=
+                    elapsed_ms(begin, std::chrono::steady_clock::now());
+                ++result.preconditioner_coarse_apply_calls;
+              };
+        } else {
+          custom_preconditioner =
+              [sparse_ilu_preconditioner](const std::vector<double> &in,
+                                          std::vector<double> &out) {
+                sparse_ilu_preconditioner->apply(in, out);
+              };
+        }
       } else if (!fmm_nearfield_ilu0 && block_preconditioner != nullptr &&
                  block_preconditioner->valid_blocks > 0 &&
                  block_preconditioner->valid_panel_count >=

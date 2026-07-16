@@ -483,13 +483,10 @@ int Multi_MOL::post_process_atom_from_topo(vector<topo_info_temp> &info_topo) {
   // original PDB atom IDs to pluck the exact corresponding topology atom,
   // bypassing string-matching.
   if (info_topo.size() > info.size() && !info.empty()) {
-    bool ids_were_set = false;
-    for (size_t i = 1; i < info.size(); ++i) {
-      if (info[i].get_original_atom_id() != 0) {
-        ids_were_set = true;
-        break;
-      }
-    }
+    const bool ids_were_set =
+        std::all_of(info.begin(), info.end(), [](const mol_info &atom_info) {
+          return atom_info.has_original_atom_id();
+        });
 
     if (ids_were_set) {
       bool can_subset = true;

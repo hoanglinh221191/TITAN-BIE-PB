@@ -3,16 +3,26 @@
 #include "aligned_allocator.h"
 #include "pbctopo/config.h"
 #include "pbctopo/anchor_graph.h"
+#include "pbctopo/candidate_order.h"
+#include "pbctopo/candidate_scoring.h"
+#include "pbctopo/certification.h"
 #include "pbctopo/component_graph.h"
+#include "pbctopo/component_metric.h"
 #include "pbctopo/component_refine.h"
 #include "pbctopo/component_search.h"
+#include "pbctopo/component_shift_domain.h"
 #include "pbctopo/llps_local.h"
+#include "pbctopo/image_assignment.h"
+#include "pbctopo/lattice_math.h"
 #include "pbctopo/local_graph.h"
 #include "pbctopo/logging.h"
 #include "pbctopo/report.h"
+#include "pbctopo/steric_clash.h"
+#include "pbctopo/temporal_path.h"
+#include "pbctopo/temporal_replay.h"
 #include "pbctopo/types.h"
 #include "pbctopo/virtual_seed.h"
-#include "pbctopo/virtual_planes.h"
+#include "pbctopo/virtual_discrete_search.h"
 #include "pbctopo_hull.h"
 #include "titan_gyration.h"
 #include "titan_simd_dispatch.h"
@@ -59,13 +69,18 @@ using titan_gyration::compute_rg2_from_stats;
 using titan_gyration::GyrationShapeMetrics;
 using titan_gyration::PointStats;
 using PbctopoAnchorBackend = titan_pbctopo::AnchorBackend;
+using PbctopoAnchorMetricMode = titan_pbctopo::AnchorMetricMode;
 using PbctopoRuntimeCutoffs = titan_pbctopo::RuntimeCutoffs;
 using PbctopoSolveMode = titan_pbctopo::SolveMode;
+using PbctopoTemporalMode = titan_pbctopo::TemporalMode;
+using PbctopoTemporalCandidate = titan_pbctopo::PbctopoTemporalCandidate;
 using PbctopoAnchorContactEdge = titan_pbctopo::PbctopoAnchorContactEdge;
 using PbctopoAnchorGraphContext = titan_pbctopo::PbctopoAnchorGraphContext;
 using PbctopoAnchorGraphScore = titan_pbctopo::PbctopoAnchorGraphScore;
 using PbctopoAtom = titan_pbctopo::PbctopoAtom;
 using PbctopoComponentCandidate = titan_pbctopo::PbctopoComponentCandidate;
+using PbctopoComponentCandidatePrefixStage =
+    titan_pbctopo::PbctopoComponentCandidatePrefixStage;
 using PbctopoComponentBaseGeometry = titan_pbctopo::PbctopoComponentBaseGeometry;
 using PbctopoComponentSearchCallbacks =
     titan_pbctopo::PbctopoComponentSearchCallbacks;
@@ -80,7 +95,12 @@ using PbctopoFrameMode = titan_pbctopo::PbctopoFrameMode;
 using PbctopoFrameReport = titan_pbctopo::PbctopoFrameReport;
 using PbctopoFrameStatus = titan_pbctopo::PbctopoFrameStatus;
 using PbctopoGraphEdge = titan_pbctopo::PbctopoGraphEdge;
+using PbctopoHardFeasibility = titan_pbctopo::PbctopoHardFeasibility;
+using PbctopoImageAssignment = titan_pbctopo::PbctopoImageAssignment;
+using PbctopoImageEquationResiduals =
+    titan_pbctopo::PbctopoImageEquationResiduals;
 using PbctopoLocalEdge = titan_pbctopo::PbctopoLocalEdge;
+using PbctopoLocalEdgeKind = titan_pbctopo::PbctopoLocalEdgeKind;
 using PbctopoLlpsLocalUnits = titan_pbctopo::PbctopoLlpsLocalUnits;
 using PbctopoPairShiftCandidate = titan_pbctopo::PbctopoPairShiftCandidate;
 using PbctopoPairShiftCandidateSet = titan_pbctopo::PbctopoPairShiftCandidateSet;
@@ -100,12 +120,14 @@ using PbctopoTrajectoryContext = titan_pbctopo::PbctopoTrajectoryContext;
 using PbctopoTimingStats = titan_pbctopo::PbctopoTimingStats;
 using PbctopoVirtualSeedCenter = titan_pbctopo::PbctopoVirtualSeedCenter;
 using PbctopoVirtualSeedSource = titan_pbctopo::PbctopoVirtualSeedSource;
-using PbctopoVirtualPlaneBuildOptions =
-    titan_pbctopo::PbctopoVirtualPlaneBuildOptions;
-using PbctopoVirtualPlaneSet = titan_pbctopo::PbctopoVirtualPlaneSet;
-using PbctopoVirtualStateTracker = titan_pbctopo::PbctopoVirtualStateTracker;
-using PbctopoVirtualAssignmentSignatureTable =
-    titan_pbctopo::PbctopoVirtualAssignmentSignatureTable;
+using PbctopoLatticeMetric = titan_pbctopo::PbctopoLatticeMetric;
+using PbctopoLexicographicGap = titan_pbctopo::PbctopoLexicographicGap;
+using PbctopoVirtualDiscreteSearchOptions =
+    titan_pbctopo::PbctopoVirtualDiscreteSearchOptions;
+using PbctopoVirtualDiscreteSearchPlan =
+    titan_pbctopo::PbctopoVirtualDiscreteSearchPlan;
+using PbctopoVirtualDiscreteSeedHint =
+    titan_pbctopo::PbctopoVirtualDiscreteSeedHint;
 using PbctopoWarmState = titan_pbctopo::PbctopoWarmState;
 using ClashCellKey = titan_pbctopo::ClashCellKey;
 using ClashCellKeyHash = titan_pbctopo::ClashCellKeyHash;
@@ -124,8 +146,29 @@ using titan_pbctopo::build_tapered_stage1_anchor_subset;
 using titan_pbctopo::build_third_anchor_subset;
 using titan_pbctopo::clear_component_trial_hints;
 using titan_pbctopo::compare_anchor_graph_score;
+using titan_pbctopo::compare_pbctopo_metric;
 using titan_pbctopo::component_trial_hints_compatible;
 using titan_pbctopo::better_component_graph_edge;
+using titan_pbctopo::better_component_candidate;
+using titan_pbctopo::better_cut_candidate;
+using titan_pbctopo::better_preclash_cut_candidate;
+using titan_pbctopo::better_stage1_cut_candidate;
+using titan_pbctopo::candidate_anchor_prefix_equivalent;
+using titan_pbctopo::candidate_close_enough_to_skip_search;
+using titan_pbctopo::candidate_has_projection_clash_margin;
+using titan_pbctopo::candidate_lexicographic_gap;
+using titan_pbctopo::candidate_skip_search_reject_reason;
+using titan_pbctopo::component_candidate_cannot_beat_incumbent_prefix;
+using titan_pbctopo::component_candidate_is_outlier;
+using titan_pbctopo::component_candidate_to_cut_candidate;
+using titan_pbctopo::compare_candidate_prefix_before_edge_stretch;
+using titan_pbctopo::compare_pbctopo_double_metric;
+using titan_pbctopo::compare_principal_rg2;
+using titan_pbctopo::compare_shape_kappa;
+using titan_pbctopo::compare_shape_moment;
+using titan_pbctopo::cut_candidate_cannot_beat_incumbent;
+using titan_pbctopo::make_score_vector;
+using titan_pbctopo::preclash_cut_candidate_cannot_beat_incumbent;
 using titan_pbctopo::graph_edge_has_zero_shift;
 using titan_pbctopo::graph_edge_matches_delta;
 using titan_pbctopo::append_atoms_for_system;
@@ -134,6 +177,7 @@ using titan_pbctopo::append_topology_bond_edges_for_system;
 using titan_pbctopo::build_pbctopo_llps_local_units;
 using titan_pbctopo::build_pbctopo_trajectory_context;
 using titan_pbctopo::improve_component_offsets_locally;
+using titan_pbctopo::make_pbctopo_image_assignment;
 using titan_pbctopo::build_heavy_atom_subset;
 using titan_pbctopo::build_local_neighborhood_graph;
 using titan_pbctopo::build_projection_anchor_subset;
@@ -142,27 +186,29 @@ using titan_pbctopo::build_projection_edge_subset;
 using titan_pbctopo::build_ranges_for_system;
 using titan_pbctopo::merge_pbctopo_llps_unit_source;
 using titan_pbctopo::pbctopo_topology_source_label;
+using titan_pbctopo::pbctopo_atoms_clash;
+using titan_pbctopo::pbctopo_max_clash_cutoff;
+using titan_pbctopo::pbctopo_component_shift_metric;
+using titan_pbctopo::prepare_pbctopo_steric_radii;
+using titan_pbctopo::certify_pbctopo_candidate;
+using titan_pbctopo::evaluate_pbctopo_image_equations;
 using titan_pbctopo::rebase_component_offsets;
+using titan_pbctopo::replay_pbctopo_assignment_delta;
 using titan_pbctopo::same_component_layout;
+using titan_pbctopo::same_pbctopo_image_assignment;
 using titan_pbctopo::score_component_offset_solution;
 using titan_pbctopo::score_component_placed_points_solution;
 using titan_pbctopo::search_component_shift_candidate;
 using titan_pbctopo::search_component_shift_candidate_beam;
+using titan_pbctopo::kPbctopoExactAssignmentBudget;
+using titan_pbctopo::pbctopo_component_assignment_upper_bound;
 using titan_pbctopo::solve_component_offsets_from_ranked_edges;
 using titan_pbctopo::solve_component_offsets_via_pair_graph;
 using titan_pbctopo::unwrap_pbctopo_llps_local_points;
 using titan_pbctopo::write_pbctopo_frame_report_header;
 using titan_pbctopo::write_pbctopo_frame_report_row;
 using titan_pbctopo::extrapolate_virtual_seed_center;
-using titan_pbctopo::build_density_cut_plane_shortlist_or_dense_fallback;
-
-constexpr int kTopoImageCoeff[27][3] = {
-    {1, 0, 0},   {-1, 0, 0},  {0, 1, 0},   {0, -1, 0},  {0, 0, 1},
-    {0, 0, -1},  {1, 1, 0},   {1, -1, 0},  {-1, 1, 0},  {-1, -1, 0},
-    {1, 0, 1},   {1, 0, -1},  {-1, 0, 1},  {-1, 0, -1}, {0, 1, 1},
-    {0, -1, 1},  {0, 1, -1},  {0, -1, -1}, {1, 1, 1},   {-1, 1, 1},
-    {1, -1, 1},  {1, 1, -1},  {-1, -1, 1}, {-1, 1, -1}, {1, -1, -1},
-    {-1, -1, -1}, {0, 0, 0}};
+using titan_pbctopo::build_pbctopo_virtual_discrete_search_plan;
 
 constexpr double kDistanceEps = 1.0e-12;
 constexpr int kPackedCellBias = 1 << 20;
@@ -358,6 +404,7 @@ struct PbctopoMergedComponentPlan {
   vector<vector<size_t>> merged_components;
   vector<vector<size_t>> merged_to_raw;
   vector<size_t> raw_to_merged;
+  vector<Int3> raw_internal_offsets;
 };
 
 struct PbctopoGraphSeedQuickScore {
@@ -371,14 +418,6 @@ struct PbctopoGraphSeedQuickScore {
   double principal_rg2_mid = numeric_limits<double>::infinity();
   double principal_rg2_min = numeric_limits<double>::infinity();
   double shift_norm2 = numeric_limits<double>::infinity();
-};
-
-enum class PbctopoComponentCandidatePrefixStage {
-  Continuity,
-  Anchor,
-  Principal,
-  ComponentMetrics,
-  Final,
 };
 
 struct PbctopoCoarseSeedOption {
@@ -402,23 +441,18 @@ struct PbctopoFrameScratch {
   vector<size_t> component_sizes;
   vector<PbctopoShift> shifts;
   vector<PbctopoSeed3D> volume_seeds;
-  PbctopoVirtualStateTracker virtual_state_tracker;
   vector<Vec3> warm_points;
   vector<Vec3> coarse_warm_points;
   vector<Vec3> placed_points;
-  vector<Vec3> best_points;
   vector<Vec3> best_safe_points;
-  vector<Vec3> refine_points;
   vector<Vec3> verify_points;
-  vector<Vec3> trial_points;
   vector<Vec3> component_points;
   vector<PbctopoCutCandidate> coarse_candidates;
   vector<PbctopoCoarseSeedOption> coarse_seed_options;
   vector<PbctopoCutCandidate> coarse_results;
-  vector<double> x_planes;
-  vector<double> y_planes;
-  vector<double> z_planes;
   vector<size_t> projection_index;
+  titan_pbctopo::PbctopoVirtualDiscreteSearchWorkspace virtual_search_workspace;
+  PbctopoVirtualDiscreteSearchPlan virtual_search_plan;
 
   void reserve_from_context(const PbctopoTrajectoryContext &context) {
     base_atoms.reserve(context.total_atoms_hint);
@@ -436,22 +470,15 @@ struct PbctopoFrameScratch {
     component_sizes.reserve(context.component_hint);
     shifts.reserve(27);
     volume_seeds.reserve(context.coarse_seed_hint);
-    virtual_state_tracker.reserve(context.virtual_state_hint);
     warm_points.reserve(context.total_atoms_hint);
     coarse_warm_points.reserve(context.heavy_atoms_hint);
     placed_points.reserve(context.heavy_atoms_hint);
-    best_points.reserve(context.total_atoms_hint);
     best_safe_points.reserve(context.total_atoms_hint);
-    refine_points.reserve(context.heavy_atoms_hint);
     verify_points.reserve(context.total_atoms_hint);
-    trial_points.reserve(context.total_atoms_hint);
     component_points.reserve(context.total_atoms_hint);
     coarse_candidates.reserve(context.coarse_candidate_hint);
     coarse_seed_options.reserve(context.coarse_seed_hint);
     coarse_results.reserve(context.coarse_seed_hint);
-    x_planes.reserve(context.plane_hint);
-    y_planes.reserve(context.plane_hint);
-    z_planes.reserve(context.plane_hint);
     projection_index.reserve(context.total_atoms_hint);
   }
 
@@ -471,23 +498,27 @@ struct PbctopoFrameScratch {
     component_sizes.clear();
     shifts.clear();
     volume_seeds.clear();
-    virtual_state_tracker.clear();
     warm_points.clear();
     coarse_warm_points.clear();
     placed_points.clear();
-    best_points.clear();
     best_safe_points.clear();
-    refine_points.clear();
     verify_points.clear();
-    trial_points.clear();
     component_points.clear();
     coarse_candidates.clear();
     coarse_seed_options.clear();
     coarse_results.clear();
-    x_planes.clear();
-    y_planes.clear();
-    z_planes.clear();
     projection_index.clear();
+    virtual_search_plan.x_states.clear();
+    virtual_search_plan.y_states.clear();
+    virtual_search_plan.z_states.clear();
+    virtual_search_plan.states.clear();
+  }
+
+  size_t point_capacity_bytes_estimate() const noexcept {
+    return (warm_points.capacity() + coarse_warm_points.capacity() +
+            placed_points.capacity() + best_safe_points.capacity() +
+            verify_points.capacity() + component_points.capacity()) *
+           sizeof(Vec3);
   }
 };
 
@@ -543,14 +574,11 @@ vector<size_t> collect_fragment_options(
     size_t fragment_id, const vector<size_t> &selected_nodes,
     const vector<PbctopoFragmentCopyNode> &nodes,
     const vector<vector<size_t>> &adjacency, size_t max_options);
-bool better_cut_candidate(const PbctopoCutCandidate &lhs,
-                          const PbctopoCutCandidate &rhs);
-bool better_preclash_cut_candidate(const PbctopoCutCandidate &lhs,
-                                   const PbctopoCutCandidate &rhs);
 vector<pair<int, int>>
 build_contacting_owner_pairs(const vector<PbctopoLocalEdge> &local_edges,
                              const vector<PbctopoAtom> &atoms, box Box,
-                             double contact_cutoff);
+                             double contact_cutoff,
+                             bool hard_required_only = false);
 unordered_map<int, Vec3>
 compute_owner_com_cartesian(const vector<Vec3> &placed_points,
                             const vector<PbctopoAtom> &atoms);
@@ -571,13 +599,6 @@ bool rescue_split_contacting_owner_candidate(
     const vector<PbctopoShift> &shifts,
     const PbctopoOwnerPairSplitDetail &split_detail, vector<Vec3> &rescued_points,
     Int3 &applied_shift, double &best_raw_delta_norm);
-bool preclash_cut_candidate_cannot_beat_incumbent(
-    const PbctopoCutCandidate &candidate,
-    const PbctopoCutCandidate *incumbent);
-bool cut_candidate_cannot_beat_incumbent(const PbctopoCutCandidate &partial,
-                                         const PbctopoCutCandidate *incumbent);
-bool candidate_close_enough_to_skip_search(const PbctopoCutCandidate &candidate,
-                                           const PbctopoCutCandidate &reference);
 PbctopoCutCandidate score_cut_candidate(const vector<PbctopoLocalEdge> &local_edges,
                                         const vector<Vec3> &placed_points,
                                         double cut_x, double cut_y, double cut_z,
@@ -598,8 +619,6 @@ PbctopoCutCandidate score_cut_candidate_principal_only(
     const PbctopoEdgeScanSoA *edge_scan_soa = nullptr,
     const PbctopoCutCandidate *edge_prune_threshold = nullptr,
     const PbctopoCutCandidate *pre_edge_seed = nullptr);
-bool better_stage1_cut_candidate(const PbctopoCutCandidate &lhs,
-                                 const PbctopoCutCandidate &rhs);
 bool edge_scan_cannot_beat_threshold(const PbctopoCutCandidate &partial,
                                      const PbctopoCutCandidate *threshold,
                                      PbctopoRefineScorePhase phase);
@@ -611,9 +630,11 @@ bool continuity_metrics_ok(
     double &path_sum, double &max_d2,
     const PbctopoCutCandidate *incumbent = nullptr);
 void analyze_cut_candidate_ultraclash(const vector<Vec3> &placed_points,
-                                      const unordered_set<uint64_t> &edge_set,
-                                      PbctopoCutCandidate &candidate,
-                                      double cutoff);
+                                       const unordered_set<uint64_t> &edge_set,
+                                       PbctopoCutCandidate &candidate,
+                                       double cutoff,
+                                       const vector<PbctopoAtom> *atoms,
+                                       const vector<size_t> *atom_component_index);
 PbctopoAnchorBackend resolve_pbctopo_anchor_backend(const arguments &Arguments);
 const char *pbctopo_anchor_backend_name(PbctopoAnchorBackend backend);
 PbctopoSolveMode resolve_pbctopo_solve_mode(const arguments &Arguments);
@@ -633,7 +654,8 @@ PbctopoCutCandidate evaluate_virtual_box_candidate(
     double frame_time_ps = numeric_limits<double>::quiet_NaN(),
     const char *reject_context = nullptr,
     const PbctopoAnchorGraphContext *anchor_context = nullptr,
-    PbctopoVirtualSeedSource seed_source = PbctopoVirtualSeedSource::None);
+    PbctopoVirtualSeedSource seed_source = PbctopoVirtualSeedSource::None,
+    const vector<size_t> *atom_component_index = nullptr);
 void append_interface_anchor_edges(
     const vector<PbctopoAtom> &atoms, const vector<Vec3> &placed_points,
     const vector<size_t> &atom_component_index,
@@ -727,28 +749,6 @@ uint64_t oriented_edge_key(int u, int v) {
          static_cast<uint32_t>(v);
 }
 
-PbctopoScoreVector make_score_vector(const PbctopoCutCandidate &candidate) {
-  PbctopoScoreVector score;
-  score.valid = candidate.valid;
-  score.ultra_clash = candidate.ultra_clash;
-  score.broken_edges = candidate.broken_edges;
-  score.continuity_max_d2 = candidate.continuity_max_d2;
-  score.continuity_path = candidate.continuity_path;
-  score.anchor_max_d2 = candidate.anchor_max_d2;
-  score.anchor_mst2 = candidate.anchor_mst2;
-  score.anchor_graph = candidate.anchor_graph;
-  score.principal_rg2_max = candidate.principal_rg2_max;
-  score.principal_rg2_mid = candidate.principal_rg2_mid;
-  score.principal_rg2_min = candidate.principal_rg2_min;
-  score.shape_kappa2 = candidate.shape_kappa2;
-  score.shape_asphericity = candidate.shape_asphericity;
-  score.shape_acylindricity = candidate.shape_acylindricity;
-  score.edge_stretch = candidate.edge_stretch;
-  score.shift_norm2 = candidate.shift_norm2;
-  score.gap_score = candidate.gap_score;
-  return score;
-}
-
 bool partial_component_ultraclash(
     const vector<size_t> &component, const vector<Vec3> &placed_points,
     const PbctopoShiftedComponent &shifted_component,
@@ -828,7 +828,7 @@ bool scaled_span_fits_unit_box(box Box, const vector<Vec3> &placed_points,
   if (placed_points.empty())
     return false;
 
-  const BoxMatrix box_matrix(Box);
+  const PbctopoLatticeMetric lattice(Box);
   double min_sx = numeric_limits<double>::infinity();
   double min_sy = numeric_limits<double>::infinity();
   double min_sz = numeric_limits<double>::infinity();
@@ -837,15 +837,10 @@ bool scaled_span_fits_unit_box(box Box, const vector<Vec3> &placed_points,
   double max_sz = -numeric_limits<double>::infinity();
 
   for (const auto &point : placed_points) {
-    const double sx = box_matrix.inv[0][0] * point.x +
-                      box_matrix.inv[0][1] * point.y +
-                      box_matrix.inv[0][2] * point.z;
-    const double sy = box_matrix.inv[1][0] * point.x +
-                      box_matrix.inv[1][1] * point.y +
-                      box_matrix.inv[1][2] * point.z;
-    const double sz = box_matrix.inv[2][0] * point.x +
-                      box_matrix.inv[2][1] * point.y +
-                      box_matrix.inv[2][2] * point.z;
+    const auto scaled = lattice.cartesian_to_scaled(point.x, point.y, point.z);
+    const double sx = scaled[0];
+    const double sy = scaled[1];
+    const double sz = scaled[2];
     min_sx = min(min_sx, sx);
     min_sy = min(min_sy, sy);
     min_sz = min(min_sz, sz);
@@ -862,7 +857,8 @@ bool scaled_span_fits_unit_box(box Box, const vector<Vec3> &placed_points,
 vector<pair<int, int>>
 build_contacting_owner_pairs(const vector<PbctopoLocalEdge> &local_edges,
                              const vector<PbctopoAtom> &atoms, box Box,
-                             double contact_cutoff) {
+                             double contact_cutoff,
+                             bool hard_required_only) {
   vector<pair<int, int>> owner_pairs;
   unordered_set<uint64_t> seen;
   seen.reserve(local_edges.size());
@@ -882,27 +878,35 @@ build_contacting_owner_pairs(const vector<PbctopoLocalEdge> &local_edges,
   for (const auto &edge : local_edges) {
     if (edge.a >= atoms.size() || edge.b >= atoms.size())
       continue;
+    if (hard_required_only &&
+        edge.kind != PbctopoLocalEdgeKind::TopologyBond) {
+      continue;
+    }
     register_owner_pair(atoms[edge.a].owner, atoms[edge.b].owner);
   }
+
+  if (hard_required_only)
+    return owner_pairs;
 
   if (atoms.size() < 2 || contact_cutoff <= kDistanceEps)
     return owner_pairs;
 
   const BoxMatrix box_matrix(Box);
+  const PbctopoLatticeMetric lattice(Box);
   const double cutoff2 = contact_cutoff * contact_cutoff;
   const double sx_bound =
       min(0.5, contact_cutoff * sqrt(box_matrix.inv[0][0] * box_matrix.inv[0][0] +
-                                     box_matrix.inv[0][1] * box_matrix.inv[0][1] +
-                                     box_matrix.inv[0][2] * box_matrix.inv[0][2]) +
+                                     box_matrix.inv[1][0] * box_matrix.inv[1][0] +
+                                     box_matrix.inv[2][0] * box_matrix.inv[2][0]) +
                     1.0e-9);
   const double sy_bound =
-      min(0.5, contact_cutoff * sqrt(box_matrix.inv[1][0] * box_matrix.inv[1][0] +
+      min(0.5, contact_cutoff * sqrt(box_matrix.inv[0][1] * box_matrix.inv[0][1] +
                                      box_matrix.inv[1][1] * box_matrix.inv[1][1] +
-                                     box_matrix.inv[1][2] * box_matrix.inv[1][2]) +
+                                     box_matrix.inv[2][1] * box_matrix.inv[2][1]) +
                     1.0e-9);
   const double sz_bound =
-      min(0.5, contact_cutoff * sqrt(box_matrix.inv[2][0] * box_matrix.inv[2][0] +
-                                     box_matrix.inv[2][1] * box_matrix.inv[2][1] +
+      min(0.5, contact_cutoff * sqrt(box_matrix.inv[0][2] * box_matrix.inv[0][2] +
+                                     box_matrix.inv[1][2] * box_matrix.inv[1][2] +
                                      box_matrix.inv[2][2] * box_matrix.inv[2][2]) +
                     1.0e-9);
   const int nx = max(1, static_cast<int>(floor(1.0 / max(sx_bound, 1.0e-6))));
@@ -939,12 +943,9 @@ build_contacting_owner_pairs(const vector<PbctopoLocalEdge> &local_edges,
             const auto &other = atoms[other_idx];
             if (atom.owner == other.owner)
               continue;
-            double dx_cart = other.x - atom.x;
-            double dy_cart = other.y - atom.y;
-            double dz_cart = other.z - atom.z;
-            box_matrix.apply_mic(dx_cart, dy_cart, dz_cart);
-            const double d2 = dx_cart * dx_cart + dy_cart * dy_cart +
-                              dz_cart * dz_cart;
+            const auto mic = lattice.nearest_image_cartesian(
+                other.x - atom.x, other.y - atom.y, other.z - atom.z);
+            const double d2 = mic.d2;
             if (d2 > cutoff2)
               continue;
             register_owner_pair(atom.owner, other.owner);
@@ -990,15 +991,10 @@ compute_owner_com_scaled(box Box,
                          const unordered_map<int, Vec3> &owner_com_cartesian) {
   unordered_map<int, Vec3> owner_com_scaled;
   owner_com_scaled.reserve(owner_com_cartesian.size());
-  const BoxMatrix box_matrix(Box);
+  const PbctopoLatticeMetric lattice(Box);
   for (const auto &[owner, point] : owner_com_cartesian) {
-    owner_com_scaled[owner] = {
-        box_matrix.inv[0][0] * point.x + box_matrix.inv[0][1] * point.y +
-            box_matrix.inv[0][2] * point.z,
-        box_matrix.inv[1][0] * point.x + box_matrix.inv[1][1] * point.y +
-            box_matrix.inv[1][2] * point.z,
-        box_matrix.inv[2][0] * point.x + box_matrix.inv[2][1] * point.y +
-            box_matrix.inv[2][2] * point.z};
+    const auto scaled = lattice.cartesian_to_scaled(point.x, point.y, point.z);
+    owner_com_scaled[owner] = {scaled[0], scaled[1], scaled[2]};
   }
   return owner_com_scaled;
 }
@@ -1017,6 +1013,8 @@ bool candidate_has_split_contacting_owners(
 
   const auto owner_com_cartesian = compute_owner_com_cartesian(placed_points, atoms);
   const auto owner_com_scaled = compute_owner_com_scaled(Box, owner_com_cartesian);
+  const PbctopoLatticeMetric lattice(Box);
+  const double box_scale = max(lattice.shortest_basis_length(), 1.0e-12);
 
   for (const auto &[owner_a, owner_b] : contacting_owner_pairs) {
     const auto it_a = owner_com_scaled.find(owner_a);
@@ -1027,23 +1025,21 @@ bool candidate_has_split_contacting_owners(
     const Vec3 raw_delta_scaled{it_b->second.x - it_a->second.x,
                                 it_b->second.y - it_a->second.y,
                                 it_b->second.z - it_a->second.z};
-    const Vec3 minimg_delta_scaled{
-        raw_delta_scaled.x - round(raw_delta_scaled.x),
-        raw_delta_scaled.y - round(raw_delta_scaled.y),
-        raw_delta_scaled.z - round(raw_delta_scaled.z)};
+    const auto mic = lattice.nearest_image_scaled(
+        raw_delta_scaled.x, raw_delta_scaled.y, raw_delta_scaled.z);
+    const Vec3 minimg_delta_scaled{mic.sx, mic.sy, mic.sz};
     const Vec3 split_delta{raw_delta_scaled.x - minimg_delta_scaled.x,
                            raw_delta_scaled.y - minimg_delta_scaled.y,
                            raw_delta_scaled.z - minimg_delta_scaled.z};
     const double axis_shift_max =
         max({fabs(split_delta.x), fabs(split_delta.y), fabs(split_delta.z)});
-    const double raw_norm = sqrt(raw_delta_scaled.x * raw_delta_scaled.x +
-                                 raw_delta_scaled.y * raw_delta_scaled.y +
-                                 raw_delta_scaled.z * raw_delta_scaled.z);
-    const double minimg_norm =
-        sqrt(minimg_delta_scaled.x * minimg_delta_scaled.x +
-             minimg_delta_scaled.y * minimg_delta_scaled.y +
-             minimg_delta_scaled.z * minimg_delta_scaled.z);
-    const double norm_gap = raw_norm - minimg_norm;
+    const auto raw_cart = lattice.scaled_to_cartesian(
+        raw_delta_scaled.x, raw_delta_scaled.y, raw_delta_scaled.z);
+    const double raw_norm_A = sqrt(raw_cart[0] * raw_cart[0] +
+                                   raw_cart[1] * raw_cart[1] +
+                                   raw_cart[2] * raw_cart[2]);
+    const double minimg_norm_A = sqrt(max(0.0, mic.d2));
+    const double norm_gap = (raw_norm_A - minimg_norm_A) / box_scale;
     if (axis_shift_max <= 0.5 || norm_gap <= 0.20)
       continue;
 
@@ -1055,8 +1051,8 @@ bool candidate_has_split_contacting_owners(
         detail->owner_b = owner_b;
         detail->raw_delta_scaled = raw_delta_scaled;
         detail->minimg_delta_scaled = minimg_delta_scaled;
-        detail->raw_norm = raw_norm;
-        detail->minimg_norm = minimg_norm;
+        detail->raw_norm = raw_norm_A;
+        detail->minimg_norm = minimg_norm_A;
         detail->valid = true;
       }
     }
@@ -1073,6 +1069,7 @@ bool reimage_contacting_owner_points_minimum_image(
 
   const auto owner_com_cartesian = compute_owner_com_cartesian(placed_points, atoms);
   const auto owner_com_scaled = compute_owner_com_scaled(Box, owner_com_cartesian);
+  const PbctopoLatticeMetric lattice(Box);
   if (owner_com_scaled.size() < 2)
     return false;
 
@@ -1113,10 +1110,11 @@ bool reimage_contacting_owner_points_minimum_image(
       const Int3 shift_u = owner_shifts.at(owner_u);
       for (int owner_v : adj_it->second) {
         const Vec3 &com_v = owner_com_scaled.at(owner_v);
-        const Int3 proposed_shift{
-            shift_u.x - static_cast<int>(llround(round(com_v.x - com_u.x))),
-            shift_u.y - static_cast<int>(llround(round(com_v.y - com_u.y))),
-            shift_u.z - static_cast<int>(llround(round(com_v.z - com_u.z)))};        
+        const auto mic = lattice.nearest_image_scaled(
+            com_v.x - com_u.x, com_v.y - com_u.y, com_v.z - com_u.z);
+        const Int3 proposed_shift{shift_u.x + mic.image_x,
+                                  shift_u.y + mic.image_y,
+                                  shift_u.z + mic.image_z};
         const auto [shift_it, inserted] =
             owner_shifts.emplace(owner_v, proposed_shift);
         if (inserted)
@@ -1374,7 +1372,7 @@ vector<Int3> extract_component_offsets_from_points(
   if (placed_points.size() != atoms.size())
     return offsets;
   offsets.resize(components.size());
-  const BoxMatrix box_matrix(Box);
+  const PbctopoLatticeMetric lattice(Box);
   for (size_t comp_idx = 0; comp_idx < components.size(); ++comp_idx) {
     if (components[comp_idx].empty())
       continue;
@@ -1382,18 +1380,12 @@ vector<Int3> extract_component_offsets_from_points(
     const double dx = placed_points[atom_idx].x - atoms[atom_idx].x;
     const double dy = placed_points[atom_idx].y - atoms[atom_idx].y;
     const double dz = placed_points[atom_idx].z - atoms[atom_idx].z;
-    offsets[comp_idx] = {
-        static_cast<int>(llround(box_matrix.inv[0][0] * dx +
-                                 box_matrix.inv[0][1] * dy +
-                                 box_matrix.inv[0][2] * dz)),
-        static_cast<int>(llround(box_matrix.inv[1][0] * dx +
-                                 box_matrix.inv[1][1] * dy +
-                                 box_matrix.inv[1][2] * dz)),
-        static_cast<int>(llround(box_matrix.inv[2][0] * dx +
-                                 box_matrix.inv[2][1] * dy +
-                                 box_matrix.inv[2][2] * dz))};
+    const auto scaled = lattice.cartesian_to_scaled(dx, dy, dz);
+    offsets[comp_idx] = {static_cast<int>(llround(scaled[0])),
+                         static_cast<int>(llround(scaled[1])),
+                         static_cast<int>(llround(scaled[2]))};
   }
-  rebase_component_offsets(offsets, components);
+  rebase_component_offsets(offsets, Box);
   return offsets;
 }
 
@@ -1402,7 +1394,7 @@ const char *pbctopo_component_mode_name(PbctopoComponentMode mode) {
   case PbctopoComponentMode::Disabled:
     return "disabled";
   case PbctopoComponentMode::Exact:
-    return "exact";
+    return "small_graph";
   case PbctopoComponentMode::MergeThenGraph:
     return "merge_then_graph";
   case PbctopoComponentMode::Beam:
@@ -1432,13 +1424,16 @@ struct PbctopoRawComponentMetadata {
   size_t min_local_atom_index = numeric_limits<size_t>::max();
   size_t max_local_atom_index = 0;
   size_t min_atom_index = numeric_limits<size_t>::max();
+  size_t first_atom_index = numeric_limits<size_t>::max();
+  size_t last_atom_index = numeric_limits<size_t>::max();
 };
 
 PbctopoMergedComponentPlan build_chain_merged_component_plan(
-    const vector<PbctopoAtom> &atoms,
+    const vector<PbctopoAtom> &atoms, box Box,
     const vector<vector<size_t>> &raw_components) {
   PbctopoMergedComponentPlan plan;
   plan.raw_to_merged.assign(raw_components.size(), numeric_limits<size_t>::max());
+  plan.raw_internal_offsets.assign(raw_components.size(), {});
   if (raw_components.empty())
     return plan;
 
@@ -1462,6 +1457,16 @@ PbctopoMergedComponentPlan build_chain_merged_component_plan(
       meta.max_local_atom_index =
           max(meta.max_local_atom_index, atoms[atom_idx].local_atom_index);
       meta.min_atom_index = min(meta.min_atom_index, atom_idx);
+      if (meta.first_atom_index == numeric_limits<size_t>::max() ||
+          atoms[atom_idx].local_atom_index <
+              atoms[meta.first_atom_index].local_atom_index) {
+        meta.first_atom_index = atom_idx;
+      }
+      if (meta.last_atom_index == numeric_limits<size_t>::max() ||
+          atoms[atom_idx].local_atom_index >
+              atoms[meta.last_atom_index].local_atom_index) {
+        meta.last_atom_index = atom_idx;
+      }
     }
     metadata.push_back(meta);
   }
@@ -1480,6 +1485,15 @@ PbctopoMergedComponentPlan build_chain_merged_component_plan(
 
   vector<size_t> current_raw_group;
   vector<size_t> current_atoms;
+  vector<size_t> first_atom_by_raw(raw_components.size(),
+                                   numeric_limits<size_t>::max());
+  vector<size_t> last_atom_by_raw(raw_components.size(),
+                                  numeric_limits<size_t>::max());
+  for (const auto &meta : metadata) {
+    first_atom_by_raw[meta.raw_index] = meta.first_atom_index;
+    last_atom_by_raw[meta.raw_index] = meta.last_atom_index;
+  }
+  const PbctopoLatticeMetric lattice(Box);
   current_raw_group.reserve(kPbctopoMergedNodeMaxRawComponents);
   current_atoms.reserve(kPbctopoMergedNodeMaxAtoms);
   int current_owner = 0;
@@ -1490,6 +1504,26 @@ PbctopoMergedComponentPlan build_chain_merged_component_plan(
   auto flush_group = [&]() {
     if (current_raw_group.empty())
       return;
+    Int3 previous_offset{};
+    for (size_t pos = 1; pos < current_raw_group.size(); ++pos) {
+      const size_t previous_raw = current_raw_group[pos - 1];
+      const size_t current_raw = current_raw_group[pos];
+      const size_t previous_atom = last_atom_by_raw[previous_raw];
+      const size_t current_atom = first_atom_by_raw[current_raw];
+      if (previous_atom >= atoms.size() || current_atom >= atoms.size())
+        continue;
+      const auto mic = lattice.nearest_image_scaled(
+          atoms[current_atom].sx -
+              (atoms[previous_atom].sx + previous_offset.x),
+          atoms[current_atom].sy -
+              (atoms[previous_atom].sy + previous_offset.y),
+          atoms[current_atom].sz -
+              (atoms[previous_atom].sz + previous_offset.z));
+      if (!mic.valid)
+        continue;
+      previous_offset = {mic.image_x, mic.image_y, mic.image_z};
+      plan.raw_internal_offsets[current_raw] = previous_offset;
+    }
     const size_t merged_idx = plan.merged_components.size();
     sort(current_atoms.begin(), current_atoms.end());
     plan.merged_components.push_back(current_atoms);
@@ -1532,18 +1566,23 @@ PbctopoMergedComponentPlan build_chain_merged_component_plan(
 }
 
 vector<Int3> expand_merged_offsets_to_raw_components(
-    const vector<Int3> &merged_offsets, const vector<vector<size_t>> &raw_components,
+    const vector<Int3> &merged_offsets, box Box,
+    const vector<vector<size_t>> &raw_components,
     const PbctopoMergedComponentPlan &plan) {
   vector<Int3> raw_offsets(raw_components.size(), {0, 0, 0});
   for (size_t merged_idx = 0; merged_idx < plan.merged_to_raw.size(); ++merged_idx) {
     const Int3 merged_offset =
         merged_idx < merged_offsets.size() ? merged_offsets[merged_idx] : Int3{};
     for (size_t raw_idx : plan.merged_to_raw[merged_idx]) {
-      if (raw_idx < raw_offsets.size())
-        raw_offsets[raw_idx] = merged_offset;
+      if (raw_idx < raw_offsets.size()) {
+        const Int3 internal = raw_idx < plan.raw_internal_offsets.size()
+                                  ? plan.raw_internal_offsets[raw_idx]
+                                  : Int3{};
+        raw_offsets[raw_idx] = merged_offset + internal;
+      }
     }
   }
-  rebase_component_offsets(raw_offsets, raw_components);
+  rebase_component_offsets(raw_offsets, Box);
   return raw_offsets;
 }
 
@@ -1560,13 +1599,19 @@ bool derive_merged_warm_offsets(const vector<Int3> &raw_offsets,
     const size_t first_raw_idx = group.front();
     if (first_raw_idx >= raw_offsets.size())
       return false;
-    const Int3 &candidate = raw_offsets[first_raw_idx];
+    const Int3 first_internal =
+        first_raw_idx < plan.raw_internal_offsets.size()
+            ? plan.raw_internal_offsets[first_raw_idx]
+            : Int3{};
+    const Int3 candidate = raw_offsets[first_raw_idx] - first_internal;
     for (size_t raw_idx : group) {
       if (raw_idx >= raw_offsets.size())
         return false;
-      const auto &raw_offset = raw_offsets[raw_idx];
-      if (raw_offset.x != candidate.x || raw_offset.y != candidate.y ||
-          raw_offset.z != candidate.z) {
+      const Int3 internal = raw_idx < plan.raw_internal_offsets.size()
+                                ? plan.raw_internal_offsets[raw_idx]
+                                : Int3{};
+      const Int3 residual = raw_offsets[raw_idx] - internal;
+      if (!same_delta(residual, candidate)) {
         return false;
       }
     }
@@ -1575,11 +1620,31 @@ bool derive_merged_warm_offsets(const vector<Int3> &raw_offsets,
   return true;
 }
 
-int compare_principal_rg2(double lhs, double rhs);
-int compare_pbctopo_double_metric(double lhs, double rhs, double eps);
-template <typename Candidate>
-int compare_candidate_anchor_prefix(const Candidate &lhs,
-                                    const Candidate &rhs);
+vector<PbctopoAtom> apply_merged_component_internal_offsets(
+    const vector<PbctopoAtom> &atoms,
+    const vector<vector<size_t>> &raw_components,
+    const PbctopoMergedComponentPlan &plan, box Box) {
+  vector<PbctopoAtom> aligned = atoms;
+  const PbctopoLatticeMetric lattice(Box);
+  const size_t raw_count =
+      min(raw_components.size(), plan.raw_internal_offsets.size());
+  for (size_t raw_idx = 0; raw_idx < raw_count; ++raw_idx) {
+    const Int3 offset = plan.raw_internal_offsets[raw_idx];
+    for (size_t atom_idx : raw_components[raw_idx]) {
+      if (atom_idx >= aligned.size())
+        continue;
+      auto &atom = aligned[atom_idx];
+      atom.sx += offset.x;
+      atom.sy += offset.y;
+      atom.sz += offset.z;
+      const auto cart = lattice.scaled_to_cartesian(atom.sx, atom.sy, atom.sz);
+      atom.x = cart[0];
+      atom.y = cart[1];
+      atom.z = cart[2];
+    }
+  }
+  return aligned;
+}
 
 bool graph_seed_quick_score_better(const PbctopoGraphSeedQuickScore &lhs,
                                    const PbctopoGraphSeedQuickScore &rhs) {
@@ -1587,10 +1652,14 @@ bool graph_seed_quick_score_better(const PbctopoGraphSeedQuickScore &lhs,
     return false;
   if (!rhs.valid)
     return true;
-  if (fabs(lhs.continuity_max_d2 - rhs.continuity_max_d2) > 1.0e-6)
-    return lhs.continuity_max_d2 < rhs.continuity_max_d2;
-  if (fabs(lhs.continuity_path - rhs.continuity_path) > 1.0e-6)
-    return lhs.continuity_path < rhs.continuity_path;
+  int metric_cmp = compare_pbctopo_double_metric(
+      lhs.continuity_max_d2, rhs.continuity_max_d2, 1.0e-6);
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
+  metric_cmp = compare_pbctopo_double_metric(lhs.continuity_path,
+                                             rhs.continuity_path, 1.0e-6);
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
   int anchor_cmp = compare_anchor_graph_score(lhs.anchor_graph,
                                               rhs.anchor_graph);
   if (anchor_cmp == 0) {
@@ -1615,8 +1684,10 @@ bool graph_seed_quick_score_better(const PbctopoGraphSeedQuickScore &lhs,
       compare_principal_rg2(lhs.principal_rg2_min, rhs.principal_rg2_min);
   if (principal_min_cmp != 0)
     return principal_min_cmp < 0;
-  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-6)
-    return lhs.shift_norm2 < rhs.shift_norm2;
+  metric_cmp = compare_pbctopo_double_metric(lhs.shift_norm2, rhs.shift_norm2,
+                                              1.0e-6);
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
   return false;
 }
 
@@ -1662,260 +1733,6 @@ PbctopoGraphSeedQuickScore score_component_graph_seed_quick(
   score.shift_norm2 = shift_norm2;
   score.valid = true;
   return score;
-}
-
-constexpr double kPrincipalRgRelTol = 0.08;
-constexpr double kPrincipalRgAbsTol = 5.0;
-constexpr double kShapeKappaRelTol = 0.10;
-constexpr double kShapeKappaAbsTol = 0.02;
-constexpr double kShapeMomentRelTol = 0.08;
-constexpr double kShapeMomentAbsTol = 5.0;
-
-double principal_rg2_tolerance(double reference) {
-  return max(kPrincipalRgAbsTol, max(0.0, reference) * kPrincipalRgRelTol);
-}
-
-bool principal_rg2_significantly_worse(double value, double reference) {
-  if (!isfinite(value) || !isfinite(reference))
-    return false;
-  return value > reference + principal_rg2_tolerance(reference);
-}
-
-bool principal_rg2_significantly_better(double value, double reference) {
-  if (!isfinite(value) || !isfinite(reference))
-    return false;
-  return value + principal_rg2_tolerance(reference) < reference;
-}
-
-int compare_principal_rg2(double lhs, double rhs) {
-  if (principal_rg2_significantly_better(lhs, rhs))
-    return -1;
-  if (principal_rg2_significantly_better(rhs, lhs))
-    return 1;
-  return 0;
-}
-
-double shape_kappa_tolerance(double reference) {
-  return max(kShapeKappaAbsTol, max(0.0, reference) * kShapeKappaRelTol);
-}
-
-bool shape_kappa_significantly_worse(double value, double reference) {
-  if (!isfinite(value) || !isfinite(reference))
-    return false;
-  return value > reference + shape_kappa_tolerance(reference);
-}
-
-bool shape_kappa_significantly_better(double value, double reference) {
-  if (!isfinite(value) || !isfinite(reference))
-    return false;
-  return value + shape_kappa_tolerance(reference) < reference;
-}
-
-int compare_shape_kappa(double lhs, double rhs) {
-  if (shape_kappa_significantly_better(lhs, rhs))
-    return -1;
-  if (shape_kappa_significantly_better(rhs, lhs))
-    return 1;
-  return 0;
-}
-
-double shape_moment_tolerance(double reference) {
-  return max(kShapeMomentAbsTol, max(0.0, reference) * kShapeMomentRelTol);
-}
-
-bool shape_moment_significantly_worse(double value, double reference) {
-  if (!isfinite(value) || !isfinite(reference))
-    return false;
-  return value > reference + shape_moment_tolerance(reference);
-}
-
-bool shape_moment_significantly_better(double value, double reference) {
-  if (!isfinite(value) || !isfinite(reference))
-    return false;
-  return value + shape_moment_tolerance(reference) < reference;
-}
-
-int compare_shape_moment(double lhs, double rhs) {
-  if (shape_moment_significantly_better(lhs, rhs))
-    return -1;
-  if (shape_moment_significantly_better(rhs, lhs))
-    return 1;
-  return 0;
-}
-
-int compare_pbctopo_double_metric(double lhs, double rhs,
-                                  double eps = 1.0e-6) {
-  const bool lhs_valid = isfinite(lhs);
-  const bool rhs_valid = isfinite(rhs);
-  if (lhs_valid != rhs_valid)
-    return lhs_valid ? -1 : 1;
-  if (!lhs_valid)
-    return 0;
-  if (fabs(lhs - rhs) <= eps)
-    return 0;
-  return lhs < rhs ? -1 : 1;
-}
-
-template <typename Candidate>
-int compare_candidate_anchor_prefix(const Candidate &lhs,
-                                    const Candidate &rhs) {
-  const int graph_cmp = compare_anchor_graph_score(lhs.anchor_graph,
-                                                   rhs.anchor_graph);
-  if (graph_cmp != 0)
-    return graph_cmp;
-  const bool lhs_has_anchor =
-      isfinite(lhs.anchor_max_d2) && isfinite(lhs.anchor_mst2);
-  const bool rhs_has_anchor =
-      isfinite(rhs.anchor_max_d2) && isfinite(rhs.anchor_mst2);
-  if (lhs_has_anchor != rhs_has_anchor)
-    return lhs_has_anchor ? -1 : 1;
-  if (!lhs_has_anchor)
-    return 0;
-  int cmp = compare_pbctopo_double_metric(lhs.anchor_max_d2, rhs.anchor_max_d2);
-  if (cmp != 0)
-    return cmp;
-  return compare_pbctopo_double_metric(lhs.anchor_mst2, rhs.anchor_mst2);
-}
-
-template <typename Candidate>
-bool candidate_anchor_prefix_equivalent(const Candidate &lhs,
-                                        const Candidate &rhs) {
-  if (lhs.broken_edges != rhs.broken_edges)
-    return false;
-  if (compare_pbctopo_double_metric(lhs.continuity_max_d2,
-                                    rhs.continuity_max_d2) != 0)
-    return false;
-  if (compare_pbctopo_double_metric(lhs.continuity_path,
-                                    rhs.continuity_path) != 0)
-    return false;
-  return compare_candidate_anchor_prefix(lhs, rhs) == 0;
-}
-
-bool component_candidate_is_outlier(const PbctopoCutCandidate &candidate,
-                                    const PbctopoCutCandidate *reference) {
-  if (!candidate.valid || candidate.ultra_clash || reference == nullptr ||
-      !reference->valid || reference->ultra_clash) {
-    return false;
-  }
-  return principal_rg2_significantly_worse(candidate.principal_rg2_max,
-                                           reference->principal_rg2_max) &&
-         (shape_moment_significantly_worse(candidate.shape_asphericity,
-                                           reference->shape_asphericity) ||
-          shape_kappa_significantly_worse(candidate.shape_kappa2,
-                                          reference->shape_kappa2));
-}
-
-const char *candidate_skip_search_reject_reason(
-    const PbctopoCutCandidate &candidate, const PbctopoCutCandidate &reference) {
-  if (!candidate.valid || candidate.ultra_clash)
-    return "invalid_or_ultraclash";
-  if (!reference.valid || reference.ultra_clash)
-    return nullptr;
-  if (candidate.broken_edges > reference.broken_edges)
-    return "broken_edges";
-  if (isfinite(candidate.continuity_max_d2) &&
-      isfinite(reference.continuity_max_d2) &&
-      candidate.continuity_max_d2 >
-          max(reference.continuity_max_d2 * 1.05,
-              reference.continuity_max_d2 + 4.0)) {
-    return "continuity_max_d2";
-  }
-  if (isfinite(candidate.continuity_path) &&
-      isfinite(reference.continuity_path) &&
-      candidate.continuity_path >
-          max(reference.continuity_path * 1.05,
-              reference.continuity_path + 20.0)) {
-    return "continuity_path";
-  }
-  if (candidate.anchor_graph.residue_order_violations >
-      reference.anchor_graph.residue_order_violations) {
-    return "anchor_residue_order_violations";
-  }
-  if (isfinite(candidate.anchor_graph.endpoint_image_gap) &&
-      isfinite(reference.anchor_graph.endpoint_image_gap) &&
-      candidate.anchor_graph.endpoint_image_gap >
-          reference.anchor_graph.endpoint_image_gap + 1.0e-6) {
-    return "anchor_endpoint_image_gap";
-  }
-  if (candidate.anchor_graph.contact_map_lost >
-      reference.anchor_graph.contact_map_lost) {
-    return "anchor_contact_map_lost";
-  }
-  if (isfinite(candidate.anchor_graph.contact_map_max_d2) &&
-      isfinite(reference.anchor_graph.contact_map_max_d2) &&
-      candidate.anchor_graph.contact_map_max_d2 >
-          reference.anchor_graph.contact_map_max_d2 + 1.0e-6) {
-    return "anchor_contact_map_max_d2";
-  }
-  if (isfinite(candidate.anchor_graph.order_max_d2) &&
-      isfinite(reference.anchor_graph.order_max_d2) &&
-      candidate.anchor_graph.order_max_d2 >
-          reference.anchor_graph.order_max_d2 + 1.0e-6) {
-    return "anchor_order_max_d2";
-  }
-  if (isfinite(candidate.anchor_graph.order_path_d2) &&
-      isfinite(reference.anchor_graph.order_path_d2) &&
-      candidate.anchor_graph.order_path_d2 >
-          reference.anchor_graph.order_path_d2 + 1.0e-6) {
-    return "anchor_order_path_d2";
-  }
-  if (isfinite(candidate.anchor_max_d2) &&
-      isfinite(reference.anchor_max_d2) &&
-      candidate.anchor_max_d2 >
-          max(reference.anchor_max_d2 * 1.10, reference.anchor_max_d2 + 25.0)) {
-    return "anchor_max_d2";
-  }
-  if (isfinite(candidate.anchor_mst2) && isfinite(reference.anchor_mst2) &&
-      candidate.anchor_mst2 >
-          max(reference.anchor_mst2 * 1.10, reference.anchor_mst2 + 100.0)) {
-    return "anchor_mst2";
-  }
-  if (principal_rg2_significantly_worse(candidate.principal_rg2_max,
-                                        reference.principal_rg2_max)) {
-    return "principal_rg2_max";
-  }
-  if (principal_rg2_significantly_worse(candidate.principal_rg2_mid,
-                                        reference.principal_rg2_mid)) {
-    return "principal_rg2_mid";
-  }
-  if (principal_rg2_significantly_worse(candidate.principal_rg2_min,
-                                        reference.principal_rg2_min)) {
-    return "principal_rg2_min";
-  }
-  if (shape_kappa_significantly_worse(candidate.shape_kappa2,
-                                      reference.shape_kappa2)) {
-    return "shape_kappa2";
-  }
-  if (shape_moment_significantly_worse(candidate.shape_asphericity,
-                                       reference.shape_asphericity)) {
-    return "shape_asphericity";
-  }
-  if (shape_moment_significantly_worse(candidate.shape_acylindricity,
-                                       reference.shape_acylindricity)) {
-    return "shape_acylindricity";
-  }
-  if (candidate.edge_stretch >
-      max(reference.edge_stretch * 1.10, reference.edge_stretch + 0.05))
-    return "edge_stretch";
-  if (isfinite(reference.min_pair_d2) &&
-      candidate.min_pair_d2 + 1.0e-6 <
-          min(reference.min_pair_d2 * 0.90, reference.min_pair_d2 - 0.05))
-    return "min_pair_d2";
-  return nullptr;
-}
-
-bool candidate_close_enough_to_skip_search(const PbctopoCutCandidate &candidate,
-                                           const PbctopoCutCandidate &reference) {
-  return candidate_skip_search_reject_reason(candidate, reference) == nullptr;
-}
-
-bool candidate_has_projection_clash_margin(const PbctopoCutCandidate &candidate,
-                                           double clash_cutoff) {
-  if (!candidate.valid || candidate.ultra_clash || !isfinite(candidate.min_pair_d2))
-    return false;
-  const double margin_distance =
-      max(clash_cutoff * 1.10, clash_cutoff + 0.20);
-  return candidate.min_pair_d2 >= margin_distance * margin_distance;
 }
 
 PbctopoVirtualSeedCenter
@@ -2011,7 +1828,7 @@ vector<PbctopoGraphSeedSolveResult> build_large_component_graph_seed_candidates(
     vector<PbctopoGraphEdge> ranked_edges = base_edges;
     sort_fn(ranked_edges);
     vector<Int3> offsets;
-    if (!solve_component_offsets_from_ranked_edges(components.size(), components,
+    if (!solve_component_offsets_from_ranked_edges(components.size(), Box, components,
                                                    ranked_edges, offsets)) {
       return;
     }
@@ -2050,18 +1867,30 @@ vector<PbctopoGraphSeedSolveResult> build_large_component_graph_seed_candidates(
                   const bool rhs_zero = graph_edge_has_zero_shift(rhs);
                   if (lhs_zero != rhs_zero)
                     return !lhs_zero;
-                  if (lhs.contact_atoms != rhs.contact_atoms)
-                    return lhs.contact_atoms > rhs.contact_atoms;
-                  if (fabs(lhs.confidence - rhs.confidence) > 1.0e-9)
-                    return lhs.confidence > rhs.confidence;
-                  if (fabs(lhs.soft_penalty - rhs.soft_penalty) > 1.0e-9)
-                    return lhs.soft_penalty < rhs.soft_penalty;
-                  if (fabs(lhs.min_pair_d2 - rhs.min_pair_d2) > 1.0e-9)
-                    return lhs.min_pair_d2 > rhs.min_pair_d2;
-                  if (fabs(lhs.bbox_d2 - rhs.bbox_d2) > 1.0e-9)
-                    return lhs.bbox_d2 < rhs.bbox_d2;
-                  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-9)
-                    return lhs.shift_norm2 < rhs.shift_norm2;
+                  int metric_cmp = compare_pbctopo_double_metric(
+                      lhs.contact_fraction, rhs.contact_fraction, 1.0e-9);
+                  if (metric_cmp != 0)
+                    return metric_cmp > 0;
+                  metric_cmp = compare_pbctopo_double_metric(
+                      lhs.confidence, rhs.confidence, 1.0e-9);
+                  if (metric_cmp != 0)
+                    return metric_cmp > 0;
+                  metric_cmp = compare_pbctopo_double_metric(
+                      lhs.soft_penalty_mean, rhs.soft_penalty_mean, 1.0e-9);
+                  if (metric_cmp != 0)
+                    return metric_cmp < 0;
+                  metric_cmp = compare_pbctopo_double_metric(
+                      lhs.min_pair_d2, rhs.min_pair_d2, 1.0e-9);
+                  if (metric_cmp != 0)
+                    return metric_cmp > 0;
+                  metric_cmp = compare_pbctopo_double_metric(
+                      lhs.bbox_d2, rhs.bbox_d2, 1.0e-9);
+                  if (metric_cmp != 0)
+                    return metric_cmp < 0;
+                  metric_cmp = compare_pbctopo_double_metric(
+                      lhs.shift_norm2, rhs.shift_norm2, 1.0e-9);
+                  if (metric_cmp != 0)
+                    return metric_cmp < 0;
                   if (lhs.a != rhs.a)
                     return lhs.a < rhs.a;
                   return lhs.b < rhs.b;
@@ -2107,18 +1936,30 @@ vector<PbctopoGraphSeedSolveResult> build_large_component_graph_seed_candidates(
                   const bool rhs_zero = graph_edge_has_zero_shift(rhs);
                   if (lhs_zero != rhs_zero)
                     return !lhs_zero;
-                  if (lhs.contact_atoms != rhs.contact_atoms)
-                    return lhs.contact_atoms > rhs.contact_atoms;
-                  if (fabs(lhs.confidence - rhs.confidence) > 1.0e-9)
-                    return lhs.confidence > rhs.confidence;
-                  if (fabs(lhs.soft_penalty - rhs.soft_penalty) > 1.0e-9)
-                    return lhs.soft_penalty < rhs.soft_penalty;
-                  if (fabs(lhs.min_pair_d2 - rhs.min_pair_d2) > 1.0e-9)
-                    return lhs.min_pair_d2 > rhs.min_pair_d2;
-                  if (fabs(lhs.bbox_d2 - rhs.bbox_d2) > 1.0e-9)
-                    return lhs.bbox_d2 < rhs.bbox_d2;
-                  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-9)
-                    return lhs.shift_norm2 < rhs.shift_norm2;
+                  int metric_cmp = compare_pbctopo_double_metric(
+                      lhs.contact_fraction, rhs.contact_fraction, 1.0e-9);
+                  if (metric_cmp != 0)
+                    return metric_cmp > 0;
+                  metric_cmp = compare_pbctopo_double_metric(
+                      lhs.confidence, rhs.confidence, 1.0e-9);
+                  if (metric_cmp != 0)
+                    return metric_cmp > 0;
+                  metric_cmp = compare_pbctopo_double_metric(
+                      lhs.soft_penalty_mean, rhs.soft_penalty_mean, 1.0e-9);
+                  if (metric_cmp != 0)
+                    return metric_cmp < 0;
+                  metric_cmp = compare_pbctopo_double_metric(
+                      lhs.min_pair_d2, rhs.min_pair_d2, 1.0e-9);
+                  if (metric_cmp != 0)
+                    return metric_cmp > 0;
+                  metric_cmp = compare_pbctopo_double_metric(
+                      lhs.bbox_d2, rhs.bbox_d2, 1.0e-9);
+                  if (metric_cmp != 0)
+                    return metric_cmp < 0;
+                  metric_cmp = compare_pbctopo_double_metric(
+                      lhs.shift_norm2, rhs.shift_norm2, 1.0e-9);
+                  if (metric_cmp != 0)
+                    return metric_cmp < 0;
                   if (lhs.a != rhs.a)
                     return lhs.a < rhs.a;
                   return lhs.b < rhs.b;
@@ -2409,45 +2250,6 @@ bool accumulate_edge_scan(
   return true;
 }
 
-int compare_candidate_prefix_before_edge_stretch(
-    const PbctopoCutCandidate &lhs, const PbctopoCutCandidate &rhs,
-    PbctopoRefineScorePhase phase) {
-  if (lhs.broken_edges != rhs.broken_edges)
-    return (lhs.broken_edges < rhs.broken_edges) ? -1 : 1;
-  const bool lhs_has_cont =
-      isfinite(lhs.continuity_max_d2) && isfinite(lhs.continuity_path);
-  const bool rhs_has_cont =
-      isfinite(rhs.continuity_max_d2) && isfinite(rhs.continuity_path);
-  if (lhs_has_cont != rhs_has_cont)
-    return lhs_has_cont ? -1 : 1;
-  if (lhs_has_cont &&
-      fabs(lhs.continuity_max_d2 - rhs.continuity_max_d2) > 1.0e-6) {
-    return (lhs.continuity_max_d2 < rhs.continuity_max_d2) ? -1 : 1;
-  }
-  if (lhs_has_cont &&
-      fabs(lhs.continuity_path - rhs.continuity_path) > 1.0e-6) {
-    return (lhs.continuity_path < rhs.continuity_path) ? -1 : 1;
-  }
-  const int anchor_cmp = compare_candidate_anchor_prefix(lhs, rhs);
-  if (anchor_cmp != 0)
-    return anchor_cmp;
-  const int principal_max_cmp =
-      compare_principal_rg2(lhs.principal_rg2_max, rhs.principal_rg2_max);
-  if (principal_max_cmp != 0)
-    return principal_max_cmp;
-  const int principal_mid_cmp =
-      compare_principal_rg2(lhs.principal_rg2_mid, rhs.principal_rg2_mid);
-  if (principal_mid_cmp != 0)
-    return principal_mid_cmp;
-  if (phase == PbctopoRefineScorePhase::CoarseStage1) {
-    const int principal_min_cmp =
-        compare_principal_rg2(lhs.principal_rg2_min, rhs.principal_rg2_min);
-    if (principal_min_cmp != 0)
-      return principal_min_cmp;
-  }
-  return 0;
-}
-
 bool edge_scan_cannot_beat_threshold(const PbctopoCutCandidate &partial,
                                      const PbctopoCutCandidate *threshold,
                                      PbctopoRefineScorePhase phase) {
@@ -2535,8 +2337,10 @@ void append_interface_anchor_edges(
       continue;
     sort(candidates.begin(), candidates.end(),
          [](const AnchorCandidate &lhs, const AnchorCandidate &rhs) {
-           if (fabs(lhs.d2 - rhs.d2) > 1.0e-9)
-             return lhs.d2 < rhs.d2;
+           const int metric_cmp =
+               compare_pbctopo_double_metric(lhs.d2, rhs.d2, 1.0e-9);
+           if (metric_cmp != 0)
+             return metric_cmp < 0;
            if (lhs.a != rhs.a)
              return lhs.a < rhs.a;
            return lhs.b < rhs.b;
@@ -2589,6 +2393,7 @@ vector<PbctopoAtom> unwrap_atoms_by_local_graph(
   vector<PbctopoAtom> unwrapped = wrapped_atoms;
   if (wrapped_atoms.empty())
     return unwrapped;
+  const PbctopoLatticeMetric lattice(Box);
 
   vector<vector<size_t>> adjacency(wrapped_atoms.size());
   adjacency.reserve(wrapped_atoms.size());
@@ -2615,15 +2420,13 @@ vector<PbctopoAtom> unwrap_atoms_by_local_graph(
       for (size_t nb : adjacency[current]) {
         if (seen[nb] != 0)
           continue;
-        const double dsx = wrapped_atoms[nb].sx - wrapped_atoms[current].sx -
-                           round(wrapped_atoms[nb].sx - wrapped_atoms[current].sx);
-        const double dsy = wrapped_atoms[nb].sy - wrapped_atoms[current].sy -
-                           round(wrapped_atoms[nb].sy - wrapped_atoms[current].sy);
-        const double dsz = wrapped_atoms[nb].sz - wrapped_atoms[current].sz -
-                           round(wrapped_atoms[nb].sz - wrapped_atoms[current].sz);
-        unwrapped[nb].sx = unwrapped[current].sx + dsx;
-        unwrapped[nb].sy = unwrapped[current].sy + dsy;
-        unwrapped[nb].sz = unwrapped[current].sz + dsz;
+        const auto mic = lattice.nearest_image_scaled(
+            wrapped_atoms[nb].sx - wrapped_atoms[current].sx,
+            wrapped_atoms[nb].sy - wrapped_atoms[current].sy,
+            wrapped_atoms[nb].sz - wrapped_atoms[current].sz);
+        unwrapped[nb].sx = unwrapped[current].sx + mic.sx;
+        unwrapped[nb].sy = unwrapped[current].sy + mic.sy;
+        unwrapped[nb].sz = unwrapped[current].sz + mic.sz;
         seen[nb] = 1;
         stack.push_back(nb);
       }
@@ -2634,31 +2437,6 @@ vector<PbctopoAtom> unwrap_atoms_by_local_graph(
     scaled_to_cartesian(Box, atom.sx, atom.sy, atom.sz, atom.x, atom.y, atom.z);
   }
   return unwrapped;
-}
-
-PbctopoCutCandidate
-component_candidate_to_cut_candidate(const PbctopoComponentCandidate &candidate) {
-  PbctopoCutCandidate cut;
-  cut.continuity_path = candidate.continuity_path;
-  cut.continuity_max_d2 = candidate.continuity_max_d2;
-  cut.anchor_mst2 = candidate.anchor_mst2;
-  cut.anchor_max_d2 = candidate.anchor_max_d2;
-  cut.anchor_graph = candidate.anchor_graph;
-  cut.principal_rg2_max = candidate.principal_rg2_max;
-  cut.principal_rg2_mid = candidate.principal_rg2_mid;
-  cut.principal_rg2_min = candidate.principal_rg2_min;
-  cut.bbox_volume = candidate.bbox_volume;
-  cut.rg2 = candidate.rg2;
-  cut.shape_kappa2 = candidate.shape_kappa2;
-  cut.shape_asphericity = candidate.shape_asphericity;
-  cut.shape_acylindricity = candidate.shape_acylindricity;
-  cut.shift_norm2 = candidate.shift_norm2;
-  cut.min_pair_d2 = candidate.min_pair_d2;
-  cut.clash_atom_a = candidate.clash_atom_a;
-  cut.clash_atom_b = candidate.clash_atom_b;
-  cut.ultra_clash = candidate.ultra_clash;
-  cut.valid = candidate.valid;
-  return cut;
 }
 
 PbctopoComponentCandidate build_component_candidate_seed(
@@ -2707,120 +2485,6 @@ PbctopoComponentCandidate build_component_candidate_seed(
   seed.component_mst2 = compute_mst2(component_centers);
   seed.valid = true;
   return seed;
-}
-
-bool component_candidate_cannot_beat_incumbent_prefix(
-    const PbctopoComponentCandidate &candidate,
-    const PbctopoComponentCandidate *incumbent,
-    PbctopoComponentCandidatePrefixStage stage) {
-  if (incumbent == nullptr || !incumbent->valid || incumbent->ultra_clash ||
-      candidate.ultra_clash) {
-    return false;
-  }
-
-  const bool candidate_has_cont =
-      isfinite(candidate.continuity_max_d2) && isfinite(candidate.continuity_path);
-  const bool incumbent_has_cont =
-      isfinite(incumbent->continuity_max_d2) && isfinite(incumbent->continuity_path);
-  if (candidate_has_cont != incumbent_has_cont)
-    return !candidate_has_cont;
-  if (candidate_has_cont) {
-    if (candidate.continuity_max_d2 > incumbent->continuity_max_d2 + 1.0e-6)
-      return true;
-    if (candidate.continuity_max_d2 + 1.0e-6 < incumbent->continuity_max_d2)
-      return false;
-    if (candidate.continuity_path > incumbent->continuity_path + 1.0e-6)
-      return true;
-    if (candidate.continuity_path + 1.0e-6 < incumbent->continuity_path)
-      return false;
-  }
-  if (stage == PbctopoComponentCandidatePrefixStage::Continuity)
-    return false;
-
-  const int anchor_cmp = compare_candidate_anchor_prefix(candidate, *incumbent);
-  if (anchor_cmp > 0)
-    return true;
-  if (anchor_cmp < 0)
-    return false;
-  if (stage == PbctopoComponentCandidatePrefixStage::Anchor)
-    return false;
-
-  const int principal_max_cmp =
-      compare_principal_rg2(candidate.principal_rg2_max, incumbent->principal_rg2_max);
-  if (principal_max_cmp > 0)
-    return true;
-  if (principal_max_cmp < 0)
-    return false;
-  const int principal_mid_cmp =
-      compare_principal_rg2(candidate.principal_rg2_mid, incumbent->principal_rg2_mid);
-  if (principal_mid_cmp > 0)
-    return true;
-  if (principal_mid_cmp < 0)
-    return false;
-  const int principal_min_cmp =
-      compare_principal_rg2(candidate.principal_rg2_min, incumbent->principal_rg2_min);
-  if (principal_min_cmp > 0)
-    return true;
-  if (principal_min_cmp < 0)
-    return false;
-  if (stage == PbctopoComponentCandidatePrefixStage::Principal)
-    return false;
-
-  if (candidate.component_mst2 > incumbent->component_mst2 + 1.0e-6)
-    return true;
-  if (candidate.component_mst2 + 1.0e-6 < incumbent->component_mst2)
-    return false;
-  const int component_kappa_cmp =
-      compare_shape_kappa(candidate.component_kappa2,
-                          incumbent->component_kappa2);
-  if (component_kappa_cmp > 0)
-    return true;
-  if (component_kappa_cmp < 0)
-    return false;
-  const int component_asph_cmp =
-      compare_shape_moment(candidate.component_asphericity,
-                           incumbent->component_asphericity);
-  if (component_asph_cmp > 0)
-    return true;
-  if (component_asph_cmp < 0)
-    return false;
-  const int component_acyl_cmp =
-      compare_shape_moment(candidate.component_acylindricity,
-                           incumbent->component_acylindricity);
-  if (component_acyl_cmp > 0)
-    return true;
-  if (component_acyl_cmp < 0)
-    return false;
-  if (stage == PbctopoComponentCandidatePrefixStage::ComponentMetrics)
-    return false;
-
-  const int shape_kappa_cmp =
-      compare_shape_kappa(candidate.shape_kappa2, incumbent->shape_kappa2);
-  if (shape_kappa_cmp > 0)
-    return true;
-  if (shape_kappa_cmp < 0)
-    return false;
-  const int shape_asph_cmp =
-      compare_shape_moment(candidate.shape_asphericity,
-                           incumbent->shape_asphericity);
-  if (shape_asph_cmp > 0)
-    return true;
-  if (shape_asph_cmp < 0)
-    return false;
-  const int shape_acyl_cmp =
-      compare_shape_moment(candidate.shape_acylindricity,
-                           incumbent->shape_acylindricity);
-  if (shape_acyl_cmp > 0)
-    return true;
-  if (shape_acyl_cmp < 0)
-    return false;
-  if (candidate.shift_norm2 > incumbent->shift_norm2 + 1.0e-6)
-    return true;
-  if (candidate.shift_norm2 + 1.0e-6 < incumbent->shift_norm2)
-    return false;
-  if (candidate.min_pair_d2 + 1.0e-9 < incumbent->min_pair_d2)
-    return true;
-  return false;
 }
 
 PbctopoComponentCandidate score_component_assignment(
@@ -2995,74 +2659,6 @@ PbctopoComponentCandidate score_component_assignment(
   return finish(candidate);
 }
 
-bool better_component_candidate(const PbctopoComponentCandidate &lhs,
-                                const PbctopoComponentCandidate &rhs) {
-  if (!lhs.valid)
-    return false;
-  if (!rhs.valid)
-    return true;
-  if (lhs.ultra_clash != rhs.ultra_clash)
-    return rhs.ultra_clash;
-  const bool lhs_has_cont =
-      isfinite(lhs.continuity_max_d2) && isfinite(lhs.continuity_path);
-  const bool rhs_has_cont =
-      isfinite(rhs.continuity_max_d2) && isfinite(rhs.continuity_path);
-  if (lhs_has_cont != rhs_has_cont)
-    return lhs_has_cont;
-  if (lhs_has_cont &&
-      fabs(lhs.continuity_max_d2 - rhs.continuity_max_d2) > 1.0e-6)
-    return lhs.continuity_max_d2 < rhs.continuity_max_d2;
-  if (lhs_has_cont &&
-      fabs(lhs.continuity_path - rhs.continuity_path) > 1.0e-6)
-    return lhs.continuity_path < rhs.continuity_path;
-  const int anchor_cmp = compare_candidate_anchor_prefix(lhs, rhs);
-  if (anchor_cmp != 0)
-    return anchor_cmp < 0;
-  const int principal_max_cmp =
-      compare_principal_rg2(lhs.principal_rg2_max, rhs.principal_rg2_max);
-  if (principal_max_cmp != 0)
-    return principal_max_cmp < 0;
-  const int principal_mid_cmp =
-      compare_principal_rg2(lhs.principal_rg2_mid, rhs.principal_rg2_mid);
-  if (principal_mid_cmp != 0)
-    return principal_mid_cmp < 0;
-  const int principal_min_cmp =
-      compare_principal_rg2(lhs.principal_rg2_min, rhs.principal_rg2_min);
-  if (principal_min_cmp != 0)
-    return principal_min_cmp < 0;
-  if (fabs(lhs.component_mst2 - rhs.component_mst2) > 1.0e-6)
-    return lhs.component_mst2 < rhs.component_mst2;
-  const int component_kappa_cmp =
-      compare_shape_kappa(lhs.component_kappa2, rhs.component_kappa2);
-  if (component_kappa_cmp != 0)
-    return component_kappa_cmp < 0;
-  const int component_asph_cmp =
-      compare_shape_moment(lhs.component_asphericity, rhs.component_asphericity);
-  if (component_asph_cmp != 0)
-    return component_asph_cmp < 0;
-  const int component_acyl_cmp = compare_shape_moment(
-      lhs.component_acylindricity, rhs.component_acylindricity);
-  if (component_acyl_cmp != 0)
-    return component_acyl_cmp < 0;
-  const int shape_kappa_cmp =
-      compare_shape_kappa(lhs.shape_kappa2, rhs.shape_kappa2);
-  if (shape_kappa_cmp != 0)
-    return shape_kappa_cmp < 0;
-  const int shape_asph_cmp =
-      compare_shape_moment(lhs.shape_asphericity, rhs.shape_asphericity);
-  if (shape_asph_cmp != 0)
-    return shape_asph_cmp < 0;
-  const int shape_acyl_cmp =
-      compare_shape_moment(lhs.shape_acylindricity, rhs.shape_acylindricity);
-  if (shape_acyl_cmp != 0)
-    return shape_acyl_cmp < 0;
-  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-6)
-    return lhs.shift_norm2 < rhs.shift_norm2;
-  if (fabs(lhs.min_pair_d2 - rhs.min_pair_d2) > 1.0e-9)
-    return lhs.min_pair_d2 > rhs.min_pair_d2;
-  return false;
-}
-
 PbctopoComponentSearchCallbacks make_component_search_callbacks() {
   PbctopoComponentSearchCallbacks callbacks;
   callbacks.build_seed = build_component_candidate_seed;
@@ -3095,6 +2691,17 @@ bool solve_large_component_merge_mode(
   if (merge_plan.merged_components.empty())
     return false;
 
+  const vector<PbctopoAtom> merged_atoms =
+      apply_merged_component_internal_offsets(atoms, raw_components,
+                                              merge_plan, Box);
+  if (timing != nullptr) {
+    ++timing->component_large_mode_internal_offsets_preserved;
+    timing->component_large_mode_internal_offset_nonzero +=
+        count_if(merge_plan.raw_internal_offsets.begin(),
+                 merge_plan.raw_internal_offsets.end(),
+                 [](const Int3 &offset) { return !is_zero_delta(offset); });
+  }
+
   vector<Int3> merged_warm_offsets;
   const vector<Int3> *merged_warm_offsets_ptr =
       (warm_component_offsets != nullptr &&
@@ -3125,8 +2732,8 @@ bool solve_large_component_merge_mode(
 
   const vector<PbctopoGraphSeedSolveResult> graph_seed_results =
       build_large_component_graph_seed_candidates(
-          atoms, Box, merge_plan.merged_components, shifts, continuity_pairs,
-          anchor_indices, cutoffs, merged_warm_offsets_ptr, timing,
+          merged_atoms, Box, merge_plan.merged_components, shifts,
+          continuity_pairs, anchor_indices, cutoffs, merged_warm_offsets_ptr, timing,
           anchor_backend, anchor_context);
   if (timing != nullptr)
     timing->component_large_mode_graph_seed_count += graph_seed_results.size();
@@ -3152,7 +2759,7 @@ bool solve_large_component_merge_mode(
         ++timing->component_large_mode_graph_seed_nonbaseline_win;
     }
     consider_raw_offsets(expand_merged_offsets_to_raw_components(
-        selected_seed->offsets, raw_components, merge_plan));
+        selected_seed->offsets, Box, raw_components, merge_plan));
   }
 
   if (allow_exact_search_on_merged) {
@@ -3167,7 +2774,7 @@ bool solve_large_component_merge_mode(
     if (timing != nullptr)
       ++timing->component_search_frames;
     PbctopoComponentCandidate merged_candidate = search_component_shift_candidate(
-        atoms, Box, merge_plan.merged_components, shifts, continuity_pairs,
+        merged_atoms, Box, merge_plan.merged_components, shifts, continuity_pairs,
         anchor_indices, cutoffs, merged_search_points,
         make_component_search_callbacks(), merged_warm_offsets_ptr,
         search_incumbent, search_incumbent_points, timing, anchor_backend,
@@ -3175,10 +2782,11 @@ bool solve_large_component_merge_mode(
     if (merged_candidate.valid && !merged_candidate.ultra_clash &&
         merged_search_points.size() == atoms.size()) {
       const vector<Int3> merged_search_offsets = extract_component_offsets_from_points(
-          atoms, merge_plan.merged_components, Box, merged_search_points);
+          merged_atoms, merge_plan.merged_components, Box,
+          merged_search_points);
       if (merged_search_offsets.size() == merge_plan.merged_components.size()) {
         consider_raw_offsets(expand_merged_offsets_to_raw_components(
-            merged_search_offsets, raw_components, merge_plan));
+            merged_search_offsets, Box, raw_components, merge_plan));
       }
     }
   }
@@ -3236,11 +2844,13 @@ void push_unique_xy_seed(vector<PbctopoSeed2D> &best, const PbctopoSeed2D &seed,
   best.push_back(seed);
   sort(best.begin(), best.end(), [](const PbctopoSeed2D &lhs,
                                     const PbctopoSeed2D &rhs) {
-    if (fabs(lhs.score - rhs.score) > 1.0e-9)
-      return lhs.score > rhs.score;
-    if (fabs(lhs.cx - rhs.cx) > 1.0e-9)
-      return lhs.cx < rhs.cx;
-    return lhs.cy < rhs.cy;
+    int cmp = compare_pbctopo_double_metric(lhs.score, rhs.score, 1.0e-9);
+    if (cmp != 0)
+      return cmp > 0;
+    cmp = compare_pbctopo_double_metric(lhs.cx, rhs.cx, 1.0e-9);
+    if (cmp != 0)
+      return cmp < 0;
+    return compare_pbctopo_double_metric(lhs.cy, rhs.cy, 1.0e-9) < 0;
   });
   if (best.size() > max_keep)
     best.resize(max_keep);
@@ -3255,9 +2865,11 @@ void push_unique_axis_seed(vector<PbctopoCutOption> &best,
   best.push_back(seed);
   sort(best.begin(), best.end(),
        [](const PbctopoCutOption &lhs, const PbctopoCutOption &rhs) {
-         if (fabs(lhs.gap - rhs.gap) > 1.0e-9)
-           return lhs.gap > rhs.gap;
-         return lhs.cut < rhs.cut;
+         const int gap_cmp =
+             compare_pbctopo_double_metric(lhs.gap, rhs.gap, 1.0e-9);
+         if (gap_cmp != 0)
+           return gap_cmp > 0;
+         return compare_pbctopo_double_metric(lhs.cut, rhs.cut, 1.0e-9) < 0;
        });
   if (best.size() > max_keep)
     best.resize(max_keep);
@@ -3275,13 +2887,16 @@ void push_unique_xyz_seed(vector<PbctopoSeed3D> &best, const PbctopoSeed3D &seed
   best.push_back(seed);
   sort(best.begin(), best.end(), [](const PbctopoSeed3D &lhs,
                                     const PbctopoSeed3D &rhs) {
-    if (fabs(lhs.score - rhs.score) > 1.0e-9)
-      return lhs.score > rhs.score;
-    if (fabs(lhs.cx - rhs.cx) > 1.0e-9)
-      return lhs.cx < rhs.cx;
-    if (fabs(lhs.cy - rhs.cy) > 1.0e-9)
-      return lhs.cy < rhs.cy;
-    return lhs.cz < rhs.cz;
+    int cmp = compare_pbctopo_double_metric(lhs.score, rhs.score, 1.0e-9);
+    if (cmp != 0)
+      return cmp > 0;
+    cmp = compare_pbctopo_double_metric(lhs.cx, rhs.cx, 1.0e-9);
+    if (cmp != 0)
+      return cmp < 0;
+    cmp = compare_pbctopo_double_metric(lhs.cy, rhs.cy, 1.0e-9);
+    if (cmp != 0)
+      return cmp < 0;
+    return compare_pbctopo_double_metric(lhs.cz, rhs.cz, 1.0e-9) < 0;
   });
   if (best.size() > max_keep)
     best.resize(max_keep);
@@ -3404,8 +3019,10 @@ bool projection_density_is_local_maximum(const vector<double> &scores,
 
 bool projection_seed2d_better(const PbctopoSeed2D &lhs,
                               const PbctopoSeed2D &rhs) {
-  if (fabs(lhs.score - rhs.score) > 1.0e-12)
-    return lhs.score > rhs.score;
+  const int score_cmp =
+      compare_pbctopo_double_metric(lhs.score, rhs.score, 1.0e-12);
+  if (score_cmp != 0)
+    return score_cmp > 0;
   if (lhs.ix != rhs.ix)
     return lhs.ix < rhs.ix;
   return lhs.iy < rhs.iy;
@@ -3787,7 +3404,8 @@ PbctopoCutCandidate evaluate_virtual_box_candidate(
     double continuity_cutoff, const PbctopoCutCandidate *incumbent,
     bool skip_clash, double frame_time_ps, const char *reject_context,
     const PbctopoAnchorGraphContext *anchor_context,
-    PbctopoVirtualSeedSource seed_source) {
+    PbctopoVirtualSeedSource seed_source,
+    const vector<size_t> *atom_component_index) {
   PbctopoCutCandidate candidate;
   candidate.cut_x = clamp_virtual_box_center(cut_x);
   candidate.cut_y = clamp_virtual_box_center(cut_y);
@@ -3796,6 +3414,7 @@ PbctopoCutCandidate evaluate_virtual_box_candidate(
   candidate.virtual_seed_source = seed_source;
   candidate.broken_edges = 0;
   candidate.edge_stretch = 0.0;
+  candidate.shift_norm2 = 0.0;
   const PbctopoCutCandidate *active_incumbent =
       (incumbent != nullptr && incumbent->valid && !incumbent->ultra_clash)
           ? incumbent
@@ -3810,6 +3429,7 @@ PbctopoCutCandidate evaluate_virtual_box_candidate(
 
   placed_points.resize(atoms.size());
   PointStats stats;
+  vector<Int3> atom_image_offsets(atoms.size());
 
   const int global_shift_x = static_cast<int>(floor(candidate.cut_x)) - 1;
   const int global_shift_y = static_cast<int>(floor(candidate.cut_y)) - 1;
@@ -3836,14 +3456,49 @@ PbctopoCutCandidate evaluate_virtual_box_candidate(
                atom.z + translation.z};
     placed_points[idx] = point;
     stats.add(point.x, point.y, point.z);
-    candidate.shift_norm2 +=
-        static_cast<double>(actual_shift_x * actual_shift_x +
-                            actual_shift_y * actual_shift_y +
-                            actual_shift_z * actual_shift_z);
+    atom_image_offsets[idx] = {actual_shift_x, actual_shift_y, actual_shift_z};
   }
 
   if (stats.count != atoms.size())
     return PbctopoCutCandidate{};
+
+  const vector<Int3> *metric_offsets = &atom_image_offsets;
+  vector<Int3> component_image_offsets;
+  vector<unsigned char> component_offset_seen;
+  bool component_assignment_consistent =
+      atom_component_index != nullptr &&
+      atom_component_index->size() == atoms.size();
+  if (component_assignment_consistent) {
+    size_t component_count = 0;
+    for (size_t comp_idx : *atom_component_index) {
+      if (comp_idx >= atoms.size()) {
+        component_assignment_consistent = false;
+        break;
+      }
+      component_count = max(component_count, comp_idx + 1);
+    }
+    if (component_assignment_consistent && component_count > 0) {
+      component_image_offsets.resize(component_count);
+      component_offset_seen.assign(component_count, 0);
+      for (size_t atom_idx = 0; atom_idx < atom_image_offsets.size(); ++atom_idx) {
+        const size_t comp_idx = (*atom_component_index)[atom_idx];
+        if (component_offset_seen[comp_idx] == 0) {
+          component_image_offsets[comp_idx] = atom_image_offsets[atom_idx];
+          component_offset_seen[comp_idx] = 1;
+        } else if (!same_delta(component_image_offsets[comp_idx],
+                               atom_image_offsets[atom_idx])) {
+          component_assignment_consistent = false;
+          break;
+        }
+      }
+      if (component_assignment_consistent &&
+          find(component_offset_seen.begin(), component_offset_seen.end(), 0) ==
+              component_offset_seen.end()) {
+        metric_offsets = &component_image_offsets;
+      }
+    }
+  }
+  candidate.shift_norm2 = pbctopo_component_shift_metric(Box, *metric_offsets);
 
   if (contacting_owner_pairs != nullptr) {
     PbctopoOwnerPairSplitDetail split_detail;
@@ -3925,7 +3580,8 @@ PbctopoCutCandidate evaluate_virtual_box_candidate(
   }
   if (!skip_clash)
     analyze_cut_candidate_ultraclash(placed_points, edge_set, candidate,
-                                     clash_cutoff);
+                                     clash_cutoff, &atoms,
+                                     atom_component_index);
   return candidate;
 }
 
@@ -3962,8 +3618,10 @@ collect_cut_options(const vector<PbctopoAtom> &atoms, char axis,
 
   sort(options.begin(), options.end(),
        [](const PbctopoCutOption &lhs, const PbctopoCutOption &rhs) {
-          if (fabs(lhs.gap - rhs.gap) > 1.0e-9)
-           return lhs.gap > rhs.gap;
+          const int metric_cmp =
+              compare_pbctopo_double_metric(lhs.gap, rhs.gap, 1.0e-9);
+          if (metric_cmp != 0)
+            return metric_cmp > 0;
          return lhs.cut < rhs.cut;
        });
 
@@ -4156,228 +3814,13 @@ PbctopoCutCandidate score_cut_candidate_principal_only(
   return candidate;
 }
 
-bool better_stage1_cut_candidate(const PbctopoCutCandidate &lhs,
-                                 const PbctopoCutCandidate &rhs) {
-  if (!lhs.valid)
-    return false;
-  if (!rhs.valid)
-    return true;
-  if (lhs.broken_edges != rhs.broken_edges)
-    return lhs.broken_edges < rhs.broken_edges;
-  const bool lhs_has_cont =
-      isfinite(lhs.continuity_max_d2) && isfinite(lhs.continuity_path);
-  const bool rhs_has_cont =
-      isfinite(rhs.continuity_max_d2) && isfinite(rhs.continuity_path);
-  if (lhs_has_cont != rhs_has_cont)
-    return lhs_has_cont;
-  if (lhs_has_cont &&
-      fabs(lhs.continuity_max_d2 - rhs.continuity_max_d2) > 1.0e-6)
-    return lhs.continuity_max_d2 < rhs.continuity_max_d2;
-  if (lhs_has_cont &&
-      fabs(lhs.continuity_path - rhs.continuity_path) > 1.0e-6)
-    return lhs.continuity_path < rhs.continuity_path;
-  const int anchor_cmp = compare_candidate_anchor_prefix(lhs, rhs);
-  if (anchor_cmp != 0)
-    return anchor_cmp < 0;
-  const int principal_max_cmp =
-      compare_principal_rg2(lhs.principal_rg2_max, rhs.principal_rg2_max);
-  if (principal_max_cmp != 0)
-    return principal_max_cmp < 0;
-  const int principal_mid_cmp =
-      compare_principal_rg2(lhs.principal_rg2_mid, rhs.principal_rg2_mid);
-  if (principal_mid_cmp != 0)
-    return principal_mid_cmp < 0;
-  const int principal_min_cmp =
-      compare_principal_rg2(lhs.principal_rg2_min, rhs.principal_rg2_min);
-  if (principal_min_cmp != 0)
-    return principal_min_cmp < 0;
-  const int kappa_cmp = compare_shape_kappa(lhs.shape_kappa2, rhs.shape_kappa2);
-  if (kappa_cmp != 0)
-    return kappa_cmp < 0;
-  const int asph_cmp =
-      compare_shape_moment(lhs.shape_asphericity, rhs.shape_asphericity);
-  if (asph_cmp != 0)
-    return asph_cmp < 0;
-  const int acyl_cmp =
-      compare_shape_moment(lhs.shape_acylindricity, rhs.shape_acylindricity);
-  if (acyl_cmp != 0)
-    return acyl_cmp < 0;
-  if (fabs(lhs.edge_stretch - rhs.edge_stretch) > 1.0e-6)
-    return lhs.edge_stretch < rhs.edge_stretch;
-  if (fabs(lhs.gap_score - rhs.gap_score) > 1.0e-9)
-    return lhs.gap_score > rhs.gap_score;
-  return false;
-}
-
-bool better_preclash_cut_candidate(const PbctopoCutCandidate &lhs,
-                                   const PbctopoCutCandidate &rhs) {
-  if (!lhs.valid)
-    return false;
-  if (!rhs.valid)
-    return true;
-  if (lhs.broken_edges != rhs.broken_edges)
-    return lhs.broken_edges < rhs.broken_edges;
-  const bool lhs_has_cont =
-      isfinite(lhs.continuity_max_d2) && isfinite(lhs.continuity_path);
-  const bool rhs_has_cont =
-      isfinite(rhs.continuity_max_d2) && isfinite(rhs.continuity_path);
-  if (lhs_has_cont != rhs_has_cont)
-    return lhs_has_cont;
-  if (lhs_has_cont &&
-      fabs(lhs.continuity_max_d2 - rhs.continuity_max_d2) > 1.0e-6)
-    return lhs.continuity_max_d2 < rhs.continuity_max_d2;
-  if (lhs_has_cont &&
-      fabs(lhs.continuity_path - rhs.continuity_path) > 1.0e-6)
-    return lhs.continuity_path < rhs.continuity_path;
-  const int anchor_cmp = compare_candidate_anchor_prefix(lhs, rhs);
-  if (anchor_cmp != 0)
-    return anchor_cmp < 0;
-  const int principal_max_cmp =
-      compare_principal_rg2(lhs.principal_rg2_max, rhs.principal_rg2_max);
-  if (principal_max_cmp != 0)
-    return principal_max_cmp < 0;
-  const int principal_mid_cmp =
-      compare_principal_rg2(lhs.principal_rg2_mid, rhs.principal_rg2_mid);
-  if (principal_mid_cmp != 0)
-    return principal_mid_cmp < 0;
-  const int principal_min_cmp =
-      compare_principal_rg2(lhs.principal_rg2_min, rhs.principal_rg2_min);
-  if (principal_min_cmp != 0)
-    return principal_min_cmp < 0;
-  const int kappa_cmp = compare_shape_kappa(lhs.shape_kappa2, rhs.shape_kappa2);
-  if (kappa_cmp != 0)
-    return kappa_cmp < 0;
-  const int asph_cmp =
-      compare_shape_moment(lhs.shape_asphericity, rhs.shape_asphericity);
-  if (asph_cmp != 0)
-    return asph_cmp < 0;
-  const int acyl_cmp =
-      compare_shape_moment(lhs.shape_acylindricity, rhs.shape_acylindricity);
-  if (acyl_cmp != 0)
-    return acyl_cmp < 0;
-  if (fabs(lhs.edge_stretch - rhs.edge_stretch) > 1.0e-6)
-    return lhs.edge_stretch < rhs.edge_stretch;
-  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-6)
-    return lhs.shift_norm2 < rhs.shift_norm2;
-  if (fabs(lhs.gap_score - rhs.gap_score) > 1.0e-9)
-    return lhs.gap_score > rhs.gap_score;
-  return false;
-}
-
-bool better_cut_candidate(const PbctopoCutCandidate &lhs,
-                          const PbctopoCutCandidate &rhs) {
-  if (!lhs.valid)
-    return false;
-  if (!rhs.valid)
-    return true;
-  if (lhs.ultra_clash != rhs.ultra_clash)
-    return rhs.ultra_clash;
-  if (lhs.broken_edges != rhs.broken_edges)
-    return lhs.broken_edges < rhs.broken_edges;
-  const bool lhs_has_cont =
-      isfinite(lhs.continuity_max_d2) && isfinite(lhs.continuity_path);
-  const bool rhs_has_cont =
-      isfinite(rhs.continuity_max_d2) && isfinite(rhs.continuity_path);
-  if (lhs_has_cont != rhs_has_cont)
-    return lhs_has_cont;
-  if (lhs_has_cont &&
-      fabs(lhs.continuity_max_d2 - rhs.continuity_max_d2) > 1.0e-6)
-    return lhs.continuity_max_d2 < rhs.continuity_max_d2;
-  if (lhs_has_cont &&
-      fabs(lhs.continuity_path - rhs.continuity_path) > 1.0e-6)
-    return lhs.continuity_path < rhs.continuity_path;
-  const int anchor_cmp = compare_candidate_anchor_prefix(lhs, rhs);
-  if (anchor_cmp != 0)
-    return anchor_cmp < 0;
-  const int principal_max_cmp =
-      compare_principal_rg2(lhs.principal_rg2_max, rhs.principal_rg2_max);
-  if (principal_max_cmp != 0)
-    return principal_max_cmp < 0;
-  const int principal_mid_cmp =
-      compare_principal_rg2(lhs.principal_rg2_mid, rhs.principal_rg2_mid);
-  if (principal_mid_cmp != 0)
-    return principal_mid_cmp < 0;
-  const int principal_min_cmp =
-      compare_principal_rg2(lhs.principal_rg2_min, rhs.principal_rg2_min);
-  if (principal_min_cmp != 0)
-    return principal_min_cmp < 0;
-  const int kappa_cmp = compare_shape_kappa(lhs.shape_kappa2, rhs.shape_kappa2);
-  if (kappa_cmp != 0)
-    return kappa_cmp < 0;
-  const int asph_cmp =
-      compare_shape_moment(lhs.shape_asphericity, rhs.shape_asphericity);
-  if (asph_cmp != 0)
-    return asph_cmp < 0;
-  const int acyl_cmp =
-      compare_shape_moment(lhs.shape_acylindricity, rhs.shape_acylindricity);
-  if (acyl_cmp != 0)
-    return acyl_cmp < 0;
-  if (fabs(lhs.edge_stretch - rhs.edge_stretch) > 1.0e-6)
-    return lhs.edge_stretch < rhs.edge_stretch;
-  if (fabs(lhs.min_pair_d2 - rhs.min_pair_d2) > 1.0e-9)
-    return lhs.min_pair_d2 > rhs.min_pair_d2;
-  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-6)
-    return lhs.shift_norm2 < rhs.shift_norm2;
-  if (fabs(lhs.cut_x - rhs.cut_x) > 1.0e-9)
-    return lhs.cut_x < rhs.cut_x;
-  if (fabs(lhs.cut_y - rhs.cut_y) > 1.0e-9)
-    return lhs.cut_y < rhs.cut_y;
-  return lhs.cut_z < rhs.cut_z;
-}
-
-bool preclash_cut_candidate_cannot_beat_incumbent(
-    const PbctopoCutCandidate &candidate,
-    const PbctopoCutCandidate *incumbent) {
-  if (!candidate.valid || incumbent == nullptr || !incumbent->valid ||
-      incumbent->ultra_clash)
-    return false;
-  return better_preclash_cut_candidate(*incumbent, candidate);
-}
-
-bool cut_candidate_cannot_beat_incumbent(const PbctopoCutCandidate &partial,
-                                         const PbctopoCutCandidate *incumbent) {
-  if (incumbent == nullptr || !incumbent->valid || incumbent->ultra_clash ||
-      partial.ultra_clash) {
-    return false;
-  }
-  if (partial.broken_edges > incumbent->broken_edges)
-    return true;
-  if (isfinite(partial.continuity_max_d2) &&
-      isfinite(incumbent->continuity_max_d2) &&
-      partial.continuity_max_d2 > incumbent->continuity_max_d2 + 1.0e-6 &&
-      partial.continuity_path > incumbent->continuity_path + 1.0e-6) {
-    return true;
-  }
-  if (compare_anchor_graph_score(partial.anchor_graph,
-                                 incumbent->anchor_graph) > 0 &&
-      isfinite(partial.anchor_max_d2) && isfinite(incumbent->anchor_max_d2) &&
-      partial.anchor_max_d2 > incumbent->anchor_max_d2 + 1.0e-6 &&
-      partial.anchor_mst2 > incumbent->anchor_mst2 + 1.0e-6) {
-    return true;
-  }
-  if (principal_rg2_significantly_worse(partial.principal_rg2_max,
-                                        incumbent->principal_rg2_max) &&
-      principal_rg2_significantly_worse(partial.principal_rg2_mid,
-                                        incumbent->principal_rg2_mid)) {
-    return true;
-  }
-  if (shape_kappa_significantly_worse(partial.shape_kappa2,
-                                      incumbent->shape_kappa2) &&
-      shape_moment_significantly_worse(partial.shape_asphericity,
-                                       incumbent->shape_asphericity)) {
-    return true;
-  }
-  if (partial.broken_edges == incumbent->broken_edges &&
-      partial.edge_stretch > incumbent->edge_stretch + 1.0e-6) {
-    return true;
-  }
-  return false;
-}
 
 void analyze_cut_candidate_ultraclash(const vector<Vec3> &placed_points,
-                                      const unordered_set<uint64_t> &edge_set,
-                                      PbctopoCutCandidate &candidate,
-                                      double cutoff) {
+                                       const unordered_set<uint64_t> &edge_set,
+                                       PbctopoCutCandidate &candidate,
+                                       double cutoff,
+                                       const vector<PbctopoAtom> *atoms,
+                                       const vector<size_t> *atom_component_index) {
   thread_local PbctopoUltraclashScratch scratch;
   candidate.min_pair_d2 = numeric_limits<double>::infinity();
   candidate.clash_atom_a = numeric_limits<size_t>::max();
@@ -4386,9 +3829,21 @@ void analyze_cut_candidate_ultraclash(const vector<Vec3> &placed_points,
   if (!candidate.valid || placed_points.size() < 2)
     return;
 
-  const double inv_grid = 1.0 / cutoff;
+  const bool filter_heavy =
+      atoms != nullptr && atoms->size() == placed_points.size();
+  const double grid_cutoff =
+      filter_heavy ? pbctopo_max_clash_cutoff(*atoms, cutoff) : cutoff;
+  const double inv_grid = 1.0 / grid_cutoff;
   const double cutoff2 = cutoff * cutoff;
+  const bool filter_same_component =
+      atom_component_index != nullptr &&
+      atom_component_index->size() == placed_points.size() &&
+      candidate.broken_edges == 0;
   auto accumulate_pair = [&](size_t atom_idx, size_t other_idx) {
+    if (filter_same_component &&
+        (*atom_component_index)[atom_idx] ==
+            (*atom_component_index)[other_idx])
+      return false;
     if (edge_set.find(atom_pair_key(atom_idx, other_idx)) != edge_set.end())
       return false;
     const auto &point = placed_points[atom_idx];
@@ -4402,7 +3857,12 @@ void analyze_cut_candidate_ultraclash(const vector<Vec3> &placed_points,
       candidate.clash_atom_a = atom_idx;
       candidate.clash_atom_b = other_idx;
     }
-    if (d2 + kDistanceEps < cutoff2) {
+    const bool clashes =
+        filter_heavy
+            ? pbctopo_atoms_clash(d2, (*atoms)[atom_idx],
+                                   (*atoms)[other_idx], cutoff)
+            : d2 + kDistanceEps < cutoff2;
+    if (clashes) {
       candidate.ultra_clash = true;
       return true;
     }
@@ -4413,6 +3873,8 @@ void analyze_cut_candidate_ultraclash(const vector<Vec3> &placed_points,
     unordered_map<uint64_t, vector<size_t>> clash_grid;
     clash_grid.reserve(max<size_t>(64, placed_points.size()));
     for (size_t atom_idx = 0; atom_idx < placed_points.size(); ++atom_idx) {
+      if (filter_heavy && !(*atoms)[atom_idx].is_heavy)
+        continue;
       const auto &point = placed_points[atom_idx];
       const int cx = static_cast<int>(floor(point.x * inv_grid));
       const int cy = static_cast<int>(floor(point.y * inv_grid));
@@ -4448,6 +3910,8 @@ void analyze_cut_candidate_ultraclash(const vector<Vec3> &placed_points,
   int max_cz = numeric_limits<int>::min();
 
   for (size_t atom_idx = 0; atom_idx < placed_points.size(); ++atom_idx) {
+    if (filter_heavy && !(*atoms)[atom_idx].is_heavy)
+      continue;
     const auto &point = placed_points[atom_idx];
     const int cx = static_cast<int>(floor(point.x * inv_grid));
     const int cy = static_cast<int>(floor(point.y * inv_grid));
@@ -4462,6 +3926,8 @@ void analyze_cut_candidate_ultraclash(const vector<Vec3> &placed_points,
     max_cy = max(max_cy, cy);
     max_cz = max(max_cz, cz);
   }
+  if (min_cx == numeric_limits<int>::max())
+    return;
 
   const size_t nx = static_cast<size_t>(max_cx - min_cx) + 1;
   const size_t ny = static_cast<size_t>(max_cy - min_cy) + 1;
@@ -4491,6 +3957,8 @@ void analyze_cut_candidate_ultraclash(const vector<Vec3> &placed_points,
   };
 
   for (size_t atom_idx = 0; atom_idx < placed_points.size(); ++atom_idx) {
+    if (filter_heavy && !(*atoms)[atom_idx].is_heavy)
+      continue;
     const int cx = scratch.cell_x[atom_idx];
     const int cy = scratch.cell_y[atom_idx];
     const int cz = scratch.cell_z[atom_idx];
@@ -4532,7 +4000,7 @@ void apply_cut_candidate(const vector<PbctopoAtom> &atoms,
     return;
 
   box Box = mol1_system.m_mol[frame_index].Box;
-  const BoxMatrix box_matrix(Box);
+  const PbctopoLatticeMetric lattice(Box);
   double min_sx = numeric_limits<double>::infinity();
   double min_sy = numeric_limits<double>::infinity();
   double min_sz = numeric_limits<double>::infinity();
@@ -4541,15 +4009,10 @@ void apply_cut_candidate(const vector<PbctopoAtom> &atoms,
   double max_sz = -numeric_limits<double>::infinity();
 
   for (const auto &point : placed_points) {
-    const double sx = box_matrix.inv[0][0] * point.x +
-                      box_matrix.inv[0][1] * point.y +
-                      box_matrix.inv[0][2] * point.z;
-    const double sy = box_matrix.inv[1][0] * point.x +
-                      box_matrix.inv[1][1] * point.y +
-                      box_matrix.inv[1][2] * point.z;
-    const double sz = box_matrix.inv[2][0] * point.x +
-                      box_matrix.inv[2][1] * point.y +
-                      box_matrix.inv[2][2] * point.z;
+    const auto scaled = lattice.cartesian_to_scaled(point.x, point.y, point.z);
+    const double sx = scaled[0];
+    const double sy = scaled[1];
+    const double sz = scaled[2];
     min_sx = min(min_sx, sx);
     min_sy = min(min_sy, sy);
     min_sz = min(min_sz, sz);
@@ -4654,35 +4117,8 @@ append_fragments_for_system(const Multi_MOL &system, const MOL &mol, int owner,
   }
 }
 
-vector<PbctopoShift> build_topology_shifts(box Box) {
-  double v1[3]{}, v2[3]{}, v3[3]{};
-  Box.get_v1(v1);
-  Box.get_v2(v2);
-  Box.get_v3(v3);
-
-  vector<PbctopoShift> shifts;
-  shifts.reserve(27);
-  for (size_t idx = 0; idx < 27; ++idx) {
-    const int *coeff = kTopoImageCoeff[idx];
-    shifts.push_back({idx,
-                      coeff[0],
-                      coeff[1],
-                      coeff[2],
-                      coeff[0] * v1[0] + coeff[1] * v2[0] + coeff[2] * v3[0],
-                      coeff[0] * v1[1] + coeff[1] * v2[1] + coeff[2] * v3[1],
-                      coeff[0] * v1[2] + coeff[1] * v2[2] + coeff[2] * v3[2]});
-  }
-  stable_sort(shifts.begin(), shifts.end(),
-              [](const PbctopoShift &lhs, const PbctopoShift &rhs) {
-                const int lhs_norm2 =
-                    lhs.ix * lhs.ix + lhs.iy * lhs.iy + lhs.iz * lhs.iz;
-                const int rhs_norm2 =
-                    rhs.ix * rhs.ix + rhs.iy * rhs.iy + rhs.iz * rhs.iz;
-                if (lhs_norm2 != rhs_norm2)
-                  return lhs_norm2 < rhs_norm2;
-                return lhs.shift_index < rhs.shift_index;
-              });
-  return shifts;
+vector<PbctopoShift> build_topology_shifts(box Box, int shell_radius = 1) {
+  return titan_pbctopo::build_component_image_shifts(Box, shell_radius);
 }
 
 [[maybe_unused]] void
@@ -4961,12 +4397,16 @@ vector<size_t> collect_fragment_options(
                                       candidate_dist2.end());
   sort(ranked.begin(), ranked.end(),
        [&](const pair<size_t, double> &lhs, const pair<size_t, double> &rhs) {
-         if (fabs(lhs.second - rhs.second) > 1.0e-9)
-           return lhs.second < rhs.second;
+         int metric_cmp = compare_pbctopo_double_metric(
+             lhs.second, rhs.second, 1.0e-9);
+         if (metric_cmp != 0)
+           return metric_cmp < 0;
          const double lhs_shift = node_shift_norm2(nodes[lhs.first]);
          const double rhs_shift = node_shift_norm2(nodes[rhs.first]);
-         if (fabs(lhs_shift - rhs_shift) > 1.0e-9)
-           return lhs_shift < rhs_shift;
+         metric_cmp = compare_pbctopo_double_metric(lhs_shift, rhs_shift,
+                                                     1.0e-9);
+         if (metric_cmp != 0)
+           return metric_cmp < 0;
          return lhs.first < rhs.first;
        });
 
@@ -5173,8 +4613,10 @@ bool better_pbctopo_coarse_candidate(const PbctopoCandidate &lhs,
     return true;
   if (lhs.connectivity_edges != rhs.connectivity_edges)
     return lhs.connectivity_edges > rhs.connectivity_edges;
-  if (fabs(lhs.fragment_mst2 - rhs.fragment_mst2) > 1.0e-6)
-    return lhs.fragment_mst2 < rhs.fragment_mst2;
+  int metric_cmp =
+      compare_pbctopo_double_metric(lhs.fragment_mst2, rhs.fragment_mst2);
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
   const int fragment_kappa_cmp =
       compare_shape_kappa(lhs.fragment_kappa2, rhs.fragment_kappa2);
   if (fragment_kappa_cmp != 0)
@@ -5187,8 +4629,9 @@ bool better_pbctopo_coarse_candidate(const PbctopoCandidate &lhs,
       lhs.fragment_acylindricity, rhs.fragment_acylindricity);
   if (fragment_acyl_cmp != 0)
     return fragment_acyl_cmp < 0;
-  if (fabs(lhs.bbox_volume - rhs.bbox_volume) > 1.0e-6)
-    return lhs.bbox_volume < rhs.bbox_volume;
+  metric_cmp = compare_pbctopo_double_metric(lhs.bbox_volume, rhs.bbox_volume);
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
   const int shape_kappa_cmp =
       compare_shape_kappa(lhs.shape_kappa2, rhs.shape_kappa2);
   if (shape_kappa_cmp != 0)
@@ -5201,8 +4644,9 @@ bool better_pbctopo_coarse_candidate(const PbctopoCandidate &lhs,
       compare_shape_moment(lhs.shape_acylindricity, rhs.shape_acylindricity);
   if (shape_acyl_cmp != 0)
     return shape_acyl_cmp < 0;
-  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-6)
-    return lhs.shift_norm2 < rhs.shift_norm2;
+  metric_cmp = compare_pbctopo_double_metric(lhs.shift_norm2, rhs.shift_norm2);
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
   return lhs.node_ids < rhs.node_ids;
 }
 
@@ -5379,8 +4823,10 @@ better_pbctopo_candidate(const PbctopoCandidate &lhs,
     return rhs.hard_clash;
   if (lhs.connectivity_edges != rhs.connectivity_edges)
     return lhs.connectivity_edges > rhs.connectivity_edges;
-  if (fabs(lhs.fragment_mst2 - rhs.fragment_mst2) > 1.0e-6)
-    return lhs.fragment_mst2 < rhs.fragment_mst2;
+  int metric_cmp = compare_pbctopo_double_metric(lhs.fragment_mst2,
+                                                  rhs.fragment_mst2);
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
   const int fragment_kappa_cmp =
       compare_shape_kappa(lhs.fragment_kappa2, rhs.fragment_kappa2);
   if (fragment_kappa_cmp != 0)
@@ -5405,15 +4851,21 @@ better_pbctopo_candidate(const PbctopoCandidate &lhs,
       compare_shape_moment(lhs.shape_acylindricity, rhs.shape_acylindricity);
   if (shape_acyl_cmp != 0)
     return shape_acyl_cmp < 0;
-  if (fabs(lhs.bbox_volume - rhs.bbox_volume) > 1.0e-6)
-    return lhs.bbox_volume < rhs.bbox_volume;
+  metric_cmp = compare_pbctopo_double_metric(lhs.bbox_volume,
+                                              rhs.bbox_volume);
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
   if (lhs.hull_valid && rhs.hull_valid &&
-      fabs(lhs.hull_volume - rhs.hull_volume) > 1.0e-6)
-    return lhs.hull_volume < rhs.hull_volume;
-  if (fabs(lhs.min_interfragment_d2 - rhs.min_interfragment_d2) > 1.0e-6)
-    return lhs.min_interfragment_d2 < rhs.min_interfragment_d2;
-  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-6)
-    return lhs.shift_norm2 < rhs.shift_norm2;
+      (metric_cmp = compare_pbctopo_double_metric(lhs.hull_volume,
+                                                   rhs.hull_volume)) != 0)
+    return metric_cmp < 0;
+  metric_cmp = compare_pbctopo_double_metric(lhs.min_interfragment_d2,
+                                              rhs.min_interfragment_d2);
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
+  metric_cmp = compare_pbctopo_double_metric(lhs.shift_norm2, rhs.shift_norm2);
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
   return lhs.node_ids < rhs.node_ids;
 }
 
@@ -5457,12 +4909,13 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
   if (frame_count == 0)
     return 0;
 
+  cache_topology_vdw_radii_from_parameters();
+  mol2.cache_topology_vdw_radii_from_parameters();
+
   reset_pbctopo_log_file();
   ofstream pbctopo_frame_report = open_pbctopo_frame_report();
   size_t fallback_frames = 0;
-  size_t partial_components = 0;
   size_t valid_candidates = 0;
-  size_t hull_fallback_candidates = 0;
   PbctopoTimingStats timing;
   PbctopoWarmState warm_state;
   const PbctopoRuntimeCutoffs runtime_cutoffs =
@@ -5470,6 +4923,10 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
   const PbctopoSolveMode solve_mode = resolve_pbctopo_solve_mode(Arguments);
   const PbctopoAnchorBackend anchor_backend =
       resolve_pbctopo_anchor_backend(Arguments);
+  const PbctopoAnchorMetricMode anchor_metric_mode =
+      titan_pbctopo::resolve_anchor_metric_mode(Arguments);
+  const PbctopoTemporalMode temporal_mode =
+      titan_pbctopo::resolve_temporal_mode(Arguments);
   const size_t requested_exact_component_limit =
       Arguments.pbc.pbctopo_exact_component_limit_set
           ? static_cast<size_t>(Arguments.pbc.pbctopo_exact_component_limit)
@@ -5487,6 +4944,13 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                           pbctopo_solve_mode_name(solve_mode) +
                           ", anchor_backend=" +
                           pbctopo_anchor_backend_name(anchor_backend) +
+                          ", anchor_metrics=" +
+                          titan_pbctopo::anchor_metric_mode_name(
+                              anchor_metric_mode) +
+                          ", temporal=" +
+                          titan_pbctopo::temporal_mode_name(temporal_mode) +
+                          ", vdw_clash_scale=" +
+                          to_string(runtime_cutoffs.vdw_clash_scale) +
                           ", bond_cutoff=" +
                           to_string(runtime_cutoffs.bond_cutoff) +
                           ", clash_cutoff=" +
@@ -5500,6 +4964,65 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                           to_string(beam_width));
   const PbctopoTrajectoryContext trajectory_context =
       build_pbctopo_trajectory_context(*this, mol2, frame_count);
+  vector<vector<PbctopoCutCandidate>> temporal_cut_candidates(frame_count);
+  vector<PbctopoCutCandidate> greedy_selected_candidates(frame_count);
+  struct PbctopoTemporalComponentLayout {
+    vector<uint32_t> atom_component_index;
+    size_t component_count = 0;
+  };
+  vector<PbctopoTemporalComponentLayout> temporal_component_layouts;
+  vector<size_t> temporal_frame_layout(
+      frame_count, numeric_limits<size_t>::max());
+  vector<PbctopoFrameReport> deferred_frame_reports(frame_count);
+  vector<unsigned char> deferred_frame_report_valid(frame_count, 0);
+  auto write_or_defer_frame_report = [&](size_t frame_idx,
+                                         const PbctopoFrameReport &report) {
+    if (temporal_mode == PbctopoTemporalMode::Viterbi) {
+      deferred_frame_reports[frame_idx] = report;
+      deferred_frame_report_valid[frame_idx] = 1;
+    } else if (pbctopo_frame_report.is_open()) {
+      write_pbctopo_frame_report_row(pbctopo_frame_report, report);
+    }
+  };
+  const bool has_ligand_static = trajectory_context.lig_static.atom_count > 0;
+  const bool static_topology_ready =
+      trajectory_context.rec_static.topology_graph_available &&
+      (!has_ligand_static ||
+       trajectory_context.lig_static.topology_graph_available);
+  const bool static_metadata_ready =
+      !static_topology_ready &&
+      trajectory_context.rec_static.metadata_graph_available &&
+      (!has_ligand_static ||
+       trajectory_context.lig_static.metadata_graph_available);
+  const string static_graph_source =
+      static_topology_ready
+          ? "gromacs_topology"
+          : (static_metadata_ready ? "metadata_chain_residue"
+                                   : "geometry_cutoff");
+  append_pbctopo_log_line(
+      "[pbctopo] local graph prepared: source=" + static_graph_source +
+      ", selected_atoms=" +
+      to_string(trajectory_context.rec_static.atom_count +
+                trajectory_context.lig_static.atom_count) +
+      ", topology_bonds=" +
+      to_string(trajectory_context.rec_static.topology_bonds_available +
+                trajectory_context.lig_static.topology_bonds_available) +
+      ", projected_topology_bonds=" +
+      to_string(
+          trajectory_context.rec_static.projected_topology_bonds.size() +
+          trajectory_context.lig_static.projected_topology_bonds.size()) +
+      ", metadata_edges=" +
+      to_string(trajectory_context.rec_static.projected_metadata_edges.size() +
+                trajectory_context.lig_static.projected_metadata_edges.size()) +
+      ", vdw_topology_radii=" +
+      to_string(trajectory_context.rec_static.vdw_topology_count +
+                trajectory_context.lig_static.vdw_topology_count) +
+      ", vdw_parameter_radii=" +
+      to_string(trajectory_context.rec_static.vdw_parameter_count +
+                trajectory_context.lig_static.vdw_parameter_count) +
+      ", vdw_inferred_radii=" +
+      to_string(trajectory_context.rec_static.vdw_inferred_count +
+                trajectory_context.lig_static.vdw_inferred_count));
   PbctopoFrameScratch scratch;
   scratch.reserve_from_context(trajectory_context);
   PbctopoHullScratch hull_scratch;
@@ -5518,23 +5041,19 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
   auto &component_sizes = scratch.component_sizes;
   auto &shifts = scratch.shifts;
   auto &volume_seeds = scratch.volume_seeds;
-  auto &virtual_state_tracker = scratch.virtual_state_tracker;
   auto &warm_points = scratch.warm_points;
   auto &coarse_warm_points = scratch.coarse_warm_points;
   auto &placed_points = scratch.placed_points;
-  auto &best_points = scratch.best_points;
   auto &best_safe_points = scratch.best_safe_points;
-  auto &refine_points = scratch.refine_points;
   auto &verify_points = scratch.verify_points;
-  auto &trial_points = scratch.trial_points;
   auto &component_points = scratch.component_points;
   auto &coarse_candidates = scratch.coarse_candidates;
   auto &coarse_seed_options = scratch.coarse_seed_options;
   auto &coarse_results = scratch.coarse_results;
-  auto &x_planes = scratch.x_planes;
-  auto &y_planes = scratch.y_planes;
-  auto &z_planes = scratch.z_planes;
   auto &projection_index = scratch.projection_index;
+  auto &atom_component_index = scratch.atom_component_index;
+  auto &virtual_search_workspace = scratch.virtual_search_workspace;
+  auto &virtual_search_plan = scratch.virtual_search_plan;
   vector<PbctopoHullSpan> hull_owner_spans;
   hull_owner_spans.reserve(8);
   vector<Vec3> hull_rescue_points;
@@ -5542,6 +5061,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
   bool projection_clash_skip_active = false;
   string llps_local_unit_source = "none";
   auto fallback_pbci_frame = [&](size_t frame_index) {
+    ++timing.pbci_fallback_frames;
     int chain_ref = Arguments.pbc.chain_ref;
     const size_t chain_count = this->Index.empty() ? 0 : this->Index.size() - 1;
     if (chain_count == 0) {
@@ -5563,10 +5083,13 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       append_atoms_for_system(mol2.m_mol[frame_index], &mol2.info,
                               &trajectory_context.lig_static, 1, fallback_atoms);
     }
+    prepare_pbctopo_steric_radii(fallback_atoms,
+                                 runtime_cutoffs.vdw_clash_scale);
     vector<pair<int, int>> fallback_contacting_owner_pairs =
         build_contacting_owner_pairs({}, fallback_atoms,
                                      this->m_mol[frame_index].Box,
-                                     runtime_cutoffs.pair_contact_cutoff);
+                                     runtime_cutoffs.pair_contact_cutoff,
+                                     false);
     vector<Vec3> fallback_points;
     fallback_points.reserve(fallback_atoms.size());
     for (const auto &atom : fallback_atoms)
@@ -5592,7 +5115,6 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     append_pbctopo_log_line(
         "[pbctopo] fallback pbci=0 reimaged contacting owners at frame " +
         to_string(static_cast<long long>(this->m_mol[frame_index].time_of_snap)));
-    ++timing.pbci_fallback_frames;
   };
 
   for (size_t frame_idx = 0; frame_idx < frame_count; ++frame_idx) {
@@ -5609,7 +5131,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     const auto frame_report_started = clock::now();
     const double frame_graph_s_before = timing.graph_s + timing.component_graph_s;
     const double frame_virtual_s_before =
-        timing.coarse_s + timing.refine_s + timing.early_projection_s;
+        timing.event_planes_s + timing.coarse_s + timing.refine_s +
+        timing.early_projection_s;
     const double frame_component_s_before =
         timing.component_prep_s + timing.component_graph_s +
         timing.component_search_s + timing.warm_component_s;
@@ -5624,6 +5147,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       append_atoms_for_system(mol2.m_mol[frame_idx], &mol2.info,
                               &trajectory_context.lig_static, 1, base_atoms);
     }
+    prepare_pbctopo_steric_radii(base_atoms,
+                                 runtime_cutoffs.vdw_clash_scale);
     timing.append_s += chrono::duration<double>(clock::now() - stage_started).count();
 
     if (base_atoms.empty()) {
@@ -5633,8 +5158,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       frame_report.time_total_ms =
           chrono::duration<double, milli>(clock::now() - frame_report_started)
               .count();
-      if (pbctopo_frame_report.is_open())
-        write_pbctopo_frame_report_row(pbctopo_frame_report, frame_report);
+      write_or_defer_frame_report(frame_idx, frame_report);
       reset_kinematic_seed_history(warm_state, timing);
       continue;
     }
@@ -5772,8 +5296,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       frame_report.time_total_ms =
           chrono::duration<double, milli>(clock::now() - frame_report_started)
               .count();
-      if (pbctopo_frame_report.is_open())
-        write_pbctopo_frame_report_row(pbctopo_frame_report, frame_report);
+      write_or_defer_frame_report(frame_idx, frame_report);
       reset_kinematic_seed_history(warm_state, timing);
       continue;
     }
@@ -5789,32 +5312,79 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     build_projection_anchor_subset(base_atoms,
                                    trajectory_context.continuity_anchor_indices,
                                    projection_anchor_indices, projection_index);
-    const vector<pair<int, int>> local_contacting_owner_pairs =
+    const vector<pair<int, int>> local_hard_required_owner_pairs =
         build_contacting_owner_pairs(local_edges, base_atoms,
                                      this->m_mol[frame_idx].Box,
-                                     runtime_cutoffs.pair_contact_cutoff);
-    const vector<pair<int, int>> projection_contacting_owner_pairs =
+                                     runtime_cutoffs.pair_contact_cutoff,
+                                     true);
+    const vector<pair<int, int>> projection_hard_required_owner_pairs =
         build_contacting_owner_pairs(projection_edges, projection_atoms,
                                      this->m_mol[frame_idx].Box,
-                                     runtime_cutoffs.pair_contact_cutoff);
+                                     runtime_cutoffs.pair_contact_cutoff,
+                                     true);
+    timing.pbctopo_hard_required_owner_pairs +=
+        local_hard_required_owner_pairs.size();
     timing.projection_edge_s +=
         chrono::duration<double>(clock::now() - stage_started).count();
 
-    const PbctopoAnchorGraphContext base_anchor_context =
+    PbctopoAnchorGraphContext base_anchor_context =
         build_anchor_graph_context(base_atoms, this->m_mol[frame_idx].Box,
                                    trajectory_context.continuity_pairs,
                                    trajectory_context.continuity_anchor_indices,
                                    runtime_cutoffs.pair_contact_cutoff,
                                    &timing);
-    const PbctopoAnchorGraphContext projection_anchor_context =
+    PbctopoAnchorGraphContext projection_anchor_context =
         build_anchor_graph_context(projection_atoms, this->m_mol[frame_idx].Box,
                                    projection_continuity_pairs,
                                    projection_anchor_indices,
                                    runtime_cutoffs.pair_contact_cutoff,
                                    &timing);
+    const bool use_anchor_order =
+        anchor_metric_mode == PbctopoAnchorMetricMode::Full ||
+        anchor_metric_mode == PbctopoAnchorMetricMode::NoContact;
+    const bool use_anchor_contact =
+        anchor_metric_mode == PbctopoAnchorMetricMode::Full ||
+        anchor_metric_mode == PbctopoAnchorMetricMode::NoOrder;
+    base_anchor_context.use_order_metrics = use_anchor_order;
+    base_anchor_context.use_contact_metrics = use_anchor_contact;
+    projection_anchor_context.use_order_metrics = use_anchor_order;
+    projection_anchor_context.use_contact_metrics = use_anchor_contact;
 
     stage_started = clock::now();
     components = build_connected_components_from_local_edges(base_atoms.size(), local_edges);
+    atom_component_index =
+        build_atom_component_index(base_atoms.size(), components);
+    if (temporal_mode == PbctopoTemporalMode::Viterbi &&
+        !atom_component_index.empty() &&
+        components.size() <= numeric_limits<uint32_t>::max()) {
+      vector<uint32_t> compact_layout;
+      compact_layout.reserve(atom_component_index.size());
+      bool layout_valid = true;
+      for (size_t comp_idx : atom_component_index) {
+        if (comp_idx >= components.size() ||
+            comp_idx > numeric_limits<uint32_t>::max()) {
+          layout_valid = false;
+          break;
+        }
+        compact_layout.push_back(static_cast<uint32_t>(comp_idx));
+      }
+      if (layout_valid) {
+        size_t layout_idx = 0;
+        for (; layout_idx < temporal_component_layouts.size(); ++layout_idx) {
+          if (temporal_component_layouts[layout_idx].component_count ==
+                  components.size() &&
+              temporal_component_layouts[layout_idx].atom_component_index ==
+                  compact_layout) {
+            break;
+          }
+        }
+        if (layout_idx == temporal_component_layouts.size()) {
+          temporal_component_layouts.push_back(
+              {std::move(compact_layout), components.size()});
+        }
+        temporal_frame_layout[frame_idx] = layout_idx;
+      }
+    }
     timing.component_split_s +=
         chrono::duration<double>(clock::now() - stage_started).count();
     const size_t raw_component_count = components.size();
@@ -5831,13 +5401,14 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       clear_component_trial_hints(warm_state);
     bool component_context_ready = false;
     auto ensure_component_context = [&]() {
-      if (!can_use_component_logic || component_context_ready)
+      if (component_context_ready)
         return;
       const auto component_context_started = clock::now();
       component_atoms =
           unwrap_atoms_by_local_graph(base_atoms, local_edges,
                                       this->m_mol[frame_idx].Box);
-      shifts = build_topology_shifts(this->m_mol[frame_idx].Box);
+      if (can_use_component_logic)
+        shifts = build_topology_shifts(this->m_mol[frame_idx].Box);
       component_context_ready = true;
       ++timing.component_context_builds;
       timing.component_context_s +=
@@ -5853,6 +5424,92 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           chrono::duration<double>(clock::now() - extract_started).count();
       return offsets;
     };
+    const PbctopoLatticeMetric certification_lattice(
+        this->m_mol[frame_idx].Box);
+    auto certify_candidate_for_output =
+        [&](PbctopoCutCandidate &candidate, const vector<Vec3> &points,
+            const vector<Int3> *known_offsets = nullptr) {
+          ++timing.pbctopo_certification_attempts;
+          vector<Int3> extracted_offsets;
+          const vector<Int3> *offsets = known_offsets;
+          if (offsets == nullptr || offsets->size() != components.size()) {
+            ensure_component_context();
+            extracted_offsets =
+                extract_offsets_and_time(component_atoms, points);
+            offsets = &extracted_offsets;
+          }
+          candidate.assignment = make_pbctopo_image_assignment(
+              *offsets, components);
+          if (!candidate.assignment.valid) {
+            ++timing.pbctopo_certification_assignment_rejects;
+            candidate.hard_feasibility = {};
+            candidate.hard_feasibility.evaluated = candidate.valid;
+            return false;
+          }
+          const size_t cycle_mismatches =
+              candidate.hard_feasibility.cycle_mismatches;
+          const PbctopoImageEquationResiduals image_equations =
+              evaluate_pbctopo_image_equations(
+                  base_atoms, points, local_edges, certification_lattice);
+          const auto required_contacts =
+              titan_pbctopo::evaluate_pbctopo_required_contacts(
+                  base_atoms, points, local_edges);
+          timing.pbctopo_certification_topology_edges_checked +=
+              image_equations.topology_edges_checked;
+          timing.pbctopo_certification_topology_edge_residuals +=
+              image_equations.topology_edge_residuals;
+          timing.pbctopo_certification_atom_image_residuals +=
+              image_equations.atom_image_residuals;
+          timing.pbctopo_certification_required_contacts_checked +=
+              required_contacts.contacts_checked;
+          timing.pbctopo_certification_required_contacts_lost +=
+              required_contacts.contacts_lost;
+          if (!certify_pbctopo_candidate(candidate, image_equations,
+                                         cycle_mismatches,
+                                         required_contacts)) {
+            ++timing.pbctopo_certification_hard_rejects;
+            return false;
+          }
+          ++timing.pbctopo_certification_successes;
+          return true;
+        };
+    auto record_temporal_certified_candidate =
+        [&](const PbctopoCutCandidate &source_candidate,
+            const vector<Vec3> &candidate_points,
+            const vector<Int3> *known_offsets = nullptr) {
+          if (temporal_mode != PbctopoTemporalMode::Viterbi ||
+              !source_candidate.valid || source_candidate.ultra_clash ||
+              candidate_points.size() != base_atoms.size()) {
+            return;
+          }
+          PbctopoCutCandidate candidate = source_candidate;
+          if (!candidate.hard_feasibility.certified() ||
+              !candidate.assignment.valid) {
+            if (!certify_candidate_for_output(candidate, candidate_points,
+                                              known_offsets)) {
+              return;
+            }
+          }
+          auto &frame_candidates = temporal_cut_candidates[frame_idx];
+          const bool duplicate = any_of(
+              frame_candidates.begin(), frame_candidates.end(),
+              [&](const PbctopoCutCandidate &existing) {
+                return same_pbctopo_image_assignment(existing.assignment,
+                                                      candidate.assignment);
+              });
+          if (duplicate) {
+            ++timing.pbctopo_temporal_assignment_deduped;
+            return;
+          }
+          frame_candidates.push_back(std::move(candidate));
+          sort(frame_candidates.begin(), frame_candidates.end(),
+               better_cut_candidate);
+          const size_t keep =
+              static_cast<size_t>(Arguments.pbc.pbctopo_temporal_k);
+          if (frame_candidates.size() > keep)
+            frame_candidates.resize(keep);
+          ++timing.pbctopo_temporal_certified_candidates;
+        };
     auto apply_cut_candidate_timed = [&](const vector<Vec3> &points) {
       const auto apply_started = clock::now();
       apply_cut_candidate(base_atoms, points, *this, mol2, frame_idx);
@@ -5869,6 +5526,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     prefetched_safe_points.reserve(base_atoms.size());
     PbctopoCutCandidate prefetched_safe_candidate;
     PbctopoCutCandidate best_verified_virtual_candidate;
+    PbctopoCutCandidate best_virtual_geometry_reference;
+    PbctopoCutCandidate best_coarse_virtual_geometry_seed;
     vector<Vec3> split_rescue_points;
     split_rescue_points.reserve(base_atoms.size());
     PbctopoCutCandidate split_rescue_candidate;
@@ -5908,7 +5567,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           PbctopoOwnerPairSplitDetail detail;
           if (candidate_has_split_contacting_owners(
                   candidate_points, base_atoms, this->m_mol[frame_idx].Box,
-                  local_contacting_owner_pairs, split_owner_pairs, split_gap,
+                  local_hard_required_owner_pairs, split_owner_pairs, split_gap,
                   &detail)) {
             return false;
           }
@@ -5916,18 +5575,11 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           const vector<Int3> rescue_offsets = extract_component_offsets_from_points(
               base_atoms, components, this->m_mol[frame_idx].Box,
               candidate_points);
-          double rescue_shift_norm2 = 0.0;
-          for (size_t comp_idx = 0; comp_idx < rescue_offsets.size() &&
-                                   comp_idx < components.size();
-               ++comp_idx) {
-            const auto &offset = rescue_offsets[comp_idx];
-            const double comp_shift_norm2 = static_cast<double>(
-                offset.x * offset.x + offset.y * offset.y + offset.z * offset.z);
-            rescue_shift_norm2 +=
-                comp_shift_norm2 * static_cast<double>(components[comp_idx].size());
-          }
+          const double rescue_shift_norm2 = pbctopo_component_shift_metric(
+              this->m_mol[frame_idx].Box, rescue_offsets);
 
-          const BoxMatrix rescue_box(this->m_mol[frame_idx].Box);
+          const PbctopoLatticeMetric rescue_lattice(
+              this->m_mol[frame_idx].Box);
           double min_sx = numeric_limits<double>::infinity();
           double min_sy = numeric_limits<double>::infinity();
           double min_sz = numeric_limits<double>::infinity();
@@ -5935,15 +5587,11 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           double max_sy = -numeric_limits<double>::infinity();
           double max_sz = -numeric_limits<double>::infinity();
           for (const auto &point : candidate_points) {
-            const double sx = rescue_box.inv[0][0] * point.x +
-                              rescue_box.inv[0][1] * point.y +
-                              rescue_box.inv[0][2] * point.z;
-            const double sy = rescue_box.inv[1][0] * point.x +
-                              rescue_box.inv[1][1] * point.y +
-                              rescue_box.inv[1][2] * point.z;
-            const double sz = rescue_box.inv[2][0] * point.x +
-                              rescue_box.inv[2][1] * point.y +
-                              rescue_box.inv[2][2] * point.z;
+            const auto scaled = rescue_lattice.cartesian_to_scaled(
+                point.x, point.y, point.z);
+            const double sx = scaled[0];
+            const double sy = scaled[1];
+            const double sz = scaled[2];
             min_sx = min(min_sx, sx);
             min_sy = min(min_sy, sy);
             min_sz = min(min_sz, sz);
@@ -5997,9 +5645,10 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           candidate_out.anchor_mst2 = anchor_mst2;
           candidate_out.anchor_max_d2 = anchor_max_d2;
           candidate_out.anchor_graph = anchor_graph_score;
-          analyze_cut_candidate_ultraclash(candidate_points, local_edge_set,
-                                           candidate_out,
-                                           runtime_cutoffs.clash_cutoff);
+          analyze_cut_candidate_ultraclash(
+              candidate_points, local_edge_set, candidate_out,
+              runtime_cutoffs.clash_cutoff, &base_atoms,
+              &atom_component_index);
           return !candidate_out.ultra_clash;
         };
     if (warm_state.has_projection_candidate) {
@@ -6012,7 +5661,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           warm_state.previous_projection_candidate.cut_z,
           warm_state.previous_projection_candidate.gap_score, coarse_warm_points,
           runtime_cutoffs.clash_cutoff, &projection_continuity_pairs,
-          &projection_anchor_indices, &projection_contacting_owner_pairs,
+          &projection_anchor_indices, &projection_hard_required_owner_pairs,
           runtime_cutoffs.continuity_cutoff, nullptr,
           skip_projection_candidate_clash, numeric_limits<double>::quiet_NaN(),
           nullptr, &projection_anchor_context,
@@ -6029,10 +5678,10 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             warm_state.previous_projection_candidate.gap_score, warm_points,
             runtime_cutoffs.clash_cutoff, &trajectory_context.continuity_pairs,
             &trajectory_context.continuity_anchor_indices,
-            &local_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
+            &local_hard_required_owner_pairs, runtime_cutoffs.continuity_cutoff,
             nullptr, false, this->m_mol[frame_idx].time_of_snap,
             "warm_projection", &base_anchor_context,
-            PbctopoVirtualSeedSource::Previous);
+            PbctopoVirtualSeedSource::Previous, &atom_component_index);
         if (early_projection.valid && !early_projection.ultra_clash &&
           candidate_close_enough_to_skip_search(
               early_projection, warm_state.previous_projection_candidate)) {
@@ -6048,9 +5697,6 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             prefetched_safe_points = warm_points;
             frame_report.mode = PbctopoFrameMode::EarlyProjection;
           }
-          timing.early_projection_s +=
-              chrono::duration<double>(clock::now() - early_projection_started)
-                  .count();
         }
       }
       timing.early_projection_s +=
@@ -6062,7 +5708,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       const auto warm_component_started = clock::now();
       ensure_component_context();
       vector<Int3> warm_offsets = warm_state.previous_component_offsets;
-      rebase_component_offsets(warm_offsets, components);
+      rebase_component_offsets(warm_offsets, this->m_mol[frame_idx].Box);
       PbctopoCutCandidate early_component = score_component_offset_solution(
           component_atoms, components, this->m_mol[frame_idx].Box, warm_offsets,
           local_edges, local_edge_set, runtime_cutoffs.clash_cutoff,
@@ -6080,7 +5726,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           early_component.valid && !early_component.ultra_clash &&
           candidate_has_split_contacting_owners(
               warm_points, base_atoms, this->m_mol[frame_idx].Box,
-              local_contacting_owner_pairs, early_component_split_owner_pairs,
+              local_hard_required_owner_pairs, early_component_split_owner_pairs,
               early_component_split_gap, &early_component_split_detail);
       if (early_component_split && early_component_split_detail.valid) {
         record_split_rescue_seed(early_component, warm_points,
@@ -6112,18 +5758,123 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           prefetched_safe_points = warm_points;
           frame_report.mode = PbctopoFrameMode::Warm;
         }
-        timing.warm_component_s +=
-            chrono::duration<double>(clock::now() - warm_component_started)
-                .count();
       }
       timing.warm_component_s +=
           chrono::duration<double>(clock::now() - warm_component_started)
               .count();
     }
 
-    stage_started = clock::now();
-    collect_projection_volume_seeds(projection_atoms, 16, kProjectionTopSeeds, 0.22,
-                                    volume_seeds);
+    component_scoring_edges = local_edges;
+    bool primary_component_graph_used = false;
+    if (can_use_component_logic &&
+        component_mode == PbctopoComponentMode::Exact) {
+      ++timing.component_graph_primary_attempts;
+      ensure_component_context();
+      PbctopoCutCandidate primary_cut;
+      double primary_shift_norm2 = 0.0;
+      vector<Int3> primary_tree_offsets;
+      vector<Int3> primary_refined_offsets;
+      vector<PbctopoGraphEdge> primary_tree_edges;
+      PbctopoCycleSyncMetrics primary_cycle_metrics;
+      const PbctopoCutCandidate *primary_warm_reference =
+          warm_state.has_projection_candidate &&
+                  warm_state.previous_projection_candidate.valid &&
+                  !warm_state.previous_projection_candidate.ultra_clash
+              ? &warm_state.previous_projection_candidate
+              : nullptr;
+      auto try_primary_component_shell = [&](int shell_radius) {
+        if (shell_radius > 1)
+          shifts = build_topology_shifts(this->m_mol[frame_idx].Box,
+                                         shell_radius);
+        timing.component_image_shell_max_radius =
+            max(timing.component_image_shell_max_radius,
+                static_cast<size_t>(shell_radius));
+        timing.component_image_shell_max_shift_count =
+            max(timing.component_image_shell_max_shift_count, shifts.size());
+        primary_cut = {};
+        primary_shift_norm2 = 0.0;
+        primary_tree_offsets.clear();
+        primary_refined_offsets.clear();
+        primary_tree_edges.clear();
+        primary_cycle_metrics = {};
+        component_points.clear();
+
+        const auto primary_graph_started = clock::now();
+        const bool graph_ok = solve_component_offsets_via_pair_graph(
+            component_atoms, this->m_mol[frame_idx].Box, components, shifts,
+            component_scoring_edges, local_edge_set, component_points,
+            trajectory_context.continuity_pairs,
+            trajectory_context.continuity_anchor_indices, runtime_cutoffs,
+            primary_cut, primary_shift_norm2, beam_width, &timing,
+            make_component_refine_callbacks(), anchor_backend,
+            same_component_warm_layout
+                ? &warm_state.previous_component_offsets
+                : nullptr,
+            &warm_state, primary_warm_reference, &primary_tree_offsets,
+            &primary_refined_offsets, &primary_tree_edges,
+            &primary_cycle_metrics, &base_anchor_context);
+        timing.component_graph_s +=
+            chrono::duration<double>(clock::now() - primary_graph_started)
+                .count();
+        frame_report.cycle_support = primary_cycle_metrics.cycle_support;
+        frame_report.cycle_mismatch = primary_cycle_metrics.cycle_mismatch;
+        frame_report.inconsistent_edge_count =
+            primary_cycle_metrics.inconsistent_edge_count;
+        frame_report.fundamental_cycle_count =
+            primary_cycle_metrics.fundamental_cycle_count;
+        frame_report.fundamental_cycle_residual_rms =
+            primary_cycle_metrics.fundamental_cycle_residual_rms;
+        frame_report.fundamental_cycle_residual_max =
+            primary_cycle_metrics.fundamental_cycle_residual_max;
+        primary_cut.hard_feasibility.cycle_mismatches =
+            primary_cycle_metrics.inconsistent_edge_count;
+
+        size_t split_pairs = 0;
+        double split_gap = 0.0;
+        const bool split =
+            graph_ok && primary_cut.valid && !primary_cut.ultra_clash &&
+            component_points.size() == base_atoms.size() &&
+            candidate_has_split_contacting_owners(
+                component_points, base_atoms, this->m_mol[frame_idx].Box,
+                local_hard_required_owner_pairs, split_pairs, split_gap);
+        return graph_ok && primary_cut.valid && !primary_cut.ultra_clash &&
+               !split && component_points.size() == base_atoms.size() &&
+               primary_refined_offsets.size() == components.size() &&
+               certify_candidate_for_output(primary_cut, component_points,
+                                            &primary_refined_offsets);
+      };
+
+      bool primary_certified = try_primary_component_shell(1);
+      if (!primary_certified) {
+        ++timing.component_image_shell_expansions;
+        primary_certified = try_primary_component_shell(2);
+        if (primary_certified)
+          ++timing.component_image_shell_retry_successes;
+      }
+      if (primary_certified) {
+        record_temporal_certified_candidate(primary_cut, component_points,
+                                            &primary_refined_offsets);
+        prefetched_safe_candidate = primary_cut;
+        prefetched_safe_points = component_points;
+        warm_state.previous_component_offsets = primary_refined_offsets;
+        warm_state.previous_component_sizes = component_sizes;
+        warm_state.has_component_offsets = true;
+        frame_report.mode = PbctopoFrameMode::ComponentGraph;
+        primary_component_graph_used = true;
+        ++timing.component_graph_primary_certified;
+        ++timing.component_graph_primary_virtual_skips;
+        ++timing.component_graph_used;
+      } else {
+        ++timing.component_graph_primary_fallbacks;
+      }
+    }
+
+    vector<PbctopoVirtualDiscreteSeedHint> virtual_seed_hints;
+    if (!primary_component_graph_used) {
+      stage_started = clock::now();
+      collect_projection_volume_seeds(projection_atoms, 16,
+                                      kProjectionTopSeeds, 0.22,
+                                      volume_seeds);
     if (warm_state.has_projection_candidate) {
       PbctopoSeed3D previous_seed;
       previous_seed.cx =
@@ -6142,7 +5893,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       const PbctopoVirtualSeedCenter predicted_center =
           extrapolate_virtual_seed_center(
               virtual_seed_center_from_candidate(kinematic_seed_previous),
-              virtual_seed_center_from_candidate(kinematic_seed_latest));
+              virtual_seed_center_from_candidate(kinematic_seed_latest),
+              PbctopoLatticeMetric(this->m_mol[frame_idx].Box));
       PbctopoSeed3D kinematic_seed;
       kinematic_seed.cx = predicted_center.cx;
       kinematic_seed.cy = predicted_center.cy;
@@ -6154,42 +5906,81 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       ++timing.pbctopo_kinematic_seed_candidates;
     }
     timing.seed_s += chrono::duration<double>(clock::now() - stage_started).count();
-    const double coarse_step = 2.0 / 15.0;
-    stage_started = clock::now();
-    PbctopoVirtualPlaneBuildOptions plane_options;
-    plane_options.histogram_bins = 64;
-    plane_options.max_sparse_planes_per_axis = 3;
-    PbctopoVirtualPlaneSet plane_set =
-        build_density_cut_plane_shortlist_or_dense_fallback(projection_atoms,
-                                                            plane_options);
-    PbctopoVirtualAssignmentSignatureTable virtual_signature_table;
-    virtual_signature_table.build(projection_atoms);
-    x_planes = std::move(plane_set.x);
-    y_planes = std::move(plane_set.y);
-    z_planes = std::move(plane_set.z);
-    if (plane_set.used_dense_fallback) {
-      ++timing.pbctopo_density_cut_plane_dense_fallbacks;
-    } else {
-      ++timing.pbctopo_density_cut_planes_frames;
+
+    virtual_seed_hints.reserve(volume_seeds.size());
+    for (const auto &seed : volume_seeds) {
+      virtual_seed_hints.push_back(
+          {seed.cx, seed.cy, seed.cz, seed.score, seed.source});
     }
-    timing.pbctopo_density_cut_planes_x += x_planes.size();
-    timing.pbctopo_density_cut_planes_y += y_planes.size();
-    timing.pbctopo_density_cut_planes_z += z_planes.size();
-    timing.pbctopo_density_cut_planes_dense_equiv_x +=
-        plane_set.dense_equivalent_x;
-    timing.pbctopo_density_cut_planes_dense_equiv_y +=
-        plane_set.dense_equivalent_y;
-    timing.pbctopo_density_cut_planes_dense_equiv_z +=
-        plane_set.dense_equivalent_z;
-    const double plane_build_s =
+    stage_started = clock::now();
+    PbctopoVirtualDiscreteSearchOptions discrete_options;
+    discrete_options.top_k_per_axis = 4;
+    discrete_options.max_exhaustive_states = 4096;
+    build_pbctopo_virtual_discrete_search_plan(
+        projection_atoms, projection_edges, this->m_mol[frame_idx].Box,
+        virtual_seed_hints, discrete_options, virtual_search_workspace,
+        virtual_search_plan);
+    const double seam_sweep_s =
         chrono::duration<double>(clock::now() - stage_started).count();
-    timing.pbctopo_density_cut_plane_build_s += plane_build_s;
-    timing.event_planes_s += plane_build_s;
-    virtual_state_tracker.reset(x_planes, y_planes, z_planes);
-    virtual_state_tracker.reserve(512);
+    timing.event_planes_s += seam_sweep_s;
+    timing.pbctopo_virtual_seam_sweep_s += seam_sweep_s;
+    ++timing.pbctopo_virtual_discrete_frames;
+    timing.pbctopo_virtual_axis_states_x +=
+        virtual_search_plan.x_states.size();
+    timing.pbctopo_virtual_axis_states_y +=
+        virtual_search_plan.y_states.size();
+    timing.pbctopo_virtual_axis_states_z +=
+        virtual_search_plan.z_states.size();
+    timing.pbctopo_virtual_sweep_events_x +=
+        virtual_search_plan.event_count_x;
+    timing.pbctopo_virtual_sweep_events_y +=
+        virtual_search_plan.event_count_y;
+    timing.pbctopo_virtual_sweep_events_z +=
+        virtual_search_plan.event_count_z;
+    if (virtual_search_plan.workspace_reused)
+      ++timing.pbctopo_virtual_sweep_workspace_reuse_frames;
+    timing.pbctopo_virtual_sweep_workspace_peak_bytes =
+        max(timing.pbctopo_virtual_sweep_workspace_peak_bytes,
+            virtual_search_plan.workspace_bytes_estimate);
+    if (numeric_limits<uint64_t>::max() - timing.pbctopo_virtual_state_space <
+        virtual_search_plan.total_state_space) {
+      timing.pbctopo_virtual_state_space = numeric_limits<uint64_t>::max();
+    } else {
+      timing.pbctopo_virtual_state_space +=
+          virtual_search_plan.total_state_space;
+    }
+    timing.pbctopo_virtual_states_evaluated +=
+        virtual_search_plan.states.size();
+    if (virtual_search_plan.search_exhaustive)
+      ++timing.pbctopo_virtual_search_exhaustive_frames;
+    else
+      ++timing.pbctopo_virtual_search_shortlist_frames;
+    if (virtual_search_plan.branch_and_bound_used)
+      ++timing.pbctopo_virtual_branch_and_bound_frames;
+    if (isfinite(virtual_search_plan.omitted_seam_lower_bound)) {
+      timing.pbctopo_virtual_omitted_seam_lower_bound_min =
+          min(timing.pbctopo_virtual_omitted_seam_lower_bound_min,
+              virtual_search_plan.omitted_seam_lower_bound);
+    }
+    if (isfinite(virtual_search_plan.lower_bound_gap)) {
+      timing.pbctopo_virtual_lower_bound_gap_min =
+          min(timing.pbctopo_virtual_lower_bound_gap_min,
+              virtual_search_plan.lower_bound_gap);
+    }
+    frame_report.virtual_search_exhaustive =
+        virtual_search_plan.search_exhaustive;
+    frame_report.virtual_branch_and_bound_used =
+        virtual_search_plan.branch_and_bound_used;
+    frame_report.virtual_state_space = virtual_search_plan.total_state_space;
+    frame_report.virtual_states_evaluated = virtual_search_plan.states.size();
+    frame_report.virtual_omitted_seam_lower_bound =
+        virtual_search_plan.omitted_seam_lower_bound;
+    frame_report.virtual_lower_bound_gap = virtual_search_plan.lower_bound_gap;
+    }
 
     PbctopoCutCandidate best_candidate;
     PbctopoCutCandidate best_safe_candidate;
+    bool best_safe_certification_rejected = false;
     size_t safe_candidates = 0;
     PbctopoCutCandidate report_best_candidate;
     PbctopoCutCandidate report_second_candidate;
@@ -6223,6 +6014,15 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
         [&](PbctopoFrameStatus status, PbctopoFrameMode mode,
             PbctopoFailureReason reason,
             const PbctopoCutCandidate *selected_candidate) {
+          if (selected_candidate != nullptr && selected_candidate->valid) {
+            greedy_selected_candidates[frame_idx] = *selected_candidate;
+            frame_report.hard_feasibility =
+                selected_candidate->hard_feasibility;
+            frame_report.assignment_signature =
+                selected_candidate->assignment.signature;
+            frame_report.assignment_component_count =
+                selected_candidate->assignment.component_offsets.size();
+          }
           frame_report.status = status;
           if (frame_report.mode == PbctopoFrameMode::None ||
               status != PbctopoFrameStatus::Certified) {
@@ -6237,16 +6037,32 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
               max(frame_report.safe_candidate_count, safe_candidates);
 
           const PbctopoCutCandidate *best_for_report =
-              report_best_candidate.valid ? &report_best_candidate
-                                          : selected_candidate;
+              selected_candidate != nullptr && selected_candidate->valid
+                  ? selected_candidate
+                  : (report_best_candidate.valid ? &report_best_candidate
+                                                 : nullptr);
+          const PbctopoCutCandidate *second_for_report = nullptr;
+          if (best_for_report == selected_candidate &&
+              report_best_candidate.valid) {
+            const bool report_best_differs =
+                better_cut_candidate(*best_for_report, report_best_candidate) ||
+                better_cut_candidate(report_best_candidate, *best_for_report);
+            second_for_report = report_best_differs
+                                    ? &report_best_candidate
+                                    : (report_second_candidate.valid
+                                           ? &report_second_candidate
+                                           : nullptr);
+          } else if (report_second_candidate.valid) {
+            second_for_report = &report_second_candidate;
+          }
           if (best_for_report != nullptr && best_for_report->valid) {
             frame_report.anchor_graph = best_for_report->anchor_graph;
-            if (report_second_candidate.valid &&
+            if (second_for_report != nullptr && second_for_report->valid &&
                 candidate_anchor_prefix_equivalent(
-                    *best_for_report, report_second_candidate) &&
+                    *best_for_report, *second_for_report) &&
                 (better_cut_candidate(*best_for_report,
-                                      report_second_candidate) ||
-                 better_cut_candidate(report_second_candidate,
+                                      *second_for_report) ||
+                 better_cut_candidate(*second_for_report,
                                       *best_for_report))) {
               frame_report.anchor_graph.ambiguity_count = 1;
               if (!frame_anchor_ambiguity_counted) {
@@ -6258,23 +6074,47 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             frame_report.best_score.anchor_graph.ambiguity_count =
                 frame_report.anchor_graph.ambiguity_count;
           }
-          if (report_second_candidate.valid) {
-            frame_report.second_score = make_score_vector(report_second_candidate);
+          if (second_for_report != nullptr && second_for_report->valid) {
+            frame_report.second_score = make_score_vector(*second_for_report);
             frame_report.second_score.anchor_graph.ambiguity_count =
                 frame_report.anchor_graph.ambiguity_count;
           }
-          frame_report.score_gap =
-              report_best_candidate.valid && report_second_candidate.valid
-                  ? report_best_candidate.gap_score -
-                        report_second_candidate.gap_score
-                  : numeric_limits<double>::quiet_NaN();
+          if (best_for_report != nullptr && best_for_report->valid &&
+              second_for_report != nullptr && second_for_report->valid) {
+            const PbctopoLexicographicGap score_gap =
+                candidate_lexicographic_gap(*best_for_report,
+                                            *second_for_report);
+            frame_report.score_gap_metric = score_gap.metric;
+            frame_report.score_gap = score_gap.gap;
+          }
           if (best_for_report != nullptr && best_for_report->valid) {
-            frame_report.clash_margin = best_for_report->min_pair_d2;
-            frame_report.continuity_margin = best_for_report->continuity_max_d2;
-            frame_report.anchor_margin = best_for_report->anchor_max_d2;
+            if (isfinite(best_for_report->min_pair_d2)) {
+              double active_clash_cutoff = runtime_cutoffs.clash_cutoff;
+              if (best_for_report->clash_atom_a < base_atoms.size() &&
+                  best_for_report->clash_atom_b < base_atoms.size()) {
+                active_clash_cutoff =
+                    titan_pbctopo::pbctopo_pair_clash_threshold(
+                        base_atoms[best_for_report->clash_atom_a],
+                        base_atoms[best_for_report->clash_atom_b],
+                        runtime_cutoffs.clash_cutoff)
+                        .cutoff;
+              }
+              frame_report.clash_margin_A =
+                  sqrt(max(0.0, best_for_report->min_pair_d2)) -
+                  active_clash_cutoff;
+            }
+            if (isfinite(best_for_report->continuity_max_d2)) {
+              frame_report.continuity_margin_A =
+                  runtime_cutoffs.continuity_cutoff -
+                  sqrt(max(0.0, best_for_report->continuity_max_d2));
+            }
+            if (isfinite(best_for_report->anchor_max_d2)) {
+              frame_report.anchor_max_edge_A =
+                  sqrt(max(0.0, best_for_report->anchor_max_d2));
+            }
             frame_report.anchor_graph.ambiguity_count =
                 frame_report.best_score.anchor_graph.ambiguity_count;
-            frame_report.split_owner_margin =
+            frame_report.split_owner_gap_scaled =
                 best_for_report->max_owner_raw_minus_minimg_delta;
           }
           frame_report.time_graph_ms =
@@ -6282,8 +6122,9 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                         frame_graph_s_before) *
                            1000.0);
           frame_report.time_virtual_ms =
-              max(0.0, (timing.coarse_s + timing.refine_s +
-                        timing.early_projection_s - frame_virtual_s_before) *
+              max(0.0, (timing.event_planes_s + timing.coarse_s +
+                        timing.refine_s + timing.early_projection_s -
+                        frame_virtual_s_before) *
                            1000.0);
           frame_report.time_component_ms =
               max(0.0, (timing.component_prep_s + timing.component_graph_s +
@@ -6293,17 +6134,21 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           frame_report.time_total_ms =
               chrono::duration<double, milli>(clock::now() - frame_report_started)
                   .count();
-          if (pbctopo_frame_report.is_open())
-            write_pbctopo_frame_report_row(pbctopo_frame_report, frame_report);
+          write_or_defer_frame_report(frame_idx, frame_report);
         };
     auto accept_rescue_candidate =
         [&](const vector<Vec3> &candidate_points,
-            const PbctopoCutCandidate &candidate) {
+            PbctopoCutCandidate candidate) {
+          if (!certify_candidate_for_output(candidate, candidate_points)) {
+            ++timing.pbctopo_diagnostic_only_candidates;
+            record_frame_failure(PbctopoFailureReason::CertificationReject);
+            return false;
+          }
+          record_temporal_certified_candidate(candidate, candidate_points);
           record_report_safe_candidate(candidate);
           best_safe_candidate = candidate;
           best_candidate = candidate;
           best_safe_points = candidate_points;
-          best_points = candidate_points;
           safe_candidates = max<size_t>(safe_candidates, 1);
           projection_clash_skip_active =
               candidate_has_projection_clash_margin(best_safe_candidate,
@@ -6312,36 +6157,53 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           warm_state.has_projection_candidate = true;
           update_kinematic_history_for_frame();
           apply_cut_candidate_timed(best_safe_points);
+          return true;
         };
     placed_points.reserve(projection_atoms.size());
-    best_points.reserve(base_atoms.size());
     best_safe_points.reserve(base_atoms.size());
     coarse_candidates.reserve(12);
-    coarse_seed_options.reserve(volume_seeds.size());
+    coarse_seed_options.reserve(virtual_search_plan.states.size());
     if (prefetched_safe_candidate.valid && !prefetched_safe_candidate.ultra_clash &&
         prefetched_safe_points.size() == base_atoms.size()) {
       best_candidate = prefetched_safe_candidate;
       best_safe_candidate = prefetched_safe_candidate;
-      best_points = prefetched_safe_points;
       best_safe_points = prefetched_safe_points;
       safe_candidates = 1;
+      record_temporal_certified_candidate(prefetched_safe_candidate,
+                                          prefetched_safe_points);
       record_report_safe_candidate(prefetched_safe_candidate);
     }
 
     stage_started = clock::now();
-    for (const auto &seed : volume_seeds) {
-      const uint64_t shift_signature =
-          virtual_signature_table.state_signature(seed.cx, seed.cy, seed.cz);
-      if (!virtual_state_tracker.try_insert(seed.cx, seed.cy, seed.cz,
-                                            shift_signature)) {
-        if (seed.source == PbctopoVirtualSeedSource::Kinematic)
-          ++timing.pbctopo_kinematic_seed_deduped;
-        continue;
-      }
-      if (seed.source == PbctopoVirtualSeedSource::Kinematic)
+    const bool has_kinematic_hint = any_of(
+        virtual_seed_hints.begin(), virtual_seed_hints.end(),
+        [](const PbctopoVirtualDiscreteSeedHint &hint) {
+          return hint.source == PbctopoVirtualSeedSource::Kinematic;
+        });
+    size_t kinematic_states_evaluated = 0;
+    for (size_t state_idx = 0;
+         state_idx < virtual_search_plan.states.size(); ++state_idx) {
+      const auto &state = virtual_search_plan.states[state_idx];
+      PbctopoSeed3D seed;
+      seed.cx = state.cx;
+      seed.cy = state.cy;
+      seed.cz = state.cz;
+      // Density and temporal hints order exact states only; they are not part
+      // of the physical candidate score.
+      seed.score = 0.0;
+      seed.ix = state.ix;
+      seed.iy = state.iy;
+      seed.iz = state.iz;
+      seed.source = state.source;
+      if (seed.source == PbctopoVirtualSeedSource::Kinematic) {
         ++timing.pbctopo_kinematic_seed_evaluated;
-      coarse_seed_options.push_back({0, seed});
+        ++kinematic_states_evaluated;
+      }
+      coarse_seed_options.push_back(
+          {static_cast<uint64_t>(state_idx), seed});
     }
+    if (has_kinematic_hint && kinematic_states_evaluated == 0)
+      ++timing.pbctopo_kinematic_seed_deduped;
     timing.coarse_candidates += coarse_seed_options.size();
     const size_t requested_threads =
         (Arguments.nt > 1) ? Arguments.nt : static_cast<size_t>(1);
@@ -6366,7 +6228,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                   seed.cy, seed.cz, seed.score,
                   local_points, runtime_cutoffs.clash_cutoff,
                   &projection_continuity_pairs, &projection_anchor_indices,
-                  &projection_contacting_owner_pairs,
+                  &projection_hard_required_owner_pairs,
                   runtime_cutoffs.continuity_cutoff, nullptr,
                   skip_projection_candidate_clash,
                   numeric_limits<double>::quiet_NaN(), nullptr,
@@ -6398,7 +6260,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
                 seed.cz, seed.score,
                 local_points, runtime_cutoffs.clash_cutoff,
                 &projection_continuity_pairs, &projection_anchor_indices,
-                &projection_contacting_owner_pairs,
+                &projection_hard_required_owner_pairs,
                 runtime_cutoffs.continuity_cutoff, nullptr,
                 skip_projection_candidate_clash,
                 numeric_limits<double>::quiet_NaN(), nullptr,
@@ -6419,7 +6281,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             seed.cz, seed.score,
             placed_points, runtime_cutoffs.clash_cutoff,
             &projection_continuity_pairs, &projection_anchor_indices,
-            &projection_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
+            &projection_hard_required_owner_pairs, runtime_cutoffs.continuity_cutoff,
             nullptr, skip_projection_candidate_clash,
             numeric_limits<double>::quiet_NaN(), nullptr,
             &projection_anchor_context, seed.source);
@@ -6430,44 +6292,57 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     timing.projection_clash_skip_evals +=
         coarse_projection_skip_evals.load(memory_order_relaxed);
     for (const auto &candidate : coarse_results) {
+      if (better_preclash_cut_candidate(
+              candidate, best_coarse_virtual_geometry_seed)) {
+        best_coarse_virtual_geometry_seed = candidate;
+      }
       push_top_virtual_box_candidate(coarse_candidates, candidate,
                                      kProjectionKeepCandidates);
     }
     timing.coarse_s += chrono::duration<double>(clock::now() - stage_started).count();
 
-    auto evaluate_refine_center = [&](double center_x, double center_y,
-                                      double center_z, double gap_score,
-                                      vector<Vec3> &scratch_points,
-                                      const PbctopoCutCandidate *incumbent,
-                                      PbctopoVirtualSeedSource seed_source) {
-      const double clamped_x = clamp_virtual_box_center(center_x);
-      const double clamped_y = clamp_virtual_box_center(center_y);
-      const double clamped_z = clamp_virtual_box_center(center_z);
-      const uint64_t shift_signature = virtual_signature_table.state_signature(
-          clamped_x, clamped_y, clamped_z);
-      if (!virtual_state_tracker.try_insert(clamped_x, clamped_y, clamped_z,
-                                            shift_signature))
-        return PbctopoCutCandidate{};
-      PbctopoCutCandidate candidate = evaluate_virtual_box_candidate(
-          projection_atoms, projection_edges, projection_edge_set,
-          translation_cache, this->m_mol[frame_idx].Box, clamped_x, clamped_y,
-          clamped_z, gap_score, scratch_points, runtime_cutoffs.clash_cutoff,
-          &projection_continuity_pairs, &projection_anchor_indices,
-          &projection_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
-          incumbent, skip_projection_candidate_clash,
-          numeric_limits<double>::quiet_NaN(), nullptr,
-          &projection_anchor_context, seed_source);
-      if (skip_projection_candidate_clash)
-        ++timing.projection_clash_skip_evals;
-      ++timing.refine_candidates;
-      ++valid_candidates;
-      return candidate;
-     };
-
     stage_started = clock::now();
-    refine_points.reserve(projection_atoms.size());
     verify_points.reserve(base_atoms.size());
-    trial_points.reserve(projection_atoms.size());
+    if (best_coarse_virtual_geometry_seed.valid) {
+      ++timing.pbctopo_verify_geometry_buffer_reuses;
+      ++timing.pbctopo_virtual_geometry_reference_evals;
+      PbctopoCutCandidate geometry_reference = evaluate_virtual_box_candidate(
+          base_atoms, local_edges, local_edge_set, translation_cache,
+          this->m_mol[frame_idx].Box,
+          best_coarse_virtual_geometry_seed.cut_x,
+          best_coarse_virtual_geometry_seed.cut_y,
+          best_coarse_virtual_geometry_seed.cut_z,
+          best_coarse_virtual_geometry_seed.gap_score,
+          verify_points, runtime_cutoffs.clash_cutoff,
+          &trajectory_context.continuity_pairs,
+          &trajectory_context.continuity_anchor_indices,
+          &local_hard_required_owner_pairs, runtime_cutoffs.continuity_cutoff,
+          nullptr, false, this->m_mol[frame_idx].time_of_snap,
+          "virtual_geometry_reference", &base_anchor_context,
+          best_coarse_virtual_geometry_seed.virtual_seed_source,
+          &atom_component_index);
+      if (geometry_reference.valid) {
+        if (geometry_reference.ultra_clash) {
+          ++timing.pbctopo_virtual_geometry_reference_clashing;
+        } else {
+          best_virtual_geometry_reference = geometry_reference;
+          ++timing.pbctopo_virtual_geometry_reference_safe;
+          ++safe_candidates;
+          record_temporal_certified_candidate(geometry_reference,
+                                              verify_points);
+          record_report_safe_candidate(geometry_reference);
+          best_verified_virtual_candidate = geometry_reference;
+          if (better_cut_candidate(geometry_reference, best_safe_candidate)) {
+            best_safe_candidate = geometry_reference;
+            best_safe_points = verify_points;
+            frame_report.mode = PbctopoFrameMode::Virtual;
+          }
+          if (better_cut_candidate(geometry_reference, best_candidate)) {
+            best_candidate = geometry_reference;
+          }
+        }
+      }
+    }
     size_t refine_limit = coarse_candidates.size();
     if (coarse_candidates.size() >= 2) {
       const auto &top1 = coarse_candidates[0];
@@ -6501,41 +6376,6 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
     }
     for (size_t coarse_idx = 0; coarse_idx < refine_limit; ++coarse_idx) {
       const auto &coarse = coarse_candidates[coarse_idx];
-      double center_x = coarse.cut_x;
-      double center_y = coarse.cut_y;
-      double center_z = coarse.cut_z;
-      PbctopoCutCandidate local_best = evaluate_refine_center(
-          center_x, center_y, center_z, coarse.gap_score, refine_points, nullptr,
-          coarse.virtual_seed_source);
-      double step = 0.5 * coarse_step;
-      for (int pass = 0; pass < 4 && step >= (coarse_step / 16.0); ++pass) {
-        bool improved = false;
-        const array<array<double, 3>, 6> directions = {
-            array<double, 3>{step, 0.0, 0.0},   array<double, 3>{-step, 0.0, 0.0},
-            array<double, 3>{0.0, step, 0.0},   array<double, 3>{0.0, -step, 0.0},
-            array<double, 3>{0.0, 0.0, step},   array<double, 3>{0.0, 0.0, -step}};
-        for (const auto &dir : directions) {
-          trial_points.clear();
-          const PbctopoCutCandidate *local_incumbent =
-              (local_best.valid && !local_best.ultra_clash) ? &local_best : nullptr;
-          PbctopoCutCandidate trial = evaluate_refine_center(
-              center_x + dir[0], center_y + dir[1], center_z + dir[2],
-              coarse.gap_score, trial_points, local_incumbent,
-              coarse.virtual_seed_source);
-          if (better_cut_candidate(trial, local_best)) {
-            local_best = trial;
-            center_x = trial.cut_x;
-            center_y = trial.cut_y;
-            center_z = trial.cut_z;
-            refine_points = trial_points;
-            improved = true;
-          }
-        }
-        if (!improved)
-          step *= 0.5;
-      }
-      if (!local_best.valid)
-        continue;
       const PbctopoCutCandidate *verify_incumbent =
           (best_safe_candidate.valid && !best_safe_candidate.ultra_clash)
               ? &best_safe_candidate
@@ -6543,17 +6383,47 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       PbctopoCutCandidate verified_candidate = evaluate_virtual_box_candidate(
           base_atoms, local_edges, local_edge_set, translation_cache,
           this->m_mol[frame_idx].Box,
-          center_x, center_y, center_z, coarse.gap_score, verify_points,
+          coarse.cut_x, coarse.cut_y, coarse.cut_z, coarse.gap_score,
+          verify_points,
           runtime_cutoffs.clash_cutoff, &trajectory_context.continuity_pairs,
           &trajectory_context.continuity_anchor_indices,
-          &local_contacting_owner_pairs, runtime_cutoffs.continuity_cutoff,
+          &local_hard_required_owner_pairs, runtime_cutoffs.continuity_cutoff,
           verify_incumbent, false, this->m_mol[frame_idx].time_of_snap,
           "verified_candidate", &base_anchor_context,
-          coarse.virtual_seed_source);
+          coarse.virtual_seed_source, &atom_component_index);
+      ++timing.refine_candidates;
+      if (verified_candidate.valid)
+        ++valid_candidates;
       if (!verified_candidate.valid)
         continue;
+      const bool virtual_geometry_outlier = component_candidate_is_outlier(
+          verified_candidate,
+          best_virtual_geometry_reference.valid
+              ? &best_virtual_geometry_reference
+              : nullptr);
       if (!verified_candidate.ultra_clash) {
+        if (virtual_geometry_outlier) {
+          ++timing.pbctopo_virtual_geometry_outlier_observations;
+          append_pbctopo_log_line(
+              "[pbctopo] observe virtual geometry deviation at frame " +
+              to_string(static_cast<long long>(
+                  this->m_mol[frame_idx].time_of_snap)) +
+              ": principal_rg2_max=" +
+              to_string(verified_candidate.principal_rg2_max) +
+              ", reference_principal_rg2_max=" +
+              to_string(best_virtual_geometry_reference.principal_rg2_max) +
+              ", kappa2=" + to_string(verified_candidate.shape_kappa2) +
+              ", reference_kappa2=" +
+              to_string(best_virtual_geometry_reference.shape_kappa2) +
+              ", policy=soft_observation");
+        }
+        if (better_preclash_cut_candidate(
+                verified_candidate, best_virtual_geometry_reference)) {
+          best_virtual_geometry_reference = verified_candidate;
+        }
         ++safe_candidates;
+        record_temporal_certified_candidate(verified_candidate,
+                                            verify_points);
         record_report_safe_candidate(verified_candidate);
         if (better_cut_candidate(verified_candidate,
                                  best_verified_virtual_candidate)) {
@@ -6567,12 +6437,9 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       }
       if (better_cut_candidate(verified_candidate, best_candidate)) {
         best_candidate = verified_candidate;
-        best_points = verify_points;
       }
     }
     timing.refine_s += chrono::duration<double>(clock::now() - stage_started).count();
-    timing.pbctopo_density_cut_plane_collisions +=
-        virtual_state_tracker.collision_count();
     if (best_verified_virtual_candidate.valid &&
         !best_verified_virtual_candidate.ultra_clash &&
         best_verified_virtual_candidate.virtual_seed_source ==
@@ -6580,12 +6447,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       ++timing.pbctopo_kinematic_seed_best;
     }
 
-    component_scoring_edges = local_edges;
-    // Keep component scoring aligned with the original virtual-box local graph.
-    // Experimental interface-anchor edges can overweight noisy inter-chain contacts
-    // and pull component solutions away from the compact box-consistent candidate.
-
-    bool component_search_used = false;
+    // Keep component scoring aligned with the original local graph.
+    bool component_search_used = primary_component_graph_used;
     stage_started = clock::now();
     if (can_use_component_logic) {
       ++timing.component_frames;
@@ -6612,12 +6475,42 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             candidate_points.size() != base_atoms.size()) {
           return false;
         }
+        const PbctopoCutCandidate *virtual_cloud_reference =
+            best_virtual_geometry_reference.valid &&
+                    !best_virtual_geometry_reference.ultra_clash
+                ? &best_virtual_geometry_reference
+                : nullptr;
+        if (component_candidate_is_outlier(candidate,
+                                           virtual_cloud_reference)) {
+          if (source_label.find("search") != string::npos ||
+              source_label.find("beam") != string::npos) {
+            ++timing.component_search_outlier_observations;
+          } else {
+            ++timing.component_graph_outlier_observations;
+          }
+          append_pbctopo_log_line(
+              "[pbctopo] observe component geometry deviation at frame " +
+              to_string(static_cast<long long>(
+                  this->m_mol[frame_idx].time_of_snap)) +
+              " via " + source_label + ": principal_rg2_max=" +
+              to_string(candidate.principal_rg2_max) +
+              ", virtual_principal_rg2_max=" +
+              to_string(virtual_cloud_reference->principal_rg2_max) +
+              ", kappa2=" + to_string(candidate.shape_kappa2) +
+              ", virtual_kappa2=" +
+              to_string(virtual_cloud_reference->shape_kappa2) +
+              ", asphericity=" +
+              to_string(candidate.shape_asphericity) +
+              ", virtual_asphericity=" +
+              to_string(virtual_cloud_reference->shape_asphericity) +
+              ", policy=soft_observation");
+        }
         PbctopoOwnerPairSplitDetail split_detail;
         size_t split_owner_pairs = 0;
         double max_owner_raw_minus_minimg_delta = 0.0;
         if (candidate_has_split_contacting_owners(
                 candidate_points, base_atoms, this->m_mol[frame_idx].Box,
-                local_contacting_owner_pairs, split_owner_pairs,
+                local_hard_required_owner_pairs, split_owner_pairs,
                 max_owner_raw_minus_minimg_delta, &split_detail)) {
           record_frame_failure(PbctopoFailureReason::SplitOwnerReject);
           if (split_detail.valid) {
@@ -6642,6 +6535,11 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
         if (!best_safe_candidate.valid ||
             better_cut_candidate(candidate, best_safe_candidate)) {
           best_safe_candidate = candidate;
+          if (accepted_offsets != nullptr &&
+              accepted_offsets->size() == components.size()) {
+            best_safe_candidate.assignment = make_pbctopo_image_assignment(
+                *accepted_offsets, components);
+          }
           best_safe_points = candidate_points;
           accepted = true;
           better_than_best = true;
@@ -6651,6 +6549,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
         }
         if (!accepted)
           return false;
+        record_temporal_certified_candidate(candidate, candidate_points,
+                                            accepted_offsets);
         record_report_safe_candidate(candidate);
         if (source_label.find("beam") != string::npos) {
           frame_report.mode = PbctopoFrameMode::ComponentSearchBeam;
@@ -6723,7 +6623,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           };
       if (same_component_warm_layout) {
         vector<Int3> warm_offsets = warm_state.previous_component_offsets;
-        rebase_component_offsets(warm_offsets, components);
+        rebase_component_offsets(warm_offsets, this->m_mol[frame_idx].Box);
         PbctopoCutCandidate warm_cut = improve_component_offsets_locally(
             component_atoms, components, this->m_mol[frame_idx].Box, shifts,
             component_scoring_edges, local_edge_set,
@@ -6740,7 +6640,7 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             warm_cut.valid && !warm_cut.ultra_clash &&
             candidate_has_split_contacting_owners(
                 component_points, base_atoms, this->m_mol[frame_idx].Box,
-                local_contacting_owner_pairs, warm_cut_split_owner_pairs,
+                local_hard_required_owner_pairs, warm_cut_split_owner_pairs,
                 warm_cut_split_gap, &warm_cut_split_detail);
         if (warm_cut_split && warm_cut_split_detail.valid) {
           record_frame_failure(PbctopoFailureReason::SplitOwnerReject);
@@ -6767,6 +6667,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             best_safe_points = component_points;
             warm_accepted = true;
             frame_report.mode = PbctopoFrameMode::Warm;
+            record_temporal_certified_candidate(warm_cut, component_points,
+                                                &warm_offsets);
             record_report_safe_candidate(warm_cut);
           } else if (candidate_close_enough_to_skip_search(
                          warm_cut, best_safe_candidate)) {
@@ -6806,6 +6708,14 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
           frame_report.cycle_mismatch = graph_cycle_metrics.cycle_mismatch;
           frame_report.inconsistent_edge_count =
               graph_cycle_metrics.inconsistent_edge_count;
+          frame_report.fundamental_cycle_count =
+              graph_cycle_metrics.fundamental_cycle_count;
+          frame_report.fundamental_cycle_residual_rms =
+              graph_cycle_metrics.fundamental_cycle_residual_rms;
+          frame_report.fundamental_cycle_residual_max =
+              graph_cycle_metrics.fundamental_cycle_residual_max;
+          graph_as_cut.hard_feasibility.cycle_mismatches =
+              graph_cycle_metrics.inconsistent_edge_count;
           if (!graph_ok) {
             ++timing.component_graph_failed;
             component_graph_fallthrough_reason = "graph_fail";
@@ -6817,7 +6727,8 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             component_graph_fallthrough_reason = "points_mismatch";
           }
           if (graph_ok && component_points.size() == base_atoms.size()) {
-            if (accept_component_cut(graph_as_cut, component_points, nullptr,
+            if (accept_component_cut(graph_as_cut, component_points,
+                                     &graph_refined_offsets,
                                      "component graph solve")) {
               ++timing.component_graph_used;
             } else if (!graph_as_cut.valid) {
@@ -6844,6 +6755,27 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
 
         if (!component_search_used) {
           ++timing.component_search_frames;
+          auto component_clash_atom_summary =
+              [&](size_t atom_idx) -> string {
+            if (atom_idx >= component_atoms.size())
+              return "na";
+            size_t component_idx = numeric_limits<size_t>::max();
+            for (size_t idx = 0; idx < components.size(); ++idx) {
+              if (binary_search(components[idx].begin(), components[idx].end(),
+                                atom_idx)) {
+                component_idx = idx;
+                break;
+              }
+            }
+            const PbctopoAtom &atom = component_atoms[atom_idx];
+            return to_string(atom_idx) + "/global=" +
+                   to_string(atom.global_atom_id) + "/owner=" +
+                   to_string(atom.owner) + "/component=" +
+                   (component_idx == numeric_limits<size_t>::max()
+                        ? string("na")
+                        : to_string(component_idx)) +
+                   "/heavy=" + (atom.is_heavy ? "yes" : "no");
+          };
           append_pbctopo_log_line(
               "[pbctopo] component graph fell through to search at frame " +
               to_string(static_cast<long long>(
@@ -6863,6 +6795,10 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
               ", graph_anchor_mst2=" + to_string(graph_as_cut.anchor_mst2) +
               ", ref_anchor_mst2=" + to_string(best_safe_candidate.anchor_mst2) +
               ", graph_min_pair_d2=" + to_string(graph_as_cut.min_pair_d2) +
+              ", graph_clash_atom_a=" +
+              component_clash_atom_summary(graph_as_cut.clash_atom_a) +
+              ", graph_clash_atom_b=" +
+              component_clash_atom_summary(graph_as_cut.clash_atom_b) +
               ", graph_kappa2=" + to_string(graph_as_cut.shape_kappa2) +
               ", graph_asph=" + to_string(graph_as_cut.shape_asphericity) +
               ", graph_bbox=" + to_string(graph_as_cut.bbox_volume));
@@ -6874,28 +6810,68 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
               ", refined_offsets=" + format_component_offsets(graph_refined_offsets) +
               ", tree_edges=" + format_graph_edges(graph_tree_edges));
           const auto component_search_started = clock::now();
+          const size_t exact_state_upper_bound =
+              pbctopo_component_assignment_upper_bound(
+                  components.size(), shifts.size(),
+                  kPbctopoExactAssignmentBudget + 1);
+          timing.component_search_exact_state_upper_bound =
+              max(timing.component_search_exact_state_upper_bound,
+                  exact_state_upper_bound);
+          const bool use_budgeted_beam =
+              exact_state_upper_bound > kPbctopoExactAssignmentBudget;
+          if (use_budgeted_beam) {
+            ++timing.component_search_exact_budget_skips;
+            append_pbctopo_log_line(
+                "[pbctopo] replace exact search with beam at frame " +
+                to_string(static_cast<long long>(
+                    this->m_mol[frame_idx].time_of_snap)) +
+                ": assignment_upper_bound=" +
+                to_string(exact_state_upper_bound) +
+                ", budget=" + to_string(kPbctopoExactAssignmentBudget));
+          }
+          const auto search_incumbent =
+              (best_safe_candidate.valid && !best_safe_candidate.ultra_clash)
+                  ? &best_safe_candidate
+                  : nullptr;
+          const auto search_incumbent_points =
+              (search_incumbent != nullptr &&
+               best_safe_points.size() == base_atoms.size())
+                  ? &best_safe_points
+                  : nullptr;
           PbctopoComponentCandidate component_candidate =
-              search_component_shift_candidate(
-                  component_atoms, this->m_mol[frame_idx].Box, components, shifts,
-                  trajectory_context.continuity_pairs,
-                  trajectory_context.continuity_anchor_indices, runtime_cutoffs,
-                  component_points, make_component_search_callbacks(),
-                  same_component_warm_layout
-                      ? &warm_state.previous_component_offsets
-                      : nullptr,
-                  (best_safe_candidate.valid && !best_safe_candidate.ultra_clash)
-                      ? &best_safe_candidate
-                      : nullptr,
-                  (best_safe_candidate.valid && !best_safe_candidate.ultra_clash &&
-                   best_safe_points.size() == base_atoms.size())
-                      ? &best_safe_points
-                      : nullptr,
-                  &timing, anchor_backend, &base_anchor_context);
+              use_budgeted_beam
+                  ? search_component_shift_candidate_beam(
+                        component_atoms, this->m_mol[frame_idx].Box,
+                        components, shifts,
+                        trajectory_context.continuity_pairs,
+                        trajectory_context.continuity_anchor_indices,
+                        runtime_cutoffs, component_points, beam_width,
+                        make_component_search_callbacks(),
+                        same_component_warm_layout
+                            ? &warm_state.previous_component_offsets
+                            : nullptr,
+                        search_incumbent, search_incumbent_points, &timing,
+                        anchor_backend, &base_anchor_context)
+                  : search_component_shift_candidate(
+                        component_atoms, this->m_mol[frame_idx].Box,
+                        components, shifts,
+                        trajectory_context.continuity_pairs,
+                        trajectory_context.continuity_anchor_indices,
+                        runtime_cutoffs, component_points,
+                        make_component_search_callbacks(),
+                        same_component_warm_layout
+                            ? &warm_state.previous_component_offsets
+                            : nullptr,
+                        search_incumbent, search_incumbent_points, &timing,
+                        anchor_backend, &base_anchor_context);
           timing.component_search_s +=
               chrono::duration<double>(clock::now() - component_search_started)
                   .count();
           if (accept_component_candidate(component_candidate, component_points,
-                                         nullptr, "component search winner")) {
+                                         nullptr,
+                                         use_budgeted_beam
+                                             ? "component beam budget winner"
+                                             : "component search winner")) {
             const vector<Int3> search_offsets =
                 extract_offsets_and_time(component_atoms, component_points);
             warm_state.previous_component_offsets = search_offsets;
@@ -6922,13 +6898,36 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       } else if (component_mode == PbctopoComponentMode::MergeThenGraph) {
         ++timing.component_large_mode_merge_frames;
         const PbctopoMergedComponentPlan merge_plan =
-            build_chain_merged_component_plan(component_atoms, components);
+            build_chain_merged_component_plan(
+                component_atoms, this->m_mol[frame_idx].Box, components);
         effective_component_count = merge_plan.merged_components.size();
         if (raw_component_count > effective_component_count)
           timing.component_large_mode_merge_count +=
               raw_component_count - effective_component_count;
+        const size_t merged_exact_state_upper_bound =
+            pbctopo_component_assignment_upper_bound(
+                effective_component_count, shifts.size(),
+                kPbctopoExactAssignmentBudget + 1);
+        timing.component_search_exact_state_upper_bound =
+            max(timing.component_search_exact_state_upper_bound,
+                merged_exact_state_upper_bound);
+        const bool merged_exact_within_budget =
+            merged_exact_state_upper_bound <= kPbctopoExactAssignmentBudget;
         const bool allow_exact_search_on_merged =
-            effective_component_count <= exact_component_limit;
+            effective_component_count <= exact_component_limit &&
+            merged_exact_within_budget;
+        if (effective_component_count <= exact_component_limit &&
+            !merged_exact_within_budget) {
+          ++timing.component_search_exact_budget_skips;
+          append_pbctopo_log_line(
+              "[pbctopo] skip merged exact search at frame " +
+              to_string(static_cast<long long>(
+                  this->m_mol[frame_idx].time_of_snap)) +
+              ": assignment_upper_bound=" +
+              to_string(merged_exact_state_upper_bound) +
+              ", budget=" + to_string(kPbctopoExactAssignmentBudget) +
+              ", policy=component_graph_refine");
+        }
         if (!allow_exact_search_on_merged)
           ++timing.component_large_mode_pair_only_frames;
 
@@ -7049,23 +7048,46 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
 
     if (best_safe_candidate.valid && !best_safe_candidate.ultra_clash &&
         best_safe_points.size() == base_atoms.size()) {
-      projection_clash_skip_active =
-          candidate_has_projection_clash_margin(best_safe_candidate,
-                                                runtime_cutoffs.clash_cutoff);
-      warm_state.previous_projection_candidate = best_safe_candidate;
-      warm_state.has_projection_candidate = true;
-      update_kinematic_history_for_frame();
-      apply_cut_candidate_timed(best_safe_points);
-      finalize_frame_report(PbctopoFrameStatus::Certified,
-                            frame_report.mode == PbctopoFrameMode::None
-                                ? PbctopoFrameMode::Virtual
-                                : frame_report.mode,
-                            PbctopoFailureReason::None,
-                            &best_safe_candidate);
-      continue;
+      if (certify_candidate_for_output(best_safe_candidate,
+                                       best_safe_points)) {
+        record_temporal_certified_candidate(best_safe_candidate,
+                                            best_safe_points);
+        projection_clash_skip_active =
+            candidate_has_projection_clash_margin(best_safe_candidate,
+                                                  runtime_cutoffs.clash_cutoff);
+        warm_state.previous_projection_candidate = best_safe_candidate;
+        warm_state.has_projection_candidate = true;
+        update_kinematic_history_for_frame();
+        apply_cut_candidate_timed(best_safe_points);
+        finalize_frame_report(PbctopoFrameStatus::Certified,
+                              frame_report.mode == PbctopoFrameMode::None
+                                  ? PbctopoFrameMode::Virtual
+                                  : frame_report.mode,
+                              PbctopoFailureReason::None,
+                              &best_safe_candidate);
+        continue;
+      }
+      ++timing.pbctopo_diagnostic_only_candidates;
+      best_safe_certification_rejected = true;
+      record_frame_failure(PbctopoFailureReason::CertificationReject);
+      append_pbctopo_log_line(
+          "[pbctopo] reject output candidate at frame " +
+          to_string(static_cast<long long>(
+              this->m_mol[frame_idx].time_of_snap)) +
+          ": assignment_available=" +
+          string(best_safe_candidate.hard_feasibility.assignment_available
+                     ? "yes"
+                     : "no") +
+          ", hard_edge_residuals=" +
+          to_string(best_safe_candidate.hard_feasibility.hard_edge_residuals) +
+          ", cycle_mismatches=" +
+          to_string(best_safe_candidate.hard_feasibility.cycle_mismatches) +
+          ", hard_clashes=" +
+          to_string(best_safe_candidate.hard_feasibility.hard_clashes));
     }
 
-    if ((!best_safe_candidate.valid || best_safe_candidate.ultra_clash) &&
+    if ((!best_safe_candidate.valid || best_safe_candidate.ultra_clash ||
+         best_safe_certification_rejected) &&
         split_rescue_available) {
       ensure_component_context();
       ++timing.hull_rescue_attempts;
@@ -7122,7 +7144,6 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
         }
       }
       if (best_hull_candidate.valid) {
-        ++timing.hull_rescue_successes;
         append_pbctopo_log_line(
             "[pbctopo] hull rescue candidate at frame " +
             to_string(static_cast<long long>(
@@ -7133,12 +7154,14 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
             to_string(best_hull_volume) + ", valid_candidates=" +
             to_string(hull_valid_candidates) + ", avx2=" +
             string(pbctopo_hull::avx2_available() ? "on" : "off"));
-        accept_rescue_candidate(best_hull_points, best_hull_candidate);
-        finalize_frame_report(PbctopoFrameStatus::Rescued,
-                              PbctopoFrameMode::HullRescue,
-                              PbctopoFailureReason::None,
-                              &best_hull_candidate);
-        continue;
+        if (accept_rescue_candidate(best_hull_points, best_hull_candidate)) {
+          ++timing.hull_rescue_successes;
+          finalize_frame_report(PbctopoFrameStatus::Rescued,
+                                PbctopoFrameMode::HullRescue,
+                                PbctopoFailureReason::None,
+                                &best_safe_candidate);
+          continue;
+        }
       }
 
       ++timing.distance_rescue_attempts;
@@ -7148,12 +7171,11 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       double rescue_raw_delta_norm = numeric_limits<double>::infinity();
       if (rescue_split_contacting_owner_candidate(
               split_rescue_points, base_atoms, this->m_mol[frame_idx].Box,
-              local_contacting_owner_pairs, shifts, split_rescue_detail,
+              local_hard_required_owner_pairs, shifts, split_rescue_detail,
               rescued_points, rescue_shift, rescue_raw_delta_norm)) {
         PbctopoCutCandidate rescued_candidate;
         if (validate_rescue_candidate_points(rescued_points, nullptr,
                                              rescued_candidate)) {
-          ++timing.distance_rescue_successes;
           append_pbctopo_log_line(
               "[pbctopo] distance rescue candidate at frame " +
               to_string(static_cast<long long>(
@@ -7161,55 +7183,178 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
               " from " + split_rescue_source + ": applied_shift=" +
               format_int3(rescue_shift) + ", rescued_raw_delta_norm=" +
               to_string(rescue_raw_delta_norm));
-          accept_rescue_candidate(rescued_points, rescued_candidate);
-          finalize_frame_report(PbctopoFrameStatus::Rescued,
-                                PbctopoFrameMode::DistanceRescue,
-                                PbctopoFailureReason::None,
-                                &rescued_candidate);
-          continue;
+          if (accept_rescue_candidate(rescued_points, rescued_candidate)) {
+            ++timing.distance_rescue_successes;
+            finalize_frame_report(PbctopoFrameStatus::Rescued,
+                                  PbctopoFrameMode::DistanceRescue,
+                                  PbctopoFailureReason::None,
+                                  &best_safe_candidate);
+            continue;
+          }
         }
       }
     }
 
-    if (!best_candidate.valid || best_candidate.ultra_clash) {
-      const string fallback_message =
-          "[pbctopo] frame " +
-          to_string(static_cast<long long>(this->m_mol[frame_idx].time_of_snap)) +
-          " fell back to pbci=0 after unsafe virtual-box search: safe_candidates=" +
-          to_string(safe_candidates) + ", best.min_pair_d2=" +
-          to_string(best_candidate.min_pair_d2) + ", best.kappa2=" +
-          to_string(best_candidate.shape_kappa2) + ", best.asph=" +
-          to_string(best_candidate.shape_asphericity) + ", best.bbox=" +
-          to_string(best_candidate.bbox_volume);
-      append_pbctopo_log_line(fallback_message);
-      TitanUI::print_warning(
-          fallback_message);
-      ++fallback_frames;
-      projection_clash_skip_active = false;
-      clear_component_trial_hints(warm_state);
-      reset_kinematic_seed_history(warm_state, timing);
-      fallback_pbci_frame(frame_idx);
-      finalize_frame_report(PbctopoFrameStatus::Fallback,
-                            PbctopoFrameMode::Pbci,
-                            PbctopoFailureReason::FallbackPbci,
-                            best_candidate.valid ? &best_candidate : nullptr);
-      continue;
-    }
-
-    projection_clash_skip_active =
-        candidate_has_projection_clash_margin(best_candidate,
-                                              runtime_cutoffs.clash_cutoff);
-    warm_state.previous_projection_candidate = best_candidate;
-    warm_state.has_projection_candidate = best_candidate.valid;
-    update_kinematic_history_for_frame();
-    apply_cut_candidate_timed(best_points);
-    finalize_frame_report(PbctopoFrameStatus::Certified,
-                          frame_report.mode == PbctopoFrameMode::None
-                              ? PbctopoFrameMode::Virtual
-                              : frame_report.mode,
-                          PbctopoFailureReason::None, &best_candidate);
+    if (best_candidate.valid)
+      ++timing.pbctopo_diagnostic_only_candidates;
+    const PbctopoFailureReason fallback_reason =
+        frame_report.fallback_reason == PbctopoFailureReason::CertificationReject
+            ? PbctopoFailureReason::CertificationReject
+            : PbctopoFailureReason::FallbackPbci;
+    const string fallback_message =
+        "[pbctopo] frame " +
+        to_string(static_cast<long long>(this->m_mol[frame_idx].time_of_snap)) +
+        " fell back to pbci=0 after no certified image assignment: "
+        "safe_candidates=" +
+        to_string(safe_candidates) + ", best.min_pair_d2=" +
+        to_string(best_candidate.min_pair_d2) + ", best.kappa2=" +
+        to_string(best_candidate.shape_kappa2) + ", best.asph=" +
+        to_string(best_candidate.shape_asphericity) + ", best.bbox=" +
+        to_string(best_candidate.bbox_volume);
+    append_pbctopo_log_line(fallback_message);
+    TitanUI::print_warning(fallback_message);
+    ++fallback_frames;
+    projection_clash_skip_active = false;
+    clear_component_trial_hints(warm_state);
+    reset_kinematic_seed_history(warm_state, timing);
+    fallback_pbci_frame(frame_idx);
+    finalize_frame_report(PbctopoFrameStatus::Fallback,
+                          PbctopoFrameMode::Pbci, fallback_reason,
+                          best_candidate.valid ? &best_candidate : nullptr);
   }
 
+  if (temporal_mode == PbctopoTemporalMode::Viterbi) {
+    vector<vector<PbctopoTemporalCandidate>> temporal_frames(frame_count);
+    for (size_t frame_idx = 0; frame_idx < frame_count; ++frame_idx) {
+      const auto &cuts = temporal_cut_candidates[frame_idx];
+      const auto &greedy = greedy_selected_candidates[frame_idx];
+      if (cuts.empty() || !greedy.valid || !greedy.assignment.valid ||
+          !greedy.hard_feasibility.certified())
+        continue;
+      ++timing.pbctopo_temporal_candidate_frames;
+      timing.pbctopo_temporal_candidates += cuts.size();
+      temporal_frames[frame_idx].reserve(cuts.size());
+      const double denominator =
+          static_cast<double>(max<size_t>(1, cuts.size() - 1));
+      for (size_t rank = 0; rank < cuts.size(); ++rank) {
+        PbctopoTemporalCandidate candidate;
+        candidate.center = {cuts[rank].cut_x, cuts[rank].cut_y,
+                            cuts[rank].cut_z};
+        candidate.emission_cost = static_cast<double>(rank) / denominator;
+        candidate.component_offsets =
+            cuts[rank].assignment.component_offsets;
+        candidate.assignment_signature = cuts[rank].assignment.signature;
+        candidate.certified = cuts[rank].hard_feasibility.certified() &&
+                              cuts[rank].assignment.valid;
+        temporal_frames[frame_idx].push_back(std::move(candidate));
+      }
+    }
+
+    const auto temporal_result = titan_pbctopo::solve_pbctopo_temporal_viterbi(
+        temporal_frames, Arguments.pbc.pbctopo_temporal_penalty);
+    ofstream temporal_report("pbctopo_temporal_path.csv", ios::trunc);
+    if (temporal_report.is_open())
+      temporal_report << "frame,time_ps,selected_rank,cut_x,cut_y,cut_z,"
+                         "emission_cost,assignment_signature,"
+                         "changed_from_greedy,replay_applied\n";
+    const size_t invalid = numeric_limits<size_t>::max();
+    if (temporal_result.valid) {
+      for (size_t frame_idx = 0; frame_idx < frame_count; ++frame_idx) {
+        const size_t selected = temporal_result.selected[frame_idx];
+        if (selected == invalid ||
+            selected >= temporal_cut_candidates[frame_idx].size())
+          continue;
+        const auto &chosen = temporal_cut_candidates[frame_idx][selected];
+        const auto &greedy = greedy_selected_candidates[frame_idx];
+        const bool changed = !same_pbctopo_image_assignment(
+            chosen.assignment, greedy.assignment);
+        if (changed)
+          ++timing.pbctopo_temporal_proposed_changes;
+        ++timing.pbctopo_temporal_viterbi_frames;
+        ++timing.pbctopo_temporal_replay_frames;
+
+        bool replay_applied = !changed;
+        if (changed) {
+          const size_t layout_idx = temporal_frame_layout[frame_idx];
+          vector<PbctopoAtom> replay_atoms;
+          replay_atoms.reserve(trajectory_context.total_atoms_hint);
+          append_atoms_for_system(this->m_mol[frame_idx], &this->info,
+                                  &trajectory_context.rec_static, 0,
+                                  replay_atoms);
+          if (frame_idx < mol2.m_mol.size() &&
+              !mol2.m_mol[frame_idx].pos.x.empty()) {
+            append_atoms_for_system(mol2.m_mol[frame_idx], &mol2.info,
+                                    &trajectory_context.lig_static, 1,
+                                    replay_atoms);
+          }
+          vector<Vec3> applied_points;
+          applied_points.reserve(replay_atoms.size());
+          for (const auto &atom : replay_atoms)
+            applied_points.push_back({atom.x, atom.y, atom.z});
+          vector<Vec3> replayed_points;
+          if (layout_idx < temporal_component_layouts.size() &&
+              replay_pbctopo_assignment_delta(
+                  applied_points,
+                  temporal_component_layouts[layout_idx].atom_component_index,
+                  greedy.assignment, chosen.assignment,
+                  this->m_mol[frame_idx].Box, replayed_points)) {
+            apply_pbctopo_points_direct(replay_atoms, replayed_points, *this,
+                                        mol2, frame_idx);
+            replay_applied = true;
+            ++timing.pbctopo_temporal_replay_applied;
+            ++timing.pbctopo_temporal_path_changes;
+          } else {
+            ++timing.pbctopo_temporal_replay_skipped;
+          }
+        }
+        if (deferred_frame_report_valid[frame_idx] != 0) {
+          auto &report = deferred_frame_reports[frame_idx];
+          report.temporal_selected = true;
+          report.temporal_changed_from_greedy = changed && replay_applied;
+          report.temporal_assignment_signature = chosen.assignment.signature;
+          if (replay_applied) {
+            report.assignment_signature = chosen.assignment.signature;
+            report.assignment_component_count =
+                chosen.assignment.component_offsets.size();
+            report.hard_feasibility = chosen.hard_feasibility;
+            report.best_score = make_score_vector(chosen);
+          }
+        }
+        if (temporal_report.is_open()) {
+          temporal_report << frame_report_offset + frame_idx << ','
+                          << this->m_mol[frame_idx].time_of_snap << ','
+                          << selected << ',' << chosen.cut_x << ','
+                          << chosen.cut_y << ',' << chosen.cut_z << ','
+                          << temporal_frames[frame_idx][selected].emission_cost
+                          << ',' << chosen.assignment.signature << ','
+                          << (changed ? 1 : 0) << ','
+                          << (replay_applied ? 1 : 0) << '\n';
+        }
+      }
+      append_pbctopo_log_line(
+          "[pbctopo temporal] mode=viterbi, frames=" +
+          to_string(timing.pbctopo_temporal_viterbi_frames) +
+          ", candidates=" + to_string(timing.pbctopo_temporal_candidates) +
+          ", proposed_changes=" +
+          to_string(timing.pbctopo_temporal_proposed_changes) +
+          ", applied_changes=" +
+          to_string(timing.pbctopo_temporal_path_changes) +
+          ", replay=immutable_assignment_delta" +
+          ", total_cost=" + to_string(temporal_result.total_cost));
+    }
+    if (pbctopo_frame_report.is_open()) {
+      for (size_t frame_idx = 0; frame_idx < frame_count; ++frame_idx) {
+        if (deferred_frame_report_valid[frame_idx] != 0) {
+          write_pbctopo_frame_report_row(pbctopo_frame_report,
+                                         deferred_frame_reports[frame_idx]);
+        }
+      }
+    }
+  }
+
+  timing.pbctopo_frame_point_buffer_peak_bytes_estimate =
+      max(timing.pbctopo_frame_point_buffer_peak_bytes_estimate,
+          scratch.point_capacity_bytes_estimate());
   if (fallback_frames > 0) {
     const string fallback_summary = "[pbctopo] Fell back to pbci=0 on " +
                                     to_string(fallback_frames) + " frame(s).";
@@ -7231,7 +7376,9 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.seed_s) + " s, event_planes=" +
       to_string(timing.event_planes_s) +
       " s, pbctopo_density_cut_plane_build=" +
-      to_string(timing.pbctopo_density_cut_plane_build_s) + " s, coarse=" +
+      to_string(timing.pbctopo_density_cut_plane_build_s) +
+      " s, pbctopo_virtual_seam_sweep=" +
+      to_string(timing.pbctopo_virtual_seam_sweep_s) + " s, coarse=" +
       to_string(timing.coarse_s) + " s, refine=" +
       to_string(timing.refine_s) + " s, early_projection=" +
       to_string(timing.early_projection_s) + " s, warm_component=" +
@@ -7363,6 +7510,46 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.pbctopo_density_cut_plane_collisions) +
       ", pbctopo_density_cut_plane_dense_fallbacks=" +
       to_string(timing.pbctopo_density_cut_plane_dense_fallbacks) +
+      ", pbctopo_virtual_discrete_frames=" +
+      to_string(timing.pbctopo_virtual_discrete_frames) +
+      ", pbctopo_virtual_axis_states_x=" +
+      to_string(timing.pbctopo_virtual_axis_states_x) +
+      ", pbctopo_virtual_axis_states_y=" +
+      to_string(timing.pbctopo_virtual_axis_states_y) +
+      ", pbctopo_virtual_axis_states_z=" +
+      to_string(timing.pbctopo_virtual_axis_states_z) +
+      ", pbctopo_virtual_state_space=" +
+      to_string(timing.pbctopo_virtual_state_space) +
+      ", pbctopo_virtual_states_evaluated=" +
+      to_string(timing.pbctopo_virtual_states_evaluated) +
+      ", pbctopo_virtual_search_exhaustive_frames=" +
+      to_string(timing.pbctopo_virtual_search_exhaustive_frames) +
+      ", pbctopo_virtual_search_shortlist_frames=" +
+      to_string(timing.pbctopo_virtual_search_shortlist_frames) +
+      ", pbctopo_virtual_branch_and_bound_frames=" +
+      to_string(timing.pbctopo_virtual_branch_and_bound_frames) +
+      ", pbctopo_virtual_sweep_workspace_reuse_frames=" +
+      to_string(timing.pbctopo_virtual_sweep_workspace_reuse_frames) +
+      ", pbctopo_virtual_sweep_events_x=" +
+      to_string(timing.pbctopo_virtual_sweep_events_x) +
+      ", pbctopo_virtual_sweep_events_y=" +
+      to_string(timing.pbctopo_virtual_sweep_events_y) +
+      ", pbctopo_virtual_sweep_events_z=" +
+      to_string(timing.pbctopo_virtual_sweep_events_z) +
+      ", pbctopo_virtual_sweep_workspace_peak_bytes=" +
+      to_string(timing.pbctopo_virtual_sweep_workspace_peak_bytes) +
+      ", pbctopo_verify_geometry_buffer_reuses=" +
+      to_string(timing.pbctopo_verify_geometry_buffer_reuses) +
+      ", pbctopo_frame_point_buffer_peak_bytes_estimate=" +
+      to_string(timing.pbctopo_frame_point_buffer_peak_bytes_estimate) +
+      ", pbctopo_virtual_omitted_seam_lower_bound_min=" +
+      (isfinite(timing.pbctopo_virtual_omitted_seam_lower_bound_min)
+           ? to_string(timing.pbctopo_virtual_omitted_seam_lower_bound_min)
+           : string("na")) +
+      ", pbctopo_virtual_lower_bound_gap_min=" +
+      (isfinite(timing.pbctopo_virtual_lower_bound_gap_min)
+           ? to_string(timing.pbctopo_virtual_lower_bound_gap_min)
+           : string("na")) +
        ", component_graph_edges=" + to_string(timing.component_graph_edges) +
        ", component_graph_shift_descriptors=" +
        to_string(timing.component_graph_shift_descriptors) +
@@ -7371,6 +7558,22 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
        ", component_graph_bbox_only_scores=" +
        to_string(timing.component_graph_bbox_only_scores) +
         ", component_graph_used=" + to_string(timing.component_graph_used) +
+        ", component_graph_primary_attempts=" +
+        to_string(timing.component_graph_primary_attempts) +
+        ", component_graph_primary_certified=" +
+        to_string(timing.component_graph_primary_certified) +
+        ", component_graph_primary_virtual_skips=" +
+        to_string(timing.component_graph_primary_virtual_skips) +
+        ", component_graph_primary_fallbacks=" +
+        to_string(timing.component_graph_primary_fallbacks) +
+        ", component_image_shell_expansions=" +
+        to_string(timing.component_image_shell_expansions) +
+        ", component_image_shell_retry_successes=" +
+        to_string(timing.component_image_shell_retry_successes) +
+        ", component_image_shell_max_radius=" +
+        to_string(timing.component_image_shell_max_radius) +
+        ", component_image_shell_max_shift_count=" +
+        to_string(timing.component_image_shell_max_shift_count) +
          ", component_warm_used=" + to_string(timing.component_warm_used) +
        ", component_warm_skip_search=" + to_string(timing.component_warm_skip_search) +
        ", component_search_frames=" + to_string(timing.component_search_frames) +
@@ -7473,6 +7676,10 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.pbctopo_anchor_endpoint_edges) +
       ", pbctopo_anchor_contact_pairs=" +
       to_string(timing.pbctopo_anchor_contact_pairs) +
+      ", pbctopo_soft_observed_contact_pairs=" +
+      to_string(timing.pbctopo_soft_observed_contact_pairs) +
+      ", pbctopo_hard_required_owner_pairs=" +
+      to_string(timing.pbctopo_hard_required_owner_pairs) +
       ", pbctopo_anchor_residue_order_violations=" +
       to_string(timing.pbctopo_anchor_residue_order_violations) +
       ", pbctopo_anchor_ambiguous_frames=" +
@@ -7532,6 +7739,10 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.component_search_prefix_continuity_prunes) +
       ", component_search_prefix_continuity_hard_rejects=" +
       to_string(timing.component_search_prefix_continuity_hard_rejects) +
+      ", component_search_exact_budget_skips=" +
+      to_string(timing.component_search_exact_budget_skips) +
+      ", component_search_exact_state_upper_bound=" +
+      to_string(timing.component_search_exact_state_upper_bound) +
       ", component_search_prefix_continuity_time=" +
       to_string(timing.component_search_prefix_continuity_s) +
       " s" +
@@ -7543,6 +7754,10 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.component_large_mode_beam_frames) +
       ", component_large_mode_merge_count=" +
       to_string(timing.component_large_mode_merge_count) +
+      ", component_large_mode_internal_offsets_preserved=" +
+      to_string(timing.component_large_mode_internal_offsets_preserved) +
+      ", component_large_mode_internal_offset_nonzero=" +
+      to_string(timing.component_large_mode_internal_offset_nonzero) +
       ", component_large_mode_graph_seed_count=" +
       to_string(timing.component_large_mode_graph_seed_count) +
       ", component_large_mode_graph_seed_refined=" +
@@ -7561,10 +7776,44 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.component_large_mode_fallback_frames) +
       ", component_search_shift_warm_hits=" +
       to_string(timing.component_search_shift_warm_hits) +
+      ", pbctopo_certification_attempts=" +
+      to_string(timing.pbctopo_certification_attempts) +
+      ", pbctopo_certification_successes=" +
+      to_string(timing.pbctopo_certification_successes) +
+      ", pbctopo_certification_assignment_rejects=" +
+      to_string(timing.pbctopo_certification_assignment_rejects) +
+      ", pbctopo_certification_hard_rejects=" +
+      to_string(timing.pbctopo_certification_hard_rejects) +
+      ", pbctopo_certification_topology_edges_checked=" +
+      to_string(timing.pbctopo_certification_topology_edges_checked) +
+      ", pbctopo_certification_topology_edge_residuals=" +
+      to_string(timing.pbctopo_certification_topology_edge_residuals) +
+      ", pbctopo_certification_atom_image_residuals=" +
+      to_string(timing.pbctopo_certification_atom_image_residuals) +
+      ", pbctopo_certification_required_contacts_checked=" +
+      to_string(timing.pbctopo_certification_required_contacts_checked) +
+      ", pbctopo_certification_required_contacts_lost=" +
+      to_string(timing.pbctopo_certification_required_contacts_lost) +
+      ", pbctopo_diagnostic_only_candidates=" +
+      to_string(timing.pbctopo_diagnostic_only_candidates) +
+      ", pbctopo_virtual_geometry_reference_evals=" +
+      to_string(timing.pbctopo_virtual_geometry_reference_evals) +
+      ", pbctopo_virtual_geometry_reference_safe=" +
+      to_string(timing.pbctopo_virtual_geometry_reference_safe) +
+      ", pbctopo_virtual_geometry_reference_clashing=" +
+      to_string(timing.pbctopo_virtual_geometry_reference_clashing) +
+      ", pbctopo_virtual_geometry_outlier_rejects=" +
+      to_string(timing.pbctopo_virtual_geometry_outlier_rejects) +
+      ", pbctopo_virtual_geometry_outlier_observations=" +
+      to_string(timing.pbctopo_virtual_geometry_outlier_observations) +
       ", component_graph_outlier_rejects=" +
       to_string(timing.component_graph_outlier_rejects) +
       ", component_search_outlier_rejects=" +
       to_string(timing.component_search_outlier_rejects) +
+      ", component_graph_outlier_observations=" +
+      to_string(timing.component_graph_outlier_observations) +
+      ", component_search_outlier_observations=" +
+      to_string(timing.component_search_outlier_observations) +
       ", component_score_continuity_time=" +
       to_string(timing.component_score_continuity_s) +
       " s, component_score_anchor_time=" +
@@ -7596,12 +7845,40 @@ int Multi_MOL::solve_pbc_pbctopo(Multi_MOL &mol2, arguments &Arguments,
       to_string(timing.component_search_depth_visits[5]) + ",d6:" +
       to_string(timing.component_search_depth_visits[6]) + ",d7:" +
       to_string(timing.component_search_depth_visits[7]) + "]");
-  append_pbctopo_log_line("[pbctopo] Valid N-atom block candidates: " +
-                          to_string(valid_candidates) +
-                          ", rejected partial/invalid components: " +
-                          to_string(partial_components) +
-                          ", hull fallbacks: " +
-                          to_string(hull_fallback_candidates));
+  append_pbctopo_log_line(
+      "[pbctopo math] pair_shift_score=normalized, shift_metric="
+      "cartesian_component_mean_A2, gauge=closest_lattice_mean, cycle_residual="
+      "fundamental_basis, anchor_metrics=" +
+      string(titan_pbctopo::anchor_metric_mode_name(anchor_metric_mode)) +
+      ", clash_model=vdw_radius, vdw_pair_checks=" +
+      to_string(timing.pbctopo_vdw_pair_checks) +
+      ", vdw_radius_pairs=" + to_string(timing.pbctopo_vdw_radius_pairs) +
+      ", vdw_fallback_pairs=" +
+      to_string(timing.pbctopo_vdw_radius_fallback_pairs) +
+      ", temporal_mode=" +
+      string(titan_pbctopo::temporal_mode_name(temporal_mode)) +
+      ", temporal_candidate_frames=" +
+      to_string(timing.pbctopo_temporal_candidate_frames) +
+      ", temporal_candidates=" +
+      to_string(timing.pbctopo_temporal_candidates) +
+      ", temporal_certified_candidates=" +
+      to_string(timing.pbctopo_temporal_certified_candidates) +
+      ", temporal_assignment_deduped=" +
+      to_string(timing.pbctopo_temporal_assignment_deduped) +
+      ", temporal_diagnostic_only_frames=" +
+      to_string(timing.pbctopo_temporal_diagnostic_only_frames) +
+      ", temporal_proposed_changes=" +
+      to_string(timing.pbctopo_temporal_proposed_changes) +
+      ", temporal_path_changes=" +
+      to_string(timing.pbctopo_temporal_path_changes) +
+      ", temporal_replay_frames=" +
+      to_string(timing.pbctopo_temporal_replay_frames) +
+      ", temporal_replay_applied=" +
+      to_string(timing.pbctopo_temporal_replay_applied) +
+      ", temporal_replay_skipped=" +
+      to_string(timing.pbctopo_temporal_replay_skipped));
+  append_pbctopo_log_line("[pbctopo] Valid candidate evaluations: " +
+                          to_string(valid_candidates));
   append_pbctopo_log_line("[pbctopo] end run");
   return 0;
 }

@@ -1,4 +1,7 @@
 #include "titan_energy_decomposition.h"
+#include "titan_energy_validation.h"
+
+#include "BoxMatrix.h"
 
 #include "arguments.h"
 #include "c6c12.h"
@@ -215,9 +218,10 @@ EnergyPairDecomposition EnergyDecompositionProvider::pair_energy_generic(
   double dx = frame_a.pos.x[pos_a] - frame_b.pos.x[pos_b];
   double dy = frame_a.pos.y[pos_a] - frame_b.pos.y[pos_b];
   double dz = frame_a.pos.z[pos_a] - frame_b.pos.z[pos_b];
-  dx = titan_energy_mic_delta(dx, frame_a.Box.get_a());
-  dy = titan_energy_mic_delta(dy, frame_a.Box.get_b());
-  dz = titan_energy_mic_delta(dz, frame_a.Box.get_c());
+  if (BoxMatrix::valid_box(frame_a.Box)) {
+    const BoxMatrix box_matrix(frame_a.Box);
+    box_matrix.apply_mic(dx, dy, dz);
+  }
   const double d_nm = 0.1 * std::sqrt(dx * dx + dy * dy + dz * dz);
   return pair_energy_generic_at_distance(frame_a, mol_a, pos_a, frame_b, mol_b,
                                          pos_b, d_nm);
@@ -233,32 +237,47 @@ EnergyDecompositionProvider::pair_energy_generic_at_distance(
       pos_b >= frame_b.size() || pos_a >= mol_a.parameters.size() ||
       pos_b >= mol_b.parameters.size())
     return out;
-  if (d_nm <= 1e-10)
+  if (d_nm <= titan_energy_validation::kMinimumPairDistanceNm)
     return out;
   if (cutoff_active_ && cutoff_nm_ > 0.0 && d_nm > cutoff_nm_)
     return out;
 
   if (titan_energy_force_field_contains(force_field_, "martini")) {
+    const auto cfg =
+        martini_config_for_cutoff(*args_, cutoff_nm_, cutoff_active_);
+    if (!martini::within_cutoff(cfg, d_nm))
+      return out;
     double sigma_ij{}, epsilon_ij{};
     martini::pair_params(*cached_data_, mol_a.parameters, mol_b.parameters, pos_a,
                          pos_b, sigma_ij, epsilon_ij);
     if (martini::excluded_pair(*args_, mol_a.info, mol_b.info, pos_a, pos_b,
                                d_nm, sigma_ij))
       return out;
-    const auto cfg =
-        martini_config_for_cutoff(*args_, cutoff_nm_, cutoff_active_);
     out.elec = martini::electro_energy(cfg, mol_a.parameters.charge[pos_a],
                                        mol_b.parameters.charge[pos_b], d_nm);
     out.vdw = martini::lj_energy(sigma_ij, epsilon_ij, d_nm);
     return out;
   }
 
+  const bool is_amber =
+      titan_energy_force_field_contains(force_field_, "amber");
+  const bool is_charmm =
+      titan_energy_force_field_contains(force_field_, "charmm");
+  const bool is_opls = titan_energy_force_field_contains(force_field_, "opls");
+  const bool is_gromos =
+      titan_energy_force_field_contains(force_field_, "gromos");
   const double qi = mol_a.parameters.charge[pos_a];
   const double qj = mol_b.parameters.charge[pos_b];
-  out.elec = 138.935457839 * qi * qj /
+  double screening = 1.0;
+  if (args_->flag_elec_screening && (is_amber || is_charmm) &&
+      args_->salt_concentration > 0.0) {
+    const double lambda_debye = 3.07 / std::sqrt(args_->salt_concentration);
+    screening = std::exp(-d_nm / lambda_debye);
+  }
+  out.elec = 138.935457839 * qi * qj * screening /
              (std::max(1e-12, args_->epsilon_in) * d_nm);
 
-  if (titan_energy_force_field_contains(force_field_, "charmm")) {
+  if (is_charmm) {
     double sigma_ij{}, epsilon_ij{};
     charmm::pair_params(*cached_data_, mol_a.parameters, mol_b.parameters, pos_a,
                         pos_b, sigma_ij, epsilon_ij);
@@ -268,24 +287,41 @@ EnergyDecompositionProvider::pair_energy_generic_at_distance(
           mol_b.info[pos_b].get_chain() == mol_a.info[pos_a].get_chain())))
       return {};
     out.vdw = charmm::lj_energy(sigma_ij, epsilon_ij, d_nm);
+  } else if (is_gromos) {
+    if (args_->self_int &&
+        ((&mol_a == &mol_b && pos_a == pos_b) ||
+         (args_->flag_interchain_energy &&
+          mol_b.info[pos_b].get_chain() == mol_a.info[pos_a].get_chain())))
+      return {};
+    const double c6_ij = std::sqrt(std::max(
+        0.0, mol_b.parameters.sigma[pos_b] * mol_a.parameters.sigma[pos_a]));
+    const double c12_ij = std::sqrt(std::max(
+        0.0,
+        mol_b.parameters.epsilon[pos_b] * mol_a.parameters.epsilon[pos_a]));
+    const double inv_r2 = 1.0 / (d_nm * d_nm);
+    const double inv_r6 = inv_r2 * inv_r2 * inv_r2;
+    out.vdw = c12_ij * inv_r6 * inv_r6 - c6_ij * inv_r6;
   } else {
     double sigma_ij =
         0.5 * (mol_b.parameters.sigma[pos_b] + mol_a.parameters.sigma[pos_a]);
     const double epsilon_ij = std::sqrt(std::max(
         0.0, mol_b.parameters.epsilon[pos_b] * mol_a.parameters.epsilon[pos_a]));
-    if (titan_energy_force_field_contains(force_field_, "opls"))
+    if (is_opls)
       sigma_ij = std::sqrt(std::max(
           0.0, mol_b.parameters.sigma[pos_b] * mol_a.parameters.sigma[pos_a]));
-    double sr6 = 0.0;
-    if (mol_b.parameters.sigma[pos_b] >= 0.0 &&
-        mol_a.parameters.sigma[pos_a] >= 0.0)
-      sr6 = c6(sigma_ij / d_nm);
+    const bool repulsive_only =
+        is_amber && (mol_b.parameters.sigma[pos_b] < 0.0 ||
+                     mol_a.parameters.sigma[pos_a] < 0.0);
+    const double sr6 = c6(sigma_ij / d_nm);
     if (args_->self_int &&
         (sr6 > 1.0 ||
          (args_->flag_interchain_energy &&
           mol_b.info[pos_b].get_chain() == mol_a.info[pos_a].get_chain())))
       return {};
-    out.vdw = epsilon_ij * (square(sr6) - sr6);
+    // AMBER and OPLS-AA store the Lennard-Jones well depth as epsilon.
+    // Match the production pair kernels' 4*epsilon convention.
+    out.vdw = 4.0 * epsilon_ij *
+              (square(sr6) - (repulsive_only ? 0.0 : sr6));
   }
   return out;
 }

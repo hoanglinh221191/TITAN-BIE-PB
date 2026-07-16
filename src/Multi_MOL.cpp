@@ -45,14 +45,19 @@ void Multi_MOL::post_process_coordinates_user_define(string_view type) {
 }
 
 string Multi_MOL::check_head_tail_res(class index &in, size_t pos_res) {
+  if (info.empty() || pos_res >= in.get_size_v())
+    return "normal";
+  const size_t residue_start = in.get_res_pos_e(pos_res);
+  if (residue_start == 0 || residue_start > info.size())
+    return "normal";
+  const size_t first_atom = residue_start - 1;
   if (in.get_type_base(pos_res) == "protein") {
-    if (info[in.get_res_pos_e(pos_res) - 1].get_atom().find("N") !=
+    if (first_atom + 3 < info.size() &&
+        info[first_atom].get_atom().find("N") !=
             string::npos &&
-        info[in.get_res_pos_e(pos_res)].get_atom().find("H") != string::npos &&
-        info[in.get_res_pos_e(pos_res) + 1].get_atom().find("H") !=
-            string::npos &&
-        info[in.get_res_pos_e(pos_res) + 2].get_atom().find("H") !=
-            string::npos)
+        info[first_atom + 1].get_atom().find("H") != string::npos &&
+        info[first_atom + 2].get_atom().find("H") != string::npos &&
+        info[first_atom + 3].get_atom().find("H") != string::npos)
       return "nterminal";
     size_t remain{in.get_res_pos_e(pos_res) + 160 >= info.size()
                       ? info.size()
@@ -67,7 +72,8 @@ string Multi_MOL::check_head_tail_res(class index &in, size_t pos_res) {
     }
     if (pos == 0)
       pos = info.size();
-    if (info[pos - 3].get_atom().find("C") != string::npos &&
+    if (pos >= 3 &&
+        info[pos - 3].get_atom().find("C") != string::npos &&
         info[pos - 1].get_atom().find("O") != string::npos &&
         info[pos - 2].get_atom().find("O") != string::npos)
       return "cterminal";
@@ -296,6 +302,11 @@ int Multi_MOL::gen_vector_parameters() {
     this->parameters.resize(info.size());
     return 0;
   }
+}
+
+void Multi_MOL::cache_topology_vdw_radii_from_parameters() {
+  topology.cache_missing_vdw_radii(std::span<const double>(
+      parameters.radius.data(), parameters.radius.size()));
 }
 
 int Multi_MOL::com_mol(const size_t num_snap, std::span<double> com) const {

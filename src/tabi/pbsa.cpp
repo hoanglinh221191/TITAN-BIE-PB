@@ -455,7 +455,8 @@ void AnalyzerImpl::write_pbsa_energy_csv(const PbsaEntropyResult &entropy) const
   for (const FrameResult &row : pbsa_rows_) {
     const double dg_bind = row.pbsa_no_entropy_kj_mol + minus_tds;
     out << row.trajectory_id << ',' << row.frame_index << ','
-        << row.global_index << ',' << row.time_ps << ",grid,"
+        << row.global_index << ',' << row.time_ps << ',' << row.pbe_backend
+        << ','
         << row.atom_count << ',' << row.pbsa_receptor_atom_count << ','
         << row.pbsa_ligand_atom_count << ',' << row.nx << ',' << row.ny
         << ',' << row.nz << ',' << row.solver_mode << ',' << row.mg_levels
@@ -941,7 +942,10 @@ void AnalyzerImpl::write_pbsa_performance() const {
   out << "timing_granularity natural_boundaries\n";
   out << "interaction_entropy_source E_MM_elec_plus_vdw\n";
   out << "frames " << pbsa_rows_.size() << "\n";
-  out << "endpoint_solves " << (pbsa_rows_.size() * 6) << "\n";
+  const std::size_t endpoint_solves_per_frame =
+      args_.backend == "tabi" ? 3U : 6U;
+  out << "endpoint_solves "
+      << (pbsa_rows_.size() * endpoint_solves_per_frame) << "\n";
   out << "max_grid_points " << max_grid_points_seen_ << "\n";
   out << "max_memory_bytes " << max_memory_bytes_seen_ << "\n";
   out << "residue_decomp " << args_.pbsa_decomp << "\n";
@@ -1125,7 +1129,7 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
 
   out << "# TITAN MM/PBSA summary\n";
   out << "model MM/PBSA_PBE_linear\n";
-  out << "pbsa_backend grid\n";
+  out << "pbsa_backend " << args_.backend << "\n";
   out << "pbsa_enabled true\n";
   out << "pbsa_components_requested " << args_.pbsa_components << "\n";
   out << "pbsa_decomp_requested " << args_.pbsa_decomp << "\n";
@@ -1146,7 +1150,8 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
       << format_fixed(TitanSASA::kNonpolarGammaKJPerMolA2, 8) << "\n";
   out << "nonpolar_gamma_kcalmol_A2 "
       << format_fixed(TitanSASA::kNonpolarGammaKcalPerMolA2, 8) << "\n";
-  out << "endpoint_solves_per_frame 6\n";
+  out << "endpoint_solves_per_frame "
+      << (args_.backend == "tabi" ? 3 : 6) << "\n";
   out << "energy_timeseries mm_pbsa_energy.csv\n";
   if (effective_pbsa_decomp() != "off")
     out << "decomposition mm_pbsa_decomposition.dat\n";

@@ -77,10 +77,11 @@ struct BoxMatrix {
   }
 
   void apply_mic(double &dx, double &dy, double &dz) const {
-    // To fractional
-    double fx = inv[0][0] * dx + inv[0][1] * dy + inv[0][2] * dz;
-    double fy = inv[1][0] * dx + inv[1][1] * dy + inv[1][2] * dz;
-    double fz = inv[2][0] * dx + inv[2][1] * dy + inv[2][2] * dz;
+    // Lattice vectors are stored as rows, so r = transpose(m) * f and
+    // f = transpose(inv) * r.
+    double fx = inv[0][0] * dx + inv[1][0] * dy + inv[2][0] * dz;
+    double fy = inv[0][1] * dx + inv[1][1] * dy + inv[2][1] * dz;
+    double fz = inv[0][2] * dx + inv[1][2] * dy + inv[2][2] * dz;
 
     // Shift to [-0.5, 0.5]
     fx -= std::round(fx);
@@ -96,13 +97,13 @@ struct BoxMatrix {
 #if TITAN_COMPILED_WITH_AVX
   void apply_mic_avx(__m256d &dx, __m256d &dy, __m256d &dz) const {
     __m256d m00 = _mm256_set1_pd(inv[0][0]);
-    __m256d m01 = _mm256_set1_pd(inv[0][1]);
-    __m256d m02 = _mm256_set1_pd(inv[0][2]);
-    __m256d m10 = _mm256_set1_pd(inv[1][0]);
+    __m256d m01 = _mm256_set1_pd(inv[1][0]);
+    __m256d m02 = _mm256_set1_pd(inv[2][0]);
+    __m256d m10 = _mm256_set1_pd(inv[0][1]);
     __m256d m11 = _mm256_set1_pd(inv[1][1]);
-    __m256d m12 = _mm256_set1_pd(inv[1][2]);
-    __m256d m20 = _mm256_set1_pd(inv[2][0]);
-    __m256d m21 = _mm256_set1_pd(inv[2][1]);
+    __m256d m12 = _mm256_set1_pd(inv[2][1]);
+    __m256d m20 = _mm256_set1_pd(inv[0][2]);
+    __m256d m21 = _mm256_set1_pd(inv[1][2]);
     __m256d m22 = _mm256_set1_pd(inv[2][2]);
 
     __m256d fx = simd_compat::fmadd_pd(
@@ -125,13 +126,13 @@ struct BoxMatrix {
     fz = _mm256_sub_pd(fz, round_half_away_from_zero(fz));
 
     __m256d r00 = _mm256_set1_pd(m[0][0]);
-    __m256d r01 = _mm256_set1_pd(m[1][0]);
-    __m256d r02 = _mm256_set1_pd(m[2][0]);
-    __m256d r10 = _mm256_set1_pd(m[0][1]);
+    __m256d r01 = _mm256_set1_pd(m[0][1]);
+    __m256d r02 = _mm256_set1_pd(m[0][2]);
+    __m256d r10 = _mm256_set1_pd(m[1][0]);
     __m256d r11 = _mm256_set1_pd(m[1][1]);
-    __m256d r12 = _mm256_set1_pd(m[2][1]);
-    __m256d r20 = _mm256_set1_pd(m[0][2]);
-    __m256d r21 = _mm256_set1_pd(m[1][2]);
+    __m256d r12 = _mm256_set1_pd(m[1][2]);
+    __m256d r20 = _mm256_set1_pd(m[2][0]);
+    __m256d r21 = _mm256_set1_pd(m[2][1]);
     __m256d r22 = _mm256_set1_pd(m[2][2]);
 
     dx = simd_compat::fmadd_pd(

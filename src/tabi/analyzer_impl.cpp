@@ -7315,6 +7315,7 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_preconditioner_block_near,"
            "tabi_preconditioner_block_panel_cap,"
            "tabi_preconditioner_overlap_panel_cap,"
+           "tabi_preconditioner_ilu_neighbor_cap_requested,"
            "tabi_preconditioner_ilu_neighbor_cap,"
            "tabi_preconditioner_ilu_drop_tol,"
            "tabi_preconditioner_ilu_regularization,"
@@ -7347,6 +7348,10 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_preconditioner_quality_failure_probe_rel_residual,"
            "tabi_preconditioner_quality_status,"
            "tabi_preconditioner_setup_seconds,"
+           "tabi_preconditioner_graph_setup_seconds,"
+           "tabi_preconditioner_graph_cache_reused,"
+           "tabi_preconditioner_near_assembly_setup_seconds,"
+           "tabi_preconditioner_ilu_factor_setup_seconds,"
            "tabi_preconditioner_apply_seconds,"
            "tabi_preconditioner_apply_calls,"
            "tabi_preconditioner_sparse_nnz_blocks,"
@@ -7361,6 +7366,9 @@ void AnalyzerImpl::write_timing_header_if_needed() {
            "tabi_preconditioner_coarse_status,"
            "tabi_preconditioner_coarse_setup_matvec_calls,"
            "tabi_preconditioner_coarse_setup_seconds,"
+           "tabi_preconditioner_coarse_moments_setup_seconds,"
+           "tabi_preconditioner_coarse_far_setup_seconds,"
+           "tabi_preconditioner_coarse_audit_setup_seconds,"
            "tabi_preconditioner_coarse_apply_seconds,"
            "tabi_preconditioner_coarse_apply_calls,"
            "tabi_preconditioner_coarse_rp_identity_error_max,"
@@ -7940,9 +7948,10 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
       << csv_escape(result.tabi_preconditioner_requested) << ','
       << csv_escape(result.tabi_preconditioner_effective) << ','
       << csv_escape(result.tabi_preconditioner_block_near) << ','
-      << result.tabi_preconditioner_block_panel_cap << ','
-      << result.tabi_preconditioner_overlap_panel_cap << ','
-      << result.tabi_preconditioner_ilu_neighbor_cap << ','
+              << result.tabi_preconditioner_block_panel_cap << ','
+              << result.tabi_preconditioner_overlap_panel_cap << ','
+              << result.tabi_preconditioner_ilu_neighbor_cap_requested << ','
+              << result.tabi_preconditioner_ilu_neighbor_cap << ','
       << result.tabi_preconditioner_ilu_drop_tol << ','
       << csv_escape(result.tabi_preconditioner_ilu_regularization) << ','
       << result.tabi_preconditioner_ilu_regularization_max << ','
@@ -7974,6 +7983,11 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
       << result.tabi_preconditioner_quality_failure_probe_rel_residual << ','
       << csv_escape(result.tabi_preconditioner_quality_status) << ','
       << seconds(result.tabi_preconditioner_setup_ms) << ','
+      << seconds(result.tabi_preconditioner_graph_setup_ms) << ','
+      << (result.tabi_preconditioner_graph_cache_reused ? "true" : "false")
+      << ','
+      << seconds(result.tabi_preconditioner_near_assembly_setup_ms) << ','
+      << seconds(result.tabi_preconditioner_ilu_factor_setup_ms) << ','
       << seconds(result.tabi_preconditioner_apply_ms) << ','
       << result.tabi_preconditioner_apply_calls << ','
       << result.tabi_preconditioner_sparse_nnz_blocks << ','
@@ -7988,6 +8002,9 @@ void AnalyzerImpl::append_timing_row(const FrameResult &result,
       << csv_escape(result.tabi_preconditioner_coarse_status) << ','
       << result.tabi_preconditioner_coarse_setup_matvec_calls << ','
       << seconds(result.tabi_preconditioner_coarse_setup_ms) << ','
+      << seconds(result.tabi_preconditioner_coarse_moments_setup_ms) << ','
+      << seconds(result.tabi_preconditioner_coarse_far_setup_ms) << ','
+      << seconds(result.tabi_preconditioner_coarse_audit_setup_ms) << ','
       << seconds(result.tabi_preconditioner_coarse_apply_ms) << ','
       << result.tabi_preconditioner_coarse_apply_calls << ','
       << result.tabi_preconditioner_coarse_rp_identity_error_max << ','
@@ -8535,6 +8552,7 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "preconditioner_requested,preconditioner_effective,"
            "preconditioner_block_near,"
            "preconditioner_block_panel_cap,preconditioner_overlap_panel_cap,"
+           "preconditioner_ilu_neighbor_cap_requested,"
            "preconditioner_ilu_neighbor_cap,preconditioner_ilu_drop_tol,"
            "preconditioner_ilu_regularization,"
            "preconditioner_ilu_regularization_max,"
@@ -9141,6 +9159,7 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << csv_escape(result.tabi_preconditioner_block_near) << ','
       << result.tabi_preconditioner_block_panel_cap << ','
       << result.tabi_preconditioner_overlap_panel_cap << ','
+      << result.tabi_preconditioner_ilu_neighbor_cap_requested << ','
       << result.tabi_preconditioner_ilu_neighbor_cap << ','
       << result.tabi_preconditioner_ilu_drop_tol << ','
       << csv_escape(result.tabi_preconditioner_ilu_regularization) << ','
@@ -9173,6 +9192,11 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << result.tabi_preconditioner_quality_failure_probe_rel_residual << ','
       << csv_escape(result.tabi_preconditioner_quality_status) << ','
       << seconds(result.tabi_preconditioner_setup_ms) << ','
+      << seconds(result.tabi_preconditioner_graph_setup_ms) << ','
+      << (result.tabi_preconditioner_graph_cache_reused ? "true" : "false")
+      << ','
+      << seconds(result.tabi_preconditioner_near_assembly_setup_ms) << ','
+      << seconds(result.tabi_preconditioner_ilu_factor_setup_ms) << ','
       << seconds(result.tabi_preconditioner_apply_ms) << ','
       << result.tabi_preconditioner_apply_calls << ','
       << result.tabi_preconditioner_sparse_nnz_blocks << ','
@@ -9187,6 +9211,9 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << csv_escape(result.tabi_preconditioner_coarse_status) << ','
       << result.tabi_preconditioner_coarse_setup_matvec_calls << ','
       << seconds(result.tabi_preconditioner_coarse_setup_ms) << ','
+      << seconds(result.tabi_preconditioner_coarse_moments_setup_ms) << ','
+      << seconds(result.tabi_preconditioner_coarse_far_setup_ms) << ','
+      << seconds(result.tabi_preconditioner_coarse_audit_setup_ms) << ','
       << seconds(result.tabi_preconditioner_coarse_apply_ms) << ','
       << result.tabi_preconditioner_coarse_apply_calls << ','
       << result.tabi_preconditioner_coarse_rp_identity_error_max << ','
@@ -13198,6 +13225,8 @@ AnalyzerImpl::solve_tabi_reaction_field(const std::vector<Atom> &atoms,
       tabi.preconditioner_block_panel_cap;
   solve.tabi_preconditioner_overlap_panel_cap =
       tabi.preconditioner_overlap_panel_cap;
+  solve.tabi_preconditioner_ilu_neighbor_cap_requested =
+      tabi.preconditioner_ilu_neighbor_cap_requested;
   solve.tabi_preconditioner_ilu_neighbor_cap =
       tabi.preconditioner_ilu_neighbor_cap;
   solve.tabi_preconditioner_ilu_drop_tol = tabi.preconditioner_ilu_drop_tol;
@@ -13257,6 +13286,14 @@ AnalyzerImpl::solve_tabi_reaction_field(const std::vector<Atom> &atoms,
       tabi.preconditioner_quality_failure_probe_rel_residual;
   solve.tabi_preconditioner_quality_status = tabi.preconditioner_quality_status;
   solve.tabi_preconditioner_setup_ms = tabi.preconditioner_setup_ms;
+  solve.tabi_preconditioner_graph_setup_ms =
+      tabi.preconditioner_graph_setup_ms;
+  solve.tabi_preconditioner_graph_cache_reused =
+      tabi.preconditioner_graph_cache_reused;
+  solve.tabi_preconditioner_near_assembly_setup_ms =
+      tabi.preconditioner_near_assembly_setup_ms;
+  solve.tabi_preconditioner_ilu_factor_setup_ms =
+      tabi.preconditioner_ilu_factor_setup_ms;
   solve.tabi_preconditioner_apply_ms = tabi.preconditioner_apply_ms;
   solve.tabi_preconditioner_apply_calls = tabi.preconditioner_apply_calls;
   solve.tabi_preconditioner_sparse_nnz_blocks =
@@ -13281,6 +13318,12 @@ AnalyzerImpl::solve_tabi_reaction_field(const std::vector<Atom> &atoms,
       tabi.preconditioner_coarse_setup_matvec_calls;
   solve.tabi_preconditioner_coarse_setup_ms =
       tabi.preconditioner_coarse_setup_ms;
+  solve.tabi_preconditioner_coarse_moments_setup_ms =
+      tabi.preconditioner_coarse_moments_setup_ms;
+  solve.tabi_preconditioner_coarse_far_setup_ms =
+      tabi.preconditioner_coarse_far_setup_ms;
+  solve.tabi_preconditioner_coarse_audit_setup_ms =
+      tabi.preconditioner_coarse_audit_setup_ms;
   solve.tabi_preconditioner_coarse_apply_ms =
       tabi.preconditioner_coarse_apply_ms;
   solve.tabi_preconditioner_coarse_apply_calls =
@@ -13537,14 +13580,25 @@ FrameResult AnalyzerImpl::consume_frame(
 
   if (args_.backend == "tabi") {
     const auto tabi_time_begin = std::chrono::steady_clock::now();
+    const auto tabi_complex_time_begin = std::chrono::steady_clock::now();
     const ReactionSolve tabi_solve =
         solve_tabi_reaction_field(atoms_, executor);
+    const auto tabi_complex_time_end = std::chrono::steady_clock::now();
     ReactionSolve tabi_receptor_solve;
     ReactionSolve tabi_ligand_solve;
     const bool binding_cycle = args_.binding_cycle == "pqr-components";
-    if (binding_cycle) {
+    const bool native_pbsa_cycle = args_.pbsa;
+    const bool endpoint_cycle = binding_cycle || native_pbsa_cycle;
+    if (endpoint_cycle) {
+      const auto receptor_time_begin = std::chrono::steady_clock::now();
       tabi_receptor_solve = solve_tabi_reaction_field(mol1_atoms, executor);
+      const auto receptor_time_end = std::chrono::steady_clock::now();
+      const auto ligand_time_begin = std::chrono::steady_clock::now();
       tabi_ligand_solve = solve_tabi_reaction_field(mol2_atoms, executor);
+      const auto ligand_time_end = std::chrono::steady_clock::now();
+      result.pbsa_time_receptor_ms =
+          elapsed_ms(receptor_time_begin, receptor_time_end);
+      result.pbsa_time_ligand_ms = elapsed_ms(ligand_time_begin, ligand_time_end);
     }
     const auto tabi_time_end = std::chrono::steady_clock::now();
     const double tabi_total_ms = elapsed_ms(tabi_time_begin, tabi_time_end);
@@ -14439,6 +14493,8 @@ FrameResult AnalyzerImpl::consume_frame(
         tabi_solve.tabi_preconditioner_block_panel_cap;
     result.tabi_preconditioner_overlap_panel_cap =
         tabi_solve.tabi_preconditioner_overlap_panel_cap;
+    result.tabi_preconditioner_ilu_neighbor_cap_requested =
+        tabi_solve.tabi_preconditioner_ilu_neighbor_cap_requested;
     result.tabi_preconditioner_ilu_neighbor_cap =
         tabi_solve.tabi_preconditioner_ilu_neighbor_cap;
     result.tabi_preconditioner_ilu_drop_tol =
@@ -14503,6 +14559,14 @@ FrameResult AnalyzerImpl::consume_frame(
         tabi_solve.tabi_preconditioner_quality_status;
     result.tabi_preconditioner_setup_ms =
         tabi_solve.tabi_preconditioner_setup_ms;
+    result.tabi_preconditioner_graph_setup_ms =
+        tabi_solve.tabi_preconditioner_graph_setup_ms;
+    result.tabi_preconditioner_graph_cache_reused =
+        tabi_solve.tabi_preconditioner_graph_cache_reused;
+    result.tabi_preconditioner_near_assembly_setup_ms =
+        tabi_solve.tabi_preconditioner_near_assembly_setup_ms;
+    result.tabi_preconditioner_ilu_factor_setup_ms =
+        tabi_solve.tabi_preconditioner_ilu_factor_setup_ms;
     result.tabi_preconditioner_apply_ms =
         tabi_solve.tabi_preconditioner_apply_ms;
     result.tabi_preconditioner_apply_calls =
@@ -14531,6 +14595,12 @@ FrameResult AnalyzerImpl::consume_frame(
         tabi_solve.tabi_preconditioner_coarse_setup_matvec_calls;
     result.tabi_preconditioner_coarse_setup_ms =
         tabi_solve.tabi_preconditioner_coarse_setup_ms;
+    result.tabi_preconditioner_coarse_moments_setup_ms =
+        tabi_solve.tabi_preconditioner_coarse_moments_setup_ms;
+    result.tabi_preconditioner_coarse_far_setup_ms =
+        tabi_solve.tabi_preconditioner_coarse_far_setup_ms;
+    result.tabi_preconditioner_coarse_audit_setup_ms =
+        tabi_solve.tabi_preconditioner_coarse_audit_setup_ms;
     result.tabi_preconditioner_coarse_apply_ms =
         tabi_solve.tabi_preconditioner_coarse_apply_ms;
     result.tabi_preconditioner_coarse_apply_calls =
@@ -14605,7 +14675,7 @@ FrameResult AnalyzerImpl::consume_frame(
     result.reaction_energy_source = tabi_solve.reaction_energy_source;
     result.complex_energy_kcal_mol = tabi_solve.energy_kcal_mol;
     result.complex_energy_kj_mol = tabi_solve.energy_kj_mol;
-    if (args_.dgsolv && !binding_cycle) {
+    if (args_.dgsolv && !binding_cycle && !native_pbsa_cycle) {
       // TABI solves directly for the reaction field. By the standard PB/BIE
       // definition, Delta G_solv = 1/2 sum_i q_i phi_reac(r_i), so no second
       // vacuum solve or solvent-minus-vacuum subtraction is required here.
@@ -14615,7 +14685,7 @@ FrameResult AnalyzerImpl::consume_frame(
       result.deltaG_solv_kt = tabi_solve.energy_kt;
       result.dgsolv_status = tabi_solve.converged ? "ok" : "not_converged";
     }
-    if (binding_cycle) {
+    if (endpoint_cycle) {
       result.dgsolv_enabled = true;
       result.mol1_energy_kcal_mol = tabi_receptor_solve.energy_kcal_mol;
       result.mol1_energy_kj_mol = tabi_receptor_solve.energy_kj_mol;
@@ -14636,12 +14706,138 @@ FrameResult AnalyzerImpl::consume_frame(
           std::max({result.memory_bytes, tabi_receptor_solve.peak_memory_bytes,
                     tabi_ligand_solve.peak_memory_bytes});
     }
+    if (native_pbsa_cycle) {
+      result.pbsa_time_complex_ms =
+          elapsed_ms(tabi_complex_time_begin, tabi_complex_time_end);
+      result.pbsa_grid_reuse_effective = "not_applicable";
+      const auto components_time_begin = std::chrono::steady_clock::now();
+      const PbsaComponents pbsa = compute_pbsa_components(
+          mol1, params1, *mol2, *params2, mol1_atoms, mol2_atoms, atoms_,
+          result.deltaG_solv_kj_mol, executor, energy_provider);
+      const auto components_time_end = std::chrono::steady_clock::now();
+      result.pbsa_time_components_ms =
+          elapsed_ms(components_time_begin, components_time_end);
+      result.pbsa_enabled = true;
+      result.pbsa_status =
+          (tabi_solve.converged && tabi_receptor_solve.converged &&
+           tabi_ligand_solve.converged && pbsa.status == "ok")
+              ? "ok"
+              : "not_converged";
+      result.pbsa_elec_kj_mol = pbsa.elec_kj_mol;
+      result.pbsa_vdw_kj_mol = pbsa.vdw_kj_mol;
+      result.pbsa_mm_kj_mol = pbsa.mm_kj_mol;
+      result.pbsa_sasa_complex_a2 = pbsa.sasa_complex_a2;
+      result.pbsa_sasa_mol1_a2 = pbsa.sasa_mol1_a2;
+      result.pbsa_sasa_mol2_a2 = pbsa.sasa_mol2_a2;
+      result.pbsa_delta_sasa_a2 = pbsa.delta_sasa_a2;
+      result.pbsa_nonpolar_kj_mol = pbsa.nonpolar_kj_mol;
+      result.pbsa_delta_solv_kj_mol = pbsa.delta_solv_kj_mol;
+      result.pbsa_delta_solv_kcal_mol = pbsa.delta_solv_kj_mol * kKJToKcal;
+      result.pbsa_no_entropy_kj_mol = pbsa.no_entropy_kj_mol;
+      result.pbsa_no_entropy_kcal_mol = pbsa.no_entropy_kj_mol * kKJToKcal;
+      result.pbsa_receptor_atom_count = mol1_atoms.size();
+      result.pbsa_ligand_atom_count = mol2_atoms.size();
+      result.pbsa_complex_status =
+          tabi_solve.converged ? "ok" : "not_converged";
+      result.pbsa_receptor_status =
+          tabi_receptor_solve.converged ? "ok" : "not_converged";
+      result.pbsa_ligand_status =
+          tabi_ligand_solve.converged ? "ok" : "not_converged";
+      result.pbsa_receptor_solvent_iterations =
+          tabi_receptor_solve.solvent_total_iterations;
+      result.pbsa_receptor_vacuum_iterations = 0;
+      result.pbsa_ligand_solvent_iterations =
+          tabi_ligand_solve.solvent_total_iterations;
+      result.pbsa_ligand_vacuum_iterations = 0;
+      result.pbsa_receptor_solvent_rms = tabi_receptor_solve.solvent.rms;
+      result.pbsa_receptor_vacuum_rms = 0.0;
+      result.pbsa_ligand_solvent_rms = tabi_ligand_solve.solvent.rms;
+      result.pbsa_ligand_vacuum_rms = 0.0;
+      result.pbsa_receptor_solvent_max_dphi =
+          tabi_receptor_solve.solvent.max_dphi;
+      result.pbsa_receptor_vacuum_max_dphi = 0.0;
+      result.pbsa_ligand_solvent_max_dphi =
+          tabi_ligand_solve.solvent.max_dphi;
+      result.pbsa_ligand_vacuum_max_dphi = 0.0;
+
+      if (args_.pbsa_perf == "detail") {
+        auto append_tabi_endpoint =
+            [&](const std::string &endpoint, const ReactionSolve &solve,
+                double elapsed, const std::string &status) {
+              PbsaEndpointTimingRow row;
+              row.trajectory_id = result.trajectory_id;
+              row.frame_index = result.frame_index;
+              row.global_index = result.global_index;
+              row.time_ps = result.time_ps;
+              row.endpoint = endpoint;
+              row.phase = "reaction_field";
+              row.variant = "baseline";
+              row.timing.surface_ms = solve.tabi_surface_build_ms;
+              row.timing.solver_ms = solve.tabi_gmres_ms;
+              row.timing.setup_ms = std::max(
+                  0.0, elapsed - row.timing.surface_ms - row.timing.solver_ms);
+              row.reuse_surface_hits = 0;
+              row.reuse_operator_hits = 0;
+              row.status = status;
+              pbsa_endpoint_timing_rows_.push_back(std::move(row));
+            };
+        append_tabi_endpoint("complex", tabi_solve,
+                             result.pbsa_time_complex_ms,
+                             result.pbsa_complex_status);
+        append_tabi_endpoint("receptor", tabi_receptor_solve,
+                             result.pbsa_time_receptor_ms,
+                             result.pbsa_receptor_status);
+        append_tabi_endpoint("ligand", tabi_ligand_solve,
+                             result.pbsa_time_ligand_ms,
+                             result.pbsa_ligand_status);
+      }
+
+      const std::string pbsa_decomp = effective_pbsa_decomp();
+      const bool legacy_pbsa_decomp =
+          pbsa_decomp == "residue" || pbsa_decomp == "hybrid";
+      if (legacy_pbsa_decomp || edecomp_sink_) {
+        const auto residue_time_begin = std::chrono::steady_clock::now();
+        const std::vector<ResidueFrameRow> residue_rows =
+            compute_pbsa_residue_rows(
+                mol1, *mol2, mol1_atoms, mol2_atoms, atoms_, tabi_solve,
+                tabi_receptor_solve, tabi_ligand_solve, result, executor,
+                energy_provider);
+        const auto residue_time_end = std::chrono::steady_clock::now();
+        result.pbsa_time_residue_ms =
+            elapsed_ms(residue_time_begin, residue_time_end);
+        if (legacy_pbsa_decomp)
+          accumulate_pbsa_residue_rows(result, residue_rows);
+        if (edecomp_sink_) {
+          std::vector<EDecompRow> sink_rows;
+          sink_rows.reserve(residue_rows.size());
+          for (const ResidueFrameRow &row : residue_rows) {
+            EDecompRow sink_row;
+            sink_row.molecule = row.key.molecule;
+            sink_row.unit_type = row.key.unit_type;
+            sink_row.chain = row.key.chain;
+            sink_row.resnr = row.key.resnr;
+            sink_row.respos = row.key.respos;
+            sink_row.resname = row.key.resname;
+            sink_row.atom_index = row.key.atom_index;
+            sink_row.atom_name = row.key.atom_name;
+            sink_row.elec_kj_mol = row.elec_kj_mol;
+            sink_row.vdw_kj_mol = row.vdw_kj_mol;
+            sink_row.polar_kj_mol = row.polar_kj_mol;
+            sink_row.nonpolar_kj_mol = row.nonpolar_kj_mol;
+            sink_rows.push_back(std::move(sink_row));
+          }
+          edecomp_sink_(sink_rows);
+        }
+      }
+    }
     result.status =
         result.tabi_status == "off" || result.tabi_status.empty()
             ? ((result.solvent_converged && result.vacuum_converged) ? "ok"
                                                                      : "failed")
             : result.tabi_status;
     if (result.dgsolv_enabled && result.dgsolv_status != "ok")
+      result.status = "not_converged";
+    if (result.pbsa_enabled && result.pbsa_status != "ok")
       result.status = "not_converged";
     result.pbsa_time_frame_ms =
         elapsed_ms(frame_time_begin, std::chrono::steady_clock::now());
@@ -14661,14 +14857,16 @@ FrameResult AnalyzerImpl::consume_frame(
         frame_memory_after.peak_working_set_bytes;
     maybe_write_tabi_surface_solution(result, tabi_solve);
     maybe_write_atom_reaction_potentials(result, atoms_, tabi_solve, "complex");
-    if (binding_cycle) {
+    if (endpoint_cycle) {
       maybe_write_atom_reaction_potentials(result, mol1_atoms,
                                            tabi_receptor_solve, "receptor");
       maybe_write_atom_reaction_potentials(result, mol2_atoms,
                                            tabi_ligand_solve, "ligand");
+    }
+    if (binding_cycle) {
       maybe_write_binding_electrostatics(result, atoms_, mol1_atoms, mol2_atoms,
-                                         tabi_solve, tabi_receptor_solve,
-                                         tabi_ligand_solve);
+                                          tabi_solve, tabi_receptor_solve,
+                                          tabi_ligand_solve);
     }
     append_energy_row(result);
     frame_timing.total_ms =
@@ -14749,6 +14947,21 @@ FrameResult AnalyzerImpl::consume_frame(
         (static_cast<double>(result.solvent_iterations) - iter_mean_) / frame_n;
     mg_cycle_mean_ +=
         (static_cast<double>(result.mg_cycles) - mg_cycle_mean_) / frame_n;
+    if (result.dgsolv_enabled) {
+      ++dgsolv_frames_;
+      const double dg_n = static_cast<double>(dgsolv_frames_);
+      const double dg_delta = result.deltaG_solv_kj_mol - dgsolv_mean_;
+      dgsolv_mean_ += dg_delta / dg_n;
+      dgsolv_m2_ += dg_delta * (result.deltaG_solv_kj_mol - dgsolv_mean_);
+      if (dgsolv_frames_ == 1) {
+        dgsolv_min_ = result.deltaG_solv_kj_mol;
+        dgsolv_max_ = result.deltaG_solv_kj_mol;
+      } else {
+        dgsolv_min_ = std::min(dgsolv_min_, result.deltaG_solv_kj_mol);
+        dgsolv_max_ = std::max(dgsolv_max_, result.deltaG_solv_kj_mol);
+      }
+    }
+    accumulate_pbsa(result);
     if (log.is_open() && result.status != "ok") {
       TitanUI::log_kv(log, "PBE Warning",
                       "frame " + std::to_string(result.global_index) +

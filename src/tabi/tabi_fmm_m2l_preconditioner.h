@@ -71,6 +71,10 @@ struct JcpSparseIluPreconditioner {
   std::vector<std::vector<std::size_t>> forward_levels;
   std::vector<std::vector<std::size_t>> backward_levels;
   std::size_t parallel_level_max_width{0};
+  double graph_setup_ms{0.0};
+  bool graph_cache_reused{false};
+  double near_assembly_setup_ms{0.0};
+  double factor_setup_ms{0.0};
 
   // GMRES invokes this serial preconditioner repeatedly; retain its four
   // triangular-solve work vectors without exposing mutable state to callers.
@@ -117,6 +121,23 @@ std::size_t estimate_fmm_m2l_nearfield_ilu0_bytes(
     bool include_regularization_retry = false,
     const std::string &graph_source = "fmm-near");
 
+struct FmmIluBudgetSelection {
+  std::size_t requested_neighbor_cap{32};
+  std::size_t effective_neighbor_cap{32};
+  std::size_t estimated_bytes{0};
+  bool fits_budget{false};
+  double graph_build_ms{0.0};
+  std::shared_ptr<const std::vector<std::vector<std::size_t>>>
+      normalized_graph;
+};
+
+FmmIluBudgetSelection select_fmm_m2l_nearfield_ilu0_budget(
+    const titan::tabi::fmm_m2l::FmmM2lAnalyticContext &context,
+    std::size_t diagonal_size, bool coupled, std::size_t neighbor_cap,
+    std::size_t memory_budget_bytes,
+    bool include_regularization_retry = false,
+    const std::string &graph_source = "fmm-near");
+
 std::shared_ptr<JcpSparseIluPreconditioner>
 build_fmm_m2l_nearfield_ilu0_preconditioner(
     const std::vector<Panel> &panels,
@@ -128,7 +149,10 @@ build_fmm_m2l_nearfield_ilu0_preconditioner(
     const std::string &quad_buffer = "off",
     const std::string &regularization_mode = "adaptive",
     double regularization_max_relative = 1.0e-2,
-    const std::string &graph_source = "fmm-near");
+    const std::string &graph_source = "fmm-near",
+    JcpCoarseGalerkinPreconditioner *coarse_near_capture = nullptr,
+    std::shared_ptr<const std::vector<std::vector<std::size_t>>>
+        normalized_graph = {});
 
 std::size_t estimate_jcp_sparse_ilu0_graph_bytes(
     const std::vector<std::vector<std::size_t>> &graph,

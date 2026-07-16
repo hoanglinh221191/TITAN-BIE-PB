@@ -22,7 +22,42 @@ RuntimeCutoffs resolve_runtime_cutoffs(const arguments &Arguments) {
     cutoffs.pair_contact_cutoff = Arguments.pbc.pbctopo_contact_cutoff;
   if (Arguments.pbc.pbctopo_continuity_cutoff_set)
     cutoffs.continuity_cutoff = Arguments.pbc.pbctopo_continuity_cutoff;
+  cutoffs.vdw_clash_scale = Arguments.pbc.pbctopo_vdw_clash_scale;
   return cutoffs;
+}
+
+AnchorMetricMode resolve_anchor_metric_mode(const arguments &Arguments) {
+  const std::string &mode = Arguments.pbc.pbctopo_anchor_metrics;
+  if (mode == "mst-only")
+    return AnchorMetricMode::MstOnly;
+  if (mode == "no-order")
+    return AnchorMetricMode::NoOrder;
+  if (mode == "no-contact")
+    return AnchorMetricMode::NoContact;
+  return AnchorMetricMode::Full;
+}
+
+const char *anchor_metric_mode_name(AnchorMetricMode mode) {
+  switch (mode) {
+  case AnchorMetricMode::MstOnly:
+    return "mst-only";
+  case AnchorMetricMode::NoOrder:
+    return "no-order";
+  case AnchorMetricMode::NoContact:
+    return "no-contact";
+  case AnchorMetricMode::Full:
+  default:
+    return "full";
+  }
+}
+
+TemporalMode resolve_temporal_mode(const arguments &Arguments) {
+  return Arguments.pbc.pbctopo_temporal == "viterbi" ? TemporalMode::Viterbi
+                                                       : TemporalMode::Greedy;
+}
+
+const char *temporal_mode_name(TemporalMode mode) {
+  return mode == TemporalMode::Viterbi ? "viterbi" : "greedy";
 }
 
 SolveMode resolve_solve_mode(const arguments &Arguments) {

@@ -37,6 +37,7 @@ enum class PbctopoFailureReason {
   ComponentGraphFailed,
   BeamEmpty,
   NotBetterThanIncumbent,
+  CertificationReject,
   FallbackPbci,
 };
 
@@ -69,12 +70,27 @@ struct PbctopoFrameReport {
   std::size_t safe_candidate_count = 0;
   PbctopoScoreVector best_score;
   PbctopoScoreVector second_score;
+  std::string score_gap_metric = "na";
   double score_gap = std::numeric_limits<double>::quiet_NaN();
-  double clash_margin = std::numeric_limits<double>::quiet_NaN();
-  double continuity_margin = std::numeric_limits<double>::quiet_NaN();
-  double anchor_margin = std::numeric_limits<double>::quiet_NaN();
-  double split_owner_margin = std::numeric_limits<double>::quiet_NaN();
+  double clash_margin_A = std::numeric_limits<double>::quiet_NaN();
+  double continuity_margin_A = std::numeric_limits<double>::quiet_NaN();
+  double anchor_max_edge_A = std::numeric_limits<double>::quiet_NaN();
+  double split_owner_gap_scaled = std::numeric_limits<double>::quiet_NaN();
   PbctopoAnchorGraphScore anchor_graph;
+  PbctopoHardFeasibility hard_feasibility;
+  std::uint64_t assignment_signature = 0;
+  std::size_t assignment_component_count = 0;
+  bool temporal_selected = false;
+  bool temporal_changed_from_greedy = false;
+  std::uint64_t temporal_assignment_signature = 0;
+  bool virtual_search_exhaustive = false;
+  bool virtual_branch_and_bound_used = false;
+  std::uint64_t virtual_state_space = 0;
+  std::size_t virtual_states_evaluated = 0;
+  double virtual_omitted_seam_lower_bound =
+      std::numeric_limits<double>::quiet_NaN();
+  double virtual_lower_bound_gap =
+      std::numeric_limits<double>::quiet_NaN();
   PbctopoFailureReason fallback_reason = PbctopoFailureReason::None;
   double time_total_ms = 0.0;
   double time_graph_ms = 0.0;
@@ -83,6 +99,9 @@ struct PbctopoFrameReport {
   std::size_t cycle_support = 0;
   double cycle_mismatch = 0.0;
   std::size_t inconsistent_edge_count = 0;
+  std::size_t fundamental_cycle_count = 0;
+  double fundamental_cycle_residual_rms = 0.0;
+  double fundamental_cycle_residual_max = 0.0;
 };
 
 const char *pbctopo_frame_status_name(PbctopoFrameStatus status);

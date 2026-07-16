@@ -6,6 +6,7 @@
 #include "info.h"
 #include "martini_nonbonded.h"
 #include "miscellaneous.h"
+#include "titan_energy_validation.h"
 #include "titan_executor.h"
 #include "uti_func.h"
 #include <cmath>
@@ -16,6 +17,16 @@
 #include <vector>
 
 using namespace std;
+
+namespace {
+inline void zero_cached_pair_if_present(cache_sigma_epsilon &cached_data,
+                                        size_t pos) {
+  if (!cached_data.elec_ener.empty())
+    cached_data.set_elec_vdw(pos, 0.0, 0.0);
+  if (cached_data.get_force(pos).has_value())
+    cached_data.set_force(pos, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+}
+} // namespace
 
 #ifdef __AVX__
 #include "avx_math.h"
@@ -54,41 +65,59 @@ int force_energy_add(const cache_sigma_epsilon &CachedData, size_t i,
            lg.m_mol[snap].pos.y[lg_pos]},
         dz{rec.m_mol[snap].pos.z[rec_pos] -
            lg.m_mol[snap].pos.z[lg_pos]},
-        charge{138.935457839 * rec_parameters[rec_pos].get_charge() *
-               lg_parameters[lg_pos].get_charge() / Arguments.epsilon_in},
+        charge_prefactor{138.935457839 *
+                         rec_parameters[rec_pos].get_charge() *
+                         lg_parameters[lg_pos].get_charge() /
+                         std::max(1.0e-12, Arguments.epsilon_in)},
         d{0.1 * sqrt(square(dx) + square(dy) + square(dz))};
     const bool is_martini =
         CachedData.force_field_name.find("MARTINI") != string::npos;
+    const bool screened =
+        Arguments.flag_elec_screening &&
+        (CachedData.force_field_name.find("AMBER") != string::npos ||
+         CachedData.force_field_name.find("CHARMM") != string::npos);
 
-    if (CachedData.cutoff_dis > 0. && d > CachedData.cutoff_dis)
+    if (!std::isfinite(d) ||
+        d <= titan_energy_validation::kMinimumPairDistanceNm ||
+        (CachedData.cutoff_dis > 0. && d > CachedData.cutoff_dis))
       return 1;
 
-    if (!is_martini)
-      electro_energy += charge / d;
+    double screening = 1.0;
+    double lambda_debye = 0.0;
+    if (screened) {
+      lambda_debye = 3.07 / std::sqrt(Arguments.salt_concentration);
+      screening = std::exp(-d / lambda_debye);
+    }
+    const double electro_pair = charge_prefactor * screening / d;
+    const double inv_d = 1.0 / d;
+    const double electro_force_prefactor =
+        charge_prefactor * screening *
+        (inv_d * inv_d * inv_d +
+         (screened ? inv_d * inv_d / lambda_debye : 0.0));
 
     if (CachedData.force_field_name.find("CHARMM") != string::npos) {
       double sigma_ij{}, epsilon_ij{};
       charmm::pair_params(CachedData, rec_parameters, lg_parameters, rec_pos,
                           lg_pos, sigma_ij, epsilon_ij);
-      van_der_waals_energy += charmm::lj_energy(sigma_ij, epsilon_ij, d);
-
       if (Arguments.self_int == true &&
           ((sigma_ij > 0.0 && d < sigma_ij) ||
            (Arguments.flag_interchain_energy == true &&
             lg.info[lg_pos].get_chain() == rec.info[rec_pos].get_chain())))
         return 1;
+      electro_energy += electro_pair;
+      van_der_waals_energy += charmm::lj_energy(sigma_ij, epsilon_ij, d);
       if (Arguments.flag_cal_force == true) {
         const double temp_par_vdw =
             charmm::lj_force_prefactor(sigma_ij, epsilon_ij, d);
-        const double temp_elec = charge / (d * d);
-        force_elec.add(0.1 * temp_elec * dx, 0.1 * temp_elec * dy,
-                       0.1 * temp_elec * dz);
+        force_elec.add(0.1 * electro_force_prefactor * dx,
+                       0.1 * electro_force_prefactor * dy,
+                       0.1 * electro_force_prefactor * dz);
         force_vdw.add(0.1 * temp_par_vdw * dx, 0.1 * temp_par_vdw * dy,
                       0.1 * temp_par_vdw * dz);
       }
     } else if (CachedData.force_field_name.find("AMBER") != string::npos) {
-      double temp_vdw{sqrt(rec_parameters[rec_pos].get_epsilon() *
-                           lg_parameters[lg_pos].get_epsilon())},
+      double temp_vdw{4.0 * sqrt(rec_parameters[rec_pos].get_epsilon() *
+                                 lg_parameters[lg_pos].get_epsilon())},
           c_6{c6(0.5 *
                  (lg_parameters[lg_pos].get_sigma() +
                   rec_parameters[rec_pos].get_sigma()) /
@@ -99,25 +128,25 @@ int force_energy_add(const cache_sigma_epsilon &CachedData, size_t i,
           rec_parameters[rec_pos].get_sigma() < 0.)
         c_6 = 0.000;
 
-      van_der_waals_energy += temp_vdw * (c_12 - c_6);
-
       if (Arguments.self_int == true &&
           (c_6 > 1. ||
            (Arguments.flag_interchain_energy == true &&
-            lg.info[lg_pos].get_chain() == rec.info[i].get_chain())))
+            lg.info[lg_pos].get_chain() == rec.info[rec_pos].get_chain())))
         return 1;
+      electro_energy += electro_pair;
+      van_der_waals_energy += temp_vdw * (c_12 - c_6);
       if (Arguments.flag_cal_force == true) {
         double sd{square(1. / d)},
-            temp_par_vdw{temp_vdw * (12. * c_12 * sd - 6. * c_6 * sd)},
-            temp_elec{charge * sd};
-        force_elec.add(0.1 * temp_elec * dx, 0.1 * temp_elec * dy,
-                       0.1 * temp_elec * dz);
+            temp_par_vdw{temp_vdw * (12. * c_12 * sd - 6. * c_6 * sd)};
+        force_elec.add(0.1 * electro_force_prefactor * dx,
+                       0.1 * electro_force_prefactor * dy,
+                       0.1 * electro_force_prefactor * dz);
         force_vdw.add(0.1 * temp_par_vdw * dx, 0.1 * temp_par_vdw * dy,
                       0.1 * temp_par_vdw * dz);
       }
     } else if (CachedData.force_field_name.find("OPLS") != string::npos) {
-      double temp_vdw{sqrt(rec_parameters[rec_pos].get_epsilon() *
-                           lg_parameters[lg_pos].get_epsilon())},
+      double temp_vdw{4.0 * sqrt(rec_parameters[rec_pos].get_epsilon() *
+                                 lg_parameters[lg_pos].get_epsilon())},
           c_6{c6(sqrt(lg_parameters[lg_pos].get_sigma() *
                       rec_parameters[rec_pos].get_sigma()) /
                  d)},
@@ -130,17 +159,18 @@ int force_energy_add(const cache_sigma_epsilon &CachedData, size_t i,
       if (Arguments.self_int == true &&
           (c_6 > 1. ||
            (Arguments.flag_interchain_energy == true &&
-            lg.info[lg_pos].get_chain() == rec.info[i].get_chain())))
+            lg.info[lg_pos].get_chain() == rec.info[rec_pos].get_chain())))
         return 1;
 
+      electro_energy += electro_pair;
       van_der_waals_energy += temp_vdw * (c_12 - c_6);
 
       if (Arguments.flag_cal_force == true) {
         double sd{square(1. / d)},
-            temp_par_vdw{temp_vdw * (12. * c_12 * sd - 6. * c_6 * sd)},
-            temp_elec{charge * sd};
-        force_elec.add(0.1 * temp_elec * dx, 0.1 * temp_elec * dy,
-                       0.1 * temp_elec * dz);
+            temp_par_vdw{temp_vdw * (12. * c_12 * sd - 6. * c_6 * sd)};
+        force_elec.add(0.1 * electro_force_prefactor * dx,
+                       0.1 * electro_force_prefactor * dy,
+                       0.1 * electro_force_prefactor * dz);
         force_vdw.add(0.1 * temp_par_vdw * dx, 0.1 * temp_par_vdw * dy,
                       0.1 * temp_par_vdw * dz);
       }
@@ -172,19 +202,25 @@ int force_energy_add(const cache_sigma_epsilon &CachedData, size_t i,
                       0.1 * temp_vdw * dz);
       }
     } else {
-      double sd{1. / square(d)}, temp_elec{sd * charge}, c_6{c6(d)},
-          c_12{square(c_6)};
+      if (Arguments.self_int == true &&
+          ((&rec == &lg && rec_pos == lg_pos) ||
+           (Arguments.flag_interchain_energy == true &&
+            lg.info[lg_pos].get_chain() == rec.info[rec_pos].get_chain())))
+        return 1;
+      double sd{1. / square(d)}, c_6{c6(d)}, c_12{square(c_6)};
       double epsilon{sqrt(rec_parameters[rec_pos].get_epsilon() *
                           lg_parameters[lg_pos].get_epsilon())},
           sigma{sqrt(rec_parameters[rec_pos].get_sigma() *
                      lg_parameters[lg_pos].get_sigma())},
           temp_vdw{12. * sd * epsilon / c_12 - 6. * sd * sigma / c_6};
 
+      electro_energy += electro_pair;
       van_der_waals_energy += epsilon / c_12 - sigma / c_6;
 
       if (Arguments.flag_cal_force == true) {
-        force_elec.add(0.1 * temp_elec * dx, 0.1 * temp_elec * dy,
-                       0.1 * temp_elec * dz);
+        force_elec.add(0.1 * electro_force_prefactor * dx,
+                       0.1 * electro_force_prefactor * dy,
+                       0.1 * electro_force_prefactor * dz);
         force_vdw.add(0.1 * temp_vdw * dx, 0.1 * temp_vdw * dy,
                       0.1 * temp_vdw * dz);
       }
@@ -252,6 +288,10 @@ void cal_energy_force_amber(const MOL &rec, const MOL &lg,
   Force.set_force(force(0., 0., 0.), force(0., 0., 0.));
   const bool is_charmm =
       Arguments.force_f.find("CHARMM") != string::npos;
+  const double epsilon_in = std::max(1.0e-12, Arguments.epsilon_in);
+  const bool screened = Arguments.flag_elec_screening;
+  const double lambda_debye =
+      screened ? 3.07 / std::sqrt(Arguments.salt_concentration) : 0.0;
 
   for (size_t j{begin}; j < end; ++j) {
     double temp_charge{138.935457839 * lg_parameters[j].get_charge()};
@@ -260,8 +300,21 @@ void cal_energy_force_amber(const MOL &rec, const MOL &lg,
           dy{rec.pos.y[i] - lg.pos.y[j]},
           dz{rec.pos.z[i] - lg.pos.z[j]};
       double d{0.1 * sqrt(square(dx) + square(dy) + square(dz))},
-          charge{temp_charge * rec_parameters[i].get_charge() / d};
-      double sd{square(1. / d)}, temp_elec{sd * charge};
+          charge_prefactor{temp_charge * rec_parameters[i].get_charge() /
+                           epsilon_in};
+      const size_t pos{rec.size() * j + i};
+      if (!std::isfinite(d) ||
+          d <= titan_energy_validation::kMinimumPairDistanceNm) {
+        zero_cached_pair_if_present(CachedData, pos);
+        continue;
+      }
+      const double screening = screened ? std::exp(-d / lambda_debye) : 1.0;
+      const double charge = charge_prefactor * screening / d;
+      const double inv_d = 1.0 / d;
+      const double sd{inv_d * inv_d};
+      const double temp_elec =
+          charge_prefactor * screening *
+          (inv_d * sd + (screened ? sd / lambda_debye : 0.0));
 
       double sigma_self = 0.5 *
                           (lg_parameters[j].get_sigma() +
@@ -291,8 +344,7 @@ void cal_energy_force_amber(const MOL &rec, const MOL &lg,
 
       if (Arguments.distance_energy_cutoff > 0. &&
           d > Arguments.distance_energy_cutoff) {
-        size_t pos{rec.size() * j + i};
-        CachedData.set_elec_vdw(pos, 0., 0.);
+        zero_cached_pair_if_present(CachedData, pos);
         continue;
       }
 
@@ -300,6 +352,7 @@ void cal_energy_force_amber(const MOL &rec, const MOL &lg,
           ((sigma_self > 0.0 && sigma_self > d) ||
            (Arguments.flag_interchain_energy == true &&
             info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+        zero_cached_pair_if_present(CachedData, pos);
         continue;
       }
 
@@ -309,7 +362,6 @@ void cal_energy_force_amber(const MOL &rec, const MOL &lg,
                              0.1 * temp_elec * dz, 0.1 * temp_par_vdw * dx,
                              0.1 * temp_par_vdw * dy, 0.1 * temp_par_vdw * dz);
       } else {
-        size_t pos{rec.size() * j + i};
         CachedData.set_elec_vdw(pos, charge, v_val);
         CachedData.set_force(pos, 0.1 * temp_elec * dx, 0.1 * temp_elec * dy,
                              0.1 * temp_elec * dz, 0.1 * temp_par_vdw * dx,
@@ -332,6 +384,7 @@ void cal_energy_force_opls(const MOL &rec, const MOL &lg,
                            const Multi_MOL_parameters & lg_parameters) {
   Energy.set_energy(0., 0.);
   Force.set_force(force(0., 0., 0.), force(0., 0., 0.));
+  const double epsilon_in = std::max(1.0e-12, Arguments.epsilon_in);
 
   for (size_t j{begin}; j < end; ++j) {
     double temp_epsilon_lg{16. * lg_parameters[j].get_epsilon()},
@@ -342,7 +395,15 @@ void cal_energy_force_opls(const MOL &rec, const MOL &lg,
           dy{rec.pos.y[i] - lg.pos.y[j]},
           dz{rec.pos.z[i] - lg.pos.z[j]};
       double d{0.1 * sqrt(square(dx) + square(dy) + square(dz))},
-          charge{temp_charge * rec_parameters[i].get_charge() / d};
+          charge_prefactor{temp_charge * rec_parameters[i].get_charge() /
+                           epsilon_in};
+      const size_t pos{rec.size() * j + i};
+      if (!std::isfinite(d) ||
+          d <= titan_energy_validation::kMinimumPairDistanceNm) {
+        zero_cached_pair_if_present(CachedData, pos);
+        continue;
+      }
+      const double charge = charge_prefactor / d;
       double sd{square(1. / d)}, temp_elec{sd * charge},
           temp_vdw{sqrt(rec_parameters[i].get_epsilon() * temp_epsilon_lg)},
           c_6{c6(sqrt(temp_sigma_lg * rec_parameters[i].get_sigma()) / d)},
@@ -351,8 +412,7 @@ void cal_energy_force_opls(const MOL &rec, const MOL &lg,
 
       if (Arguments.distance_energy_cutoff > 0. &&
           d > Arguments.distance_energy_cutoff) {
-        size_t pos{rec.size() * j + i};
-        CachedData.set_elec_vdw(pos, 0., 0.);
+        zero_cached_pair_if_present(CachedData, pos);
         continue;
       }
 
@@ -360,6 +420,7 @@ void cal_energy_force_opls(const MOL &rec, const MOL &lg,
           (sqrt(temp_sigma_lg * rec_parameters[i].get_sigma()) > d ||
            (Arguments.flag_interchain_energy == true &&
             info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+        zero_cached_pair_if_present(CachedData, pos);
         continue;
       }
 
@@ -369,7 +430,6 @@ void cal_energy_force_opls(const MOL &rec, const MOL &lg,
                              0.1 * temp_elec * dz, 0.1 * temp_par_vdw * dx,
                              0.1 * temp_par_vdw * dy, 0.1 * temp_par_vdw * dz);
       } else {
-        size_t pos{rec.size() * j + i};
         CachedData.set_elec_vdw(pos, charge, temp_vdw * (c_12 - c_6));
         CachedData.set_force(pos, 0.1 * temp_elec * dx, 0.1 * temp_elec * dy,
                              0.1 * temp_elec * dz, 0.1 * temp_par_vdw * dx,
@@ -390,15 +450,19 @@ void cal_energy_force_gromos(
     const Multi_MOL_parameters & lg_parameters) {
   Energy.set_energy(0., 0.);
   Force.set_force(force(0., 0., 0.), force(0., 0., 0.));
+  const double epsilon_in = std::max(1.0e-12, Arguments.epsilon_in);
 
   for (size_t j{begin}; j < end; ++j) {
     double temp_charge{138.935457839 * lg_parameters[j].get_charge()},
         temp_epsilon_lg{lg_parameters[j].get_epsilon()},
         temp_sigma_lg{lg_parameters[j].get_sigma()};
     for (size_t i{}; i < rec.size(); ++i) {
+      const size_t pos{rec.size() * j + i};
       if (Arguments.self_int == true &&
-          (i == j || (Arguments.flag_interchain_energy == true &&
-                      info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+          ((&rec == &lg && i == j) ||
+           (Arguments.flag_interchain_energy == true &&
+            info_lg[j].get_chain() == info_rec[i].get_chain()))) {
+        zero_cached_pair_if_present(CachedData, pos);
         continue;
       }
 
@@ -407,7 +471,12 @@ void cal_energy_force_gromos(
           dz{rec.pos.z[i] - lg.pos.z[j]};
 
       double d{0.1 * sqrt(square(dx) + square(dy) + square(dz))},
-          charge{temp_charge * rec_parameters[i].get_charge()};
+          charge{temp_charge * rec_parameters[i].get_charge() / epsilon_in};
+      if (!std::isfinite(d) ||
+          d <= titan_energy_validation::kMinimumPairDistanceNm) {
+        zero_cached_pair_if_present(CachedData, pos);
+        continue;
+      }
       double sd{1. / square(d)}, temp_elec{sd * charge / d}, c_6{c6(d)},
           c_12{square(c_6)};
       double epsilon{sqrt(rec_parameters[i].get_epsilon() * temp_epsilon_lg)},
@@ -416,8 +485,7 @@ void cal_energy_force_gromos(
 
       if (Arguments.distance_energy_cutoff > 0. &&
           d > Arguments.distance_energy_cutoff) {
-        size_t pos{rec.size() * j + i};
-        CachedData.set_elec_vdw(pos, 0., 0.);
+        zero_cached_pair_if_present(CachedData, pos);
         continue;
       }
 
@@ -427,7 +495,6 @@ void cal_energy_force_gromos(
                              0.1 * temp_elec * dz, 0.1 * temp_vdw * dx,
                              0.1 * temp_vdw * dy, 0.1 * temp_vdw * dz);
       } else {
-        size_t pos{rec.size() * j + i};
         CachedData.set_elec_vdw(pos, charge / d, epsilon / c_12 - sigma / c_6);
         CachedData.set_force(pos, 0.1 * temp_elec * dx, 0.1 * temp_elec * dy,
                              0.1 * temp_elec * dz, 0.1 * temp_vdw * dx,
@@ -460,7 +527,7 @@ void cal_energy_force_martini(const MOL &rec, const MOL &lg,
       const double d{0.1 * sqrt(square(dx) + square(dy) + square(dz))};
 
       size_t pos{rec.size() * j + i};
-      if (d < 1e-10) {
+      if (d <= titan_energy_validation::kMinimumPairDistanceNm) {
         if (!CachedData.elec_ener.empty()) {
           CachedData.set_elec_vdw(pos, 0., 0.);
           if (CachedData.has_forces())
@@ -737,19 +804,21 @@ int wrap_cal_force_map(TitanExecutor &executor, Multi_MOL &mol1,
                        const cache_sigma_epsilon &CachedData,
                        vector<energy_res> &Energy_res_mol1,
                        vector<energy_res> &Energy_res_mol2, info &info_output) {
-  if (Arguments.flag_topo_1 == true && Arguments.flag_topo_2 == true ||
+  if ((Arguments.flag_topo_1 == true && Arguments.flag_topo_2 == true) ||
       (Arguments.force_map == 3 && Arguments.fmap_type == "atom-atom")) {
     forceMapOf2Ligs(executor, mol1, mol2, num_snap, dmin, CachedData, Arguments.nt,
                     Arguments, Energy_res_mol1, Energy_res_mol2, info_output,
                     mol1.parameters, mol2.parameters);
-  } else if (Arguments.flag_topo_1 == true && Arguments.flag_topo_2 == false ||
+  } else if ((Arguments.flag_topo_1 == true &&
+              Arguments.flag_topo_2 == false) ||
              (Arguments.force_map == 3 &&
               Arguments.fmap_type == "residue-atom")) {
     forceMapOfProLig(executor, mol1, mol2, num_snap, dmin, CachedData,
                      Arguments.nt, Arguments.fmap_level == "all", Arguments,
                      Energy_res_mol1, Energy_res_mol2, info_output,
                      mol1.parameters, mol2.parameters);
-  } else if (Arguments.flag_topo_1 == false && Arguments.flag_topo_2 == true ||
+  } else if ((Arguments.flag_topo_1 == false &&
+              Arguments.flag_topo_2 == true) ||
              (Arguments.force_map == 3 &&
               Arguments.fmap_type == "atom-residue")) {
     forceMapOfProLig(executor, mol2, mol1, num_snap, dmin, CachedData,

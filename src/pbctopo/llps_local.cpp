@@ -1,5 +1,6 @@
 #include "llps_local.h"
 #include "../Multi_MOL.h"
+#include "lattice_math.h"
 
 #include <algorithm>
 #include <cmath>
@@ -206,6 +207,7 @@ std::vector<Vec3> unwrap_pbctopo_llps_local_points(
   std::vector<Vec3> points(wrapped_atoms.size());
   if (wrapped_atoms.empty())
     return points;
+  const PbctopoLatticeMetric lattice(Box);
 
   std::vector<std::vector<std::size_t>> adjacency(wrapped_atoms.size());
   for (const auto &edge : edges) {
@@ -243,18 +245,13 @@ std::vector<Vec3> unwrap_pbctopo_llps_local_points(
         for (std::size_t nb : adjacency[current]) {
           if (seen[nb] != 0)
             continue;
-          const double dsx =
-              wrapped_atoms[nb].sx - wrapped_atoms[current].sx -
-              std::round(wrapped_atoms[nb].sx - wrapped_atoms[current].sx);
-          const double dsy =
-              wrapped_atoms[nb].sy - wrapped_atoms[current].sy -
-              std::round(wrapped_atoms[nb].sy - wrapped_atoms[current].sy);
-          const double dsz =
-              wrapped_atoms[nb].sz - wrapped_atoms[current].sz -
-              std::round(wrapped_atoms[nb].sz - wrapped_atoms[current].sz);
-          unwrapped[nb].sx = unwrapped[current].sx + dsx;
-          unwrapped[nb].sy = unwrapped[current].sy + dsy;
-          unwrapped[nb].sz = unwrapped[current].sz + dsz;
+          const PbctopoNearestImage mic = lattice.nearest_image_scaled(
+              wrapped_atoms[nb].sx - wrapped_atoms[current].sx,
+              wrapped_atoms[nb].sy - wrapped_atoms[current].sy,
+              wrapped_atoms[nb].sz - wrapped_atoms[current].sz);
+          unwrapped[nb].sx = unwrapped[current].sx + mic.sx;
+          unwrapped[nb].sy = unwrapped[current].sy + mic.sy;
+          unwrapped[nb].sz = unwrapped[current].sz + mic.sz;
           seen[nb] = 1;
           stack.push_back(nb);
         }

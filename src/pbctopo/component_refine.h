@@ -31,7 +31,9 @@ struct PbctopoRefineScoringCallbacks {
       double, double &, double &, const PbctopoCutCandidate *);
   using AnalyzeUltraclashFn = void (*)(const std::vector<Vec3> &,
                                        const std::unordered_set<std::uint64_t> &,
-                                       PbctopoCutCandidate &, double);
+                                       PbctopoCutCandidate &, double,
+                                       const std::vector<PbctopoAtom> *,
+                                       const std::vector<std::size_t> *);
   using BetterCandidateFn = bool (*)(const PbctopoCutCandidate &,
                                      const PbctopoCutCandidate &);
   using CandidateThresholdFn = bool (*)(const PbctopoCutCandidate &,
@@ -81,8 +83,6 @@ PbctopoStage1EdgeContext build_stage1_edge_context(
 PbctopoEdgeScanSoA
 build_edge_scan_soa(const std::vector<PbctopoLocalEdge> &local_edges);
 
-void rebase_component_offsets(std::vector<Int3> &offsets,
-                              const std::vector<std::vector<std::size_t>> &components);
 void build_component_points_from_offsets(
     const std::vector<PbctopoAtom> &atoms,
     const std::vector<std::vector<std::size_t>> &components, box Box,
@@ -104,7 +104,9 @@ PbctopoCutCandidate score_component_placed_points_solution(
     const PbctopoCutCandidate *edge_prune_threshold = nullptr,
     AnchorBackend anchor_backend = AnchorBackend::Auto,
     const titan_gyration::PointStats *precomputed_stats = nullptr,
-    const PbctopoAnchorGraphContext *anchor_context = nullptr);
+    const PbctopoAnchorGraphContext *anchor_context = nullptr,
+    const std::vector<PbctopoAtom> *clash_atoms = nullptr,
+    const std::vector<std::size_t> *atom_component_index = nullptr);
 
 PbctopoCutCandidate score_component_offset_solution(
     const std::vector<PbctopoAtom> &atoms,
@@ -123,7 +125,8 @@ PbctopoCutCandidate score_component_offset_solution(
     const PbctopoEdgeScanSoA *edge_scan_soa = nullptr,
     const PbctopoCutCandidate *edge_prune_threshold = nullptr,
     AnchorBackend anchor_backend = AnchorBackend::Auto,
-    const PbctopoAnchorGraphContext *anchor_context = nullptr);
+    const PbctopoAnchorGraphContext *anchor_context = nullptr,
+    const std::vector<std::size_t> *atom_component_index = nullptr);
 
 PbctopoCutCandidate improve_component_offsets_locally(
     const std::vector<PbctopoAtom> &atoms,

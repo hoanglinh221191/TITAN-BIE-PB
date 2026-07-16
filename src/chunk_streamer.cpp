@@ -724,25 +724,14 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
     if (!stream_pro.is_open())
       return std::unexpected("Failed to open stream: " + args_ref.pdb_name);
 
-    if (frame0_end_pos_pro >= 0) {
-      stream_pro.seekg(frame0_end_pos_pro);
-    } else {
-      // Fallback: parse-skip if position was not saved
-      Multi_MOL dummy_mol;
-      auto sk =
-          dummy_mol.read_pdb_chunk(stream_pro, 1, args_ref, info_ref, force_f);
-      if (!sk)
-        return std::unexpected("Failed to skip Frame 0 in stream");
-    }
+    // Frame 0 provides topology/reference coordinates during initialization,
+    // but it is also a real trajectory sample. Re-read it through the normal
+    // streaming path so every enabled analysis sees the complete trajectory.
     pro_data_offset_bytes_ = stream_offset(stream_pro, pro_total_bytes_);
     if (args_ref.dt > 0.0 && !init_pro.m_mol.empty()) {
       pdb_next_target_time_ =
           args_ref.flag_begin_set ? args_ref.begin_time
                                   : init_pro.m_mol[0].time_of_snap;
-      while (pdb_next_target_time_ <=
-             init_pro.m_mol[0].time_of_snap + kXdrTimeTolerancePs) {
-        pdb_next_target_time_ += args_ref.dt;
-      }
     }
   } else {
     pro_total_bytes_ = file_size_bytes(name_pro);
@@ -755,20 +744,8 @@ std::expected<void, std::string> ChunkStreamer::open_streams(
     if (!stream_lig.is_open())
       return std::unexpected("Failed to open stream: " + name_lig);
 
-    // Skip frame 0
-    if (frame0_end_pos_pro >= 0) {
-      stream_pro.seekg(frame0_end_pos_pro);
-    } else {
-      Multi_MOL dummy_mol;
-      dummy_mol.read_pdb_chunk(stream_pro, 1, args_ref, info_ref, force_f);
-    }
-
-    if (frame0_end_pos_lig >= 0) {
-      stream_lig.seekg(frame0_end_pos_lig);
-    } else {
-      Multi_MOL dummy_mol;
-      dummy_mol.read_pdb_chunk(stream_lig, 1, args_ref, info_ref, force_f);
-    }
+    // As in the combined-PDB path, the initialization/reference snapshot is
+    // still part of both trajectories and must be streamed for analysis.
     pro_data_offset_bytes_ = stream_offset(stream_pro, pro_total_bytes_);
     lig_data_offset_bytes_ = stream_offset(stream_lig, lig_total_bytes_);
   }

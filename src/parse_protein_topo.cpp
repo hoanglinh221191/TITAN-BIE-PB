@@ -163,9 +163,27 @@ int Multi_MOL::topo_protein(std::string_view input_topo,
 
   std::unordered_map<size_t, size_t> selected_atom_pos;
   selected_atom_pos.reserve(info.size());
-  bool use_direct_subset = !info.empty();
-  for (size_t idx = 0; idx < info.size(); ++idx) {
-    selected_atom_pos.emplace(info[idx].get_original_atom_id(), idx);
+  const bool any_source_ids =
+      std::any_of(info.begin(), info.end(), [](const mol_info &atom_info) {
+        return atom_info.has_original_atom_id();
+      });
+  bool use_direct_subset = !info.empty() &&
+                           std::all_of(info.begin(), info.end(),
+                                       [](const mol_info &atom_info) {
+                                         return atom_info.has_original_atom_id();
+                                       });
+  if (any_source_ids && !use_direct_subset) {
+    std::cerr << "[WARNING] Selection has partially populated source atom IDs "
+              << "for " << input_topo << ".\n";
+  }
+  for (size_t idx = 0; idx < info.size() && use_direct_subset; ++idx) {
+    if (!selected_atom_pos.emplace(info[idx].get_original_atom_id(), idx)
+             .second) {
+      std::cerr << "[WARNING] Duplicate source atom ID in selection for "
+                << input_topo << ".\n";
+      use_direct_subset = false;
+      selected_atom_pos.clear();
+    }
   }
   vector<topo_info_temp> subset_topo;
   vector<unsigned char> subset_filled;
@@ -302,16 +320,16 @@ int Multi_MOL::topo_protein(std::string_view input_topo,
     info_topo = info_topo_total_temp;
   }
 
-  attach_gromacs_mol_topology_graph(*this, input_topo);
-
-  // BUG 5 FIX: If we have multiple copies added to info_topo_total_temp,
-  // we must also initialize original_atom_ids if the sizes match exactly
-  // to avoid subset array bounds crashes.
-  if (info_topo.size() == info.size()) {
+  // A full unselected system may legitimately have no source provenance. Only
+  // synthesize sequential IDs in that exact-size case; never overwrite IDs
+  // carried from an index-selected reference structure.
+  if (!any_source_ids && info_topo.size() == info.size()) {
     for (size_t a = 0; a < info.size(); ++a) {
       info[a].set_original_atom_id(a);
     }
   }
+
+  attach_gromacs_mol_topology_graph(*this, input_topo);
 
   this->post_process_atom_from_topo(info_topo);
   // cout << "info topo size: " << info_topo.size() << '\n';

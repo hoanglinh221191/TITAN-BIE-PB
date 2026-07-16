@@ -24,6 +24,7 @@ private: // OPT: Explicit private access modifier
   size_t respos;
   size_t internal_resnr;
   size_t original_atom_id;
+  bool original_atom_id_set;
   bool side_chain;
 
 public:
@@ -32,7 +33,8 @@ public:
   mol_info()
       : atom_type{"NULL"}, res_name{"UND"}, original_res_name{"UND"},
         atom{"NULL"}, chain{" "}, resnr{0}, chainnum{0}, respos{0},
-        internal_resnr{0}, original_atom_id{0}, side_chain{false} {}
+        internal_resnr{0}, original_atom_id{0}, original_atom_id_set{false},
+        side_chain{false} {}
 
   // OPT: Constructor using std::string_view for zero-copy string references
   mol_info(size_t _resnr, std::string_view _atom_type, std::string_view _atom,
@@ -40,7 +42,7 @@ public:
       : atom_type{_atom_type}, res_name{_res_name},
         original_res_name{_res_name}, atom{_atom}, chain{_chain}, resnr{_resnr},
         chainnum{0}, respos{0}, internal_resnr{0}, original_atom_id{0},
-        side_chain{true} {}
+        original_atom_id_set{false}, side_chain{true} {}
 
   // OPT: Rule of Zero - Deleted manual destructor since compiler-generated
   // default is optimal
@@ -59,8 +61,12 @@ public:
   void set_internal_resnr(size_t res) noexcept { internal_resnr = res; }
   size_t get_internal_resnr() const noexcept { return internal_resnr; }
 
-  void set_original_atom_id(size_t id) noexcept { original_atom_id = id; }
+  void set_original_atom_id(size_t id) noexcept {
+    original_atom_id = id;
+    original_atom_id_set = true;
+  }
   size_t get_original_atom_id() const noexcept { return original_atom_id; }
+  bool has_original_atom_id() const noexcept { return original_atom_id_set; }
 
   void set_chainnum(size_t num) noexcept { chainnum = num; }
   size_t get_chainnum() const noexcept { return chainnum; }

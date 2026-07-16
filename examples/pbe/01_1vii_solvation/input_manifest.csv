@@ -1,2 +1,0 @@
-fixture,pdb_id,protein_name,model,chain,source_url,pqr,pqr_sha256,atom_count,pdb2pqr_version,force_field,ph
-1vii,1VII,Villin headpiece subdomain,1,A,https://www.rcsb.org/structure/1VII,1vii_full_amber_ph7.pqr,43f5689375c21f09a3c43af152065fb0d614c93fa6e65bbf9dbc66acf0fa9c97,596,3.7.1,AMBER,7.0

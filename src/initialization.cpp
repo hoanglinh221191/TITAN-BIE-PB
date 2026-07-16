@@ -135,10 +135,16 @@ std::expected<void, std::string> initialize_topology_streaming(
           pro_in.topo_lg(Arguments.topo_name_2, force_f, parameter);
       } else {
         vector<topo_info_temp> info_topo;
-        if (pro_in.topo_protein(Arguments.topo_name_2, force_f, parameter,
-                                info_topo) == 1 ||
+        const bool pro_failed =
+            pro_in.topo_protein(Arguments.topo_name_2, force_f, parameter,
+                                info_topo) == 1;
+        const bool need_lig_topology =
+            Arguments.needs_mol2_coordinates() && !lig.info.empty();
+        const bool lig_failed =
+            need_lig_topology &&
             lig.topo_protein(Arguments.topo_name, force_f, parameter,
-                             info_topo) == 1) {
+                             info_topo) == 1;
+        if (pro_failed || lig_failed) {
           return std::unexpected("Cannot parse topology files");
         }
       }
@@ -309,14 +315,21 @@ int parse_input_pdb(arguments &Arguments, fstream &log, string name_pro,
           int topo_parse_result_1 = pro_in.topo_protein(
               Arguments.topo_name_2, force_f, parameter, info_topo);
 
-          std::cout << "\033[1;36m[TITAN]\033[0m \033[1;35m>> Loading Common "
-                       "Topology 2:\033[0m "
-                    << Arguments.topo_name << "\n";
-          TitanUI::log_kv(log, "Common Topo 2 Loaded", Arguments.topo_name);
-          int topo_parse_result_2 = lig.topo_protein(
-              Arguments.topo_name, force_f, parameter, info_topo);
+          int topo_parse_result_2 = 0;
+          const bool need_lig_topology =
+              Arguments.needs_mol2_coordinates() && !lig.info.empty();
+          if (need_lig_topology) {
+            std::cout
+                << "\033[1;36m[TITAN]\033[0m \033[1;35m>> Loading Common "
+                   "Topology 2:\033[0m "
+                << Arguments.topo_name << "\n";
+            TitanUI::log_kv(log, "Common Topo 2 Loaded", Arguments.topo_name);
+            topo_parse_result_2 = lig.topo_protein(
+                Arguments.topo_name, force_f, parameter, info_topo);
+          }
 
-          if (topo_parse_result_1 == 1 && topo_parse_result_2 == 1) {
+          if (topo_parse_result_1 == 1 ||
+              (need_lig_topology && topo_parse_result_2 == 1)) {
             std::cout << "\033[1;31m[FATAL ERROR]\033[0m Cannot parse topology "
                          "files ("
                       << Arguments.topo_name << " and " << Arguments.topo_name_2

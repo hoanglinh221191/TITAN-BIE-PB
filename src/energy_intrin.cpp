@@ -4,6 +4,7 @@
 #include "functions.h"
 #include "martini_nonbonded.h"
 #include "miscellaneous.h"
+#include "titan_energy_validation.h"
 #include "titan_simd_dispatch.h"
 #include "uti_func.h"
 #include <algorithm>
@@ -159,7 +160,8 @@ int cal_energy_amber_intrin(const MOL &rec, const MOL &lg,
         if (has_cutoff && d_arr[k] > Arguments.distance_energy_cutoff)
           keep = false;
         if (keep && check_self) {
-          if (d_arr[k] < sigma_self_arr[k]) {
+          if (i + static_cast<size_t>(k) == j ||
+              d_arr[k] < sigma_self_arr[k]) {
             keep = false;
           } else if (check_interchain) {
             keep = info_lg[j].get_chain() != info_rec[i + k].get_chain();
@@ -184,6 +186,10 @@ int cal_energy_amber_intrin(const MOL &rec, const MOL &lg,
 
     if (size_vector_rec * 4 < rec_size) {
       for (size_t i{size_vector_rec * 4}; i < rec_size; ++i) {
+        if (check_self && i == j) {
+          zero_cached_pair_if_present(CachedData, rec_size * j + i);
+          continue;
+        }
         const double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
                                   square(rec.pos.y[i] - pos_y) +
                                   square(rec.pos.z[i] - pos_z))};
@@ -252,7 +258,7 @@ int cal_one_ele(const MOL &rec, const MOL &lg, cache_sigma_epsilon &CachedData,
   double d{0.1 *
            sqrt(square(rec.pos.x[i] - pos_x) + square(rec.pos.y[i] - pos_y) +
                 square(rec.pos.z[i] - pos_z))};
-  if (d < 1e-10)
+  if (d <= titan_energy_validation::kMinimumPairDistanceNm)
     return 0; // Guard: beads at same position
   double c_6{c6(0.5 * (temp_sigma + rec_parameters[i].get_sigma()) / d)};
 
@@ -305,7 +311,8 @@ int cal_energy_amber_screening_intrin(
     const arguments &Arguments, const Multi_MOL_parameters &rec_parameters,
     const Multi_MOL_parameters &lg_parameters) {
   Energy.set_energy(0., 0.);
-  constexpr double kScreeningMinDistance = 1e-10;
+  constexpr double kScreeningMinDistance =
+      titan_energy_validation::kMinimumPairDistanceNm;
   const double epsilon_in{Arguments.epsilon_in};
   const double lambda_debye{3.07 / sqrt(Arguments.salt_concentration)};
   const bool is_charmm =
@@ -405,7 +412,8 @@ int cal_energy_amber_screening_intrin(
         if (keep && has_cutoff && d[k] > Arguments.distance_energy_cutoff)
           keep = false;
         if (keep && check_self) {
-          if ((sigma_self_arr[k] > 0.0 && d[k] < sigma_self_arr[k])) {
+          if (i + static_cast<size_t>(k) == j ||
+              (sigma_self_arr[k] > 0.0 && d[k] < sigma_self_arr[k])) {
             keep = false;
           } else if (check_interchain) {
             keep = info_lg[j].get_chain() != info_rec[i + k].get_chain();
@@ -431,6 +439,10 @@ int cal_energy_amber_screening_intrin(
 
     if (size_vector_rec * 4 < rec_size) {
       for (size_t i{size_vector_rec * 4}; i < rec_size; ++i) {
+        if (check_self && i == j) {
+          zero_cached_pair_if_present(CachedData, rec_size * j + i);
+          continue;
+        }
         double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
                             square(rec.pos.y[i] - pos_y) +
                             square(rec.pos.z[i] - pos_z))};
@@ -594,6 +606,10 @@ int cal_energy_gromos_intrin(const MOL &rec, const MOL &lg,
 
     if (size_vector_rec * 4 < rec_size) {
       for (size_t i{size_vector_rec * 4}; i < rec_size; ++i) {
+        if (check_self && i == j) {
+          zero_cached_pair_if_present(CachedData, rec_size * j + i);
+          continue;
+        }
         double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
                             square(rec.pos.y[i] - pos_y) +
                             square(rec.pos.z[i] - pos_z))};
@@ -604,7 +620,7 @@ int cal_energy_gromos_intrin(const MOL &rec, const MOL &lg,
         }
 
         if (check_self &&
-            (i == j || (check_interchain &&
+            ((i == j) || (check_interchain &&
                         info_lg[j].get_chain() == info_rec[i].get_chain()))) {
           zero_cached_pair_if_present(CachedData, pos);
           continue;
@@ -713,7 +729,8 @@ void cal_energy_opls_intrin(const MOL &rec, const MOL &lg,
       for (int k = 0; k < 4; ++k) {
         bool keep = true;
         if (check_self &&
-            (c6_arr[k] > 1.0 || (check_interchain &&
+            (i + static_cast<size_t>(k) == j || c6_arr[k] > 1.0 ||
+             (check_interchain &&
                                  info_lg[j].get_chain() ==
                                      info_rec[i + k].get_chain()))) {
           keep = false;
@@ -739,6 +756,10 @@ void cal_energy_opls_intrin(const MOL &rec, const MOL &lg,
 
     if (size_vector_rec * 4 < rec_size)
       for (size_t i{size_vector_rec * 4}; i < rec_size; ++i) {
+        if (check_self && i == j) {
+          zero_cached_pair_if_present(CachedData, rec_size * j + i);
+          continue;
+        }
         double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
                             square(rec.pos.y[i] - pos_y) +
                             square(rec.pos.z[i] - pos_z))},
@@ -800,7 +821,8 @@ int cal_energy_martini_intrin(const MOL &rec, const MOL &lg,
       _mm256_set1_pd(martini::kCoulomb / elec_cfg.epsilon_r);
   const __m256d avx_k_rf = _mm256_set1_pd(elec_cfg.k_rf);
   const __m256d avx_c_rf = _mm256_set1_pd(elec_cfg.c_rf);
-  const __m256d avx_min_d = _mm256_set1_pd(1e-10);
+  const __m256d avx_min_d = _mm256_set1_pd(
+      titan_energy_validation::kMinimumPairDistanceNm);
   const size_t rec_size = rec.size();
   const size_t size_vector_rec = rec_size / 4;
   const bool write_cache = !CachedData.elec_ener.empty();
@@ -916,7 +938,8 @@ int cal_energy_martini_intrin(const MOL &rec, const MOL &lg,
       _mm256_storeu_pd(sigma_arr, sigma_vec);
 
       for (int k = 0; k < 4; ++k) {
-        bool keep = d_arr[k] > 1e-10;
+        bool keep =
+            d_arr[k] > titan_energy_validation::kMinimumPairDistanceNm;
         if (keep)
           keep = d_arr[k] <= elec_cfg.cutoff_nm;
         if (keep && Arguments.self_int == true) {
@@ -950,7 +973,7 @@ int cal_energy_martini_intrin(const MOL &rec, const MOL &lg,
                             square(rec.pos.y[i] - pos_y) +
                             square(rec.pos.z[i] - pos_z))};
         size_t pos{rec_size * j + i};
-        if (d < 1e-10) {
+        if (d <= titan_energy_validation::kMinimumPairDistanceNm) {
           if (write_cache)
             CachedData.set_elec_vdw(pos, 0., 0.);
           continue;

@@ -1,5 +1,9 @@
 #include "component_graph.h"
 
+#include "candidate_order.h"
+#include "component_graph_math.h"
+#include "component_metric.h"
+#include "steric_clash.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -124,17 +128,18 @@ bool component_bbox_may_clash(const PbctopoShiftedComponent &lhs,
 
 PbctopoComponentBaseGeometry
 build_component_base_geometry(const vector<PbctopoAtom> &atoms,
-                              const vector<size_t> &component) {
+                               const vector<size_t> &component) {
   PbctopoComponentBaseGeometry base;
-  base.x.resize(component.size());
-  base.y.resize(component.size());
-  base.z.resize(component.size());
-  for (size_t local_idx = 0; local_idx < component.size(); ++local_idx) {
-    const size_t atom_idx = component[local_idx];
+  base.x.reserve(component.size());
+  base.y.reserve(component.size());
+  base.z.reserve(component.size());
+  base.atom_indices.reserve(component.size());
+  auto append_atom = [&](size_t atom_idx) {
     const auto &atom = atoms[atom_idx];
-    base.x[local_idx] = atom.x;
-    base.y[local_idx] = atom.y;
-    base.z[local_idx] = atom.z;
+    base.x.push_back(atom.x);
+    base.y.push_back(atom.y);
+    base.z.push_back(atom.z);
+    base.atom_indices.push_back(atom_idx);
     base.center = base.center + Vec3{atom.x, atom.y, atom.z};
     base.min_x = min(base.min_x, atom.x);
     base.min_y = min(base.min_y, atom.y);
@@ -142,9 +147,19 @@ build_component_base_geometry(const vector<PbctopoAtom> &atoms,
     base.max_x = max(base.max_x, atom.x);
     base.max_y = max(base.max_y, atom.y);
     base.max_z = max(base.max_z, atom.z);
+  };
+  for (size_t atom_idx : component) {
+    if (atom_idx < atoms.size() && atoms[atom_idx].is_heavy)
+      append_atom(atom_idx);
   }
-  if (!component.empty()) {
-    base.center = base.center * (1.0 / static_cast<double>(component.size()));
+  if (base.x.empty()) {
+    for (size_t atom_idx : component) {
+      if (atom_idx < atoms.size())
+        append_atom(atom_idx);
+    }
+  }
+  if (!base.x.empty()) {
+    base.center = base.center * (1.0 / static_cast<double>(base.x.size()));
   }
   return base;
 }
@@ -153,10 +168,7 @@ PbctopoShiftedComponentDescriptor
 describe_shifted_component(const PbctopoComponentBaseGeometry &base,
                            const PbctopoShift &shift) {
   PbctopoShiftedComponentDescriptor descriptor;
-  descriptor.weighted_shift_norm2 =
-      static_cast<double>(shift.ix * shift.ix + shift.iy * shift.iy +
-                          shift.iz * shift.iz) *
-      static_cast<double>(base.x.size());
+  descriptor.translation_norm2 = pbctopo_translation_norm2(shift);
   descriptor.center = {base.center.x + shift.tx, base.center.y + shift.ty,
                        base.center.z + shift.tz};
   descriptor.min_x = base.min_x + shift.tx;
@@ -176,6 +188,7 @@ void fill_shifted_component_from_base(
       describe_shifted_component(base, shift);
   const size_t atom_count = base.x.size();
   shifted.points.resize(atom_count);
+  shifted.atom_indices = base.atom_indices;
   shifted.clash_keys.resize(atom_count);
   shifted.contact_keys.resize(atom_count);
   shifted.clash_grid.clear();
@@ -183,7 +196,7 @@ void fill_shifted_component_from_base(
     shifted.clash_grid.reserve(max<size_t>(32, atom_count));
   shifted.contact_grid.clear();
   shifted.contact_grid.reserve(max<size_t>(32, atom_count));
-  shifted.weighted_shift_norm2 = descriptor.weighted_shift_norm2;
+  shifted.translation_norm2 = descriptor.translation_norm2;
   shifted.center = descriptor.center;
   shifted.min_x = descriptor.min_x;
   shifted.min_y = descriptor.min_y;
@@ -339,9 +352,7 @@ PbctopoPairShiftScore make_bbox_only_pair_shift_score(const PbctopoShift &shift,
   score.ix = shift.ix;
   score.iy = shift.iy;
   score.iz = shift.iz;
-  score.shift_norm2 = static_cast<double>(shift.ix * shift.ix +
-                                          shift.iy * shift.iy +
-                                          shift.iz * shift.iz);
+  score.shift_norm2 = pbctopo_translation_norm2(shift);
   score.bbox_d2 = bbox_d2;
   score.min_pair_d2 = bbox_d2;
   score.valid = true;
@@ -356,16 +367,28 @@ bool better_pair_shift_score(const PbctopoPairShiftScore &lhs,
     return true;
   if (lhs.ultra_clash != rhs.ultra_clash)
     return rhs.ultra_clash;
-  if (lhs.contact_atoms != rhs.contact_atoms)
-    return lhs.contact_atoms > rhs.contact_atoms;
-  if (fabs(lhs.soft_penalty - rhs.soft_penalty) > 1.0e-9)
-    return lhs.soft_penalty < rhs.soft_penalty;
-  if (fabs(lhs.min_pair_d2 - rhs.min_pair_d2) > 1.0e-9)
-    return lhs.min_pair_d2 < rhs.min_pair_d2;
-  if (fabs(lhs.bbox_d2 - rhs.bbox_d2) > 1.0e-9)
-    return lhs.bbox_d2 < rhs.bbox_d2;
-  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-9)
-    return lhs.shift_norm2 < rhs.shift_norm2;
+  int metric_cmp = compare_pbctopo_metric(lhs.contact_fraction,
+                                           rhs.contact_fraction,
+                                           {1.0e-9, 0.0});
+  if (metric_cmp != 0)
+    return metric_cmp > 0;
+  metric_cmp = compare_pbctopo_metric(lhs.soft_penalty_mean,
+                                       rhs.soft_penalty_mean,
+                                           {1.0e-9, 0.0});
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
+  metric_cmp = compare_pbctopo_metric(lhs.min_pair_d2, rhs.min_pair_d2,
+                                       {1.0e-9, 0.0});
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
+  metric_cmp = compare_pbctopo_metric(lhs.bbox_d2, rhs.bbox_d2,
+                                       {1.0e-9, 0.0});
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
+  metric_cmp = compare_pbctopo_metric(lhs.shift_norm2, rhs.shift_norm2,
+                                       {1.0e-9, 0.0});
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
   if (lhs.ix != rhs.ix)
     return lhs.ix < rhs.ix;
   if (lhs.iy != rhs.iy)
@@ -409,10 +432,6 @@ bool pair_shift_cannot_beat_incumbent(
   const size_t max_contact_atoms = partial.contact_atoms + remaining_lhs_points;
   if (max_contact_atoms < incumbent->contact_atoms)
     return true;
-  if (max_contact_atoms == incumbent->contact_atoms &&
-      partial.soft_penalty > incumbent->soft_penalty + 1.0e-9) {
-    return true;
-  }
   return false;
 }
 
@@ -424,18 +443,32 @@ bool better_component_graph_edge(const PbctopoGraphEdge &lhs,
     return true;
   if (lhs.ultra_clash != rhs.ultra_clash)
     return rhs.ultra_clash;
-  if (lhs.contact_atoms != rhs.contact_atoms)
-    return lhs.contact_atoms > rhs.contact_atoms;
-  if (fabs(lhs.confidence - rhs.confidence) > 1.0e-9)
-    return lhs.confidence > rhs.confidence;
-  if (fabs(lhs.soft_penalty - rhs.soft_penalty) > 1.0e-9)
-    return lhs.soft_penalty < rhs.soft_penalty;
-  if (fabs(lhs.min_pair_d2 - rhs.min_pair_d2) > 1.0e-9)
-    return lhs.min_pair_d2 < rhs.min_pair_d2;
-  if (fabs(lhs.bbox_d2 - rhs.bbox_d2) > 1.0e-9)
-    return lhs.bbox_d2 < rhs.bbox_d2;
-  if (fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-9)
-    return lhs.shift_norm2 < rhs.shift_norm2;
+  int metric_cmp = compare_pbctopo_metric(lhs.contact_fraction,
+                                           rhs.contact_fraction,
+                                           {1.0e-9, 0.0});
+  if (metric_cmp != 0)
+    return metric_cmp > 0;
+  metric_cmp = compare_pbctopo_metric(lhs.confidence, rhs.confidence,
+                                           {1.0e-9, 0.0});
+  if (metric_cmp != 0)
+    return metric_cmp > 0;
+  metric_cmp = compare_pbctopo_metric(lhs.soft_penalty_mean,
+                                       rhs.soft_penalty_mean,
+                                       {1.0e-9, 0.0});
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
+  metric_cmp = compare_pbctopo_metric(lhs.min_pair_d2, rhs.min_pair_d2,
+                                       {1.0e-9, 0.0});
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
+  metric_cmp = compare_pbctopo_metric(lhs.bbox_d2, rhs.bbox_d2,
+                                       {1.0e-9, 0.0});
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
+  metric_cmp = compare_pbctopo_metric(lhs.shift_norm2, rhs.shift_norm2,
+                                       {1.0e-9, 0.0});
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
   if (lhs.a != rhs.a)
     return lhs.a < rhs.a;
   return lhs.b < rhs.b;
@@ -444,20 +477,20 @@ bool better_component_graph_edge(const PbctopoGraphEdge &lhs,
 PbctopoPairShiftScore score_component_pair_shift(
     const PbctopoShiftedComponent &lhs, const PbctopoShiftedComponent &rhs,
     const PbctopoShift &shift, double hard_cutoff, double contact_cutoff,
-    const PbctopoPairShiftScore *incumbent) {
+    const PbctopoPairShiftScore *incumbent,
+    const vector<PbctopoAtom> &atoms,
+    PbctopoTimingStats *timing) {
   PbctopoPairShiftScore score;
   score.shift_index = shift.shift_index;
   score.ix = shift.ix;
   score.iy = shift.iy;
   score.iz = shift.iz;
-  score.shift_norm2 =
-      static_cast<double>(shift.ix * shift.ix + shift.iy * shift.iy + shift.iz * shift.iz);
+  score.shift_norm2 = pbctopo_translation_norm2(shift);
   score.bbox_d2 = shifted_component_bbox_distance2(lhs, rhs);
   score.min_pair_d2 = score.bbox_d2;
   score.valid = true;
 
   const double contact_cutoff2 = contact_cutoff * contact_cutoff;
-  const double hard_cutoff2 = hard_cutoff * hard_cutoff;
   constexpr double kSoftMin2 = 2.6 * 2.6;
   if (score.bbox_d2 > contact_cutoff2)
     return score;
@@ -484,11 +517,18 @@ PbctopoPairShiftScore score_component_pair_shift(
               const double d2 = ddx * ddx + ddy * ddy + ddz * ddz;
               if (d2 < score.min_pair_d2)
                 score.min_pair_d2 = d2;
-              if (d2 + kDistanceEps < hard_cutoff2) {
+              const size_t lhs_atom_idx = lhs.atom_indices[lhs_idx];
+              const size_t rhs_atom_idx = rhs.atom_indices[rhs_idx];
+              if (lhs_atom_idx < atoms.size() && rhs_atom_idx < atoms.size() &&
+                  pbctopo_atoms_clash(d2, atoms[lhs_atom_idx],
+                                       atoms[rhs_atom_idx], hard_cutoff,
+                                       timing)) {
                 score.ultra_clash = true;
                 score.quality_score = -numeric_limits<double>::infinity();
                 return score;
               }
+              if (d2 <= contact_cutoff2)
+                ++score.contact_pairs;
               if (d2 < kSoftMin2)
                 score.soft_penalty += (kSoftMin2 - d2);
               if (d2 <= contact_cutoff2)
@@ -504,9 +544,8 @@ PbctopoPairShiftScore score_component_pair_shift(
       return score;
   }
 
-  score.quality_score = static_cast<double>(score.contact_atoms) * 1000.0 -
-                        score.soft_penalty * 50.0 - score.bbox_d2 * 5.0 -
-                        score.shift_norm2;
+  finalize_normalized_pair_shift_score(score, lhs.points.size(),
+                                       rhs.points.size(), contact_cutoff);
   return score;
 }
 
@@ -674,7 +713,7 @@ struct PbctopoCycleSyncBeamState {
 };
 
 PbctopoCycleSyncResult solve_component_offsets_cycle_consistent(
-    size_t component_count, const vector<vector<size_t>> &components,
+    size_t component_count, box Box,
     const vector<PbctopoPairShiftCandidateSet> &pair_candidates,
     size_t beam_width) {
   PbctopoCycleSyncResult result;
@@ -786,10 +825,14 @@ PbctopoCycleSyncResult solve_component_offsets_cycle_consistent(
       }
     }
     sort(next.begin(), next.end(), [](const auto &lhs, const auto &rhs) {
-      if (fabs(lhs.cost - rhs.cost) > 1.0e-9)
-        return lhs.cost < rhs.cost;
-      if (fabs(lhs.support - rhs.support) > 1.0e-9)
-        return lhs.support > rhs.support;
+      int metric_cmp = compare_pbctopo_metric(lhs.cost, rhs.cost,
+                                               {1.0e-9, 0.0});
+      if (metric_cmp != 0)
+        return metric_cmp < 0;
+      metric_cmp = compare_pbctopo_metric(lhs.support, rhs.support,
+                                           {1.0e-9, 0.0});
+      if (metric_cmp != 0)
+        return metric_cmp > 0;
       return lhs.inconsistent_edges < rhs.inconsistent_edges;
     });
     if (next.size() > keep)
@@ -802,11 +845,19 @@ PbctopoCycleSyncResult solve_component_offsets_cycle_consistent(
   const auto &best = beam.front();
   result.valid = true;
   result.offsets = best.offsets;
-  rebase_component_offsets(result.offsets, components);
+  rebase_component_offsets(result.offsets, Box);
   result.metrics.cycle_support =
       static_cast<size_t>(llround(max(0.0, best.support)));
-  result.metrics.cycle_mismatch = best.cost;
+  result.metrics.cycle_mismatch =
+      best.support > 0.0 ? best.cost / best.support : best.cost;
   result.metrics.inconsistent_edge_count = best.inconsistent_edges;
+  const PbctopoCycleSyncMetrics fundamental =
+      compute_fundamental_cycle_residuals(component_count, pair_candidates);
+  result.metrics.fundamental_cycle_count = fundamental.fundamental_cycle_count;
+  result.metrics.fundamental_cycle_residual_rms =
+      fundamental.fundamental_cycle_residual_rms;
+  result.metrics.fundamental_cycle_residual_max =
+      fundamental.fundamental_cycle_residual_max;
   return result;
 }
 
@@ -882,7 +933,8 @@ vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
           score = score_component_pair_shift(
               shifted_components.materialize(lhs, identity_shift_pos),
               shifted_components.materialize(rhs, shift_idx), shift,
-              cutoffs.clash_cutoff, cutoffs.pair_contact_cutoff, incumbent);
+              cutoffs.clash_cutoff, cutoffs.pair_contact_cutoff, incumbent,
+              atoms, timing);
         }
         if (pair_candidates_out != nullptr) {
           insert_pair_shift_candidate(
@@ -905,7 +957,10 @@ vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
       edge.dy = best_score.iy;
       edge.dz = best_score.iz;
       edge.contact_atoms = best_score.contact_atoms;
+      edge.contact_pairs = best_score.contact_pairs;
+      edge.contact_fraction = best_score.contact_fraction;
       edge.soft_penalty = best_score.soft_penalty;
+      edge.soft_penalty_mean = best_score.soft_penalty_mean;
       edge.min_pair_d2 = best_score.min_pair_d2;
       edge.bbox_d2 = best_score.bbox_d2;
       edge.shift_norm2 = best_score.shift_norm2;
@@ -980,7 +1035,7 @@ bool solve_component_offsets_via_pair_graph(
             .count();
   }
 
-  rebase_component_offsets(offsets, components);
+  rebase_component_offsets(offsets, Box);
   if (tree_offsets_out != nullptr)
     *tree_offsets_out = offsets;
   if (tree_edges_out != nullptr)
@@ -1013,7 +1068,7 @@ bool solve_component_offsets_via_pair_graph(
   if (timing != nullptr)
     ++timing->component_cycle_sync_attempts;
   PbctopoCycleSyncResult cycle_result = solve_component_offsets_cycle_consistent(
-      components.size(), components, pair_candidates,
+      components.size(), Box, pair_candidates,
       max<size_t>(64, component_beam_width));
   if (timing != nullptr) {
     timing->component_cycle_sync_s +=
@@ -1068,7 +1123,7 @@ bool solve_component_offsets_via_pair_graph(
   return best_cut.valid && placed_points.size() == atoms.size();
 }
 bool solve_component_offsets_from_ranked_edges(
-    size_t component_count, const vector<vector<size_t>> &components,
+    size_t component_count, box Box, const vector<vector<size_t>> &components,
     const vector<PbctopoGraphEdge> &ranked_edges, vector<Int3> &offsets) {
   vector<PbctopoGraphEdge> tree_edges;
   if (!build_component_tree_from_ranked_edges(component_count, ranked_edges, {},
@@ -1076,7 +1131,7 @@ bool solve_component_offsets_from_ranked_edges(
     return false;
   if (!solve_component_offsets_from_tree(component_count, tree_edges, offsets))
     return false;
-  rebase_component_offsets(offsets, components);
+  rebase_component_offsets(offsets, Box);
   return true;
 }
 

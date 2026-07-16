@@ -1,6 +1,8 @@
 #ifndef TITAN_PBCTOPO_VIRTUAL_SEED_H
 #define TITAN_PBCTOPO_VIRTUAL_SEED_H
 
+#include "lattice_math.h"
+
 namespace titan_pbctopo {
 
 struct PbctopoVirtualSeedCenter {
@@ -12,10 +14,12 @@ struct PbctopoVirtualSeedCenter {
 double pbctopo_normalize_virtual_center(double center);
 PbctopoVirtualSeedCenter
 pbctopo_center_delta_mic(PbctopoVirtualSeedCenter latest,
-                         PbctopoVirtualSeedCenter previous);
+                         PbctopoVirtualSeedCenter previous,
+                         const PbctopoLatticeMetric &lattice);
 PbctopoVirtualSeedCenter
 extrapolate_virtual_seed_center(PbctopoVirtualSeedCenter previous,
-                                PbctopoVirtualSeedCenter latest);
+                                PbctopoVirtualSeedCenter latest,
+                                const PbctopoLatticeMetric &lattice);
 
 } // namespace titan_pbctopo
 

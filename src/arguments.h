@@ -26,6 +26,11 @@ struct PbcArgs {
   string ref_pdb_name{};
   string pbctopo_mode{"vibe"};
   string pbctopo_anchor_backend{"auto"};
+  string pbctopo_anchor_metrics{"full"};
+  string pbctopo_temporal{"greedy"};
+  int pbctopo_temporal_k{4};
+  double pbctopo_temporal_penalty{2.0};
+  double pbctopo_vdw_clash_scale{0.55};
   double pbctopo_bond_cutoff{0.0};
   bool pbctopo_bond_cutoff_set{false};
   double pbctopo_clash_cutoff{0.0};

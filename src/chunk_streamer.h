@@ -26,11 +26,6 @@ public:
                 size_t num_threads);
   ~ChunkStreamer();
 
-  void set_frame0_positions(std::streampos pos_pro, std::streampos pos_lig) {
-    frame0_end_pos_pro = pos_pro;
-    frame0_end_pos_lig = pos_lig;
-  }
-
   std::expected<void, std::string> open_streams(const std::string &name_pro,
                                                 const std::string &name_lig,
                                                 const Multi_MOL &init_pro,
@@ -67,9 +62,6 @@ private:
 
   std::ifstream stream_pro;
   std::ifstream stream_lig;
-
-  std::streampos frame0_end_pos_pro = -1;
-  std::streampos frame0_end_pos_lig = -1;
 
   MOL last_pro_frame;
   MOL last_lig_frame;

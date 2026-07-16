@@ -1481,6 +1481,24 @@ JcpNearPairKernel evaluate_jcp_near_pair_kernel(
   return selected;
 }
 
+JcpNearPairKernel evaluate_jcp_centroid_monopole_kernel(
+    const Panel &target, const Panel &source, double eps_ratio,
+    double kappa) noexcept {
+  JcpNearPairKernel selected;
+  const KernelValues kernel =
+      centroid_integral(target, source, eps_ratio, kappa);
+  if (!finite_kernel(kernel))
+    return selected;
+  selected.k1 = kernel.k1;
+  selected.k2 = kernel.k2;
+  selected.k3 = kernel.k3;
+  selected.k4 = kernel.k4;
+  selected.used_centroid = true;
+  selected.valid = true;
+  selected.policy = "centroid_monopole";
+  return selected;
+}
+
 JcpNearAccum accumulate_jcp_near_ordered(
     const Panel &target, std::size_t target_index,
     const std::vector<Panel> &panels, const std::vector<double> &unknowns,

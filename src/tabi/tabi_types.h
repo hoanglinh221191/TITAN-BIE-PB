@@ -913,6 +913,7 @@ struct Result {
   std::string preconditioner_block_near{"singular"};
   int preconditioner_block_panel_cap{32};
   int preconditioner_overlap_panel_cap{64};
+  int preconditioner_ilu_neighbor_cap_requested{192};
   int preconditioner_ilu_neighbor_cap{192};
   double preconditioner_ilu_drop_tol{0.0};
   std::string preconditioner_ilu_regularization{"adaptive"};
@@ -945,6 +946,10 @@ struct Result {
   double preconditioner_quality_failure_probe_rel_residual{0.0};
   std::string preconditioner_quality_status{"off"};
   double preconditioner_setup_ms{0.0};
+  double preconditioner_graph_setup_ms{0.0};
+  bool preconditioner_graph_cache_reused{false};
+  double preconditioner_near_assembly_setup_ms{0.0};
+  double preconditioner_ilu_factor_setup_ms{0.0};
   double preconditioner_apply_ms{0.0};
   std::size_t preconditioner_apply_calls{0};
   std::size_t preconditioner_sparse_nnz_blocks{0};
@@ -959,6 +964,9 @@ struct Result {
   std::string preconditioner_coarse_status{"off"};
   std::size_t preconditioner_coarse_setup_matvec_calls{0};
   double preconditioner_coarse_setup_ms{0.0};
+  double preconditioner_coarse_moments_setup_ms{0.0};
+  double preconditioner_coarse_far_setup_ms{0.0};
+  double preconditioner_coarse_audit_setup_ms{0.0};
   double preconditioner_coarse_apply_ms{0.0};
   std::size_t preconditioner_coarse_apply_calls{0};
   double preconditioner_coarse_rp_identity_error_max{0.0};

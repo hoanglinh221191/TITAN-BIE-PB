@@ -162,6 +162,7 @@ public:
 
   // --- CÁC HÀM XỬ LÝ CHÍNH ---
   int gen_vector_parameters();
+  void cache_topology_vdw_radii_from_parameters();
   int generate_index();
 
   void assign_lcpo_parameters(size_t num_atoms,

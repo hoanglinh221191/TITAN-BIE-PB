@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -68,15 +69,32 @@ struct JcpCoarseGalerkinPreconditioner {
   std::size_t panel_count{0};
   bool coupled{false};
   std::vector<Aggregate> aggregates;
+  // Fine-panel to aggregate lookup used while the sparse near operator is
+  // assembled. Keeping this map lets the ILU builder accumulate A_near*P
+  // without retaining a second copy of the unfactored sparse matrix.
+  std::vector<std::size_t> panel_aggregate;
   std::vector<double> inv_diag;
   std::vector<double> lu;
   std::vector<int> pivots;
+  // Row-major fine-grid images A * P(:,j). The balanced two-level path
+  // retains these columns during Galerkin setup so that applying
+  // (I - A P A_c^-1 R) does not require another full FMM matvec.
+  std::vector<double> fine_operator_basis;
   std::shared_ptr<JcpBlockPreconditioner> block_base;
   double pivot_ratio{0.0};
   bool valid{false};
   std::size_t setup_matvec_calls{0};
   double rp_identity_error_max{0.0};
   double verify_rel_error_max{0.0};
+  double moments_setup_ms{0.0};
+  double far_setup_ms{0.0};
+  double audit_setup_ms{0.0};
+
+  // GMRES applies the balanced correction serially. Reuse the fine residual
+  // and small coarse solve vector instead of allocating them every iteration.
+  mutable std::mutex balanced_workspace_mutex;
+  mutable std::vector<double> balanced_residual_workspace;
+  mutable std::vector<double> balanced_coarse_workspace;
 
   [[nodiscard]] std::size_t dimension() const noexcept;
   void restrict_area_weighted(const std::vector<Panel> &panels,
@@ -84,9 +102,15 @@ struct JcpCoarseGalerkinPreconditioner {
                               std::vector<double> &coarse) const;
   void prolongate(const std::vector<double> &coarse,
                   std::vector<double> &fine) const;
-  [[nodiscard]] std::size_t estimated_bytes() const noexcept;
+  [[nodiscard]] std::size_t
+  estimated_bytes(bool include_operator_basis = false) const noexcept;
   void apply(const std::vector<Panel> &panels, const std::vector<double> &in,
              std::vector<double> &out, TitanExecutor &executor) const;
+  void apply_balanced(
+      const std::vector<Panel> &panels, const std::vector<double> &in,
+      std::vector<double> &out,
+      const std::function<void(const std::vector<double> &,
+                               std::vector<double> &)> &base_apply) const;
 };
 
 std::vector<JcpBlockRange>
@@ -140,7 +164,17 @@ bool build_jcp_exact_galerkin(
     const std::vector<Panel> &panels, JcpCoarseGalerkinPreconditioner &coarse,
     const std::function<void(const std::vector<double> &,
                              std::vector<double> &)> &setup_matvec,
-    bool verify);
+    bool verify, bool retain_operator_basis = false);
+
+bool complete_jcp_hybrid_galerkin_monopole(
+    const std::vector<Panel> &panels, JcpCoarseGalerkinPreconditioner &coarse,
+    const std::vector<std::size_t> &near_row_ptr,
+    const std::vector<std::size_t> &near_col_index, double eps_ratio,
+    double kappa,
+    const std::function<void(const std::vector<double> &,
+                             std::vector<double> &)> &audit_matvec,
+    std::size_t audit_probes, double audit_tolerance,
+    TitanExecutor &executor);
 
 } // namespace TitanPBE::Tabi
 

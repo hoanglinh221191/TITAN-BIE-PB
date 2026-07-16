@@ -4,6 +4,7 @@
 #include "functions.h"
 #include "martini_nonbonded.h"
 #include "miscellaneous.h"
+#include "titan_energy_validation.h"
 #include "titan_executor.h"
 #include "uti_func.h"
 #include <algorithm>
@@ -60,6 +61,8 @@ inline int add_energy(const cache_sigma_epsilon &CachedData, size_t i,
   } else {
     if (rec_pos >= rec.size() || lg_pos >= lg.size())
       return 1;
+    if (Arguments.self_int && rec_pos == lg_pos)
+      return 1;
     double dx{rec.pos.x[rec_pos] - lg.pos.x[lg_pos]},
         dy{rec.pos.y[rec_pos] - lg.pos.y[lg_pos]},
         dz{rec.pos.z[rec_pos] - lg.pos.z[lg_pos]},
@@ -90,8 +93,8 @@ inline int add_energy(const cache_sigma_epsilon &CachedData, size_t i,
 
       van_der_waals_energy += charmm::lj_energy(sigma_ij, epsilon_ij, d);
     } else if (CachedData.force_field_name.find("AMBER") != string::npos) {
-      double temp_vdw{sqrt(rec_parameters[rec_pos].get_epsilon() *
-                           lg_parameters[lg_pos].get_epsilon())},
+      double temp_vdw{4.0 * sqrt(rec_parameters[rec_pos].get_epsilon() *
+                                 lg_parameters[lg_pos].get_epsilon())},
           c_6{c6(0.5 *
                  (lg_parameters[lg_pos].get_sigma() +
                   rec_parameters[rec_pos].get_sigma()) /
@@ -111,8 +114,8 @@ inline int add_energy(const cache_sigma_epsilon &CachedData, size_t i,
 
       van_der_waals_energy += temp_vdw * (c_12 - c_6);
     } else if (CachedData.force_field_name.find("OPLS") != string::npos) {
-      double temp_vdw{sqrt(rec_parameters[rec_pos].get_epsilon() *
-                           lg_parameters[lg_pos].get_epsilon())},
+      double temp_vdw{4.0 * sqrt(rec_parameters[rec_pos].get_epsilon() *
+                                 lg_parameters[lg_pos].get_epsilon())},
           c_6{c6(sqrt(lg_parameters[lg_pos].get_sigma() *
                       rec_parameters[rec_pos].get_sigma()) /
                  d)},
@@ -174,7 +177,8 @@ int cal_energy_amber_screening(const MOL &rec, const MOL &lg,
                                size_t num_snap, const arguments &Arguments,
                                const Multi_MOL_parameters &rec_parameters,
                                const Multi_MOL_parameters &lg_parameters) {
-  constexpr double kScreeningMinDistance = 1e-10;
+  constexpr double kScreeningMinDistance =
+      titan_energy_validation::kMinimumPairDistanceNm;
   const double epsilon_in{Arguments.epsilon_in};
   const double lambda_debye{3.07 / sqrt(Arguments.salt_concentration)};
   const bool is_charmm =
@@ -261,6 +265,10 @@ void cal_energy_amber(const MOL &rec, const MOL &lg,
     const double pos_x{lg.pos.x[j]}, pos_y{lg.pos.y[j]}, pos_z{lg.pos.z[j]};
     const size_t rec_size{rec.size()};
     for (size_t i{}; i < rec_size; ++i) {
+      if (Arguments.self_int && i == j) {
+        zero_cached_pair_if_present(CachedData, rec.size() * j + i);
+        continue;
+      }
       double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
                           square(rec.pos.y[i] - pos_y) +
                           square(rec.pos.z[i] - pos_z))};
@@ -337,6 +345,10 @@ void cal_energy_opls(const MOL &rec, const MOL &lg,
     size_t rec_size{rec.size()};
 
     for (size_t i{}; i < rec_size; ++i) {
+      if (Arguments.self_int && i == j) {
+        zero_cached_pair_if_present(CachedData, rec.size() * j + i);
+        continue;
+      }
       double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
                           square(rec.pos.y[i] - pos_y) +
                           square(rec.pos.z[i] - pos_z))},
@@ -395,17 +407,14 @@ void cal_energy_gromos(const MOL &rec, const MOL &lg,
         pos_y{lg.pos.y[j]}, pos_z{lg.pos.z[j]};
     size_t rec_size{rec.size()};
     for (size_t i{}; i < rec_size; ++i) {
+      if (Arguments.self_int && i == j) {
+        zero_cached_pair_if_present(CachedData, rec.size() * j + i);
+        continue;
+      }
       double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
                           square(rec.pos.y[i] - pos_y) +
                           square(rec.pos.z[i] - pos_z))},
           c_6{c6(d)};
-
-      if (num_snap == 0 && i == 1719 && j == 2584) {
-        ofstream err("global_debug.log", ios::app);
-        err << "GlobalPair: i=" << i << " j=" << j << " D=" << d
-            << " c6=" << c_6 << " Cutoff=" << Arguments.distance_energy_cutoff
-            << " Self=" << Arguments.self_int << endl;
-      }
 
       if (Arguments.distance_energy_cutoff > 0. &&
           d > Arguments.distance_energy_cutoff) [[unlikely]] {
@@ -414,7 +423,8 @@ void cal_energy_gromos(const MOL &rec, const MOL &lg,
       }
 
       if (Arguments.self_int == true &&
-          (i == j || (Arguments.flag_interchain_energy == true &&
+          ((i == j) ||
+           (Arguments.flag_interchain_energy == true &&
                       info_lg[j].get_chain() == info_rec[i].get_chain()))) {
         zero_cached_pair_if_present(CachedData, rec.size() * j + i);
         continue;
@@ -457,7 +467,7 @@ void cal_energy_martini(const MOL &rec, const MOL &lg,
       double d{0.1 * sqrt(square(rec.pos.x[i] - pos_x) +
                           square(rec.pos.y[i] - pos_y) +
                           square(rec.pos.z[i] - pos_z))};
-      if (d < 1e-10) {
+      if (d <= titan_energy_validation::kMinimumPairDistanceNm) {
         if (!CachedData.elec_ener.empty()) {
           size_t pos{rec.size() * j + i};
           CachedData.set_elec_vdw(pos, 0., 0.);

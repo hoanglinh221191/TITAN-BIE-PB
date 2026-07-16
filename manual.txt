@@ -289,12 +289,15 @@ IMPORTANT NOTES
       -pbe-tabi-fmm-m2l=auto|off|single-matvec-analytic,
       -pbe-tabi-precond=auto|none|diagonal|block|block-budgeted|
         coarse-galerkin-probe|fmm-block-jacobi|fmm-overlap-schwarz|
-        fmm-nearfield-ilu0|distance-knn-overlap-schwarz|
+        fmm-nearfield-ilu0|fmm-nearfield-ilu0-coarse|
+        distance-knn-overlap-schwarz|
         distance-knn-ilu0,
       -pbe-tabi-precond-ilu-neighbor-cap=<32..1024>,
       -pbe-tabi-precond-ilu-drop-tol=<0..1e-2>,
       -pbe-tabi-precond-ilu-regularization=adaptive|off (default adaptive),
       -pbe-tabi-precond-ilu-regularization-max=<0..1e-2>,
+      -pbe-tabi-precond-coarse-aggregate-cap=<4..64>,
+      -pbe-tabi-precond-coarse-verify=off|full-small,
       -pbe-tabi-near-integration=auto|centroid|analytic_singular|
         duffy_adaptive
       -pbe-tabi-primary-surface=sphere-patch|grid-ses|analytic-ses,
@@ -306,6 +309,16 @@ IMPORTANT NOTES
     analytic-ses independently constructs exact contact, toroidal, and
     reentrant probe patches from expanded atom spheres, intersects grid rays
     with those patches, and topology-audits the welded mesh before solving.
+    fmm-nearfield-ilu0-coarse is an opt-in balanced two-level
+    preconditioner. It reuses adaptive occupied octree nodes for an
+    area-weighted coarse space and combines the coarse correction with the
+    existing near-field ILU(0). Its setup captures A_near*P while assembling
+    ILU, adds spatial-octant far monopoles, and audits the hybrid operator with
+    one full FMM probe. A failed audit falls back to exact Galerkin
+    setup; a setup or budget failure falls back to ILU(0). Auto and
+    fmm-nearfield-ilu0 keep the current single-level pipeline. Setting
+    coarse-verify=full-small deliberately requires exact fallback and repeats
+    the exact coarse columns for verification.
     hidden PQR parity only: -pbe-parity-dump, -pbe-parity-map-dump,
     -pbe-test-charge-grid, -pbe-test-charge-grid-diff,
     -pbe-test-surface-map,
@@ -329,7 +342,9 @@ IMPORTANT NOTES
     counters, and paper-mode guard status when an
     experimental path is pinned.
     It rejects nonlinear, RPB, Gaussian dielectric/surface, focus, multigrid,
-    PBSA, decomposition, and grid-map modes until later phases.
+    and grid-map modes. Linear MM/PBSA is supported through three TABI
+    reaction-field endpoint solves (complex, receptor, and ligand), including
+    molecule, residue, atom, and hybrid decomposition outputs.
 
   Typical outputs:
     pbe_energy.csv
@@ -338,7 +353,8 @@ IMPORTANT NOTES
     mm_pbsa_ie_diagnostics.csv, and mm_pbsa_performance.dat when -pbsa is
     enabled
     optional: mm_pbsa_decomposition.dat and mm_pbsa_residue_*.csv when
-    -pbsa-decomp is molecule/residue
+    -pbsa-decomp is molecule/residue; mm_pbsa_unit_*.csv for hybrid/auto
+    protein-ligand decomposition
     energies are reported in kJ/mol and kcal/mol; kT is retained for continuity
     optional: pbe_phi_*.cube, pbe_epsilon_*.cube, and pbe_ion_*.cube
     optional: pbe_probe_sites.csv when DelPhi focus/probe fixture knobs are used
@@ -2017,11 +2033,15 @@ IMPORTANT NOTES
                         mm_pbsa_energy.csv and mm_pbsa_summary.dat with PB
                         endpoint polar, SASA nonpolar, elec/vdw,
                         interaction entropy, and final dG.
+                        -pbe=grid uses solvent/vacuum grid endpoints;
+                        -pbe=tabi uses three boundary-integral reaction-field
+                        endpoints (complex, receptor, ligand).
                         Arg file: -pbsa=true; CLI: -pbsa true
   -pbsa-components <m>  auto or complex,receptor,ligand. Default: auto
-  -pbsa-decomp <mode>   off, molecule, or residue. Default: off
-                        residue writes component decomposition without
-                        re-solving PB per residue.
+  -pbsa-decomp <mode>   off, molecule, residue, hybrid, or auto. Default: auto
+                        auto selects hybrid only for protein-ligand input;
+                        hybrid writes protein residues and ligand atoms
+                        without re-solving PB per unit.
   -pbsa-ie <bool>       Enable interaction entropy correction. Default: true
                         Uses the same Duan-Zhang interaction entropy core as
                         TITAN's -entropy module, with PBSA diagnostics.
@@ -2033,6 +2053,11 @@ IMPORTANT NOTES
   -pbsa-ie-min-samples <N>
                         Minimum samples before IE correction is applied.
                         Default: 10
+  -pbsa-grid-reuse <m> off, validate, or auto. Default: auto
+                        validate compares same-endpoint solvent/vacuum
+                        geometry/operator reuse against the baseline grid
+                        solve. TABI reports this grid-only optimization as
+                        not_applicable and rejects validate mode.
   -pbsa-ie-filter-sigma <val>
                         Sigma filter for IE samples. Default: 2.0
   -pbsa-perf <mode>     off, summary, or detail. Default: summary
@@ -2297,6 +2322,12 @@ IMPORTANT NOTES
   -pbcn                 FixBox-style PBC mode
   -pbctopo              pbctopo (VIBE): Virtual Intact Block Extraction PBC mode
   -pbctopo-anchor-backend=<name>
+  -pbctopo-anchor-metrics=<full|mst-only|no-order|no-contact>
+  -pbctopo-temporal=<greedy|viterbi>
+  -pbctopo-temporal-k=<N>
+  -pbctopo-temporal-penalty=<value>
+  -pbctopo-vdw-clash-scale=<value>
+                        Severe-overlap threshold lambda*(ri+rj). Range: (0,1]; default: 0.55
                         auto | prim | spatial-all. Default: auto
   -pbcclust <axes>      Clustered PBC mode; axes like x, xy, xyz
   -pbcm [chain_ref]     Membrane-oriented PBC mode

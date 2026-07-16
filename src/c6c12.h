@@ -15,17 +15,19 @@ struct para_base {
   template <typename T1, typename T11, typename T2, typename T3>
   para_base(T1 &&_c6_sigma, T1 &&_c12_epsilon, T11 &&_mass, T3 &&_radius,
             T2 &&_atom_type)
-      : c6_sigma{forward<T1>(_c6_sigma)},
-        c12_epsilon{forward<T1>(_c12_epsilon)}, mass{forward<T11>(_mass)},
-        radius{forward<T1>(_radius)}, atom_type{forward<T2>(_atom_type)} {}
+      : c6_sigma{std::forward<T1>(_c6_sigma)},
+        c12_epsilon{std::forward<T1>(_c12_epsilon)},
+        mass{std::forward<T11>(_mass)}, radius{std::forward<T1>(_radius)},
+        atom_type{std::forward<T2>(_atom_type)} {}
 
   template <typename T1, typename T11, typename T2, typename T3>
   para_base(T1 &&_c6_sigma, T1 &&_c12_epsilon, T11 &&_mass, T3 &&_radius,
             T1 &&_charge, T2 &&_atom_type, T2 &&_code_name)
-      : c6_sigma{forward<T1>(_c6_sigma)},
-        c12_epsilon{forward<T1>(_c12_epsilon)}, mass{forward<T11>(_mass)},
-        radius{forward<T1>(_radius)}, charge{_charge},
-        atom_type{forward<T2>(_atom_type)}, code_name{_code_name} {}
+      : c6_sigma{std::forward<T1>(_c6_sigma)},
+        c12_epsilon{std::forward<T1>(_c12_epsilon)},
+        mass{std::forward<T11>(_mass)}, radius{std::forward<T1>(_radius)},
+        charge{_charge}, atom_type{std::forward<T2>(_atom_type)},
+        code_name{_code_name} {}
 };
 class para {
 public:
@@ -43,7 +45,7 @@ public:
 
   void register_atom_type(const string &atom_type) {
     if (!atom_type.empty())
-      atom_type_to_id.try_emplace(atom_type, base.size() - 1);
+      atom_type_to_id.insert_or_assign(atom_type, base.size() - 1);
   }
 
   void add_nonbond_override(string atom_type_i, string atom_type_j,

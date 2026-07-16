@@ -35,6 +35,7 @@
 #include "titan_pca.h" // Ensured inclusion as per instruction
 #include "titan_dssp.h"
 #include "titan_energy_decomp_engine.h"
+#include "titan_energy_validation.h"
 #include "titan_hbond_kinetics.h"
 #include "titan_hotspot_report.h"
 #include "titan_lj.h"
@@ -81,6 +82,7 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -1994,34 +1996,6 @@ int engine(arguments &Arguments) {
     // --- STREAMING ARCHITECTURE INITIALIZATION ---
     ChunkStreamer streamer(Arguments, info_output, Groups_from_index_file,
                            force_f, executor, num_threads);
-    // Save file positions after Frame 0 was consumed by init
-    std::streampos pos_pro = -1, pos_lig = -1;
-    {
-      std::ifstream probe_pro(
-          Arguments.flag_1_pdb ? Arguments.pdb_name : name_pro, std::ios::in);
-      if (probe_pro.is_open()) {
-        std::string tmp;
-        while (std::getline(probe_pro, tmp)) {
-          if (tmp.starts_with("ENDMDL") || tmp.starts_with("END")) {
-            pos_pro = probe_pro.tellg();
-            break;
-          }
-        }
-      }
-    }
-    if (!Arguments.flag_1_pdb) {
-      std::ifstream probe_lig(name_lig, std::ios::in);
-      if (probe_lig.is_open()) {
-        std::string tmp;
-        while (std::getline(probe_lig, tmp)) {
-          if (tmp.starts_with("ENDMDL") || tmp.starts_with("END")) {
-            pos_lig = probe_lig.tellg();
-            break;
-          }
-        }
-      }
-    }
-    streamer.set_frame0_positions(pos_pro, pos_lig);
 
     auto stream_ok =
         streamer.open_streams(name_pro, name_lig, pro_in, lig, membrane_traj);
@@ -3451,6 +3425,42 @@ int engine(arguments &Arguments) {
            ++chunk_snap_idx) {
         size_t global_snap_idx = global_frame_counter + chunk_snap_idx;
 
+        const size_t energy_lg_snap =
+            (lig.m_mol.size() > 1) ? chunk_snap_idx : 0;
+        if (energy_lg_snap >= lig.m_mol.size()) {
+          TitanUI::print_error(
+              "Energy validation: ligand frame is unavailable.");
+          return 1;
+        }
+        const MOL &energy_lig_frame = lig.m_mol[energy_lg_snap];
+        const auto energy_validation_begin = std::chrono::steady_clock::now();
+        const auto overlap = titan_energy_validation::find_overlapping_atoms(
+            pro_in.m_mol[chunk_snap_idx], energy_lig_frame,
+            Arguments.self_int, executor);
+        const auto energy_validation_end = std::chrono::steady_clock::now();
+        perf_observer.add_frame_elapsed(
+            "EnergyValidation",
+            static_cast<std::uint64_t>(tot_snap_allfiles + global_snap_idx),
+            pro_in.m_mol[chunk_snap_idx].time_of_snap,
+            std::chrono::duration<double, std::milli>(energy_validation_end -
+                                                      energy_validation_begin)
+                .count(),
+            "coordinate_overlap_gate", !overlap.has_value());
+        if (overlap) {
+          std::ostringstream message;
+          message << titan_energy_validation::kOverlappingAtomsError
+                  << ": frame=" << (global_snap_idx + 1)
+                  << ", mol1_atom=" << (overlap->mol1_atom + 1)
+                  << ", mol2_atom=" << (overlap->mol2_atom + 1)
+                  << ", distance_nm=" << std::scientific
+                  << overlap->distance_nm
+                  << "; electrostatic/vdW energy requires distinct atom "
+                     "coordinates.";
+          TitanUI::print_error(message.str());
+          TitanUI::log_message(log, "[Validation] " + message.str());
+          return 1;
+        }
+
         // --- LLPS per-frame analysis (async pipeline — overlaps energy calc)
         // ---
         if (Arguments.llps.flag_llps && llps_analyzer) {
@@ -3568,8 +3578,7 @@ int engine(arguments &Arguments) {
         AlignedDoubleVector lg_free_radii;
         AlignedDoubleVector rec_complex_radii;
         AlignedDoubleVector lg_complex_radii;
-        size_t lg_snap = (lig.m_mol.size() > 1) ? chunk_snap_idx : 0;
-        const MOL &active_lg_mol = lig.m_mol[lg_snap];
+        const MOL &active_lg_mol = energy_lig_frame;
         const vector<mol_info> &active_lg_info = lig.info;
         const size_t ligand_atom_count = lig.m_mol[0].size();
 

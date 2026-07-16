@@ -284,13 +284,16 @@ IMPORTANT NOTES
       -pbe-tabi-fmm-m2l=auto|off|single-matvec-analytic,
       -pbe-tabi-precond=auto|none|diagonal|block|block-budgeted|
         coarse-galerkin-probe|fmm-block-jacobi|fmm-overlap-schwarz|
-        fmm-nearfield-ilu0|distance-knn-overlap-schwarz|
+        fmm-nearfield-ilu0|fmm-nearfield-ilu0-coarse|
+        distance-knn-overlap-schwarz|
         distance-knn-ilu0,
       -pbe-tabi-precond-ilu-neighbor-cap=<32..1024>,
       -pbe-tabi-precond-ilu-drop-tol=<0..1e-2>,
       -pbe-tabi-precond-ilu-regularization=adaptive|off (default adaptive),
+      -pbe-tabi-precond-coarse-aggregate-cap=<4..64>,
+      -pbe-tabi-precond-coarse-verify=off|full-small,
       -pbe-tabi-precond-ilu-regularization-max=<0..1e-2>,
-      -pbe-tabi-precond-memory-budget-mb=<16..4096>,
+      -pbe-tabi-precond-memory-budget-mb=<16..8192>,
       -pbe-tabi-near-integration=auto|centroid|analytic_singular|
         duffy_adaptive,
       -pbe-tabi-quad-buffer=auto|off|gauss7|adaptive,
@@ -331,6 +334,16 @@ IMPORTANT NOTES
     analytic-ses independently constructs exact contact, toroidal, and
     reentrant probe patches from expanded atom spheres, intersects grid rays
     with those patches, and topology-audits the welded mesh before solving.
+    fmm-nearfield-ilu0-coarse is an opt-in balanced two-level
+    preconditioner. It reuses adaptive occupied octree nodes for an
+    area-weighted coarse space and combines the coarse correction with the
+    existing near-field ILU(0). Its setup captures A_near*P while assembling
+    ILU, adds spatial-octant far monopoles, and audits the hybrid operator with
+    one full FMM probe. A failed audit falls back to exact Galerkin
+    setup; a setup or budget failure falls back to ILU(0). Auto and
+    fmm-nearfield-ilu0 keep the current single-level pipeline. Setting
+    coarse-verify=full-small deliberately requires exact fallback and repeats
+    the exact coarse columns for verification.
     hidden PQR parity only: -pbe-parity-dump, -pbe-parity-map-dump,
     -pbe-test-charge-grid, -pbe-test-charge-grid-diff,
     -pbe-test-surface-map,
@@ -354,7 +367,9 @@ IMPORTANT NOTES
     counters, and paper-mode guard status when an
     experimental path is pinned.
     It rejects nonlinear, RPB, Gaussian dielectric/surface, focus, multigrid,
-    PBSA, decomposition, and grid-map modes until later phases.
+    and grid-map modes. Linear MM/PBSA is supported through three TABI
+    reaction-field endpoint solves (complex, receptor, and ligand), including
+    molecule, residue, atom, and hybrid decomposition outputs.
 
   Typical outputs:
     pbe_energy.csv
@@ -2064,6 +2079,9 @@ IMPORTANT NOTES
                         mm_pbsa_energy.csv and mm_pbsa_summary.dat with PB
                         endpoint polar, SASA nonpolar, elec/vdw,
                         interaction entropy, and final dG.
+                        -pbe=grid uses solvent/vacuum grid endpoints;
+                        -pbe=tabi uses three boundary-integral reaction-field
+                        endpoints (complex, receptor, ligand).
                         Arg file: -pbsa=true; CLI: -pbsa true
   -pbsa-components <m>  auto or complex,receptor,ligand. Default: auto
   -pbsa-decomp <mode>   off, molecule, residue, hybrid, or auto. Default: auto
@@ -2086,6 +2104,8 @@ IMPORTANT NOTES
                         validate compares same-endpoint solvent/vacuum
                         geometry/operator reuse against the baseline grid
                         solve; auto remains gated until validation passes.
+                        TABI reports this grid-only optimization as
+                        not_applicable and rejects validate mode.
   -pbsa-ie-filter-sigma <val>
                         Sigma filter for IE samples. Default: 2.0
   -pbsa-perf <mode>     off, summary, or detail. Default: summary
@@ -2362,6 +2382,16 @@ IMPORTANT NOTES
   -pbctopo-llps-local   Alias for -pbctopo -pbctopo-mode=llps-local
   -pbctopo-anchor-backend=<name>
                         auto | prim | spatial-all. Default: auto
+  -pbctopo-anchor-metrics=<name>
+                        full | mst-only | no-order | no-contact. Default: full
+  -pbctopo-temporal=<name>
+                        greedy | viterbi. Default: greedy
+  -pbctopo-temporal-k=<N>
+                        Top-K virtual candidates for Viterbi. Range: 1..32; default: 4
+  -pbctopo-temporal-penalty=<value>
+                        Center-jump penalty for Viterbi. Default: 2.0
+  -pbctopo-vdw-clash-scale=<value>
+                        Severe-overlap threshold lambda*(ri+rj). Range: (0,1]; default: 0.55
   -pbctopo-bond-cutoff=<A>
                         Local topology bond cutoff. Default: 2.15 A; MARTINI: 5.5 A
   -pbctopo-clash-cutoff=<A>

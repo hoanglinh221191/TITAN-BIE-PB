@@ -1,7 +1,11 @@
 #include "component_search.h"
+
+#include "candidate_order.h"
 #include "component_graph.h"
+#include "component_metric.h"
 #include "component_refine.h"
 #include "component_search_pair_table.h"
+#include "steric_clash.h"
 
 #include <algorithm>
 #include <chrono>
@@ -132,30 +136,28 @@ bool consume_search_continuity_prefix(
 }
 
 PbctopoComponentPairShiftEntry compute_component_pair_shift_entry(
-    const std::vector<std::size_t> &lhs_component,
     const PbctopoShiftedComponent &lhs,
-    const std::vector<std::size_t> &rhs_component,
-    const PbctopoShiftedComponent &rhs, double clash_cutoff) {
+    const PbctopoShiftedComponent &rhs, double clash_cutoff,
+    const std::vector<PbctopoAtom> &atoms, PbctopoTimingStats *timing) {
   PbctopoComponentPairShiftEntry entry;
   entry.bbox_d2 = shifted_component_bbox_distance2(lhs, rhs);
   if (!component_bbox_may_clash(lhs, rhs, clash_cutoff))
     return entry;
 
-  const double cutoff2 = clash_cutoff * clash_cutoff;
-  const std::vector<std::size_t> *scan_component = &lhs_component;
-  const std::vector<std::size_t> *grid_component = &rhs_component;
+  const std::vector<std::size_t> *scan_atom_indices = &lhs.atom_indices;
+  const std::vector<std::size_t> *grid_atom_indices = &rhs.atom_indices;
   const PbctopoShiftedComponent *scan_shifted = &lhs;
   const PbctopoShiftedComponent *grid_shifted = &rhs;
-  if (lhs_component.size() > rhs_component.size()) {
-    scan_component = &rhs_component;
-    grid_component = &lhs_component;
+  if (lhs.points.size() > rhs.points.size()) {
+    scan_atom_indices = &rhs.atom_indices;
+    grid_atom_indices = &lhs.atom_indices;
     scan_shifted = &rhs;
     grid_shifted = &lhs;
   }
 
-  for (std::size_t local_idx = 0; local_idx < scan_component->size();
+  for (std::size_t local_idx = 0; local_idx < scan_shifted->points.size();
        ++local_idx) {
-    const std::size_t atom_idx = (*scan_component)[local_idx];
+    const std::size_t atom_idx = (*scan_atom_indices)[local_idx];
     const auto &point = scan_shifted->points[local_idx];
     const auto &key = scan_shifted->clash_keys[local_idx];
     const int cx = key.x;
@@ -169,7 +171,7 @@ PbctopoComponentPairShiftEntry compute_component_pair_shift_entry(
           if (it == grid_shifted->clash_grid.end())
             continue;
           for (std::size_t other_local_idx : it->second) {
-            const std::size_t other_idx = (*grid_component)[other_local_idx];
+            const std::size_t other_idx = (*grid_atom_indices)[other_local_idx];
             const auto &other = grid_shifted->points[other_local_idx];
             const double ddx = point.x - other.x;
             const double ddy = point.y - other.y;
@@ -180,7 +182,9 @@ PbctopoComponentPairShiftEntry compute_component_pair_shift_entry(
               entry.clash_atom_a = atom_idx;
               entry.clash_atom_b = other_idx;
             }
-            if (d2 + kDistanceEps < cutoff2) {
+            if (atom_idx < atoms.size() && other_idx < atoms.size() &&
+                pbctopo_atoms_clash(d2, atoms[atom_idx], atoms[other_idx],
+                                     clash_cutoff, timing)) {
               entry.hard_clash = true;
               return entry;
             }
@@ -195,7 +199,9 @@ PbctopoComponentPairShiftEntry compute_component_pair_shift_entry(
 PbctopoComponentPairShiftTable build_component_pair_shift_table(
     const std::vector<std::vector<std::size_t>> &components,
     const std::vector<std::vector<PbctopoShiftedComponent>> &shifted_components,
-    double clash_cutoff, PbctopoTimingStats *timing = nullptr) {
+    double clash_cutoff, double search_cutoff,
+    const std::vector<PbctopoAtom> &atoms,
+    PbctopoTimingStats *timing = nullptr) {
   using clock = std::chrono::steady_clock;
   const auto started = clock::now();
   PbctopoComponentPairShiftTable table;
@@ -212,13 +218,12 @@ PbctopoComponentPairShiftTable build_component_pair_shift_table(
           const auto &lhs_shifted = shifted_components[lhs_comp][lhs_shift];
           const auto &rhs_shifted = shifted_components[rhs_comp][rhs_shift];
           if (!component_bbox_may_clash(lhs_shifted, rhs_shifted,
-                                        clash_cutoff)) {
+                                        search_cutoff)) {
             table.add_bbox_prefiltered(2);
             continue;
           }
           const auto entry = compute_component_pair_shift_entry(
-              components[lhs_comp], lhs_shifted, components[rhs_comp],
-              rhs_shifted, clash_cutoff);
+              lhs_shifted, rhs_shifted, clash_cutoff, atoms, timing);
           if (entry.hard_clash || std::isfinite(entry.min_pair_d2)) {
             table.store_directed_pair(lhs_comp, lhs_shift, rhs_comp, rhs_shift,
                                       entry);
@@ -348,11 +353,11 @@ struct PbctopoBeamState {
 
 std::vector<Int3> normalize_search_warm_offsets(
     const std::vector<Int3> &warm_offsets,
-    const std::vector<std::vector<std::size_t>> &components) {
+    box Box) {
   if (warm_offsets.empty())
     return {};
   std::vector<Int3> rebased = warm_offsets;
-  rebase_component_offsets(rebased, components);
+  rebase_component_offsets(rebased, Box);
   std::vector<Int3> normalized;
   normalized.reserve(rebased.size());
   const Int3 root = rebased.front();
@@ -401,10 +406,7 @@ std::vector<PbctopoComponentSearchShiftOption> build_component_search_shift_orde
     option.next_min_pair_d2 = current_min_pair_d2;
     option.ordering_min_pair_d2 = std::numeric_limits<double>::infinity();
     option.future_remaining_shifts = 0;
-    option.shift_norm2 = static_cast<double>(
-        shifts[shift_idx].ix * shifts[shift_idx].ix +
-        shifts[shift_idx].iy * shifts[shift_idx].iy +
-        shifts[shift_idx].iz * shifts[shift_idx].iz);
+    option.shift_norm2 = pbctopo_translation_norm2(shifts[shift_idx]);
     option.clash_atom_a = clash_atom_a;
     option.clash_atom_b = clash_atom_b;
     option.warm_priority =
@@ -461,11 +463,15 @@ std::vector<PbctopoComponentSearchShiftOption> build_component_search_shift_orde
                 return lhs.warm_priority;
               if (lhs.future_remaining_shifts != rhs.future_remaining_shifts)
                 return lhs.future_remaining_shifts < rhs.future_remaining_shifts;
-              if (std::fabs(lhs.ordering_min_pair_d2 -
-                            rhs.ordering_min_pair_d2) > 1.0e-9)
-                return lhs.ordering_min_pair_d2 > rhs.ordering_min_pair_d2;
-              if (std::fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-9)
-                return lhs.shift_norm2 < rhs.shift_norm2;
+               int metric_cmp = compare_pbctopo_metric(
+                   lhs.ordering_min_pair_d2, rhs.ordering_min_pair_d2,
+                   {1.0e-9, 0.0});
+               if (metric_cmp != 0)
+                 return metric_cmp > 0;
+               metric_cmp = compare_pbctopo_metric(
+                   lhs.shift_norm2, rhs.shift_norm2, {1.0e-9, 0.0});
+               if (metric_cmp != 0)
+                 return metric_cmp < 0;
               return lhs.shift_idx < rhs.shift_idx;
             });
   if (!ordered.empty() && ordered.front().warm_priority && timing != nullptr)
@@ -479,14 +485,21 @@ bool better_component_beam_state(const PbctopoBeamState &lhs,
   const bool rhs_has_pair = std::isfinite(rhs.min_pair_d2);
   if (lhs_has_pair != rhs_has_pair)
     return lhs_has_pair;
-  if (lhs_has_pair && std::fabs(lhs.min_pair_d2 - rhs.min_pair_d2) > 1.0e-9)
-    return lhs.min_pair_d2 > rhs.min_pair_d2;
+  int metric_cmp = lhs_has_pair
+                       ? compare_pbctopo_metric(lhs.min_pair_d2,
+                                                rhs.min_pair_d2,
+                                                {1.0e-9, 0.0})
+                       : 0;
+  if (metric_cmp != 0)
+    return metric_cmp > 0;
   if (lhs.warm_hits != rhs.warm_hits)
     return lhs.warm_hits > rhs.warm_hits;
   if (lhs.future_remaining_shifts != rhs.future_remaining_shifts)
     return lhs.future_remaining_shifts < rhs.future_remaining_shifts;
-  if (std::fabs(lhs.shift_norm2 - rhs.shift_norm2) > 1.0e-9)
-    return lhs.shift_norm2 < rhs.shift_norm2;
+  metric_cmp = compare_pbctopo_metric(lhs.shift_norm2, rhs.shift_norm2,
+                                      {1.0e-9, 0.0});
+  if (metric_cmp != 0)
+    return metric_cmp < 0;
   return lhs.selected_shift < rhs.selected_shift;
 }
 
@@ -494,6 +507,7 @@ bool build_component_points_from_selected_shifts(
     const std::vector<PbctopoAtom> &atoms,
     const std::vector<std::vector<std::size_t>> &components,
     const std::vector<std::vector<PbctopoShiftedComponent>> &shifted_components,
+    const std::vector<PbctopoShift> &shifts,
     const std::vector<std::size_t> &selected_shift,
     std::vector<Vec3> &placed_points, double &shift_norm2) {
   if (components.size() != selected_shift.size())
@@ -502,16 +516,22 @@ bool build_component_points_from_selected_shifts(
   shift_norm2 = 0.0;
   for (std::size_t comp_idx = 0; comp_idx < components.size(); ++comp_idx) {
     const std::size_t shift_idx = selected_shift[comp_idx];
-    if (shift_idx >= shifted_components[comp_idx].size())
+    if (shift_idx >= shifted_components[comp_idx].size() ||
+        shift_idx >= shifts.size())
       return false;
     const auto &component = components[comp_idx];
     const auto &shifted = shifted_components[comp_idx][shift_idx];
-    if (shifted.points.size() != component.size())
-      return false;
-    shift_norm2 += shifted.weighted_shift_norm2;
-    for (std::size_t local_idx = 0; local_idx < component.size(); ++local_idx)
-      placed_points[component[local_idx]] = shifted.points[local_idx];
+    const auto &shift = shifts[shift_idx];
+    shift_norm2 += shifted.translation_norm2;
+    for (std::size_t atom_idx : component) {
+      if (atom_idx >= atoms.size())
+        return false;
+      placed_points[atom_idx] = {atoms[atom_idx].x + shift.tx,
+                                 atoms[atom_idx].y + shift.ty,
+                                 atoms[atom_idx].z + shift.tz};
+    }
   }
+  shift_norm2 /= static_cast<double>(components.size());
   return true;
 }
 
@@ -527,6 +547,23 @@ std::size_t identity_shift_index(const std::vector<PbctopoShift> &shifts) {
 
 } // namespace
 
+std::size_t pbctopo_component_assignment_upper_bound(
+    std::size_t component_count, std::size_t shift_count,
+    std::size_t saturation_limit) {
+  if (component_count <= 1)
+    return 1;
+  if (shift_count == 0 || saturation_limit == 0)
+    return 0;
+
+  std::size_t state_count = 1;
+  for (std::size_t depth = 1; depth < component_count; ++depth) {
+    if (state_count > saturation_limit / shift_count)
+      return saturation_limit;
+    state_count *= shift_count;
+  }
+  return state_count;
+}
+
 PbctopoComponentCandidate search_component_shift_candidate_beam(
     const std::vector<PbctopoAtom> &atoms, box Box,
     const std::vector<std::vector<std::size_t>> &components,
@@ -540,7 +577,6 @@ PbctopoComponentCandidate search_component_shift_candidate_beam(
     const std::vector<Vec3> *incumbent_points, PbctopoTimingStats *timing,
     AnchorBackend anchor_backend,
     const PbctopoAnchorGraphContext *anchor_context) {
-  (void)Box;
   beam_width = std::max<std::size_t>(
       1, std::min(beam_width, static_cast<std::size_t>(kMaxBeamWidth)));
   PbctopoComponentCandidate best;
@@ -551,9 +587,12 @@ PbctopoComponentCandidate search_component_shift_candidate_beam(
   best_points_out.clear();
   best_points_out.reserve(atoms.size());
 
+  const double clash_search_cutoff =
+      pbctopo_max_clash_cutoff(atoms, cutoffs.clash_cutoff);
+
   const auto shifted_components =
       precompute_shifted_components(atoms, components, shifts,
-                                    cutoffs.clash_cutoff,
+                                    clash_search_cutoff,
                                     cutoffs.pair_contact_cutoff);
 
   const std::size_t identity_shift_pos = identity_shift_index(shifts);
@@ -570,7 +609,8 @@ PbctopoComponentCandidate search_component_shift_candidate_beam(
 
   const PbctopoComponentPairShiftTable pair_table =
       build_component_pair_shift_table(components, shifted_components,
-                                       cutoffs.clash_cutoff, timing);
+                                       cutoffs.clash_cutoff,
+                                       clash_search_cutoff, atoms, timing);
   const std::vector<std::size_t> atom_component_index =
       build_atom_component_index(atoms.size(), components);
   const std::vector<std::size_t> search_order = build_component_search_order(
@@ -579,7 +619,7 @@ PbctopoComponentCandidate search_component_shift_candidate_beam(
   const std::vector<Int3> normalized_warm_offsets =
       (warm_component_offsets != nullptr &&
        warm_component_offsets->size() == components.size())
-          ? normalize_search_warm_offsets(*warm_component_offsets, components)
+          ? normalize_search_warm_offsets(*warm_component_offsets, Box)
           : std::vector<Int3>{};
   const std::vector<Int3> *normalized_warm_offsets_ptr =
       normalized_warm_offsets.empty() ? nullptr : &normalized_warm_offsets;
@@ -653,7 +693,7 @@ PbctopoComponentCandidate search_component_shift_candidate_beam(
         }
         next_state.shift_norm2 +=
             shifted_components[actual_comp_idx][option.shift_idx]
-                .weighted_shift_norm2;
+                .translation_norm2;
         next_state.min_pair_d2 = option.next_min_pair_d2;
         next_state.clash_atom_a = option.clash_atom_a;
         next_state.clash_atom_b = option.clash_atom_b;
@@ -698,7 +738,7 @@ PbctopoComponentCandidate search_component_shift_candidate_beam(
        ++state_idx) {
     double candidate_shift_norm2 = 0.0;
     if (!build_component_points_from_selected_shifts(
-            atoms, components, shifted_components,
+            atoms, components, shifted_components, shifts,
             beam_states[state_idx].selected_shift, placed_points,
             candidate_shift_norm2)) {
       continue;
@@ -731,7 +771,6 @@ PbctopoComponentCandidate search_component_shift_candidate(
     const std::vector<Vec3> *incumbent_points, PbctopoTimingStats *timing,
     AnchorBackend anchor_backend,
     const PbctopoAnchorGraphContext *anchor_context) {
-  (void)Box;
   PbctopoComponentCandidate best;
   if (components.empty() || !callbacks.ready())
     return best;
@@ -739,10 +778,12 @@ PbctopoComponentCandidate search_component_shift_candidate(
   std::vector<Vec3> placed_points(atoms.size());
   best_points_out.clear();
   best_points_out.reserve(atoms.size());
+  const double clash_search_cutoff =
+      pbctopo_max_clash_cutoff(atoms, cutoffs.clash_cutoff);
   std::vector<std::size_t> selected_shift(components.size(), shifts.size());
   const auto shifted_components =
       precompute_shifted_components(atoms, components, shifts,
-                                    cutoffs.clash_cutoff,
+                                    clash_search_cutoff,
                                     cutoffs.pair_contact_cutoff);
 
   const std::size_t identity_shift_pos = identity_shift_index(shifts);
@@ -766,7 +807,8 @@ PbctopoComponentCandidate search_component_shift_candidate(
 
   const PbctopoComponentPairShiftTable pair_table =
       build_component_pair_shift_table(components, shifted_components,
-                                       cutoffs.clash_cutoff, timing);
+                                       cutoffs.clash_cutoff,
+                                       clash_search_cutoff, atoms, timing);
   const std::vector<std::size_t> atom_component_index =
       build_atom_component_index(atoms.size(), components);
   const std::vector<std::size_t> search_order = build_component_search_order(
@@ -778,7 +820,7 @@ PbctopoComponentCandidate search_component_shift_candidate(
   const std::vector<Int3> normalized_warm_offsets =
       (warm_component_offsets != nullptr &&
        warm_component_offsets->size() == components.size())
-          ? normalize_search_warm_offsets(*warm_component_offsets, components)
+          ? normalize_search_warm_offsets(*warm_component_offsets, Box)
           : std::vector<Int3>{};
   const std::vector<Int3> *normalized_warm_offsets_ptr =
       normalized_warm_offsets.empty() ? nullptr : &normalized_warm_offsets;
@@ -831,7 +873,8 @@ PbctopoComponentCandidate search_component_shift_candidate(
           PbctopoComponentCandidate candidate = callbacks.score_assignment(
               atoms, placed_points, components, min_pair_d2, clash_atom_a,
               clash_atom_b, continuity_pairs, anchor_indices,
-              cutoffs.continuity_cutoff, shift_norm2,
+              cutoffs.continuity_cutoff,
+              shift_norm2 / static_cast<double>(components.size()),
               best.valid ? &best : nullptr, timing, anchor_backend,
               anchor_context);
           if (callbacks.better_candidate(candidate, best)) {
@@ -853,9 +896,13 @@ PbctopoComponentCandidate search_component_shift_candidate(
             ++timing->component_shift_trials;
           const auto &component = components[actual_comp_idx];
           const auto &shifted = shifted_components[actual_comp_idx][shift_idx];
-          for (std::size_t local_idx = 0; local_idx < component.size();
-               ++local_idx) {
-            placed_points[component[local_idx]] = shifted.points[local_idx];
+          const auto &shift = shifts[shift_idx];
+          for (std::size_t atom_idx : component) {
+            if (atom_idx >= atoms.size())
+              continue;
+            placed_points[atom_idx] = {atoms[atom_idx].x + shift.tx,
+                                       atoms[atom_idx].y + shift.ty,
+                                       atoms[atom_idx].z + shift.tz};
           }
           selected_shift[actual_comp_idx] = shift_idx;
           std::vector<std::pair<std::size_t, PbctopoShiftMask>>
@@ -890,7 +937,7 @@ PbctopoComponentCandidate search_component_shift_candidate(
                 next_continuity_path, next_continuity_max_d2, timing);
           }
           if (prefix_ok) {
-            dfs(depth + 1, shift_norm2 + shifted.weighted_shift_norm2,
+            dfs(depth + 1, shift_norm2 + shifted.translation_norm2,
                 next_continuity_path, next_continuity_max_d2,
                 option.next_min_pair_d2, option.clash_atom_a,
                 option.clash_atom_b, allowed_masks);

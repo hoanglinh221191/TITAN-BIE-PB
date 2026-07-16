@@ -989,6 +989,7 @@ private:
     std::string tabi_preconditioner_block_near{"off"};
     int tabi_preconditioner_block_panel_cap{32};
     int tabi_preconditioner_overlap_panel_cap{64};
+    int tabi_preconditioner_ilu_neighbor_cap_requested{192};
     int tabi_preconditioner_ilu_neighbor_cap{192};
     double tabi_preconditioner_ilu_drop_tol{0.0};
     std::string tabi_preconditioner_ilu_regularization{"off"};
@@ -1021,6 +1022,10 @@ private:
     double tabi_preconditioner_quality_failure_probe_rel_residual{0.0};
     std::string tabi_preconditioner_quality_status{"off"};
     double tabi_preconditioner_setup_ms{0.0};
+    double tabi_preconditioner_graph_setup_ms{0.0};
+    bool tabi_preconditioner_graph_cache_reused{false};
+    double tabi_preconditioner_near_assembly_setup_ms{0.0};
+    double tabi_preconditioner_ilu_factor_setup_ms{0.0};
     double tabi_preconditioner_apply_ms{0.0};
     std::size_t tabi_preconditioner_apply_calls{0};
     std::size_t tabi_preconditioner_sparse_nnz_blocks{0};
@@ -1035,6 +1040,9 @@ private:
     std::string tabi_preconditioner_coarse_status{"off"};
     std::size_t tabi_preconditioner_coarse_setup_matvec_calls{0};
     double tabi_preconditioner_coarse_setup_ms{0.0};
+    double tabi_preconditioner_coarse_moments_setup_ms{0.0};
+    double tabi_preconditioner_coarse_far_setup_ms{0.0};
+    double tabi_preconditioner_coarse_audit_setup_ms{0.0};
     double tabi_preconditioner_coarse_apply_ms{0.0};
     std::size_t tabi_preconditioner_coarse_apply_calls{0};
     double tabi_preconditioner_coarse_rp_identity_error_max{0.0};

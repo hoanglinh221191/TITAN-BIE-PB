@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -20,7 +21,13 @@ namespace {
 struct GromacsMoleculeType {
   std::string name;
   std::uint32_t atom_count = 0;
+  std::vector<std::string> atom_types;
   std::vector<MolTopologyBond> bonds;
+};
+
+struct GromacsLennardJonesType {
+  double first = 0.0;
+  double second = 0.0;
 };
 
 struct GromacsMoleculeInstance {
@@ -32,7 +39,26 @@ struct ExpandedGromacsTopology {
   std::uint32_t atom_count = 0;
   std::vector<MolTopologyBond> bonds;
   std::vector<MolTopologyMoleculeRange> molecule_ranges;
+  std::vector<double> vdw_radii;
 };
+
+double gromacs_vdw_radius_angstrom(const GromacsLennardJonesType &lj,
+                                   int combination_rule) {
+  if (!std::isfinite(lj.first) || !std::isfinite(lj.second) ||
+      lj.first <= 0.0 || lj.second <= 0.0)
+    return 0.0;
+
+  double minimum_distance_nm = 0.0;
+  if (combination_rule == 1) {
+    minimum_distance_nm = std::pow(2.0 * lj.second / lj.first, 1.0 / 6.0);
+  } else {
+    minimum_distance_nm = std::pow(2.0, 1.0 / 6.0) * lj.first;
+  }
+  const double radius_angstrom = 5.0 * minimum_distance_nm;
+  return std::isfinite(radius_angstrom) && radius_angstrom > 0.0
+             ? radius_angstrom
+             : 0.0;
+}
 
 std::string trim_topology_line(std::string line) {
   const size_t comment_pos = line.find(';');
@@ -114,8 +140,12 @@ parse_and_expand_gromacs_topology(std::string_view topology_path) {
     return std::unexpected("no topology files collected");
 
   std::unordered_map<std::string, GromacsMoleculeType> molecule_types;
+  std::unordered_map<std::string, GromacsLennardJonesType> atom_types;
+  std::unordered_map<std::string, GromacsLennardJonesType>
+      self_nonbond_parameters;
   std::vector<std::string> molecule_type_order;
   std::vector<GromacsMoleculeInstance> molecules;
+  int combination_rule = 2;
 
   for (const fs::path &filename : files) {
     std::fstream input(filename, std::ios::in);
@@ -155,14 +185,57 @@ parse_and_expand_gromacs_topology(std::string_view topology_path) {
         continue;
       }
 
+      if (section == "defaults") {
+        std::istringstream iss(line);
+        int nonbond_function = 0;
+        int parsed_combination_rule = 0;
+        if (iss >> nonbond_function >> parsed_combination_rule &&
+            parsed_combination_rule >= 1 && parsed_combination_rule <= 3) {
+          combination_rule = parsed_combination_rule;
+        }
+        continue;
+      }
+
+      if (section == "atomtypes") {
+        std::istringstream iss(line);
+        std::vector<std::string> fields;
+        for (std::string field; iss >> field;)
+          fields.push_back(std::move(field));
+        if (fields.size() < 3)
+          continue;
+        try {
+          const double first = std::stod(fields[fields.size() - 2]);
+          const double second = std::stod(fields.back());
+          atom_types[fields.front()] = {first, second};
+        } catch (const std::exception &) {
+        }
+        continue;
+      }
+
+      if (section == "nonbond_params") {
+        std::istringstream iss(line);
+        std::string lhs;
+        std::string rhs;
+        int function = 0;
+        double first = 0.0;
+        double second = 0.0;
+        if (iss >> lhs >> rhs >> function >> first >> second && lhs == rhs)
+          self_nonbond_parameters[lhs] = {first, second};
+        continue;
+      }
+
       if (section == "atoms") {
         if (current_molecule == nullptr)
           continue;
         std::istringstream iss(line);
         std::uint32_t atom_index = 0;
-        if (iss >> atom_index) {
+        std::string atom_type;
+        if (iss >> atom_index >> atom_type) {
           current_molecule->atom_count =
               std::max(current_molecule->atom_count, atom_index);
+          if (current_molecule->atom_types.size() < atom_index)
+            current_molecule->atom_types.resize(atom_index);
+          current_molecule->atom_types[atom_index - 1] = std::move(atom_type);
         }
         continue;
       }
@@ -209,6 +282,24 @@ parse_and_expand_gromacs_topology(std::string_view topology_path) {
       const std::uint32_t begin = expanded.atom_count;
       const std::uint32_t end = begin + type.atom_count;
       expanded.molecule_ranges.push_back({begin, end, instance.name, copy});
+      expanded.vdw_radii.resize(end, 0.0);
+      for (std::uint32_t atom = 0; atom < type.atom_count; ++atom) {
+        if (atom >= type.atom_types.size() || type.atom_types[atom].empty())
+          continue;
+        const std::string &atom_type = type.atom_types[atom];
+        const GromacsLennardJonesType *lj = nullptr;
+        if (const auto self_it = self_nonbond_parameters.find(atom_type);
+            self_it != self_nonbond_parameters.end()) {
+          lj = &self_it->second;
+        } else if (const auto type_it = atom_types.find(atom_type);
+                   type_it != atom_types.end()) {
+          lj = &type_it->second;
+        }
+        if (lj == nullptr)
+          continue;
+        expanded.vdw_radii[begin + atom] =
+            gromacs_vdw_radius_angstrom(*lj, combination_rule);
+      }
       for (MolTopologyBond bond : type.bonds) {
         if (bond.a >= type.atom_count || bond.b >= type.atom_count)
           continue;
@@ -227,10 +318,11 @@ std::uint64_t bond_key(std::uint32_t a, std::uint32_t b) {
   return (static_cast<std::uint64_t>(a) << 32) | b;
 }
 
-bool source_ids_look_direct(std::span<const mol_info> selection_info) {
-  return std::any_of(selection_info.begin(), selection_info.end(),
+bool source_ids_are_complete(std::span<const mol_info> selection_info) {
+  return !selection_info.empty() &&
+         std::all_of(selection_info.begin(), selection_info.end(),
                      [](const mol_info &info) {
-                       return info.get_original_atom_id() != 0;
+                       return info.has_original_atom_id();
                      });
 }
 
@@ -258,7 +350,15 @@ build_source_to_local_map(const ExpandedGromacsTopology &expanded,
   source_atom_ids.clear();
   source_atom_ids.reserve(selection_info.size());
 
-  const bool use_direct_ids = source_ids_look_direct(selection_info);
+  const bool any_source_ids =
+      std::any_of(selection_info.begin(), selection_info.end(),
+                  [](const mol_info &info) {
+                    return info.has_original_atom_id();
+                  });
+  const bool use_direct_ids = source_ids_are_complete(selection_info);
+  if (any_source_ids && !use_direct_ids) {
+    return std::unexpected("selection has partially populated source atom IDs");
+  }
   if (!use_direct_ids) {
     if (expanded.atom_count != selection_info.size()) {
       return std::unexpected(
@@ -354,6 +454,21 @@ MolTopology::neighbors(std::uint32_t atom) const noexcept {
                                         end - begin);
 }
 
+std::optional<double>
+MolTopology::vdw_radius(std::uint32_t atom) const noexcept {
+  if (atom >= vdw_radii_.size() || !std::isfinite(vdw_radii_[atom]) ||
+      vdw_radii_[atom] <= 0.0)
+    return std::nullopt;
+  return vdw_radii_[atom];
+}
+
+MolTopologyVdwRadiusSource
+MolTopology::vdw_radius_source(std::uint32_t atom) const noexcept {
+  if (atom >= vdw_radius_sources_.size())
+    return MolTopologyVdwRadiusSource::None;
+  return vdw_radius_sources_[atom];
+}
+
 void MolTopology::clear() noexcept {
   atom_count_ = 0;
   bonds_.clear();
@@ -361,12 +476,17 @@ void MolTopology::clear() noexcept {
   row_offsets_.clear();
   col_indices_.clear();
   source_atom_ids_.clear();
+  vdw_radii_.clear();
+  vdw_radius_sources_.clear();
+  vdw_radius_count_ = 0;
+  parameter_radius_cache_size_ = 0;
 }
 
 void MolTopology::set_bonds(
     std::uint32_t atom_count, std::vector<MolTopologyBond> bonds,
     std::vector<MolTopologyMoleculeRange> molecule_ranges,
-    std::vector<std::uint32_t> source_atom_ids) {
+    std::vector<std::uint32_t> source_atom_ids,
+    std::vector<double> vdw_radii) {
   atom_count_ = atom_count;
   bonds_.clear();
   bonds_.reserve(bonds.size());
@@ -391,7 +511,42 @@ void MolTopology::set_bonds(
             });
   molecule_ranges_ = std::move(molecule_ranges);
   source_atom_ids_ = std::move(source_atom_ids);
+  vdw_radii_.assign(atom_count_, 0.0);
+  vdw_radius_sources_.assign(atom_count_, MolTopologyVdwRadiusSource::None);
+  vdw_radius_count_ = 0;
+  parameter_radius_cache_size_ = 0;
+  const std::size_t radius_count =
+      std::min<std::size_t>(atom_count_, vdw_radii.size());
+  for (std::size_t atom = 0; atom < radius_count; ++atom) {
+    if (!std::isfinite(vdw_radii[atom]) || vdw_radii[atom] <= 0.0)
+      continue;
+    vdw_radii_[atom] = vdw_radii[atom];
+    vdw_radius_sources_[atom] =
+        MolTopologyVdwRadiusSource::GromacsTopology;
+    ++vdw_radius_count_;
+  }
   build_adjacency();
+}
+
+void MolTopology::cache_missing_vdw_radii(std::span<const double> radii) {
+  if (radii.empty() || vdw_radius_count_ >= radii.size() ||
+      parameter_radius_cache_size_ == radii.size())
+    return;
+  if (vdw_radii_.size() < radii.size()) {
+    vdw_radii_.resize(radii.size(), 0.0);
+    vdw_radius_sources_.resize(radii.size(),
+                               MolTopologyVdwRadiusSource::None);
+  }
+  for (std::size_t atom = 0; atom < radii.size(); ++atom) {
+    if (vdw_radius_sources_[atom] != MolTopologyVdwRadiusSource::None ||
+        !std::isfinite(radii[atom]) || radii[atom] <= 0.0)
+      continue;
+    vdw_radii_[atom] = radii[atom];
+    vdw_radius_sources_[atom] =
+        MolTopologyVdwRadiusSource::MultiMolParameters;
+    ++vdw_radius_count_;
+  }
+  parameter_radius_cache_size_ = radii.size();
 }
 
 void MolTopology::build_adjacency() {
@@ -451,18 +606,30 @@ build_gromacs_mol_topology(std::string_view topology_path,
     projected_bonds.push_back({a_it->second, b_it->second});
   }
 
+  std::vector<double> projected_vdw_radii(selection_info.size(), 0.0);
+  for (const auto &[source, local] : source_to_local) {
+    if (source < expanded.vdw_radii.size() &&
+        local < projected_vdw_radii.size())
+      projected_vdw_radii[local] = expanded.vdw_radii[source];
+  }
+
   MolTopology topology;
   auto molecule_ranges = project_molecule_ranges_to_selection(
       expanded, source_to_local,
       static_cast<std::uint32_t>(selection_info.size()));
   topology.set_bonds(static_cast<std::uint32_t>(selection_info.size()),
                      std::move(projected_bonds), std::move(molecule_ranges),
-                     std::move(source_atom_ids));
+                     std::move(source_atom_ids),
+                     std::move(projected_vdw_radii));
   return topology;
 }
 
 bool attach_gromacs_mol_topology_graph(Multi_MOL &mol,
                                        std::string_view topology_path) {
+  if (mol.info.empty()) {
+    mol.topology.clear();
+    return false;
+  }
   auto topology_result = build_gromacs_mol_topology(topology_path, mol.info);
   if (!topology_result) {
     mol.topology.clear();
@@ -472,5 +639,11 @@ bool attach_gromacs_mol_topology_graph(Multi_MOL &mol,
   }
 
   mol.topology = std::move(*topology_result);
+  std::cout << "[INFO] MolTopology graph attached from " << topology_path
+            << ": selection_atoms=" << mol.info.size()
+            << ", projected_bonds=" << mol.topology.bonds().size()
+            << ", molecule_ranges=" << mol.topology.molecule_ranges().size()
+            << ", vdw_radii=" << mol.topology.vdw_radius_count()
+            << "\n";
   return mol.topology.has_bonds();
 }

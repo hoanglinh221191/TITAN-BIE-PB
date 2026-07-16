@@ -95,15 +95,24 @@ int arguments::post_process() {
         "[MARTINI] Auto-set epsilon_in = 15.0 (Martini relative "
         "permittivity). Override with -epsilon_in if needed.");
   }
+  if (!std::isfinite(epsilon_in) || epsilon_in <= 0.0) {
+    TitanUI::print_error("Electrostatics: -epsilon_in must be finite and > 0.");
+    exit(EXIT_FAILURE);
+  }
   if (flag_elec_screening) {
-    if (salt_concentration <= 0.0) {
+    const bool supports_screening =
+        force_f.find("AMBER") != string::npos ||
+        force_f.find("CHARMM") != string::npos;
+    if (!supports_screening) {
       TitanUI::print_error(
-          "Electrostatic screening: salt concentration must be > 0.");
+          "Electrostatic screening is currently supported only for AMBER "
+          "and CHARMM force fields; refusing to run an unscreened " +
+          force_f + " calculation.");
       exit(EXIT_FAILURE);
     }
-    if (epsilon_in <= 0.0) {
+    if (!std::isfinite(salt_concentration) || salt_concentration <= 0.0) {
       TitanUI::print_error(
-          "Electrostatic screening: -epsilon_in must be > 0.");
+          "Electrostatic screening: salt concentration must be finite and > 0.");
       exit(EXIT_FAILURE);
     }
   }
@@ -1324,7 +1333,8 @@ int arguments::post_process() {
       if (!pbe.tabi_precond_ilu_neighbor_cap_explicit) {
         pbe.tabi_precond_ilu_neighbor_cap = 64;
       }
-    } else if (pbe.tabi_precond == "fmm-nearfield-ilu0" &&
+    } else if ((pbe.tabi_precond == "fmm-nearfield-ilu0" ||
+                pbe.tabi_precond == "fmm-nearfield-ilu0-coarse") &&
                !pbe.tabi_precond_ilu_neighbor_cap_explicit) {
       pbe.tabi_precond_ilu_neighbor_cap = 64;
     }
@@ -1500,16 +1510,18 @@ int arguments::post_process() {
         pbe.tabi_precond != "fmm-block-jacobi" &&
         pbe.tabi_precond != "fmm-overlap-schwarz" &&
         pbe.tabi_precond != "fmm-nearfield-ilu0" &&
+        pbe.tabi_precond != "fmm-nearfield-ilu0-coarse" &&
         pbe.tabi_precond != "distance-knn-overlap-schwarz" &&
         pbe.tabi_precond != "distance-knn-ilu0") {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-precond must be auto, none, diagonal, block, block-budgeted, coarse-galerkin-probe, fmm-block-jacobi, fmm-overlap-schwarz, fmm-nearfield-ilu0, distance-knn-overlap-schwarz, or distance-knn-ilu0.");
+          "PBE: -pbe-tabi-precond must be auto, none, diagonal, block, block-budgeted, coarse-galerkin-probe, fmm-block-jacobi, fmm-overlap-schwarz, fmm-nearfield-ilu0, fmm-nearfield-ilu0-coarse, distance-knn-overlap-schwarz, or distance-knn-ilu0.");
       exit(EXIT_FAILURE);
     }
     const bool fmm_native_preconditioner =
         pbe.tabi_precond == "fmm-block-jacobi" ||
         pbe.tabi_precond == "fmm-overlap-schwarz" ||
         pbe.tabi_precond == "fmm-nearfield-ilu0" ||
+        pbe.tabi_precond == "fmm-nearfield-ilu0-coarse" ||
         pbe.tabi_precond == "distance-knn-overlap-schwarz" ||
         pbe.tabi_precond == "distance-knn-ilu0";
     if (fmm_native_preconditioner &&
@@ -1555,9 +1567,9 @@ int arguments::post_process() {
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_precond_memory_budget_mb < 16 ||
-        pbe.tabi_precond_memory_budget_mb > 4096) {
+        pbe.tabi_precond_memory_budget_mb > 8192) {
       TitanUI::print_error(
-          "PBE: -pbe-tabi-precond-memory-budget-mb must be between 16 and 4096.");
+          "PBE: -pbe-tabi-precond-memory-budget-mb must be between 16 and 8192.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_precond_coarse_aggregate_cap < 4 ||
@@ -2043,6 +2055,7 @@ int arguments::post_process() {
     }
     const bool sparse_ilu_preconditioner =
         pbe.tabi_precond == "fmm-nearfield-ilu0" ||
+        pbe.tabi_precond == "fmm-nearfield-ilu0-coarse" ||
         pbe.tabi_precond == "distance-knn-ilu0";
     // Adaptive is the default for sparse ILU. Other preconditioners do not use
     // this setting; keep their audit state unambiguous instead of rejecting a
@@ -2686,6 +2699,7 @@ int arguments::post_process() {
         (pbe.tabi_precond == "fmm-block-jacobi" ||
          pbe.tabi_precond == "fmm-overlap-schwarz" ||
          pbe.tabi_precond == "fmm-nearfield-ilu0" ||
+         pbe.tabi_precond == "fmm-nearfield-ilu0-coarse" ||
          pbe.tabi_precond == "distance-knn-overlap-schwarz" ||
          pbe.tabi_precond == "distance-knn-ilu0");
     if (fmm_native_coupled_preconditioner && pbe.salt <= 0.0) {
@@ -3217,10 +3231,11 @@ int arguments::post_process() {
             "PBE: -pbe=tabi v1 does not support focus or multigrid options.");
         exit(EXIT_FAILURE);
       }
-      if (pbe.pbsa) {
+      if (pbe.pbsa && pbe.pbsa_grid_reuse == "validate") {
         TitanUI::print_error(
-            "PBE: -pbe=tabi v1 does not support PBSA or decomposition; "
-            "single-system -pbe-dgsolv uses the TABI reaction-field energy.");
+            "PBSA: -pbsa-grid-reuse=validate is available only for the grid "
+            "backend; TABI computes independent boundary-integral endpoint "
+            "solves.");
         exit(EXIT_FAILURE);
       }
       if (pbe.map != "off") {
@@ -3562,6 +3577,15 @@ int arguments::post_process() {
                  pbc.pbctopo_mode.begin(), [](unsigned char c) {
                    return static_cast<char>(std::tolower(c));
                  });
+  std::transform(pbc.pbctopo_anchor_metrics.begin(),
+                 pbc.pbctopo_anchor_metrics.end(),
+                 pbc.pbctopo_anchor_metrics.begin(), [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  std::transform(pbc.pbctopo_temporal.begin(), pbc.pbctopo_temporal.end(),
+                 pbc.pbctopo_temporal.begin(), [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
   if (pbc.pbctopo_mode != "vibe" && pbc.pbctopo_mode != "llps-local") {
     TitanUI::print_error(
         "PBCTOPO: -pbctopo-mode must be one of vibe, llps-local.");
@@ -3572,6 +3596,38 @@ int arguments::post_process() {
       pbc.pbctopo_anchor_backend != "spatial-all") {
     TitanUI::print_error(
         "PBCTOPO: -pbctopo-anchor-backend must be one of auto, prim, spatial-all.");
+    exit(EXIT_FAILURE);
+  }
+  if (pbc.pbctopo_anchor_metrics != "full" &&
+      pbc.pbctopo_anchor_metrics != "mst-only" &&
+      pbc.pbctopo_anchor_metrics != "no-order" &&
+      pbc.pbctopo_anchor_metrics != "no-contact") {
+    TitanUI::print_error(
+        "PBCTOPO: -pbctopo-anchor-metrics must be one of full, mst-only, "
+        "no-order, no-contact.");
+    exit(EXIT_FAILURE);
+  }
+  if (pbc.pbctopo_temporal != "greedy" &&
+      pbc.pbctopo_temporal != "viterbi") {
+    TitanUI::print_error(
+        "PBCTOPO: -pbctopo-temporal must be one of greedy, viterbi.");
+    exit(EXIT_FAILURE);
+  }
+  if (pbc.pbctopo_temporal_k <= 0 || pbc.pbctopo_temporal_k > 32) {
+    TitanUI::print_error("PBCTOPO: -pbctopo-temporal-k must be in 1..32.");
+    exit(EXIT_FAILURE);
+  }
+  if (!std::isfinite(pbc.pbctopo_temporal_penalty) ||
+      pbc.pbctopo_temporal_penalty < 0.0) {
+    TitanUI::print_error(
+        "PBCTOPO: -pbctopo-temporal-penalty must be finite and >= 0.");
+    exit(EXIT_FAILURE);
+  }
+  if (!std::isfinite(pbc.pbctopo_vdw_clash_scale) ||
+      pbc.pbctopo_vdw_clash_scale <= 0.0 ||
+      pbc.pbctopo_vdw_clash_scale > 1.0) {
+    TitanUI::print_error(
+        "PBCTOPO: -pbctopo-vdw-clash-scale must be in (0, 1].");
     exit(EXIT_FAILURE);
   }
   auto require_pbctopo_positive_double = [&](bool is_set, double value,

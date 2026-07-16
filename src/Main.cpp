@@ -78,12 +78,12 @@ int main(int argc, char **argv) {
     if (argc != 1) {
       if (Arguments.parse_arguments(argc, argv) == 2)
         return 0;
-      engine(Arguments);
+      return engine(Arguments);
     } else if (Arguments.parse_arg_file() == 0) {
-      engine(Arguments);
+      return engine(Arguments);
     } else {
       Arguments.parse_arguments_interactive(argc);
-      engine(Arguments);
+      return engine(Arguments);
     }
   } catch (const std::exception &e) {
     std::cerr << "Exception caught in main: " << e.what() << std::endl;

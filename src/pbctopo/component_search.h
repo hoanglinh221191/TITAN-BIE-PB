@@ -6,9 +6,16 @@
 #include "../box_type.h"
 
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 namespace titan_pbctopo {
+
+inline constexpr std::size_t kPbctopoExactAssignmentBudget = 100000;
+
+std::size_t pbctopo_component_assignment_upper_bound(
+    std::size_t component_count, std::size_t shift_count,
+    std::size_t saturation_limit = std::numeric_limits<std::size_t>::max());
 
 struct PbctopoComponentSearchCallbacks {
   using BuildSeedFn = PbctopoComponentCandidate (*)(

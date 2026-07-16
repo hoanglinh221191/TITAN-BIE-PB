@@ -2,6 +2,8 @@
 
 #include "../BoxMatrix.h"
 #include "../titan_simd_dispatch.h"
+#include "candidate_order.h"
+#include "lattice_math.h"
 
 #include <algorithm>
 #include <chrono>
@@ -86,15 +88,7 @@ int compare_pbctopo_size_metric(size_t lhs, size_t rhs) {
 
 int compare_pbctopo_double_metric(double lhs, double rhs,
                                   double eps = 1.0e-6) {
-  const bool lhs_valid = isfinite(lhs);
-  const bool rhs_valid = isfinite(rhs);
-  if (lhs_valid != rhs_valid)
-    return lhs_valid ? -1 : 1;
-  if (!lhs_valid)
-    return 0;
-  if (fabs(lhs - rhs) <= eps)
-    return 0;
-  return lhs < rhs ? -1 : 1;
+  return compare_pbctopo_metric(lhs, rhs, {eps, 0.0});
 }
 
 } // namespace
@@ -108,6 +102,7 @@ PbctopoAnchorGraphContext build_anchor_graph_context(
   PbctopoAnchorGraphContext context;
   context.anchor_count = anchor_indices.size();
   const BoxMatrix box_matrix(Box);
+  const PbctopoLatticeMetric lattice(Box);
   for (size_t row = 0; row < 3; ++row) {
     for (size_t col = 0; col < 3; ++col) {
       context.box_m[row][col] = box_matrix.m[row][col];
@@ -195,19 +190,19 @@ PbctopoAnchorGraphContext build_anchor_graph_context(
     const double sx_bound = min(
         0.5, contact_cutoff *
                  sqrt(box_matrix.inv[0][0] * box_matrix.inv[0][0] +
-                      box_matrix.inv[0][1] * box_matrix.inv[0][1] +
-                      box_matrix.inv[0][2] * box_matrix.inv[0][2]) +
+                      box_matrix.inv[1][0] * box_matrix.inv[1][0] +
+                      box_matrix.inv[2][0] * box_matrix.inv[2][0]) +
                  1.0e-9);
     const double sy_bound = min(
         0.5, contact_cutoff *
-                 sqrt(box_matrix.inv[1][0] * box_matrix.inv[1][0] +
+                 sqrt(box_matrix.inv[0][1] * box_matrix.inv[0][1] +
                       box_matrix.inv[1][1] * box_matrix.inv[1][1] +
-                      box_matrix.inv[1][2] * box_matrix.inv[1][2]) +
+                      box_matrix.inv[2][1] * box_matrix.inv[2][1]) +
                  1.0e-9);
     const double sz_bound = min(
         0.5, contact_cutoff *
-                 sqrt(box_matrix.inv[2][0] * box_matrix.inv[2][0] +
-                      box_matrix.inv[2][1] * box_matrix.inv[2][1] +
+                 sqrt(box_matrix.inv[0][2] * box_matrix.inv[0][2] +
+                      box_matrix.inv[1][2] * box_matrix.inv[1][2] +
                       box_matrix.inv[2][2] * box_matrix.inv[2][2]) +
                  1.0e-9);
     const int nx = max(1, static_cast<int>(floor(1.0 / max(sx_bound, 1.0e-6))));
@@ -234,8 +229,10 @@ PbctopoAnchorGraphContext build_anchor_graph_context(
       sort(contacts.begin(), contacts.end(),
            [](const AnchorContactCandidate &lhs,
               const AnchorContactCandidate &rhs) {
-             if (fabs(lhs.d2 - rhs.d2) > 1.0e-9)
-               return lhs.d2 < rhs.d2;
+             const int metric_cmp = compare_pbctopo_metric(
+                 lhs.d2, rhs.d2, {1.0e-9, 0.0});
+             if (metric_cmp != 0)
+               return metric_cmp < 0;
              if (lhs.a != rhs.a)
                return lhs.a < rhs.a;
              return lhs.b < rhs.b;
@@ -265,12 +262,9 @@ PbctopoAnchorGraphContext build_anchor_graph_context(
               const auto &other = atoms[other_idx];
               if (atom.owner == other.owner)
                 continue;
-              double dx_cart = other.x - atom.x;
-              double dy_cart = other.y - atom.y;
-              double dz_cart = other.z - atom.z;
-              box_matrix.apply_mic(dx_cart, dy_cart, dz_cart);
-              const double d2 = dx_cart * dx_cart + dy_cart * dy_cart +
-                                dz_cart * dz_cart;
+              const PbctopoNearestImage mic = lattice.nearest_image_cartesian(
+                  other.x - atom.x, other.y - atom.y, other.z - atom.z);
+              const double d2 = mic.d2;
               if (d2 > cutoff2)
                 continue;
               insert_contact(pbctopo_owner_pair_key(atom.owner, other.owner),
@@ -284,7 +278,8 @@ PbctopoAnchorGraphContext build_anchor_graph_context(
 
     for (const auto &[_, contacts] : contacts_by_owner) {
       for (const auto &contact : contacts) {
-        context.contact_edges.push_back({contact.a, contact.b, cutoff2});
+        context.soft_observed_contact_edges.push_back(
+            {contact.a, contact.b, cutoff2});
       }
     }
   }
@@ -292,7 +287,10 @@ PbctopoAnchorGraphContext build_anchor_graph_context(
   if (timing != nullptr) {
     timing->pbctopo_anchor_order_edges += context.ordered_edges.size();
     timing->pbctopo_anchor_endpoint_edges += context.endpoint_edges.size();
-    timing->pbctopo_anchor_contact_pairs += context.contact_edges.size();
+    timing->pbctopo_anchor_contact_pairs +=
+        context.soft_observed_contact_edges.size();
+    timing->pbctopo_soft_observed_contact_pairs +=
+        context.soft_observed_contact_edges.size();
     timing->pbctopo_anchor_residue_order_violations +=
         context.residue_order_violations;
     timing->pbctopo_anchor_context_build_s +=
@@ -840,22 +838,11 @@ double anchor_endpoint_image_gap(const vector<Vec3> &placed_points,
   if (!context.has_box || a >= placed_points.size() || b >= placed_points.size())
     return numeric_limits<double>::infinity();
   const Vec3 delta = placed_points[b] - placed_points[a];
-  const double raw_sx = context.box_inv[0][0] * delta.x +
-                        context.box_inv[0][1] * delta.y +
-                        context.box_inv[0][2] * delta.z;
-  const double raw_sy = context.box_inv[1][0] * delta.x +
-                        context.box_inv[1][1] * delta.y +
-                        context.box_inv[1][2] * delta.z;
-  const double raw_sz = context.box_inv[2][0] * delta.x +
-                        context.box_inv[2][1] * delta.y +
-                        context.box_inv[2][2] * delta.z;
-  const double mic_sx = raw_sx - round(raw_sx);
-  const double mic_sy = raw_sy - round(raw_sy);
-  const double mic_sz = raw_sz - round(raw_sz);
-  const double raw_norm =
-      sqrt(raw_sx * raw_sx + raw_sy * raw_sy + raw_sz * raw_sz);
-  const double mic_norm =
-      sqrt(mic_sx * mic_sx + mic_sy * mic_sy + mic_sz * mic_sz);
+  const PbctopoLatticeMetric lattice(context.box_m, context.box_inv);
+  const PbctopoNearestImage mic =
+      lattice.nearest_image_cartesian(delta.x, delta.y, delta.z);
+  const double raw_norm = sqrt(norm2(delta));
+  const double mic_norm = sqrt(max(0.0, mic.d2));
   return max(0.0, raw_norm - mic_norm);
 }
 
@@ -872,14 +859,21 @@ bool anchor_graph_metrics_enhanced(
           incumbent, phase, backend, timing)) {
     return false;
   }
+  anchor_graph.mst_mean_d2 =
+      anchor_indices.size() > 1
+          ? mst2 / static_cast<double>(anchor_indices.size() - 1)
+          : 0.0;
 
   if (anchor_context == nullptr)
     return true;
 
   anchor_graph.residue_order_violations =
-      anchor_context->residue_order_violations;
+      anchor_context->use_order_metrics
+          ? anchor_context->residue_order_violations
+          : 0;
   const auto order_started = chrono::steady_clock::now();
-  if (!anchor_context->ordered_edges.empty()) {
+  if (anchor_context->use_order_metrics &&
+      !anchor_context->ordered_edges.empty()) {
     anchor_graph.order_max_d2 = 0.0;
     anchor_graph.order_path_d2 = 0.0;
     for (const auto &edge : anchor_context->ordered_edges) {
@@ -888,9 +882,16 @@ bool anchor_graph_metrics_enhanced(
         continue;
       anchor_graph.order_max_d2 = max(anchor_graph.order_max_d2, d2);
       anchor_graph.order_path_d2 += d2;
+      ++anchor_graph.order_edge_count;
     }
+    anchor_graph.order_path_mean_d2 =
+        anchor_graph.order_edge_count > 0
+            ? anchor_graph.order_path_d2 /
+                  static_cast<double>(anchor_graph.order_edge_count)
+            : 0.0;
   }
-  if (!anchor_context->endpoint_edges.empty()) {
+  if (anchor_context->use_order_metrics &&
+      !anchor_context->endpoint_edges.empty()) {
     anchor_graph.endpoint_image_gap = 0.0;
     for (const auto &edge : anchor_context->endpoint_edges) {
       const double gap =
@@ -907,10 +908,13 @@ bool anchor_graph_metrics_enhanced(
   }
 
   const auto contact_started = chrono::steady_clock::now();
-  if (!anchor_context->contact_edges.empty()) {
+  if (anchor_context->use_contact_metrics &&
+      !anchor_context->soft_observed_contact_edges.empty()) {
     anchor_graph.contact_map_lost = 0;
     anchor_graph.contact_map_max_d2 = 0.0;
-    for (const auto &edge : anchor_context->contact_edges) {
+    anchor_graph.contact_pair_count =
+        anchor_context->soft_observed_contact_edges.size();
+    for (const auto &edge : anchor_context->soft_observed_contact_edges) {
       const double d2 = anchor_context_distance2(placed_points, edge.a, edge.b);
       if (!isfinite(d2))
         continue;
@@ -919,6 +923,9 @@ bool anchor_graph_metrics_enhanced(
       if (d2 > edge.cutoff_d2 + 1.0e-6)
         ++anchor_graph.contact_map_lost;
     }
+    anchor_graph.contact_map_lost_fraction =
+        static_cast<double>(anchor_graph.contact_map_lost) /
+        static_cast<double>(anchor_graph.contact_pair_count);
   }
   if (timing != nullptr) {
     timing->component_graph_refine_anchor_contact_s +=
@@ -938,8 +945,8 @@ int compare_anchor_graph_score(const PbctopoAnchorGraphScore &lhs,
                                       rhs.endpoint_image_gap);
   if (cmp != 0)
     return cmp;
-  cmp =
-      compare_pbctopo_size_metric(lhs.contact_map_lost, rhs.contact_map_lost);
+  cmp = compare_pbctopo_double_metric(lhs.contact_map_lost_fraction,
+                                      rhs.contact_map_lost_fraction);
   if (cmp != 0)
     return cmp;
   cmp = compare_pbctopo_double_metric(lhs.contact_map_max_d2,
@@ -949,7 +956,11 @@ int compare_anchor_graph_score(const PbctopoAnchorGraphScore &lhs,
   cmp = compare_pbctopo_double_metric(lhs.order_max_d2, rhs.order_max_d2);
   if (cmp != 0)
     return cmp;
-  return compare_pbctopo_double_metric(lhs.order_path_d2, rhs.order_path_d2);
+  cmp = compare_pbctopo_double_metric(lhs.order_path_mean_d2,
+                                      rhs.order_path_mean_d2);
+  if (cmp != 0)
+    return cmp;
+  return compare_pbctopo_double_metric(lhs.mst_mean_d2, rhs.mst_mean_d2);
 }
 
 } // namespace titan_pbctopo

@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -22,6 +23,12 @@ struct MolTopologyMoleculeRange {
   std::uint32_t end = 0;
   std::string name;
   std::uint32_t copy_index = 0;
+};
+
+enum class MolTopologyVdwRadiusSource : std::uint8_t {
+  None = 0,
+  GromacsTopology,
+  MultiMolParameters,
 };
 
 class MolTopology {
@@ -42,6 +49,13 @@ public:
   source_atom_ids() const noexcept {
     return source_atom_ids_;
   }
+  [[nodiscard]] std::optional<double>
+  vdw_radius(std::uint32_t atom) const noexcept;
+  [[nodiscard]] MolTopologyVdwRadiusSource
+  vdw_radius_source(std::uint32_t atom) const noexcept;
+  [[nodiscard]] std::size_t vdw_radius_count() const noexcept {
+    return vdw_radius_count_;
+  }
 
   [[nodiscard]] std::span<const std::uint32_t>
   neighbors(std::uint32_t atom) const noexcept;
@@ -49,7 +63,9 @@ public:
   void clear() noexcept;
   void set_bonds(std::uint32_t atom_count, std::vector<MolTopologyBond> bonds,
                  std::vector<MolTopologyMoleculeRange> molecule_ranges = {},
-                 std::vector<std::uint32_t> source_atom_ids = {});
+                 std::vector<std::uint32_t> source_atom_ids = {},
+                 std::vector<double> vdw_radii = {});
+  void cache_missing_vdw_radii(std::span<const double> radii);
   void build_adjacency();
 
 private:
@@ -59,6 +75,10 @@ private:
   std::vector<std::uint32_t> row_offsets_;
   std::vector<std::uint32_t> col_indices_;
   std::vector<std::uint32_t> source_atom_ids_;
+  std::vector<double> vdw_radii_;
+  std::vector<MolTopologyVdwRadiusSource> vdw_radius_sources_;
+  std::size_t vdw_radius_count_ = 0;
+  std::size_t parameter_radius_cache_size_ = 0;
 };
 
 std::expected<MolTopology, std::string>

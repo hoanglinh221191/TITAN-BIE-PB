@@ -17,10 +17,15 @@ using pbctopo_hull::Vec3;
 struct PbctopoAnchorGraphScore {
   double order_max_d2 = std::numeric_limits<double>::infinity();
   double order_path_d2 = std::numeric_limits<double>::infinity();
+  double order_path_mean_d2 = std::numeric_limits<double>::infinity();
   double endpoint_image_gap = std::numeric_limits<double>::infinity();
   std::size_t residue_order_violations = 0;
   std::size_t contact_map_lost = 0;
+  double contact_map_lost_fraction = std::numeric_limits<double>::infinity();
   double contact_map_max_d2 = std::numeric_limits<double>::infinity();
+  double mst_mean_d2 = std::numeric_limits<double>::infinity();
+  std::size_t order_edge_count = 0;
+  std::size_t contact_pair_count = 0;
   std::size_t ambiguity_count = 0;
 };
 
@@ -29,6 +34,55 @@ enum class PbctopoVirtualSeedSource : std::uint8_t {
   Density,
   Previous,
   Kinematic
+};
+
+struct Int3 {
+  int x = 0;
+  int y = 0;
+  int z = 0;
+};
+
+inline Int3 operator+(const Int3 &lhs, const Int3 &rhs) {
+  return {lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z};
+}
+
+inline Int3 operator-(const Int3 &lhs, const Int3 &rhs) {
+  return {lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z};
+}
+
+inline bool is_zero_delta(const Int3 &delta) {
+  return delta.x == 0 && delta.y == 0 && delta.z == 0;
+}
+
+inline bool same_delta(const Int3 &lhs, const Int3 &rhs) {
+  return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z;
+}
+
+struct PbctopoImageAssignment {
+  std::vector<Int3> component_offsets;
+  Int3 global_gauge{};
+  std::uint64_t signature = 0;
+  bool valid = false;
+};
+
+struct PbctopoHardFeasibility {
+  std::size_t topology_edges_checked = 0;
+  std::size_t hard_edge_residuals = 0;
+  std::size_t atom_image_residuals = 0;
+  double max_atom_image_error = 0.0;
+  std::size_t cycle_mismatches = 0;
+  std::size_t hard_clashes = 0;
+  std::size_t required_contacts_checked = 0;
+  std::size_t required_contacts_lost = 0;
+  bool assignment_available = false;
+  bool evaluated = false;
+
+  [[nodiscard]] bool certified() const noexcept {
+    return evaluated && assignment_available && hard_edge_residuals == 0 &&
+           atom_image_residuals == 0 && cycle_mismatches == 0 &&
+           hard_clashes == 0 &&
+           required_contacts_lost == 0;
+  }
 };
 
 struct PbctopoAtom {
@@ -41,6 +95,9 @@ struct PbctopoAtom {
   bool has_topology_key = false;
   bool has_topology_graph = false;
   bool is_heavy = true;
+  bool has_vdw_radius = false;
+  double vdw_radius = 0.0;
+  double steric_radius = 0.0;
   double x = 0.0;
   double y = 0.0;
   double z = 0.0;
@@ -77,6 +134,8 @@ struct PbctopoCutCandidate {
   std::size_t clash_atom_b = std::numeric_limits<std::size_t>::max();
   PbctopoVirtualSeedSource virtual_seed_source =
       PbctopoVirtualSeedSource::None;
+  PbctopoImageAssignment assignment;
+  PbctopoHardFeasibility hard_feasibility;
   bool ultra_clash = false;
   bool valid = false;
 };
@@ -128,28 +187,6 @@ struct PbctopoComponentCandidate {
   bool valid = false;
 };
 
-struct Int3 {
-  int x = 0;
-  int y = 0;
-  int z = 0;
-};
-
-inline Int3 operator+(const Int3 &lhs, const Int3 &rhs) {
-  return {lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z};
-}
-
-inline Int3 operator-(const Int3 &lhs, const Int3 &rhs) {
-  return {lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z};
-}
-
-inline bool is_zero_delta(const Int3 &delta) {
-  return delta.x == 0 && delta.y == 0 && delta.z == 0;
-}
-
-inline bool same_delta(const Int3 &lhs, const Int3 &rhs) {
-  return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z;
-}
-
 struct PbctopoShift {
   std::size_t shift_index = 26;
   int ix = 0;
@@ -166,7 +203,10 @@ struct PbctopoPairShiftScore {
   int iy = 0;
   int iz = 0;
   std::size_t contact_atoms = 0;
+  std::size_t contact_pairs = 0;
+  double contact_fraction = 0.0;
   double soft_penalty = 0.0;
+  double soft_penalty_mean = 0.0;
   double min_pair_d2 = std::numeric_limits<double>::infinity();
   double bbox_d2 = std::numeric_limits<double>::infinity();
   double shift_norm2 = std::numeric_limits<double>::infinity();
@@ -183,7 +223,10 @@ struct PbctopoGraphEdge {
   int dz = 0;
   std::size_t option_rank = 0;
   std::size_t contact_atoms = 0;
+  std::size_t contact_pairs = 0;
+  double contact_fraction = 0.0;
   double soft_penalty = 0.0;
+  double soft_penalty_mean = 0.0;
   double min_pair_d2 = std::numeric_limits<double>::infinity();
   double bbox_d2 = std::numeric_limits<double>::infinity();
   double shift_norm2 = std::numeric_limits<double>::infinity();
@@ -237,6 +280,9 @@ struct PbctopoCycleSyncMetrics {
   std::size_t cycle_support = 0;
   double cycle_mismatch = 0.0;
   std::size_t inconsistent_edge_count = 0;
+  std::size_t fundamental_cycle_count = 0;
+  double fundamental_cycle_residual_rms = 0.0;
+  double fundamental_cycle_residual_max = 0.0;
 };
 
 struct PbctopoCycleSyncResult {
@@ -285,6 +331,7 @@ struct ClashCellKeyHash {
 
 struct PbctopoShiftedComponent {
   std::vector<Vec3> points;
+  std::vector<std::size_t> atom_indices;
   std::vector<ClashCellKey> clash_keys;
   std::vector<ClashCellKey> contact_keys;
   std::unordered_map<std::uint64_t, std::vector<std::size_t>> clash_grid;
@@ -296,7 +343,7 @@ struct PbctopoShiftedComponent {
   double max_x = -std::numeric_limits<double>::infinity();
   double max_y = -std::numeric_limits<double>::infinity();
   double max_z = -std::numeric_limits<double>::infinity();
-  double weighted_shift_norm2 = 0.0;
+  double translation_norm2 = 0.0;
 };
 
 struct PbctopoShiftedComponentDescriptor {
@@ -307,13 +354,14 @@ struct PbctopoShiftedComponentDescriptor {
   double max_x = -std::numeric_limits<double>::infinity();
   double max_y = -std::numeric_limits<double>::infinity();
   double max_z = -std::numeric_limits<double>::infinity();
-  double weighted_shift_norm2 = 0.0;
+  double translation_norm2 = 0.0;
 };
 
 struct PbctopoComponentBaseGeometry {
   std::vector<double> x;
   std::vector<double> y;
   std::vector<double> z;
+  std::vector<std::size_t> atom_indices;
   Vec3 center{};
   double min_x = std::numeric_limits<double>::infinity();
   double min_y = std::numeric_limits<double>::infinity();
@@ -359,10 +407,14 @@ struct PbctopoTimingStats {
   std::size_t component_search_prefix_continuity_checks = 0;
   std::size_t component_search_prefix_continuity_prunes = 0;
   std::size_t component_search_prefix_continuity_hard_rejects = 0;
+  std::size_t component_search_exact_budget_skips = 0;
+  std::size_t component_search_exact_state_upper_bound = 0;
   std::size_t component_large_mode_merge_frames = 0;
   std::size_t component_large_mode_pair_only_frames = 0;
   std::size_t component_large_mode_beam_frames = 0;
   std::size_t component_large_mode_merge_count = 0;
+  std::size_t component_large_mode_internal_offsets_preserved = 0;
+  std::size_t component_large_mode_internal_offset_nonzero = 0;
   std::size_t component_large_mode_graph_seed_count = 0;
   std::size_t component_large_mode_graph_seed_refined = 0;
   std::size_t component_large_mode_graph_seed_nonbaseline_win = 0;
@@ -371,8 +423,25 @@ struct PbctopoTimingStats {
   std::size_t component_large_mode_beam_complete_assignments = 0;
   std::size_t component_large_mode_beam_final_rescored = 0;
   std::size_t component_large_mode_fallback_frames = 0;
+  std::size_t pbctopo_certification_attempts = 0;
+  std::size_t pbctopo_certification_successes = 0;
+  std::size_t pbctopo_certification_assignment_rejects = 0;
+  std::size_t pbctopo_certification_hard_rejects = 0;
+  std::size_t pbctopo_certification_topology_edges_checked = 0;
+  std::size_t pbctopo_certification_topology_edge_residuals = 0;
+  std::size_t pbctopo_certification_atom_image_residuals = 0;
+  std::size_t pbctopo_certification_required_contacts_checked = 0;
+  std::size_t pbctopo_certification_required_contacts_lost = 0;
+  std::size_t pbctopo_diagnostic_only_candidates = 0;
+  std::size_t pbctopo_virtual_geometry_reference_evals = 0;
+  std::size_t pbctopo_virtual_geometry_reference_safe = 0;
+  std::size_t pbctopo_virtual_geometry_reference_clashing = 0;
+  std::size_t pbctopo_virtual_geometry_outlier_rejects = 0;
+  std::size_t pbctopo_virtual_geometry_outlier_observations = 0;
   std::size_t component_graph_outlier_rejects = 0;
   std::size_t component_search_outlier_rejects = 0;
+  std::size_t component_graph_outlier_observations = 0;
+  std::size_t component_search_outlier_observations = 0;
   std::size_t component_score_continuity_rejects = 0;
   std::size_t component_score_anchor_rejects = 0;
   std::size_t component_score_prefix_prunes_after_continuity = 0;
@@ -385,6 +454,14 @@ struct PbctopoTimingStats {
   std::size_t component_graph_shift_materialized = 0;
   std::size_t component_graph_bbox_only_scores = 0;
   std::size_t component_graph_used = 0;
+  std::size_t component_graph_primary_attempts = 0;
+  std::size_t component_graph_primary_certified = 0;
+  std::size_t component_graph_primary_virtual_skips = 0;
+  std::size_t component_graph_primary_fallbacks = 0;
+  std::size_t component_image_shell_expansions = 0;
+  std::size_t component_image_shell_retry_successes = 0;
+  std::size_t component_image_shell_max_radius = 1;
+  std::size_t component_image_shell_max_shift_count = 27;
   std::size_t component_warm_used = 0;
   std::size_t component_warm_skip_search = 0;
   std::size_t component_search_frames = 0;
@@ -420,8 +497,24 @@ struct PbctopoTimingStats {
   std::size_t pbctopo_anchor_order_edges = 0;
   std::size_t pbctopo_anchor_endpoint_edges = 0;
   std::size_t pbctopo_anchor_contact_pairs = 0;
+  std::size_t pbctopo_soft_observed_contact_pairs = 0;
+  std::size_t pbctopo_hard_required_owner_pairs = 0;
   std::size_t pbctopo_anchor_residue_order_violations = 0;
   std::size_t pbctopo_anchor_ambiguous_frames = 0;
+  std::size_t pbctopo_vdw_pair_checks = 0;
+  std::size_t pbctopo_vdw_radius_pairs = 0;
+  std::size_t pbctopo_vdw_radius_fallback_pairs = 0;
+  std::size_t pbctopo_temporal_candidate_frames = 0;
+  std::size_t pbctopo_temporal_candidates = 0;
+  std::size_t pbctopo_temporal_certified_candidates = 0;
+  std::size_t pbctopo_temporal_assignment_deduped = 0;
+  std::size_t pbctopo_temporal_viterbi_frames = 0;
+  std::size_t pbctopo_temporal_diagnostic_only_frames = 0;
+  std::size_t pbctopo_temporal_proposed_changes = 0;
+  std::size_t pbctopo_temporal_path_changes = 0;
+  std::size_t pbctopo_temporal_replay_frames = 0;
+  std::size_t pbctopo_temporal_replay_applied = 0;
+  std::size_t pbctopo_temporal_replay_skipped = 0;
   std::size_t component_cycle_sync_attempts = 0;
   std::size_t component_cycle_sync_used = 0;
   std::size_t component_cycle_sync_pair_candidates = 0;
@@ -459,6 +552,22 @@ struct PbctopoTimingStats {
   std::size_t pbctopo_density_cut_planes_dense_equiv_z = 0;
   std::size_t pbctopo_density_cut_plane_collisions = 0;
   std::size_t pbctopo_density_cut_plane_dense_fallbacks = 0;
+  std::size_t pbctopo_virtual_discrete_frames = 0;
+  std::size_t pbctopo_virtual_axis_states_x = 0;
+  std::size_t pbctopo_virtual_axis_states_y = 0;
+  std::size_t pbctopo_virtual_axis_states_z = 0;
+  std::uint64_t pbctopo_virtual_state_space = 0;
+  std::size_t pbctopo_virtual_states_evaluated = 0;
+  std::size_t pbctopo_virtual_search_exhaustive_frames = 0;
+  std::size_t pbctopo_virtual_search_shortlist_frames = 0;
+  std::size_t pbctopo_virtual_branch_and_bound_frames = 0;
+  std::size_t pbctopo_virtual_sweep_workspace_reuse_frames = 0;
+  std::size_t pbctopo_virtual_sweep_events_x = 0;
+  std::size_t pbctopo_virtual_sweep_events_y = 0;
+  std::size_t pbctopo_virtual_sweep_events_z = 0;
+  std::size_t pbctopo_virtual_sweep_workspace_peak_bytes = 0;
+  std::size_t pbctopo_verify_geometry_buffer_reuses = 0;
+  std::size_t pbctopo_frame_point_buffer_peak_bytes_estimate = 0;
   std::array<std::size_t, 8> component_search_depth_visits{};
   double append_s = 0.0;
   double heavy_subset_s = 0.0;
@@ -470,6 +579,11 @@ struct PbctopoTimingStats {
   double component_split_s = 0.0;
   double event_planes_s = 0.0;
   double pbctopo_density_cut_plane_build_s = 0.0;
+  double pbctopo_virtual_seam_sweep_s = 0.0;
+  double pbctopo_virtual_omitted_seam_lower_bound_min =
+      std::numeric_limits<double>::infinity();
+  double pbctopo_virtual_lower_bound_gap_min =
+      std::numeric_limits<double>::infinity();
   double seed_s = 0.0;
   double coarse_s = 0.0;
   double refine_s = 0.0;
@@ -538,9 +652,11 @@ struct PbctopoAnchorContactEdge {
 struct PbctopoAnchorGraphContext {
   std::vector<PbctopoContinuityPair> ordered_edges;
   std::vector<PbctopoContinuityPair> endpoint_edges;
-  std::vector<PbctopoAnchorContactEdge> contact_edges;
+  std::vector<PbctopoAnchorContactEdge> soft_observed_contact_edges;
   std::size_t anchor_count = 0;
   std::size_t residue_order_violations = 0;
+  bool use_order_metrics = true;
+  bool use_contact_metrics = true;
   double box_m[3][3]{};
   double box_inv[3][3]{};
   bool has_box = false;

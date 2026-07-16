@@ -45,7 +45,7 @@ std::vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
     std::vector<PbctopoPairShiftCandidateSet> *pair_candidates_out = nullptr);
 
 bool solve_component_offsets_from_ranked_edges(
-    std::size_t component_count,
+    std::size_t component_count, box Box,
     const std::vector<std::vector<std::size_t>> &components,
     const std::vector<PbctopoGraphEdge> &ranked_edges,
     std::vector<Int3> &offsets);

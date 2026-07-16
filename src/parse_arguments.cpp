@@ -1483,6 +1483,7 @@ int arguments::parse_arguments(int argc, char **argv) {
                          {"auto", "none", "diagonal", "block", "block-budgeted",
                           "coarse-galerkin-probe", "fmm-block-jacobi",
                           "fmm-overlap-schwarz", "fmm-nearfield-ilu0",
+                          "fmm-nearfield-ilu0-coarse",
                           "distance-knn-overlap-schwarz", "distance-knn-ilu0"},
                          "-pbe-tabi-precond");
       pbe.tabi_precond_explicit = true;
@@ -4528,6 +4529,34 @@ int arguments::parse_arguments(int argc, char **argv) {
             arg, {"-pbctopo-anchor-backend", "--pbctopo-anchor-backend"},
             common_value, i)) {
       pbc.pbctopo_anchor_backend = common_value;
+    }
+    if (consume_required_option_value(
+            arg, {"-pbctopo-anchor-metrics", "--pbctopo-anchor-metrics"},
+            common_value, i)) {
+      pbc.pbctopo_anchor_metrics = common_value;
+    }
+    if (consume_required_option_value(
+            arg, {"-pbctopo-temporal", "--pbctopo-temporal"}, common_value,
+            i)) {
+      pbc.pbctopo_temporal = common_value;
+    }
+    if (consume_required_option_value(
+            arg, {"-pbctopo-temporal-k", "--pbctopo-temporal-k"},
+            common_value, i)) {
+      pbc.pbctopo_temporal_k =
+          parse_integer_option(common_value, "-pbctopo-temporal-k");
+    }
+    if (consume_required_option_value(
+            arg, {"-pbctopo-temporal-penalty", "--pbctopo-temporal-penalty"},
+            common_value, i)) {
+      pbc.pbctopo_temporal_penalty =
+          parse_numeric_option(common_value, "-pbctopo-temporal-penalty");
+    }
+    if (consume_required_option_value(
+            arg, {"-pbctopo-vdw-clash-scale", "--pbctopo-vdw-clash-scale"},
+            common_value, i)) {
+      pbc.pbctopo_vdw_clash_scale =
+          parse_numeric_option(common_value, "-pbctopo-vdw-clash-scale");
     }
     if (consume_required_option_value(
             arg, {"-pbctopo-bond-cutoff", "--pbctopo-bond-cutoff"},

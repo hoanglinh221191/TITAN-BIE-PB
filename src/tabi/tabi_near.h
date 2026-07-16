@@ -54,6 +54,13 @@ JcpNearPairKernel evaluate_jcp_near_pair_kernel(
     const std::string &near_integration, const std::string &quad_buffer,
     TreecodeStats *stats = nullptr);
 
+// Specialized centroid-only path for synthetic aggregate monopoles. These
+// sources have no panel topology, so self/one-ring/node-patch classification
+// and geometric near-buffer dispatch are both unnecessary.
+JcpNearPairKernel evaluate_jcp_centroid_monopole_kernel(
+    const Panel &target, const Panel &source, double eps_ratio,
+    double kappa) noexcept;
+
 JcpNearAccum accumulate_jcp_near_ordered(
     const Panel &target, std::size_t target_index,
     const std::vector<Panel> &panels, const std::vector<double> &unknowns,

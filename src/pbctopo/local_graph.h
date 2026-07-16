@@ -38,6 +38,11 @@ struct PbctopoSystemStaticData {
   std::size_t atom_count = 0;
   std::size_t heavy_count = 0;
   std::vector<char> heavy_mask;
+  std::vector<double> vdw_radii;
+  std::vector<char> vdw_radius_available;
+  std::size_t vdw_topology_count = 0;
+  std::size_t vdw_parameter_count = 0;
+  std::size_t vdw_inferred_count = 0;
   std::vector<PbctopoRange> ranges;
   bool topology_graph_available = false;
   std::size_t topology_bonds_available = 0;

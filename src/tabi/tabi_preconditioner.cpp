@@ -5,6 +5,7 @@
 #include "../titan_executor.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -502,11 +503,40 @@ void JcpCoarseGalerkinPreconditioner::prolongate(
   }
 }
 
-std::size_t JcpCoarseGalerkinPreconditioner::estimated_bytes() const noexcept {
+std::size_t JcpCoarseGalerkinPreconditioner::estimated_bytes(
+    bool include_operator_basis) const noexcept {
   const std::size_t dim = dimension();
+  const std::size_t fine_dim = coupled ? 2 * panel_count : panel_count;
   std::size_t bytes = inv_diag.size() * sizeof(double) +
+                      panel_aggregate.size() * sizeof(std::size_t) +
                       aggregates.size() * sizeof(Aggregate) +
-                      dim * dim * sizeof(double) + dim * sizeof(int);
+                      dim * dim * sizeof(double) + dim * sizeof(int) +
+                      fine_operator_basis.size() * sizeof(double);
+  if (include_operator_basis && fine_operator_basis.empty()) {
+    if (dim > 0 && fine_dim <=
+                       (std::numeric_limits<std::size_t>::max() - bytes) /
+                           (dim * sizeof(double))) {
+      bytes += fine_dim * dim * sizeof(double);
+    } else {
+      return std::numeric_limits<std::size_t>::max();
+    }
+  }
+  const std::size_t residual_workspace =
+      balanced_residual_workspace.empty()
+          ? fine_dim
+          : balanced_residual_workspace.size();
+  const std::size_t coarse_workspace =
+      balanced_coarse_workspace.empty() ? dim
+                                        : balanced_coarse_workspace.size();
+  if (residual_workspace >
+          (std::numeric_limits<std::size_t>::max() - bytes) /
+              sizeof(double) ||
+      coarse_workspace >
+          (std::numeric_limits<std::size_t>::max() - bytes -
+           residual_workspace * sizeof(double)) /
+              sizeof(double))
+    return std::numeric_limits<std::size_t>::max();
+  bytes += (residual_workspace + coarse_workspace) * sizeof(double);
   for (const Aggregate &aggregate : aggregates)
     bytes += aggregate.panels.size() * sizeof(std::size_t);
   return bytes;
@@ -534,6 +564,78 @@ void JcpCoarseGalerkinPreconditioner::apply(
     prolongate(coarse_rhs, projected);
     for (std::size_t i = 0; i < out.size(); ++i)
       out[i] += i < projected.size() ? projected[i] : 0.0;
+  }
+}
+
+void JcpCoarseGalerkinPreconditioner::apply_balanced(
+    const std::vector<Panel> &panels, const std::vector<double> &in,
+    std::vector<double> &out,
+    const std::function<void(const std::vector<double> &,
+                             std::vector<double> &)> &base_apply) const {
+  const std::size_t dim = dimension();
+  const std::size_t fine_dim = coupled ? 2 * panel_count : panel_count;
+  const bool ready = valid && lu.size() == dim * dim &&
+                     fine_operator_basis.size() == dim * fine_dim;
+  if (!ready) {
+    if (base_apply) {
+      base_apply(in, out);
+    } else {
+      out.resize(in.size());
+      for (std::size_t i = 0; i < in.size(); ++i)
+        out[i] = in[i] * (i < inv_diag.size() ? inv_diag[i] : 1.0);
+    }
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(balanced_workspace_mutex);
+  std::vector<double> &coarse_solution = balanced_coarse_workspace;
+  restrict_area_weighted(panels, in, coarse_solution);
+  solve_dense_lu(lu, pivots, dim, coarse_solution);
+
+  std::vector<double> &residual = balanced_residual_workspace;
+  residual.assign(in.begin(), in.end());
+  if (residual.size() < fine_dim)
+    residual.resize(fine_dim, 0.0);
+  for (std::size_t row = 0; row < fine_dim; ++row) {
+    const double *const images =
+        fine_operator_basis.data() + row * dim;
+    double coarse_image = 0.0;
+    for (std::size_t col = 0; col < dim; ++col)
+      coarse_image += images[col] * coarse_solution[col];
+    residual[row] -= coarse_image;
+  }
+
+  if (base_apply) {
+    base_apply(residual, out);
+  } else {
+    out.resize(residual.size());
+    for (std::size_t i = 0; i < residual.size(); ++i)
+      out[i] = residual[i] * (i < inv_diag.size() ? inv_diag[i] : 1.0);
+  }
+  if (out.size() < fine_dim)
+    out.resize(fine_dim, 0.0);
+  if (panel_aggregate.size() == panel_count) {
+    const std::size_t q = aggregates.size();
+    for (std::size_t panel = 0; panel < panel_count; ++panel) {
+      const std::size_t aggregate = panel_aggregate[panel];
+      if (aggregate >= q)
+        continue;
+      out[panel] += coarse_solution[aggregate];
+      if (coupled)
+        out[panel_count + panel] += coarse_solution[q + aggregate];
+    }
+  } else {
+    for (std::size_t aggregate = 0; aggregate < aggregates.size();
+         ++aggregate) {
+      for (const std::size_t panel : aggregates[aggregate].panels) {
+        if (panel >= panel_count)
+          continue;
+        out[panel] += coarse_solution[aggregate];
+        if (coupled)
+          out[panel_count + panel] +=
+              coarse_solution[aggregates.size() + aggregate];
+      }
+    }
   }
 }
 
@@ -813,6 +915,15 @@ make_jcp_coarse_structure(const std::vector<Panel> &panels,
   coarse->coupled = coupled;
   coarse->aggregates =
       make_jcp_coarse_aggregates(panels, tree, aggregate_cap);
+  coarse->panel_aggregate.assign(panels.size(),
+                                 static_cast<std::size_t>(-1));
+  for (std::size_t aggregate = 0; aggregate < coarse->aggregates.size();
+       ++aggregate) {
+    for (const std::size_t panel : coarse->aggregates[aggregate].panels) {
+      if (panel < coarse->panel_aggregate.size())
+        coarse->panel_aggregate[panel] = aggregate;
+    }
+  }
   coarse->inv_diag.assign(diagonal.size(), 1.0);
   for (std::size_t i = 0; i < diagonal.size(); ++i) {
     const double diag = std::abs(diagonal[i]);
@@ -826,10 +937,18 @@ bool build_jcp_exact_galerkin(
     const std::vector<Panel> &panels, JcpCoarseGalerkinPreconditioner &coarse,
     const std::function<void(const std::vector<double> &,
                              std::vector<double> &)> &setup_matvec,
-    bool verify) {
+    bool verify, bool retain_operator_basis) {
   const std::size_t dim = coarse.dimension();
   if (dim == 0 || !setup_matvec)
     return false;
+  coarse.fine_operator_basis.clear();
+  const std::size_t fine_dim =
+      coarse.coupled ? 2 * coarse.panel_count : coarse.panel_count;
+  if (retain_operator_basis) {
+    if (fine_dim > std::numeric_limits<std::size_t>::max() / dim)
+      return false;
+    coarse.fine_operator_basis.assign(fine_dim * dim, 0.0);
+  }
   std::vector<double> matrix(dim * dim, 0.0);
   std::vector<double> basis(dim, 0.0);
   std::vector<double> fine;
@@ -841,6 +960,12 @@ bool build_jcp_exact_galerkin(
     coarse.prolongate(basis, fine);
     setup_matvec(fine, applied);
     ++coarse.setup_matvec_calls;
+    if (retain_operator_basis) {
+      if (applied.size() < fine_dim)
+        return false;
+      for (std::size_t row = 0; row < fine_dim; ++row)
+        coarse.fine_operator_basis[row * dim + col] = applied[row];
+    }
     coarse.restrict_area_weighted(panels, applied, restricted);
     for (std::size_t row = 0; row < dim; ++row)
       matrix[row * dim + col] = restricted[row];
@@ -877,6 +1002,285 @@ bool build_jcp_exact_galerkin(
     coarse.verify_rel_error_max =
         std::sqrt(diff_sq) / std::max(1.0e-300, std::sqrt(ref_sq));
   }
+  coarse.lu = std::move(matrix);
+  coarse.valid =
+      factor_dense_lu(coarse.lu, coarse.pivots, dim, &coarse.pivot_ratio);
+  constexpr double kMinCoarsePivotRatio = 1.0e-12;
+  if (!std::isfinite(coarse.pivot_ratio) ||
+      coarse.pivot_ratio < kMinCoarsePivotRatio)
+    coarse.valid = false;
+  return coarse.valid;
+}
+
+bool complete_jcp_hybrid_galerkin_monopole(
+    const std::vector<Panel> &panels, JcpCoarseGalerkinPreconditioner &coarse,
+    const std::vector<std::size_t> &near_row_ptr,
+    const std::vector<std::size_t> &near_col_index, double eps_ratio,
+    double kappa,
+    const std::function<void(const std::vector<double> &,
+                             std::vector<double> &)> &audit_matvec,
+    std::size_t audit_probes, double audit_tolerance,
+    TitanExecutor &executor) {
+  struct AggregateMoment {
+    double area{0.0};
+    double x{0.0};
+    double y{0.0};
+    double z{0.0};
+    double nx{0.0};
+    double ny{0.0};
+    double nz{0.0};
+  };
+
+  const std::size_t n = panels.size();
+  const std::size_t q = coarse.aggregates.size();
+  const std::size_t dim = coarse.dimension();
+  const std::size_t fine_dim = coarse.coupled ? 2 * n : n;
+  constexpr std::size_t kOctantsPerAggregate = 8;
+  const bool dimensions_safe =
+      dim > 0 && fine_dim <= std::numeric_limits<std::size_t>::max() / dim &&
+      q <= std::numeric_limits<std::size_t>::max() / kOctantsPerAggregate &&
+      n <= std::numeric_limits<std::size_t>::max() -
+               q * kOctantsPerAggregate;
+  const bool capture_ready =
+      dimensions_safe && coarse.coupled && coarse.panel_count == n && q > 0 &&
+      dim == 2 * q && coarse.panel_aggregate.size() == n &&
+      near_row_ptr.size() == n + 1 &&
+      coarse.fine_operator_basis.size() == fine_dim * dim &&
+      std::all_of(coarse.panel_aggregate.begin(),
+                  coarse.panel_aggregate.end(),
+                  [q](std::size_t aggregate) { return aggregate < q; });
+  if (!capture_ready || !audit_matvec || !std::isfinite(audit_tolerance) ||
+      audit_tolerance <= 0.0)
+    return false;
+
+  const auto moments_begin = std::chrono::steady_clock::now();
+  std::vector<AggregateMoment> aggregate_moments(q);
+  auto source_x = [](const Panel &panel) noexcept {
+    return panel.has_source_quadrature_center ? panel.source_x : panel.x;
+  };
+  auto source_y = [](const Panel &panel) noexcept {
+    return panel.has_source_quadrature_center ? panel.source_y : panel.y;
+  };
+  auto source_z = [](const Panel &panel) noexcept {
+    return panel.has_source_quadrature_center ? panel.source_z : panel.z;
+  };
+  auto subtract_panel = [&](AggregateMoment &moment,
+                            const Panel &panel) noexcept {
+    moment.area -= panel.area;
+    moment.x -= panel.area * source_x(panel);
+    moment.y -= panel.area * source_y(panel);
+    moment.z -= panel.area * source_z(panel);
+    moment.nx -= panel.area * panel.nx;
+    moment.ny -= panel.area * panel.ny;
+    moment.nz -= panel.area * panel.nz;
+  };
+  for (std::size_t aggregate = 0; aggregate < q; ++aggregate) {
+    AggregateMoment &moment = aggregate_moments[aggregate];
+    for (const std::size_t panel_index : coarse.aggregates[aggregate].panels) {
+      if (panel_index >= n)
+        return false;
+      const Panel &panel = panels[panel_index];
+      moment.area += panel.area;
+      moment.x += panel.area * source_x(panel);
+      moment.y += panel.area * source_y(panel);
+      moment.z += panel.area * source_z(panel);
+      moment.nx += panel.area * panel.nx;
+      moment.ny += panel.area * panel.ny;
+      moment.nz += panel.area * panel.nz;
+    }
+  }
+
+  coarse.rp_identity_error_max = 0.0;
+  for (std::size_t aggregate = 0; aggregate < q; ++aggregate) {
+    const double denom = coarse.aggregates[aggregate].area_sum;
+    if (!(denom > 1.0e-300) || !std::isfinite(denom))
+      return false;
+    coarse.rp_identity_error_max =
+        std::max(coarse.rp_identity_error_max,
+                 std::abs(aggregate_moments[aggregate].area / denom - 1.0));
+  }
+
+  std::vector<AggregateMoment> octant_moments(q * kOctantsPerAggregate);
+  std::vector<std::size_t> panel_octant(n, 0);
+  for (std::size_t aggregate = 0; aggregate < q; ++aggregate) {
+    const AggregateMoment &total = aggregate_moments[aggregate];
+    if (!(total.area > 1.0e-14))
+      continue;
+    const double center_x = total.x / total.area;
+    const double center_y = total.y / total.area;
+    const double center_z = total.z / total.area;
+    for (const std::size_t panel_index : coarse.aggregates[aggregate].panels) {
+      const Panel &panel = panels[panel_index];
+      const std::size_t octant =
+          (source_x(panel) >= center_x ? 1U : 0U) |
+          (source_y(panel) >= center_y ? 2U : 0U) |
+          (source_z(panel) >= center_z ? 4U : 0U);
+      panel_octant[panel_index] = octant;
+      AggregateMoment &moment =
+          octant_moments[aggregate * kOctantsPerAggregate + octant];
+      moment.area += panel.area;
+      moment.x += panel.area * source_x(panel);
+      moment.y += panel.area * source_y(panel);
+      moment.z += panel.area * source_z(panel);
+      moment.nx += panel.area * panel.nx;
+      moment.ny += panel.area * panel.ny;
+      moment.nz += panel.area * panel.nz;
+    }
+  }
+  coarse.moments_setup_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - moments_begin)
+          .count();
+
+  // A_near*P was captured while the ILU matrix was assembled. Complete each
+  // fine row with octant monopoles after subtracting graph sources already
+  // represented exactly. The target's own octant is omitted because a single
+  // monopole is not reliable there; the full-FMM audit below decides whether
+  // that controlled approximation is accurate enough for coarse correction.
+  const auto far_begin = std::chrono::steady_clock::now();
+  const std::size_t workers = solver_workers(executor, n);
+  executor.parallel_for(
+      n, workers, 4,
+      [&](std::size_t, std::size_t begin, std::size_t end) {
+        std::vector<AggregateMoment> remaining(q * kOctantsPerAggregate);
+        for (std::size_t target = begin; target < end; ++target) {
+          remaining = octant_moments;
+          const std::size_t row_begin = near_row_ptr[target];
+          const std::size_t row_end = near_row_ptr[target + 1];
+          if (row_begin > row_end || row_end > near_col_index.size())
+            continue;
+          for (std::size_t position = row_begin; position < row_end;
+               ++position) {
+            const std::size_t source = near_col_index[position];
+            if (source >= n)
+              continue;
+            const std::size_t aggregate = coarse.panel_aggregate[source];
+            if (aggregate < q) {
+              const std::size_t octant = panel_octant[source];
+              subtract_panel(
+                  remaining[aggregate * kOctantsPerAggregate + octant],
+                  panels[source]);
+            }
+          }
+          const std::size_t target_aggregate =
+              coarse.panel_aggregate[target];
+          const std::size_t target_octant = panel_octant[target];
+          double *const phi_row = coarse.fine_operator_basis.data() +
+                                  target * dim;
+          double *const phin_row = coarse.fine_operator_basis.data() +
+                                   (n + target) * dim;
+          for (std::size_t aggregate = 0; aggregate < q; ++aggregate) {
+            for (std::size_t octant = 0; octant < kOctantsPerAggregate;
+                 ++octant) {
+              if (aggregate == target_aggregate && octant == target_octant)
+                continue;
+              const AggregateMoment &moment =
+                  remaining[aggregate * kOctantsPerAggregate + octant];
+              if (!(moment.area > 1.0e-14) || !std::isfinite(moment.area))
+                continue;
+              Panel source;
+              source.area = moment.area;
+              source.x = moment.x / moment.area;
+              source.y = moment.y / moment.area;
+              source.z = moment.z / moment.area;
+              source.nx = moment.nx / moment.area;
+              source.ny = moment.ny / moment.area;
+              source.nz = moment.nz / moment.area;
+              const JcpNearPairKernel kernel =
+                  evaluate_jcp_centroid_monopole_kernel(
+                      panels[target], source, eps_ratio, kappa);
+              if (!kernel.valid)
+                continue;
+              phi_row[aggregate] -= kernel.k2;
+              phi_row[q + aggregate] -= kernel.k1;
+              phin_row[aggregate] -= kernel.k4;
+              phin_row[q + aggregate] -= kernel.k3;
+            }
+          }
+        }
+      });
+
+  // Form R(A_hybrid P) in a single fine-row pass. The previous column-wise
+  // implementation reconstructed a full fine vector and rescanned every
+  // aggregate for each coarse basis column.
+  std::vector<double> matrix(dim * dim, 0.0);
+  for (std::size_t target = 0; target < n; ++target) {
+    const std::size_t aggregate = coarse.panel_aggregate[target];
+    const double weight =
+        panels[target].area / coarse.aggregates[aggregate].area_sum;
+    double *const phi_coarse_row = matrix.data() + aggregate * dim;
+    double *const phin_coarse_row = matrix.data() + (q + aggregate) * dim;
+    const double *const phi_fine_row =
+        coarse.fine_operator_basis.data() + target * dim;
+    const double *const phin_fine_row =
+        coarse.fine_operator_basis.data() + (n + target) * dim;
+    for (std::size_t col = 0; col < dim; ++col) {
+      phi_coarse_row[col] += weight * phi_fine_row[col];
+      phin_coarse_row[col] += weight * phin_fine_row[col];
+    }
+  }
+  coarse.far_setup_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - far_begin)
+          .count();
+
+  coarse.verify_rel_error_max = 0.0;
+  const auto audit_begin = std::chrono::steady_clock::now();
+  const std::size_t probes = std::clamp<std::size_t>(audit_probes, 1, 2);
+  std::vector<double> basis(dim, 0.0);
+  std::vector<double> fine;
+  std::vector<double> exact_fine;
+  std::vector<double> exact_coarse;
+  std::vector<double> approximate_coarse(dim, 0.0);
+  for (std::size_t probe = 0; probe < probes; ++probe) {
+    for (std::size_t col = 0; col < dim; ++col) {
+      const std::size_t code = (col + 1) * (probe == 0 ? 5 : 11) + 3 * probe;
+      basis[col] = (code & 1U) == 0U ? 1.0 : -1.0;
+    }
+    coarse.prolongate(basis, fine);
+    audit_matvec(fine, exact_fine);
+    ++coarse.setup_matvec_calls;
+    if (exact_fine.size() < fine_dim) {
+      coarse.audit_setup_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - audit_begin)
+              .count();
+      return false;
+    }
+    coarse.restrict_area_weighted(panels, exact_fine, exact_coarse);
+    for (std::size_t row = 0; row < dim; ++row) {
+      double value = 0.0;
+      const double *const coarse_row = matrix.data() + row * dim;
+      for (std::size_t col = 0; col < dim; ++col)
+        value += coarse_row[col] * basis[col];
+      approximate_coarse[row] = value;
+    }
+    double diff_sq = 0.0;
+    double ref_sq = 0.0;
+    for (std::size_t row = 0; row < dim; ++row) {
+      const double delta = approximate_coarse[row] - exact_coarse[row];
+      diff_sq += delta * delta;
+      ref_sq += exact_coarse[row] * exact_coarse[row];
+    }
+    const double relative_error =
+        std::sqrt(diff_sq) / std::max(1.0e-300, std::sqrt(ref_sq));
+    if (!std::isfinite(relative_error)) {
+      coarse.audit_setup_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - audit_begin)
+              .count();
+      return false;
+    }
+    coarse.verify_rel_error_max =
+        std::max(coarse.verify_rel_error_max, relative_error);
+  }
+  coarse.audit_setup_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - audit_begin)
+          .count();
+  if (coarse.verify_rel_error_max > audit_tolerance)
+    return false;
+
   coarse.lu = std::move(matrix);
   coarse.valid =
       factor_dense_lu(coarse.lu, coarse.pivots, dim, &coarse.pivot_ratio);
