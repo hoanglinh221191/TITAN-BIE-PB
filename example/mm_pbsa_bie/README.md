@@ -1,4 +1,4 @@
-# TITAN TABI MM/PBSA Example
+# TITAN BIE MM/PBSA Example
 
 This self-contained example applies TITAN's boundary-integral Poisson-Boltzmann
 backend to the complete protein-ligand trajectory from `example/1`. The input
@@ -15,8 +15,8 @@ the conventional MM/PBSA estimate
 Interaction entropy is evaluated from the full trajectory and is reported both
 separately and in the final binding-energy estimate. The example is intended to
 accompany the manuscript. It uses the production
-TABI protocol: a watertight analytical solvent-excluded surface, node-patch
-discretization, analytical FMM/M2L far-field evaluation, sparse near-field
+BIE protocol: a watertight analytical solvent-excluded surface, node-patch
+discretization, hierarchical Cartesian multipole acceleration, sparse near-field
 ILU(0), a 0.45 opening parameter, and a `1e-4` true-residual target.
 
 The native MM/PBSA path does not require separately prepared complex,
@@ -45,7 +45,7 @@ From the repository root:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass `
-  -File example\manuscript_mm_pbsa_tabi\run_mm_pbsa_tabi.ps1 `
+  -File example\mm_pbsa_bie\run_mm_pbsa_bie.ps1 `
   -TitanExe .\titan.exe `
   -Threads 4
 ```
@@ -79,7 +79,8 @@ or atoms.
 - `edecomp_mmpbsa_residue_{map,ranking}.csv`: residue decomposition.
 - `edecomp_mmpbsa_atom_{map,ranking}.csv`: atom decomposition.
 - `mm_pbsa_performance.dat`: endpoint and decomposition timing.
-- `pbe_tabi_profile.csv`: TABI solver, FMM, preconditioner, and audit telemetry.
+- `pbe_tabi_profile.csv`: BIE solver, multipole, preconditioner, and audit
+  telemetry. The `pbe_tabi_*` stem is retained for output-schema compatibility.
 
-All paths in `arg_tabi_mm_pbsa.in` are relative to the generated `results`
+All paths in `arg_bie_mm_pbsa.in` are relative to the generated `results`
 directory, so the example remains portable within the repository layout.

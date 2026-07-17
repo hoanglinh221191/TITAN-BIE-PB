@@ -1,7 +1,7 @@
 # 1VII surface electrostatic-potential export
 
 This example uses the same physical and numerical protocol as the solvation
-example, with `-pbe-tabi-surface-output=all`. TITAN writes:
+example, with `-pbe-bie-surface-output=all`. TITAN writes:
 
 - `pbe_tabi_surface_solution.csv` for analysis and plotting;
 - `pbe_tabi_surface_solution.vtk` for PyMOL/ParaView-compatible workflows;

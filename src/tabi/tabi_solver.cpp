@@ -130,7 +130,7 @@ void write_operator_attribution_outputs(
                        std::ios::out | std::ios::trunc);
   if (!samples.is_open() || !summary.is_open() || !levels.is_open()) {
     throw std::runtime_error(
-        "PBE TABI: failed to open sampled-detail attribution outputs.");
+        "PBE BIE: failed to open sampled-detail attribution outputs.");
   }
   samples
       << "approximation_mode,configured_expansion_order,implemented_far_moment_"
@@ -4002,7 +4002,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       formulation.formulation != "jcp2013-treecode" &&
       formulation.formulation != "tabi2-nodepatch") {
     throw std::runtime_error(
-        "PBE TABI: node-patch discretization is supported only by the JCP "
+        "PBE BIE: node-patch discretization is supported only by the JCP "
         "2013 coupled formulations.");
   }
   result.discretization =
@@ -4022,8 +4022,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   if (node_patch_discretization) {
     if (options.surface_geometry != "triangle")
       throw std::runtime_error(
-          "PBE TABI: node-patch discretization requires "
-          "-pbe-tabi-geometry=triangle.");
+          "PBE BIE: node-patch discretization requires "
+          "-pbe-bie-geometry=triangle.");
     panels = build_node_patch_panels(panels, options.diagonal_mode);
     if (!panels.empty() && panels.front().node_patch_geometry != nullptr) {
       const NodePatchGeometry &geometry = *panels.front().node_patch_geometry;
@@ -4138,9 +4138,9 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   if (paper_bie_formulation) {
     if (mode == "treecode" && formulation.formulation != "jcp2013-treecode") {
       throw std::runtime_error(
-          "PBE: -pbe=tabi JCP/TABI2 direct formulations do not support "
-          "-pbe-tabi-sum=treecode yet; use auto/direct, pin "
-          "-pbe-tabi-formulation=jcp2013-treecode for the experimental "
+          "PBE: -pbe=bie JCP/TABI2 direct formulations do not support "
+          "-pbe-bie-sum=treecode yet; use auto/direct, pin "
+          "-pbe-bie-formulation=jcp2013-treecode for the experimental "
           "paper-treecode validation path, or pin titan-v1 for the legacy "
           "scalar treecode.");
     }
@@ -4173,7 +4173,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                      options.preconditioner == "distance-knn-overlap-schwarz" ||
                      options.preconditioner == "distance-knn-ilu0")) {
       throw std::invalid_argument(
-          "FMM-native TABI preconditioners require positive ionic strength and "
+          "FMM-native BIE preconditioners require positive ionic strength and "
           "the coupled JCP system");
     }
     if (options.fmm_local == "gmres-p4" &&
@@ -5698,8 +5698,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                      0, 0.0, "running", true);
       if (!experimental_treecode || !fmm_m2l_single_matvec || !coupled) {
         throw std::invalid_argument(
-            "PBE TABI FMM-native preconditioners require coupled "
-            "JCP treecode with -pbe-tabi-fmm-m2l=single-matvec-analytic");
+            "PBE BIE FMM-native preconditioners require coupled "
+            "JCP treecode with -pbe-bie-fmm-m2l=single-matvec-analytic");
       }
       result.preconditioner_block_near = "operator-near";
       const auto precond_begin = std::chrono::steady_clock::now();

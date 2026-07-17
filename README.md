@@ -3,7 +3,7 @@
 This repository is the manuscript-facing source release for TITAN
 (Thermodynamic & Interaction Trajectory ANalyzer). It contains the C++23
 source, command reference, and reproducible examples supporting the paper
-"Stabilized Boundary-Integral Poisson-Boltzmann Solvers for Biomolecular
+"A Stabilized Boundary-Integral Poisson-Boltzmann Solver for Biomolecular
 Solvation Electrostatics."
 
 The release centers on two contributions:
@@ -19,15 +19,16 @@ The implemented workflow includes:
 
 - watertight analytical solvent-excluded surfaces;
 - node-patch boundary-integral discretization;
-- degree-one analytical FMM/M2L matrix-vector products;
+- hierarchical Cartesian multipole acceleration for matrix-vector products;
 - sparse near-field block ILU(0) preconditioning;
 - polar solvation and binding-energy output; and
 - export of surface electrostatic potentials for visualization.
 
-The default production PB solver remains the grid backend. The analytical
-TABI/FMM path documented in the manuscript is selected explicitly. This public
-tree contains the source snapshot and examples needed to build, run, and audit
-the reported workflow.
+The default production PB solver remains the grid backend. The
+boundary-integral equation (BIE) path documented in the manuscript is selected
+explicitly with `-pbe=bie`; `tabi` remains accepted as a compatibility alias
+for archived inputs. This public tree contains the source snapshot and examples
+needed to build, run, and audit the reported workflow.
 
 ## Build
 
@@ -63,7 +64,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File example\pbe\01_1vii_solvatio
 
 Additional examples are provided in:
 
-- `example/mm_pbsa_tabi/`: trajectory-native complex/receptor/ligand TABI
+- `example/mm_pbsa_bie/`: trajectory-native complex/receptor/ligand BIE
   MM/PBSA with residue/atom decomposition and reference outputs.
 - `example/compact_mm_pbsa/`: a compact two-model submission companion.
 

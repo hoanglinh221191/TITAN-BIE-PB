@@ -346,13 +346,13 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
   if (tree.fmm_m2l == "single-matvec-analytic") {
     if (unknowns.size() < (coupled ? 2 * n : n)) {
       throw std::runtime_error(
-          "PBE TABI: -pbe-tabi-fmm-m2l=single-matvec-analytic received an incomplete JCP unknown vector.");
+          "PBE BIE: -pbe-bie-fmm-m2l=single-matvec-analytic received an incomplete JCP unknown vector.");
     }
     if (near_integration != "centroid" && near_integration != "off" &&
         near_integration != "analytic_singular" &&
         near_integration != "duffy_adaptive") {
       throw std::runtime_error(
-          "PBE TABI: -pbe-tabi-fmm-m2l=single-matvec-analytic supports centroid, analytic_singular, or duffy_adaptive near integration.");
+          "PBE BIE: -pbe-bie-fmm-m2l=single-matvec-analytic supports centroid, analytic_singular, or duffy_adaptive near integration.");
     }
     FmmM2lSingleMatvecStats fmm_stats;
     TitanPBE::Tabi::apply_jcp_fmm_m2l_single_matvec(

@@ -1,9 +1,9 @@
 cff-version: 1.2.0
 message: "If you use this TITAN release, please cite the associated manuscript and this versioned software archive."
 type: software
-title: "TITAN: Stabilized Boundary-Integral Poisson-Boltzmann Solvers for Biomolecular Solvation Electrostatics"
-version: "fagbi-ilu-robustness-v0.3"
-date-released: "2026-07-16"
+title: "A Stabilized Boundary-Integral Poisson-Boltzmann Solver for Biomolecular Solvation Electrostatics"
+version: "titan-bie-pb-v0.4"
+date-released: "2026-07-17"
 license: "MIT"
 authors:
   - family-names: "O"
@@ -15,7 +15,7 @@ authors:
   - family-names: "Li"
     given-names: "Mai Suan"
     affiliation: "Institute of Physics, Polish Academy of Sciences"
-repository-code: "https://github.com/hoanglinh221191/TITAN-fagbi-submission"
+repository-code: "https://github.com/hoanglinh221191/TITAN-BIE-PB"
 abstract: "This manuscript-associated TITAN release provides an end-to-end biomolecular Poisson-Boltzmann workflow and sparse near-field block ILU(0) stabilization for coupled boundary-integral solves. It includes source code, build instructions, PBE and MM/PBSA examples, and reference outputs."
 keywords:
   - Poisson-Boltzmann

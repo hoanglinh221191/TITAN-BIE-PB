@@ -10,15 +10,16 @@ All paths are local to the cloned repository; no download occurs at run time.
 - probe radius 1.4 Angstrom;
 - watertight analytical solvent-excluded surface, spacing 1.25 Angstrom;
 - node-patch boundary-integral discretization;
-- degree-one analytical FMM/M2L, opening parameter 0.45;
+- hierarchical Cartesian multipole acceleration (`p1` preset), opening
+  parameter 0.45;
 - analytical singular near integration;
 - sparse FMM-near-graph block ILU(0), neighbor cap 64;
 - GMRES true-residual tolerance 1e-4; and
 - four CPU threads.
 
-The option `-pbe-tabi-taylor-order=4` remains in the argument files because it
-is part of the current parser contract. With `-pbe-tabi-fmm-local=off`, the
-production analytical far operator is the degree-one path described above.
+The public examples select this path with `-pbe=bie` and
+`-pbe-bie-fast-operator=p1`. The historical `tabi` backend spelling and
+`-pbe-tabi-*` option prefix remain accepted for archived input files.
 
 ## Included runs
 

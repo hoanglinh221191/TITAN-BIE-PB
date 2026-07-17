@@ -669,7 +669,7 @@ KernelValues node_patch_near_integral(const Panel &target,
   const std::size_t node = source.node_patch_index;
   if (node + 1 >= geometry.incident_offsets.size())
     throw std::runtime_error(
-        "PBE TABI: invalid node-patch incident-triangle topology.");
+        "PBE BIE: invalid node-patch incident-triangle topology.");
   KernelValues out;
   const std::size_t begin = geometry.incident_offsets[node];
   const std::size_t end = geometry.incident_offsets[node + 1];
@@ -685,7 +685,7 @@ KernelValues node_patch_near_integral(const Panel &target,
     }
     if (local < 0)
       throw std::runtime_error(
-          "PBE TABI: node-patch incidence does not reference its node.");
+          "PBE BIE: node-patch incidence does not reference its node.");
     const Vec3 vertex =
         node_patch_triangle_vertex(geometry, triangle, local);
     const Vec3 next =
@@ -1283,12 +1283,12 @@ std::string resolve_near_integration_mode(const std::string &requested,
   if ((mode == "analytic_singular" || mode == "duffy_adaptive") &&
       !triangle_ready) {
     throw std::runtime_error(
-        "PBE TABI: -pbe-tabi-near-integration requires triangle surface "
-        "geometry; use -pbe-tabi-geometry=triangle or near-integration=auto.");
+        "PBE BIE: -pbe-bie-near-integration requires triangle surface "
+        "geometry; use -pbe-bie-geometry=triangle or near-integration=auto.");
   }
   if (mode != "analytic_singular" && mode != "duffy_adaptive")
     throw std::runtime_error(
-        "PBE TABI: invalid near integration mode; expected auto, centroid, "
+        "PBE BIE: invalid near integration mode; expected auto, centroid, "
         "analytic_singular, or duffy_adaptive.");
   return mode;
 }
@@ -1304,15 +1304,15 @@ std::string resolve_quad_buffer_mode(const std::string &requested,
     return "off";
   if (mode != "gauss7" && mode != "adaptive")
     throw std::runtime_error(
-        "PBE TABI: invalid quad-buffer mode; expected auto, off, gauss7, "
+        "PBE BIE: invalid quad-buffer mode; expected auto, off, gauss7, "
         "or adaptive.");
   const bool node_patch_ready =
       !panels.empty() &&
       std::all_of(panels.begin(), panels.end(), is_node_patch_panel);
   if (!has_all_triangle_geometry(panels) && !node_patch_ready) {
     throw std::runtime_error(
-        "PBE TABI: -pbe-tabi-quad-buffer requires triangle surface geometry; "
-        "use -pbe-tabi-geometry=triangle or quad-buffer=auto/off.");
+        "PBE BIE: -pbe-bie-quad-buffer requires triangle surface geometry; "
+        "use -pbe-bie-geometry=triangle or quad-buffer=auto/off.");
   }
   return mode;
 }
@@ -1405,7 +1405,7 @@ JcpNearPairKernel evaluate_jcp_near_pair_kernel(
   } else if (selected.self_pair) {
     if (!target.has_triangle_geometry || !source.has_triangle_geometry)
       throw std::runtime_error(
-          "PBE TABI: analytic near integration requires triangle geometry "
+          "PBE BIE: analytic near integration requires triangle geometry "
           "for self panels.");
     block_decision = self_singular_decision(source, kappa);
     kernel = block_decision.kernel;
@@ -1415,7 +1415,7 @@ JcpNearPairKernel evaluate_jcp_near_pair_kernel(
   } else if (selected.one_ring && near_integration == "duffy_adaptive") {
     if (!target.has_triangle_geometry || !source.has_triangle_geometry)
       throw std::runtime_error(
-          "PBE TABI: Duffy one-ring near integration requires triangle "
+          "PBE BIE: Duffy one-ring near integration requires triangle "
           "geometry.");
     block_decision =
         guarded_one_ring_cpv_integral_decision(target, source, eps_ratio,
@@ -1448,7 +1448,7 @@ JcpNearPairKernel evaluate_jcp_near_pair_kernel(
 
   if (!finite_kernel(kernel))
     throw std::runtime_error(
-        "PBE TABI: non-finite analytic near-integration kernel.");
+        "PBE BIE: non-finite analytic near-integration kernel.");
   selected.k1 = kernel.k1;
   selected.k2 = kernel.k2;
   selected.k3 = kernel.k3;

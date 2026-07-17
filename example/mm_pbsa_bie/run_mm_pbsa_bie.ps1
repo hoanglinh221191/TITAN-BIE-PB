@@ -31,7 +31,7 @@ if (Test-Path -LiteralPath $ResultsDir) {
 }
 New-Item -ItemType Directory -Path $ResultsDir -Force | Out-Null
 
-$argSource = Join-Path $PSScriptRoot 'arg_tabi_mm_pbsa.in'
+$argSource = Join-Path $PSScriptRoot 'arg_bie_mm_pbsa.in'
 $argPath = Join-Path $ResultsDir 'arg.in'
 $argLines = @(Get-Content -LiteralPath $argSource)
 $argLines = @($argLines | ForEach-Object {
@@ -65,7 +65,7 @@ try {
 $summaryPath = Join-Path $ResultsDir 'mm_pbsa_summary.dat'
 if (-not (Test-Path -LiteralPath $summaryPath)) { throw 'Missing mm_pbsa_summary.dat' }
 $summary = Read-SummaryMap $summaryPath
-if ($summary['pbsa_backend'] -ne 'tabi') { throw 'The example did not use the TABI backend.' }
+if ($summary['pbsa_backend'] -ne 'tabi') { throw 'The example did not use the BIE backend.' }
 if ([int]$summary['frames_total'] -ne $expectedFrames) {
     throw "Expected $expectedFrames MM/PBSA frames, found $($summary['frames_total'])."
 }
@@ -79,7 +79,7 @@ if ($energyRows.Count -ne $expectedFrames) {
     throw "Expected $expectedFrames energy rows, found $($energyRows.Count)."
 }
 if (@($energyRows | Where-Object { $_.status -ne 'ok' }).Count -gt 0) {
-    throw 'At least one trajectory frame failed the TABI MM/PBSA cycle.'
+    throw 'At least one trajectory frame failed the BIE MM/PBSA cycle.'
 }
 
 $logPath = Join-Path $ResultsDir 'log.txt'
@@ -94,7 +94,7 @@ if ([math]::Abs([double]$decomp['unit_closure_total_max_abs_kJmol']) -gt 1e-5) {
 }
 
 Write-Host ''
-Write-Host 'TABI MM/PBSA completed:'
+Write-Host 'BIE MM/PBSA completed:'
 Write-Host "  Trajectory MODEL records:  $modelRecords"
 Write-Host "  PBC-corrected frames:      $expectedFrames"
 Write-Host "  Delta G_bind (no entropy): $($summary['DeltaG_no_entropy_kcalmol_mean']) kcal/mol"

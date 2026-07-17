@@ -4831,7 +4831,7 @@ void apply_jcp_fmm_m2l_single_matvec(
     return;
   }
   if (unknowns.size() < (coupled ? 2 * n : n)) {
-    throw std::invalid_argument("PBE TABI FMM/M2L single-matvec received an "
+    throw std::invalid_argument("PBE BIE FMM/M2L single-matvec received an "
                                 "incomplete JCP unknown vector");
   }
 

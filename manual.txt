@@ -202,32 +202,34 @@ IMPORTANT NOTES
     PBE deltaG_solv endpoint solves, force-field elec/vdw interaction energy,
     SASA nonpolar energy, optional interaction entropy, and per-frame binding
     energy CSV output. The `TitanSurface` workspace is shared by GBSA/PBSA
-    SASA and TABI exposed-panel construction; `TitanSASA` remains the
+    SASA and BIE exposed-panel construction; `TitanSASA` remains the
     compatibility wrapper for per-atom SASA/SA nonpolar energy. Each workflow
     keeps its own residue grouping and output files.
     Backend selection is explicit: bare -pbe, -pbe=grid, and compatibility
     aliases -pbe=delphi, -pbe=pydelphi, and -pbe=fd use the established
-    finite-difference grid implementation; -pbe=tabi uses the separate
-    clean-room boundary-integral TABI v1 backend for linear PB only. TABI
-    defaults to the JCP 2013 coupled boundary-integral formulation with a
+    finite-difference grid implementation; -pbe=bie uses the separate
+    clean-room boundary-integral equation (BIE) backend for linear PB only.
+    The historical TABI/JCP name denotes the formulation lineage; `tabi` and
+    `-pbe-tabi-*` remain accepted as compatibility aliases for archived input
+    files. The BIE backend defaults to the JCP 2013 coupled formulation with a
     clean-room triangle surface. Self-panel analytic singular integration is
     available as a hidden validation path; one-ring Duffy remains
     experimental/report-only, and `auto` remains centroid until analytic gates
     pass. The legacy scalar `titan-v1`
     formulation is retained only as a hidden debug path. `jcp2013-centroid` is the paper-style
-    direct centroid-collocation path. When users explicitly choose TABI
-    treecode (`-pbe=tabi -pbe-tabi-sum=treecode`), TITAN resolves to the
-    coupled JCP 2013 treecode path and now uses the analytical FMM/M2L engine
-    with sparse near-field ILU by default. Sparse ILU always follows the
+    direct centroid-collocation path. The public production selection
+    `-pbe=bie -pbe-bie-fast-operator=p1` uses the coupled JCP 2013 BIE path,
+    hierarchical Cartesian multipole acceleration, and sparse near-field ILU
+    by default. Sparse ILU always follows the
     automatic fallback pipeline ILU(0) -> bounded row-scaled regularized ILU
     -> diagonal: the unshifted factor is retained when it passes the pivot,
     growth, and sparse-solve quality gates; regularization is attempted only
     after that failure. This pipeline is enabled by default; use
-    `-pbe-tabi-precond-ilu-regularization=off` to restore ILU(0) -> diagonal,
-    or `-pbe-tabi-precond-ilu-regularization-max` to change the shift ceiling.
-    The legacy TABI treecode remains
-    available for regression with `-pbe-tabi-fmm-m2l=off`. The opt-in
-    `-pbe-tabi-discretization=node-patch` path assigns one unknown location per
+    `-pbe-bie-precond-ilu-regularization=off` to restore ILU(0) -> diagonal,
+    or `-pbe-bie-precond-ilu-regularization-max` to change the shift ceiling.
+    Lower-level sum and operator controls remain available for regression and
+    diagnostics. The opt-in
+    `-pbe-bie-discretization=node-patch` path assigns one unknown location per
     mesh vertex, with barycentric patch area sum(A_triangle/3). Regular source
     terms use the exact dual-patch area centroid in both near and far paths;
     the self single-layer term uses an equal-area analytic integral while the
@@ -239,21 +241,22 @@ IMPORTANT NOTES
     Boundary-energy projection uses a structure-of-arrays source cache,
     dynamically scheduled four-atom tiles on the TITAN executor, and an AVX2
     source kernel with exact scalar `exp` evaluation when AVX2 is available;
-    other CPUs use the scalar kernel. The per-component CSV and TABI timing
+    other CPUs use the scalar kernel. The per-component CSV and BIE timing
     profiles report `energy_projection_seconds` and
     `energy_projection_kernel` so this post-GMRES cost is not hidden.
     The default remains `centroid`. The legacy `tabi2-nodepatch` formulation
     name is retained as a compatibility alias for the real node-patch path.
-    `pbe_timing.csv` reports TABI mesh, diagonal, RHS, GMRES, matvec,
+    `pbe_timing.csv` reports BIE mesh, diagonal, RHS, GMRES, matvec,
     BIE-formulation, and tree counters; `-pbe-timing=summary|detail` also
     writes `pbe_memory_profile.csv`, while `detail` writes
     `pbe_tabi_profile.csv`.
-    The hidden `-pbe-tabi-surface-only=true` feasibility mode builds and
-    profiles the TABI surface, then exits before RHS, operator,
+    The hidden `-pbe-bie-surface-only=true` feasibility mode builds and
+    profiles the BIE surface, then exits before RHS, operator,
     preconditioner, or GMRES construction; it does not report an energy.
 
   Main inputs:
-    -pbe[=grid|tabi]
+    -pbe[=grid|bie]
+    -pbe-bie-fast-operator=auto|direct|p1
     -pbe-scale, -pbe-margin, -pbe-gridbox
     -pbe-model, -pbe-biomodel, -pbe-dielectric
     -pbe-int-diel, -pbe-ext-diel, -pbe-salt, -pbe-temp
@@ -275,37 +278,37 @@ IMPORTANT NOTES
     -pbe-focus, -pbe-multigrid, -pbe-focus-levels, -pbe-focus-margin
     -pbe-mg-levels, -pbe-mg-pre, -pbe-mg-post, -pbe-mg-coarse-iter
     -pbe-map, -pbe-map-frames, -pbe-max-grid, -pbe-kernel
-    TABI advanced/debug: -pbe-tabi-sum=auto|direct|treecode,
-      -pbe-tabi-geometry=triangle|point-panel,
-      -pbe-tabi-diagonal=solid-angle|flat|off,
-      -pbe-tabi-surface-points=<24..4096>,
-      -pbe-tabi-surface-only=true|false,
-      -pbe-tabi-ses-max-grid-vertices=<4000000..100000000>,
-      -pbe-tabi-taylor-order=3|4,
-      -pbe-tabi-discretization=centroid|node-patch,
-      -pbe-tabi-formulation=titan-v1|jcp2013|jcp2013-centroid|
+    BIE advanced/debug: -pbe-bie-sum=auto|direct|treecode,
+      -pbe-bie-geometry=triangle|point-panel,
+      -pbe-bie-diagonal=solid-angle|flat|off,
+      -pbe-bie-surface-points=<24..4096>,
+      -pbe-bie-surface-only=true|false,
+      -pbe-bie-ses-max-grid-vertices=<4000000..100000000>,
+      -pbe-bie-taylor-order=3|4,
+      -pbe-bie-discretization=centroid|node-patch,
+      -pbe-bie-formulation=titan-v1|jcp2013|jcp2013-centroid|
         jcp2013-treecode|tabi2-nodepatch|calibrated-debug,
-      -pbe-tabi-energy-projection=boundary|born-check|charge-potential-debug,
-      -pbe-tabi-fmm-m2l=auto|off|single-matvec-analytic,
-      -pbe-tabi-precond=auto|none|diagonal|block|block-budgeted|
+      -pbe-bie-energy-projection=boundary|born-check|charge-potential-debug,
+      -pbe-bie-fmm-m2l=auto|off|single-matvec-analytic,
+      -pbe-bie-precond=auto|none|diagonal|block|block-budgeted|
         coarse-galerkin-probe|fmm-block-jacobi|fmm-overlap-schwarz|
         fmm-nearfield-ilu0|fmm-nearfield-ilu0-coarse|
         distance-knn-overlap-schwarz|
         distance-knn-ilu0,
-      -pbe-tabi-precond-ilu-neighbor-cap=<32..1024>,
-      -pbe-tabi-precond-ilu-drop-tol=<0..1e-2>,
-      -pbe-tabi-precond-ilu-regularization=adaptive|off (default adaptive),
-      -pbe-tabi-precond-ilu-regularization-max=<0..1e-2>,
-      -pbe-tabi-precond-coarse-aggregate-cap=<4..64>,
-      -pbe-tabi-precond-coarse-verify=off|full-small,
-      -pbe-tabi-near-integration=auto|centroid|analytic_singular|
+      -pbe-bie-precond-ilu-neighbor-cap=<32..1024>,
+      -pbe-bie-precond-ilu-drop-tol=<0..1e-2>,
+      -pbe-bie-precond-ilu-regularization=adaptive|off (default adaptive),
+      -pbe-bie-precond-ilu-regularization-max=<0..1e-2>,
+      -pbe-bie-precond-coarse-aggregate-cap=<4..64>,
+      -pbe-bie-precond-coarse-verify=off|full-small,
+      -pbe-bie-near-integration=auto|centroid|analytic_singular|
         duffy_adaptive
-      -pbe-tabi-primary-surface=sphere-patch|grid-ses|analytic-ses,
-      -pbe-tabi-ses-grid-spacing=<0.25..4.0>
+      -pbe-bie-primary-surface=sphere-patch|grid-ses|analytic-ses,
+      -pbe-bie-ses-grid-spacing=<0.25..4.0>
     grid-ses is an opt-in watertight solvent-excluded surface. It applies a
     probe-radius morphological closing to the VDW volume on a Cartesian grid,
     extracts a welded triangle mesh, and rejects any open or nonmanifold mesh
-    before the TABI solve. The default remains sphere-patch.
+    before the BIE solve. The default remains sphere-patch.
     analytic-ses independently constructs exact contact, toroidal, and
     reentrant probe patches from expanded atom spheres, intersects grid rays
     with those patches, and topology-audits the welded mesh before solving.
@@ -333,16 +336,16 @@ IMPORTANT NOTES
     v1 requires normal charge/radius initialization; do not combine with -nocal
     Zero-radius polar hydrogens from supported force fields use a small
     Bondi-style PBE surface fallback radius while charges remain mandatory.
-    TABI v1 uses an explicit linear-BIE convention with Angstrom kernels,
+    BIE v1 uses an explicit linear-BIE convention with Angstrom kernels,
     outward normals, solid-angle diagonal terms, and final Coulomb conversion.
-    TABI writes `pbe_tabi_formulation_audit.csv` for sign/scale, kappa,
+    BIE writes `pbe_tabi_formulation_audit.csv` for sign/scale, kappa,
     dielectric contrast, energy projection, and fallback diagnostics.
-    TABI audit/profile rows also report surface_generator, discretization,
+    BIE audit/profile rows also report surface_generator, discretization,
     requested/effective preconditioner, near_integration/self/one-ring ASI
     counters, and paper-mode guard status when an
     experimental path is pinned.
     It rejects nonlinear, RPB, Gaussian dielectric/surface, focus, multigrid,
-    and grid-map modes. Linear MM/PBSA is supported through three TABI
+    and grid-map modes. Linear MM/PBSA is supported through three BIE
     reaction-field endpoint solves (complex, receptor, and ligand), including
     molecule, residue, atom, and hybrid decomposition outputs.
 
@@ -1976,8 +1979,11 @@ IMPORTANT NOTES
   -epsilon_in <val>     Internal epsilon for solvation models
 
   -pbe[=backend]        Enable frame-based PB electrostatics. backend is grid
-                        or tabi. Bare -pbe defaults to grid; delphi,
-                        pydelphi, and fd are grid compatibility aliases.
+                        or bie. Bare -pbe defaults to grid; delphi, pydelphi,
+                        and fd are grid aliases. tabi is a legacy BIE alias.
+  -pbe-bie-fast-operator <mode>
+                        auto, direct, or p1. The p1 preset selects the
+                        manuscript production fast operator. Default: auto
   -pbe-model <mode>     linear or nonlinear. Default: linear
                         nonlinear uses the current linear off/focus/vcycle
                         solve as a seed, then runs Picard/SOR or damped Newton
@@ -2022,7 +2028,7 @@ IMPORTANT NOTES
                         stern applies Debye screening only in ion-accessible
                         solvent after excluding atom radius + ion radius.
   -pbe-ion-radius <val> Ion probe radius for Stern accessibility (A). Default: 2.0
-  -pbe-dgsolv [bool]    Compute deltaG_solv. For a single TABI system this is
+  -pbe-dgsolv [bool]    Compute deltaG_solv. For a single BIE system this is
                         the reaction-field energy 0.5*sum(q_i*phi_reac_i)
                         from the selected ionic-solvent solve. Native grid
                         two-molecule systems use six endpoint solves: complex,
@@ -2034,7 +2040,7 @@ IMPORTANT NOTES
                         endpoint polar, SASA nonpolar, elec/vdw,
                         interaction entropy, and final dG.
                         -pbe=grid uses solvent/vacuum grid endpoints;
-                        -pbe=tabi uses three boundary-integral reaction-field
+                        -pbe=bie uses three boundary-integral reaction-field
                         endpoints (complex, receptor, ligand).
                         Arg file: -pbsa=true; CLI: -pbsa true
   -pbsa-components <m>  auto or complex,receptor,ligand. Default: auto
@@ -2056,7 +2062,7 @@ IMPORTANT NOTES
   -pbsa-grid-reuse <m> off, validate, or auto. Default: auto
                         validate compares same-endpoint solvent/vacuum
                         geometry/operator reuse against the baseline grid
-                        solve. TABI reports this grid-only optimization as
+                        solve. BIE reports this grid-only optimization as
                         not_applicable and rejects validate mode.
   -pbsa-ie-filter-sigma <val>
                         Sigma filter for IE samples. Default: 2.0
@@ -2116,7 +2122,7 @@ IMPORTANT NOTES
   -pbe-atom-potentials <m>
                         off or csv. Default: off. csv writes per-atom reaction
                         potentials in kJ mol^-1 e^-1 and 0.5*q*phi reaction-
-                        energy contributions for grid and TABI.
+                        energy contributions for grid and BIE.
   -pbe-binding-cycle <m>
                         off or pqr-components. The latter solves complex,
                         receptor, and ligand PQRs in TITAN and writes polar and

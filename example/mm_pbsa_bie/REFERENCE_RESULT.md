@@ -3,9 +3,9 @@
 The bundled protein-ligand trajectory contains 52 coordinate models spanning
 89.8-100.0 ns. TITAN uses the first model as the coordinate/topology seed and
 evaluates 51 PBC-corrected frames from 90.0 to 100.0 ns with four CPU threads
-and the settings in `arg_tabi_mm_pbsa.in`.
+and the settings in `arg_bie_mm_pbsa.in`.
 
-All 153 TABI endpoint solves (complex, receptor, and ligand for every frame)
+All 153 BIE endpoint solves (complex, receptor, and ligand for every frame)
 completed successfully. The complex solve used sparse near-field ILU(0) in
 all 51 profiles, without fallback. The sampled accelerated-versus-direct
 operator discrepancy was at most `3.38e-3`, and the final true residual was at
@@ -42,7 +42,7 @@ larger interaction-entropy correction. The different final sign therefore
 comes from the continuum-solvation and entropy models, not from
 periodic-boundary handling or the ligand ILU cap.
 
-The three TABI endpoint solves required 69.61 s per analyzed frame on average.
+The three BIE endpoint solves required 69.61 s per analyzed frame on average.
 The ligand endpoint averaged only 0.26 s, so retaining the common ILU neighbor
 cap of 64 has negligible practical cost for this small ligand. Peak reported
 memory was 204.9 MiB. Hybrid decomposition produced 434 protein-residue and

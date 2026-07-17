@@ -88,13 +88,13 @@ build_node_patch_panels(const std::vector<Panel> &triangle_panels,
         panel.v1_index == kInvalid || panel.v2_index == kInvalid ||
         !(panel.area > 0.0) || !std::isfinite(panel.area)) {
       throw std::runtime_error(
-          "PBE TABI: node-patch discretization requires indexed, positive-area "
+          "PBE BIE: node-patch discretization requires indexed, positive-area "
           "triangle geometry.");
     }
     if (panel.v0_index == panel.v1_index || panel.v1_index == panel.v2_index ||
         panel.v2_index == panel.v0_index) {
       throw std::runtime_error(
-          "PBE TABI: node-patch discretization found a degenerate triangle.");
+          "PBE BIE: node-patch discretization found a degenerate triangle.");
     }
     vertex_count =
         std::max(vertex_count,
@@ -126,7 +126,7 @@ build_node_patch_panels(const std::vector<Panel> &triangle_panels,
       NodeAccum &node = nodes[id];
       if (node.initialized && !same_point(node.xyz, xyz))
         throw std::runtime_error(
-            "PBE TABI: inconsistent coordinates for a shared mesh vertex.");
+            "PBE BIE: inconsistent coordinates for a shared mesh vertex.");
       node.xyz = xyz;
       node.initialized = true;
       const double share = panel.area / 3.0;
@@ -185,7 +185,7 @@ build_node_patch_panels(const std::vector<Panel> &triangle_panels,
   for (std::size_t i = 0; i < vertex_count; ++i) {
     if (!nodes[i].initialized || incident[i].empty())
       throw std::runtime_error(
-          "PBE TABI: node-patch mesh contains an unreferenced vertex index.");
+          "PBE BIE: node-patch mesh contains an unreferenced vertex index.");
     geometry->vertex_xyz.push_back(nodes[i].xyz);
     geometry->incident_triangles.insert(geometry->incident_triangles.end(),
                                         incident[i].begin(), incident[i].end());
@@ -206,7 +206,7 @@ build_node_patch_panels(const std::vector<Panel> &triangle_panels,
                                   node.nz_area * node.nz_area);
     if (!(node.area > 0.0) || !(norm > 1.0e-15) || !std::isfinite(norm))
       throw std::runtime_error(
-          "PBE TABI: node-patch construction produced an invalid node.");
+          "PBE BIE: node-patch construction produced an invalid node.");
     Panel &patch = patches[i];
     patch.x = node.xyz[0];
     patch.y = node.xyz[1];
@@ -255,7 +255,7 @@ build_node_patch_panels(const std::vector<Panel> &triangle_panels,
   if (!std::isfinite(patch_area_sum) ||
       std::abs(patch_area_sum - triangle_area_sum) > 1.0e-12 * area_scale) {
     throw std::runtime_error(
-        "PBE TABI: node-patch lumped areas do not preserve surface area.");
+        "PBE BIE: node-patch lumped areas do not preserve surface area.");
   }
   return patches;
 }
