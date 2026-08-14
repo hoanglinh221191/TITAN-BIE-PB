@@ -20,16 +20,12 @@ precompute_shifted_components(
     const std::vector<PbctopoAtom> &atoms,
     const std::vector<std::vector<std::size_t>> &components,
     const std::vector<PbctopoShift> &shifts, double clash_cutoff,
-    double contact_cutoff, bool build_clash_grid = false);
+    double contact_cutoff, bool build_clash_grid);
 double shifted_component_bbox_distance2(const PbctopoShiftedComponent &lhs,
                                         const PbctopoShiftedComponent &rhs);
 
 bool better_pair_shift_score(const PbctopoPairShiftScore &lhs,
                              const PbctopoPairShiftScore &rhs);
-PbctopoPairShiftScore score_component_pair_shift(
-    const PbctopoShiftedComponent &lhs, const PbctopoShiftedComponent &rhs,
-    const PbctopoShift &shift, double hard_cutoff, double contact_cutoff,
-    const PbctopoPairShiftScore *incumbent = nullptr);
 
 bool better_component_graph_edge(const PbctopoGraphEdge &lhs,
                                  const PbctopoGraphEdge &rhs);
@@ -37,12 +33,13 @@ bool graph_edge_has_zero_shift(const PbctopoGraphEdge &edge);
 bool graph_edge_matches_delta(const PbctopoGraphEdge &edge, const Int3 &delta);
 
 std::vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
-    const std::vector<PbctopoAtom> &atoms,
+    const std::vector<PbctopoAtom> &atoms, box Box,
     const std::vector<std::vector<std::size_t>> &components,
     const std::vector<PbctopoShift> &shifts,
     const RuntimeCutoffs &cutoffs, PbctopoTimingStats *timing,
     const std::vector<Int3> *warm_component_offsets,
-    std::vector<PbctopoPairShiftCandidateSet> *pair_candidates_out = nullptr);
+    std::vector<PbctopoPairShiftCandidateSet> *pair_candidates_out = nullptr,
+    const std::vector<PbctopoRequiredContact> *required_contacts = nullptr);
 
 bool solve_component_offsets_from_ranked_edges(
     std::size_t component_count, box Box,
@@ -71,7 +68,9 @@ bool solve_component_offsets_via_pair_graph(
     std::vector<Int3> *refined_offsets_out = nullptr,
     std::vector<PbctopoGraphEdge> *tree_edges_out = nullptr,
     PbctopoCycleSyncMetrics *cycle_metrics_out = nullptr,
-    const PbctopoAnchorGraphContext *anchor_context = nullptr);
+    const PbctopoAnchorGraphContext *anchor_context = nullptr,
+    const std::vector<PbctopoRequiredContact> *required_contacts = nullptr,
+    PbctopoIdentifiability *identifiability_out = nullptr);
 
 } // namespace titan_pbctopo
 

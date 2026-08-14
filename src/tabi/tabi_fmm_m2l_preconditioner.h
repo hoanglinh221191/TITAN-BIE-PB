@@ -29,6 +29,8 @@ struct JcpSparseIluPreconditioner {
   std::vector<double> inv_diag;
   std::vector<std::size_t> row_ptr;
   std::vector<std::size_t> col_index;
+  std::vector<std::size_t> lower_end;
+  std::vector<std::size_t> upper_begin;
   std::vector<Block2> values;
   std::vector<Block2> diag_inverse;
   std::size_t nnz_blocks{0};

@@ -6,6 +6,7 @@
 #include "arguments.h"
 #include "titan_selection_utils.h"
 
+#include <array>
 #include <cstdint>
 #include <cstddef>
 #include <fstream>
@@ -60,6 +61,22 @@ private:
     double time_ps{0.0};
     double rg2{0.0};
     double rg{0.0};
+    std::array<double, 3> principal_rg2{0.0, 0.0, 0.0};
+    double kappa2{0.0};
+    double asphericity{0.0};
+    double normalized_asphericity{0.0};
+    double acylindricity{0.0};
+    double prolateness{0.0};
+    double principal_aspect_ratio{1.0};
+  };
+  struct ShapeFrame {
+    std::array<double, 3> principal_rg2{0.0, 0.0, 0.0};
+    double kappa2{0.0};
+    double asphericity{0.0};
+    double normalized_asphericity{0.0};
+    double acylindricity{0.0};
+    double prolateness{0.0};
+    double principal_aspect_ratio{1.0};
   };
   struct AggregateTrajectorySummary {
     std::size_t traj_index{0};
@@ -115,6 +132,7 @@ private:
   std::vector<double> rg2_series_;
   std::vector<double> rg_series_;
   std::vector<double> time_series_ps_;
+  std::vector<ShapeFrame> shape_series_;
   std::vector<AggregateFrame> aggregate_frames_;
   std::vector<AggregateTrajectorySummary> aggregate_summaries_;
   std::vector<double> aggregate_rg2_series_;

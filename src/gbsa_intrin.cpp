@@ -1,17 +1,24 @@
 #include "gbsa_intrin.h"
 #include "charmm_nonbonded.h"
+#include "titan_electrostatics.h"
+#include "titan_gb_model.h"
+#include "titan_interaction_entropy.h"
+#include "titan_executor.h"
 #include "titan_simd_dispatch.h"
 #include "titan_sasa.h"
 #include "titan_ui.h"
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <span>
+#include <sstream>
 
 #ifdef __AVX__
 #include "avx_math.h"
@@ -36,58 +43,230 @@ static inline __m256d charmm_lj_energy_gbsa_avx(__m256d sigma_vec,
   return _mm256_and_pd(energy, valid_mask);
 }
 
+namespace {
+
+char first_alpha_upper(const std::string &value) {
+  for (const unsigned char c : value) {
+    if (std::isalpha(c) != 0)
+      return static_cast<char>(std::toupper(c));
+  }
+  return '\0';
+}
+
+char gb_element(const mol_info &atom) {
+  std::string name = atom.get_atom();
+  std::transform(name.begin(), name.end(), name.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::toupper(c));
+                 });
+  name.erase(std::remove_if(name.begin(), name.end(), [](unsigned char c) {
+               return std::isalnum(c) == 0;
+             }),
+             name.end());
+
+  if (name.starts_with("CL"))
+    return 'L';
+  if (name.starts_with("BR"))
+    return 'B';
+  return first_alpha_upper(name.empty() ? atom.get_atom_type() : name);
+}
+
+char nearest_heavy_element(const MOL &mol,
+                           const std::vector<mol_info> &atom_info,
+                           size_t atom_index) {
+  constexpr double kMaximumHydrogenBondLengthA = 1.55;
+  const double cutoff2 = kMaximumHydrogenBondLengthA *
+                         kMaximumHydrogenBondLengthA;
+  double best2 = cutoff2;
+  char best = '\0';
+  for (size_t other = 0; other < mol.size() && other < atom_info.size();
+       ++other) {
+    if (other == atom_index || gb_element(atom_info[other]) == 'H')
+      continue;
+    const double dx = mol.pos.x[atom_index] - mol.pos.x[other];
+    const double dy = mol.pos.y[atom_index] - mol.pos.y[other];
+    const double dz = mol.pos.z[atom_index] - mol.pos.z[other];
+    const double r2 = dx * dx + dy * dy + dz * dz;
+    if (std::isfinite(r2) && r2 < best2) {
+      best2 = r2;
+      best = gb_element(atom_info[other]);
+    }
+  }
+  return best;
+}
+
+char hydrogen_partner_from_atom_type(const mol_info &atom) {
+  std::string type = atom.get_atom_type();
+  std::transform(type.begin(), type.end(), type.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::toupper(c));
+                 });
+  type.erase(std::remove_if(type.begin(), type.end(), [](unsigned char c) {
+               return std::isalnum(c) == 0;
+             }),
+             type.end());
+  if (type == "H" || type.starts_with("HN"))
+    return 'N';
+  if (type.starts_with("HO") || type.starts_with("HW"))
+    return 'O';
+  if (type.starts_with("HS"))
+    return 'S';
+  if (!type.empty() && type.front() == 'H')
+    return 'C';
+  return '\0';
+}
+
+double gb_intrinsic_radius_angstrom(const MOL &mol,
+                                    const std::vector<mol_info> &atom_info,
+                                    size_t atom_index, int igb) {
+  if (atom_index >= atom_info.size())
+    return 1.50;
+  const char element = gb_element(atom_info[atom_index]);
+  if (element != 'H') {
+    if (element == 'L')
+      return 1.70; // chlorine
+    if (element == 'B')
+      return 1.85; // bromine
+    return titan_gb::standard_heavy_atom_radius_angstrom(element);
+  }
+
+  char partner = nearest_heavy_element(mol, atom_info, atom_index);
+  if (partner == '\0')
+    partner = hydrogen_partner_from_atom_type(atom_info[atom_index]);
+  if (igb == 1) {
+    if (partner == 'C' || partner == 'N')
+      return 1.30;
+    if (partner == 'O' || partner == 'S')
+      return 0.80;
+    return 1.20;
+  }
+  return partner == 'N' ? 1.30 : 1.20;
+}
+
+struct GbAtomParameters {
+  std::vector<double> intrinsic_radius_a;
+  std::vector<double> offset_radius_a;
+  std::vector<double> scaled_radius_a;
+};
+
+GbAtomParameters build_gb_atom_parameters(
+    const MOL &mol, const AlignedDoubleVector &input_vdw_radii,
+    const std::vector<mol_info> &atom_info, int igb) {
+  GbAtomParameters result;
+  result.intrinsic_radius_a.resize(mol.size());
+  result.offset_radius_a.resize(mol.size());
+  result.scaled_radius_a.resize(mol.size());
+  for (size_t atom = 0; atom < mol.size(); ++atom) {
+    const double intrinsic =
+        gb_intrinsic_radius_angstrom(mol, atom_info, atom, igb);
+    const double offset = intrinsic - titan_gb::kDielectricOffsetAngstrom;
+    result.intrinsic_radius_a[atom] = intrinsic;
+    result.offset_radius_a[atom] = offset;
+
+    // CAS marks deleted side-chain atoms with the exact 0.001 A sentinel.
+    // They retain a finite target Born radius but must not descreen neighbours.
+    const bool inactive =
+        atom < input_vdw_radii.size() &&
+        std::abs(input_vdw_radii[atom] - 0.001) <= 1.0e-9;
+    const char element = atom < atom_info.size() ? gb_element(atom_info[atom])
+                                                 : '\0';
+    result.scaled_radius_a[atom] =
+        inactive ? 0.0
+                 : offset * titan_gb::screening_factor_for_element(element);
+  }
+  return result;
+}
+
+void calculate_born_radius_range(
+    const MOL &mol, const GbAtomParameters &primary,
+    AlignedDoubleVector &radii, int igb, size_t begin, size_t end,
+    const MOL *env_mol, const GbAtomParameters *environment) {
+  end = std::min(end, mol.size());
+  for (size_t i = begin; i < end; ++i) {
+    double integral = 0.0;
+    bool valid = true;
+    const auto accumulate_sources = [&](const MOL &sources,
+                                        const GbAtomParameters &parameters,
+                                        bool same_molecule) {
+      for (size_t j = 0; j < sources.size(); ++j) {
+        if ((same_molecule && i == j) ||
+            parameters.scaled_radius_a[j] <= 0.0)
+          continue;
+        const double dx = mol.pos.x[i] - sources.pos.x[j];
+        const double dy = mol.pos.y[i] - sources.pos.y[j];
+        const double dz = mol.pos.z[i] - sources.pos.z[j];
+        const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const double contribution =
+            titan_gb::hct_pair_integral_inverse_angstrom(
+                primary.offset_radius_a[i], parameters.scaled_radius_a[j],
+                distance);
+        if (!std::isfinite(contribution)) {
+          valid = false;
+          return;
+        }
+        integral += contribution;
+      }
+    };
+
+    accumulate_sources(mol, primary, true);
+    if (valid && env_mol != nullptr && environment != nullptr)
+      accumulate_sources(*env_mol, *environment, false);
+
+    const double born_a =
+        valid ? titan_gb::born_radius_angstrom(
+                    primary.intrinsic_radius_a[i], integral, igb)
+              : std::numeric_limits<double>::quiet_NaN();
+    radii[i] = born_a * 0.1;
+  }
+}
+
+} // namespace
+
 void cal_effective_born_radii_avx2(const MOL &mol,
                                    const AlignedDoubleVector &vdw_radii,
+                                   const std::vector<mol_info> &atom_info,
                                    AlignedDoubleVector &radii, int igb,
                                    size_t begin, size_t end, const MOL *env_mol,
-                                   const AlignedDoubleVector *env_vdw_radii) {
-
-  size_t size = mol.size();
-
-  double alpha = 0.0, beta = 0.0, gamma = 0.0;
-  if (igb == 2) {
-    alpha = 0.8;
-    beta = 0.0;
-    gamma = 2.91;
-  } else if (igb == 5) {
-    alpha = 1.0;
-    beta = 0.8;
-    gamma = 4.85;
+                                   const AlignedDoubleVector *env_vdw_radii,
+                                   const std::vector<mol_info> *env_atom_info) {
+  if (radii.size() < mol.size())
+    radii.resize(mol.size());
+  const GbAtomParameters primary =
+      build_gb_atom_parameters(mol, vdw_radii, atom_info, igb);
+  GbAtomParameters environment;
+  const bool has_environment = env_mol != nullptr && env_vdw_radii != nullptr &&
+                               env_atom_info != nullptr;
+  if (has_environment) {
+    environment = build_gb_atom_parameters(*env_mol, *env_vdw_radii,
+                                           *env_atom_info, igb);
   }
+  calculate_born_radius_range(mol, primary, radii, igb, begin, end, env_mol,
+                              has_environment ? &environment : nullptr);
+}
 
-  for (size_t i = begin; i < end; ++i) {
-    double pos_x = mol.pos.x[i], pos_y = mol.pos.y[i], pos_z = mol.pos.z[i];
-    double rho_i = vdw_radii[i]; // In Angstroms!
-    if (rho_i < 1.0)
-      rho_i = 1.5; // fallback
-    double psi = titan_simd_dispatch::gbsa_inverse_r4_volume_sum(
-        mol.pos.x.data(), mol.pos.y.data(), mol.pos.z.data(), vdw_radii.data(),
-        size, pos_x, pos_y, pos_z, 1e-6, true);
-
-    if (env_mol != nullptr && env_vdw_radii != nullptr) {
-      psi += titan_simd_dispatch::gbsa_inverse_r4_volume_sum(
-          env_mol->pos.x.data(), env_mol->pos.y.data(), env_mol->pos.z.data(),
-          env_vdw_radii->data(), env_mol->size(), pos_x, pos_y, pos_z, 1e-6,
-          true);
-    }
-
-    psi *= 0.1; // Convert integral from Angstrom^-4 to nm^-4
-
-    double inv_Ri = 1.0 / rho_i;
-    if (igb == 1) {
-      inv_Ri -= psi;
-    } else {
-      double tanh_arg =
-          alpha * psi - beta * psi * psi + gamma * psi * psi * psi;
-      inv_Ri -= (1.0 / 25.0) *
-                std::tanh(tanh_arg); // Rmax = 25.0 A Born radius ceiling
-    }
-
-    if (inv_Ri < 0.001)
-      inv_Ri = 0.001; // ceiling
-    radii[i] = (1.0 / inv_Ri) *
-               0.1; // Convert Born radius from A to nm for use in energy kernel
+void cal_effective_born_radii_parallel_avx2(
+    const MOL &mol, const AlignedDoubleVector &vdw_radii,
+    const std::vector<mol_info> &atom_info, AlignedDoubleVector &radii,
+    int igb, TitanExecutor &executor, const MOL *env_mol,
+    const AlignedDoubleVector *env_vdw_radii,
+    const std::vector<mol_info> *env_atom_info) {
+  radii.resize(mol.size());
+  const GbAtomParameters primary =
+      build_gb_atom_parameters(mol, vdw_radii, atom_info, igb);
+  GbAtomParameters environment;
+  const bool has_environment = env_mol != nullptr && env_vdw_radii != nullptr &&
+                               env_atom_info != nullptr;
+  if (has_environment) {
+    environment = build_gb_atom_parameters(*env_mol, *env_vdw_radii,
+                                           *env_atom_info, igb);
   }
+  executor.parallel_for(
+      mol.size(), executor.capacity(), 32,
+      [&](size_t, size_t begin, size_t end) {
+        calculate_born_radius_range(
+            mol, primary, radii, igb, begin, end, env_mol,
+            has_environment ? &environment : nullptr);
+      });
 }
 
 static void build_complex_geometry(const MOL &rec, const MOL &lg,
@@ -129,21 +308,35 @@ make_sasa_atoms(const MOL &mol, std::span<const double> radii) {
 
 static std::vector<double>
 compute_gbsa_sasa(const MOL &mol, std::span<const double> radii,
-                  std::span<const size_t> targets = {}) {
+                  std::span<const size_t> targets, int point_count,
+                  TitanExecutor *executor = nullptr) {
   std::vector<TitanSASA::Atom> atoms = make_sasa_atoms(mol, radii);
   TitanSASA::Options options;
   options.probe_radius = TitanSASA::kDefaultProbeRadiusA;
   options.min_cell_size = 3.0;
-  options.point_count = TitanSASA::kDefaultPointCount;
+  options.point_count = point_count;
   return TitanSASA::compute_per_atom_sasa(
       std::span<const TitanSASA::Atom>(atoms.data(), atoms.size()), options,
-      targets);
+      targets, executor);
+}
+
+static double alpb_electrostatic_size_nm(const MOL &mol,
+                                         std::span<const double> radii) {
+  const size_t atom_count = mol.size();
+  if (radii.size() != atom_count)
+    return std::numeric_limits<double>::quiet_NaN();
+  return titan_gb::electrostatic_size_adet_nm(
+      std::span<const double>(mol.pos.x.data(), atom_count),
+      std::span<const double>(mol.pos.y.data(), atom_count),
+      std::span<const double>(mol.pos.z.data(), atom_count), radii);
 }
 
 void build_gbsa_sasa_cache(const MOL &rec, const MOL &lg,
                            const Multi_MOL_parameters &rec_parameters,
                            const Multi_MOL_parameters &lg_parameters,
-                           GBSASasaCache &cache_out) {
+                           GBSASasaCache &cache_out, int point_count,
+                           bool compute_alpb_sizes,
+                           TitanExecutor *executor) {
   const size_t rec_size = rec.size();
   const size_t lg_size = lg.size();
 
@@ -163,16 +356,34 @@ void build_gbsa_sasa_cache(const MOL &rec, const MOL &lg,
 
   cache_out.sasa_rec_free = compute_gbsa_sasa(
       rec, std::span<const double>(rec_parameters.radius.data(), rec_size),
-      std::span<const size_t>(rec_targets.data(), rec_targets.size()));
+      std::span<const size_t>(rec_targets.data(), rec_targets.size()),
+      point_count, executor);
 
   cache_out.sasa_lig_free = compute_gbsa_sasa(
       lg, std::span<const double>(lg_parameters.radius.data(), lg_size),
-      std::span<const size_t>(lig_targets.data(), lig_targets.size()));
+      std::span<const size_t>(lig_targets.data(), lig_targets.size()),
+      point_count, executor);
 
   cache_out.sasa_complex = compute_gbsa_sasa(
       complex_mol,
       std::span<const double>(complex_radii.data(), rec_size + lg_size),
-      std::span<const size_t>(com_targets.data(), com_targets.size()));
+      std::span<const size_t>(com_targets.data(), com_targets.size()),
+      point_count, executor);
+
+  if (compute_alpb_sizes) {
+    cache_out.alpb_rec_electrostatic_size_nm = alpb_electrostatic_size_nm(
+        rec, std::span<const double>(rec_parameters.radius.data(), rec_size));
+    cache_out.alpb_lig_electrostatic_size_nm = alpb_electrostatic_size_nm(
+        lg, std::span<const double>(lg_parameters.radius.data(), lg_size));
+    cache_out.alpb_complex_electrostatic_size_nm =
+        alpb_electrostatic_size_nm(
+            complex_mol,
+            std::span<const double>(complex_radii.data(), rec_size + lg_size));
+  } else {
+    cache_out.alpb_rec_electrostatic_size_nm = 0.0;
+    cache_out.alpb_lig_electrostatic_size_nm = 0.0;
+    cache_out.alpb_complex_electrostatic_size_nm = 0.0;
+  }
 }
 
 int cal_energy_gbsa_avx2(
@@ -191,7 +402,8 @@ int cal_energy_gbsa_avx2(
     const AlignedDoubleVector &rec_complex_radii,
     const AlignedDoubleVector &lg_complex_radii, GBSA_Aggregator *aggregator,
     const GBSASasaCache *sasa_cache,
-    bool write_pair_cache) {
+    bool write_pair_cache, bool include_rec_onebody,
+    bool include_lig_onebody) {
   (void)num_snap;
   (void)rec_lcpo_p1;
   (void)rec_lcpo_p2;
@@ -206,22 +418,19 @@ int cal_energy_gbsa_avx2(
       !Arguments.flag_use_common_topo;
   __m256d avx_one = _mm256_set1_pd(1.0);
   __m256d avx_four = _mm256_set1_pd(4.0);
-  __m256d kappa = _mm256_set1_pd(
-      0.73 * std::sqrt(Arguments.saltcon)); // Debye length approx
-
   double ext_diel = Arguments.ext_diel;
   double int_diel = Arguments.int_diel;
+  const double kappa_val = titan_electrostatics::amber_gb_kappa_nm_inverse(
+      Arguments.saltcon, ext_diel, Arguments.gbsa_temperature);
+  __m256d kappa = _mm256_set1_pd(kappa_val);
   __m256d avx_half = _mm256_set1_pd(0.5);
   bool is_oplsaa = (Arguments.force_f == "OPLSAA");
 
-  bool use_alpb = Arguments.flag_alpb;
-  double alpb_alpha = 2.5; // Empirical effective electrostatic size
+  const bool use_alpb = Arguments.flag_alpb;
   __m256d avx_int_diel = _mm256_set1_pd(int_diel);
   __m256d avx_ext_diel = _mm256_set1_pd(ext_diel);
-  __m256d avx_alpb_alpha_term = _mm256_set1_pd(int_diel * alpb_alpha);
 
-  double self_gpol_sum = 0.0;
-  double kappa_val = 0.73 * std::sqrt(Arguments.saltcon);
+  double endpoint_gpol_sum = 0.0;
   const bool is_charmm =
       Arguments.force_f.find("CHARMM") != std::string::npos;
   const bool can_write_pair_cache =
@@ -229,6 +438,38 @@ int cal_energy_gbsa_avx2(
 
   const size_t rec_size = rec.size();
   const size_t lg_size = lg.size();
+
+  double alpb_rec_size_nm = std::numeric_limits<double>::quiet_NaN();
+  double alpb_lig_size_nm = std::numeric_limits<double>::quiet_NaN();
+  double alpb_complex_size_nm = std::numeric_limits<double>::quiet_NaN();
+  if (use_alpb && sasa_cache != nullptr) {
+    alpb_rec_size_nm = sasa_cache->alpb_rec_electrostatic_size_nm;
+    alpb_lig_size_nm = sasa_cache->alpb_lig_electrostatic_size_nm;
+    alpb_complex_size_nm = sasa_cache->alpb_complex_electrostatic_size_nm;
+  } else if (use_alpb) {
+    alpb_rec_size_nm = alpb_electrostatic_size_nm(
+        rec, std::span<const double>(rec_parameters.radius.data(), rec_size));
+    alpb_lig_size_nm = alpb_electrostatic_size_nm(
+        lg, std::span<const double>(lg_parameters.radius.data(), lg_size));
+    MOL complex_mol;
+    std::vector<double> complex_radii;
+    build_complex_geometry(rec, lg, rec_parameters, lg_parameters, complex_mol,
+                           complex_radii);
+    alpb_complex_size_nm = alpb_electrostatic_size_nm(
+        complex_mol,
+        std::span<const double>(complex_radii.data(), complex_radii.size()));
+  }
+  if (use_alpb &&
+      (!(alpb_rec_size_nm > 0.0) || !std::isfinite(alpb_rec_size_nm) ||
+       !(alpb_lig_size_nm > 0.0) || !std::isfinite(alpb_lig_size_nm) ||
+       !(alpb_complex_size_nm > 0.0) ||
+       !std::isfinite(alpb_complex_size_nm)))
+    return 1;
+
+  rec_begin = std::min(rec_begin, rec_size);
+  rec_end = std::clamp(rec_end, rec_begin, rec_size);
+  lg_begin = std::min(lg_begin, lg_size);
+  lg_end = std::clamp(lg_end, lg_begin, lg_size);
   const bool collect_decomposition = (aggregator != nullptr);
   struct LocalDecompEntry {
     bool is_ligand;
@@ -271,29 +512,40 @@ int cal_energy_gbsa_avx2(
   };
 
   std::unordered_map<std::uint64_t, size_t> rec_decomp_slots_by_key;
-  std::vector<size_t> rec_decomp_slot(rec_size, size_t{0});
+  const size_t invalid_decomp_slot = std::numeric_limits<size_t>::max();
+  std::vector<size_t> rec_decomp_slot(rec_size, invalid_decomp_slot);
+  const auto rec_slot_for_atom = [&](size_t atom) -> size_t {
+    if (rec_decomp_slot[atom] != invalid_decomp_slot)
+      return rec_decomp_slot[atom];
+    const int rec_id = is_lig_rec ? static_cast<int>(atom + 1)
+                                  : info_rec[atom].get_resnr();
+    rec_decomp_slot[atom] = register_decomp_slot(
+        rec_decomp_slots_by_key, false, info_rec[atom].get_chainnum(), rec_id,
+        is_lig_rec, &info_rec[atom]);
+    return rec_decomp_slot[atom];
+  };
   if (collect_decomposition) {
-    rec_decomp_slots_by_key.reserve(rec_size);
-    for (size_t i = 0; i < rec_size; ++i) {
-      const int rec_id = is_lig_rec ? static_cast<int>(i + 1)
-                                    : info_rec[i].get_resnr();
-      rec_decomp_slot[i] = register_decomp_slot(
-          rec_decomp_slots_by_key, false, info_rec[i].get_chainnum(), rec_id,
-          is_lig_rec, &info_rec[i]);
-    }
+    rec_decomp_slots_by_key.reserve(rec_end - rec_begin);
+    for (size_t i = rec_begin; i < rec_end; ++i)
+      (void)rec_slot_for_atom(i);
   }
 
   std::unordered_map<std::uint64_t, size_t> lig_decomp_slots_by_key;
-  std::vector<size_t> lig_decomp_slot(lg_end - lg_begin, size_t{0});
+  std::vector<size_t> lig_decomp_slot(lg_size, invalid_decomp_slot);
+  const auto lig_slot_for_atom = [&](size_t atom) -> size_t {
+    if (lig_decomp_slot[atom] != invalid_decomp_slot)
+      return lig_decomp_slot[atom];
+    const int lig_id = is_lig_lg ? static_cast<int>(atom + 1)
+                                 : info_lg[atom].get_resnr();
+    lig_decomp_slot[atom] = register_decomp_slot(
+        lig_decomp_slots_by_key, true, info_lg[atom].get_chainnum(), lig_id,
+        is_lig_lg, &info_lg[atom]);
+    return lig_decomp_slot[atom];
+  };
   if (collect_decomposition) {
     lig_decomp_slots_by_key.reserve(lg_end - lg_begin);
-    for (size_t j = lg_begin; j < lg_end; ++j) {
-      const int lig_id = is_lig_lg ? static_cast<int>(j + 1)
-                                   : info_lg[j].get_resnr();
-      lig_decomp_slot[j - lg_begin] = register_decomp_slot(
-          lig_decomp_slots_by_key, true, info_lg[j].get_chainnum(), lig_id,
-          is_lig_lg, &info_lg[j]);
-    }
+    for (size_t j = lg_begin; j < lg_end; ++j)
+      (void)lig_slot_for_atom(j);
   }
 
   std::vector<double> local_sasa_rec_free;
@@ -393,16 +645,19 @@ int cal_energy_gbsa_avx2(
 
     local_sasa_rec_free = compute_gbsa_sasa(
         rec, std::span<const double>(rec_parameters.radius.data(), rec_size),
-        std::span<const size_t>(rec_targets.data(), rec_targets.size()));
+        std::span<const size_t>(rec_targets.data(), rec_targets.size()),
+        Arguments.gbsa_sasa_points);
 
     local_sasa_lig_free = compute_gbsa_sasa(
         lg, std::span<const double>(lg_parameters.radius.data(), lg_size),
-        std::span<const size_t>(lig_targets.data(), lig_targets.size()));
+        std::span<const size_t>(lig_targets.data(), lig_targets.size()),
+        Arguments.gbsa_sasa_points);
 
     local_sasa_complex = compute_gbsa_sasa(
         complex_mol,
         std::span<const double>(complex_radii.data(), rec_size + lg_size),
-        std::span<const size_t>(com_targets.data(), com_targets.size()));
+        std::span<const size_t>(com_targets.data(), com_targets.size()),
+        Arguments.gbsa_sasa_points);
 
     sasa_rec_free_ptr = &local_sasa_rec_free;
     sasa_lig_free_ptr = &local_sasa_lig_free;
@@ -413,73 +668,95 @@ int cal_energy_gbsa_avx2(
   std::vector<double> dG_np_rec(rec_size, 0.0);
   std::vector<double> dG_np_lig(lg_size, 0.0);
 
-  for (size_t i = rec_begin; i < rec_end; ++i) {
+  for (size_t i = rec_begin; include_rec_onebody && i < rec_end; ++i) {
     dG_np_rec[i] =
         gamma_kj * ((*sasa_complex_ptr)[i] - (*sasa_rec_free_ptr)[i]);
     Energy.G_nonpolar += dG_np_rec[i];
   }
-  for (size_t j = lg_begin; j < lg_end; ++j) {
+  for (size_t j = lg_begin; include_lig_onebody && j < lg_end; ++j) {
     dG_np_lig[j] = gamma_kj *
                    ((*sasa_complex_ptr)[rec_size + j] - (*sasa_lig_free_ptr)[j]);
     Energy.G_nonpolar += dG_np_lig[j];
   }
 
-  for (size_t i = rec_begin; i < rec_end; ++i) {
-    double q = rec_parameters.charge[i];
-    double dG_self;
-    if (use_alpb) {
-      double term_com_in = 1.0 / (int_diel * rec_complex_radii[i]);
-      double term_com_out =
-          std::exp(-kappa_val * rec_complex_radii[i]) /
-          (ext_diel * rec_complex_radii[i] + int_diel * alpb_alpha);
-      double term_free_in = 1.0 / (int_diel * rec_free_radii[i]);
-      double term_free_out =
-          std::exp(-kappa_val * rec_free_radii[i]) /
-          (ext_diel * rec_free_radii[i] + int_diel * alpb_alpha);
-      dG_self = -138.935 * 0.5 * q *
-                q * // 138.935 = 1/(4pe0) in units of kJ A/(mol e2)
-                ((term_com_in - term_com_out) - (term_free_in - term_free_out));
-    } else {
-      double term_com_in = 1.0 / (int_diel * rec_complex_radii[i]);
-      double term_com_out = std::exp(-kappa_val * rec_complex_radii[i]) /
-                            (ext_diel * rec_complex_radii[i]);
-      double term_free_in = 1.0 / (int_diel * rec_free_radii[i]);
-      double term_free_out = std::exp(-kappa_val * rec_free_radii[i]) /
-                             (ext_diel * rec_free_radii[i]);
-      dG_self = -138.935 * 0.5 * q *
-                q * // 138.935 = 1/(4pe0) in units of kJ A/(mol e2)
-                ((term_com_in - term_com_out) - (term_free_in - term_free_out));
-    }
-    self_gpol_sum += dG_self;
+  for (size_t i = rec_begin; include_rec_onebody && i < rec_end; ++i) {
+    const double q = rec_parameters.charge[i];
+    const double dG_self =
+        0.5 * (titan_gb::polar_pair_energy_kj_mol(
+                   q, q, 0.0, rec_complex_radii[i], rec_complex_radii[i],
+                   kappa_val, int_diel, ext_diel, use_alpb,
+                   alpb_complex_size_nm) -
+               titan_gb::polar_pair_energy_kj_mol(
+                   q, q, 0.0, rec_free_radii[i], rec_free_radii[i],
+                   kappa_val, int_diel, ext_diel, use_alpb,
+                   alpb_rec_size_nm));
+    endpoint_gpol_sum += dG_self;
+    if (collect_decomposition)
+      local_decomp_entries[rec_slot_for_atom(i)].gpol += dG_self;
   }
-  for (size_t j = lg_begin; j < lg_end; ++j) {
-    double q = lg_parameters.charge[j];
-    double dG_self;
-    if (use_alpb) {
-      double term_com_in = 1.0 / (int_diel * lg_complex_radii[j]);
-      double term_com_out =
-          std::exp(-kappa_val * lg_complex_radii[j]) /
-          (ext_diel * lg_complex_radii[j] + int_diel * alpb_alpha);
-      double term_free_in = 1.0 / (int_diel * lg_free_radii[j]);
-      double term_free_out =
-          std::exp(-kappa_val * lg_free_radii[j]) /
-          (ext_diel * lg_free_radii[j] + int_diel * alpb_alpha);
-      dG_self = -138.935 * 0.5 * q * q *
-                ((term_com_in - term_com_out) - (term_free_in - term_free_out));
-    } else {
-      double term_com_in = 1.0 / (int_diel * lg_complex_radii[j]);
-      double term_com_out = std::exp(-kappa_val * lg_complex_radii[j]) /
-                            (ext_diel * lg_complex_radii[j]);
-      double term_free_in = 1.0 / (int_diel * lg_free_radii[j]);
-      double term_free_out = std::exp(-kappa_val * lg_free_radii[j]) /
-                             (ext_diel * lg_free_radii[j]);
-      dG_self = -138.935 * 0.5 * q * q *
-                ((term_com_in - term_com_out) - (term_free_in - term_free_out));
+  for (size_t j = lg_begin; include_lig_onebody && j < lg_end; ++j) {
+    const double q = lg_parameters.charge[j];
+    const double dG_self =
+        0.5 * (titan_gb::polar_pair_energy_kj_mol(
+                   q, q, 0.0, lg_complex_radii[j], lg_complex_radii[j],
+                   kappa_val, int_diel, ext_diel, use_alpb,
+                   alpb_complex_size_nm) -
+               titan_gb::polar_pair_energy_kj_mol(
+                   q, q, 0.0, lg_free_radii[j], lg_free_radii[j], kappa_val,
+                   int_diel, ext_diel, use_alpb, alpb_lig_size_nm));
+    endpoint_gpol_sum += dG_self;
+    if (collect_decomposition)
+      local_decomp_entries[lig_slot_for_atom(j)].gpol += dG_self;
+  }
+
+  // Complete the endpoint cycle.  Intramolecular GB pair terms do not cancel
+  // when ligand descreening changes Born radii between free and complex states.
+  for (size_t i = rec_begin; include_rec_onebody && i < rec_end; ++i) {
+    for (size_t k = i + 1; k < rec_size; ++k) {
+      const double dx = rec.pos.x[i] - rec.pos.x[k];
+      const double dy = rec.pos.y[i] - rec.pos.y[k];
+      const double dz = rec.pos.z[i] - rec.pos.z[k];
+      const double r2_nm = 0.01 * (dx * dx + dy * dy + dz * dz);
+      const double delta =
+          titan_gb::polar_pair_energy_kj_mol(
+              rec_parameters.charge[i], rec_parameters.charge[k], r2_nm,
+              rec_complex_radii[i], rec_complex_radii[k], kappa_val,
+              int_diel, ext_diel, use_alpb, alpb_complex_size_nm) -
+          titan_gb::polar_pair_energy_kj_mol(
+              rec_parameters.charge[i], rec_parameters.charge[k], r2_nm,
+              rec_free_radii[i], rec_free_radii[k], kappa_val, int_diel,
+              ext_diel, use_alpb, alpb_rec_size_nm);
+      endpoint_gpol_sum += delta;
+      if (collect_decomposition) {
+        local_decomp_entries[rec_slot_for_atom(i)].gpol += 0.5 * delta;
+        local_decomp_entries[rec_slot_for_atom(k)].gpol += 0.5 * delta;
+      }
     }
-    self_gpol_sum += dG_self;
+  }
+  for (size_t j = lg_begin; include_lig_onebody && j < lg_end; ++j) {
+    for (size_t k = j + 1; k < lg_size; ++k) {
+      const double dx = lg.pos.x[j] - lg.pos.x[k];
+      const double dy = lg.pos.y[j] - lg.pos.y[k];
+      const double dz = lg.pos.z[j] - lg.pos.z[k];
+      const double r2_nm = 0.01 * (dx * dx + dy * dy + dz * dz);
+      const double delta =
+          titan_gb::polar_pair_energy_kj_mol(
+              lg_parameters.charge[j], lg_parameters.charge[k], r2_nm,
+              lg_complex_radii[j], lg_complex_radii[k], kappa_val, int_diel,
+              ext_diel, use_alpb, alpb_complex_size_nm) -
+          titan_gb::polar_pair_energy_kj_mol(
+              lg_parameters.charge[j], lg_parameters.charge[k], r2_nm,
+              lg_free_radii[j], lg_free_radii[k], kappa_val, int_diel,
+              ext_diel, use_alpb, alpb_lig_size_nm);
+      endpoint_gpol_sum += delta;
+      if (collect_decomposition) {
+        local_decomp_entries[lig_slot_for_atom(j)].gpol += 0.5 * delta;
+        local_decomp_entries[lig_slot_for_atom(k)].gpol += 0.5 * delta;
+      }
+    }
   }
   // FIX: DO NOT divide by scalar_eu_par here. Keep it in kJ/mol.
-  Energy.G_polar += self_gpol_sum;
+  Energy.G_polar += endpoint_gpol_sum;
 
   __m256d v_scale = _mm256_set1_pd(0.01);
 
@@ -492,13 +769,14 @@ int cal_energy_gbsa_avx2(
     __m256d v_R_j = _mm256_set1_pd(R_j);
     __m256d v_q_j = _mm256_set1_pd(lg_parameters.charge[j]);
 
-    size_t size_vector_rec = rec.size() / 4;
-    for (size_t i = 0; i < size_vector_rec * 4; i += 4) {
-      __m256d v_x = _mm256_load_pd(&rec.pos.x[i]);
-      __m256d v_y = _mm256_load_pd(&rec.pos.y[i]);
-      __m256d v_z = _mm256_load_pd(&rec.pos.z[i]);
-      __m256d v_q_i = _mm256_load_pd(&rec_parameters.charge[i]);
-      __m256d v_R_i = _mm256_load_pd(&rec_complex_radii[i]);
+    const size_t vector_rec_end =
+        rec_begin + ((rec_end - rec_begin) / 4) * 4;
+    for (size_t i = rec_begin; i < vector_rec_end; i += 4) {
+      __m256d v_x = _mm256_loadu_pd(&rec.pos.x[i]);
+      __m256d v_y = _mm256_loadu_pd(&rec.pos.y[i]);
+      __m256d v_z = _mm256_loadu_pd(&rec.pos.z[i]);
+      __m256d v_q_i = _mm256_loadu_pd(&rec_parameters.charge[i]);
+      __m256d v_R_i = _mm256_loadu_pd(&rec_complex_radii[i]);
 
       __m256d dx = _mm256_sub_pd(v_x, v_pos_x);
       __m256d dy = _mm256_sub_pd(v_y, v_pos_y);
@@ -510,21 +788,17 @@ int cal_energy_gbsa_avx2(
       __m256d r_nm = _mm256_sqrt_pd(r2_nm);
 
       // VDW Mixing Rules
-      __m256d avx_rec_epsilon = _mm256_load_pd(&rec_parameters.epsilon[i]);
-      __m256d avx_rec_sigma = _mm256_load_pd(&rec_parameters.sigma[i]);
+      __m256d avx_rec_epsilon = _mm256_loadu_pd(&rec_parameters.epsilon[i]);
+      __m256d avx_rec_sigma = _mm256_loadu_pd(&rec_parameters.sigma[i]);
       __m256d avx_temp_epsilon_lg = _mm256_set1_pd(lg_parameters.epsilon[j]);
       __m256d avx_temp_sigma_lg = _mm256_set1_pd(lg_parameters.sigma[j]);
 
       __m256d eps_ij = _mm256_sqrt_pd(_mm256_mul_pd(
           avx_temp_epsilon_lg, avx_rec_epsilon)); // Geometric mean
-      // FIX: Guard against r ~ 0 causing LJ explosion.
-      // Cap r6_nm to a minimum to prevent (sigma/r)^12 -> infinity.
+      // The frame-level close-contact gate rejects r < 0.05 nm before this
+      // kernel. Never silently zero or cap an unphysical interaction.
       __m256d r6_nm_raw = _mm256_mul_pd(_mm256_mul_pd(r2_nm, r2_nm), r2_nm);
-      __m256d r6_min = _mm256_set1_pd(1e-12); // floor for r^6 in nm^6
-      __m256d r6_nm = _mm256_max_pd(r6_nm_raw, r6_min);
-      // Mask: zero VdW for pairs with r_nm < 0.05 nm (0.5 A) — bonded/overlap
-      __m256d r_min_mask =
-          _mm256_cmp_pd(r_nm, _mm256_set1_pd(0.05), _CMP_GE_OQ);
+      __m256d r6_nm = r6_nm_raw;
 
       __m256d vdw_res;
       if (is_charmm) {
@@ -554,12 +828,11 @@ int cal_energy_gbsa_avx2(
             sigma_lane, epsilon_lane, r6_lane, vdw_lane);
         vdw_res = _mm256_loadu_pd(vdw_lane);
       }
-      // Apply distance mask: zero out VdW for too-close pairs
-      vdw_res = _mm256_and_pd(vdw_res, r_min_mask);
-
       // Elec (Vacuum Coulomb MUST NOT be divided by int_diel)
       __m256d elec_res = _mm256_div_pd(
-          _mm256_mul_pd(_mm256_set1_pd(138.935), _mm256_mul_pd(v_q_i, v_q_j)),
+          _mm256_mul_pd(
+              _mm256_set1_pd(titan_gb::kCoulombKJMolNmPerE2),
+              _mm256_mul_pd(v_q_i, v_q_j)),
           r_nm);
 
       // G_polar
@@ -578,30 +851,22 @@ int cal_energy_gbsa_avx2(
       __m256d gpol_res;
 
       if (use_alpb) {
-        __m256d term_com_in =
-            _mm256_div_pd(avx_one, _mm256_mul_pd(avx_int_diel, fGB));
-        __m256d term_com_out = _mm256_div_pd(
-            screen_exp, _mm256_add_pd(_mm256_mul_pd(avx_ext_diel, fGB),
-                                      avx_alpb_alpha_term));
-        gpol_res = _mm256_mul_pd(
-            _mm256_set1_pd(-138.935),
-            _mm256_mul_pd(v_qij, _mm256_sub_pd(term_com_in, term_com_out)));
+        gpol_res = titan_gb::alpb_polar_pair_energy_from_fgb_avx(
+            v_qij, fGB, screen_exp, int_diel, ext_diel,
+            alpb_complex_size_nm);
       } else {
         __m256d term_com_in =
             _mm256_div_pd(avx_one, _mm256_mul_pd(avx_int_diel, fGB));
         __m256d term_com_out =
             _mm256_div_pd(screen_exp, _mm256_mul_pd(avx_ext_diel, fGB));
         gpol_res = _mm256_mul_pd(
-            _mm256_set1_pd(-138.935),
+            _mm256_set1_pd(-titan_gb::kCoulombKJMolNmPerE2),
             _mm256_mul_pd(v_qij, _mm256_sub_pd(term_com_in, term_com_out)));
       }
 
       __m256d E_vdw_scaled = vdw_res;
       __m256d E_elec_scaled = elec_res;
       __m256d G_polar_scaled = gpol_res;
-      E_elec_scaled = _mm256_and_pd(E_elec_scaled, r_min_mask);
-      G_polar_scaled = _mm256_and_pd(G_polar_scaled, r_min_mask);
-
       double vdw_a[4], elec_a[4], gpol_a[4];
       _mm256_storeu_pd(vdw_a, E_vdw_scaled);
       _mm256_storeu_pd(elec_a, E_elec_scaled);
@@ -620,22 +885,24 @@ int cal_energy_gbsa_avx2(
           CachedData.set_elec_vdw(pos, elec_a[k], vdw_a[k]);
         }
         if (collect_decomposition) {
-          auto &rec_decomp = local_decomp_entries[rec_decomp_slot[i + k]];
-          rec_decomp.ev += vdw_a[k];
-          rec_decomp.ee += elec_a[k];
-          rec_decomp.gpol += gpol_a[k];
+          constexpr double half = 0.5;
+          auto &rec_decomp =
+              local_decomp_entries[rec_slot_for_atom(i + k)];
+          rec_decomp.ev += half * vdw_a[k];
+          rec_decomp.ee += half * elec_a[k];
+          rec_decomp.gpol += half * gpol_a[k];
 
           auto &lig_decomp =
-              local_decomp_entries[lig_decomp_slot[j - lg_begin]];
-          lig_decomp.ev += vdw_a[k];
-          lig_decomp.ee += elec_a[k];
-          lig_decomp.gpol += gpol_a[k];
+              local_decomp_entries[lig_slot_for_atom(j)];
+          lig_decomp.ev += half * vdw_a[k];
+          lig_decomp.ee += half * elec_a[k];
+          lig_decomp.gpol += half * gpol_a[k];
         }
       }
     }
 
     // Scalar Remainder Loop
-    for (size_t i = size_vector_rec * 4; i < rec.size(); ++i) {
+    for (size_t i = vector_rec_end; i < rec_end; ++i) {
       double dx = rec.pos.x[i] - pos_x;
       double dy = rec.pos.y[i] - pos_y;
       double dz = rec.pos.z[i] - pos_z;
@@ -643,17 +910,6 @@ int cal_energy_gbsa_avx2(
       double r2_nm = r2_A * 0.01;
       double r_nm = std::sqrt(r2_nm);
       double r6_nm = r2_nm * r2_nm * r2_nm;
-
-      // FIX: Guard against r ~ 0 causing LJ explosion
-      if (r_nm < 0.05) { // 0.5 Angstrom — overlap/bonded
-        if (can_write_pair_cache) {
-          size_t pos = rec.size() * j + i;
-          CachedData.set_elec_vdw(pos, 0., 0.);
-        }
-        continue;
-      }
-      if (r6_nm < 1e-12)
-        r6_nm = 1e-12; // floor
 
       double vdw;
       if (Arguments.force_f.find("CHARMM") != std::string::npos) {
@@ -683,27 +939,14 @@ int cal_energy_gbsa_avx2(
 
       // Elec (Remove int_diel division)
       double elec =
-          138.935 * lg_parameters.charge[j] * rec_parameters.charge[i] / r_nm;
+          titan_gb::kCoulombKJMolNmPerE2 * lg_parameters.charge[j] *
+          rec_parameters.charge[i] / r_nm;
 
       // G_polar
-      double RiRj = rec_complex_radii[i] * R_j;
-      double exp_arg = -0.25 * r2_nm / (RiRj);
-      double fGB = std::sqrt(r2_nm + RiRj * std::exp(exp_arg));
-      double exp_screen = std::exp(-kappa_val * fGB);
-      double gpol;
-
-      if (use_alpb) {
-        double term_com_in = 1.0 / (int_diel * fGB);
-        double term_com_out =
-            exp_screen / (ext_diel * fGB + int_diel * alpb_alpha);
-        gpol = -138.935 * lg_parameters.charge[j] * rec_parameters.charge[i] *
-               (term_com_in - term_com_out);
-      } else {
-        double term_com_in = 1.0 / (int_diel * fGB);
-        double term_com_out = exp_screen / (ext_diel * fGB);
-        gpol = -138.935 * lg_parameters.charge[j] * rec_parameters.charge[i] *
-               (term_com_in - term_com_out);
-      }
+      const double gpol = titan_gb::polar_pair_energy_kj_mol(
+          rec_parameters.charge[i], lg_parameters.charge[j], r2_nm,
+          rec_complex_radii[i], R_j, kappa_val, int_diel, ext_diel,
+          use_alpb, alpb_complex_size_nm);
 
       // CRITICAL: Remove all / scalar_eu_par divisions below this point.
 
@@ -717,15 +960,17 @@ int cal_energy_gbsa_avx2(
       Energy.G_polar += gpol;
 
       if (collect_decomposition) {
-        auto &rec_decomp = local_decomp_entries[rec_decomp_slot[i]];
-        rec_decomp.ev += vdw;
-        rec_decomp.ee += elec;
-        rec_decomp.gpol += gpol;
+        constexpr double half = 0.5;
+        auto &rec_decomp =
+            local_decomp_entries[rec_slot_for_atom(i)];
+        rec_decomp.ev += half * vdw;
+        rec_decomp.ee += half * elec;
+        rec_decomp.gpol += half * gpol;
 
-        auto &lig_decomp = local_decomp_entries[lig_decomp_slot[j - lg_begin]];
-        lig_decomp.ev += vdw;
-        lig_decomp.ee += elec;
-        lig_decomp.gpol += gpol;
+        auto &lig_decomp = local_decomp_entries[lig_slot_for_atom(j)];
+        lig_decomp.ev += half * vdw;
+        lig_decomp.ee += half * elec;
+        lig_decomp.gpol += half * gpol;
       }
     }
   }
@@ -733,15 +978,16 @@ int cal_energy_gbsa_avx2(
   // CRITICAL: Final injection of SASA nonpolar energy into decomposition
   // structure Because Gnonpol does not distribute purely pairwise, we assign it
   // post-loop directly into the relevant aggregates
-  for (size_t i = rec_begin; i < rec_end; ++i) {
+  for (size_t i = rec_begin; include_rec_onebody && i < rec_end; ++i) {
     if (collect_decomposition && std::abs(dG_np_rec[i]) > 1e-8) {
-      auto &rec_decomp = local_decomp_entries[rec_decomp_slot[i]];
+      auto &rec_decomp =
+          local_decomp_entries[rec_slot_for_atom(i)];
       rec_decomp.gnp += dG_np_rec[i];
     }
   }
-  for (size_t j = lg_begin; j < lg_end; ++j) {
+  for (size_t j = lg_begin; include_lig_onebody && j < lg_end; ++j) {
     if (collect_decomposition && std::abs(dG_np_lig[j]) > 1e-8) {
-      auto &lig_decomp = local_decomp_entries[lig_decomp_slot[j - lg_begin]];
+      auto &lig_decomp = local_decomp_entries[lig_slot_for_atom(j)];
       lig_decomp.gnp += dG_np_lig[j];
     }
   }
@@ -830,49 +1076,25 @@ void GBSA_Aggregator::merge(const GBSA_Aggregator &other) {
   }
 }
 
-static double
-calc_residue_interaction_entropy(const std::vector<double> &energies,
-                                 double eu_par) {
-  if (energies.empty())
-    return 0.0;
-  double avg_e = 0.0;
-  for (double e : energies)
-    avg_e += e;
-  avg_e /= energies.size();
-
-  double sigma = 0.0;
-  for (double e : energies)
-    sigma += (e - avg_e) * (e - avg_e);
-  sigma = std::sqrt(sigma / energies.size());
-
-  // RT MUST match the internal unit of 'energies' (kJ/mol) to make the exponent
-  // dimensionless.
-  const double kB_kJ = 1.38064e-23 * 6.02214e23 / 1000.0; // kJ/(mol·K)
-  const double T = 300.0;                                 // K
-  const double RT = kB_kJ * T;
-
-  std::vector<double> valid_e;
-  for (double e : energies) {
-    if (std::abs(e - avg_e) <= 2.0 * sigma) {
-      valid_e.push_back((e - avg_e) / RT); // Now rigorously unitless
-    }
-  }
-
-  if (valid_e.empty())
-    return 0.0;
-  double max_e = valid_e[0];
-  for (double e : valid_e)
-    if (e > max_e)
-      max_e = e;
-
-  double log_e = 0.0;
-  for (double e : valid_e)
-    log_e += std::exp(e - max_e);
-  log_e = max_e + std::log(log_e);
-
-  // Convert the final TS energy back to the user's requested output unit via
-  // eu_par
-  return (-std::log(valid_e.size()) + log_e) * (RT / eu_par);
+static TitanEntropy::InteractionEntropyResult
+calc_gbsa_interaction_entropy(const std::vector<double> &energies,
+                              const arguments &Arguments) {
+  constexpr double kGasConstantKJPerMolK = 0.00831446261815324;
+  const std::size_t block_size =
+      Arguments.gbsa_ie_block == "auto"
+          ? std::max<std::size_t>(
+                1, static_cast<std::size_t>(
+                       std::floor(std::sqrt(energies.size()))))
+          : static_cast<std::size_t>(std::stoi(Arguments.gbsa_ie_block));
+  TitanEntropy::InteractionEntropyOptions options;
+  options.rt_energy =
+      kGasConstantKJPerMolK * Arguments.gbsa_temperature;
+  options.filter_sigma = Arguments.gbsa_ie_filter_sigma;
+  options.min_samples =
+      static_cast<std::size_t>(Arguments.gbsa_ie_min_samples);
+  options.block_size = block_size;
+  return TitanEntropy::compute_interaction_entropy(
+      std::span<const double>(energies.data(), energies.size()), options);
 }
 
 void GBSA_Aggregator::commit_frame_decompositions(
@@ -920,8 +1142,42 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix,
   const bool capture_performance = Arguments.gbsa_perf != "off";
   const auto entropy_output_begin =
       capture_performance ? std::chrono::steady_clock::now()
-                          : std::chrono::steady_clock::time_point{};
+                           : std::chrono::steady_clock::time_point{};
   std::string eu_str = "(" + Arguments.eu + ")";
+
+  std::size_t alpb_size_frame_count = 0;
+  long double alpb_receptor_size_sum = 0.0L;
+  long double alpb_ligand_size_sum = 0.0L;
+  long double alpb_complex_size_sum = 0.0L;
+  double alpb_receptor_size_min = std::numeric_limits<double>::infinity();
+  double alpb_ligand_size_min = std::numeric_limits<double>::infinity();
+  double alpb_complex_size_min = std::numeric_limits<double>::infinity();
+  double alpb_receptor_size_max = 0.0;
+  double alpb_ligand_size_max = 0.0;
+  double alpb_complex_size_max = 0.0;
+  bool alpb_sizes_file_written = false;
+  if (Arguments.flag_alpb) {
+    for (const auto &trajectory : trajectories) {
+      for (const auto &snapshot : trajectory) {
+        ++alpb_size_frame_count;
+        alpb_receptor_size_sum += snapshot.alpb_receptor_size_nm;
+        alpb_ligand_size_sum += snapshot.alpb_ligand_size_nm;
+        alpb_complex_size_sum += snapshot.alpb_complex_size_nm;
+        alpb_receptor_size_min =
+            std::min(alpb_receptor_size_min, snapshot.alpb_receptor_size_nm);
+        alpb_ligand_size_min =
+            std::min(alpb_ligand_size_min, snapshot.alpb_ligand_size_nm);
+        alpb_complex_size_min =
+            std::min(alpb_complex_size_min, snapshot.alpb_complex_size_nm);
+        alpb_receptor_size_max =
+            std::max(alpb_receptor_size_max, snapshot.alpb_receptor_size_nm);
+        alpb_ligand_size_max =
+            std::max(alpb_ligand_size_max, snapshot.alpb_ligand_size_nm);
+        alpb_complex_size_max =
+            std::max(alpb_complex_size_max, snapshot.alpb_complex_size_nm);
+      }
+    }
+  }
   // 1. Raw Snapshots
   for (size_t t = 0; t < trajectories.size(); ++t) {
     std::string fname_snap = dir_prefix + "/traj_" + std::to_string(t) + "_" +
@@ -944,6 +1200,38 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix,
             << s.total_energy / Arguments.eu_par << "\n";
     }
     fsnap.close();
+  }
+
+  if (Arguments.flag_alpb) {
+    std::ofstream alpb_sizes(dir_prefix + "/gbsa_alpb_sizes.csv",
+                             std::ios::out | std::ios::trunc);
+    if (alpb_sizes.is_open()) {
+      alpb_sizes
+          << "trajectory_id,frame_index,time_ps,alpb_alpha_dimensionless,"
+             "size_method,A_receptor_nm,A_ligand_nm,A_complex_nm\n";
+      alpb_sizes << std::setprecision(12);
+      for (std::size_t trajectory_id = 0;
+           trajectory_id < trajectories.size(); ++trajectory_id) {
+        for (std::size_t frame_index = 0;
+             frame_index < trajectories[trajectory_id].size(); ++frame_index) {
+          const auto &snapshot = trajectories[trajectory_id][frame_index];
+          alpb_sizes << trajectory_id << ',' << frame_index << ','
+                     << snapshot.time << ',' << titan_gb::kAlpbAlpha
+                     << ",ADet_Sigalov_Eq23,"
+                     << snapshot.alpb_receptor_size_nm << ','
+                     << snapshot.alpb_ligand_size_nm << ','
+                     << snapshot.alpb_complex_size_nm << '\n';
+        }
+      }
+      alpb_sizes.flush();
+      alpb_sizes_file_written = alpb_sizes.good();
+      if (!alpb_sizes_file_written) {
+        TitanUI::print_warning(
+            "GBSA: incomplete write of gbsa_alpb_sizes.csv.");
+      }
+    } else {
+      TitanUI::print_warning("GBSA: failed to write gbsa_alpb_sizes.csv.");
+    }
   }
 
   // 2. Time-series Average
@@ -1013,7 +1301,48 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix,
     std::cerr << "[GBSA] ERROR: Cannot open output file: " << fname_sum << "\n";
     return;
   }
+  fsum << "energy_distance_policy preprocessed_raw\n";
+  fsum << "gbsa_sasa_point_count " << Arguments.gbsa_sasa_points << "\n";
+  if (Arguments.flag_alpb) {
+    const std::streamsize previous_precision = fsum.precision();
+    const double size_count = static_cast<double>(alpb_size_frame_count);
+    fsum << "alpb_enabled true\n";
+    fsum << std::setprecision(12);
+    fsum << "alpb_alpha_dimensionless " << titan_gb::kAlpbAlpha << "\n";
+    fsum << "alpb_formula Sigalov_Eq25_salt_screened\n";
+    fsum << "alpb_size_method ADet_Sigalov_Eq23\n";
+    fsum << "alpb_size_units nm\n";
+    fsum << "alpb_sizes_export_status "
+         << (alpb_sizes_file_written ? "ok" : "failed") << "\n";
+    fsum << "alpb_sizes_file "
+         << (alpb_sizes_file_written ? "gbsa_alpb_sizes.csv" : "unavailable")
+         << "\n";
+    if (alpb_size_frame_count > 0) {
+      fsum << "alpb_A_receptor_nm_mean "
+           << static_cast<double>(alpb_receptor_size_sum / size_count) << "\n";
+      fsum << "alpb_A_receptor_nm_range " << alpb_receptor_size_min << ' '
+           << alpb_receptor_size_max << "\n";
+      fsum << "alpb_A_ligand_nm_mean "
+           << static_cast<double>(alpb_ligand_size_sum / size_count) << "\n";
+      fsum << "alpb_A_ligand_nm_range " << alpb_ligand_size_min << ' '
+           << alpb_ligand_size_max << "\n";
+      fsum << "alpb_A_complex_nm_mean "
+           << static_cast<double>(alpb_complex_size_sum / size_count) << "\n";
+      fsum << "alpb_A_complex_nm_range " << alpb_complex_size_min << ' '
+           << alpb_complex_size_max << "\n";
+    }
+    fsum.precision(previous_precision);
+  }
   fsum << "interaction_entropy_source E_MM_elec_plus_vdw\n";
+  fsum << "interaction_entropy_temperature_K " << Arguments.gbsa_temperature
+       << "\n";
+  fsum << "interaction_entropy_min_samples "
+       << Arguments.gbsa_ie_min_samples << "\n";
+  fsum << "interaction_entropy_filter_sigma "
+       << Arguments.gbsa_ie_filter_sigma
+       << " # 0 means no hard filtering\n";
+  fsum << "interaction_entropy_block_config " << Arguments.gbsa_ie_block
+       << "\n";
   fsum << "GRAND AVERAGE OVERALL TRAJECTORIES AND FRAMES " << eu_str << ":\n";
   double g_tot = 0., g_vdw = 0., g_elec = 0., g_pol = 0., g_nonpol = 0.;
 
@@ -1041,15 +1370,32 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix,
     double avg_gpol = (g_pol / total_frames) / Arguments.eu_par;
     double avg_gnonpol = (g_nonpol / total_frames) / Arguments.eu_par;
 
-    double global_minus_TdS = calc_residue_interaction_entropy(
-        global_mm_energies, Arguments.eu_par);
-    double global_dG_binding = avg_tot + global_minus_TdS;
+    const TitanEntropy::InteractionEntropyResult global_entropy =
+        calc_gbsa_interaction_entropy(global_mm_energies, Arguments);
+    const bool entropy_ok = global_entropy.status == "ok";
+    const double global_minus_TdS =
+        entropy_ok ? global_entropy.minus_tds_energy / Arguments.eu_par
+                   : std::numeric_limits<double>::quiet_NaN();
+    const double global_dG_binding =
+        entropy_ok ? avg_tot + global_minus_TdS
+                   : std::numeric_limits<double>::quiet_NaN();
 
     fsum << "Total(dH): " << avg_tot << " | VDW: " << avg_vdw
          << " | Elec: " << avg_elec << " | Gpol: " << avg_gpol
          << " | Gnonpol: " << avg_gnonpol << "\n";
+    fsum << "IE_status: " << global_entropy.status
+         << " | samples: " << global_entropy.samples
+         << " | filtered_samples: " << global_entropy.filtered_samples
+         << " | ESS_lag1: " << global_entropy.ess
+         << " | block_size: " << global_entropy.block_size
+         << " | block_count: " << global_entropy.block_count
+         << " | block_std: "
+         << global_entropy.block_std_energy / Arguments.eu_par
+         << " | block_drift: "
+         << global_entropy.block_drift_energy / Arguments.eu_par << "\n";
     fsum << "-TdS_IE  : " << global_minus_TdS << "\n";
-    fsum << "Final_dG : " << global_dG_binding << "\n\n";
+    fsum << "Final_dG : " << global_dG_binding
+         << " # nan unless IE_status=ok\n\n";
   }
 
   fsum << "AVERAGE PER TRAJECTORY " << eu_str << ":\n";
@@ -1062,16 +1408,86 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix,
     }
     if (!trajectories[t].empty()) {
       double t_avg = (t_tot / trajectories[t].size()) / Arguments.eu_par;
-      double t_minus_TdS =
-          calc_residue_interaction_entropy(traj_mm_energies, Arguments.eu_par);
-      double t_dG = t_avg + t_minus_TdS;
+      const TitanEntropy::InteractionEntropyResult trajectory_entropy =
+          calc_gbsa_interaction_entropy(traj_mm_energies, Arguments);
+      const bool entropy_ok = trajectory_entropy.status == "ok";
+      const double t_minus_TdS =
+          entropy_ok
+              ? trajectory_entropy.minus_tds_energy / Arguments.eu_par
+              : std::numeric_limits<double>::quiet_NaN();
+      const double t_dG =
+          entropy_ok ? t_avg + t_minus_TdS
+                     : std::numeric_limits<double>::quiet_NaN();
 
       fsum << "Trajectory " << t << " Avg Total(dH) = " << t_avg
+           << " | IE_status = " << trajectory_entropy.status
+           << " | samples = " << trajectory_entropy.samples
+           << " | ESS_lag1 = " << trajectory_entropy.ess
            << " | -TdS_IE = " << t_minus_TdS << " | Final dG = " << t_dG
            << "\n";
     }
   }
   fsum.close();
+
+  if (Arguments.flag_alpb && log != nullptr && log->is_open()) {
+    std::ostringstream alpb_alpha_text;
+    alpb_alpha_text << std::setprecision(12) << titan_gb::kAlpbAlpha
+                    << " (dimensionless)";
+    TitanUI::log_section(*log, "MM/GBSA ALPB PROVENANCE");
+    TitanUI::log_kv(*log, "ALPB Enabled", "true");
+    TitanUI::log_kv(*log, "ALPB Alpha", alpb_alpha_text.str());
+    TitanUI::log_kv(*log, "ALPB Formula", "Sigalov Eq.25 salt-screened");
+    TitanUI::log_kv(*log, "Electrostatic Size", "ADet, Sigalov Eq.23");
+    TitanUI::log_kv(*log, "Per-frame Size Artifact",
+                    alpb_sizes_file_written ? "gbsa_alpb_sizes.csv (nm)"
+                                            : "export failed");
+    if (alpb_size_frame_count > 0) {
+      const long double count =
+          static_cast<long double>(alpb_size_frame_count);
+      TitanUI::log_kv(
+          *log, "A Receptor Mean (nm)",
+          std::to_string(static_cast<double>(alpb_receptor_size_sum / count)));
+      TitanUI::log_kv(
+          *log, "A Ligand Mean (nm)",
+          std::to_string(static_cast<double>(alpb_ligand_size_sum / count)));
+      TitanUI::log_kv(
+          *log, "A Complex Mean (nm)",
+          std::to_string(static_cast<double>(alpb_complex_size_sum / count)));
+    }
+  }
+
+  std::ofstream ie_diag(dir_prefix + "/gbsa_ie_diagnostics.csv",
+                        std::ios::out | std::ios::trunc);
+  if (ie_diag.is_open()) {
+    ie_diag << "scope,trajectory_id,samples,filtered_samples,ess,status,"
+               "block_size,block_count,minus_TDeltaS_IE_kJmol,"
+               "block_mean_kJmol,block_std_kJmol,block_drift_kJmol\n";
+    const auto write_ie = [&](const char *scope, size_t trajectory_id,
+                              const std::vector<double> &values) {
+      const TitanEntropy::InteractionEntropyResult entropy =
+          calc_gbsa_interaction_entropy(values, Arguments);
+      const double minus_tds =
+          entropy.status == "ok"
+              ? entropy.minus_tds_energy
+              : std::numeric_limits<double>::quiet_NaN();
+      ie_diag << scope << ',' << trajectory_id << ',' << entropy.samples << ','
+              << entropy.filtered_samples << ',' << entropy.ess << ','
+              << entropy.status << ',' << entropy.block_size << ','
+              << entropy.block_count << ',' << minus_tds << ','
+              << entropy.block_mean_energy << ',' << entropy.block_std_energy
+              << ',' << entropy.block_drift_energy << '\n';
+    };
+    write_ie("global", 0, global_mm_energies);
+    for (size_t t = 0; t < trajectories.size(); ++t) {
+      std::vector<double> values;
+      values.reserve(trajectories[t].size());
+      for (const auto &snapshot : trajectories[t])
+        values.push_back(snapshot.E_vdw + snapshot.E_elec);
+      write_ie("trajectory", t, values);
+    }
+  } else {
+    TitanUI::print_warning("GBSA: failed to write gbsa_ie_diagnostics.csv.");
+  }
 
   // 4. Decomposition (Split into Receptor and Ligand)
   std::string base_dec =
@@ -1100,7 +1516,8 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix,
   std::string header = "Chain | ID | ResName/AtomName | E_vdw" + eu_str +
                        " | E_elec" + eu_str + " | G_polar" + eu_str +
                        " | G_nonpolar" + eu_str + " | Total" + eu_str +
-                       " | -TdS_IE" + eu_str + " | dG_Binding" + eu_str + "\n";
+                       " | IE_status | IE_samples | IE_ESS | -TdS_IE" +
+                       eu_str + " | dG_Binding" + eu_str + "\n";
   fdec_rec << "# interaction_entropy_source E_MM_elec_plus_vdw\n" << header;
   fdec_lig << "# interaction_entropy_source E_MM_elec_plus_vdw\n" << header;
 
@@ -1117,17 +1534,23 @@ void GBSA_Aggregator::print_all_stats(const std::string &dir_prefix,
       double avg_gnp = (d.G_nonpolar / div) / Arguments.eu_par;
       double avg_total = (d.total / div) / Arguments.eu_par;
 
-      double minus_TdS =
-          calc_residue_interaction_entropy(d.frame_mm_energies,
-                                           Arguments.eu_par);
-      double dG_binding = avg_total + minus_TdS;
+      const TitanEntropy::InteractionEntropyResult entropy =
+          calc_gbsa_interaction_entropy(d.frame_mm_energies, Arguments);
+      const bool entropy_ok = entropy.status == "ok";
+      const double minus_TdS =
+          entropy_ok ? entropy.minus_tds_energy / Arguments.eu_par
+                     : std::numeric_limits<double>::quiet_NaN();
+      const double dG_binding =
+          entropy_ok ? avg_total + minus_TdS
+                     : std::numeric_limits<double>::quiet_NaN();
 
       std::fstream &target_file = d.is_ligand ? fdec_lig : fdec_rec;
       target_file << std::fixed << d.chain_str << " | " << std::setprecision(4)
                   << d.resnr << " | " << d.name_str << " | " << avg_vdw << " | "
                   << avg_elec << " | " << avg_gpol << " | " << avg_gnp << " | "
-                  << avg_total << " | " << minus_TdS << " | " << dG_binding
-                  << "\n";
+                  << avg_total << " | " << entropy.status << " | "
+                  << entropy.samples << " | " << entropy.ess << " | "
+                  << minus_TdS << " | " << dG_binding << "\n";
     }
   }
 

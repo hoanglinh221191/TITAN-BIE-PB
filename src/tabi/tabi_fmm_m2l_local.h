@@ -96,6 +96,21 @@ CartesianJcpLocalP4 apply_cartesian_jcp_compressed_green_operator_p4_order(
     const CartesianJcpMoments &moments, std::span<const double> coulomb,
     std::span<const double> yukawa, double eps_ratio, int local_order);
 
+// Accumulate a compressed Cartesian JCP translation directly into caller-owned
+// local coefficients.  The full-FMM hot path already owns moments and locals
+// in the same fixed Cartesian layout, so this avoids constructing and copying
+// legacy CartesianJcpMoments/CartesianJcpLocalP4 objects for every M2L pair.
+// Translation buffers are validated when the immutable plan is prepared;
+// finite-output validation remains an apply-level operation.
+bool accumulate_cartesian_jcp_compressed_green_operator_p4_order(
+    const std::array<double, kCartesianJcpMomentMax> &phin,
+    const std::array<std::array<double, kCartesianJcpMomentMax>, 3>
+        &phi_normal,
+    std::size_t source_term_count, std::span<const double> coulomb,
+    std::span<const double> yukawa, double eps_ratio, int local_order,
+    std::array<std::array<double, kCartesianLocalTermMax>, 4>
+        &destination) noexcept;
+
 void accumulate_cartesian_jcp_local(
     CartesianJcpLocalP4 &destination,
     const CartesianJcpLocalP4 &source) noexcept;

@@ -656,32 +656,83 @@ PointSoA make_panel_source_points(const std::vector<PrototypePanel> &panels) {
   return points;
 }
 
+void compute_panel_source_moments_into(
+    const Tree &tree, const std::vector<PrototypePanel> &panels,
+    const std::vector<double> &phi_values,
+    const std::vector<double> &phin_values,
+    std::vector<PanelSourceMoments> &moments) {
+  moments.assign(tree.cells.size(), PanelSourceMoments{});
+  for (std::size_t reverse = tree.cells.size(); reverse > 0; --reverse) {
+    const std::size_t node_index = reverse - 1u;
+    const Cell &cell = tree.cells[node_index];
+    PanelSourceMoments acc;
+    if (cell.is_leaf()) {
+      for (std::size_t pos = cell.begin; pos < cell.end; ++pos) {
+        const std::size_t source_index = tree.order[pos];
+        const PrototypePanel &source = panels[source_index];
+        const double phin = phin_values[source_index];
+        const double q_phin = source.area * phin;
+        acc.q_phin += q_phin;
+        acc.phin_px += q_phin * (source_x(source) - cell.qx);
+        acc.phin_py += q_phin * (source_y(source) - cell.qy);
+        acc.phin_pz += q_phin * (source_z(source) - cell.qz);
+        const double q_phi = source.area * phi_values[source_index];
+        acc.phi_nx += q_phi * source.nx;
+        acc.phi_ny += q_phi * source.ny;
+        acc.phi_nz += q_phi * source.nz;
+      }
+    } else {
+      const std::array<int, 2> children{cell.left, cell.right};
+      bool valid_children = true;
+      for (const int child_index : children) {
+        if (child_index < 0 ||
+            static_cast<std::size_t>(child_index) >= moments.size()) {
+          valid_children = false;
+          break;
+        }
+        const std::size_t child = static_cast<std::size_t>(child_index);
+        const Cell &child_cell = tree.cells[child];
+        const PanelSourceMoments &source = moments[child];
+        acc.q_phin += source.q_phin;
+        acc.phin_px += source.phin_px +
+                       source.q_phin * (child_cell.qx - cell.qx);
+        acc.phin_py += source.phin_py +
+                       source.q_phin * (child_cell.qy - cell.qy);
+        acc.phin_pz += source.phin_pz +
+                       source.q_phin * (child_cell.qz - cell.qz);
+        acc.phi_nx += source.phi_nx;
+        acc.phi_ny += source.phi_ny;
+        acc.phi_nz += source.phi_nz;
+      }
+      if (!valid_children) {
+        acc = PanelSourceMoments{};
+        for (std::size_t pos = cell.begin; pos < cell.end; ++pos) {
+          const std::size_t source_index = tree.order[pos];
+          const PrototypePanel &source = panels[source_index];
+          const double q_phin = source.area * phin_values[source_index];
+          acc.q_phin += q_phin;
+          acc.phin_px += q_phin * (source_x(source) - cell.qx);
+          acc.phin_py += q_phin * (source_y(source) - cell.qy);
+          acc.phin_pz += q_phin * (source_z(source) - cell.qz);
+          const double q_phi = source.area * phi_values[source_index];
+          acc.phi_nx += q_phi * source.nx;
+          acc.phi_ny += q_phi * source.ny;
+          acc.phi_nz += q_phi * source.nz;
+        }
+      }
+    }
+    moments[node_index] = acc;
+  }
+}
+
 std::vector<PanelSourceMoments>
 compute_panel_source_moments(const Tree &tree,
                              const std::vector<PrototypePanel> &panels,
                              const std::vector<double> &phi_values,
                              const std::vector<double> &phin_values) {
-  std::vector<PanelSourceMoments> moments(tree.cells.size());
-  for (std::size_t node_index = 0; node_index < tree.cells.size();
-       ++node_index) {
-    const Cell &cell = tree.cells[node_index];
-    PanelSourceMoments acc;
-    for (std::size_t pos = cell.begin; pos < cell.end; ++pos) {
-      const std::size_t source_index = tree.order[pos];
-      const PrototypePanel &source = panels[source_index];
-      const double phin = phin_values[source_index];
-      const double q_phin = source.area * phin;
-      acc.q_phin += q_phin;
-      acc.phin_px += q_phin * (source_x(source) - cell.qx);
-      acc.phin_py += q_phin * (source_y(source) - cell.qy);
-      acc.phin_pz += q_phin * (source_z(source) - cell.qz);
-      const double q_phi = source.area * phi_values[source_index];
-      acc.phi_nx += q_phi * source.nx;
-      acc.phi_ny += q_phi * source.ny;
-      acc.phi_nz += q_phi * source.nz;
-    }
-    moments[node_index] = acc;
-  }
+  std::vector<PanelSourceMoments> moments;
+  compute_panel_source_moments_into(tree, panels, phi_values, phin_values,
+                                    moments);
   return moments;
 }
 
@@ -1010,6 +1061,7 @@ struct FmmM2lAnalyticContext::Impl {
   // triangle geometry is available, then only refresh density SoA values.
   mutable std::unique_ptr<PackedJcpFallbackPlan> degree1_packed_near_plan;
   mutable std::mutex degree1_apply_mutex;
+  mutable std::vector<PanelSourceMoments> degree1_moment_workspace;
   bool local_p4_prepared{false};
   JcpLocalP4OperatorOptions local_p4_options;
   std::vector<TitanPBE::Tabi::Panel> local_p4_production_panels;
@@ -1481,6 +1533,22 @@ JcpAnalyticOperatorResult FmmM2lAnalyticContext::apply(
     bool coupled, const std::string &near_integration,
     const std::string &quad_buffer,
     const std::vector<TitanPBE::Tabi::Panel> *production_panels) const {
+  std::vector<double> phi_out;
+  std::vector<double> phin_out;
+  JcpAnalyticOperatorResult result = apply_into(
+      phi_values, phin_values, executor, phi_out, phin_out, coupled,
+      near_integration, quad_buffer, production_panels);
+  result.phi = std::move(phi_out);
+  result.phin = std::move(phin_out);
+  return result;
+}
+
+JcpAnalyticOperatorResult FmmM2lAnalyticContext::apply_into(
+    const std::vector<double> &phi_values,
+    const std::vector<double> &phin_values, TitanExecutor &executor,
+    std::vector<double> &phi_out, std::vector<double> &phin_out, bool coupled,
+    const std::string &near_integration, const std::string &quad_buffer,
+    const std::vector<TitanPBE::Tabi::Panel> *production_panels) const {
   if (impl_ == nullptr) {
     throw std::logic_error("JCP analytic FMM/M2L context is not initialized");
   }
@@ -1506,10 +1574,11 @@ JcpAnalyticOperatorResult FmmM2lAnalyticContext::apply(
   result.setup_seconds = impl_->setup_seconds;
   result.context_nodes = context_nodes();
   result.context_work_items = context_work_items();
-  result.phi.assign(impl_->panels.size(), 0.0);
-  result.phin.assign(impl_->panels.size(), 0.0);
+  phi_out.assign(impl_->panels.size(), 0.0);
+  phin_out.assign(impl_->panels.size(), 0.0);
 
-  std::unique_lock<std::mutex> packed_apply_lock;
+  std::unique_lock<std::mutex> degree1_apply_lock(
+      impl_->degree1_apply_mutex);
   const bool node_patch_sources =
       production_panels != nullptr && !production_panels->empty() &&
       production_panels->front().node_patch_geometry != nullptr;
@@ -1517,8 +1586,6 @@ JcpAnalyticOperatorResult FmmM2lAnalyticContext::apply(
       use_production_near_kernel && near_integration == "analytic_singular" &&
       quad_buffer == "off" && packed_jcp_fallback_avx2_available();
   if (use_packed_near) {
-    packed_apply_lock =
-        std::unique_lock<std::mutex>(impl_->degree1_apply_mutex);
     if (impl_->degree1_packed_near_plan == nullptr) {
       std::vector<PackedFallbackLeafInput> leaves;
       leaves.reserve(impl_->target_tree.target_leaf_nodes.size());
@@ -1544,12 +1611,10 @@ JcpAnalyticOperatorResult FmmM2lAnalyticContext::apply(
           build_packed_jcp_fallback_plan(
               *production_panels, impl_->source_tree.order, leaves, 4, 32));
     }
-    PackedFallbackApplyResult packed = apply_packed_jcp_fallback(
+    const PackedFallbackApplyMetrics packed = accumulate_packed_jcp_fallback(
         *impl_->degree1_packed_near_plan, *production_panels, phi_values,
         phin_values, impl_->eps_ratio, impl_->kappa, coupled, near_integration,
-        quad_buffer, "packed-avx2", executor);
-    result.phi = std::move(packed.phi);
-    result.phin = std::move(packed.phin);
+        quad_buffer, "packed-avx2", executor, phi_out, phin_out);
     result.near_self_pairs = packed.scalar_self_pairs;
     if (node_patch_sources) {
       result.near_duffy_pairs = packed.scalar_self_pairs;
@@ -1562,9 +1627,11 @@ JcpAnalyticOperatorResult FmmM2lAnalyticContext::apply(
         impl_->near_pairs >= corrected ? impl_->near_pairs - corrected : 0;
   }
 
-  const std::vector<PanelSourceMoments> source_moments =
-      compute_panel_source_moments(impl_->source_tree, impl_->panels,
-                                   phi_values, phin_values);
+  compute_panel_source_moments_into(
+      impl_->source_tree, impl_->panels, phi_values, phin_values,
+      impl_->degree1_moment_workspace);
+  const std::vector<PanelSourceMoments> &source_moments =
+      impl_->degree1_moment_workspace;
 
   const auto apply_begin = Clock::now();
   const std::size_t workers = std::max<std::size_t>(1, executor.capacity());
@@ -1585,8 +1652,8 @@ JcpAnalyticOperatorResult FmmM2lAnalyticContext::apply(
           for (std::size_t tpos = target_cell.begin; tpos < target_cell.end;
                ++tpos) {
             const std::size_t ti = impl_->target_tree.order[tpos];
-            double phi_sum = use_packed_near ? result.phi[ti] : 0.0;
-            double phin_sum = use_packed_near ? result.phin[ti] : 0.0;
+            double phi_sum = use_packed_near ? phi_out[ti] : 0.0;
+            double phin_sum = use_packed_near ? phin_out[ti] : 0.0;
             const PrototypePanel &target = impl_->panels[ti];
             if (!use_packed_near)
               for (int source_node : work.near_sources) {
@@ -1620,8 +1687,8 @@ JcpAnalyticOperatorResult FmmM2lAnalyticContext::apply(
                                source_moments[source_index], impl_->eps_ratio,
                                impl_->kappa, phi_sum, phin_sum);
             }
-            result.phi[ti] = phi_sum;
-            result.phin[ti] = phin_sum;
+            phi_out[ti] = phi_sum;
+            phin_out[ti] = phin_sum;
           }
         }
       });
@@ -1660,9 +1727,9 @@ JcpAnalyticOperatorResult FmmM2lAnalyticContext::apply(
   }
 
   result.finite_outputs =
-      std::all_of(result.phi.begin(), result.phi.end(),
+      std::all_of(phi_out.begin(), phi_out.end(),
                   [](double value) { return std::isfinite(value); }) &&
-      std::all_of(result.phin.begin(), result.phin.end(),
+      std::all_of(phin_out.begin(), phin_out.end(),
                   [](double value) { return std::isfinite(value); });
   return result;
 }
@@ -4821,7 +4888,8 @@ void apply_jcp_fmm_m2l_single_matvec(
     TitanExecutor &executor, std::vector<double> &out,
     FmmM2lSingleMatvecStats *stats, bool coupled,
     std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext> *context_cache,
-    const std::string &near_integration, const std::string &quad_buffer) {
+    const std::string &near_integration, const std::string &quad_buffer,
+    FmmM2lSingleMatvecWorkspace *workspace) {
   const std::size_t n = panels.size();
   if (n == 0) {
     out.clear();
@@ -4835,11 +4903,14 @@ void apply_jcp_fmm_m2l_single_matvec(
                                 "incomplete JCP unknown vector");
   }
 
-  std::vector<double> phi(n, 0.0);
-  std::vector<double> phin(n, 0.0);
+  FmmM2lSingleMatvecWorkspace local_workspace;
+  FmmM2lSingleMatvecWorkspace &active_workspace =
+      workspace != nullptr ? *workspace : local_workspace;
+  active_workspace.phi.resize(n);
+  active_workspace.phin.resize(n);
   for (std::size_t i = 0; i < n; ++i) {
-    phi[i] = unknowns[i];
-    phin[i] = coupled ? unknowns[n + i] : 0.0;
+    active_workspace.phi[i] = unknowns[i];
+    active_workspace.phin[i] = coupled ? unknowns[n + i] : 0.0;
   }
 
   const std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext> context =
@@ -4847,20 +4918,24 @@ void apply_jcp_fmm_m2l_single_matvec(
                                  opening_theta, expansion_order, executor,
                                  context_cache);
 
-  const titan::tabi::fmm_m2l::JcpAnalyticOperatorResult result = context->apply(
-      phi, phin, executor, coupled, near_integration, quad_buffer, &panels);
+  const titan::tabi::fmm_m2l::JcpAnalyticOperatorResult result =
+      context->apply_into(
+          active_workspace.phi, active_workspace.phin, executor,
+          active_workspace.interaction_phi,
+          active_workspace.interaction_phin, coupled, near_integration,
+          quad_buffer, &panels);
 
-  out.assign(coupled ? 2 * n : n, 0.0);
+  out.resize(coupled ? 2 * n : n);
   bool finite = result.finite_outputs;
   for (std::size_t i = 0; i < n; ++i) {
     out[i] = jcp_lhs_phi_for_panel(panels[i], eps_ratio, lhs_phi) *
                  unknowns[i] -
-             result.phi[i];
+             active_workspace.interaction_phi[i];
     finite = finite && std::isfinite(out[i]);
     if (coupled) {
       out[n + i] = jcp_lhs_phin_for_panel(panels[i], eps_ratio, lhs_phin) *
                        unknowns[n + i] -
-                   result.phin[i];
+                   active_workspace.interaction_phin[i];
       finite = finite && std::isfinite(out[n + i]);
     }
   }

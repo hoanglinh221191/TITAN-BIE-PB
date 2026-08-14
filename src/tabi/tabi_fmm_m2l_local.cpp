@@ -623,52 +623,12 @@ CartesianJcpLocalP4 apply_cartesian_jcp_compressed_green_operator_p4_order(
     const CartesianJcpMoments &moments, std::span<const double> coulomb,
     std::span<const double> yukawa, double eps_ratio, int local_order) {
   CartesianJcpLocalP4 local;
-  const int order = std::clamp(local_order, 1, kCartesianLocalSourceOrder);
-  const std::size_t green_term_count =
-      cartesian_compressed_green_jet_term_count_order(order);
-  if (!valid_local_order(local_order) || moments.order != order ||
-      moments.term_count != cartesian_moment_term_count(order) ||
-      coulomb.size() < green_term_count || yukawa.size() < green_term_count) {
-    local.finite_outputs = false;
+  local.finite_outputs =
+      accumulate_cartesian_jcp_compressed_green_operator_p4_order(
+          moments.phin, moments.phi_normal, moments.term_count, coulomb,
+          yukawa, eps_ratio, local_order, local.fields);
+  if (!local.finite_outputs)
     return local;
-  }
-  const double safe_eps = std::max(1.0e-12, eps_ratio);
-  const auto &stencils = compressed_translation_stencils();
-  const std::size_t term_count = cartesian_moment_term_count(order);
-  for (std::size_t b = 0; b < term_count; ++b) {
-    double k1 = 0.0;
-    double k3 = 0.0;
-    std::array<double, 3> k2{};
-    std::array<double, 3> k4{};
-    for (std::size_t a = 0; a < term_count; ++a) {
-      const auto &stencil =
-          stencils[b * kCartesianLocalTermMax + a];
-      const double green0 = coulomb[stencil.green_index];
-      const double greenk = yukawa[stencil.green_index];
-      k1 += moments.phin[a] * stencil.factor * (green0 - greenk);
-      k3 += moments.phin[a] * stencil.factor *
-            (green0 - greenk / safe_eps);
-      for (std::size_t component = 0; component < 3; ++component) {
-        const double source0 =
-            stencil.derivative_degree[component] *
-            coulomb[stencil.derivative_index[component]];
-        const double sourcek =
-            stencil.derivative_degree[component] *
-            yukawa[stencil.derivative_index[component]];
-        const double moment = moments.phi_normal[component][a];
-        k2[component] +=
-            moment * stencil.factor * (safe_eps * sourcek - source0);
-        k4[component] +=
-            moment * stencil.factor * (source0 - sourcek);
-      }
-    }
-    local.fields[static_cast<std::size_t>(JcpLocalField::K1)][b] += k1;
-    local.fields[static_cast<std::size_t>(JcpLocalField::K3Potential)][b] += k3;
-    local.fields[static_cast<std::size_t>(JcpLocalField::K2)][b] +=
-        (k2[0] + k2[1]) + k2[2];
-    local.fields[static_cast<std::size_t>(JcpLocalField::K4Potential)][b] +=
-        (k4[0] + k4[1]) + k4[2];
-  }
 
   for (const double value : coulomb)
     local.finite_outputs = local.finite_outputs && std::isfinite(value);
@@ -679,6 +639,60 @@ CartesianJcpLocalP4 apply_cartesian_jcp_compressed_green_operator_p4_order(
       local.finite_outputs = local.finite_outputs && std::isfinite(value);
   }
   return local;
+}
+
+bool accumulate_cartesian_jcp_compressed_green_operator_p4_order(
+    const std::array<double, kCartesianJcpMomentMax> &phin,
+    const std::array<std::array<double, kCartesianJcpMomentMax>, 3>
+        &phi_normal,
+    std::size_t source_term_count, std::span<const double> coulomb,
+    std::span<const double> yukawa, double eps_ratio, int local_order,
+    std::array<std::array<double, kCartesianLocalTermMax>, 4>
+        &destination) noexcept {
+  const int order = std::clamp(local_order, 1, kCartesianLocalSourceOrder);
+  const std::size_t green_term_count =
+      cartesian_compressed_green_jet_term_count_order(order);
+  const std::size_t term_count = cartesian_moment_term_count(order);
+  if (!valid_local_order(local_order) || source_term_count != term_count ||
+      coulomb.size() < green_term_count || yukawa.size() < green_term_count) {
+    return false;
+  }
+  const double safe_eps = std::max(1.0e-12, eps_ratio);
+  const auto &stencils = compressed_translation_stencils();
+  for (std::size_t b = 0; b < term_count; ++b) {
+    double k1 = 0.0;
+    double k3 = 0.0;
+    std::array<double, 3> k2{};
+    std::array<double, 3> k4{};
+    for (std::size_t a = 0; a < term_count; ++a) {
+      const auto &stencil =
+          stencils[b * kCartesianLocalTermMax + a];
+      const double green0 = coulomb[stencil.green_index];
+      const double greenk = yukawa[stencil.green_index];
+      k1 += phin[a] * stencil.factor * (green0 - greenk);
+      k3 += phin[a] * stencil.factor * (green0 - greenk / safe_eps);
+      for (std::size_t component = 0; component < 3; ++component) {
+        const double source0 =
+            stencil.derivative_degree[component] *
+            coulomb[stencil.derivative_index[component]];
+        const double sourcek =
+            stencil.derivative_degree[component] *
+            yukawa[stencil.derivative_index[component]];
+        const double moment = phi_normal[component][a];
+        k2[component] +=
+            moment * stencil.factor * (safe_eps * sourcek - source0);
+        k4[component] +=
+            moment * stencil.factor * (source0 - sourcek);
+      }
+    }
+    destination[static_cast<std::size_t>(JcpLocalField::K1)][b] += k1;
+    destination[static_cast<std::size_t>(JcpLocalField::K3Potential)][b] += k3;
+    destination[static_cast<std::size_t>(JcpLocalField::K2)][b] +=
+        (k2[0] + k2[1]) + k2[2];
+    destination[static_cast<std::size_t>(JcpLocalField::K4Potential)][b] +=
+        (k4[0] + k4[1]) + k4[2];
+  }
+  return true;
 }
 
 void accumulate_cartesian_jcp_local(

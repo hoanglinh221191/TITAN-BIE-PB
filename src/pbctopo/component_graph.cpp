@@ -3,6 +3,10 @@
 #include "candidate_order.h"
 #include "component_graph_math.h"
 #include "component_metric.h"
+#include "component_shift_domain.h"
+#include "identifiability.h"
+#include "lattice_math.h"
+#include "required_contacts.h"
 #include "steric_clash.h"
 #include <algorithm>
 #include <chrono>
@@ -19,27 +23,34 @@ namespace titan_pbctopo {
 
 namespace {
 
-constexpr double kDistanceEps = 1.0e-12;
-constexpr int kPackedCellBias = 1 << 20;
-constexpr uint64_t kPackedCellMask = (1ull << 21) - 1ull;
+struct PbctopoContactEpochScratch {
+  vector<uint32_t> epochs;
+  uint32_t epoch = 0;
+  size_t marked = 0;
 
-uint64_t pack_cell_key(int x, int y, int z) noexcept {
-  const uint64_t ux =
-      static_cast<uint32_t>(x + kPackedCellBias) & kPackedCellMask;
-  const uint64_t uy =
-      static_cast<uint32_t>(y + kPackedCellBias) & kPackedCellMask;
-  const uint64_t uz =
-      static_cast<uint32_t>(z + kPackedCellBias) & kPackedCellMask;
-  return (ux << 42) | (uy << 21) | uz;
-}
+  void begin(size_t count, PbctopoTimingStats *timing) {
+    if (epochs.size() < count) {
+      epochs.resize(count, 0u);
+      if (timing != nullptr)
+        ++timing->component_graph_contact_epoch_scratch_resizes;
+    }
+    ++epoch;
+    if (epoch == 0u) {
+      fill(epochs.begin(), epochs.end(), 0u);
+      epoch = 1u;
+      if (timing != nullptr)
+        ++timing->component_graph_contact_epoch_wrap_clears;
+    }
+    marked = 0;
+  }
 
-uint64_t pack_cell_key(const ClashCellKey &key) noexcept {
-  return pack_cell_key(key.x, key.y, key.z);
-}
-
-} // namespace
-
-namespace {
+  void mark(size_t index) {
+    if (index >= epochs.size() || epochs[index] == epoch)
+      return;
+    epochs[index] = epoch;
+    ++marked;
+  }
+};
 
 size_t find_shift_index(const vector<PbctopoShift> &shifts, const Int3 &delta) {
   for (size_t idx = 0; idx < shifts.size(); ++idx) {
@@ -87,7 +98,11 @@ vector<size_t> build_pair_shift_order(const vector<PbctopoShift> &shifts,
         for (int dz = -1; dz <= 1; ++dz) {
           if (dx == 0 && dy == 0 && dz == 0)
             continue;
-          const Int3 neighbor = *expected_delta + Int3{dx, dy, dz};
+          Int3 neighbor{};
+          if (!checked_int3_add(*expected_delta, Int3{dx, dy, dz},
+                                neighbor)) {
+            continue;
+          }
           if (append_shift_index_if_present(shifts, neighbor, true,
                                             ordered_indices, seen_indices) &&
               timing != nullptr) {
@@ -197,6 +212,7 @@ void fill_shifted_component_from_base(
   shifted.contact_grid.clear();
   shifted.contact_grid.reserve(max<size_t>(32, atom_count));
   shifted.translation_norm2 = descriptor.translation_norm2;
+  shifted.spatial_keys_valid = true;
   shifted.center = descriptor.center;
   shifted.min_x = descriptor.min_x;
   shifted.min_y = descriptor.min_y;
@@ -209,19 +225,25 @@ void fill_shifted_component_from_base(
                      base.y[local_idx] + shift.ty,
                      base.z[local_idx] + shift.tz};
     shifted.points[local_idx] = point;
-    shifted.clash_keys[local_idx] = {
-        static_cast<int>(floor(point.x * inv_grid)),
-        static_cast<int>(floor(point.y * inv_grid)),
-        static_cast<int>(floor(point.z * inv_grid))};
+    if (!pbctopo_make_cell_key(point.x, point.y, point.z, inv_grid,
+                                shifted.clash_keys[local_idx])) {
+      shifted.spatial_keys_valid = false;
+      shifted.clash_grid.clear();
+      shifted.contact_grid.clear();
+      return;
+    }
     if (build_clash_grid)
-      shifted.clash_grid[pack_cell_key(shifted.clash_keys[local_idx])]
-          .push_back(local_idx);
-    const ClashCellKey contact_key{
-        static_cast<int>(floor(point.x * inv_contact_grid)),
-        static_cast<int>(floor(point.y * inv_contact_grid)),
-        static_cast<int>(floor(point.z * inv_contact_grid))};
+      shifted.clash_grid[shifted.clash_keys[local_idx]].push_back(local_idx);
+    ClashCellKey contact_key;
+    if (!pbctopo_make_cell_key(point.x, point.y, point.z, inv_contact_grid,
+                                contact_key)) {
+      shifted.spatial_keys_valid = false;
+      shifted.clash_grid.clear();
+      shifted.contact_grid.clear();
+      return;
+    }
     shifted.contact_keys[local_idx] = contact_key;
-    shifted.contact_grid[pack_cell_key(contact_key)].push_back(local_idx);
+    shifted.contact_grid[contact_key].push_back(local_idx);
   }
 }
 
@@ -237,54 +259,57 @@ public:
         inv_contact_grid_(1.0 / contact_cutoff),
         build_clash_grid_(build_clash_grid), timing_(timing) {
     bases_.reserve(components.size());
-    descriptors_.resize(components.size());
-    materialized_.resize(components.size());
-    materialized_flags_.resize(components.size());
     for (size_t comp_idx = 0; comp_idx < components.size(); ++comp_idx) {
       bases_.push_back(build_component_base_geometry(atoms, components[comp_idx]));
-      auto &component_descriptors = descriptors_[comp_idx];
-      component_descriptors.reserve(shifts_.size());
-      for (const auto &shift : shifts_) {
-        component_descriptors.push_back(
-            describe_shifted_component(bases_.back(), shift));
-      }
-      materialized_[comp_idx].resize(shifts_.size());
-      materialized_flags_[comp_idx].assign(shifts_.size(), 0);
     }
+    materialized_.reserve(
+        components.size() * min<size_t>(shifts_.size(), 8));
     if (timing_ != nullptr) {
-      timing_->component_graph_shift_descriptors +=
+      timing_->component_graph_shift_descriptor_domain +=
+          components.size() * shifts_.size();
+      timing_->component_graph_shift_cache_dense_entries_equivalent +=
           components.size() * shifts_.size();
     }
   }
 
-  const PbctopoShiftedComponentDescriptor &descriptor(size_t comp_idx,
-                                                      size_t shift_idx) const {
-    return descriptors_[comp_idx][shift_idx];
+  PbctopoShiftedComponentDescriptor descriptor(size_t comp_idx,
+                                               size_t shift_idx) const {
+    if (timing_ != nullptr)
+      ++timing_->component_graph_shift_descriptors;
+    return describe_shifted_component(bases_[comp_idx], shifts_[shift_idx]);
+  }
+
+  size_t component_count() const noexcept { return bases_.size(); }
+
+  const PbctopoComponentBaseGeometry &base_geometry(size_t comp_idx) const {
+    return bases_[comp_idx];
   }
 
   const PbctopoShiftedComponent &materialize(size_t comp_idx, size_t shift_idx) {
-    if (materialized_flags_[comp_idx][shift_idx] == 0) {
+    const size_t key = comp_idx * shifts_.size() + shift_idx;
+    auto [it, inserted] = materialized_.try_emplace(key);
+    if (inserted) {
       const auto started = chrono::steady_clock::now();
       fill_shifted_component_from_base(
           bases_[comp_idx], shifts_[shift_idx], inv_grid_, inv_contact_grid_,
-          build_clash_grid_, materialized_[comp_idx][shift_idx]);
-      materialized_flags_[comp_idx][shift_idx] = 1;
+          build_clash_grid_, it->second);
       if (timing_ != nullptr) {
         ++timing_->component_graph_shift_materialized;
+        timing_->component_graph_shift_cache_entries_peak =
+            max(timing_->component_graph_shift_cache_entries_peak,
+                materialized_.size());
         timing_->component_graph_lazy_materialize_s +=
             chrono::duration<double>(chrono::steady_clock::now() - started)
                 .count();
       }
     }
-    return materialized_[comp_idx][shift_idx];
+    return it->second;
   }
 
 private:
   const vector<PbctopoShift> &shifts_;
   vector<PbctopoComponentBaseGeometry> bases_;
-  vector<vector<PbctopoShiftedComponentDescriptor>> descriptors_;
-  vector<vector<PbctopoShiftedComponent>> materialized_;
-  vector<vector<unsigned char>> materialized_flags_;
+  unordered_map<size_t, PbctopoShiftedComponent> materialized_;
   double inv_grid_ = 1.0;
   double inv_contact_grid_ = 1.0;
   bool build_clash_grid_ = false;
@@ -345,6 +370,136 @@ double shifted_component_bbox_distance2(
   return dx * dx + dy * dy + dz * dz;
 }
 
+namespace {
+
+struct PbctopoComponentPairSpatialShortlist {
+  size_t component_count = 0;
+  vector<vector<size_t>> contact_shift_indices;
+  bool valid = false;
+
+  const vector<size_t> &for_pair(size_t lhs, size_t rhs) const {
+    return contact_shift_indices[lhs * component_count + rhs];
+  }
+};
+
+PbctopoComponentPairSpatialShortlist build_component_pair_spatial_shortlist(
+    const PbctopoLazyShiftedComponents &shifted_components,
+    const vector<PbctopoShift> &shifts, size_t identity_shift_pos,
+    double contact_cutoff, PbctopoTimingStats *timing) {
+  PbctopoComponentPairSpatialShortlist result;
+  const auto started = chrono::steady_clock::now();
+  const size_t component_count = shifted_components.component_count();
+  result.component_count = component_count;
+  const auto finish = [&](bool valid) {
+    result.valid = valid;
+    if (timing != nullptr) {
+      ++timing->component_graph_spatial_shortlist_builds;
+      if (!valid)
+        ++timing->component_graph_spatial_shortlist_fallbacks;
+      timing->component_graph_spatial_shortlist_s +=
+          chrono::duration<double>(chrono::steady_clock::now() - started)
+              .count();
+    }
+    return result;
+  };
+  if (component_count == 0 || shifts.empty() ||
+      identity_shift_pos >= shifts.size() || !isfinite(contact_cutoff) ||
+      contact_cutoff < 0.0 ||
+      component_count > numeric_limits<size_t>::max() / component_count) {
+    return finish(false);
+  }
+  result.contact_shift_indices.resize(component_count * component_count);
+
+  double max_component_width = 0.0;
+  vector<Vec3> bbox_centers(component_count);
+  vector<PbctopoShiftedComponentDescriptor> identity_descriptors;
+  identity_descriptors.reserve(component_count);
+  for (size_t comp_idx = 0; comp_idx < component_count; ++comp_idx) {
+    const auto &base = shifted_components.base_geometry(comp_idx);
+    if (base.x.empty() || !isfinite(base.min_x) || !isfinite(base.min_y) ||
+        !isfinite(base.min_z) || !isfinite(base.max_x) ||
+        !isfinite(base.max_y) || !isfinite(base.max_z)) {
+      return finish(false);
+    }
+    const double width_x = base.max_x - base.min_x;
+    const double width_y = base.max_y - base.min_y;
+    const double width_z = base.max_z - base.min_z;
+    if (width_x < 0.0 || width_y < 0.0 || width_z < 0.0)
+      return finish(false);
+    max_component_width =
+        max({max_component_width, width_x, width_y, width_z});
+    bbox_centers[comp_idx] = {0.5 * (base.min_x + base.max_x),
+                              0.5 * (base.min_y + base.max_y),
+                              0.5 * (base.min_z + base.max_z)};
+    identity_descriptors.push_back(
+        shifted_components.descriptor(comp_idx, identity_shift_pos));
+  }
+  const double raw_cell_size = max_component_width + contact_cutoff;
+  if (!isfinite(raw_cell_size) || raw_cell_size <= 0.0)
+    return finish(false);
+  // Bbox midpoints of any contact-capable pair differ by at most this value
+  // on each axis, so the 27 neighboring cells form a complete shortlist.
+  const double cell_size =
+      nextafter(raw_cell_size, numeric_limits<double>::infinity());
+  const double inv_cell_size = 1.0 / cell_size;
+  unordered_map<ClashCellKey, vector<size_t>, ClashCellKeyHash> base_grid;
+  base_grid.reserve(max<size_t>(32, component_count * 2));
+  for (size_t comp_idx = 0; comp_idx < component_count; ++comp_idx) {
+    ClashCellKey key;
+    const auto &center = bbox_centers[comp_idx];
+    if (!pbctopo_make_cell_key(center.x, center.y, center.z, inv_cell_size,
+                                key)) {
+      return finish(false);
+    }
+    base_grid[key].push_back(comp_idx);
+  }
+
+  const double contact_cutoff2 = contact_cutoff * contact_cutoff;
+  for (size_t shift_idx = 0; shift_idx < shifts.size(); ++shift_idx) {
+    const auto &shift = shifts[shift_idx];
+    if (!isfinite(shift.tx) || !isfinite(shift.ty) || !isfinite(shift.tz))
+      return finish(false);
+    for (size_t lhs = 0; lhs < component_count; ++lhs) {
+      const Vec3 query_center{bbox_centers[lhs].x - shift.tx,
+                              bbox_centers[lhs].y - shift.ty,
+                              bbox_centers[lhs].z - shift.tz};
+      ClashCellKey query_key;
+      if (!pbctopo_make_cell_key(query_center.x, query_center.y,
+                                  query_center.z, inv_cell_size, query_key)) {
+        return finish(false);
+      }
+      for (int dx = -1; dx <= 1; ++dx) {
+        for (int dy = -1; dy <= 1; ++dy) {
+          for (int dz = -1; dz <= 1; ++dz) {
+            ClashCellKey neighbor_key;
+            if (!pbctopo_offset_cell_key(query_key, dx, dy, dz,
+                                          neighbor_key)) {
+              return finish(false);
+            }
+            const auto cell_it = base_grid.find(neighbor_key);
+            if (cell_it == base_grid.end())
+              continue;
+            for (size_t rhs : cell_it->second) {
+              if (lhs >= rhs)
+                continue;
+              const double bbox_d2 = shifted_component_bbox_distance2(
+                  identity_descriptors[lhs],
+                  shifted_components.descriptor(rhs, shift_idx));
+              if (bbox_d2 <= contact_cutoff2) {
+                result.contact_shift_indices[lhs * component_count + rhs]
+                    .push_back(shift_idx);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return finish(true);
+}
+
+} // namespace
+
 PbctopoPairShiftScore make_bbox_only_pair_shift_score(const PbctopoShift &shift,
                                                        double bbox_d2) {
   PbctopoPairShiftScore score;
@@ -356,14 +511,15 @@ PbctopoPairShiftScore make_bbox_only_pair_shift_score(const PbctopoShift &shift,
   score.bbox_d2 = bbox_d2;
   score.min_pair_d2 = bbox_d2;
   score.valid = true;
+  score.complete = true;
   return score;
 }
 
 bool better_pair_shift_score(const PbctopoPairShiftScore &lhs,
                              const PbctopoPairShiftScore &rhs) {
-  if (!lhs.valid)
+  if (!lhs.valid || !lhs.complete)
     return false;
-  if (!rhs.valid)
+  if (!rhs.valid || !rhs.complete)
     return true;
   if (lhs.ultra_clash != rhs.ultra_clash)
     return rhs.ultra_clash;
@@ -377,14 +533,6 @@ bool better_pair_shift_score(const PbctopoPairShiftScore &lhs,
                                            {1.0e-9, 0.0});
   if (metric_cmp != 0)
     return metric_cmp < 0;
-  metric_cmp = compare_pbctopo_metric(lhs.min_pair_d2, rhs.min_pair_d2,
-                                       {1.0e-9, 0.0});
-  if (metric_cmp != 0)
-    return metric_cmp < 0;
-  metric_cmp = compare_pbctopo_metric(lhs.bbox_d2, rhs.bbox_d2,
-                                       {1.0e-9, 0.0});
-  if (metric_cmp != 0)
-    return metric_cmp < 0;
   metric_cmp = compare_pbctopo_metric(lhs.shift_norm2, rhs.shift_norm2,
                                        {1.0e-9, 0.0});
   if (metric_cmp != 0)
@@ -396,21 +544,10 @@ bool better_pair_shift_score(const PbctopoPairShiftScore &lhs,
   return lhs.iz < rhs.iz;
 }
 
-double pair_shift_candidate_weight(const PbctopoPairShiftScore &score) {
-  if (!score.valid || score.ultra_clash)
-    return 0.0;
-  const double contact_weight = log1p(static_cast<double>(score.contact_atoms));
-  const double confidence_weight =
-      isfinite(score.quality_score) ? max(0.0, score.quality_score) : 0.0;
-  const double distance_weight =
-      isfinite(score.min_pair_d2) ? 1.0 / (1.0 + score.min_pair_d2) : 0.0;
-  return 1.0 + contact_weight + confidence_weight + distance_weight;
-}
-
 void insert_pair_shift_candidate(vector<PbctopoPairShiftCandidate> &top,
                                  const PbctopoPairShiftCandidate &candidate,
                                  size_t keep) {
-  if (!candidate.score.valid)
+  if (!candidate.score.valid || !candidate.score.complete)
     return;
   auto pos = top.begin();
   while (pos != top.end() &&
@@ -420,19 +557,6 @@ void insert_pair_shift_candidate(vector<PbctopoPairShiftCandidate> &top,
   top.insert(pos, candidate);
   if (top.size() > keep)
     top.resize(keep);
-}
-
-bool pair_shift_cannot_beat_incumbent(
-    const PbctopoPairShiftScore &partial, size_t remaining_lhs_points,
-    const PbctopoPairShiftScore *incumbent) {
-  if (incumbent == nullptr || !incumbent->valid || incumbent->ultra_clash ||
-      partial.ultra_clash) {
-    return false;
-  }
-  const size_t max_contact_atoms = partial.contact_atoms + remaining_lhs_points;
-  if (max_contact_atoms < incumbent->contact_atoms)
-    return true;
-  return false;
 }
 
 bool better_component_graph_edge(const PbctopoGraphEdge &lhs,
@@ -457,14 +581,6 @@ bool better_component_graph_edge(const PbctopoGraphEdge &lhs,
                                        {1.0e-9, 0.0});
   if (metric_cmp != 0)
     return metric_cmp < 0;
-  metric_cmp = compare_pbctopo_metric(lhs.min_pair_d2, rhs.min_pair_d2,
-                                       {1.0e-9, 0.0});
-  if (metric_cmp != 0)
-    return metric_cmp < 0;
-  metric_cmp = compare_pbctopo_metric(lhs.bbox_d2, rhs.bbox_d2,
-                                       {1.0e-9, 0.0});
-  if (metric_cmp != 0)
-    return metric_cmp < 0;
   metric_cmp = compare_pbctopo_metric(lhs.shift_norm2, rhs.shift_norm2,
                                        {1.0e-9, 0.0});
   if (metric_cmp != 0)
@@ -474,10 +590,9 @@ bool better_component_graph_edge(const PbctopoGraphEdge &lhs,
   return lhs.b < rhs.b;
 }
 
-PbctopoPairShiftScore score_component_pair_shift(
+static PbctopoPairShiftScore score_component_pair_shift(
     const PbctopoShiftedComponent &lhs, const PbctopoShiftedComponent &rhs,
     const PbctopoShift &shift, double hard_cutoff, double contact_cutoff,
-    const PbctopoPairShiftScore *incumbent,
     const vector<PbctopoAtom> &atoms,
     PbctopoTimingStats *timing) {
   PbctopoPairShiftScore score;
@@ -486,27 +601,35 @@ PbctopoPairShiftScore score_component_pair_shift(
   score.iy = shift.iy;
   score.iz = shift.iz;
   score.shift_norm2 = pbctopo_translation_norm2(shift);
+  if (!lhs.spatial_keys_valid || !rhs.spatial_keys_valid) {
+    score.complete = true;
+    return score;
+  }
   score.bbox_d2 = shifted_component_bbox_distance2(lhs, rhs);
   score.min_pair_d2 = score.bbox_d2;
   score.valid = true;
 
   const double contact_cutoff2 = contact_cutoff * contact_cutoff;
-  constexpr double kSoftMin2 = 2.6 * 2.6;
   if (score.bbox_d2 > contact_cutoff2)
     return score;
+
+  thread_local PbctopoContactEpochScratch rhs_contact_scratch;
+  rhs_contact_scratch.begin(rhs.points.size(), timing);
 
   for (size_t lhs_idx = 0; lhs_idx < lhs.points.size(); ++lhs_idx) {
     const auto &lhs_point = lhs.points[lhs_idx];
     const ClashCellKey &contact_key = lhs.contact_keys[lhs_idx];
-    const int cx = contact_key.x;
-    const int cy = contact_key.y;
-    const int cz = contact_key.z;
     bool atom_has_contact = false;
     for (int dx = -1; dx <= 1; ++dx) {
         for (int dy = -1; dy <= 1; ++dy) {
           for (int dz = -1; dz <= 1; ++dz) {
-            const auto it =
-                rhs.contact_grid.find(pack_cell_key(cx + dx, cy + dy, cz + dz));
+            ClashCellKey neighbor;
+            if (!pbctopo_offset_cell_key(contact_key, dx, dy, dz, neighbor)) {
+              score.valid = false;
+              score.complete = true;
+              return score;
+            }
+            const auto it = rhs.contact_grid.find(neighbor);
             if (it == rhs.contact_grid.end())
               continue;
             for (size_t rhs_idx : it->second) {
@@ -525,24 +648,29 @@ PbctopoPairShiftScore score_component_pair_shift(
                                        timing)) {
                 score.ultra_clash = true;
                 score.quality_score = -numeric_limits<double>::infinity();
+                score.complete = true;
                 return score;
               }
               if (d2 <= contact_cutoff2)
                 ++score.contact_pairs;
-              if (d2 < kSoftMin2)
-                score.soft_penalty += (kSoftMin2 - d2);
-              if (d2 <= contact_cutoff2)
+              if (lhs_atom_idx < atoms.size() &&
+                  rhs_atom_idx < atoms.size()) {
+                score.soft_penalty += pbctopo_pair_soft_overlap_penalty(
+                    d2, atoms[lhs_atom_idx], atoms[rhs_atom_idx], hard_cutoff);
+              }
+              if (d2 <= contact_cutoff2) {
                 atom_has_contact = true;
+                rhs_contact_scratch.mark(rhs_idx);
+              }
             }
           }
         }
       }
     if (atom_has_contact)
-      ++score.contact_atoms;
-    const size_t remaining_lhs_points = lhs.points.size() - lhs_idx - 1;
-    if (pair_shift_cannot_beat_incumbent(score, remaining_lhs_points, incumbent))
-      return score;
+      ++score.lhs_contact_atoms;
   }
+
+  score.rhs_contact_atoms = rhs_contact_scratch.marked;
 
   finalize_normalized_pair_shift_score(score, lhs.points.size(),
                                        rhs.points.size(), contact_cutoff);
@@ -640,8 +768,11 @@ bool solve_component_offsets_from_tree(
   vector<vector<pair<size_t, Int3>>> adjacency(component_count);
   for (const auto &edge : tree_edges) {
     const Int3 delta = edge_delta(edge);
+    Int3 reverse_delta{};
+    if (!checked_int3_negate(delta, reverse_delta))
+      return false;
     adjacency[edge.a].push_back({edge.b, delta});
-    adjacency[edge.b].push_back({edge.a, {-delta.x, -delta.y, -delta.z}});
+    adjacency[edge.b].push_back({edge.a, reverse_delta});
   }
 
   vector<char> seen(component_count, 0);
@@ -656,7 +787,8 @@ bool solve_component_offsets_from_tree(
       const size_t next = edge.first;
       if (seen[next] != 0)
         continue;
-      offsets[next] = offsets[current] + edge.second;
+      if (!checked_int3_add(offsets[current], edge.second, offsets[next]))
+        return false;
       seen[next] = 1;
       q.push(next);
     }
@@ -686,22 +818,92 @@ bool same_int3_offsets(const vector<Int3> &lhs, const vector<Int3> &rhs) {
   return true;
 }
 
-Int3 oriented_pair_delta(const PbctopoPairShiftCandidateSet &set,
+bool oriented_pair_delta(const PbctopoPairShiftCandidateSet &set,
                          const PbctopoPairShiftCandidate &candidate,
-                         size_t from, size_t to) {
-  if (from == set.a && to == set.b)
-    return candidate.delta;
+                         size_t from, size_t to, Int3 &delta) {
+  if (from == set.a && to == set.b) {
+    delta = candidate.delta;
+    return true;
+  }
   if (from == set.b && to == set.a)
-    return {-candidate.delta.x, -candidate.delta.y, -candidate.delta.z};
-  return {0, 0, 0};
+    return checked_int3_negate(candidate.delta, delta);
+  return false;
 }
 
-int int3_l1_norm(Int3 value) {
-  return abs(value.x) + abs(value.y) + abs(value.z);
+struct PbctopoCyclePenaltyContext {
+  box Box{};
+  double inverse_basis2 = 1.0;
+};
+
+PbctopoCyclePenaltyContext make_cycle_penalty_context(box Box) {
+  PbctopoCyclePenaltyContext context;
+  context.Box = Box;
+  const double shortest_basis =
+      PbctopoLatticeMetric(Box).shortest_basis_length();
+  if (isfinite(shortest_basis) && shortest_basis > 1.0e-9)
+    context.inverse_basis2 = 1.0 / (shortest_basis * shortest_basis);
+  return context;
 }
 
-double robust_cycle_penalty(int mismatch_l1) {
-  return static_cast<double>(min(mismatch_l1, 2));
+double robust_cycle_penalty(Int3 residual,
+                            const PbctopoCyclePenaltyContext &context) {
+  const double residual2 = pbctopo_translation_norm2(context.Box, residual);
+  if (!isfinite(residual2))
+    return numeric_limits<double>::infinity();
+  return min(residual2 * context.inverse_basis2, 4.0);
+}
+
+PbctopoCycleSyncMetrics evaluate_pair_graph_metrics_for_offsets(
+    const vector<Int3> &offsets,
+    const vector<PbctopoPairShiftCandidateSet> &pair_candidates, box Box) {
+  PbctopoCycleSyncMetrics metrics;
+  const PbctopoCyclePenaltyContext penalty_context =
+      make_cycle_penalty_context(Box);
+  double total_cost = 0.0;
+  double total_support = 0.0;
+  for (const auto &set : pair_candidates) {
+    if (set.a >= offsets.size() || set.b >= offsets.size() ||
+        set.candidates.empty()) {
+      continue;
+    }
+    Int3 observed{};
+    if (!checked_int3_subtract(offsets[set.b], offsets[set.a], observed)) {
+      ++metrics.inconsistent_edge_count;
+      continue;
+    }
+    double best_penalty = numeric_limits<double>::infinity();
+    double best_weight = 0.0;
+    for (const auto &candidate : set.candidates) {
+      const double weight = max(1.0, candidate.weight);
+      Int3 residual{};
+      if (!checked_int3_subtract(observed, candidate.delta, residual))
+        continue;
+      const double penalty =
+          robust_cycle_penalty(residual, penalty_context) * weight;
+      if (penalty < best_penalty) {
+        best_penalty = penalty;
+        best_weight = weight;
+      }
+    }
+    if (!isfinite(best_penalty))
+      continue;
+    total_cost += best_penalty;
+    total_support += best_weight;
+    if (best_penalty > 1.0e-9)
+      ++metrics.inconsistent_edge_count;
+  }
+  metrics.cycle_support =
+      static_cast<size_t>(llround(max(0.0, total_support)));
+  metrics.cycle_mismatch =
+      total_support > 0.0 ? total_cost / total_support : total_cost;
+  const PbctopoCycleSyncMetrics fundamental =
+      compute_fundamental_cycle_residuals(offsets.size(), pair_candidates, Box);
+  metrics.fundamental_cycle_count = fundamental.fundamental_cycle_count;
+  metrics.fundamental_cycle_residual_rms =
+      fundamental.fundamental_cycle_residual_rms;
+  metrics.fundamental_cycle_residual_max =
+      fundamental.fundamental_cycle_residual_max;
+  return metrics;
 }
 
 struct PbctopoCycleSyncBeamState {
@@ -724,6 +926,8 @@ PbctopoCycleSyncResult solve_component_offsets_cycle_consistent(
     result.offsets.assign(1, {0, 0, 0});
     return result;
   }
+  const PbctopoCyclePenaltyContext penalty_context =
+      make_cycle_penalty_context(Box);
 
   vector<vector<size_t>> incident(component_count);
   for (size_t edge_idx = 0; edge_idx < pair_candidates.size(); ++edge_idx) {
@@ -782,9 +986,15 @@ PbctopoCycleSyncResult solve_component_offsets_cycle_consistent(
         if (other >= state.assigned.size() || !state.assigned[other])
           continue;
         for (const auto &candidate : set.candidates) {
-          const Int3 delta_other_to_comp =
-              oriented_pair_delta(set, candidate, other, comp);
-          proposed_offsets.push_back(state.offsets[other] + delta_other_to_comp);
+          Int3 delta_other_to_comp{};
+          Int3 proposed{};
+          if (!oriented_pair_delta(set, candidate, other, comp,
+                                   delta_other_to_comp) ||
+              !checked_int3_add(state.offsets[other], delta_other_to_comp,
+                                proposed)) {
+            continue;
+          }
+          proposed_offsets.push_back(proposed);
         }
       }
       sort(proposed_offsets.begin(), proposed_offsets.end(),
@@ -804,11 +1014,18 @@ PbctopoCycleSyncResult solve_component_offsets_cycle_consistent(
           double best_edge_penalty = numeric_limits<double>::infinity();
           double best_edge_weight = 0.0;
           for (const auto &candidate : set.candidates) {
-            const Int3 expected = oriented_pair_delta(set, candidate, other, comp);
-            const Int3 observed = trial.offsets[comp] - trial.offsets[other];
-            const int mismatch = int3_l1_norm(observed - expected);
+            Int3 expected{};
+            Int3 observed{};
+            Int3 residual{};
+            if (!oriented_pair_delta(set, candidate, other, comp, expected) ||
+                !checked_int3_subtract(trial.offsets[comp],
+                                       trial.offsets[other], observed) ||
+                !checked_int3_subtract(observed, expected, residual)) {
+              continue;
+            }
             const double penalty =
-                robust_cycle_penalty(mismatch) * max(1.0, candidate.weight);
+                robust_cycle_penalty(residual, penalty_context) *
+                max(1.0, candidate.weight);
             if (penalty < best_edge_penalty) {
               best_edge_penalty = penalty;
               best_edge_weight = max(1.0, candidate.weight);
@@ -845,14 +1062,16 @@ PbctopoCycleSyncResult solve_component_offsets_cycle_consistent(
   const auto &best = beam.front();
   result.valid = true;
   result.offsets = best.offsets;
-  rebase_component_offsets(result.offsets, Box);
+  if (!rebase_component_offsets(result.offsets, Box))
+    return {};
   result.metrics.cycle_support =
       static_cast<size_t>(llround(max(0.0, best.support)));
   result.metrics.cycle_mismatch =
       best.support > 0.0 ? best.cost / best.support : best.cost;
   result.metrics.inconsistent_edge_count = best.inconsistent_edges;
   const PbctopoCycleSyncMetrics fundamental =
-      compute_fundamental_cycle_residuals(component_count, pair_candidates);
+      compute_fundamental_cycle_residuals(component_count, pair_candidates,
+                                          Box);
   result.metrics.fundamental_cycle_count = fundamental.fundamental_cycle_count;
   result.metrics.fundamental_cycle_residual_rms =
       fundamental.fundamental_cycle_residual_rms;
@@ -870,15 +1089,48 @@ bool graph_edge_matches_delta(const PbctopoGraphEdge &edge, const Int3 &delta) {
 }
 
 vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
-    const vector<PbctopoAtom> &atoms,
+    const vector<PbctopoAtom> &atoms, box Box,
     const vector<vector<size_t>> &components, const vector<PbctopoShift> &shifts,
     const RuntimeCutoffs &cutoffs, PbctopoTimingStats *timing,
     const vector<Int3> *warm_component_offsets,
-    vector<PbctopoPairShiftCandidateSet> *pair_candidates_out) {
+    vector<PbctopoPairShiftCandidateSet> *pair_candidates_out,
+    const vector<PbctopoRequiredContact> *required_contacts) {
+  bool relative_domain_analytic = false;
+  const auto relative_domain = build_component_relative_shift_domain(
+      shifts, &relative_domain_analytic);
+  if (timing != nullptr) {
+    if (relative_domain_analytic)
+      ++timing->component_relative_domain_analytic_builds;
+    else
+      ++timing->component_relative_domain_generic_builds;
+  }
+  vector<PbctopoShift> pair_shifts;
+  pair_shifts.reserve(relative_domain.size());
+  for (const auto &relative : relative_domain)
+    pair_shifts.push_back(relative.shift);
+  PbctopoRequiredContactConstraintContext required_contact_context;
+  const bool has_required_contacts =
+      required_contacts != nullptr && !required_contacts->empty();
+  if (has_required_contacts) {
+    required_contact_context =
+        build_pbctopo_required_contact_constraint_context(
+            atoms, components, Box, *required_contacts);
+    if (timing != nullptr) {
+      ++timing->component_required_contact_constraint_builds;
+      timing->component_required_contact_constraint_pairs +=
+          required_contact_context.groups.size();
+    }
+    if (!required_contact_context.valid ||
+        required_contact_context.infeasible) {
+      if (timing != nullptr)
+        ++timing->component_required_contact_infeasible;
+      return {};
+    }
+  }
   size_t identity_shift_pos = 0;
-  for (size_t shift_idx = 0; shift_idx < shifts.size(); ++shift_idx) {
-    if (shifts[shift_idx].ix == 0 && shifts[shift_idx].iy == 0 &&
-        shifts[shift_idx].iz == 0) {
+  for (size_t shift_idx = 0; shift_idx < pair_shifts.size(); ++shift_idx) {
+    if (pair_shifts[shift_idx].ix == 0 && pair_shifts[shift_idx].iy == 0 &&
+        pair_shifts[shift_idx].iz == 0) {
       identity_shift_pos = shift_idx;
       break;
     }
@@ -886,9 +1138,14 @@ vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
 
   const auto precompute_started = chrono::steady_clock::now();
   PbctopoLazyShiftedComponents shifted_components(
-      atoms, components, shifts, cutoffs.clash_cutoff,
+      atoms, components, pair_shifts, cutoffs.clash_cutoff,
       cutoffs.pair_contact_cutoff, timing);
   if (timing != nullptr) {
+    timing->component_graph_input_shift_domain_max =
+        max(timing->component_graph_input_shift_domain_max, shifts.size());
+    timing->component_graph_relative_shift_domain_max =
+        max(timing->component_graph_relative_shift_domain_max,
+            pair_shifts.size());
     timing->component_graph_precompute_s +=
         chrono::duration<double>(chrono::steady_clock::now() - precompute_started)
             .count();
@@ -901,6 +1158,26 @@ vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
       timing != nullptr ? timing->component_graph_lazy_materialize_s : 0.0;
   const double contact_cutoff2 =
       cutoffs.pair_contact_cutoff * cutoffs.pair_contact_cutoff;
+  vector<size_t> bbox_only_ranked_shift_indices(pair_shifts.size());
+  iota(bbox_only_ranked_shift_indices.begin(),
+       bbox_only_ranked_shift_indices.end(), 0);
+  stable_sort(bbox_only_ranked_shift_indices.begin(),
+              bbox_only_ranked_shift_indices.end(),
+              [&](size_t lhs_idx, size_t rhs_idx) {
+                return better_pair_shift_score(
+                    make_bbox_only_pair_shift_score(
+                        pair_shifts[lhs_idx],
+                        numeric_limits<double>::infinity()),
+                    make_bbox_only_pair_shift_score(
+                        pair_shifts[rhs_idx],
+                        numeric_limits<double>::infinity()));
+              });
+  const PbctopoComponentPairSpatialShortlist spatial_shortlist =
+      build_component_pair_spatial_shortlist(
+          shifted_components, pair_shifts, identity_shift_pos,
+          cutoffs.pair_contact_cutoff, timing);
+  vector<uint32_t> included_shift_epochs(pair_shifts.size(), 0u);
+  uint32_t included_shift_epoch = 0u;
   for (size_t lhs = 0; lhs < components.size(); ++lhs) {
     for (size_t rhs = lhs + 1; rhs < components.size(); ++rhs) {
       PbctopoPairShiftScore best_score;
@@ -912,35 +1189,26 @@ vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
       const Int3 *expected_delta_ptr = nullptr;
       if (warm_component_offsets != nullptr &&
           warm_component_offsets->size() == components.size()) {
-        expected_delta = (*warm_component_offsets)[rhs] - (*warm_component_offsets)[lhs];
-        expected_delta_ptr = &expected_delta;
-      }
-      const vector<size_t> ordered_shift_indices =
-          build_pair_shift_order(shifts, expected_delta_ptr, timing);
-      for (size_t shift_idx : ordered_shift_indices) {
-        const auto &shift = shifts[shift_idx];
-        const PbctopoPairShiftScore *incumbent =
-            (best_score.valid && !best_score.ultra_clash) ? &best_score : nullptr;
-        const double bbox_d2 = shifted_component_bbox_distance2(
-            shifted_components.descriptor(lhs, identity_shift_pos),
-            shifted_components.descriptor(rhs, shift_idx));
-        PbctopoPairShiftScore score;
-        if (bbox_d2 > contact_cutoff2) {
-          score = make_bbox_only_pair_shift_score(shift, bbox_d2);
-          if (timing != nullptr)
-            ++timing->component_graph_bbox_only_scores;
-        } else {
-          score = score_component_pair_shift(
-              shifted_components.materialize(lhs, identity_shift_pos),
-              shifted_components.materialize(rhs, shift_idx), shift,
-              cutoffs.clash_cutoff, cutoffs.pair_contact_cutoff, incumbent,
-              atoms, timing);
+        if (checked_int3_subtract((*warm_component_offsets)[rhs],
+                                  (*warm_component_offsets)[lhs],
+                                  expected_delta)) {
+          expected_delta_ptr = &expected_delta;
         }
+      }
+      const bool has_pair_contact_constraints =
+          has_required_contacts &&
+          find_pbctopo_required_contact_constraint_group(
+              required_contact_context, lhs, rhs) != nullptr;
+      const PbctopoShiftedComponentDescriptor lhs_descriptor =
+          shifted_components.descriptor(lhs, identity_shift_pos);
+      const auto accept_score = [&](size_t shift_idx,
+                                    const PbctopoPairShiftScore &score) {
+        const auto &shift = pair_shifts[shift_idx];
         if (pair_candidates_out != nullptr) {
           insert_pair_shift_candidate(
               top_pair_candidates,
               PbctopoPairShiftCandidate{{shift.ix, shift.iy, shift.iz}, score,
-                                        pair_shift_candidate_weight(score)},
+                                        0.0},
               3);
         }
         if (better_pair_shift_score(score, best_score)) {
@@ -948,6 +1216,87 @@ vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
           best_score = score;
         } else if (better_pair_shift_score(score, second_score)) {
           second_score = score;
+        }
+      };
+      const bool use_spatial_shortlist =
+          spatial_shortlist.valid && !has_pair_contact_constraints;
+      if (use_spatial_shortlist) {
+        ++included_shift_epoch;
+        if (included_shift_epoch == 0u) {
+          fill(included_shift_epochs.begin(), included_shift_epochs.end(), 0u);
+          included_shift_epoch = 1u;
+        }
+        vector<size_t> score_shift_indices =
+            spatial_shortlist.for_pair(lhs, rhs);
+        for (size_t shift_idx : score_shift_indices)
+          included_shift_epochs[shift_idx] = included_shift_epoch;
+        const size_t bbox_only_keep =
+            pair_candidates_out != nullptr ? size_t{3} : size_t{2};
+        size_t bbox_only_added = 0;
+        for (size_t shift_idx : bbox_only_ranked_shift_indices) {
+          if (included_shift_epochs[shift_idx] == included_shift_epoch)
+            continue;
+          score_shift_indices.push_back(shift_idx);
+          included_shift_epochs[shift_idx] = included_shift_epoch;
+          if (++bbox_only_added >= bbox_only_keep)
+            break;
+        }
+        for (size_t shift_idx : score_shift_indices) {
+          const auto &shift = pair_shifts[shift_idx];
+          const double bbox_d2 = shifted_component_bbox_distance2(
+              lhs_descriptor, shifted_components.descriptor(rhs, shift_idx));
+          PbctopoPairShiftScore score;
+          if (bbox_d2 > contact_cutoff2) {
+            score = make_bbox_only_pair_shift_score(shift, bbox_d2);
+            if (timing != nullptr)
+              ++timing->component_graph_bbox_only_scores;
+          } else {
+            score = score_component_pair_shift(
+                shifted_components.materialize(lhs, identity_shift_pos),
+                shifted_components.materialize(rhs, shift_idx), shift,
+                cutoffs.clash_cutoff, cutoffs.pair_contact_cutoff, atoms,
+                timing);
+          }
+          accept_score(shift_idx, score);
+        }
+        if (timing != nullptr) {
+          ++timing->component_graph_spatial_shortlist_pairs;
+          timing->component_graph_spatial_shortlist_shift_scores_avoided +=
+              pair_shifts.size() - score_shift_indices.size();
+        }
+      } else {
+        const vector<size_t> ordered_shift_indices =
+            build_pair_shift_order(pair_shifts, expected_delta_ptr, timing);
+        for (size_t shift_idx : ordered_shift_indices) {
+          const auto &shift = pair_shifts[shift_idx];
+          const Int3 relative_delta{shift.ix, shift.iy, shift.iz};
+          if (has_pair_contact_constraints) {
+            if (timing != nullptr)
+              ++timing->component_required_contact_relative_deltas_checked;
+            if (!pbctopo_required_contact_relative_shift_allowed(
+                    required_contact_context, atoms, lhs, rhs,
+                    relative_delta)) {
+              if (timing != nullptr)
+                ++timing->component_required_contact_relative_deltas_rejected;
+              continue;
+            }
+          }
+          const double bbox_d2 = shifted_component_bbox_distance2(
+              lhs_descriptor,
+              shifted_components.descriptor(rhs, shift_idx));
+          PbctopoPairShiftScore score;
+          if (bbox_d2 > contact_cutoff2) {
+            score = make_bbox_only_pair_shift_score(shift, bbox_d2);
+            if (timing != nullptr)
+              ++timing->component_graph_bbox_only_scores;
+          } else {
+            score = score_component_pair_shift(
+                shifted_components.materialize(lhs, identity_shift_pos),
+                shifted_components.materialize(rhs, shift_idx), shift,
+                cutoffs.clash_cutoff, cutoffs.pair_contact_cutoff, atoms,
+                timing);
+          }
+          accept_score(shift_idx, score);
         }
       }
       PbctopoGraphEdge edge;
@@ -964,13 +1313,20 @@ vector<PbctopoGraphEdge> build_component_graph_edge_candidates(
       edge.min_pair_d2 = best_score.min_pair_d2;
       edge.bbox_d2 = best_score.bbox_d2;
       edge.shift_norm2 = best_score.shift_norm2;
-      edge.confidence = best_score.quality_score -
-                        (second_score.valid ? second_score.quality_score
-                                            : best_score.quality_score - 1.0);
+      edge.confidence =
+          pbctopo_pair_shift_confidence(best_score, second_score);
       edge.ultra_clash = best_score.ultra_clash;
-      edge.valid = best_score.valid;
+      edge.valid = best_score.valid && best_score.complete;
       ranked_edges.push_back(edge);
       if (pair_candidates_out != nullptr && !top_pair_candidates.empty()) {
+        for (size_t candidate_idx = 0;
+             candidate_idx < top_pair_candidates.size(); ++candidate_idx) {
+          const double confidence =
+              candidate_idx == 0 ? edge.confidence : 0.0;
+          top_pair_candidates[candidate_idx].weight =
+              pbctopo_pair_shift_candidate_weight(
+                  top_pair_candidates[candidate_idx].score, confidence);
+        }
         pair_candidates_out->push_back({lhs, rhs, top_pair_candidates});
         if (timing != nullptr)
           timing->component_cycle_sync_pair_candidates +=
@@ -1010,7 +1366,11 @@ bool solve_component_offsets_via_pair_graph(
     vector<Int3> *refined_offsets_out,
     vector<PbctopoGraphEdge> *tree_edges_out,
     PbctopoCycleSyncMetrics *cycle_metrics_out,
-    const PbctopoAnchorGraphContext *anchor_context) {
+    const PbctopoAnchorGraphContext *anchor_context,
+    const vector<PbctopoRequiredContact> *required_contacts,
+    PbctopoIdentifiability *identifiability_out) {
+  if (identifiability_out != nullptr)
+    *identifiability_out = {};
   if (components.empty())
     return false;
 
@@ -1018,8 +1378,18 @@ bool solve_component_offsets_via_pair_graph(
     *cycle_metrics_out = {};
   vector<PbctopoPairShiftCandidateSet> pair_candidates;
   vector<PbctopoGraphEdge> ranked_edges = build_component_graph_edge_candidates(
-      atoms, components, shifts, cutoffs, timing, warm_component_offsets,
-      &pair_candidates);
+      atoms, Box, components, shifts, cutoffs, timing, warm_component_offsets,
+      &pair_candidates, required_contacts);
+  if (identifiability_out != nullptr) {
+    const vector<size_t> atom_component_index =
+        build_atom_component_index(atoms.size(), components);
+    const span<const PbctopoRequiredContact> contacts =
+        required_contacts != nullptr
+            ? span<const PbctopoRequiredContact>(*required_contacts)
+            : span<const PbctopoRequiredContact>{};
+    *identifiability_out = evaluate_pbctopo_identifiability(
+        components.size(), pair_candidates, contacts, atom_component_index);
+  }
   const auto tree_started = chrono::steady_clock::now();
   sort(ranked_edges.begin(), ranked_edges.end(), better_component_graph_edge);
   vector<PbctopoGraphEdge> tree_edges;
@@ -1035,7 +1405,8 @@ bool solve_component_offsets_via_pair_graph(
             .count();
   }
 
-  rebase_component_offsets(offsets, Box);
+  if (!rebase_component_offsets(offsets, Box))
+    return false;
   if (tree_offsets_out != nullptr)
     *tree_offsets_out = offsets;
   if (tree_edges_out != nullptr)
@@ -1081,9 +1452,6 @@ bool solve_component_offsets_via_pair_graph(
     timing->component_cycle_sync_inconsistent_edges +=
         cycle_result.metrics.inconsistent_edge_count;
   }
-  if (cycle_metrics_out != nullptr)
-    *cycle_metrics_out = cycle_result.metrics;
-
   if (cycle_result.valid &&
       !same_int3_offsets(cycle_result.offsets, tree_refined_offsets)) {
     vector<Vec3> cycle_points;
@@ -1117,6 +1485,11 @@ bool solve_component_offsets_via_pair_graph(
     }
   }
 
+  if (cycle_metrics_out != nullptr) {
+    *cycle_metrics_out =
+        evaluate_pair_graph_metrics_for_offsets(offsets, pair_candidates, Box);
+  }
+
   if (refined_offsets_out != nullptr)
     *refined_offsets_out = offsets;
   shift_norm2 = best_cut.shift_norm2;
@@ -1131,7 +1504,8 @@ bool solve_component_offsets_from_ranked_edges(
     return false;
   if (!solve_component_offsets_from_tree(component_count, tree_edges, offsets))
     return false;
-  rebase_component_offsets(offsets, Box);
+  if (!rebase_component_offsets(offsets, Box))
+    return false;
   return true;
 }
 

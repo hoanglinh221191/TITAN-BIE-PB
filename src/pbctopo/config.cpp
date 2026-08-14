@@ -76,6 +76,17 @@ const char *solve_mode_name(SolveMode mode) {
   }
 }
 
+SearchPolicy resolve_search_policy(const arguments &Arguments) {
+  return Arguments.pbc.pbctopo_search_policy == "audit-exact"
+             ? SearchPolicy::AuditExact
+             : SearchPolicy::FastCertified;
+}
+
+const char *search_policy_name(SearchPolicy policy) {
+  return policy == SearchPolicy::AuditExact ? "audit-exact"
+                                             : "fast-certified";
+}
+
 AnchorBackend resolve_anchor_backend(const arguments &Arguments) {
   const std::string &backend = Arguments.pbc.pbctopo_anchor_backend;
   if (backend == "prim")

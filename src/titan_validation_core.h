@@ -39,7 +39,7 @@ struct ChapmanKolmogorovMetric {
   int rows_compared{0};
   double weighted_mae{std::numeric_limits<double>::quiet_NaN()};
   double weighted_frobenius{std::numeric_limits<double>::quiet_NaN()};
-  double max_abs{std::numeric_limits<double>::quiet_NaN()};
+  double max_abs{0.0};
   std::vector<ChapmanKolmogorovRowError> row_errors;
 };
 

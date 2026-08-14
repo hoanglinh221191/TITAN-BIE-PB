@@ -28,7 +28,9 @@ struct MolTopologyMoleculeRange {
 enum class MolTopologyVdwRadiusSource : std::uint8_t {
   None = 0,
   GromacsTopology,
+  GromacsTopologyExplicitZeroLJ,
   MultiMolParameters,
+  MultiMolParametersExplicitZeroLJ,
 };
 
 class MolTopology {
@@ -65,7 +67,11 @@ public:
                  std::vector<MolTopologyMoleculeRange> molecule_ranges = {},
                  std::vector<std::uint32_t> source_atom_ids = {},
                  std::vector<double> vdw_radii = {});
-  void cache_missing_vdw_radii(std::span<const double> radii);
+  void cache_missing_vdw_radii(
+      std::span<const double> radii,
+      std::span<const double> sigma = {},
+      std::span<const double> epsilon = {},
+      std::span<const std::int32_t> type_ids = {});
   void build_adjacency();
 
 private:
@@ -78,7 +84,6 @@ private:
   std::vector<double> vdw_radii_;
   std::vector<MolTopologyVdwRadiusSource> vdw_radius_sources_;
   std::size_t vdw_radius_count_ = 0;
-  std::size_t parameter_radius_cache_size_ = 0;
 };
 
 std::expected<MolTopology, std::string>

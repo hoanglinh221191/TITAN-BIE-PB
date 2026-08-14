@@ -11,9 +11,14 @@
 #include <deque>
 #include <iomanip>
 #include <limits>
+#include <map>
+#include <numeric>
 #include <ostream>
+#include <set>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
+#include <tuple>
 
 namespace {
 
@@ -191,12 +196,19 @@ void TitanDSSPAnalyzer::configure(const DsspArgs &args) {
   enabled_ = requested_ && initialized_;
 }
 
+void TitanDSSPAnalyzer::configure_segments(const SegmentArgs &args,
+                                           std::uint8_t molecule) {
+  segment_config_file_ = args.config_file;
+  molecule_id_ = molecule;
+}
+
 void TitanDSSPAnalyzer::init(const Multi_MOL &mol, const std::string &label) {
   label_ = label;
   if (initialized_)
     return;
 
   build_residue_map(mol.info);
+  load_segment_annotations();
   initialized_ = !residues_.empty();
   enabled_ = requested_ && initialized_;
   if (!initialized_)
@@ -229,7 +241,8 @@ void TitanDSSPAnalyzer::build_residue_map(const std::vector<mol_info> &info) {
         ++local_index;
 
       residues_.push_back(ResidueBackbone{
-          residues_.size() + 1, resnr, chainnum, local_index,
+          residues_.size() + 1, resnr, atom_info.get_internal_resnr(),
+          chainnum, local_index,
           atom_info.get_chain(), atom_info.get_res_name(), -1, -1, -1, -1, -1});
 
       prev_chain = chainnum;
@@ -262,6 +275,125 @@ void TitanDSSPAnalyzer::build_residue_map(const std::vector<mol_info> &info) {
       continue;
     }
   }
+}
+
+void TitanDSSPAnalyzer::load_segment_annotations() {
+  residue_annotations_.assign(residues_.size(), {});
+  resolved_segments_.clear();
+  segment_config_loaded_ = false;
+  if (segment_config_file_.empty() || residues_.empty())
+    return;
+
+  segment_config_ = titan_segments::load_config(segment_config_file_);
+  segment_config_loaded_ = true;
+
+  std::map<std::pair<std::string, std::string>, std::size_t>
+      resolved_lookup;
+  for (const titan_segments::Entity &entity : segment_config_.entities) {
+    if (entity.molecule != molecule_id_)
+      continue;
+    const std::size_t all_index = resolved_segments_.size();
+    resolved_segments_.push_back(
+        ResolvedSegment{entity.name, "all", "all", 0, 0, {}});
+    resolved_lookup.emplace(std::make_pair(entity.name, "all"), all_index);
+    for (const titan_segments::Segment *segment :
+         segment_config_.segments_for_entity(entity.name)) {
+      const std::size_t index = resolved_segments_.size();
+      resolved_segments_.push_back(
+          ResolvedSegment{entity.name, segment->name,
+                          titan_segments::coordinate_name(segment->coordinate),
+                          segment->begin, segment->end, {}});
+      resolved_lookup.emplace(std::make_pair(entity.name, segment->name),
+                              index);
+    }
+  }
+
+  for (std::size_t residue_index = 0; residue_index < residues_.size();
+       ++residue_index) {
+    const ResidueBackbone &residue = residues_[residue_index];
+    titan_segments::ResidueDescriptor descriptor;
+    descriptor.molecule = molecule_id_;
+    descriptor.chain_number = residue.chainnum;
+    descriptor.chain = residue.chain;
+    descriptor.residue_number = residue.resnr;
+    descriptor.internal_residue_number = residue.internal_resnr;
+    descriptor.ordinal = residue.local_index + 1;
+    descriptor.residue_name = residue.resname;
+
+    const titan_segments::Entity *matched_entity = nullptr;
+    for (const titan_segments::Entity &entity : segment_config_.entities) {
+      if (!titan_segments::entity_matches(entity, descriptor))
+        continue;
+      if (matched_entity != nullptr) {
+        throw std::runtime_error(
+            "DSSP segment entities overlap at molecule " +
+            std::to_string(static_cast<int>(molecule_id_)) + ", chain '" +
+            residue.chain + "', residue " + std::to_string(residue.resnr) +
+            ".");
+      }
+      matched_entity = &entity;
+    }
+    if (matched_entity == nullptr)
+      continue;
+
+    const auto all_it =
+        resolved_lookup.find({matched_entity->name, "all"});
+    if (all_it != resolved_lookup.end())
+      resolved_segments_[all_it->second].residue_indices.push_back(
+          residue_index);
+
+    const auto segments =
+        segment_config_.segments_for_entity(matched_entity->name);
+    const titan_segments::Segment *matched_segment = nullptr;
+    for (const titan_segments::Segment *segment : segments) {
+      if (!titan_segments::segment_matches(*segment, descriptor))
+        continue;
+      if (matched_segment != nullptr) {
+        throw std::runtime_error(
+            "DSSP segments overlap for entity '" + matched_entity->name +
+            "' at ordinal " + std::to_string(descriptor.ordinal) + ".");
+      }
+      matched_segment = segment;
+    }
+
+    residue_annotations_[residue_index].entity = matched_entity->name;
+    residue_annotations_[residue_index].segment =
+        matched_segment != nullptr
+            ? matched_segment->name
+            : (segments.empty() ? "all" : "unassigned");
+    if (matched_segment != nullptr) {
+      const auto segment_it =
+          resolved_lookup.find({matched_entity->name, matched_segment->name});
+      if (segment_it != resolved_lookup.end())
+        resolved_segments_[segment_it->second].residue_indices.push_back(
+            residue_index);
+    }
+  }
+
+  std::map<std::string, std::vector<std::size_t>> unassigned;
+  for (std::size_t i = 0; i < residue_annotations_.size(); ++i) {
+    if (!residue_annotations_[i].entity.empty() &&
+        residue_annotations_[i].segment == "unassigned") {
+      unassigned[residue_annotations_[i].entity].push_back(i);
+    }
+  }
+  for (auto &[entity, indices] : unassigned) {
+    resolved_segments_.push_back(ResolvedSegment{
+        entity, "unassigned", "resolved", 0, 0, std::move(indices)});
+  }
+}
+
+const char *
+TitanDSSPAnalyzer::bridge_type_name(BridgeType type) noexcept {
+  switch (type) {
+  case BridgeType::Parallel:
+    return "parallel";
+  case BridgeType::AntiParallel:
+    return "antiparallel";
+  case BridgeType::None:
+    return "none";
+  }
+  return "none";
 }
 
 void TitanDSSPAnalyzer::ensure_scratch_capacity(std::size_t n_res) {
@@ -585,6 +717,8 @@ void TitanDSSPAnalyzer::classify_current_frame() {
     return;
 
   std::fill(frame_states_.begin(), frame_states_.end(), State::C);
+  current_frame_bridge_pairs_.clear();
+  current_frame_ladders_.clear();
   for (auto &flags : helix_flags_) {
     flags[0] = HelixFlag::None;
     flags[1] = HelixFlag::None;
@@ -609,6 +743,16 @@ void TitanDSSPAnalyzer::classify_current_frame() {
       const BridgeType type = test_bridge(i, j);
       if (type == BridgeType::None)
         continue;
+
+      const long long ordinal_i =
+          static_cast<long long>(residues_[i].local_index + 1);
+      const long long ordinal_j =
+          static_cast<long long>(residues_[j].local_index + 1);
+      const long long registry =
+          type == BridgeType::Parallel ? ordinal_j - ordinal_i
+                                       : ordinal_i + ordinal_j;
+      current_frame_bridge_pairs_.push_back(
+          FrameBridgePair{i, j, type, registry});
 
       bool found = false;
       for (auto &bridge : bridges) {
@@ -696,6 +840,17 @@ void TitanDSSPAnalyzer::classify_current_frame() {
       bridges.erase(bridges.begin() + static_cast<std::ptrdiff_t>(j));
       --j;
     }
+  }
+
+  for (const auto &bridge : bridges) {
+    if (bridge.i.empty() || bridge.j.empty())
+      continue;
+    const bool interchain =
+        residues_[bridge.i.front()].chainnum !=
+        residues_[bridge.j.front()].chainnum;
+    current_frame_ladders_.push_back(
+        FrameLadder{bridge.type,
+                    std::min(bridge.i.size(), bridge.j.size()), interchain});
   }
 
   for (const auto &bridge : bridges) {
@@ -797,6 +952,8 @@ void TitanDSSPAnalyzer::process_frame(const Multi_MOL &mol, std::size_t snap_idx
   prepare_backbone_coordinates(mol.m_mol[snap_idx]);
   compute_hbond_topology(executor);
   classify_current_frame();
+  bridge_frames_.push_back(current_frame_bridge_pairs_);
+  ladder_frames_.push_back(current_frame_ladders_);
 
   FrameProfile frame_profile{};
   frame_profile.fill(0.0);
@@ -1053,4 +1210,178 @@ void TitanDSSPAnalyzer::export_content_profile(const std::string &filename,
   if (log.is_open()) {
     TitanUI::log_kv(log, "DSSP " + label_ + " content", filename);
   }
+}
+
+void TitanDSSPAnalyzer::export_segment_content(const std::string &filename,
+                                               std::fstream &log) const {
+  if (!enabled_ || !segment_config_loaded_ || trajectory_fractions_.empty() ||
+      resolved_segments_.empty())
+    return;
+
+  std::ofstream out(filename);
+  if (!out.is_open()) {
+    TitanUI::print_warning("[DSSP] Could not open output file: " + filename);
+    return;
+  }
+  out << "# Segment definitions are read from " << segment_config_file_ << "\n";
+  out << "# beta_total=B+E; helix_total=H+G+I\n";
+  out << "molecule,entity,segment,coordinate,begin,end,residue_count,state,"
+         "mean,sem,trajectories\n";
+  out << std::setprecision(12);
+
+  struct StateGroup {
+    std::string name;
+    std::vector<std::size_t> states;
+  };
+  std::vector<StateGroup> groups;
+  for (std::size_t state = 0; state < kStateCount; ++state) {
+    groups.push_back(
+        StateGroup{std::string(1, state_to_char(static_cast<State>(state))),
+                   {state}});
+  }
+  groups.push_back(StateGroup{"beta_total",
+                              {state_index(State::B), state_index(State::E)}});
+  groups.push_back(StateGroup{
+      "helix_total", {state_index(State::H), state_index(State::G),
+                      state_index(State::I)}});
+
+  for (const ResolvedSegment &segment : resolved_segments_) {
+    for (const StateGroup &group : groups) {
+      std::vector<double> trajectory_values;
+      trajectory_values.reserve(trajectory_fractions_.size());
+      if (!segment.residue_indices.empty()) {
+        for (const auto &trajectory : trajectory_fractions_) {
+          double value = 0.0;
+          for (const std::size_t residue : segment.residue_indices) {
+            for (const std::size_t state : group.states)
+              value += trajectory[flat_index(residue, state)];
+          }
+          value /= static_cast<double>(segment.residue_indices.size());
+          trajectory_values.push_back(value);
+        }
+      }
+
+      double mean = std::numeric_limits<double>::quiet_NaN();
+      double sem = std::numeric_limits<double>::quiet_NaN();
+      if (!trajectory_values.empty()) {
+        mean = std::accumulate(trajectory_values.begin(),
+                               trajectory_values.end(), 0.0) /
+               static_cast<double>(trajectory_values.size());
+        if (trajectory_values.size() > 1) {
+          double ss = 0.0;
+          for (const double value : trajectory_values) {
+            const double delta = value - mean;
+            ss += delta * delta;
+          }
+          sem = std::sqrt(
+                    ss / static_cast<double>(trajectory_values.size() - 1)) /
+                std::sqrt(static_cast<double>(trajectory_values.size()));
+        }
+      }
+      out << label_ << ',' << segment.entity << ',' << segment.segment << ','
+          << segment.coordinate << ',' << segment.begin << ',' << segment.end
+          << ',' << segment.residue_indices.size() << ',' << group.name << ','
+          << mean << ',' << sem << ',' << trajectory_values.size() << '\n';
+    }
+  }
+
+  if (log.is_open())
+    TitanUI::log_kv(log, "DSSP " + label_ + " segments", filename);
+}
+
+void TitanDSSPAnalyzer::export_bridge_registry(const std::string &filename,
+                                               std::fstream &log) const {
+  if (!enabled_ || bridge_frames_.empty() || residues_.empty())
+    return;
+
+  using Key = std::tuple<std::size_t, std::size_t, int, long long>;
+  std::map<Key, std::size_t> counts;
+  for (const auto &frame : bridge_frames_) {
+    for (const FrameBridgePair &pair : frame) {
+      counts[{pair.residue_i, pair.residue_j,
+              static_cast<int>(pair.type), pair.registry}]++;
+    }
+  }
+
+  std::ofstream out(filename);
+  if (!out.is_open()) {
+    TitanUI::print_warning("[DSSP] Could not open output file: " + filename);
+    return;
+  }
+  out << "# Parallel registry=ordinal_j-ordinal_i; antiparallel "
+         "registry=ordinal_i+ordinal_j.\n";
+  out << "orientation,registry,interchain,entity_i,segment_i,chain_i,"
+         "ordinal_i,resnr_i,resname_i,entity_j,segment_j,chain_j,ordinal_j,"
+         "resnr_j,resname_j,contact_frames,frame_occupancy\n";
+  out << std::setprecision(12);
+  for (const auto &[key, count] : counts) {
+    const auto [i, j, type_value, registry] = key;
+    const ResidueBackbone &first = residues_[i];
+    const ResidueBackbone &second = residues_[j];
+    const ResidueAnnotation empty_annotation{};
+    const ResidueAnnotation &annotation_i =
+        i < residue_annotations_.size() ? residue_annotations_[i]
+                                        : empty_annotation;
+    const ResidueAnnotation &annotation_j =
+        j < residue_annotations_.size() ? residue_annotations_[j]
+                                        : empty_annotation;
+    const BridgeType type = static_cast<BridgeType>(type_value);
+    out << bridge_type_name(type) << ',' << registry << ','
+        << (first.chainnum != second.chainnum ? "true" : "false") << ','
+        << annotation_i.entity << ',' << annotation_i.segment << ','
+        << first.chain << ',' << first.local_index + 1 << ',' << first.resnr
+        << ',' << first.resname << ',' << annotation_j.entity << ','
+        << annotation_j.segment << ',' << second.chain << ','
+        << second.local_index + 1 << ',' << second.resnr << ','
+        << second.resname << ',' << count << ','
+        << static_cast<double>(count) /
+               static_cast<double>(bridge_frames_.size())
+        << '\n';
+  }
+
+  if (log.is_open())
+    TitanUI::log_kv(log, "DSSP " + label_ + " bridges", filename);
+}
+
+void TitanDSSPAnalyzer::export_ladder_distribution(
+    const std::string &filename, std::fstream &log) const {
+  if (!enabled_ || ladder_frames_.empty())
+    return;
+
+  using Key = std::tuple<int, std::size_t, bool>;
+  std::map<Key, std::size_t> counts;
+  std::size_t total_ladders = 0;
+  for (const auto &frame : ladder_frames_) {
+    for (const FrameLadder &ladder : frame) {
+      counts[{static_cast<int>(ladder.type), ladder.length,
+              ladder.interchain}]++;
+      ++total_ladders;
+    }
+  }
+
+  std::ofstream out(filename);
+  if (!out.is_open()) {
+    TitanUI::print_warning("[DSSP] Could not open output file: " + filename);
+    return;
+  }
+  out << "orientation,ladder_length,interchain,count,count_per_frame,"
+         "fraction_of_ladders\n";
+  out << std::setprecision(12);
+  for (const auto &[key, count] : counts) {
+    const auto [type_value, length, interchain] = key;
+    out << bridge_type_name(static_cast<BridgeType>(type_value)) << ','
+        << length << ',' << (interchain ? "true" : "false") << ',' << count
+        << ','
+        << static_cast<double>(count) /
+               static_cast<double>(ladder_frames_.size())
+        << ','
+        << (total_ladders > 0
+                ? static_cast<double>(count) /
+                      static_cast<double>(total_ladders)
+                : 0.0)
+        << '\n';
+  }
+
+  if (log.is_open())
+    TitanUI::log_kv(log, "DSSP " + label_ + " ladders", filename);
 }

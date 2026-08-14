@@ -1,6 +1,7 @@
 #include "tabi/analyzer_impl.h"
 
 #include "pbe/grid/grid_common.h"
+#include "pbe/grid/ses_mask.h"
 
 #include <algorithm>
 #include <cctype>
@@ -483,20 +484,22 @@ void AnalyzerImpl::reset_grid_anchor() const noexcept {
   grid_anchor_shapes_.clear();
 }
 
-void AnalyzerImpl::ensure_workspace(const GridShape &shape) {
+void AnalyzerImpl::ensure_workspace(const GridShape &shape, bool reset_medium) {
   invalidate_nwt_half_workspace();
   const bool sized = grid_.sized(shape.n);
   if (sized) {
     ++grid_reuse_stats_.workspace_reuse_hits;
     std::fill(grid_.phi.begin(), grid_.phi.end(), 0.0);
     std::fill(grid_.rho.begin(), grid_.rho.end(), 0.0);
-    std::fill(grid_.eps_x.begin(), grid_.eps_x.end(), args_.ext_diel);
-    std::fill(grid_.eps_y.begin(), grid_.eps_y.end(), args_.ext_diel);
-    std::fill(grid_.eps_z.begin(), grid_.eps_z.end(), args_.ext_diel);
-    std::fill(grid_.denom.begin(), grid_.denom.end(), 1.0);
-    std::fill(grid_.screen.begin(), grid_.screen.end(), 0.0);
-    std::fill(grid_.inside.begin(), grid_.inside.end(), 0U);
-    std::fill(grid_.ion_accessible.begin(), grid_.ion_accessible.end(), 1U);
+    if (reset_medium) {
+      std::fill(grid_.eps_x.begin(), grid_.eps_x.end(), args_.ext_diel);
+      std::fill(grid_.eps_y.begin(), grid_.eps_y.end(), args_.ext_diel);
+      std::fill(grid_.eps_z.begin(), grid_.eps_z.end(), args_.ext_diel);
+      std::fill(grid_.denom.begin(), grid_.denom.end(), 1.0);
+      std::fill(grid_.screen.begin(), grid_.screen.end(), 0.0);
+      std::fill(grid_.inside.begin(), grid_.inside.end(), 0U);
+      std::fill(grid_.ion_accessible.begin(), grid_.ion_accessible.end(), 1U);
+    }
   } else {
     ++grid_reuse_stats_.workspace_reallocations;
     grid_.reset(shape.n, GridOptions{args_.ext_diel});
@@ -726,6 +729,13 @@ void AnalyzerImpl::classify_surface(const GridShape &shape,
 
   if (!surface_uses_ses_flood_fill(args_.surface))
     return;
+
+  erode_expanded_mask_to_ses(
+      SesMaskShape{shape.nx, shape.ny, shape.nz, shape.h},
+      std::span<const std::uint8_t>(grid_.inside.data(), grid_.inside.size()),
+      args_.probe_radius,
+      std::span<std::uint8_t>(grid_.inside.data(), grid_.inside.size()),
+      &executor);
 
   if (shape.n >
       static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {

@@ -1,7 +1,6 @@
 #include "titan_energy_decomposition.h"
 #include "titan_energy_validation.h"
-
-#include "BoxMatrix.h"
+#include "titan_electrostatics.h"
 
 #include "arguments.h"
 #include "c6c12.h"
@@ -38,18 +37,6 @@ martini_config_for_cutoff(const arguments &args, double cutoff_nm,
   }
   return cfg;
 }
-
-#ifdef __AVX2__
-__m256d mic_delta_avx2(__m256d delta, double box_len) {
-  if (!(box_len > 0.0) || !std::isfinite(box_len))
-    return delta;
-  const __m256d lengths = _mm256_set1_pd(box_len);
-  const __m256d shifts = _mm256_round_pd(
-      _mm256_div_pd(delta, lengths),
-      _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-  return _mm256_sub_pd(delta, _mm256_mul_pd(shifts, lengths));
-}
-#endif
 
 } // namespace
 
@@ -144,9 +131,6 @@ bool EnergyDecompositionProvider::inter_pair_energies_batch(
           _mm256_loadu_pd(rec_frame.pos.y.data() + rec_pos), lig_y);
       __m256d dz = _mm256_sub_pd(
           _mm256_loadu_pd(rec_frame.pos.z.data() + rec_pos), lig_z);
-      dx = mic_delta_avx2(dx, rec_frame.Box.get_a());
-      dy = mic_delta_avx2(dy, rec_frame.Box.get_b());
-      dz = mic_delta_avx2(dz, rec_frame.Box.get_c());
       const __m256d squared_distance = _mm256_add_pd(
           _mm256_add_pd(_mm256_mul_pd(dx, dx), _mm256_mul_pd(dy, dy)),
           _mm256_mul_pd(dz, dz));
@@ -218,10 +202,8 @@ EnergyPairDecomposition EnergyDecompositionProvider::pair_energy_generic(
   double dx = frame_a.pos.x[pos_a] - frame_b.pos.x[pos_b];
   double dy = frame_a.pos.y[pos_a] - frame_b.pos.y[pos_b];
   double dz = frame_a.pos.z[pos_a] - frame_b.pos.z[pos_b];
-  if (BoxMatrix::valid_box(frame_a.Box)) {
-    const BoxMatrix box_matrix(frame_a.Box);
-    box_matrix.apply_mic(dx, dy, dz);
-  }
+  // Match the standard energy kernels exactly: frames are consumed in their
+  // preprocessed/reconstructed coordinate image and no implicit MIC is added.
   const double d_nm = 0.1 * std::sqrt(dx * dx + dy * dy + dz * dz);
   return pair_energy_generic_at_distance(frame_a, mol_a, pos_a, frame_b, mol_b,
                                          pos_b, d_nm);
@@ -271,7 +253,8 @@ EnergyDecompositionProvider::pair_energy_generic_at_distance(
   double screening = 1.0;
   if (args_->flag_elec_screening && (is_amber || is_charmm) &&
       args_->salt_concentration > 0.0) {
-    const double lambda_debye = 3.07 / std::sqrt(args_->salt_concentration);
+    const double lambda_debye = titan_electrostatics::debye_length_nm(
+        args_->salt_concentration);
     screening = std::exp(-d_nm / lambda_debye);
   }
   out.elec = 138.935457839 * qi * qj * screening /

@@ -1,7 +1,10 @@
 #include "titan_config_schema.h"
+#include "titan_build_info.h"
 #include "titan_ui.h"
+#include "titan_version_info.h"
 
 #include <fstream>
+#include <string_view>
 #include <vector>
 
 namespace titan_config_schema {
@@ -16,7 +19,7 @@ struct OptionSchema {
   const char *incompatible;
 };
 
-void json_string(std::ostream &out, const std::string &value) {
+void json_string(std::ostream &out, std::string_view value) {
   out << '"';
   for (const char c : value) {
     switch (c) {
@@ -74,6 +77,23 @@ std::vector<OptionSchema> schemas() {
        ""},
       {"-cmap", "bool", "false", "true,false",
        "Enable residue contact probability map.", ""},
+      {"-segment-config", "path", "", "file",
+       "Define generic entities, roles, and coordinate ranges outside the source code.",
+       ""},
+      {"-interface-analysis", "bool", "false", "true,false",
+       "Enable configurable two/three-entity contact-state and buried-surface analysis.",
+       ""},
+      {"-interface-contact-mode", "enum", "sidechain-com",
+       "sidechain-com,sidechain-heavy,cb,ca,bb",
+       "Contact geometry used by interface-state analysis.", ""},
+      {"-interface-cut", "float", "6.5", "positive",
+       "Interface contact cutoff in Angstrom.", ""},
+      {"-interface-state-min-contacts", "int", "1", "positive",
+       "Minimum residue-pair contacts used to assign a contact state.", ""},
+      {"-interface-sasa-stride", "int", "10", "nonnegative",
+       "SASA/BSA sampling stride; zero disables buried-surface analysis.", ""},
+      {"-interface-sasa-points", "int", "96", "N>=12",
+       "Sphere points per atom for interface SASA/BSA.", ""},
       {"-qnative", "bool", "false", "true,false",
        "Enable native-contact Q analysis.", ""},
       {"-dihedral", "bool", "false", "true,false",
@@ -125,6 +145,8 @@ std::vector<OptionSchema> schemas() {
       {"-pbctopo-contact-cutoff", "float", "auto",
        "positive",
        "Override VIBE owner/contact cutoff in Angstrom.", ""},
+      {"-pbctopo-required-contacts", "path", "", "file",
+       "Explicit hard interface-contact graph for VIBE certification.", ""},
       {"-pbctopo-continuity-cutoff", "float", "auto",
        "positive",
        "Override VIBE continuity cutoff in Angstrom.", ""},
@@ -142,10 +164,48 @@ void export_schema_json(const arguments &args, const std::string &filename,
                         std::fstream *log) {
   std::ofstream out(filename);
   out << "{\n";
-  out << "  \"schema_version\": 1,\n";
+  out << "  \"schema_version\": 2,\n";
   out << "  \"build\": ";
   json_string(out, args.get_build_number());
   out << ",\n";
+  out << "  \"build_info\": {\n";
+  out << "    \"version\": ";
+  json_string(out, titan_build::product_version());
+  out << ",\n    \"full_version\": ";
+  json_string(out, titan_build::full_version());
+  out << ",\n    \"build_number\": " << titan_build::build_number();
+  out << ",\n    \"git_commit\": ";
+  json_string(out, titan_build::git_commit());
+  out << ",\n    \"git_commit_short\": ";
+  json_string(out, titan_build::git_commit_short());
+  out << ",\n    \"git_dirty\": "
+      << (titan_build::git_dirty() ? "true" : "false");
+  out << ",\n    \"git_tag\": ";
+  json_string(out, titan_build::git_tag());
+  out << ",\n    \"release_build\": "
+      << (titan_build::release_build() ? "true" : "false");
+  out << ",\n    \"source_date_utc\": ";
+  json_string(out, titan_build::source_date_utc());
+  out << ",\n    \"profile\": ";
+  json_string(out, titan_build::build_profile_name());
+  out << ",\n    \"compiler\": ";
+  json_string(out, titan_build::compiler_name());
+  out << ",\n    \"target_os\": ";
+  json_string(out, titan_build::target_os_name());
+  out << ",\n    \"target_arch\": ";
+  json_string(out, titan_build::target_arch_name());
+  out << ",\n    \"compiled_simd\": ";
+  json_string(out,
+              titan_build::simd_level_name(titan_build::compiled_simd_level()));
+  out << ",\n    \"ci_provider\": ";
+  json_string(out, titan_build::ci_provider());
+  out << ",\n    \"ci_build_number\": ";
+  json_string(out, titan_build::ci_build_number());
+  out << ",\n    \"ci_run_id\": ";
+  json_string(out, titan_build::ci_run_id());
+  out << ",\n    \"generated_metadata\": "
+      << (titan_build::generated_metadata_available() ? "true" : "false");
+  out << "\n  },\n";
   out << "  \"notes\": [\n";
   out << "    \"This schema covers primary public options and Phase 3 "
          "manifest/dry-run contracts.\",\n";

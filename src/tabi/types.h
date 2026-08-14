@@ -1,10 +1,14 @@
 #ifndef TITAN_PBE_TYPES_H
 #define TITAN_PBE_TYPES_H
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
+#include <string_view>
 
 namespace TitanPBE {
 
@@ -40,6 +44,351 @@ inline constexpr std::size_t kGeometricNearAuditBucketCount =
     kGeometricGapBucketCount * kGeometricCenterBucketCount *
     kGeometricKernelCount;
 inline constexpr std::size_t kJcpExpansionChannelCount = 4;
+
+// A sampled, pre-GMRES measurement for the Cartesian full-FMM operator.
+// This is deliberately distinct from the post-solve matvec audit: the two
+// measurements use different probes and answer different questions.
+struct FmmCartesianPreAuditTelemetry {
+  std::string mode{"off"};
+  bool enabled{false};
+  bool finite{true};
+  double aggregate_rel{0.0};
+  double max_stratum_rel{0.0};
+  std::size_t audited_targets{0};
+  std::size_t audited_rows{0};
+  int stages{0};
+  bool expanded_to_256{false};
+  bool expanded_to_512{false};
+  double seconds{0.0};
+  double channel_shadow_seconds{0.0};
+  std::uint64_t probe_hash{0};
+  std::uint64_t channel_probe_hash{0};
+  std::uint64_t sampled_target_hash{0};
+  std::uint64_t channel_direct_pairs_expected{0};
+  std::uint64_t channel_direct_pairs_applied{0};
+};
+
+// Opt-in sampled direct comparison of the converged solution.  It is kept
+// separate from both the fixed pre-GMRES probe and the legacy audit fields.
+struct FmmCartesianSolutionAuditTelemetry {
+  bool enabled{false};
+  bool finite{true};
+  bool relative_available{false};
+  std::string status{"off"};
+  double relative_error{0.0};
+  double absolute_l2{0.0};
+  double direct_l2{0.0};
+  std::size_t targets{0};
+  std::size_t rows{0};
+  double seconds{0.0};
+  std::uint64_t target_hash{0};
+  std::uint64_t direct_pairs_expected{0};
+  std::uint64_t direct_pairs_applied{0};
+};
+
+// The four JCP interaction blocks are reported independently by the opt-in
+// Cartesian channel shadow.  ``available=false`` with ``absolute_only``
+// means the direct norm was too small for a meaningful relative metric.
+struct FmmCartesianChannelAudit {
+  bool available{false};
+  bool finite{true};
+  std::string status{"off"};
+  std::size_t samples{0};
+  double abs_l2{0.0};
+  double rms{0.0};
+  double reference_l2{0.0};
+  double relative_error{0.0};
+};
+
+// P2B2 records retry state separately from the established pre- and
+// post-solve audit telemetry.  The runtime remains opt-in; these default
+// values deliberately make a non-retry solve self-describing in profiles.
+inline constexpr double kFmmCartesianRetrySolutionRelativeGate = 1.0e-4;
+inline constexpr double kFmmCartesianRetryThetaTolerance = 1.0e-12;
+
+enum class FmmCartesianRetryAttemptRole {
+  initial_theta_020,
+  tightened_theta_015,
+};
+
+enum class FmmCartesianRetryAttemptDisposition {
+  accept,
+  retry_trigger,
+  fail_closed,
+};
+
+struct FmmCartesianRetryAttemptClassification {
+  FmmCartesianRetryAttemptDisposition disposition{
+      FmmCartesianRetryAttemptDisposition::fail_closed};
+  std::string_view reason{"not_evaluated"};
+};
+
+struct FmmCartesianRetryIdentityClassification {
+  bool valid{false};
+  std::string_view reason{"not_evaluated"};
+};
+
+// The outer retry wrapper has exactly two possible solve attempts.  Keeping
+// this state machine pure makes the no-third-attempt contract testable without
+// manufacturing another expensive molecular solve.
+enum class FmmCartesianRetryWrapperAction {
+  accept_attempt1,
+  run_attempt2,
+  accept_attempt2,
+  fail_closed,
+};
+
+struct FmmCartesianRetryWrapperDecision {
+  FmmCartesianRetryWrapperAction action{
+      FmmCartesianRetryWrapperAction::fail_closed};
+  int accepted_attempt{0};
+  bool sanitize_result{true};
+  std::string_view reason{"not_evaluated"};
+};
+
+inline FmmCartesianRetryWrapperDecision
+decide_fmm_cartesian_retry_after_attempt1(
+    const FmmCartesianRetryAttemptClassification &first) noexcept {
+  switch (first.disposition) {
+  case FmmCartesianRetryAttemptDisposition::accept:
+    return {FmmCartesianRetryWrapperAction::accept_attempt1, 1, false,
+            first.reason};
+  case FmmCartesianRetryAttemptDisposition::retry_trigger:
+    return {FmmCartesianRetryWrapperAction::run_attempt2, 0, false,
+            first.reason};
+  case FmmCartesianRetryAttemptDisposition::fail_closed:
+    return {FmmCartesianRetryWrapperAction::fail_closed, 0, true,
+            first.reason};
+  }
+  return {FmmCartesianRetryWrapperAction::fail_closed, 0, true,
+          "invalid_attempt1_disposition"};
+}
+
+inline FmmCartesianRetryWrapperDecision
+decide_fmm_cartesian_retry_after_attempt2(
+    const FmmCartesianRetryAttemptClassification &second,
+    const FmmCartesianRetryIdentityClassification &identity) noexcept {
+  if (second.disposition != FmmCartesianRetryAttemptDisposition::accept) {
+    return {FmmCartesianRetryWrapperAction::fail_closed, 0, true,
+            second.reason};
+  }
+  if (!identity.valid) {
+    return {FmmCartesianRetryWrapperAction::fail_closed, 0, true,
+            identity.reason};
+  }
+  return {FmmCartesianRetryWrapperAction::accept_attempt2, 2, false,
+          "accepted_attempt2"};
+}
+
+// A compact, self-contained record of one complete solve.  P2B2C will fill
+// these records around two independent solve_linear_pb attempts; P2B2B keeps
+// them default-off so the existing paths remain numerically unchanged.
+struct FmmCartesianRetryAttemptTelemetry {
+  std::size_t attempt{0};
+  bool started{false};
+  bool completed{false};
+  bool accepted{false};
+  bool technically_valid{false};
+  std::string classification{"off"};
+  std::string classification_reason{"off"};
+  std::string status{"off"};
+  std::string convergence_reason{"off"};
+  bool converged{false};
+  bool finite{false};
+  double theta{0.0};
+  double salt_molar{0.0};
+  bool coupled{false};
+  std::string discretization{"off"};
+  bool node_patch_operator_audit_enabled{false};
+  double true_residual_rel{0.0};
+
+  bool cartesian_full_active{false};
+  bool cartesian_full_finite{false};
+  std::string cartesian_full_requested{"off"};
+  std::string cartesian_full_effective{"off"};
+  int cartesian_full_order{0};
+  int cartesian_full_leaf_size{0};
+  std::size_t panel_count{0};
+  std::uint64_t geometry_hash{0};
+  std::uint64_t tree_hash{0};
+  std::uint64_t worklist_hash{0};
+  std::uint64_t policy_hash{0};
+  std::uint64_t direct_pairs_expected{0};
+  std::uint64_t direct_pairs_applied_last{0};
+  std::uint64_t direct_pairs_applied_total{0};
+  std::uint64_t pre_audit_sampled_target_hash{0};
+  FmmCartesianSolutionAuditTelemetry solution_audit{};
+
+  bool fallback_used{false};
+  std::string preconditioner_requested{"off"};
+  std::string preconditioner_effective{"off"};
+  std::string preconditioner_quality_status{"off"};
+  std::string preconditioner_coarse_status{"off"};
+  std::string preconditioner_ilu_regularization{"off"};
+  double preconditioner_ilu_regularization_selected{0.0};
+  std::size_t preconditioner_ilu_regularization_shifted_rows{0};
+  std::string preconditioner_ilu_unshifted_failure_stage{"off"};
+  std::size_t preconditioner_valid_panels{0};
+  std::size_t preconditioner_ill_conditioned_blocks{0};
+  std::size_t preconditioner_quality_rejected_blocks{0};
+  double preconditioner_setup_ms{0.0};
+  double preconditioner_ilu_factor_setup_ms{0.0};
+
+  double surface_build_ms{0.0};
+  double fmm_prepare_ms{0.0};
+  double gmres_ms{0.0};
+  double wall_ms{0.0};
+  std::size_t accounted_memory_bytes{0};
+  std::size_t rss_before_bytes{0};
+  std::size_t rss_after_bytes{0};
+};
+
+struct FmmCartesianRetryTelemetry {
+  std::string mode{"off"};
+  bool enabled{false};
+  std::size_t attempts_started{0};
+  std::size_t attempts_completed{0};
+  int accepted_attempt{0};
+  std::string trigger_reason{"off"};
+  std::string final_reason{"off"};
+  bool geometry_identity_valid{false};
+  bool tree_identity_valid{false};
+  bool policy_transition_valid{false};
+  double cumulative_wall_ms{0.0};
+  double cumulative_gmres_ms{0.0};
+  std::size_t cumulative_accounted_memory_bytes{0};
+  std::size_t max_boundary_rss_bytes{0};
+  std::array<FmmCartesianRetryAttemptTelemetry, 2> attempts{};
+};
+
+inline bool fmm_cartesian_retry_theta_matches(double actual,
+                                               double expected) noexcept {
+  if (!std::isfinite(actual) || !std::isfinite(expected))
+    return false;
+  const double scale = std::max({1.0, std::abs(actual), std::abs(expected)});
+  return std::abs(actual - expected) <=
+         kFmmCartesianRetryThetaTolerance * scale;
+}
+
+inline bool fmm_cartesian_retry_plain_ilu0_valid(
+    const FmmCartesianRetryAttemptTelemetry &attempt) noexcept {
+  const bool effective_plain =
+      attempt.preconditioner_effective == "fmm_nearfield_ilu0";
+  return attempt.preconditioner_requested == "fmm-nearfield-ilu0" &&
+         effective_plain && attempt.preconditioner_coarse_status == "off" &&
+         std::isfinite(attempt.preconditioner_ilu_regularization_selected) &&
+         attempt.preconditioner_ilu_regularization_selected == 0.0 &&
+         attempt.preconditioner_ilu_regularization_shifted_rows == 0 &&
+         attempt.preconditioner_ilu_unshifted_failure_stage == "off" &&
+         attempt.preconditioner_quality_status == "pass" &&
+         attempt.preconditioner_valid_panels == attempt.panel_count &&
+         attempt.preconditioner_ill_conditioned_blocks == 0 &&
+         attempt.preconditioner_quality_rejected_blocks == 0;
+}
+
+inline FmmCartesianRetryAttemptClassification
+classify_fmm_cartesian_retry_attempt(
+    const FmmCartesianRetryAttemptTelemetry &attempt,
+    FmmCartesianRetryAttemptRole role) noexcept {
+  const double expected_theta =
+      role == FmmCartesianRetryAttemptRole::initial_theta_020 ? 0.20 : 0.15;
+  const auto fail = [](std::string_view reason) {
+    return FmmCartesianRetryAttemptClassification{
+        FmmCartesianRetryAttemptDisposition::fail_closed, reason};
+  };
+  if (!attempt.started || !attempt.completed)
+    return fail("attempt_incomplete");
+  if (attempt.status != "ok")
+    return fail("solver_status_not_ok");
+  if (!attempt.converged)
+    return fail("not_converged");
+  if (!attempt.finite)
+    return fail("solver_nonfinite");
+  if (!std::isfinite(attempt.true_residual_rel) ||
+      attempt.true_residual_rel < 0.0 ||
+      attempt.true_residual_rel > kFmmCartesianRetrySolutionRelativeGate)
+    return fail("true_residual_gate_failed");
+  if (!attempt.coupled || attempt.discretization != "node_patch" ||
+      !attempt.node_patch_operator_audit_enabled ||
+      !std::isfinite(attempt.salt_molar) || attempt.salt_molar <= 0.0)
+    return fail("scientific_scope_mismatch");
+  if (!attempt.cartesian_full_active || !attempt.cartesian_full_finite ||
+      attempt.cartesian_full_requested != "cartesian-full-experimental" ||
+      attempt.cartesian_full_effective != "cartesian-full-experimental" ||
+      attempt.cartesian_full_order != 1 || attempt.cartesian_full_leaf_size != 64)
+    return fail("cartesian_full_fmm_scope_mismatch");
+  if (!fmm_cartesian_retry_theta_matches(attempt.theta, expected_theta))
+    return fail("theta_mismatch");
+  if (attempt.panel_count == 0 || attempt.geometry_hash == 0 ||
+      attempt.tree_hash == 0 || attempt.worklist_hash == 0 ||
+      attempt.policy_hash == 0)
+    return fail("cartesian_full_fmm_hash_missing");
+  if (attempt.direct_pairs_expected == 0 ||
+      attempt.direct_pairs_applied_last != attempt.direct_pairs_expected ||
+      attempt.direct_pairs_applied_total < attempt.direct_pairs_expected ||
+      attempt.direct_pairs_applied_total % attempt.direct_pairs_expected != 0)
+    return fail("cartesian_full_fmm_direct_coverage_mismatch");
+  const FmmCartesianSolutionAuditTelemetry &audit = attempt.solution_audit;
+  const bool audit_rows_valid =
+      audit.targets <= std::numeric_limits<std::size_t>::max() / 2u &&
+      audit.rows == 2u * audit.targets;
+  if (!audit.enabled || !audit.finite || !audit.relative_available ||
+      audit.status != "relative" || !std::isfinite(audit.relative_error) ||
+      audit.relative_error < 0.0 || !std::isfinite(audit.absolute_l2) ||
+      audit.absolute_l2 < 0.0 || !std::isfinite(audit.direct_l2) ||
+      audit.direct_l2 <= 0.0 || !std::isfinite(audit.seconds) ||
+      audit.seconds < 0.0 ||
+      audit.target_hash == 0 || audit.targets == 0 || audit.rows == 0 ||
+      !audit_rows_valid ||
+      audit.target_hash != attempt.pre_audit_sampled_target_hash ||
+      audit.direct_pairs_expected == 0 ||
+      audit.direct_pairs_applied != audit.direct_pairs_expected)
+    return fail("solution_audit_unavailable_or_invalid");
+  if (attempt.fallback_used)
+    return fail("fallback_used");
+  if (!fmm_cartesian_retry_plain_ilu0_valid(attempt))
+    return fail("plain_fmm_nearfield_ilu0_required");
+  if (audit.relative_error <= kFmmCartesianRetrySolutionRelativeGate) {
+    return {FmmCartesianRetryAttemptDisposition::accept,
+            "solution_audit_within_gate"};
+  }
+  if (role == FmmCartesianRetryAttemptRole::initial_theta_020) {
+    return {FmmCartesianRetryAttemptDisposition::retry_trigger,
+            "solution_audit_above_gate"};
+  }
+  return fail("solution_audit_above_gate_after_tighten");
+}
+
+inline FmmCartesianRetryIdentityClassification
+classify_fmm_cartesian_retry_identity(
+    const FmmCartesianRetryAttemptTelemetry &first,
+    const FmmCartesianRetryAttemptTelemetry &second) noexcept {
+  const auto fail = [](std::string_view reason) {
+    return FmmCartesianRetryIdentityClassification{false, reason};
+  };
+  if (!first.started || !first.completed || !second.started ||
+      !second.completed)
+    return fail("attempt_incomplete");
+  if (first.panel_count == 0 || first.panel_count != second.panel_count)
+    return fail("panel_count_mismatch");
+  if (first.geometry_hash == 0 || first.geometry_hash != second.geometry_hash)
+    return fail("geometry_hash_mismatch");
+  if (first.tree_hash == 0 || first.tree_hash != second.tree_hash)
+    return fail("tree_hash_mismatch");
+  if (first.cartesian_full_order != 1 || second.cartesian_full_order != 1 ||
+      first.cartesian_full_leaf_size != 64 ||
+      second.cartesian_full_leaf_size != 64)
+    return fail("cartesian_full_fmm_order_or_leaf_mismatch");
+  if (!fmm_cartesian_retry_theta_matches(first.theta, 0.20) ||
+      !fmm_cartesian_retry_theta_matches(second.theta, 0.15))
+    return fail("retry_theta_mismatch");
+  if (first.worklist_hash == 0 || second.worklist_hash == 0)
+    return fail("worklist_hash_missing");
+  if (first.policy_hash == 0 || second.policy_hash == 0 ||
+      first.policy_hash == second.policy_hash)
+    return fail("policy_hash_transition_invalid");
+  return {true, "identity_match"};
+}
 
 struct GeometricNearAuditBucket {
   std::size_t pairs{0};
@@ -129,6 +478,38 @@ struct FrameResult {
   double tabi_fmm_m2l_setup_ms{0.0};
   double tabi_fmm_m2l_apply_ms{0.0};
   bool tabi_fmm_m2l_finite_outputs{true};
+  bool tabi_bie_cartesian_full_fmm_active{false};
+  std::string tabi_bie_cartesian_full_fmm_requested{"off"};
+  std::string tabi_bie_cartesian_full_fmm_effective{"off"};
+  int tabi_bie_cartesian_full_fmm_order{0};
+  int tabi_bie_cartesian_full_fmm_leaf_size{0};
+  double tabi_bie_cartesian_full_fmm_opening_theta{0.0};
+  std::uint64_t tabi_bie_cartesian_full_fmm_tree_hash{0};
+  std::uint64_t tabi_bie_cartesian_full_fmm_worklist_hash{0};
+  std::uint64_t tabi_bie_cartesian_full_fmm_policy_hash{0};
+  std::size_t tabi_bie_cartesian_full_fmm_nodes{0};
+  std::size_t tabi_bie_cartesian_full_fmm_far_pairs{0};
+  std::size_t tabi_bie_cartesian_full_fmm_direct_pairs{0};
+  std::uint64_t tabi_bie_cartesian_full_fmm_direct_panel_pairs_expected{0};
+  std::uint64_t tabi_bie_cartesian_full_fmm_direct_panel_pairs_applied_last{0};
+  std::uint64_t tabi_bie_cartesian_full_fmm_direct_panel_pairs_applied_total{0};
+  std::size_t tabi_bie_cartesian_full_fmm_cache_entries{0};
+  std::size_t tabi_bie_cartesian_full_fmm_cache_hits{0};
+  std::size_t tabi_bie_cartesian_full_fmm_cache_bytes{0};
+  std::size_t tabi_bie_cartesian_full_fmm_plan_bytes{0};
+  std::size_t tabi_bie_cartesian_full_fmm_workspace_bytes{0};
+  double tabi_bie_cartesian_full_fmm_tree_seconds{0.0};
+  double tabi_bie_cartesian_full_fmm_worklist_seconds{0.0};
+  double tabi_bie_cartesian_full_fmm_cache_seconds{0.0};
+  double tabi_bie_cartesian_full_fmm_audit_seconds{0.0};
+  double tabi_bie_cartesian_full_fmm_p2m_seconds{0.0};
+  double tabi_bie_cartesian_full_fmm_m2m_seconds{0.0};
+  double tabi_bie_cartesian_full_fmm_m2l_seconds{0.0};
+  double tabi_bie_cartesian_full_fmm_l2l_seconds{0.0};
+  double tabi_bie_cartesian_full_fmm_l2p_seconds{0.0};
+  double tabi_bie_cartesian_full_fmm_direct_seconds{0.0};
+  double tabi_bie_cartesian_full_fmm_m2m_parity_error{0.0};
+  double tabi_bie_cartesian_full_fmm_l2l_parity_error{0.0};
   bool tabi_fmm_local_gmres_active{false};
   double tabi_fmm_local_prepare_seconds{0.0};
   std::size_t tabi_fmm_local_plan_build_count{0};
@@ -187,6 +568,11 @@ struct FrameResult {
   double tabi_tree_vs_direct_matvec_rel{0.0};
   std::size_t tabi_matvec_audit_rows{0};
   double tabi_matvec_audit_ms{0.0};
+  FmmCartesianPreAuditTelemetry tabi_fmm_cartesian_pre_audit{};
+  FmmCartesianSolutionAuditTelemetry tabi_fmm_cartesian_solution_audit{};
+  std::array<FmmCartesianChannelAudit, kJcpExpansionChannelCount>
+      tabi_fmm_cartesian_channel_audit{};
+  FmmCartesianRetryTelemetry tabi_fmm_cartesian_retry{};
   double tabi_orthogonalization_ms{0.0};
   double tabi_preconditioner_ms{0.0};
   double tabi_surface_neighbor_ms{0.0};
@@ -605,6 +991,56 @@ struct FrameResult {
   double tabi_surface_quality_enclosed_volume_a3{0.0};
   double tabi_surface_quality_enclosed_volume_rel_error_vs_4piR3_over3{0.0};
   double tabi_surface_quality_triangle_area_cv{0.0};
+  std::string tabi_surface_topology_source{"not_built"};
+  std::string tabi_surface_analytic_ses_engine{"not_applicable"};
+  std::string tabi_surface_status_detail{"not_built"};
+  std::string tabi_surface_cavity_policy{"not_applicable"};
+  std::size_t tabi_surface_odd_ray_rows{0};
+  std::size_t tabi_surface_patch_ray_unresolved_uncertified_rows{0};
+  std::size_t tabi_surface_morphology_fallback_vertices{0};
+  std::string tabi_surface_analytic_orientation_status{"not_run"};
+  std::size_t tabi_surface_analytic_inverted_faces{0};
+  std::size_t tabi_surface_analytic_orientation_uncertified_faces{0};
+  std::size_t tabi_surface_analytic_self_intersections{0};
+  std::size_t tabi_surface_wide_repair_attempts{0};
+  std::size_t tabi_surface_topology_certificate_accepts{0};
+  std::size_t tabi_surface_topology_fallback_audits{0};
+  double tabi_surface_initial_collapse_ms{0.0};
+  double tabi_surface_stable_sliver_ms{0.0};
+  double tabi_surface_full_projection_ms{0.0};
+  double tabi_surface_orientation_repair_ms{0.0};
+  double tabi_surface_wide_repair_ms{0.0};
+  double tabi_surface_self_intersection_audit_ms{0.0};
+  std::size_t tabi_surface_filled_cavity_regions{0};
+  std::size_t tabi_surface_filled_cavity_vertices{0};
+  std::size_t tabi_surface_poor_triangles_before{0};
+  std::size_t tabi_surface_poor_triangles_after{0};
+  double tabi_surface_triangle_quality_min_before{0.0};
+  double tabi_surface_triangle_quality_min_after{0.0};
+  double tabi_surface_max_edge_ratio_before{0.0};
+  double tabi_surface_max_edge_ratio_after{0.0};
+  std::string tabi_surface_analytic_audit_status{"not_run"};
+  std::size_t tabi_surface_analytic_audit_samples{0};
+  std::size_t tabi_surface_analytic_audit_hits{0};
+  std::size_t tabi_surface_analytic_audit_misses{0};
+  double tabi_surface_analytic_projection_distance_rms{0.0};
+  double tabi_surface_analytic_projection_distance_max{0.0};
+  double tabi_surface_analytic_patch_residual_rms{0.0};
+  double tabi_surface_analytic_patch_residual_max{0.0};
+  double tabi_surface_analytic_normal_angle_rms_deg{0.0};
+  double tabi_surface_analytic_normal_angle_max_deg{0.0};
+  double tabi_surface_sampled_hausdorff_proxy{0.0};
+  std::string tabi_surface_analytic_normal_quality_status{"not_run"};
+  std::size_t tabi_surface_analytic_orientation_smooth_faces{0};
+  std::size_t tabi_surface_analytic_orientation_seam_faces{0};
+  std::size_t tabi_surface_analytic_normal_cosine_below_025_faces{0};
+  std::size_t tabi_surface_analytic_normal_cosine_below_050_faces{0};
+  double tabi_surface_analytic_normal_area_weighted_rms_deg{0.0};
+  double tabi_surface_analytic_normal_p99_deg{0.0};
+  double tabi_surface_analytic_smooth_normal_p99_deg{0.0};
+  double tabi_surface_analytic_seam_normal_p99_deg{0.0};
+  double tabi_surface_analytic_normal_area_below_cosine_025_fraction{0.0};
+  double tabi_surface_analytic_normal_area_below_cosine_050_fraction{0.0};
   std::string tabi_calderon_trace_space_status{"off"};
   std::size_t tabi_calderon_trace_vertices{0};
   std::size_t tabi_calderon_trace_edges{0};
@@ -612,6 +1048,10 @@ struct FrameResult {
   std::size_t tabi_calderon_trace_orientation_mismatches{0};
   std::size_t tabi_calderon_trace_nonmanifold_edges{0};
   std::size_t tabi_calderon_trace_unreferenced_vertices{0};
+  std::size_t tabi_calderon_trace_components{0};
+  std::int64_t tabi_calderon_trace_euler_characteristic{0};
+  std::size_t tabi_calderon_trace_genus_sum{0};
+  bool tabi_calderon_trace_topology_invariants_valid{false};
   std::string tabi_calderon_aux_surface_mode{"off"};
   std::string tabi_calderon_aux_trace_status{"off"};
   std::size_t tabi_calderon_aux_panels{0};

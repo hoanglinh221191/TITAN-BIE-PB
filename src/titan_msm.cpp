@@ -1308,7 +1308,7 @@ void TitanMSM::export_results(
     TitanExecutor &executor, const info &info_output, std::fstream &log,
     int n_timescales, bool msm_run_its, bool msm_run_pcca, int msm_macrostates,
     const std::vector<int> &its_lags, TitanMSMItsSolverMode its_solver_mode,
-    int its_topk, int its_max_k_full) const {
+    int its_topk, int its_max_k_full, bool kinetics_interpretable) const {
   if (!msm_built_) {
     TitanUI::print_error(
         "TitanMSM::export_results: build_markov_model() must run first.");
@@ -1320,7 +1320,12 @@ void TitanMSM::export_results(
   // =========================================================================
   // 1. Compute reference implied timescales (at the stored lag)
   // =========================================================================
-  auto ref_timescales = compute_implied_timescales(n_timescales);
+  const auto ref_timescales = kinetics_interpretable
+                                  ? compute_implied_timescales(n_timescales)
+                                  : std::vector<double>{};
+  TitanUI::log_kv(log, "MSM Kinetic Interpretation",
+                  kinetics_interpretable ? "physical continuity available"
+                                         : "disabled (REMD state streams)");
 
   // =========================================================================
   // 2. Write TPM
@@ -1436,9 +1441,15 @@ void TitanMSM::export_results(
       TitanUI::print_error("Cannot open " +
                            info_output.get_msm_timescales_filename());
     } else {
+      if (!kinetics_interpretable) {
+        f << "# unavailable: REMD thermodynamic-state trajectories contain "
+             "accepted configuration exchanges\n";
+      }
       // Fix 4: use cached eigenvalues from build_markov_model for the timescale
       // table
-      if (!eigen_solved_) {
+      if (!kinetics_interpretable) {
+        // State populations and count matrices remain available above.
+      } else if (!eigen_solved_) {
         TitanUI::print_info(
             "[WARNING] Eigenvalues not cached; skipping table.");
       } else {
@@ -1472,7 +1483,7 @@ void TitanMSM::export_results(
   // =========================================================================
   // 6. ITS scan (multi-lag)
   // =========================================================================
-  if (msm_run_its) {
+  if (msm_run_its && kinetics_interpretable) {
     std::vector<int> lags_to_use =
         its_lags.empty() ? generate_its_lags() : its_lags;
 
@@ -1609,12 +1620,15 @@ void TitanMSM::export_results(
       }
     }
   } else {
-    TitanUI::log_kv(log, "ITS Scan", "disabled");
+    TitanUI::log_kv(log, "ITS Scan",
+                    kinetics_interpretable
+                        ? "disabled"
+                        : "disabled (REMD state trajectories)");
   }
   // 7. PCCA crisp macrostate lumping
   // =========================================================================
   int n_macro_used = 0;
-  if (msm_run_pcca) {
+  if (msm_run_pcca && kinetics_interpretable) {
     TitanUI::log_kv(log, "PCCA Method",
                     "weighted spectral k-means on slow eigenmodes");
     // Determine n_macro
@@ -1664,6 +1678,9 @@ void TitanMSM::export_results(
     }
 
     TitanUI::log_kv(log, "PCCA Macrostates", std::to_string(n_macro_used));
+  } else if (msm_run_pcca) {
+    TitanUI::log_kv(log, "PCCA",
+                    "disabled (requires interpretable kinetic eigenmodes)");
   } else {
     TitanUI::log_kv(log, "PCCA Macrostates", "disabled");
   }

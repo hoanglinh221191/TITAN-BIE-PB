@@ -45,6 +45,14 @@ extern "C" {
 /* This function returns the number of atoms in the xtc file in *natoms */
 extern int read_xtc_natoms(char *fn, int *natoms);
 
+/* Estimate frames selected by TITAN's time-window and dt rules. The estimator
+ * samples real XTC frame headers and compressed payload sizes without decoding
+ * coordinates, using 64-bit offsets for both magic 1995 and 2023. */
+extern int estimate_xtc_frame_count(const char *fn, double begin_time_ps,
+                                    mybool begin_set, double end_time_ps,
+                                    mybool end_set, double dt_ps,
+                                    int64_t *selected_frames);
+
 /* Read one frame of an open xtc file */
 extern int read_xtc(XDRFILE * xd, int natoms, int *step, float *time,
                     matrix box, rvec *x, float *prec);

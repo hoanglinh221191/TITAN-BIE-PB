@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -355,11 +356,15 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
           "PBE BIE: -pbe-bie-fmm-m2l=single-matvec-analytic supports centroid, analytic_singular, or duffy_adaptive near integration.");
     }
     FmmM2lSingleMatvecStats fmm_stats;
+    if (tree.fmm_m2l_workspace == nullptr) {
+      tree.fmm_m2l_workspace =
+          std::make_shared<FmmM2lSingleMatvecWorkspace>();
+    }
     TitanPBE::Tabi::apply_jcp_fmm_m2l_single_matvec(
         panels, unknowns, eps_ratio, kappa, lhs_phi, lhs_phin,
         tree.leaf_size, tree.opening_theta, tree.taylor_order, executor, out,
         &fmm_stats, coupled, &tree.fmm_m2l_context, near_integration,
-        quad_buffer);
+        quad_buffer, tree.fmm_m2l_workspace.get());
     if (stats != nullptr) {
       stats->matvec_mode = "jcp2013_fmm_m2l_single_matvec_analytic";
       stats->taylor_order = tree.taylor_order;

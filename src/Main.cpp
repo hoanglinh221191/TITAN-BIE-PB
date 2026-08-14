@@ -67,6 +67,7 @@
 // energy interaction as a function of different coordinate of coms
 /**********************************************************************************************************************/
 #include "functions.h"
+#include "cli/option_validation.h"
 #include "titan_ui.h"
 #include <iostream>
 #include <sstream>
@@ -76,12 +77,20 @@ int main(int argc, char **argv) {
   try {
     arguments Arguments{};
     if (argc != 1) {
-      if (Arguments.parse_arguments(argc, argv) == 2)
+      const int parse_status = Arguments.parse_arguments(argc, argv);
+      if (parse_status == titan_cli::kHandledAndExit)
         return 0;
-      return engine(Arguments);
-    } else if (Arguments.parse_arg_file() == 0) {
+      if (parse_status != titan_cli::kParseSuccess)
+        return parse_status;
       return engine(Arguments);
     } else {
+      const int parse_status = Arguments.parse_arg_file();
+      if (parse_status == titan_cli::kParseSuccess)
+        return engine(Arguments);
+      if (parse_status == titan_cli::kHandledAndExit)
+        return 0;
+      if (parse_status != titan_cli::kNoArgumentFile)
+        return parse_status;
       Arguments.parse_arguments_interactive(argc);
       return engine(Arguments);
     }

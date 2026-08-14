@@ -222,6 +222,7 @@ private:
   std::vector<StoredEdge> last_allostery_te_edges_;
   NetworkMemoryConfig network_memory_cfg_;
   CommunityConfig community_cfg_;
+  UncertaintyArgs uncertainty_cfg_;
   CommunityResult last_community_result_;
   MOL first_pro_frame_;
   MOL first_lig_frame_;

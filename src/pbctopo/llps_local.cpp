@@ -208,6 +208,13 @@ std::vector<Vec3> unwrap_pbctopo_llps_local_points(
   if (wrapped_atoms.empty())
     return points;
   const PbctopoLatticeMetric lattice(Box);
+  if (!lattice.valid()) {
+    for (std::size_t atom_idx = 0; atom_idx < wrapped_atoms.size(); ++atom_idx) {
+      points[atom_idx] = {wrapped_atoms[atom_idx].x, wrapped_atoms[atom_idx].y,
+                          wrapped_atoms[atom_idx].z};
+    }
+    return points;
+  }
 
   std::vector<std::vector<std::size_t>> adjacency(wrapped_atoms.size());
   for (const auto &edge : edges) {
@@ -249,6 +256,8 @@ std::vector<Vec3> unwrap_pbctopo_llps_local_points(
               wrapped_atoms[nb].sx - wrapped_atoms[current].sx,
               wrapped_atoms[nb].sy - wrapped_atoms[current].sy,
               wrapped_atoms[nb].sz - wrapped_atoms[current].sz);
+          if (!mic.valid)
+            continue;
           unwrapped[nb].sx = unwrapped[current].sx + mic.sx;
           unwrapped[nb].sy = unwrapped[current].sy + mic.sy;
           unwrapped[nb].sz = unwrapped[current].sz + mic.sz;

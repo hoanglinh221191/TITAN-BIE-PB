@@ -3,6 +3,7 @@
 
 #include "Multi_MOL.h"
 #include "aligned_allocator.h"
+#include "titan_segment_config.h"
 
 #include <array>
 #include <cstddef>
@@ -41,6 +42,7 @@ public:
   static const char *state_name(State state);
 
   void configure(const DsspArgs &args);
+  void configure_segments(const SegmentArgs &args, std::uint8_t molecule);
   void init(const Multi_MOL &mol, const std::string &label);
   void process_frame(const Multi_MOL &mol, std::size_t snap_idx,
                      TitanExecutor &executor);
@@ -48,6 +50,12 @@ public:
   void export_results(const std::string &filename, std::fstream &log) const;
   void export_content_profile(const std::string &filename,
                               std::fstream &log) const;
+  void export_segment_content(const std::string &filename,
+                              std::fstream &log) const;
+  void export_bridge_registry(const std::string &filename,
+                              std::fstream &log) const;
+  void export_ladder_distribution(const std::string &filename,
+                                  std::fstream &log) const;
 
   [[nodiscard]] bool enabled() const noexcept { return enabled_; }
   [[nodiscard]] bool has_results() const noexcept {
@@ -74,6 +82,7 @@ private:
   struct ResidueBackbone {
     std::size_t ordinal{0};
     std::size_t resnr{0};
+    std::size_t internal_resnr{0};
     std::size_t chainnum{0};
     std::size_t local_index{0};
     std::string chain{" "};
@@ -93,6 +102,33 @@ private:
     std::deque<std::size_t> j;
   };
 
+  struct ResidueAnnotation {
+    std::string entity;
+    std::string segment;
+  };
+
+  struct ResolvedSegment {
+    std::string entity;
+    std::string segment;
+    std::string coordinate;
+    std::size_t begin{0};
+    std::size_t end{0};
+    std::vector<std::size_t> residue_indices;
+  };
+
+  struct FrameBridgePair {
+    std::size_t residue_i{0};
+    std::size_t residue_j{0};
+    BridgeType type{BridgeType::None};
+    long long registry{0};
+  };
+
+  struct FrameLadder {
+    BridgeType type{BridgeType::None};
+    std::size_t length{0};
+    bool interchain{false};
+  };
+
   void build_residue_map(const std::vector<mol_info> &info);
   void prepare_backbone_coordinates(const MOL &frame);
   void compute_hbond_topology(TitanExecutor &executor);
@@ -102,6 +138,9 @@ private:
   [[nodiscard]] std::string
   build_consensus(const std::vector<double> &mean) const;
   void ensure_scratch_capacity(std::size_t n_res);
+  void load_segment_annotations();
+  [[nodiscard]] static const char *
+  bridge_type_name(BridgeType type) noexcept;
 
   [[nodiscard]] bool no_chain_break_between(std::size_t begin,
                                             std::size_t end) const noexcept;
@@ -133,6 +172,10 @@ private:
   std::size_t total_frames_{0};
   std::size_t current_traj_frames_{0};
   double hbond_cutoff_{-0.5};
+  std::string segment_config_file_;
+  std::uint8_t molecule_id_{1};
+  titan_segments::Config segment_config_;
+  bool segment_config_loaded_{false};
 
   std::vector<ResidueBackbone> residues_;
   std::vector<std::array<std::uint64_t, kStateCount>> current_traj_counts_;
@@ -143,6 +186,12 @@ private:
   std::vector<State> frame_states_;
   std::vector<std::array<BondRecord, 2>> best_acceptors_;
   std::vector<std::array<HelixFlag, 3>> helix_flags_;
+  std::vector<ResidueAnnotation> residue_annotations_;
+  std::vector<ResolvedSegment> resolved_segments_;
+  std::vector<FrameBridgePair> current_frame_bridge_pairs_;
+  std::vector<FrameLadder> current_frame_ladders_;
+  std::vector<std::vector<FrameBridgePair>> bridge_frames_;
+  std::vector<std::vector<FrameLadder>> ladder_frames_;
 
   AlignedDoubleVector n_x_, n_y_, n_z_;
   AlignedDoubleVector h_x_, h_y_, h_z_;

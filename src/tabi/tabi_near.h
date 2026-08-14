@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace TitanPBE::Tabi {
@@ -27,6 +28,17 @@ struct JcpNearPairKernel {
   bool valid{false};
   std::string policy{"off"};
 };
+
+// The near-kernel API uses valid=false as an intentional zero sentinel only
+// for a self pair in the uncoupled formulation or in centroid mode.  Callers
+// must fail closed for every other invalid result; source_index == target_index
+// alone is not enough to establish this contract.
+[[nodiscard]] inline bool is_intentional_zero_self_kernel(
+    const JcpNearPairKernel &kernel, bool coupled,
+    std::string_view near_integration) noexcept {
+  return !kernel.valid && kernel.self_pair &&
+         (!coupled || near_integration == "centroid");
+}
 
 std::string resolve_near_integration_mode(const std::string &requested,
                                           const std::vector<Panel> &panels);

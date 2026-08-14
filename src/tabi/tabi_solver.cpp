@@ -3,7 +3,9 @@
 #include "tabi_fmm_m2l_preconditioner.h"
 #include "tabi_fmm_m2l_prototype.h"
 #include "tabi_preconditioner.h"
+#include "tabi_cartesian_retry_foundation.h"
 #include "tabi_types.h"
+#include "../bie/bie_cartesian_fmm_solver_adapter.h"
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -27,9 +29,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -39,7 +44,9 @@
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace TitanPBE::Tabi {
@@ -50,6 +57,252 @@ constexpr double kCoulombKcalPerMol = 332.063713299;
 constexpr double kKcalToKJ = 4.184;
 constexpr double kKBKJPerMolK = 0.00831446261815324;
 constexpr std::size_t kParallelVectorThreshold = 32768;
+
+constexpr std::uint64_t kFmmAuditHashOffset = 1469598103934665603ULL;
+constexpr std::uint64_t kFmmAuditHashPrime = 1099511628211ULL;
+
+#if defined(TITAN_CARTESIAN_FMM_TESTING)
+void maybe_write_p3c0_packed_plan_inspection(
+    const titan::bie::CartesianFullFmmSolverOperator &op) {
+  const char *const destination =
+      std::getenv("TITAN_P3C0_PACKED_PLAN_INSPECT_PATH");
+  if (destination == nullptr || *destination == '\0')
+    return;
+  const auto inspection = op.packed_direct_plan_inspection_for_testing();
+  const auto &stats = op.stats();
+  std::ofstream out(destination, std::ios::out | std::ios::trunc);
+  if (!out.is_open())
+    throw std::runtime_error(
+        "P3C0 test-only packed-plan inspector could not open output");
+  out << std::setprecision(17);
+  out << "available,target_batches,full_four_lane_batches,tail_batches,"
+         "full_four_lane_task_count,tail_task_count,"
+         "target_lanes,task_count,source_span_count,source_spans_per_task,"
+         "tasks_per_batch_mean,tasks_per_batch_min,tasks_per_batch_p50,"
+         "tasks_per_batch_p95,tasks_per_batch_max,"
+         "source_panels_per_task_mean,source_panels_per_task_min,"
+         "source_panels_per_task_p50,source_panels_per_task_p95,"
+         "source_panels_per_task_max,metadata_bytes,total_pairs,"
+         "plan_direct_panel_pairs,plan_direct_pairs,plan_tree_hash,"
+         "plan_worklist_hash,leaf_size,theta\n";
+  out << (inspection.available ? "true" : "false") << ','
+      << inspection.target_batches << ',' << inspection.full_four_lane_batches
+      << ',' << inspection.tail_batches << ','
+      << inspection.full_four_lane_task_count << ','
+      << inspection.tail_task_count << ',' << inspection.target_lanes << ','
+      << inspection.task_count << ',' << inspection.source_span_count << ','
+      << inspection.source_spans_per_task << ','
+      << inspection.tasks_per_batch_mean << ','
+      << inspection.tasks_per_batch_min << ','
+      << inspection.tasks_per_batch_p50 << ','
+      << inspection.tasks_per_batch_p95 << ','
+      << inspection.tasks_per_batch_max << ','
+      << inspection.source_panels_per_task_mean << ','
+      << inspection.source_panels_per_task_min << ','
+      << inspection.source_panels_per_task_p50 << ','
+      << inspection.source_panels_per_task_p95 << ','
+      << inspection.source_panels_per_task_max << ','
+      << inspection.metadata_bytes << ',' << inspection.total_pairs << ','
+      << stats.plan.direct_panel_pairs << ',' << stats.plan.direct_pairs << ','
+      << stats.plan.tree_hash << ',' << stats.plan.worklist_hash << ','
+      << stats.leaf_size << ',' << stats.opening_theta << '\n';
+  if (!out)
+    throw std::runtime_error(
+        "P3C0 test-only packed-plan inspector could not write output");
+}
+
+bool p3d0_timing_value_valid(double value) noexcept {
+  return std::isfinite(value) && value >= 0.0;
+}
+
+double p3d0_timing_tolerance(double parent_seconds,
+                              std::size_t apply_count) noexcept {
+  return std::max(1.0e-6 * static_cast<double>(apply_count),
+                  1.0e-5 * std::max(0.0, parent_seconds));
+}
+
+void maybe_write_p3d0_direct_phase_attribution(
+    const titan::bie::CartesianFullFmmSolverOperator &op,
+    const Result &result) {
+  const char *const destination =
+      std::getenv("TITAN_P3D0_DIRECT_PHASE_PATH");
+  if (destination == nullptr || *destination == '\0')
+    return;
+
+  const auto &stats = op.stats();
+  const auto &timing = stats.testing_direct_phase_timing;
+  const auto inspection = op.packed_direct_plan_inspection_for_testing();
+  const auto fail = [](const char *reason) {
+    throw std::runtime_error(
+        std::string("P3D0 test-only direct phase sidecar invariant failed: ") +
+        reason);
+  };
+  if (!timing.available || !timing.finite || !inspection.available)
+    fail("testing_timing_or_packed_plan_unavailable");
+  if (stats.direct_kernel != "packed-avx2-vector-exp-node-patch-corrected")
+    fail("unexpected_direct_kernel");
+  if (stats.apply_calls == 0 || timing.counted_apply_calls != stats.apply_calls ||
+      result.fmm_local_gmres_matvec_calls != stats.apply_calls)
+    fail("counted_apply_call_mismatch");
+  if (!stats.finite_outputs || !stats.last_apply.finite_outputs ||
+      stats.plan.direct_panel_pairs == 0 || inspection.total_pairs == 0 ||
+      stats.plan.direct_panel_pairs != inspection.total_pairs ||
+      timing.expected_direct_panel_pairs != timing.applied_direct_panel_pairs ||
+      timing.expected_direct_panel_pairs !=
+          stats.total_apply.expected_direct_panel_pairs ||
+      timing.applied_direct_panel_pairs != stats.total_apply.direct_panel_pairs ||
+      stats.total_apply.expected_direct_panel_pairs !=
+          stats.total_apply.direct_panel_pairs)
+    fail("direct_coverage_mismatch");
+  const std::uint64_t apply_count =
+      static_cast<std::uint64_t>(stats.apply_calls);
+  if (apply_count != stats.apply_calls ||
+      inspection.total_pairs >
+          std::numeric_limits<std::uint64_t>::max() / apply_count ||
+      timing.expected_direct_panel_pairs != inspection.total_pairs * apply_count)
+    fail("direct_coverage_count_overflow_or_drift");
+  if (result.bie_cartesian_full_fmm_tree_hash == 0 ||
+      result.bie_cartesian_full_fmm_worklist_hash == 0 ||
+      result.bie_cartesian_full_fmm_policy_hash == 0 ||
+      result.bie_cartesian_full_fmm_tree_hash != stats.plan.tree_hash ||
+      result.bie_cartesian_full_fmm_worklist_hash != stats.plan.worklist_hash ||
+      result.bie_cartesian_full_fmm_direct_panel_pairs_applied_total !=
+          timing.applied_direct_panel_pairs)
+    fail("result_identity_or_coverage_drift");
+
+  const std::array<double, 15> nonnegative_timing{
+      timing.packed_unknown_cache_reorder_seconds,
+      timing.packed_worker_scratch_prep_seconds,
+      timing.packed_parallel_region_seconds,
+      timing.packed_worker_metric_reduction_seconds,
+      timing.packed_finite_scan_seconds,
+      timing.packed_wrapper_residual_seconds,
+      timing.packed_phase_sum_seconds,
+      timing.packed_total_seconds,
+      timing.node_patch_correction_seconds,
+      timing.adapter_direct_total_seconds,
+      timing.adapter_direct_residual_seconds,
+      timing.adapter_coverage_bookkeeping_seconds,
+      timing.adapter_residual_coverage_seconds,
+      timing.adapter_direct_phase_sum_seconds,
+      stats.total_apply.direct_seconds};
+  for (const double value : nonnegative_timing) {
+    if (!p3d0_timing_value_valid(value))
+      fail("nonfinite_or_negative_timing");
+  }
+  if (timing.adapter_direct_total_seconds <= 0.0)
+    fail("zero_adapter_direct_total");
+  if (!std::isfinite(timing.packed_closure_seconds) ||
+      !std::isfinite(timing.adapter_direct_closure_seconds))
+    fail("nonfinite_timing_closure");
+  const double packed_tolerance =
+      p3d0_timing_tolerance(timing.packed_total_seconds, stats.apply_calls);
+  const double adapter_tolerance = p3d0_timing_tolerance(
+      timing.adapter_direct_total_seconds, stats.apply_calls);
+  if (timing.packed_phase_sum_seconds >
+          timing.packed_total_seconds + packed_tolerance ||
+      std::abs(timing.packed_closure_seconds) > packed_tolerance ||
+      timing.adapter_direct_phase_sum_seconds >
+          timing.adapter_direct_total_seconds + adapter_tolerance ||
+      std::abs(timing.adapter_direct_closure_seconds) > adapter_tolerance ||
+      timing.adapter_direct_total_seconds != stats.total_apply.direct_seconds)
+    fail("phase_parent_or_closure_mismatch");
+
+  std::ofstream out(destination, std::ios::out | std::ios::trunc);
+  if (!out.is_open())
+    throw std::runtime_error(
+        "P3D0 test-only direct phase sidecar could not open output");
+  out << std::setprecision(17);
+  out << "status,apply_count,stats_apply_calls,panels,iterations,matvec_calls,"
+         "fmm_gmres_matvec_calls,direct_kernel,tree_hash,worklist_hash,"
+         "policy_hash,plan_direct_leaf_pairs,plan_direct_panel_pairs,"
+         "packed_target_batches,packed_task_count,packed_metadata_bytes,"
+         "packed_total_pairs,direct_pairs_expected_total,"
+         "direct_pairs_applied_total,packed_unknown_cache_reorder_seconds,"
+         "packed_worker_scratch_prep_seconds,packed_parallel_region_seconds,"
+         "packed_worker_metric_reduction_seconds,"
+         "packed_finite_scan_seconds,packed_wrapper_residual_seconds,"
+         "packed_phase_sum_seconds,packed_total_seconds,"
+         "packed_closure_seconds,node_patch_correction_seconds,"
+         "adapter_direct_total_seconds,adapter_direct_residual_seconds,"
+         "adapter_coverage_bookkeeping_seconds,"
+         "adapter_residual_coverage_seconds,"
+         "adapter_direct_phase_sum_seconds,adapter_direct_closure_seconds,"
+         "packed_unknown_cache_reorder_fraction,"
+         "packed_worker_scratch_prep_fraction,"
+         "packed_parallel_region_fraction,"
+         "packed_worker_metric_reduction_fraction,"
+         "packed_finite_scan_fraction,packed_wrapper_residual_fraction,"
+         "node_patch_correction_fraction,adapter_direct_residual_fraction,"
+         "adapter_coverage_bookkeeping_fraction,finite_outputs\n";
+  const double direct_total = timing.adapter_direct_total_seconds;
+  out << result.status << ',' << timing.counted_apply_calls << ','
+      << stats.apply_calls << ',' << result.panel_count << ','
+      << result.iterations
+      << ',' << result.matvec_calls << ',' << result.fmm_local_gmres_matvec_calls
+      << ',' << stats.direct_kernel << ',' << stats.plan.tree_hash << ','
+      << stats.plan.worklist_hash << ','
+      << result.bie_cartesian_full_fmm_policy_hash << ','
+      << stats.plan.direct_pairs << ',' << stats.plan.direct_panel_pairs << ','
+      << inspection.target_batches << ',' << inspection.task_count << ','
+      << inspection.metadata_bytes << ',' << inspection.total_pairs << ','
+      << timing.expected_direct_panel_pairs << ','
+      << timing.applied_direct_panel_pairs << ','
+      << timing.packed_unknown_cache_reorder_seconds << ','
+      << timing.packed_worker_scratch_prep_seconds << ','
+      << timing.packed_parallel_region_seconds << ','
+      << timing.packed_worker_metric_reduction_seconds << ','
+      << timing.packed_finite_scan_seconds << ','
+      << timing.packed_wrapper_residual_seconds << ','
+      << timing.packed_phase_sum_seconds << ',' << timing.packed_total_seconds
+      << ',' << timing.packed_closure_seconds << ','
+      << timing.node_patch_correction_seconds << ','
+      << timing.adapter_direct_total_seconds << ','
+      << timing.adapter_direct_residual_seconds << ','
+      << timing.adapter_coverage_bookkeeping_seconds << ','
+      << timing.adapter_residual_coverage_seconds << ','
+      << timing.adapter_direct_phase_sum_seconds << ','
+      << timing.adapter_direct_closure_seconds << ','
+      << timing.packed_unknown_cache_reorder_seconds / direct_total << ','
+      << timing.packed_worker_scratch_prep_seconds / direct_total << ','
+      << timing.packed_parallel_region_seconds / direct_total << ','
+      << timing.packed_worker_metric_reduction_seconds / direct_total << ','
+      << timing.packed_finite_scan_seconds / direct_total << ','
+      << timing.packed_wrapper_residual_seconds / direct_total << ','
+      << timing.node_patch_correction_seconds / direct_total << ','
+      << timing.adapter_direct_residual_seconds / direct_total << ','
+      << timing.adapter_coverage_bookkeeping_seconds / direct_total << ','
+      << (stats.finite_outputs ? "true" : "false") << '\n';
+  if (!out)
+    throw std::runtime_error(
+        "P3D0 test-only direct phase sidecar could not write output");
+}
+#endif
+
+void fmm_audit_hash_mix(std::uint64_t &hash, std::uint64_t value) noexcept {
+  hash ^= value;
+  hash *= kFmmAuditHashPrime;
+}
+
+std::uint64_t fmm_audit_probe_hash(const std::vector<double> &values,
+                                   std::uint64_t tag) noexcept {
+  std::uint64_t hash = kFmmAuditHashOffset;
+  fmm_audit_hash_mix(hash, tag);
+  fmm_audit_hash_mix(hash, static_cast<std::uint64_t>(values.size()));
+  for (const double value : values)
+    fmm_audit_hash_mix(hash, std::bit_cast<std::uint64_t>(value));
+  return hash == 0 ? 1 : hash;
+}
+
+std::uint64_t
+fmm_audit_target_hash(const std::vector<std::size_t> &targets) noexcept {
+  std::uint64_t hash = kFmmAuditHashOffset;
+  fmm_audit_hash_mix(hash, 0x54415247455453ULL); // "TARGETS"
+  fmm_audit_hash_mix(hash, static_cast<std::uint64_t>(targets.size()));
+  for (const std::size_t target : targets)
+    fmm_audit_hash_mix(hash, static_cast<std::uint64_t>(target));
+  return hash == 0 ? 1 : hash;
+}
 
 struct AttributionAggregate {
   double error_sq{0.0};
@@ -3069,8 +3322,8 @@ std::vector<double> build_jcp_rhs(const std::vector<Atom> &atoms,
   };
 
 #if TITAN_SIMD_X86
-  auto avx2_panel = [&](const Panel &panel, double &s1,
-                        double &s2) TITAN_TARGET_AVX2 noexcept {
+  auto avx2_panel = [&] TITAN_LAMBDA_TARGET_AVX2(const Panel &panel, double &s1,
+                                                 double &s2) noexcept {
     constexpr double inv_four_pi_scalar = 1.0 / (4.0 * kPi);
     const __m256d px = _mm256_set1_pd(panel.x);
     const __m256d py = _mm256_set1_pd(panel.y);
@@ -3640,9 +3893,22 @@ double jcp_poisson_energy_kcal(const std::vector<Atom> &atoms,
 
 } // namespace
 
-Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
-                       TitanExecutor &executor) {
+static Result solve_linear_pb_single_attempt(const std::vector<Atom> &atoms,
+                                             const Options &options,
+                                             TitanExecutor &executor) {
   Result result;
+  const bool cartesian_full_requested =
+      options.fmm_engine == "cartesian-full-experimental";
+  const bool cartesian_full_order4 =
+      cartesian_full_requested && options.bie_fmm_cartesian_order == 4;
+  const int effective_tree_leaf_size =
+      cartesian_full_requested && !options.tree_leaf_size_explicit
+          ? (cartesian_full_order4 ? 80 : 64)
+          : options.tree_leaf_size;
+  const double effective_tree_opening_theta =
+      cartesian_full_requested && !options.tree_opening_theta_explicit
+          ? (cartesian_full_order4 ? 0.65 : 0.20)
+          : options.tree_opening_theta;
   result.tree_preset = (options.tree_preset == "stage3u-safe" ||
                         options.tree_preset == "stage3u-perf" ||
                         options.tree_preset == "stage3u-perf2")
@@ -4047,6 +4313,16 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   }
   result.panel_count = panels.size();
   result.boundary_nodes = panels.size();
+  if (options.fmm_cartesian_retry_runtime) {
+    const cartesian_retry::CartesianRetryGeometryFingerprint fingerprint =
+        cartesian_retry::fingerprint_cartesian_retry_geometry(panels);
+    if (!fingerprint.valid || fingerprint.value == 0) {
+      throw std::runtime_error(
+          "cartesian_full_fmm_retry_geometry_fingerprint_failed");
+    }
+    result.fmm_cartesian_retry_geometry_hash = fingerprint.value;
+    result.fmm_cartesian_retry_geometry_valid = true;
+  }
   const int surface_point_max = options.highres_surface ? 65536 : 4096;
   result.surface_point_count_requested =
       std::clamp(options.surface_point_count, 8, surface_point_max);
@@ -4326,8 +4602,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                                        : std::string("onthefly"));
       jcp_tree = build_tree_workspace(
           panels, executor,
-          static_cast<std::size_t>(std::max(8, options.tree_leaf_size)),
-          options.tree_opening_theta, options.leaf_near_policy,
+          static_cast<std::size_t>(std::max(8, effective_tree_leaf_size)),
+          effective_tree_opening_theta, options.leaf_near_policy,
           options.leaf_panel_kernel, options.adaptive_level, result.quad_buffer,
           jcp_tree_interaction_mode, result.node_bounds_mode,
           result.tree_builder, options.mac_safety, options.mac_gap_factor,
@@ -4594,6 +4870,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       return rows;
     };
 
+    const bool cartesian_full_gmres = cartesian_full_requested;
     const bool gmres_p4 = options.fmm_local == "gmres-p4";
     const bool kifmm_gmres = options.fmm_engine == "kifmm-lite-experimental";
     const bool channel_hybrid_gmres =
@@ -4604,6 +4881,120 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     [[maybe_unused]] const std::string kifmm_ilu0_graph_source =
         kifmm_fallback_ilu_graph ? "kifmm_fallback_capped_panel_graph"
                                  : "cartesian_fmm_m2l_near_panel_graph";
+    std::unique_ptr<titan::bie::CartesianFullFmmSolverOperator>
+        cartesian_full_operator;
+    bool cartesian_full_workspace_accounted = false;
+    std::uint64_t cartesian_full_tree_hash = 0;
+    std::uint64_t cartesian_full_worklist_hash = 0;
+    std::uint64_t cartesian_full_policy_hash = 0;
+    if (cartesian_full_gmres) {
+      titan::bie::CartesianFullFmmPrepareOptions full_options;
+      full_options.expansion_order = options.bie_fmm_cartesian_order;
+      full_options.leaf_size = std::max(8, effective_tree_leaf_size);
+      full_options.max_depth = 10;
+      full_options.theta = effective_tree_opening_theta;
+      full_options.eps_ratio = eps_ratio;
+      full_options.kappa = kappa;
+      full_options.near_integration = result.near_integration;
+      full_options.quad_buffer = result.quad_buffer;
+      auto prepared =
+          titan::bie::CartesianFullFmmSolverOperator::prepare(panels,
+                                                               full_options,
+                                                               executor);
+      if (!prepared)
+        throw std::runtime_error("cartesian_full_prepare_failed: " +
+                                 prepared.error());
+      cartesian_full_operator = std::move(*prepared);
+      const auto &full_stats = cartesian_full_operator->stats();
+#if defined(TITAN_CARTESIAN_FMM_TESTING)
+      maybe_write_p3c0_packed_plan_inspection(*cartesian_full_operator);
+#endif
+      result.bie_cartesian_full_fmm_active = true;
+      result.bie_cartesian_full_fmm_requested =
+          "cartesian-full-experimental";
+      result.bie_cartesian_full_fmm_effective =
+          full_stats.effective_engine;
+      result.bie_cartesian_full_fmm_order = full_stats.expansion_order;
+      result.bie_cartesian_full_fmm_leaf_size = full_stats.leaf_size;
+      result.bie_cartesian_full_fmm_opening_theta =
+          full_stats.opening_theta;
+      cartesian_full_tree_hash = full_stats.plan.tree_hash;
+      cartesian_full_worklist_hash = full_stats.plan.worklist_hash;
+      std::uint64_t policy_hash = kFmmAuditHashOffset;
+      auto mix_policy_text = [&](const std::string &text) {
+        for (const unsigned char character : text)
+          fmm_audit_hash_mix(policy_hash,
+                             static_cast<std::uint64_t>(character));
+        fmm_audit_hash_mix(policy_hash, 0xffu);
+      };
+      fmm_audit_hash_mix(policy_hash, 0x43415254464d4dULL); // "CARTFMM"
+      fmm_audit_hash_mix(policy_hash,
+                         static_cast<std::uint64_t>(full_stats.expansion_order));
+      fmm_audit_hash_mix(policy_hash,
+                         static_cast<std::uint64_t>(full_stats.leaf_size));
+      fmm_audit_hash_mix(
+          policy_hash, std::bit_cast<std::uint64_t>(full_stats.opening_theta));
+      fmm_audit_hash_mix(policy_hash, std::bit_cast<std::uint64_t>(eps_ratio));
+      fmm_audit_hash_mix(policy_hash, std::bit_cast<std::uint64_t>(kappa));
+      fmm_audit_hash_mix(policy_hash, coupled ? 1u : 0u);
+      mix_policy_text(result.near_integration);
+      mix_policy_text(result.quad_buffer);
+      mix_policy_text(result.discretization);
+      cartesian_full_policy_hash = policy_hash == 0 ? 1 : policy_hash;
+      result.bie_cartesian_full_fmm_tree_hash = cartesian_full_tree_hash;
+      result.bie_cartesian_full_fmm_worklist_hash =
+          cartesian_full_worklist_hash;
+      result.bie_cartesian_full_fmm_policy_hash = cartesian_full_policy_hash;
+      result.bie_cartesian_full_fmm_nodes = full_stats.plan.nodes;
+      result.bie_cartesian_full_fmm_far_pairs = full_stats.plan.far_pairs;
+      result.bie_cartesian_full_fmm_direct_pairs =
+          full_stats.plan.direct_pairs;
+      result.bie_cartesian_full_fmm_direct_panel_pairs_expected =
+          full_stats.plan.direct_panel_pairs;
+      result.bie_cartesian_full_fmm_cache_entries =
+          full_stats.plan.translation_cache_entries;
+      result.bie_cartesian_full_fmm_cache_hits =
+          full_stats.plan.translation_cache_hits;
+      result.bie_cartesian_full_fmm_cache_bytes =
+          full_stats.plan.translation_cache_bytes;
+      result.bie_cartesian_full_fmm_plan_bytes =
+          full_stats.plan.retained_plan_bytes;
+      result.bie_cartesian_full_fmm_tree_seconds =
+          full_stats.plan.tree_seconds;
+      result.bie_cartesian_full_fmm_worklist_seconds =
+          full_stats.plan.worklist_seconds;
+      result.bie_cartesian_full_fmm_cache_seconds =
+          full_stats.plan.cache_seconds;
+      result.bie_cartesian_full_fmm_audit_seconds =
+          full_stats.plan.audit_seconds;
+      result.bie_cartesian_full_fmm_m2m_parity_error =
+          full_stats.plan.m2m_parity_relative_error;
+      result.bie_cartesian_full_fmm_l2l_parity_error =
+          full_stats.plan.l2l_parity_relative_error;
+      result.fmm_local_gmres_active = true;
+      result.fmm_local_prepare_seconds = full_stats.plan.setup_seconds;
+      result.fmm_local_plan_build_count = 1;
+      result.fmm_local_cache_build_count =
+          full_stats.plan.translation_cache_entries > 0 ? 1 : 0;
+      result.fmm_local_operator_finite = full_stats.plan.finite_outputs;
+      result.memory_bytes += full_stats.plan.retained_plan_bytes;
+      jcp_tree_stats.matvec_mode =
+          options.bie_fmm_cartesian_order == 1
+              ? "jcp2013_cartesian_full_fmm_order1"
+              : "jcp2013_cartesian_full_fmm_order4";
+      jcp_tree_stats.taylor_order = options.bie_fmm_cartesian_order;
+      jcp_tree_stats.fmm_m2l_mode = "cartesian-full-experimental";
+      jcp_tree_stats.jcp_direct_kernel = full_stats.direct_kernel;
+      jcp_tree_stats.fmm_m2l_expansion_order =
+          options.bie_fmm_cartesian_order;
+      jcp_tree_stats.fmm_m2l_near_pairs =
+          full_stats.plan.direct_panel_pairs;
+      jcp_tree_stats.fmm_m2l_far_pairs = full_stats.plan.far_pairs;
+      jcp_tree_stats.fmm_m2l_setup_ms =
+          1000.0 * full_stats.plan.setup_seconds;
+      jcp_tree_stats.fmm_m2l_finite_outputs =
+          full_stats.plan.finite_outputs;
+    }
     std::shared_ptr<titan::tabi::fmm_m2l::FmmM2lAnalyticContext>
         gmres_p4_context;
     // The p4 input split is performed for every Krylov matvec. Retain these
@@ -4958,6 +5349,71 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       write_kifmm_gmres_phase("prepare_done");
     }
 
+    auto apply_cartesian_full_operator = [&](const std::vector<double> &x,
+                                              std::vector<double> &out,
+                                              bool count_gmres_matvec) {
+      if (!cartesian_full_operator)
+        throw std::logic_error("cartesian_full_context_not_prepared");
+      cartesian_full_operator->apply(x, lhs_phi, lhs_phin, coupled, executor,
+                                     out, count_gmres_matvec);
+      const auto &full_stats = cartesian_full_operator->stats();
+      if (full_stats.plan.tree_hash != cartesian_full_tree_hash ||
+          full_stats.plan.worklist_hash != cartesian_full_worklist_hash) {
+        throw std::runtime_error(
+            "cartesian_full_fmm_lifecycle_hash_drift");
+      }
+      result.fmm_local_operator_finite =
+          result.fmm_local_operator_finite && full_stats.finite_outputs;
+      result.bie_cartesian_full_fmm_workspace_bytes =
+          std::max(result.bie_cartesian_full_fmm_workspace_bytes,
+                   full_stats.last_apply.retained_workspace_bytes);
+      result.bie_cartesian_full_fmm_direct_panel_pairs_expected =
+          full_stats.last_apply.expected_direct_panel_pairs;
+      result.bie_cartesian_full_fmm_direct_panel_pairs_applied_last =
+          full_stats.last_apply.direct_panel_pairs;
+      result.bie_cartesian_full_fmm_direct_panel_pairs_applied_total =
+          full_stats.total_apply.direct_panel_pairs;
+      if (!cartesian_full_workspace_accounted) {
+        result.memory_bytes += full_stats.last_apply.retained_workspace_bytes;
+        cartesian_full_workspace_accounted = true;
+      }
+      if (count_gmres_matvec) {
+        result.fmm_local_gmres_matvec_calls = full_stats.apply_calls;
+        result.fmm_local_gmres_apply_seconds_total =
+            full_stats.total_apply.apply_seconds;
+        result.fmm_local_gmres_apply_seconds_mean =
+            full_stats.apply_calls > 0
+                ? full_stats.total_apply.apply_seconds /
+                      static_cast<double>(full_stats.apply_calls)
+                : 0.0;
+        result.fmm_local_moment_seconds_total =
+            full_stats.total_apply.p2m_seconds +
+            full_stats.total_apply.m2m_seconds;
+        result.fmm_local_m2l_seconds_total =
+            full_stats.total_apply.m2l_seconds;
+        result.fmm_local_fallback_seconds_total =
+            full_stats.total_apply.direct_seconds;
+        result.fmm_local_l2p_seconds_total =
+            full_stats.total_apply.l2l_seconds +
+            full_stats.total_apply.l2p_seconds;
+        result.bie_cartesian_full_fmm_p2m_seconds =
+            full_stats.total_apply.p2m_seconds;
+        result.bie_cartesian_full_fmm_m2m_seconds =
+            full_stats.total_apply.m2m_seconds;
+        result.bie_cartesian_full_fmm_m2l_seconds =
+            full_stats.total_apply.m2l_seconds;
+        result.bie_cartesian_full_fmm_l2l_seconds =
+            full_stats.total_apply.l2l_seconds;
+        result.bie_cartesian_full_fmm_l2p_seconds =
+            full_stats.total_apply.l2p_seconds;
+        result.bie_cartesian_full_fmm_direct_seconds =
+            full_stats.total_apply.direct_seconds;
+        jcp_tree_stats.fmm_m2l_apply_ms =
+            1000.0 * full_stats.total_apply.apply_seconds;
+        jcp_tree_stats.fmm_m2l_finite_outputs = full_stats.finite_outputs;
+      }
+    };
+
     auto apply_p4_operator = [&](const std::vector<double> &x,
                                  std::vector<double> &out,
                                  bool count_gmres_matvec) {
@@ -5281,7 +5737,9 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
 
     auto matvec = [&](const std::vector<double> &x, std::vector<double> &out) {
       const auto begin = std::chrono::steady_clock::now();
-      if (channel_hybrid_gmres) {
+      if (cartesian_full_gmres) {
+        apply_cartesian_full_operator(x, out, true);
+      } else if (channel_hybrid_gmres) {
         apply_channel_hybrid_operator(x, out, true);
       } else if (kifmm_gmres) {
         apply_kifmm_operator(x, out, true);
@@ -5304,6 +5762,34 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       }
       matvec_ms_total += elapsed_ms(begin, std::chrono::steady_clock::now());
       ++matvec_calls;
+    };
+    // Pre-GMRES diagnostics must exercise the prepared operator without
+    // contaminating Krylov/apply counters or their timing totals.
+    auto audit_apply = [&](const std::vector<double> &x,
+                           std::vector<double> &out) {
+      if (cartesian_full_gmres) {
+        apply_cartesian_full_operator(x, out, false);
+      } else if (channel_hybrid_gmres) {
+        apply_channel_hybrid_operator(x, out, false);
+      } else if (kifmm_gmres) {
+        apply_kifmm_operator(x, out, false);
+      } else if (gmres_p4) {
+        apply_p4_operator(x, out, false);
+      } else if (experimental_treecode) {
+        apply_jcp_treecode_operator(panels, x, eps_ratio, kappa, lhs_phi,
+                                    lhs_phin, coupled, jcp_tree,
+                                    result.near_integration, result.quad_buffer,
+                                    executor, out, nullptr);
+      } else if (coupled) {
+        apply_jcp_linear_pb_operator(
+            panels, x, eps_ratio, kappa, lhs_phi, lhs_phin,
+            result.near_integration, result.quad_buffer, executor, out,
+            nullptr);
+      } else {
+        apply_jcp_poisson_operator(panels, x, eps_ratio, lhs_phi,
+                                   result.near_integration, result.quad_buffer,
+                                   executor, out, nullptr);
+      }
     };
     std::vector<std::size_t> direct_order(panels.size(), 0);
     std::iota(direct_order.begin(), direct_order.end(), std::size_t{0});
@@ -5476,12 +5962,31 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       };
     }
 
+    const bool cartesian_channel_shadow_requested =
+        options.fmm_cartesian_error_audit == "channel-shadow";
+    std::vector<std::size_t> cartesian_channel_shadow_targets;
+    std::uint64_t cartesian_channel_shadow_target_hash = 0;
+    if (cartesian_channel_shadow_requested &&
+        !(cartesian_full_gmres && options.bie_fmm_cartesian_order == 1 &&
+          node_patch_discretization && coupled &&
+          options.node_patch_operator_audit == "on")) {
+      throw std::logic_error(
+          "cartesian_full_fmm_channel_shadow_scope_mismatch");
+    }
+
     // Node-patch is opt-in and uses a distinct source quadrature center.  Do
     // not spend hundreds of Krylov iterations on a mismatched near/far
     // operator: compare one deterministic FMM action against sampled direct
     // rows before constructing the preconditioner or entering GMRES.
-    if (node_patch_discretization && experimental_treecode) {
+    if (node_patch_discretization && experimental_treecode &&
+        options.node_patch_operator_audit == "on") {
       const auto audit_begin = std::chrono::steady_clock::now();
+      FmmCartesianPreAuditTelemetry &pre_audit =
+          result.fmm_cartesian_pre_audit;
+      pre_audit.mode = cartesian_channel_shadow_requested
+                           ? "combined+channel-shadow"
+                           : "combined";
+      pre_audit.enabled = true;
       std::vector<double> probe(rhs.size(), 0.0);
       for (std::size_t i = 0; i < panels.size(); ++i) {
         const double t = static_cast<double>(i + 1);
@@ -5489,8 +5994,9 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         if (coupled)
           probe[panels.size() + i] = 0.5 * std::cos(0.017 * t) - 0.15;
       }
+      pre_audit.probe_hash = fmm_audit_probe_hash(probe, 0x434f4d42494e4544ULL);
       std::vector<double> approximate;
-      matvec(probe, approximate);
+      audit_apply(probe, approximate);
       struct AuditMetrics {
         double diff_sq{0.0};
         double direct_sq{0.0};
@@ -5554,8 +6060,10 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         metrics.direct_sq = std::accumulate(target_direct_sq.begin(),
                                             target_direct_sq.end(), 0.0);
         constexpr std::size_t max_strata = 16;
-        const std::size_t stratum_count =
-            std::min<std::size_t>(max_strata, targets.size());
+        constexpr std::size_t targets_per_stratum = 8;
+        const std::size_t stratum_count = std::max<std::size_t>(
+            1u, std::min<std::size_t>(
+                    max_strata, targets.size() / targets_per_stratum));
         std::vector<double> stratum_diff_sq(stratum_count, 0.0);
         std::vector<double> stratum_direct_sq(stratum_count, 0.0);
         for (std::size_t pos = 0; pos < targets.size(); ++pos) {
@@ -5581,59 +6089,142 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
 
       const std::vector<std::size_t> spatial_targets =
           build_spatial_audit_targets(panels, 512u);
-      const std::size_t stage_one_count =
-          std::min<std::size_t>(256u, spatial_targets.size());
-      std::vector<std::size_t> stage_one_targets;
-      std::vector<std::size_t> stage_two_targets;
-      stage_one_targets.reserve(stage_one_count);
-      stage_two_targets.reserve(spatial_targets.size() - stage_one_count);
-      std::vector<unsigned char> selected(spatial_targets.size(), 0u);
-      for (std::size_t k = 0; k < stage_one_count; ++k) {
-        const std::size_t position =
-            ((2u * k + 1u) * spatial_targets.size()) /
-            std::max<std::size_t>(1, 2u * stage_one_count);
-        const std::size_t bounded =
-            std::min(position, spatial_targets.size() - 1u);
-        selected[bounded] = 1u;
-        stage_one_targets.push_back(spatial_targets[bounded]);
+      struct AuditInterval {
+        std::size_t begin{0};
+        std::size_t end{0};
+      };
+      std::vector<std::size_t> nested_positions;
+      nested_positions.reserve(spatial_targets.size());
+      std::vector<AuditInterval> intervals;
+      intervals.reserve(2u * spatial_targets.size() + 1u);
+      intervals.push_back({0u, spatial_targets.size()});
+      for (std::size_t head = 0;
+           head < intervals.size() &&
+           nested_positions.size() < spatial_targets.size();
+           ++head) {
+        const AuditInterval interval = intervals[head];
+        if (interval.begin >= interval.end)
+          continue;
+        const std::size_t midpoint =
+            interval.begin + (interval.end - interval.begin) / 2u;
+        nested_positions.push_back(midpoint);
+        if (interval.begin < midpoint)
+          intervals.push_back({interval.begin, midpoint});
+        if (midpoint + 1u < interval.end)
+          intervals.push_back({midpoint + 1u, interval.end});
       }
-      for (std::size_t position = 0; position < spatial_targets.size();
-           ++position) {
-        if (selected[position] == 0u)
-          stage_two_targets.push_back(spatial_targets[position]);
-      }
+      auto build_nested_stage =
+          [&](std::size_t begin, std::size_t end) {
+            end = std::min(end, nested_positions.size());
+            begin = std::min(begin, end);
+            std::vector<std::size_t> positions(
+                nested_positions.begin() + static_cast<std::ptrdiff_t>(begin),
+                nested_positions.begin() + static_cast<std::ptrdiff_t>(end));
+            std::sort(positions.begin(), positions.end());
+            std::vector<std::size_t> targets;
+            targets.reserve(positions.size());
+            for (const std::size_t position : positions)
+              targets.push_back(spatial_targets[position]);
+            return targets;
+          };
+      const std::size_t stage_one_end =
+          std::min<std::size_t>(64u, nested_positions.size());
+      const std::size_t stage_two_end =
+          std::min<std::size_t>(256u, nested_positions.size());
+      const std::size_t stage_three_end = nested_positions.size();
+      const std::vector<std::size_t> stage_one_targets =
+          build_nested_stage(0u, stage_one_end);
+      const std::vector<std::size_t> stage_two_targets =
+          build_nested_stage(stage_one_end, stage_two_end);
+      const std::vector<std::size_t> stage_three_targets =
+          build_nested_stage(stage_two_end, stage_three_end);
       const AuditMetrics stage_one = audit_targets(stage_one_targets);
       double diff_sq = stage_one.diff_sq;
       double direct_sq = stage_one.direct_sq;
       bool finite = stage_one.finite;
+      double max_stratum_rel = stage_one.max_stratum_rel;
       std::size_t audited_targets = stage_one_targets.size();
-      const double stage_one_rel =
-          std::sqrt(std::max(0.0, stage_one.diff_sq)) /
+      auto cumulative_rel = [&]() {
+        return std::sqrt(std::max(0.0, diff_sq)) /
           std::max(1.0e-300,
-                   std::sqrt(std::max(0.0, stage_one.direct_sq)));
-      constexpr double kNodePatchAuditExpandGlobal = 5.0e-3;
-      constexpr double kNodePatchAuditExpandStratum = 1.0e-2;
-      const bool expand_audit =
-          !stage_one.finite || !std::isfinite(stage_one_rel) ||
-          stage_one_rel > kNodePatchAuditExpandGlobal ||
-          stage_one.max_stratum_rel > kNodePatchAuditExpandStratum;
-      if (expand_audit && !stage_two_targets.empty()) {
+                   std::sqrt(std::max(0.0, direct_sq)));
+      };
+      auto needs_expansion = [&](double global_threshold,
+                                 double stratum_threshold) {
+        const double rel = cumulative_rel();
+        return !finite || !std::isfinite(rel) ||
+               rel > global_threshold ||
+               max_stratum_rel > stratum_threshold;
+      };
+      constexpr double kNodePatchAudit64ExpandGlobal = 4.0e-3;
+      constexpr double kNodePatchAudit64ExpandStratum = 8.0e-3;
+      constexpr double kNodePatchAudit256ExpandGlobal = 5.0e-3;
+      constexpr double kNodePatchAudit256ExpandStratum = 1.0e-2;
+      const bool expand_to_256 =
+          needs_expansion(kNodePatchAudit64ExpandGlobal,
+                          kNodePatchAudit64ExpandStratum);
+      int audit_stages = 1;
+      if (expand_to_256 && !stage_two_targets.empty()) {
         const AuditMetrics stage_two = audit_targets(stage_two_targets);
         diff_sq += stage_two.diff_sq;
         direct_sq += stage_two.direct_sq;
         finite = finite && stage_two.finite;
+        max_stratum_rel =
+            std::max(max_stratum_rel, stage_two.max_stratum_rel);
         audited_targets += stage_two_targets.size();
+        ++audit_stages;
       }
-      result.tree_vs_direct_matvec_rel =
-          std::sqrt(std::max(0.0, diff_sq)) /
-          std::max(1.0e-300, std::sqrt(std::max(0.0, direct_sq)));
-      result.matvec_audit_rows = audited_targets * (coupled ? 2u : 1u);
-      result.matvec_audit_ms =
+      const bool expand_to_512 =
+          expand_to_256 &&
+          needs_expansion(kNodePatchAudit256ExpandGlobal,
+                          kNodePatchAudit256ExpandStratum);
+      if (expand_to_512 && !stage_three_targets.empty()) {
+        const AuditMetrics stage_three = audit_targets(stage_three_targets);
+        diff_sq += stage_three.diff_sq;
+        direct_sq += stage_three.direct_sq;
+        finite = finite && stage_three.finite;
+        max_stratum_rel =
+            std::max(max_stratum_rel, stage_three.max_stratum_rel);
+        audited_targets += stage_three_targets.size();
+        ++audit_stages;
+      }
+      std::vector<std::size_t> audited_target_set = stage_one_targets;
+      if (expand_to_256 && !stage_two_targets.empty())
+        audited_target_set.insert(audited_target_set.end(),
+                                  stage_two_targets.begin(),
+                                  stage_two_targets.end());
+      if (expand_to_512 && !stage_three_targets.empty())
+        audited_target_set.insert(audited_target_set.end(),
+                                  stage_three_targets.begin(),
+                                  stage_three_targets.end());
+      const double aggregate_rel = cumulative_rel();
+      pre_audit.finite = finite && std::isfinite(aggregate_rel);
+      pre_audit.aggregate_rel = aggregate_rel;
+      pre_audit.max_stratum_rel = max_stratum_rel;
+      pre_audit.audited_targets = audited_targets;
+      pre_audit.audited_rows = audited_targets * (coupled ? 2u : 1u);
+      pre_audit.stages = audit_stages;
+      pre_audit.expanded_to_256 = expand_to_256;
+      pre_audit.expanded_to_512 = expand_to_512;
+      pre_audit.sampled_target_hash =
+          fmm_audit_target_hash(audited_target_set);
+      if (cartesian_channel_shadow_requested) {
+        cartesian_channel_shadow_targets = audited_target_set;
+        cartesian_channel_shadow_target_hash =
+            pre_audit.sampled_target_hash;
+      }
+      pre_audit.seconds =
           elapsed_ms(audit_begin, std::chrono::steady_clock::now());
+      // Preserve the established node-patch compatibility fields.  They are
+      // the fixed pre-GMRES probe; the opt-in solution audit below has its own
+      // explicitly named telemetry and never overwrites these values.
+      result.tree_vs_direct_matvec_rel = aggregate_rel;
+      result.matvec_audit_rows = pre_audit.audited_rows;
+      result.matvec_audit_ms = pre_audit.seconds;
       constexpr double kNodePatchOperatorAuditGate = 2.0e-2;
       if (!finite ||
-          !std::isfinite(result.tree_vs_direct_matvec_rel) ||
-          result.tree_vs_direct_matvec_rel > kNodePatchOperatorAuditGate) {
+          !std::isfinite(aggregate_rel) ||
+          aggregate_rel > kNodePatchOperatorAuditGate) {
         result.status = "failed";
         result.converged = false;
         result.convergence_reason = "node_patch_operator_audit_failed";
@@ -5648,6 +6239,262 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                 ? matvec_ms_total / static_cast<double>(matvec_calls)
                 : 0.0;
         return result;
+      }
+
+      if (cartesian_channel_shadow_requested) {
+        // The two fixed probes isolate the four JCP blocks.  Worklist and
+        // operator configuration have already been prepared above; neither
+        // the probes nor the sampled targets changes during GMRES.
+        const auto channel_begin = std::chrono::steady_clock::now();
+        const std::size_t panel_count = panels.size();
+        if (panel_count > std::numeric_limits<std::size_t>::max() / 2u) {
+          throw std::overflow_error(
+              "cartesian_full_fmm_channel_shadow_unknown_count_overflow");
+        }
+        const std::size_t required_unknowns = 2u * panel_count;
+        if (panel_count == 0 || rhs.size() != required_unknowns ||
+            audited_target_set.empty() || direct_order.size() != panel_count) {
+          throw std::runtime_error(
+              "cartesian_full_fmm_channel_shadow_input_shape_mismatch");
+        }
+        if (pre_audit.sampled_target_hash !=
+            fmm_audit_target_hash(audited_target_set)) {
+          throw std::runtime_error(
+              "cartesian_full_fmm_channel_shadow_target_hash_mismatch");
+        }
+        for (const std::size_t source : direct_order) {
+          if (source >= panel_count)
+            throw std::runtime_error(
+                "cartesian_full_fmm_channel_shadow_source_index_invalid");
+        }
+        if (audited_target_set.size() >
+            std::numeric_limits<std::uint64_t>::max() / panel_count) {
+          throw std::overflow_error(
+              "cartesian_full_fmm_channel_shadow_pair_count_overflow");
+        }
+        pre_audit.channel_direct_pairs_expected =
+            static_cast<std::uint64_t>(audited_target_set.size()) *
+            static_cast<std::uint64_t>(panel_count);
+
+        std::vector<double> phi_only(required_unknowns, 0.0);
+        std::vector<double> phin_only(required_unknowns, 0.0);
+        for (std::size_t panel = 0; panel < panel_count; ++panel) {
+          const double t = static_cast<double>(panel + 1);
+          phi_only[panel] = 0.5 * std::sin(0.013 * t) + 0.25;
+          phin_only[panel_count + panel] =
+              0.5 * std::cos(0.017 * t) - 0.15;
+        }
+        std::uint64_t channel_probe_hash =
+            fmm_audit_probe_hash(phi_only, 0x5048495f4f4e4c59ULL);
+        fmm_audit_hash_mix(channel_probe_hash,
+                           fmm_audit_probe_hash(phin_only,
+                                                0x5048494e5f4f4e4cULL));
+        pre_audit.channel_probe_hash =
+            channel_probe_hash == 0 ? 1 : channel_probe_hash;
+
+        std::vector<double> phi_only_approximate;
+        std::vector<double> phin_only_approximate;
+        apply_cartesian_full_operator(phi_only, phi_only_approximate, false);
+        apply_cartesian_full_operator(phin_only, phin_only_approximate,
+                                      false);
+        if (phi_only_approximate.size() != required_unknowns ||
+            phin_only_approximate.size() != required_unknowns) {
+          throw std::runtime_error(
+              "cartesian_full_fmm_channel_shadow_output_shape_mismatch");
+        }
+
+        struct ChannelShadowAccum {
+          std::array<double, kJcpExpansionChannelCount> diff_sq{};
+          std::array<double, kJcpExpansionChannelCount> reference_sq{};
+          std::uint64_t applied_pairs{0};
+          bool finite{true};
+        };
+        std::vector<ChannelShadowAccum> per_target(
+            audited_target_set.size());
+        std::atomic_bool shadow_finite{true};
+        std::atomic<int> shadow_failure{0};
+        std::atomic<std::size_t> failure_target{panel_count};
+        std::atomic<std::size_t> failure_source{panel_count};
+        auto record_shadow_failure = [&](int code, std::size_t target,
+                                         std::size_t source) {
+          int expected = 0;
+          if (shadow_failure.compare_exchange_strong(
+                  expected, code, std::memory_order_relaxed)) {
+            failure_target.store(target, std::memory_order_relaxed);
+            failure_source.store(source, std::memory_order_relaxed);
+          }
+          shadow_finite.store(false, std::memory_order_relaxed);
+        };
+        const std::size_t shadow_workers =
+            solver_workers(executor, audited_target_set.size());
+        executor.parallel_for(
+            audited_target_set.size(), shadow_workers, 1,
+            [&](std::size_t, std::size_t begin, std::size_t end) {
+              for (std::size_t pos = begin; pos < end; ++pos) {
+                const std::size_t target = audited_target_set[pos];
+                if (target >= panel_count) {
+                  record_shadow_failure(1, target, panel_count);
+                  per_target[pos].finite = false;
+                  continue;
+                }
+                ChannelShadowAccum &local = per_target[pos];
+                double direct_k1 = 0.0;
+                double direct_k2 = 0.0;
+                double direct_k3 = 0.0;
+                double direct_k4 = 0.0;
+                // Evaluate each semantic target-source pair once, use that
+                // kernel for both fixed probes, and count it only after the
+                // P0 invalid/intentional-zero contract has been established.
+                for (std::size_t source_position = 0;
+                     source_position < direct_order.size(); ++source_position) {
+                  const std::size_t source = direct_order[source_position];
+                  if (source >= panel_count) {
+                    local.finite = false;
+                    record_shadow_failure(2, target, source);
+                    break;
+                  }
+                  const JcpNearPairKernel kernel =
+                      evaluate_jcp_near_pair_kernel(
+                          panels[target], target, panels[source], source,
+                          eps_ratio, kappa, true, result.near_integration,
+                          result.quad_buffer, nullptr);
+                  const bool intentional_zero_self =
+                      is_intentional_zero_self_kernel(
+                          kernel, true, result.near_integration);
+                  if (!kernel.valid && !intentional_zero_self) {
+                    local.finite = false;
+                    record_shadow_failure(3, target, source);
+                    break;
+                  }
+                  ++local.applied_pairs;
+                  if (intentional_zero_self)
+                    continue;
+                  if (!std::isfinite(kernel.k1) || !std::isfinite(kernel.k2) ||
+                      !std::isfinite(kernel.k3) || !std::isfinite(kernel.k4)) {
+                    local.finite = false;
+                    record_shadow_failure(4, target, source);
+                    break;
+                  }
+                  direct_k1 += kernel.k1 * phin_only[panel_count + source];
+                  direct_k2 += kernel.k2 * phi_only[source];
+                  direct_k3 += kernel.k3 * phin_only[panel_count + source];
+                  direct_k4 += kernel.k4 * phi_only[source];
+                }
+                if (!local.finite)
+                  continue;
+                // For K2 and K3, compare interaction terms after explicitly
+                // removing the exact diagonal contribution.
+                const std::array<double, kJcpExpansionChannelCount>
+                    approximate_interaction{
+                        -phin_only_approximate[target],
+                        jcp_lhs_phi_for_panel(panels[target], eps_ratio,
+                                              lhs_phi) *
+                                phi_only[target] -
+                            phi_only_approximate[target],
+                        jcp_lhs_phin_for_panel(panels[target], eps_ratio,
+                                               lhs_phin) *
+                                phin_only[panel_count + target] -
+                            phin_only_approximate[panel_count + target],
+                        -phi_only_approximate[panel_count + target]};
+                const std::array<double, kJcpExpansionChannelCount>
+                    direct_interaction{direct_k1, direct_k2, direct_k3,
+                                       direct_k4};
+                for (std::size_t channel = 0;
+                     channel < kJcpExpansionChannelCount; ++channel) {
+                  const double approximate_value =
+                      approximate_interaction[channel];
+                  const double direct_value = direct_interaction[channel];
+                  if (!std::isfinite(approximate_value) ||
+                      !std::isfinite(direct_value)) {
+                    local.finite = false;
+                    record_shadow_failure(5, target, panel_count);
+                    break;
+                  }
+                  const double delta = approximate_value - direct_value;
+                  local.diff_sq[channel] = delta * delta;
+                  local.reference_sq[channel] = direct_value * direct_value;
+                }
+              }
+            });
+        if (!shadow_finite.load(std::memory_order_relaxed)) {
+          const int failure = shadow_failure.load(std::memory_order_relaxed);
+          const char *reason =
+              failure == 1 ? "target_index_invalid"
+              : failure == 2 ? "source_index_invalid"
+              : failure == 3 ? "kernel_invalid"
+              : failure == 4 ? "kernel_nonfinite"
+                             : "output_nonfinite";
+          std::ostringstream message;
+          message << "cartesian_full_fmm_channel_shadow_fail_closed"
+                  << " reason=" << reason
+                  << " target_panel="
+                  << failure_target.load(std::memory_order_relaxed)
+                  << " source_panel="
+                  << failure_source.load(std::memory_order_relaxed)
+                  << " near_integration=" << result.near_integration
+                  << " quad_buffer=" << result.quad_buffer;
+          throw std::runtime_error(message.str());
+        }
+        std::array<double, kJcpExpansionChannelCount> diff_sq_by_channel{};
+        std::array<double, kJcpExpansionChannelCount>
+            reference_sq_by_channel{};
+        std::uint64_t applied_pair_count = 0;
+        for (const ChannelShadowAccum &local : per_target) {
+          if (!local.finite) {
+            throw std::runtime_error(
+                "cartesian_full_fmm_channel_shadow_coverage_failure");
+          }
+          if (applied_pair_count >
+              std::numeric_limits<std::uint64_t>::max() -
+                  local.applied_pairs) {
+            throw std::overflow_error(
+                "cartesian_full_fmm_channel_shadow_applied_pair_overflow");
+          }
+          applied_pair_count += local.applied_pairs;
+          for (std::size_t channel = 0;
+               channel < kJcpExpansionChannelCount; ++channel) {
+            diff_sq_by_channel[channel] += local.diff_sq[channel];
+            reference_sq_by_channel[channel] += local.reference_sq[channel];
+          }
+        }
+        pre_audit.channel_direct_pairs_applied = applied_pair_count;
+        if (pre_audit.channel_direct_pairs_applied !=
+            pre_audit.channel_direct_pairs_expected) {
+          throw std::runtime_error(
+              "cartesian_full_fmm_channel_shadow_coverage_mismatch");
+        }
+        constexpr double kChannelRelativeReferenceFloor = 1.0e-14;
+        for (std::size_t channel = 0; channel < kJcpExpansionChannelCount;
+             ++channel) {
+          FmmCartesianChannelAudit &metric =
+              result.fmm_cartesian_channel_audit[channel];
+          metric.samples = audited_target_set.size();
+          metric.finite = std::isfinite(diff_sq_by_channel[channel]) &&
+                          std::isfinite(reference_sq_by_channel[channel]);
+          if (!metric.finite) {
+            metric.status = "nonfinite";
+            throw std::runtime_error(
+                "cartesian_full_fmm_channel_shadow_metric_nonfinite");
+          }
+          metric.abs_l2 =
+              std::sqrt(std::max(0.0, diff_sq_by_channel[channel]));
+          metric.rms = metric.abs_l2 /
+                       std::sqrt(static_cast<double>(metric.samples));
+          metric.reference_l2 =
+              std::sqrt(std::max(0.0, reference_sq_by_channel[channel]));
+          if (metric.reference_l2 <= kChannelRelativeReferenceFloor) {
+            metric.available = false;
+            metric.status = "absolute_only";
+            metric.relative_error =
+                std::numeric_limits<double>::quiet_NaN();
+          } else {
+            metric.available = true;
+            metric.status = "relative";
+            metric.relative_error = metric.abs_l2 / metric.reference_l2;
+          }
+        }
+        pre_audit.channel_shadow_seconds =
+            elapsed_ms(channel_begin, std::chrono::steady_clock::now());
       }
     }
 
@@ -5707,8 +6554,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       if (!(fmm_nearfield_ilu0 && kifmm_fallback_ilu_graph)) {
         fmm_context = ensure_jcp_fmm_m2l_context(
             panels, eps_ratio, kappa,
-            static_cast<std::size_t>(std::max(8, options.tree_leaf_size)),
-            options.tree_opening_theta, result.taylor_order, executor,
+            static_cast<std::size_t>(std::max(8, effective_tree_leaf_size)),
+            effective_tree_opening_theta, result.taylor_order, executor,
             &jcp_tree.fmm_m2l_context);
       }
       std::vector<std::vector<std::size_t>> kifmm_fallback_graph;
@@ -6551,6 +7398,242 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
     result.matvec_ms_avg =
         matvec_calls > 0 ? matvec_ms_total / static_cast<double>(matvec_calls)
                          : 0.0;
+    // Node-patch deliberately retains its historical legacy audit fields as
+    // the fixed pre-GMRES probe.  The opt-in channel shadow adds a separate
+    // sampled comparison of the final GMRES iterate; it never repurposes the
+    // legacy field or affects the fixed operator used by GMRES.
+    if (cartesian_channel_shadow_requested) {
+      const auto solution_audit_begin = std::chrono::steady_clock::now();
+      FmmCartesianSolutionAuditTelemetry &solution_audit =
+          result.fmm_cartesian_solution_audit;
+      solution_audit.enabled = true;
+      const std::size_t panel_count = panels.size();
+      if (panel_count == 0 ||
+          panel_count > std::numeric_limits<std::size_t>::max() / 2u) {
+        throw std::overflow_error(
+            "cartesian_full_fmm_solution_audit_unknown_count_overflow");
+      }
+      const std::size_t required_unknowns = 2u * panel_count;
+      const std::vector<double> &audit_x =
+          !linear.best_x.empty() ? linear.best_x : linear.x;
+      if (audit_x.size() != required_unknowns ||
+          cartesian_channel_shadow_targets.empty() ||
+          direct_order.size() != panel_count) {
+        throw std::runtime_error(
+            "cartesian_full_fmm_solution_audit_input_shape_mismatch");
+      }
+      const std::uint64_t target_hash =
+          fmm_audit_target_hash(cartesian_channel_shadow_targets);
+      if (target_hash == 0 || target_hash != cartesian_channel_shadow_target_hash ||
+          target_hash != result.fmm_cartesian_pre_audit.sampled_target_hash) {
+        throw std::runtime_error(
+            "cartesian_full_fmm_solution_audit_target_hash_mismatch");
+      }
+      if (cartesian_channel_shadow_targets.size() >
+          std::numeric_limits<std::uint64_t>::max() / panel_count) {
+        throw std::overflow_error(
+            "cartesian_full_fmm_solution_audit_pair_count_overflow");
+      }
+      solution_audit.targets = cartesian_channel_shadow_targets.size();
+      if (solution_audit.targets >
+          std::numeric_limits<std::size_t>::max() / 2u) {
+        throw std::overflow_error(
+            "cartesian_full_fmm_solution_audit_row_count_overflow");
+      }
+      solution_audit.rows = 2u * solution_audit.targets;
+      solution_audit.target_hash = target_hash;
+      solution_audit.direct_pairs_expected =
+          static_cast<std::uint64_t>(solution_audit.targets) *
+          static_cast<std::uint64_t>(panel_count);
+
+      // Do not use matvec here: audit_apply intentionally omits both GMRES
+      // timing and full-FMM apply counters.
+      std::vector<double> approximate;
+      audit_apply(audit_x, approximate);
+      if (approximate.size() != required_unknowns) {
+        throw std::runtime_error(
+            "cartesian_full_fmm_solution_audit_output_shape_mismatch");
+      }
+
+      struct SolutionAuditAccum {
+        double diff_sq{0.0};
+        double direct_sq{0.0};
+        std::uint64_t applied_pairs{0};
+        bool finite{true};
+      };
+      std::vector<SolutionAuditAccum> per_target(solution_audit.targets);
+      std::atomic_bool audit_finite{true};
+      std::atomic<int> audit_failure{0};
+      std::atomic<std::size_t> failure_target{panel_count};
+      std::atomic<std::size_t> failure_source{panel_count};
+      auto record_solution_audit_failure = [&](int code, std::size_t target,
+                                               std::size_t source) {
+        int expected = 0;
+        if (audit_failure.compare_exchange_strong(
+                expected, code, std::memory_order_relaxed)) {
+          failure_target.store(target, std::memory_order_relaxed);
+          failure_source.store(source, std::memory_order_relaxed);
+        }
+        audit_finite.store(false, std::memory_order_relaxed);
+      };
+      const std::size_t audit_workers =
+          solver_workers(executor, solution_audit.targets);
+      executor.parallel_for(
+          solution_audit.targets, audit_workers, 1,
+          [&](std::size_t, std::size_t begin, std::size_t end) {
+            for (std::size_t pos = begin; pos < end; ++pos) {
+              const std::size_t target = cartesian_channel_shadow_targets[pos];
+              SolutionAuditAccum &local = per_target[pos];
+              if (target >= panel_count) {
+                local.finite = false;
+                record_solution_audit_failure(1, target, panel_count);
+                continue;
+              }
+              double sum_phi = 0.0;
+              double sum_phin = 0.0;
+              // This is intentionally a local explicit direct loop rather
+              // than accumulate_jcp_near_ordered(): the audit must fail closed
+              // for an unexpected invalid kernel and measure actual semantic
+              // target-source coverage exactly once.
+              for (std::size_t source_position = 0;
+                   source_position < direct_order.size(); ++source_position) {
+                const std::size_t source = direct_order[source_position];
+                if (source >= panel_count) {
+                  local.finite = false;
+                  record_solution_audit_failure(2, target, source);
+                  break;
+                }
+                const JcpNearPairKernel kernel = evaluate_jcp_near_pair_kernel(
+                    panels[target], target, panels[source], source, eps_ratio,
+                    kappa, true, result.near_integration, result.quad_buffer,
+                    nullptr);
+                const bool intentional_zero_self =
+                    is_intentional_zero_self_kernel(
+                        kernel, true, result.near_integration);
+                if (!kernel.valid && !intentional_zero_self) {
+                  local.finite = false;
+                  record_solution_audit_failure(3, target, source);
+                  break;
+                }
+                ++local.applied_pairs;
+                if (intentional_zero_self)
+                  continue;
+                if (!std::isfinite(kernel.k1) || !std::isfinite(kernel.k2) ||
+                    !std::isfinite(kernel.k3) || !std::isfinite(kernel.k4)) {
+                  local.finite = false;
+                  record_solution_audit_failure(4, target, source);
+                  break;
+                }
+                sum_phi += kernel.k1 * audit_x[panel_count + source] +
+                           kernel.k2 * audit_x[source];
+                sum_phin += kernel.k3 * audit_x[panel_count + source] +
+                            kernel.k4 * audit_x[source];
+              }
+              if (!local.finite)
+                continue;
+              const double direct_phi =
+                  jcp_lhs_phi_for_panel(panels[target], eps_ratio, lhs_phi) *
+                      audit_x[target] -
+                  sum_phi;
+              const double direct_phin =
+                  jcp_lhs_phin_for_panel(panels[target], eps_ratio, lhs_phin) *
+                      audit_x[panel_count + target] -
+                  sum_phin;
+              const double approximate_phi = approximate[target];
+              const double approximate_phin = approximate[panel_count + target];
+              if (!std::isfinite(direct_phi) || !std::isfinite(direct_phin) ||
+                  !std::isfinite(approximate_phi) ||
+                  !std::isfinite(approximate_phin)) {
+                local.finite = false;
+                record_solution_audit_failure(5, target, panel_count);
+                continue;
+              }
+              const double phi_delta = approximate_phi - direct_phi;
+              const double phin_delta = approximate_phin - direct_phin;
+              local.diff_sq = phi_delta * phi_delta + phin_delta * phin_delta;
+              local.direct_sq = direct_phi * direct_phi +
+                                direct_phin * direct_phin;
+              if (!std::isfinite(local.diff_sq) ||
+                  !std::isfinite(local.direct_sq)) {
+                local.finite = false;
+                record_solution_audit_failure(6, target, panel_count);
+              }
+            }
+          });
+      if (!audit_finite.load(std::memory_order_relaxed)) {
+        const int failure = audit_failure.load(std::memory_order_relaxed);
+        const char *reason =
+            failure == 1 ? "target_index_invalid"
+            : failure == 2 ? "source_index_invalid"
+            : failure == 3 ? "kernel_invalid"
+            : failure == 4 ? "kernel_nonfinite"
+            : failure == 5 ? "output_nonfinite"
+                           : "accumulator_nonfinite";
+        std::ostringstream message;
+        message << "cartesian_full_fmm_solution_audit_fail_closed"
+                << " reason=" << reason
+                << " target_panel="
+                << failure_target.load(std::memory_order_relaxed)
+                << " source_panel="
+                << failure_source.load(std::memory_order_relaxed)
+                << " near_integration=" << result.near_integration
+                << " quad_buffer=" << result.quad_buffer;
+        throw std::runtime_error(message.str());
+      }
+      double diff_sq = 0.0;
+      double direct_sq = 0.0;
+      std::uint64_t applied_pair_count = 0;
+      for (const SolutionAuditAccum &local : per_target) {
+        if (!local.finite) {
+          throw std::runtime_error(
+              "cartesian_full_fmm_solution_audit_coverage_failure");
+        }
+        if (applied_pair_count >
+            std::numeric_limits<std::uint64_t>::max() -
+                local.applied_pairs) {
+          throw std::overflow_error(
+              "cartesian_full_fmm_solution_audit_applied_pair_overflow");
+        }
+        applied_pair_count += local.applied_pairs;
+        diff_sq += local.diff_sq;
+        direct_sq += local.direct_sq;
+      }
+      solution_audit.direct_pairs_applied = applied_pair_count;
+      if (solution_audit.direct_pairs_applied !=
+          solution_audit.direct_pairs_expected) {
+        throw std::runtime_error(
+            "cartesian_full_fmm_solution_audit_coverage_mismatch");
+      }
+      if (!std::isfinite(diff_sq) || !std::isfinite(direct_sq)) {
+        throw std::runtime_error(
+            "cartesian_full_fmm_solution_audit_accumulator_nonfinite");
+      }
+      solution_audit.absolute_l2 = std::sqrt(std::max(0.0, diff_sq));
+      solution_audit.direct_l2 = std::sqrt(std::max(0.0, direct_sq));
+      constexpr double kSolutionRelativeReferenceFloor = 1.0e-14;
+      if (solution_audit.direct_l2 <= kSolutionRelativeReferenceFloor) {
+        solution_audit.relative_available = false;
+        solution_audit.status = "absolute_only";
+        solution_audit.relative_error =
+            std::numeric_limits<double>::quiet_NaN();
+      } else {
+        solution_audit.relative_available = true;
+        solution_audit.status = "relative";
+        solution_audit.relative_error =
+            solution_audit.absolute_l2 / solution_audit.direct_l2;
+      }
+      solution_audit.finite =
+          std::isfinite(solution_audit.absolute_l2) &&
+          std::isfinite(solution_audit.direct_l2) &&
+          (!solution_audit.relative_available ||
+           std::isfinite(solution_audit.relative_error));
+      if (!solution_audit.finite) {
+        throw std::runtime_error(
+            "cartesian_full_fmm_solution_audit_metric_nonfinite");
+      }
+      solution_audit.seconds =
+          elapsed_ms(solution_audit_begin, std::chrono::steady_clock::now());
+    }
     if (experimental_treecode && options.matvec_audit != "off" &&
         !node_patch_discretization) {
       const auto audit_begin = std::chrono::steady_clock::now();
@@ -6576,7 +7659,9 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       }
       if (!audit_x.empty() && !audit_rows.empty()) {
         std::vector<double> tree_ax;
-        if (channel_hybrid_gmres) {
+        if (cartesian_full_gmres) {
+          apply_cartesian_full_operator(audit_x, tree_ax, false);
+        } else if (channel_hybrid_gmres) {
           apply_channel_hybrid_operator(audit_x, tree_ax, false);
         } else if (kifmm_gmres) {
           apply_kifmm_operator(audit_x, tree_ax, false);
@@ -6686,12 +7771,13 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
             std::sqrt(std::max(0.0, diff_sq)) /
             std::max(1.0e-300, std::sqrt(std::max(0.0, direct_sq)));
         result.matvec_audit_rows = audit_rows.size();
-        if (gmres_p4 || kifmm_any_gmres) {
+        if (cartesian_full_gmres || gmres_p4 || kifmm_any_gmres) {
           result.fmm_local_sampled_direct_true_residual =
               std::sqrt(std::max(0.0, direct_residual_sq)) /
               std::max(1.0e-300, std::sqrt(std::max(0.0, rhs_sq)));
         }
-        if (options.matvec_audit == "sampled-detail" && !kifmm_any_gmres) {
+        if (options.matvec_audit == "sampled-detail" &&
+            !cartesian_full_gmres && !kifmm_any_gmres) {
           const auto context = ensure_jcp_fmm_m2l_context(
               panels, eps_ratio, kappa, jcp_tree.leaf_size,
               jcp_tree.opening_theta, jcp_tree.taylor_order, executor,
@@ -6861,7 +7947,7 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
         write_kifmm_gmres_phase("post_audit_done");
       }
     }
-    if (gmres_p4 || kifmm_any_gmres) {
+    if (cartesian_full_gmres || gmres_p4 || kifmm_any_gmres) {
       jcp_tree_stats.fmm_m2l_apply_ms =
           1000.0 * result.fmm_local_gmres_apply_seconds_total;
       jcp_tree_stats.fmm_m2l_finite_outputs = result.fmm_local_operator_finite;
@@ -7693,6 +8779,11 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
       result.output_solution = linear.x;
       result.output_rhs = rhs;
     }
+#if defined(TITAN_CARTESIAN_FMM_TESTING)
+    if (cartesian_full_operator)
+      maybe_write_p3d0_direct_phase_attribution(*cartesian_full_operator,
+                                                 result);
+#endif
     progress.write("solve_done", result, &jcp_tree_stats, result.matvec_calls,
                    result.iterations, 0, result.residual, result.status, true);
     return result;
@@ -7786,8 +8877,8 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
                    "running", true);
     tree = build_tree_workspace(
         panels, executor,
-        static_cast<std::size_t>(std::max(8, options.tree_leaf_size)),
-        options.tree_opening_theta, options.leaf_near_policy,
+        static_cast<std::size_t>(std::max(8, effective_tree_leaf_size)),
+        effective_tree_opening_theta, options.leaf_near_policy,
         options.leaf_panel_kernel, options.adaptive_level, "off",
         options.interaction_mode, result.node_bounds_mode, result.tree_builder,
         options.mac_safety, options.mac_gap_factor, options.moment_audit,
@@ -8673,6 +9764,504 @@ Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
   progress.write("solve_done", result, &matvec_stats, result.matvec_calls,
                  result.iterations, 0, result.residual, result.status, true);
   return result;
+}
+
+namespace {
+
+constexpr std::string_view kCartesianRetryAuditMode =
+    "channel-shadow-retry-global-theta015";
+
+std::string cartesian_retry_eligibility_reason(const Options &options) {
+  if (options.sum_mode != "treecode")
+    return "sum_mode_not_treecode";
+  if (options.formulation != "jcp2013-treecode")
+    return "formulation_not_jcp2013_treecode";
+  if (options.fmm_m2l != "single-matvec-analytic")
+    return "fmm_m2l_not_analytic";
+  if (options.fmm_engine != "cartesian-full-experimental")
+    return "fmm_engine_not_cartesian_full";
+  if (options.bie_fmm_cartesian_order != 1)
+    return "cartesian_order_not_1";
+  if (options.fmm_local != "off")
+    return "local_p4_or_refinement_not_off";
+  if (options.surface_geometry != "triangle")
+    return "surface_geometry_not_triangle";
+  if (options.discretization != "node-patch")
+    return "discretization_not_node_patch";
+  if (!std::isfinite(options.salt_m) || options.salt_m <= 0.0)
+    return "salt_not_positive";
+  if (options.node_patch_operator_audit != "on")
+    return "node_patch_operator_audit_not_on";
+  if (options.surface_only)
+    return "surface_only_not_allowed";
+  if (options.preconditioner != "fmm-nearfield-ilu0")
+    return "requested_preconditioner_not_plain_ilu0";
+  const int effective_leaf =
+      options.tree_leaf_size_explicit ? options.tree_leaf_size : 64;
+  if (effective_leaf != 64)
+    return "effective_leaf_not_64";
+  const double effective_theta =
+      options.tree_opening_theta_explicit ? options.tree_opening_theta : 0.20;
+  if (!fmm_cartesian_retry_theta_matches(effective_theta, 0.20))
+    return "effective_theta_not_020";
+  return {};
+}
+
+const char *cartesian_retry_disposition_name(
+    FmmCartesianRetryAttemptDisposition disposition) noexcept {
+  switch (disposition) {
+  case FmmCartesianRetryAttemptDisposition::accept:
+    return "accept";
+  case FmmCartesianRetryAttemptDisposition::retry_trigger:
+    return "retry_trigger";
+  case FmmCartesianRetryAttemptDisposition::fail_closed:
+    return "fail_closed";
+  }
+  return "fail_closed";
+}
+
+bool finite_nonnegative(double value) noexcept {
+  return std::isfinite(value) && value >= 0.0;
+}
+
+FmmCartesianRetryAttemptTelemetry make_retry_attempt_snapshot(
+    const Result &result, const Options &options, std::size_t attempt_number,
+    double wall_ms, std::size_t rss_before_bytes,
+    std::size_t rss_after_bytes) {
+  FmmCartesianRetryAttemptTelemetry attempt;
+  attempt.attempt = attempt_number;
+  attempt.started = true;
+  attempt.completed = true;
+  attempt.status = result.status;
+  attempt.convergence_reason = result.convergence_reason;
+  attempt.converged = result.converged;
+  attempt.theta = result.bie_cartesian_full_fmm_opening_theta;
+  attempt.salt_molar = options.salt_m;
+  attempt.coupled = result.bie_system == "linear_pb_2x2";
+  attempt.discretization = result.discretization;
+  attempt.node_patch_operator_audit_enabled =
+      options.node_patch_operator_audit == "on" &&
+      result.fmm_cartesian_pre_audit.enabled;
+  attempt.true_residual_rel = result.true_residual_rel;
+
+  attempt.cartesian_full_active = result.bie_cartesian_full_fmm_active;
+  attempt.cartesian_full_finite = result.fmm_local_operator_finite &&
+                                  result.fmm_m2l_finite_outputs;
+  attempt.cartesian_full_requested = result.bie_cartesian_full_fmm_requested;
+  attempt.cartesian_full_effective = result.bie_cartesian_full_fmm_effective;
+  attempt.cartesian_full_order = result.bie_cartesian_full_fmm_order;
+  attempt.cartesian_full_leaf_size = result.bie_cartesian_full_fmm_leaf_size;
+  attempt.panel_count = result.panel_count;
+  attempt.geometry_hash = result.fmm_cartesian_retry_geometry_valid
+                              ? result.fmm_cartesian_retry_geometry_hash
+                              : 0;
+  attempt.tree_hash = result.bie_cartesian_full_fmm_tree_hash;
+  attempt.worklist_hash = result.bie_cartesian_full_fmm_worklist_hash;
+  attempt.policy_hash = result.bie_cartesian_full_fmm_policy_hash;
+  attempt.direct_pairs_expected =
+      result.bie_cartesian_full_fmm_direct_panel_pairs_expected;
+  attempt.direct_pairs_applied_last =
+      result.bie_cartesian_full_fmm_direct_panel_pairs_applied_last;
+  attempt.direct_pairs_applied_total =
+      result.bie_cartesian_full_fmm_direct_panel_pairs_applied_total;
+  attempt.pre_audit_sampled_target_hash =
+      result.fmm_cartesian_pre_audit.sampled_target_hash;
+  attempt.solution_audit = result.fmm_cartesian_solution_audit;
+
+  attempt.fallback_used = result.fallback_used;
+  attempt.preconditioner_requested = result.preconditioner_requested;
+  attempt.preconditioner_effective = result.preconditioner_effective;
+  attempt.preconditioner_quality_status = result.preconditioner_quality_status;
+  attempt.preconditioner_coarse_status = result.preconditioner_coarse_status;
+  attempt.preconditioner_ilu_regularization =
+      result.preconditioner_ilu_regularization;
+  attempt.preconditioner_ilu_regularization_selected =
+      result.preconditioner_ilu_regularization_selected;
+  attempt.preconditioner_ilu_regularization_shifted_rows =
+      result.preconditioner_ilu_regularization_shifted_rows;
+  attempt.preconditioner_ilu_unshifted_failure_stage =
+      result.preconditioner_ilu_unshifted_failure_stage;
+  attempt.preconditioner_valid_panels = result.preconditioner_valid_panels;
+  attempt.preconditioner_ill_conditioned_blocks =
+      result.preconditioner_ill_conditioned_blocks;
+  attempt.preconditioner_quality_rejected_blocks =
+      result.preconditioner_quality_rejected_blocks;
+  attempt.preconditioner_setup_ms = result.preconditioner_setup_ms;
+  attempt.preconditioner_ilu_factor_setup_ms =
+      result.preconditioner_ilu_factor_setup_ms;
+
+  attempt.surface_build_ms = result.surface_build_ms;
+  attempt.fmm_prepare_ms = 1000.0 * result.fmm_local_prepare_seconds;
+  attempt.gmres_ms = result.gmres_ms;
+  attempt.wall_ms = wall_ms;
+  attempt.accounted_memory_bytes = result.memory_bytes;
+  attempt.rss_before_bytes = rss_before_bytes;
+  attempt.rss_after_bytes = rss_after_bytes;
+  attempt.finite =
+      std::isfinite(result.energy_kcal_mol) &&
+      std::isfinite(result.energy_kj_mol) && std::isfinite(result.energy_kt) &&
+      finite_nonnegative(result.true_residual_rel) &&
+      finite_nonnegative(result.surface_build_ms) &&
+      finite_nonnegative(result.fmm_local_prepare_seconds) &&
+      finite_nonnegative(result.gmres_ms) && finite_nonnegative(wall_ms);
+  return attempt;
+}
+
+FmmCartesianRetryAttemptClassification
+classify_retry_attempt(FmmCartesianRetryAttemptTelemetry &attempt,
+                       FmmCartesianRetryAttemptRole role) {
+  const FmmCartesianRetryAttemptClassification classification =
+      classify_fmm_cartesian_retry_attempt(attempt, role);
+  attempt.classification =
+      cartesian_retry_disposition_name(classification.disposition);
+  attempt.classification_reason = std::string(classification.reason);
+  attempt.technically_valid =
+      classification.disposition != FmmCartesianRetryAttemptDisposition::fail_closed;
+  attempt.accepted =
+      classification.disposition == FmmCartesianRetryAttemptDisposition::accept;
+  return classification;
+}
+
+FmmCartesianRetryAttemptTelemetry make_retry_inflight_attempt(
+    std::size_t attempt_number, const Options &options, double theta,
+    std::size_t rss_before_bytes) {
+  FmmCartesianRetryAttemptTelemetry attempt;
+  attempt.attempt = attempt_number;
+  attempt.started = true;
+  attempt.status = "running";
+  attempt.convergence_reason = "running";
+  attempt.theta = theta;
+  attempt.salt_molar = options.salt_m;
+  attempt.discretization = options.discretization;
+  attempt.rss_before_bytes = rss_before_bytes;
+  attempt.classification = "running";
+  attempt.classification_reason = "not_evaluated";
+  return attempt;
+}
+
+class CartesianRetryTraceWriter {
+public:
+  CartesianRetryTraceWriter() {
+    out_.open("pbe_tabi_fmm_cartesian_retry.csv",
+              std::ios::out | std::ios::trunc);
+    if (!out_.is_open()) {
+      throw std::runtime_error("cartesian_full_fmm_retry_trace_open_failed");
+    }
+    // The retry decision gate is 1e-4.  Keep every persisted scalar at
+    // round-trip precision so trace replay cannot move a value across it.
+    out_ << std::setprecision(std::numeric_limits<double>::max_digits10);
+    out_ << "event,attempt,theta,status,converged,classification,"
+            "classification_reason,reason,"
+            "solution_audit_status,solution_audit_rel,true_residual_rel,"
+            "panels,geometry_hash,tree_hash,worklist_hash,policy_hash,"
+            "identity_reason\n";
+    flush_or_throw("header");
+  }
+
+  void write(std::string_view event,
+             const FmmCartesianRetryAttemptTelemetry &attempt,
+             std::string_view reason,
+             std::string_view identity_reason = "off") {
+    out_ << csv_escape_progress(std::string(event)) << ',' << attempt.attempt
+         << ',' << attempt.theta << ',' << csv_escape_progress(attempt.status)
+         << ',' << (attempt.converged ? "true" : "false") << ','
+         << csv_escape_progress(attempt.classification) << ','
+         << csv_escape_progress(attempt.classification_reason) << ','
+         << csv_escape_progress(std::string(reason)) << ','
+         << csv_escape_progress(attempt.solution_audit.status) << ','
+         << attempt.solution_audit.relative_error << ','
+         << attempt.true_residual_rel << ',' << attempt.panel_count << ','
+         << attempt.geometry_hash << ',' << attempt.tree_hash << ','
+         << attempt.worklist_hash << ',' << attempt.policy_hash << ','
+         << csv_escape_progress(std::string(identity_reason)) << '\n';
+    flush_or_throw("row");
+  }
+
+private:
+  void flush_or_throw(std::string_view stage) {
+    out_.flush();
+    if (!out_) {
+      throw std::runtime_error("cartesian_full_fmm_retry_trace_write_failed:" +
+                               std::string(stage));
+    }
+  }
+
+  std::ofstream out_;
+};
+
+void write_cartesian_retry_trace_best_effort(
+    CartesianRetryTraceWriter &trace, std::string_view event,
+    const FmmCartesianRetryAttemptTelemetry &attempt,
+    std::string_view reason,
+    std::string_view identity_reason = "off") noexcept {
+  try {
+    trace.write(event, attempt, reason, identity_reason);
+  } catch (...) {
+    // The primary solver exception is more important than a diagnostic sink.
+  }
+}
+
+std::string_view
+cartesian_retry_exception_reason(const std::exception_ptr &original) noexcept {
+  try {
+    std::rethrow_exception(original);
+  } catch (const std::exception &error) {
+    return error.what();
+  } catch (...) {
+    return "unknown_exception_rethrown";
+  }
+}
+
+bool preserve_cartesian_retry_progress(const Options &options,
+                                       std::size_t attempt_number) {
+  if (options.progress == "off")
+    return false;
+  const std::string source = "pbe_tabi_longrun_progress.csv";
+  const std::string destination =
+      "pbe_tabi_longrun_progress_retry_attempt" +
+      std::to_string(attempt_number) + ".csv";
+  std::ifstream input(source, std::ios::in | std::ios::binary);
+  if (!input.is_open()) {
+    throw std::runtime_error(
+        "cartesian_full_fmm_retry_progress_source_open_failed:" + source);
+  }
+  std::ofstream output(destination,
+                       std::ios::out | std::ios::trunc | std::ios::binary);
+  if (!output.is_open()) {
+    throw std::runtime_error(
+        "cartesian_full_fmm_retry_progress_destination_open_failed:" +
+        destination);
+  }
+  output << input.rdbuf();
+  output.flush();
+  if (input.bad() || !output) {
+    throw std::runtime_error(
+        "cartesian_full_fmm_retry_progress_copy_failed:" + source + "->" +
+        destination);
+  }
+  return true;
+}
+
+void record_retry_attempt(FmmCartesianRetryTelemetry &retry,
+                          const FmmCartesianRetryAttemptTelemetry &attempt) {
+  if (attempt.attempt == 0 || attempt.attempt > retry.attempts.size()) {
+    throw std::logic_error("cartesian_full_fmm_retry_attempt_index_invalid");
+  }
+  retry.attempts[attempt.attempt - 1u] = attempt;
+  ++retry.attempts_started;
+  if (attempt.completed)
+    ++retry.attempts_completed;
+  if (!std::isfinite(attempt.wall_ms) || !std::isfinite(attempt.gmres_ms)) {
+    throw std::runtime_error("cartesian_full_fmm_retry_timing_nonfinite");
+  }
+  retry.cumulative_wall_ms += attempt.wall_ms;
+  retry.cumulative_gmres_ms += attempt.gmres_ms;
+  if (retry.cumulative_accounted_memory_bytes >
+      std::numeric_limits<std::size_t>::max() -
+          attempt.accounted_memory_bytes) {
+    throw std::overflow_error(
+        "cartesian_full_fmm_retry_accounted_memory_overflow");
+  }
+  retry.cumulative_accounted_memory_bytes += attempt.accounted_memory_bytes;
+  retry.max_boundary_rss_bytes = std::max(
+      retry.max_boundary_rss_bytes,
+      std::max(attempt.rss_before_bytes, attempt.rss_after_bytes));
+}
+
+struct CompletedCartesianRetryAttempt {
+  Result result;
+  FmmCartesianRetryAttemptTelemetry telemetry;
+  FmmCartesianRetryAttemptClassification classification;
+};
+
+} // namespace
+
+Result solve_linear_pb(const std::vector<Atom> &atoms, const Options &options,
+                       TitanExecutor &executor) {
+  if (options.fmm_cartesian_error_audit != kCartesianRetryAuditMode) {
+    return solve_linear_pb_single_attempt(atoms, options, executor);
+  }
+
+  const std::string eligibility_reason =
+      cartesian_retry_eligibility_reason(options);
+  if (!eligibility_reason.empty()) {
+    throw std::invalid_argument(
+        "cartesian_full_fmm_retry_scope_rejected:" + eligibility_reason);
+  }
+
+  CartesianRetryTraceWriter trace;
+  FmmCartesianRetryTelemetry retry;
+  retry.mode = std::string(kCartesianRetryAuditMode);
+  retry.enabled = true;
+  FmmCartesianRetryAttemptTelemetry trace_context;
+
+  const auto run_attempt =
+      [&](std::size_t attempt_number, const Options &attempt_options,
+          double requested_theta, FmmCartesianRetryAttemptRole role) {
+        const auto begin = std::chrono::steady_clock::now();
+        const std::size_t rss_before = current_working_set_bytes();
+        FmmCartesianRetryAttemptTelemetry inflight =
+            make_retry_inflight_attempt(attempt_number, attempt_options,
+                                        requested_theta, rss_before);
+        FmmCartesianRetryAttemptTelemetry trace_attempt = inflight;
+        trace.write("attempt_started", inflight, "started");
+        try {
+          Result attempt_result =
+              solve_linear_pb_single_attempt(atoms, attempt_options, executor);
+          FmmCartesianRetryAttemptTelemetry attempt =
+              make_retry_attempt_snapshot(
+                  attempt_result, attempt_options, attempt_number,
+                  elapsed_ms(begin, std::chrono::steady_clock::now()),
+                  rss_before, current_working_set_bytes());
+          const FmmCartesianRetryAttemptClassification classification =
+              classify_retry_attempt(attempt, role);
+          trace_attempt = attempt;
+          trace.write("attempt_completed", attempt,
+                      attempt.classification_reason);
+          if (preserve_cartesian_retry_progress(attempt_options,
+                                                attempt_number)) {
+            trace.write("progress_preserved", attempt,
+                        "canonical_progress_preserved");
+          } else {
+            trace.write("progress_disabled", attempt,
+                        "canonical_progress_disabled");
+          }
+          return CompletedCartesianRetryAttempt{std::move(attempt_result),
+                                                std::move(attempt),
+                                                classification};
+        } catch (...) {
+          const std::exception_ptr original = std::current_exception();
+          // All exception-path diagnostics are deliberately best-effort: no
+          // trace/progress I/O error may replace the original solver failure.
+          try {
+            if (!trace_attempt.completed) {
+              trace_attempt.status = "exception";
+              trace_attempt.convergence_reason = "exception";
+              trace_attempt.classification = "exception";
+              trace_attempt.classification_reason = "exception_rethrown";
+              trace_attempt.wall_ms =
+                  elapsed_ms(begin, std::chrono::steady_clock::now());
+              trace_attempt.rss_after_bytes = current_working_set_bytes();
+            }
+            write_cartesian_retry_trace_best_effort(
+                trace, "attempt_exception", trace_attempt,
+                cartesian_retry_exception_reason(original));
+            // A solver exception can occur after LongRunProgressWriter has
+            // emitted a useful partial or completed canonical file. Preserve
+            // it best-effort without replacing the original scientific
+            // exception when the copy or trace cannot be completed.
+            if (attempt_options.progress != "off") {
+              try {
+                if (preserve_cartesian_retry_progress(attempt_options,
+                                                      attempt_number)) {
+                  write_cartesian_retry_trace_best_effort(
+                      trace,
+                      trace_attempt.completed
+                          ? "progress_preserved_after_exception"
+                          : "progress_preserved_partial",
+                      trace_attempt,
+                      "canonical_progress_preserved_after_exception");
+                }
+              } catch (...) {
+                const std::exception_ptr copy_error =
+                    std::current_exception();
+                write_cartesian_retry_trace_best_effort(
+                    trace, "progress_preserve_failed", trace_attempt,
+                    cartesian_retry_exception_reason(copy_error));
+              }
+            }
+          } catch (...) {
+            // Even allocation failure while composing telemetry is secondary.
+          }
+          std::rethrow_exception(original);
+        }
+      };
+
+  try {
+    Options first_options = options;
+    first_options.fmm_cartesian_error_audit = "channel-shadow";
+    first_options.fmm_cartesian_retry_runtime = true;
+    CompletedCartesianRetryAttempt first = run_attempt(
+        1u, first_options, 0.20,
+        FmmCartesianRetryAttemptRole::initial_theta_020);
+    trace_context = first.telemetry;
+    record_retry_attempt(retry, first.telemetry);
+
+    const FmmCartesianRetryWrapperDecision first_decision =
+        decide_fmm_cartesian_retry_after_attempt1(first.classification);
+    if (first_decision.action == FmmCartesianRetryWrapperAction::accept_attempt1) {
+      retry.accepted_attempt = first_decision.accepted_attempt;
+      retry.trigger_reason = "not_needed";
+      retry.final_reason = "accepted_attempt1";
+      first.result.fmm_cartesian_retry = std::move(retry);
+      trace.write("attempt_accepted", trace_context, "accepted_attempt1");
+      return std::move(first.result);
+    }
+    if (first_decision.action != FmmCartesianRetryWrapperAction::run_attempt2) {
+      retry.trigger_reason = first.telemetry.classification_reason;
+      retry.final_reason = std::string(first_decision.reason);
+      trace.write("retry_fail_closed", trace_context, retry.final_reason);
+      return sanitize_cartesian_retry_failure(std::move(first.result),
+                                              std::move(retry));
+    }
+
+    retry.trigger_reason = first.telemetry.classification_reason;
+    trace.write("retry_triggered", trace_context, retry.trigger_reason);
+    // Release the first surface/operator/preconditioner result before the
+    // second complete solve constructs its own independent state.
+    first.result = Result{};
+
+    Options second_options = first_options;
+    second_options.tree_opening_theta = 0.15;
+    second_options.tree_opening_theta_explicit = true;
+    CompletedCartesianRetryAttempt second = run_attempt(
+        2u, second_options, 0.15,
+        FmmCartesianRetryAttemptRole::tightened_theta_015);
+    trace_context = second.telemetry;
+    record_retry_attempt(retry, second.telemetry);
+
+    const FmmCartesianRetryIdentityClassification identity =
+        classify_fmm_cartesian_retry_identity(retry.attempts[0],
+                                              retry.attempts[1]);
+    retry.geometry_identity_valid =
+        retry.attempts[0].geometry_hash != 0 &&
+        retry.attempts[0].geometry_hash == retry.attempts[1].geometry_hash;
+    retry.tree_identity_valid = retry.attempts[0].tree_hash != 0 &&
+                                retry.attempts[0].tree_hash ==
+                                    retry.attempts[1].tree_hash;
+    retry.policy_transition_valid = retry.attempts[0].policy_hash != 0 &&
+                                    retry.attempts[1].policy_hash != 0 &&
+                                    retry.attempts[0].policy_hash !=
+                                        retry.attempts[1].policy_hash;
+    trace.write("cross_attempt_identity", second.telemetry,
+                identity.reason, identity.reason);
+
+    const FmmCartesianRetryWrapperDecision second_decision =
+        decide_fmm_cartesian_retry_after_attempt2(second.classification,
+                                                  identity);
+    if (second_decision.action == FmmCartesianRetryWrapperAction::accept_attempt2) {
+      retry.accepted_attempt = second_decision.accepted_attempt;
+      retry.final_reason = "accepted_attempt2";
+      second.result.fmm_cartesian_retry = std::move(retry);
+      trace.write("attempt_accepted", trace_context, "accepted_attempt2",
+                  identity.reason);
+      return std::move(second.result);
+    }
+
+    second.telemetry.accepted = false;
+    retry.attempts[1].accepted = false;
+    retry.final_reason = std::string(second_decision.reason);
+    trace.write("retry_fail_closed", trace_context, retry.final_reason,
+                identity.reason);
+    return sanitize_cartesian_retry_failure(std::move(second.result),
+                                            std::move(retry));
+  } catch (...) {
+    const std::exception_ptr original = std::current_exception();
+    write_cartesian_retry_trace_best_effort(
+        trace, "wrapper_exception", trace_context,
+        cartesian_retry_exception_reason(original));
+    std::rethrow_exception(original);
+  }
 }
 
 } // namespace TitanPBE::Tabi

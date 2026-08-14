@@ -1,6 +1,7 @@
 /build/
 /titan
 /titan.exe
+/test/tmp/
 **/run/
 *.o
 *.d

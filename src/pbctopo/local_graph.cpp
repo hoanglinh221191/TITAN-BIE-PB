@@ -111,10 +111,16 @@ bool detect_heavy_atom(const std::vector<mol_info> *info,
   return atom_symbol != 'H' && type_symbol != 'H';
 }
 
-double infer_bondi_vdw_radius(const std::vector<mol_info> &info,
-                              std::size_t local_atom_index) {
+struct PbctopoInferredRadius {
+  double radius = 1.70;
+  bool element_supported = false;
+};
+
+PbctopoInferredRadius
+infer_bondi_vdw_radius(const std::vector<mol_info> &info,
+                       std::size_t local_atom_index) {
   if (local_atom_index >= info.size())
-    return 1.70;
+    return {};
   std::string atom_name = info[local_atom_index].get_atom();
   std::string atom_type = info[local_atom_index].get_atom_type();
   for (char &ch : atom_name)
@@ -122,29 +128,29 @@ double infer_bondi_vdw_radius(const std::vector<mol_info> &info,
   for (char &ch : atom_type)
     ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
   if (atom_name == "CL" || atom_type.starts_with("CL"))
-    return 1.75;
+    return {1.75, true};
   if (atom_name == "BR" || atom_type.starts_with("BR"))
-    return 1.85;
+    return {1.85, true};
   const char element = first_alpha_upper(atom_name);
   switch (element) {
   case 'H':
-    return 1.20;
+    return {1.20, true};
   case 'N':
-    return 1.55;
+    return {1.55, true};
   case 'O':
-    return 1.52;
+    return {1.52, true};
   case 'F':
-    return 1.47;
+    return {1.47, true};
   case 'P':
-    return 1.80;
+    return {1.80, true};
   case 'S':
-    return 1.80;
+    return {1.80, true};
   case 'I':
-    return 1.98;
+    return {1.98, true};
   case 'C':
-    return 1.70;
+    return {1.70, true};
   default:
-    return 1.70;
+    return {};
   }
 }
 
@@ -198,22 +204,61 @@ std::size_t choose_metadata_residue_anchor(
 
 bool add_projected_metadata_edge(
     std::size_t a, std::size_t b, bool inter_residue,
+    bool hard_connectivity,
     std::unordered_set<std::uint64_t> &edge_set,
     std::vector<PbctopoProjectedMetadataEdge> &edges) {
   if (a == b)
     return false;
   if (!edge_set.insert(atom_pair_key(a, b)).second)
     return false;
-  edges.push_back({a, b, inter_residue});
+  edges.push_back({a, b, inter_residue, hard_connectivity});
   return true;
 }
 
-void build_projected_metadata_graph(const Multi_MOL &system,
+double metadata_anchor_continuity_cutoff(
+    const Multi_MOL &system, const PbctopoSystemStaticData &data,
+    std::size_t lhs_anchor, std::size_t rhs_anchor) {
+  const int lhs_priority =
+      metadata_anchor_priority(system, data, lhs_anchor);
+  const int rhs_priority =
+      metadata_anchor_priority(system, data, rhs_anchor);
+  if (lhs_priority == 1 || rhs_priority == 1)
+    return 8.0;
+  if (lhs_priority <= 2 || rhs_priority <= 2)
+    return 5.0;
+  return 4.5;
+}
+
+bool metadata_inter_residue_edge_is_hard(
+    const Multi_MOL &system, const MOL &mol,
+    const PbctopoSystemStaticData &data,
+    const PbctopoMetadataResidueGroup &prev,
+    const PbctopoMetadataResidueGroup &curr,
+    const PbctopoLatticeMetric &lattice) {
+  if (prev.internal_resnr == std::numeric_limits<std::size_t>::max() ||
+      curr.internal_resnr != prev.internal_resnr + 1 || !lattice.valid() ||
+      prev.anchor >= mol.pos.x.size() || curr.anchor >= mol.pos.x.size()) {
+    return false;
+  }
+  const PbctopoNearestImage nearest = lattice.nearest_image_cartesian(
+      mol.pos.x[curr.anchor] - mol.pos.x[prev.anchor],
+      mol.pos.y[curr.anchor] - mol.pos.y[prev.anchor],
+      mol.pos.z[curr.anchor] - mol.pos.z[prev.anchor]);
+  if (!nearest.valid)
+    return false;
+  const double cutoff = metadata_anchor_continuity_cutoff(
+      system, data, prev.anchor, curr.anchor);
+  return nearest.d2 <= cutoff * cutoff;
+}
+
+void build_projected_metadata_graph(const Multi_MOL &system, const MOL &mol,
                                     PbctopoSystemStaticData &data) {
   data.metadata_graph_available = false;
   data.metadata_residue_groups = 0;
   data.metadata_intra_edges = 0;
   data.metadata_inter_edges = 0;
+  data.metadata_inter_hard_edges = 0;
+  data.metadata_inter_soft_edges = 0;
   data.projected_metadata_edges.clear();
   if (system.info.size() != data.atom_count || data.atom_count == 0)
     return;
@@ -254,7 +299,7 @@ void build_projected_metadata_graph(const Multi_MOL &system,
           atom_idx >= data.heavy_mask.size() || data.heavy_mask[atom_idx] != 0;
       if (!atom_is_heavy)
         continue;
-      if (add_projected_metadata_edge(group.anchor, atom_idx, false,
+      if (add_projected_metadata_edge(group.anchor, atom_idx, false, true,
                                       metadata_edge_set,
                                       data.projected_metadata_edges)) {
         ++data.metadata_intra_edges;
@@ -262,6 +307,7 @@ void build_projected_metadata_graph(const Multi_MOL &system,
     }
   }
 
+  const PbctopoLatticeMetric lattice(mol.Box);
   for (std::size_t group_idx = 1; group_idx < groups.size(); ++group_idx) {
     const auto &prev = groups[group_idx - 1];
     const auto &curr = groups[group_idx];
@@ -270,10 +316,17 @@ void build_projected_metadata_graph(const Multi_MOL &system,
     if (prev.anchor == std::numeric_limits<std::size_t>::max() ||
         curr.anchor == std::numeric_limits<std::size_t>::max())
       continue;
+    const bool hard_connectivity = metadata_inter_residue_edge_is_hard(
+        system, mol, data, prev, curr, lattice);
     if (add_projected_metadata_edge(prev.anchor, curr.anchor, true,
+                                    hard_connectivity,
                                     metadata_edge_set,
                                     data.projected_metadata_edges)) {
       ++data.metadata_inter_edges;
+      if (hard_connectivity)
+        ++data.metadata_inter_hard_edges;
+      else
+        ++data.metadata_inter_soft_edges;
     }
   }
 
@@ -290,8 +343,12 @@ std::vector<PbctopoContinuityPair> build_local_continuity_pairs(
     if (!static_data.metadata_graph_available)
       return continuity_pairs;
     continuity_pairs.reserve(static_data.projected_metadata_edges.size());
-    for (const auto &edge : static_data.projected_metadata_edges)
-      continuity_pairs.push_back({edge.a, edge.b});
+    for (const auto &edge : static_data.projected_metadata_edges) {
+      continuity_pairs.push_back(
+          {edge.a, edge.b, 1.0, 1.0,
+           edge.hard_connectivity ? PbctopoContinuityKind::MetadataHard
+                                  : PbctopoContinuityKind::MetadataSoft});
+    }
     return continuity_pairs;
   }
 
@@ -307,9 +364,31 @@ std::vector<PbctopoContinuityPair> build_local_continuity_pairs(
                          static_data.heavy_mask[bond.b] != 0;
     if (!a_heavy || !b_heavy)
       continue;
-    continuity_pairs.push_back({bond.a, bond.b});
+    continuity_pairs.push_back({bond.a, bond.b, 1.0, 1.0,
+                                PbctopoContinuityKind::TopologyHard});
   }
   return continuity_pairs;
+}
+
+void initialize_continuity_reference_lengths(
+    const MOL &mol, std::vector<PbctopoContinuityPair> &continuity_pairs) {
+  const PbctopoLatticeMetric lattice(mol.Box);
+  const std::size_t atom_count = mol.pos.x.size();
+  for (auto &pair : continuity_pairs) {
+    if (pair.a >= atom_count || pair.b >= atom_count)
+      continue;
+    const double dx = mol.pos.x[pair.b] - mol.pos.x[pair.a];
+    const double dy = mol.pos.y[pair.b] - mol.pos.y[pair.a];
+    const double dz = mol.pos.z[pair.b] - mol.pos.z[pair.a];
+    const PbctopoNearestImage mic =
+        lattice.nearest_image_cartesian(dx, dy, dz);
+    const double raw_d2 = dx * dx + dy * dy + dz * dz;
+    const double reference_d2 =
+        mic.valid && std::isfinite(mic.d2) ? mic.d2 : raw_d2;
+    const double ref_d2 = std::max(reference_d2, 1.0e-6);
+    pair.ref_d2 = ref_d2;
+    pair.inv_ref_d2 = 1.0 / ref_d2;
+  }
 }
 
 void build_projected_topology_bonds(
@@ -332,7 +411,9 @@ void append_global_continuity_pairs(
     std::vector<PbctopoContinuityPair> &global_pairs) {
   global_pairs.reserve(global_pairs.size() + local_pairs.size());
   for (const auto &pair : local_pairs)
-    global_pairs.push_back({pair.a + offset, pair.b + offset});
+    global_pairs.push_back({pair.a + offset, pair.b + offset, pair.ref_d2,
+                            pair.inv_ref_d2, pair.kind, pair.weight,
+                            pair.hard_cutoff_d2});
 }
 
 void build_anchor_index_list(
@@ -447,26 +528,64 @@ build_pbctopo_system_static_data(const Multi_MOL &system, const MOL &mol) {
   build_projected_topology_bonds(system.topology, data.atom_count,
                                  data.projected_topology_bonds);
   data.ranges = build_ranges_for_system(system, mol);
+  data.anchor_unit_ranges =
+      build_ranges_from_topology(system.topology, mol.pos.x.size());
+  if (data.anchor_unit_ranges.empty())
+    data.anchor_unit_ranges =
+        build_ranges_from_info(system.info, mol.pos.x.size());
+  if (data.anchor_unit_ranges.empty())
+    data.anchor_unit_ranges = data.ranges;
   data.heavy_mask.assign(data.atom_count, 1);
   data.vdw_radii.assign(data.atom_count, 0.0);
   data.vdw_radius_available.assign(data.atom_count, 0);
+  data.vdw_radius_sources.assign(
+      data.atom_count, PbctopoStericRadiusSource::Unavailable);
+  data.atomic_masses.assign(data.atom_count, 0.0);
+  data.atomic_mass_available.assign(data.atom_count, 0);
+  const bool mass_parameters_available =
+      system.parameters_match_info() &&
+      system.parameters.mass.size() == data.atom_count;
   data.heavy_count = 0;
   for (std::size_t atom_idx = 0; atom_idx < data.atom_count; ++atom_idx) {
     const bool is_heavy = detect_heavy_atom(&system.info, atom_idx);
     data.heavy_mask[atom_idx] = is_heavy ? 1 : 0;
     data.heavy_count += is_heavy ? 1u : 0u;
+    if (mass_parameters_available &&
+        std::isfinite(system.parameters.mass[atom_idx]) &&
+        system.parameters.mass[atom_idx] > 0.0) {
+      data.atomic_masses[atom_idx] = system.parameters.mass[atom_idx];
+      data.atomic_mass_available[atom_idx] = 1;
+      ++data.atomic_mass_count;
+    }
     if (const auto radius = system.topology.vdw_radius(
             static_cast<std::uint32_t>(atom_idx));
         radius.has_value()) {
       data.vdw_radii[atom_idx] = *radius;
       data.vdw_radius_available[atom_idx] = 1;
-      if (system.topology.vdw_radius_source(
-              static_cast<std::uint32_t>(atom_idx)) ==
-          MolTopologyVdwRadiusSource::GromacsTopology) {
+      const auto radius_source = system.topology.vdw_radius_source(
+          static_cast<std::uint32_t>(atom_idx));
+      const bool topology_source =
+          radius_source == MolTopologyVdwRadiusSource::GromacsTopology ||
+          radius_source ==
+              MolTopologyVdwRadiusSource::GromacsTopologyExplicitZeroLJ;
+      const bool explicit_zero_lj =
+          radius_source ==
+              MolTopologyVdwRadiusSource::GromacsTopologyExplicitZeroLJ ||
+          radius_source ==
+              MolTopologyVdwRadiusSource::MultiMolParametersExplicitZeroLJ;
+      data.vdw_radius_sources[atom_idx] =
+          explicit_zero_lj
+              ? PbctopoStericRadiusSource::ExplicitZeroLennardJones
+              : topology_source
+                    ? PbctopoStericRadiusSource::ForceFieldTopology
+                    : PbctopoStericRadiusSource::ForceFieldParameter;
+      if (topology_source) {
         ++data.vdw_topology_count;
       } else {
         ++data.vdw_parameter_count;
       }
+      if (*radius == 0.0)
+        ++data.vdw_zero_lj_count;
     }
     if (data.vdw_radius_available[atom_idx] == 0 &&
         atom_idx < system.parameters.size()) {
@@ -474,15 +593,25 @@ build_pbctopo_system_static_data(const Multi_MOL &system, const MOL &mol) {
       if (std::isfinite(radius) && radius > 0.0) {
         data.vdw_radii[atom_idx] = radius;
         data.vdw_radius_available[atom_idx] = 1;
+        data.vdw_radius_sources[atom_idx] =
+            PbctopoStericRadiusSource::ForceFieldParameter;
         ++data.vdw_parameter_count;
       }
     }
     if (data.vdw_radius_available[atom_idx] == 0 &&
         atom_idx < system.info.size()) {
-      data.vdw_radii[atom_idx] =
+      const PbctopoInferredRadius inferred =
           infer_bondi_vdw_radius(system.info, atom_idx);
+      data.vdw_radii[atom_idx] = inferred.radius;
       data.vdw_radius_available[atom_idx] = 1;
-      ++data.vdw_inferred_count;
+      data.vdw_radius_sources[atom_idx] =
+          inferred.element_supported
+              ? PbctopoStericRadiusSource::InferredElement
+              : PbctopoStericRadiusSource::GenericFallback;
+      if (inferred.element_supported)
+        ++data.vdw_inferred_count;
+      else
+        ++data.vdw_generic_fallback_count;
     }
   }
   if (data.heavy_count == 0 && data.atom_count > 0) {
@@ -490,17 +619,13 @@ build_pbctopo_system_static_data(const Multi_MOL &system, const MOL &mol) {
     data.heavy_count = data.atom_count;
   }
   if (!data.topology_graph_available)
-    build_projected_metadata_graph(system, data);
+    build_projected_metadata_graph(system, mol, data);
   PbctopoSystemStaticData continuity_data = data;
-  continuity_data.ranges =
-      build_ranges_from_topology(system.topology, mol.pos.x.size());
-  if (continuity_data.ranges.empty())
-    continuity_data.ranges =
-        build_ranges_from_info(system.info, mol.pos.x.size());
-  if (continuity_data.ranges.empty())
-    continuity_data.ranges = data.ranges;
+  continuity_data.ranges = data.anchor_unit_ranges;
   data.continuity_pairs_local =
       build_local_continuity_pairs(system, continuity_data);
+  initialize_continuity_reference_lengths(mol,
+                                          data.continuity_pairs_local);
   if (data.continuity_anchor_local.empty()) {
     build_metadata_anchor_index_list(system, continuity_data,
                                      data.continuity_anchor_local);
@@ -620,7 +745,9 @@ void build_projection_continuity_subset(
         projection_index[base_atoms[pair.b].global_atom_id];
     if (mapped_a == invalid_index || mapped_b == invalid_index)
       continue;
-    projection_continuity_pairs.push_back({mapped_a, mapped_b});
+    projection_continuity_pairs.push_back(
+        {mapped_a, mapped_b, pair.ref_d2, pair.inv_ref_d2, pair.kind,
+         pair.weight, pair.hard_cutoff_d2});
   }
 }
 
@@ -654,6 +781,7 @@ void append_atoms_for_system(const MOL &mol,
                              const PbctopoSystemStaticData *static_data,
                              int owner,
                              std::vector<PbctopoAtom> &atoms) {
+  std::size_t unit_range_index = 0;
   for (std::size_t local = 0; local < mol.pos.x.size(); ++local) {
     double r[3]{mol.pos.x[local], mol.pos.y[local], mol.pos.z[local]};
     double s[3]{};
@@ -665,14 +793,32 @@ void append_atoms_for_system(const MOL &mol,
 
     PbctopoAtom atom;
     atom.global_atom_id = atoms.size();
-    atom.fragment_id = 0;
+    bool matched_anchor_unit = false;
+    if (static_data != nullptr) {
+      const auto &unit_ranges = static_data->anchor_unit_ranges;
+      atom.fragment_id = unit_ranges.size();
+      while (unit_range_index < unit_ranges.size() &&
+             local >= unit_ranges[unit_range_index].end) {
+        ++unit_range_index;
+      }
+      if (unit_range_index < unit_ranges.size() &&
+          local >= unit_ranges[unit_range_index].begin &&
+          local < unit_ranges[unit_range_index].end) {
+        atom.fragment_id = unit_ranges[unit_range_index].source_index;
+        matched_anchor_unit = true;
+      }
+    }
     atom.owner = owner;
     atom.local_atom_index = local;
+    atom.source_atom_id = local;
     if (info != nullptr && local < info->size()) {
       const auto &atom_info = (*info)[local];
-      const std::uint64_t chainnum =
-          static_cast<std::uint64_t>(atom_info.get_chainnum());
-      atom.chain_key = chainnum;
+      if (atom_info.has_original_atom_id())
+        atom.source_atom_id = atom_info.get_original_atom_id();
+      const std::size_t chainnum = atom_info.get_chainnum();
+      if (static_data != nullptr && !matched_anchor_unit)
+        atom.fragment_id = static_data->anchor_unit_ranges.size() + chainnum;
+      atom.chain_key = static_cast<std::uint64_t>(chainnum);
       atom.residue_id = static_cast<int>(atom_info.get_internal_resnr());
       atom.has_topology_key = true;
     }
@@ -687,6 +833,15 @@ void append_atoms_for_system(const MOL &mol,
         static_data->vdw_radius_available[local] != 0) {
       atom.vdw_radius = static_data->vdw_radii[local];
       atom.has_vdw_radius = true;
+      if (local < static_data->vdw_radius_sources.size())
+        atom.steric_radius_source = static_data->vdw_radius_sources[local];
+    }
+    if (static_data != nullptr &&
+        local < static_data->atomic_masses.size() &&
+        local < static_data->atomic_mass_available.size() &&
+        static_data->atomic_mass_available[local] != 0) {
+      atom.atomic_mass = static_data->atomic_masses[local];
+      atom.has_atomic_mass = true;
     }
     atom.x = r[0];
     atom.y = r[1];
@@ -701,17 +856,35 @@ void append_atoms_for_system(const MOL &mol,
 void build_local_neighborhood_graph(
     const std::vector<PbctopoAtom> &atoms, box Box,
     std::vector<PbctopoLocalEdge> &edges,
-    std::unordered_set<std::uint64_t> &edge_set, double bond_cutoff) {
-  edges.clear();
-  edge_set.clear();
+    std::unordered_set<std::uint64_t> &edge_set, double bond_cutoff,
+    bool append, std::span<const char> eligible_atoms) {
+  if (!append) {
+    edges.clear();
+    edge_set.clear();
+  }
   if (atoms.size() < 2)
+    return;
+  const PbctopoLatticeMetric basis(Box);
+  if (!basis.valid())
     return;
 
   const double kBondCutoff = bond_cutoff;
   const double kBondCutoff2 = bond_cutoff * bond_cutoff;
-  edges.reserve(atoms.size() * 2);
-  edge_set.reserve(atoms.size() * 2);
+  const auto is_eligible = [&](std::size_t atom_idx) {
+    return eligible_atoms.empty() ||
+           (atom_idx < eligible_atoms.size() && eligible_atoms[atom_idx] != 0);
+  };
+  edges.reserve(edges.size() + atoms.size() * 2);
+  edge_set.reserve(edge_set.size() + atoms.size() * 2);
   std::vector<std::size_t> degree(atoms.size(), 0);
+  if (append) {
+    for (const auto &edge : edges) {
+      if (edge.a >= atoms.size() || edge.b >= atoms.size() || edge.a == edge.b)
+        continue;
+      ++degree[edge.a];
+      ++degree[edge.b];
+    }
+  }
   auto same_local_unit = [](const PbctopoAtom &lhs, const PbctopoAtom &rhs) {
     if (lhs.owner != rhs.owner)
       return false;
@@ -731,7 +904,6 @@ void build_local_neighborhood_graph(
     ++degree[b];
     return true;
   };
-  const PbctopoLatticeMetric basis(Box);
   const BoxMatrix box_matrix(Box);
   const double sx_bound = std::min(
       0.5, kBondCutoff *
@@ -771,6 +943,8 @@ void build_local_neighborhood_graph(
       bond_grid;
   bond_grid.reserve(std::max<std::size_t>(64, atoms.size() / 2));
   for (std::size_t i = 0; i < atoms.size(); ++i) {
+    if (!is_eligible(i))
+      continue;
     const auto &ai = atoms[i];
     const int cx = std::min(nx - 1, static_cast<int>(std::floor(ai.sx / cell_sx)));
     const int cy = std::min(ny - 1, static_cast<int>(std::floor(ai.sy / cell_sy)));
@@ -785,13 +959,19 @@ void build_local_neighborhood_graph(
           if (it == bond_grid.end())
             continue;
           for (std::size_t j : it->second) {
+            if (!is_eligible(j))
+              continue;
             const auto &aj = atoms[j];
             if (!same_local_unit(ai, aj))
                 continue;
             double dsx = aj.sx - ai.sx;
             double dsy = aj.sy - ai.sy;
             double dsz = aj.sz - ai.sz;
-            const double d2 = basis.nearest_image_scaled(dsx, dsy, dsz).d2;
+            const PbctopoNearestImage mic =
+                basis.nearest_image_scaled(dsx, dsy, dsz);
+            if (!mic.valid)
+              continue;
+            const double d2 = mic.d2;
             if (d2 > kBondCutoff2)
               continue;
             add_edge(j, i, d2);
@@ -802,30 +982,6 @@ void build_local_neighborhood_graph(
     bond_grid[{cx, cy, cz}].push_back(i);
   }
 
-  for (std::size_t i = 0; i < atoms.size(); ++i) {
-    const auto &ai = atoms[i];
-    if (!ai.is_heavy || ai.has_topology_graph || degree[i] != 0)
-      continue;
-    std::size_t best = std::numeric_limits<std::size_t>::max();
-    double best_d2 = std::numeric_limits<double>::infinity();
-    for (std::size_t j = 0; j < atoms.size(); ++j) {
-      if (i == j)
-        continue;
-      const auto &aj = atoms[j];
-      if (!aj.is_heavy || aj.has_topology_graph || !same_local_unit(ai, aj))
-        continue;
-      double dsx = aj.sx - ai.sx;
-      double dsy = aj.sy - ai.sy;
-      double dsz = aj.sz - ai.sz;
-      const double d2 = basis.nearest_image_scaled(dsx, dsy, dsz).d2;
-      if (d2 < best_d2) {
-        best_d2 = d2;
-        best = j;
-      }
-    }
-    if (best != std::numeric_limits<std::size_t>::max())
-      add_edge(i, best, best_d2);
-  }
 }
 
 void append_topology_bond_edges_for_system(
@@ -861,17 +1017,22 @@ void append_topology_bond_edges_for_system(
       continue;
     }
 
+    double dsx = atoms[b].sx - atoms[a].sx;
+    double dsy = atoms[b].sy - atoms[a].sy;
+    double dsz = atoms[b].sz - atoms[a].sz;
+    const PbctopoNearestImage mic =
+        basis.nearest_image_scaled(dsx, dsy, dsz);
+    if (!mic.valid || !std::isfinite(mic.d2)) {
+      ++timing.pbctopo_topology_bond_edges_skipped;
+      continue;
+    }
     const std::uint64_t pair_key = atom_pair_key(a, b);
     if (!edge_set.insert(pair_key).second) {
       ++timing.pbctopo_topology_bond_edges_skipped;
       ++timing.pbctopo_topology_duplicate_edges;
       continue;
     }
-
-    double dsx = atoms[b].sx - atoms[a].sx;
-    double dsy = atoms[b].sy - atoms[a].sy;
-    double dsz = atoms[b].sz - atoms[a].sz;
-    const double d2 = basis.nearest_image_scaled(dsx, dsy, dsz).d2;
+    const double d2 = mic.d2;
     const double ref_d2 = std::max(d2, 1.0e-6);
     edges.push_back({a, b, ref_d2, 1.0 / ref_d2,
                      std::max(9.0, ref_d2 * 4.0),
@@ -892,24 +1053,81 @@ void append_metadata_graph_edges_for_system(
       static_data.metadata_residue_groups;
   timing.pbctopo_metadata_intra_edges += static_data.metadata_intra_edges;
   timing.pbctopo_metadata_inter_edges += static_data.metadata_inter_edges;
+  timing.pbctopo_metadata_inter_hard_edges +=
+      static_data.metadata_inter_hard_edges;
+  timing.pbctopo_metadata_inter_soft_edges +=
+      static_data.metadata_inter_soft_edges;
   if (static_data.projected_metadata_edges.empty())
     return;
 
-  const double neutral_ref = std::numeric_limits<double>::infinity();
+  constexpr double neutral_ref = 0.0;
+  const double neutral_break = std::numeric_limits<double>::infinity();
   for (const PbctopoProjectedMetadataEdge &edge :
        static_data.projected_metadata_edges) {
+    if (!edge.hard_connectivity)
+      continue;
     const std::size_t a = atom_offset + edge.a;
     const std::size_t b = atom_offset + edge.b;
     if (a >= atoms.size() || b >= atoms.size() || a == b)
       continue;
     if (!edge_set.insert(atom_pair_key(a, b)).second)
       continue;
-    edges.push_back({a, b, neutral_ref, 0.0, neutral_ref,
+    edges.push_back({a, b, neutral_ref, 0.0, neutral_break,
                      PbctopoLocalEdgeKind::MetadataSkeleton});
   }
 }
 
+std::vector<std::vector<std::size_t>>
+build_hard_connected_components_from_local_edges(
+    std::size_t atom_count, const std::vector<PbctopoLocalEdge> &edges) {
+  std::vector<std::vector<std::size_t>> adjacency(atom_count);
+  for (const auto &edge : edges) {
+    if (!pbctopo_edge_is_hard_connectivity(edge.kind) ||
+        edge.a >= atom_count || edge.b >= atom_count || edge.a == edge.b) {
+      continue;
+    }
+    adjacency[edge.a].push_back(edge.b);
+    adjacency[edge.b].push_back(edge.a);
+  }
+
+  std::vector<std::vector<std::size_t>> components;
+  std::vector<char> seen(atom_count, 0);
+  std::vector<std::size_t> stack;
+  for (std::size_t atom = 0; atom < atom_count; ++atom) {
+    if (seen[atom] != 0)
+      continue;
+    seen[atom] = 1;
+    stack.clear();
+    stack.push_back(atom);
+    std::vector<std::size_t> component;
+    while (!stack.empty()) {
+      const std::size_t current = stack.back();
+      stack.pop_back();
+      component.push_back(current);
+      for (std::size_t neighbor : adjacency[current]) {
+        if (seen[neighbor] != 0)
+          continue;
+        seen[neighbor] = 1;
+        stack.push_back(neighbor);
+      }
+    }
+    std::sort(component.begin(), component.end());
+    components.push_back(std::move(component));
+  }
+
+  std::sort(components.begin(), components.end(),
+            [](const auto &lhs, const auto &rhs) {
+              if (lhs.size() != rhs.size())
+                return lhs.size() > rhs.size();
+              return lhs.front() < rhs.front();
+            });
+  return components;
+}
+
 std::string pbctopo_topology_source_label(const PbctopoTimingStats &timing) {
+  if (timing.pbctopo_metadata_graph_frames > 0 &&
+      timing.pbctopo_topology_static_graph_frames > 0)
+    return "mixed";
   if (timing.frames > 0 &&
       timing.pbctopo_topology_static_graph_frames == timing.frames)
     return "gromacs_topology";

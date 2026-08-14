@@ -473,6 +473,38 @@ private:
     double tabi_fmm_m2l_setup_ms{0.0};
     double tabi_fmm_m2l_apply_ms{0.0};
     bool tabi_fmm_m2l_finite_outputs{true};
+    bool tabi_bie_cartesian_full_fmm_active{false};
+    std::string tabi_bie_cartesian_full_fmm_requested{"off"};
+    std::string tabi_bie_cartesian_full_fmm_effective{"off"};
+    int tabi_bie_cartesian_full_fmm_order{0};
+    int tabi_bie_cartesian_full_fmm_leaf_size{0};
+    double tabi_bie_cartesian_full_fmm_opening_theta{0.0};
+    std::uint64_t tabi_bie_cartesian_full_fmm_tree_hash{0};
+    std::uint64_t tabi_bie_cartesian_full_fmm_worklist_hash{0};
+    std::uint64_t tabi_bie_cartesian_full_fmm_policy_hash{0};
+    std::size_t tabi_bie_cartesian_full_fmm_nodes{0};
+    std::size_t tabi_bie_cartesian_full_fmm_far_pairs{0};
+    std::size_t tabi_bie_cartesian_full_fmm_direct_pairs{0};
+    std::uint64_t tabi_bie_cartesian_full_fmm_direct_panel_pairs_expected{0};
+    std::uint64_t tabi_bie_cartesian_full_fmm_direct_panel_pairs_applied_last{0};
+    std::uint64_t tabi_bie_cartesian_full_fmm_direct_panel_pairs_applied_total{0};
+    std::size_t tabi_bie_cartesian_full_fmm_cache_entries{0};
+    std::size_t tabi_bie_cartesian_full_fmm_cache_hits{0};
+    std::size_t tabi_bie_cartesian_full_fmm_cache_bytes{0};
+    std::size_t tabi_bie_cartesian_full_fmm_plan_bytes{0};
+    std::size_t tabi_bie_cartesian_full_fmm_workspace_bytes{0};
+    double tabi_bie_cartesian_full_fmm_tree_seconds{0.0};
+    double tabi_bie_cartesian_full_fmm_worklist_seconds{0.0};
+    double tabi_bie_cartesian_full_fmm_cache_seconds{0.0};
+    double tabi_bie_cartesian_full_fmm_audit_seconds{0.0};
+    double tabi_bie_cartesian_full_fmm_p2m_seconds{0.0};
+    double tabi_bie_cartesian_full_fmm_m2m_seconds{0.0};
+    double tabi_bie_cartesian_full_fmm_m2l_seconds{0.0};
+    double tabi_bie_cartesian_full_fmm_l2l_seconds{0.0};
+    double tabi_bie_cartesian_full_fmm_l2p_seconds{0.0};
+    double tabi_bie_cartesian_full_fmm_direct_seconds{0.0};
+    double tabi_bie_cartesian_full_fmm_m2m_parity_error{0.0};
+    double tabi_bie_cartesian_full_fmm_l2l_parity_error{0.0};
     bool tabi_fmm_local_gmres_active{false};
     double tabi_fmm_local_prepare_seconds{0.0};
     std::size_t tabi_fmm_local_plan_build_count{0};
@@ -531,6 +563,11 @@ private:
     double tabi_tree_vs_direct_matvec_rel{0.0};
     std::size_t tabi_matvec_audit_rows{0};
     double tabi_matvec_audit_ms{0.0};
+    FmmCartesianPreAuditTelemetry tabi_fmm_cartesian_pre_audit{};
+    FmmCartesianSolutionAuditTelemetry tabi_fmm_cartesian_solution_audit{};
+    std::array<FmmCartesianChannelAudit, kJcpExpansionChannelCount>
+        tabi_fmm_cartesian_channel_audit{};
+    FmmCartesianRetryTelemetry tabi_fmm_cartesian_retry{};
     double tabi_orthogonalization_ms{0.0};
     double tabi_preconditioner_ms{0.0};
     double tabi_surface_neighbor_ms{0.0};
@@ -949,6 +986,56 @@ private:
     double tabi_surface_quality_enclosed_volume_a3{0.0};
     double tabi_surface_quality_enclosed_volume_rel_error_vs_4piR3_over3{0.0};
     double tabi_surface_quality_triangle_area_cv{0.0};
+    std::string tabi_surface_topology_source{"not_built"};
+    std::string tabi_surface_analytic_ses_engine{"not_applicable"};
+    std::string tabi_surface_status_detail{"not_built"};
+    std::string tabi_surface_cavity_policy{"not_applicable"};
+    std::size_t tabi_surface_odd_ray_rows{0};
+    std::size_t tabi_surface_patch_ray_unresolved_uncertified_rows{0};
+    std::size_t tabi_surface_morphology_fallback_vertices{0};
+    std::string tabi_surface_analytic_orientation_status{"not_run"};
+    std::size_t tabi_surface_analytic_inverted_faces{0};
+    std::size_t tabi_surface_analytic_orientation_uncertified_faces{0};
+    std::size_t tabi_surface_analytic_self_intersections{0};
+    std::size_t tabi_surface_wide_repair_attempts{0};
+    std::size_t tabi_surface_topology_certificate_accepts{0};
+    std::size_t tabi_surface_topology_fallback_audits{0};
+    double tabi_surface_initial_collapse_ms{0.0};
+    double tabi_surface_stable_sliver_ms{0.0};
+    double tabi_surface_full_projection_ms{0.0};
+    double tabi_surface_orientation_repair_ms{0.0};
+    double tabi_surface_wide_repair_ms{0.0};
+    double tabi_surface_self_intersection_audit_ms{0.0};
+    std::size_t tabi_surface_filled_cavity_regions{0};
+    std::size_t tabi_surface_filled_cavity_vertices{0};
+    std::size_t tabi_surface_poor_triangles_before{0};
+    std::size_t tabi_surface_poor_triangles_after{0};
+    double tabi_surface_triangle_quality_min_before{0.0};
+    double tabi_surface_triangle_quality_min_after{0.0};
+    double tabi_surface_max_edge_ratio_before{0.0};
+    double tabi_surface_max_edge_ratio_after{0.0};
+    std::string tabi_surface_analytic_audit_status{"not_run"};
+    std::size_t tabi_surface_analytic_audit_samples{0};
+    std::size_t tabi_surface_analytic_audit_hits{0};
+    std::size_t tabi_surface_analytic_audit_misses{0};
+    double tabi_surface_analytic_projection_distance_rms{0.0};
+    double tabi_surface_analytic_projection_distance_max{0.0};
+    double tabi_surface_analytic_patch_residual_rms{0.0};
+    double tabi_surface_analytic_patch_residual_max{0.0};
+    double tabi_surface_analytic_normal_angle_rms_deg{0.0};
+    double tabi_surface_analytic_normal_angle_max_deg{0.0};
+    double tabi_surface_sampled_hausdorff_proxy{0.0};
+    std::string tabi_surface_analytic_normal_quality_status{"not_run"};
+    std::size_t tabi_surface_analytic_orientation_smooth_faces{0};
+    std::size_t tabi_surface_analytic_orientation_seam_faces{0};
+    std::size_t tabi_surface_analytic_normal_cosine_below_025_faces{0};
+    std::size_t tabi_surface_analytic_normal_cosine_below_050_faces{0};
+    double tabi_surface_analytic_normal_area_weighted_rms_deg{0.0};
+    double tabi_surface_analytic_normal_p99_deg{0.0};
+    double tabi_surface_analytic_smooth_normal_p99_deg{0.0};
+    double tabi_surface_analytic_seam_normal_p99_deg{0.0};
+    double tabi_surface_analytic_normal_area_below_cosine_025_fraction{0.0};
+    double tabi_surface_analytic_normal_area_below_cosine_050_fraction{0.0};
     std::string tabi_calderon_trace_space_status{"off"};
     std::size_t tabi_calderon_trace_vertices{0};
     std::size_t tabi_calderon_trace_edges{0};
@@ -956,6 +1043,10 @@ private:
     std::size_t tabi_calderon_trace_orientation_mismatches{0};
     std::size_t tabi_calderon_trace_nonmanifold_edges{0};
     std::size_t tabi_calderon_trace_unreferenced_vertices{0};
+    std::size_t tabi_calderon_trace_components{0};
+    std::int64_t tabi_calderon_trace_euler_characteristic{0};
+    std::size_t tabi_calderon_trace_genus_sum{0};
+    bool tabi_calderon_trace_topology_invariants_valid{false};
     std::string tabi_calderon_aux_surface_mode{"off"};
     std::string tabi_calderon_aux_trace_status{"off"};
     std::size_t tabi_calderon_aux_panels{0};
@@ -1604,7 +1695,7 @@ private:
   GridShape build_shape(const std::vector<Atom> &atoms) const;
   GridShape build_shape(const std::vector<Atom> &atoms, double scale,
                         double margin) const;
-  void ensure_workspace(const GridShape &shape);
+  void ensure_workspace(const GridShape &shape, bool reset_medium = true);
   [[nodiscard]] bool pbsa_grid_reuse_gate() const;
   [[nodiscard]] bool grid_medium_operator_cache_allowed(
       const GridShape &shape, const std::vector<Atom> &atoms, double eps_in,
@@ -1613,6 +1704,8 @@ private:
   [[nodiscard]] std::uint64_t grid_medium_operator_cache_key(
       const GridShape &shape, const std::vector<Atom> &atoms, double eps_in,
       double eps_out, double kappa) const;
+  [[nodiscard]] bool grid_medium_operator_cache_matches(
+      std::uint64_t key, const GridShape &shape) const noexcept;
   bool restore_grid_medium_operator_cache(std::uint64_t key,
                                           const GridShape &shape);
   void store_grid_medium_operator_cache(std::uint64_t key,
@@ -1669,9 +1762,11 @@ private:
   BoundaryDiagnostics set_boundary(const GridShape &shape,
                                    const std::vector<Atom> &atoms,
                                    double eps_out, double kappa);
-  SolveStats solve_sor(const GridShape &shape, TitanExecutor &executor);
+  SolveStats solve_sor(const GridShape &shape, TitanExecutor &executor,
+                       int iteration_limit = -1);
   SolveStats solve_sor_half_packed(const GridShape &shape,
-                                   TitanExecutor &executor);
+                                   TitanExecutor &executor,
+                                   int iteration_limit = -1);
   SolveStats solve_nonlinear_sor_block(const GridShape &shape,
                                        const AlignedDoubleVector &source,
                                        int sweeps, double relax,
@@ -1693,6 +1788,7 @@ private:
   void prepare_nwt_half_workspace(const GridShape &shape, double rhs_scale);
   void flush_nwt_half_workspace(const GridShape &shape);
   double compute_linear_residual(const GridShape &shape) const;
+  [[nodiscard]] double grid_linear_residual_tolerance() const noexcept;
   double compute_nonlinear_residual(const GridShape &shape,
                                     const AlignedDoubleVector &source,
                                     double screen_scale) const;
@@ -2022,6 +2118,8 @@ private:
   void write_pbsa_summary(std::fstream &log);
   static void add_scalar(ScalarStats &stats, double value);
   static double scalar_stddev(const ScalarStats &stats);
+  static double scalar_mean_or_nan(const ScalarStats &stats);
+  static double scalar_stddev_or_nan(const ScalarStats &stats);
   void maybe_write_maps(const GridShape &shape, const FrameResult &result,
                         bool write_phi_now);
   [[nodiscard]] std::string maybe_write_probe_sites(
@@ -2183,6 +2281,7 @@ private:
   double dgsolv_min_{0.0};
   double dgsolv_max_{0.0};
   std::size_t pbsa_frames_{0};
+  std::size_t pbsa_valid_{0};
   std::size_t pbsa_failed_{0};
   ScalarStats pbsa_elec_stats_{};
   ScalarStats pbsa_vdw_stats_{};

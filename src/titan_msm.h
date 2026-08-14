@@ -148,7 +148,8 @@ public:
       bool msm_run_pcca = true, int msm_macrostates = -1,
       const std::vector<int> &its_lags = {},
       TitanMSMItsSolverMode its_solver_mode = TitanMSMItsSolverMode::Full,
-      int its_topk = 0, int its_max_k_full = 256) const;
+      int its_topk = 0, int its_max_k_full = 256,
+      bool kinetics_interpretable = true) const;
 
   // -----------------------------------------------------------------------
   // Accessors

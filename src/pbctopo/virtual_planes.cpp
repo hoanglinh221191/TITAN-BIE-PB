@@ -76,11 +76,18 @@ std::size_t interval_index(const std::vector<double> &planes, double center) {
   return std::min(idx, planes.size() - 2);
 }
 
-std::uint64_t pack_interval_key(std::size_t ix, std::size_t iy,
+std::uint64_t hash_interval_key(std::size_t ix, std::size_t iy,
                                 std::size_t iz) {
-  return (static_cast<std::uint64_t>(ix) << 42) ^
-         (static_cast<std::uint64_t>(iy) << 21) ^
-         static_cast<std::uint64_t>(iz);
+  const auto mix = [](std::uint64_t value) {
+    value += 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+  };
+  std::uint64_t hash = mix(static_cast<std::uint64_t>(ix));
+  hash ^= mix(static_cast<std::uint64_t>(iy) + hash);
+  hash ^= mix(static_cast<std::uint64_t>(iz) + hash);
+  return hash;
 }
 
 void sort_unique_axis_coords(std::vector<double> &coords) {
@@ -298,7 +305,7 @@ PbctopoVirtualStateTracker::quantize_center(double cut_x, double cut_y,
 std::uint64_t PbctopoVirtualStateTracker::sparse_state_key(double cut_x,
                                                            double cut_y,
                                                            double cut_z) const {
-  return pack_interval_key(interval_index(x_planes_, cut_x),
+  return hash_interval_key(interval_index(x_planes_, cut_x),
                            interval_index(y_planes_, cut_y),
                            interval_index(z_planes_, cut_z));
 }
@@ -387,7 +394,7 @@ std::uint64_t PbctopoVirtualAssignmentSignatureTable::axis_interval_signature(
 
 std::uint64_t PbctopoVirtualAssignmentSignatureTable::state_signature(
     double cut_x, double cut_y, double cut_z) const {
-  return pack_interval_key(axis_interval_signature(x_coords_, cut_x),
+  return hash_interval_key(axis_interval_signature(x_coords_, cut_x),
                            axis_interval_signature(y_coords_, cut_y),
                            axis_interval_signature(z_coords_, cut_z));
 }

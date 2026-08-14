@@ -5,6 +5,7 @@
 #include "martini_nonbonded.h"
 #include "miscellaneous.h"
 #include "titan_energy_validation.h"
+#include "titan_electrostatics.h"
 #include "titan_executor.h"
 #include "uti_func.h"
 #include <algorithm>
@@ -180,7 +181,8 @@ int cal_energy_amber_screening(const MOL &rec, const MOL &lg,
   constexpr double kScreeningMinDistance =
       titan_energy_validation::kMinimumPairDistanceNm;
   const double epsilon_in{Arguments.epsilon_in};
-  const double lambda_debye{3.07 / sqrt(Arguments.salt_concentration)};
+  const double lambda_debye{
+      titan_electrostatics::debye_length_nm(Arguments.salt_concentration)};
   const bool is_charmm =
       Arguments.force_f.find("CHARMM") != string::npos;
   Energy.set_energy(0., 0.);

@@ -7,6 +7,7 @@
 #include "martini_nonbonded.h"
 #include "miscellaneous.h"
 #include "titan_energy_validation.h"
+#include "titan_electrostatics.h"
 #include "titan_executor.h"
 #include "uti_func.h"
 #include <cmath>
@@ -85,7 +86,8 @@ int force_energy_add(const cache_sigma_epsilon &CachedData, size_t i,
     double screening = 1.0;
     double lambda_debye = 0.0;
     if (screened) {
-      lambda_debye = 3.07 / std::sqrt(Arguments.salt_concentration);
+      lambda_debye = titan_electrostatics::debye_length_nm(
+          Arguments.salt_concentration);
       screening = std::exp(-d / lambda_debye);
     }
     const double electro_pair = charge_prefactor * screening / d;
@@ -291,7 +293,9 @@ void cal_energy_force_amber(const MOL &rec, const MOL &lg,
   const double epsilon_in = std::max(1.0e-12, Arguments.epsilon_in);
   const bool screened = Arguments.flag_elec_screening;
   const double lambda_debye =
-      screened ? 3.07 / std::sqrt(Arguments.salt_concentration) : 0.0;
+      screened ? titan_electrostatics::debye_length_nm(
+                     Arguments.salt_concentration)
+               : 0.0;
 
   for (size_t j{begin}; j < end; ++j) {
     double temp_charge{138.935457839 * lg_parameters[j].get_charge()};

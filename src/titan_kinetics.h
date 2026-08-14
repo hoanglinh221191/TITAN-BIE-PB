@@ -84,9 +84,9 @@ public:
   // dt_ns       : physical timestep between frames in nanoseconds
   TitanKinetics(int feature_dim, int lag_time, int n_components, double dt_ns,
                 TicaBackend backend = TicaBackend::Auto,
-                int randomized_rank = 64,
-                size_t feature_cache_cap_bytes = 0,
-                bool allow_backend_promotion = false);
+                int randomized_rank = 24,
+                size_t hard_memory_cap_bytes = 0,
+                bool enforce_hard_memory_cap = false);
   ~TitanKinetics();
 
   // ---- Hot-loop methods (called once per frame) ----------------------------
@@ -109,7 +109,8 @@ public:
 
   // Write eigenvalues + implied timescales and eigenvectors to disk.
   void write_results(const std::string &eval_file, const std::string &evec_file,
-                     std::fstream &log) const;
+                     std::fstream &log,
+                     bool kinetics_interpretable = true) const;
 
   // Write TICA projections from a PRE-PROJECTED matrix (rows = frames, cols =
   // PCs). Use with msm_analyzer->proj_mat_ref() which already holds TICA-space
@@ -151,6 +152,7 @@ public:
   TicaBackend requested_backend() const { return requested_backend_; }
   int64_t raw_feature_cache_rows() const { return frame_cache_.rows(); }
   const TimingStats &timing_stats() const { return timing_stats_; }
+  const std::filesystem::path &spool_path() const { return spool_path_; }
 
   const Eigen::VectorXd &eigenvalues() const { return eigenvalues_; }
   const Eigen::MatrixXd &eigenvectors() const { return eigenvectors_; }
@@ -167,8 +169,8 @@ private:
   TicaBackend backend_;
   int randomized_rank_;
   int retained_components_ = 0;
-  size_t feature_cache_cap_bytes_ = 0;
-  bool allow_backend_promotion_ = false;
+  size_t hard_memory_cap_bytes_ = 0;
+  bool enforce_hard_memory_cap_ = false;
 
   // Online accumulators shared by all backends
   Eigen::VectorXd sum_x_;        // (D×1) sum of features at time t

@@ -3,13 +3,16 @@
 #include "titan_ui.h"
 
 #include <Eigen/Eigenvalues>
+#include <Eigen/SVD>
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <numeric>
 #include <random>
+#include <tuple>
 #include <unordered_set>
 
 namespace TitanValidation {
@@ -150,14 +153,197 @@ build_candidate_model(const TitanMSM &base_msm, const ModelConfig &config,
   return candidate;
 }
 
-std::vector<StateSegments> split_segments_into_folds(const StateSegments &segments,
-                                                     int n_folds) {
-  std::vector<StateSegments> folds(
-      static_cast<std::size_t>(std::max(1, n_folds)));
-  for (std::size_t i = 0; i < segments.size(); ++i) {
-    folds[i % folds.size()].push_back(segments[i]);
+struct FrameRange {
+  int64_t begin{0};
+  int64_t end{0};
+};
+
+struct FoldDiscreteData {
+  bool valid{false};
+  StateSegments train_segments;
+  StateSegments test_segments;
+};
+
+std::vector<FrameRange> build_frame_ranges(const TitanMSM &msm) {
+  std::vector<FrameRange> ranges;
+  const int64_t n_frames = msm.n_frames();
+  if (n_frames <= 0)
+    return ranges;
+
+  int64_t begin = 0;
+  for (int raw_boundary : msm.traj_break_indices()) {
+    const int64_t boundary = std::clamp<int64_t>(raw_boundary, 0, n_frames);
+    if (boundary > begin)
+      ranges.push_back({begin, boundary});
+    begin = std::max(begin, boundary);
   }
-  return folds;
+  if (begin < n_frames)
+    ranges.push_back({begin, n_frames});
+  return ranges;
+}
+
+int nearest_centroid(const TitanMSM::ProjMatrixRM &projections, int64_t frame,
+                     int components,
+                     const TitanMSM::DenseMatrixRM &centroids) {
+  int best_cluster = -1;
+  double best_distance = std::numeric_limits<double>::infinity();
+  for (int cluster = 0; cluster < centroids.rows(); ++cluster) {
+    double distance = 0.0;
+    for (int component = 0; component < components; ++component) {
+      const double delta = projections(frame, component) -
+                           centroids(cluster, component);
+      distance += delta * delta;
+    }
+    if (distance < best_distance) {
+      best_distance = distance;
+      best_cluster = cluster;
+    }
+  }
+  return best_cluster;
+}
+
+FoldDiscreteData build_fold_discrete_data(
+    const TitanMSM &base_msm, const ModelConfig &config,
+    const std::vector<FrameRange> &ranges, int held_out_fold, int n_folds,
+    int kmeans_iter, unsigned int seed, TitanExecutor &executor) {
+  FoldDiscreteData fold;
+  if (ranges.size() < 2 || n_folds < 2)
+    return fold;
+
+  int64_t train_frames = 0;
+  for (std::size_t segment = 0; segment < ranges.size(); ++segment) {
+    if (static_cast<int>(segment % static_cast<std::size_t>(n_folds)) !=
+        held_out_fold) {
+      train_frames += ranges[segment].end - ranges[segment].begin;
+    }
+  }
+  if (train_frames < config.n_clusters)
+    return fold;
+
+  TitanMSM train_model(config.n_clusters, config.components, base_msm.dt_ns());
+  const auto &projections = base_msm.proj_mat_ref();
+  for (std::size_t segment = 0; segment < ranges.size(); ++segment) {
+    if (static_cast<int>(segment % static_cast<std::size_t>(n_folds)) ==
+        held_out_fold) {
+      continue;
+    }
+    for (int64_t frame = ranges[segment].begin; frame < ranges[segment].end;
+         ++frame) {
+      train_model.add_projected_frame(
+          projections.row(frame).leftCols(config.components).transpose());
+    }
+    train_model.add_trajectory_break();
+  }
+  train_model.train_kmeans(executor, kmeans_iter,
+                           seed ^ static_cast<unsigned int>(held_out_fold + 1) *
+                                      0x9e3779b9u);
+  if (!train_model.is_clustered())
+    return fold;
+
+  const auto &centroids = train_model.centroids();
+  for (std::size_t segment = 0; segment < ranges.size(); ++segment) {
+    std::vector<int> assignments;
+    assignments.reserve(static_cast<std::size_t>(ranges[segment].end -
+                                                  ranges[segment].begin));
+    for (int64_t frame = ranges[segment].begin; frame < ranges[segment].end;
+         ++frame) {
+      assignments.push_back(nearest_centroid(
+          projections, frame, config.components, centroids));
+    }
+    if (static_cast<int>(segment % static_cast<std::size_t>(n_folds)) ==
+        held_out_fold) {
+      fold.test_segments.push_back(std::move(assignments));
+    } else {
+      fold.train_segments.push_back(std::move(assignments));
+    }
+  }
+  fold.valid = !fold.train_segments.empty() && !fold.test_segments.empty();
+  return fold;
+}
+
+Eigen::MatrixXd symmetric_inverse_sqrt(const Eigen::MatrixXd &matrix) {
+  if (matrix.rows() == 0 || matrix.rows() != matrix.cols())
+    return {};
+  const Eigen::MatrixXd sym = 0.5 * (matrix + matrix.transpose());
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(sym);
+  if (solver.info() != Eigen::Success)
+    return Eigen::MatrixXd::Zero(matrix.rows(), matrix.cols());
+  const double max_eval = std::max(0.0, solver.eigenvalues().maxCoeff());
+  const double cutoff = std::max(1e-12, max_eval * 1e-10);
+  Eigen::VectorXd inv = Eigen::VectorXd::Zero(matrix.rows());
+  for (int i = 0; i < inv.size(); ++i) {
+    if (solver.eigenvalues()[i] > cutoff)
+      inv[i] = 1.0 / std::sqrt(solver.eigenvalues()[i]);
+  }
+  return solver.eigenvectors() * inv.asDiagonal() *
+         solver.eigenvectors().transpose();
+}
+
+double compute_held_out_vamp2_score(const StateSegments &train_segments,
+                                    const StateSegments &test_segments,
+                                    int n_states, int lag_frames,
+                                    int score_rank) {
+  Eigen::MatrixXd train_counts;
+  Eigen::VectorXd train_occupancy;
+  std::int64_t train_transitions = 0;
+  std::string error;
+  if (!build_segment_count_matrix(n_states, lag_frames, train_segments,
+                                  train_counts, train_occupancy,
+                                  train_transitions, error) ||
+      train_transitions <= 0) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+
+  Eigen::MatrixXd test_counts;
+  Eigen::VectorXd test_occupancy;
+  std::int64_t test_transitions = 0;
+  if (!build_segment_count_matrix(n_states, lag_frames, test_segments,
+                                  test_counts, test_occupancy, test_transitions,
+                                  error) ||
+      test_transitions <= 0) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+
+  const double inv_train = 1.0 / static_cast<double>(train_transitions);
+  const Eigen::MatrixXd train_c01 = train_counts * inv_train;
+  const Eigen::MatrixXd train_c00 =
+      (train_counts.rowwise().sum() * inv_train).asDiagonal();
+  const Eigen::MatrixXd train_c11 =
+      (train_counts.colwise().sum().transpose() * inv_train).asDiagonal();
+  const Eigen::MatrixXd train_w0 = symmetric_inverse_sqrt(train_c00);
+  const Eigen::MatrixXd train_w1 = symmetric_inverse_sqrt(train_c11);
+  const Eigen::MatrixXd train_koopman = train_w0 * train_c01 * train_w1;
+  Eigen::JacobiSVD<Eigen::MatrixXd> svd(train_koopman,
+                                        Eigen::ComputeThinU |
+                                            Eigen::ComputeThinV);
+  if (svd.info() != Eigen::Success || svd.singularValues().size() == 0)
+    return std::numeric_limits<double>::quiet_NaN();
+  const int rank = std::max(
+      1, std::min({score_rank, static_cast<int>(svd.singularValues().size()),
+                   n_states}));
+  const Eigen::MatrixXd left_basis =
+      train_w0 * svd.matrixU().leftCols(rank);
+  const Eigen::MatrixXd right_basis =
+      train_w1 * svd.matrixV().leftCols(rank);
+
+  const double inv_test = 1.0 / static_cast<double>(test_transitions);
+  const Eigen::MatrixXd test_c01 = test_counts * inv_test;
+  const Eigen::MatrixXd test_c00 =
+      (test_counts.rowwise().sum() * inv_test).asDiagonal();
+  const Eigen::MatrixXd test_c11 =
+      (test_counts.colwise().sum().transpose() * inv_test).asDiagonal();
+  const Eigen::MatrixXd projected_c00 =
+      left_basis.transpose() * test_c00 * left_basis;
+  const Eigen::MatrixXd projected_c11 =
+      right_basis.transpose() * test_c11 * right_basis;
+  const Eigen::MatrixXd projected_c01 =
+      left_basis.transpose() * test_c01 * right_basis;
+  const Eigen::MatrixXd normalized_test =
+      symmetric_inverse_sqrt(projected_c00) * projected_c01 *
+      symmetric_inverse_sqrt(projected_c11);
+  const double score = normalized_test.squaredNorm();
+  return std::isfinite(score) ? score
+                              : std::numeric_limits<double>::quiet_NaN();
 }
 
 void append_if_finite(std::vector<double> &out, double value) {
@@ -522,33 +708,49 @@ VampSweepResult evaluate_vamp_candidates(
   VampSweepResult sweep;
   VampCandidateResult best_result;
   bool have_best = false;
+  const auto ranges = build_frame_ranges(base_msm);
+  using FoldKey = std::tuple<int, int, int, int>;
+  std::map<FoldKey, FoldDiscreteData> fold_cache;
 
   for (const auto &candidate_config : candidates) {
     VampCandidateResult candidate_result;
     candidate_result.config = candidate_config;
     candidate_result.folds_requested = requested_folds;
-
-    auto candidate_model =
-        build_candidate_model(base_msm, candidate_config, kmeans_iter,
-                              fold_seed(base_seed, candidate_config), executor);
-    if (!candidate_model) {
+    if (candidate_config.components <= 0 ||
+        candidate_config.components > base_components ||
+        candidate_config.n_clusters <= 1 || candidate_config.lag_frames <= 0 ||
+        ranges.size() < 2) {
       candidate_result.status = "build_failed";
       sweep.candidates.push_back(candidate_result);
       continue;
     }
 
-    const StateSegments segments = build_msm_state_segments(*candidate_model);
     candidate_result.folds_effective =
-        std::max(1, std::min(requested_folds, static_cast<int>(segments.size())));
-    const auto folds =
-        split_segments_into_folds(segments, candidate_result.folds_effective);
+        std::max(1, std::min(requested_folds, static_cast<int>(ranges.size())));
 
     std::vector<double> fold_scores;
-    fold_scores.reserve(folds.size());
-    for (const auto &fold_segments : folds) {
-      const double score = compute_discrete_vamp2_score(
-          fold_segments, candidate_model->n_clusters(),
-          candidate_config.lag_frames);
+    fold_scores.reserve(
+        static_cast<std::size_t>(candidate_result.folds_effective));
+    for (int fold_index = 0; fold_index < candidate_result.folds_effective;
+         ++fold_index) {
+      const FoldKey key{candidate_config.components,
+                        candidate_config.n_clusters,
+                        candidate_result.folds_effective, fold_index};
+      auto [it, inserted] = fold_cache.try_emplace(key);
+      if (inserted) {
+        ModelConfig clustering_config = candidate_config;
+        clustering_config.lag_frames = 1;
+        it->second = build_fold_discrete_data(
+            base_msm, clustering_config, ranges, fold_index,
+            candidate_result.folds_effective, kmeans_iter,
+            fold_seed(base_seed, clustering_config), executor);
+      }
+      if (!it->second.valid)
+        continue;
+      const double score = compute_held_out_vamp2_score(
+          it->second.train_segments, it->second.test_segments,
+          candidate_config.n_clusters, candidate_config.lag_frames,
+          candidate_config.components);
       if (std::isfinite(score))
         fold_scores.push_back(score);
     }
@@ -579,20 +781,24 @@ VampSweepResult evaluate_vamp_candidates(
       candidate_result.status = "ok";
     }
 
-    if (!have_best || better_candidate(candidate_result, best_result)) {
+    if (candidate_result.folds_scored > 0 &&
+        (!have_best || better_candidate(candidate_result, best_result))) {
       have_best = true;
       best_result = candidate_result;
-      sweep.winning_model = std::move(candidate_model);
     }
     sweep.candidates.push_back(candidate_result);
   }
 
-  sweep.valid = have_best;
-  if (have_best)
+  if (have_best) {
     sweep.selected = best_result.config;
-  else
+    sweep.winning_model = build_candidate_model(
+        base_msm, sweep.selected, kmeans_iter,
+        fold_seed(base_seed, sweep.selected), executor);
+  } else {
     sweep.warning_message = "no VAMP candidate produced a valid score";
+  }
 
+  sweep.valid = have_best && static_cast<bool>(sweep.winning_model);
   if (!sweep.valid)
     sweep.winning_model.reset();
   return sweep;

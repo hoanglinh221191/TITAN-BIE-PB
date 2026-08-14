@@ -37,6 +37,45 @@
 
 namespace titan_build {
 
+inline constexpr const char *compiler_name() noexcept {
+#if defined(__clang__)
+  return "Clang " __clang_version__;
+#elif defined(__GNUC__)
+  return "GCC " TITAN_STRINGIZE(__GNUC__) "." TITAN_STRINGIZE(
+      __GNUC_MINOR__) "." TITAN_STRINGIZE(__GNUC_PATCHLEVEL__);
+#elif defined(_MSC_VER)
+  return "MSVC " TITAN_STRINGIZE(_MSC_VER);
+#else
+  return "unknown";
+#endif
+}
+
+inline constexpr const char *target_os_name() noexcept {
+#if defined(_WIN32)
+  return "windows";
+#elif defined(__linux__)
+  return "linux";
+#elif defined(__APPLE__)
+  return "macos";
+#else
+  return "unknown";
+#endif
+}
+
+inline constexpr const char *target_arch_name() noexcept {
+#if defined(__x86_64__) || defined(_M_X64)
+  return "x86_64";
+#elif defined(__i386__) || defined(_M_IX86)
+  return "x86";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+  return "aarch64";
+#elif defined(__arm__) || defined(_M_ARM)
+  return "arm";
+#else
+  return "unknown";
+#endif
+}
+
 enum class SimdLevel {
   scalar = 0,
   avx = 1,

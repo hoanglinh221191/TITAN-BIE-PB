@@ -15,6 +15,7 @@
 #include "polymer_classification.h"
 #include "tda.h"
 #include "titan_ui.h"
+#include "titan_version_info.h"
 
 #include "engine_postproc.h"
 #include "titan_alignment.h"
@@ -32,6 +33,7 @@
 #include "titan_executor.h"
 #include "titan_awh_ifp.h"
 #include "titan_ifp.h"
+#include "titan_interface_analysis.h"
 #include "titan_pca.h" // Ensured inclusion as per instruction
 #include "titan_dssp.h"
 #include "titan_energy_decomp_engine.h"
@@ -81,6 +83,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -912,7 +915,24 @@ int engine(arguments &Arguments) {
 
   TitanUI::log_section(log, "TITAN ENGINE INITIALIZATION");
   TitanUI::log_kv(log, "Software Build", info_output.getBuild());
+  TitanUI::log_kv(log, "Software Version", titan_build::product_version());
+  TitanUI::log_kv(log, "Build Number",
+                  titan_build::build_number_string());
+  TitanUI::log_kv(log, "Git Commit", titan_build::git_commit());
+  TitanUI::log_kv(log, "Git State", titan_build::git_state_name());
+  TitanUI::log_kv(log, "Release Build",
+                  titan_build::release_build() ? "yes" : "no");
+  TitanUI::log_kv(log, "Source Date", titan_build::source_date_utc());
+  if (std::string_view(titan_build::ci_build_number()).empty() == false) {
+    TitanUI::log_kv(log, "CI Provider", titan_build::ci_provider());
+    TitanUI::log_kv(log, "CI Build", titan_build::ci_build_number());
+    TitanUI::log_kv(log, "CI Run ID", titan_build::ci_run_id());
+  }
   TitanUI::log_kv(log, "Build Profile", titan_build::build_profile_name());
+  TitanUI::log_kv(log, "Compiler", titan_build::compiler_name());
+  TitanUI::log_kv(log, "Target OS", titan_build::target_os_name());
+  TitanUI::log_kv(log, "Target Architecture",
+                  titan_build::target_arch_name());
   TitanUI::log_kv(log, "C++23 Floor", titan_build::cxx23_floor_name());
   TitanUI::log_kv(log, "Compiled SIMD",
                   titan_build::simd_level_name(
@@ -945,6 +965,10 @@ int engine(arguments &Arguments) {
 
   TitanUI::log_kv(log, "Molecule 1 Type", Arguments.mol_1_type);
   TitanUI::log_kv(log, "Molecule 2 Type", Arguments.mol_2_type);
+  TitanUI::log_kv(log, "Trajectory Semantics",
+                  Arguments.trajectory_semantics == "remd_state"
+                      ? "remd-state (equilibrium/descriptive only)"
+                      : "continuous");
 
   std::string group_str = std::to_string(Arguments.group_1) + " - " +
                           std::to_string(Arguments.group_2);
@@ -975,6 +999,18 @@ int engine(arguments &Arguments) {
                     format_double(Arguments.ext_diel));
     TitanUI::log_kv(log, "Salt Concentration",
                     format_double(Arguments.saltcon) + " M");
+    TitanUI::log_kv(log, "GBSA Temperature",
+                    format_double(Arguments.gbsa_temperature) + " K");
+    TitanUI::log_kv(log, "GBSA SASA Points",
+                    std::to_string(Arguments.gbsa_sasa_points));
+    TitanUI::log_kv(log, "Born Model",
+                    "Amber HCT/OBC analytical pair descreening");
+    TitanUI::log_kv(log, "Salt Screening",
+                    "Amber Debye kappa with 0.73 ion-exclusion factor");
+    TitanUI::log_kv(log, "IE Minimum Samples",
+                    std::to_string(Arguments.gbsa_ie_min_samples));
+    TitanUI::log_kv(log, "IE Filter Sigma",
+                    format_double(Arguments.gbsa_ie_filter_sigma));
   }
   if (Arguments.pbe.flag_pbe) {
     TitanUI::log_section(log, "PBE CONFIGURATION");
@@ -1102,6 +1138,10 @@ int engine(arguments &Arguments) {
       TitanUI::log_kv(log, "PBC Algorithm", "Prob (legacy)");
     else
       TitanUI::log_kv(log, "PBC Algorithm", "None");
+    if (!Arguments.flag_nocal || Arguments.flag_gbsa ||
+        Arguments.pbe.flag_pbe)
+      TitanUI::log_kv(log, "Energy Distance Policy",
+                      "preprocessed_raw (no implicit MIC in energy kernels)");
     if (Arguments.pbc.auto_enabled_pbcn || Arguments.pbc.auto_enabled_pbci) {
       std::vector<std::string> auto_pbc_modules;
       if (Arguments.flag_nocal)
@@ -1177,6 +1217,7 @@ int engine(arguments &Arguments) {
   TitanLJAnalyzer lj_analyzer;
   TitanSqAnalyzer sq_analyzer;
   TitanContactMapAnalyzer cmap_analyzer;
+  TitanInterfaceAnalyzer interface_analyzer;
   TitanDihedralAnalyzer dihedral_analyzer;
   TitanQNativeAnalyzer qnative_analyzer;
   TitanObservableFeatureRouter feature_router;
@@ -1193,8 +1234,10 @@ int engine(arguments &Arguments) {
 
   // Network Analysis (DCCM) Variables
   DCCMNetwork dccm_analyzer;
+  bool dccm_analyzer_initialized = false;
   std::chrono::milliseconds time_gbsa{0}, time_cas{0}, time_dssp{0},
       time_hbk{0}, time_lj{0}, time_sq{0}, time_cmap{0},
+      time_interface{0},
       time_dihedral{0}, time_qnative{0}, time_msd{0}, time_rg{0}, time_rms{0},
       time_membrane{0}, time_s2{0}, time_edecomp{0},
       time_network{0}, time_tda{0}, time_llps{0}, time_tica{0};
@@ -1221,10 +1264,14 @@ int engine(arguments &Arguments) {
 
   dssp_mol1_analyzer.configure(Arguments.dssp);
   dssp_mol2_analyzer.configure(Arguments.dssp);
+  dssp_mol1_analyzer.configure_segments(Arguments.segments, 1);
+  dssp_mol2_analyzer.configure_segments(Arguments.segments, 2);
   hbk_analyzer.configure(Arguments.hbk);
   lj_analyzer.configure(Arguments.lj);
   sq_analyzer.configure(Arguments.sq);
   cmap_analyzer.configure(Arguments.cmap);
+  interface_analyzer.configure(Arguments.interface_analysis,
+                               Arguments.segments);
   dihedral_analyzer.configure(Arguments.dihedral);
   qnative_analyzer.configure(Arguments.qnative);
   msd_analyzer.configure(Arguments.msd);
@@ -1258,6 +1305,55 @@ int engine(arguments &Arguments) {
     ifp_analyzer = std::make_unique<TitanIFP>();
     TitanUI::print_info("[IFP] Interaction Fingerprint module enabled.");
   }
+  std::ofstream ifp_pbctopo_filter_report;
+  size_t ifp_pbctopo_total_frames = 0;
+  size_t ifp_pbctopo_included_frames = 0;
+  size_t ifp_pbctopo_missing_status_frames = 0;
+  std::map<std::string, size_t> ifp_pbctopo_status_counts;
+  if (Arguments.ifp.pbctopo_certified_only) {
+    ifp_pbctopo_filter_report.open(
+        info_output.get_ifp_pbctopo_frame_filter_filename());
+    if (!ifp_pbctopo_filter_report.is_open()) {
+      TitanUI::print_error(
+          "[IFP] Cannot open PBCTOPO frame-filter audit output.");
+      return 1;
+    }
+    ifp_pbctopo_filter_report
+        << "trajectory_id,trajectory_frame_index,global_frame_index,time_ps,"
+           "pbctopo_status,ifp_included\n";
+  }
+  auto include_ifp_frame =
+      [&](const Multi_MOL &source, size_t chunk_frame_index,
+          size_t trajectory_id, size_t trajectory_frame_index,
+          size_t global_frame_index) {
+        if (!Arguments.ifp.pbctopo_certified_only)
+          return true;
+
+        ++ifp_pbctopo_total_frames;
+        const bool have_status =
+            source.has_pbctopo_frame_status(chunk_frame_index);
+        const std::string status =
+            have_status
+                ? std::string(source.pbctopo_frame_status(chunk_frame_index))
+                : "missing_status";
+        const bool included =
+            have_status && source.pbctopo_frame_certified(chunk_frame_index);
+        if (!have_status)
+          ++ifp_pbctopo_missing_status_frames;
+        if (included)
+          ++ifp_pbctopo_included_frames;
+        ++ifp_pbctopo_status_counts[status];
+
+        const double time_ps =
+            chunk_frame_index < source.m_mol.size()
+                ? source.m_mol[chunk_frame_index].time_of_snap
+                : std::numeric_limits<double>::quiet_NaN();
+        ifp_pbctopo_filter_report
+            << trajectory_id << ',' << trajectory_frame_index << ','
+            << global_frame_index << ',' << std::setprecision(12) << time_ps
+            << ',' << status << ',' << (included ? 1 : 0) << '\n';
+        return included;
+      };
   if (Arguments.awh.flag_awh_ifp) {
     awh_ifp_analyzer = std::make_unique<TitanAwhIfp>();
     const size_t expected_awh_walkers = input_line.empty() ? 1u : input_line.size();
@@ -1290,6 +1386,7 @@ int engine(arguments &Arguments) {
     const auto time_lj_base = time_lj;
     const auto time_sq_base = time_sq;
     const auto time_cmap_base = time_cmap;
+    const auto time_interface_base = time_interface;
     const auto time_dihedral_base = time_dihedral;
     const auto time_qnative_base = time_qnative;
     const auto time_msd_base = time_msd;
@@ -1787,7 +1884,12 @@ int engine(arguments &Arguments) {
 
     if (Arguments.flag_cas)
       cas_analyzer.init(pro_in, lig, Arguments.mol_2_type);
-    const bool dssp_allow_mol2 = !Arguments.flag_nocal;
+    const bool dssp_allow_mol2 =
+        !Arguments.flag_nocal ||
+        Arguments.needs_mol2_for_interface_analysis() ||
+        Arguments.needs_mol2_for_cmap_interface() ||
+        Arguments.needs_mol2_for_qnative_interface() ||
+        Arguments.needs_mol2_for_msd();
     const bool dssp_mol1_requested =
         Arguments.dssp.flag_dssp &&
         TitanDSSPAnalyzer::supports_moltype(Arguments.mol_1_type);
@@ -1819,7 +1921,12 @@ int engine(arguments &Arguments) {
                           std::to_string(pro_in.info.size()) + ")");
     }
     if (dssp_mol1_requested && dssp_mol1_has_backbone) {
-      dssp_mol1_analyzer.init(pro_in, "mol1");
+      try {
+        dssp_mol1_analyzer.init(pro_in, "mol1");
+      } catch (const std::exception &e) {
+        TitanUI::print_error(e.what());
+        return 1;
+      }
       TitanUI::log_kv(log, "DSSP mol1 residues",
                       std::to_string(dssp_mol1_analyzer.residue_count()));
     }
@@ -1836,7 +1943,12 @@ int engine(arguments &Arguments) {
                           std::to_string(lig.info.size()) + ")");
     }
     if (dssp_mol2_requested && dssp_mol2_has_backbone) {
-      dssp_mol2_analyzer.init(lig, "mol2");
+      try {
+        dssp_mol2_analyzer.init(lig, "mol2");
+      } catch (const std::exception &e) {
+        TitanUI::print_error(e.what());
+        return 1;
+      }
       TitanUI::log_kv(log, "DSSP mol2 residues",
                       std::to_string(dssp_mol2_analyzer.residue_count()));
     }
@@ -1856,6 +1968,16 @@ int engine(arguments &Arguments) {
       const Multi_MOL *cmap_mol2 =
           Arguments.needs_mol2_for_cmap_interface() ? &lig : nullptr;
       cmap_analyzer.init(pro_in, cmap_mol2, Arguments, log);
+    }
+    if (Arguments.interface_analysis.flag_interface_analysis) {
+      try {
+        const Multi_MOL *interface_mol2 =
+            Arguments.needs_mol2_for_interface_analysis() ? &lig : nullptr;
+        interface_analyzer.init(pro_in, interface_mol2, Arguments, log);
+      } catch (const std::exception &e) {
+        TitanUI::print_error(e.what());
+        return 1;
+      }
     }
     if (Arguments.dihedral.flag_dihedral) {
       try {
@@ -1951,7 +2073,10 @@ int engine(arguments &Arguments) {
 
     if (Arguments.flag_network || Arguments.flag_pca ||
         Arguments.corr_knn.flag_corr_knn) {
-      dccm_analyzer.init(pro_in, lig, Arguments);
+      if (!dccm_analyzer_initialized) {
+        dccm_analyzer.init(pro_in, lig, Arguments);
+        dccm_analyzer_initialized = true;
+      }
       const bool needs_side_trace_cache =
           Arguments.flag_allostery ||
           (Arguments.corr_knn.flag_corr_knn &&
@@ -1973,7 +2098,10 @@ int engine(arguments &Arguments) {
     // LSP-MD standalone: init DCCM data collector without DCCM/PCA
     if (Arguments.lspmd.flag_lspmd && !Arguments.flag_network &&
         !Arguments.flag_pca) {
-      dccm_analyzer.init(pro_in, lig, Arguments);
+      if (!dccm_analyzer_initialized) {
+        dccm_analyzer.init(pro_in, lig, Arguments);
+        dccm_analyzer_initialized = true;
+      }
       const bool needs_side_trace_cache =
           Arguments.flag_allostery ||
           (Arguments.corr_knn.flag_corr_knn &&
@@ -2128,9 +2256,11 @@ int engine(arguments &Arguments) {
             "Feature export: selected -feature-source produced zero TICA features.");
         return 1;
       }
-      double tica_dt_ns = info_output.get_current_dt() > 0
-                              ? info_output.get_current_dt() / 1000.0
-                              : 0.001; // fallback 1 ps
+      const double selected_dt_ps =
+          Arguments.dt > 0 ? static_cast<double>(Arguments.dt)
+                           : info_output.get_current_dt();
+      const double tica_dt_ns =
+          selected_dt_ps > 0.0 ? selected_dt_ps / 1000.0 : 0.001;
       TicaBackend requested_backend = TicaBackend::Auto;
       if (!tica_backend_from_string(Arguments.msm.tica_backend,
                                     requested_backend)) {
@@ -2166,6 +2296,8 @@ int engine(arguments &Arguments) {
       frame_estimate_config.number_of_files = Arguments.number_of_files;
       frame_estimate_config.fallback_estimated_frames =
           estimated_total_traj_bytes / bytes_per_frame_estimate;
+      if (Arguments.flag_xdr && Arguments.xdr_type == "xtc")
+        frame_estimate_config.xtc_paths = input_line;
       const TitanTicaFrameEstimate frame_estimate =
           estimate_tica_selected_frames(frame_estimate_config);
       long double estimated_frames =
@@ -2198,13 +2330,21 @@ int engine(arguments &Arguments) {
           select_tica_backend_for_policy(backend_policy_config);
       const TicaBackend selected_backend = backend_decision.selected_backend;
 
+      long double hard_memory_cap_bytes = backend_decision.ram_budget;
+      if (hard_memory_cap_bytes <= 0.0L) {
+        constexpr long double kExactDualPeakFactor = 3.0L;
+        hard_memory_cap_bytes = backend_decision.large_matrix_value_limit *
+                                sizeof(double) * kExactDualPeakFactor;
+      }
+      const size_t hard_memory_cap = static_cast<size_t>(std::min<long double>(
+          hard_memory_cap_bytes,
+          static_cast<long double>(std::numeric_limits<size_t>::max())));
+
       tica_analyzer = std::make_unique<TitanKinetics>(
           tica_feature_dim, Arguments.msm.tica_lag,
           Arguments.msm.tica_components, tica_dt_ns, selected_backend,
-          Arguments.msm.tica_rank,
-          available_ram_bytes > 0 ? (available_ram_bytes / 3) : 0,
-          requested_backend == TicaBackend::Auto &&
-              selected_backend == TicaBackend::ExactDual);
+          Arguments.msm.tica_rank, hard_memory_cap,
+          selected_backend == TicaBackend::ExactDual);
       tica_use_lj_features_global = use_lj_tica_features;
       tica_use_observable_features_global = use_observable_tica_features;
       if (Arguments.feature_export.export_features ||
@@ -2253,12 +2393,21 @@ int engine(arguments &Arguments) {
                       tica_backend_to_string(requested_backend));
       TitanUI::log_kv(log, "TICA Backend Selected",
                       tica_backend_to_string(selected_backend));
+      if (backend_decision.explicit_exact_dual_overridden) {
+        TitanUI::log_kv(log, "TICA Hard-Cap Override",
+                        "exact_dual -> randomized");
+        TitanUI::print_warning(
+            "TICA: explicit exact_dual request exceeds the hard memory cap; "
+            "using randomized instead.");
+      }
       if (backend_decision.large_matrix_limit_exceeded) {
         TitanUI::log_kv(
             log, "TICA Large-Matrix Policy",
             backend_decision.selected_by_large_matrix_limit
                 ? "auto -> randomized"
-                : "limit exceeded; explicit backend honored");
+                : (backend_decision.explicit_exact_dual_overridden
+                       ? "limit exceeded; hard memory cap override"
+                       : "limit exceeded; explicit backend honored"));
       }
       TitanUI::log_kv(log, "TICA Rank",
                       std::to_string(Arguments.msm.tica_rank));
@@ -2266,6 +2415,13 @@ int engine(arguments &Arguments) {
                       std::to_string(static_cast<int64_t>(estimated_frames)));
       TitanUI::log_kv(log, "TICA Frame Estimate Source",
                       frame_estimate.source);
+      if (!frame_estimate.diagnostic.empty()) {
+        TitanUI::log_kv(log, "TICA Frame Scan Fallback",
+                        frame_estimate.diagnostic);
+        TitanUI::print_warning("TICA: " + frame_estimate.diagnostic +
+                               "; using " + frame_estimate.source +
+                               " estimate.");
+      }
       TitanUI::log_kv(
           log, "TICA Raw Feature Values",
           std::to_string(static_cast<int64_t>(
@@ -2280,6 +2436,8 @@ int engine(arguments &Arguments) {
                       bytes_to_mb_string(dual_memory_estimate));
       TitanUI::log_kv(log, "TICA Randomized Est",
                       bytes_to_mb_string(randomized_memory_estimate));
+      TitanUI::log_kv(log, "TICA Hard Memory Cap",
+                      bytes_to_mb_string(hard_memory_cap_bytes));
     }
 
     if (Arguments.msm.flag_tica && tica_analyzer &&
@@ -2591,9 +2749,11 @@ int engine(arguments &Arguments) {
 
     // --- MSM INITIALIZATION (after TICA init, shares n_components) ---
     if (need_tica_projection_cache && tica_analyzer && !msm_analyzer) {
-      double msm_dt_ns = info_output.get_current_dt() > 0
-                             ? info_output.get_current_dt() / 1000.0
-                             : 0.001;
+      const double selected_dt_ps =
+          Arguments.dt > 0 ? static_cast<double>(Arguments.dt)
+                           : info_output.get_current_dt();
+      const double msm_dt_ns =
+          selected_dt_ps > 0.0 ? selected_dt_ps / 1000.0 : 0.001;
       msm_analyzer = std::make_unique<TitanMSM>(
           Arguments.msm.msm_clusters, tica_analyzer->n_components(), msm_dt_ns);
       if (Arguments.msm.flag_msm) {
@@ -2671,6 +2831,8 @@ int engine(arguments &Arguments) {
     append_module_label(resolved_modules, "LJ");
   if (cmap_analyzer.enabled())
     append_module_label(resolved_modules, "CMap");
+  if (interface_analyzer.enabled())
+    append_module_label(resolved_modules, "Interface");
   if (dihedral_analyzer.enabled())
     append_module_label(resolved_modules, "Dihedral");
   if (qnative_analyzer.enabled())
@@ -2998,11 +3160,11 @@ int engine(arguments &Arguments) {
           }
 
           if (dssp_mol1_analyzer.enabled() ||
-              (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled())) {
+              dssp_mol2_analyzer.enabled()) {
             auto start_dssp = std::chrono::steady_clock::now();
             if (dssp_mol1_analyzer.enabled())
               dssp_mol1_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
-            if (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled())
+            if (dssp_mol2_analyzer.enabled())
               dssp_mol2_analyzer.process_frame(lig, chunk_snap_idx, executor);
             time_dssp += std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start_dssp);
@@ -3038,6 +3200,96 @@ int engine(arguments &Arguments) {
                 pro_in.m_mol[chunk_snap_idx].time_of_snap,
                 std::chrono::duration<double, std::milli>(end_cmap -
                                                           start_cmap)
+                    .count());
+          }
+
+          if (Arguments.ifp.flag_ifp && ifp_analyzer &&
+              include_ifp_frame(
+                  pro_in, chunk_snap_idx,
+                  static_cast<size_t>(progress_traj_id), global_snap_idx + 1,
+                  tot_snap_allfiles + global_snap_idx + 1)) {
+            auto start_sc = std::chrono::steady_clock::now();
+            std::vector<d_min> ifp_dis_min(num_threads);
+
+            if (pro_in.Index.size() > 1) {
+              executor.parallel_for(
+                  pro_in.Index.size() - 1, num_threads, 1,
+                  [&](size_t /*worker_id*/, size_t begin, size_t end) {
+                    for (size_t residue_idx = begin; residue_idx < end;
+                         ++residue_idx) {
+                      pro_in.m_mol[chunk_snap_idx].take_com(
+                          pro_in.parameters, residue_idx,
+                          pro_in.Index[residue_idx + 1].get_res_pos_e(0),
+                          pro_in.Index, pro_in.info);
+                    }
+                  });
+            }
+
+            if (lig.Index.size() > 1) {
+              executor.parallel_for(
+                  lig.Index.size() - 1, num_threads, 1,
+                  [&](size_t /*worker_id*/, size_t begin, size_t end) {
+                    for (size_t residue_idx = begin; residue_idx < end;
+                         ++residue_idx) {
+                      lig.m_mol[chunk_snap_idx].take_com(
+                          lig.parameters, residue_idx,
+                          lig.Index[residue_idx + 1].get_res_pos_e(0),
+                          lig.Index, lig.info);
+                    }
+                  });
+            }
+
+            impl_add_coms_2_mols(lig, pro_in, Arguments, chunk_snap_idx);
+            executor.parallel_do(num_threads, [&](size_t worker_id) {
+              take_min(
+                  pro_in.m_mol[chunk_snap_idx].Com,
+                  lig.m_mol[chunk_snap_idx].Com, ifp_dis_min[worker_id],
+                  worker_id * pro_in.m_mol[chunk_snap_idx].Com.size() /
+                      num_threads,
+                  (worker_id + 1) *
+                      pro_in.m_mol[chunk_snap_idx].Com.size() / num_threads,
+                  0, lig.m_mol[chunk_snap_idx].Com.size(), Arguments, 0,
+                  d_standard);
+            });
+            time_sc += std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_sc);
+
+            auto start_ifp = std::chrono::steady_clock::now();
+            const size_t lg_snap_ifp =
+                (lig.m_mol.size() > 1) ? chunk_snap_idx : 0;
+            ifp_analyzer->process_frame(
+                pro_in.m_mol[chunk_snap_idx], lig.m_mol[lg_snap_ifp],
+                pro_in.info, lig.info, pro_in.Index, lig.Index,
+                pro_in.info.size(), lig.info.size(), ifp_dis_min,
+                Arguments.ifp, executor, num_threads, false);
+            time_ifp += std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_ifp);
+          }
+
+          if (interface_analyzer.enabled()) {
+            const auto start_interface = std::chrono::steady_clock::now();
+            const Multi_MOL *interface_mol2 =
+                Arguments.needs_mol2_for_interface_analysis() ? &lig : nullptr;
+            try {
+              interface_analyzer.process_frame(
+                  pro_in, interface_mol2, chunk_snap_idx, global_snap_idx,
+                  executor);
+            } catch (const std::exception &e) {
+              TitanUI::print_error(std::string("Interface analysis: ") +
+                                   e.what());
+              return 1;
+            }
+            const auto end_interface = std::chrono::steady_clock::now();
+            time_interface +=
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    end_interface - start_interface);
+            perf_observer.add_frame_elapsed(
+                "Interface",
+                static_cast<std::uint64_t>(tot_snap_allfiles +
+                                           global_snap_idx),
+                pro_in.m_mol[chunk_snap_idx].time_of_snap,
+                std::chrono::duration<double, std::milli>(end_interface -
+                                                          start_interface)
                     .count());
           }
 
@@ -3375,7 +3627,6 @@ int engine(arguments &Arguments) {
               std::chrono::steady_clock::now() - start_pdb);
         }
 
-        tot_snap_allfiles += chunk_num_snaps;
         global_frame_counter += chunk_num_snaps;
         continue; // skip energy calculations, read next chunk
       }
@@ -3434,9 +3685,39 @@ int engine(arguments &Arguments) {
         }
         const MOL &energy_lig_frame = lig.m_mol[energy_lg_snap];
         const auto energy_validation_begin = std::chrono::steady_clock::now();
+        if (Arguments.flag_gbsa && Arguments.self_int) {
+          const std::string message =
+              std::string(titan_energy_validation::
+                              kIdenticalGbsaSelectionsError) +
+              ": MM/GBSA binding endpoints require distinct receptor and "
+              "ligand selections; the same group cannot be used twice.";
+          TitanUI::print_error(message);
+          TitanUI::log_message(log, "[Validation] " + message);
+          return 1;
+        }
+        const auto invalid_coordinate =
+            titan_energy_validation::find_nonfinite_coordinate(
+                pro_in.m_mol[chunk_snap_idx], energy_lig_frame);
+        if (invalid_coordinate) {
+          std::ostringstream message;
+          message << titan_energy_validation::kNonfiniteCoordinateError
+                  << ": frame=" << (global_snap_idx + 1)
+                  << ", molecule=" << invalid_coordinate->molecule
+                  << ", atom=" << (invalid_coordinate->atom + 1)
+                  << ", axis=" << invalid_coordinate->axis
+                  << ", value=" << invalid_coordinate->value
+                  << "; energy modules require finite Cartesian coordinates.";
+          TitanUI::print_error(message.str());
+          TitanUI::log_message(log, "[Validation] " + message.str());
+          return 1;
+        }
+        const double minimum_pair_distance_nm =
+            Arguments.flag_gbsa
+                ? titan_energy_validation::kMinimumGbsaPairDistanceNm
+                : titan_energy_validation::kMinimumPairDistanceNm;
         const auto overlap = titan_energy_validation::find_overlapping_atoms(
             pro_in.m_mol[chunk_snap_idx], energy_lig_frame,
-            Arguments.self_int, executor);
+            Arguments.self_int, executor, minimum_pair_distance_nm);
         const auto energy_validation_end = std::chrono::steady_clock::now();
         perf_observer.add_frame_elapsed(
             "EnergyValidation",
@@ -3448,14 +3729,20 @@ int engine(arguments &Arguments) {
             "coordinate_overlap_gate", !overlap.has_value());
         if (overlap) {
           std::ostringstream message;
-          message << titan_energy_validation::kOverlappingAtomsError
+          message << (Arguments.flag_gbsa
+                          ? titan_energy_validation::kCloseContactError
+                          : titan_energy_validation::kOverlappingAtomsError)
                   << ": frame=" << (global_snap_idx + 1)
                   << ", mol1_atom=" << (overlap->mol1_atom + 1)
                   << ", mol2_atom=" << (overlap->mol2_atom + 1)
                   << ", distance_nm=" << std::scientific
                   << overlap->distance_nm
-                  << "; electrostatic/vdW energy requires distinct atom "
-                     "coordinates.";
+                  << "; "
+                  << (Arguments.flag_gbsa
+                          ? "MM/GBSA rejects cross-group distances below 0.05 "
+                            "nm instead of suppressing their energy."
+                          : "electrostatic/vdW energy requires distinct atom "
+                            "coordinates.");
           TitanUI::print_error(message.str());
           TitanUI::log_message(log, "[Validation] " + message.str());
           return 1;
@@ -3596,68 +3883,121 @@ int engine(arguments &Arguments) {
           rec_complex_radii.resize(pro_in.m_mol[chunk_snap_idx].size());
           lg_complex_radii.resize(active_lg_mol.size());
 
-          const size_t born_task_count = active_lg_mol.size() > 0 ? 4ull : 1ull;
-          executor.parallel_for(
-              born_task_count, born_task_count, 1,
-              [&](size_t /*worker_id*/, size_t begin, size_t end) {
-                for (size_t task_id = begin; task_id < end; ++task_id) {
-                  if (task_id == 0) {
-                    cal_effective_born_radii_avx2(
-                        pro_in.m_mol[chunk_snap_idx], rec_vdw_radii,
-                        rec_free_radii, Arguments.igb, 0,
-                        pro_in.m_mol[chunk_snap_idx].size(), nullptr, nullptr);
-                  } else if (task_id == 1) {
-                    cal_effective_born_radii_avx2(
-                        active_lg_mol, lg_vdw_radii, lg_free_radii,
-                        Arguments.igb, 0, active_lg_mol.size(), nullptr,
-                        nullptr);
-                  } else if (task_id == 2) {
-                    cal_effective_born_radii_avx2(
-                        pro_in.m_mol[chunk_snap_idx], rec_vdw_radii,
-                        rec_complex_radii, Arguments.igb, 0,
-                        pro_in.m_mol[chunk_snap_idx].size(), &active_lg_mol,
-                        &lg_vdw_radii);
-                  } else {
-                    cal_effective_born_radii_avx2(
-                        active_lg_mol, lg_vdw_radii, lg_complex_radii,
-                        Arguments.igb, 0, active_lg_mol.size(),
-                        &pro_in.m_mol[chunk_snap_idx], &rec_vdw_radii);
-                  }
-                }
-              });
+          cal_effective_born_radii_parallel_avx2(
+              pro_in.m_mol[chunk_snap_idx], rec_vdw_radii, pro_in.info,
+              rec_free_radii, Arguments.igb, executor);
+          cal_effective_born_radii_parallel_avx2(
+              active_lg_mol, lg_vdw_radii, active_lg_info, lg_free_radii,
+              Arguments.igb, executor);
+          cal_effective_born_radii_parallel_avx2(
+              pro_in.m_mol[chunk_snap_idx], rec_vdw_radii, pro_in.info,
+              rec_complex_radii, Arguments.igb, executor, &active_lg_mol,
+              &lg_vdw_radii, &active_lg_info);
+          cal_effective_born_radii_parallel_avx2(
+              active_lg_mol, lg_vdw_radii, active_lg_info, lg_complex_radii,
+              Arguments.igb, executor, &pro_in.m_mol[chunk_snap_idx],
+              &rec_vdw_radii, &pro_in.info);
+
+          const auto validate_born_radii = [&](const AlignedDoubleVector &values,
+                                                const char *endpoint) {
+            for (size_t atom = 0; atom < values.size(); ++atom) {
+              if (!std::isfinite(values[atom]) || values[atom] <= 0.0) {
+                std::ostringstream message;
+                message << "invalid_gb_born_radius: frame="
+                        << (global_snap_idx + 1) << ", endpoint=" << endpoint
+                        << ", atom=" << (atom + 1)
+                        << ", radius_nm=" << values[atom];
+                TitanUI::print_error(message.str());
+                TitanUI::log_message(log, "[Validation] " + message.str());
+                return false;
+              }
+            }
+            return true;
+          };
+          if (!validate_born_radii(rec_free_radii, "receptor_free") ||
+              !validate_born_radii(lg_free_radii, "ligand_free") ||
+              !validate_born_radii(rec_complex_radii, "receptor_complex") ||
+              !validate_born_radii(lg_complex_radii, "ligand_complex")) {
+            return 1;
+          }
 
           build_gbsa_sasa_cache(pro_in.m_mol[chunk_snap_idx], active_lg_mol,
                                 pro_in.parameters, lig.parameters,
-                                frame_sasa_cache);
+                                frame_sasa_cache,
+                                Arguments.gbsa_sasa_points,
+                                Arguments.flag_alpb, &executor);
+          if (Arguments.flag_alpb &&
+              (!(frame_sasa_cache.alpb_rec_electrostatic_size_nm > 0.0) ||
+               !std::isfinite(
+                   frame_sasa_cache.alpb_rec_electrostatic_size_nm) ||
+               !(frame_sasa_cache.alpb_lig_electrostatic_size_nm > 0.0) ||
+               !std::isfinite(
+                   frame_sasa_cache.alpb_lig_electrostatic_size_nm) ||
+               !(frame_sasa_cache.alpb_complex_electrostatic_size_nm > 0.0) ||
+               !std::isfinite(
+                   frame_sasa_cache.alpb_complex_electrostatic_size_nm))) {
+            std::ostringstream message;
+            message << "invalid_alpb_electrostatic_size: frame="
+                    << (global_snap_idx + 1) << ", receptor_nm="
+                    << frame_sasa_cache.alpb_rec_electrostatic_size_nm
+                    << ", ligand_nm="
+                    << frame_sasa_cache.alpb_lig_electrostatic_size_nm
+                    << ", complex_nm="
+                    << frame_sasa_cache.alpb_complex_electrostatic_size_nm;
+            TitanUI::print_error(message.str());
+            TitanUI::log_message(log, "[Validation] " + message.str());
+            return 1;
+          }
 #else
           std::cerr << "Error: AVX2 is required for GBSA!" << std::endl;
           exit(1);
 #endif
 
-          std::vector<GBSA_Aggregator> local_aggs(
-              num_threads, GBSA_Aggregator(Arguments, info_output));
-          std::vector<GBSA_energy_snap> gbsa_energies(num_threads);
-
           size_t active_lg_size = active_lg_mol.size();
           size_t rec_size = pro_in.m_mol[chunk_snap_idx].size();
+          constexpr size_t gbsa_tile_atoms = 64;
+          const bool tile_receptor = rec_size >= active_lg_size;
+          const size_t tiled_atoms = tile_receptor ? rec_size : active_lg_size;
+          const size_t gbsa_task_count =
+              std::max<size_t>(1, (tiled_atoms + gbsa_tile_atoms - 1) /
+                                      gbsa_tile_atoms);
+          std::vector<GBSA_Aggregator> local_aggs(
+              gbsa_task_count, GBSA_Aggregator(Arguments, info_output));
+          std::vector<GBSA_energy_snap> gbsa_energies(gbsa_task_count);
           const auto gbsa_kernel_begin =
               capture_gbsa_timing ? std::chrono::steady_clock::now()
                                   : gbsa_precompute_begin;
-          executor.parallel_do(num_threads, [&](size_t i) {
+          executor.parallel_for(
+              gbsa_task_count, num_threads, 1,
+              [&](size_t, size_t task_begin, size_t task_end) {
 #ifdef __AVX__
-            cal_energy_gbsa_avx2(
-                pro_in.m_mol[chunk_snap_idx], active_lg_mol, pro_in.info,
-                active_lg_info, CachedData,
-                rec_size * i / num_threads, rec_size * (i + 1) / num_threads,
-                active_lg_size * i / num_threads,
-                active_lg_size * (i + 1) / num_threads,
-                gbsa_energies[i], chunk_snap_idx, Arguments,
-                pro_in.parameters, lig.parameters, pro_in.lcpo_p1,
-                pro_in.lcpo_p2, lig.lcpo_p1, lig.lcpo_p2, rec_free_radii,
-                lg_free_radii, rec_complex_radii, lg_complex_radii,
-                &local_aggs[i], &frame_sasa_cache, true);
+                for (size_t task = task_begin; task < task_end; ++task) {
+                  const size_t tile_begin = task * gbsa_tile_atoms;
+                  const size_t rec_begin = tile_receptor ? tile_begin : 0;
+                  const size_t rec_end =
+                      tile_receptor
+                          ? std::min(rec_size, tile_begin + gbsa_tile_atoms)
+                          : rec_size;
+                  const size_t lig_begin = tile_receptor ? 0 : tile_begin;
+                  const size_t lig_end =
+                      tile_receptor
+                          ? active_lg_size
+                          : std::min(active_lg_size,
+                                     tile_begin + gbsa_tile_atoms);
+                  cal_energy_gbsa_avx2(
+                      pro_in.m_mol[chunk_snap_idx], active_lg_mol,
+                      pro_in.info, active_lg_info, CachedData, rec_begin,
+                      rec_end, lig_begin, lig_end, gbsa_energies[task],
+                      chunk_snap_idx, Arguments, pro_in.parameters,
+                      lig.parameters, pro_in.lcpo_p1, pro_in.lcpo_p2,
+                      lig.lcpo_p1, lig.lcpo_p2, rec_free_radii,
+                      lg_free_radii, rec_complex_radii, lg_complex_radii,
+                      &local_aggs[task], &frame_sasa_cache, true,
+                      tile_receptor || task == 0,
+                      !tile_receptor || task == 0);
+                }
 #endif
-          });
+              });
 
           const auto gbsa_merge_begin =
               capture_gbsa_timing ? std::chrono::steady_clock::now()
@@ -3678,10 +4018,7 @@ int engine(arguments &Arguments) {
                             // frame
                             // nÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â y
 
-          for (size_t i{}; i < num_threads; ++i) {
-            Energy[i].vdw_ener = gbsa_energies[i].E_vdw;
-            Energy[i].elec_ener = gbsa_energies[i].E_elec;
-
+          for (size_t i{}; i < gbsa_task_count; ++i) {
             frame_gbsa_total.E_vdw += gbsa_energies[i].E_vdw;
             frame_gbsa_total.E_elec += gbsa_energies[i].E_elec;
             frame_gbsa_total.G_polar += gbsa_energies[i].G_polar;
@@ -3692,6 +4029,50 @@ int engine(arguments &Arguments) {
                 local_aggs
                     [i]); // GÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â»ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢p
                           // Thread -> Frame
+          }
+          if (!Energy.empty()) {
+            Energy[0].vdw_ener = frame_gbsa_total.E_vdw;
+            Energy[0].elec_ener = frame_gbsa_total.E_elec;
+          }
+
+          const auto finite_gbsa_frame = [](const GBSA_energy_snap &value) {
+            return std::isfinite(value.E_vdw) &&
+                   std::isfinite(value.E_elec) &&
+                   std::isfinite(value.G_polar) &&
+                   std::isfinite(value.G_nonpolar) &&
+                   std::isfinite(value.total_energy);
+          };
+          if (!finite_gbsa_frame(frame_gbsa_total)) {
+            TitanUI::print_error(
+                "invalid_gbsa_energy: a non-finite MM/GBSA component was "
+                "produced; the frame was not added to statistics.");
+            return 1;
+          }
+
+          GBSA_energy_snap decomposition_sum;
+          for (const auto &entry : frame_decomp.get_decomp()) {
+            decomposition_sum.E_vdw += entry.E_vdw;
+            decomposition_sum.E_elec += entry.E_elec;
+            decomposition_sum.G_polar += entry.G_polar;
+            decomposition_sum.G_nonpolar += entry.G_nonpolar;
+            decomposition_sum.total_energy += entry.total;
+          }
+          const auto closes = [](double observed, double reference) {
+            return std::abs(observed - reference) <=
+                   1.0e-8 * std::max(1.0, std::abs(reference));
+          };
+          if (!closes(decomposition_sum.E_vdw, frame_gbsa_total.E_vdw) ||
+              !closes(decomposition_sum.E_elec, frame_gbsa_total.E_elec) ||
+              !closes(decomposition_sum.G_polar,
+                      frame_gbsa_total.G_polar) ||
+              !closes(decomposition_sum.G_nonpolar,
+                      frame_gbsa_total.G_nonpolar) ||
+              !closes(decomposition_sum.total_energy,
+                      frame_gbsa_total.total_energy)) {
+            TitanUI::print_error(
+                "invalid_gbsa_decomposition_closure: receptor plus ligand "
+                "attribution does not reproduce the frame energy.");
+            return 1;
           }
 
           if (edecomp_gbsa_requested(Arguments) && edecomp_gbsa_engine) {
@@ -3726,6 +4107,14 @@ int engine(arguments &Arguments) {
                 std::chrono::duration<double, std::milli>(
                     gbsa_frame_end - gbsa_precompute_begin)
                     .count();
+          }
+          if (Arguments.flag_alpb) {
+            frame_gbsa_total.alpb_receptor_size_nm =
+                frame_sasa_cache.alpb_rec_electrostatic_size_nm;
+            frame_gbsa_total.alpb_ligand_size_nm =
+                frame_sasa_cache.alpb_lig_electrostatic_size_nm;
+            frame_gbsa_total.alpb_complex_size_nm =
+                frame_sasa_cache.alpb_complex_electrostatic_size_nm;
           }
           global_gbsa_agg.add_snapshot(input_name - Arguments.b_input,
                                        frame_gbsa_total);
@@ -4112,7 +4501,12 @@ int engine(arguments &Arguments) {
         }
 
         // --- IFP per-frame processing ---
-        if (Arguments.ifp.flag_ifp && ifp_analyzer) {
+        if (Arguments.ifp.flag_ifp && ifp_analyzer &&
+            include_ifp_frame(
+                pro_in, chunk_snap_idx,
+                static_cast<size_t>(input_name - Arguments.b_input + 1),
+                global_snap_idx + 1,
+                tot_snap_allfiles + global_snap_idx + 1)) {
           auto start_ifp = std::chrono::steady_clock::now();
           size_t lg_snap_ifp = (lig.m_mol.size() > 1) ? chunk_snap_idx : 0;
           TitanAwhIfp::AwhFrameContext awh_frame_ctx;
@@ -4167,11 +4561,11 @@ int engine(arguments &Arguments) {
         }
 
         if (dssp_mol1_analyzer.enabled() ||
-            (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled())) {
+            dssp_mol2_analyzer.enabled()) {
           auto start_dssp = std::chrono::steady_clock::now();
             if (dssp_mol1_analyzer.enabled())
               dssp_mol1_analyzer.process_frame(pro_in, chunk_snap_idx, executor);
-            if (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled())
+            if (dssp_mol2_analyzer.enabled())
               dssp_mol2_analyzer.process_frame(lig, chunk_snap_idx, executor);
           time_dssp += std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - start_dssp);
@@ -4205,6 +4599,32 @@ int engine(arguments &Arguments) {
                                                  global_snap_idx),
               pro_in.m_mol[chunk_snap_idx].time_of_snap,
               std::chrono::duration<double, std::milli>(end_cmap - start_cmap)
+                  .count());
+        }
+
+        if (interface_analyzer.enabled()) {
+          const auto start_interface = std::chrono::steady_clock::now();
+          const Multi_MOL *interface_mol2 =
+              Arguments.needs_mol2_for_interface_analysis() ? &lig : nullptr;
+          try {
+            interface_analyzer.process_frame(
+                pro_in, interface_mol2, chunk_snap_idx, global_snap_idx,
+                executor);
+          } catch (const std::exception &e) {
+            TitanUI::print_error(std::string("Interface analysis: ") +
+                                 e.what());
+            return 1;
+          }
+          const auto end_interface = std::chrono::steady_clock::now();
+          time_interface +=
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  end_interface - start_interface);
+          perf_observer.add_frame_elapsed(
+              "Interface",
+              static_cast<std::uint64_t>(tot_snap_allfiles + global_snap_idx),
+              pro_in.m_mol[chunk_snap_idx].time_of_snap,
+              std::chrono::duration<double, std::milli>(end_interface -
+                                                        start_interface)
                   .count());
         }
 
@@ -4731,11 +5151,11 @@ int engine(arguments &Arguments) {
       membrane_traj.m_mol = saved_membrane_frame0;
 
       if (dssp_mol1_analyzer.enabled() ||
-          (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled())) {
+          dssp_mol2_analyzer.enabled()) {
         auto start_dssp = std::chrono::steady_clock::now();
         if (dssp_mol1_analyzer.enabled())
           dssp_mol1_analyzer.process_frame(pro_in, 0, executor);
-        if (!Arguments.flag_nocal && dssp_mol2_analyzer.enabled() &&
+        if (dssp_mol2_analyzer.enabled() &&
             !lig.m_mol.empty())
           dssp_mol2_analyzer.process_frame(lig, 0, executor);
         time_dssp += std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -4761,6 +5181,24 @@ int engine(arguments &Arguments) {
         cmap_analyzer.process_frame(pro_in, cmap_mol2, 0, executor);
         time_cmap += std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start_cmap);
+        consumed_reference_structural_frame = true;
+      }
+
+      if (interface_analyzer.enabled()) {
+        const auto start_interface = std::chrono::steady_clock::now();
+        const Multi_MOL *interface_mol2 =
+            Arguments.needs_mol2_for_interface_analysis() ? &lig : nullptr;
+        try {
+          interface_analyzer.process_frame(pro_in, interface_mol2, 0, 0,
+                                           executor);
+        } catch (const std::exception &e) {
+          TitanUI::print_error(std::string("Interface analysis: ") +
+                               e.what());
+          return 1;
+        }
+        time_interface +=
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_interface);
         consumed_reference_structural_frame = true;
       }
 
@@ -4972,6 +5410,26 @@ int engine(arguments &Arguments) {
                                         input_line, input_name, log);
       perf_observer.add_export_elapsed(
           "CMap", elapsed_ms_since(start_cmap_export));
+    }
+    if (interface_analyzer.enabled()) {
+      const std::size_t traj_index =
+          input_name >= Arguments.b_input ? input_name - Arguments.b_input : 0;
+      const std::size_t path_index =
+          (Arguments.flag_separation_results && traj_index < paths.get_size())
+              ? traj_index
+              : 0;
+      const std::string base_dir = paths.get_path(path_index);
+      const auto start_interface_export = std::chrono::steady_clock::now();
+      try {
+        interface_analyzer.finalize_trajectory(
+            base_dir, info_output, Arguments, input_line, input_name, log);
+      } catch (const std::exception &e) {
+        TitanUI::print_error(std::string("Interface analysis export: ") +
+                             e.what());
+        return 1;
+      }
+      perf_observer.add_export_elapsed(
+          "Interface", elapsed_ms_since(start_interface_export));
     }
     if (qnative_analyzer.enabled()) {
       const std::size_t traj_index =
@@ -5207,6 +5665,9 @@ int engine(arguments &Arguments) {
                       (time_sq - time_sq_base).count() / 1000.0);
     TitanUI::log_time(log, "CMap Analysis",
                       (time_cmap - time_cmap_base).count() / 1000.0);
+    TitanUI::log_time(
+        log, "Interface Analysis",
+        (time_interface - time_interface_base).count() / 1000.0);
     TitanUI::log_time(log, "Dihedral Analysis",
                       (time_dihedral - time_dihedral_base).count() / 1000.0);
     TitanUI::log_time(log, "QNative Analysis",
@@ -5261,6 +5722,7 @@ int engine(arguments &Arguments) {
         (time_lj - time_lj_base).count() / 1000.0 +
         (time_sq - time_sq_base).count() / 1000.0 +
         (time_cmap - time_cmap_base).count() / 1000.0 +
+        (time_interface - time_interface_base).count() / 1000.0 +
         (time_dihedral - time_dihedral_base).count() / 1000.0 +
         (time_qnative - time_qnative_base).count() / 1000.0 +
         (time_msd - time_msd_base).count() / 1000.0 +
@@ -5310,6 +5772,46 @@ int engine(arguments &Arguments) {
 
   // --- IFP: Aggregate occupancy and export CSV ---
   if (Arguments.ifp.flag_ifp && ifp_analyzer) {
+    if (Arguments.ifp.pbctopo_certified_only) {
+      ifp_pbctopo_filter_report.flush();
+      const size_t processed_frames = ifp_analyzer->processed_frame_count();
+      std::ofstream summary(
+          info_output.get_ifp_pbctopo_filter_summary_filename());
+      if (!summary.is_open()) {
+        TitanUI::print_error(
+            "[IFP] Cannot open PBCTOPO frame-filter summary output.");
+        return 1;
+      }
+      const auto status_count = [&](const char *status) {
+        const auto found = ifp_pbctopo_status_counts.find(status);
+        return found == ifp_pbctopo_status_counts.end() ? size_t{0}
+                                                        : found->second;
+      };
+      summary
+          << "criterion,total_frames,included_frames,excluded_frames,"
+             "ifp_processed_frames,certified_frames,rescued_frames,"
+             "weak_observation_frames,local_unwrap_frames,fallback_frames,"
+             "missing_status_frames\n"
+          << "status_equals_certified," << ifp_pbctopo_total_frames << ','
+          << ifp_pbctopo_included_frames << ','
+          << (ifp_pbctopo_total_frames - ifp_pbctopo_included_frames) << ','
+          << processed_frames << ',' << status_count("certified") << ','
+          << status_count("rescued") << ','
+          << status_count("weak_observation") << ','
+          << status_count("local_unwrap") << ','
+          << status_count("fallback") << ','
+          << ifp_pbctopo_missing_status_frames << '\n';
+      TitanUI::print_info(
+          "[IFP] PBCTOPO certified-frame filter included " +
+          std::to_string(ifp_pbctopo_included_frames) + " of " +
+          std::to_string(ifp_pbctopo_total_frames) + " frames.");
+      if (ifp_pbctopo_missing_status_frames != 0 ||
+          processed_frames != ifp_pbctopo_included_frames) {
+        TitanUI::print_error(
+            "[IFP] PBCTOPO frame-filter accounting failed closed.");
+        return 1;
+      }
+    }
     ifp_analyzer->aggregate_occupancy();
     std::string ifp_outfile = Arguments.ifp.output_filename.empty()
                                   ? info_output.get_ifp_filename()
@@ -5333,6 +5835,17 @@ int engine(arguments &Arguments) {
       (input_line.size() > 1 || Arguments.flag_listfile ||
        Arguments.flag_pattern_input || Arguments.flag_xdr)) {
     cmap_analyzer.finalize_all(".", info_output, log);
+  }
+  if (interface_analyzer.enabled() &&
+      (input_line.size() > 1 || Arguments.flag_listfile ||
+       Arguments.flag_pattern_input)) {
+    try {
+      interface_analyzer.finalize_all(".", info_output, Arguments, log);
+    } catch (const std::exception &e) {
+      TitanUI::print_error(std::string("Interface analysis aggregate: ") +
+                           e.what());
+      return 1;
+    }
   }
   if (qnative_analyzer.enabled() &&
       (input_line.size() > 1 || Arguments.flag_listfile ||
@@ -5595,6 +6108,13 @@ int engine(arguments &Arguments) {
   run_dham_postproc(Arguments, msm_analyzer, executor, info_output, log,
                     dham_frame_weights, &dham_tpt_tpm, &dham_tpt_pi,
                     &dham_tpt_converged, &validation_runtime.dham_context);
+  if (Arguments.dham.flag_dham &&
+      Arguments.eq_weight_source == "dham" && !dham_tpt_converged) {
+    TitanUI::print_error(
+        "DHAM was selected as the required equilibrium weight source but did "
+        "not converge. No successful analysis marker should be written.");
+    return 1;
+  }
   auto time_pp_dham = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_dham);
 
@@ -5605,6 +6125,16 @@ int engine(arguments &Arguments) {
       run_mbar_postproc(Arguments, msm_analyzer, &dccm_analyzer, executor,
                         info_output, log, &mbar_frame_weights,
                         &mbar_pca_frame_weights);
+  if (Arguments.mbar.flag_mbar &&
+      Arguments.eq_weight_source == "mbar" &&
+      (!mbar_result.solved || !mbar_result.converged ||
+       mbar_result.global_frame_weights.empty())) {
+    TitanUI::print_error(
+        "MBAR was selected as the required equilibrium weight source but did "
+        "not produce converged frame weights. No successful analysis marker "
+        "should be written.");
+    return 1;
+  }
   auto time_pp_mbar = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start_pp_mbar);
 

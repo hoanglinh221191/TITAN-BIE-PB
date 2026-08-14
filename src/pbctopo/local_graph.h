@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -32,6 +33,7 @@ struct PbctopoProjectedMetadataEdge {
   std::size_t a = 0;
   std::size_t b = 0;
   bool inter_residue = false;
+  bool hard_connectivity = true;
 };
 
 struct PbctopoSystemStaticData {
@@ -40,10 +42,17 @@ struct PbctopoSystemStaticData {
   std::vector<char> heavy_mask;
   std::vector<double> vdw_radii;
   std::vector<char> vdw_radius_available;
+  std::vector<PbctopoStericRadiusSource> vdw_radius_sources;
+  std::vector<double> atomic_masses;
+  std::vector<char> atomic_mass_available;
+  std::size_t atomic_mass_count = 0;
   std::size_t vdw_topology_count = 0;
   std::size_t vdw_parameter_count = 0;
+  std::size_t vdw_zero_lj_count = 0;
   std::size_t vdw_inferred_count = 0;
+  std::size_t vdw_generic_fallback_count = 0;
   std::vector<PbctopoRange> ranges;
+  std::vector<PbctopoRange> anchor_unit_ranges;
   bool topology_graph_available = false;
   std::size_t topology_bonds_available = 0;
   std::vector<PbctopoProjectedTopologyBond> projected_topology_bonds;
@@ -51,6 +60,8 @@ struct PbctopoSystemStaticData {
   std::size_t metadata_residue_groups = 0;
   std::size_t metadata_intra_edges = 0;
   std::size_t metadata_inter_edges = 0;
+  std::size_t metadata_inter_hard_edges = 0;
+  std::size_t metadata_inter_soft_edges = 0;
   std::vector<PbctopoProjectedMetadataEdge> projected_metadata_edges;
   std::vector<PbctopoContinuityPair> continuity_pairs_local;
   std::vector<std::size_t> continuity_anchor_local;
@@ -117,7 +128,12 @@ void append_atoms_for_system(const MOL &mol,
 void build_local_neighborhood_graph(
     const std::vector<PbctopoAtom> &atoms, box Box,
     std::vector<PbctopoLocalEdge> &edges,
-    std::unordered_set<std::uint64_t> &edge_set, double bond_cutoff);
+    std::unordered_set<std::uint64_t> &edge_set, double bond_cutoff,
+    bool append = false, std::span<const char> eligible_atoms = {});
+
+std::vector<std::vector<std::size_t>>
+build_hard_connected_components_from_local_edges(
+    std::size_t atom_count, const std::vector<PbctopoLocalEdge> &edges);
 
 void append_topology_bond_edges_for_system(
     const PbctopoSystemStaticData &static_data, std::size_t atom_offset,

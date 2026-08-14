@@ -56,11 +56,20 @@ SUPPORTED INPUT MODES
      Use:
        -a arg.in
      Notes:
-       options can be stored in a text file. For single-token entries,
-       arg.in commonly uses key=value syntax, for example:
+       value options must use -option=value; '=' is mandatory for them.
+       Boolean/presence switches may stand alone. Examples:
+         -1pdb
          -traj=md.xtc
          -ff=AMBER99SB
          -g=1&2
+
+  SYNTAX CONTRACT
+     Terminal: value options use -option value; switches may stand alone.
+     arg.in: value options use -option=value; switches may stand alone.
+     Explicit boolean values remain valid: terminal `-gbsa false`, arg.in
+     `-gbsa=false`.
+     Unknown or obsolete options, conflicts, and missing values are reported
+     before analysis starts; close misspellings include suggested options.
 
 CORE DEPENDENCY CHAIN
 
@@ -186,8 +195,10 @@ IMPORTANT NOTES
 
   Main inputs:
     -gbsa or -alpb
-    -igb, -ext_diel, -int_diel, -saltcon, -epsilon_in
+    -igb, -ext_diel, -int_diel, -saltcon, -gbsa-temp, -epsilon_in
+    -gbsa-sasa-points
     -gbsa-perf off|summary|detail
+    -gbsa-ie-block, -gbsa-ie-min-samples, -gbsa-ie-filter-sigma
 
   Typical outputs:
     gbsa_snapshots.dat
@@ -196,6 +207,8 @@ IMPORTANT NOTES
     gbsa_decomposition.dat
     gbsa_performance.dat
     gbsa_performance_frames.csv   (with -gbsa-perf=detail)
+    gbsa_ie_diagnostics.csv
+    gbsa_alpb_sizes.csv                 (with -alpb)
     edecomp_mmgbsa_residue_map.csv       (with -edecomp-source=gbsa|all)
     edecomp_mmgbsa_residue_ranking.csv   (with -edecomp-source=gbsa|all)
     out_entropy.dat   (auto-enabled by -gbsa for free-energy completeness)
@@ -205,6 +218,19 @@ IMPORTANT NOTES
       -nocal to compute implicit-solvent free energies.
     - GBSA interaction entropy uses E_MM = E_elec + E_vdw; the reported
       energy kernel timing remains fused with GB pair-polar work.
+    - HCT/OBC use analytical pair descreening, Amber intrinsic radii and
+      element screen factors. Salt concentration is converted to Amber's
+      temperature/dielectric-aware Debye kappa.
+    - IE reports status, sample count, lag-1 ESS and block diagnostics.
+      Final_dG is nan until the configured minimum sample gate is satisfied;
+      filter sigma 0 (default) disables hard outlier filtering.
+    - ALPB uses the salt-screened Sigalov expression with dimensionless
+      alpha=0.571412 and a per-frame determinant electrostatic size (A_Det)
+      for the complex, receptor, and ligand endpoints. It is not a fixed
+      empirical length added to the GB denominator. Summary/log provenance
+      and all three endpoint sizes are exported for audit.
+    - When IE sigma filtering removes samples, the retained ensemble is
+      re-centered and the minimum-sample gate is applied again.
 
 2.2b PBE
 
@@ -222,7 +248,8 @@ IMPORTANT NOTES
     SASA and BIE exposed-panel construction; `TitanSASA` remains the
     compatibility wrapper for per-atom SASA/SA nonpolar energy. Each workflow
     keeps its own residue grouping and output files.
-    Backend selection is explicit: bare -pbe, -pbe=grid, and compatibility
+    Backend selection is explicit: bare -pbe, terminal -pbe grid, and
+    arg.in -pbe=grid; compatibility
     aliases -pbe=delphi, -pbe=pydelphi, and -pbe=fd use the established
     finite-difference grid implementation; -pbe=bie uses the separate
     clean-room boundary-integral equation (BIE) backend for linear PB only.
@@ -262,6 +289,7 @@ IMPORTANT NOTES
     -pbsa-components, -pbsa-decomp, -pbsa-residue-frames
     -pbsa-ie, -pbsa-ie-block, -pbsa-ie-min-samples
     -pbsa-ie-filter-sigma, -pbsa-perf, -pbsa-grid-reuse
+    -pbsa-sasa-points
     -pbe-max-iter, -pbe-rms, -pbe-dphi, -pbe-omega
     -pbe-nl-max-iter, -pbe-nl-inner-iter, -pbe-nl-stagnation
     -pbe-nl-block, -pbe-nl-dphi, -pbe-nl-relax, -pbe-nl-clip
@@ -285,6 +313,12 @@ IMPORTANT NOTES
         jcp2013-treecode|tabi2-nodepatch|calibrated-debug,
       -pbe-bie-energy-projection=boundary|born-check|charge-potential-debug,
       -pbe-bie-fmm-m2l=auto|off|single-matvec-analytic,
+      -pbe-bie-fmm-engine=cartesian|cartesian-full-experimental|kifmm-lite|
+        kifmm-local|kifmm-lite-experimental|
+        kifmm-channel-hybrid-experimental,
+      -pbe-bie-fmm-cartesian-order=1|4 (required by cartesian-full-experimental),
+      -pbe-bie-fmm-cartesian-error-audit=off|channel-shadow|
+        channel-shadow-retry-global-theta015 (opt-in O1 node-patch),
       -pbe-bie-precond=auto|none|diagonal|block|block-budgeted|
         coarse-galerkin-probe|fmm-block-jacobi|fmm-overlap-schwarz|
         fmm-nearfield-ilu0|fmm-nearfield-ilu0-coarse|
@@ -323,13 +357,15 @@ IMPORTANT NOTES
         -pbe-bie-expansion-audit-max-panels=<128..8192>,
         -pbe-bie-matvec-audit=off|sampled|sampled-detail|full-small,
         -pbe-bie-matvec-audit-sample-count=<128..4096>,
+        -pbe-bie-node-patch-operator-audit=on|off,
       -pbe-bie-progress=off|auto|detail,
       -pbe-bie-progress-interval=<1..300>,
       -pbe-bie-gmres-restart=<8..128>,
       -pbe-bie-true-residual-probe=restart|interval|off,
       -pbe-bie-true-residual-probe-interval=<1..128>
       -pbe-bie-primary-surface=sphere-patch|grid-ses|analytic-ses,
-      -pbe-bie-ses-grid-spacing=<0.25..4.0>
+      -pbe-bie-analytic-ses-engine=current|patch-ray-experimental,
+      -pbe-bie-ses-grid-spacing=<0.25..4.0> (default 0.75)
     grid-ses is an opt-in watertight solvent-excluded surface. It applies a
     probe-radius morphological closing to the VDW volume on a Cartesian grid,
     extracts a welded triangle mesh, and rejects open/nonmanifold output before
@@ -337,6 +373,44 @@ IMPORTANT NOTES
     analytic-ses independently constructs exact contact, toroidal, and
     reentrant probe patches from expanded atom spheres, intersects grid rays
     with those patches, and topology-audits the welded mesh before solving.
+    patch-ray-experimental is a clean-room, opt-in analytic SES extractor. It
+    visits patches, builds compact three-axis ray crossings, and does not
+    change the established analytic SES engine or its default selection. Any
+    odd ray row invalidates only the vertices that use that row. Certified,
+    unanimous three-axis parity is authoritative in the compact solvent shell;
+    exact seam/tangency vertices use deterministic analytic symbolic
+    perturbation. Any remaining morphology fallback, unresolved odd or
+    uncertified quartic row, or failed all-vertex analytic projection makes the
+    experimental engine fail closed. Unequal-radius torus arcs use
+    the minor contact arc, and spindle-torus quartic roots must also pass a
+    geometric probe-radius residual. Boundary magnitude and projection use
+    sparse active-cell storage plus an atom-local patch CSR. Patch events are
+    written to CSR by two merge passes without a full merged-event copy, and
+    final vertex projection uses the TITAN executor and a vertex-only
+    transaction. Short-edge collapse builds an immutable-source candidate
+    without copying the full panel mesh. Projection-created zero-area faces
+    and locally inverted faces are repaired transactionally; ULP-scale seam
+    duplicates are welded by a local-scale tolerance. Every final face must
+    pass a minimum analytic-normal orientation certificate, and all
+    broad-phase non-adjacent triangle AABB pairs are checked and counted for
+    self-intersection;
+    generic diagonal flips are disabled because planar quality alone cannot
+    certify a curved analytic-patch seam. Final gates report connected
+    components, Euler characteristic, genus, filled cavities, sampled analytic
+    distance/residual/normal error, the all-vertex and all-face certificates,
+    repair scratch/event peak bytes, and deterministic repair rollback. A
+    coarse mesh that reports analytic_self_intersection must be rerun with a
+    smaller SES grid spacing; the certificate cannot be disabled. No lazy
+    ray-bucket index is built. SES grid spacing controls geometric
+    discretization independently of the GMRES tolerance. The 0.75 A default
+    is a throughput setting, not a universal energy-accuracy guarantee;
+    quantitative work should report an h-refinement check and reduce the
+    spacing until the observable is stable.
+    Node-patch treecode runs a fail-closed, spatially stratified pre-GMRES
+    operator audit by default. It starts at 64 targets and expands to 256 or
+    512 only when the sampled error is ambiguous. Advanced production runs
+    may set -pbe-bie-node-patch-operator-audit=off to remove this guard;
+    convergence then no longer certifies agreement with sampled direct rows.
     fmm-nearfield-ilu0-coarse is an opt-in balanced two-level
     preconditioner. It reuses adaptive occupied octree nodes for an
     area-weighted coarse space and combines the coarse correction with the
@@ -500,11 +574,15 @@ IMPORTANT NOTES
     -dssp                enable DSSP output
     -no-dssp             disable DSSP output
     -dssp-hbond-cutoff <val>
+    -segment-config <file>
     protein/protein-user molecule types
 
   Typical outputs:
     dssp_mol1.dat
     dssp_mol1_content.dat
+    dssp_mol1_segments.csv
+    dssp_mol1_bridges.csv
+    dssp_mol1_ladders.csv
     dssp_mol2.dat        only outside -nocal and only if molecule 2 is
                          protein/protein-user
     dssp_mol2_content.dat
@@ -512,7 +590,8 @@ IMPORTANT NOTES
                          protein/protein-user
 
   Notes:
-    - In -nocal mode, DSSP is evaluated only for molecule 1.
+    - In -nocal mode, molecule 2 DSSP is evaluated only when another enabled
+      analysis explicitly loads molecule 2 coordinates.
     - TITAN auto-skips DSSP if topology lacks a DSSP-compatible protein
       backbone signature, which avoids meaningless output on LJ/monoatomic jobs.
     - For each residue, Titan writes the dominant state, state fractions,
@@ -524,6 +603,8 @@ IMPORTANT NOTES
     - Trajectory aggregation is two-stage:
       1. frame fractions are averaged within each input trajectory
       2. Titan reports mean +/- SEM across trajectories
+    - A segment config adds entity/segment state content plus bridge
+      orientation, registry, and ladder-length distributions.
 
 2.3b RMSD / RMSF
 
@@ -766,6 +847,46 @@ IMPORTANT NOTES
       arg.in uses `-cmap-scope=interface`
       CLI uses `-cmap-scope interface`
 
+2.4c-i Configurable Interface-State Analysis
+
+  Purpose:
+    Quantify contacts among two core entities and an optional third entity,
+    without embedding entity names or segment indices in TITAN.
+
+  Main inputs:
+    -interface-analysis
+    -interface-config <file>
+    -segment-config <file>
+    -interface-contact-mode <sidechain-com|sidechain-heavy|cb|ca|bb>
+    -interface-cut <A>
+    -interface-state-min-contacts <N>
+    -interface-sasa-stride <N>
+    -interface-sasa-points <N>
+
+  Config grammar:
+    version 1
+    entity NAME mol1|mol2 chain|chainnum VALUE
+    role core_a ENTITY
+    role core_b ENTITY
+    role partner ENTITY
+    segment ENTITY NAME ordinal|resnr|internal BEGIN END
+
+  Typical outputs:
+    interface_state_timeseries.csv
+    interface_state_populations.csv
+    interface_segment_contacts.csv
+    interface_segment_timeseries.csv
+    interface_metrics.csv
+    interface_sasa_timeseries.csv
+
+  Notes:
+    - The partner role is optional for two-entity controls.
+    - State populations and segment contacts use the global uncertainty
+      settings. Use -uncertainty=block for equilibrium ensemble estimates.
+    - Buried surface is reported both as total loss of accessible area and
+      one-half of that value under the per-side convention.
+    - Whole-entity coordinates are required for SASA; PBCTOPO is recommended.
+
 2.4d Native Contacts Q
 
   Purpose:
@@ -939,8 +1060,8 @@ IMPORTANT NOTES
       order, curvature, contact-probability, and leaflet-composition deltas
       using per-frame protein-lipid contacts.
     - membrane_summary.dat records a reference note for interpretation.
-    - arg.in uses the equals syntax shown above; bare `-membrane` also enables
-      the analyzer.
+    - arg.in uses the equals syntax shown above; terminal `-membrane true`
+      enables the analyzer.
 
 2.4h NMR Order Parameters S2 (Phase 6)
 
@@ -978,7 +1099,7 @@ IMPORTANT NOTES
     s2_bfactor_average.pdb         optional
 
   Notes:
-    - S2 analysis defaults off. Bare `-s2` enables it.
+    - S2 analysis defaults off. Terminal `-s2 true` enables it.
     - N-H rows require exact backbone H or HN atoms. PRO and terminal
       residues without a backbone hydrogen are skipped with a warning.
     - CA-C rows use the exact vector and are emitted independently of N-H rows.
@@ -1209,8 +1330,9 @@ IMPORTANT NOTES
   Notes:
     - `-validation` implies `-msm` and reuses the solved TICA embedding plus
       cached MSM segments.
-    - VAMP-2 candidate sweeps only vary component-prefix, MSM lag, and cluster
-      count inside the already solved TICA space.
+    - VAMP-2 candidate sweeps fit K-means centroids on training trajectories
+      only and score held-out trajectory folds. Component-prefix, MSM lag, and
+      cluster count vary inside the already solved TICA space.
     - `-validation-auto-pick` is opt-in; when off, TITAN only reports ranking
       and leaves the current MSM/TPT pipeline unchanged.
     - `-validation-bootstrap` covers MSM uncertainty and, when `-tpt` is also
@@ -1248,8 +1370,8 @@ IMPORTANT NOTES
 
   Integration note:
     `-eq-weight-source mbar` adds equilibrium-only UMAP sidecars without
-    changing the embedding fit itself. Default UMAP behavior is unchanged
-    unless MBAR is requested explicitly.
+    changing the embedding fit itself. KNN mode defaults to `auto` so large
+    embeddings can select the approximate path.
 
 2.10 DHAM Reweighting
 
@@ -1729,27 +1851,27 @@ IMPORTANT NOTES
 
 3.5 DCCM network + PCA/FES
 
-  titan.exe -s reference.pdb -traj md.xtc -network -community=louvain \
-      -pca -fes-grid=80
+  titan.exe -s reference.pdb -traj md.xtc -network -community louvain \
+      -pca -fes-grid 80
 
 3.6 Allostery analysis
 
   titan.exe -s reference.pdb -traj md.xtc -allostery \
-      -allostery-tau=10 -allostery-bins=48
+      -allostery-tau 10 -allostery-bins 48
 
   titan.exe -s reference.pdb -traj md.xtc -allostery \
-      -allostery-cut=12 -allostery-prune-window=avg -allostery-no-te
+      -allostery-cut 12 -allostery-prune-window avg -allostery-no-te
 
   titan.exe -s reference.pdb -traj md.xtc -allostery \
-      -allostery-cut=12 -allostery-knn=4
+      -allostery-cut 12 -allostery-knn 4
 
   titan.exe -s reference.pdb -traj md.xtc -allostery \
-      -allostery-knn=4 -allostery-knn-prior=contact \
-      -allostery-knn-contact-cut=8 -allostery-no-te
+      -allostery-knn 4 -allostery-knn-prior contact \
+      -allostery-knn-contact-cut 8 -allostery-no-te
 
   titan.exe -s reference.pdb -traj md.xtc -allostery \
-      -allostery-estimator=knn -allostery-estimator-k=4 \
-      -allostery-knn=6 -allostery-cut=12
+      -allostery-estimator knn -allostery-estimator-k 4 \
+      -allostery-knn 6 -allostery-cut 12
 
   Inspect:
     raw_mi_edges.csv for unthresholded mutual information
@@ -1759,11 +1881,11 @@ IMPORTANT NOTES
   3.6a Corr-kNN raw information export
 
   titan.exe -s reference.pdb -traj md.xtc -corr-knn \
-      -corr-knn-k=4 -corr-knn-tau=10 -corr-knn-pair-cut=12
+      -corr-knn-k 4 -corr-knn-tau 10 -corr-knn-pair-cut 12
 
   titan.exe -s reference.pdb -traj md.xtc -corr-knn \
-      -corr-knn-pair-topk=6 -corr-knn-pair-prior=contact \
-      -corr-knn-pair-contact-cut=8 -corr-knn-no-te
+      -corr-knn-pair-topk 6 -corr-knn-pair-prior contact \
+      -corr-knn-pair-contact-cut 8 -corr-knn-no-te
 
   3.6b HBond kinetics
 
@@ -1772,7 +1894,7 @@ IMPORTANT NOTES
         -hbk-kind hbond -hbk-kind salt -hbk-domain both -hbk-maxlag 250
 
   arg.in:
-    -hbk
+    -hbk=true
     -hbk-kind=hbond
     -hbk-kind=salt
     -hbk-domain=both
@@ -1783,8 +1905,8 @@ IMPORTANT NOTES
 
   3.7 TICA + MSM workflow
 
-  titan.exe -s reference.pdb -i input.txt -tica -tica-lag=10 \
-      -tica-components=5 -msm -msm-clusters 150 -msm-lag 10
+  titan.exe -s reference.pdb -i input.txt -tica -tica-lag 10 \
+      -tica-components 5 -msm -msm-clusters 150 -msm-lag 10
 
 3.8 DHAM + weighted FES from REMD-style data
 
@@ -1793,8 +1915,8 @@ IMPORTANT NOTES
       -dham-temps temps.txt \
       -dham-ener energy_xvg_list.txt \
       -dham-target-temp 300 \
-      -dham-max-iter=5000 \
-      -dham-tol=1e-6
+      -dham-max-iter 5000 \
+      -dham-tol 1e-6
 
   Example temps.txt:
     300
@@ -1829,7 +1951,7 @@ IMPORTANT NOTES
 
 3.8b LJ REMD / Argon DHAM workflow
 
-  titan.exe -s conf.pdb -i xtc_list.txt -nocal -lj -tica -msm -dham \
+  titan.exe -s conf.pdb -i xtc_list.txt -nocal true -lj -tica -msm -dham \
       -common-topo topol.top \
       -dham-temps temps.txt \
       -dham-ener energy_xvg_list.txt \
@@ -1888,18 +2010,19 @@ IMPORTANT NOTES
 
 3.10 LLPS analysis (Martini)
 
-  titan.exe -s system.pdb -traj md.xtc -ff MARTINI -llps
+  titan.exe -s system.pdb -traj md.xtc -ff MARTINI -llps true
 
-  titan.exe -s system.pdb -traj md.xtc -ff MARTINI -llps \
-      -llps-dbscan-eps 12 -llps-dbscan-minpts 8 -llps-voxel 0.6 -llps-fuzzy
+  titan.exe -s system.pdb -traj md.xtc -ff MARTINI -llps true \
+      -llps-dbscan-eps 12 -llps-dbscan-minpts 8 -llps-voxel 0.6 \
+      -llps-fuzzy true
 
 3.11 GIST water thermodynamics
 
   titan.exe -s complex.pdb -traj md.xtc -gist \
-      -gist-resolution=0.5 \
-      -gist-padding=8.0 \
-      -gist-temperature=300 \
-      -gist-water-model=TIP3P
+      -gist-resolution 0.5 \
+      -gist-padding 8.0 \
+      -gist-temperature 300 \
+      -gist-water-model TIP3P
 
 3.12 IFP occupancy analysis
 
@@ -1911,7 +2034,7 @@ IMPORTANT NOTES
 
 3.13 LSP-MD network analysis
 
-  titan.exe -s reference.pdb -traj md.xtc -lspmd -lspmd_cut=12.0
+  titan.exe -s reference.pdb -traj md.xtc -lspmd -lspmd_cut 12.0
 
 3.14 Using arg.in
 
@@ -1922,11 +2045,11 @@ IMPORTANT NOTES
     -traj=md.xtc
     -g=1&2
     -ff=AMBER99SB
-    -network
-    -pca
-    -tica
+    -network=true
+    -pca=true
+    -tica=true
     -tica-lag=10
-    -msm
+    -msm=true
     -msm-lag=10
 
 ================================================================================
@@ -1990,17 +2113,17 @@ IMPORTANT NOTES
 4.2 Groups / Molecules / Time
 
   -g <G1>&<G2>          Interaction groups
-  -sg <SG1>-<SG2>       CLI sub-groups within main groups
-  -sg= <SG1>-<SG2>      arg.in sub-groups within main groups
-  -sg-mode=auto|stream|cache
+  -sg <SG1>-<SG2>       Terminal sub-groups; e.g. -sg 1 2-3 4
+  -sg=<SG1>-<SG2>       arg.in form; e.g. -sg= 1 2-3 4
+  -sg-mode <mode>       auto, stream, or cache
                         Sub-group energy mode. stream avoids dense pair cache.
-  -sg-cache=auto|off|on Dense pair-cache preference for -sg
-  -sg-memory-gb=auto|N  RAM budget for -sg auto mode
-  -sg-timeseries=auto|full|summary-only
+  -sg-cache <mode>      auto, off, or on; dense pair-cache preference for -sg
+  -sg-memory-gb <v>     auto or N; RAM budget for -sg auto mode
+  -sg-timeseries <mode> auto, full, or summary-only
                         Control -sg time-series output volume
-  -sg-kernel=auto|scalar|avx2
+  -sg-kernel <mode>     auto, scalar, or avx2
                         Streaming -sg compute kernel preference
-  -sg-cutoff=auto|VALUE|none
+  -sg-cutoff <value>    auto, VALUE, or none
                         Streaming -sg cutoff in nm; auto uses energy cutoff
   -mol-1-type <type>    protein, complex, lig, rna, dna
   -mol-2-type <type>    protein, protein-user, complex, lig, rna, dna
@@ -2015,16 +2138,24 @@ IMPORTANT NOTES
 4.3 Energy / Solvation / Entropy
 
   -gbsa                 Enable GBSA solvation analysis
-  -alpb                 Enable ALPB and imply -gbsa
+  -alpb                 Enable Sigalov ALPB (per-frame A_Det) and imply -gbsa
   -gbsa-perf <mode>     off, summary, or detail. Default: summary.
                         Reports a fused GBSA energy-kernel timing bucket.
+  -gbsa-sasa-points <N> Shrake-Rupley points/atom. Default: 96; perform a
+                        convergence check (for example 96, 384, 1536).
   -igb <N>              GB model. Default: 5
   -ext_diel <val>       External dielectric. Default: 78.5
   -int_diel <val>       Internal dielectric. Default: 1.0
   -saltcon <val>        Salt concentration (M). Default: 0.15
+  -gbsa-temp <val>      GB/IE temperature (K). Default: 298.15
+  -gbsa-ie-block <N>    auto or positive block size. Default: auto
+  -gbsa-ie-min-samples <N>
+                        Minimum frames before IE is valid. Default: 10
+  -gbsa-ie-filter-sigma <val>
+                        Hard sigma filter; 0 disables it. Default: 0
   -epsilon_in <val>     Internal epsilon for solvation models
 
-  -pbe[=backend]        Enable frame-based PB electrostatics. backend is grid
+  -pbe <backend>        Enable frame-based PB electrostatics. backend is grid
                         or bie. Bare -pbe defaults to grid; delphi, pydelphi,
                         and fd are grid aliases. tabi is a legacy BIE alias.
   -pbe-bie-fast-operator <mode>
@@ -2045,10 +2176,10 @@ IMPORTANT NOTES
   -pbe-temp <val>       PBE temperature (K). Default: 298.15
   -pbe-surface <mode>   vdw, sas, ses, delphi-ses, delphi-vdw, gaussian, or
                         gaussian-cutoff. Default: vdw
-                        ses uses probe-excluded voxels plus boundary flood fill
-                        to identify solvent-accessible grid points.
-                        delphi-ses keeps the SES flood fill and refines
-                        dielectric faces by 2x2 midpoint-face sampling.
+                        ses applies a Euclidean rolling-probe closing to the
+                        VDW mask, then fills only solvent-inaccessible cavities.
+                        delphi-ses uses the same SES mask and refines dielectric
+                        faces by 2x2 sub-grid sampling of that mask.
                         delphi-vdw uses DelPhi-compatible discrete media
                         indices at positive x/y/z half-grid faces: each
                         midpoint is classified by VDW atom radius, then the
@@ -2074,13 +2205,13 @@ IMPORTANT NOTES
                         stern applies Debye screening only in ion-accessible
                         solvent after excluding atom radius + ion radius.
   -pbe-ion-radius <val> Ion probe radius for Stern accessibility (A). Default: 2.0
-  -pbe-dgsolv [bool]    Compute deltaG_solv. For a single BIE system this is
+  -pbe-dgsolv [bool]    Compute deltaG_solv. For a single BIE or Grid PQR this is
                         the reaction-field energy 0.5*sum(q_i*phi_reac_i)
-                        from the selected ionic-solvent solve. Native grid
-                        two-molecule systems use six endpoint solves: complex,
-                        mol1, mol2 each solvent/vacuum.
-                        Arg file: -pbe-dgsolv=true; CLI: -pbe-dgsolv
-  -pbsa [bool]          Enable MM/PBSA summary for two-molecule systems.
+                        from the selected ionic-solvent solve. Native Grid
+                        two-molecule systems use complex, mol1, and mol2
+                        solvent/vacuum endpoint solves.
+                        Arg file: -pbe-dgsolv=true; CLI: -pbe-dgsolv true
+  -pbsa                 Enable MM/PBSA summary for two-molecule systems.
                         Implies -pbe and -pbe-dgsolv; writes
                         mm_pbsa_energy.csv and mm_pbsa_summary.dat with PB
                         endpoint polar, SASA nonpolar, elec/vdw,
@@ -2088,8 +2219,10 @@ IMPORTANT NOTES
                         -pbe=grid uses solvent/vacuum grid endpoints;
                         -pbe=bie uses three boundary-integral reaction-field
                         endpoints (complex, receptor, ligand).
-                        Arg file: -pbsa=true; CLI: -pbsa true
-  -pbsa-components <m>  auto or complex,receptor,ligand. Default: auto
+                        Use bare -pbsa in both arg.in and the command line.
+  -pbsa-components <m>  auto, complex,ligand,receptor, or the equivalent
+                        ligand-receptor-complex order. All three components
+                        are required when selection is explicit. Default: auto
   -pbsa-decomp <mode>   off, molecule, residue, hybrid, or auto. Default: auto
                         auto selects hybrid only for protein-ligand input;
                         hybrid writes protein residues and ligand atoms
@@ -2112,6 +2245,9 @@ IMPORTANT NOTES
                         solve; auto remains gated until validation passes.
                         BIE reports this grid-only optimization as
                         not_applicable and rejects validate mode.
+  -pbsa-sasa-points <N>
+                        Shrake-Rupley points/atom. Default: 96; perform a
+                        convergence check (for example 96, 384, 1536).
   -pbsa-ie-filter-sigma <val>
                         Sigma filter for IE samples. Default: 2.0
   -pbsa-perf <mode>     off, summary, or detail. Default: summary
@@ -2386,24 +2522,40 @@ IMPORTANT NOTES
   -pbctopo              pbctopo (VIBE): Virtual Intact Block Extraction PBC mode
   -pbctopo-mode=<name>  vibe | llps-local. Default: vibe
   -pbctopo-llps-local   Alias for -pbctopo -pbctopo-mode=llps-local
+  -pbctopo-search-policy=<name>
+                        fast-certified | audit-exact. Default: fast-certified
+                        audit-exact runs exact search after a certified graph seed.
+  -pbctopo-audit-max-states=<N>
+                        Maximum exact-search nodes per audit frame. Default: 10000000
+  -pbctopo-audit-max-seconds=<value>
+                        Maximum exact-search wall time per audit frame. Default: 60
+  -pbctopo-audit-max-memory-mb=<N>
+                        Maximum estimated audit workspace per frame. Default: 1024
   -pbctopo-anchor-backend=<name>
                         auto | prim | spatial-all. Default: auto
   -pbctopo-anchor-metrics=<name>
                         full | mst-only | no-order | no-contact. Default: full
   -pbctopo-temporal=<name>
                         greedy | viterbi. Default: greedy
+                        viterbi is experimental/diagnostic and is not part of
+                        the framewise VIBE observation contract.
   -pbctopo-temporal-k=<N>
-                        Top-K virtual candidates for Viterbi. Range: 1..32; default: 4
+                        Top-K virtual candidates for experimental Viterbi.
+                        Range: 1..32; default: 4
   -pbctopo-temporal-penalty=<value>
-                        Center-jump penalty for Viterbi. Default: 2.0
+                        Center-jump penalty for experimental Viterbi. Default: 2.0
   -pbctopo-vdw-clash-scale=<value>
                         Severe-overlap threshold lambda*(ri+rj). Range: (0,1]; default: 0.55
+                        Explicit zero-LJ sites have no LJ hard core.
   -pbctopo-bond-cutoff=<A>
                         Local topology bond cutoff. Default: 2.15 A; MARTINI: 5.5 A
   -pbctopo-clash-cutoff=<A>
                         Clash cutoff for VIBE candidate rejection. Default: 1.05 A; MARTINI: 3.5 A
   -pbctopo-contact-cutoff=<A>
                         Owner/contact cutoff for split guards. Default: 4.5 A; MARTINI: 8.0 A
+  -pbctopo-required-contacts=<file>
+                        Hard interface contacts: atom_a atom_b max_A [weight].
+                        Atom indices are 1-based in the selected PBCTOPO atom set.
   -pbctopo-continuity-cutoff=<A>
                         Continuity graph cutoff. Default: 20.0 A
   -pbctopo-exact-component-limit=<N>
@@ -2480,6 +2632,18 @@ IMPORTANT NOTES
   -cmap-cut <A>         Default: 6.5 for sidechain-com; 4.5 for atom modes
   -cmap-domain <mode>   intra | inter | both. Default: both
   -cmap-min-seqsep <N>  Minimum intra-chain sequence separation. Default: 3
+  -segment-config <f>   Generic entity/role/segment definition file
+  -interface-analysis   Configurable two/three-entity contact-state analysis
+  -interface-config <f> Alias that sets segment config and enables analysis
+  -interface-contact-mode <mode>
+                        sidechain-com | sidechain-heavy | cb | ca | bb
+  -interface-cut <A>    Contact cutoff. Default: 6.5
+  -interface-state-min-contacts <N>
+                        Contact-pair threshold for state labels. Default: 1
+  -interface-sasa-stride <N>
+                        SASA/BSA sampling stride; 0 disables. Default: 10
+  -interface-sasa-points <N>
+                        Sphere points per atom. Default: 96
   -qnative              Native-contact fraction Q analysis
   -qnative-ref <file>   Optional reference; default: loaded reference/first frame
   -qnative-scope <mode> mol1 | interface. Default: mol1
@@ -2571,7 +2735,7 @@ IMPORTANT NOTES
   -tica-lag=<N>         TICA lag. Default: 10
   -tica-components=<N>  Components kept. Default: 5
   -tica-backend=<name>  auto | exact_dense | exact_dual | randomized
-  -tica-rank=<N>        Reduced-rank target for large-system TICA. Default: 64
+  -tica-rank=<N>        Reduced-rank target for large-system TICA. Default: 24
   -feature-export=<b>   Export routed observable features by frame. Default: false
   -feature-source=<m>   auto | dccm | lj | dihedral | qnative | cmap | mixed
   -perf-report=<mode>   off | summary | detail. Default: off
@@ -2622,6 +2786,18 @@ IMPORTANT NOTES
                         Controls which equilibrium frame weights feed the
                         default PCA/TICA FES path and equilibrium-only
                         MSM/TPT summaries. `auto` preserves legacy behavior.
+                        An explicitly selected DHAM/MBAR source is required to
+                        converge; otherwise TITAN exits with failure.
+  -trajectory-semantics <mode>
+                        continuous | remd-state. Default: continuous
+                        `remd-state` means fixed-temperature REMD streams with
+                        configuration swaps. Use fixed-ladder MBAR for
+                        equilibrium reweighting. DHAM/dTRAM requires explicit
+                        exchange segmentation and is rejected on these raw
+                        streams. TICA/MSM may be used only as descriptive
+                        state-space models; physical timescales, ITS, CK/VAMP
+                        validation, HBK, lagged allostery, and corr-kNN are
+                        disabled. Kinetic TPT additionally needs a demux map.
 
   -dham                 DHAM reweighting
   -dham-temps <file>    Replica temperatures in K
@@ -2776,6 +2952,9 @@ IMPORTANT NOTES
   -ifp-out <file>       Custom IFP output filename
                         Extra RNA/DNA annotations still go to
                         ifp_rna_annotations.csv when applicable
+  -ifp-pbctopo-certified-only[=<bool>]
+                        Include only frames whose PBCTOPO status is certified;
+                        writes frame-level and summary audit CSV files
   -awh-ifp              RC-binned IFP analysis for GROMACS AWH trajectories
                         Auto-enables -ifp and keeps classic IFP output intact
                         Writes awh_frame_assignments.dat and
@@ -2880,7 +3059,8 @@ IMPORTANT NOTES
   -cache                Enable cache
   -cache -no            Disable cache
   -use-CI               Use confidence intervals
-  -elec-screening       Electrostatic screening
+  -elec-screening       Debye-Huckel screening for aqueous 1:1 electrolyte at
+                        298.15 K (kappa=3.291*sqrt(I) nm^-1).
   -dipole-moment        Dipole moment analysis
   -split                Split results per trajectory
   -all-subfolders       Process all subfolders and split outputs

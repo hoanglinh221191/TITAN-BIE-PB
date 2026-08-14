@@ -305,8 +305,18 @@ int Multi_MOL::gen_vector_parameters() {
 }
 
 void Multi_MOL::cache_topology_vdw_radii_from_parameters() {
-  topology.cache_missing_vdw_radii(std::span<const double>(
-      parameters.radius.data(), parameters.radius.size()));
+  const std::span<const std::int32_t> type_ids =
+      parameters.has_type_ids()
+          ? std::span<const std::int32_t>(parameters.type_id.data(),
+                                          parameters.type_id.size())
+          : std::span<const std::int32_t>{};
+  topology.cache_missing_vdw_radii(
+      std::span<const double>(parameters.radius.data(),
+                              parameters.radius.size()),
+      std::span<const double>(parameters.sigma.data(), parameters.sigma.size()),
+      std::span<const double>(parameters.epsilon.data(),
+                              parameters.epsilon.size()),
+      type_ids);
 }
 
 int Multi_MOL::com_mol(const size_t num_snap, std::span<double> com) const {

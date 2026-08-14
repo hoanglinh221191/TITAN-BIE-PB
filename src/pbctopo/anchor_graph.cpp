@@ -1,5 +1,7 @@
 #include "anchor_graph.h"
 
+#include "evidence_audit.h"
+
 #include "../BoxMatrix.h"
 #include "../titan_simd_dispatch.h"
 #include "candidate_order.h"
@@ -28,6 +30,7 @@ namespace {
 constexpr double kDistanceEps = 1.0e-12;
 constexpr size_t kPbctopoSpatialAnchorThreshold = 512;
 constexpr size_t kPbctopoSpatialAnchorK = 12;
+constexpr size_t kPbctopoSpatialAnchorMaxK = 64;
 
 struct AnchorContactCellKey {
   int x = 0;
@@ -41,10 +44,9 @@ struct AnchorContactCellKey {
 
 struct AnchorContactCellKeyHash {
   size_t operator()(const AnchorContactCellKey &key) const noexcept {
-    const uint64_t ux = static_cast<uint32_t>(key.x + (1 << 20));
-    const uint64_t uy = static_cast<uint32_t>(key.y + (1 << 20));
-    const uint64_t uz = static_cast<uint32_t>(key.z + (1 << 20));
-    return static_cast<size_t>((ux << 42) ^ (uy << 21) ^ uz);
+    return ClashCellKeyHash{}(
+        {static_cast<int64_t>(key.x), static_cast<int64_t>(key.y),
+         static_cast<int64_t>(key.z)});
   }
 };
 
@@ -67,17 +69,47 @@ struct PbctopoAnchorKdNode {
   double max_z = 0.0;
 };
 
-uint64_t atom_pair_key(size_t a, size_t b) {
-  const size_t lo = min(a, b);
-  const size_t hi = max(a, b);
-  return (static_cast<uint64_t>(lo) << 32) | static_cast<uint64_t>(hi);
+struct PbctopoAnchorUnitKey {
+  int owner = 0;
+  size_t fragment_id = 0;
+
+  bool operator==(const PbctopoAnchorUnitKey &) const = default;
+};
+
+bool anchor_unit_less(const PbctopoAnchorUnitKey &lhs,
+                      const PbctopoAnchorUnitKey &rhs) {
+  if (lhs.owner != rhs.owner)
+    return lhs.owner < rhs.owner;
+  return lhs.fragment_id < rhs.fragment_id;
 }
 
-uint64_t pbctopo_owner_pair_key(int owner_a, int owner_b) {
-  const int lo = min(owner_a, owner_b);
-  const int hi = max(owner_a, owner_b);
-  return (static_cast<uint64_t>(static_cast<uint32_t>(lo)) << 32) |
-         static_cast<uint32_t>(hi);
+struct PbctopoAnchorUnitPairKey {
+  PbctopoAnchorUnitKey lo;
+  PbctopoAnchorUnitKey hi;
+
+  bool operator==(const PbctopoAnchorUnitPairKey &) const = default;
+};
+
+struct PbctopoAnchorUnitPairKeyHash {
+  size_t operator()(const PbctopoAnchorUnitPairKey &key) const noexcept {
+    size_t value = hash<int>{}(key.lo.owner);
+    auto combine = [&](size_t part) {
+      value ^= part + 0x9e3779b97f4a7c15ULL + (value << 6) + (value >> 2);
+    };
+    combine(hash<size_t>{}(key.lo.fragment_id));
+    combine(hash<int>{}(key.hi.owner));
+    combine(hash<size_t>{}(key.hi.fragment_id));
+    return value;
+  }
+};
+
+PbctopoAnchorUnitPairKey pbctopo_anchor_unit_pair_key(
+    const PbctopoAtom &lhs, const PbctopoAtom &rhs) {
+  PbctopoAnchorUnitKey lhs_key{lhs.owner, lhs.fragment_id};
+  PbctopoAnchorUnitKey rhs_key{rhs.owner, rhs.fragment_id};
+  if (anchor_unit_less(rhs_key, lhs_key))
+    swap(lhs_key, rhs_key);
+  return {lhs_key, rhs_key};
 }
 
 int compare_pbctopo_size_metric(size_t lhs, size_t rhs) {
@@ -111,7 +143,7 @@ PbctopoAnchorGraphContext build_anchor_graph_context(
   }
   context.has_box = true;
 
-  if (atoms.empty() || anchor_indices.empty()) {
+  if (atoms.empty()) {
     if (timing != nullptr) {
       timing->pbctopo_anchor_context_build_s +=
           chrono::duration<double>(chrono::steady_clock::now() - build_started)
@@ -129,7 +161,10 @@ PbctopoAnchorGraphContext build_anchor_graph_context(
   context.ordered_edges.reserve(continuity_pairs.size());
   for (const auto &pair : continuity_pairs) {
     if (pair.a < atoms.size() && pair.b < atoms.size() &&
-        is_anchor[pair.a] != 0 && is_anchor[pair.b] != 0) {
+        is_anchor[pair.a] != 0 && is_anchor[pair.b] != 0 &&
+        atoms[pair.a].owner == atoms[pair.b].owner &&
+        atoms[pair.a].fragment_id == atoms[pair.b].fragment_id &&
+        atoms[pair.a].chain_key == atoms[pair.b].chain_key) {
       context.ordered_edges.push_back(pair);
     }
   }
@@ -139,11 +174,14 @@ PbctopoAnchorGraphContext build_anchor_graph_context(
     const size_t first_anchor = anchor_indices[chain_begin];
     const bool first_valid = first_anchor < atoms.size();
     const int owner = first_valid ? atoms[first_anchor].owner : 0;
+    const size_t fragment_id =
+        first_valid ? atoms[first_anchor].fragment_id : 0;
     const uint64_t chain_key = first_valid ? atoms[first_anchor].chain_key : 0;
     size_t chain_end = chain_begin + 1;
     while (chain_end < anchor_indices.size()) {
       const size_t anchor_idx = anchor_indices[chain_end];
       if (anchor_idx >= atoms.size() || atoms[anchor_idx].owner != owner ||
+          atoms[anchor_idx].fragment_id != fragment_id ||
           atoms[anchor_idx].chain_key != chain_key) {
         break;
       }
@@ -174,13 +212,20 @@ PbctopoAnchorGraphContext build_anchor_graph_context(
   }
 
   if (atoms.size() >= 2 && contact_cutoff > kDistanceEps) {
+    context.soft_observed_contact_construction_attempted = true;
+    if (timing != nullptr)
+      ++timing->pbctopo_eobs_construction_attempts;
     struct AnchorContactCandidate {
       size_t a = 0;
       size_t b = 0;
       double d2 = numeric_limits<double>::infinity();
+      Int3 nearest_image{};
+      size_t equivalent_nearest_images = 0;
     };
-    unordered_map<uint64_t, vector<AnchorContactCandidate>> contacts_by_owner;
-    contacts_by_owner.reserve(16);
+    unordered_map<PbctopoAnchorUnitPairKey, vector<AnchorContactCandidate>,
+                  PbctopoAnchorUnitPairKeyHash>
+        contacts_by_unit_pair;
+    contacts_by_unit_pair.reserve(16);
     unordered_map<AnchorContactCellKey, vector<size_t>,
                   AnchorContactCellKeyHash>
         contact_grid;
@@ -205,82 +250,158 @@ PbctopoAnchorGraphContext build_anchor_graph_context(
                       box_matrix.inv[1][2] * box_matrix.inv[1][2] +
                       box_matrix.inv[2][2] * box_matrix.inv[2][2]) +
                  1.0e-9);
-    const int nx = max(1, static_cast<int>(floor(1.0 / max(sx_bound, 1.0e-6))));
-    const int ny = max(1, static_cast<int>(floor(1.0 / max(sy_bound, 1.0e-6))));
-    const int nz = max(1, static_cast<int>(floor(1.0 / max(sz_bound, 1.0e-6))));
-    const double cell_sx = 1.0 / static_cast<double>(nx);
-    const double cell_sy = 1.0 / static_cast<double>(ny);
-    const double cell_sz = 1.0 / static_cast<double>(nz);
-    auto wrap_index = [](int value, int mod) {
-      int wrapped = value % mod;
-      if (wrapped < 0)
-        wrapped += mod;
-      return wrapped;
-    };
-    auto insert_contact = [&](uint64_t owner_key, size_t a, size_t b,
-                              double d2) {
-      auto &contacts = contacts_by_owner[owner_key];
-      const uint64_t pair_key = atom_pair_key(a, b);
-      for (const auto &existing : contacts) {
-        if (atom_pair_key(existing.a, existing.b) == pair_key)
-          return;
+    const auto checked_cell_count = [](double bound, int &count) {
+      if (!isfinite(bound))
+        return false;
+      const double raw = floor(1.0 / max(bound, 1.0e-6));
+      if (!isfinite(raw) || raw < 1.0 ||
+          raw > static_cast<double>(numeric_limits<int>::max())) {
+        return false;
       }
-      contacts.push_back({a, b, d2});
-      sort(contacts.begin(), contacts.end(),
-           [](const AnchorContactCandidate &lhs,
-              const AnchorContactCandidate &rhs) {
-             const int metric_cmp = compare_pbctopo_metric(
-                 lhs.d2, rhs.d2, {1.0e-9, 0.0});
-             if (metric_cmp != 0)
-               return metric_cmp < 0;
-             if (lhs.a != rhs.a)
-               return lhs.a < rhs.a;
-             return lhs.b < rhs.b;
-           });
-      constexpr size_t kMaxAnchorContactsPerOwnerPair = 8;
-      if (contacts.size() > kMaxAnchorContactsPerOwnerPair)
-        contacts.resize(kMaxAnchorContactsPerOwnerPair);
+      count = static_cast<int>(raw);
+      return true;
     };
+    int nx = 0;
+    int ny = 0;
+    int nz = 0;
+    const bool contact_cell_setup_valid =
+        lattice.valid() && checked_cell_count(sx_bound, nx) &&
+        checked_cell_count(sy_bound, ny) && checked_cell_count(sz_bound, nz);
+    if (contact_cell_setup_valid) {
+      auto wrap_index = [](int value, int mod) {
+        int wrapped = value % mod;
+        if (wrapped < 0)
+          wrapped += mod;
+        return wrapped;
+      };
+      const auto checked_cell_index = [](double scaled, int cell_count,
+                                         int &index) {
+        if (!isfinite(scaled) || cell_count <= 0)
+          return false;
+        const double wrapped = scaled - floor(scaled);
+        const double raw = floor(wrapped * static_cast<double>(cell_count));
+        if (!isfinite(raw))
+          return false;
+        index = clamp(static_cast<int>(raw), 0, cell_count - 1);
+        return true;
+      };
+      auto insert_contact = [&](const PbctopoAnchorUnitPairKey &unit_pair,
+                                size_t a, size_t b, double d2,
+                                const PbctopoNearestImage &mic) {
+        auto &contacts = contacts_by_unit_pair[unit_pair];
+        const size_t pair_lo = min(a, b);
+        const size_t pair_hi = max(a, b);
+        for (const auto &existing : contacts) {
+          if (min(existing.a, existing.b) == pair_lo &&
+              max(existing.a, existing.b) == pair_hi) {
+            return;
+          }
+        }
+        Int3 reversed_image{};
+        if (!checked_int3_negate(
+                {mic.image_x, mic.image_y, mic.image_z}, reversed_image)) {
+          ++context.soft_observed_contact_mic_query_failures;
+          return;
+        }
+        // The stored orientation is (a=other,b=atom), while the MIC query was
+        // other-atom. Store n_ab for the declared H(s_b-s_a+n_ab) convention.
+        contacts.push_back({a, b, d2, reversed_image,
+                            mic.equivalent_minima});
+        sort(contacts.begin(), contacts.end(),
+             [](const AnchorContactCandidate &lhs,
+                const AnchorContactCandidate &rhs) {
+               const int metric_cmp =
+                   compare_pbctopo_metric(
+                       lhs.d2, rhs.d2,
+                       {PBCTOPO_EOBS_SELECTION_TIE_TOLERANCE_D2_A2, 0.0});
+               if (metric_cmp != 0)
+                 return metric_cmp < 0;
+               if (lhs.a != rhs.a)
+                 return lhs.a < rhs.a;
+               return lhs.b < rhs.b;
+             });
+        if (contacts.size() > PBCTOPO_EOBS_MAX_PAIRS_PER_UNIT_PAIR)
+          contacts.resize(PBCTOPO_EOBS_MAX_PAIRS_PER_UNIT_PAIR);
+      };
 
-    for (size_t atom_idx = 0; atom_idx < atoms.size(); ++atom_idx) {
-      const auto &atom = atoms[atom_idx];
-      if (!atom.is_heavy)
-        continue;
-      const int cx = min(nx - 1, static_cast<int>(floor(atom.sx / cell_sx)));
-      const int cy = min(ny - 1, static_cast<int>(floor(atom.sy / cell_sy)));
-      const int cz = min(nz - 1, static_cast<int>(floor(atom.sz / cell_sz)));
-      for (int dx = -1; dx <= 1; ++dx) {
-        for (int dy = -1; dy <= 1; ++dy) {
-          for (int dz = -1; dz <= 1; ++dz) {
-            const AnchorContactCellKey key{wrap_index(cx + dx, nx),
-                                           wrap_index(cy + dy, ny),
-                                           wrap_index(cz + dz, nz)};
-            const auto it = contact_grid.find(key);
-            if (it == contact_grid.end())
-              continue;
-            for (size_t other_idx : it->second) {
-              const auto &other = atoms[other_idx];
-              if (atom.owner == other.owner)
+      for (size_t atom_idx = 0; atom_idx < atoms.size(); ++atom_idx) {
+        const auto &atom = atoms[atom_idx];
+        if (!atom.is_heavy)
+          continue;
+        int cx = 0;
+        int cy = 0;
+        int cz = 0;
+        if (!checked_cell_index(atom.sx, nx, cx) ||
+            !checked_cell_index(atom.sy, ny, cy) ||
+            !checked_cell_index(atom.sz, nz, cz)) {
+          ++context.soft_observed_contact_atom_index_failures;
+          continue;
+        }
+        for (int dx = -1; dx <= 1; ++dx) {
+          for (int dy = -1; dy <= 1; ++dy) {
+            for (int dz = -1; dz <= 1; ++dz) {
+              const AnchorContactCellKey key{wrap_index(cx + dx, nx),
+                                             wrap_index(cy + dy, ny),
+                                             wrap_index(cz + dz, nz)};
+              const auto it = contact_grid.find(key);
+              if (it == contact_grid.end())
                 continue;
-              const PbctopoNearestImage mic = lattice.nearest_image_cartesian(
-                  other.x - atom.x, other.y - atom.y, other.z - atom.z);
-              const double d2 = mic.d2;
-              if (d2 > cutoff2)
-                continue;
-              insert_contact(pbctopo_owner_pair_key(atom.owner, other.owner),
-                             other_idx, atom_idx, d2);
+              for (size_t other_idx : it->second) {
+                const auto &other = atoms[other_idx];
+                if (atom.owner == other.owner &&
+                    atom.fragment_id == other.fragment_id)
+                  continue;
+                const PbctopoNearestImage mic = lattice.nearest_image_cartesian(
+                    other.x - atom.x, other.y - atom.y, other.z - atom.z);
+                if (!mic.valid) {
+                  ++context.soft_observed_contact_mic_query_failures;
+                  continue;
+                }
+                const double d2 = mic.d2;
+                if (d2 > cutoff2)
+                  continue;
+                insert_contact(pbctopo_anchor_unit_pair_key(atom, other),
+                               other_idx, atom_idx, d2, mic);
+              }
             }
           }
         }
+        contact_grid[{cx, cy, cz}].push_back(atom_idx);
       }
-      contact_grid[{cx, cy, cz}].push_back(atom_idx);
-    }
 
-    for (const auto &[_, contacts] : contacts_by_owner) {
-      for (const auto &contact : contacts) {
-        context.soft_observed_contact_edges.push_back(
-            {contact.a, contact.b, cutoff2});
+      size_t intra_owner_contact_pairs = 0;
+      for (const auto &[unit_pair, contacts] : contacts_by_unit_pair) {
+        for (const auto &contact : contacts) {
+          context.soft_observed_contact_edges.push_back(
+              {contact.a, contact.b, cutoff2, contact.nearest_image,
+               contact.equivalent_nearest_images, true});
+          if (unit_pair.lo.owner == unit_pair.hi.owner)
+            ++intra_owner_contact_pairs;
+        }
       }
+      if (timing != nullptr)
+        timing->pbctopo_anchor_intra_owner_contact_pairs +=
+            intra_owner_contact_pairs;
+    } else {
+      ++context.soft_observed_contact_cell_setup_failures;
+    }
+    context.soft_observed_contact_construction_complete =
+        context.soft_observed_contact_cell_setup_failures == 0 &&
+        context.soft_observed_contact_atom_index_failures == 0 &&
+        context.soft_observed_contact_mic_query_failures == 0;
+    if (!context.soft_observed_contact_construction_complete)
+      context.soft_observed_contact_edges.clear();
+    if (timing != nullptr) {
+      timing->pbctopo_eobs_construction_completed +=
+          context.soft_observed_contact_construction_complete ? 1 : 0;
+      timing->pbctopo_eobs_construction_failures +=
+          context.soft_observed_contact_construction_complete ? 0 : 1;
+      timing->pbctopo_eobs_cell_setup_failures +=
+          context.soft_observed_contact_cell_setup_failures;
+      timing->pbctopo_eobs_atom_index_failures +=
+          context.soft_observed_contact_atom_index_failures;
+      timing->pbctopo_eobs_mic_query_failures +=
+          context.soft_observed_contact_mic_query_failures;
     }
   }
 
@@ -651,8 +772,10 @@ void query_anchor_kdtree_knn(
 bool build_anchor_knn_edges_kdtree(
     const vector<Vec3> &placed_points, const vector<size_t> &anchor_indices,
     const vector<PbctopoContinuityPair> &continuity_pairs, size_t knn_k,
-    vector<PbctopoSparseAnchorEdge> &edges, double &build_s, double &query_s) {
+    vector<PbctopoSparseAnchorEdge> &edges,
+    double &omitted_edge_lower_bound_d2, double &build_s, double &query_s) {
   edges.clear();
+  omitted_edge_lower_bound_d2 = numeric_limits<double>::infinity();
   build_s = 0.0;
   query_s = 0.0;
   const size_t n = anchor_indices.size();
@@ -714,6 +837,10 @@ bool build_anchor_knn_edges_kdtree(
     priority_queue<pair<double, size_t>> neighbors;
     query_anchor_kdtree_knn(nodes, root, anchor_points, anchor_points[query_idx],
                             query_idx, k_eff, neighbors);
+    if (k_eff < n - 1 && neighbors.size() == k_eff) {
+      omitted_edge_lower_bound_d2 =
+          min(omitted_edge_lower_bound_d2, neighbors.top().first);
+    }
     while (!neighbors.empty()) {
       append_unique_edge(query_idx, neighbors.top().second,
                          neighbors.top().first);
@@ -794,24 +921,61 @@ bool anchor_graph_metrics_spatial_or_dense(
   if (timing != nullptr)
     ++timing->component_graph_refine_anchor_spatial_calls;
   vector<PbctopoSparseAnchorEdge> sparse_edges;
-  double build_s = 0.0;
-  double query_s = 0.0;
-  const bool built = build_anchor_knn_edges_kdtree(
-      placed_points, anchor_indices, continuity_pairs, kPbctopoSpatialAnchorK,
-      sparse_edges, build_s, query_s);
-  if (timing != nullptr) {
-    timing->component_graph_refine_anchor_spatial_build_s += build_s;
-    timing->component_graph_refine_anchor_spatial_query_s += query_s;
+  const size_t max_adaptive_k =
+      min(anchor_indices.size() - 1, kPbctopoSpatialAnchorMaxK);
+  size_t knn_k = min(kPbctopoSpatialAnchorK, max_adaptive_k);
+  bool last_sparse_ok = false;
+  while (knn_k > 0) {
+    double omitted_edge_lower_bound_d2 =
+        numeric_limits<double>::infinity();
+    double build_s = 0.0;
+    double query_s = 0.0;
+    const bool built = build_anchor_knn_edges_kdtree(
+        placed_points, anchor_indices, continuity_pairs, knn_k, sparse_edges,
+        omitted_edge_lower_bound_d2, build_s, query_s);
+    if (timing != nullptr) {
+      timing->component_graph_refine_anchor_spatial_build_s += build_s;
+      timing->component_graph_refine_anchor_spatial_query_s += query_s;
+      timing->component_graph_refine_anchor_spatial_max_k =
+          max(timing->component_graph_refine_anchor_spatial_max_k, knn_k);
+    }
+    last_sparse_ok =
+        built && compute_sparse_anchor_mst(sparse_edges, anchor_indices.size(),
+                                           mst2, max_d2);
+    if (!last_sparse_ok && timing != nullptr)
+      ++timing->component_graph_refine_anchor_spatial_disconnects;
+
+    const double certificate_eps =
+        1.0e-9 * max({1.0, abs(max_d2), abs(omitted_edge_lower_bound_d2)});
+    const bool complete_graph = knn_k + 1 >= anchor_indices.size();
+    const bool exact_certificate =
+        last_sparse_ok &&
+        (complete_graph ||
+         max_d2 <= omitted_edge_lower_bound_d2 + certificate_eps);
+    if (exact_certificate) {
+      if (timing != nullptr)
+        ++timing->component_graph_refine_anchor_spatial_exact_certified;
+      const bool has_incumbent =
+          incumbent != nullptr && incumbent->valid &&
+          isfinite(incumbent->anchor_max_d2);
+      return !has_incumbent ||
+             max_d2 <= incumbent->anchor_max_d2 + 1.0e-6;
+    }
+
+    if (timing != nullptr)
+      ++timing->component_graph_refine_anchor_spatial_uncertified;
+    if (knn_k >= max_adaptive_k)
+      break;
+    const size_t next_k = min(max_adaptive_k, knn_k * 2);
+    if (next_k == knn_k)
+      break;
+    knn_k = next_k;
+    if (timing != nullptr)
+      ++timing->component_graph_refine_anchor_spatial_expansions;
   }
-  const bool sparse_ok =
-      built && compute_sparse_anchor_mst(sparse_edges, anchor_indices.size(), mst2,
-                                        max_d2);
-  if (sparse_ok)
-    return true;
 
   if (timing != nullptr) {
     ++timing->component_graph_refine_anchor_spatial_fallbacks;
-    ++timing->component_graph_refine_anchor_spatial_disconnects;
   }
   const auto dense_started = chrono::steady_clock::now();
   const bool dense_ok = anchor_graph_metrics_ok(placed_points, anchor_indices, mst2,
@@ -841,6 +1005,8 @@ double anchor_endpoint_image_gap(const vector<Vec3> &placed_points,
   const PbctopoLatticeMetric lattice(context.box_m, context.box_inv);
   const PbctopoNearestImage mic =
       lattice.nearest_image_cartesian(delta.x, delta.y, delta.z);
+  if (!mic.valid)
+    return numeric_limits<double>::infinity();
   const double raw_norm = sqrt(norm2(delta));
   const double mic_norm = sqrt(max(0.0, mic.d2));
   return max(0.0, raw_norm - mic_norm);
@@ -908,25 +1074,15 @@ bool anchor_graph_metrics_enhanced(
   }
 
   const auto contact_started = chrono::steady_clock::now();
-  if (anchor_context->use_contact_metrics &&
-      !anchor_context->soft_observed_contact_edges.empty()) {
-    anchor_graph.contact_map_lost = 0;
-    anchor_graph.contact_map_max_d2 = 0.0;
-    anchor_graph.contact_pair_count =
-        anchor_context->soft_observed_contact_edges.size();
-    for (const auto &edge : anchor_context->soft_observed_contact_edges) {
-      const double d2 = anchor_context_distance2(placed_points, edge.a, edge.b);
-      if (!isfinite(d2))
-        continue;
-      anchor_graph.contact_map_max_d2 =
-          max(anchor_graph.contact_map_max_d2, d2);
-      if (d2 > edge.cutoff_d2 + 1.0e-6)
-        ++anchor_graph.contact_map_lost;
-    }
-    anchor_graph.contact_map_lost_fraction =
-        static_cast<double>(anchor_graph.contact_map_lost) /
-        static_cast<double>(anchor_graph.contact_pair_count);
-  }
+  // Optional shift-labelled contacts are audited against the final assignment.
+  // They are deliberately neutral here: ranking all retained hard-feasible
+  // relations by a global contact conjunction would penalize H0 and violate the
+  // alternative-hypothesis semantics.
+  anchor_graph.contact_map_lost = 0;
+  anchor_graph.contact_map_lost_fraction =
+      numeric_limits<double>::infinity();
+  anchor_graph.contact_map_max_d2 = numeric_limits<double>::infinity();
+  anchor_graph.contact_pair_count = 0;
   if (timing != nullptr) {
     timing->component_graph_refine_anchor_contact_s +=
         chrono::duration<double>(chrono::steady_clock::now() - contact_started)
@@ -943,14 +1099,6 @@ int compare_anchor_graph_score(const PbctopoAnchorGraphScore &lhs,
     return cmp;
   cmp = compare_pbctopo_double_metric(lhs.endpoint_image_gap,
                                       rhs.endpoint_image_gap);
-  if (cmp != 0)
-    return cmp;
-  cmp = compare_pbctopo_double_metric(lhs.contact_map_lost_fraction,
-                                      rhs.contact_map_lost_fraction);
-  if (cmp != 0)
-    return cmp;
-  cmp = compare_pbctopo_double_metric(lhs.contact_map_max_d2,
-                                      rhs.contact_map_max_d2);
   if (cmp != 0)
     return cmp;
   cmp = compare_pbctopo_double_metric(lhs.order_max_d2, rhs.order_max_d2);

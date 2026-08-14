@@ -25,6 +25,10 @@ struct PbcArgs {
   bool flag_pbc_ref{false};
   string ref_pdb_name{};
   string pbctopo_mode{"vibe"};
+  string pbctopo_search_policy{"fast-certified"};
+  int pbctopo_audit_max_states{10000000};
+  double pbctopo_audit_max_seconds{60.0};
+  int pbctopo_audit_max_memory_mb{1024};
   string pbctopo_anchor_backend{"auto"};
   string pbctopo_anchor_metrics{"full"};
   string pbctopo_temporal{"greedy"};
@@ -37,6 +41,7 @@ struct PbcArgs {
   bool pbctopo_clash_cutoff_set{false};
   double pbctopo_contact_cutoff{0.0};
   bool pbctopo_contact_cutoff_set{false};
+  string pbctopo_required_contacts_file{};
   double pbctopo_continuity_cutoff{0.0};
   bool pbctopo_continuity_cutoff_set{false};
   int pbctopo_exact_component_limit{0};
@@ -78,7 +83,7 @@ struct MsmArgs {
   int msm_its_max_k_full{256};
   int tica_lag{10}, tica_components{5};
   std::string tica_backend{"auto"};
-  int tica_rank{64};
+  int tica_rank{24};
   PcaSolverMode pca_solver{PcaSolverMode::Full};
   int pca_topk{0};
   int pca_max_k_full{512};
@@ -203,6 +208,7 @@ struct PbeArgs {
   double pbsa_ie_filter_sigma{2.0};
   std::string pbsa_perf{"summary"};
   std::string pbsa_grid_reuse{"auto"};
+  int pbsa_sasa_points{96};
   std::string timing{"off"};
   std::string tabi_diagnostics{"off"};
   std::string tabi_tree_preset{"off"};
@@ -217,11 +223,14 @@ struct PbeArgs {
   std::string tabi_calderon_aux_surface{"off"};
   double tabi_calderon_aux_grid_spacing{1.25};
   std::string tabi_primary_surface{"sphere-patch"};
+  std::string tabi_analytic_ses_engine{"current"};
   double tabi_ses_grid_spacing{0.75};
   std::size_t tabi_ses_max_grid_vertices{4000000};
   std::string tabi_sphere_mesh{"auto"};
   int tabi_tree_leaf_size{32};
+  bool tabi_tree_leaf_size_explicit{false};
   double tabi_tree_opening_theta{0.45};
+  bool tabi_tree_opening_theta_explicit{false};
   int tabi_taylor_order{3};
   std::string tabi_derivatives{"analytic"};
   std::string tabi_formulation{"jcp2013"};
@@ -231,6 +240,10 @@ struct PbeArgs {
   std::string tabi_energy_projection{"boundary"};
   std::string tabi_precond{"auto"};
   bool tabi_precond_explicit{false};
+  // Preserve the user spelling across post-process auto resolution.  The
+  // calibrated Cartesian retry mode is allowed only when ILU(0) was
+  // explicitly requested, not when an `auto` default happens to resolve to it.
+  std::string tabi_precond_requested{"auto"};
   std::string tabi_precond_block_near{"singular"};
   int tabi_precond_block_panel_cap{32};
   int tabi_precond_overlap_panel_cap{64};
@@ -270,6 +283,7 @@ struct PbeArgs {
   std::string tabi_fmm_m2l{"auto"};
   bool tabi_fmm_m2l_explicit{false};
   std::string tabi_fmm_engine{"cartesian"};
+  int bie_fmm_cartesian_order{0};
   int tabi_kifmm_order{6};
   double tabi_kifmm_equiv_scale{1.05};
   double tabi_kifmm_check_scale{1.60};
@@ -296,6 +310,7 @@ struct PbeArgs {
   double tabi_cartesian_k4_geometry_theta{0.4};
   double tabi_cartesian_k4_tail_tol{0.002};
   std::string tabi_fmm_cartesian_audit{"off"};
+  std::string tabi_fmm_cartesian_error_audit{"off"};
   std::string tabi_fmm_local{"off"};
   std::string tabi_fmm_local_refine{"off"};
   double tabi_fmm_local_refine_tol{4.0e-3};
@@ -359,6 +374,7 @@ struct PbeArgs {
   int tabi_expansion_audit_max_panels{2048};
   std::string tabi_matvec_audit{"off"};
   int tabi_matvec_audit_sample_count{1024};
+  std::string tabi_node_patch_operator_audit{"on"};
   std::string tabi_progress{"auto"};
   std::string tabi_pre_solver_progress{"off"};
   int tabi_progress_interval{5};
@@ -475,6 +491,7 @@ struct LlpsArgs {
 
 struct IfpArgs {
   bool flag_ifp{false};
+  bool pbctopo_certified_only{false};
   double cutoff_hbond{3.5};       // D···A distance (Å)
   double cutoff_salt_bridge{4.0}; // charged atom pair (Å)
   double cutoff_hydrophobic{4.0}; // C···C contact (Å)
@@ -561,6 +578,20 @@ struct CMapArgs {
   bool new_option_explicit{false};
   bool legacy_alias_seen{false};
   bool legacy_alias_enabled{false};
+};
+
+struct SegmentArgs {
+  std::string config_file{};
+};
+
+struct InterfaceAnalysisArgs {
+  bool flag_interface_analysis{false};
+  std::string contact_mode{"sidechain-com"};
+  double cutoff_ang{6.5};
+  int state_min_contacts{1};
+  int sasa_stride{10};
+  int sasa_points{96};
+  bool uses_mol2{false};
 };
 
 struct QNativeArgs {
@@ -726,7 +757,7 @@ struct UmapArgs {
   double umap_min_dist{0.1};
   double umap_spread{1.0};
   unsigned int umap_seed{42};
-  string umap_knn_mode{"exact"};
+  string umap_knn_mode{"auto"};
   bool umap_knn_benchmark{false};
   bool umap_verbose{false};
 };
@@ -882,10 +913,10 @@ struct HotspotReportArgs {
 
 struct arguments {
 private:
-  string Buildnumber;
-  string set_Buildnumber();
   bool parse_input_file_is_open();
-  std::vector<std::string> tokenize_arg_file(const std::string &filename);
+  int tokenize_arg_file(const std::string &filename,
+                        std::vector<std::string> &tokens);
+  bool parsing_arg_file_tokens{false};
 
 public:
   // Domain sub-structs
@@ -907,6 +938,8 @@ public:
   CommunityArgs community;
   GraphArgs graph;
   CMapArgs cmap;
+  SegmentArgs segments;
+  InterfaceAnalysisArgs interface_analysis;
   QNativeArgs qnative;
   DihedralArgs dihedral;
   MsdArgs msd;
@@ -925,6 +958,9 @@ public:
   EDecompArgs edecomp;
   HotspotReportArgs hotspot;
   std::string eq_weight_source{"auto"};
+  // continuous: ordinary MD with physically contiguous frames.
+  // remd_state: fixed-temperature REMD streams with exchange discontinuities.
+  std::string trajectory_semantics{"continuous"};
 
   // LSP-MD (Kornev, JCTC 2025) — Local Spatial Pattern network analysis
   struct LSPMDArgs {
@@ -974,6 +1010,11 @@ public:
   double mem_budget_gb{-1.0};
   bool low_memory{false};
   std::string gbsa_perf{"summary"};
+  int gbsa_sasa_points{96};
+  double gbsa_temperature{298.15};
+  std::string gbsa_ie_block{"auto"};
+  int gbsa_ie_min_samples{10};
+  double gbsa_ie_filter_sigma{0.0};
   std::string network_mode{"auto"};
   double network_sparse_cut{30.0};
   int network_sparse_k{24};
@@ -1008,8 +1049,7 @@ public:
       ref_file, tu, input_file_type, mol_1_type, mol_2_type, water_type;
 
   arguments()
-      : Buildnumber{set_Buildnumber()},
-        // Core bools
+      : // Core bools
         flag_gbsa{false}, flag_alpb{false}, cal_dis_sc_contact{false},
         opdb{false}, file_par{false}, new_al_1pdb{false}, entropy{false},
         entropy_quasi{false}, flag_index{false}, flag_topo_1{false},
@@ -1073,6 +1113,9 @@ public:
   bool needs_mol2_for_qnative_interface() const {
     return qnative.flag_qnative && qnative.scope == "interface";
   }
+  bool needs_mol2_for_interface_analysis() const {
+    return interface_analysis.flag_interface_analysis;
+  }
   bool needs_mol2_for_msd() const {
     return msd.flag_msd && msd.selection == "mol2";
   }
@@ -1084,7 +1127,8 @@ public:
   bool needs_mol2_coordinates() const {
     return !flag_nocal || needs_mol2_for_nocal_output() ||
            needs_mol2_for_cmap_interface() ||
-           needs_mol2_for_qnative_interface() || needs_mol2_for_msd();
+           needs_mol2_for_qnative_interface() ||
+           needs_mol2_for_interface_analysis() || needs_mol2_for_msd();
   }
   string get_build_number() const;
   int parse_arguments(int argc, char **argv);

@@ -13,10 +13,6 @@
 namespace titan_energy_validation {
 namespace {
 
-constexpr double kMinimumPairDistanceAngstrom =
-    10.0 * kMinimumPairDistanceNm;
-constexpr double kMinimumPairDistanceSquaredAngstrom =
-    kMinimumPairDistanceAngstrom * kMinimumPairDistanceAngstrom;
 constexpr std::size_t kParallelPairScanLimit = 4'000'000;
 
 struct CellKey {
@@ -38,13 +34,14 @@ struct CellKeyHash {
   }
 };
 
-CellKey cell_for(const MOL &mol, std::size_t atom) noexcept {
+CellKey cell_for(const MOL &mol, std::size_t atom,
+                 double cell_width_angstrom) noexcept {
   return {static_cast<std::int64_t>(
-              std::floor(mol.pos.x[atom] / kMinimumPairDistanceAngstrom)),
+              std::floor(mol.pos.x[atom] / cell_width_angstrom)),
           static_cast<std::int64_t>(
-              std::floor(mol.pos.y[atom] / kMinimumPairDistanceAngstrom)),
+              std::floor(mol.pos.y[atom] / cell_width_angstrom)),
           static_cast<std::int64_t>(
-              std::floor(mol.pos.z[atom] / kMinimumPairDistanceAngstrom))};
+              std::floor(mol.pos.z[atom] / cell_width_angstrom))};
 }
 
 bool finite_coordinate(const MOL &mol, std::size_t atom) noexcept {
@@ -54,12 +51,41 @@ bool finite_coordinate(const MOL &mol, std::size_t atom) noexcept {
 
 } // namespace
 
+std::optional<InvalidCoordinate>
+find_nonfinite_coordinate(const MOL &mol1, const MOL &mol2) {
+  const auto scan = [](const MOL &mol,
+                       int molecule) -> std::optional<InvalidCoordinate> {
+    if (!mol.coordinates_consistent())
+      return InvalidCoordinate{molecule, 0, 's',
+                               std::numeric_limits<double>::quiet_NaN()};
+    for (std::size_t atom = 0; atom < mol.size(); ++atom) {
+      if (!std::isfinite(mol.pos.x[atom]))
+        return InvalidCoordinate{molecule, atom, 'x', mol.pos.x[atom]};
+      if (!std::isfinite(mol.pos.y[atom]))
+        return InvalidCoordinate{molecule, atom, 'y', mol.pos.y[atom]};
+      if (!std::isfinite(mol.pos.z[atom]))
+        return InvalidCoordinate{molecule, atom, 'z', mol.pos.z[atom]};
+    }
+    return std::nullopt;
+  };
+  if (auto invalid = scan(mol1, 1))
+    return invalid;
+  return scan(mol2, 2);
+}
+
 std::optional<OverlappingAtomPair>
 find_overlapping_atoms(const MOL &mol1, const MOL &mol2,
-                       bool identical_selections, TitanExecutor &executor) {
+                       bool identical_selections, TitanExecutor &executor,
+                       double minimum_pair_distance_nm) {
   if (!mol1.coordinates_consistent() || !mol2.coordinates_consistent() ||
-      mol1.size() == 0 || mol2.size() == 0)
+      mol1.size() == 0 || mol2.size() == 0 ||
+      !std::isfinite(minimum_pair_distance_nm) ||
+      minimum_pair_distance_nm <= 0.0)
     return std::nullopt;
+  const double minimum_pair_distance_angstrom =
+      10.0 * minimum_pair_distance_nm;
+  const double minimum_pair_distance_squared_angstrom =
+      minimum_pair_distance_angstrom * minimum_pair_distance_angstrom;
 
   // For the common protein-small-ligand shape, constructing a spatial hash is
   // more expensive than the coordinate comparisons themselves. Reuse TITAN's
@@ -92,7 +118,7 @@ find_overlapping_atoms(const MOL &mol1, const MOL &mol2,
                                               delta_y * delta_y +
                                               delta_z * delta_z;
               if (distance_squared <=
-                  kMinimumPairDistanceSquaredAngstrom) {
+                  minimum_pair_distance_squared_angstrom) {
                 local_hit = OverlappingAtomPair{
                     mol1_atom, mol2_atom,
                     0.1 * std::sqrt(distance_squared)};
@@ -125,7 +151,8 @@ find_overlapping_atoms(const MOL &mol1, const MOL &mol2,
   cells.reserve(indexed.size());
   for (std::size_t atom = 0; atom < indexed.size(); ++atom) {
     if (finite_coordinate(indexed, atom))
-      cells.emplace(cell_for(indexed, atom), atom);
+      cells.emplace(cell_for(indexed, atom, minimum_pair_distance_angstrom),
+                    atom);
   }
 
   // The index is immutable from here, so neighborhood probes can share it
@@ -142,7 +169,8 @@ find_overlapping_atoms(const MOL &mol1, const MOL &mol2,
              ++query_atom) {
           if (!finite_coordinate(queried, query_atom))
             continue;
-          const CellKey query_cell = cell_for(queried, query_atom);
+          const CellKey query_cell =
+              cell_for(queried, query_atom, minimum_pair_distance_angstrom);
           for (std::int64_t dz = -1; dz <= 1 && !local_hit; ++dz) {
             for (std::int64_t dy = -1; dy <= 1 && !local_hit; ++dy) {
               for (std::int64_t dx = -1; dx <= 1 && !local_hit; ++dx) {
@@ -169,7 +197,7 @@ find_overlapping_atoms(const MOL &mol1, const MOL &mol2,
                                                   delta_y * delta_y +
                                                   delta_z * delta_z;
                   if (distance_squared <=
-                      kMinimumPairDistanceSquaredAngstrom) {
+                      minimum_pair_distance_squared_angstrom) {
                     local_hit = OverlappingAtomPair{
                         mol1_atom, mol2_atom,
                         0.1 * std::sqrt(distance_squared)};

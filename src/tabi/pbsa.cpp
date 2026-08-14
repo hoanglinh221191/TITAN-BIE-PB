@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <span>
 #include <sstream>
@@ -57,6 +58,18 @@ std::string csv_escape(const std::string &value) {
 
 bool is_ligand_type(const std::string &type) {
   return type == "ligand" || type == "lig";
+}
+
+bool pbsa_frame_usable(const FrameResult &row) {
+  if (!row.pbsa_enabled || row.pbsa_status != "ok")
+    return false;
+  const std::array<double, 7> required = {
+      row.pbsa_elec_kj_mol,       row.pbsa_vdw_kj_mol,
+      row.pbsa_mm_kj_mol,         row.pbsa_delta_sasa_a2,
+      row.pbsa_nonpolar_kj_mol,   row.pbsa_delta_solv_kj_mol,
+      row.pbsa_no_entropy_kj_mol};
+  return std::all_of(required.begin(), required.end(),
+                     [](double value) { return std::isfinite(value); });
 }
 
 } // namespace
@@ -114,6 +127,15 @@ AnalyzerImpl::PbsaComponents AnalyzerImpl::compute_pbsa_components(
   comp.delta_solv_kj_mol = deltaG_solv_kj_mol;
   comp.no_entropy_kj_mol =
       comp.mm_kj_mol + comp.delta_solv_kj_mol + comp.nonpolar_kj_mol;
+  const std::array<double, 10> required = {
+      comp.elec_kj_mol,       comp.vdw_kj_mol,
+      comp.mm_kj_mol,         comp.sasa_complex_a2,
+      comp.sasa_mol1_a2,      comp.sasa_mol2_a2,
+      comp.delta_sasa_a2,     comp.nonpolar_kj_mol,
+      comp.delta_solv_kj_mol, comp.no_entropy_kj_mol};
+  if (!std::all_of(required.begin(), required.end(),
+                   [](double value) { return std::isfinite(value); }))
+    comp.status = "nonfinite_energy";
   return comp;
 }
 
@@ -264,7 +286,7 @@ std::vector<AnalyzerImpl::ResidueFrameRow> AnalyzerImpl::compute_pbsa_residue_ro
 
 void AnalyzerImpl::accumulate_pbsa_residue_rows(
     const FrameResult &result, const std::vector<ResidueFrameRow> &rows) {
-  if (rows.empty())
+  if (!pbsa_frame_usable(result) || rows.empty())
     return;
 
   auto key_id = [](const ResidueKey &key) {
@@ -349,21 +371,35 @@ double AnalyzerImpl::scalar_stddev(const ScalarStats &stats) {
   return std::sqrt(stats.m2 / static_cast<double>(stats.count - 1));
 }
 
+double AnalyzerImpl::scalar_mean_or_nan(const ScalarStats &stats) {
+  return stats.count == 0 ? std::numeric_limits<double>::quiet_NaN()
+                          : stats.mean;
+}
+
+double AnalyzerImpl::scalar_stddev_or_nan(const ScalarStats &stats) {
+  return stats.count == 0 ? std::numeric_limits<double>::quiet_NaN()
+                          : scalar_stddev(stats);
+}
+
 void AnalyzerImpl::accumulate_pbsa(const FrameResult &result) {
   if (!result.pbsa_enabled)
     return;
   ++pbsa_frames_;
-  if (result.pbsa_status != "ok")
+  const bool usable = pbsa_frame_usable(result);
+  if (!usable) {
     ++pbsa_failed_;
-  add_scalar(pbsa_elec_stats_, result.pbsa_elec_kj_mol);
-  add_scalar(pbsa_vdw_stats_, result.pbsa_vdw_kj_mol);
-  add_scalar(pbsa_mm_stats_, result.pbsa_mm_kj_mol);
-  add_scalar(pbsa_delta_sasa_stats_, result.pbsa_delta_sasa_a2);
-  add_scalar(pbsa_nonpolar_stats_, result.pbsa_nonpolar_kj_mol);
-  add_scalar(pbsa_polar_stats_, result.pbsa_delta_solv_kj_mol);
-  add_scalar(pbsa_no_entropy_stats_, result.pbsa_no_entropy_kj_mol);
+  } else {
+    ++pbsa_valid_;
+    add_scalar(pbsa_elec_stats_, result.pbsa_elec_kj_mol);
+    add_scalar(pbsa_vdw_stats_, result.pbsa_vdw_kj_mol);
+    add_scalar(pbsa_mm_stats_, result.pbsa_mm_kj_mol);
+    add_scalar(pbsa_delta_sasa_stats_, result.pbsa_delta_sasa_a2);
+    add_scalar(pbsa_nonpolar_stats_, result.pbsa_nonpolar_kj_mol);
+    add_scalar(pbsa_polar_stats_, result.pbsa_delta_solv_kj_mol);
+    add_scalar(pbsa_no_entropy_stats_, result.pbsa_no_entropy_kj_mol);
+  }
   pbsa_rows_.push_back(result);
-  if (args_.pbsa_ie && result.pbsa_status == "ok")
+  if (args_.pbsa_ie && usable)
     pbsa_ie_values_kj_.push_back(result.pbsa_mm_kj_mol);
 }
 
@@ -428,6 +464,7 @@ void AnalyzerImpl::write_pbsa_energy_csv(const PbsaEntropyResult &entropy) const
          "grid_nx,grid_ny,grid_nz,solver_mode,mg_levels,"
          "mg_cycles_complex,mg_cycles_receptor,mg_cycles_ligand,"
          "status,complex_status,receptor_status,ligand_status,"
+         "included_in_statistics,"
          "complex_solvent_iter,complex_vacuum_iter,"
          "receptor_solvent_iter,receptor_vacuum_iter,"
          "ligand_solvent_iter,ligand_vacuum_iter,"
@@ -449,11 +486,22 @@ void AnalyzerImpl::write_pbsa_energy_csv(const PbsaEntropyResult &entropy) const
          "DeltaG_bind_kcalmol,ie_status\n";
 
   out << std::setprecision(10);
+  const bool entropy_available = !args_.pbsa_ie || entropy.status == "ok";
   const double minus_tds =
-      (args_.pbsa_ie && entropy.status == "ok") ? entropy.minus_tds_kj_mol
-                                                 : 0.0;
+      !args_.pbsa_ie
+          ? 0.0
+          : (entropy.status == "ok"
+                 ? entropy.minus_tds_kj_mol
+                 : std::numeric_limits<double>::quiet_NaN());
   for (const FrameResult &row : pbsa_rows_) {
-    const double dg_bind = row.pbsa_no_entropy_kj_mol + minus_tds;
+    const bool usable = pbsa_frame_usable(row);
+    const double row_minus_tds =
+        usable && entropy_available
+            ? minus_tds
+            : std::numeric_limits<double>::quiet_NaN();
+    const double dg_bind = usable && entropy_available
+                               ? row.pbsa_no_entropy_kj_mol + minus_tds
+                               : std::numeric_limits<double>::quiet_NaN();
     out << row.trajectory_id << ',' << row.frame_index << ','
         << row.global_index << ',' << row.time_ps << ',' << row.pbe_backend
         << ','
@@ -463,7 +511,8 @@ void AnalyzerImpl::write_pbsa_energy_csv(const PbsaEntropyResult &entropy) const
         << ',' << row.mg_cycles << ',' << row.pbsa_receptor_mg_cycles << ','
         << row.pbsa_ligand_mg_cycles << ',' << row.pbsa_status << ','
         << row.pbsa_complex_status << ',' << row.pbsa_receptor_status << ','
-        << row.pbsa_ligand_status << ',' << row.solvent_iterations << ','
+        << row.pbsa_ligand_status << ',' << (usable ? "true" : "false") << ','
+        << row.solvent_iterations << ','
         << row.vacuum_iterations << ','
         << row.pbsa_receptor_solvent_iterations << ','
         << row.pbsa_receptor_vacuum_iterations << ','
@@ -490,9 +539,10 @@ void AnalyzerImpl::write_pbsa_energy_csv(const PbsaEntropyResult &entropy) const
         << row.pbsa_delta_solv_kcal_mol << ','
         << row.pbsa_nonpolar_kj_mol << ','
         << row.pbsa_nonpolar_kj_mol * kKJToKcal << ','
-        << row.pbsa_delta_sasa_a2 << ',' << minus_tds << ','
-        << minus_tds * kKJToKcal << ',' << dg_bind << ','
-        << dg_bind * kKJToKcal << ',' << entropy.status << '\n';
+        << row.pbsa_delta_sasa_a2 << ',' << row_minus_tds << ','
+        << row_minus_tds * kKJToKcal << ',' << dg_bind << ','
+        << dg_bind * kKJToKcal << ','
+        << (usable ? entropy.status : "frame_excluded") << '\n';
   }
 }
 
@@ -565,9 +615,10 @@ void AnalyzerImpl::write_pbsa_decomposition(
   out << "interaction_entropy_status " << entropy.status << "\n";
   out << "component,mean_kJmol,mean_kcalmol,std_kJmol,std_kcalmol\n";
   auto write_stat_row = [&](const char *name, const ScalarStats &stats) {
-    const double sd = scalar_stddev(stats);
-    out << name << ',' << format_fixed(stats.mean) << ','
-        << format_fixed(stats.mean * kKJToKcal) << ',' << format_fixed(sd)
+    const double mean = scalar_mean_or_nan(stats);
+    const double sd = scalar_stddev_or_nan(stats);
+    out << name << ',' << format_fixed(mean) << ','
+        << format_fixed(mean * kKJToKcal) << ',' << format_fixed(sd)
         << ',' << format_fixed(sd * kKJToKcal) << "\n";
   };
   write_stat_row("DeltaE_elec", pbsa_elec_stats_);
@@ -703,8 +754,15 @@ void AnalyzerImpl::write_pbsa_unit_outputs() const {
     const PbsaEntropyResult entropy =
         compute_pbsa_entropy_for_values(stats.ie_values_kj_mol);
     const double minus_tds =
-        entropy.status == "ok" ? entropy.minus_tds_kj_mol : 0.0;
-    const double dg_ie = stats.total.mean + minus_tds;
+        !args_.pbsa_ie
+            ? 0.0
+            : (entropy.status == "ok"
+                   ? entropy.minus_tds_kj_mol
+                   : std::numeric_limits<double>::quiet_NaN());
+    const double dg_ie =
+        std::isfinite(minus_tds)
+            ? stats.total.mean + minus_tds
+            : std::numeric_limits<double>::quiet_NaN();
     write_key(out, stats.key);
     out << ',' << stats.frames;
     write_mean_std(out, stats.elec);
@@ -781,6 +839,7 @@ void AnalyzerImpl::write_pbsa_by_trajectory() const {
     return;
   struct TrajStats {
     std::size_t frames{0};
+    std::size_t valid{0};
     std::size_t failed{0};
     ScalarStats elec;
     ScalarStats vdw;
@@ -794,16 +853,20 @@ void AnalyzerImpl::write_pbsa_by_trajectory() const {
   for (const FrameResult &row : pbsa_rows_) {
     TrajStats &stats = stats_by_traj[row.trajectory_id];
     ++stats.frames;
-    if (row.pbsa_status != "ok")
+    const bool usable = pbsa_frame_usable(row);
+    if (!usable) {
       ++stats.failed;
+      continue;
+    }
+    ++stats.valid;
     add_scalar(stats.elec, row.pbsa_elec_kj_mol);
     add_scalar(stats.vdw, row.pbsa_vdw_kj_mol);
     add_scalar(stats.mm, row.pbsa_mm_kj_mol);
     add_scalar(stats.polar, row.pbsa_delta_solv_kj_mol);
     add_scalar(stats.nonpolar, row.pbsa_nonpolar_kj_mol);
     add_scalar(stats.no_entropy, row.pbsa_no_entropy_kj_mol);
-      if (args_.pbsa_ie && row.pbsa_status == "ok")
-        stats.ie_values.push_back(row.pbsa_mm_kj_mol);
+    if (args_.pbsa_ie)
+      stats.ie_values.push_back(row.pbsa_mm_kj_mol);
   }
 
   std::ofstream out("mm_pbsa_by_trajectory.csv",
@@ -812,7 +875,8 @@ void AnalyzerImpl::write_pbsa_by_trajectory() const {
     TitanUI::print_warning("PBSA: failed to write mm_pbsa_by_trajectory.csv.");
     return;
   }
-  out << "trajectory_id,frames,failed,E_elec_kJmol_mean,E_elec_kJmol_std,"
+  out << "trajectory_id,frames,valid,failed,statistics_status,"
+         "E_elec_kJmol_mean,E_elec_kJmol_std,"
          "E_vdw_kJmol_mean,E_vdw_kJmol_std,E_MM_kJmol_mean,"
          "E_MM_kJmol_std,DeltaDeltaG_solv_PB_kJmol_mean,"
          "DeltaDeltaG_solv_PB_kJmol_std,DeltaG_nonpolar_SASA_kJmol_mean,"
@@ -824,21 +888,32 @@ void AnalyzerImpl::write_pbsa_by_trajectory() const {
     const PbsaEntropyResult entropy =
         compute_pbsa_entropy_for_values(stats.ie_values);
     const double minus_tds =
-        entropy.status == "ok" ? entropy.minus_tds_kj_mol : 0.0;
-    const double dg_ie = stats.no_entropy.mean + minus_tds;
-    out << trajectory_id << ',' << stats.frames << ',' << stats.failed << ','
-        << format_fixed(stats.elec.mean, 10) << ','
-        << format_fixed(scalar_stddev(stats.elec), 10) << ','
-        << format_fixed(stats.vdw.mean, 10) << ','
-        << format_fixed(scalar_stddev(stats.vdw), 10) << ','
-        << format_fixed(stats.mm.mean, 10) << ','
-        << format_fixed(scalar_stddev(stats.mm), 10) << ','
-        << format_fixed(stats.polar.mean, 10) << ','
-        << format_fixed(scalar_stddev(stats.polar), 10) << ','
-        << format_fixed(stats.nonpolar.mean, 10) << ','
-        << format_fixed(scalar_stddev(stats.nonpolar), 10) << ','
-        << format_fixed(stats.no_entropy.mean, 10) << ','
-        << format_fixed(stats.no_entropy.mean * kKJToKcal, 10) << ','
+        !args_.pbsa_ie
+            ? 0.0
+            : (entropy.status == "ok"
+                   ? entropy.minus_tds_kj_mol
+                   : std::numeric_limits<double>::quiet_NaN());
+    const double no_entropy = scalar_mean_or_nan(stats.no_entropy);
+    const double dg_ie = stats.valid > 0 && std::isfinite(minus_tds)
+                             ? no_entropy + minus_tds
+                             : std::numeric_limits<double>::quiet_NaN();
+    const char *statistics_status =
+        stats.valid == 0 ? "no_valid_frames"
+                         : (stats.failed > 0 ? "partial" : "ok");
+    out << trajectory_id << ',' << stats.frames << ',' << stats.valid << ','
+        << stats.failed << ',' << statistics_status << ','
+        << format_fixed(scalar_mean_or_nan(stats.elec), 10) << ','
+        << format_fixed(scalar_stddev_or_nan(stats.elec), 10) << ','
+        << format_fixed(scalar_mean_or_nan(stats.vdw), 10) << ','
+        << format_fixed(scalar_stddev_or_nan(stats.vdw), 10) << ','
+        << format_fixed(scalar_mean_or_nan(stats.mm), 10) << ','
+        << format_fixed(scalar_stddev_or_nan(stats.mm), 10) << ','
+        << format_fixed(scalar_mean_or_nan(stats.polar), 10) << ','
+        << format_fixed(scalar_stddev_or_nan(stats.polar), 10) << ','
+        << format_fixed(scalar_mean_or_nan(stats.nonpolar), 10) << ','
+        << format_fixed(scalar_stddev_or_nan(stats.nonpolar), 10) << ','
+        << format_fixed(no_entropy, 10) << ','
+        << format_fixed(no_entropy * kKJToKcal, 10) << ','
         << entropy.status << ',' << entropy.samples << ','
         << format_fixed(entropy.ess, 4) << ',' << format_fixed(minus_tds, 10)
         << ',' << format_fixed(minus_tds * kKJToKcal, 10) << ','
@@ -864,12 +939,18 @@ void AnalyzerImpl::write_pbsa_ie_diagnostics(
   auto write_entropy = [&](const char *scope, std::size_t traj,
                            int block_index,
                            const PbsaEntropyResult &entropy) {
+    const double minus_tds =
+        !args_.pbsa_ie
+            ? 0.0
+            : (entropy.status == "ok"
+                   ? entropy.minus_tds_kj_mol
+                   : std::numeric_limits<double>::quiet_NaN());
     out << scope << ',' << traj << ',' << block_index << ','
         << entropy.samples << ',' << entropy.filtered_samples << ','
         << format_fixed(entropy.ess, 4) << ',' << entropy.status << ','
         << entropy.block_size << ',' << entropy.block_count << ','
-        << format_fixed(entropy.minus_tds_kj_mol, 10) << ','
-        << format_fixed(entropy.minus_tds_kj_mol * kKJToKcal, 10) << ','
+        << format_fixed(minus_tds, 10) << ','
+        << format_fixed(minus_tds * kKJToKcal, 10) << ','
         << format_fixed(entropy.block_mean_kj_mol, 10) << ','
         << format_fixed(entropy.block_std_kj_mol, 10) << ','
         << format_fixed(entropy.block_drift_kj_mol, 10) << "\n";
@@ -878,7 +959,7 @@ void AnalyzerImpl::write_pbsa_ie_diagnostics(
 
   std::map<std::size_t, std::vector<double>> values_by_traj;
   for (const FrameResult &row : pbsa_rows_) {
-    if (args_.pbsa_ie && row.pbsa_status == "ok")
+    if (args_.pbsa_ie && pbsa_frame_usable(row))
       values_by_traj[row.trajectory_id].push_back(row.pbsa_mm_kj_mol);
   }
   for (const auto &[trajectory_id, values] : values_by_traj)
@@ -1099,11 +1180,17 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
   }
   write_pbsa_performance();
 
-  const double dg_no_entropy_kj = pbsa_no_entropy_stats_.mean;
+  const double dg_no_entropy_kj = scalar_mean_or_nan(pbsa_no_entropy_stats_);
   const double minus_tds_ie_kj =
-      (args_.pbsa_ie && entropy.status == "ok") ? entropy.minus_tds_kj_mol
-                                                 : 0.0;
-  const double dg_binding_ie_kj = dg_no_entropy_kj + minus_tds_ie_kj;
+      !args_.pbsa_ie
+          ? 0.0
+          : (entropy.status == "ok"
+                 ? entropy.minus_tds_kj_mol
+                 : std::numeric_limits<double>::quiet_NaN());
+  const double dg_binding_ie_kj =
+      std::isfinite(dg_no_entropy_kj) && std::isfinite(minus_tds_ie_kj)
+          ? dg_no_entropy_kj + minus_tds_ie_kj
+          : std::numeric_limits<double>::quiet_NaN();
 
   std::ofstream out("mm_pbsa_summary.dat", std::ios::out | std::ios::trunc);
   if (!out.is_open()) {
@@ -1112,18 +1199,25 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
   }
 
   auto write_energy_stats = [&](const char *name, const ScalarStats &stats) {
-    out << name << "_kJmol_mean " << format_fixed(stats.mean) << "\n";
-    out << name << "_kJmol_std " << format_fixed(scalar_stddev(stats))
-        << "\n";
-    out << name << "_kJmol_min " << format_fixed(stats.min) << "\n";
-    out << name << "_kJmol_max " << format_fixed(stats.max) << "\n";
-    out << name << "_kcalmol_mean " << format_fixed(stats.mean * kKJToKcal)
+    const double mean = scalar_mean_or_nan(stats);
+    const double stddev = scalar_stddev_or_nan(stats);
+    const double minimum = stats.count == 0
+                               ? std::numeric_limits<double>::quiet_NaN()
+                               : stats.min;
+    const double maximum = stats.count == 0
+                               ? std::numeric_limits<double>::quiet_NaN()
+                               : stats.max;
+    out << name << "_kJmol_mean " << format_fixed(mean) << "\n";
+    out << name << "_kJmol_std " << format_fixed(stddev) << "\n";
+    out << name << "_kJmol_min " << format_fixed(minimum) << "\n";
+    out << name << "_kJmol_max " << format_fixed(maximum) << "\n";
+    out << name << "_kcalmol_mean " << format_fixed(mean * kKJToKcal)
         << "\n";
     out << name << "_kcalmol_std "
-        << format_fixed(scalar_stddev(stats) * kKJToKcal) << "\n";
-    out << name << "_kcalmol_min " << format_fixed(stats.min * kKJToKcal)
+        << format_fixed(stddev * kKJToKcal) << "\n";
+    out << name << "_kcalmol_min " << format_fixed(minimum * kKJToKcal)
         << "\n";
-    out << name << "_kcalmol_max " << format_fixed(stats.max * kKJToKcal)
+    out << name << "_kcalmol_max " << format_fixed(maximum * kKJToKcal)
         << "\n";
   };
 
@@ -1140,12 +1234,19 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
                              : pbsa_rows_.front().pbsa_grid_reuse_effective)
       << "\n";
   out << "frames_total " << pbsa_frames_ << "\n";
+  out << "mm_energy_distance_policy preprocessed_raw\n";
+  out << "frames_valid " << pbsa_valid_ << "\n";
   out << "frames_failed " << pbsa_failed_ << "\n";
+  out << "statistics_status "
+      << (pbsa_valid_ == 0 ? "no_valid_frames"
+                           : (pbsa_failed_ > 0 ? "partial" : "ok"))
+      << "\n";
+  out << "failure_policy strict\n";
   out << "temperature_K " << format_fixed(args_.temp) << "\n";
   out << "pbe_salt_M " << format_fixed(args_.salt) << "\n";
   out << "pbe_surface " << args_.surface << "\n";
   out << "sasa_probe_A " << format_fixed(args_.probe_radius) << "\n";
-  out << "sasa_points_per_atom " << TitanSASA::kDefaultPointCount << "\n";
+  out << "sasa_points_per_atom " << args_.pbsa_sasa_points << "\n";
   out << "nonpolar_gamma_kJmol_A2 "
       << format_fixed(TitanSASA::kNonpolarGammaKJPerMolA2, 8) << "\n";
   out << "nonpolar_gamma_kcalmol_A2 "
@@ -1204,13 +1305,20 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
   write_energy_stats("G_polar_PB", pbsa_polar_stats_);
   write_energy_stats("DeltaDeltaG_solv_PB", pbsa_polar_stats_);
   write_energy_stats("G_nonpolar_SASA", pbsa_nonpolar_stats_);
-  out << "deltaSASA_A2_mean " << format_fixed(pbsa_delta_sasa_stats_.mean)
+  out << "deltaSASA_A2_mean "
+      << format_fixed(scalar_mean_or_nan(pbsa_delta_sasa_stats_))
       << "\n";
   out << "deltaSASA_A2_std "
-      << format_fixed(scalar_stddev(pbsa_delta_sasa_stats_)) << "\n";
-  out << "deltaSASA_A2_min " << format_fixed(pbsa_delta_sasa_stats_.min)
+      << format_fixed(scalar_stddev_or_nan(pbsa_delta_sasa_stats_)) << "\n";
+  out << "deltaSASA_A2_min "
+      << format_fixed(pbsa_delta_sasa_stats_.count == 0
+                          ? std::numeric_limits<double>::quiet_NaN()
+                          : pbsa_delta_sasa_stats_.min)
       << "\n";
-  out << "deltaSASA_A2_max " << format_fixed(pbsa_delta_sasa_stats_.max)
+  out << "deltaSASA_A2_max "
+      << format_fixed(pbsa_delta_sasa_stats_.count == 0
+                          ? std::numeric_limits<double>::quiet_NaN()
+                          : pbsa_delta_sasa_stats_.max)
       << "\n";
   write_energy_stats("DeltaG_no_entropy", pbsa_no_entropy_stats_);
   out << "minus_TdS_IE_kJmol " << format_fixed(minus_tds_ie_kj) << "\n";
@@ -1230,31 +1338,42 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
     ScalarStats noie;
     std::vector<double> ie_values;
     for (const FrameResult *row : rows) {
+      if (!pbsa_frame_usable(*row))
+        continue;
       add_scalar(noie, row->pbsa_no_entropy_kj_mol);
-      if (args_.pbsa_ie && row->pbsa_status == "ok")
+      if (args_.pbsa_ie)
         ie_values.push_back(row->pbsa_mm_kj_mol);
     }
+    if (noie.count == 0)
+      continue;
     const PbsaEntropyResult traj_entropy =
         compute_pbsa_entropy_for_values(ie_values);
     const double traj_minus_tds =
-        traj_entropy.status == "ok" ? traj_entropy.minus_tds_kj_mol : 0.0;
+        !args_.pbsa_ie
+            ? 0.0
+            : (traj_entropy.status == "ok"
+                   ? traj_entropy.minus_tds_kj_mol
+                   : std::numeric_limits<double>::quiet_NaN());
     add_scalar(traj_equal_noie, noie.mean);
-    add_scalar(traj_equal_ie, noie.mean + traj_minus_tds);
+    if (std::isfinite(traj_minus_tds))
+      add_scalar(traj_equal_ie, noie.mean + traj_minus_tds);
   }
   out << "trajectory_equal_DeltaG_no_entropy_kJmol_mean "
-      << format_fixed(traj_equal_noie.mean) << "\n";
+      << format_fixed(scalar_mean_or_nan(traj_equal_noie)) << "\n";
   out << "trajectory_equal_DeltaG_no_entropy_kJmol_std "
-      << format_fixed(scalar_stddev(traj_equal_noie)) << "\n";
+      << format_fixed(scalar_stddev_or_nan(traj_equal_noie)) << "\n";
   out << "trajectory_equal_DeltaG_binding_IE_kJmol_mean "
-      << format_fixed(traj_equal_ie.mean) << "\n";
+      << format_fixed(scalar_mean_or_nan(traj_equal_ie)) << "\n";
   out << "trajectory_equal_DeltaG_binding_IE_kJmol_std "
-      << format_fixed(scalar_stddev(traj_equal_ie)) << "\n";
+      << format_fixed(scalar_stddev_or_nan(traj_equal_ie)) << "\n";
 
   if (log.is_open()) {
     TitanUI::log_section(log, "MM/PBSA OUTPUT AUDIT");
     TitanUI::log_kv(log, "Frames", std::to_string(pbsa_frames_));
+    TitanUI::log_kv(log, "Valid", std::to_string(pbsa_valid_));
     TitanUI::log_kv(log, "Failed", std::to_string(pbsa_failed_));
-    TitanUI::log_kv(log, "Endpoint solves/frame", "6");
+    TitanUI::log_kv(log, "Endpoint solves/frame",
+                    args_.backend == "tabi" ? "3" : "6");
     TitanUI::log_kv(log, "IE Source", "E_MM_elec_plus_vdw");
     TitanUI::log_kv(log, "IE Status", entropy.status);
     TitanUI::log_kv(log, "Interaction Entropy",
@@ -1299,6 +1418,15 @@ void AnalyzerImpl::write_pbsa_summary(std::fstream &log) {
                       "mm_pbsa_residue_summary.csv");
     if (effective_pbsa_decomp() == "hybrid")
       TitanUI::log_kv(log, "Unit Summary", "mm_pbsa_unit_summary.csv");
+  }
+
+  if (pbsa_failed_ > 0) {
+    throw std::runtime_error(
+        "MM/PBSA strict failure policy: " + std::to_string(pbsa_failed_) +
+        " of " + std::to_string(pbsa_frames_) +
+        " frame(s) were excluded because an endpoint did not converge or an "
+        "energy was non-finite. Partial diagnostic outputs were written, but "
+        "the run is not scientifically valid.");
   }
 }
 

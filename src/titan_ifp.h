@@ -128,6 +128,7 @@ public:
     return worker_contact_accumulators_;
   }
   size_t last_frame_active_workers() const { return last_frame_active_workers_; }
+  size_t processed_frame_count() const { return total_frames_; }
 
 private:
   size_t total_frames_{0};  // online frame counter

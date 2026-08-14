@@ -45,8 +45,21 @@ struct ExpandedGromacsTopology {
 double gromacs_vdw_radius_angstrom(const GromacsLennardJonesType &lj,
                                    int combination_rule) {
   if (!std::isfinite(lj.first) || !std::isfinite(lj.second) ||
-      lj.first <= 0.0 || lj.second <= 0.0)
+      lj.first < 0.0 || lj.second < 0.0) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+
+  // A zero self Lennard-Jones term is explicit force-field data, notably for
+  // polar hydrogens in CHARMM. Preserve it as a zero steric radius instead of
+  // treating it as missing and replacing it with an element-based radius.
+  if (combination_rule == 1) {
+    if (lj.first == 0.0 && lj.second == 0.0)
+      return 0.0;
+    if (lj.first == 0.0 || lj.second == 0.0)
+      return std::numeric_limits<double>::quiet_NaN();
+  } else if (lj.first == 0.0 || lj.second == 0.0) {
     return 0.0;
+  }
 
   double minimum_distance_nm = 0.0;
   if (combination_rule == 1) {
@@ -57,7 +70,7 @@ double gromacs_vdw_radius_angstrom(const GromacsLennardJonesType &lj,
   const double radius_angstrom = 5.0 * minimum_distance_nm;
   return std::isfinite(radius_angstrom) && radius_angstrom > 0.0
              ? radius_angstrom
-             : 0.0;
+             : std::numeric_limits<double>::quiet_NaN();
 }
 
 std::string trim_topology_line(std::string line) {
@@ -282,7 +295,8 @@ parse_and_expand_gromacs_topology(std::string_view topology_path) {
       const std::uint32_t begin = expanded.atom_count;
       const std::uint32_t end = begin + type.atom_count;
       expanded.molecule_ranges.push_back({begin, end, instance.name, copy});
-      expanded.vdw_radii.resize(end, 0.0);
+      expanded.vdw_radii.resize(
+          end, std::numeric_limits<double>::quiet_NaN());
       for (std::uint32_t atom = 0; atom < type.atom_count; ++atom) {
         if (atom >= type.atom_types.size() || type.atom_types[atom].empty())
           continue;
@@ -456,9 +470,11 @@ MolTopology::neighbors(std::uint32_t atom) const noexcept {
 
 std::optional<double>
 MolTopology::vdw_radius(std::uint32_t atom) const noexcept {
-  if (atom >= vdw_radii_.size() || !std::isfinite(vdw_radii_[atom]) ||
-      vdw_radii_[atom] <= 0.0)
+  if (atom >= vdw_radii_.size() || atom >= vdw_radius_sources_.size() ||
+      vdw_radius_sources_[atom] == MolTopologyVdwRadiusSource::None ||
+      !std::isfinite(vdw_radii_[atom]) || vdw_radii_[atom] < 0.0) {
     return std::nullopt;
+  }
   return vdw_radii_[atom];
 }
 
@@ -479,7 +495,6 @@ void MolTopology::clear() noexcept {
   vdw_radii_.clear();
   vdw_radius_sources_.clear();
   vdw_radius_count_ = 0;
-  parameter_radius_cache_size_ = 0;
 }
 
 void MolTopology::set_bonds(
@@ -514,23 +529,26 @@ void MolTopology::set_bonds(
   vdw_radii_.assign(atom_count_, 0.0);
   vdw_radius_sources_.assign(atom_count_, MolTopologyVdwRadiusSource::None);
   vdw_radius_count_ = 0;
-  parameter_radius_cache_size_ = 0;
   const std::size_t radius_count =
       std::min<std::size_t>(atom_count_, vdw_radii.size());
   for (std::size_t atom = 0; atom < radius_count; ++atom) {
-    if (!std::isfinite(vdw_radii[atom]) || vdw_radii[atom] <= 0.0)
+    if (!std::isfinite(vdw_radii[atom]) || vdw_radii[atom] < 0.0)
       continue;
     vdw_radii_[atom] = vdw_radii[atom];
     vdw_radius_sources_[atom] =
-        MolTopologyVdwRadiusSource::GromacsTopology;
+        vdw_radii[atom] == 0.0
+            ? MolTopologyVdwRadiusSource::GromacsTopologyExplicitZeroLJ
+            : MolTopologyVdwRadiusSource::GromacsTopology;
     ++vdw_radius_count_;
   }
   build_adjacency();
 }
 
-void MolTopology::cache_missing_vdw_radii(std::span<const double> radii) {
-  if (radii.empty() || vdw_radius_count_ >= radii.size() ||
-      parameter_radius_cache_size_ == radii.size())
+void MolTopology::cache_missing_vdw_radii(
+    std::span<const double> radii, std::span<const double> sigma,
+    std::span<const double> epsilon,
+    std::span<const std::int32_t> type_ids) {
+  if (radii.empty())
     return;
   if (vdw_radii_.size() < radii.size()) {
     vdw_radii_.resize(radii.size(), 0.0);
@@ -539,14 +557,25 @@ void MolTopology::cache_missing_vdw_radii(std::span<const double> radii) {
   }
   for (std::size_t atom = 0; atom < radii.size(); ++atom) {
     if (vdw_radius_sources_[atom] != MolTopologyVdwRadiusSource::None ||
-        !std::isfinite(radii[atom]) || radii[atom] <= 0.0)
+        !std::isfinite(radii[atom]) || radii[atom] < 0.0)
+      continue;
+    const bool assigned_parameter = atom < type_ids.size() &&
+                                    type_ids[atom] >= 0;
+    const bool explicit_zero_lj =
+        radii[atom] == 0.0 && assigned_parameter && atom < sigma.size() &&
+        atom < epsilon.size() && std::isfinite(sigma[atom]) &&
+        std::isfinite(epsilon[atom]) && sigma[atom] >= 0.0 &&
+        epsilon[atom] >= 0.0 &&
+        (sigma[atom] == 0.0 || epsilon[atom] == 0.0);
+    if (radii[atom] == 0.0 && !explicit_zero_lj)
       continue;
     vdw_radii_[atom] = radii[atom];
     vdw_radius_sources_[atom] =
-        MolTopologyVdwRadiusSource::MultiMolParameters;
+        explicit_zero_lj
+            ? MolTopologyVdwRadiusSource::MultiMolParametersExplicitZeroLJ
+            : MolTopologyVdwRadiusSource::MultiMolParameters;
     ++vdw_radius_count_;
   }
-  parameter_radius_cache_size_ = radii.size();
 }
 
 void MolTopology::build_adjacency() {
@@ -606,7 +635,8 @@ build_gromacs_mol_topology(std::string_view topology_path,
     projected_bonds.push_back({a_it->second, b_it->second});
   }
 
-  std::vector<double> projected_vdw_radii(selection_info.size(), 0.0);
+  std::vector<double> projected_vdw_radii(
+      selection_info.size(), std::numeric_limits<double>::quiet_NaN());
   for (const auto &[source, local] : source_to_local) {
     if (source < expanded.vdw_radii.size() &&
         local < projected_vdw_radii.size())

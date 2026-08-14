@@ -16,6 +16,11 @@ enum class SolveMode {
   LlpsLocal,
 };
 
+enum class SearchPolicy {
+  FastCertified,
+  AuditExact,
+};
+
 enum class AnchorMetricMode {
   Full,
   MstOnly,
@@ -44,6 +49,8 @@ struct RuntimeCutoffs {
 RuntimeCutoffs resolve_runtime_cutoffs(const arguments &Arguments);
 SolveMode resolve_solve_mode(const arguments &Arguments);
 const char *solve_mode_name(SolveMode mode);
+SearchPolicy resolve_search_policy(const arguments &Arguments);
+const char *search_policy_name(SearchPolicy policy);
 AnchorBackend resolve_anchor_backend(const arguments &Arguments);
 const char *anchor_backend_name(AnchorBackend backend);
 AnchorMetricMode resolve_anchor_metric_mode(const arguments &Arguments);

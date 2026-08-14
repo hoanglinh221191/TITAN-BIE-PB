@@ -673,7 +673,7 @@ void direct_jcp_packed_target_source_span_avx2(
     double eps_ratio, double kappa, bool coupled, std::size_t source_first,
     std::size_t source_count, std::vector<JcpAccum> &accum,
     std::size_t &near_count, std::size_t &vectorized_sources,
-    std::size_t &vector_lanes) noexcept;
+    std::size_t &vector_lanes, bool vector_exp = false) noexcept;
 JcpAccum direct_jcp_ordered_tile_sum(
     const Panel &target, std::size_t target_index,
     const TreePanelCache &panel_cache, const TreeUnknownCache &unknown_cache,

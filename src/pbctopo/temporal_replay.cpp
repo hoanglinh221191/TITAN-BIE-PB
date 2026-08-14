@@ -2,6 +2,9 @@
 
 #include "lattice_math.h"
 
+#include <unordered_map>
+#include <unordered_set>
+
 namespace titan_pbctopo {
 
 bool replay_pbctopo_assignment_delta(
@@ -15,17 +18,46 @@ bool replay_pbctopo_assignment_delta(
       applied_points.empty() ||
       applied_points.size() != atom_component_index.size() ||
       applied_assignment.component_offsets.size() !=
-          selected_assignment.component_offsets.size()) {
+          selected_assignment.component_offsets.size() ||
+      applied_assignment.component_ids.size() !=
+          applied_assignment.component_offsets.size() ||
+      selected_assignment.component_ids.size() !=
+          selected_assignment.component_offsets.size() ||
+      applied_assignment.layout_signature == 0 ||
+      applied_assignment.layout_signature !=
+          selected_assignment.layout_signature) {
     return false;
   }
 
   const std::size_t component_count =
       applied_assignment.component_offsets.size();
+  std::unordered_map<std::uint64_t, std::size_t> selected_component_index;
+  selected_component_index.reserve(component_count);
+  for (std::size_t comp_idx = 0; comp_idx < component_count; ++comp_idx) {
+    if (!selected_component_index
+             .emplace(selected_assignment.component_ids[comp_idx], comp_idx)
+             .second) {
+      return false;
+    }
+  }
+  std::unordered_set<std::uint64_t> applied_component_ids;
+  applied_component_ids.reserve(component_count);
   std::vector<Vec3> translations(component_count);
   const PbctopoLatticeMetric lattice(Box);
   for (std::size_t comp_idx = 0; comp_idx < component_count; ++comp_idx) {
-    const Int3 delta = selected_assignment.component_offsets[comp_idx] -
-                       applied_assignment.component_offsets[comp_idx];
+    const std::uint64_t component_id =
+        applied_assignment.component_ids[comp_idx];
+    if (!applied_component_ids.insert(component_id).second)
+      return false;
+    const auto selected_it = selected_component_index.find(component_id);
+    if (selected_it == selected_component_index.end())
+      return false;
+    Int3 delta{};
+    if (!checked_int3_subtract(
+            selected_assignment.component_offsets[selected_it->second],
+            applied_assignment.component_offsets[comp_idx], delta)) {
+      return false;
+    }
     const auto cart = lattice.scaled_to_cartesian(
         static_cast<double>(delta.x), static_cast<double>(delta.y),
         static_cast<double>(delta.z));

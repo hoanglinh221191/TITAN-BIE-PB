@@ -443,6 +443,15 @@ public:
                                   const std::vector<TitanPBE::Tabi::Panel>
                                       *production_panels = nullptr) const;
 
+  JcpAnalyticOperatorResult apply_into(
+      const std::vector<double> &phi, const std::vector<double> &phin,
+      TitanExecutor &executor, std::vector<double> &phi_out,
+      std::vector<double> &phin_out, bool coupled = true,
+      const std::string &near_integration = "centroid",
+      const std::string &quad_buffer = "off",
+      const std::vector<TitanPBE::Tabi::Panel> *production_panels = nullptr)
+      const;
+
   JcpOperatorAttributionResult attribute(
       const std::vector<double> &phi, const std::vector<double> &phin,
       std::size_t sample_count, const std::string &probe,

@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,10 @@ struct TraceSpaceQuality {
   std::size_t orientation_mismatch_count{0};
   std::size_t nonmanifold_edge_count{0};
   std::size_t unreferenced_vertex_count{0};
+  std::size_t connected_component_count{0};
+  std::int64_t euler_characteristic{0};
+  std::size_t genus_sum{0};
+  bool topology_invariants_valid{false};
   double total_area{0.0};
   std::string failure_reason{"not_built"};
 };

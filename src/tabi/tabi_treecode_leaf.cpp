@@ -592,6 +592,88 @@ inline __m256d avx2_lane_mask_pd(unsigned bits) noexcept {
       (bits & 0x2u) ? -1ll : 0ll, (bits & 0x1u) ? -1ll : 0ll));
 }
 
+// Double-precision exp for the screened direct kernel.  Range reduction keeps
+// the polynomial argument in [-ln(2)/2, ln(2)/2]; a degree-12 Taylor/Horner
+// evaluation is then at roundoff accuracy on that interval.  Unusual extreme
+// exponents retain the scalar libm behavior instead of relying on denormal
+// exponent-bit construction.
+TITAN_TARGET_AVX2
+inline __m256d avx2_exp_accurate_pd(__m256d x) noexcept {
+  const __m256d lower = _mm256_set1_pd(-700.0);
+  const __m256d upper = _mm256_set1_pd(700.0);
+  const int extreme = _mm256_movemask_pd(_mm256_or_pd(
+      _mm256_cmp_pd(x, lower, _CMP_LT_OQ),
+      _mm256_cmp_pd(x, upper, _CMP_GT_OQ)));
+  if (extreme != 0) {
+    alignas(32) double lanes[4];
+    _mm256_store_pd(lanes, x);
+    for (double &lane : lanes)
+      lane = std::exp(lane);
+    return _mm256_load_pd(lanes);
+  }
+
+  constexpr double kInvLn2 = 1.44269504088896340735992468100189214;
+  constexpr double kLn2Hi = 0.693147180559945286226763982995180413;
+  constexpr double kLn2Lo = 2.319046813846299558417771099e-17;
+  const __m256d scaled =
+      _mm256_mul_pd(x, _mm256_set1_pd(kInvLn2));
+  const __m256d rounded = _mm256_round_pd(
+      scaled, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+  const __m128i exponents = _mm256_cvtpd_epi32(rounded);
+  const __m256d exponent_pd = _mm256_cvtepi32_pd(exponents);
+  const __m256d reduced = _mm256_sub_pd(
+      _mm256_sub_pd(x,
+                    _mm256_mul_pd(exponent_pd, _mm256_set1_pd(kLn2Hi))),
+      _mm256_mul_pd(exponent_pd, _mm256_set1_pd(kLn2Lo)));
+
+  __m256d polynomial = _mm256_set1_pd(1.0 / 479001600.0); // 1/12!
+  polynomial = _mm256_add_pd(
+      _mm256_mul_pd(polynomial, reduced),
+      _mm256_set1_pd(1.0 / 39916800.0)); // 1/11!
+  polynomial = _mm256_add_pd(
+      _mm256_mul_pd(polynomial, reduced),
+      _mm256_set1_pd(1.0 / 3628800.0)); // 1/10!
+  polynomial = _mm256_add_pd(
+      _mm256_mul_pd(polynomial, reduced),
+      _mm256_set1_pd(1.0 / 362880.0)); // 1/9!
+  polynomial = _mm256_add_pd(
+      _mm256_mul_pd(polynomial, reduced),
+      _mm256_set1_pd(1.0 / 40320.0)); // 1/8!
+  polynomial = _mm256_add_pd(
+      _mm256_mul_pd(polynomial, reduced),
+      _mm256_set1_pd(1.0 / 5040.0)); // 1/7!
+  polynomial = _mm256_add_pd(
+      _mm256_mul_pd(polynomial, reduced),
+      _mm256_set1_pd(1.0 / 720.0)); // 1/6!
+  polynomial = _mm256_add_pd(
+      _mm256_mul_pd(polynomial, reduced),
+      _mm256_set1_pd(1.0 / 120.0)); // 1/5!
+  polynomial = _mm256_add_pd(
+      _mm256_mul_pd(polynomial, reduced),
+      _mm256_set1_pd(1.0 / 24.0)); // 1/4!
+  polynomial = _mm256_add_pd(
+      _mm256_mul_pd(polynomial, reduced),
+      _mm256_set1_pd(1.0 / 6.0)); // 1/3!
+  polynomial = _mm256_add_pd(
+      _mm256_mul_pd(polynomial, reduced),
+      _mm256_set1_pd(0.5));
+  polynomial = _mm256_add_pd(_mm256_mul_pd(polynomial, reduced),
+                             _mm256_set1_pd(1.0));
+  polynomial = _mm256_add_pd(_mm256_mul_pd(polynomial, reduced),
+                             _mm256_set1_pd(1.0));
+
+  alignas(16) std::int32_t exponent_lanes[4];
+  _mm_store_si128(reinterpret_cast<__m128i *>(exponent_lanes), exponents);
+  alignas(32) std::uint64_t scale_bits[4];
+  for (std::size_t lane = 0; lane < 4; ++lane) {
+    scale_bits[lane] =
+        static_cast<std::uint64_t>(exponent_lanes[lane] + 1023) << 52;
+  }
+  const __m256d scale = _mm256_castsi256_pd(
+      _mm256_load_si256(reinterpret_cast<const __m256i *>(scale_bits)));
+  return _mm256_mul_pd(polynomial, scale);
+}
+
 inline std::size_t popcount4(unsigned bits) noexcept {
   bits &= 0x0fu;
   return static_cast<std::size_t>((bits & 0x1u) + ((bits >> 1) & 0x1u) +
@@ -1058,7 +1140,8 @@ void direct_jcp_target_source_tile_sum_avx2_4x4(
     const TreePanelCache &panel_cache, const TreeUnknownCache &unknown_cache,
     double eps_ratio, double kappa, bool coupled, const TreeNode &node,
     std::vector<JcpAccum> &accum, std::size_t &near_count,
-    std::size_t &vectorized_sources, std::size_t &vector_lanes) noexcept {
+    std::size_t &vectorized_sources, std::size_t &vector_lanes,
+    bool vector_exp = false) noexcept {
   accum.assign(target_indices.size(), JcpAccum{});
   if (target_indices.empty())
     return;
@@ -1140,10 +1223,16 @@ void direct_jcp_target_source_tile_sum_avx2_4x4(
         _mm256_mul_pd(inv_four_pi_v,
                       _mm256_mul_pd(source_projection, inv_r3));
     if (coupled) {
-      _mm256_store_pd(r_lane, r);
-      for (int lane = 0; lane < 4; ++lane)
-        exp_lane[lane] = std::exp(-kk * r_lane[lane]);
-      const __m256d expkr = _mm256_load_pd(exp_lane);
+      __m256d expkr;
+      if (vector_exp) {
+        expkr =
+            avx2_exp_accurate_pd(_mm256_mul_pd(_mm256_set1_pd(-kk), r));
+      } else {
+        _mm256_store_pd(r_lane, r);
+        for (std::size_t lane = 0; lane < 4; ++lane)
+          exp_lane[lane] = std::exp(-kk * r_lane[lane]);
+        expkr = _mm256_load_pd(exp_lane);
+      }
       const __m256d one_plus_kr =
           _mm256_add_pd(one_v, _mm256_mul_pd(kk_v, r));
       const __m256d source_dk =
@@ -1510,7 +1599,7 @@ void direct_jcp_packed_target_source_span_avx2(
     double eps_ratio, double kappa, bool coupled, std::size_t source_first,
     std::size_t source_count, std::vector<JcpAccum> &accum,
     std::size_t &near_count, std::size_t &vectorized_sources,
-    std::size_t &vector_lanes) noexcept {
+    std::size_t &vector_lanes, bool vector_exp) noexcept {
 #if TITAN_SIMD_X86 && TITAN_RUNTIME_TARGET_ATTRS
   if (titan_simd_dispatch::runtime_has_avx2()) {
     TreeNode span;
@@ -1518,7 +1607,8 @@ void direct_jcp_packed_target_source_span_avx2(
     span.panel_count = source_count;
     direct_jcp_target_source_tile_sum_avx2_4x4(
         panels, target_indices, panel_cache, unknown_cache, eps_ratio, kappa,
-        coupled, span, accum, near_count, vectorized_sources, vector_lanes);
+        coupled, span, accum, near_count, vectorized_sources, vector_lanes,
+        vector_exp);
     return;
   }
 #else
@@ -1533,6 +1623,7 @@ void direct_jcp_packed_target_source_span_avx2(
   (void)near_count;
   (void)vectorized_sources;
   (void)vector_lanes;
+  (void)vector_exp;
 #endif
   accum.assign(target_indices.size(), JcpAccum{});
 }

@@ -1,4 +1,5 @@
 #include "functions.h"
+#include "titan_electrostatics.h"
 #include "titan_simd_dispatch.h"
 
 #ifdef __AVX__
@@ -166,7 +167,8 @@ int cal_energy_amber_screening_intrin_nofilter(
   const double *rec_epsilon = rec_parameters.epsilon.data();
 
   const double epsilon_in = Arguments.epsilon_in;
-  const double lambda_debye = 3.07 / sqrt(Arguments.salt_concentration);
+  const double lambda_debye =
+      titan_electrostatics::debye_length_nm(Arguments.salt_concentration);
 
   const __m256d avx_half = _mm256_set1_pd(0.5);
   const __m256d avx_one = _mm256_set1_pd(1.0);

@@ -11,6 +11,8 @@
 
 #include <vector>
 
+class TitanExecutor;
+
 // Structure to hold GBSA outputs per snap
 struct GBSA_energy_snap {
   double total_energy;
@@ -23,10 +25,15 @@ struct GBSA_energy_snap {
   double time_energy_kernel_ms;
   double time_decomposition_merge_ms;
   double time_total_ms;
+  double alpb_receptor_size_nm;
+  double alpb_ligand_size_nm;
+  double alpb_complex_size_nm;
   GBSA_energy_snap()
       : total_energy(0.), E_vdw(0.), E_elec(0.), G_polar(0.), G_nonpolar(0.),
         time(0.), time_precompute_ms(0.), time_energy_kernel_ms(0.),
-        time_decomposition_merge_ms(0.), time_total_ms(0.) {}
+        time_decomposition_merge_ms(0.), time_total_ms(0.),
+        alpb_receptor_size_nm(0.), alpb_ligand_size_nm(0.),
+        alpb_complex_size_nm(0.) {}
 };
 
 struct GBSA_decomposition {
@@ -52,6 +59,9 @@ struct GBSASasaCache {
   std::vector<double> sasa_rec_free;
   std::vector<double> sasa_lig_free;
   std::vector<double> sasa_complex;
+  double alpb_rec_electrostatic_size_nm = 0.0;
+  double alpb_lig_electrostatic_size_nm = 0.0;
+  double alpb_complex_electrostatic_size_nm = 0.0;
 };
 
 class GBSA_Aggregator {
@@ -105,14 +115,25 @@ public:
 void build_gbsa_sasa_cache(const MOL &rec, const MOL &lg,
                            const Multi_MOL_parameters &rec_parameters,
                            const Multi_MOL_parameters &lg_parameters,
-                           GBSASasaCache &cache_out);
+                           GBSASasaCache &cache_out, int point_count,
+                           bool compute_alpb_sizes,
+                           TitanExecutor *executor = nullptr);
 
 // Calculate Effective Born Radii AVX2 Kernel
 void cal_effective_born_radii_avx2(
     const MOL &mol, const AlignedDoubleVector &vdw_radii,
-    AlignedDoubleVector &radii, int igb, size_t begin, size_t end,
+    const std::vector<mol_info> &atom_info, AlignedDoubleVector &radii,
+    int igb, size_t begin, size_t end,
     const MOL *env_mol = nullptr,
-    const AlignedDoubleVector *env_vdw_radii = nullptr);
+    const AlignedDoubleVector *env_vdw_radii = nullptr,
+    const std::vector<mol_info> *env_atom_info = nullptr);
+
+void cal_effective_born_radii_parallel_avx2(
+    const MOL &mol, const AlignedDoubleVector &vdw_radii,
+    const std::vector<mol_info> &atom_info, AlignedDoubleVector &radii,
+    int igb, TitanExecutor &executor, const MOL *env_mol = nullptr,
+    const AlignedDoubleVector *env_vdw_radii = nullptr,
+    const std::vector<mol_info> *env_atom_info = nullptr);
 
 int cal_energy_gbsa_avx2(
     const MOL &rec, const MOL &lg, const std::vector<mol_info> &info_rec,
@@ -130,7 +151,8 @@ int cal_energy_gbsa_avx2(
     const AlignedDoubleVector &rec_complex_radii,
     const AlignedDoubleVector &lg_complex_radii, GBSA_Aggregator *aggregator,
     const GBSASasaCache *sasa_cache = nullptr,
-    bool write_pair_cache = true);
+    bool write_pair_cache = true, bool include_rec_onebody = true,
+    bool include_lig_onebody = true);
 
 #endif // __AVX__
 

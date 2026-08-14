@@ -55,6 +55,9 @@ bool better_component_candidate(const PbctopoComponentCandidate &lhs,
 
 PbctopoLexicographicGap candidate_lexicographic_gap(
     const PbctopoCutCandidate &best, const PbctopoCutCandidate &second);
+double candidate_temporal_emission_cost(
+    const PbctopoCutCandidate &frame_best,
+    const PbctopoCutCandidate &candidate);
 bool preclash_cut_candidate_cannot_beat_incumbent(
     const PbctopoCutCandidate &candidate,
     const PbctopoCutCandidate *incumbent);

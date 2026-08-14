@@ -3957,16 +3957,28 @@ void run_dssp_postproc(const arguments &args, TitanDSSPAnalyzer &mol1_dssp,
     mol1_dssp.export_results(info_output.get_dssp_mol1_filename(), log);
     mol1_dssp.export_content_profile(
         info_output.get_dssp_mol1_content_filename(), log);
+    mol1_dssp.export_segment_content(
+        info_output.get_dssp_mol1_segments_filename(), log);
+    mol1_dssp.export_bridge_registry(
+        info_output.get_dssp_mol1_bridges_filename(), log);
+    mol1_dssp.export_ladder_distribution(
+        info_output.get_dssp_mol1_ladders_filename(), log);
     TitanUI::print_info("[DSSP] Exported mol1 summary to " +
                         info_output.get_dssp_mol1_filename());
     TitanUI::print_info("[DSSP] Exported mol1 content to " +
                         info_output.get_dssp_mol1_content_filename());
     exported = true;
   }
-  if (!args.flag_nocal && mol2_dssp.has_results()) {
+  if (mol2_dssp.has_results()) {
     mol2_dssp.export_results(info_output.get_dssp_mol2_filename(), log);
     mol2_dssp.export_content_profile(
         info_output.get_dssp_mol2_content_filename(), log);
+    mol2_dssp.export_segment_content(
+        info_output.get_dssp_mol2_segments_filename(), log);
+    mol2_dssp.export_bridge_registry(
+        info_output.get_dssp_mol2_bridges_filename(), log);
+    mol2_dssp.export_ladder_distribution(
+        info_output.get_dssp_mol2_ladders_filename(), log);
     TitanUI::print_info("[DSSP] Exported mol2 summary to " +
                         info_output.get_dssp_mol2_filename());
     TitanUI::print_info("[DSSP] Exported mol2 content to " +
@@ -4009,8 +4021,9 @@ void run_tica_msm_postproc(const arguments &args,
     TitanUI::log_kv(log, "TICA Retained Components",
                     std::to_string(tica_analyzer->retained_components()));
     tica_analyzer->write_results(info_output.get_tica_eigenvalues_filename(),
-                                 info_output.get_tica_eigenvectors_filename(),
-                                 log);
+                                  info_output.get_tica_eigenvectors_filename(),
+                                  log,
+                                  args.trajectory_semantics == "continuous");
 
     if (msm_analyzer) {
       TitanUI::print_module_header("TICA Projection Cache");
@@ -4126,7 +4139,8 @@ void run_tica_msm_postproc(const arguments &args,
               executor, info_output, log, args.msm.msm_nts, args.msm.msm_run_its,
               args.msm.msm_run_pcca, args.msm.msm_macrostates,
               args.msm.msm_its_lags, its_solver_mode, args.msm.msm_its_topk,
-              args.msm.msm_its_max_k_full);
+              args.msm.msm_its_max_k_full,
+              args.trajectory_semantics == "continuous");
         }
       } else {
         TitanUI::log_kv(log, "TICA Projections",

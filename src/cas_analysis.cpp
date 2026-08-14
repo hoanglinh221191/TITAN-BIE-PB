@@ -353,19 +353,21 @@ void CASAnalyzer::process_frame(Multi_MOL &pro_in, Multi_MOL &lig,
 
                 cal_effective_born_radii_avx2(
                     worker_frame, scratch.parameters.radius,
-                    scratch.mut_free_radii, Arguments.igb, 0, m_size, nullptr,
-                    nullptr);
+                    mol.info, scratch.mut_free_radii, Arguments.igb, 0, m_size,
+                    nullptr, nullptr);
 
                 if (mutate_receptor && active_lg_size_ > 0) {
                   cal_effective_born_radii_avx2(
                       worker_frame, scratch.parameters.radius,
-                      scratch.mut_complex_radii, Arguments.igb, 0, m_size,
-                      &active_lg_mol, &lig.parameters.radius);
+                      mol.info, scratch.mut_complex_radii, Arguments.igb, 0,
+                      m_size, &active_lg_mol, &lig.parameters.radius,
+                      &lig.info);
                 } else if (!mutate_receptor && rec_size_ > 0) {
                   cal_effective_born_radii_avx2(
                       worker_frame, scratch.parameters.radius,
-                      scratch.mut_complex_radii, Arguments.igb, 0, m_size,
-                      &pro_in.m_mol[num_snap], &pro_in.parameters.radius);
+                      mol.info, scratch.mut_complex_radii, Arguments.igb, 0,
+                      m_size, &pro_in.m_mol[num_snap],
+                      &pro_in.parameters.radius, &pro_in.info);
                 }
 
                 GBSA_energy_snap mut_gbsa_total;

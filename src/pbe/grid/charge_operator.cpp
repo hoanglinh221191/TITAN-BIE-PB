@@ -1053,11 +1053,13 @@ void AnalyzerImpl::build_coefficients(const GridShape &shape,
   };
   const bool refine_faces = surface_uses_face_refinement(args_.surface);
   const bool delphi_vdw_faces = args_.surface == "delphi-vdw";
+  const bool ses_faces = args_.surface == "delphi-ses";
   const double surface_inflate =
       surface_uses_probe_exclusion(args_.surface) ? args_.probe_radius : 0.0;
   const AtomSpatialBins face_bins =
-      refine_faces ? build_atom_bins(surface_atoms, surface_inflate, shape.h)
-                   : AtomSpatialBins{};
+      refine_faces && !ses_faces
+          ? build_atom_bins(surface_atoms, surface_inflate, shape.h)
+          : AtomSpatialBins{};
   auto segment_face_eps = [&](double x0, double y0, double z0, double x1,
                               double y1, double z1) {
     const double inside_fraction = segment_inside_fraction(
@@ -1065,6 +1067,38 @@ void AnalyzerImpl::build_coefficients(const GridShape &shape,
     return dielectric_from_inside_fraction(inside_fraction, eps_in, eps_out);
   };
   auto sampled_face_eps = [&](double x, double y, double z, int axis) {
+    auto ses_inside_at = [&](double sx, double sy, double sz) {
+      const double gx = std::clamp((sx - shape.ox) / shape.h, 0.0,
+                                   static_cast<double>(shape.nx - 1));
+      const double gy = std::clamp((sy - shape.oy) / shape.h, 0.0,
+                                   static_cast<double>(shape.ny - 1));
+      const double gz = std::clamp((sz - shape.oz) / shape.h, 0.0,
+                                   static_cast<double>(shape.nz - 1));
+      const std::size_t i0 = static_cast<std::size_t>(std::floor(gx));
+      const std::size_t j0 = static_cast<std::size_t>(std::floor(gy));
+      const std::size_t k0 = static_cast<std::size_t>(std::floor(gz));
+      const std::size_t i1 = std::min(i0 + 1, shape.nx - 1);
+      const std::size_t j1 = std::min(j0 + 1, shape.ny - 1);
+      const std::size_t k1 = std::min(k0 + 1, shape.nz - 1);
+      const double tx = gx - static_cast<double>(i0);
+      const double ty = gy - static_cast<double>(j0);
+      const double tz = gz - static_cast<double>(k0);
+      auto value = [&](std::size_t i, std::size_t j, std::size_t k) {
+        return static_cast<double>(
+            grid_.inside[idx3(i, j, k, shape.nx, shape.ny)] != 0U);
+      };
+      const double c00 = value(i0, j0, k0) * (1.0 - tx) +
+                         value(i1, j0, k0) * tx;
+      const double c10 = value(i0, j1, k0) * (1.0 - tx) +
+                         value(i1, j1, k0) * tx;
+      const double c01 = value(i0, j0, k1) * (1.0 - tx) +
+                         value(i1, j0, k1) * tx;
+      const double c11 = value(i0, j1, k1) * (1.0 - tx) +
+                         value(i1, j1, k1) * tx;
+      const double c0 = c00 * (1.0 - ty) + c10 * ty;
+      const double c1 = c01 * (1.0 - ty) + c11 * ty;
+      return c0 * (1.0 - tz) + c1 * tz >= 0.5;
+    };
     int inside_samples = 0;
     const double q = 0.25 * shape.h;
     for (int a = -1; a <= 1; a += 2) {
@@ -1082,8 +1116,9 @@ void AnalyzerImpl::build_coefficients(const GridShape &shape,
           sx += static_cast<double>(a) * q;
           sy += static_cast<double>(b) * q;
         }
-        if (point_inside_inflated_atom(face_bins, surface_atoms, sx, sy, sz,
-                                       surface_inflate))
+        if (ses_faces ? ses_inside_at(sx, sy, sz)
+                      : point_inside_inflated_atom(face_bins, surface_atoms, sx,
+                                                   sy, sz, surface_inflate))
           ++inside_samples;
       }
     }

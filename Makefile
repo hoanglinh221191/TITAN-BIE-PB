@@ -12,7 +12,18 @@ LLVM_PREFIX ?= /usr/lib/llvm-$(LLVM_VERSION)
 BUILD_ROOT = build
 BUILD_DIR = $(BUILD_ROOT)/$(PROFILE)
 SRC_ROOT = src
-INCLUDE_DIRS = -I$(SRC_ROOT) -I$(SRC_ROOT)/gmxtraj/include -I$(SRC_ROOT)/eigen
+GENERATED_DIR = $(BUILD_DIR)/generated
+VERSION_FILE = VERSION
+BUILD_INFO_GENERATOR = tools/generate_build_info.py
+BUILD_INFO_TEST = tools/test_build_metadata.py
+BUILD_INFO_HEADER = $(GENERATED_DIR)/titan_version_generated.h
+BUILD_INFO_MANIFEST = $(GENERATED_DIR)/titan_build_manifest.json
+BUILD_INFO_RC = $(GENERATED_DIR)/titan_version.rc
+CLI_REGISTRY_GENERATOR = tools/generate_cli_registry.py
+CLI_PARSER_SOURCE = $(SRC_ROOT)/cli/parse_arguments.cpp
+CLI_REGISTRY_HEADER = $(GENERATED_DIR)/titan_cli_registry_generated.h
+CLI_VALIDATION_TEST = tools/test_cli_validation.py
+INCLUDE_DIRS = -I$(GENERATED_DIR) -I$(SRC_ROOT) -I$(SRC_ROOT)/gmxtraj/include -I$(SRC_ROOT)/eigen
 
 COMMON_CXX_DEFINES = -DTITAN_CXX23_FLOOR_CLANG20_GXX13=1 -DTITAN_RUNTIME_DISPATCH_HOTSPOTS=1
 ifeq ($(PROFILE),native)
@@ -37,7 +48,8 @@ ifeq ($(OS),Windows_NT)
     # ─── CẤU HÌNH CHO WINDOWS (CLANG) ───
     MSYS2_UCRT64_BIN ?= C:/msys64/ucrt64/bin
     CXX  = $(MSYS2_UCRT64_BIN)/clang++.exe
-    RM   = del /Q /F
+    PYTHON ?= $(MSYS2_UCRT64_BIN)/python.exe
+    WINDRES ?= $(MSYS2_UCRT64_BIN)/windres.exe
     TARGET = titan.exe
     PIPE_FLAG = -pipe
     STACK_NOTE_FLAG =
@@ -54,9 +66,21 @@ ifeq ($(OS),Windows_NT)
     LTO_FLAG = -flto=thin
     
     # Lệnh dọn dẹp trên Windows CMD/MSYS2
-    CLEAN_CMD = if exist "$(subst /,\,$(BUILD_DIR))" rmdir /S /Q "$(subst /,\,$(BUILD_DIR))" & if exist "$(TARGET)" del /Q /F "$(TARGET)"
-    CLEAN_ALL_CMD = if exist "$(subst /,\,$(BUILD_ROOT))" rmdir /S /Q "$(subst /,\,$(BUILD_ROOT))" & if exist "$(TARGET)" del /Q /F "$(TARGET)"
-    CLEAN_GENERATED_CMD = $(RM) network_edges.csv network_nodes.csv network_communities.csv network_community_summary.csv network_supergraph.csv pca_fel.csv tica_projections.csv extract_basins.sh tmp_test_dham*.in 2>nul || exit 0
+    # Keep recipe syntax aligned with the shell that invokes mingw32-make.
+    # GitHub Actions uses an MSYS2 shell, while local PowerShell/CMD builds do not.
+    ifneq ($(strip $(MSYSTEM)),)
+        RM = rm -f
+        MKDIR_CMD = mkdir -p "$(@D)"
+        CLEAN_CMD = rm -rf $(BUILD_DIR) $(TARGET)
+        CLEAN_ALL_CMD = rm -rf $(BUILD_ROOT) $(TARGET)
+        CLEAN_GENERATED_CMD = $(RM) network_edges.csv network_nodes.csv network_communities.csv network_community_summary.csv network_supergraph.csv pca_fel.csv tica_projections.csv extract_basins.sh tmp_test_dham*.in 2>/dev/null || true
+    else
+        RM = del /Q /F
+        MKDIR_CMD = if not exist "$(subst /,\,$(@D))" mkdir "$(subst /,\,$(@D))"
+        CLEAN_CMD = if exist "$(subst /,\,$(BUILD_DIR))" rmdir /S /Q "$(subst /,\,$(BUILD_DIR))" & if exist "$(TARGET)" del /Q /F "$(TARGET)"
+        CLEAN_ALL_CMD = if exist "$(subst /,\,$(BUILD_ROOT))" rmdir /S /Q "$(subst /,\,$(BUILD_ROOT))" & if exist "$(TARGET)" del /Q /F "$(TARGET)"
+        CLEAN_GENERATED_CMD = $(RM) network_edges.csv network_nodes.csv network_communities.csv network_community_summary.csv network_supergraph.csv pca_fel.csv tica_projections.csv extract_basins.sh tmp_test_dham*.in 2>nul || exit 0
+    endif
 else
     # ─── CẤU HÌNH CHO LINUX (GCC 13) ───
     TOOLCHAIN_NAME := $(TOOLCHAIN)
@@ -99,6 +123,7 @@ else
         $(error Unsupported TOOLCHAIN '$(TOOLCHAIN)'. Use TOOLCHAIN=auto, gcc, or clang)
     endif
     RM   = rm -f
+    PYTHON ?= python3
     TARGET = titan
     PIPE_FLAG =
     STACK_NOTE_FLAG = -Wa,--noexecstack
@@ -119,28 +144,82 @@ else
 endif
 
 # ─── Tệp nguồn (Sources) ───
-ROOT_SRCS = $(wildcard $(SRC_ROOT)/*.cpp)
+ROOT_SRCS = $(filter-out $(SRC_ROOT)/parse_arguments.cpp,$(wildcard $(SRC_ROOT)/*.cpp))
+CLI_SRCS = $(wildcard $(SRC_ROOT)/cli/*.cpp)
 PBE_GRID_SRCS = $(wildcard $(SRC_ROOT)/pbe/grid/*.cpp)
-PBE_SRCS  = $(wildcard $(SRC_ROOT)/tabi/*.cpp) $(PBE_GRID_SRCS)
+BIE_SRCS = $(wildcard $(SRC_ROOT)/bie/*.cpp) \
+           $(wildcard $(SRC_ROOT)/bie/fmm/cartesian/*.cpp)
+PBE_SRCS  = $(wildcard $(SRC_ROOT)/tabi/*.cpp) $(BIE_SRCS) $(PBE_GRID_SRCS)
 PBCTOPO_SRCS = $(wildcard $(SRC_ROOT)/pbctopo/*.cpp)
+HOLOLIFT_SRCS = $(wildcard $(SRC_ROOT)/hololift/*.cpp)
 GMXTRAJ_SRCS = $(wildcard $(SRC_ROOT)/gmxtraj/*.cpp)
-SRCS  = $(ROOT_SRCS) $(PBE_SRCS) $(PBCTOPO_SRCS) $(GMXTRAJ_SRCS)
+SRCS  = $(ROOT_SRCS) $(CLI_SRCS) $(PBE_SRCS) $(PBCTOPO_SRCS) $(HOLOLIFT_SRCS) $(GMXTRAJ_SRCS)
 OBJS  = $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(SRCS))
 DEPS  = $(OBJS:.o=.d)
+
+ifeq ($(OS),Windows_NT)
+    RESOURCE_OBJ = $(BUILD_DIR)/titan_version_resource.o
+    SCHEMA_SMOKE_TARGET = $(BUILD_DIR)/titan_build_schema_smoke.exe
+    CLI_VALIDATION_SMOKE_TARGET = $(BUILD_DIR)/titan_cli_validation_smoke.exe
+else
+    RESOURCE_OBJ =
+    SCHEMA_SMOKE_TARGET = $(BUILD_DIR)/titan_build_schema_smoke
+    CLI_VALIDATION_SMOKE_TARGET = $(BUILD_DIR)/titan_cli_validation_smoke
+endif
+LINK_INPUTS = $(OBJS) $(RESOURCE_OBJ)
+SCHEMA_SMOKE_CXXFLAGS = $(filter-out -MMD -MP,$(CXXFLAGS))
 
 # ==========================================
 # BUILD RULES
 # ==========================================
 
 .DELETE_ON_ERROR:
-.PHONY: all clean clean-all clean-generated release native portable release-native release-portable print-config
+.PHONY: all build-info cli-registry build-metadata-test version-smoke cli-validation-test clean clean-all clean-generated release native portable release-native release-portable print-config FORCE
+
+FORCE:
+
+$(BUILD_INFO_HEADER): FORCE $(VERSION_FILE) $(BUILD_INFO_GENERATOR)
+	@$(PYTHON) $(BUILD_INFO_GENERATOR) --repo-root . --version-file $(VERSION_FILE) --header-output $(BUILD_INFO_HEADER) --manifest-output $(BUILD_INFO_MANIFEST) --rc-output $(BUILD_INFO_RC) --profile $(PROFILE) --executable-name $(notdir $(TARGET))
+
+build-info: $(BUILD_INFO_HEADER)
+
+$(CLI_REGISTRY_HEADER): $(CLI_PARSER_SOURCE) $(CLI_REGISTRY_GENERATOR)
+	@$(PYTHON) $(CLI_REGISTRY_GENERATOR) --parser $(CLI_PARSER_SOURCE) --output $(CLI_REGISTRY_HEADER)
+
+cli-registry: $(CLI_REGISTRY_HEADER)
+
+build-metadata-test:
+	@$(PYTHON) $(BUILD_INFO_TEST)
+
+$(SCHEMA_SMOKE_TARGET): tools/titan_build_schema_smoke.cpp $(SRC_ROOT)/titan_config_schema.cpp $(BUILD_INFO_HEADER)
+	@echo Compiling build-schema smoke...
+	@$(CXX) $(SCHEMA_SMOKE_CXXFLAGS) tools/titan_build_schema_smoke.cpp $(SRC_ROOT)/titan_config_schema.cpp -o $@ $(LDFLAGS)
+
+$(CLI_VALIDATION_SMOKE_TARGET): tools/titan_cli_validation_smoke.cpp $(CLI_REGISTRY_HEADER)
+	@echo Compiling CLI validation smoke...
+	@$(CXX) $(SCHEMA_SMOKE_CXXFLAGS) tools/titan_cli_validation_smoke.cpp -o $@ $(LDFLAGS)
 
 all: $(TARGET)
 
-$(TARGET): $(OBJS)
+$(OBJS): | $(BUILD_INFO_HEADER) $(CLI_REGISTRY_HEADER)
+
+ifeq ($(OS),Windows_NT)
+$(RESOURCE_OBJ): $(BUILD_INFO_HEADER) $(BUILD_INFO_GENERATOR)
+	@echo Compiling Windows version resource...
+	@$(WINDRES) --input-format=rc --output-format=coff -i $(BUILD_INFO_RC) -o $@
+endif
+
+$(TARGET): $(LINK_INPUTS)
 	@echo Linking $(TARGET) [$(PROFILE)]...
 	@$(CXX) -o $@ $^ $(LDFLAGS)
 	@echo Build successful!
+
+version-smoke: all $(SCHEMA_SMOKE_TARGET)
+	@$(PYTHON) $(BUILD_INFO_TEST) --binary $(TARGET) --manifest $(BUILD_INFO_MANIFEST) --schema-driver $(SCHEMA_SMOKE_TARGET)
+
+cli-validation-test: all $(CLI_VALIDATION_SMOKE_TARGET)
+	@$(CLI_VALIDATION_SMOKE_TARGET)
+	@$(PYTHON) $(CLI_VALIDATION_TEST) --binary $(TARGET)
 
 $(BUILD_DIR)/$(SRC_ROOT)/titan_rf_model.o: CXXFLAGS := $(filter-out -O3,$(CXXFLAGS)) -O0
 
@@ -164,7 +243,7 @@ endif
 $(BUILD_DIR)/%.o: %.cpp
 	@echo Compiling $<...
 ifeq ($(OS),Windows_NT)
-	@if not exist "$(subst /,\,$(@D))" mkdir "$(subst /,\,$(@D))"
+	@$(MKDIR_CMD)
 else
 	@mkdir -p $(@D)
 endif
@@ -210,6 +289,11 @@ print-config:
 	@echo CXX=$(CXX)
 	@echo TITAN_CXX23_FLOOR=$(TITAN_CXX23_FLOOR)
 	@echo BUILD_DIR=$(BUILD_DIR)
+	@echo GENERATED_DIR=$(GENERATED_DIR)
+	@echo VERSION_FILE=$(VERSION_FILE)
+	@echo BUILD_INFO_MANIFEST=$(BUILD_INFO_MANIFEST)
+	@echo CLI_REGISTRY_HEADER=$(CLI_REGISTRY_HEADER)
+	@echo PYTHON=$(PYTHON)
 	@echo ARCH_FLAGS=$(ARCH_FLAGS)
 	@echo COMMON_CXX_DEFINES=$(COMMON_CXX_DEFINES)
 	@echo OPENMP_FLAG=$(OPENMP_FLAG)

@@ -17,7 +17,10 @@ The release centers on two contributions:
 
 The implemented workflow includes:
 
-- watertight analytical solvent-excluded surfaces;
+- watertight analytical patch-ray solvent-excluded surfaces with certified
+  quartic ray intersections, minor-contact-arc handling for unequal expanded
+  radii, spindle-torus inner-sheet rejection, and preservation of distinct
+  re-entrant faces;
 - node-patch boundary-integral discretization;
 - hierarchical Cartesian multipole acceleration for matrix-vector products;
 - sparse near-field block ILU(0) preconditioning;
@@ -30,6 +33,20 @@ explicitly with `-pbe=bie`; `tabi` remains accepted as a compatibility alias
 for archived inputs. This public tree contains the source snapshot and examples
 needed to build, run, and audit the reported workflow.
 
+## Versioned validation snapshot
+
+Tag `titan-bie-pb-v0.5` updates the manuscript-facing source from the earlier
+July 2026 SES snapshot to the hardened analytical SES implementation used for
+the five-test-system preconditioner cohort. The archived matrices contain 90
+rows: five test geometries, three surface representations, and six
+preconditioners. The two graph ILU(0) routes converge in every row; regularized
+rows retain ILU(0) sparsity and are recorded explicitly as
+`*_ilu0_regularized`, not as diagonal fallbacks.
+
+The inputs, scripts, raw matrix CSV files, checksums, and generated manuscript
+tables are under
+[`validation/n5_preconditioner_cohort`](validation/n5_preconditioner_cohort).
+
 ## Build
 
 TITAN requires a C++23 compiler and OpenMP. Eigen is vendored under
@@ -38,7 +55,7 @@ TITAN requires a C++23 compiler and OpenMP. Eigen is vendored under
 ### Windows (MSYS2 UCRT64)
 
 ```powershell
-mingw32-make PROFILE=native TARGET=titan.exe all -j4
+mingw32-make PROFILE=native TARGET=titan.exe all -j8
 ```
 
 The Makefile defaults to `C:/msys64/ucrt64/bin/clang++.exe`. Override

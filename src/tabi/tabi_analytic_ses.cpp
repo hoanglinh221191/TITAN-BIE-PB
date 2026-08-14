@@ -1,4 +1,7 @@
 #include "tabi_analytic_ses.h"
+#include "tabi_ses_quartic.h"
+
+#include "../titan_executor.h"
 
 #include <algorithm>
 #include <array>
@@ -8,14 +11,12 @@
 #include <limits>
 #include <numbers>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 
 namespace TitanPBE::Tabi::analytic_ses {
 namespace {
 
 constexpr double kGeometryRelTol = 2.0e-12;
-constexpr double kAngleTol = 1.0e-12;
 
 struct CellKey {
   int x{0};
@@ -29,24 +30,6 @@ struct CellKeyHash {
     std::size_t hash = static_cast<std::size_t>(key.x) * 73856093U;
     hash ^= static_cast<std::size_t>(key.y) * 19349663U;
     hash ^= static_cast<std::size_t>(key.z) * 83492791U;
-    return hash;
-  }
-};
-
-struct ProbeKey {
-  std::int64_t x{0};
-  std::int64_t y{0};
-  std::int64_t z{0};
-  bool operator==(const ProbeKey &) const = default;
-};
-
-struct ProbeKeyHash {
-  std::size_t operator()(const ProbeKey &key) const noexcept {
-    std::size_t hash = static_cast<std::size_t>(key.x);
-    hash ^= static_cast<std::size_t>(key.y) + 0x9e3779b9U + (hash << 6U) +
-            (hash >> 2U);
-    hash ^= static_cast<std::size_t>(key.z) + 0x9e3779b9U + (hash << 6U) +
-            (hash >> 2U);
     return hash;
   }
 };
@@ -220,23 +203,11 @@ empty_probe_center_local(std::span<const Atom> atoms, double probe_radius,
                                      scale(std::sin(angle), patch.basis_v))));
 }
 
-[[nodiscard]] bool same_probe_key(const ProbeKey &left,
-                                  const ProbeKey &right) noexcept {
-  return left == right;
-}
-
-[[nodiscard]] ProbeKey probe_key(const Vec3 &point) noexcept {
-  constexpr double scale_value = 1.0e8;
-  return {static_cast<std::int64_t>(std::llround(scale_value * point.x)),
-          static_cast<std::int64_t>(std::llround(scale_value * point.y)),
-          static_cast<std::int64_t>(std::llround(scale_value * point.z))};
-}
-
 [[nodiscard]] bool angle_in_interval(double angle,
                                      const AngularInterval &interval) noexcept {
   angle = normalize_angle(angle);
-  return angle >= interval.begin - kAngleTol &&
-         angle <= interval.end + kAngleTol;
+  return angle >= interval.begin - kAnalyticSesAngleTolerance &&
+         angle <= interval.end + kAnalyticSesAngleTolerance;
 }
 
 [[nodiscard]] bool angle_in_exposed_intervals(
@@ -247,12 +218,16 @@ empty_probe_center_local(std::span<const Atom> atoms, double probe_radius,
                      });
 }
 
-[[nodiscard]] bool angle_on_arc_containing(double angle, double begin,
-                                           double end, double anchor) noexcept {
+// The probe touches the two atoms along the minor geodesic between their
+// contact directions.  Selecting the arc through beta=pi is only valid for
+// equal (or nearly equal) expanded radii; for unequal radii both contacts can
+// lie on the same side of pi and that rule selects the solvent-facing major
+// arc instead.
+[[nodiscard]] bool angle_on_minor_arc(double angle, double begin,
+                                      double end) noexcept {
   angle = normalize_angle(angle);
   begin = normalize_angle(begin);
   end = normalize_angle(end);
-  anchor = normalize_angle(anchor);
   const auto ccw_distance = [](double from, double to) {
     const double period = 2.0 * std::numbers::pi;
     double value = to - from;
@@ -261,92 +236,9 @@ empty_probe_center_local(std::span<const Atom> atoms, double probe_radius,
     return value;
   };
   const double span = ccw_distance(begin, end);
-  const bool anchor_on_ccw = ccw_distance(begin, anchor) <= span + kAngleTol;
-  const bool angle_on_ccw = ccw_distance(begin, angle) <= span + kAngleTol;
-  return anchor_on_ccw ? angle_on_ccw : !angle_on_ccw;
-}
-
-[[nodiscard]] double polynomial_value(std::span<const double> coefficients,
-                                      double x) noexcept {
-  double value = 0.0;
-  for (auto it = coefficients.rbegin(); it != coefficients.rend(); ++it)
-    value = value * x + *it;
-  return value;
-}
-
-[[nodiscard]] std::vector<double>
-real_polynomial_roots(std::vector<double> coefficients) {
-  while (coefficients.size() > 1 && std::abs(coefficients.back()) <= 1.0e-18)
-    coefficients.pop_back();
-  const std::size_t degree = coefficients.size() - 1U;
-  if (degree == 0)
-    return {};
-  if (degree == 1)
-    return {-coefficients[0] / coefficients[1]};
-
-  std::vector<double> derivative(degree);
-  for (std::size_t i = 1; i < coefficients.size(); ++i)
-    derivative[i - 1] = static_cast<double>(i) * coefficients[i];
-  std::vector<double> critical = real_polynomial_roots(std::move(derivative));
-  const double leading = std::abs(coefficients.back());
-  double bound = 1.0;
-  for (std::size_t i = 0; i < degree; ++i)
-    bound = std::max(bound, 1.0 + std::abs(coefficients[i]) / leading);
-  critical.erase(std::remove_if(critical.begin(), critical.end(),
-                                [bound](double value) {
-                                  return !std::isfinite(value) ||
-                                         value <= -bound || value >= bound;
-                                }),
-                 critical.end());
-  std::sort(critical.begin(), critical.end());
-  std::vector<double> points;
-  points.reserve(critical.size() + 2U);
-  points.push_back(-bound);
-  points.insert(points.end(), critical.begin(), critical.end());
-  points.push_back(bound);
-
-  double coefficient_scale = 0.0;
-  for (const double value : coefficients)
-    coefficient_scale = std::max(coefficient_scale, std::abs(value));
-  const double value_tolerance = 1.0e-11 * std::max(1.0, coefficient_scale);
-  std::vector<double> roots;
-  for (const double point : critical) {
-    if (std::abs(polynomial_value(coefficients, point)) <= value_tolerance)
-      roots.push_back(point);
-  }
-  for (std::size_t interval = 0; interval + 1 < points.size(); ++interval) {
-    double left = points[interval];
-    double right = points[interval + 1];
-    double f_left = polynomial_value(coefficients, left);
-    double f_right = polynomial_value(coefficients, right);
-    if (std::abs(f_left) <= value_tolerance)
-      roots.push_back(left);
-    if (std::abs(f_right) <= value_tolerance)
-      roots.push_back(right);
-    if ((f_left < 0.0) == (f_right < 0.0))
-      continue;
-    for (int iteration = 0; iteration < 80; ++iteration) {
-      const double middle = 0.5 * (left + right);
-      const double f_middle = polynomial_value(coefficients, middle);
-      if ((f_left < 0.0) == (f_middle < 0.0)) {
-        left = middle;
-        f_left = f_middle;
-      } else {
-        right = middle;
-        f_right = f_middle;
-      }
-    }
-    roots.push_back(0.5 * (left + right));
-  }
-  std::sort(roots.begin(), roots.end());
-  roots.erase(
-      std::unique(roots.begin(), roots.end(),
-                  [](double a, double b) {
-                    return std::abs(a - b) <=
-                           2.0e-9 * std::max({1.0, std::abs(a), std::abs(b)});
-                  }),
-      roots.end());
-  return roots;
+  const bool angle_on_ccw =
+      ccw_distance(begin, angle) <= span + kAnalyticSesAngleTolerance;
+  return span <= std::numbers::pi ? angle_on_ccw : !angle_on_ccw;
 }
 
 [[nodiscard]] bool contact_point_is_exposed(const PatchComplex &complex,
@@ -434,12 +326,13 @@ exposed_circle_intervals(const ToroidalPatch &patch,
   std::sort(events.begin(), events.end());
   events.erase(std::unique(events.begin(), events.end(),
                            [](double a, double b) {
-                             return std::abs(a - b) <= kAngleTol;
+                             return std::abs(a - b) <=
+                                    kAnalyticSesAngleTolerance;
                            }),
                events.end());
-  if (events.empty() || events.front() > kAngleTol)
+  if (events.empty() || events.front() > kAnalyticSesAngleTolerance)
     events.insert(events.begin(), 0.0);
-  if (events.back() < period - kAngleTol)
+  if (events.back() < period - kAnalyticSesAngleTolerance)
     events.push_back(period);
 
   std::vector<AngularInterval> result;
@@ -447,13 +340,14 @@ exposed_circle_intervals(const ToroidalPatch &patch,
   for (std::size_t index = 0; index + 1 < events.size(); ++index) {
     const double begin = events[index];
     const double end = events[index + 1];
-    if (end - begin <= kAngleTol)
+    if (end - begin <= kAnalyticSesAngleTolerance)
       continue;
     const double midpoint = 0.5 * (begin + end);
     if (empty_probe_center_local(atoms, probe_radius,
                                  circle_point(patch, midpoint), blockers,
                                  ignore)) {
-      if (!result.empty() && std::abs(result.back().end - begin) <= kAngleTol)
+      if (!result.empty() &&
+          std::abs(result.back().end - begin) <= kAnalyticSesAngleTolerance)
         result.back().end = end;
       else
         result.push_back({begin, end});
@@ -626,7 +520,8 @@ bool probe_center_is_empty(const PatchComplex &complex, const Vec3 &center,
 }
 
 PatchComplex build_patch_complex(std::span<const Atom> input_atoms,
-                                 double probe_radius) {
+                                 double probe_radius, TitanExecutor *executor,
+                                 bool build_ray_index) {
   PatchComplex complex;
   complex.probe_radius = probe_radius;
   if (!(probe_radius > 0.0) || !std::isfinite(probe_radius)) {
@@ -656,117 +551,151 @@ PatchComplex build_patch_complex(std::span<const Atom> input_atoms,
                                 complex.atoms[i].radius + probe_radius});
   }
 
-  std::unordered_set<ProbeKey, ProbeKeyHash> probe_centers;
-  for (std::size_t i = 0; i < complex.atoms.size(); ++i) {
-    const Vec3 ci = atom_center(complex.atoms[i]);
-    const double ri = complex.atoms[i].radius + probe_radius;
-    for (const std::size_t j : neighbors[i]) {
-      if (j <= i)
-        continue;
-      ++complex.candidate_pairs;
-      const Vec3 cj = atom_center(complex.atoms[j]);
-      const double rj = complex.atoms[j].radius + probe_radius;
-      const Vec3 delta = subtract(cj, ci);
-      const double distance = norm(delta);
-      const double tolerance =
-          kGeometryRelTol * std::max({1.0, ri, rj, distance});
-      if (!(distance > std::abs(ri - rj) + tolerance) ||
-          !(distance < ri + rj - tolerance)) {
-        continue;
-      }
-      const Vec3 axis = scale(1.0 / distance, delta);
-      const double offset =
-          (ri * ri - rj * rj + distance * distance) / (2.0 * distance);
-      const double circle_radius2 = ri * ri - offset * offset;
-      if (!(circle_radius2 > tolerance * tolerance))
-        continue;
-      ToroidalPatch patch;
-      patch.atom_i = i;
-      patch.atom_j = j;
-      patch.axis = axis;
-      patch.basis_u = perpendicular_unit(axis);
-      patch.basis_v = cross(axis, patch.basis_u);
-      patch.circle_center = add(ci, scale(offset, axis));
-      patch.circle_radius = std::sqrt(circle_radius2);
-      patch.axis_offset_i = offset;
-      patch.expanded_radius_i = ri;
-      patch.expanded_radius_j = rj;
-      std::vector<std::size_t> blockers = neighbors[i];
-      blockers.insert(blockers.end(), neighbors[j].begin(), neighbors[j].end());
-      std::sort(blockers.begin(), blockers.end());
-      blockers.erase(std::unique(blockers.begin(), blockers.end()),
-                     blockers.end());
-      patch.exposed_intervals = exposed_circle_intervals(
-          patch, complex.atoms, probe_radius, blockers);
-      if (patch.exposed_intervals.empty()) {
-        ++complex.buried_pair_circles;
-      } else {
-        complex.tori.push_back(std::move(patch));
-      }
+  struct PatchSlab {
+    std::vector<ToroidalPatch> tori;
+    std::vector<ReentrantPatch> reentrant;
+    std::size_t candidate_pairs{0};
+    std::size_t candidate_triples{0};
+    std::size_t buried_pair_circles{0};
+    std::size_t rejected_probe_centres{0};
+  };
+  const std::size_t workers =
+      executor == nullptr
+          ? 1U
+          : std::min(executor->capacity(), complex.atoms.size());
+  std::vector<PatchSlab> slabs(workers);
+  const auto build_slab = [&](std::size_t worker, std::size_t begin_atom,
+                              std::size_t end_atom) {
+    PatchSlab &slab = slabs[worker];
+    slab.tori.reserve((end_atom - begin_atom) * 6U);
+    slab.reentrant.reserve((end_atom - begin_atom) * 4U);
+    for (std::size_t i = begin_atom; i < end_atom; ++i) {
+      const Vec3 ci = atom_center(complex.atoms[i]);
+      const double ri = complex.atoms[i].radius + probe_radius;
+      for (const std::size_t j : neighbors[i]) {
+        if (j <= i)
+          continue;
+        ++slab.candidate_pairs;
+        const Vec3 cj = atom_center(complex.atoms[j]);
+        const double rj = complex.atoms[j].radius + probe_radius;
+        const Vec3 delta = subtract(cj, ci);
+        const double distance = norm(delta);
+        const double tolerance =
+            kGeometryRelTol * std::max({1.0, ri, rj, distance});
+        if (!(distance > std::abs(ri - rj) + tolerance) ||
+            !(distance < ri + rj - tolerance)) {
+          continue;
+        }
+        const Vec3 axis = scale(1.0 / distance, delta);
+        const double offset =
+            (ri * ri - rj * rj + distance * distance) / (2.0 * distance);
+        const double circle_radius2 = ri * ri - offset * offset;
+        if (!(circle_radius2 > tolerance * tolerance))
+          continue;
+        ToroidalPatch patch;
+        patch.atom_i = i;
+        patch.atom_j = j;
+        patch.axis = axis;
+        patch.basis_u = perpendicular_unit(axis);
+        patch.basis_v = cross(axis, patch.basis_u);
+        patch.circle_center = add(ci, scale(offset, axis));
+        patch.circle_radius = std::sqrt(circle_radius2);
+        patch.axis_offset_i = offset;
+        patch.expanded_radius_i = ri;
+        patch.expanded_radius_j = rj;
+        std::vector<std::size_t> blockers = neighbors[i];
+        blockers.insert(blockers.end(), neighbors[j].begin(),
+                        neighbors[j].end());
+        std::sort(blockers.begin(), blockers.end());
+        blockers.erase(std::unique(blockers.begin(), blockers.end()),
+                       blockers.end());
+        patch.exposed_intervals = exposed_circle_intervals(
+            patch, complex.atoms, probe_radius, blockers);
+        if (patch.exposed_intervals.empty()) {
+          ++slab.buried_pair_circles;
+        } else {
+          slab.tori.push_back(std::move(patch));
+        }
 
-      std::vector<std::size_t> common;
-      std::set_intersection(neighbors[i].begin(), neighbors[i].end(),
-                            neighbors[j].begin(), neighbors[j].end(),
-                            std::back_inserter(common));
-      for (const std::size_t k : common) {
-        if (k <= j)
-          continue;
-        ++complex.candidate_triples;
-        bool valid = false;
-        bool tangent = false;
-        const auto centers = three_sphere_intersections(
-            complex.atoms[i], complex.atoms[j], complex.atoms[k], probe_radius,
-            valid, tangent);
-        if (!valid)
-          continue;
-        const std::array<std::size_t, 3> triple = {i, j, k};
-        const std::size_t count = tangent ? 1U : 2U;
-        for (std::size_t side = 0; side < count; ++side) {
-          const Vec3 center = centers[side];
-          if (!empty_probe_center_local(complex.atoms, probe_radius, center,
-                                        neighbors[i], triple)) {
-            ++complex.rejected_probe_centres;
+        std::vector<std::size_t> common;
+        std::set_intersection(neighbors[i].begin(), neighbors[i].end(),
+                              neighbors[j].begin(), neighbors[j].end(),
+                              std::back_inserter(common));
+        for (const std::size_t k : common) {
+          if (k <= j)
             continue;
-          }
-          const ProbeKey key = probe_key(center);
-          const auto [position, inserted] = probe_centers.insert(key);
-          if (!inserted && same_probe_key(*position, key))
+          ++slab.candidate_triples;
+          bool valid = false;
+          bool tangent = false;
+          const auto centers = three_sphere_intersections(
+              complex.atoms[i], complex.atoms[j], complex.atoms[k],
+              probe_radius, valid, tangent);
+          if (!valid)
             continue;
-          ReentrantPatch patch;
-          patch.atoms = triple;
-          patch.probe_center = center;
-          for (std::size_t q = 0; q < 3; ++q) {
-            const std::size_t atom_index = triple[q];
-            patch.contact_directions[q] = normalized(
-                subtract(atom_center(complex.atoms[atom_index]), center));
+          const std::array<std::size_t, 3> triple = {i, j, k};
+          const std::size_t count = tangent ? 1U : 2U;
+          for (std::size_t side = 0; side < count; ++side) {
+            const Vec3 center = centers[side];
+            if (!empty_probe_center_local(complex.atoms, probe_radius, center,
+                                          neighbors[i], triple)) {
+              ++slab.rejected_probe_centres;
+              continue;
+            }
+            ReentrantPatch patch;
+            patch.atoms = triple;
+            patch.probe_center = center;
+            for (std::size_t q = 0; q < 3; ++q) {
+              const std::size_t atom_index = triple[q];
+              patch.contact_directions[q] = normalized(
+                  subtract(atom_center(complex.atoms[atom_index]), center));
+            }
+            slab.reentrant.push_back(patch);
           }
-          complex.reentrant.push_back(patch);
         }
       }
     }
+  };
+  if (executor != nullptr && workers > 1U)
+    executor->parallel_for(complex.atoms.size(), workers, 8U, build_slab);
+  else
+    build_slab(0U, 0U, complex.atoms.size());
+
+  std::size_t torus_count = 0U;
+  std::size_t reentrant_count = 0U;
+  for (const PatchSlab &slab : slabs) {
+    complex.candidate_pairs += slab.candidate_pairs;
+    complex.candidate_triples += slab.candidate_triples;
+    complex.buried_pair_circles += slab.buried_pair_circles;
+    complex.rejected_probe_centres += slab.rejected_probe_centres;
+    torus_count += slab.tori.size();
+    reentrant_count += slab.reentrant.size();
   }
-  build_ray_buckets(complex);
+  complex.tori.reserve(torus_count);
+  complex.reentrant.reserve(reentrant_count);
+  for (PatchSlab &slab : slabs) {
+    for (ToroidalPatch &patch : slab.tori)
+      complex.tori.push_back(std::move(patch));
+    // Different atom triples that share one probe centre describe distinct
+    // faces of a higher-order spherical polygon. Keeping only the first
+    // quantized centre silently removed valid reentrant area for four-atom
+    // and near-degenerate contacts.
+    for (ReentrantPatch &patch : slab.reentrant)
+      complex.reentrant.push_back(std::move(patch));
+  }
+  if (build_ray_index)
+    build_ray_buckets(complex);
   complex.status = "pass";
   return complex;
 }
 
-std::vector<RayHit> intersect_ray_x(const PatchComplex &complex, double y,
-                                    double z) {
+namespace {
+
+std::vector<RayHit> intersect_ray_x_bucket(const PatchComplex &complex,
+                                           const RayBucket &bucket, double y,
+                                           double z) {
   std::vector<RayHit> hits;
   if (complex.status != "pass")
     return hits;
-
-  if (complex.ray_buckets.empty() || y < complex.ray_bucket_origin.y ||
-      z < complex.ray_bucket_origin.z)
-    return hits;
-  const std::size_t iy = static_cast<std::size_t>(
-      std::floor((y - complex.ray_bucket_origin.y) / complex.ray_bucket_size));
-  const std::size_t iz = static_cast<std::size_t>(
-      std::floor((z - complex.ray_bucket_origin.z) / complex.ray_bucket_size));
-  if (iy >= complex.ray_bucket_ny || iz >= complex.ray_bucket_nz)
-    return hits;
-  const RayBucket &bucket =
-      complex.ray_buckets[iy + complex.ray_bucket_ny * iz];
   const auto covered_by_reentrant_probe = [&](const Vec3 &point,
                                               std::size_t ignore) {
     const double radius2 = complex.probe_radius * complex.probe_radius;
@@ -794,21 +723,28 @@ std::vector<RayHit> intersect_ray_x(const PatchComplex &complex, double y,
 
   for (const std::size_t index : bucket.tori) {
     const ToroidalPatch &patch = complex.tori[index];
-    const Vec3 q0{-patch.circle_center.x, y - patch.circle_center.y,
-                  z - patch.circle_center.z};
+    // Form the quartic in a coordinate t local to the torus centre.  Using the
+    // world x coordinate here used to inflate coefficient dynamic range under
+    // a rigid translation and changed the number of reported intersections.
+    const double center_coordinate = patch.circle_center.x;
+    const Vec3 q0{0.0, y - patch.circle_center.y, z - patch.circle_center.z};
     const double axial0 = dot(q0, patch.axis);
     const double q0_squared = norm_squared(q0);
     const double major2 = patch.circle_radius * patch.circle_radius;
     const double minor2 = complex.probe_radius * complex.probe_radius;
     const double p0 = q0_squared + major2 - minor2;
-    const double p1 = 2.0 * q0.x;
+    const double p1 = 0.0;
     const double u0 = q0_squared - axial0 * axial0;
     const double u1 = 2.0 * (q0.x - patch.axis.x * axial0);
     const double u2 = 1.0 - patch.axis.x * patch.axis.x;
-    const std::vector<double> coefficients = {
+    const std::array<double, 5> coefficients = {
         p0 * p0 - 4.0 * major2 * u0, 2.0 * p0 * p1 - 4.0 * major2 * u1,
         p1 * p1 + 2.0 * p0 - 4.0 * major2 * u2, 2.0 * p1, 1.0};
-    for (const double x : real_polynomial_roots(coefficients)) {
+    const QuarticRoots roots = solve_real_quartic(coefficients);
+    if (!roots.certified)
+      continue;
+    for (std::size_t root = 0; root < roots.count; ++root) {
+      const double x = center_coordinate + roots.values[root];
       const Vec3 point{x, y, z};
       const Vec3 q = subtract(point, patch.circle_center);
       const double axial = dot(q, patch.axis);
@@ -823,7 +759,18 @@ std::vector<RayHit> intersect_ray_x(const PatchComplex &complex, double y,
         continue;
       const Vec3 probe_center =
           add(patch.circle_center, scale(patch.circle_radius, radial));
-      const Vec3 tube_direction = normalized(subtract(point, probe_center));
+      const Vec3 tube_vector = subtract(point, probe_center);
+      const double tube_length = norm(tube_vector);
+      const double tube_tolerance =
+          2.0e-9 * std::max({1.0, patch.circle_radius, complex.probe_radius});
+      // The polynomial implicitization contains the self-intersecting inner
+      // sheet of a spindle torus (major radius < probe radius).  It is not the
+      // envelope generated by the closest probe-centre circle point.  Do not
+      // turn that algebraic branch into a seemingly valid surface normal by
+      // normalizing it blindly.
+      if (std::abs(tube_length - complex.probe_radius) > tube_tolerance)
+        continue;
+      const Vec3 tube_direction = scale(1.0 / tube_length, tube_vector);
       const Atom &atom_i = complex.atoms[patch.atom_i];
       const Atom &atom_j = complex.atoms[patch.atom_j];
       const double center_distance =
@@ -836,7 +783,7 @@ std::vector<RayHit> intersect_ray_x(const PatchComplex &complex, double y,
       const double beta_j = normalize_angle(std::atan2(
           (center_distance - patch.axis_offset_i) / patch.expanded_radius_j,
           -patch.circle_radius / patch.expanded_radius_j));
-      if (!angle_on_arc_containing(beta, beta_i, beta_j, std::numbers::pi))
+      if (!angle_on_minor_arc(beta, beta_i, beta_j))
         continue;
       if (covered_by_reentrant_probe(point,
                                      std::numeric_limits<std::size_t>::max()))
@@ -880,6 +827,23 @@ std::vector<RayHit> intersect_ray_x(const PatchComplex &complex, double y,
     deduplicated.push_back(hit);
   }
   return deduplicated;
+}
+
+} // namespace
+
+std::vector<RayHit> intersect_ray_x(const PatchComplex &complex, double y,
+                                    double z) {
+  if (complex.status != "pass" || complex.ray_buckets.empty() ||
+      y < complex.ray_bucket_origin.y || z < complex.ray_bucket_origin.z)
+    return {};
+  const std::size_t iy = static_cast<std::size_t>(
+      std::floor((y - complex.ray_bucket_origin.y) / complex.ray_bucket_size));
+  const std::size_t iz = static_cast<std::size_t>(
+      std::floor((z - complex.ray_bucket_origin.z) / complex.ray_bucket_size));
+  if (iy >= complex.ray_bucket_ny || iz >= complex.ray_bucket_nz)
+    return {};
+  return intersect_ray_x_bucket(
+      complex, complex.ray_buckets[iy + complex.ray_bucket_ny * iz], y, z);
 }
 
 } // namespace TitanPBE::Tabi::analytic_ses

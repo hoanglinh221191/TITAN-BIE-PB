@@ -1,7 +1,10 @@
 #include "arguments.h"
 #include "pbctopo/config.h"
+#include "tabi/types.h"
+#include "titan_segment_config.h"
 #include "titan_tpt.h"
 #include "titan_ui.h"
+#include "titan_version_info.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -56,8 +59,9 @@ int arguments::recheck_and_change_pdb_input() {
   return 0;
 }
 
-string arguments::set_Buildnumber() { return "20260406"; }
-string arguments::get_build_number() const { return "20260406"; }
+string arguments::get_build_number() const {
+  return std::string(titan_build::full_version());
+}
 
 string arguments::get_pdbOutput() const {
   if (opdb_name_explicit && !out_pdb_name.empty())
@@ -141,6 +145,18 @@ int arguments::post_process() {
       eq_weight_source != "dham" && eq_weight_source != "mbar") {
     TitanUI::print_error(
         "-eq-weight-source must be auto, uniform, dham, or mbar.");
+    exit(EXIT_FAILURE);
+  }
+  std::transform(trajectory_semantics.begin(), trajectory_semantics.end(),
+                 trajectory_semantics.begin(), [](unsigned char c) {
+                   if (c == '-')
+                     return '_';
+                   return static_cast<char>(std::tolower(c));
+                 });
+  if (trajectory_semantics != "continuous" &&
+      trajectory_semantics != "remd_state") {
+    TitanUI::print_error(
+        "-trajectory-semantics must be continuous or remd-state.");
     exit(EXIT_FAILURE);
   }
   if (mbar.flag_mbar) {
@@ -449,6 +465,18 @@ int arguments::post_process() {
       }
     }
   }
+  if (ifp.pbctopo_certified_only) {
+    if (!ifp.flag_ifp) {
+      TitanUI::print_error(
+          "IFP: -ifp-pbctopo-certified-only requires -ifp.");
+      exit(EXIT_FAILURE);
+    }
+    if (!pbc.solv_pbctopo) {
+      TitanUI::print_error(
+          "IFP: -ifp-pbctopo-certified-only requires -pbctopo=true.");
+      exit(EXIT_FAILURE);
+    }
+  }
   if (awh.flag_awh_ifp) {
     if (!ifp.flag_ifp) {
       TitanUI::print_error(
@@ -688,6 +716,82 @@ int arguments::post_process() {
   }
   if (output_manifest.dry_run)
     output_manifest.output_manifest = true;
+  if (!segments.config_file.empty()) {
+    try {
+      const titan_segments::Config segment_config =
+          titan_segments::load_config(segments.config_file);
+      interface_analysis.uses_mol2 = false;
+      if (interface_analysis.flag_interface_analysis) {
+        const titan_segments::Entity *core_a =
+            segment_config.entity_for_role("core_a");
+        const titan_segments::Entity *core_b =
+            segment_config.entity_for_role("core_b");
+        if (core_a == nullptr || core_b == nullptr) {
+          TitanUI::print_error(
+              "Interface analysis: the segment config must define roles "
+              "core_a and core_b.");
+          exit(EXIT_FAILURE);
+        }
+        const titan_segments::Entity *partner =
+            segment_config.entity_for_role("partner");
+        interface_analysis.uses_mol2 =
+            core_a->molecule == 2 || core_b->molecule == 2 ||
+            (partner != nullptr && partner->molecule == 2);
+      }
+    } catch (const std::exception &e) {
+      TitanUI::print_error(e.what());
+      exit(EXIT_FAILURE);
+    }
+  } else if (interface_analysis.flag_interface_analysis) {
+    TitanUI::print_error(
+        "Interface analysis: -interface-analysis requires "
+        "-segment-config or -interface-config.");
+    exit(EXIT_FAILURE);
+  }
+  if (interface_analysis.flag_interface_analysis) {
+    std::transform(interface_analysis.contact_mode.begin(),
+                   interface_analysis.contact_mode.end(),
+                   interface_analysis.contact_mode.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::replace(interface_analysis.contact_mode.begin(),
+                 interface_analysis.contact_mode.end(), '_', '-');
+    if (interface_analysis.contact_mode == "sidechain")
+      interface_analysis.contact_mode = "sidechain-com";
+    if (interface_analysis.contact_mode == "backbone")
+      interface_analysis.contact_mode = "bb";
+    if (interface_analysis.contact_mode != "sidechain-com" &&
+        interface_analysis.contact_mode != "sidechain-heavy" &&
+        interface_analysis.contact_mode != "cb" &&
+        interface_analysis.contact_mode != "ca" &&
+        interface_analysis.contact_mode != "bb") {
+      TitanUI::print_error(
+          "Interface analysis: -interface-contact-mode must be one of "
+          "sidechain-com, sidechain-heavy, cb, ca, bb.");
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(interface_analysis.cutoff_ang) ||
+        interface_analysis.cutoff_ang <= 0.0) {
+      TitanUI::print_error("Interface analysis: -interface-cut must be > 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (interface_analysis.state_min_contacts < 1) {
+      TitanUI::print_error(
+          "Interface analysis: -interface-state-min-contacts must be >= 1.");
+      exit(EXIT_FAILURE);
+    }
+    if (interface_analysis.sasa_stride < 0) {
+      TitanUI::print_error(
+          "Interface analysis: -interface-sasa-stride must be >= 0.");
+      exit(EXIT_FAILURE);
+    }
+    if (interface_analysis.sasa_points < 12) {
+      TitanUI::print_error(
+          "Interface analysis: -interface-sasa-points must be >= 12.");
+      exit(EXIT_FAILURE);
+    }
+  }
   if (cmap.legacy_alias_enabled) {
     cmap.flag_cmap = true;
     cmap.mode = "sidechain-com";
@@ -1258,6 +1362,10 @@ int arguments::post_process() {
       cout << "GBSA Error: -gbsa-perf must be off, summary, or detail.\n";
       exit(EXIT_FAILURE);
     }
+    if (gbsa_sasa_points < 24 || gbsa_sasa_points > 8192) {
+      cout << "GBSA Error: -gbsa-sasa-points must be in [24, 8192].\n";
+      exit(EXIT_FAILURE);
+    }
     if (entropy == false) {
       TitanUI::print_info(
           "Note: -gbsa option is on, will automatically activate -entropy "
@@ -1276,6 +1384,31 @@ int arguments::post_process() {
     }
     if (saltcon < 0.0) {
       cout << "GBSA Error: Salt concentration (saltcon) cannot be negative!\n";
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(gbsa_temperature) || gbsa_temperature <= 0.0) {
+      cout << "GBSA Error: -gbsa-temp must be a positive finite temperature "
+              "in kelvin.\n";
+      exit(EXIT_FAILURE);
+    }
+    if (gbsa_ie_block != "auto") {
+      try {
+        if (std::stoi(gbsa_ie_block) <= 0)
+          throw std::invalid_argument("non-positive");
+      } catch (...) {
+        cout << "GBSA Error: -gbsa-ie-block must be auto or a positive "
+                "integer.\n";
+        exit(EXIT_FAILURE);
+      }
+    }
+    if (gbsa_ie_min_samples <= 0) {
+      cout << "GBSA Error: -gbsa-ie-min-samples must be > 0.\n";
+      exit(EXIT_FAILURE);
+    }
+    if (!std::isfinite(gbsa_ie_filter_sigma) ||
+        gbsa_ie_filter_sigma < 0.0) {
+      cout << "GBSA Error: -gbsa-ie-filter-sigma must be finite and >= 0 "
+              "(0 disables filtering).\n";
       exit(EXIT_FAILURE);
     }
   }
@@ -1418,6 +1551,19 @@ int arguments::post_process() {
         pbe.tabi_primary_surface != "analytic-ses") {
       TitanUI::print_error(
           "PBE: -pbe-bie-primary-surface must be sphere-patch, grid-ses, or analytic-ses.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_analytic_ses_engine != "current" &&
+        pbe.tabi_analytic_ses_engine != "patch-ray-experimental") {
+      TitanUI::print_error(
+          "PBE: -pbe-bie-analytic-ses-engine must be current or patch-ray-experimental.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_analytic_ses_engine != "current" &&
+        (pbe.backend != "tabi" ||
+         pbe.tabi_primary_surface != "analytic-ses")) {
+      TitanUI::print_error(
+          "PBE: -pbe-bie-analytic-ses-engine=patch-ray-experimental requires -pbe=bie and -pbe-bie-primary-surface=analytic-ses.");
       exit(EXIT_FAILURE);
     }
     if (!std::isfinite(pbe.tabi_ses_grid_spacing) ||
@@ -1753,12 +1899,40 @@ int arguments::post_process() {
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_fmm_engine != "cartesian" &&
+        pbe.tabi_fmm_engine != "cartesian-full-experimental" &&
         pbe.tabi_fmm_engine != "kifmm-lite" &&
         pbe.tabi_fmm_engine != "kifmm-local" &&
         pbe.tabi_fmm_engine != "kifmm-lite-experimental" &&
         pbe.tabi_fmm_engine != "kifmm-channel-hybrid-experimental") {
       TitanUI::print_error(
-          "PBE: -pbe-bie-fmm-engine must be cartesian, kifmm-lite, kifmm-local, kifmm-lite-experimental, or kifmm-channel-hybrid-experimental.");
+          "PBE: -pbe-bie-fmm-engine must be cartesian, cartesian-full-experimental, kifmm-lite, kifmm-local, kifmm-lite-experimental, or kifmm-channel-hybrid-experimental.");
+      exit(EXIT_FAILURE);
+    }
+    const bool cartesian_full_experimental =
+        pbe.tabi_fmm_engine == "cartesian-full-experimental";
+    if (cartesian_full_experimental &&
+        pbe.bie_fmm_cartesian_order != 1 &&
+        pbe.bie_fmm_cartesian_order != 4) {
+      TitanUI::print_error(
+          "PBE: -pbe-bie-fmm-engine=cartesian-full-experimental requires -pbe-bie-fmm-cartesian-order=1 or 4.");
+      exit(EXIT_FAILURE);
+    }
+    if (!cartesian_full_experimental && pbe.bie_fmm_cartesian_order != 0) {
+      TitanUI::print_error(
+          "PBE: -pbe-bie-fmm-cartesian-order is only valid with -pbe-bie-fmm-engine=cartesian-full-experimental.");
+      exit(EXIT_FAILURE);
+    }
+    if (cartesian_full_experimental && pbe.tabi_fmm_local != "off") {
+      TitanUI::print_error(
+          "PBE: Cartesian full FMM is a separate engine and requires -pbe-bie-fmm-local=off.");
+      exit(EXIT_FAILURE);
+    }
+    if (cartesian_full_experimental &&
+        !(pbe.backend == "tabi" && pbe.tabi_sum == "treecode" &&
+          pbe.tabi_formulation == "jcp2013-treecode" &&
+          pbe.tabi_derivatives == "analytic")) {
+      TitanUI::print_error(
+          "PBE: Cartesian full FMM requires the P1 JCP treecode workflow with analytic derivatives; select -pbe=bie -pbe-bie-fast-operator=p1.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_kifmm_order < 2 || pbe.tabi_kifmm_order > 16 ||
@@ -2039,6 +2213,53 @@ int arguments::post_process() {
       TitanUI::print_error(
           "PBE: -pbe-bie-fmm-cartesian-audit=on requires analytical FMM/M2L TABI treecode with -pbe-bie-matvec-audit=sampled-detail and Taylor order 2, 3, 4, or 5.");
       exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_cartesian_error_audit != "off" &&
+        pbe.tabi_fmm_cartesian_error_audit != "channel-shadow" &&
+        pbe.tabi_fmm_cartesian_error_audit !=
+            "channel-shadow-retry-global-theta015") {
+      TitanUI::print_error(
+          "PBE: -pbe-bie-fmm-cartesian-error-audit must be off, channel-shadow, or channel-shadow-retry-global-theta015.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_cartesian_error_audit == "channel-shadow" &&
+        !(pbe.backend == "tabi" && pbe.tabi_sum == "treecode" &&
+          pbe.tabi_fmm_engine == "cartesian-full-experimental" &&
+          pbe.bie_fmm_cartesian_order == 1 &&
+          pbe.tabi_discretization == "node-patch" && pbe.salt > 0.0 &&
+          pbe.tabi_node_patch_operator_audit == "on")) {
+      TitanUI::print_error(
+          "PBE: -pbe-bie-fmm-cartesian-error-audit=channel-shadow requires coupled node-patch Cartesian full FMM order 1 with -pbe-bie-node-patch-operator-audit=on.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_fmm_cartesian_error_audit ==
+        "channel-shadow-retry-global-theta015") {
+      const int retry_effective_leaf =
+          pbe.tabi_tree_leaf_size_explicit ? pbe.tabi_tree_leaf_size : 64;
+      const double retry_effective_theta =
+          pbe.tabi_tree_opening_theta_explicit
+              ? pbe.tabi_tree_opening_theta
+              : 0.20;
+      const bool retry_scope =
+          pbe.backend == "tabi" && pbe.tabi_sum == "treecode" &&
+          pbe.tabi_formulation == "jcp2013-treecode" &&
+          pbe.tabi_fmm_m2l == "single-matvec-analytic" &&
+          pbe.tabi_fmm_engine == "cartesian-full-experimental" &&
+          pbe.bie_fmm_cartesian_order == 1 &&
+          pbe.tabi_geometry == "triangle" &&
+          pbe.tabi_discretization == "node-patch" && pbe.salt > 0.0 &&
+          pbe.tabi_node_patch_operator_audit == "on" &&
+          !pbe.tabi_surface_only && pbe.tabi_precond_explicit &&
+          pbe.tabi_precond_requested == "fmm-nearfield-ilu0" &&
+          pbe.tabi_precond == "fmm-nearfield-ilu0" &&
+          retry_effective_leaf == 64 &&
+          TitanPBE::fmm_cartesian_retry_theta_matches(retry_effective_theta,
+                                                       0.20);
+      if (!retry_scope) {
+        TitanUI::print_error(
+            "PBE: -pbe-bie-fmm-cartesian-error-audit=channel-shadow-retry-global-theta015 requires TABI JCP treecode coupled node-patch Cartesian full FMM order 1, salt>0, node-patch audit=on, surface-only=false, explicit -pbe-bie-precond=fmm-nearfield-ilu0, and effective leaf=64/theta=0.20.");
+        exit(EXIT_FAILURE);
+      }
     }
     if (pbe.tabi_precond_ilu_regularization != "off" &&
         pbe.tabi_precond_ilu_regularization != "adaptive") {
@@ -2386,6 +2607,12 @@ int arguments::post_process() {
         pbe.tabi_matvec_audit_sample_count > 4096) {
       TitanUI::print_error(
           "PBE: -pbe-bie-matvec-audit-sample-count must be between 128 and 4096.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.tabi_node_patch_operator_audit != "on" &&
+        pbe.tabi_node_patch_operator_audit != "off") {
+      TitanUI::print_error(
+          "PBE: -pbe-bie-node-patch-operator-audit must be on or off.");
       exit(EXIT_FAILURE);
     }
     if (pbe.tabi_target_batch_size != 1 &&
@@ -3030,13 +3257,6 @@ int arguments::post_process() {
           "PBE: hidden parity diagnostics require -pbe-test-pqr.");
       exit(EXIT_FAILURE);
     }
-    if (pbe.dgsolv && !pbe.test_pqr.empty() && pbe.backend != "tabi") {
-      TitanUI::print_error(
-          "PBE: -pbe-dgsolv is not compatible with the hidden PQR fixture "
-          "adapter for grid solves; use BIE for a single-system reaction-field "
-          "solvation energy or run a native two-molecule TITAN input.");
-      exit(EXIT_FAILURE);
-    }
     if (pbe.pbsa && !pbe.test_pqr.empty()) {
       TitanUI::print_error(
           "PBSA: -pbsa is not compatible with the hidden PQR fixture adapter; "
@@ -3133,6 +3353,11 @@ int arguments::post_process() {
         pbe.pbsa_grid_reuse != "auto") {
       TitanUI::print_error(
           "PBSA: -pbsa-grid-reuse must be off, validate, or auto.");
+      exit(EXIT_FAILURE);
+    }
+    if (pbe.pbsa_sasa_points < 24 || pbe.pbsa_sasa_points > 8192) {
+      TitanUI::print_error(
+          "PBSA: -pbsa-sasa-points must be in [24, 8192].");
       exit(EXIT_FAILURE);
     }
     if (pbe.timing != "off" && pbe.timing != "summary" &&
@@ -3498,6 +3723,54 @@ int arguments::post_process() {
     }
   }
 
+  // Run this guard after all module implication rules above. For example,
+  // -validation and MBAR/TICA domains can enable MSM after initial parsing.
+  if (trajectory_semantics == "remd_state") {
+    if (mbar.flag_mbar && mbar.temp_mode != "fixed") {
+      TitanUI::print_error(
+          "MBAR: fixed-temperature REMD state streams require "
+          "-mbar-temp-mode=fixed. Instantaneous kinetic temperature is not "
+          "the thermodynamic-state label.");
+      exit(EXIT_FAILURE);
+    }
+    if (dham.flag_dham) {
+      TitanUI::print_error(
+          "DHAM/dTRAM transition counts require contiguous trajectory "
+          "segments within each thermodynamic state. Fixed-temperature REMD "
+          "streams cross accepted exchanges; use MBAR for equilibrium "
+          "reweighting or provide exchange-segmented continuous input.");
+      exit(EXIT_FAILURE);
+    }
+    if (validation.flag_validation) {
+      TitanUI::print_error(
+          "Validation: VAMP/CK validation requires continuous trajectories. "
+          "Fixed-temperature REMD state streams contain configuration swaps; "
+          "remove -validation or provide continuous trajectories.");
+      exit(EXIT_FAILURE);
+    }
+    if (hbk.flag_hbk || flag_allostery || corr_knn.flag_corr_knn) {
+      TitanUI::print_error(
+          "Kinetic correlation modules (-hbk, -allostery, -corr-knn) require "
+          "continuous trajectories and cannot run with "
+          "-trajectory-semantics=remd-state.");
+      exit(EXIT_FAILURE);
+    }
+    if (tpt.flag_tpt && tpt.mode == "kinetic" &&
+        tpt.demux_map_file.empty()) {
+      TitanUI::print_error(
+          "Kinetic TPT on REMD state trajectories requires "
+          "-tpt-demux-map to reconstruct continuous walker trajectories.");
+      exit(EXIT_FAILURE);
+    }
+    if (msm.flag_msm) {
+      msm.msm_run_its = false;
+      TitanUI::print_warning(
+          "REMD state trajectories: MSM/TICA are descriptive state-space "
+          "models only. Absolute timescales, ITS, CK, and kinetic claims are "
+          "disabled because accepted exchanges break physical continuity.");
+    }
+  }
+
   if (flag_allostery) {
     if (allostery_tau <= 0) {
       TitanUI::print_error("Allostery: -allostery-tau must be > 0.");
@@ -3577,6 +3850,11 @@ int arguments::post_process() {
                  pbc.pbctopo_mode.begin(), [](unsigned char c) {
                    return static_cast<char>(std::tolower(c));
                  });
+  std::transform(pbc.pbctopo_search_policy.begin(),
+                 pbc.pbctopo_search_policy.end(),
+                 pbc.pbctopo_search_policy.begin(), [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
   std::transform(pbc.pbctopo_anchor_metrics.begin(),
                  pbc.pbctopo_anchor_metrics.end(),
                  pbc.pbctopo_anchor_metrics.begin(), [](unsigned char c) {
@@ -3589,6 +3867,44 @@ int arguments::post_process() {
   if (pbc.pbctopo_mode != "vibe" && pbc.pbctopo_mode != "llps-local") {
     TitanUI::print_error(
         "PBCTOPO: -pbctopo-mode must be one of vibe, llps-local.");
+    exit(EXIT_FAILURE);
+  }
+  if (pbc.pbctopo_search_policy != "fast-certified" &&
+      pbc.pbctopo_search_policy != "audit-exact") {
+    TitanUI::print_error(
+        "PBCTOPO: -pbctopo-search-policy must be one of fast-certified, "
+        "audit-exact.");
+    exit(EXIT_FAILURE);
+  }
+  if (pbc.pbctopo_mode == "llps-local" &&
+      pbc.pbctopo_search_policy != "fast-certified") {
+    TitanUI::print_error(
+        "PBCTOPO: audit-exact search policy is only valid in vibe mode.");
+    exit(EXIT_FAILURE);
+  }
+  if (pbc.pbctopo_audit_max_states <= 0 ||
+      pbc.pbctopo_audit_max_states > 1000000000) {
+    TitanUI::print_error(
+        "PBCTOPO: -pbctopo-audit-max-states must be in 1..1000000000.");
+    exit(EXIT_FAILURE);
+  }
+  if (!std::isfinite(pbc.pbctopo_audit_max_seconds) ||
+      pbc.pbctopo_audit_max_seconds <= 0.0 ||
+      pbc.pbctopo_audit_max_seconds > 86400.0) {
+    TitanUI::print_error(
+        "PBCTOPO: -pbctopo-audit-max-seconds must be in (0, 86400].");
+    exit(EXIT_FAILURE);
+  }
+  if (pbc.pbctopo_audit_max_memory_mb <= 0 ||
+      pbc.pbctopo_audit_max_memory_mb > 1048576) {
+    TitanUI::print_error(
+        "PBCTOPO: -pbctopo-audit-max-memory-mb must be in 1..1048576.");
+    exit(EXIT_FAILURE);
+  }
+  if (!pbc.pbctopo_required_contacts_file.empty() &&
+      pbc.pbctopo_mode == "llps-local") {
+    TitanUI::print_error(
+        "PBCTOPO: -pbctopo-required-contacts is only valid in vibe mode.");
     exit(EXIT_FAILURE);
   }
   if (pbc.pbctopo_anchor_backend != "auto" &&
@@ -3676,7 +3992,8 @@ int arguments::post_process() {
     TitanUI::print_error("RG2: -rg2-hist-bins must be a positive integer.");
     exit(EXIT_FAILURE);
   }
-  if ((flag_nocal || rms.flag_rms || rg.flag_rg2 || lj.flag_lj || sq.flag_sq) &&
+  if ((flag_nocal || rms.flag_rms || rg.flag_rg2 || lj.flag_lj || sq.flag_sq ||
+       interface_analysis.flag_interface_analysis) &&
       !has_explicit_pbc_mode) {
     pbc.solv_pbc_int = 1;
     pbc.solv_pbc = 0;
@@ -3693,6 +4010,8 @@ int arguments::post_process() {
       modules.push_back("LJ");
     if (sq.flag_sq)
       modules.push_back("SQ");
+    if (interface_analysis.flag_interface_analysis)
+      modules.push_back("Interface");
     std::string reason;
     for (size_t i = 0; i < modules.size(); ++i) {
       if (i > 0)

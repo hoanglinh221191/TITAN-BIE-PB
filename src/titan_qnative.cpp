@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -173,7 +174,7 @@ void TitanQNativeAnalyzer::build_native_contacts_from_reference(
     const Multi_MOL &mol1, const Multi_MOL *mol2) {
   native_contacts_.clear();
   native_pair_indices_.clear();
-  if (mol1.m_mol.empty() || !has_valid_box(mol1.m_mol.front().Box))
+  if (mol1.m_mol.empty())
     return;
 
   std::vector<titan_contact_geometry::ContactPoint> row_points;
@@ -188,7 +189,9 @@ void TitanQNativeAnalyzer::build_native_contacts_from_reference(
     col_points = row_points;
   }
 
-  const BoxMatrix box_matrix(mol1.m_mol.front().Box);
+  std::optional<BoxMatrix> box_matrix;
+  if (BoxMatrix::valid_box(mol1.m_mol.front().Box))
+    box_matrix.emplace(mol1.m_mol.front().Box);
   std::unordered_map<titan_contact::ResiduePairKey, double,
                      titan_contact::ResiduePairKeyHash>
       nearest;
@@ -200,7 +203,8 @@ void TitanQNativeAnalyzer::build_native_contacts_from_reference(
     double dx = lhs.x - rhs.x;
     double dy = lhs.y - rhs.y;
     double dz = lhs.z - rhs.z;
-    box_matrix.apply_mic(dx, dy, dz);
+    if (box_matrix)
+      box_matrix->apply_mic(dx, dy, dz);
     const double distance_sq = dx * dx + dy * dy + dz * dz;
     if (distance_sq > cutoff_a_ * cutoff_a_)
       return;

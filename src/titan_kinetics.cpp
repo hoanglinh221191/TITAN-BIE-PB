@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstdlib>
 #include <cstdio>
 #include <iomanip>
 #include <limits>
@@ -98,14 +99,14 @@ bool tica_backend_from_string(const std::string &text, TicaBackend &backend) {
 
 TitanKinetics::TitanKinetics(int feature_dim, int lag_time, int n_components,
                              double dt_ns, TicaBackend backend,
-                             int randomized_rank, size_t feature_cache_cap_bytes,
-                             bool allow_backend_promotion)
+                             int randomized_rank, size_t hard_memory_cap_bytes,
+                             bool enforce_hard_memory_cap)
     : dim_(feature_dim), lag_(lag_time),
       n_comp_(std::max(1, std::min(n_components, feature_dim))), dt_ns_(dt_ns),
       requested_backend_(backend), backend_(backend),
       randomized_rank_(std::max(1, randomized_rank)),
-      feature_cache_cap_bytes_(feature_cache_cap_bytes),
-      allow_backend_promotion_(allow_backend_promotion),
+      hard_memory_cap_bytes_(hard_memory_cap_bytes),
+      enforce_hard_memory_cap_(enforce_hard_memory_cap),
       sum_x_(Eigen::VectorXd::Zero(feature_dim)),
       sum_x_lagged_(Eigen::VectorXd::Zero(feature_dim)),
       sum_x_paired_(Eigen::VectorXd::Zero(feature_dim)),
@@ -136,9 +137,19 @@ void TitanKinetics::open_spool_for_write_() {
   }
 
   std::error_code ec;
-  std::filesystem::path base_dir = std::filesystem::temp_directory_path(ec);
-  if (ec || base_dir.empty()) {
+  std::filesystem::path base_dir;
+  if (const char *configured = std::getenv("TITAN_TICA_SPOOL_DIR");
+      configured != nullptr && *configured != '\0') {
+    base_dir = configured;
+    std::filesystem::create_directories(base_dir, ec);
+  } else {
+    // Keep multi-gigabyte replay files beside the current analysis output.
+    // On Windows, %TEMP% is commonly on the smaller system drive.
     base_dir = std::filesystem::current_path(ec);
+  }
+  if (ec || base_dir.empty()) {
+    ec.clear();
+    base_dir = std::filesystem::temp_directory_path(ec);
   }
   if (ec || base_dir.empty()) {
     throw std::runtime_error("TICA randomized: cannot determine spool directory.");
@@ -217,12 +228,15 @@ void TitanKinetics::append_cached_frame_(const Eigen::VectorXd &x) {
   if (n_frames_ >= frame_cache_.rows()) {
     const int64_t new_rows =
         std::max<int64_t>(int64_t(1024), frame_cache_.rows() * 2);
-    if (allow_backend_promotion_ && feature_cache_cap_bytes_ > 0) {
-      const long double estimated_bytes =
+    if (enforce_hard_memory_cap_ && hard_memory_cap_bytes_ > 0) {
+      const long double estimated_raw_bytes =
           static_cast<long double>(new_rows) * static_cast<long double>(dim_) *
           static_cast<long double>(sizeof(double));
-      if (estimated_bytes >
-          static_cast<long double>(feature_cache_cap_bytes_)) {
+      constexpr long double kExactDualPeakFactor = 3.0L;
+      const long double estimated_peak_bytes =
+          kExactDualPeakFactor * estimated_raw_bytes;
+      if (estimated_peak_bytes >
+          static_cast<long double>(hard_memory_cap_bytes_)) {
         backend_ = TicaBackend::Randomized;
         const auto promotion_start = std::chrono::steady_clock::now();
         open_spool_for_write_();
@@ -238,7 +252,7 @@ void TitanKinetics::append_cached_frame_(const Eigen::VectorXd &x) {
         timing_stats_.spool_write_bytes +=
             static_cast<uint64_t>(std::max<int64_t>(0, n_frames_)) * frame_bytes;
         TitanUI::print_warning(
-            "TICA: feature cache exceeded auto memory budget. "
+            "TICA: exact_dual peak estimate exceeded the hard memory cap. "
             "Promoting backend from exact_dual to randomized.");
         const auto write_start = std::chrono::steady_clock::now();
         spool_writer_.write(reinterpret_cast<const char *>(x.data()),
@@ -381,8 +395,7 @@ Eigen::MatrixXd TitanKinetics::build_exact_dual_basis_() {
   timing_stats_.exact_dual_center_seconds += seconds_since(center_start);
 
   const auto svd_start = std::chrono::steady_clock::now();
-  Eigen::JacobiSVD<Eigen::MatrixXd> svd(centered,
-                                        Eigen::ComputeThinU | Eigen::ComputeThinV);
+  Eigen::JacobiSVD<Eigen::MatrixXd> svd(centered, Eigen::ComputeThinV);
   timing_stats_.exact_dual_svd_seconds += seconds_since(svd_start);
   ++timing_stats_.exact_dual_svd_calls;
   const int rank = singular_rank(svd.singularValues(), dim_);
@@ -481,8 +494,7 @@ Eigen::MatrixXd TitanKinetics::build_randomized_basis_() {
   }
 
   const auto svd_start = std::chrono::steady_clock::now();
-  Eigen::JacobiSVD<Eigen::MatrixXd> svd(B,
-                                        Eigen::ComputeThinU | Eigen::ComputeThinV);
+  Eigen::JacobiSVD<Eigen::MatrixXd> svd(B, Eigen::ComputeThinV);
   timing_stats_.randomized_svd_seconds += seconds_since(svd_start);
   ++timing_stats_.randomized_svd_calls;
   const int available_rank = singular_rank(svd.singularValues(), dim_);
@@ -799,7 +811,8 @@ Eigen::VectorXd TitanKinetics::project_frame(const Eigen::VectorXd &x) const {
 
 void TitanKinetics::write_results(const std::string &eval_file,
                                   const std::string &evec_file,
-                                  std::fstream &log) const {
+                                  std::fstream &log,
+                                  bool kinetics_interpretable) const {
   if (!solved_) {
     TitanUI::print_warning("TICA: solve_tica() was not successful, skipping "
                            "output.");
@@ -816,15 +829,28 @@ void TitanKinetics::write_results(const std::string &eval_file,
     ofs << "# backend = " << tica_backend_to_string(backend_) << "\n";
     ofs << "# lag_time = " << lag_ << " frames, dt = " << dt_ns_ << " ns\n";
     ofs << "# n_frames = " << n_frames_ << ", n_pairs = " << n_pairs_ << "\n";
+    ofs << "# kinetics_interpretable = "
+        << (kinetics_interpretable ? "yes" : "no") << "\n";
+    if (!kinetics_interpretable) {
+      ofs << "# REMD thermodynamic-state trajectories contain accepted "
+             "configuration exchanges; timescales are intentionally omitted.\n";
+    }
     ofs << "# Component  Eigenvalue  Implied_Timescale(ns)\n";
     for (int i = 0; i < retained_components_; ++i) {
       ofs << std::setw(4) << (i + 1) << "  " << std::fixed
-          << std::setprecision(8) << eigenvalues_[i] << "  "
-          << std::setprecision(4) << timescales_[i] << "\n";
+          << std::setprecision(8) << eigenvalues_[i] << "  ";
+      if (kinetics_interpretable)
+        ofs << std::setprecision(4) << timescales_[i];
+      else
+        ofs << "nan";
+      ofs << "\n";
     }
     ofs.close();
     TitanUI::print_info("TICA: eigenvalues written to " + eval_file);
     TitanUI::log_kv(log, "TICA Eigenvalues File", eval_file);
+    TitanUI::log_kv(log, "TICA Kinetic Interpretation",
+                    kinetics_interpretable ? "physical continuity available"
+                                           : "disabled (REMD state streams)");
   }
 
   {

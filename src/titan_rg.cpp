@@ -68,6 +68,7 @@ void TitanRgAnalyzer::reset_trajectory_state() {
   rg2_series_.clear();
   rg_series_.clear();
   time_series_ps_.clear();
+  shape_series_.clear();
 }
 
 void TitanRgAnalyzer::init(const Multi_MOL &mol1, const Multi_MOL &mol2,
@@ -191,10 +192,32 @@ void TitanRgAnalyzer::process_frame(const Multi_MOL &mol1, const Multi_MOL &mol2
       raw_x_.data(), raw_y_.data(), raw_z_.data(), total_trace_count_);
   const double rg2 = titan_gyration::compute_rg2_from_stats(stats);
   const double rg = titan_gyration::compute_rg_from_stats(stats);
+  const auto principal_rg2 = titan_gyration::compute_principal_rg2(stats);
+  const auto shape =
+      titan_gyration::compute_gyration_shape_metrics(principal_rg2);
+  const double lambda_sum =
+      principal_rg2[0] + principal_rg2[1] + principal_rg2[2];
+  const double lambda_mean = lambda_sum / 3.0;
+  const double normalized_asphericity =
+      lambda_sum > 1.0e-12 ? shape.asphericity / lambda_sum : 0.0;
+  const double prolateness =
+      lambda_sum > 1.0e-12
+          ? 27.0 * (principal_rg2[0] - lambda_mean) *
+                (principal_rg2[1] - lambda_mean) *
+                (principal_rg2[2] - lambda_mean) /
+                (lambda_sum * lambda_sum * lambda_sum)
+          : 0.0;
+  const double principal_aspect_ratio =
+      std::sqrt(std::max(0.0, principal_rg2[0]) /
+                std::max(1.0e-12, principal_rg2[2]));
 
   rg2_series_.push_back(rg2);
   rg_series_.push_back(rg);
   time_series_ps_.push_back(mol1.m_mol[snap_idx].time_of_snap);
+  shape_series_.push_back(
+      {principal_rg2, shape.kappa2, shape.asphericity,
+       normalized_asphericity, shape.acylindricity, prolateness,
+       principal_aspect_ratio});
 }
 
 TitanRgAnalyzer::OutputSummary TitanRgAnalyzer::compute_summary() const {
@@ -253,14 +276,25 @@ void TitanRgAnalyzer::export_timeseries(const std::string &filename,
       << summary.mean_rg2 << "\n";
   out << "# mean_rg_A " << std::fixed << std::setprecision(6)
       << summary.mean_rg << "\n";
-  out << "# columns = frame time_ps rg2_A2 rg_A\n";
+  out << "# principal_rg2_order lambda1 >= lambda2 >= lambda3\n";
+  out << "# prolateness_sign negative=oblate positive=prolate\n";
+  out << "# columns = frame time_ps rg2_A2 rg_A lambda1_A2 lambda2_A2 "
+         "lambda3_A2 kappa2 asphericity_A2 normalized_asphericity "
+         "acylindricity_A2 prolateness principal_aspect_ratio\n";
   for (std::size_t i = 0; i < rg2_series_.size(); ++i) {
+    const ShapeFrame shape =
+        i < shape_series_.size() ? shape_series_[i] : ShapeFrame{};
     out << std::setw(10) << std::right << (i + 1) << " "
         << std::setw(14) << std::fixed << std::setprecision(4)
         << (i < time_series_ps_.size() ? time_series_ps_[i] : 0.0) << " "
         << std::setw(14) << std::fixed << std::setprecision(6)
         << rg2_series_[i] << " " << std::setw(12) << std::fixed
         << std::setprecision(6) << (i < rg_series_.size() ? rg_series_[i] : 0.0)
+        << " " << shape.principal_rg2[0] << " " << shape.principal_rg2[1]
+        << " " << shape.principal_rg2[2] << " " << shape.kappa2 << " "
+        << shape.asphericity << " " << shape.normalized_asphericity << " "
+        << shape.acylindricity << " " << shape.prolateness << " "
+        << shape.principal_aspect_ratio
         << "\n";
   }
 
@@ -343,14 +377,23 @@ void TitanRgAnalyzer::export_aggregate_timeseries(const std::string &filename,
   out << "# TITAN aggregated Rg2 time series\n";
   out << "# trajectories " << aggregate_summaries_.size() << "\n";
   out << "# frames " << aggregate_frames_.size() << "\n";
-  out << "# columns = traj_index frame time_ps rg2_A2 rg_A\n";
+  out << "# principal_rg2_order lambda1 >= lambda2 >= lambda3\n";
+  out << "# prolateness_sign negative=oblate positive=prolate\n";
+  out << "# columns = traj_index frame time_ps rg2_A2 rg_A lambda1_A2 "
+         "lambda2_A2 lambda3_A2 kappa2 asphericity_A2 "
+         "normalized_asphericity acylindricity_A2 prolateness "
+         "principal_aspect_ratio\n";
   for (const auto &frame : aggregate_frames_) {
     out << std::setw(10) << std::right << frame.traj_index << " "
         << std::setw(10) << std::right << frame.frame_index << " "
         << std::setw(14) << std::fixed << std::setprecision(4) << frame.time_ps
         << " " << std::setw(14) << std::fixed << std::setprecision(6)
         << frame.rg2 << " " << std::setw(12) << std::fixed
-        << std::setprecision(6) << frame.rg << "\n";
+        << std::setprecision(6) << frame.rg << " " << frame.principal_rg2[0]
+        << " " << frame.principal_rg2[1] << " " << frame.principal_rg2[2]
+        << " " << frame.kappa2 << " " << frame.asphericity << " "
+        << frame.normalized_asphericity << " " << frame.acylindricity << " "
+        << frame.prolateness << " " << frame.principal_aspect_ratio << "\n";
   }
 
   if (log.is_open())
@@ -453,11 +496,21 @@ void TitanRgAnalyzer::finalize_trajectory(const std::string &rg2_filename,
 
   const OutputSummary summary = compute_summary();
   for (std::size_t i = 0; i < rg2_series_.size(); ++i) {
-    aggregate_frames_.push_back({traj_index, i + 1,
-                                 i < time_series_ps_.size() ? time_series_ps_[i]
-                                                             : 0.0,
-                                 rg2_series_[i],
-                                 i < rg_series_.size() ? rg_series_[i] : 0.0});
+    const ShapeFrame shape =
+        i < shape_series_.size() ? shape_series_[i] : ShapeFrame{};
+    aggregate_frames_.push_back(
+        {traj_index,
+         i + 1,
+         i < time_series_ps_.size() ? time_series_ps_[i] : 0.0,
+         rg2_series_[i],
+         i < rg_series_.size() ? rg_series_[i] : 0.0,
+         shape.principal_rg2,
+         shape.kappa2,
+         shape.asphericity,
+         shape.normalized_asphericity,
+         shape.acylindricity,
+         shape.prolateness,
+         shape.principal_aspect_ratio});
   }
   aggregate_summaries_.push_back({traj_index, traj_label, summary});
   aggregate_rg2_series_.insert(aggregate_rg2_series_.end(), rg2_series_.begin(),

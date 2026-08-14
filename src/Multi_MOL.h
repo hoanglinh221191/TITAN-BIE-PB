@@ -34,6 +34,9 @@ class groups_cal;
 
 class Multi_MOL {
 private:
+  vector<unsigned char> pbctopo_frame_certified_;
+  vector<string> pbctopo_frame_status_;
+
   int find_best_image(size_t ind, int chain_ref, arguments &Arguments);
   int find_best_image_envelope(size_t ind, int chain_ref, arguments &Arguments);
   int find_best_image_new(size_t ind, size_t chain_ref, arguments &Arguments,
@@ -159,6 +162,22 @@ public:
   [[nodiscard]] bool parameters_match_info() const noexcept;
   [[nodiscard]] bool parameters_match_frame(size_t frame_index) const noexcept;
   [[nodiscard]] bool analysis_frame_ready(size_t frame_index) const noexcept;
+  [[nodiscard]] bool has_pbctopo_frame_status(size_t frame_index) const
+      noexcept {
+    return frame_index < pbctopo_frame_status_.size();
+  }
+  [[nodiscard]] bool pbctopo_frame_certified(size_t frame_index) const
+      noexcept {
+    return frame_index < pbctopo_frame_certified_.size() &&
+           pbctopo_frame_certified_[frame_index] != 0;
+  }
+  [[nodiscard]] string_view pbctopo_frame_status(size_t frame_index) const
+      noexcept {
+    static constexpr string_view missing{"missing_status"};
+    return frame_index < pbctopo_frame_status_.size()
+               ? string_view(pbctopo_frame_status_[frame_index])
+               : missing;
+  }
 
   // --- CÁC HÀM XỬ LÝ CHÍNH ---
   int gen_vector_parameters();

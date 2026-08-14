@@ -789,7 +789,8 @@ AnalyzerImpl::set_boundary(const GridShape &shape,
 
 AnalyzerImpl::SolveStats
 AnalyzerImpl::solve_sor_half_packed(const GridShape &shape,
-                                    TitanExecutor &executor) {
+                                    TitanExecutor &executor,
+                                    int iteration_limit) {
   const auto update_begin = std::chrono::steady_clock::now();
   SolveStats stats;
   if (shape.n == 0)
@@ -944,7 +945,10 @@ AnalyzerImpl::solve_sor_half_packed(const GridShape &shape,
         });
   };
 
-  for (int iter = 1; iter <= args_.max_iter; ++iter) {
+  const int max_iterations = iteration_limit > 0
+                                 ? std::min(args_.max_iter, iteration_limit)
+                                 : args_.max_iter;
+  for (int iter = 1; iter <= max_iterations; ++iter) {
     std::fill(local_sumsq.begin(), local_sumsq.end(), 0.0);
     std::fill(local_max.begin(), local_max.end(), 0.0);
     std::fill(local_count.begin(), local_count.end(), 0);
@@ -966,11 +970,18 @@ AnalyzerImpl::solve_sor_half_packed(const GridShape &shape,
     stats.rms = count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
     stats.max_dphi = max_delta;
     const bool can_stop_this_iter =
-        !delphi_block_stop || (iter % 50 == 0) || iter == args_.max_iter;
-    if (can_stop_this_iter &&
-        (stats.rms <= args_.rms_tol || stats.max_dphi <= args_.dphi_tol)) {
-      stats.converged = true;
-      break;
+        !delphi_block_stop || (iter % 50 == 0) || iter == max_iterations;
+    if (can_stop_this_iter && stats.rms <= args_.rms_tol &&
+        stats.max_dphi <= args_.dphi_tol) {
+      for (std::size_t id = 0; id < shape.n; ++id) {
+        grid_.phi[id] =
+            (id & 1U) == 0U ? even_phi[id / 2] : odd_phi[id / 2];
+      }
+      if (compute_linear_residual(shape) <=
+          grid_linear_residual_tolerance()) {
+        stats.converged = true;
+        break;
+      }
     }
   }
 
@@ -985,7 +996,8 @@ AnalyzerImpl::solve_sor_half_packed(const GridShape &shape,
 }
 
 AnalyzerImpl::SolveStats AnalyzerImpl::solve_sor(const GridShape &shape,
-                                                 TitanExecutor &executor) {
+                                                 TitanExecutor &executor,
+                                                 int iteration_limit) {
   SolveStats stats;
   double omega =
       args_.omega == "auto"
@@ -1020,7 +1032,7 @@ AnalyzerImpl::SolveStats AnalyzerImpl::solve_sor(const GridShape &shape,
       (shape.nx & 1U) != 0U && (shape.ny & 1U) != 0U && (shape.nz & 1U) != 0U &&
       shape.n <=
           static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
-    return solve_sor_half_packed(shape, executor);
+    return solve_sor_half_packed(shape, executor, iteration_limit);
   }
   std::vector<std::size_t> trace_ids;
   std::unordered_map<std::string, double> oracle_trace_charge_density;
@@ -1098,7 +1110,10 @@ AnalyzerImpl::SolveStats AnalyzerImpl::solve_sor(const GridShape &shape,
     }
     trace_out << std::setprecision(12);
   }
-  for (int iter = 1; iter <= args_.max_iter; ++iter) {
+  const int max_iterations = iteration_limit > 0
+                                 ? std::min(args_.max_iter, iteration_limit)
+                                 : args_.max_iter;
+  for (int iter = 1; iter <= max_iterations; ++iter) {
     std::fill(local_sumsq.begin(), local_sumsq.end(), 0.0);
     std::fill(local_max.begin(), local_max.end(), 0.0);
     std::fill(local_count.begin(), local_count.end(), 0);
@@ -1199,9 +1214,10 @@ AnalyzerImpl::SolveStats AnalyzerImpl::solve_sor(const GridShape &shape,
                 << csv_escape(args_.test_charge_grid) << '\n';
     }
     const bool can_stop_this_iter =
-        !delphi_block_stop || (iter % 50 == 0) || iter == args_.max_iter;
-    if (can_stop_this_iter &&
-        (stats.rms <= args_.rms_tol || stats.max_dphi <= args_.dphi_tol)) {
+        !delphi_block_stop || (iter % 50 == 0) || iter == max_iterations;
+    if (can_stop_this_iter && stats.rms <= args_.rms_tol &&
+        stats.max_dphi <= args_.dphi_tol &&
+        compute_linear_residual(shape) <= grid_linear_residual_tolerance()) {
       stats.converged = true;
       break;
     }
@@ -1237,6 +1253,13 @@ double AnalyzerImpl::compute_linear_residual(const GridShape &shape) const {
     }
   }
   return count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
+}
+
+double AnalyzerImpl::grid_linear_residual_tolerance() const noexcept {
+  // A red-black SOR sweep updates two colors sequentially, so the operator
+  // residual is normally a small multiple of the largest point update.
+  return std::max(1.0e-12,
+                  5.0 * std::max(args_.rms_tol, args_.dphi_tol));
 }
 
 int AnalyzerImpl::effective_focus_levels() const noexcept {
@@ -1284,7 +1307,8 @@ bool AnalyzerImpl::grid_medium_operator_cache_allowed(
          args_.dielectric_model == "two-dielectric" &&
          args_.charge_assignment == "trilinear" &&
          args_.test_energy_convention == "auto" && args_.focus == "off" &&
-         effective_solver_mode() == "sor" && args_.surface == "vdw" &&
+         effective_solver_mode() == "sor" &&
+         (args_.surface == "vdw" || args_.surface == "ses") &&
          args_.ion_access == "dielectric" && !uses_gaussian_model() &&
          args_.test_pqr.empty() && args_.test_charge_grid == "native" &&
          args_.test_surface_map == "native" &&
@@ -1336,18 +1360,23 @@ std::uint64_t AnalyzerImpl::grid_medium_operator_cache_key(
   return hash;
 }
 
+bool AnalyzerImpl::grid_medium_operator_cache_matches(
+    std::uint64_t key, const GridShape &shape) const noexcept {
+  return grid_medium_operator_cache_.valid &&
+         grid_medium_operator_cache_.key == key &&
+         same_shape(grid_medium_operator_cache_.shape, shape) &&
+         grid_medium_operator_cache_.eps_x.size() == shape.n &&
+         grid_medium_operator_cache_.eps_y.size() == shape.n &&
+         grid_medium_operator_cache_.eps_z.size() == shape.n &&
+         grid_medium_operator_cache_.denom.size() == shape.n &&
+         grid_medium_operator_cache_.screen.size() == shape.n &&
+         grid_medium_operator_cache_.inside.size() == shape.n &&
+         grid_medium_operator_cache_.ion_accessible.size() == shape.n;
+}
+
 bool AnalyzerImpl::restore_grid_medium_operator_cache(std::uint64_t key,
                                                       const GridShape &shape) {
-  if (!grid_medium_operator_cache_.valid ||
-      grid_medium_operator_cache_.key != key ||
-      !same_shape(grid_medium_operator_cache_.shape, shape) ||
-      grid_medium_operator_cache_.eps_x.size() != shape.n ||
-      grid_medium_operator_cache_.eps_y.size() != shape.n ||
-      grid_medium_operator_cache_.eps_z.size() != shape.n ||
-      grid_medium_operator_cache_.denom.size() != shape.n ||
-      grid_medium_operator_cache_.screen.size() != shape.n ||
-      grid_medium_operator_cache_.inside.size() != shape.n ||
-      grid_medium_operator_cache_.ion_accessible.size() != shape.n) {
+  if (!grid_medium_operator_cache_matches(key, shape)) {
     return false;
   }
   grid_.eps_x = grid_medium_operator_cache_.eps_x;
@@ -1522,14 +1551,6 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_focused_field(
     const std::size_t peak_bytes =
         shape.memory_bytes + previous_phi.size() * sizeof(double);
     field.peak_memory_bytes = std::max(field.peak_memory_bytes, peak_bytes);
-    ensure_workspace(shape);
-    const double focus_setup_ms =
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - focus_setup_begin)
-            .count();
-    add_timing_ms(TimingBucket::FocusSetup, focus_setup_ms);
-    if (has_previous)
-      add_timing_ms(TimingBucket::FocusChildSetup, focus_setup_ms);
     const bool medium_cache_allowed = grid_medium_operator_cache_allowed(
         shape, *level_atoms, eps_in, eps_out, kappa, map_result,
         reuse_homogeneous_vacuum);
@@ -1537,9 +1558,20 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_focused_field(
         medium_cache_allowed ? grid_medium_operator_cache_key(
                                    shape, *level_atoms, eps_in, eps_out, kappa)
                              : 0ULL;
+    const bool medium_cache_available =
+        medium_cache_allowed &&
+        grid_medium_operator_cache_matches(medium_cache_key, shape);
+    ensure_workspace(shape, !medium_cache_available);
+    const double focus_setup_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - focus_setup_begin)
+            .count();
+    add_timing_ms(TimingBucket::FocusSetup, focus_setup_ms);
+    if (has_previous)
+      add_timing_ms(TimingBucket::FocusChildSetup, focus_setup_ms);
     const auto surface_begin = std::chrono::steady_clock::now();
     const bool medium_cache_hit =
-        medium_cache_allowed &&
+        medium_cache_available &&
         restore_grid_medium_operator_cache(medium_cache_key, shape);
     if (medium_cache_allowed && !medium_cache_hit)
       ++grid_reuse_stats_.medium_cache_misses;
@@ -1817,6 +1849,9 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_focused_field(
       field.boundary_rms = boundary_diag.rms;
       field.boundary_max = boundary_diag.max_abs;
       field.linear_residual = compute_linear_residual(shape);
+      field.stats.converged =
+          field.stats.converged &&
+          field.linear_residual <= grid_linear_residual_tolerance();
       field.parity = compute_parity_audit(shape, nullptr, nullptr);
       field.mg_pre = 0;
       field.mg_post = 0;

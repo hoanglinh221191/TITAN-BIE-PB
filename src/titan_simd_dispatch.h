@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 
 #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) ||           \
     defined(_M_X64)
@@ -19,24 +20,43 @@
 #if TITAN_SIMD_X86 && (defined(__GNUC__) || defined(__clang__))
 #define TITAN_TARGET_AVX2 __attribute__((target("avx2")))
 #define TITAN_TARGET_AVX2_FMA __attribute__((target("avx2,fma")))
+#define TITAN_LAMBDA_TARGET_AVX2 [[gnu::target("avx2")]]
+#define TITAN_LAMBDA_TARGET_AVX2_FMA [[gnu::target("avx2,fma")]]
 #define TITAN_RUNTIME_TARGET_ATTRS 1
 #else
 #define TITAN_TARGET_AVX2
 #define TITAN_TARGET_AVX2_FMA
+#define TITAN_LAMBDA_TARGET_AVX2
+#define TITAN_LAMBDA_TARGET_AVX2_FMA
 #define TITAN_RUNTIME_TARGET_ATTRS 0
 #endif
 
 namespace titan_simd_dispatch {
 
+inline bool runtime_simd_forced_scalar() noexcept {
+  static const bool forced = [] {
+    const char *value = std::getenv("TITAN_FORCE_SCALAR");
+    if (value == nullptr)
+      return false;
+    return value[0] == '1' || value[0] == 'y' || value[0] == 'Y' ||
+           value[0] == 't' || value[0] == 'T';
+  }();
+  return forced;
+}
+
 inline bool runtime_has_avx2() noexcept {
-  return titan_build::runtime_cpu_features_cached().avx2;
+  return !runtime_simd_forced_scalar() &&
+         titan_build::runtime_cpu_features_cached().avx2;
 }
 
 inline bool runtime_has_fma() noexcept {
-  return titan_build::runtime_cpu_features_cached().fma;
+  return !runtime_simd_forced_scalar() &&
+         titan_build::runtime_cpu_features_cached().fma;
 }
 
 inline bool runtime_has_avx2_fma() noexcept {
+  if (runtime_simd_forced_scalar())
+    return false;
   const auto &features = titan_build::runtime_cpu_features_cached();
   return features.avx2 && features.fma;
 }

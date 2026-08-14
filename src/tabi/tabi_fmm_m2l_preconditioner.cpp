@@ -66,7 +66,7 @@ std::size_t estimate_fmm_ilu_bytes_from_graph(
          (graph.size() + 1) * sizeof(std::size_t) +
          nnz * (sizeof(std::size_t) + sizeof(Block2)) +
          graph.size() * sizeof(Block2) + 4 * panel_count * sizeof(double) +
-         2 * graph.size() * sizeof(std::size_t) + retry_bytes;
+         4 * graph.size() * sizeof(std::size_t) + retry_bytes;
 }
 
 std::vector<JcpOwnedFactorPanelGroup> to_owned_factor_groups(
@@ -280,6 +280,8 @@ void build_sparse_ilu_levels(JcpSparseIluPreconditioner &precond) {
   const std::size_t n = precond.panel_count;
   if (precond.row_ptr.size() != n + 1)
     return;
+  precond.lower_end.resize(n);
+  precond.upper_begin.resize(n);
   auto append_level = [](std::vector<std::vector<std::size_t>> &levels,
                          std::size_t level, std::size_t row) {
     if (levels.size() <= level)
@@ -289,13 +291,20 @@ void build_sparse_ilu_levels(JcpSparseIluPreconditioner &precond) {
   std::vector<std::size_t> forward_level(n, 0);
   for (std::size_t row = 0; row < n; ++row) {
     std::size_t level = 0;
+    std::size_t lower_end = precond.row_ptr[row + 1];
+    std::size_t upper_begin = precond.row_ptr[row + 1];
     for (std::size_t p = precond.row_ptr[row];
          p < precond.row_ptr[row + 1]; ++p) {
       const std::size_t col = precond.col_index[p];
-      if (col >= row)
+      if (col >= row) {
+        lower_end = p;
+        upper_begin = col == row ? p + 1u : p;
         break;
+      }
       level = std::max(level, forward_level[col] + 1);
     }
+    precond.lower_end[row] = lower_end;
+    precond.upper_begin[row] = upper_begin;
     forward_level[row] = level;
     append_level(precond.forward_levels, level, row);
   }
@@ -336,9 +345,7 @@ void JcpSparseIluPreconditioner::apply(const std::vector<double> &in,
 
   std::lock_guard<std::mutex> lock(workspace_mutex);
   if (workspace.size() != 4 * n)
-    workspace.assign(4 * n, 0.0);
-  else
-    std::fill(workspace.begin(), workspace.end(), 0.0);
+    workspace.resize(4 * n);
   double *const y0 = workspace.data();
   double *const y1 = y0 + n;
   double *const x0 = y1 + n;
@@ -346,9 +353,11 @@ void JcpSparseIluPreconditioner::apply(const std::vector<double> &in,
   const auto forward_solve_row = [&](std::size_t i) {
     double rhs0 = i < in.size() ? in[i] : 0.0;
     double rhs1 = coupled && n + i < in.size() ? in[n + i] : 0.0;
-    for (std::size_t p = row_ptr[i]; p < row_ptr[i + 1]; ++p) {
+    const std::size_t end = lower_end.size() == n ? lower_end[i]
+                                                  : row_ptr[i + 1];
+    for (std::size_t p = row_ptr[i]; p < end; ++p) {
       const std::size_t col = col_index[p];
-      if (col >= i)
+      if (lower_end.size() != n && col >= i)
         break;
       const auto [v0, v1] = mul_vec(values[p], y0[col], y1[col]);
       rhs0 -= v0;
@@ -360,9 +369,11 @@ void JcpSparseIluPreconditioner::apply(const std::vector<double> &in,
   const auto backward_solve_row = [&](std::size_t i) {
     double rhs0 = y0[i];
     double rhs1 = y1[i];
-    for (std::size_t p = row_ptr[i]; p < row_ptr[i + 1]; ++p) {
+    const std::size_t begin =
+        upper_begin.size() == n ? upper_begin[i] : row_ptr[i];
+    for (std::size_t p = begin; p < row_ptr[i + 1]; ++p) {
       const std::size_t col = col_index[p];
-      if (col <= i)
+      if (upper_begin.size() != n && col <= i)
         continue;
       const auto [v0, v1] = mul_vec(values[p], x0[col], x1[col]);
       rhs0 -= v0;
@@ -375,11 +386,11 @@ void JcpSparseIluPreconditioner::apply(const std::vector<double> &in,
 
   const auto apply_levels = [&](const std::vector<std::vector<std::size_t>> &levels,
                                 const auto &solve_row) {
+    const std::size_t available_workers =
+        executor == nullptr ? 1 : executor->capacity();
     for (const auto &level : levels) {
       if (level.empty())
         continue;
-      const std::size_t available_workers =
-          executor == nullptr ? 1 : executor->capacity();
       const std::size_t workers = std::min(available_workers, level.size());
       // Short triangular levels are cheaper to execute serially than to fan
       // out through the executor. Retain the original small-problem fast path
@@ -409,7 +420,7 @@ void JcpSparseIluPreconditioner::apply(const std::vector<double> &in,
       backward_solve_row(n - 1 - rev);
   }
 
-  out.assign(expected, 0.0);
+  out.resize(expected);
   for (std::size_t i = 0; i < n; ++i) {
     out[i] = x0[i];
     if (coupled)
@@ -427,6 +438,7 @@ std::size_t JcpSparseIluPreconditioner::estimated_bytes() const noexcept {
     level_bytes += level.capacity() * sizeof(std::size_t);
   return inv_diag.size() * sizeof(double) + row_ptr.size() * sizeof(std::size_t) +
          col_index.size() * sizeof(std::size_t) +
+         (lower_end.size() + upper_begin.size()) * sizeof(std::size_t) +
          values.size() * sizeof(Block2) + diag_inverse.size() * sizeof(Block2) +
          workspace.capacity() * sizeof(double) + level_bytes;
 }
@@ -913,7 +925,8 @@ std::size_t estimate_jcp_sparse_ilu0_graph_bytes(
   return diagonal_size * sizeof(double) +
          (graph.size() + 1) * sizeof(std::size_t) +
          nnz * (sizeof(std::size_t) + sizeof(Block2)) +
-         graph.size() * sizeof(Block2) + retry_bytes;
+         graph.size() * sizeof(Block2) +
+         2 * graph.size() * sizeof(std::size_t) + retry_bytes;
 }
 
 std::shared_ptr<JcpSparseIluPreconditioner>

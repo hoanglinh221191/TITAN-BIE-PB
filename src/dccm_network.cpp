@@ -10,6 +10,7 @@
 #include "titan_simd_dispatch.h"
 #include "titan_sparse_graph.h"
 #include "titan_ui.h"
+#include "titan_uncertainty.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -1646,6 +1647,7 @@ void DCCMNetwork::init(const Multi_MOL &pro_in, const Multi_MOL &lig,
   network_memory_cfg_.cache_precision = args.network_cache_precision;
   community_cfg_.enabled = args.community.flag_community && !args.graph.flag_graph;
   community_cfg_.method = args.community.method;
+  uncertainty_cfg_ = args.uncertainty;
   last_community_result_ = CommunityResult{};
   store_full_traj_ =
       args.flag_network_explicit || args.flag_pca || args.flag_allostery ||
@@ -2223,6 +2225,198 @@ void DCCMNetwork::calculate_and_export(TitanExecutor &executor,
   for (size_t i = 0; i < num_ca; ++i)
     for (size_t j = i + 1; j < num_ca; ++j)
       cov(j, i) = cov(i, j);
+
+  // Export the complete signed DCCM before applying the graph edge threshold.
+  std::ofstream matrix_out("dccm_matrix.csv");
+  matrix_out << "Residue";
+  for (size_t j = 0; j < num_ca; ++j) {
+    matrix_out << ","
+               << build_network_node_id(ca_resname, ca_resnrs, ca_chain, j);
+  }
+  matrix_out << "\n";
+  matrix_out << std::setprecision(10);
+  for (size_t i = 0; i < num_ca; ++i) {
+    matrix_out
+        << build_network_node_id(ca_resname, ca_resnrs, ca_chain, i);
+    for (size_t j = 0; j < num_ca; ++j) {
+      const double denom = std::sqrt(cov(i, i) * cov(j, j));
+      double corr = denom > 1e-12 ? cov(i, j) / denom : 0.0;
+      if (!std::isfinite(corr))
+        corr = 0.0;
+      corr = std::max(-1.0, std::min(1.0, corr));
+      matrix_out << "," << corr;
+    }
+    matrix_out << "\n";
+  }
+  matrix_out.close();
+
+  if (uncertainty_cfg_.mode != "off") {
+    const auto blocks = titan_uncertainty::partition_blocks(
+        total_frames, uncertainty_cfg_.blocks);
+    std::ofstream uncertainty_out(
+        info_output.get_dccm_block_uncertainty_filename());
+    std::ofstream block_values_out(
+        info_output.get_dccm_block_values_filename());
+    uncertainty_out
+        << "node_i,node_j,correlation,n_frames,n_blocks,block_mean,"
+           "block_sem,ci95_low,ci95_high,bootstrap_ci95_low,"
+           "bootstrap_ci95_high,positive_block_fraction,"
+           "sign_consistency,status\n";
+    block_values_out
+        << "block,frame_begin,frame_end,node_i,node_j,correlation\n";
+
+    if (blocks.size() < 2) {
+      TitanUI::print_warning(
+          "[DCCM] Block uncertainty requested, but fewer than two valid "
+          "blocks are available.");
+    } else {
+      const std::size_t block_count = blocks.size();
+      std::vector<double> block_mean_x(block_count * num_ca, 0.0);
+      std::vector<double> block_mean_y(block_count * num_ca, 0.0);
+      std::vector<double> block_mean_z(block_count * num_ca, 0.0);
+      std::vector<double> block_variance(block_count * num_ca, 0.0);
+      const auto offset = [num_ca](std::size_t block, std::size_t node) {
+        return block * num_ca + node;
+      };
+
+      for (std::size_t block_index = 0; block_index < block_count;
+           ++block_index) {
+        const auto &block = blocks[block_index];
+        const double inv_frames =
+            1.0 / static_cast<double>(block.end - block.begin);
+        for (std::size_t frame = block.begin; frame < block.end; ++frame) {
+          for (std::size_t node = 0; node < num_ca; ++node) {
+            block_mean_x[offset(block_index, node)] += traj_x[frame][node];
+            block_mean_y[offset(block_index, node)] += traj_y[frame][node];
+            block_mean_z[offset(block_index, node)] += traj_z[frame][node];
+          }
+        }
+        for (std::size_t node = 0; node < num_ca; ++node) {
+          block_mean_x[offset(block_index, node)] *= inv_frames;
+          block_mean_y[offset(block_index, node)] *= inv_frames;
+          block_mean_z[offset(block_index, node)] *= inv_frames;
+        }
+        for (std::size_t frame = block.begin; frame < block.end; ++frame) {
+          for (std::size_t node = 0; node < num_ca; ++node) {
+            const double dx =
+                traj_x[frame][node] -
+                block_mean_x[offset(block_index, node)];
+            const double dy =
+                traj_y[frame][node] -
+                block_mean_y[offset(block_index, node)];
+            const double dz =
+                traj_z[frame][node] -
+                block_mean_z[offset(block_index, node)];
+            block_variance[offset(block_index, node)] +=
+                dx * dx + dy * dy + dz * dz;
+          }
+        }
+      }
+
+      std::vector<std::pair<std::size_t, std::size_t>> node_pairs;
+      node_pairs.reserve(num_ca * (num_ca - 1) / 2);
+      for (std::size_t i = 0; i < num_ca; ++i) {
+        for (std::size_t j = i + 1; j < num_ca; ++j)
+          node_pairs.emplace_back(i, j);
+      }
+      std::vector<double> block_correlations(node_pairs.size() * block_count,
+                                             0.0);
+      const std::size_t worker_count =
+          std::max<std::size_t>(1, executor.capacity());
+      const std::size_t pairs_per_worker =
+          (node_pairs.size() + worker_count - 1) / worker_count;
+      executor.parallel_do(worker_count, [&](std::size_t worker) {
+        const std::size_t begin = worker * pairs_per_worker;
+        const std::size_t end =
+            std::min(begin + pairs_per_worker, node_pairs.size());
+        for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
+          const auto [i, j] = node_pairs[pair_index];
+          for (std::size_t block_index = 0; block_index < block_count;
+               ++block_index) {
+            const auto &block = blocks[block_index];
+            double dot = 0.0;
+            const double mix = block_mean_x[offset(block_index, i)];
+            const double miy = block_mean_y[offset(block_index, i)];
+            const double miz = block_mean_z[offset(block_index, i)];
+            const double mjx = block_mean_x[offset(block_index, j)];
+            const double mjy = block_mean_y[offset(block_index, j)];
+            const double mjz = block_mean_z[offset(block_index, j)];
+            for (std::size_t frame = block.begin; frame < block.end; ++frame) {
+              dot += (traj_x[frame][i] - mix) *
+                         (traj_x[frame][j] - mjx) +
+                     (traj_y[frame][i] - miy) *
+                         (traj_y[frame][j] - mjy) +
+                     (traj_z[frame][i] - miz) *
+                         (traj_z[frame][j] - mjz);
+            }
+            const double denominator =
+                std::sqrt(block_variance[offset(block_index, i)] *
+                          block_variance[offset(block_index, j)]);
+            double correlation =
+                denominator > 1.0e-12 ? dot / denominator : 0.0;
+            if (!std::isfinite(correlation))
+              correlation = 0.0;
+            block_correlations[pair_index * block_count + block_index] =
+                std::max(-1.0, std::min(1.0, correlation));
+          }
+        }
+      });
+
+      uncertainty_out << std::setprecision(12);
+      block_values_out << std::setprecision(12);
+      for (std::size_t pair_index = 0; pair_index < node_pairs.size();
+           ++pair_index) {
+        const auto [i, j] = node_pairs[pair_index];
+        std::vector<double> values(block_count, 0.0);
+        std::size_t positive = 0;
+        for (std::size_t block_index = 0; block_index < block_count;
+             ++block_index) {
+          values[block_index] =
+              block_correlations[pair_index * block_count + block_index];
+          positive += values[block_index] > 0.0 ? 1U : 0U;
+          block_values_out
+              << block_index << ',' << blocks[block_index].begin << ','
+              << blocks[block_index].end << ','
+              << build_network_node_id(ca_resname, ca_resnrs, ca_chain, i)
+              << ','
+              << build_network_node_id(ca_resname, ca_resnrs, ca_chain, j)
+              << ',' << values[block_index] << '\n';
+        }
+        const auto stats = titan_uncertainty::summarize_values(values);
+        const double denominator = std::sqrt(cov(i, i) * cov(j, j));
+        double correlation =
+            denominator > 1.0e-12 ? cov(i, j) / denominator : 0.0;
+        if (!std::isfinite(correlation))
+          correlation = 0.0;
+        correlation = std::max(-1.0, std::min(1.0, correlation));
+        double bootstrap_low = std::numeric_limits<double>::quiet_NaN();
+        double bootstrap_high = std::numeric_limits<double>::quiet_NaN();
+        if (uncertainty_cfg_.mode == "bootstrap") {
+          const auto bootstrap = titan_uncertainty::bootstrap_ci95(
+              values, uncertainty_cfg_.bootstrap_samples,
+              uncertainty_cfg_.seed +
+                  static_cast<unsigned int>(pair_index));
+          bootstrap_low = bootstrap.first;
+          bootstrap_high = bootstrap.second;
+        }
+        const double positive_fraction =
+            static_cast<double>(positive) / static_cast<double>(block_count);
+        const double sign_consistency =
+            std::max(positive_fraction, 1.0 - positive_fraction);
+        uncertainty_out
+            << build_network_node_id(ca_resname, ca_resnrs, ca_chain, i)
+            << ','
+            << build_network_node_id(ca_resname, ca_resnrs, ca_chain, j)
+            << ',' << correlation << ',' << total_frames << ','
+            << block_count << ',' << stats.mean << ',' << stats.sem << ','
+            << stats.ci95_low << ',' << stats.ci95_high << ','
+            << bootstrap_low << ',' << bootstrap_high << ','
+            << positive_fraction << ',' << sign_consistency << ",ok\n";
+      }
+      TitanUI::print_info(
+          "[DCCM] Exported pairwise block uncertainty and block values.");
+    }
+  }
 
   // 3. Tính Correlation và Xuất File
   std::vector<std::tuple<int, int, double>> community_edges;

@@ -3,6 +3,8 @@
 #include "lattice_math.h"
 
 #include <algorithm>
+#include <limits>
+#include <utility>
 
 namespace titan_pbctopo {
 
@@ -41,13 +43,26 @@ Int3 pbctopo_component_offset_gauge(box Box,
       PbctopoLatticeMetric(Box).nearest_image_scaled(mean_x, mean_y, mean_z);
   if (!nearest.valid)
     return {};
-  return {-nearest.image_x, -nearest.image_y, -nearest.image_z};
+  Int3 gauge{};
+  if (!checked_int3_negate(
+          {nearest.image_x, nearest.image_y, nearest.image_z}, gauge)) {
+    return {};
+  }
+  return gauge;
 }
 
-void rebase_component_offsets(std::vector<Int3> &offsets, box Box) {
+bool rebase_component_offsets(std::vector<Int3> &offsets, box Box) {
   const Int3 gauge = pbctopo_component_offset_gauge(Box, offsets);
-  for (Int3 &offset : offsets)
-    offset = offset - gauge;
+  std::vector<Int3> rebased;
+  rebased.reserve(offsets.size());
+  for (const Int3 &offset : offsets) {
+    Int3 value{};
+    if (!checked_int3_subtract(offset, gauge, value))
+      return false;
+    rebased.push_back(value);
+  }
+  offsets = std::move(rebased);
+  return true;
 }
 
 double pbctopo_component_shift_metric(box Box,
@@ -58,7 +73,9 @@ double pbctopo_component_shift_metric(box Box,
   const PbctopoLatticeMetric lattice(Box);
   double sum_d2 = 0.0;
   for (const Int3 &raw_offset : offsets) {
-    const Int3 offset = raw_offset - gauge;
+    Int3 offset{};
+    if (!checked_int3_subtract(raw_offset, gauge, offset))
+      return std::numeric_limits<double>::infinity();
     const auto translation = lattice.scaled_to_cartesian(
         static_cast<double>(offset.x), static_cast<double>(offset.y),
         static_cast<double>(offset.z));

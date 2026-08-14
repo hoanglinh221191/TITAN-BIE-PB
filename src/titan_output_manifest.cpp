@@ -71,6 +71,12 @@ std::string active_modules_text(const arguments &args) {
     modules.push_back("CAS");
   if (args.cmap.flag_cmap)
     modules.push_back("CMap");
+  if (args.interface_analysis.flag_interface_analysis)
+    modules.push_back("Interface");
+  if (args.dssp.flag_dssp)
+    modules.push_back("DSSP");
+  if (args.flag_network)
+    modules.push_back("DCCM");
   if (args.qnative.flag_qnative)
     modules.push_back("QNative");
   if (args.dihedral.flag_dihedral)
@@ -133,6 +139,54 @@ std::vector<OutputManifestRow> build_output_manifest(const arguments &args,
                 "Residue occupancy in observed contacts.");
     add_indexed(rows, args, "CMap", "contact_probability_summary.dat", "text",
                 "per trajectory", "Contact-map settings and summary.");
+  }
+  if (args.interface_analysis.flag_interface_analysis) {
+    add_indexed(rows, args, "Interface", "interface_state_timeseries.csv",
+                "contact pairs", "time series",
+                "Three-entity contact state and pair counts by frame.");
+    add_indexed(rows, args, "Interface", "interface_state_populations.csv",
+                "probability", "block estimate",
+                "State populations with block uncertainty.");
+    add_indexed(rows, args, "Interface", "interface_segment_contacts.csv",
+                "contact pairs", "block estimate",
+                "Segment-pair contact means and occupancies.");
+    add_indexed(rows, args, "Interface", "interface_segment_timeseries.csv",
+                "contact pairs", "time series",
+                "Per-frame segment-pair contact counts and occupancy.");
+    add_indexed(rows, args, "Interface", "interface_metrics.csv", "mixed",
+                "block estimate",
+                "Contact and buried-surface observables.");
+    add_indexed(rows, args, "Interface", "interface_sasa_timeseries.csv",
+                "A^2", "strided time series",
+                "SASA and total/per-side buried surface.");
+  }
+  if (args.dssp.flag_dssp) {
+    add(rows, "DSSP", out_info.get_dssp_mol1_filename(), "occupancy",
+        "all trajectories", "Per-residue secondary-state occupancy.");
+    add(rows, "DSSP", out_info.get_dssp_mol1_content_filename(), "occupancy",
+        "all trajectories", "Whole-object secondary-state content.");
+    if (!args.segments.config_file.empty()) {
+      add(rows, "DSSP", out_info.get_dssp_mol1_segments_filename(),
+          "occupancy", "all trajectories",
+          "Entity and segment secondary-state content.");
+    }
+    add(rows, "DSSP", out_info.get_dssp_mol1_bridges_filename(),
+        "occupancy", "all frames",
+        "Bridge orientation and registry distribution.");
+    add(rows, "DSSP", out_info.get_dssp_mol1_ladders_filename(), "count",
+        "all frames", "Ladder orientation and length distribution.");
+  }
+  if (args.flag_network) {
+    add(rows, "DCCM", "dccm_matrix.csv", "correlation", "all frames",
+        "Complete signed displacement-correlation matrix.");
+    if (args.uncertainty.mode != "off") {
+      add(rows, "DCCM", out_info.get_dccm_block_uncertainty_filename(),
+          "correlation", "block estimate",
+          "Pairwise DCCM uncertainty and sign stability.");
+      add(rows, "DCCM", out_info.get_dccm_block_values_filename(),
+          "correlation", "per block",
+          "Per-block pair correlations for between-ensemble contrasts.");
+    }
   }
   if (args.qnative.flag_qnative) {
     add_indexed(rows, args, "QNative", "qnative_timeseries.csv", "fraction",

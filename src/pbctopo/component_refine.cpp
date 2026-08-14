@@ -1,6 +1,8 @@
 #include "component_refine.h"
 
 #include "component_metric.h"
+#include "reference_strain.h"
+#include "warm_state.h"
 
 #include "../BoxMatrix.h"
 
@@ -683,9 +685,13 @@ PbctopoCutCandidate score_component_placed_points_solution(
     stage_started = chrono::steady_clock::now();
   double continuity_path = numeric_limits<double>::infinity();
   double continuity_max_d2 = numeric_limits<double>::infinity();
+  double continuity_min_margin_A = numeric_limits<double>::quiet_NaN();
+  size_t continuity_margin_atom_a = numeric_limits<size_t>::max();
+  size_t continuity_margin_atom_b = numeric_limits<size_t>::max();
   if (!callbacks.continuity_metrics_ok(
           placed_points, continuity_pairs, continuity_cutoff, continuity_path,
-          continuity_max_d2, incumbent)) {
+          continuity_max_d2, continuity_min_margin_A,
+          continuity_margin_atom_a, continuity_margin_atom_b, incumbent)) {
     if (timing != nullptr) {
       accumulate_continuity(
           chrono::duration<double>(chrono::steady_clock::now() - stage_started)
@@ -739,6 +745,9 @@ PbctopoCutCandidate score_component_placed_points_solution(
   PbctopoCutCandidate pre_edge_seed;
   pre_edge_seed.continuity_path = continuity_path;
   pre_edge_seed.continuity_max_d2 = continuity_max_d2;
+  pre_edge_seed.continuity_min_margin_A = continuity_min_margin_A;
+  pre_edge_seed.continuity_margin_atom_a = continuity_margin_atom_a;
+  pre_edge_seed.continuity_margin_atom_b = continuity_margin_atom_b;
   pre_edge_seed.anchor_mst2 = anchor_mst2;
   pre_edge_seed.anchor_max_d2 = anchor_max_d2;
   pre_edge_seed.anchor_graph = anchor_graph_score;
@@ -773,6 +782,9 @@ PbctopoCutCandidate score_component_placed_points_solution(
   }
   candidate.continuity_path = continuity_path;
   candidate.continuity_max_d2 = continuity_max_d2;
+  candidate.continuity_min_margin_A = continuity_min_margin_A;
+  candidate.continuity_margin_atom_a = continuity_margin_atom_a;
+  candidate.continuity_margin_atom_b = continuity_margin_atom_b;
   candidate.anchor_mst2 = anchor_mst2;
   candidate.anchor_max_d2 = anchor_max_d2;
   candidate.anchor_graph = anchor_graph_score;
@@ -921,11 +933,13 @@ PbctopoCutCandidate improve_component_offsets_locally(
   const bool warm_offsets_compatible =
       (warm_state != nullptr && warm_state->has_component_offsets &&
        warm_state->previous_component_offsets.size() == offsets.size() &&
-       same_component_layout(components, warm_state->previous_component_sizes));
+       same_component_layout(components,
+                             warm_state->previous_component_layout));
   const bool warm_trial_hints_compatible =
       (warm_state != nullptr &&
        component_trial_hints_compatible(*warm_state, offsets.size()) &&
-       same_component_layout(components, warm_state->previous_component_sizes));
+       same_component_layout(components,
+                             warm_state->previous_component_layout));
   const bool strong_warm_candidate =
       (warm_reference_candidate != nullptr && warm_reference_candidate->valid &&
        !warm_reference_candidate->ultra_clash &&
@@ -1025,9 +1039,11 @@ PbctopoCutCandidate improve_component_offsets_locally(
       const Int3 *warm_target_delta_ptr = nullptr;
       if (warm_offsets_compatible &&
           comp_idx < warm_state->previous_component_offsets.size()) {
-        warm_target_delta =
-            warm_state->previous_component_offsets[comp_idx] - offsets[comp_idx];
-        warm_target_delta_ptr = &warm_target_delta;
+        if (checked_int3_subtract(
+                warm_state->previous_component_offsets[comp_idx],
+                offsets[comp_idx], warm_target_delta)) {
+          warm_target_delta_ptr = &warm_target_delta;
+        }
       }
       const vector<Int3> *stage1_hint_deltas =
           (warm_trial_hints_compatible &&
@@ -1046,18 +1062,24 @@ PbctopoCutCandidate improve_component_offsets_locally(
         for (size_t shift_pos : ordered_shift_indices) {
           const auto &shift = shifts[shift_pos];
           trial_offsets = offsets;
-          trial_offsets[comp_idx] =
-              offsets[comp_idx] + Int3{shift.ix, shift.iy, shift.iz};
+          if (!checked_int3_add(offsets[comp_idx],
+                                Int3{shift.ix, shift.iy, shift.iz},
+                                trial_offsets[comp_idx])) {
+            continue;
+          }
+          bool rebase_ok = false;
           if (timing != nullptr) {
             const auto rebase_started = chrono::steady_clock::now();
-            rebase_component_offsets(trial_offsets, Box);
+            rebase_ok = rebase_component_offsets(trial_offsets, Box);
             timing->component_graph_refine_rebase_s +=
                 chrono::duration<double>(chrono::steady_clock::now() -
                                          rebase_started)
                     .count();
           } else {
-            rebase_component_offsets(trial_offsets, Box);
+            rebase_ok = rebase_component_offsets(trial_offsets, Box);
           }
+          if (!rebase_ok)
+            continue;
           PbctopoCutCandidate trial = score_refine_trial(
               comp_idx, trial_offsets, exact_anchor_indices, local_points,
               &best_local, true, PbctopoRefineScorePhase::Exact, nullptr,
@@ -1074,18 +1096,24 @@ PbctopoCutCandidate improve_component_offsets_locally(
         for (size_t shift_pos : ordered_shift_indices) {
           const auto &shift = shifts[shift_pos];
           trial_offsets = offsets;
-          trial_offsets[comp_idx] =
-              offsets[comp_idx] + Int3{shift.ix, shift.iy, shift.iz};
+          if (!checked_int3_add(offsets[comp_idx],
+                                Int3{shift.ix, shift.iy, shift.iz},
+                                trial_offsets[comp_idx])) {
+            continue;
+          }
+          bool rebase_ok = false;
           if (timing != nullptr) {
             const auto rebase_started = chrono::steady_clock::now();
-            rebase_component_offsets(trial_offsets, Box);
+            rebase_ok = rebase_component_offsets(trial_offsets, Box);
             timing->component_graph_refine_rebase_s +=
                 chrono::duration<double>(chrono::steady_clock::now() -
                                          rebase_started)
                     .count();
           } else {
-            rebase_component_offsets(trial_offsets, Box);
+            rebase_ok = rebase_component_offsets(trial_offsets, Box);
           }
+          if (!rebase_ok)
+            continue;
           const PbctopoCutCandidate *stage2_prune_threshold =
               (top_trials.size() >= stage2_keep) ? &top_trials.back().candidate
                                                  : nullptr;
@@ -1121,18 +1149,24 @@ PbctopoCutCandidate improve_component_offsets_locally(
         for (size_t shift_pos : ordered_shift_indices) {
           const auto &shift = shifts[shift_pos];
           trial_offsets = offsets;
-          trial_offsets[comp_idx] =
-              offsets[comp_idx] + Int3{shift.ix, shift.iy, shift.iz};
+          if (!checked_int3_add(offsets[comp_idx],
+                                Int3{shift.ix, shift.iy, shift.iz},
+                                trial_offsets[comp_idx])) {
+            continue;
+          }
+          bool rebase_ok = false;
           if (timing != nullptr) {
             const auto rebase_started = chrono::steady_clock::now();
-            rebase_component_offsets(trial_offsets, Box);
+            rebase_ok = rebase_component_offsets(trial_offsets, Box);
             timing->component_graph_refine_rebase_s +=
                 chrono::duration<double>(chrono::steady_clock::now() -
                                          rebase_started)
                     .count();
           } else {
-            rebase_component_offsets(trial_offsets, Box);
+            rebase_ok = rebase_component_offsets(trial_offsets, Box);
           }
+          if (!rebase_ok)
+            continue;
           const PbctopoCutCandidate *stage1_prune_threshold =
               (sparse_top_trials.size() >= stage1_keep)
                   ? &sparse_top_trials.back().candidate
@@ -1210,7 +1244,11 @@ PbctopoCutCandidate improve_component_offsets_locally(
                                       comp_idx < delta_hints.size();
                  ++comp_idx) {
               for (const auto &absolute_offset : absolute_offsets[comp_idx]) {
-                const Int3 delta = absolute_offset - offsets[comp_idx];
+                Int3 delta{};
+                if (!checked_int3_subtract(absolute_offset,
+                                           offsets[comp_idx], delta)) {
+                  continue;
+                }
                 if (is_zero_delta(delta))
                   continue;
                 auto &dst = delta_hints[comp_idx];
@@ -1244,16 +1282,6 @@ PbctopoCutCandidate improve_component_offsets_locally(
     }
   }
   return best;
-}
-bool same_component_layout(const vector<vector<size_t>> &components,
-                           const vector<size_t> &sizes) {
-  if (components.size() != sizes.size())
-    return false;
-  for (size_t idx = 0; idx < components.size(); ++idx) {
-    if (components[idx].size() != sizes[idx])
-      return false;
-  }
-  return true;
 }
 vector<size_t> build_atom_component_index(
     size_t atom_count, const vector<vector<size_t>> &components) {
@@ -1296,8 +1324,8 @@ PbctopoStage1EdgeContext build_stage1_edge_context(
     const double d2 = norm2(delta);
     if (d2 > edge.break_cutoff_d2)
       ++context.fixed_broken_edges;
-    if (d2 > edge.ref_d2)
-      context.fixed_edge_stretch += (d2 - edge.ref_d2) * edge.inv_ref_d2;
+    context.fixed_edge_stretch +=
+        pbctopo_symmetric_reference_strain(d2, edge.ref_d2);
   }
   return context;
 }

@@ -28,7 +28,8 @@ struct PbctopoRefineScoringCallbacks {
       const PbctopoCutCandidate *);
   using ContinuityMetricsFn = bool (*)(
       const std::vector<Vec3> &, const std::vector<PbctopoContinuityPair> &,
-      double, double &, double &, const PbctopoCutCandidate *);
+      double, double &, double &, double &, std::size_t &, std::size_t &,
+      const PbctopoCutCandidate *);
   using AnalyzeUltraclashFn = void (*)(const std::vector<Vec3> &,
                                        const std::unordered_set<std::uint64_t> &,
                                        PbctopoCutCandidate &, double,
@@ -59,8 +60,6 @@ struct PbctopoRefineScoringCallbacks {
 void clear_component_trial_hints(PbctopoWarmState &warm_state);
 bool component_trial_hints_compatible(const PbctopoWarmState &warm_state,
                                       std::size_t component_count);
-bool same_component_layout(const std::vector<std::vector<std::size_t>> &components,
-                           const std::vector<std::size_t> &sizes);
 
 std::vector<std::size_t>
 build_coarse_anchor_subset(const std::vector<PbctopoAtom> &atoms,

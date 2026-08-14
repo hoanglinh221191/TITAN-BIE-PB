@@ -99,7 +99,8 @@ struct EdgeKeyHash {
 
 bool finite_atom(const Atom &atom) {
   return std::isfinite(atom.x) && std::isfinite(atom.y) &&
-         std::isfinite(atom.z) && std::isfinite(atom.radius);
+         std::isfinite(atom.z) && std::isfinite(atom.radius) &&
+         atom.radius > 0.0;
 }
 
 double elapsed_ms(std::chrono::steady_clock::time_point begin,
@@ -995,26 +996,42 @@ std::vector<Panel> build_surface(const std::vector<Atom> &atoms,
 
   SurfaceMesh mesh;
   calderon::TraceSpaces calderon_trace;
+  calderon::AuxiliarySurfaceResult primary_surface;
   if (options.primary_surface == "grid-ses" ||
       options.primary_surface == "analytic-ses") {
     const bool analytic = options.primary_surface == "analytic-ses";
-    calderon::AuxiliarySurfaceResult primary =
-        analytic
-            ? calderon::build_analytic_ses_surface(
-                  finite_atoms, options.ses_grid_spacing, options.probe_radius,
-                  executor, options.ses_max_grid_vertices, true)
-            : calderon::build_implicit_ses_surface(
-                  finite_atoms, options.ses_grid_spacing, options.probe_radius,
-                  executor, options.ses_max_grid_vertices, true);
-    if (primary.status != "pass") {
+    primary_surface =
+        analytic ? calderon::build_analytic_ses_surface(
+                       finite_atoms, options.ses_grid_spacing,
+                       options.probe_radius, executor,
+                       options.ses_max_grid_vertices, true,
+                       options.analytic_ses_engine)
+                 : calderon::build_implicit_ses_surface(
+                       finite_atoms, options.ses_grid_spacing,
+                       options.probe_radius, executor,
+                       options.ses_max_grid_vertices, true);
+    if (primary_surface.status != "pass") {
       throw std::runtime_error(
           "TABI " + options.primary_surface +
-          " surface failed watertight topology gate: " + primary.status);
+          " surface failed watertight topology gate: " +
+          primary_surface.status);
     }
-    mesh = std::move(primary.mesh);
-    calderon_trace = std::move(primary.trace_spaces);
+    mesh = std::move(primary_surface.mesh);
+    calderon_trace = std::move(primary_surface.trace_spaces);
     mesh.sphere_mesh_mode = options.primary_surface;
-    mesh.mesh_build_ms = primary.build_ms;
+    if (analytic && options.analytic_ses_engine ==
+                        "patch-ray-experimental") {
+      // Reuse the established profile columns as a stable high-level split:
+      // neighbor = patch graph + compact ray CSR, mesh = topology + active
+      // polygonization + projection/repair. surface_build_ms remains total.
+      mesh.neighbor_build_ms =
+          primary_surface.patch_build_ms + primary_surface.ray_build_ms;
+      mesh.mesh_build_ms = primary_surface.topology_ms +
+                           primary_surface.polygonize_ms +
+                           primary_surface.repair_ms;
+    } else {
+      mesh.mesh_build_ms = primary_surface.build_ms;
+    }
     for (Vertex &vertex : mesh.vertices) {
       if (vertex.atom_index < original_indices.size()) {
         vertex.atom_index = original_indices[vertex.atom_index];
@@ -1087,6 +1104,97 @@ std::vector<Panel> build_surface(const std::vector<Atom> &atoms,
         mesh.quality_enclosed_volume_rel_error_vs_4piR3_over3;
     result->surface_quality_triangle_area_cv =
         mesh.quality_triangle_area_cv;
+    result->surface_topology_source = primary_surface.topology_source;
+    result->surface_analytic_ses_engine =
+        primary_surface.analytic_ses_engine;
+    result->surface_status_detail = primary_surface.status;
+    result->surface_cavity_policy = primary_surface.cavity_policy;
+    result->surface_odd_ray_rows = primary_surface.odd_ray_rows;
+    result->surface_patch_ray_unresolved_uncertified_rows =
+        primary_surface.patch_ray_unresolved_uncertified_rows;
+    result->surface_morphology_fallback_vertices =
+        primary_surface.morphology_fallback_vertices;
+    result->surface_analytic_orientation_status =
+        primary_surface.analytic_orientation_status;
+    result->surface_analytic_inverted_faces =
+        primary_surface.analytic_inverted_faces;
+    result->surface_analytic_orientation_uncertified_faces =
+        primary_surface.analytic_orientation_uncertified_faces;
+    result->surface_analytic_self_intersections =
+        primary_surface.analytic_self_intersections;
+    result->surface_wide_repair_attempts =
+        primary_surface.wide_repair_attempts;
+    result->surface_topology_certificate_accepts =
+        primary_surface.topology_certificate_accepts;
+    result->surface_topology_fallback_audits =
+        primary_surface.topology_fallback_audits;
+    result->surface_initial_collapse_ms = primary_surface.initial_collapse_ms;
+    result->surface_stable_sliver_ms = primary_surface.stable_sliver_ms;
+    result->surface_full_projection_ms = primary_surface.full_projection_ms;
+    result->surface_orientation_repair_ms =
+        primary_surface.orientation_repair_ms;
+    result->surface_wide_repair_ms = primary_surface.wide_repair_ms;
+    result->surface_self_intersection_audit_ms =
+        primary_surface.self_intersection_audit_ms;
+    result->surface_filled_cavity_regions =
+        primary_surface.filled_cavity_regions;
+    result->surface_filled_cavity_vertices =
+        primary_surface.filled_cavity_vertices;
+    result->surface_poor_triangles_before =
+        primary_surface.poor_triangles_before;
+    result->surface_poor_triangles_after =
+        primary_surface.poor_triangles_after;
+    result->surface_triangle_quality_min_before =
+        primary_surface.triangle_quality_min_before;
+    result->surface_triangle_quality_min_after =
+        primary_surface.triangle_quality_min_after;
+    result->surface_max_edge_ratio_before =
+        primary_surface.max_edge_ratio_before;
+    result->surface_max_edge_ratio_after =
+        primary_surface.max_edge_ratio_after;
+    result->surface_analytic_audit_status =
+        primary_surface.analytic_audit_status;
+    result->surface_analytic_audit_samples =
+        primary_surface.analytic_audit_samples;
+    result->surface_analytic_audit_hits = primary_surface.analytic_audit_hits;
+    result->surface_analytic_audit_misses =
+        primary_surface.analytic_audit_misses;
+    result->surface_analytic_projection_distance_rms =
+        primary_surface.analytic_projection_distance_rms;
+    result->surface_analytic_projection_distance_max =
+        primary_surface.analytic_projection_distance_max;
+    result->surface_analytic_patch_residual_rms =
+        primary_surface.analytic_patch_residual_rms;
+    result->surface_analytic_patch_residual_max =
+        primary_surface.analytic_patch_residual_max;
+    result->surface_analytic_normal_angle_rms_deg =
+        primary_surface.analytic_normal_angle_rms_deg;
+    result->surface_analytic_normal_angle_max_deg =
+        primary_surface.analytic_normal_angle_max_deg;
+    result->surface_sampled_hausdorff_proxy =
+        primary_surface.sampled_hausdorff_proxy;
+    result->surface_analytic_normal_quality_status =
+        primary_surface.analytic_normal_quality_status;
+    result->surface_analytic_orientation_smooth_faces =
+        primary_surface.analytic_orientation_smooth_faces;
+    result->surface_analytic_orientation_seam_faces =
+        primary_surface.analytic_orientation_seam_faces;
+    result->surface_analytic_normal_cosine_below_025_faces =
+        primary_surface.analytic_normal_cosine_below_025_faces;
+    result->surface_analytic_normal_cosine_below_050_faces =
+        primary_surface.analytic_normal_cosine_below_050_faces;
+    result->surface_analytic_normal_area_weighted_rms_deg =
+        primary_surface.analytic_normal_area_weighted_rms_deg;
+    result->surface_analytic_normal_p99_deg =
+        primary_surface.analytic_normal_p99_deg;
+    result->surface_analytic_smooth_normal_p99_deg =
+        primary_surface.analytic_smooth_normal_p99_deg;
+    result->surface_analytic_seam_normal_p99_deg =
+        primary_surface.analytic_seam_normal_p99_deg;
+    result->surface_analytic_normal_area_below_cosine_025_fraction =
+        primary_surface.analytic_normal_area_below_cosine_025_fraction;
+    result->surface_analytic_normal_area_below_cosine_050_fraction =
+        primary_surface.analytic_normal_area_below_cosine_050_fraction;
     result->calderon_trace_space_status = calderon_trace.quality.failure_reason;
     result->calderon_trace_vertices = calderon_trace.quality.vertex_count;
     result->calderon_trace_edges = calderon_trace.quality.edge_count;
@@ -1098,6 +1206,13 @@ std::vector<Panel> build_surface(const std::vector<Atom> &atoms,
         calderon_trace.quality.nonmanifold_edge_count;
     result->calderon_trace_unreferenced_vertices =
         calderon_trace.quality.unreferenced_vertex_count;
+    result->calderon_trace_components =
+        calderon_trace.quality.connected_component_count;
+    result->calderon_trace_euler_characteristic =
+        calderon_trace.quality.euler_characteristic;
+    result->calderon_trace_genus_sum = calderon_trace.quality.genus_sum;
+    result->calderon_trace_topology_invariants_valid =
+        calderon_trace.quality.topology_invariants_valid;
     result->calderon_aux_surface_mode = options.calderon_aux_surface;
     result->calderon_aux_trace_status =
         options.calderon_aux_surface == "off" ? "off" : calderon_auxiliary.status;

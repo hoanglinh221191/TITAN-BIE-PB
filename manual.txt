@@ -48,11 +48,28 @@ SUPPORTED INPUT MODES
      Use:
        -a arg.in
      Notes:
-       options can be stored in a text file. For single-token entries,
-       arg.in commonly uses key=value syntax, for example:
+       value options must use -option=value; '=' is mandatory for them.
+      Boolean/presence switches may stand alone. Explicit boolean values remain
+      accepted for compatibility: terminal -1pdb or -1pdb true; arg.in -1pdb
+      or -1pdb=true. Examples:
+         -1pdb
          -traj=md.xtc
          -ff=AMBER99SB
          -g=1&2
+
+  SYNTAX CONTRACT
+     Terminal: value options use -option value; switches may stand alone.
+     arg.in: value options use -option=value; switches may stand alone.
+     Explicit boolean values remain valid: terminal `-gbsa false`, arg.in
+     `-gbsa=false`.
+     Unknown or obsolete options, conflicts, and missing values are reported
+     before analysis starts; close misspellings include suggested options.
+
+  BUILD PORTABILITY CONTRACT
+     The native profile targets the build host. The portable profile uses a
+     generic x86-64 AVX2+FMA baseline; it does not support pre-AVX2 CPUs.
+     The current MM/GBSA kernel requires AVX2. Check the generated build
+     manifest before copying a TITAN binary to a different machine.
 
 CORE DEPENDENCY CHAIN
 
@@ -174,13 +191,17 @@ IMPORTANT NOTES
 
   Main inputs:
     -gbsa or -alpb
-    -igb, -ext_diel, -int_diel, -saltcon, -epsilon_in
+    -igb, -ext_diel, -int_diel, -saltcon, -gbsa-temp, -epsilon_in
+    -gbsa-sasa-points
+    -gbsa-ie-block, -gbsa-ie-min-samples, -gbsa-ie-filter-sigma
 
   Typical outputs:
     gbsa_snapshots.dat
     gbsa_timeseries_avg.dat
     gbsa_summary.dat
     gbsa_decomposition.dat
+    gbsa_ie_diagnostics.csv
+    gbsa_alpb_sizes.csv                 (with -alpb)
     edecomp_mmgbsa_residue_map.csv       (with -edecomp-source=gbsa|all)
     edecomp_mmgbsa_residue_ranking.csv   (with -edecomp-source=gbsa|all)
     out_entropy.dat   (auto-enabled by -gbsa for free-energy completeness)
@@ -188,6 +209,17 @@ IMPORTANT NOTES
   Notes:
     - GBSA/ALPB are energy modules and are ignored in -nocal mode; remove
       -nocal to compute implicit-solvent free energies.
+    - HCT/OBC use analytical pair descreening, Amber intrinsic radii and
+      element screen factors. Salt uses temperature/dielectric-aware Amber
+      Debye kappa. IE reports status, ESS and block drift; Final_dG is nan
+      until the minimum-sample gate passes. Sigma 0 disables hard filtering.
+    - ALPB uses the salt-screened Sigalov expression with dimensionless
+      alpha=0.571412 and a per-frame determinant electrostatic size (A_Det)
+      for the complex, receptor, and ligand endpoints. It is not a fixed
+      empirical length added to the GB denominator. Summary/log provenance
+      and all three endpoint sizes are exported for audit.
+    - When IE sigma filtering removes samples, the retained ensemble is
+      re-centered and the minimum-sample gate is applied again.
 
 2.2b PBE
 
@@ -202,34 +234,33 @@ IMPORTANT NOTES
     PBE deltaG_solv endpoint solves, force-field elec/vdw interaction energy,
     SASA nonpolar energy, optional interaction entropy, and per-frame binding
     energy CSV output. The `TitanSurface` workspace is shared by GBSA/PBSA
-    SASA and BIE exposed-panel construction; `TitanSASA` remains the
+    SASA and TABI exposed-panel construction; `TitanSASA` remains the
     compatibility wrapper for per-atom SASA/SA nonpolar energy. Each workflow
     keeps its own residue grouping and output files.
-    Backend selection is explicit: bare -pbe, -pbe=grid, and compatibility
+    Backend selection is explicit: bare -pbe, terminal -pbe grid, and
+    arg.in -pbe=grid; compatibility
     aliases -pbe=delphi, -pbe=pydelphi, and -pbe=fd use the established
-    finite-difference grid implementation; -pbe=bie uses the separate
-    clean-room boundary-integral equation (BIE) backend for linear PB only.
-    The historical TABI/JCP name denotes the formulation lineage; `tabi` and
-    `-pbe-tabi-*` remain accepted as compatibility aliases for archived input
-    files. The BIE backend defaults to the JCP 2013 coupled formulation with a
+    finite-difference grid implementation; -pbe=tabi uses the separate
+    clean-room boundary-integral TABI v1 backend for linear PB only. TABI
+    defaults to the JCP 2013 coupled boundary-integral formulation with a
     clean-room triangle surface. Self-panel analytic singular integration is
     available as a hidden validation path; one-ring Duffy remains
     experimental/report-only, and `auto` remains centroid until analytic gates
     pass. The legacy scalar `titan-v1`
     formulation is retained only as a hidden debug path. `jcp2013-centroid` is the paper-style
-    direct centroid-collocation path. The public production selection
-    `-pbe=bie -pbe-bie-fast-operator=p1` uses the coupled JCP 2013 BIE path,
-    hierarchical Cartesian multipole acceleration, and sparse near-field ILU
-    by default. Sparse ILU always follows the
+    direct centroid-collocation path. When users explicitly choose TABI
+    treecode (`-pbe=tabi -pbe-tabi-sum=treecode`), TITAN resolves to the
+    coupled JCP 2013 treecode path and now uses the analytical FMM/M2L engine
+    with sparse near-field ILU by default. Sparse ILU always follows the
     automatic fallback pipeline ILU(0) -> bounded row-scaled regularized ILU
     -> diagonal: the unshifted factor is retained when it passes the pivot,
     growth, and sparse-solve quality gates; regularization is attempted only
     after that failure. This pipeline is enabled by default; use
-    `-pbe-bie-precond-ilu-regularization=off` to restore ILU(0) -> diagonal,
-    or `-pbe-bie-precond-ilu-regularization-max` to change the shift ceiling.
-    Lower-level sum and operator controls remain available for regression and
-    diagnostics. The opt-in
-    `-pbe-bie-discretization=node-patch` path assigns one unknown location per
+    `-pbe-tabi-precond-ilu-regularization=off` to restore ILU(0) -> diagonal,
+    or `-pbe-tabi-precond-ilu-regularization-max` to change the shift ceiling.
+    The legacy TABI treecode remains
+    available for regression with `-pbe-tabi-fmm-m2l=off`. The opt-in
+    `-pbe-tabi-discretization=node-patch` path assigns one unknown location per
     mesh vertex, with barycentric patch area sum(A_triangle/3). Regular source
     terms use the exact dual-patch area centroid in both near and far paths;
     the self single-layer term uses an equal-area analytic integral while the
@@ -241,22 +272,21 @@ IMPORTANT NOTES
     Boundary-energy projection uses a structure-of-arrays source cache,
     dynamically scheduled four-atom tiles on the TITAN executor, and an AVX2
     source kernel with exact scalar `exp` evaluation when AVX2 is available;
-    other CPUs use the scalar kernel. The per-component CSV and BIE timing
+    other CPUs use the scalar kernel. The per-component CSV and TABI timing
     profiles report `energy_projection_seconds` and
     `energy_projection_kernel` so this post-GMRES cost is not hidden.
     The default remains `centroid`. The legacy `tabi2-nodepatch` formulation
     name is retained as a compatibility alias for the real node-patch path.
-    `pbe_timing.csv` reports BIE mesh, diagonal, RHS, GMRES, matvec,
+    `pbe_timing.csv` reports TABI mesh, diagonal, RHS, GMRES, matvec,
     BIE-formulation, and tree counters; `-pbe-timing=summary|detail` also
     writes `pbe_memory_profile.csv`, while `detail` writes
     `pbe_tabi_profile.csv`.
-    The hidden `-pbe-bie-surface-only=true` feasibility mode builds and
-    profiles the BIE surface, then exits before RHS, operator,
+    The hidden `-pbe-tabi-surface-only=true` feasibility mode builds and
+    profiles the TABI surface, then exits before RHS, operator,
     preconditioner, or GMRES construction; it does not report an energy.
 
   Main inputs:
-    -pbe[=grid|bie]
-    -pbe-bie-fast-operator=auto|direct|p1
+    -pbe[=grid|tabi]
     -pbe-scale, -pbe-margin, -pbe-gridbox
     -pbe-model, -pbe-biomodel, -pbe-dielectric
     -pbe-int-diel, -pbe-ext-diel, -pbe-salt, -pbe-temp
@@ -290,6 +320,10 @@ IMPORTANT NOTES
         jcp2013-treecode|tabi2-nodepatch|calibrated-debug,
       -pbe-bie-energy-projection=boundary|born-check|charge-potential-debug,
       -pbe-bie-fmm-m2l=auto|off|single-matvec-analytic,
+      -pbe-bie-fmm-engine=cartesian|cartesian-full-experimental|kifmm-lite|
+        kifmm-local|kifmm-lite-experimental|
+        kifmm-channel-hybrid-experimental,
+      -pbe-bie-fmm-cartesian-order=1|4,
       -pbe-bie-precond=auto|none|diagonal|block|block-budgeted|
         coarse-galerkin-probe|fmm-block-jacobi|fmm-overlap-schwarz|
         fmm-nearfield-ilu0|fmm-nearfield-ilu0-coarse|
@@ -303,15 +337,43 @@ IMPORTANT NOTES
       -pbe-bie-precond-coarse-verify=off|full-small,
       -pbe-bie-near-integration=auto|centroid|analytic_singular|
         duffy_adaptive
+      -pbe-bie-node-patch-operator-audit=on|off (default on),
       -pbe-bie-primary-surface=sphere-patch|grid-ses|analytic-ses,
+      -pbe-bie-analytic-ses-engine=current|patch-ray-experimental,
       -pbe-bie-ses-grid-spacing=<0.25..4.0>
+    cartesian-full-experimental is a separate, opt-in Cartesian P2M/M2M/M2L/
+    L2L/L2P engine for expansion order 1 or 4. It reuses the established
+    octree/worklist builder, but it does not use KIFMM equivalent/check
+    surfaces or an equivalent-density solve. The existing cartesian and KIFMM
+    engines retain their current behavior. Cartesian full-FMM accuracy is
+    controlled by -pbe-bie-opening-theta. When tree parameters are not passed
+    explicitly, full FMM uses the audited order-dependent defaults leaf 64 /
+    theta 0.20 for order 1 and leaf 80 / theta 0.65 for order 4. The existing
+    production treecode defaults are unchanged. Explicit
+    -pbe-bie-tree-leaf-size and -pbe-bie-opening-theta values always win.
     grid-ses is an opt-in watertight solvent-excluded surface. It applies a
     probe-radius morphological closing to the VDW volume on a Cartesian grid,
     extracts a welded triangle mesh, and rejects any open or nonmanifold mesh
-    before the BIE solve. The default remains sphere-patch.
+    before the TABI solve. The default remains sphere-patch.
     analytic-ses independently constructs exact contact, toroidal, and
     reentrant probe patches from expanded atom spheres, intersects grid rays
     with those patches, and topology-audits the welded mesh before solving.
+    patch-ray-experimental is a clean-room, opt-in analytic SES extractor. It
+    visits patches, builds compact three-axis ray crossings, and does not
+    change the established analytic SES engine or its default selection. Any
+    odd ray row invalidates only the vertices that use that row. Unanimous
+    three-axis parity is checked in the compact solvent shell; disagreements
+    are repaired locally by the morphology predicate, while exact VDW/expanded
+    sphere certificates classify the homogeneous interior/exterior. Boundary
+    magnitude and projection use sparse active-cell storage plus an atom-local
+    patch CSR. Final gates report connected components, Euler characteristic,
+    genus, filled cavities, sampled analytic distance/residual/normal error,
+    and curvature-aware repair rollback. No lazy ray-bucket index is built.
+    Node-patch treecode uses a fail-closed, spatially stratified pre-GMRES
+    operator audit. It starts at 64 targets and expands to 256 or 512 only
+    when the sampled error is ambiguous. Advanced production runs may set
+    -pbe-bie-node-patch-operator-audit=off to remove this guard; convergence
+    then no longer certifies agreement with sampled direct rows.
     fmm-nearfield-ilu0-coarse is an opt-in balanced two-level
     preconditioner. It reuses adaptive occupied octree nodes for an
     area-weighted coarse space and combines the coarse correction with the
@@ -336,16 +398,16 @@ IMPORTANT NOTES
     v1 requires normal charge/radius initialization; do not combine with -nocal
     Zero-radius polar hydrogens from supported force fields use a small
     Bondi-style PBE surface fallback radius while charges remain mandatory.
-    BIE v1 uses an explicit linear-BIE convention with Angstrom kernels,
+    TABI v1 uses an explicit linear-BIE convention with Angstrom kernels,
     outward normals, solid-angle diagonal terms, and final Coulomb conversion.
-    BIE writes `pbe_tabi_formulation_audit.csv` for sign/scale, kappa,
+    TABI writes `pbe_tabi_formulation_audit.csv` for sign/scale, kappa,
     dielectric contrast, energy projection, and fallback diagnostics.
-    BIE audit/profile rows also report surface_generator, discretization,
+    TABI audit/profile rows also report surface_generator, discretization,
     requested/effective preconditioner, near_integration/self/one-ring ASI
     counters, and paper-mode guard status when an
     experimental path is pinned.
     It rejects nonlinear, RPB, Gaussian dielectric/surface, focus, multigrid,
-    and grid-map modes. Linear MM/PBSA is supported through three BIE
+    and grid-map modes. Linear MM/PBSA is supported through three TABI
     reaction-field endpoint solves (complex, receptor, and ligand), including
     molecule, residue, atom, and hybrid decomposition outputs.
 
@@ -904,7 +966,7 @@ IMPORTANT NOTES
     s2_bfactor_average.pdb         optional
 
   Notes:
-    - S2 analysis defaults off. Bare `-s2` enables it.
+    - S2 analysis defaults off. Terminal `-s2 true` enables it.
     - N-H rows require exact backbone H or HN atoms. PRO and terminal
       residues without a backbone hydrogen are skipped with a warning.
     - CA-C rows use the exact vector and are emitted independently of N-H rows.
@@ -1692,27 +1754,27 @@ IMPORTANT NOTES
 
 3.5 DCCM network + PCA/FES
 
-  titan.exe -s reference.pdb -traj md.xtc -network -community=louvain \
-      -pca -fes-grid=80
+  titan.exe -s reference.pdb -traj md.xtc -network -community louvain \
+      -pca -fes-grid 80
 
 3.6 Allostery analysis
 
   titan.exe -s reference.pdb -traj md.xtc -allostery \
-      -allostery-tau=10 -allostery-bins=48
+      -allostery-tau 10 -allostery-bins 48
 
   titan.exe -s reference.pdb -traj md.xtc -allostery \
-      -allostery-cut=12 -allostery-prune-window=avg -allostery-no-te
+      -allostery-cut 12 -allostery-prune-window avg -allostery-no-te
 
   titan.exe -s reference.pdb -traj md.xtc -allostery \
-      -allostery-cut=12 -allostery-knn=4
+      -allostery-cut 12 -allostery-knn 4
 
   titan.exe -s reference.pdb -traj md.xtc -allostery \
-      -allostery-knn=4 -allostery-knn-prior=contact \
-      -allostery-knn-contact-cut=8 -allostery-no-te
+      -allostery-knn 4 -allostery-knn-prior contact \
+      -allostery-knn-contact-cut 8 -allostery-no-te
 
   titan.exe -s reference.pdb -traj md.xtc -allostery \
-      -allostery-estimator=knn -allostery-estimator-k=4 \
-      -allostery-knn=6 -allostery-cut=12
+      -allostery-estimator knn -allostery-estimator-k 4 \
+      -allostery-knn 6 -allostery-cut 12
 
   Inspect:
     raw_mi_edges.csv for unthresholded mutual information
@@ -1722,11 +1784,11 @@ IMPORTANT NOTES
   3.6a Corr-kNN raw information export
 
   titan.exe -s reference.pdb -traj md.xtc -corr-knn \
-      -corr-knn-k=4 -corr-knn-tau=10 -corr-knn-pair-cut=12
+      -corr-knn-k 4 -corr-knn-tau 10 -corr-knn-pair-cut 12
 
   titan.exe -s reference.pdb -traj md.xtc -corr-knn \
-      -corr-knn-pair-topk=6 -corr-knn-pair-prior=contact \
-      -corr-knn-pair-contact-cut=8 -corr-knn-no-te
+      -corr-knn-pair-topk 6 -corr-knn-pair-prior contact \
+      -corr-knn-pair-contact-cut 8 -corr-knn-no-te
 
   3.6b HBond kinetics
 
@@ -1735,7 +1797,7 @@ IMPORTANT NOTES
         -hbk-kind hbond -hbk-kind salt -hbk-domain both -hbk-maxlag 250
 
   arg.in:
-    -hbk
+    -hbk=true
     -hbk-kind=hbond
     -hbk-kind=salt
     -hbk-domain=both
@@ -1746,8 +1808,8 @@ IMPORTANT NOTES
 
   3.7 TICA + MSM workflow
 
-  titan.exe -s reference.pdb -i input.txt -tica -tica-lag=10 \
-      -tica-components=5 -msm -msm-clusters 150 -msm-lag 10
+  titan.exe -s reference.pdb -i input.txt -tica -tica-lag 10 \
+      -tica-components 5 -msm -msm-clusters 150 -msm-lag 10
 
 3.8 DHAM + weighted FES from REMD-style data
 
@@ -1756,8 +1818,8 @@ IMPORTANT NOTES
       -dham-temps temps.txt \
       -dham-ener energy_xvg_list.txt \
       -dham-target-temp 300 \
-      -dham-max-iter=5000 \
-      -dham-tol=1e-6
+      -dham-max-iter 5000 \
+      -dham-tol 1e-6
 
   Example temps.txt:
     300
@@ -1792,7 +1854,7 @@ IMPORTANT NOTES
 
 3.8b LJ REMD / Argon DHAM workflow
 
-  titan.exe -s conf.pdb -i xtc_list.txt -nocal -lj -tica -msm -dham \
+  titan.exe -s conf.pdb -i xtc_list.txt -nocal true -lj -tica -msm -dham \
       -common-topo topol.top \
       -dham-temps temps.txt \
       -dham-ener energy_xvg_list.txt \
@@ -1851,18 +1913,19 @@ IMPORTANT NOTES
 
 3.10 LLPS analysis (Martini)
 
-  titan.exe -s system.pdb -traj md.xtc -ff MARTINI -llps
+  titan.exe -s system.pdb -traj md.xtc -ff MARTINI -llps true
 
-  titan.exe -s system.pdb -traj md.xtc -ff MARTINI -llps \
-      -llps-dbscan-eps 12 -llps-dbscan-minpts 8 -llps-voxel 0.6 -llps-fuzzy
+  titan.exe -s system.pdb -traj md.xtc -ff MARTINI -llps true \
+      -llps-dbscan-eps 12 -llps-dbscan-minpts 8 -llps-voxel 0.6 \
+      -llps-fuzzy true
 
 3.11 GIST water thermodynamics
 
   titan.exe -s complex.pdb -traj md.xtc -gist \
-      -gist-resolution=0.5 \
-      -gist-padding=8.0 \
-      -gist-temperature=300 \
-      -gist-water-model=TIP3P
+      -gist-resolution 0.5 \
+      -gist-padding 8.0 \
+      -gist-temperature 300 \
+      -gist-water-model TIP3P
 
 3.12 IFP occupancy analysis
 
@@ -1874,7 +1937,7 @@ IMPORTANT NOTES
 
 3.13 LSP-MD network analysis
 
-  titan.exe -s reference.pdb -traj md.xtc -lspmd -lspmd_cut=12.0
+  titan.exe -s reference.pdb -traj md.xtc -lspmd -lspmd_cut 12.0
 
 3.14 Using arg.in
 
@@ -1885,11 +1948,11 @@ IMPORTANT NOTES
     -traj=md.xtc
     -g=1&2
     -ff=AMBER99SB
-    -network
-    -pca
-    -tica
+    -network=true
+    -pca=true
+    -tica=true
     -tica-lag=10
-    -msm
+    -msm=true
     -msm-lag=10
 
 ================================================================================
@@ -1946,17 +2009,17 @@ IMPORTANT NOTES
 4.2 Groups / Molecules / Time
 
   -g <G1>&<G2>          Interaction groups
-  -sg <SG1>-<SG2>       CLI sub-groups within main groups
-  -sg= <SG1>-<SG2>      arg.in sub-groups within main groups
-  -sg-mode=auto|stream|cache
+  -sg <SG1>-<SG2>       Terminal sub-groups; e.g. -sg 1 2-3 4
+  -sg=<SG1>-<SG2>       arg.in form; e.g. -sg= 1 2-3 4
+  -sg-mode <mode>       auto, stream, or cache
                         Sub-group energy mode. stream avoids dense pair cache.
-  -sg-cache=auto|off|on Dense pair-cache preference for -sg
-  -sg-memory-gb=auto|N  RAM budget for -sg auto mode
-  -sg-timeseries=auto|full|summary-only
+  -sg-cache <mode>      auto, off, or on; dense pair-cache preference for -sg
+  -sg-memory-gb <v>     auto or N; RAM budget for -sg auto mode
+  -sg-timeseries <mode> auto, full, or summary-only
                         Control -sg time-series output volume
-  -sg-kernel=auto|scalar|avx2
+  -sg-kernel <mode>     auto, scalar, or avx2
                         Streaming -sg compute kernel preference
-  -sg-cutoff=auto|VALUE|none
+  -sg-cutoff <value>    auto, VALUE, or none
                         Streaming -sg cutoff in nm; auto uses energy cutoff
   -mol-1-type <type>    protein, complex, lig, rna, dna
   -mol-2-type <type>    protein, protein-user, complex, lig, rna, dna
@@ -1971,19 +2034,24 @@ IMPORTANT NOTES
 4.3 Energy / Solvation / Entropy
 
   -gbsa                 Enable GBSA solvation analysis
-  -alpb                 Enable ALPB and imply -gbsa
+  -alpb                 Enable Sigalov ALPB (per-frame A_Det) and imply -gbsa
+  -gbsa-sasa-points <N> Shrake-Rupley points/atom. Default: 96; perform a
+                        convergence check (for example 96, 384, 1536).
   -igb <N>              GB model. Default: 5
   -ext_diel <val>       External dielectric. Default: 78.5
   -int_diel <val>       Internal dielectric. Default: 1.0
   -saltcon <val>        Salt concentration (M). Default: 0.15
+  -gbsa-temp <val>      GB/IE temperature (K). Default: 298.15
+  -gbsa-ie-block <N>    auto or positive block size. Default: auto
+  -gbsa-ie-min-samples <N>
+                        Minimum frames before IE is valid. Default: 10
+  -gbsa-ie-filter-sigma <val>
+                        Hard sigma filter; 0 disables it. Default: 0
   -epsilon_in <val>     Internal epsilon for solvation models
 
-  -pbe[=backend]        Enable frame-based PB electrostatics. backend is grid
-                        or bie. Bare -pbe defaults to grid; delphi, pydelphi,
-                        and fd are grid aliases. tabi is a legacy BIE alias.
-  -pbe-bie-fast-operator <mode>
-                        auto, direct, or p1. The p1 preset selects the
-                        manuscript production fast operator. Default: auto
+  -pbe <backend>        Enable frame-based PB electrostatics. backend is grid
+                        or tabi. Bare -pbe defaults to grid; delphi,
+                        pydelphi, and fd are grid compatibility aliases.
   -pbe-model <mode>     linear or nonlinear. Default: linear
                         nonlinear uses the current linear off/focus/vcycle
                         solve as a seed, then runs Picard/SOR or damped Newton
@@ -1999,10 +2067,10 @@ IMPORTANT NOTES
   -pbe-temp <val>       PBE temperature (K). Default: 298.15
   -pbe-surface <mode>   vdw, sas, ses, delphi-ses, delphi-vdw, gaussian, or
                         gaussian-cutoff. Default: vdw
-                        ses uses probe-excluded voxels plus boundary flood fill
-                        to identify solvent-accessible grid points.
-                        delphi-ses keeps the SES flood fill and refines
-                        dielectric faces by 2x2 midpoint-face sampling.
+                        ses applies a Euclidean rolling-probe closing to the
+                        VDW mask, then fills only solvent-inaccessible cavities.
+                        delphi-ses uses the same SES mask and refines dielectric
+                        faces by 2x2 sub-grid sampling of that mask.
                         delphi-vdw uses DelPhi-compatible discrete media
                         indices at positive x/y/z half-grid faces: each
                         midpoint is classified by VDW atom radius, then the
@@ -2028,22 +2096,24 @@ IMPORTANT NOTES
                         stern applies Debye screening only in ion-accessible
                         solvent after excluding atom radius + ion radius.
   -pbe-ion-radius <val> Ion probe radius for Stern accessibility (A). Default: 2.0
-  -pbe-dgsolv [bool]    Compute deltaG_solv. For a single BIE system this is
+  -pbe-dgsolv [bool]    Compute deltaG_solv. For a single TABI or Grid PQR this is
                         the reaction-field energy 0.5*sum(q_i*phi_reac_i)
-                        from the selected ionic-solvent solve. Native grid
-                        two-molecule systems use six endpoint solves: complex,
-                        mol1, mol2 each solvent/vacuum.
-                        Arg file: -pbe-dgsolv=true; CLI: -pbe-dgsolv
-  -pbsa [bool]          Enable MM/PBSA summary for two-molecule systems.
+                        from the selected ionic-solvent solve. Native Grid
+                        two-molecule systems use complex, mol1, and mol2
+                        solvent/vacuum endpoint solves.
+                        Arg file: -pbe-dgsolv=true; CLI: -pbe-dgsolv true
+  -pbsa                 Enable MM/PBSA summary for two-molecule systems.
                         Implies -pbe and -pbe-dgsolv; writes
                         mm_pbsa_energy.csv and mm_pbsa_summary.dat with PB
                         endpoint polar, SASA nonpolar, elec/vdw,
                         interaction entropy, and final dG.
                         -pbe=grid uses solvent/vacuum grid endpoints;
-                        -pbe=bie uses three boundary-integral reaction-field
+                        -pbe=tabi uses three boundary-integral reaction-field
                         endpoints (complex, receptor, ligand).
-                        Arg file: -pbsa=true; CLI: -pbsa true
-  -pbsa-components <m>  auto or complex,receptor,ligand. Default: auto
+                        Use bare -pbsa in both arg.in and the command line.
+  -pbsa-components <m>  auto, complex,ligand,receptor, or the equivalent
+                        ligand-receptor-complex order. All three components
+                        are required when selection is explicit. Default: auto
   -pbsa-decomp <mode>   off, molecule, residue, hybrid, or auto. Default: auto
                         auto selects hybrid only for protein-ligand input;
                         hybrid writes protein residues and ligand atoms
@@ -2062,8 +2132,11 @@ IMPORTANT NOTES
   -pbsa-grid-reuse <m> off, validate, or auto. Default: auto
                         validate compares same-endpoint solvent/vacuum
                         geometry/operator reuse against the baseline grid
-                        solve. BIE reports this grid-only optimization as
+                        solve. TABI reports this grid-only optimization as
                         not_applicable and rejects validate mode.
+  -pbsa-sasa-points <N>
+                        Shrake-Rupley points/atom. Default: 96; perform a
+                        convergence check (for example 96, 384, 1536).
   -pbsa-ie-filter-sigma <val>
                         Sigma filter for IE samples. Default: 2.0
   -pbsa-perf <mode>     off, summary, or detail. Default: summary
@@ -2122,7 +2195,7 @@ IMPORTANT NOTES
   -pbe-atom-potentials <m>
                         off or csv. Default: off. csv writes per-atom reaction
                         potentials in kJ mol^-1 e^-1 and 0.5*q*phi reaction-
-                        energy contributions for grid and BIE.
+                        energy contributions for grid and TABI.
   -pbe-binding-cycle <m>
                         off or pqr-components. The latter solves complex,
                         receptor, and ligand PQRs in TITAN and writes polar and
@@ -2327,14 +2400,45 @@ IMPORTANT NOTES
   -pbca <chain_ref>     Aggressive PBC mode
   -pbcn                 FixBox-style PBC mode
   -pbctopo              pbctopo (VIBE): Virtual Intact Block Extraction PBC mode
+  -pbctopo-mode=<name>  vibe | llps-local. Default: vibe
+  -pbctopo-llps-local   Alias for -pbctopo -pbctopo-mode=llps-local
+  -pbctopo-search-policy=<name>
+                        fast-certified | audit-exact. Default: fast-certified
+                        audit-exact runs exact search after a certified graph seed.
+  -pbctopo-audit-max-states=<N>
+                        Maximum exact-search nodes per audit frame. Default: 10000000
+  -pbctopo-audit-max-seconds=<value>
+                        Maximum exact-search wall time per audit frame. Default: 60
+  -pbctopo-audit-max-memory-mb=<N>
+                        Maximum estimated audit workspace per frame. Default: 1024
   -pbctopo-anchor-backend=<name>
+                        auto | prim | spatial-all. Default: auto
   -pbctopo-anchor-metrics=<full|mst-only|no-order|no-contact>
   -pbctopo-temporal=<greedy|viterbi>
+                        Greedy is the production framewise default. Viterbi is
+                        experimental/diagnostic and outside the VIBE
+                        observation contract.
   -pbctopo-temporal-k=<N>
   -pbctopo-temporal-penalty=<value>
   -pbctopo-vdw-clash-scale=<value>
                         Severe-overlap threshold lambda*(ri+rj). Range: (0,1]; default: 0.55
-                        auto | prim | spatial-all. Default: auto
+                        Explicit zero-LJ sites have no LJ hard core.
+
+  VIBE evidence semantics:
+    Inter-unit contacts are optional, shift-labelled observations. They are
+    not topology bonds, permanent-contact constraints, or candidate-ranking
+    terms. A selected H0/no-supported-contact relation is weak and
+    underdetermined; it is not a contradiction and does not prove a unique
+    dissociated periodic image.
+    A hard-certified result satisfies the declared geometric and steric
+    constraints only. Hard certification does not establish evidence support,
+    uniqueness, or trajectory truth. Weak observations, contradicted evidence,
+    rescue, actual fallback, and PBCI fallback are distinct outcomes and must
+    be reported separately.
+    A candidate band is complete only relative to its declared bounded search
+    domain and only when the exported complete flag is set. An incomplete or
+    capped band must not be interpreted as the full set of admissible images.
+
   -pbcclust <axes>      Clustered PBC mode; axes like x, xy, xyz
   -pbcm [chain_ref]     Membrane-oriented PBC mode
   -refpbc <file>        Separate reference PDB for PBC correction
@@ -2778,7 +2882,8 @@ IMPORTANT NOTES
   -cache                Enable cache
   -cache -no            Disable cache
   -use-CI               Use confidence intervals
-  -elec-screening       Electrostatic screening
+  -elec-screening       Debye-Huckel screening for aqueous 1:1 electrolyte at
+                        298.15 K (kappa=3.291*sqrt(I) nm^-1).
   -dipole-moment        Dipole moment analysis
   -split                Split results per trajectory
   -all-subfolders       Process all subfolders and split outputs

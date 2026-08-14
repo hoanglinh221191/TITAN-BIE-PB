@@ -179,10 +179,14 @@ AnalyzerImpl::smooth_multigrid_level(MultigridLevel &level, int iterations,
     stats.iterations = iter;
     stats.rms = count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
     stats.max_dphi = max_delta;
-    if (stop_on_convergence &&
-        (stats.rms <= args_.rms_tol || stats.max_dphi <= args_.dphi_tol)) {
-      stats.converged = true;
-      break;
+    if (stop_on_convergence && stats.rms <= args_.rms_tol &&
+        stats.max_dphi <= args_.dphi_tol) {
+      AlignedDoubleVector residual;
+      if (compute_multigrid_residual(level, residual) <=
+          grid_linear_residual_tolerance()) {
+        stats.converged = true;
+        break;
+      }
     }
   }
   return stats;
@@ -342,8 +346,10 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_vcycle_field(
   if (map_result != nullptr)
     maybe_write_maps(fine_shape, *map_result, false);
 
-  const int cycle_work =
-      std::max(1, args_.mg_pre + args_.mg_post + args_.mg_coarse_iter);
+  const int smoothing_levels = std::max(0, levels_count - 1);
+  const int cycle_work = std::max(
+      1, smoothing_levels * (args_.mg_pre + args_.mg_post) +
+             args_.mg_coarse_iter);
   const int max_cycles = std::max(1, args_.max_iter / cycle_work);
   SolveStats cycle_stats;
   const auto solver_begin = std::chrono::steady_clock::now();
@@ -371,23 +377,40 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_vcycle_field(
     cycle_stats.rms =
         count > 0 ? std::sqrt(sumsq / static_cast<double>(count)) : 0.0;
     cycle_stats.max_dphi = max_delta;
-    if (cycle_stats.rms <= args_.rms_tol ||
+    if (cycle_stats.rms <= args_.rms_tol &&
         cycle_stats.max_dphi <= args_.dphi_tol) {
-      cycle_stats.converged = true;
-      break;
+      AlignedDoubleVector residual;
+      if (compute_multigrid_residual(levels.front(), residual) <=
+          grid_linear_residual_tolerance()) {
+        cycle_stats.converged = true;
+        break;
+      }
     }
   }
 
   field.mg_cycles = cycle_stats.iterations;
   copy_level_to_workspace(levels.front());
-  SolveStats final_stats = solve_sor(fine_shape, executor);
+  const int cycle_iterations = field.mg_cycles * cycle_work;
+  SolveStats final_stats;
+  if (cycle_stats.converged) {
+    final_stats = cycle_stats;
+    final_stats.iterations = 0;
+  } else {
+    const int remaining_iterations =
+        std::max(0, args_.max_iter - cycle_iterations);
+    if (remaining_iterations > 0) {
+      final_stats = solve_sor(fine_shape, executor, remaining_iterations);
+    } else {
+      final_stats = cycle_stats;
+      final_stats.iterations = 0;
+    }
+  }
   add_timing_ms(
       TimingBucket::Solver,
       std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - solver_begin)
           .count());
-  field.total_iterations =
-      field.mg_cycles * cycle_work + final_stats.iterations;
+  field.total_iterations = cycle_iterations + final_stats.iterations;
   field.stats = final_stats;
   field.boundary_convention = effective_boundary_convention();
   field.field_units = args_.test_field_units;
@@ -415,6 +438,9 @@ AnalyzerImpl::FieldSolve AnalyzerImpl::solve_vcycle_field(
   field.boundary_rms = levels.front().boundary_diag.rms;
   field.boundary_max = levels.front().boundary_diag.max_abs;
   field.linear_residual = compute_linear_residual(fine_shape);
+  field.stats.converged =
+      field.stats.converged &&
+      field.linear_residual <= grid_linear_residual_tolerance();
   field.parity = compute_parity_audit(fine_shape, nullptr, nullptr);
   if (map_result != nullptr)
     maybe_write_maps(fine_shape, *map_result, true);

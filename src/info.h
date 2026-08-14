@@ -209,6 +209,30 @@ public:
   string get_dssp_mol2_content_filename() const {
     return "dssp_mol2_content.dat";
   }
+  string get_dssp_mol1_segments_filename() const {
+    return "dssp_mol1_segments.csv";
+  }
+  string get_dssp_mol2_segments_filename() const {
+    return "dssp_mol2_segments.csv";
+  }
+  string get_dssp_mol1_bridges_filename() const {
+    return "dssp_mol1_bridges.csv";
+  }
+  string get_dssp_mol2_bridges_filename() const {
+    return "dssp_mol2_bridges.csv";
+  }
+  string get_dssp_mol1_ladders_filename() const {
+    return "dssp_mol1_ladders.csv";
+  }
+  string get_dssp_mol2_ladders_filename() const {
+    return "dssp_mol2_ladders.csv";
+  }
+  string get_dccm_block_uncertainty_filename() const {
+    return "dccm_block_uncertainty.csv";
+  }
+  string get_dccm_block_values_filename() const {
+    return "dccm_block_values.csv";
+  }
   string get_network_communities_filename() const {
     return "network_communities.csv";
   }
@@ -341,6 +365,74 @@ public:
   }
   string get_cmap_occupancy_average_filename() const {
     return "contact_residue_occupancy_average.csv";
+  }
+  string get_interface_filename(const std::string &stem,
+                                const arguments &Arguments,
+                                const std::vector<string> &input_line,
+                                int input_name) const {
+    if (Arguments.flag_separation_results)
+      return stem + ".csv";
+    const bool multi_input = input_line.size() > 1 || Arguments.flag_listfile ||
+                             Arguments.flag_pattern_input || Arguments.flag_xdr;
+    if (multi_input) {
+      return stem + "_" +
+             std::to_string(input_name >= Arguments.b_input
+                                ? input_name - Arguments.b_input
+                                : 0) +
+             ".csv";
+    }
+    return stem + ".csv";
+  }
+  string get_interface_timeseries_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return get_interface_filename("interface_state_timeseries", Arguments,
+                                  input_line, input_name);
+  }
+  string get_interface_populations_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return get_interface_filename("interface_state_populations", Arguments,
+                                  input_line, input_name);
+  }
+  string get_interface_segments_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return get_interface_filename("interface_segment_contacts", Arguments,
+                                  input_line, input_name);
+  }
+  string get_interface_segment_timeseries_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return get_interface_filename("interface_segment_timeseries", Arguments,
+                                  input_line, input_name);
+  }
+  string get_interface_metrics_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return get_interface_filename("interface_metrics", Arguments, input_line,
+                                  input_name);
+  }
+  string get_interface_sasa_filename(
+      const arguments &Arguments, const std::vector<string> &input_line,
+      int input_name) const {
+    return get_interface_filename("interface_sasa_timeseries", Arguments,
+                                  input_line, input_name);
+  }
+  string get_interface_timeseries_average_filename() const {
+    return "interface_state_timeseries_average.csv";
+  }
+  string get_interface_populations_average_filename() const {
+    return "interface_state_populations_average.csv";
+  }
+  string get_interface_segments_average_filename() const {
+    return "interface_segment_contacts_average.csv";
+  }
+  string get_interface_metrics_average_filename() const {
+    return "interface_metrics_average.csv";
+  }
+  string get_interface_sasa_average_filename() const {
+    return "interface_sasa_timeseries_average.csv";
   }
   string get_qnative_timeseries_filename(const arguments &Arguments,
                                          const std::vector<string> &input_line,
@@ -1363,6 +1455,12 @@ public:
   string get_ifp_filename() const { return "ifp_occupancy.csv"; }
   string get_ifp_rna_annotations_filename() const {
     return "ifp_rna_annotations.csv";
+  }
+  string get_ifp_pbctopo_frame_filter_filename() const {
+    return "ifp_pbctopo_frame_filter.csv";
+  }
+  string get_ifp_pbctopo_filter_summary_filename() const {
+    return "ifp_pbctopo_filter_summary.csv";
   }
   string get_nucleic_acid_interactions_filename() const {
     return "nucleic_acid_interactions.csv";
