@@ -2,6 +2,7 @@
 // TitanDHAM — Dynamic Histogram Analysis Method (Implementation)
 // ============================================================================
 #include "titan_dham.h"
+#include "titan_markov_estimator.h"
 #include "titan_thread_compat.h"
 #include <algorithm>
 #include <iomanip>
@@ -35,6 +36,10 @@ TitanDHAM::TitanDHAM(int n_states, int n_replicas,
                        double target_temp)
     : n_states_(n_states), n_replicas_(n_replicas)
 {
+    if(n_states<=0 || n_replicas<=0 || !std::isfinite(target_temp) || target_temp<=0)
+        throw std::invalid_argument("DHAM dimensions and target temperature must be positive");
+    for(double temp:temps) if(!std::isfinite(temp) || temp<=0)
+        throw std::invalid_argument("DHAM replica temperatures must be finite and positive");
     if (static_cast<int>(temps.size()) != n_replicas) {
         TitanUI::print_error("TitanDHAM: temps.size() (" +
             std::to_string(temps.size()) + ") != n_replicas (" +
@@ -53,10 +58,7 @@ TitanDHAM::TitanDHAM(int n_states, int n_replicas,
     c_out_  = MatrixXdRM::Zero(n_states, n_replicas);
     u_ik_   = MatrixXdRM::Constant(
         n_states, n_replicas, std::numeric_limits<double>::infinity());
-    log_c_  = MatrixXdRM::Zero(n_states, n_replicas);
 
-    // Initialize f_k to zero (first replica anchored during solve)
-    f_k_ = Eigen::VectorXd::Zero(n_replicas);
     p_i_ = Eigen::VectorXd::Constant(n_states, 1.0 / n_states);
 }
 
@@ -66,7 +68,7 @@ TitanDHAM::TitanDHAM(int n_states, int n_replicas,
 void TitanDHAM::accumulate_counts(int replica_k, int state_i, int state_j) {
     if (replica_k < 0 || replica_k >= n_replicas_ ||
         state_i  < 0 || state_i  >= n_states_   ||
-        state_j  < 0 || state_j  >= n_states_) return;
+        state_j  < 0 || state_j  >= n_states_) throw std::out_of_range("DHAM transition replica/state index out of range");
 
     const std::uint64_t key =
         pack_transition_key(state_i, state_j, n_states_);
@@ -82,7 +84,8 @@ void TitanDHAM::accumulate_counts(int replica_k, int state_i, int state_j) {
 void TitanDHAM::set_state_energy(int replica_k, int state_i,
                                    double mean_energy_kJ) {
     if (replica_k < 0 || replica_k >= n_replicas_ ||
-        state_i  < 0 || state_i  >= n_states_) return;
+        state_i  < 0 || state_i  >= n_states_) throw std::out_of_range("DHAM energy replica/state index out of range");
+    if(!std::isfinite(mean_energy_kJ)) throw std::invalid_argument("DHAM state energy must be finite");
     // u_ik(i,k) = beta_k * U_k(i)  (dimensionless reduced potential)
     u_ik_(state_i, static_cast<int>(replica_k)) =
         betas_[static_cast<size_t>(replica_k)] * mean_energy_kJ;
@@ -103,237 +106,79 @@ void TitanDHAM::rebuild_c_out() {
     }
 }
 
-// ============================================================================
-// iterate_once — one DHAM self-consistent step using LSE trick
-// Returns max |Δf_k| for convergence check.
-// ============================================================================
-double TitanDHAM::iterate_once() {
-    // ------------------------------------------------------------
-    // Step 1: Update p_i (stationary distribution at target T)
-    // ------------------------------------------------------------
-
-    Eigen::VectorXd log_p_new(n_states_);
-    for (int i = 0; i < n_states_; ++i) {
-        double max_value = -std::numeric_limits<double>::infinity();
-        for (int k = 0; k < n_replicas_; ++k) {
-            if (!std::isfinite(u_ik_(i, k)) || c_out_(i, k) <= 0.0)
-                continue;
-            const double value = f_k_(k) - u_ik_(i, k) + log_c_(i, k);
-            if (value > max_value)
-                max_value = value;
-        }
-
-        if (!std::isfinite(max_value)) {
-            log_p_new(i) = -std::numeric_limits<double>::infinity();
-        } else {
-            double sum_e = 0.0;
-            for (int k = 0; k < n_replicas_; ++k) {
-                if (!std::isfinite(u_ik_(i, k)) || c_out_(i, k) <= 0.0)
-                    continue;
-                const double value = f_k_(k) - u_ik_(i, k) + log_c_(i, k);
-                sum_e += std::exp(value - max_value);
-            }
-            log_p_new(i) = max_value + std::log(sum_e + DHAM_LOG_ZERO_GUARD);
-        }
-    }
-
-
-    // Apply target-temperature reweighting in log-space.
-    for (int i = 0; i < n_states_; ++i) {
-        const double c_total = c_out_.row(i).sum();
-        if (c_total < 1e-30) {
-            log_p_new(i) = -std::numeric_limits<double>::infinity();
-            continue;
-        }
-        double log_reweight = 0.0;
-        for (int k = 0; k < n_replicas_; ++k) {
-            const double w = c_out_(i, k) / c_total;
-            if (w < 1e-15 || !std::isfinite(u_ik_(i, k)))
-                continue;
-            const double beta_k = betas_[static_cast<size_t>(k)];
-            const double U_ki = (std::abs(beta_k) > 1e-30)
-                                ? u_ik_(i, k) / beta_k
-                                : 0.0;
-            log_reweight += w * (beta_target_ - beta_k) * U_ki;
-        }
-        log_p_new(i) += log_reweight;
-    }
-
-    // p_i proportional to exp(log_p_new) - shift by max to avoid overflow.
-    const double max_log_p = log_p_new.maxCoeff();
-    if (!std::isfinite(max_log_p)) {
-        TitanUI::print_error("TitanDHAM::iterate_once: all states unvisited.");
-        return std::numeric_limits<double>::infinity();
-    }
-    Eigen::VectorXd p_new = (log_p_new.array() - max_log_p).exp();
-
-    // Normalize p_i
-    double p_sum = p_new.sum();
-    if (p_sum > 1e-300)
-        p_new /= p_sum;
-    else {
-        TitanUI::print_warning(
-            "TitanDHAM::iterate_once: p_i sum is ~0. Aborting solve.");
-        return std::numeric_limits<double>::infinity();
-    }
-    p_i_ = p_new;
-
-    // ------------------------------------------------------------
-    // Step 2: Update f_k (free energy shifts)
-    // f_k(k) = -log( Σ_i p_i(i) * exp(-u_ik(i,k)) )
-    // Anchor: f_k[0] = 0
-    // ------------------------------------------------------------
-    const Eigen::VectorXd log_pi =
-        (p_i_.array() + DHAM_LOG_ZERO_GUARD).log().matrix();
-    Eigen::VectorXd f_k_new(n_replicas_);
-    for (int k = 0; k < n_replicas_; ++k) {
-        double max_value = -std::numeric_limits<double>::infinity();
-        for (int i = 0; i < n_states_; ++i) {
-            if (!std::isfinite(u_ik_(i, k)) || p_i_(i) <= 0.0)
-                continue;
-            const double value = log_pi(i) - u_ik_(i, k);
-            if (value > max_value)
-                max_value = value;
-        }
-
-        if (!std::isfinite(max_value)) {
-            TitanUI::print_error(
-                "TitanDHAM::iterate_once: encountered non-finite free-energy update.");
-            return std::numeric_limits<double>::infinity();
-        } else {
-            double sum_e2 = 0.0;
-            for (int i = 0; i < n_states_; ++i) {
-                if (!std::isfinite(u_ik_(i, k)) || p_i_(i) <= 0.0)
-                    continue;
-                const double value = log_pi(i) - u_ik_(i, k);
-                sum_e2 += std::exp(value - max_value);
-            }
-            f_k_new(k) = -(max_value + std::log(sum_e2 + DHAM_LOG_ZERO_GUARD));
-        }
-    }
-
-    // Anchor replica 0 to f=0
-    double anchor = f_k_new(0);
-    f_k_new.array() -= anchor;
-
-    double max_delta = (f_k_new - f_k_).cwiseAbs().maxCoeff();
-    f_k_ = f_k_new;
-    return max_delta;
-}
-
-// ============================================================================
-// solve
-// ============================================================================
+// Explicit small-bias DHAM approximation (Rosta & Hummer, 2015):
+// M_ij ~ sum_k C^k_ij / sum_k n^k_i exp[-(b^k_j-b^k_i)/2], followed
+// by row normalization. b^k_i=(beta_k-beta_target)*U^k_i uses the available
+// state-mean energy approximation; it is not a general H-REMD cross-energy map.
 bool TitanDHAM::solve(int max_iter, double tol) {
-    TitanUI::print_module_header("DHAM Self-Consistent Solver");
     solved_ = false;
-
-    // Rebuild c_out from sparse count maps as a consistency check.
+    target_tpm_.resize(0,0);
+    if (max_iter<=0 || !std::isfinite(tol) || tol<=0) return false;
     rebuild_c_out();
-    const double total_counts = c_out_.sum();
-    if (total_counts < 1.0) {
-        TitanUI::print_error(
-            "TitanDHAM::solve: No counts accumulated. "
-            "Call accumulate_counts() first.");
+    Eigen::MatrixXd total=Eigen::MatrixXd::Zero(n_states_,n_states_);
+    for(const auto &replica:C_k_sparse_) for(const auto &[key,count]:replica)
+        total(unpack_transition_source(key,n_states_),unpack_transition_dest(key,n_states_))+=count;
+    if(!titan_markov::connected(total) || total.sum()<=0) {
+        TitanUI::print_error("DHAM requires lag counts on one strongly connected visited set.");
         return false;
     }
-
-    // Opt 1: Pre-compute log(c_out + guard) once — invariant during iterations
-    log_c_ = (c_out_.array() + DHAM_LOG_ZERO_GUARD).log();
-
-    TitanUI::print_info("  States: " + std::to_string(n_states_) +
-                        "  Replicas: " + std::to_string(n_replicas_) +
-                        "  Total counts: " + std::to_string(static_cast<long>(total_counts)));
-
-    // Initialize f_k to 0, p_i to uniform
-    f_k_.setZero();
-    p_i_ = Eigen::VectorXd::Constant(n_states_, 1.0 / n_states_);
-
-    int iter = 0;
-    double delta = std::numeric_limits<double>::max();
-    bool numerical_failure = false;
-
-    for (iter = 0; iter < max_iter; ++iter) {
-        delta = iterate_once();
-        if (iter % 500 == 0) {
-            TitanUI::print_info("  DHAM iter " + std::to_string(iter) +
-                                "  max |Δf_k| = " + std::to_string(delta));
+    target_tpm_=Eigen::MatrixXd::Zero(n_states_,n_states_);
+    for(int i=0;i<n_states_;++i) {
+        Eigen::VectorXd row_log=Eigen::VectorXd::Constant(n_states_,-std::numeric_limits<double>::infinity());
+        for(int j=0;j<n_states_;++j) {
+            if(total(i,j)<=0) continue;
+            double max_log=-std::numeric_limits<double>::infinity();
+            std::vector<double> terms;
+            for(int k=0;k<n_replicas_;++k) {
+                if(c_out_(i,k)<=0) continue;
+                const double factor=1.0-beta_target_/betas_[k];
+                double bias_difference=0.0;
+                if(std::abs(factor)>1e-14) {
+                    if(!std::isfinite(u_ik_(i,k)) || !std::isfinite(u_ik_(j,k))) {
+                        TitanUI::print_error("DHAM lacks state energies needed for a sampled transition bias denominator.");
+                        target_tpm_.resize(0,0);return false;
+                    }
+                    bias_difference=factor*(u_ik_(j,k)-u_ik_(i,k));
+                }
+                const double term=std::log(c_out_(i,k))-0.5*bias_difference;
+                if(!std::isfinite(term)) {target_tpm_.resize(0,0);return false;}
+                terms.push_back(term);max_log=std::max(max_log,term);
+            }
+            if(terms.empty()) {target_tpm_.resize(0,0);return false;}
+            double sum=0;for(double term:terms)sum+=std::exp(term-max_log);
+            row_log[j]=std::log(total(i,j))-max_log-std::log(sum);
         }
-        if (!std::isfinite(delta)) {
-            numerical_failure = true;
-            break;
+        const double maximum=row_log.maxCoeff();
+        if(!std::isfinite(maximum)) {target_tpm_.resize(0,0);return false;}
+        target_tpm_.row(i)=(row_log.array()-maximum).exp().matrix().transpose();
+        target_tpm_.row(i)/=target_tpm_.row(i).sum();
+    }
+    std::string error;
+    if(!titan_markov::stationary(target_tpm_,p_i_,error)) {
+        TitanUI::print_error("DHAM: "+error);target_tpm_.resize(0,0);return false;
+    }
+    if((target_tpm_.transpose()*p_i_-p_i_).cwiseAbs().maxCoeff()>tol)
+        return false;
+    f_k_=Eigen::VectorXd::Constant(n_replicas_,std::numeric_limits<double>::quiet_NaN());
+    for(int k=0;k<n_replicas_;++k) {
+        const double factor=1.0-beta_target_/betas_[k];
+        Eigen::VectorXd terms(n_states_);
+        bool complete=true;
+        for(int i=0;i<n_states_;++i) {
+            if(std::abs(factor)>1e-14 && !std::isfinite(u_ik_(i,k))) {complete=false;break;}
+            terms[i]=std::log(p_i_[i])-(std::abs(factor)>1e-14 ? factor*u_ik_(i,k) : 0.0);
         }
-        if (delta < tol) break;
+        if(complete) {const double m=terms.maxCoeff();f_k_[k]=-m-std::log((terms.array()-m).exp().sum());}
     }
-
-    if (numerical_failure) {
-        TitanUI::print_error(
-            "  DHAM aborted due to numerical instability. Results were not accepted.");
-        return false;
-    }
-
-    if (delta < tol) {
-        solved_ = true;
-        TitanUI::print_info("  DHAM converged in " + std::to_string(iter) +
-                            " iterations (|Δf_k| = " + std::to_string(delta) + ").");
-        return true;
-    } else {
-        TitanUI::print_warning(
-            "  DHAM did not converge in " + std::to_string(max_iter) +
-            " iterations (final |Δf_k| = " + std::to_string(delta) +
-            "). Results may be inaccurate.");
-        return false;
-    }
+    if(std::isfinite(f_k_[0])) {const double anchor=f_k_[0];f_k_.array()-=anchor;}
+    solved_=true;
+    TitanUI::print_info("DHAM: explicit state-energy bias approximation; stationary residual verified.");
+    return true;
 }
 
-// ============================================================================
-// get_unbiased_transition_matrix
-// ============================================================================
 Eigen::MatrixXd TitanDHAM::get_unbiased_transition_matrix() const {
-    if (!solved_) {
-        TitanUI::print_error("TitanDHAM: solve() must be called first.");
-        return Eigen::MatrixXd::Zero(n_states_, n_states_);
-    }
-
-    Eigen::MatrixXd C_unbiased = Eigen::MatrixXd::Zero(n_states_, n_states_);
-    MatrixXdRM row_weights = MatrixXdRM::Zero(n_states_, n_replicas_);
-    Eigen::VectorXd log_w(n_replicas_);
-
-    for (int i = 0; i < n_states_; ++i) {
-        for (int k = 0; k < n_replicas_; ++k)
-            log_w(k) = f_k_(k) - u_ik_(i, k);
-
-        double M = log_w.maxCoeff();
-        if (!std::isfinite(M)) continue;
-        Eigen::VectorXd w = (log_w.array() - M).exp();
-        double w_sum = w.sum();
-        if (w_sum < 1e-300) continue;
-        w /= w_sum;
-        row_weights.row(i) = w.transpose();
-    }
-
-    for (int k = 0; k < n_replicas_; ++k) {
-        for (const auto& entry : C_k_sparse_[static_cast<size_t>(k)]) {
-            const int state_i = unpack_transition_source(entry.first, n_states_);
-            const double weight = row_weights(state_i, k);
-            if (weight < 1e-15)
-                continue;
-            const int state_j = unpack_transition_dest(entry.first, n_states_);
-            C_unbiased(state_i, state_j) += weight * entry.second;
-        }
-    }
-
-    // Symmetrize and row-normalize → TPM
-    Eigen::MatrixXd C_sym = 0.5 * (C_unbiased + C_unbiased.transpose());
-    Eigen::MatrixXd T = Eigen::MatrixXd::Zero(n_states_, n_states_);
-    for (int i = 0; i < n_states_; ++i) {
-        double rs = C_sym.row(i).sum();
-        if (rs < 1e-10)
-            T.row(i) = Eigen::RowVectorXd::Constant(n_states_, 1.0 / n_states_);
-        else
-            T.row(i) = C_sym.row(i) / rs;
-    }
-    return T;
+    if(!solved_) throw std::runtime_error("DHAM transition matrix requires an accepted solve");
+    return target_tpm_;
 }
 
 // ============================================================================
@@ -474,7 +319,7 @@ void TitanDHAM::write_results(const std::string& pi_file,
         Eigen::MatrixXd T = get_unbiased_transition_matrix();
         std::ofstream f(tpm_file);
         if (f.is_open()) {
-            f << "# DHAM Unbiased Transition Matrix at Target Temperature\n";
+            f << "# DHAM state-energy small-bias approximation at target temperature\n";
             f << "# " << n_states_ << "x" << n_states_ << "\n";
             f << std::fixed << std::setprecision(8);
             for (int i = 0; i < n_states_; ++i) {
@@ -498,6 +343,18 @@ Eigen::MatrixXd TitanDHAM::compute_state_energies(
     const std::unordered_map<int, std::vector<double>>& per_replica_energies,
     int n_states, int n_replicas, int num_threads)
 {
+    if(n_states<=0 || n_replicas<=0 || num_threads<=0) throw std::invalid_argument("DHAM state-energy dimensions and thread count must be positive");
+    for(const auto& [k,traj]:per_replica_dtrajs) {
+        if(k<0 || k>=n_replicas) throw std::out_of_range("DHAM trajectory replica id out of range");
+        for(int state:traj) if(state < -1 || state>=n_states) throw std::out_of_range("DHAM state id out of range (-1 is the unsampled sentinel)");
+        auto it=per_replica_energies.find(k);
+        if(it!=per_replica_energies.end() && it->second.size()!=traj.size())
+            throw std::invalid_argument("DHAM trajectory/energy lengths differ; align by frame time before computing state means");
+    }
+    for(const auto& [k,values]:per_replica_energies) {
+        if(k<0 || k>=n_replicas) throw std::out_of_range("DHAM energy replica id out of range");
+        for(double value:values) if(std::isinf(value)) throw std::invalid_argument("DHAM energy contains infinity");
+    }
     Eigen::MatrixXd result = Eigen::MatrixXd::Zero(n_states, n_replicas);
     Eigen::MatrixXi counts  = Eigen::MatrixXi::Zero(n_states, n_replicas);
 
@@ -512,7 +369,7 @@ Eigen::MatrixXd TitanDHAM::compute_state_energies(
             const auto& dtraj   = it_d->second;
             const auto& energies = it_e->second;
 
-            size_t n_frames = std::min(dtraj.size(), energies.size());
+            size_t n_frames = dtraj.size();
             for (size_t t = 0; t < n_frames; ++t) {
                 double e = energies[t];
                 if (std::isnan(e)) continue;

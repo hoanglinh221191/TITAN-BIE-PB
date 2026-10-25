@@ -1,5 +1,5 @@
 #include "titan_llps_cluster.h"
-#include "BoxMatrix.h"
+#include "titan_llps_profile_geometry.h"
 #include "box_type.h"
 #include "info.h"
 #include "titan_ui.h"
@@ -515,7 +515,7 @@ void LLPSPaperFractalAccumulator::process_frame(
   std::vector<int> dense_types;
   dense_types.reserve(nodes.size());
   const bool use_mic = BoxMatrix::valid_box(Box);
-  std::optional<BoxMatrix> bmat;
+  std::optional<TitanExactPeriodicBox> bmat;
   if (use_mic)
     bmat.emplace(Box);
   std::size_t first_dense = nodes.size();
@@ -530,18 +530,17 @@ void LLPSPaperFractalAccumulator::process_frame(
     else
       ++row.dense_rna_nodes;
     dense_types.push_back(nodes[i].type);
-    if (use_mic) {
-      const LLPSNode &ref = nodes[first_dense];
-      double dx = nodes[i].x - ref.x;
-      double dy = nodes[i].y - ref.y;
-      double dz = nodes[i].z - ref.z;
-      bmat->apply_mic(dx, dy, dz);
-      points_nm.push_back({(ref.x + dx) / 10.0, (ref.y + dy) / 10.0,
-                           (ref.z + dz) / 10.0});
-    } else {
-      points_nm.push_back({nodes[i].x / 10.0, nodes[i].y / 10.0,
-                           nodes[i].z / 10.0});
+    points_nm.push_back({nodes[i].x / 10.0, nodes[i].y / 10.0, nodes[i].z / 10.0});
+  }
+  if (use_mic) {
+    std::vector<std::array<double,3>> points_a, lifted;
+    for (const auto &p : points_nm) points_a.push_back({10*p[0],10*p[1],10*p[2]});
+    if (!titan_lift_radius_graph(*bmat, points_a, config_.connectivity_cutoff_angstrom, lifted)) {
+      row.invalid_reason = "periodic_embedding_not_finite";
+      frames_.push_back(row);return;
     }
+    points_nm.clear();
+    for (const auto &p : lifted) points_nm.push_back({p[0]/10.,p[1]/10.,p[2]/10.});
   }
 
   if (row.dense_nodes < 8) {
@@ -714,17 +713,23 @@ LLPSPaperFractalFrame LLPSPaperFractalAccumulator::debug_fit_points(
 
 void LLPSPaperAccumulator::configure(const LLPSPaperConfig &config) {
   config_ = config;
+  if (!std::isfinite(config_.profile_bin_nm) || config_.profile_bin_nm <= 0 ||
+      config_.slab_axis < 0 || config_.slab_axis > 2 ||
+      !std::isfinite(config_.connectivity_cutoff_angstrom) || config_.connectivity_cutoff_angstrom <= 0)
+    throw std::invalid_argument("Invalid LLPS paper profile geometry parameters");
   config_.profile_bin_nm = std::max(0.01, config_.profile_bin_nm);
   if (config_.geometry != "droplet" && config_.geometry != "slab")
     config_.geometry = "auto";
   LLPSPaperFractalConfig fractal_config;
   fractal_config.enabled = config_.fractal_enabled;
+  fractal_config.connectivity_cutoff_angstrom = config_.connectivity_cutoff_angstrom;
   fractal_.configure(fractal_config);
   frames_.clear();
   contact_rows_.clear();
   profile_bins_.clear();
   skipped_no_dense_ = 0;
   skipped_bad_box_ = 0;
+  geometry_failures_.clear();
   observed_geometry_ = "none";
 }
 
@@ -741,13 +746,6 @@ void LLPSPaperAccumulator::process_frame(
     return;
   }
 
-  const double box_nm[3] = {Box.get_a() / 10.0, Box.get_b() / 10.0,
-                            Box.get_c() / 10.0};
-  int axis = 0;
-  if (box_nm[1] > box_nm[axis])
-    axis = 1;
-  if (box_nm[2] > box_nm[axis])
-    axis = 2;
 
   FrameRow row;
   row.time_ns = time_ps / 1000.0;
@@ -789,99 +787,31 @@ void LLPSPaperAccumulator::process_frame(
     return;
   }
 
-  const BoxMatrix bmat(Box);
-  const LLPSNode &ref = nodes[static_cast<std::size_t>(first_dense)];
-  std::vector<std::array<double, 3>> dense_xyz;
-  dense_xyz.reserve(nodes.size());
-  std::array<double, 3> min_nm = {std::numeric_limits<double>::max(),
-                                  std::numeric_limits<double>::max(),
-                                  std::numeric_limits<double>::max()};
-  std::array<double, 3> max_nm = {std::numeric_limits<double>::lowest(),
-                                  std::numeric_limits<double>::lowest(),
-                                  std::numeric_limits<double>::lowest()};
-  double cx = 0.0;
-  double cy = 0.0;
-  double cz = 0.0;
-  for (std::size_t i = 0; i < nodes.size(); ++i) {
-    if (!is_dense[i])
-      continue;
-    double dx = nodes[i].x - ref.x;
-    double dy = nodes[i].y - ref.y;
-    double dz = nodes[i].z - ref.z;
-    bmat.apply_mic(dx, dy, dz);
-    const double ux = ref.x + dx;
-    const double uy = ref.y + dy;
-    const double uz = ref.z + dz;
-    dense_xyz.push_back({ux, uy, uz});
-    cx += ux;
-    cy += uy;
-    cz += uz;
-    const double nm[3] = {ux / 10.0, uy / 10.0, uz / 10.0};
-    for (int d = 0; d < 3; ++d) {
-      min_nm[d] = std::min(min_nm[d], nm[d]);
-      max_nm[d] = std::max(max_nm[d], nm[d]);
-    }
+  std::vector<std::array<double,3>> points;
+  points.reserve(nodes.size());
+  for (const auto &node : nodes) points.push_back({node.x,node.y,node.z});
+  const auto profile = TitanLLPSProfileGeometry::build(Box, points, is_dense,
+      config_.geometry, config_.slab_axis, config_.connectivity_cutoff_angstrom,
+      config_.profile_bin_nm);
+  if (!profile.valid) {
+    if (profile.reason == "triclinic_requires_explicit_geometry")
+      throw std::invalid_argument("LLPS paper profiles require explicit -llps-paper-geometry droplet or slab for triclinic cells");
+    ++geometry_failures_[profile.reason];
+    fractal_.process_frame(row.time_ns, frame_idx, nodes, is_dense, giant_cluster_id, Box);
+    return;
   }
-  const double inv_dense = 1.0 / static_cast<double>(dense_xyz.size());
-  cx *= inv_dense;
-  cy *= inv_dense;
-  cz *= inv_dense;
-
-  std::array<double, 3> extent_nm = {max_nm[0] - min_nm[0],
-                                     max_nm[1] - min_nm[1],
-                                     max_nm[2] - min_nm[2]};
-  const double max_extent =
-      std::max(extent_nm[0], std::max(extent_nm[1], extent_nm[2]));
-  const double min_extent =
-      std::max(0.001, std::min(extent_nm[0], std::min(extent_nm[1], extent_nm[2])));
-  std::string geometry = config_.geometry;
-  if (geometry == "auto") {
-    const bool spans_long_axis =
-        box_nm[axis] > 0.0 && extent_nm[axis] > 0.55 * box_nm[axis];
-    geometry = (spans_long_axis || max_extent / min_extent > 2.2) ? "slab"
-                                                                  : "droplet";
+  const std::string geometry = profile.geometry;
+  if (observed_geometry_ != "none" && observed_geometry_ != geometry) {
+    ++geometry_failures_["geometry_switch_requires_separate_profile"];return;
   }
-  row.geometry = geometry;
-  if (observed_geometry_ == "none")
-    observed_geometry_ = geometry;
-
-  double radius_nm = 0.0;
-  double max_profile_distance_nm = 0.0;
-  std::vector<double> dense_distance_nm(nodes.size(), 0.0);
-  for (std::size_t i = 0; i < nodes.size(); ++i) {
-    double dx = nodes[i].x - cx;
-    double dy = nodes[i].y - cy;
-    double dz = nodes[i].z - cz;
-    bmat.apply_mic(dx, dy, dz);
-    const double r = std::sqrt(dx * dx + dy * dy + dz * dz) / 10.0;
-    const double slab_d =
-        std::abs((axis == 0 ? dx : (axis == 1 ? dy : dz))) / 10.0;
-    const double dist = (geometry == "slab") ? slab_d : r;
-    dense_distance_nm[i] = dist;
-    max_profile_distance_nm = std::max(max_profile_distance_nm, dist);
-    if (is_dense[i])
-      radius_nm = std::max(radius_nm, dist);
-  }
-  radius_nm = std::max(radius_nm, config_.profile_bin_nm);
+  observed_geometry_ = geometry;row.geometry = geometry;
+  const double radius_nm = profile.radius_nm;
+  const auto &dense_distance_nm = profile.distance_nm;
   row.radius_nm = radius_nm;
-
-  if (geometry == "slab") {
-    const double thickness = std::max(config_.profile_bin_nm, extent_nm[axis]);
-    double cross_section = 1.0;
-    for (int d = 0; d < 3; ++d) {
-      if (d != axis)
-        cross_section *= std::max(0.0, box_nm[d]);
-    }
-    row.dense_volume_nm3 =
-        std::min(volume_nm3, std::max(config_.profile_bin_nm * cross_section,
-                                      thickness * cross_section));
-    row.interface_width_nm = std::max(config_.profile_bin_nm, 0.25 * thickness);
-  } else {
-    row.dense_volume_nm3 =
-        std::min(volume_nm3, (4.0 / 3.0) * kPi * radius_nm * radius_nm *
-                                 radius_nm);
-    row.interface_width_nm = std::max(config_.profile_bin_nm, 0.20 * radius_nm);
-  }
+  row.dense_volume_nm3 = profile.dense_envelope_nm3;
+  // These envelope and interface quantities remain geometric proxies.
+  row.interface_width_nm = std::max(config_.profile_bin_nm,
+      (geometry == "slab" ? .5 : .2) * radius_nm);
   row.dilute_volume_nm3 = std::max(kEps, volume_nm3 - row.dense_volume_nm3);
   row.dense_volume_nm3 = std::max(kEps, row.dense_volume_nm3);
   row.dense_protein_conc =
@@ -954,57 +884,30 @@ void LLPSPaperAccumulator::process_frame(
   contact.rr_interface = choose2(interface_r);
   contact_rows_.push_back(contact);
 
-  // A slab coexistence profile must include the empty/dilute plateau all the
-  // way to half the periodic box. Truncating at the outermost solute bead
-  // biases dilute concentrations upward and makes binodal fitting impossible
-  // when no protein chain leaves the slab in a finite system.
-  const double profile_limit_nm =
-      (geometry == "slab")
-          ? 0.5 * box_nm[axis]
-          : std::max(radius_nm, max_profile_distance_nm);
-  const std::size_t needed_bins =
-      static_cast<std::size_t>(
-          std::floor(profile_limit_nm / config_.profile_bin_nm)) +
-      2;
-  if (profile_bins_.size() < needed_bins)
-    profile_bins_.resize(needed_bins);
+  const double profile_limit_nm = profile.limit_nm;
+  const std::size_t needed_bins = static_cast<std::size_t>(
+      std::ceil(profile_limit_nm / config_.profile_bin_nm));
+  if (profile_bins_.size() < needed_bins) profile_bins_.resize(needed_bins);
   for (std::size_t i = 0; i < nodes.size(); ++i) {
-    const std::size_t bin = std::min<std::size_t>(
-        profile_bins_.size() - 1,
-        static_cast<std::size_t>(dense_distance_nm[i] /
-                                 config_.profile_bin_nm));
+    if (dense_distance_nm[i] > profile_limit_nm) continue;
+    const std::size_t bin = std::min<std::size_t>(needed_bins - 1,
+        static_cast<std::size_t>(dense_distance_nm[i] / config_.profile_bin_nm));
     auto &dst = profile_bins_[bin];
     if (nodes[i].type == 1) {
-      dst.protein_count += 1.0;
-      dst.sticker_count += 1.0;
-      if (is_dense[i])
-        dst.dense_protein_count += 1.0;
+      dst.protein_count += 1.0;dst.sticker_count += 1.0;
+      if (is_dense[i]) dst.dense_protein_count += 1.0;
     } else {
       dst.rna_count += 1.0;
-      if (is_dense[i])
-        dst.dense_rna_count += 1.0;
+      if (is_dense[i]) dst.dense_rna_count += 1.0;
     }
   }
-  for (std::size_t bin = 0; bin < profile_bins_.size(); ++bin) {
+  for (std::size_t bin = 0; bin < needed_bins; ++bin) {
     auto &dst = profile_bins_[bin];
-    const double r0 = static_cast<double>(bin) * config_.profile_bin_nm;
-    const double r1 = r0 + config_.profile_bin_nm;
-    double shell_volume = 0.0;
-    if (geometry == "slab") {
-      double cross_section = 1.0;
-      for (int d = 0; d < 3; ++d) {
-        if (d != axis)
-          cross_section *= std::max(0.0, box_nm[d]);
-      }
-      shell_volume = 2.0 * config_.profile_bin_nm * cross_section;
-      if (r0 >= 0.5 * box_nm[axis])
-        shell_volume = 0.0;
-    } else {
-      shell_volume = (4.0 / 3.0) * kPi * (r1 * r1 * r1 - r0 * r0 * r0);
-    }
-    if (shell_volume > 0.0) {
-      dst.volume_nm3_sum += shell_volume;
-      ++dst.samples;
+    const double r0 = bin * config_.profile_bin_nm;
+    const double upper = std::min(r0 + config_.profile_bin_nm, profile_limit_nm);
+    const double volume = profile.shell_volume(r0,upper);
+    if (volume > 0) {
+      dst.volume_nm3_sum += volume;dst.sampled_upper_nm_sum += upper;++dst.samples;
     }
   }
 
@@ -1101,7 +1004,8 @@ void LLPSPaperAccumulator::export_outputs(const info &info_output,
     for (std::size_t i = 0; i < profile_bins_.size(); ++i) {
       const auto &bin = profile_bins_[i];
       const double r0 = static_cast<double>(i) * config_.profile_bin_nm;
-      const double r1 = r0 + config_.profile_bin_nm;
+      if (bin.samples == 0) continue;
+      const double r1 = bin.sampled_upper_nm_sum / bin.samples;
       const double center = 0.5 * (r0 + r1);
       const double volume =
           bin.samples > 0 ? bin.volume_nm3_sum / static_cast<double>(bin.samples)
@@ -1190,6 +1094,8 @@ void LLPSPaperAccumulator::export_outputs(const info &info_output,
     out << "frames_used " << frames_.size() << "\n";
     out << "frames_skipped_no_stable_dense_phase " << skipped_no_dense_ << "\n";
     out << "frames_skipped_bad_box " << skipped_bad_box_ << "\n";
+    for (const auto &[reason,count] : geometry_failures_)
+      out << "frames_skipped_" << reason << " " << count << "\n";
     out << "blocks " << dense_fraction.blocks << "\n";
     out << "dense_fraction_mean " << dense_fraction.mean << "\n";
     out << "dense_fraction_sem " << dense_fraction.sem << "\n";
@@ -1210,6 +1116,11 @@ void LLPSPaperAccumulator::export_outputs(const info &info_output,
     out << "# TITAN LLPS Paper Summary\n\n";
     out << "- Frames used: " << frames_.size() << "\n";
     out << "- Geometry: " << geometry << "\n";
+    out << "- Profiles use exact lattice geometry; slab normal is reciprocal axis " << config_.slab_axis << " (0=a, 1=b, 2=c).\n";
+    out << "- Radial shells stop at the conservative inscribed domain. Slab terminal bins are clipped to half the face height. BinEnd is the sampled mean upper edge across frames.\n";
+    out << "- Dense/dilute envelope concentrations and interface widths are geometric proxies, not an automatically validated binodal.\n";
+    for (const auto &[reason,count] : geometry_failures_)
+      out << "- Skipped geometry " << reason << ": " << count << " frames.\n";
     out << "- Protein dense concentration: " << protein_dense.mean << " +/- "
         << protein_dense.sem << " nodes/nm^3\n";
     out << "- RNA dense concentration: " << rna_dense.mean << " +/- "
@@ -1284,7 +1195,9 @@ void LLPSPaperAccumulator::export_outputs(const info &info_output,
 }
 
 void TitanLLPSCluster::configure_paper(const LLPSPaperConfig &config) {
-  paper_accumulator_.configure(config);
+  auto checked = config;
+  checked.connectivity_cutoff_angstrom = eps_;
+  paper_accumulator_.configure(checked);
 }
 
 void TitanLLPSCluster::export_paper_outputs(const info &info_output,

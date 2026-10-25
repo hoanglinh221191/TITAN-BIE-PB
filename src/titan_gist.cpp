@@ -25,7 +25,7 @@
 namespace {
 
 struct LocalGistVoxelAccum {
-  uint32_t count{0};
+  uint64_t count{0};
   double energy_sw{0.0};
   double dipole_x{0.0};
   double dipole_y{0.0};
@@ -87,11 +87,9 @@ struct WaterModelParams {
 static WaterModelParams get_water_params(const std::string &model) {
   if (model == "TIP3P" || model == "tip3p")
     return {-0.8340, +0.4170, 3.1507, 0.6360, 0.03340, -11.60};
-  if (model == "SPC" || model == "SPCE" || model == "spc" || model == "spce")
+  if (model == "SPCE" || model == "spce" || model == "SPC/E" || model == "spc/e")
     return {-0.8476, +0.4238, 3.1660, 0.6500, 0.03316, -12.10};
-  TitanUI::print_warning("[GIST] Unknown water model '" + model +
-                         "', defaulting to TIP3P");
-  return {-0.8340, +0.4170, 3.1507, 0.6360, 0.03340, -11.60};
+  throw std::invalid_argument("GIST supports only TIP3P and SPC/E three-site waters; unknown models are not substituted");
 }
 
 // ============================================================================
@@ -107,7 +105,7 @@ static Eigen::Matrix3d kabsch_rotation(const Eigen::MatrixXd &ref_centered,
   double d = (V * U.transpose()).determinant();
   Eigen::Matrix3d D = Eigen::Matrix3d::Identity();
   D(2, 2) = (d < 0) ? -1.0 : 1.0;
-  return V * D * U.transpose();
+  return U * D * V.transpose(); // row-vector convention; process_frame applies R.transpose()
 }
 
 // ============================================================================
@@ -120,6 +118,14 @@ void TitanGIST::init(const MOL &lig_ref, double padding, double resolution,
                      const std::vector<mol_info> &rec_info,
                      const Multi_MOL_parameters &lig_params,
                      const std::vector<mol_info> &lig_info) {
+  if (!std::isfinite(padding) || padding <= 0 || !std::isfinite(resolution) || resolution <= 0 ||
+      !std::isfinite(temperature) || temperature <= 0 || !std::isfinite(cutoff) || cutoff <= 0)
+    throw std::invalid_argument("GIST grid, temperature and cutoff must be finite and positive");
+  processed_frames_ = 0;
+  orientations_.clear();orientation_samples_=0;
+  periodic_box_.reset();
+  ref_frame_locked_=false;ref_built_=false;ref_com_.setZero();
+  self_ref_centered_.resize(0,3);ca_indices_.clear();
   voxel_size_ = resolution;
   temperature_ = temperature;
   cut2_ = cutoff * cutoff;
@@ -127,6 +133,7 @@ void TitanGIST::init(const MOL &lig_ref, double padding, double resolution,
 
   // Water model
   auto wm = get_water_params(water_model);
+  water_model_=water_model;
   q_O_ = wm.q_O;
   q_H_ = wm.q_H;
   sigma_O_ = wm.sigma_O;
@@ -138,14 +145,18 @@ void TitanGIST::init(const MOL &lig_ref, double padding, double resolution,
   const auto &lx = lig_ref.get_pos_x();
   const auto &ly = lig_ref.get_pos_y();
   const auto &lz = lig_ref.get_pos_z();
+  if(ly.size()!=lx.size()||lz.size()!=lx.size())
+    throw std::invalid_argument("GIST reference coordinate dimensions differ");
   if (lx.empty()) {
     TitanUI::print_warning("[GIST] No ligand atoms — cannot build grid");
     return;
   }
 
-  double xmin = 1e9, ymin = 1e9, zmin = 1e9;
-  double xmax = -1e9, ymax = -1e9, zmax = -1e9;
+  double xmin=std::numeric_limits<double>::infinity(),ymin=xmin,zmin=xmin;
+  double xmax=-xmin,ymax=xmax,zmax=xmax;
   for (size_t i = 0; i < lx.size(); ++i) {
+    if(!std::isfinite(lx[i])||!std::isfinite(ly[i])||!std::isfinite(lz[i]))
+      throw std::invalid_argument("GIST non-finite reference coordinate");
     xmin = std::min(xmin, lx[i]);
     xmax = std::max(xmax, lx[i]);
     ymin = std::min(ymin, ly[i]);
@@ -155,35 +166,33 @@ void TitanGIST::init(const MOL &lig_ref, double padding, double resolution,
   }
 
   origin_ = {xmin - padding, ymin - padding, zmin - padding};
-  nx_ = std::max(
-      1, static_cast<int>(std::ceil((xmax - xmin + 2 * padding) / resolution)));
-  ny_ = std::max(
-      1, static_cast<int>(std::ceil((ymax - ymin + 2 * padding) / resolution)));
-  nz_ = std::max(
-      1, static_cast<int>(std::ceil((zmax - zmin + 2 * padding) / resolution)));
-
-  size_t total = static_cast<size_t>(nx_) * ny_ * nz_;
-  if (total > 5000000) {
-    TitanUI::print_warning("[GIST] Grid too large (" + std::to_string(total) +
-                           " voxels). Consider increasing --gist-resolution.");
+  auto dimension=[&](double span) {
+    const double cells=std::max(1.,std::ceil((span+2*padding)/resolution));
+    if(!std::isfinite(cells)||cells>5000000)throw std::invalid_argument("GIST grid dimension exceeds supported bound");
+    return static_cast<int>(cells);
+  };
+  nx_=dimension(xmax-xmin);ny_=dimension(ymax-ymin);nz_=dimension(zmax-zmin);
+  size_t total=nx_;
+  for(int n:{ny_,nz_}) {
+    if(total>5000000/static_cast<size_t>(n))throw std::invalid_argument("GIST grid exceeds 5000000 voxels");
+    total*=n;
   }
-  grid_.resize(total);
+  grid_.assign(total,GistVoxel{});
   TitanUI::print_info("[GIST] Grid: " + std::to_string(nx_) + "x" +
                       std::to_string(ny_) + "x" + std::to_string(nz_) + " = " +
                       std::to_string(total) + " voxels (" +
                       std::to_string(resolution) +
                       " Å), cutoff=" + std::to_string(cutoff) + " Å");
 
-  // --- Collect heavy atom indices for rec and lig ---
+  // Coulomb sums require every solute charge, including polar hydrogens.
+  // Keep the legacy *_heavy_* storage names but include all selected atoms.
   rec_heavy_idx_.clear();
   for (size_t i = 0; i < rec_info.size(); ++i) {
-    if (rec_info[i].get_atom()[0] != 'H')
-      rec_heavy_idx_.push_back(i);
+    rec_heavy_idx_.push_back(i);
   }
   lig_heavy_idx_.clear();
   for (size_t i = 0; i < lig_info.size(); ++i) {
-    if (lig_info[i].get_atom()[0] != 'H')
-      lig_heavy_idx_.push_back(i);
+    lig_heavy_idx_.push_back(i);
   }
 
   n_rec_heavy_ = rec_heavy_idx_.size();
@@ -206,7 +215,7 @@ void TitanGIST::init(const MOL &lig_ref, double padding, double resolution,
       solute_charge_[j] = rec_params.charge[i];
     double sigma_i = 0.0, eps_i = 0.0;
     if (i < rec_params.sigma.size())
-      sigma_i = rec_params.sigma[i];
+      sigma_i = 10.0 * rec_params.sigma[i]; // nm -> Angstrom
     if (i < rec_params.epsilon.size())
       eps_i = rec_params.epsilon[i];
     // Precompute mixing rules
@@ -222,7 +231,7 @@ void TitanGIST::init(const MOL &lig_ref, double padding, double resolution,
       solute_charge_[idx] = lig_params.charge[i];
     double sigma_i = 0.0, eps_i = 0.0;
     if (i < lig_params.sigma.size())
-      sigma_i = lig_params.sigma[i];
+      sigma_i = 10.0 * lig_params.sigma[i]; // nm -> Angstrom
     if (i < lig_params.epsilon.size())
       eps_i = lig_params.epsilon[i];
     solute_sigma_half_[idx] = 0.5 * (sigma_O_ + sigma_i);
@@ -236,7 +245,7 @@ void TitanGIST::init(const MOL &lig_ref, double padding, double resolution,
       ca_indices_.push_back(i);
   }
 
-  TitanUI::print_info("[GIST] Solute heavy: " + std::to_string(n_solute_real_) +
+  TitanUI::print_info("[GIST] Solute atoms: " + std::to_string(n_solute_real_) +
                       " (rec=" + std::to_string(n_rec_heavy_) +
                       " lig=" + std::to_string(lig_heavy_idx_.size()) +
                       "), padded to " + std::to_string(n_solute_) +
@@ -248,11 +257,10 @@ void TitanGIST::init(const MOL &lig_ref, double padding, double resolution,
 // voxel_idx — returns flat index or -1 if outside grid
 // ============================================================================
 inline int TitanGIST::voxel_idx(double x, double y, double z) const noexcept {
-  int ix = static_cast<int>((x - origin_[0]) / voxel_size_);
-  int iy = static_cast<int>((y - origin_[1]) / voxel_size_);
-  int iz = static_cast<int>((z - origin_[2]) / voxel_size_);
-  if (ix < 0 || ix >= nx_ || iy < 0 || iy >= ny_ || iz < 0 || iz >= nz_)
-    return -1;
+  const double ux=(x-origin_[0])/voxel_size_, uy=(y-origin_[1])/voxel_size_, uz=(z-origin_[2])/voxel_size_;
+  if (!std::isfinite(ux) || !std::isfinite(uy) || !std::isfinite(uz) ||
+      ux<0 || uy<0 || uz<0 || ux>=nx_ || uy>=ny_ || uz>=nz_) return -1;
+  const int ix=static_cast<int>(ux), iy=static_cast<int>(uy), iz=static_cast<int>(uz);
   return ix * ny_ * nz_ + iy * nz_ + iz;
 }
 
@@ -264,9 +272,29 @@ inline int TitanGIST::voxel_idx(double x, double y, double z) const noexcept {
 double TitanGIST::compute_esw(double ox, double oy, double oz, double h1x,
                               double h1y, double h1z, double h2x, double h2y,
                               double h2z) const {
-  constexpr double K_E = 138.93546; // kJ·Å/(mol·e²), Coulomb constant
+  constexpr double K_E = 1389.3546; // kJ·Angstrom/(mol·e²)
   constexpr double MIN_D2 = 0.01;   // 0.1 Å², NaN guard
   double e = 0.0;
+  if (periodic_box_) {
+    // Convert reference-frame displacement back to the laboratory lattice.
+    // This remains valid after a Kabsch rotation of the analysis grid.
+    auto distance2 = [&](double x,double y,double z,size_t atom) {
+      Eigen::Vector3d d=current_rotation_*Eigen::Vector3d(x-solute_x_[atom],y-solute_y_[atom],z-solute_z_[atom]);
+      periodic_box_->apply_mic(d[0],d[1],d[2]);return d.squaredNorm();
+    };
+    for(size_t atom=0;atom<n_solute_real_;++atom) {
+      const double d2=distance2(ox,oy,oz,atom);
+      if(d2>=cut2_ || d2<=MIN_D2)continue;
+      const double d=std::sqrt(d2),q=solute_charge_[atom];
+      e+=K_E*q*q_O_/d;
+      const double h1=distance2(h1x,h1y,h1z,atom),h2=distance2(h2x,h2y,h2z,atom);
+      if(h1>1e-12)e+=K_E*q*q_H_/std::sqrt(h1);
+      if(h2>1e-12)e+=K_E*q*q_H_/std::sqrt(h2);
+      const double sr6=std::pow(solute_sigma_half_[atom]/d,6);
+      e+=4*solute_eps_mixed_[atom]*(sr6*sr6-sr6);
+    }
+    return e;
+  }
 
 #ifdef __AVX__
   // Broadcast water atom coords
@@ -356,8 +384,8 @@ double TitanGIST::compute_esw(double ox, double oy, double oz, double h1x,
     e_coul_H2 = _mm256_and_pd(e_coul_H2, mask);
 
     // --- LJ O-solute (Lorentz-Berthelot) ---
-    // eps_ij = eps_mixed² (since eps_mixed = sqrt(eps_O * eps_i))
-    const __m256d eps_ij = _mm256_mul_pd(v_epsmx, v_epsmx);
+    // eps_mixed already contains the Lorentz-Berthelot geometric mean.
+    const __m256d eps_ij = v_epsmx;
     // sr = sigma_half / d_O
     const __m256d sr = _mm256_div_pd(v_sighf, safe_d_O);
     const __m256d sr2 = _mm256_mul_pd(sr, sr);
@@ -410,7 +438,7 @@ double TitanGIST::compute_esw(double ox, double oy, double oz, double h1x,
         e += K_E * q_H_ * qp / dd;
     }
     // LJ: O-solute (Lorentz-Berthelot mixing, precomputed)
-    double eps_ij = solute_eps_mixed_[pi] * solute_eps_mixed_[pi];
+    double eps_ij = solute_eps_mixed_[pi];
     if (eps_ij > 1e-12) {
       double sr = solute_sigma_half_[pi] / d;
       double sr6 = sr * sr * sr * sr * sr * sr;
@@ -423,12 +451,48 @@ double TitanGIST::compute_esw(double ox, double oy, double oz, double h1x,
 }
 
 // ============================================================================
+// Pair energies use all input waters, including waters outside the output grid.
+// Assign half E_ij to each endpoint on-grid, so a pair is never double-counted.
+std::vector<double> TitanGIST::water_water_energies(const std::vector<int>& voxels,
+                                                  bool use_grid) const {
+  const size_t n=wat_buf_.size()/3;
+  if(voxels.size()!=n)throw std::invalid_argument("GIST water/voxel size mismatch");
+  if(n>static_cast<size_t>(std::numeric_limits<int>::max()))throw std::invalid_argument("Too many GIST waters");
+  std::vector<double> energies(n,0.);if(n<2)return energies;
+  auto displacement=[&](size_t i,size_t j){
+    Eigen::Vector3d d(wat_buf_[i][0]-wat_buf_[j][0],wat_buf_[i][1]-wat_buf_[j][1],wat_buf_[i][2]-wat_buf_[j][2]);
+    if(periodic_box_){d=current_rotation_*d;periodic_box_->apply_mic(d[0],d[1],d[2]);}
+    return d;
+  };
+  auto pair=[&](size_t i,size_t j){
+    if(voxels[i]<0&&voxels[j]<0)return;
+    const double oo2=displacement(3*i,3*j).squaredNorm();if(oo2>cut2_)return;
+    if(oo2<1e-12)throw std::invalid_argument("GIST coincident water oxygen sites");
+    const double sr2=sigma_O_*sigma_O_/oo2,sr6=sr2*sr2*sr2;
+    double energy=4*eps_O_*(sr6*sr6-sr6);const double charges[3]={q_O_,q_H_,q_H_};
+    for(size_t a=0;a<3;++a)for(size_t b=0;b<3;++b){double r2=displacement(3*i+a,3*j+b).squaredNorm();if(r2<1e-12)throw std::invalid_argument("GIST coincident intermolecular charge sites");energy+=1389.3546*charges[a]*charges[b]/std::sqrt(r2);}
+    if(!std::isfinite(energy))throw std::invalid_argument("Nonfinite GIST water-water energy");
+    if(voxels[i]>=0)energies[i]+=.5*energy;if(voxels[j]>=0)energies[j]+=.5*energy;
+  };
+  if(!use_grid){for(size_t i=0;i<n;++i)for(size_t j=i+1;j<n;++j)pair(i,j);return energies;}
+  std::vector<std::array<double,3>> points(n);std::array<double,3> lower{},upper{};
+  for(size_t i=0;i<n;++i){Eigen::Vector3d p(wat_buf_[3*i][0],wat_buf_[3*i][1],wat_buf_[3*i][2]);if(periodic_box_){p=current_rotation_*p;periodic_box_->grid_coordinate(p[0],p[1],p[2]);}for(int k=0;k<3;++k){points[i][k]=p[k];if(i==0)lower[k]=upper[k]=p[k];else{lower[k]=std::min(lower[k],p[k]);upper[k]=std::max(upper[k],p[k]);}}}
+  titan_neighbor::OrthorhombicGridSpec spec;spec.periodic=periodic_box_.has_value();std::array<double,3> lengths;
+  for(int k=0;k<3;++k)lengths[k]=periodic_box_?periodic_box_->heights[k]:upper[k]-lower[k]+1e-6;
+  // Coarser candidate cells are safe; cap grid allocations/casts for huge boxes.
+  spec.cutoff=std::max(std::sqrt(cut2_),*std::max_element(lengths.begin(),lengths.end())/128.);
+  spec.len_x=lengths[0];spec.len_y=lengths[1];spec.len_z=lengths[2];
+  if(!periodic_box_){spec.shift_x=-lower[0];spec.shift_y=-lower[1];spec.shift_z=-lower[2];}
+  titan_neighbor::HalfShellGrid grid;grid.for_each_pair(n,spec,[&](size_t i,double& x,double& y,double& z){x=points[i][0];y=points[i][1];z=points[i][2];},[](size_t){return true;},pair);
+  return energies;
+}
+
 // process_frame — transform water, bin into grid, accumulate E_sw + dipole
 // ============================================================================
 void TitanGIST::process_frame(const MOL &pro, const MOL &lig, const MOL &water,
                               const std::vector<mol_info> &pro_info,
                               const Eigen::MatrixXd &ref_ca_centered,
-                              const Eigen::Matrix3d &R, bool is_frame_zero,
+                              const Eigen::Matrix3d &R, bool /*is_frame_zero*/,
                               bool tica_available) {
   if (grid_.empty())
     return;
@@ -437,19 +501,31 @@ void TitanGIST::process_frame(const MOL &pro, const MOL &lig, const MOL &water,
   const auto &wy = water.get_pos_y();
   const auto &wz = water.get_pos_z();
   const size_t n_wat = wx.size();
-  if (n_wat < 3)
-    return;
+  if (n_wat < 3) throw std::invalid_argument("GIST water frame is empty or incomplete");
+  if (n_wat%3 || wy.size()!=n_wat || wz.size()!=n_wat)
+    throw std::invalid_argument("GIST requires complete ordered O,H,H triplets");
+  for(size_t i=0;i<n_wat;++i)
+    if(!std::isfinite(wx[i])||!std::isfinite(wy[i])||!std::isfinite(wz[i]))
+      throw std::invalid_argument("GIST non-finite water coordinate");
+  const bool initializing = !ref_frame_locked_;
 
   const auto &px = pro.get_pos_x();
   const auto &py = pro.get_pos_y();
   const auto &pz = pro.get_pos_z();
+  if(py.size()!=px.size()||pz.size()!=px.size()||px.size()<rec_heavy_idx_.size())
+    throw std::invalid_argument("GIST receptor coordinate dimensions changed");
+  for(size_t i=0;i<px.size();++i)
+    if(!std::isfinite(px[i])||!std::isfinite(py[i])||!std::isfinite(pz[i]))
+      throw std::invalid_argument("GIST non-finite receptor coordinate");
+  for(size_t i:tica_ca_indices_)if(i>=px.size())throw std::invalid_argument("GIST alignment index outside receptor");
+
 
   // --- Step 1: Build or reuse Kabsch alignment ---
   // BUG A fix: Initialize with safe defaults (prevents UB if both blocks skip)
   Eigen::Matrix3d R_actual = Eigen::Matrix3d::Identity();
   Eigen::Vector3d t_mobile = ref_com_;
 
-  if (is_frame_zero && !ref_frame_locked_) {
+  if (initializing) {
     // Cache receptor coords in reference frame (frame 0 = reference)
     for (size_t j = 0; j < n_rec_heavy_; ++j) {
       size_t i = rec_heavy_idx_[j];
@@ -497,7 +573,7 @@ void TitanGIST::process_frame(const MOL &pro, const MOL &lig, const MOL &water,
   }
 
   // --- Step 2: Compute rotation for subsequent frames (or multi-file frame 0)
-  if (ref_frame_locked_ && !(is_frame_zero && ref_built_)) {
+  if (ref_frame_locked_ && !initializing) {
     // BUG2: use tica_ca_indices_ when TICA is on (matches DCCM's Cα subset)
     const auto &ca_rt =
         tica_ca_indices_.empty() ? ca_indices_ : tica_ca_indices_;
@@ -531,10 +607,33 @@ void TitanGIST::process_frame(const MOL &pro, const MOL &lig, const MOL &water,
     }
   }
 
+  if(!R_actual.allFinite() || (R_actual.transpose()*R_actual-Eigen::Matrix3d::Identity()).norm()>1e-6)
+    throw std::invalid_argument("GIST invalid alignment rotation");
+  current_rotation_=R_actual;
+  periodic_box_.reset();
+  if(BoxMatrix::valid_box(pro.Box)) periodic_box_.emplace(pro.Box);
+  else if(BoxMatrix::valid_box(water.Box)) periodic_box_.emplace(water.Box);
+  if(periodic_box_) {
+    const double radius=.5*voxel_size_*std::sqrt(double(nx_)*nx_+double(ny_)*ny_+double(nz_)*nz_);
+    if(radius>=periodic_box_->contained_radius() || std::sqrt(cut2_)>periodic_box_->contained_radius())
+      throw std::invalid_argument("GIST grid/cutoff exceeds conservative single-image periodic domain");
+  }
+  // Interaction energies use the current aligned receptor, not its first frame.
+  for(size_t j=0;j<n_rec_heavy_;++j) {
+    const size_t i=rec_heavy_idx_[j];
+    const Eigen::Vector3d q=R_actual.transpose()*(Eigen::Vector3d(px[i],py[i],pz[i])-t_mobile)+ref_com_;
+    solute_x_[j]=q[0];solute_y_[j]=q[1];solute_z_[j]=q[2];
+  }
+
   // Update ligand portion of solute coords in reference frame
   const auto &lgx = lig.get_pos_x();
   const auto &lgy = lig.get_pos_y();
   const auto &lgz = lig.get_pos_z();
+  if(lgx.size()!=lgy.size()||lgx.size()!=lgz.size()||lgx.size()<lig_heavy_idx_.size())
+    throw std::invalid_argument("GIST ligand coordinate dimensions changed");
+  for(size_t i=0;i<lgx.size();++i)
+    if(!std::isfinite(lgx[i])||!std::isfinite(lgy[i])||!std::isfinite(lgz[i]))
+      throw std::invalid_argument("GIST non-finite ligand coordinate");
   for (size_t j = 0; j < lig_heavy_idx_.size(); ++j) {
     size_t idx = n_rec_heavy_ + j;
     size_t i = lig_heavy_idx_[j];
@@ -548,17 +647,36 @@ void TitanGIST::process_frame(const MOL &pro, const MOL &lig, const MOL &water,
     }
   }
 
-  // --- Step 3: Transform water coordinates into reference frame ---
+  // Register the oxygen image to the grid center in the laboratory frame,
+  // reconstruct each O-H bond, and only then rotate the whole water molecule.
+  const Eigen::Vector3d grid_center=origin_+.5*voxel_size_*Eigen::Vector3d(nx_,ny_,nz_);
+  const Eigen::Vector3d anchor=t_mobile+R_actual*(grid_center-ref_com_);
   wat_buf_.resize(n_wat);
-  for (size_t i = 0; i < n_wat; ++i) {
-    Eigen::Vector3d p{wx[i] - t_mobile[0], wy[i] - t_mobile[1],
-                      wz[i] - t_mobile[2]};
-    Eigen::Vector3d q = R_actual.transpose() * p + ref_com_;
-    wat_buf_[i] = {q[0], q[1], q[2]};
+  for(size_t w=0;w<n_wat;w+=3) {
+    Eigen::Vector3d oxygen(wx[w],wy[w],wz[w]);
+    if(periodic_box_) {Eigen::Vector3d d=oxygen-anchor;periodic_box_->apply_mic(d[0],d[1],d[2]);oxygen=anchor+d;}
+    for(size_t j=0;j<3;++j) {
+      Eigen::Vector3d point=oxygen;
+      if(j) {
+        Eigen::Vector3d d(wx[w+j]-wx[w],wy[w+j]-wy[w],wz[w+j]-wz[w]);
+        if(periodic_box_)periodic_box_->apply_mic(d[0],d[1],d[2]);
+        if(d.squaredNorm()<.04 || d.squaredNorm()>4.)throw std::invalid_argument("GIST water layout is not bonded O,H,H triplets");
+        point+=d;
+      }
+      const Eigen::Vector3d q=R_actual.transpose()*(point-t_mobile)+ref_com_;
+      wat_buf_[w+j]={q[0],q[1],q[2]};
+    }
   }
 
   // --- Step 4: Grid binning + dipole + E_sw (multi-threaded) ---
   const size_t n_water_mols = n_wat / 3; // number of complete water molecules
+  std::vector<int> frame_voxels(n_water_mols,-1);
+  std::vector<titan_gist::Quaternion> frame_orientations(n_water_mols);
+  std::size_t added_samples=0;
+  for(size_t i=0;i<n_water_mols;++i){const auto& o=wat_buf_[3*i];int v=voxel_idx(o[0],o[1],o[2]);frame_voxels[i]=v;if(v>=0){frame_orientations[i]=titan_gist::orientation(o,wat_buf_[3*i+1],wat_buf_[3*i+2]);++added_samples;}}
+  if(added_samples>max_orientation_samples_-orientation_samples_)
+    throw std::runtime_error("GIST full orientation storage exceeds 4000000 samples; use a smaller region or a documented trajectory stride; no samples were silently discarded");
+  const auto frame_eww=water_water_energies(frame_voxels);
 
   if (nt_ <= 1 || n_water_mols < 32) {
     // Single-threaded path
@@ -597,7 +715,9 @@ void TitanGIST::process_frame(const MOL &pro, const MOL &lig, const MOL &water,
     threads.reserve(nt_);
     std::vector<LocalGistAccum> local_accums(nt_);
 
+    std::vector<std::exception_ptr> worker_errors(nt_);
     auto worker = [&](size_t tid) {
+      try {
       // Divide water molecules among threads
       size_t w_per_thread = n_water_mols / nt_;
       size_t w_start = tid * w_per_thread;
@@ -630,6 +750,7 @@ void TitanGIST::process_frame(const MOL &pro, const MOL &lig, const MOL &water,
                                        H1[2], H2[0], H2[1], H2[2]);
         accum.add(static_cast<size_t>(vi), mx, my, mz, esw);
       }
+      } catch (...) { worker_errors[tid]=std::current_exception(); }
     };
 
     for (size_t t = 0; t < nt_; ++t) {
@@ -644,11 +765,15 @@ void TitanGIST::process_frame(const MOL &pro, const MOL &lig, const MOL &water,
       }
     }
 
+    for(const auto& error:worker_errors)if(error)std::rethrow_exception(error);
     // Serial reduce only the voxels that were actually touched.
     for (const auto &accum : local_accums) {
       merge_local_gist_accum(grid_, accum);
     }
   }
+  for(size_t i=0;i<n_water_mols;++i)if(frame_voxels[i]>=0){grid_[frame_voxels[i]].energy_ww+=frame_eww[i];orientations_[frame_voxels[i]].push_back(frame_orientations[i]);}
+  orientation_samples_+=added_samples;
+  ++processed_frames_;
 }
 
 // ============================================================================
@@ -705,71 +830,52 @@ void TitanGIST::export_dx_maps(const std::string &prefix, int n_frames,
     return;
 
   const int ntotal = nx_ * ny_ * nz_;
-  const double V_voxel = voxel_size_ * voxel_size_ * voxel_size_; // ų
-  constexpr double R_gas = 8.314462e-3;                           // kJ/(mol·K)
-
-  std::vector<double> density(ntotal, 0.0);
-  std::vector<double> dH_sw(ntotal, 0.0);
-  std::vector<double> dH_ww(ntotal, 0.0);
-  std::vector<double> dH_total(ntotal, 0.0);
-  std::vector<double> TdS_trans(ntotal, 0.0);
-  std::vector<double> TdS_orient(ntotal, 0.0);
-  std::vector<double> dG(ntotal, 0.0);
-
-  int occupied_voxels = 0;
-  for (int vi = 0; vi < ntotal; ++vi) {
-    uint32_t cnt = grid_[vi].count;
-    if (cnt < static_cast<uint32_t>(min_count))
-      continue; // All outputs stay 0.0
-
-    ++occupied_voxels;
-    double c = static_cast<double>(cnt);
-
-    // g(r) = count / (n_frames * V_voxel * rho_bulk)
-    double g = c / (n_frames * V_voxel * rho_bulk_);
-    density[vi] = g;
-
-    // ΔH_sw = <E_sw> per visit
-    dH_sw[vi] = grid_[vi].energy_sw / c;
-
-    // ΔH_ww = <E_ww>/2 − E_ww_bulk/2  [Phase 1: skip when E_ww=0]
-    if (grid_[vi].energy_ww != 0.0) {
-      dH_ww[vi] = grid_[vi].energy_ww / c / 2.0 - E_ww_bulk_ / 2.0;
-    } else {
-      dH_ww[vi] = 0.0; // Phase 1: E_ww not computed
+  const double missing=std::numeric_limits<double>::quiet_NaN();
+  const double V_voxel=voxel_size_*voxel_size_*voxel_size_;
+  constexpr double R_gas=8.314462e-3;
+  std::vector<double> density(ntotal,missing),esw(ntotal,missing),eww(ntotal,missing),orient(ntotal,missing),density_proxy(ntotal,missing),disorder(ntotal,missing);
+  int occupied=0,entropy_valid=0,entropy_zero_neighbor=0;
+  for(int vi=0;vi<ntotal;++vi) {
+    const double count=grid_[vi].count;
+    if(!processed_frames_ || count<std::max(1,min_count))continue;
+    ++occupied;const double g=count/(processed_frames_*V_voxel*rho_bulk_);
+    density[vi]=g;esw[vi]=grid_[vi].energy_sw/count;eww[vi]=grid_[vi].energy_ww/count;
+    if(auto it=orientations_.find(vi);it!=orientations_.end()){
+      const auto result=titan_gist::orientational_entropy(it->second);
+      if(result.zero_neighbors)++entropy_zero_neighbor;
+      if(std::isfinite(result.s_over_R)){orient[vi]=-R_gas*temperature_*result.s_over_R;++entropy_valid;}
     }
-
-    dH_total[vi] = dH_sw[vi] + dH_ww[vi];
-
-    // −TΔS_trans = R·T·ln(g)
-    if (g > 1e-12)
-      TdS_trans[vi] = R_gas * temperature_ * std::log(g);
-
-    // −TΔS_orient = R·T·(1 − |<d̂>|²)
-    // |<d̂>|² = (Σdx)² + (Σdy)² + (Σdz)² / count²
-    // Approximation: -T*dS_orient ≈ RT*(1 - |<d̂>|²)
-    // Full formula: Lazaridis 1998 / Nguyen 2012 JCTC 8:2189
-    double avg_d2 = (grid_[vi].dipole_x * grid_[vi].dipole_x +
-                     grid_[vi].dipole_y * grid_[vi].dipole_y +
-                     grid_[vi].dipole_z * grid_[vi].dipole_z) /
-                    (c * c);
-    TdS_orient[vi] = R_gas * temperature_ * (1.0 - avg_d2);
-
-    dG[vi] = dH_total[vi] + TdS_trans[vi] + TdS_orient[vi];
+    density_proxy[vi]=R_gas*temperature_*std::log(g);
+    const double order=(grid_[vi].dipole_x*grid_[vi].dipole_x+grid_[vi].dipole_y*grid_[vi].dipole_y+grid_[vi].dipole_z*grid_[vi].dipole_z)/(count*count);
+    disorder[vi]=std::clamp(1.-order,0.,1.);
   }
-
-  TitanUI::print_info(
-      "[GIST] Occupied voxels (count >= " + std::to_string(min_count) +
-      "): " + std::to_string(occupied_voxels) + " / " + std::to_string(ntotal));
-
-  // Write 7 .dx files
-  write_dx(prefix + "_density.dx", density, "density");
-  write_dx(prefix + "_dH_sw.dx", dH_sw, "dH_sw");
-  write_dx(prefix + "_dH_ww.dx", dH_ww, "dH_ww");
-  write_dx(prefix + "_dH_total.dx", dH_total, "dH_total");
-  write_dx(prefix + "_TdS_trans.dx", TdS_trans, "TdS_trans");
-  write_dx(prefix + "_TdS_orient.dx", TdS_orient, "TdS_orient");
-  write_dx(prefix + "_dG.dx", dG, "dG");
-
-  TitanUI::print_info("[GIST] Exported 7 .dx maps → " + prefix + "_*.dx");
+  write_dx(prefix+"_density.dx",density,"relative_water_density");
+  write_dx(prefix+"_E_sw.dx",esw,"mean_cutoff_solute_water_energy_kj_mol");
+  write_dx(prefix+"_E_ww_unref.dx",eww,"mean_half_allocated_cutoff_water_water_energy_kj_mol");
+  write_dx(prefix+"_minus_TdS_orient_nn.dx",orient,"minus_T_delta_S_orient_SO3_NN_kj_mol");
+  write_dx(prefix+"_minus_TdS_density_proxy.dx",density_proxy,"RT_log_density_proxy_kj_mol");
+  write_dx(prefix+"_orientational_disorder.dx",disorder,"one_minus_mean_dipole_squared");
+  std::ofstream status(prefix+"_observables.json");
+  status << "{\n  \"status\": \"partial_observables_only\",\n"
+         << "  \"processed_frames\": " << processed_frames_ << ",\n"
+         << "  \"caller_frames\": " << n_frames << ",\n"
+         << "  \"occupied_voxels\": " << occupied << ",\n"
+         << "  \"rho_bulk_assumed_per_A3\": " << rho_bulk_ << ",\n"
+         << "  \"temperature_K\": " << temperature_ << ",\n"
+         << "  \"water_model\": \"" << water_model_ << "\",\n"
+         << "  \"oxygen_cutoff_A\": " << std::sqrt(cut2_) << ",\n"
+         << "  \"E_ww_available\": true,\n  \"total_enthalpy_available\": false,\n"
+         << "  \"orientational_entropy_available\": true,\n  \"free_energy_available\": false,\n"
+         << "  \"E_ww_convention\": \"half of each pair to each on-grid water; includes off-grid input waters; unreferenced, oxygen cutoff, no PME\",\n"
+         << "  \"orientational_entropy_method\": \"first-order SO(3) exact angular-ball nearest-neighbor; labeled OHH; asymptotic Euler correction; uniform Haar reference\",\n"
+         << "  \"orientation_samples\": " << orientation_samples_ << ",\n"
+         << "  \"orientation_sample_limit\": " << max_orientation_samples_ << ",\n"
+         << "  \"orientation_valid_voxels\": " << entropy_valid << ",\n"
+         << "  \"orientation_zero_neighbor_voxels\": " << entropy_zero_neighbor << ",\n"
+         << "  \"orientation_sampling\": \"all input visits; no automatic decorrelation or convergence certificate; duplicate/unresolved orientations produce NaN\",\n"
+         << "  \"registration\": \"whole OHH waters mapped before rotation; solute alignment atoms must be whole upstream\",\n"
+         << "  \"periodic_energy\": \"minimum-image molecular-oxygen cutoff; not PME/full hydration free energy\",\n"
+         << "  \"missing_voxels\": \"NaN below min_count; missing energy terms are not zero\"\n}\n";
+  TitanUI::print_info("[GIST] Exported density, E_sw, unreferenced E_ww, SO(3) NN orientational entropy and labeled diagnostics.");
+  TitanUI::print_warning("[GIST] Bulk-referenced total enthalpy, full translational/correlation entropy and dG are unavailable; validate sampling convergence separately.");
 }

@@ -1,5 +1,4 @@
 #include "identifiability.h"
-#include "component_graph_math.h"
 
 #include <algorithm>
 #include <cmath>
@@ -38,23 +37,6 @@ void unite(std::vector<std::size_t> &parent, std::vector<unsigned char> &rank,
     ++rank[a];
 }
 
-bool pair_set_has_scored_contact_evidence(
-    const PbctopoPairShiftCandidateSet &pair_set) {
-  if (pair_set.candidates.empty())
-    return false;
-  const auto &best = pair_set.candidates.front();
-  const double confidence =
-      pair_set.candidates.size() > 1
-          ? pbctopo_pair_shift_confidence(
-                best.score, pair_set.candidates[1].score)
-          : 0.0;
-  return best.score.valid && best.score.complete && !best.score.ultra_clash &&
-         best.score.contact_pairs > 0 &&
-         best.score.contact_fraction > 0.0 &&
-         (confidence >= kPbctopoEvidenceMinConfidence ||
-          best.score.contact_fraction >= kPbctopoEvidenceMinConfidence);
-}
-
 } // namespace
 
 void apply_pbctopo_search_identifiability(
@@ -88,6 +70,46 @@ void apply_pbctopo_search_identifiability(
       identifiability.evidence_uniqueness_known &&
       identifiability.feasible_assignments_within_domain == 1;
 
+  identifiability.uniqueness_search_exhaustive =
+      identifiability.objective_uniqueness_known;
+  identifiability.unique_within_search_domain =
+      identifiability.objective_unique_within_search_domain;
+}
+
+void apply_pbctopo_final_selected_evidence(
+    PbctopoIdentifiability &identifiability, bool evidence_audit_evaluated,
+    bool evidence_graph_connected, std::size_t evidence_component_count,
+    std::size_t evidence_edge_count,
+    std::size_t explicit_contact_evidence_edges,
+    std::size_t scored_contact_evidence_edges,
+    std::size_t evidence_connected_component_count) {
+  if (!evidence_audit_evaluated)
+    return;
+
+  identifiability.evidence_component_count = evidence_component_count;
+  identifiability.evidence_edge_count = evidence_edge_count;
+  identifiability.explicit_contact_evidence_edges =
+      explicit_contact_evidence_edges;
+  identifiability.scored_contact_evidence_edges = scored_contact_evidence_edges;
+  identifiability.evidence_connected_component_count =
+      evidence_connected_component_count;
+  identifiability.unconstrained_relative_components =
+      evidence_connected_component_count > 0
+          ? evidence_connected_component_count - 1
+          : 0;
+  identifiability.relative_lattice_degrees_of_freedom =
+      3 * identifiability.unconstrained_relative_components;
+  identifiability.evidence_graph_connected = evidence_graph_connected;
+  identifiability.identified = evidence_graph_connected;
+  identifiability.objective_unique_within_search_domain =
+      identifiability.identified &&
+      identifiability.objective_uniqueness_known &&
+      identifiability.equivalent_best_assignments_within_domain == 1;
+  identifiability.evidence_unique_within_search_domain =
+      identifiability.identified &&
+      identifiability.evidence_uniqueness_known &&
+      identifiability.feasible_assignment_set_enumerated &&
+      identifiability.feasible_assignments_within_domain == 1;
   identifiability.uniqueness_search_exhaustive =
       identifiability.objective_uniqueness_known;
   identifiability.unique_within_search_domain =
@@ -131,9 +153,10 @@ PbctopoIdentifiability evaluate_pbctopo_identifiability(
   }
 
   for (const auto &pair_set : pair_candidates) {
+    const auto support =
+        evaluate_pbctopo_scored_pair_evidence_support(pair_set);
     if (pair_set.a >= component_count || pair_set.b >= component_count ||
-        pair_set.a == pair_set.b ||
-        !pair_set_has_scored_contact_evidence(pair_set)) {
+        pair_set.a == pair_set.b || !support.active_at_threshold) {
       continue;
     }
     const std::uint64_t key = component_pair_key(pair_set.a, pair_set.b);

@@ -1,3 +1,6 @@
+#include "titan_topology_energy.h"
+#include "gromos_nonbonded.h"
+#include "titan_lj_pair_override.h"
 #include "functions.h"
 #include "titan_electrostatics.h"
 #include "titan_simd_dispatch.h"
@@ -45,6 +48,11 @@ int cal_energy_amber_intrin_nofilter(
     size_t begin, size_t end, cache_energy &Energy, size_t num_snap,
     const arguments &Arguments, const Multi_MOL_parameters &rec_parameters,
     const Multi_MOL_parameters &lg_parameters) {
+  if (titan_nb::topology_energy_required(CachedData, Arguments)) {
+    titan_nb::calculate(rec, lg, info_rec, info_lg, CachedData, begin, end,
+                        Energy, nullptr, Arguments);
+    return 0;
+  }
   (void)info_rec;
   (void)info_lg;
   (void)num_snap;
@@ -68,6 +76,7 @@ int cal_energy_amber_intrin_nofilter(
   const __m256d avx_one = _mm256_set1_pd(1.0);
   const __m256d v_scale = _mm256_set1_pd(0.01);
   const double epsilon_in = Arguments.epsilon_in;
+  const bool has_overrides = CachedData.has_charmm_pair_overrides();
 
   __m256d avx_sum_elec = _mm256_setzero_pd();
   __m256d avx_sum_vdw = _mm256_setzero_pd();
@@ -105,6 +114,9 @@ int cal_energy_amber_intrin_nofilter(
       _mm256_storeu_pd(d_arr, d);
       titan_simd_dispatch::lj_mixed_sigma_epsilon_distance_fourlanes(
           sigma_arr, epsilon_arr, d_arr, vdw_arr);
+      if (has_overrides)
+        titan_lj::override_lj_lanes(CachedData, rec_parameters, lg_parameters,
+                                    i, 4, j, d_arr, vdw_arr);
       const __m256d vdw = _mm256_loadu_pd(vdw_arr);
 
       avx_sum_elec = _mm256_add_pd(avx_sum_elec, elec);
@@ -123,9 +135,12 @@ int cal_energy_amber_intrin_nofilter(
           rec_parameters.charge[i] / d;
       const double c_6{
           c6(0.5 * (lg_parameters.sigma[j] + rec_parameters.sigma[i]) / d)};
-      const double vdw_val =
+      double vdw_val =
           sqrt(16. * lg_parameters.epsilon[j] * rec_parameters.epsilon[i]) *
           (square(c_6) - c_6);
+      if (has_overrides)
+        titan_lj::override_lj_energy(CachedData, rec_parameters, lg_parameters,
+                                     i, j, d, vdw_val);
       const size_t pos = rec_size * j + i;
 
       Energy.elec_ener += elec_val;
@@ -146,6 +161,11 @@ int cal_energy_amber_screening_intrin_nofilter(
     size_t begin, size_t end, cache_energy &Energy, size_t num_snap,
     const arguments &Arguments, const Multi_MOL_parameters &rec_parameters,
     const Multi_MOL_parameters &lg_parameters) {
+  if (titan_nb::topology_energy_required(CachedData, Arguments)) {
+    titan_nb::calculate(rec, lg, info_rec, info_lg, CachedData, begin, end,
+                        Energy, nullptr, Arguments);
+    return 0;
+  }
   (void)info_rec;
   (void)info_lg;
   (void)num_snap;
@@ -169,6 +189,7 @@ int cal_energy_amber_screening_intrin_nofilter(
   const double epsilon_in = Arguments.epsilon_in;
   const double lambda_debye =
       titan_electrostatics::debye_length_nm(Arguments.salt_concentration);
+  const bool has_overrides = CachedData.has_charmm_pair_overrides();
 
   const __m256d avx_half = _mm256_set1_pd(0.5);
   const __m256d avx_one = _mm256_set1_pd(1.0);
@@ -218,6 +239,9 @@ int cal_energy_amber_screening_intrin_nofilter(
       _mm256_storeu_pd(safe_d_arr, safe_d);
       titan_simd_dispatch::lj_mixed_sigma_epsilon_distance_fourlanes(
           sigma_arr, epsilon_arr, safe_d_arr, vdw_arr);
+      if (has_overrides)
+        titan_lj::override_lj_lanes(CachedData, rec_parameters, lg_parameters,
+                                    i, 4, j, safe_d_arr, vdw_arr);
       __m256d vdw = _mm256_loadu_pd(vdw_arr);
 
       elec = _mm256_and_pd(elec, valid_mask);
@@ -247,9 +271,12 @@ int cal_energy_amber_screening_intrin_nofilter(
           (138.935457839 * lg_parameters.charge[j] * rec_parameters.charge[i] *
            term_exp) /
           (d * epsilon_in);
-      const double vdw_val =
+      double vdw_val =
           sqrt(16. * lg_parameters.epsilon[j] * rec_parameters.epsilon[i]) *
           (square(c_6) - c_6);
+      if (has_overrides)
+        titan_lj::override_lj_energy(CachedData, rec_parameters, lg_parameters,
+                                     i, j, d, vdw_val);
 
       Energy.elec_ener += elec_val;
       Energy.vdw_ener += vdw_val;
@@ -269,6 +296,11 @@ int cal_energy_gromos_intrin_nofilter(
     size_t begin, size_t end, cache_energy &Energy, size_t num_snap,
     const arguments &Arguments, const Multi_MOL_parameters &rec_parameters,
     const Multi_MOL_parameters &lg_parameters) {
+  if (titan_nb::topology_energy_required(CachedData, Arguments)) {
+    titan_nb::calculate(rec, lg, info_rec, info_lg, CachedData, begin, end,
+                        Energy, nullptr, Arguments);
+    return 0;
+  }
   (void)info_rec;
   (void)info_lg;
   (void)num_snap;
@@ -319,10 +351,16 @@ int cal_energy_gromos_intrin_nofilter(
       elec = _mm256_mul_pd(elec, inv_d);
       elec = _mm256_div_pd(elec, avx_epsilon_in);
 
-      const __m256d epsilon = _mm256_sqrt_pd(
+      __m256d epsilon = _mm256_sqrt_pd(
           _mm256_mul_pd(avx_temp_epsilon_lg, _mm256_loadu_pd(rec_epsilon + i)));
-      const __m256d sigma = _mm256_sqrt_pd(
+      __m256d sigma = _mm256_sqrt_pd(
           _mm256_mul_pd(avx_temp_sigma_lg, _mm256_loadu_pd(rec_sigma + i)));
+      if (CachedData.has_charmm_pair_overrides()) {
+        alignas(32) double c6_values[4],c12_values[4];
+        for(std::size_t lane=0;lane<4;++lane)
+          gromos::pair_params(CachedData,rec_parameters,lg_parameters,i+lane,j,c6_values[lane],c12_values[lane]);
+        sigma=_mm256_load_pd(c6_values);epsilon=_mm256_load_pd(c12_values);
+      }
       const __m256d vdw = _mm256_sub_pd(_mm256_mul_pd(epsilon, inv_d12),
                                         _mm256_mul_pd(sigma, inv_d6));
 
@@ -341,10 +379,9 @@ int cal_energy_gromos_intrin_nofilter(
           138.935457839 * lg_parameters.charge[j] * rec_parameters.charge[i] /
           (d * Arguments.epsilon_in);
       const double c_6 = c6(d);
-      const double vdw_val =
-          sqrt(lg_parameters.epsilon[j] * rec_parameters.epsilon[i]) /
-              square(c_6) -
-          sqrt(lg_parameters.sigma[j] * rec_parameters.sigma[i]) / c_6;
+      double pair_c6{},pair_c12{};
+      gromos::pair_params(CachedData,rec_parameters,lg_parameters,i,j,pair_c6,pair_c12);
+      const double vdw_val=pair_c12/square(c_6)-pair_c6/c_6;
       const size_t pos = rec_size * j + i;
 
       Energy.elec_ener += elec_val;
@@ -365,6 +402,11 @@ void cal_energy_opls_intrin_nofilter(
     size_t begin, size_t end, cache_energy &Energy, size_t num_snap,
     const arguments &Arguments, const Multi_MOL_parameters &rec_parameters,
     const Multi_MOL_parameters &lg_parameters) {
+  if (titan_nb::topology_energy_required(CachedData, Arguments)) {
+    titan_nb::calculate(rec, lg, info_rec, info_lg, CachedData, begin, end,
+                        Energy, nullptr, Arguments);
+    return;
+  }
   (void)info_rec;
   (void)info_lg;
   (void)num_snap;
@@ -386,6 +428,7 @@ void cal_energy_opls_intrin_nofilter(
 
   const __m256d avx_one = _mm256_set1_pd(1.0);
   const __m256d v_scale = _mm256_set1_pd(0.01);
+  const bool has_overrides = CachedData.has_charmm_pair_overrides();
 
   __m256d avx_sum_elec = _mm256_setzero_pd();
   __m256d avx_sum_vdw = _mm256_setzero_pd();
@@ -416,8 +459,16 @@ void cal_energy_opls_intrin_nofilter(
       const __m256d sigma = _mm256_sqrt_pd(
           _mm256_mul_pd(avx_temp_sigma, _mm256_loadu_pd(rec_sigma + i)));
       const __m256d c6 = pow6_ratio(_mm256_mul_pd(sigma, inv_d));
-      const __m256d vdw =
+      __m256d vdw =
           _mm256_mul_pd(epsilon, _mm256_sub_pd(_mm256_mul_pd(c6, c6), c6));
+      if (has_overrides) {
+        alignas(32) double d_arr[4], vdw_arr[4];
+        _mm256_store_pd(d_arr, d);
+        _mm256_store_pd(vdw_arr, vdw);
+        titan_lj::override_lj_lanes(CachedData, rec_parameters, lg_parameters,
+                                    i, 4, j, d_arr, vdw_arr);
+        vdw = _mm256_load_pd(vdw_arr);
+      }
 
       avx_sum_elec = _mm256_add_pd(avx_sum_elec, elec);
       avx_sum_vdw = _mm256_add_pd(avx_sum_vdw, vdw);
@@ -435,9 +486,12 @@ void cal_energy_opls_intrin_nofilter(
           (d * Arguments.epsilon_in);
       const double c_6{
           c6(sqrt(lg_parameters.sigma[j] * rec_parameters.sigma[i]) / d)};
-      const double vdw_val =
+      double vdw_val =
           sqrt(16. * lg_parameters.epsilon[j] * rec_parameters.epsilon[i]) *
           (square(c_6) - c_6);
+      if (has_overrides)
+        titan_lj::override_lj_energy(CachedData, rec_parameters, lg_parameters,
+                                     i, j, d, vdw_val);
       const size_t pos = rec_size * j + i;
 
       Energy.elec_ener += elec_val;

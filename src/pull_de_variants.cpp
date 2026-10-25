@@ -404,6 +404,8 @@ PullOptimizerKind classify_pull_optimizer(std::string_view pull_opt) {
     return PullOptimizerKind::Direct;
   if (pull_opt == "direct+pattern")
     return PullOptimizerKind::DirectPattern;
+  if (pull_opt == "corridor-grid")
+    return PullOptimizerKind::CorridorGrid;
   return PullOptimizerKind::Unknown;
 }
 

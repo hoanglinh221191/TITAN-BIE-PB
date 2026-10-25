@@ -6,3 +6,7 @@
 *.o
 *.d
 *.log
+!example/pbe/04_fagbi27_protocol/inputs/*.log
+!validation/rsos_v06/**/*.log
+/generated/
+__pycache__/

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 struct TitanTicaBackendPolicyConfig {
   TicaBackend requested_backend{TicaBackend::Auto};
@@ -54,36 +55,29 @@ select_tica_backend_for_policy(const TitanTicaBackendPolicyConfig &cfg) {
       titan_tica_positive_or_zero(cfg.dual_memory_estimate) >
           decision.ram_budget;
 
+  // Never silently discard slow directions to satisfy a memory limit.
+  // Dense covariance with a disk spool supports exact projection replay in
+  // O(D^2) RAM, independently of trajectory length.
+  const long double budget = decision.ram_budget > 0 ? decision.ram_budget
+                                                   : 512.0L * 1024 * 1024;
+  const bool dense_fits = titan_tica_positive_or_zero(cfg.dense_memory_estimate) <= budget;
+  const bool dual_fits = titan_tica_positive_or_zero(cfg.dual_memory_estimate) <= budget;
   if (cfg.requested_backend == TicaBackend::Auto) {
-    if (decision.large_matrix_limit_exceeded) {
-      decision.selected_backend = TicaBackend::Randomized;
-      decision.selected_by_large_matrix_limit = true;
-    } else if (cfg.available_ram_bytes > 0.0L &&
-               cfg.dense_memory_estimate <= decision.ram_budget) {
-      decision.selected_backend = TicaBackend::ExactDense;
-    } else if (cfg.available_ram_bytes <= 0.0L ||
-               cfg.dual_memory_estimate <= decision.ram_budget) {
+    if (dense_fits)
+      decision.selected_backend = cfg.need_projection_cache
+          ? TicaBackend::ExactStreaming : TicaBackend::ExactDense;
+    else if (dual_fits)
       decision.selected_backend = TicaBackend::ExactDual;
-    } else {
-      decision.selected_backend = TicaBackend::Randomized;
-    }
-  } else if (cfg.requested_backend == TicaBackend::ExactDual &&
-             (decision.hard_memory_cap_exceeded ||
-              (cfg.available_ram_bytes <= 0.0L &&
-               decision.large_matrix_limit_exceeded))) {
-    decision.selected_backend = TicaBackend::Randomized;
-    decision.explicit_exact_dual_overridden = true;
+    else
+      throw std::runtime_error("TICA exact estimates exceed the memory budget; reduce features or explicitly request randomized approximation.");
+  } else if (cfg.requested_backend == TicaBackend::ExactDual && !dual_fits) {
+    throw std::runtime_error("Requested exact_dual exceeds the memory budget; use exact_streaming or explicitly request randomized approximation.");
+  } else if ((cfg.requested_backend == TicaBackend::ExactDense ||
+              cfg.requested_backend == TicaBackend::ExactStreaming) && !dense_fits) {
+    throw std::runtime_error("Requested exact covariance exceeds the memory budget.");
   }
-
-  // Projection-cache workflows need a backend that can replay per-frame
-  // coordinates. Never let this exact_dense -> exact_dual rewrite bypass the
-  // same hard cap applied to an explicit exact_dual request.
-  if (cfg.need_projection_cache &&
-      decision.selected_backend == TicaBackend::ExactDense) {
-    decision.selected_backend = decision.hard_memory_cap_exceeded
-                                    ? TicaBackend::Randomized
-                                    : TicaBackend::ExactDual;
-  }
+  if (cfg.need_projection_cache && decision.selected_backend == TicaBackend::ExactDense)
+    decision.selected_backend = TicaBackend::ExactStreaming;
 
   return decision;
 }

@@ -2,8 +2,9 @@
 // TitanDHAM — Dynamic Histogram Analysis Method
 // Reweights REMD/H-REMD MSM to a target temperature using energy information.
 //
-// Algorithm: Kong & Brooks, J. Chem. Phys. 105(6), 2414 (1996)
-//            dHAM formulation per Rosta & Hummer, JCTC 2015
+// Explicit small-bias DHAM approximation: Rosta & Hummer, JCTC 2015.
+// State-mean energies approximate thermodynamic biases relative to target T;
+// arbitrary H-REMD and cross-temperature physical rates require more information.
 //
 // Dependencies: Eigen/Dense, TitanUI, parse_xvg.h
 // ============================================================================
@@ -184,11 +185,8 @@ private:
     // u_ik_(i,k) = beta_k * U_k(i)  — dimensionless reduced potential
     MatrixXdRM  u_ik_;               // [n_states × n_replicas]  RowMajor
 
-    // Pre-computed log(c_out + guard) — invariant during solver iterations
-    MatrixXdRM  log_c_;              // [n_states × n_replicas]  RowMajor
-
-    // Optimized variables
-    Eigen::VectorXd f_k_;             // free energy shift per replica
+    Eigen::MatrixXd target_tpm_;      // accepted DHAM transition matrix
+    Eigen::VectorXd f_k_;             // bias normalization; NaN if energies incomplete
     Eigen::VectorXd p_i_;             // stationary distribution at target T
 
     bool solved_ = false;
@@ -196,8 +194,6 @@ private:
     // Rebuild c_out_ from C_k_ row sums
     void rebuild_c_out();
 
-    // One iteration of DHAM self-consistent equations using LSE trick
-    double iterate_once();
 };
 
 // ============================================================================

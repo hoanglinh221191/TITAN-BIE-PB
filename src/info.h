@@ -1258,6 +1258,9 @@ public:
   string get_llps_contact_map_filename() const {
     return "llps_contact_map.dat";
   }
+  string get_llps_chain_residue_contact_map_filename() const {
+    return "llps_contact_map_chain_residue.csv";
+  }
   string get_llps_performance_report_filename() const {
     return "llps_performance_report.dat";
   }

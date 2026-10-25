@@ -1,4 +1,5 @@
 #include "tabi_treecode_internal.h"
+#include "tabi_node_patch_curved.h"
 #include "tabi_near.h"
 
 #include "../titan_executor.h"
@@ -501,6 +502,8 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
       panels, unknowns, coupled, tree, taylor_order, jcp_moments);
   const double moment_ms =
       elapsed_ms(moment_begin, std::chrono::steady_clock::now());
+  const JcpFarEvaluator far_evaluator =
+      make_jcp_far_evaluator(taylor_order, coupled, tree.derivative_mode);
 
   if (tree.interaction_mode == "onthefly") {
     const auto interaction_begin = std::chrono::steady_clock::now();
@@ -1282,10 +1285,12 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
                     }
                   }
                   if (!leaf_mac_fallback_to_direct) {
-                    const JcpAccum far = taylor_jcp_node_sum(
+                    const JcpAccum far = far_evaluator(
                         target, node, jcp_moments.phin[node_index],
-                        normal_moments, eps_ratio, kappa, coupled,
-                        taylor_order, tree.derivative_mode);
+                        jcp_moments.phi_normal[0][node_index],
+                        jcp_moments.phi_normal[1][node_index],
+                        jcp_moments.phi_normal[2][node_index], eps_ratio,
+                        kappa);
                     if (should_audit_far_expansion(
                             tree, n, node, expansion_audit_candidates)) {
                       std::size_t direct_panel_count = 0;
@@ -1362,7 +1367,7 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
                      pos < node.first_panel + node.panel_count; ++pos) {
                   const std::size_t source_index = tree.order[pos];
                   const Panel &source = panels[source_index];
-                  if (is_singular_near_pair(target, i, source, source_index) ||
+                  if (curved_dual_cell(source) || is_singular_near_pair(target, i, source, source_index) ||
                       classify_geometric_near_buffer_pair(
                           target, source, tree.quad_buffer)
                           .active) {
@@ -2408,14 +2413,11 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
             const std::size_t node_index =
                 interactions.smooth_leaf_node_indices[pos];
             const TreeNode &node = tree.nodes[node_index];
-            const std::array<NodeMoments, 3> normal_moments = {
+            const JcpAccum smooth = far_evaluator(
+                target, node, jcp_moments.phin[node_index],
                 jcp_moments.phi_normal[0][node_index],
                 jcp_moments.phi_normal[1][node_index],
-                jcp_moments.phi_normal[2][node_index]};
-            const JcpAccum smooth = taylor_jcp_node_sum(
-                target, node, jcp_moments.phin[node_index], normal_moments,
-                eps_ratio, kappa, coupled, taylor_order,
-                tree.derivative_mode);
+                jcp_moments.phi_normal[2][node_index], eps_ratio, kappa);
             sum_phi[i] += smooth.phi;
             if (coupled)
               sum_phin[i] += smooth.phin;
@@ -2427,9 +2429,29 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
   const double smooth_leaf_ms =
       elapsed_ms(smooth_leaf_begin, std::chrono::steady_clock::now());
 
+  // The far-field audits used to live only in the on-the-fly traversal above,
+  // which is not the one this branch runs and not the default.  The effect was
+  // that every audit counter came back zero on the default path, and a zero
+  // reads exactly like a clean far field.  The decision about which pairs are
+  // far was made once, when the interaction lists were built, so the geometry
+  // behind it has to be recomputed here -- it is a node radius over a centre
+  // distance, and cheap.  Everything else is the same free function the other
+  // traversal calls, so the two report on the same definitions.
+  const bool far_audits_active =
+      tree.convergence_audit != "off" || tree.expansion_audit != "off" ||
+      tree.expansion_audit_channel != "off" ||
+      tree.convergence_estimator == "moment-tail" ||
+      tree.convergence_estimator == "hybrid";
+  std::vector<ExpansionAuditTally> local_far_expansion_audit(
+      far_audits_active ? workers : 0U);
+  std::vector<ConvergenceAuditTally> local_far_convergence_audit(
+      far_audits_active ? workers : 0U);
+  std::vector<ConvergenceEstimatorTally> local_far_estimator(
+      far_audits_active ? workers : 0U);
+  std::atomic_size_t far_expansion_audit_candidates{0};
+
   const auto far_begin = std::chrono::steady_clock::now();
-  executor.parallel_for(
-      n, workers, 8,
+  const auto far_targets =
       [&](std::size_t worker, std::size_t begin, std::size_t end) {
         std::size_t far_count = 0;
         for (std::size_t i = begin; i < end; ++i) {
@@ -2437,18 +2459,113 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
           const std::size_t far_begin_pos = interactions.far_offsets[i];
           const std::size_t far_count_i =
               interactions.far_offsets[i + 1] - far_begin_pos;
-          for (std::size_t pos = far_begin_pos;
-               pos < far_begin_pos + far_count_i; ++pos) {
+          std::size_t pos = far_begin_pos;
+          // Four far nodes at a time; each node's term is the one the loop
+          // below would compute, added in the same list order.
+          if (far_evaluator.fast4 != nullptr && !far_audits_active) {
+            for (; pos + 4 <= far_begin_pos + far_count_i; pos += 4) {
+              const TreeNode *nodes4[4];
+              const double *density4[16];
+              for (std::size_t lane = 0; lane < 4; ++lane) {
+                const std::size_t node_index =
+                    interactions.far_node_indices[pos + lane];
+                nodes4[lane] = &tree.nodes[node_index];
+                density4[4 * lane] = jcp_moments.phin[node_index].values.data();
+                for (std::size_t c = 0; c < 3; ++c)
+                  density4[4 * lane + 1 + c] =
+                      jcp_moments.phi_normal[c][node_index].values.data();
+              }
+              JcpAccum far4[4];
+              far_evaluator.fast4(target, nodes4, density4, eps_ratio, kappa,
+                                  far4);
+              for (const JcpAccum &far : far4) {
+                sum_phi[i] += far.phi;
+                if (coupled)
+                  sum_phin[i] += far.phin;
+              }
+              far_count += 4;
+            }
+          }
+          for (; pos < far_begin_pos + far_count_i; ++pos) {
             const std::size_t node_index = interactions.far_node_indices[pos];
             const TreeNode &node = tree.nodes[node_index];
-            const std::array<NodeMoments, 3> normal_moments = {
+            const JcpAccum far = far_evaluator(
+                target, node, jcp_moments.phin[node_index],
                 jcp_moments.phi_normal[0][node_index],
                 jcp_moments.phi_normal[1][node_index],
-                jcp_moments.phi_normal[2][node_index]};
-            const JcpAccum far = taylor_jcp_node_sum(
-                target, node, jcp_moments.phin[node_index], normal_moments,
-                eps_ratio, kappa, coupled, taylor_order,
-                tree.derivative_mode);
+                jcp_moments.phi_normal[2][node_index], eps_ratio, kappa);
+            if (far_audits_active) {
+              const std::array<NodeMoments, 3> normal_moments = {
+                  jcp_moments.phi_normal[0][node_index],
+                  jcp_moments.phi_normal[1][node_index],
+                  jcp_moments.phi_normal[2][node_index]};
+              const double dx = target.x - node.cx;
+              const double dy = target.y - node.cy;
+              const double dz = target.z - node.cz;
+              const double distance =
+                  std::sqrt(std::max(1.0e-16, dx * dx + dy * dy + dz * dz));
+              const MacDecision mac =
+                  evaluate_mac(target, node, tree, distance);
+              if (tree.convergence_audit != "off")
+                record_far_convergence_audit(
+                    local_far_convergence_audit[worker], node, mac.rho);
+              const ConvergenceEstimatorDecision estimator =
+                  evaluate_convergence_estimator(tree, node, jcp_moments,
+                                                 node_index, taylor_order,
+                                                 coupled, mac.rho, eps_ratio);
+              record_convergence_estimator(local_far_estimator[worker], node,
+                                           estimator);
+              // The ground-truth comparator: the same pair summed directly.
+              // Sampled, because it is the expensive one.
+              if (should_audit_far_expansion(tree, n, node,
+                                             far_expansion_audit_candidates)) {
+                std::size_t direct_panel_count = 0;
+                const auto direct_begin = std::chrono::steady_clock::now();
+                // Per-channel when asked for, because the aggregate hides
+                // which kernel carries the error, and the K4 hypersingular
+                // channel is the one the FMM research line kept flagging.
+                const bool channel_audit =
+                    tree.expansion_audit_channel != "off";
+                JcpAccum direct;
+                JcpChannelAccum direct_channels;
+                JcpChannelAccum far_channels;
+                if (channel_audit) {
+                  direct_channels = direct_jcp_ordered_channel_sum_scalar(
+                      target, i, *panel_cache, unknown_cache, eps_ratio,
+                      kappa, coupled, tree.order, node.first_panel,
+                      node.panel_count, direct_panel_count);
+                  direct = sum_jcp_channels(direct_channels);
+                  far_channels = taylor_jcp_node_channel_sum(
+                      target, node, jcp_moments.phin[node_index],
+                      normal_moments, eps_ratio, kappa, coupled, taylor_order,
+                      tree.derivative_mode);
+                } else {
+                  direct = direct_jcp_ordered_sum(
+                      target, i, *panel_cache, unknown_cache, eps_ratio,
+                      kappa, coupled, tree.order, node.first_panel,
+                      node.panel_count, leaf_panel_kernel,
+                      direct_panel_count);
+                }
+                const double direct_ms = elapsed_ms(
+                    direct_begin, std::chrono::steady_clock::now());
+                record_far_expansion_audit(
+                    local_far_expansion_audit[worker], far, direct, coupled,
+                    node.panel_count, direct_ms, estimator.active,
+                    estimator.unstable, estimator.split_reject,
+                    tree.convergence_estimator_error_cap,
+                    tree.accepted_miss_absolute_floor,
+                    tree.channel_missed_semantics);
+                if (channel_audit)
+                  record_far_expansion_channel_audit(
+                      local_far_expansion_audit[worker], far_channels,
+                      direct_channels, estimator,
+                      tree.convergence_estimator_error_cap,
+                      tree.accepted_miss_absolute_floor,
+                      tree.channel_missed_semantics,
+                      tree.accepted_miss_diagnostics, i, node_index,
+                      node.panel_count, mac.rho);
+              }
+            }
             sum_phi[i] += far.phi;
             if (coupled)
               sum_phin[i] += far.phin;
@@ -2464,11 +2581,55 @@ void apply_jcp_treecode_operator_impl(const std::vector<Panel> &panels,
                 sum_phin[i];
         }
         local_far[worker] += far_count;
+      };
+  if (far_audits_active) {
+    executor.parallel_for(n, workers, 8, far_targets);
+  } else {
+    // Targets go out from a shared counter in shrinking chunks (a guided
+    // schedule) instead of one equal block per worker: on a hybrid CPU the
+    // equal split waits for the slowest core. The early chunks stay large and
+    // contiguous, because neighbouring targets share most of their far nodes
+    // and a worker's cache keeps them. Each target's sum is still formed by
+    // one worker in list order, so the result does not depend on the
+    // schedule. The audits keep the static split above.
+    constexpr std::size_t kFarTargetChunkMin = 32;
+    std::atomic_size_t next_target{0};
+    executor.parallel_for(
+        workers, workers, 1,
+        [&](std::size_t worker, std::size_t, std::size_t) {
+          std::size_t begin = next_target.load(std::memory_order_relaxed);
+          while (begin < n) {
+            const std::size_t chunk =
+                std::max(kFarTargetChunkMin, (n - begin) / (2 * workers));
+            if (next_target.compare_exchange_weak(begin, begin + chunk,
+                                                  std::memory_order_relaxed)) {
+              far_targets(worker, begin, std::min(n, begin + chunk));
+              begin = next_target.load(std::memory_order_relaxed);
+            }
+          }
         });
+  }
   const double far_ms = elapsed_ms(far_begin, std::chrono::steady_clock::now());
   const double traversal_ms = singular_ms + leaf_ms + smooth_leaf_ms + far_ms;
 
   if (stats != nullptr) {
+    if (far_audits_active) {
+      ExpansionAuditTally expansion_total;
+      for (const ExpansionAuditTally &worker_audit : local_far_expansion_audit)
+        merge_far_expansion_audit(expansion_total, worker_audit);
+      ConvergenceAuditTally convergence_total;
+      for (const ConvergenceAuditTally &worker_audit :
+           local_far_convergence_audit)
+        merge_far_convergence_audit(convergence_total, worker_audit);
+      ConvergenceEstimatorTally estimator_total;
+      for (const ConvergenceEstimatorTally &worker_audit : local_far_estimator)
+        merge_convergence_estimator(estimator_total, worker_audit);
+      if (tree.accepted_miss_diagnostics == "sampled-detail")
+        write_accepted_miss_detail_csv(expansion_total);
+      copy_far_expansion_audit_to_stats(*stats, expansion_total);
+      copy_far_convergence_audit_to_stats(*stats, convergence_total);
+      copy_convergence_estimator_to_stats(*stats, estimator_total);
+    }
     std::size_t singular_evaluated = 0;
     for (const TreecodeStats &worker_stats : local_near_stats)
       singular_evaluated += worker_stats.near_centroid_pairs +

@@ -23,9 +23,26 @@ int compare_scalar(double lhs, double rhs, double eps) {
   return 0;
 }
 
+// Sorting requires a strict weak ordering.  Pairwise epsilon equivalence is
+// not transitive, so it is reserved for decisions, never std::sort predicates.
+// Give NaNs an explicit order as a defensive measure for diagnostic populations;
+// the validity gate remains responsible for admitting physical candidates.
+int compare_scalar_exact(double lhs, double rhs, double) {
+  const bool lhs_nan = std::isnan(lhs);
+  const bool rhs_nan = std::isnan(rhs);
+  if (lhs_nan != rhs_nan)
+    return lhs_nan ? 1 : -1;
+  if (lhs < rhs)
+    return -1;
+  if (lhs > rhs)
+    return 1;
+  return 0;
+}
+
 int compare_candidates(const PathwayCandidateState &lhs, std::size_t lhs_index,
                        const PathwayCandidateState &rhs, std::size_t rhs_index,
-                       PathwayMode mode, bool include_index) {
+                       PathwayMode mode, bool include_index,
+                       bool exact_order = false) {
   if (lhs.valid != rhs.valid)
     return lhs.valid ? -1 : 1;
   if (!lhs.valid)
@@ -33,51 +50,71 @@ int compare_candidates(const PathwayCandidateState &lhs, std::size_t lhs_index,
                ? (lhs_index < rhs_index ? -1 : 1)
                : 0;
 
+  // Production populations share one probe mode.  Give mixed diagnostic
+  // populations an explicit mode order too: a conditional probe comparison
+  // only when both are fixed could otherwise create another ordering cycle.
+  if (exact_order && lhs.fixed_probe != rhs.fixed_probe)
+    return lhs.fixed_probe ? -1 : 1;
+  const auto compare_value = exact_order ? compare_scalar_exact : compare_scalar;
+  if (lhs.fixed_probe && rhs.fixed_probe) {
+    if (const int cmp = compare_value(rhs.probe_length, lhs.probe_length,
+                                       kPullDistanceCompareEps);
+        cmp != 0) {
+      return cmp;
+    }
+  }
+
   if (mode == PathwayMode::Recovery) {
+    if (const int cmp = compare_value(lhs.applied_path_distance,
+                                       rhs.applied_path_distance,
+                                       kPullDistanceCompareEps);
+        cmp != 0) {
+      return cmp;
+    }
     if (const int cmp =
-            compare_scalar(lhs.delta_progress, rhs.delta_progress,
+            compare_value(rhs.delta_progress, lhs.delta_progress,
                            kProgressCompareEps);
         cmp != 0) {
       return cmp;
     }
     if (const int cmp =
-            compare_scalar(lhs.pull_distance, rhs.pull_distance,
+            compare_value(lhs.pull_distance, rhs.pull_distance,
                            kPullDistanceCompareEps);
         cmp != 0) {
       return cmp;
     }
     if (const int cmp =
-            compare_scalar(lhs.energy_key, rhs.energy_key,
+            compare_value(lhs.energy_key, rhs.energy_key,
                            kEnergyKeyCompareEps);
         cmp != 0) {
       return cmp;
     }
     if (const int cmp =
-            compare_scalar(lhs.progress, rhs.progress, kProgressCompareEps);
+            compare_value(lhs.progress, rhs.progress, kProgressCompareEps);
         cmp != 0) {
       return cmp;
     }
   } else {
     if (const int cmp =
-            compare_scalar(lhs.energy_key, rhs.energy_key,
+            compare_value(lhs.energy_key, rhs.energy_key,
                            kEnergyKeyCompareEps);
         cmp != 0) {
       return cmp;
     }
     if (const int cmp =
-            compare_scalar(rhs.delta_progress, lhs.delta_progress,
+            compare_value(rhs.delta_progress, lhs.delta_progress,
                            kProgressCompareEps);
         cmp != 0) {
       return cmp;
     }
     if (const int cmp =
-            compare_scalar(lhs.pull_distance, rhs.pull_distance,
+            compare_value(lhs.pull_distance, rhs.pull_distance,
                            kPullDistanceCompareEps);
         cmp != 0) {
       return cmp;
     }
     if (const int cmp =
-            compare_scalar(lhs.angle_deg, rhs.angle_deg, kAngleCompareEps);
+            compare_value(lhs.angle_deg, rhs.angle_deg, kAngleCompareEps);
         cmp != 0) {
       return cmp;
     }
@@ -108,9 +145,8 @@ sorted_candidate_indices(const std::vector<PathwayCandidateState> &population,
   std::iota(indices.begin(), indices.end(), std::size_t{0});
   std::stable_sort(indices.begin(), indices.end(),
                    [&](std::size_t lhs, std::size_t rhs) {
-                     return compare_candidates(population[lhs], lhs,
-                                               population[rhs], rhs, mode,
-                                               true) < 0;
+                     return pathway_candidate_strict_less(
+                         population[lhs], lhs, population[rhs], rhs, mode);
                    });
   return indices;
 }
@@ -759,6 +795,13 @@ bool pathway_candidate_better(const PathwayCandidateState &lhs,
                               const PathwayCandidateState &rhs,
                               std::size_t rhs_index, PathwayMode mode) {
   return compare_candidates(lhs, lhs_index, rhs, rhs_index, mode, true) < 0;
+}
+
+bool pathway_candidate_strict_less(const PathwayCandidateState &lhs,
+                                   std::size_t lhs_index,
+                                   const PathwayCandidateState &rhs,
+                                   std::size_t rhs_index, PathwayMode mode) {
+  return compare_candidates(lhs, lhs_index, rhs, rhs_index, mode, true, true) < 0;
 }
 
 bool pathway_candidate_equivalent(const PathwayCandidateState &lhs,

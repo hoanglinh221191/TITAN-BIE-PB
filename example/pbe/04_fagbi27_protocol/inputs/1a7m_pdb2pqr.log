@@ -1,0 +1,447 @@
+﻿INFO:PDB2PQR v3.7.1: biomolecular structure conversion software.
+INFO:Please cite:  Jurrus E, et al.  Improvements to the APBS biomolecular solvation software suite.  Protein Sci 27 112-128 (2018).
+INFO:Please cite:  Dolinsky TJ, et al.  PDB2PQR: expanding and upgrading automated preparation of biomolecular structures for molecular simulations. Nucleic Acids Res 35 W522-W525 (2007).
+INFO:Checking and transforming input arguments.
+INFO:Loading topology files.
+INFO:Loading molecule: C:\Users\ADMIN\OneDrive\Documents\antigravity\elec_vdw\test\pbe_inputs_fagbi27\1a7m_model1_all_protein.pdb
+INFO:Setting up molecule.
+INFO:Created biomolecule object with 180 residues and 2803 atoms.
+INFO:Setting termini states for biomolecule chains.
+INFO:Loading forcefield.
+INFO:Loading hydrogen topology definitions.
+INFO:This biomolecule is clean.  No repair needed.
+INFO:Updating disulfide bridges.
+INFO:Debumping biomolecule.
+INFO:Assigning titration states with PROPKA.
+INFO:
+propka3.5.1                                                                                  2026-07-13
+System.Management.Automation.RemoteException
+-------------------------------------------------------------------------------
+--                                                                           --
+--  PROPKA: A PROTEIN PKA PREDICTOR                                          --
+--                                                                           --
+--  VERSION 1.0,  04/25/2004,  IOWA CITY                                     --
+--  BY HUI LI                                                                --
+--                                                                           --
+--  VERSION 2.0,  11/05/2007, IOWA CITY/COPENHAGEN                           --
+--  BY DELPHINE C. BAS AND DAVID M. ROGERS                                   --
+--                                                                           --
+--  VERSION 3.0,  01/06/2011, COPENHAGEN                                     --
+--  BY MATS H.M. OLSSON AND CHRESTEN R. SONDERGARD                           --
+--                                                                           --
+--  VERSION 3.1,  07/01/2011, COPENHAGEN                                     --
+--  BY CHRESTEN R. SONDERGARD AND MATS H.M. OLSSON                           --
+--                                                                           --
+--  VERSION 3.2,  06/17/2020, PLANET EARTH                                   --
+--  SEE ABOVE FOR AUTHORS                                                    --
+--                                                                           --
+-------------------------------------------------------------------------------
+System.Management.Automation.RemoteException
+System.Management.Automation.RemoteException
+-------------------------------------------------------------------------------
+References:
+System.Management.Automation.RemoteException
+Very Fast Empirical Prediction and Rationalization of Protein pKa Values.
+Hui Li, Andrew D. Robertson and Jan H. Jensen. PROTEINS: Structure, Function,
+and Bioinformatics. 61:704-721 (2005)
+System.Management.Automation.RemoteException
+Very Fast Prediction and Rationalization of pKa Values for Protein-Ligand
+Complexes.  Delphine C. Bas, David M. Rogers and Jan H. Jensen.  PROTEINS:
+Structure, Function, and Bioinformatics 73:765-783 (2008)
+System.Management.Automation.RemoteException
+PROPKA3: Consistent Treatment of Internal and Surface Residues in Empirical
+pKa predictions.  Mats H.M. Olsson, Chresten R. Sondergard, Michal Rostkowski,
+and Jan H. Jensen.  Journal of Chemical Theory and Computation, 7(2):525-537
+(2011)
+System.Management.Automation.RemoteException
+Improved Treatment of Ligands and Coupling Effects in Empirical Calculation
+and Rationalization of pKa Values.  Chresten R. Sondergaard, Mats H.M. Olsson,
+Michal Rostkowski, and Jan H. Jensen.  Journal of Chemical Theory and
+Computation, (2011)
+-------------------------------------------------------------------------------
+System.Management.Automation.RemoteException
+System.Management.Automation.RemoteException
+System.Management.Automation.RemoteException
+INFO:Coupling map:
+System.Management.Automation.RemoteException
+INFO:Calculating pKas for Conformation container 1A with 1658 atoms and 438 groups
+INFO:pKa determinants:
+System.Management.Automation.RemoteException
+---------  -----   ------   ---------------------    --------------    --------------    --------------
+                            DESOLVATION  EFFECTS       SIDECHAIN          BACKBONE        COULOMBIC
+ RESIDUE    pKa    BURIED     REGULAR      RE        HYDROGEN BOND     HYDROGEN BOND      INTERACTION
+---------  -----   ------   ---------   ---------    --------------    --------------    --------------
+System.Management.Automation.RemoteException
+ASP  57 A   3.78     0 %    0.30  263   0.00    0    0.00 XXX   0 X   -0.29 ASP  57 A   -0.00 LYS  58 A
+ASP  57 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.03 LYS 170 A
+System.Management.Automation.RemoteException
+ASP  66 A   4.19     0 %    0.23  262   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X   -0.03 LYS 153 A
+ASP  66 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.02 ASP 149 A
+ASP  66 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.04 HIS 150 A
+ASP  66 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.22 ASP 152 A
+System.Management.Automation.RemoteException
+ASP 100 A   4.31    26 %    0.73  353   0.23    0    0.00 XXX   0 X   -0.26 ASP 100 A   -0.06 ARG  99 A
+ASP 100 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.13 LYS 158 A
+System.Management.Automation.RemoteException
+ASP 120 A   3.97     1 %    0.36  284   0.01    0    0.00 XXX   0 X    0.00 XXX   0 X   -0.20 ARG 123 A
+System.Management.Automation.RemoteException
+ASP 143 A   3.82     0 %    0.40  270   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X   -0.05 ARG  15 A
+ASP 143 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.04 ARG  85 A
+ASP 143 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.04 LYS 136 A
+ASP 143 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.26 HIS 141 A
+System.Management.Automation.RemoteException
+ASP 149 A   2.60     0 %    0.41  229   0.00    0   -0.71 SER 151 A   -0.02 HIS 150 A   -0.15 HIS 150 A
+ASP 149 A                                            0.00 XXX   0 X   -0.73 SER 151 A    0.00 XXX   0 X
+System.Management.Automation.RemoteException
+ASP 152 A   3.91     0 %    0.28  250   0.00    0   -0.02 GLN 164 A    0.00 XXX   0 X   -0.21 LYS 153 A
+ASP 152 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.12 ASP 149 A
+ASP 152 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.06 HIS 150 A
+System.Management.Automation.RemoteException
+GLU  50 A   4.49     0 %    0.19  183   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X   -0.14 LYS 159 A
+GLU  50 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.06 LYS 160 A
+System.Management.Automation.RemoteException
+GLU  76 A   3.93     0 %    0.24  244   0.00    0   -0.71 TYR 137 A    0.00 XXX   0 X   -0.02 LYS  77 A
+GLU  76 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.08 LYS  79 A
+GLU  76 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.00 ARG 132 A
+System.Management.Automation.RemoteException
+GLU  82 A   4.47    43 %    1.11  403   0.07    0   -0.72 ARG  85 A    0.00 XXX   0 X   -0.04 LYS  77 A
+GLU  82 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.04 HIS  71 A
+GLU  82 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.41 ARG  85 A
+System.Management.Automation.RemoteException
+GLU 154 A   4.60     0 %    0.10  124   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.00 XXX   0 X
+System.Management.Automation.RemoteException
+C-  180 A   3.13    29 %    1.37  363   0.00    0   -0.85 LYS  27 A    0.00 XXX   0 X   -0.16 LYS  79 A
+C-  180 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.43 LYS  27 A
+System.Management.Automation.RemoteException
+HIS  16 A   6.52     8 %   -0.54  305   0.00    0    0.00 XXX   0 X    0.67 ARG  15 A   -0.11 ARG  15 A
+HIS  16 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.00 ARG 123 A
+System.Management.Automation.RemoteException
+HIS  19 A   6.03     0 %   -0.39  276   0.00    0    0.05 ASN 128 A    0.00 XXX   0 X   -0.13 HIS  16 A
+System.Management.Automation.RemoteException
+HIS  71 A   7.38     0 %   -0.22  243   0.00    0    0.00 XXX   0 X    0.63 PRO  69 A    0.04 GLU  82 A
+HIS  71 A                                            0.00 XXX   0 X    0.44 PHE  70 A    0.00 XXX   0 X
+System.Management.Automation.RemoteException
+HIS 112 A   6.38     7 %   -0.81  302   0.00    0    0.78 ASN 116 A    0.13 HIS 112 A   -0.21 LYS 102 A
+System.Management.Automation.RemoteException
+HIS 141 A   4.92    32 %   -1.26  370   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X   -0.53 ARG  15 A
+HIS 141 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.05 ARG  85 A
+HIS 141 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.26 ASP 143 A
+System.Management.Automation.RemoteException
+HIS 150 A   5.27    58 %   -1.48  444   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.04 ASP  66 A
+HIS 150 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.15 ASP 149 A
+HIS 150 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.06 ASP 152 A
+System.Management.Automation.RemoteException
+CYS  12 A  99.99     0 %    0.00    0   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.00 XXX   0 X
+System.Management.Automation.RemoteException
+CYS  18 A  99.99     0 %    0.00    0   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.00 XXX   0 X
+System.Management.Automation.RemoteException
+CYS  60 A  99.99     0 %    0.00    0   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.00 XXX   0 X
+System.Management.Automation.RemoteException
+CYS 131 A  99.99     0 %    0.00    0   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.00 XXX   0 X
+System.Management.Automation.RemoteException
+CYS 134 A  99.99     0 %    0.00    0   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.00 XXX   0 X
+System.Management.Automation.RemoteException
+CYS 163 A  99.99     0 %    0.00    0   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.00 XXX   0 X
+System.Management.Automation.RemoteException
+TYR  44 A  13.61   100 %    4.80  613   0.00    0    0.00 XXX   0 X   -0.55 GLY 162 A    0.04 ASP 100 A
+TYR  44 A                                            0.00 XXX   0 X   -0.68 CYS 163 A    0.00 XXX   0 X
+System.Management.Automation.RemoteException
+TYR  45 A  11.13    21 %    1.04  339   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.09 ASP  57 A
+System.Management.Automation.RemoteException
+TYR  84 A  10.85    65 %    2.23  463   0.00    0   -0.70 ARG  15 A    0.00 XXX   0 X   -0.66 ARG  15 A
+TYR  84 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.02 ARG  85 A
+System.Management.Automation.RemoteException
+TYR  89 A  13.99    98 %    3.96  556   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.03 TYR 169 A
+System.Management.Automation.RemoteException
+TYR 137 A  11.72    11 %    0.91  312   0.00    0    0.71 GLU  76 A   -0.26 LYS  77 A   -0.02 ARG 132 A
+TYR 137 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.00 ARG 138 A
+TYR 137 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.38 GLU  76 A
+System.Management.Automation.RemoteException
+TYR 169 A  13.68   100 %    3.68  600   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.00 XXX   0 X
+System.Management.Automation.RemoteException
+LYS  27 A  11.31     0 %   -0.47  274   0.00    0    0.85 C-  180 A    0.00 XXX   0 X    0.43 C-  180 A
+System.Management.Automation.RemoteException
+LYS  58 A  10.21     0 %   -0.20  205   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.00 ASP  57 A
+LYS  58 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.09 LYS 153 A
+System.Management.Automation.RemoteException
+LYS  77 A  10.17     6 %   -0.34  297   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.02 GLU  76 A
+LYS  77 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.04 GLU  82 A
+LYS  77 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.04 ARG  85 A
+System.Management.Automation.RemoteException
+LYS  79 A  10.14     8 %   -0.51  304   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.08 GLU  76 A
+LYS  79 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.16 C-  180 A
+LYS  79 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.09 LYS  27 A
+System.Management.Automation.RemoteException
+LYS 102 A  10.30     0 %   -0.15  187   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X   -0.05 ARG  99 A
+System.Management.Automation.RemoteException
+LYS 114 A   9.85    16 %   -0.65  326   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.00 XXX   0 X
+System.Management.Automation.RemoteException
+LYS 136 A   9.98     0 %   -0.31  243   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X   -0.07 ARG 138 A
+LYS 136 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.04 ASP 143 A
+LYS 136 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.19 LYS  77 A
+System.Management.Automation.RemoteException
+LYS 153 A  10.49     0 %   -0.25  259   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.03 ASP  66 A
+LYS 153 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.21 ASP 152 A
+System.Management.Automation.RemoteException
+LYS 158 A  10.49     0 %   -0.15  240   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.13 ASP 100 A
+System.Management.Automation.RemoteException
+LYS 159 A   9.60    17 %   -1.03  328   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.14 GLU  50 A
+LYS 159 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.01 LYS 158 A
+System.Management.Automation.RemoteException
+LYS 160 A   7.48    37 %   -2.73  386   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.06 GLU  50 A
+LYS 160 A                                            0.00 XXX   0 X    0.00 XXX   0 X   -0.35 LYS 159 A
+System.Management.Automation.RemoteException
+LYS 170 A   8.94    46 %   -1.59  409   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.03 ASP  57 A
+System.Management.Automation.RemoteException
+ARG  15 A  12.37    37 %   -1.54  386   0.00    0    0.70 TYR  84 A    0.00 XXX   0 X    0.66 TYR  84 A
+ARG  15 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.05 ASP 143 A
+System.Management.Automation.RemoteException
+ARG  85 A  12.69    35 %   -1.00  380   0.00    0    0.72 GLU  82 A    0.00 XXX   0 X    0.02 TYR  84 A
+ARG  85 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.04 ASP 143 A
+ARG  85 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.41 GLU  82 A
+System.Management.Automation.RemoteException
+ARG  99 A  12.48     0 %   -0.07  143   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.06 ASP 100 A
+System.Management.Automation.RemoteException
+ARG 123 A  12.55     0 %   -0.15  260   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.20 ASP 120 A
+System.Management.Automation.RemoteException
+ARG 132 A  12.18    13 %   -0.35  317   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.00 GLU  76 A
+ARG 132 A                                            0.00 XXX   0 X    0.00 XXX   0 X    0.02 TYR 137 A
+System.Management.Automation.RemoteException
+ARG 138 A  12.27     0 %   -0.23  191   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.00 TYR 137 A
+System.Management.Automation.RemoteException
+N+    1 A   7.90     0 %   -0.10   32   0.00    0    0.00 XXX   0 X    0.00 XXX   0 X    0.00 XXX   0 X
+System.Management.Automation.RemoteException
+System.Management.Automation.RemoteException
+INFO:pKa summary:
+--------------------------------------------------------------------------------------------------------
+SUMMARY OF THIS PREDICTION
+       Group      pKa  model-pKa   ligand atom-type
+   ASP  57 A     3.78       3.80                      
+   ASP  66 A     4.19       3.80                      
+   ASP 100 A     4.31       3.80                      
+   ASP 120 A     3.97       3.80                      
+   ASP 143 A     3.82       3.80                      
+   ASP 149 A     2.60       3.80                      
+   ASP 152 A     3.91       3.80                      
+   GLU  50 A     4.49       4.50                      
+   GLU  76 A     3.93       4.50                      
+   GLU  82 A     4.47       4.50                      
+   GLU 154 A     4.60       4.50                      
+   C-  180 A     3.13       3.20                      
+   HIS  16 A     6.52       6.50                      
+   HIS  19 A     6.03       6.50                      
+   HIS  71 A     7.38       6.50                      
+   HIS 112 A     6.38       6.50                      
+   HIS 141 A     4.92       6.50                      
+   HIS 150 A     5.27       6.50                      
+   CYS  12 A    99.99       9.00                      
+   CYS  18 A    99.99       9.00                      
+   CYS  60 A    99.99       9.00                      
+   CYS 131 A    99.99       9.00                      
+   CYS 134 A    99.99       9.00                      
+   CYS 163 A    99.99       9.00                      
+   TYR  44 A    13.61      10.00                      
+   TYR  45 A    11.13      10.00                      
+   TYR  84 A    10.85      10.00                      
+   TYR  89 A    13.99      10.00                      
+   TYR 137 A    11.72      10.00                      
+   TYR 169 A    13.68      10.00                      
+   LYS  27 A    11.31      10.50                      
+   LYS  58 A    10.21      10.50                      
+   LYS  77 A    10.17      10.50                      
+   LYS  79 A    10.14      10.50                      
+   LYS 102 A    10.30      10.50                      
+   LYS 114 A     9.85      10.50                      
+   LYS 136 A     9.98      10.50                      
+   LYS 153 A    10.49      10.50                      
+   LYS 158 A    10.49      10.50                      
+   LYS 159 A     9.60      10.50                      
+   LYS 160 A     7.48      10.50                      
+   LYS 170 A     8.94      10.50                      
+   ARG  15 A    12.37      12.50                      
+   ARG  85 A    12.69      12.50                      
+   ARG  99 A    12.48      12.50                      
+   ARG 123 A    12.55      12.50                      
+   ARG 132 A    12.18      12.50                      
+   ARG 138 A    12.27      12.50                      
+   N+    1 A     7.90       8.00                      
+System.Management.Automation.RemoteException
+INFO:PROPKA information:
+--------------------------------------------------------------------------------------------------------
+Free energy of   folding (kcal/mol) as a function of pH (using neutral reference)
+  0.00     18.35
+  1.00     18.33
+  2.00     18.23
+  3.00     17.75
+  4.00     17.33
+  5.00     16.80
+  6.00     15.10
+  7.00     13.83
+  8.00     13.09
+  9.00     11.56
+ 10.00     10.16
+ 11.00     12.44
+ 12.00     17.07
+ 13.00     20.83
+ 14.00     23.34
+System.Management.Automation.RemoteException
+The pH of optimum stability is 10.0 for which the free energy is   10.2 kcal/mol at 298K
+Could not determine pH values where the free energy is within 80 % of minimum
+Could not determine the pH-range where the free energy is negative
+System.Management.Automation.RemoteException
+System.Management.Automation.RemoteException
+Protein charge of folded and unfolded state as a function of pH
+    pH  unfolded  folded
+  0.00     25.00   25.00
+  0.10     25.00   24.99
+  0.20     25.00   24.99
+  0.30     25.00   24.99
+  0.40     25.00   24.99
+  0.50     24.99   24.99
+  0.60     24.99   24.98
+  0.70     24.99   24.98
+  0.80     24.99   24.97
+  0.90     24.99   24.97
+  1.00     24.98   24.96
+  1.10     24.98   24.95
+  1.20     24.97   24.94
+  1.30     24.96   24.92
+  1.40     24.95   24.90
+  1.50     24.94   24.88
+  1.60     24.93   24.85
+  1.70     24.91   24.81
+  1.80     24.88   24.76
+  1.90     24.86   24.71
+  2.00     24.82   24.64
+  2.10     24.77   24.56
+  2.20     24.72   24.47
+  2.30     24.65   24.36
+  2.40     24.56   24.24
+  2.50     24.46   24.10
+  2.60     24.33   23.93
+  2.70     24.18   23.75
+  2.80     24.00   23.54
+  2.90     23.78   23.31
+  3.00     23.53   23.06
+  3.10     23.24   22.78
+  3.20     22.90   22.46
+  3.30     22.52   22.11
+  3.40     22.09   21.73
+  3.50     21.63   21.31
+  3.60     21.12   20.86
+  3.70     20.58   20.37
+  3.80     20.02   19.85
+  3.90     19.45   19.30
+  4.00     18.86   18.73
+  4.10     18.29   18.14
+  4.20     17.72   17.55
+  4.30     17.17   16.96
+  4.40     16.65   16.38
+  4.50     16.15   15.81
+  4.60     15.69   15.27
+  4.70     15.27   14.75
+  4.80     14.88   14.26
+  4.90     14.53   13.80
+  5.00     14.21   13.37
+  5.10     13.92   12.97
+  5.20     13.66   12.60
+  5.30     13.41   12.26
+  5.40     13.18   11.94
+  5.50     12.96   11.64
+  5.60     12.73   11.35
+  5.70     12.50   11.08
+  5.80     12.26   10.82
+  5.90     12.00   10.56
+  6.00     11.72   10.31
+  6.10     11.41   10.06
+  6.20     11.09    9.81
+  6.30     10.74    9.57
+  6.40     10.38    9.32
+  6.50     10.02    9.08
+  6.60      9.66    8.84
+  6.70      9.30    8.60
+  6.80      8.96    8.37
+  6.90      8.65    8.14
+  7.00      8.36    7.91
+  7.10      8.09    7.68
+  7.20      7.86    7.46
+  7.30      7.64    7.23
+  7.40      7.45    7.01
+  7.50      7.28    6.79
+  7.60      7.12    6.57
+  7.70      6.98    6.35
+  7.80      6.84    6.15
+  7.90      6.71    5.94
+  8.00      6.59    5.75
+  8.10      6.47    5.56
+  8.20      6.35    5.38
+  8.30      6.24    5.21
+  8.40      6.12    5.03
+  8.50      6.00    4.86
+  8.60      5.87    4.68
+  8.70      5.73    4.49
+  8.80      5.57    4.29
+  8.90      5.40    4.08
+  9.00      5.19    3.85
+  9.10      4.96    3.60
+  9.20      4.67    3.32
+  9.30      4.34    3.02
+  9.40      3.95    2.69
+  9.50      3.50    2.32
+  9.60      2.97    1.92
+  9.70      2.37    1.48
+  9.80      1.69    1.01
+  9.90      0.93    0.50
+ 10.00      0.11   -0.03
+ 10.10     -0.78   -0.58
+ 10.20     -1.71   -1.15
+ 10.30     -2.67   -1.72
+ 10.40     -3.65   -2.30
+ 10.50     -4.61   -2.87
+ 10.60     -5.55   -3.43
+ 10.70     -6.45   -3.98
+ 10.80     -7.29   -4.51
+ 10.90     -8.06   -5.02
+ 11.00     -8.75   -5.51
+ 11.10     -9.38   -5.98
+ 11.20     -9.93   -6.44
+ 11.30    -10.43   -6.89
+ 11.40    -10.87   -7.33
+ 11.50    -11.27   -7.76
+ 11.60    -11.64   -8.18
+ 11.70    -11.99   -8.61
+ 11.80    -12.33   -9.03
+ 11.90    -12.67   -9.46
+ 12.00    -13.01   -9.90
+ 12.10    -13.37  -10.34
+ 12.20    -13.73  -10.79
+ 12.30    -14.10  -11.23
+ 12.40    -14.48  -11.68
+ 12.50    -14.86  -12.11
+ 12.60    -15.23  -12.54
+ 12.70    -15.59  -12.95
+ 12.80    -15.93  -13.34
+ 12.90    -16.24  -13.71
+ 13.00    -16.51  -14.06
+ 13.10    -16.76  -14.39
+ 13.20    -16.97  -14.70
+ 13.30    -17.16  -15.00
+ 13.40    -17.31  -15.29
+ 13.50    -17.44  -15.56
+ 13.60    -17.55  -15.81
+ 13.70    -17.64  -16.06
+ 13.80    -17.71  -16.29
+ 13.90    -17.76  -16.51
+ 14.00    -17.81  -16.72
+The pI is 10.00 (folded) and 10.01 (unfolded)
+System.Management.Automation.RemoteException
+--------------------------------------------------------------------------------------------------------
+INFO:Applying pKa values at a pH of 7.00:
+INFO:Adding hydrogens to biomolecule.
+INFO:Debumping biomolecule (again).
+INFO:Optimizing hydrogen bonds
+INFO:Applying force field to biomolecule states.
+INFO:Applying custom naming scheme (charmm).
+INFO:Regenerating headers.
+INFO:Regenerating PDB lines.
+WARNING:Ignoring 543 header lines in output.

@@ -193,6 +193,8 @@ IMPORTANT NOTES
     -gbsa or -alpb
     -igb, -ext_diel, -int_diel, -saltcon, -gbsa-temp, -epsilon_in
     -gbsa-sasa-points
+    -gbsa-rgbmax <A>|off
+    -gbsa-surften <kcal/mol/A^2>
     -gbsa-ie-block, -gbsa-ie-min-samples, -gbsa-ie-filter-sigma
 
   Typical outputs:
@@ -218,6 +220,11 @@ IMPORTANT NOTES
       for the complex, receptor, and ligand endpoints. It is not a fixed
       empirical length added to the GB denominator. Summary/log provenance
       and all three endpoint sizes are exported for audit.
+    - Under -alpb the direct Coulomb term is scaled by 1/(1+alpha*beta) as
+      well as the GB term, which is what sander reports for alpb=1. Without
+      that factor a TITAN total could not be compared with a raw sander total.
+      E_elec and the total therefore differ from a vacuum-Coulomb convention;
+      alpb_coulomb_scale_factor in gbsa_summary.dat records the value applied.
     - When IE sigma filtering removes samples, the retained ensemble is
       re-centered and the minimum-sample gate is applied again.
 
@@ -311,7 +318,35 @@ IMPORTANT NOTES
     BIE advanced/debug: -pbe-bie-sum=auto|direct|treecode,
       -pbe-bie-geometry=triangle|point-panel,
       -pbe-bie-diagonal=solid-angle|flat|off,
-      -pbe-bie-surface-points=<24..4096>,
+      -pbe-bie-surface-points=<8..4096> (default 96; coarse resolution),
+      -pbe-bie-sphere-mesh=auto|latlong|icosphere,
+        auto uses icosphere for sphere-patch/triangle/vdw; SAS keeps latlong.
+        Point count is a mesh-resolution target, not the resulting panel count.
+        Icosphere uses 20*4^L triangles per atom (96 -> 320, 384 -> 1280,
+        1536 -> 5120, 6144 -> 20480, 65536 -> 81920), before intersection cuts.
+        Explicit latlong preserves the base mesh policy; requests >=3969 saturate
+        at 64 rings / 16128 triangles per atom, including in highres mode.
+        -pbe-bie-highres-surface=true allows up to 65536 points only for
+        direct BIE -pbe-test-pqr runs with FMM/M2L off. Use icosphere there
+        for refinement beyond the latlong cap.
+        Check energy convergence with resolution; exact isolated-sphere area
+        does not establish accuracy at intersections of atomic spheres.
+        VDW patches are clipped from the exposed side of covering spherical
+        caps, with local subdivision at intersections. This avoids retained
+        buried panels but approximates small-circle seams with great-circle
+        edges; it is not a stitched watertight mesh. Panel counts and solve
+        costs increase near intersections. With -pbe-timing=detail, the status in
+        pbe_tabi_surface_quality.csv is approximate_exposed_patches.
+        Refine to check the remaining area and
+        energy error; geometric clearance alone is not an accuracy bound.
+        For sphere-patch/triangle/vdw, every solve reports the minimum over
+        nonzero charges and retained curved panels of distance(panel)/max-edge.
+        d/h < 1.5 gives an advisory resolution warning; it does not stop the
+        solve. no_flag is not an energy-accuracy certificate. The diagnostic
+        and retained-patch clearance are written to pbe_energy.csv in the
+        tabi_charge_* columns. Negative values mean unavailable; indices are
+        zero-based within the solver's atom/panel arrays. Other surfaces are
+        currently reported as unsupported_surface for this diagnostic.
       -pbe-bie-surface-only=true|false,
       -pbe-bie-ses-max-grid-vertices=<4000000..100000000>,
       -pbe-bie-taylor-order=3|4,
@@ -337,10 +372,22 @@ IMPORTANT NOTES
       -pbe-bie-precond-coarse-verify=off|full-small,
       -pbe-bie-near-integration=auto|centroid|analytic_singular|
         duffy_adaptive
+        For sphere-patch/triangle/vdw with centroid discretization, auto uses
+        curved self/one-ring quadrature at zero and positive salt. Explicit
+        centroid preserves the old triangle rule.
+        Node-patch on this surface uses exact spherical dual geometry for
+        self, near, source moments and energy projection (policy curved_dual).
+        Kernel caches are local to one geometry/dielectric/salt combination.
+        Direct uses a complete pair cache when it fits within 256 MiB;
+        treecode and larger systems use a bounded cache of accessed pairs.
+        Geometry and moment storage are additional to this cache budget.
+        Curved node-patch supports direct and classic treecode; the separate
+        FMM-M2L backends are not yet supported. SAS and SES node-patch retain
+        their existing representation. This is not a universal accuracy gate.
       -pbe-bie-node-patch-operator-audit=on|off (default on),
       -pbe-bie-primary-surface=sphere-patch|grid-ses|analytic-ses,
       -pbe-bie-analytic-ses-engine=current|patch-ray-experimental,
-      -pbe-bie-ses-grid-spacing=<0.25..4.0>
+      -pbe-bie-ses-grid-spacing=<0.25..4.0> (default 0.75)
     cartesian-full-experimental is a separate, opt-in Cartesian P2M/M2M/M2L/
     L2L/L2P engine for expansion order 1 or 4. It reuses the established
     octree/worklist builder, but it does not use KIFMM equivalent/check
@@ -351,6 +398,15 @@ IMPORTANT NOTES
     theta 0.20 for order 1 and leaf 80 / theta 0.65 for order 4. The existing
     production treecode defaults are unchanged. Explicit
     -pbe-bie-tree-leaf-size and -pbe-bie-opening-theta values always win.
+
+    -pbe-bie-curved-pair-cache-mb <MiB>   (default 256)
+    Memory budget for the curved node-patch pair cache.  The dense
+    all-pairs table needs 32 bytes per pair, so 256 MiB covers a direct
+    solve up to about 2896 nodes.  Past that a bounded sparse cache is
+    used and uncached pairs are recomputed on every matvec, measured at
+    about 8x slower on a 2562-node sphere; the energy is unchanged.
+    Raise it to keep larger direct solves dense, at O(N^2) memory, or
+    use the treecode, which does not form every pair.
     grid-ses is an opt-in watertight solvent-excluded surface. It applies a
     probe-radius morphological closing to the VDW volume on a Cartesian grid,
     extracts a welded triangle mesh, and rejects any open or nonmanifold mesh
@@ -361,14 +417,36 @@ IMPORTANT NOTES
     patch-ray-experimental is a clean-room, opt-in analytic SES extractor. It
     visits patches, builds compact three-axis ray crossings, and does not
     change the established analytic SES engine or its default selection. Any
-    odd ray row invalidates only the vertices that use that row. Unanimous
-    three-axis parity is checked in the compact solvent shell; disagreements
-    are repaired locally by the morphology predicate, while exact VDW/expanded
-    sphere certificates classify the homogeneous interior/exterior. Boundary
-    magnitude and projection use sparse active-cell storage plus an atom-local
-    patch CSR. Final gates report connected components, Euler characteristic,
-    genus, filled cavities, sampled analytic distance/residual/normal error,
-    and curvature-aware repair rollback. No lazy ray-bucket index is built.
+    odd ray row invalidates only the vertices that use that row. Certified,
+    unanimous three-axis parity is authoritative in the compact solvent shell;
+    exact seam/tangency vertices use deterministic analytic symbolic
+    perturbation. Any remaining morphology fallback, unresolved odd or
+    uncertified quartic row, or failed all-vertex analytic projection makes the
+    experimental engine fail closed. Unequal-radius torus arcs use
+    the minor contact arc, and spindle-torus quartic roots must also pass a
+    geometric probe-radius residual. Boundary magnitude and projection use
+    sparse active-cell storage plus an atom-local patch CSR. Patch events are
+    written to CSR by two merge passes without a full merged-event copy, and
+    final vertex projection uses the TITAN executor and a vertex-only
+    transaction. Short-edge collapse builds an immutable-source candidate
+    without copying the full panel mesh. Projection-created zero-area faces
+    and locally inverted faces are repaired transactionally; ULP-scale seam
+    duplicates are welded by a local-scale tolerance. Every final face must
+    pass a minimum analytic-normal orientation certificate, and all
+    broad-phase non-adjacent triangle AABB pairs are checked and counted for
+    self-intersection;
+    generic diagonal flips are disabled because planar quality alone cannot
+    certify a curved analytic-patch seam. Final gates report connected
+    components, Euler characteristic, genus, filled cavities, sampled analytic
+    distance/residual/normal error, the all-vertex and all-face certificates,
+    repair scratch/event peak bytes, and deterministic repair rollback. A
+    coarse mesh that reports analytic_self_intersection must be rerun with a
+    smaller SES grid spacing; the certificate cannot be disabled. No lazy
+    ray-bucket index is built. SES grid spacing controls geometric
+    discretization independently of the GMRES tolerance. The 0.75 A default
+    is a throughput setting, not a universal energy-accuracy guarantee;
+    quantitative work should report an h-refinement check and reduce the
+    spacing until the observable is stable.
     Node-patch treecode uses a fail-closed, spatially stratified pre-GMRES
     operator audit. It starts at 64 targets and expands to 256 or 512 only
     when the sampled error is ambiguous. Advanced production runs may set
@@ -1138,7 +1216,7 @@ IMPORTANT NOTES
   Main inputs:
     -tica
     optional: -tica-lag=<N>, -tica-components=<N>
-    optional: -tica-backend=<auto|exact_dense|exact_dual|randomized>
+    optional: -tica-backend=<auto|exact_dense|exact_streaming|exact_dual|randomized>
     optional: -tica-rank=<N>
     optional: -feature-export=<true|false>
     optional: -feature-source=<auto|dccm|lj|dihedral|qnative|cmap|mixed>
@@ -1285,6 +1363,11 @@ IMPORTANT NOTES
   Main inputs:
     -dham
     -dham-temps <temps.txt>
+    -dham-segment-map <metadata.txt>
+      Audited segment/exchange metadata, TITAN_DHAM_SEGMENTS_V1 format.
+      Mutually exclusive with -dham-ener. Writes candidate counts/decisions
+      only; requires exact endpoint energies and excludes closed intervals
+      touching exchanges or segment boundaries. Does not run the estimator.
     -dham-ener <energy_list.txt>
     optional:
       -dham-target-temp <K>
@@ -1524,12 +1607,21 @@ IMPORTANT NOTES
     llps_autocorr.dat
     llps_degree_dist.dat
     llps_contact_map.dat
+    llps_contact_map_chain_residue.csv
     llps_sticker_hotspots.csv
     llps_performance_report.dat
     llps_summary.dat
     llps_density_protein.dx
     llps_density_rna.dx
     polymer_scaling.dat
+
+  Contact-map note:
+    llps_contact_map.dat keeps the legacy residue-index matrix schema.
+    llps_contact_map_chain_residue.csv is a sparse long-form map with chain,
+    residue, contact class, same-dimer status, contact-frame count, and
+    contact frequency. Protein contacts are classified as intra-chain,
+    inter-chain within one dimer, or inter-chain between different dimers;
+    protein-RNA contacts are reported separately.
     llps_dbscan_droplets.pdb
     llps_dbscan_timeseries.csv
     llps_droplet_shape_timeseries.csv
@@ -1599,8 +1691,19 @@ IMPORTANT NOTES
 2.12 GIST
 
   Purpose:
-    Map solvent occupancy, energy, and entropy onto a 3D grid around the
-    solute to identify favorable and unfavorable hydration regions.
+    Map density, cutoff solute-water and unreferenced water-water energy,
+    plus first-order SO(3) nearest-neighbor orientational entropy. Pair E_ww is
+    half allocated per water and includes off-grid partners from the input.
+    Bulk-referenced total enthalpy and hydration free energy are unavailable.
+    RT-log-density remains a proxy; orientational disorder is not entropy.
+    NN entropy needs decorrelated, converged sampling. Duplicate orientations
+    give NaN; storage stops at 4000000 visits without hidden subsampling.
+    Solute alignment atoms must be made whole upstream. Periodic grids/cutoffs
+    must fit the conservative single-image domain; O,H,H waters are registered
+    before rotation. Supported models: TIP3P and SPC/E (SPCE).
+    Supply -n_wat <water group index>, or a unique Water/SOL/WAT/HOH group.
+    The group must contain ordered O,H,H triplets and exclude solute atoms.
+    GIST uses the standard analysis path; do not combine it with -nocal.
 
   Main inputs:
     -gist
@@ -1614,7 +1717,9 @@ IMPORTANT NOTES
 
   Typical outputs:
     gist_*.dx
-    (Titan exports a set of DX maps using the prefix `gist`)
+    (density, E_sw, E_ww_unref, minus_TdS_orient_nn,
+    minus_TdS_density_proxy, orientational_disorder DX maps;
+    gist_observables.json declares unavailable quantities and frame counts)
 
 2.12 IFP (Interaction Fingerprint)
 
@@ -2024,11 +2129,14 @@ IMPORTANT NOTES
   -mol-1-type <type>    protein, complex, lig, rna, dna
   -mol-2-type <type>    protein, protein-user, complex, lig, rna, dna
   -mol2 <N>             Starting residue/atom index for molecule 2
-  -n_wat <N>            Number of waters to track; -1 disables
+  -n_wat <N>            Zero-based water index-group number; -1 disables
 
-  -b <time>             Begin time (ps)
-  -e <time>             End time (ps)
-  -dt <N>               Frame step interval
+  -b <time>             Begin time (ps, or ns with -tu=ns)
+  -e <time>             End time (ps, or ns with -tu=ns)
+  -dt <N>               Time between analysed frames (ps, or whole ns with
+                        -tu=ns)
+  -tu <ps|ns>           Time unit of -b/-e/-dt and of the times written in
+                        the outputs. Default: ps
   -nt <N>               Number of threads
 
 4.3 Energy / Solvation / Entropy
@@ -2037,7 +2145,30 @@ IMPORTANT NOTES
   -alpb                 Enable Sigalov ALPB (per-frame A_Det) and imply -gbsa
   -gbsa-sasa-points <N> Shrake-Rupley points/atom. Default: 96; perform a
                         convergence check (for example 96, 384, 1536).
-  -igb <N>              GB model. Default: 5
+  -gbsa-rgbmax <A>|off  Cutoff in Angstrom on the HCT descreening integral for
+                        the effective Born radii. Default: off (uncut sum).
+                        25 matches Amber's egb default and is much faster on
+                        large systems. Any finite value changes DeltaG_polar,
+                        so re-baseline before comparing against uncut runs.
+                        The value used is recorded in gbsa_summary.dat.
+  -gbsa-surften <val>   Nonpolar surface tension in kcal/mol/A^2 applied to the
+                        buried SASA. Default: 0.0072, which is MMPBSA.py's GB
+                        default; sander's own gbsa=1 default is 0.005. The
+                        value used is recorded in gbsa_summary.dat.
+  -igb <N>              GB model: 1 HCT, 2 OBC-I, 5 OBC-II, 8 GBn2,
+                        66 GBNSR6. Default: 5.
+                        GBn2 uses mbondi3, neck tables, and Amber protein/RNA
+                        parameters. Nonstandard ligand radii require care;
+                        this path infers H partners from coordinates/types.
+  -gbnsr6               Enable experimental native SES-R6 GBSA (igb=66).
+                        Bondi radii, 1.4 A probe, B=0.028 A^-1, ALPB energy.
+                        Uses certified patch-ray SES; errors stop the frame.
+                        Different surface quadrature from Amber gbnsr6.
+                        Physical PB salt kappa; direct Coulomb is unscaled.
+                        SASA nonpolar energy retains TITAN's existing model.
+                        No CAS or finite rgbmax. Not an MD force model.
+  -gbnsr6-spacing <A>   SES mesh spacing, [0.1,1.0]. Default: 0.5.
+                        Check convergence at smaller spacing before use.
   -ext_diel <val>       External dielectric. Default: 78.5
   -int_diel <val>       Internal dielectric. Default: 1.0
   -saltcon <val>        Salt concentration (M). Default: 0.15
@@ -2389,6 +2520,11 @@ IMPORTANT NOTES
 
   -entropy              Interaction entropy
   -entropy-quasi <com> <lig> <rec>
+  -qha-temp=<K>                 Quasi-harmonic temperature (default: 300 K).
+  -ml-predict-experimental=true  No effect. The bundled affinity model is closed
+                        pending a model card (training set, feature units,
+                        cross-validation score, applicability domain).
+                        -ml still exports the five descriptors.
                         Quasi-harmonic entropy
 
 4.4 PBC
@@ -2420,6 +2556,9 @@ IMPORTANT NOTES
                         observation contract.
   -pbctopo-temporal-k=<N>
   -pbctopo-temporal-penalty=<value>
+  -pbctopo-evidence-export[=<bool>]
+                        Opt-in Paper-2 candidate evidence summary/relation
+                        sidecars. Default: false
   -pbctopo-vdw-clash-scale=<value>
                         Severe-overlap threshold lambda*(ri+rj). Range: (0,1]; default: 0.55
                         Explicit zero-LJ sites have no LJ hard core.
@@ -2522,7 +2661,7 @@ IMPORTANT NOTES
   -tica                 TICA analysis
   -tica-lag=<N>         TICA lag. Default: 10
   -tica-components=<N>  Components kept. Default: 5
-  -tica-backend=<name>  auto | exact_dense | exact_dual | randomized
+  -tica-backend=<name>  auto | exact_dense | exact_streaming | exact_dual | randomized
   -tica-rank=<N>        Reduced-rank target for large-system TICA. Default: 64
   -feature-export=<b>   Export routed observable features by frame. Default: false
   -feature-source=<m>   auto | dccm | lj | dihedral | qnative | cmap | mixed
@@ -2651,6 +2790,21 @@ IMPORTANT NOTES
   -llps-prna-rcut <val> Protein-RNA chain contact cutoff (nm). Default: llps-rcut
   -llps-density=<auto|full|projection|off>
                         Density accumulation policy. Default: auto
+  -llps-phase-geometry=<none|droplet|slab>
+                        Explicit density windows; default none produces NaN phase densities.
+  -llps-phase-axis=<a|b|c>
+                        Slab normal to the corresponding lattice face (default c).
+  -llps-phase-dense-nm=<value>
+                        Dense ball radius or slab half-width, measured from GCC center.
+  -llps-phase-dilute-inner-nm=<value>
+  -llps-phase-dilute-outer-nm=<value>
+                        Dilute annulus or paired slab windows. Require
+                        0 < dense < dilute-inner < dilute-outer < half cell height.
+                        Counts use one BB/CA representative per macro-node.
+                        Ambiguous centers/winding droplet embeddings produce NaN + status.
+  -llps-dbscan=<true|false>
+                        Optional DBSCAN/paper/dynamics companion (default true).
+                        DBSCAN and paper profiles support triclinic cells; select paper geometry explicitly.
   -llps-kernel=<auto|scalar|avx2>
                         LLPS hot-kernel policy for benchmark/regression. Default: auto
   -llps-rna-compaction=<auto|true|false>
@@ -2842,7 +2996,7 @@ IMPORTANT NOTES
   -hotspot-rank-by=<m>  cas-ddg, edecomp-abs-mean, or combined
   -tda                  Topological data analysis
   -tda-max-points=<N>   Reservoir cap for TDA point-cloud CSV. Default: 200000
-  -ml                   ML affinity prediction
+  -ml                   ML feature export (affinity prediction closed)
 
 4.6 Hydrogen Bonds / Water / Geometry
 
@@ -2854,16 +3008,21 @@ IMPORTANT NOTES
   -water-type <type>    Water mode: surface or sphere
   -dis-water <val>      Water distance cutoff. Default: 3.5
 
-  -charged_atom_dis [N] Charged-atom distance distribution
+  -charged_atom_dis [N] -nocal: distribution of the distances from mol1's
+                        centre of mass to its charged atoms, per input
+                        (<input>_distributionChargedAtoms.dat); N bins (400)
   -charged_distances_min <val>
                         Min charged distance
   -charged_distances_max <val>
                         Max charged distance
   -angle_dipole_efield [N]
-                        Dipole-electric-field angle distribution
+                        -nocal: distribution of the cosine between each water
+                        dipole and the solute field there, per input; N bins
   -cal-mindis           Minimum distance per frame
-  -resdis2com           Residue-to-COM distance analysis
-  -com-dis <axis>       x, y, z, or default euclidean
+  -resdis2com           -nocal: distance from each residue's centre of mass
+                        to mol1's, mean and SD per input
+  -com-dis <axis>       mol1-mol2 centre-of-mass distance per frame
+                        (out_dis_com.dat): x, y, z, or xyz (default)
 
 4.7 Miscellaneous
 
@@ -2874,17 +3033,25 @@ IMPORTANT NOTES
                         LJ in this mode analyzes molecule 1 only
                         RMSD/RMSF in this mode analyzes molecule 1 only
                         GBSA/ALPB are ignored in this mode
-  -cscd                 Side-chain contact distances
-  -pqr                  Write PQR-style output
+  -cscd                 Side-chain centre-of-mass distance from each mol1
+                        residue to the nearest mol2 residue, one file per
+                        residue (out_cal_dis_com_<chain><resnr>.dat);
+                        -act gives one column per mol2 residue. Glycine,
+                        non-amino-acid residues and -side_chain_contact
+                        full-res use whole-residue centres; the file header
+                        says which
+  -pqr                 Write PQR-style output
   -cal-force            Calculate atomic forces
-  -cal-volume           Molecular volume
+  -cal-volume           -nocal: box volume per frame (volume.dat) and its
+                        mean, SD and 95% CI (stat_volumes.dat)
   -max-force            Report maximum force
   -cache                Enable cache
   -cache -no            Disable cache
   -use-CI               Use confidence intervals
   -elec-screening       Debye-Huckel screening for aqueous 1:1 electrolyte at
                         298.15 K (kappa=3.291*sqrt(I) nm^-1).
-  -dipole-moment        Dipole moment analysis
+  -dipole-moment        -nocal: mol1 dipole moment per frame
+                        (<input>_dipole_moment.dat)
   -split                Split results per trajectory
   -all-subfolders       Process all subfolders and split outputs
   -cat-result           Concatenate results from multiple inputs
@@ -2892,8 +3059,8 @@ IMPORTANT NOTES
   -contact-map yes      Deprecated alias for -cmap -cmap-scope=interface
                         -cmap-mode=sidechain-com; -dsc supplies its cutoff
   -contact-map no       Disable the deprecated alias only
-  -act                  Use all side-chain contacts
-  -new_al               New alignment in single-PDB mode
+  -act                  -cscd: every mol2 residue, not only the nearest
+  -new_al              New alignment in single-PDB mode
   -new-al               Alias of -new_al
   -side_chain_contact <mode>
                         full-res or other
@@ -2910,7 +3077,7 @@ IMPORTANT NOTES
   -pull-opt <mode>      Optimizer mode. Current build supports: de, de+pattern,
                         de-shade, de-l-shade, de-jso, de-jso+pattern,
                         de-nl-shade-lbc, de-nl-shade-lbc+pattern, direct,
-                        direct+pattern
+                        direct+pattern, corridor-grid (explicit pathway only)
   -pull-max-evals <N>   Global evaluation budget. Default: 0 (unlimited)
   -pull-seed <N>        Deterministic seed for pull-direction search. Default: 42
   -de-diff-weight <val> Differential weight for legacy de only. Default: 0.9
@@ -2937,13 +3104,46 @@ IMPORTANT NOTES
   -de-min-pop-num <N>   Minimum population for de-l-shade / de-jso /
                         de-jso+pattern / de-nl-shade-lbc /
                         de-nl-shade-lbc+pattern. Default: 4
-  -de-pathway-group <N> Pathway group on reference side (subset of g1)
+  -pathway-file <file>  Ordered TITAN_PATH v1 Cartesian route. This is the
+                        publication path input and is mutually exclusive with
+                        -de-pathway-group. Relative paths in arg files resolve
+                        from the arg-file directory.
+  -pathway-route-id <id>
+                        Require an exact route ID from -pathway-file.
+  -pathway-graph-edge-cutoff <A>
+                        Legacy group auto-builder edge cutoff. Default: 4.0
+  -pathway-recovery-enter <A>
+                        Enter route-recovery mode above this distance. Default: 4.0
+  -pathway-recovery-exit <A>
+                        Return to advance mode below this distance. Default: 3.0
+  -pathway-corridor-spacing <A>
+                        Arc-length spacing for corridor geometry. Default: 0.5
+  -pathway-corridor-radial-samples <N>
+                        Deterministic disk samples per longitudinal point,
+                        in addition to the center. Default: 16
+  -pathway-registration-max-rmsd <A>
+                        Maximum rigid-anchor fit RMSD. Default: 2.0
+  -pathway-completion-tolerance <A>
+                        Terminal progress tolerance. Default: 1.0
+  -pathway-completion-min-separation <A>
+                        Require this minimum receptor-ligand atom separation
+                        at the terminal; 0 disables the physical gate. Default: 0
+  -pathway-max-turn-angle <deg>
+                        Maximum controller direction rotation per handoff. Default: 20
+  -pathway-energy-key-epsilon <val>
+                        Near-optimal energy-key window before maximizing progress.
+                        Default: 0.05
+  -pathway-min-clearance <A>
+                        Reject translated ligand targets below this minimum
+                        receptor-ligand atom distance. Default: 1.5
+  -pathway-geometry-only
+                        Ablation: rank feasible targets by geometry/progress only.
+  -de-pathway-group <N> Legacy residue-group auto-builder (subset of g1)
   -de-pathway-radius <A>
-                        Geometric rescue radius for auto-ordering pathway nodes. Default: 4.0
-                        In pathway mode, TITAN reuses DE_out_vector.dat as the
-                        previous pull direction, enforces angle(new, old) <=
-                        -de-angle, and writes pull_direction_status.txt with
-                        STOP/CONTINUE for Titan+Gromacs chaining.
+                        Compatibility alias setting graph, recovery-enter and
+                        recovery-exit radii together. Prefer the split options.
+                        In pathway mode TITAN writes pull_direction_status.txt
+                        for the external TITAN/GROMACS controller.
                         Pathway mode supports DE-family plus direct and
                         direct+pattern in the current build.
                         Recovery mode prioritizes reattaching mol2 to the
@@ -2971,3 +3171,18 @@ IMPORTANT NOTES
 ================================================================================
                                END OF MANUAL
 ================================================================================
+
+Scientific corrections (2026-09-08 follow-up): non-GBSA self energy/force and
+decomposition now require a supported complete common topology. Exclusions and
+listed 1-4 terms come from that topology; unsupported constructs fail explicitly.
+GBSA identical selections remain invalid. See docs/TITAN_P1_FOLLOWUP_2026-09-08.md.
+LLPS macro contacts use exact lattice MIC and fractional candidate grids.
+Declare droplet/slab observation windows explicitly to obtain phase densities;
+they do not automatically infer coexistence. DBSCAN and LJ now use exact lattice MIC and conservative fractional candidate grids.
+Paper profiles support triclinic cells with explicit -llps-paper-geometry droplet|slab.
+Slab normals follow -llps-phase-axis a|b|c (default c); radial profiles stop at
+the conservative inscribed radius. Invalid/winding droplets are reported and skipped.
+3D density averages per-frame number density on fixed fractional bins, displayed
+using the first accepted cell. It is not a fixed Cartesian map for variable cells.
+RNA scaling uses metadata-separated ordered-bead contours with sequential MIC;
+it does not infer covalent connectivity from coordinates.

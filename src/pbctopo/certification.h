@@ -80,10 +80,19 @@ struct PbctopoStericAudit {
   std::size_t inferred_radius_atoms = 0;
   std::size_t generic_fallback_radius_atoms = 0;
   std::size_t unavailable_radius_atoms = 0;
+  // The pair with the smallest steric margin (the certificate's deciding
+  // pair) and its squared distance.
   double min_margin_A = std::numeric_limits<double>::infinity();
-  double min_pair_d2 = std::numeric_limits<double>::infinity();
+  double min_margin_pair_d2 = std::numeric_limits<double>::infinity();
   std::size_t clash_atom_a = std::numeric_limits<std::size_t>::max();
   std::size_t clash_atom_b = std::numeric_limits<std::size_t>::max();
+  // The closest intercomponent pair among the pairs the steric search
+  // examined, which is not the same pair in general.  Only pairs within the
+  // search radius are examined, so this is the minimum over that radius, not
+  // a global minimum; it is infinite when no pair came within it.
+  double min_pair_d2 = std::numeric_limits<double>::infinity();
+  std::size_t min_pair_atom_a = std::numeric_limits<std::size_t>::max();
+  std::size_t min_pair_atom_b = std::numeric_limits<std::size_t>::max();
   bool decision_complete = false;
   bool pair_enumeration_complete = false;
   PbctopoStericTerminationReason termination_reason =

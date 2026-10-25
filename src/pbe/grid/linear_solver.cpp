@@ -265,7 +265,10 @@ double AnalyzerImpl::effective_screen_term(const GridShape &shape,
       return 0.0;
     return eps_out * shape.h * shape.h / (debye * debye);
   }
-  return kappa * kappa * shape.h * shape.h;
+  // kappa is the physical inverse Debye length in the solvent. Face
+  // coefficients carry absolute relative permittivities, so the ionic term
+  // in -div(eps grad phi) + eps_out*kappa^2*phi needs the same eps_out.
+  return eps_out * kappa * kappa * shape.h * shape.h;
 }
 
 double AnalyzerImpl::delphi_relaxation_omega(const GridShape &shape) const {

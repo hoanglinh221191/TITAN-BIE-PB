@@ -20,7 +20,8 @@ enum class TicaBackend {
   Auto,
   ExactDense,
   ExactDual,
-  Randomized
+  Randomized,
+  ExactStreaming
 };
 
 std::string tica_backend_to_string(TicaBackend backend);

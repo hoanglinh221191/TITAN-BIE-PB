@@ -230,8 +230,9 @@ int arguments::parse_arg_file() {
              flag == "-dham-temps" || flag == "-dham-ener" ||
              flag == "-mbar-temps" || flag == "-mbar-ener" ||
              flag == "-mbar-demux-map" || flag == "-path-a" ||
-             flag == "-path-n" || flag == "-pbc-ref" ||
-             flag == "-segment-config" || flag == "-interface-config" ||
+              flag == "-path-n" || flag == "-pbc-ref" ||
+              flag == "-pathway-file" || flag == "-pathway-previous-status" ||
+              flag == "-segment-config" || flag == "-interface-config" ||
              flag == "-membrane-leaflet-file" || flag == "-pbe-test-pqr" ||
              flag == "-pbe-binding-receptor-pqr" ||
              flag == "-pbe-binding-ligand-pqr";

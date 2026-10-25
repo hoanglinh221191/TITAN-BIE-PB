@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <mutex>
+#include <stdexcept>
 
 void TitanLLPS::worker_loop(titan::stop_token stoken) {
   while (true) {
@@ -26,9 +27,19 @@ void TitanLLPS::worker_loop(titan::stop_token stoken) {
     }
     queue_full_cv_.notify_one();
 
+    try {
+    cell_ = std::move(item.cell);
     process_frame_impl(item.pos_nm, item.rna_nm ? item.rna_nm->data() : nullptr,
                        item.n_rna, item.bx, item.by, item.bz, item.time_ns,
                        item.frame_idx);
+    } catch (...) {
+      { std::lock_guard<std::mutex> lock(queue_mtx_);
+        worker_error_=std::current_exception(); worker_stop_=true;
+        worker_processing_=false;
+        while(!work_queue_.empty()) work_queue_.pop();
+      }
+      queue_cv_.notify_all(); queue_full_cv_.notify_all(); return;
+    }
 
     {
       std::lock_guard<std::mutex> lock(queue_mtx_);
@@ -43,6 +54,8 @@ void TitanLLPS::worker_loop(titan::stop_token stoken) {
 }
 
 void TitanLLPS::start_async() {
+  if (async_mode_) return;
+  if (worker_error_) std::rethrow_exception(worker_error_);
   async_mode_ = true;
   worker_stop_ = false;
   worker_processing_ = false;
@@ -54,6 +67,8 @@ void TitanLLPS::process_frame_async(
     const MOL &mol_frame, const std::vector<mol_info> & /*info*/, float bx,
     float by, float bz, float time_ns, int frame_idx, const MOL *rna_frame,
     const std::vector<mol_info> *rna_info) {
+  auto frame_cell=titan_llps_geometry::Cell::from_box(mol_frame.Box,bx,by,bz);
+  if (!async_mode_) start_async();
   const auto pack_begin = std::chrono::steady_clock::now();
   const auto &ax = mol_frame.get_pos_x();
   const auto &ay = mol_frame.get_pos_y();
@@ -69,6 +84,7 @@ void TitanLLPS::process_frame_async(
       free_work_items_.pop_back();
     }
   }
+  item.cell=std::move(frame_cell);
   item.pos_nm.resize(static_cast<std::size_t>(n_atoms) * 3);
   for (int i = 0; i < n_atoms; ++i) {
     item.pos_nm[3 * i + 0] = static_cast<float>(ax[i]) * kAngToNm;
@@ -82,8 +98,11 @@ void TitanLLPS::process_frame_async(
   item.frame_idx = frame_idx;
 
   if (rna_frame) {
-    if (rna_info && rna_atom_chain_.empty())
+    if (rna_info && rna_atom_chain_.empty()) {
+      flush_async();
       set_rna_metadata(*rna_info);
+      start_async();
+    }
     const auto &rx = rna_frame->get_pos_x();
     const auto &ry = rna_frame->get_pos_y();
     const auto &rz = rna_frame->get_pos_z();
@@ -111,8 +130,8 @@ void TitanLLPS::process_frame_async(
       return static_cast<int>(work_queue_.size()) < MAX_QUEUE_SIZE_ ||
              worker_stop_;
     });
-    if (worker_stop_)
-      return;
+    if (worker_error_) std::rethrow_exception(worker_error_);
+    if (worker_stop_) throw std::runtime_error("LLPS worker stopped before accepting frame");
     work_queue_.push(std::move(item));
     perf_.max_queue_depth = std::max<std::size_t>(perf_.max_queue_depth,
                                                   work_queue_.size());
@@ -121,8 +140,10 @@ void TitanLLPS::process_frame_async(
 }
 
 void TitanLLPS::flush_async() {
-  if (!async_mode_)
+  if (!async_mode_) {
+    if(worker_error_) std::rethrow_exception(worker_error_);
     return;
+  }
   {
     std::unique_lock<std::mutex> lock(queue_mtx_);
     queue_cv_.wait(lock, [&] {
@@ -134,4 +155,5 @@ void TitanLLPS::flush_async() {
   if (worker_thread_.joinable())
     worker_thread_.join();
   async_mode_ = false;
+  if(worker_error_) std::rethrow_exception(worker_error_);
 }

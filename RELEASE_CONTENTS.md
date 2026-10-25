@@ -1,17 +1,11 @@
-﻿# TITAN public source package
+﻿# Contents of titan-bie-pb-v0.6
 
-This staging directory contains the current TITAN C++ source, build files,
-manual, license, citation metadata, and runnable examples.
+- `src/`, `Makefile`, `VERSION`, `tools/`: the TITAN C++23 source and its build (Eigen included).
+- `manual.txt`: the command-line reference of TITAN.
+- `MANUAL_BIE_PB.md`: the user manual of the boundary-integral Poisson-Boltzmann solver.
+- `example/pbe/`: solvation energy (1VII), surface potential map (1VII), polar binding cycle (6LZG), and the 27
+  proteins of the paper from the deposited PDB files, each with its inputs and reference results.
+- `validation/rsos_v06/`: the result tables behind the paper's tables and figures, the campaign and comparison
+  scripts, the APBS and PAFMPB comparison inputs and notes, and `SHA256SUMS`.
 
-- `src/`: solver and analysis source, including the BIE PB and MM/PBSA paths.
-- `test/`: bounded N=5 preconditioner drivers and public prepared inputs.
-- `validation/n5_preconditioner_cohort/`: two raw matrix CSV files, generated
-  manuscript tables, validation instructions, and a SHA-256 manifest.
-- `example/pbe/`: compact single-system solvation, surface-potential, and
-  binding-cycle examples.
-- `example/mm_pbsa_bie/`: complete trajectory-native BIE MM/PBSA example
-  with reference outputs.
-- `example/compact_mm_pbsa/`: two-model compact submission companion.
-
-No executable, build object, temporary benchmark directory, or private raw
-simulation archive is included.
+No executable, build object or temporary run directory is included.

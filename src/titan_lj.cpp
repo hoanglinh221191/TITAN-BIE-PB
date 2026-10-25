@@ -1,6 +1,6 @@
 #include "titan_lj.h"
 
-#include "BoxMatrix.h"
+#include "titan_exact_periodic_box.h"
 #include "titan_neighbor_grid.h"
 #include "titan_executor.h"
 #include "titan_simd_dispatch.h"
@@ -169,7 +169,7 @@ std::size_t effective_worker_count(std::size_t requested_threads,
       1, std::min<std::size_t>(requested_threads, work_items / 256));
 }
 
-double determinant3x3(const BoxMatrix &box_matrix) {
+double determinant3x3(const TitanExactPeriodicBox &box_matrix) {
   return box_matrix.m[0][0] *
              (box_matrix.m[1][1] * box_matrix.m[2][2] -
               box_matrix.m[1][2] * box_matrix.m[2][1]) -
@@ -325,7 +325,7 @@ void TitanLJAnalyzer::ensure_profile_layout(const MOL &frame) {
     fixed_rho_max_a_ = rho_max_input_a_;
   } else if (has_periodic_box(frame.Box)) {
     fixed_rho_max_a_ =
-        0.5 * std::min({frame.Box.get_a(), frame.Box.get_b(), frame.Box.get_c()});
+        TitanExactPeriodicBox(frame.Box).contained_radius();
   } else {
     const auto xs = frame.get_pos_x();
     const auto ys = frame.get_pos_y();
@@ -430,11 +430,12 @@ void TitanLJAnalyzer::build_contact_graph(const MOL &frame, std::size_t atom_cou
   spec.shift_z = shift_z;
   spec.periodic = periodic;
 
-  std::optional<BoxMatrix> box_matrix_storage;
+  std::optional<TitanExactPeriodicBox> box_matrix_storage;
   if (periodic)
     box_matrix_storage.emplace(frame.Box);
-  const BoxMatrix *box_matrix =
+  const TitanExactPeriodicBox *box_matrix =
       box_matrix_storage.has_value() ? &box_matrix_storage.value() : nullptr;
+  if(box_matrix) {spec.len_x=box_matrix->heights[0];spec.len_y=box_matrix->heights[1];spec.len_z=box_matrix->heights[2];}
   const double cutoff_sq = cutoff_a_ * cutoff_a_;
 
   neighbor_grid_.for_each_pair(
@@ -443,6 +444,7 @@ void TitanLJAnalyzer::build_contact_graph(const MOL &frame, std::size_t atom_cou
         x = xs[idx];
         y = ys[idx];
         z = zs[idx];
+        if(box_matrix) box_matrix->grid_coordinate(x,y,z);
       },
       [&](std::size_t idx) { return idx < atom_count; },
       [&](std::size_t lhs, std::size_t rhs) {
@@ -509,6 +511,19 @@ void TitanLJAnalyzer::unwrap_largest_cluster(const MOL &frame, bool periodic) {
   if (cluster_size == 0)
     return;
 
+  if(periodic) {
+    const TitanExactPeriodicBox cell(frame.Box);
+    std::vector<std::array<double,3>> points,lifted;
+    for(int atom:cluster_members_)points.push_back({frame.pos.x[atom],frame.pos.y[atom],frame.pos.z[atom]});
+    const bool valid=titan_lift_radius_graph(cell,points,cutoff_a_,lifted);
+    for(std::size_t i=0;i<cluster_size;++i) {
+      unwrap_x_[i]=valid?lifted[i][0]:std::numeric_limits<double>::quiet_NaN();
+      unwrap_y_[i]=valid?lifted[i][1]:std::numeric_limits<double>::quiet_NaN();
+      unwrap_z_[i]=valid?lifted[i][2]:std::numeric_limits<double>::quiet_NaN();
+    }
+    return;
+  }
+
   std::vector<std::pair<int, int>> local_edges;
   local_edges.reserve(edges_.size());
   for (const auto &[lhs, rhs] : edges_) {
@@ -541,10 +556,10 @@ void TitanLJAnalyzer::unwrap_largest_cluster(const MOL &frame, bool periodic) {
   visited_[0] = 1;
   bfs_queue_.push_back(0);
 
-  std::optional<BoxMatrix> box_matrix_storage;
+  std::optional<TitanExactPeriodicBox> box_matrix_storage;
   if (periodic)
     box_matrix_storage.emplace(frame.Box);
-  const BoxMatrix *box_matrix =
+  const TitanExactPeriodicBox *box_matrix =
       box_matrix_storage.has_value() ? &box_matrix_storage.value() : nullptr;
 
   for (std::size_t head = 0; head < bfs_queue_.size(); ++head) {
@@ -603,6 +618,7 @@ TitanLJAnalyzer::compute_cluster_geometry(TitanExecutor &executor) const {
   const std::size_t cluster_size = cluster_members_.size();
   if (cluster_size == 0)
     return geometry;
+  if(!std::isfinite(unwrap_x_[0])) {geometry.centroid_x=geometry.centroid_y=geometry.centroid_z=geometry.rg_a=geometry.rmax_a=std::numeric_limits<double>::quiet_NaN();return geometry;}
 
   geometry.centroid_x = sum_avx2(unwrap_x_.data(), cluster_size) /
                         static_cast<double>(cluster_size);
@@ -680,10 +696,10 @@ TitanLJAnalyzer::LocalOrderSummary TitanLJAnalyzer::compute_local_order_metrics(
   const auto ys = frame.get_pos_y();
   const auto zs = frame.get_pos_z();
 
-  std::optional<BoxMatrix> box_matrix_storage;
+  std::optional<TitanExactPeriodicBox> box_matrix_storage;
   if (periodic)
     box_matrix_storage.emplace(frame.Box);
-  const BoxMatrix *box_matrix =
+  const TitanExactPeriodicBox *box_matrix =
       box_matrix_storage.has_value() ? &box_matrix_storage.value() : nullptr;
 
   const std::size_t worker_count =
@@ -903,20 +919,19 @@ void TitanLJAnalyzer::accumulate_radial_density(const MOL &frame, bool periodic,
     return;
 
   shell_all_nm3.fill(0.0);
+  if(!std::isfinite(geometry.centroid_x)) {shell_all_nm3.fill(std::numeric_limits<double>::quiet_NaN());return;}
 
   double effective_rho_max_a = fixed_rho_max_a_;
   if (periodic) {
     effective_rho_max_a =
         std::min(fixed_rho_max_a_,
-                 0.5 * std::min({frame.Box.get_a(), frame.Box.get_b(),
-                                 frame.Box.get_c()}));
+                 TitanExactPeriodicBox(frame.Box).contained_radius());
   }
 
   std::size_t valid_bins = static_cast<std::size_t>(
       std::floor(effective_rho_max_a / rho_bin_a_ + 1e-12));
   valid_bins = std::min(valid_bins, radial_bin_count_);
-  if (valid_bins == 0)
-    valid_bins = 1;
+  if (valid_bins == 0) return;
 
   const std::size_t cluster_size = cluster_members_.size();
   const auto xs = frame.get_pos_x();
@@ -924,10 +939,10 @@ void TitanLJAnalyzer::accumulate_radial_density(const MOL &frame, bool periodic,
   const auto zs = frame.get_pos_z();
   const std::size_t atom_count = std::min<std::size_t>(atom_count_, xs.size());
 
-  std::optional<BoxMatrix> box_matrix_storage;
+  std::optional<TitanExactPeriodicBox> box_matrix_storage;
   if (periodic)
     box_matrix_storage.emplace(frame.Box);
-  const BoxMatrix *box_matrix =
+  const TitanExactPeriodicBox *box_matrix =
       box_matrix_storage.has_value() ? &box_matrix_storage.value() : nullptr;
 
   const std::size_t worker_count = effective_worker_count(
@@ -1043,7 +1058,7 @@ void TitanLJAnalyzer::process_frame(const Multi_MOL &mol1, std::size_t snap_idx,
 
   double volume_a3 = 0.0;
   if (periodic) {
-    const BoxMatrix box_matrix(frame.Box);
+    const TitanExactPeriodicBox box_matrix(frame.Box);
     volume_a3 = std::abs(determinant3x3(box_matrix));
   }
 

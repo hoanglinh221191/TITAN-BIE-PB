@@ -2,12 +2,16 @@
 #include "required_contacts.h"
 #include "steric_clash.h"
 
+#include "../titan_simd_dispatch.h"
+
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <numeric>
 #include <queue>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -428,6 +432,281 @@ evaluate_pbctopo_assignment_point_consistency(
 
 namespace {
 
+// The atoms the steric scan reaches, counting-sorted into a dense grid of
+// cells.  The order is the one sorting by (cell, atom) gives, and for a
+// column (x, y) the cells z0..z1 form the contiguous run
+// [cell_begin[linear(x, y, z0)], cell_begin[linear(x, y, z1) + 1]).
+// Per sorted entry it keeps what the pair filter reads: the atom, its
+// component and whether it can form a metadata-internal pair (-1) or not (0),
+// padded with entries no filter keeps so that runs load whole vectors.
+struct StericDenseGrid {
+  static constexpr std::uint64_t kMaxCells = std::uint64_t{1} << 22;
+  static constexpr std::size_t kPad = 8;
+
+  std::int64_t min_x = 0, min_y = 0, min_z = 0;
+  std::int64_t max_x = 0, max_y = 0, max_z = 0;
+  std::uint64_t ny = 0, nz = 0;
+  std::vector<std::uint32_t> cell_begin;
+  std::vector<std::uint32_t> cursor;
+  std::vector<std::int32_t> atom;
+  std::vector<std::int32_t> component;
+  std::vector<std::int32_t> metadata;
+
+  std::uint64_t linear(std::int64_t x, std::int64_t y,
+                       std::int64_t z) const noexcept {
+    return (static_cast<std::uint64_t>(x - min_x) * ny +
+            static_cast<std::uint64_t>(y - min_y)) *
+               nz +
+           static_cast<std::uint64_t>(z - min_z);
+  }
+
+  // False when the cells span too large a grid (or the indices do not fit
+  // the 32-bit lanes); the caller then sorts the cells instead.
+  bool build(const std::vector<PbctopoStericCellKey> &cells,
+             std::span<const std::size_t> atom_component_index,
+             std::span<const PbctopoAtom> atoms) {
+    const std::size_t n = cells.size();
+    if (n == 0 || atoms.size() >= static_cast<std::size_t>(
+                                      std::numeric_limits<std::int32_t>::max()))
+      return false;
+    min_x = max_x = cells[0].x;
+    min_y = max_y = cells[0].y;
+    min_z = max_z = cells[0].z;
+    for (const auto &cell : cells) {
+      min_x = std::min(min_x, cell.x);
+      max_x = std::max(max_x, cell.x);
+      min_y = std::min(min_y, cell.y);
+      max_y = std::max(max_y, cell.y);
+      min_z = std::min(min_z, cell.z);
+      max_z = std::max(max_z, cell.z);
+    }
+    // Spans as unsigned differences: exact for any int64 bounds.
+    const std::uint64_t span_x = static_cast<std::uint64_t>(max_x) -
+                                 static_cast<std::uint64_t>(min_x);
+    const std::uint64_t span_y = static_cast<std::uint64_t>(max_y) -
+                                 static_cast<std::uint64_t>(min_y);
+    const std::uint64_t span_z = static_cast<std::uint64_t>(max_z) -
+                                 static_cast<std::uint64_t>(min_z);
+    if (span_x >= kMaxCells || span_y >= kMaxCells || span_z >= kMaxCells)
+      return false;
+    const std::uint64_t nx = span_x + 1;
+    ny = span_y + 1;
+    nz = span_z + 1;
+    if (nx * ny > kMaxCells || nx * ny * nz > kMaxCells)
+      return false;
+    const std::uint64_t cells_total = nx * ny * nz;
+
+    cell_begin.assign(cells_total + 1, 0);
+    for (const auto &cell : cells)
+      ++cell_begin[linear(cell.x, cell.y, cell.z) + 1];
+    for (std::uint64_t i = 0; i < cells_total; ++i)
+      cell_begin[i + 1] += cell_begin[i];
+    cursor.assign(cell_begin.begin(), cell_begin.end() - 1);
+    atom.resize(n + kPad);
+    component.resize(n + kPad);
+    metadata.resize(n + kPad);
+    for (std::size_t i = 0; i < n; ++i) {
+      const std::uint32_t position =
+          cursor[linear(cells[i].x, cells[i].y, cells[i].z)]++;
+      atom[position] = static_cast<std::int32_t>(i);
+      component[position] =
+          static_cast<std::int32_t>(atom_component_index[i]);
+      metadata[position] =
+          !atoms[i].has_topology_graph && atoms[i].has_topology_key ? -1 : 0;
+    }
+    for (std::size_t i = n; i < n + kPad; ++i) {
+      atom[i] = std::numeric_limits<std::int32_t>::max();
+      component[i] = -1;
+      metadata[i] = 0;
+    }
+    return true;
+  }
+};
+
+StericDenseGrid &steric_dense_grid() {
+  thread_local StericDenseGrid grid;
+  return grid;
+}
+
+// The entries of the run [begin, end) the scan visits for atom self:
+// earlier atoms, of another component when cross is set, or of the same
+// component when internal is set and the entry can form a metadata-internal
+// pair.  Written to kept in run order; returns their number.
+std::size_t steric_run_filter_scalar(const StericDenseGrid &grid,
+                                     std::size_t begin, std::size_t end,
+                                     std::int32_t self,
+                                     std::int32_t self_component, bool cross,
+                                     bool internal, std::uint32_t *kept) {
+  std::size_t count = 0;
+  for (std::size_t i = begin; i < end; ++i) {
+    if (grid.atom[i] >= self)
+      continue;
+    const bool same = grid.component[i] == self_component;
+    if (same ? internal && grid.metadata[i] != 0 : cross)
+      kept[count++] = static_cast<std::uint32_t>(grid.atom[i]);
+  }
+  return count;
+}
+
+#if TITAN_SIMD_X86
+TITAN_TARGET_AVX2
+std::size_t steric_run_filter_avx2(const StericDenseGrid &grid,
+                                   std::size_t begin, std::size_t end,
+                                   std::int32_t self,
+                                   std::int32_t self_component, bool cross,
+                                   bool internal, std::uint32_t *kept) {
+  const __m256i self_v = _mm256_set1_epi32(self);
+  const __m256i component_v = _mm256_set1_epi32(self_component);
+  const __m256i cross_v = _mm256_set1_epi32(cross ? -1 : 0);
+  const __m256i internal_v = _mm256_set1_epi32(internal ? -1 : 0);
+  std::size_t count = 0;
+  for (std::size_t i = begin; i < end; i += 8) {
+    const __m256i other = _mm256_loadu_si256(
+        reinterpret_cast<const __m256i *>(grid.atom.data() + i));
+    const __m256i component = _mm256_loadu_si256(
+        reinterpret_cast<const __m256i *>(grid.component.data() + i));
+    const __m256i metadata = _mm256_loadu_si256(
+        reinterpret_cast<const __m256i *>(grid.metadata.data() + i));
+    const __m256i earlier = _mm256_cmpgt_epi32(self_v, other);
+    const __m256i same = _mm256_cmpeq_epi32(component, component_v);
+    const __m256i keep = _mm256_and_si256(
+        earlier,
+        _mm256_or_si256(_mm256_andnot_si256(same, cross_v),
+                        _mm256_and_si256(same, _mm256_and_si256(
+                                                   metadata, internal_v))));
+    unsigned mask = static_cast<unsigned>(
+        _mm256_movemask_ps(_mm256_castsi256_ps(keep)));
+    if (end - i < 8)
+      mask &= (1u << (end - i)) - 1u;
+    while (mask != 0) {
+      const int lane = std::countr_zero(mask);
+      mask &= mask - 1u;
+      kept[count++] = static_cast<std::uint32_t>(grid.atom[i + lane]);
+    }
+  }
+  return count;
+}
+#endif
+
+// The scan over the dense grid; see evaluate_pbctopo_sterics_impl.
+template <class Visit>
+bool scan_steric_dense_grid(const StericDenseGrid &grid,
+                            const std::vector<PbctopoStericCellKey> &cells,
+                            std::span<const std::size_t> atom_component_index,
+                            std::span<const PbctopoAtom> atoms,
+                            const PbctopoLatticeMetric *wrapped_lattice,
+                            bool metadata_internal_only, Visit &visit_pair) {
+  const bool lattice_valid =
+      wrapped_lattice != nullptr && wrapped_lattice->valid();
+#if TITAN_SIMD_X86
+  const bool use_avx2 = titan_simd_dispatch::runtime_has_avx2();
+#endif
+  thread_local std::vector<std::uint32_t> kept;
+  kept.resize(cells.size());
+  for (std::size_t atom_idx = 0; atom_idx < cells.size(); ++atom_idx) {
+    const bool cross = !metadata_internal_only;
+    const bool internal = lattice_valid &&
+                          !atoms[atom_idx].has_topology_graph &&
+                          atoms[atom_idx].has_topology_key;
+    if (!cross && !internal)
+      continue;
+    const PbctopoStericCellKey &cell = cells[atom_idx];
+    const auto self = static_cast<std::int32_t>(atom_idx);
+    const auto self_component =
+        static_cast<std::int32_t>(atom_component_index[atom_idx]);
+    for (int dx = -1; dx <= 1; ++dx) {
+      const std::int64_t x = cell.x + dx;
+      if (x < grid.min_x || x > grid.max_x)
+        continue;
+      for (int dy = -1; dy <= 1; ++dy) {
+        const std::int64_t y = cell.y + dy;
+        if (y < grid.min_y || y > grid.max_y)
+          continue;
+        const std::int64_t z0 = std::max(cell.z - 1, grid.min_z);
+        const std::int64_t z1 = std::min(cell.z + 1, grid.max_z);
+        if (z0 > z1)
+          continue;
+        const std::size_t begin = grid.cell_begin[grid.linear(x, y, z0)];
+        const std::size_t end = grid.cell_begin[grid.linear(x, y, z1) + 1];
+        if (begin == end)
+          continue;
+#if TITAN_SIMD_X86
+        const std::size_t count =
+            use_avx2 ? steric_run_filter_avx2(grid, begin, end, self,
+                                              self_component, cross,
+                                              internal, kept.data())
+                     : steric_run_filter_scalar(grid, begin, end, self,
+                                                self_component, cross,
+                                                internal, kept.data());
+#else
+        const std::size_t count = steric_run_filter_scalar(
+            grid, begin, end, self, self_component, cross, internal,
+            kept.data());
+#endif
+        for (std::size_t k = 0; k < count; ++k) {
+          if (!visit_pair(atom_idx, kept[k]))
+            return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+// The same scan over cells sorted by (cell, atom), for cells too spread out
+// for the dense grid: the three cells along z around (x, y) are one
+// contiguous run, found by one binary search, in z order and index order.
+template <class Visit>
+bool scan_steric_sorted_cells(const std::vector<PbctopoStericCellKey> &cells,
+                              Visit &visit_pair) {
+  struct CellEntry {
+    std::int64_t x;
+    std::int64_t y;
+    std::int64_t z;
+    std::size_t atom;
+  };
+  const auto entry_less = [](const CellEntry &lhs, const CellEntry &rhs) {
+    if (lhs.x != rhs.x)
+      return lhs.x < rhs.x;
+    if (lhs.y != rhs.y)
+      return lhs.y < rhs.y;
+    if (lhs.z != rhs.z)
+      return lhs.z < rhs.z;
+    return lhs.atom < rhs.atom;
+  };
+  thread_local std::vector<CellEntry> sorted_cells;
+  sorted_cells.clear();
+  sorted_cells.reserve(cells.size());
+  for (std::size_t atom_idx = 0; atom_idx < cells.size(); ++atom_idx) {
+    const PbctopoStericCellKey &cell = cells[atom_idx];
+    sorted_cells.push_back({cell.x, cell.y, cell.z, atom_idx});
+  }
+  std::sort(sorted_cells.begin(), sorted_cells.end(), entry_less);
+
+  for (std::size_t atom_idx = 0; atom_idx < cells.size(); ++atom_idx) {
+    const std::int64_t cx = cells[atom_idx].x;
+    const std::int64_t cy = cells[atom_idx].y;
+    const std::int64_t cz = cells[atom_idx].z;
+    for (int dx = -1; dx <= 1; ++dx) {
+      for (int dy = -1; dy <= 1; ++dy) {
+        const CellEntry first{cx + dx, cy + dy, cz - 1, 0};
+        for (auto it = std::lower_bound(sorted_cells.begin(),
+                                        sorted_cells.end(), first, entry_less);
+             it != sorted_cells.end() && it->x == cx + dx &&
+             it->y == cy + dy && it->z <= cz + 1;
+             ++it) {
+          const std::size_t other_idx = it->atom;
+          if (other_idx >= atom_idx)
+            continue;
+          if (!visit_pair(atom_idx, other_idx))
+            return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 PbctopoStericAudit evaluate_pbctopo_sterics_impl(
     std::span<const PbctopoAtom> atoms,
     std::span<const Vec3> placed_points,
@@ -479,115 +758,140 @@ PbctopoStericAudit evaluate_pbctopo_sterics_impl(
   result.termination_reason =
       PbctopoStericTerminationReason::NumericalFailure;
   const double inv_grid = 1.0 / grid_cutoff;
-  std::unordered_map<PbctopoStericCellKey, std::vector<std::size_t>,
-                     PbctopoStericCellKeyHash>
-      grid;
-  grid.reserve(std::max<std::size_t>(64, atoms.size() / 2));
-
-  for (std::size_t atom_idx = 0; atom_idx < atoms.size(); ++atom_idx) {
+  const double cell_min =
+      static_cast<double>(std::numeric_limits<std::int64_t>::min() + 1);
+  const double cell_max =
+      static_cast<double>(std::numeric_limits<std::int64_t>::max() - 1);
+  auto atom_cell = [&](std::size_t atom_idx, PbctopoStericCellKey &cell) {
     const Vec3 &point = placed_points[atom_idx];
     if (!point_is_finite(point))
-      return result;
+      return false;
     const double cell_x = std::floor(point.x * inv_grid);
     const double cell_y = std::floor(point.y * inv_grid);
     const double cell_z = std::floor(point.z * inv_grid);
-    const double cell_min = static_cast<double>(
-        std::numeric_limits<std::int64_t>::min() + 1);
-    const double cell_max = static_cast<double>(
-        std::numeric_limits<std::int64_t>::max() - 1);
     if (cell_x < cell_min || cell_x > cell_max || cell_y < cell_min ||
         cell_y > cell_max || cell_z < cell_min || cell_z > cell_max) {
-      return result;
+      return false;
     }
-    const std::int64_t cx = static_cast<std::int64_t>(cell_x);
-    const std::int64_t cy = static_cast<std::int64_t>(cell_y);
-    const std::int64_t cz = static_cast<std::int64_t>(cell_z);
-    for (int dx = -1; dx <= 1; ++dx) {
-      for (int dy = -1; dy <= 1; ++dy) {
-        for (int dz = -1; dz <= 1; ++dz) {
-          const auto it = grid.find({cx + dx, cy + dy, cz + dz});
-          if (it == grid.end())
-            continue;
-          for (std::size_t other_idx : it->second) {
-            if (excluded_pairs.contains(
-                    steric_pair_key(atom_idx, other_idx))) {
-              continue;
-            }
-            const bool same_component =
-                atom_component_index[atom_idx] ==
-                atom_component_index[other_idx];
-            const bool metadata_internal_pair =
-                same_component && wrapped_lattice != nullptr &&
-                wrapped_lattice->valid() &&
-                !atoms[atom_idx].has_topology_graph &&
-                !atoms[other_idx].has_topology_graph &&
-                atoms[atom_idx].has_topology_key &&
-                atoms[other_idx].has_topology_key;
-            if (metadata_internal_only && !metadata_internal_pair)
-              continue;
-            if (same_component && !metadata_internal_pair)
-              continue;
-            const Vec3 &other = placed_points[other_idx];
-            const double ddx = point.x - other.x;
-            const double ddy = point.y - other.y;
-            const double ddz = point.z - other.z;
-            const double d2 = ddx * ddx + ddy * ddy + ddz * ddz;
-            if (!std::isfinite(d2))
-              return result;
-            ++result.pair_checks;
-            if (metadata_internal_pair)
-              ++result.metadata_internal_pairs_checked;
-            const auto threshold = pbctopo_pair_clash_threshold(
-                atoms[atom_idx], atoms[other_idx], fallback_cutoff);
-            const double margin = std::sqrt(std::max(0.0, d2)) -
-                                  threshold.cutoff;
-            if (margin < result.min_margin_A) {
-              result.min_margin_A = margin;
-              result.min_pair_d2 = d2;
-              result.clash_atom_a = atom_idx;
-              result.clash_atom_b = other_idx;
-            }
-            const bool placed_clash = pbctopo_atoms_clash(
-                d2, atoms[atom_idx], atoms[other_idx], fallback_cutoff,
-                timing);
-            if (metadata_internal_pair && placed_clash) {
-              const auto wrapped_nearest =
-                  wrapped_lattice->nearest_image_cartesian(
-                      atoms[atom_idx].x - atoms[other_idx].x,
-                      atoms[atom_idx].y - atoms[other_idx].y,
-                      atoms[atom_idx].z - atoms[other_idx].z);
-              if (!wrapped_nearest.valid) {
-                result.termination_reason =
-                    PbctopoStericTerminationReason::NumericalFailure;
-                return result;
-              }
-              const bool clash_already_present =
-                  wrapped_nearest.d2 + 1.0e-12 < threshold.cutoff2;
-              if (!clash_already_present) {
-                result.metadata_internal_clashes = 1;
-                result.hard_clashes = 1;
-                result.input_valid = true;
-                result.decision_complete = true;
-                result.termination_reason =
-                    PbctopoStericTerminationReason::FirstHardClash;
-                return result;
-              }
-              continue;
-            }
-            if (!metadata_internal_pair && placed_clash) {
-              result.hard_clashes = 1;
-              result.input_valid = true;
-              result.decision_complete = true;
-              result.termination_reason =
-                  PbctopoStericTerminationReason::FirstHardClash;
-              return result;
-            }
-          }
-        }
+    cell = {static_cast<std::int64_t>(cell_x),
+            static_cast<std::int64_t>(cell_y),
+            static_cast<std::int64_t>(cell_z)};
+    return true;
+  };
+
+  // The scan visits, for each atom in index order, the earlier atoms of the
+  // 27 cells around it: cells in (dx, dy, dz) order, atoms of a cell in
+  // index order.  That order decides ties of the running minima and which
+  // clash ends the scan, so it is kept exactly.  An atom whose point or cell
+  // is invalid stops the scan when it is reached, so it and every later atom
+  // are left out of the index; nothing before it could meet them.
+  //
+  // visit_pair is the work for one pair, in that order; false ends the scan
+  // with the result as it stands.
+  auto visit_pair = [&](std::size_t atom_idx, std::size_t other_idx) {
+    const Vec3 &point = placed_points[atom_idx];
+    const bool same_component =
+        atom_component_index[atom_idx] == atom_component_index[other_idx];
+    const bool metadata_internal_pair =
+        same_component && wrapped_lattice != nullptr &&
+        wrapped_lattice->valid() && !atoms[atom_idx].has_topology_graph &&
+        !atoms[other_idx].has_topology_graph &&
+        atoms[atom_idx].has_topology_key && atoms[other_idx].has_topology_key;
+    if (metadata_internal_only && !metadata_internal_pair)
+      return true;
+    if (same_component && !metadata_internal_pair)
+      return true;
+    // The exclusion lookup comes after the cheap tests above: a pair they
+    // skip is skipped whether or not it is excluded, and most neighbouring
+    // pairs lie within one component.
+    if (excluded_pairs.contains(steric_pair_key(atom_idx, other_idx)))
+      return true;
+    const Vec3 &other = placed_points[other_idx];
+    const double ddx = point.x - other.x;
+    const double ddy = point.y - other.y;
+    const double ddz = point.z - other.z;
+    const double d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+    if (!std::isfinite(d2))
+      return false;
+    ++result.pair_checks;
+    if (metadata_internal_pair)
+      ++result.metadata_internal_pairs_checked;
+    const auto threshold = pbctopo_pair_clash_threshold(
+        atoms[atom_idx], atoms[other_idx], fallback_cutoff);
+    const double margin =
+        std::sqrt(std::max(0.0, d2)) - threshold.cutoff;
+    // Two different pairs: the one closest to clashing (smallest margin,
+    // which decides the certificate) and the one closest in distance
+    // (min_pair_d2, which candidate ranking reads).  With unequal radii they
+    // need not coincide; reporting the margin pair's distance as the minimum
+    // distance was a defect.
+    if (margin < result.min_margin_A) {
+      result.min_margin_A = margin;
+      result.min_margin_pair_d2 = d2;
+      result.clash_atom_a = atom_idx;
+      result.clash_atom_b = other_idx;
+    }
+    if (!same_component && d2 < result.min_pair_d2) {
+      result.min_pair_d2 = d2;
+      result.min_pair_atom_a = atom_idx;
+      result.min_pair_atom_b = other_idx;
+    }
+    const bool placed_clash = pbctopo_atoms_clash(
+        d2, atoms[atom_idx], atoms[other_idx], fallback_cutoff, timing);
+    if (metadata_internal_pair && placed_clash) {
+      const auto wrapped_nearest = wrapped_lattice->nearest_image_cartesian(
+          atoms[atom_idx].x - atoms[other_idx].x,
+          atoms[atom_idx].y - atoms[other_idx].y,
+          atoms[atom_idx].z - atoms[other_idx].z);
+      if (!wrapped_nearest.valid) {
+        result.termination_reason =
+            PbctopoStericTerminationReason::NumericalFailure;
+        return false;
       }
+      const bool clash_already_present =
+          wrapped_nearest.d2 + 1.0e-12 < threshold.cutoff2;
+      if (!clash_already_present) {
+        result.metadata_internal_clashes = 1;
+        result.hard_clashes = 1;
+        result.input_valid = true;
+        result.decision_complete = true;
+        result.termination_reason =
+            PbctopoStericTerminationReason::FirstHardClash;
+        return false;
+      }
+      return true;
     }
-    grid[{cx, cy, cz}].push_back(atom_idx);
+    if (!metadata_internal_pair && placed_clash) {
+      result.hard_clashes = 1;
+      result.input_valid = true;
+      result.decision_complete = true;
+      result.termination_reason =
+          PbctopoStericTerminationReason::FirstHardClash;
+      return false;
+    }
+    return true;
+  };
+
+  thread_local std::vector<PbctopoStericCellKey> atom_cells;
+  atom_cells.clear();
+  atom_cells.reserve(atoms.size());
+  for (std::size_t atom_idx = 0; atom_idx < atoms.size(); ++atom_idx) {
+    PbctopoStericCellKey cell;
+    if (!atom_cell(atom_idx, cell))
+      break;
+    atom_cells.push_back(cell);
   }
+  const std::size_t scanned_atoms = atom_cells.size();
+
+  StericDenseGrid &grid = steric_dense_grid();
+  const bool completed =
+      grid.build(atom_cells, atom_component_index, atoms)
+          ? scan_steric_dense_grid(grid, atom_cells, atom_component_index,
+                                   atoms, wrapped_lattice,
+                                   metadata_internal_only, visit_pair)
+          : scan_steric_sorted_cells(atom_cells, visit_pair);
+  if (!completed || scanned_atoms < atoms.size())
+    return result;
   result.decision_complete = true;
   result.pair_enumeration_complete = true;
   result.scan_complete = true;

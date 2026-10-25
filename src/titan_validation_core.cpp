@@ -1,3 +1,4 @@
+#include "titan_markov_estimator.h"
 #include "titan_validation_core.h"
 
 #include "titan_ui.h"
@@ -438,40 +439,17 @@ bool build_markov_model_from_segments(int n_states, int lag_frames,
   }
 
   if (symmetrize_counts)
-    counts = 0.5 * (counts + counts.transpose());
+    return titan_markov::reversible_mle(counts, out_tpm, out_pi, error_message);
 
-  for (int i = 0; i < n_states; ++i) {
-    const double row_sum = counts.row(i).sum();
-    if (row_sum <= 1e-12) {
-      out_tpm.row(i).setZero();
-      out_tpm(i, i) = 1.0;
-    } else {
-      out_tpm.row(i) = counts.row(i) / row_sum;
+  for (int i=0;i<n_states;++i) {
+    const double row_sum=counts.row(i).sum();
+    if (row_sum<=0) {
+      error_message="unvisited state in nonreversible transition counts";
+      return false;
     }
+    out_tpm.row(i)=counts.row(i)/row_sum;
   }
-
-  Eigen::RowVectorXd pi(n_states);
-  if (occupancy.sum() > 0.0) {
-    pi = (occupancy / occupancy.sum()).transpose();
-  } else {
-    pi = Eigen::RowVectorXd::Constant(n_states, 1.0 / n_states);
-  }
-  Eigen::RowVectorXd pi_new(n_states);
-  for (int it = 0; it < 1000; ++it) {
-    pi_new.noalias() = pi * out_tpm;
-    const double delta = (pi_new - pi).cwiseAbs().maxCoeff();
-    pi = pi_new;
-    if (delta < 1e-10)
-      break;
-  }
-  const double pi_sum = pi.sum();
-  if (pi_sum > 1e-30) {
-    pi /= pi_sum;
-  } else {
-    pi = Eigen::RowVectorXd::Constant(n_states, 1.0 / n_states);
-  }
-  out_pi = pi.transpose();
-  return true;
+  return titan_markov::stationary(out_tpm,out_pi,error_message);
 }
 
 bool build_dham_model_from_context(const DhamRebuildContext &context,

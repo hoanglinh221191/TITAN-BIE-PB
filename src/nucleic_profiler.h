@@ -59,7 +59,21 @@ private:
   std::vector<ProteinAtomInfo> protein_atom_buffer_;
   std::vector<std::vector<unsigned char>> worker_base_hits_;
   std::vector<std::vector<unsigned char>> worker_backbone_hits_;
+  std::vector<int> protein_grid_head_;
+  std::vector<int> protein_grid_next_;
   bool initialized_ = false;
+  bool coarse_grained_nucleic_ = false;
+  bool protein_grid_active_ = false;
+  int protein_grid_nx_ = 0;
+  int protein_grid_ny_ = 0;
+  int protein_grid_nz_ = 0;
+  double protein_grid_len_x_ = 0.0;
+  double protein_grid_len_y_ = 0.0;
+  double protein_grid_len_z_ = 0.0;
+  double protein_grid_cell_x_ = 0.0;
+  double protein_grid_cell_y_ = 0.0;
+  double protein_grid_cell_z_ = 0.0;
+  double contact_cutoff_a_ = 3.5;
   size_t total_frames_processed = 0;
 
   std::vector<double> calc_residue_center(const MOL &frame,
@@ -72,8 +86,12 @@ private:
                   const std::vector<mol_info> &pro_info,
                   const std::vector<mol_info> &na_info);
   void ensure_worker_storage(size_t worker_capacity);
+  void build_protein_grid(const MOL &pro_frame);
 
   inline bool is_backbone(const std::string &atom_name) const {
+    if (coarse_grained_nucleic_)
+      return atom_name == "BB1" || atom_name == "BB2" ||
+             atom_name == "BB3";
     return (atom_name == "P" || atom_name == "OP1" || atom_name == "OP2" ||
             atom_name == "OP3" || atom_name == "O1P" || atom_name == "O2P" ||
             atom_name == "O3P" ||
@@ -83,6 +101,10 @@ private:
   }
 
   inline bool is_base(const std::string &atom_name) const {
+    if (coarse_grained_nucleic_)
+      return atom_name == "SC1" || atom_name == "SC2" ||
+             atom_name == "SC3" || atom_name == "SC4" ||
+             atom_name == "SC5";
     if (atom_name.empty())
       return false;
     char first = atom_name[0];

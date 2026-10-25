@@ -542,18 +542,14 @@ build_pbctopo_system_static_data(const Multi_MOL &system, const MOL &mol) {
       data.atom_count, PbctopoStericRadiusSource::Unavailable);
   data.atomic_masses.assign(data.atom_count, 0.0);
   data.atomic_mass_available.assign(data.atom_count, 0);
-  const bool mass_parameters_available =
-      system.parameters_match_info() &&
-      system.parameters.mass.size() == data.atom_count;
   data.heavy_count = 0;
   for (std::size_t atom_idx = 0; atom_idx < data.atom_count; ++atom_idx) {
     const bool is_heavy = detect_heavy_atom(&system.info, atom_idx);
     data.heavy_mask[atom_idx] = is_heavy ? 1 : 0;
     data.heavy_count += is_heavy ? 1u : 0u;
-    if (mass_parameters_available &&
-        std::isfinite(system.parameters.mass[atom_idx]) &&
-        system.parameters.mass[atom_idx] > 0.0) {
-      data.atomic_masses[atom_idx] = system.parameters.mass[atom_idx];
+    if (const auto mass = system.topology.atomic_mass(static_cast<std::uint32_t>(atom_idx));
+        mass.has_value()) {
+      data.atomic_masses[atom_idx] = *mass;
       data.atomic_mass_available[atom_idx] = 1;
       ++data.atomic_mass_count;
     }

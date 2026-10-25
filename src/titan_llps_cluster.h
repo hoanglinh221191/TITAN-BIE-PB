@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -47,6 +48,32 @@ struct LLPSAutocorrSpeciesResult {
   std::vector<double> stddev;
   std::vector<uint64_t> contributing_chains;
   double tau_ns{0.0};
+  // Liquidity v2. `mean` above averages per-unit correlations and discards
+  // units with occupancy p == 0 or p == 1, i.e. it removes exactly the
+  // permanently resident (immobile) population a FRAP plateau measures.
+  // `pooled` is the standard pooled membership correlation
+  //   C(t) = (<h(0)h(t)> - <h>^2) / (<h> - <h>^2)
+  // accumulated over every unit of the species, permanent residents included.
+  std::vector<double> pooled;
+  std::vector<uint64_t> pooled_pairs;
+  double occupancy{0.0};        // <h>, fraction of unit-frames inside dense
+  double pooled_tau_ns{0.0};    // decay time of the decaying component
+  double mobile_fraction{0.0};  // A in C(t) = A exp(-t/tau) + (1 - A)
+  double pooled_plateau{0.0};   // 1 - A, FRAP-plateau analogue (immobile)
+  uint64_t units{0};            // units of this species (chains or segments)
+  // Material-exchange census over the analysed window. The pooled amplitude
+  // above is a variance share and is dominated by whichever units happen to
+  // shuttle; a FRAP plateau is a share of MATERIAL, so count units instead:
+  // permanent = inside the dense phase in every frame it was seen,
+  // exchanging = seen both inside and outside, never = never inside.
+  uint64_t units_permanent{0};
+  uint64_t units_exchanging{0};
+  uint64_t units_never{0};
+  // exchanging / (permanent + exchanging): the share of dense-phase material
+  // that visited the dilute phase at least once inside the window. This is
+  // the quantity to put beside a FRAP mobile fraction, and like a FRAP
+  // plateau it grows with observation time.
+  double exchange_fraction{0.0};
 };
 
 struct LLPSEpisodeSummary {
@@ -86,6 +113,59 @@ struct LLPSDenseMSDResult {
   double protein_fit_end_ns{0.0};
   double rna_fit_start_ns{0.0};
   double rna_fit_end_ns{0.0};
+  // Liquidity v2 diagnostics. The MSD log-log exponent on the fitted window
+  // tells whether a Fickian regime was reached at all; without it a slope is
+  // not a diffusion coefficient. `*_diffusive` is false when no window with
+  // exponent in [exponent_lo, exponent_hi] exists, and the corresponding
+  // diffusion value is then NaN rather than a plausible-looking number.
+  double protein_msd_exponent{0.0};
+  double rna_msd_exponent{0.0};
+  double protein_msd_intercept_nm2{0.0};
+  double rna_msd_intercept_nm2{0.0};
+  bool protein_diffusive{false};
+  bool rna_diffusive{false};
+  // FRAP-comparable mobile fraction: fraction of dense-phase units whose
+  // drift-corrected displacement exceeds `mobile_displacement_nm` over
+  // `mobile_lag_ns`.
+  double mobile_displacement_nm{0.0};
+  double mobile_lag_ns{0.0};
+  double protein_mobile_fraction_displacement{0.0};
+  double rna_mobile_fraction_displacement{0.0};
+  uint64_t protein_mobile_pairs{0};
+  uint64_t rna_mobile_pairs{0};
+  // Cumulative dense-phase translation that was removed (nm).
+  double dense_drift_removed_nm{0.0};
+  bool drift_corrected{false};
+  // Liquidity v3: local log-log exponent per lag (factor-2 window in time),
+  // MSD at fixed lags, and the displacement mobile-fraction curve.
+  std::vector<double> protein_local_alpha;
+  std::vector<double> rna_local_alpha;
+  std::vector<double> fixed_lags_ns;
+  std::vector<double> protein_msd_fixed;
+  std::vector<double> rna_msd_fixed;
+  std::vector<double> protein_mobile_curve;
+  std::vector<double> rna_mobile_curve;
+  std::vector<uint64_t> protein_mobile_curve_pairs;
+  std::vector<uint64_t> rna_mobile_curve_pairs;
+  // Lateral (in-plane) MSD and D = slope/4 for slab geometry.
+  int slab_normal_axis{2};
+  std::vector<double> protein_msd_lat_nm2;
+  std::vector<double> rna_msd_lat_nm2;
+  std::vector<double> protein_lat_local_alpha;
+  std::vector<double> rna_lat_local_alpha;
+  double protein_lat_diffusion_nm2_per_ns{0.0};
+  double rna_lat_diffusion_nm2_per_ns{0.0};
+  double protein_lat_fit_start_ns{0.0}, protein_lat_fit_end_ns{0.0};
+  double rna_lat_fit_start_ns{0.0}, rna_lat_fit_end_ns{0.0};
+  double protein_lat_exponent{0.0}, rna_lat_exponent{0.0};
+  double protein_lat_intercept_nm2{0.0}, rna_lat_intercept_nm2{0.0};
+  bool protein_lat_diffusive{false}, rna_lat_diffusive{false};
+  // Whole RNA molecule COM MSD (3D and lateral), pooled over RNA molecules.
+  std::vector<double> rna_molecule_lag_ns;
+  std::vector<double> rna_molecule_msd_nm2;
+  std::vector<double> rna_molecule_msd_lat_nm2;
+  std::vector<uint64_t> rna_molecule_counts;
+  uint64_t rna_molecules{0};
 };
 
 struct LLPSClusterLineageResult {
@@ -99,12 +179,15 @@ struct LLPSPaperConfig {
   int requested_blocks{0}; // 0 = auto
   std::string geometry{"auto"};
   bool fractal_enabled{false};
+  int slab_axis{2}; // reciprocal normal a/b/c, shared with main LLPS phase axis
+  double connectivity_cutoff_angstrom{10.0};
 };
 
 struct LLPSPaperFractalConfig {
   bool enabled{false};
   double min_scale_nm{0.5};
   double max_scale_fraction{0.75};
+  double connectivity_cutoff_angstrom{10.0};
 };
 
 struct LLPSPaperFractalFrame {
@@ -210,6 +293,7 @@ public:
   struct ProfileBin {
     uint64_t samples{0};
     double volume_nm3_sum{0.0};
+    double sampled_upper_nm_sum{0.0};
     double protein_count{0.0};
     double rna_count{0.0};
     double dense_protein_count{0.0};
@@ -250,6 +334,7 @@ private:
   std::vector<ProfileBin> profile_bins_;
   uint64_t skipped_no_dense_{0};
   uint64_t skipped_bad_box_{0};
+  std::map<std::string,uint64_t> geometry_failures_;
   std::string observed_geometry_{"none"};
   LLPSPaperFractalAccumulator fractal_;
 };
@@ -267,6 +352,10 @@ public:
                           int min_lineage_cluster_size,
                           double msd_fit_start_ns,
                           double msd_fit_end_ns);
+  // Liquidity v2 knobs; see LlpsArgs for the meaning of each value.
+  void configure_liquidity(int rna_segment_beads, bool msd_drift_correct,
+                           double mobile_displacement_nm,
+                           double mobile_lag_ns);
   void configure_trace_outputs(const info &info_output);
   void configure_rna_compaction(const std::string &mode, bool dynamics_enabled,
                                 bool detailed, bool has_rna,
@@ -338,6 +427,7 @@ private:
     double wrapped_com_x{0.0};
     double wrapped_com_y{0.0};
     double wrapped_com_z{0.0};
+    int n_beads{1};
   };
 
   struct ResidenceEpisodeRow {
@@ -711,6 +801,52 @@ private:
   std::vector<double> msd_time_sum_rna_;
   std::vector<uint64_t> msd_time_count_protein_;
   std::vector<uint64_t> msd_time_count_rna_;
+  // --- Liquidity v2 ---
+  int rna_segment_beads_{0};
+  bool msd_drift_correct_{true};
+  double mobile_displacement_nm_{2.0};
+  double mobile_lag_ns_{-1.0};
+  // Cumulative translation of the dense phase, integrated from per-frame
+  // minimum-image displacements of the units resident at both frames.
+  double dense_drift_x_{0.0};
+  double dense_drift_y_{0.0};
+  double dense_drift_z_{0.0};
+  std::vector<double> frame_dx_buf_;
+  std::vector<double> frame_dy_buf_;
+  std::vector<double> frame_dz_buf_;
+  std::vector<uint8_t> frame_drift_use_buf_;
+  std::vector<int> frame_weight_buf_;
+  // Pooled membership correlation accumulators (permanent residents kept).
+  std::vector<uint64_t> pooled_joint_protein_;
+  std::vector<uint64_t> pooled_pairs_protein_;
+  std::vector<uint64_t> pooled_joint_rna_;
+  std::vector<uint64_t> pooled_pairs_rna_;
+  uint64_t pooled_inside_protein_{0};
+  uint64_t pooled_frames_protein_{0};
+  uint64_t pooled_inside_rna_{0};
+  uint64_t pooled_frames_rna_{0};
+  // Displacement-threshold (FRAP analogue) accumulators, per lag.
+  std::vector<uint64_t> disp_gt_protein_;
+  std::vector<uint64_t> disp_all_protein_;
+  std::vector<uint64_t> disp_gt_rna_;
+  std::vector<uint64_t> disp_all_rna_;
+  // --- Liquidity v3 ---
+  // In-plane (lateral) squared displacement for slab geometries: the slab
+  // normal is the longest box axis; motion along it is confined by the slab
+  // thickness, so D is also reported from the two lateral components.
+  std::vector<double> msd_lat_sum_protein_;
+  std::vector<double> msd_lat_sum_rna_;
+  int slab_normal_axis_{2};
+  // Whole RNA molecule COM track (unwrapped, drift removed, nm), one per RNA
+  // chain, so that a molecular MSD exists beside the segment MSD.
+  struct RnaMoleculeTrack {
+    bool has_prev{false};
+    double prev_x{0.0}, prev_y{0.0}, prev_z{0.0};
+    double ux{0.0}, uy{0.0}, uz{0.0};
+    std::vector<double> t_ns, x, y, z;
+    std::vector<uint8_t> inside;
+  };
+  std::map<int, RnaMoleculeTrack> rna_molecule_tracks_;
   uint64_t protein_entry_events_{0};
   uint64_t protein_exit_events_{0};
   uint64_t rna_entry_events_{0};

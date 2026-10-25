@@ -102,114 +102,49 @@ public:
     rhs[1] = v3[1];
     rhs[2] = v3[2];
   }
+  bool is_orthorhombic() const noexcept {
+    constexpr double angle_tolerance = 1e-8;
+    return std::abs(alpha - 90.0) <= angle_tolerance &&
+           std::abs(beta - 90.0) <= angle_tolerance &&
+           std::abs(gamma - 90.0) <= angle_tolerance;
+  }
   void setv() {
-    if (alpha == 90.0 && beta == 90.0 && gamma == 90.0 && a == b && b == c)
-      box_type = "cubic";
-    else if (alpha == 90.0 && beta == 90.0 && gamma == 90.0 &&
-             (a != b || a != c))
-      box_type = "rectangular";
-    else if (alpha == 60.0 && beta == 60.0 && gamma == 90.0)
-      box_type = "dodecahedron";
-    else if (alpha != 90.0 && beta != 90.0 && gamma != 90.0)
-      box_type = "triclinic";
-    else
-      box_type = "unknown";
-
-    if (box_type == "cubic" || box_type == "rectangular") {
-      v1[0] = a;
-      v1[1] = 0.0;
-      v1[2] = 0.0;
-      v2[0] = 0.0;
-      v2[1] = b;
-      v2[2] = 0.0;
-      v3[0] = 0.;
-      v3[1] = 0.0;
-      v3[2] = c;
-    } else if (box_type == "dodecahedron" || box_type == "triclinic") {
-      v1[0] = a;
-      v1[1] = 0.0;
-      v1[2] = 0.0;
-      v2[0] = b * cos(gamma * pi / 180.0);
-      v2[1] = b * sin(gamma * pi / 180.0);
-      v2[2] = 0.0;
-      v3[0] = c * cos(beta * pi / 180.0);
-      v3[1] = c *
-              (cos(alpha * pi / 180.0) -
-               cos(beta * pi / 180.0) * cos(gamma * pi / 180.0)) /
-              sin(gamma * pi / 180.0);
-      v3[2] = c *
-              sqrt(1 +
-                   2.0 * cos(alpha * pi / 180.0) * cos(beta * pi / 180.0) *
-                       cos(gamma * pi / 180.0) -
-                   pow(cos(alpha * pi / 180.0), 2.0) -
-                   pow(cos(beta * pi / 180.0), 2.0) -
-                   pow(cos(gamma * pi / 180.0), 2.0)) /
-              sin(gamma * pi / 180.0);
-    } else {
-      v1[0] = 0.0;
-      v1[1] = 0.0;
-      v1[2] = 0.0;
-      v2[0] = 0.0;
-      v2[1] = 0.0;
-      v2[2] = 0.0;
-      v3[0] = 0;
-      v3[1] = 0.0;
-      v3[2] = 0.0;
+    for (int i = 0; i < 3; ++i) v1[i] = v2[i] = v3[i] = 0.0;
+    box_type = "unknown";
+    if (!(std::isfinite(a) && std::isfinite(b) && std::isfinite(c) &&
+          a > 0.0 && b > 0.0 && c > 0.0 && std::isfinite(alpha) &&
+          std::isfinite(beta) && std::isfinite(gamma) &&
+          alpha > 0.0 && alpha < 180.0 && beta > 0.0 && beta < 180.0 &&
+          gamma > 0.0 && gamma < 180.0)) return;
+    if (is_orthorhombic()) {
+      box_type = a == b && b == c ? "cubic" : "rectangular";
+      v1[0] = a; v2[1] = b; v3[2] = c;
+      return;
     }
+    const double ca = std::cos(alpha * pi / 180.0);
+    const double cb = std::cos(beta * pi / 180.0);
+    const double cg = std::cos(gamma * pi / 180.0);
+    const double sg = std::sin(gamma * pi / 180.0);
+    const double gram = 1.0 + 2.0 * ca * cb * cg - ca*ca - cb*cb - cg*cg;
+    if (!(gram > 0.0) || !(sg > 0.0)) return;
+    // Any valid non-orthorhombic cell needs general lattice vectors.
+    box_type = "triclinic";
+    if (std::abs(alpha-60.0) <= 1e-8 && std::abs(beta-60.0) <= 1e-8 &&
+        std::abs(gamma-90.0) <= 1e-8) box_type = "dodecahedron";
+    v1[0] = a;
+    v2[0] = b * cg; v2[1] = b * sg;
+    v3[0] = c * cb; v3[1] = c * (ca - cb*cg) / sg;
+    v3[2] = c * std::sqrt(gram) / sg;
   }
   double volume() const {
-    return a * b * c *
-               (1 - square(cos(alpha * pi / 180.)) -
-                square(cos(beta * pi / 180.)) -
-                square(cos(gamma * pi / 180.))) +
-           2. * (cos(alpha * pi / 180.) * cos(beta * pi / 180.) *
-                 cos(gamma * pi / 180.));
+    return v1[0] * v2[1] * v3[2];
   }
 
   int convert_to_v(double _a, double _b, double _c, double *_v1, double *_v2,
                    double *_v3) {
-    if (box_type == "cubic" || box_type == "rectangular") {
-      _v1[0] = _a;
-      _v1[1] = 0.0;
-      _v1[2] = 0.0;
-      _v2[0] = 0.0;
-      _v2[1] = _b;
-      _v2[2] = 0.0;
-      _v3[0] = 0.;
-      _v3[1] = 0.0;
-      _v3[2] = _c;
-    } else if (box_type == "dodecahedron" || box_type == "triclinic") {
-      _v1[0] = _a;
-      _v1[1] = 0.0;
-      _v1[2] = 0.0;
-      _v2[0] = _b * cos(gamma * pi / 180.0);
-      _v2[1] = _b * sin(gamma * pi / 180.0);
-      _v2[2] = 0.0;
-      _v3[0] = _c * cos(beta * pi / 180.0);
-      _v3[1] = _c *
-               (cos(alpha * pi / 180.0) -
-                cos(beta * pi / 180.0) * cos(gamma * pi / 180.0)) /
-               sin(gamma * pi / 180.0);
-      _v3[2] = _c *
-               sqrt(1 +
-                    2.0 * cos(alpha * pi / 180.0) * cos(beta * pi / 180.0) *
-                        cos(gamma * pi / 180.0) -
-                    pow(cos(alpha * pi / 180.0), 2.0) -
-                    pow(cos(beta * pi / 180.0), 2.0) -
-                    pow(cos(gamma * pi / 180.0), 2.0)) /
-               sin(gamma * pi / 180.0);
-    } else {
-      _v1[0] = 0.0;
-      _v1[1] = 0.0;
-      _v1[2] = 0.0;
-      _v2[0] = 0.0;
-      _v2[1] = 0.0;
-      _v2[2] = 0.0;
-      _v3[0] = 0;
-      _v3[1] = 0.0;
-      _v3[2] = 0.0;
-    }
-    return 0;
+    box converted(_a, _b, _c, alpha, beta, gamma);
+    converted.get_v1(_v1); converted.get_v2(_v2); converted.get_v3(_v3);
+    return converted.get_box_type() == "unknown" ? 1 : 0;
   }
   // FixBox (Baptista et al. 2022, Eq. 2-3): Cartesian → scaled coordinates
   // s = B⁻¹ · r  where B = [v1|v2|v3] is upper-triangular.

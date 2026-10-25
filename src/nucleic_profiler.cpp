@@ -1,10 +1,14 @@
 #include "nucleic_profiler.h"
+#include "BoxMatrix.h"
 #include "polymer_classification.h"
 #include "titan_executor.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <fstream>
 #include <iostream>
+#include <optional>
 
 namespace PC = PolymerClassification;
 
@@ -31,6 +35,9 @@ residue_atom_range(const std::vector<class index> &indices, size_t chain_pos,
 
 bool atom_has_nucleic_signature(const std::string &atom_name) {
   const std::string atom = PC::normalize_nucleic_atom_name(atom_name);
+  if (atom == "BB1" || atom == "BB2" || atom == "BB3" || atom == "SC1" ||
+      atom == "SC2" || atom == "SC3" || atom == "SC4" || atom == "SC5")
+    return true;
   return atom == "P" || atom == "OP1" || atom == "OP2" || atom == "OP3" ||
          atom == "O1P" || atom == "O2P" || atom == "O3P" ||
          atom == "C1'" || atom == "C2'" || atom == "O2'" || atom == "C3'" ||
@@ -38,6 +45,27 @@ bool atom_has_nucleic_signature(const std::string &atom_name) {
          atom == "O5'" || atom == "N9" || atom == "C8" || atom == "N7" ||
          atom == "O6" || atom == "N6" || atom == "N2" || atom == "O2" ||
          atom == "O4" || atom == "N4";
+}
+
+bool is_martini_nucleic_bead(const std::string &atom_name) {
+  const std::string atom = PC::normalize_nucleic_atom_name(atom_name);
+  return atom == "BB1" || atom == "BB2" || atom == "BB3" || atom == "SC1" ||
+         atom == "SC2" || atom == "SC3" || atom == "SC4" || atom == "SC5";
+}
+
+int wrapped_cell_index(double coordinate, double box_length, double cell_length,
+                       int cell_count) {
+  if (!(box_length > 0.0) || !(cell_length > 0.0) || cell_count <= 1)
+    return 0;
+  const double wrapped =
+      coordinate - std::floor(coordinate / box_length) * box_length;
+  return std::clamp(static_cast<int>(wrapped / cell_length), 0,
+                    cell_count - 1);
+}
+
+int wrap_grid_index(int index, int cell_count) {
+  const int wrapped = index % cell_count;
+  return wrapped < 0 ? wrapped + cell_count : wrapped;
 }
 
 bool residue_is_protein_candidate(const class index &chn, size_t res_idx) {
@@ -88,7 +116,12 @@ void NucleicProfiler::reset() {
   protein_atom_buffer_.clear();
   worker_base_hits_.clear();
   worker_backbone_hits_.clear();
+  protein_grid_head_.clear();
+  protein_grid_next_.clear();
   initialized_ = false;
+  coarse_grained_nucleic_ = false;
+  protein_grid_active_ = false;
+  contact_cutoff_a_ = 3.5;
   total_frames_processed = 0;
 }
 
@@ -104,6 +137,14 @@ void NucleicProfiler::initialize(
   protein_atom_buffer_.clear();
   worker_base_hits_.clear();
   worker_backbone_hits_.clear();
+  protein_grid_head_.clear();
+  protein_grid_next_.clear();
+
+  coarse_grained_nucleic_ =
+      std::any_of(na_info.begin(), na_info.end(), [](const mol_info &atom) {
+        return is_martini_nucleic_bead(atom.get_atom());
+      });
+  contact_cutoff_a_ = coarse_grained_nucleic_ ? 7.0 : 3.5;
 
   for (size_t chain_pos = 0; chain_pos < pro_index.size(); ++chain_pos) {
     const auto &chn = pro_index[chain_pos];
@@ -157,6 +198,12 @@ void NucleicProfiler::initialize(
   global_recognition_profile_.assign(protein_slots_.size(), RecognitionCount{});
   protein_atom_buffer_.reserve(pro_info.size());
   initialized_ = true;
+
+  std::cout << "[RNA-Profile] mode="
+            << (coarse_grained_nucleic_ ? "martini-cg" : "all-atom")
+            << ", cutoff=" << contact_cutoff_a_ << " A"
+            << ", protein_residues=" << protein_slots_.size()
+            << ", nucleic_residues=" << nucleic_residues_.size() << '\n';
 }
 
 void NucleicProfiler::initialize_if_needed(
@@ -187,6 +234,79 @@ void NucleicProfiler::ensure_worker_storage(size_t worker_capacity) {
       std::fill(worker_backbone_hits_[i].begin(), worker_backbone_hits_[i].end(),
                 0);
   }
+}
+
+void NucleicProfiler::build_protein_grid(const MOL &pro_frame) {
+  protein_grid_active_ = false;
+  protein_grid_head_.clear();
+  protein_grid_next_.assign(protein_atom_buffer_.size(), -1);
+
+  const box &frame_box = pro_frame.Box;
+  constexpr double angle_tolerance = 1.0e-6;
+  if (!BoxMatrix::valid_box(frame_box) ||
+      std::abs(frame_box.get_alpha() - 90.0) > angle_tolerance ||
+      std::abs(frame_box.get_beta() - 90.0) > angle_tolerance ||
+      std::abs(frame_box.get_gamma() - 90.0) > angle_tolerance ||
+      !(contact_cutoff_a_ > 0.0)) {
+    return;
+  }
+
+  protein_grid_len_x_ = frame_box.get_a();
+  protein_grid_len_y_ = frame_box.get_b();
+  protein_grid_len_z_ = frame_box.get_c();
+  protein_grid_nx_ =
+      std::max(1, static_cast<int>(protein_grid_len_x_ / contact_cutoff_a_));
+  protein_grid_ny_ =
+      std::max(1, static_cast<int>(protein_grid_len_y_ / contact_cutoff_a_));
+  protein_grid_nz_ =
+      std::max(1, static_cast<int>(protein_grid_len_z_ / contact_cutoff_a_));
+
+  const std::size_t max_cells =
+      std::max<std::size_t>(1024, protein_atom_buffer_.size() * 16);
+  auto grid_cell_count = [&]() {
+    return static_cast<std::size_t>(protein_grid_nx_) *
+           static_cast<std::size_t>(protein_grid_ny_) *
+           static_cast<std::size_t>(protein_grid_nz_);
+  };
+  while (grid_cell_count() > max_cells) {
+    if (protein_grid_nx_ >= protein_grid_ny_ &&
+        protein_grid_nx_ >= protein_grid_nz_ && protein_grid_nx_ > 1) {
+      protein_grid_nx_ = (protein_grid_nx_ + 1) / 2;
+    } else if (protein_grid_ny_ >= protein_grid_nz_ &&
+               protein_grid_ny_ > 1) {
+      protein_grid_ny_ = (protein_grid_ny_ + 1) / 2;
+    } else if (protein_grid_nz_ > 1) {
+      protein_grid_nz_ = (protein_grid_nz_ + 1) / 2;
+    } else {
+      break;
+    }
+  }
+
+  protein_grid_cell_x_ =
+      protein_grid_len_x_ / static_cast<double>(protein_grid_nx_);
+  protein_grid_cell_y_ =
+      protein_grid_len_y_ / static_cast<double>(protein_grid_ny_);
+  protein_grid_cell_z_ =
+      protein_grid_len_z_ / static_cast<double>(protein_grid_nz_);
+  protein_grid_head_.assign(grid_cell_count(), -1);
+
+  for (std::size_t atom_idx = 0; atom_idx < protein_atom_buffer_.size();
+       ++atom_idx) {
+    const ProteinAtomInfo &atom = protein_atom_buffer_[atom_idx];
+    const int ix = wrapped_cell_index(atom.x, protein_grid_len_x_,
+                                      protein_grid_cell_x_, protein_grid_nx_);
+    const int iy = wrapped_cell_index(atom.y, protein_grid_len_y_,
+                                      protein_grid_cell_y_, protein_grid_ny_);
+    const int iz = wrapped_cell_index(atom.z, protein_grid_len_z_,
+                                      protein_grid_cell_z_, protein_grid_nz_);
+    const std::size_t cell =
+        (static_cast<std::size_t>(ix) * protein_grid_ny_ + iy) *
+            protein_grid_nz_ +
+        iz;
+    protein_grid_next_[atom_idx] = protein_grid_head_[cell];
+    protein_grid_head_[cell] = static_cast<int>(atom_idx);
+  }
+  protein_grid_active_ = true;
 }
 
 std::vector<double> NucleicProfiler::calc_residue_center(
@@ -275,6 +395,16 @@ void NucleicProfiler::process_frame(const MOL &pro_frame, const MOL &na_frame,
   if (protein_atom_buffer_.empty())
     return;
 
+  build_protein_grid(pro_frame);
+  const box &frame_box = BoxMatrix::valid_box(pro_frame.Box)
+                             ? pro_frame.Box
+                             : na_frame.Box;
+  const std::optional<BoxMatrix> box_matrix =
+      BoxMatrix::valid_box(frame_box)
+          ? std::optional<BoxMatrix>{frame_box}
+          : std::nullopt;
+  const double cutoff_sq = contact_cutoff_a_ * contact_cutoff_a_;
+
   const size_t total_residues = nucleic_residues_.size();
   const size_t requested = std::max<size_t>(1, requested_workers);
   const size_t grain_limited = (total_residues + 7) / 8;
@@ -303,16 +433,70 @@ void NucleicProfiler::process_frame(const MOL &pro_frame, const MOL &na_frame,
             const double na_x = na_frame.pos.x[i];
             const double na_y = na_frame.pos.y[i];
             const double na_z = na_frame.pos.z[i];
-            for (const auto &p_atom : protein_atom_buffer_) {
-              const double dx = na_x - p_atom.x;
-              const double dy = na_y - p_atom.y;
-              const double dz = na_z - p_atom.z;
+
+            const auto test_protein_atom = [&](std::size_t protein_atom_idx) {
+              const ProteinAtomInfo &p_atom =
+                  protein_atom_buffer_[protein_atom_idx];
+              double dx = na_x - p_atom.x;
+              double dy = na_y - p_atom.y;
+              double dz = na_z - p_atom.z;
+              if (box_matrix)
+                box_matrix->apply_mic(dx, dy, dz);
               const double dist_sq = dx * dx + dy * dy + dz * dz;
-              if (dist_sq < 12.25) {
+              if (dist_sq <= cutoff_sq) {
                 if (is_bb)
                   backbone_hits[p_atom.slot_index] = 1;
                 if (is_b)
                   base_hits[p_atom.slot_index] = 1;
+              }
+            };
+
+            if (!protein_grid_active_) {
+              for (std::size_t protein_atom_idx = 0;
+                   protein_atom_idx < protein_atom_buffer_.size();
+                   ++protein_atom_idx) {
+                test_protein_atom(protein_atom_idx);
+              }
+              continue;
+            }
+
+            const int center_x = wrapped_cell_index(
+                na_x, protein_grid_len_x_, protein_grid_cell_x_,
+                protein_grid_nx_);
+            const int center_y = wrapped_cell_index(
+                na_y, protein_grid_len_y_, protein_grid_cell_y_,
+                protein_grid_ny_);
+            const int center_z = wrapped_cell_index(
+                na_z, protein_grid_len_z_, protein_grid_cell_z_,
+                protein_grid_nz_);
+            std::array<std::size_t, 27> visited_cells{};
+            std::size_t visited_count = 0;
+            for (int ox = -1; ox <= 1; ++ox) {
+              for (int oy = -1; oy <= 1; ++oy) {
+                for (int oz = -1; oz <= 1; ++oz) {
+                  const int ix = wrap_grid_index(center_x + ox,
+                                                 protein_grid_nx_);
+                  const int iy = wrap_grid_index(center_y + oy,
+                                                 protein_grid_ny_);
+                  const int iz = wrap_grid_index(center_z + oz,
+                                                 protein_grid_nz_);
+                  const std::size_t cell =
+                      (static_cast<std::size_t>(ix) * protein_grid_ny_ + iy) *
+                          protein_grid_nz_ +
+                      iz;
+                  if (std::find(visited_cells.begin(),
+                                visited_cells.begin() + visited_count,
+                                cell) != visited_cells.begin() + visited_count)
+                    continue;
+                  visited_cells[visited_count++] = cell;
+                  for (int protein_atom_idx = protein_grid_head_[cell];
+                       protein_atom_idx != -1;
+                       protein_atom_idx = protein_grid_next_[
+                           static_cast<std::size_t>(protein_atom_idx)]) {
+                    test_protein_atom(
+                        static_cast<std::size_t>(protein_atom_idx));
+                  }
+                }
               }
             }
           }
@@ -347,6 +531,7 @@ void NucleicProfiler::export_results(const std::string &csv_filename) {
   out << "Protein_ResNum,ResName,Base_Contact_Frames,Backbone_Contact_Frames,"
          "Base_Occupancy_%,Backbone_Occupancy_%,Recognition_Type\n";
 
+  std::size_t rows_written = 0;
   for (size_t slot_idx = 0; slot_idx < protein_slots_.size(); ++slot_idx) {
     const auto &slot = protein_slots_[slot_idx];
     const auto &counts = global_recognition_profile_[slot_idx];
@@ -370,6 +555,14 @@ void NucleicProfiler::export_results(const std::string &csv_filename) {
       out << slot.resnr << "," << slot.resname << "," << base_contacts << ","
           << backbone_contacts << "," << base_occ << "," << back_occ << ","
           << type << "\n";
+      ++rows_written;
     }
+  }
+  if (rows_written == 0) {
+    std::cerr << "[WARNING] RNA-Profile: no protein residue exceeded the 5% "
+                 "contact-occupancy threshold (mode="
+              << (coarse_grained_nucleic_ ? "martini-cg" : "all-atom")
+              << ", cutoff=" << contact_cutoff_a_
+              << " A, frames=" << total_frames_processed << ").\n";
   }
 }

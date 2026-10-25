@@ -1,6 +1,0 @@
-
-MM/PBSA endpoint decomposition summary
-source: mmpbsa
-frames: 51
-trajectories: 1
-map_semantics: MM/PBSA maps are endpoint entity decompositions and must not be interpreted as pair matrices.

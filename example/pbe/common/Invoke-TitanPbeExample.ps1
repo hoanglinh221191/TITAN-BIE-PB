@@ -29,6 +29,7 @@ New-Item -ItemType Directory -Path $runDir | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $example 'arg.in') -Destination $runDir
 Copy-Item -LiteralPath (Join-Path $pbeRoot 'common\driver.pdb') -Destination $runDir
+Copy-Item -LiteralPath (Join-Path $pbeRoot 'common\driver.top') -Destination $runDir
 Copy-Item -LiteralPath (Join-Path $pbeRoot 'common\index.ndx') -Destination $runDir
 Copy-Item -LiteralPath (Join-Path $pbeRoot 'common\cal.txt') -Destination $runDir
 Copy-Item -LiteralPath (Join-Path $pbeRoot 'common\lib_ff') `

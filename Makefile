@@ -20,7 +20,8 @@ BUILD_INFO_HEADER = $(GENERATED_DIR)/titan_version_generated.h
 BUILD_INFO_MANIFEST = $(GENERATED_DIR)/titan_build_manifest.json
 BUILD_INFO_RC = $(GENERATED_DIR)/titan_version.rc
 CLI_REGISTRY_GENERATOR = tools/generate_cli_registry.py
-CLI_PARSER_SOURCE = $(SRC_ROOT)/cli/parse_arguments.cpp
+CLI_PARSER_SOURCE = $(SRC_ROOT)/cli/parse_arguments.cpp $(SRC_ROOT)/cli/parse_helpers.cpp \
+                    $(sort $(wildcard $(SRC_ROOT)/cli/parse_options_*.cpp))
 CLI_REGISTRY_HEADER = $(GENERATED_DIR)/titan_cli_registry_generated.h
 CLI_VALIDATION_TEST = tools/test_cli_validation.py
 INCLUDE_DIRS = -I$(GENERATED_DIR) -I$(SRC_ROOT) -I$(SRC_ROOT)/gmxtraj/include -I$(SRC_ROOT)/eigen
@@ -33,8 +34,6 @@ else ifeq ($(PROFILE),portable)
 else
     COMMON_CXX_DEFINES += -DTITAN_BUILD_PROFILE_TOKEN=unknown
 endif
-
-LOWMEM_CXXFLAGS = $(filter-out -O3 -pipe,$(CXXFLAGS)) -O1
 
 ifeq ($(PROFILE),native)
     ARCH_FLAGS = -march=native
@@ -144,16 +143,52 @@ else
 endif
 
 # ─── Tệp nguồn (Sources) ───
-ROOT_SRCS = $(filter-out $(SRC_ROOT)/parse_arguments.cpp,$(wildcard $(SRC_ROOT)/*.cpp))
+# Opt-in full translation-unit instrumentation. Use a separate BUILD_ROOT so
+# sanitized and ordinary objects are never mixed. No default build is changed.
+SANITIZERS ?=
+ifneq ($(strip $(SANITIZERS)),)
+ifeq ($(OS),Windows_NT)
+    $(error SANITIZERS is currently supported by the Linux toolchain only)
+endif
+    CXXFLAGS := $(filter-out -O3 -O2,$(CXXFLAGS)) -O1 -g1 -fno-omit-frame-pointer -fsanitize=$(SANITIZERS)
+    LDFLAGS += -fsanitize=$(SANITIZERS)
+endif
+
+# KIN-10: the bundled random-forest affinity model is closed pending a model
+# card, and the engine no longer emits a pKd. Link the closed stub instead of
+# the 199,809-line generated source, which costs ~6 s and ~843 MB of peak
+# compiler memory on GCC 13.3 and adds a 3.3-4.9 MB object to the binary.
+#
+# TITAN_ENABLE_RF_MODEL=1 restores the generated model. Run a clean when you
+# change this value: make is timestamp driven and cannot see that the
+# configuration changed, so an existing binary would otherwise be left in place
+# with the other RF object still linked in.
+#   make clean && make TITAN_ENABLE_RF_MODEL=1
+TITAN_ENABLE_RF_MODEL ?= 0
+ifeq ($(TITAN_ENABLE_RF_MODEL),1)
+    RF_MODEL_EXCLUDED_SRC = $(SRC_ROOT)/titan_rf_model_closed.cpp
+else
+    RF_MODEL_EXCLUDED_SRC = $(SRC_ROOT)/titan_rf_model.cpp
+endif
+
+ROOT_SRCS = $(filter-out $(SRC_ROOT)/parse_arguments.cpp $(RF_MODEL_EXCLUDED_SRC),$(wildcard $(SRC_ROOT)/*.cpp))
 CLI_SRCS = $(wildcard $(SRC_ROOT)/cli/*.cpp)
 PBE_GRID_SRCS = $(wildcard $(SRC_ROOT)/pbe/grid/*.cpp)
 BIE_SRCS = $(wildcard $(SRC_ROOT)/bie/*.cpp) \
            $(wildcard $(SRC_ROOT)/bie/fmm/cartesian/*.cpp)
 PBE_SRCS  = $(wildcard $(SRC_ROOT)/tabi/*.cpp) $(BIE_SRCS) $(PBE_GRID_SRCS)
-PBCTOPO_SRCS = $(wildcard $(SRC_ROOT)/pbctopo/*.cpp)
-HOLOLIFT_SRCS = $(wildcard $(SRC_ROOT)/hololift/*.cpp)
+PBCTOPO_SRCS = $(wildcard $(SRC_ROOT)/pbctopo/*.cpp) \
+               $(wildcard $(SRC_ROOT)/pbctopo/solve/*.cpp)
+
+TITAN_PATH_SRCS = $(wildcard $(SRC_ROOT)/titan_path/*.cpp)
 GMXTRAJ_SRCS = $(wildcard $(SRC_ROOT)/gmxtraj/*.cpp)
-SRCS  = $(ROOT_SRCS) $(CLI_SRCS) $(PBE_SRCS) $(PBCTOPO_SRCS) $(HOLOLIFT_SRCS) $(GMXTRAJ_SRCS)
+POSTPROC_SRCS = $(wildcard $(SRC_ROOT)/postproc/*.cpp)
+ENGINE_SRCS = $(wildcard $(SRC_ROOT)/engine/*.cpp)
+NOCAL_SRCS = $(wildcard $(SRC_ROOT)/nocal/*.cpp)
+PTOPO_SRCS = $(wildcard $(SRC_ROOT)/ptopo/*.cpp)
+TOPOLOGY_SRCS = $(wildcard $(SRC_ROOT)/topology/*.cpp)
+SRCS  = $(ROOT_SRCS) $(CLI_SRCS) $(PBE_SRCS) $(PBCTOPO_SRCS) $(TITAN_PATH_SRCS) $(GMXTRAJ_SRCS) $(PTOPO_SRCS) \
+        $(POSTPROC_SRCS) $(ENGINE_SRCS) $(NOCAL_SRCS) $(TOPOLOGY_SRCS)
 OBJS  = $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(SRCS))
 DEPS  = $(OBJS:.o=.d)
 
@@ -174,7 +209,7 @@ SCHEMA_SMOKE_CXXFLAGS = $(filter-out -MMD -MP,$(CXXFLAGS))
 # ==========================================
 
 .DELETE_ON_ERROR:
-.PHONY: all build-info cli-registry build-metadata-test version-smoke cli-validation-test clean clean-all clean-generated release native portable release-native release-portable print-config FORCE
+.PHONY: all build-info cli-registry build-metadata-test tracked-includes-test version-smoke cli-validation-test clean clean-all clean-generated release native portable release-native release-portable print-config FORCE
 
 FORCE:
 
@@ -184,9 +219,12 @@ $(BUILD_INFO_HEADER): FORCE $(VERSION_FILE) $(BUILD_INFO_GENERATOR)
 build-info: $(BUILD_INFO_HEADER)
 
 $(CLI_REGISTRY_HEADER): $(CLI_PARSER_SOURCE) $(CLI_REGISTRY_GENERATOR)
-	@$(PYTHON) $(CLI_REGISTRY_GENERATOR) --parser $(CLI_PARSER_SOURCE) --output $(CLI_REGISTRY_HEADER)
+	@$(PYTHON) $(CLI_REGISTRY_GENERATOR) $(addprefix --parser ,$(CLI_PARSER_SOURCE)) --output $(CLI_REGISTRY_HEADER)
 
 cli-registry: $(CLI_REGISTRY_HEADER)
+
+tracked-includes-test:
+	$(PYTHON) tools/check_tracked_includes.py
 
 build-metadata-test:
 	@$(PYTHON) $(BUILD_INFO_TEST)
@@ -224,19 +262,6 @@ cli-validation-test: all $(CLI_VALIDATION_SMOKE_TARGET)
 $(BUILD_DIR)/$(SRC_ROOT)/titan_rf_model.o: CXXFLAGS := $(filter-out -O3,$(CXXFLAGS)) -O0
 
 ifneq ($(OS),Windows_NT)
-$(BUILD_DIR)/$(SRC_ROOT)/solv_pbc_pbctopo.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/$(SRC_ROOT)/pbctopo/anchor_graph.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/$(SRC_ROOT)/pbctopo/component_graph.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/$(SRC_ROOT)/pbctopo/component_refine.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/$(SRC_ROOT)/pbctopo/component_search.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/$(SRC_ROOT)/pbctopo/component_search_pair_table.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/$(SRC_ROOT)/pbctopo/llps_local.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/$(SRC_ROOT)/pbctopo/local_graph.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/$(SRC_ROOT)/engine_postproc.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/$(SRC_ROOT)/impl_engine.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/$(SRC_ROOT)/solv_pbc_new_al.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/$(SRC_ROOT)/find_pull_direction.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
-$(BUILD_DIR)/$(SRC_ROOT)/pull_direction_pathway.o: CXXFLAGS := $(LOWMEM_CXXFLAGS)
 $(BUILD_DIR)/$(SRC_ROOT)/titan_rf_model.o: CXXFLAGS := $(filter-out -O3 -pipe,$(CXXFLAGS)) -O0
 endif
 

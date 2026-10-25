@@ -1,4 +1,5 @@
 #include "tabi_treecode_internal.h"
+#include "tabi_node_patch_curved.h"
 #include "tabi_near.h"
 
 #include "../titan_executor.h"
@@ -80,6 +81,10 @@ void include_bound_point(TreeNode &node, double x, double y, double z,
 
 void include_panel_bounds(TreeNode &node, const Panel &panel,
                           bool &initialized) noexcept {
+  if(const auto*cell=curved_dual_cell(panel)) {
+    include_bound_point(node,panel.x-cell->radius,panel.y-cell->radius,panel.z-cell->radius,initialized);
+    include_bound_point(node,panel.x+cell->radius,panel.y+cell->radius,panel.z+cell->radius,initialized);
+  }
   if (panel.has_triangle_geometry) {
     include_bound_point(node, panel.v0x, panel.v0y, panel.v0z, initialized);
     include_bound_point(node, panel.v1x, panel.v1y, panel.v1z, initialized);
@@ -177,7 +182,9 @@ TreeNode make_leaf_node(const std::vector<Panel> &panels,
     const double dx = panel.x - node.cx;
     const double dy = panel.y - node.cy;
     const double dz = panel.z - node.cz;
-    node.radius = std::max(node.radius, std::sqrt(dx * dx + dy * dy + dz * dz));
+    const auto*curved=curved_dual_cell(panel);
+    node.radius = std::max(node.radius, std::sqrt(dx * dx + dy * dy + dz * dz) +
+                          (curved?curved->radius:0.0));
   }
   if (tight_bounds)
     finalize_tight_bounds(node, bounds_initialized,
@@ -523,7 +530,8 @@ std::string normalize_leaf_near_policy(const std::string &policy) {
 }
 
 std::string normalize_leaf_panel_kernel(const std::string &kernel) {
-  if (kernel == "tile" || kernel == "tile-scalar" || kernel == "tile-avx2")
+  if (kernel == "tile" || kernel == "tile-scalar" || kernel == "tile-avx2" ||
+      kernel == "auto")
     return kernel;
   if (kernel == "avx2-gather" || kernel == "avx2")
     return "avx2-gather";
@@ -751,7 +759,7 @@ TreeInteractionLists build_tree_interactions(const std::vector<Panel> &panels,
                    pos < node.first_panel + node.panel_count; ++pos) {
                 const std::size_t source_index = tree.order[pos];
                 const Panel &source = panels[source_index];
-                if (is_singular_near_pair(target, i, source, source_index) ||
+                if (curved_dual_cell(source) || is_singular_near_pair(target, i, source, source_index) ||
                     classify_geometric_near_buffer_pair(
                         target, source, tree.quad_buffer)
                         .active) {

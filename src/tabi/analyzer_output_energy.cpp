@@ -104,7 +104,11 @@ void AnalyzerImpl::write_energy_header_if_needed() {
            "linear_residual,nl_residual,nl_continuation_steps,nl_backtracks,"
            "grid_origin_x_A,grid_origin_y_A,grid_origin_z_A,grid_center_x_A,"
            "grid_center_y_A,grid_center_z_A,grid_spacing_A,boundary_max,"
-           "reaction_energy_source,solvent_phase_rf_kT,"
+           "reaction_energy_source,tabi_charge_resolution_status,"
+           "tabi_charge_min_d_over_h,tabi_charge_distance_A,tabi_charge_local_max_edge_A,"
+           "tabi_charge_index0,tabi_charge_panel_index0,tabi_charge_min_d_over_atom_radius,"
+           "tabi_charge_surface_inside_atom_count,tabi_charged_atom_count,"
+           "tabi_charge_patch_evaluations,tabi_charge_resolution_ms,solvent_phase_rf_kT,"
            "solvent_phase_rf_kJmol,solvent_phase_rf_kcalmol,"
            "vacuum_phase_rf_kT,vacuum_phase_rf_kJmol,"
            "vacuum_phase_rf_kcalmol,atom_corrected_rxn_kT,"
@@ -208,7 +212,19 @@ void AnalyzerImpl::append_energy_row(const FrameResult &result) {
       << result.grid_origin_z_A << ',' << result.grid_center_x_A << ','
       << result.grid_center_y_A << ',' << result.grid_center_z_A << ','
       << result.grid_spacing_A << ',' << result.boundary_max << ','
-      << result.reaction_energy_source << ',' << result.solvent_phase_kt << ','
+      << result.reaction_energy_source << ','
+      << result.tabi_charge_resolution.status << ','
+      << result.tabi_charge_resolution.min_ratio << ','
+      << result.tabi_charge_resolution.distance_a << ','
+      << result.tabi_charge_resolution.local_edge_a << ','
+      << result.tabi_charge_resolution.charge_index << ','
+      << result.tabi_charge_resolution.panel_index << ','
+      << result.tabi_charge_resolution.min_distance_over_atom_radius << ','
+      << result.tabi_charge_resolution.surface_inside_atom_count << ','
+      << result.tabi_charge_resolution.charged_atoms << ','
+      << result.tabi_charge_resolution.patch_evaluations << ','
+      << result.tabi_charge_resolution.milliseconds << ','
+      << result.solvent_phase_kt << ','
       << result.solvent_phase_kj_mol << ',' << result.solvent_phase_kcal_mol
       << ',' << result.vacuum_phase_kt << ',' << result.vacuum_phase_kj_mol
       << ',' << result.vacuum_phase_kcal_mol << ',' << result.atom_corrected_kt

@@ -1,99 +1,77 @@
-# TITAN biomolecular Poisson-Boltzmann solver
+# TITAN boundary-integral Poisson-Boltzmann solver
 
-This repository is the manuscript-facing source release for TITAN
-(Thermodynamic & Interaction Trajectory ANalyzer). It contains the C++23
-source, command reference, and reproducible examples supporting the paper
-"A Stabilized Boundary-Integral Poisson-Boltzmann Solver for Biomolecular
-Solvation Electrostatics."
+This repository is the source release of TITAN (Thermodynamic & Interaction Trajectory ANalyzer) for the paper
+"A Stabilized Boundary-Integral Poisson-Boltzmann Solver for Biomolecular Solvation Electrostatics". It contains
+the C++23 source of the whole program, the user manual of the boundary-integral solver, runnable examples, and the
+data and scripts behind the paper.
 
-The release centers on two contributions:
+The boundary-integral Poisson-Boltzmann (BIE-PB) solver of TITAN
 
-1. a sparse near-field block ILU(0) preconditioner that stabilizes GMRES for
-   the coupled boundary-integral Poisson-Boltzmann operator; and
-2. an end-to-end TITAN workflow that constructs and audits a watertight
-   solvent-excluded surface, solves the boundary-integral system, and exports
-   polar solvation energies, PB binding-cycle terms, MM/PBSA decomposition,
-   and surface electrostatic potentials.
+- builds the analytic solvent-excluded surface of the molecule, refined towards charges close to the surface;
+- discretizes it with curved node-patch cells built from the analytic surface normals, and integrates the
+  singular and near-singular kernels over them (polar Duffy-type quadrature of the self cells, converged to a set
+  tolerance; geometrically adaptive subdivision of nearby cells);
+- applies the far field with a hierarchical Cartesian multipole expansion;
+- solves the coupled system with GMRES and a sparse block ILU(0) preconditioner built on the near-field graph;
+- checks the accelerated operator against direct summation on the converged solution;
+- reports polar solvation energies, polar binding terms and surface electrostatic potentials.
 
-The implemented workflow includes:
+The BIE solver is selected with `-pbe=bie`. TITAN's default Poisson-Boltzmann solver remains the grid solver.
 
-- watertight analytical patch-ray solvent-excluded surfaces with certified
-  quartic ray intersections, minor-contact-arc handling for unequal expanded
-  radii, spindle-torus inner-sheet rejection, and preservation of distinct
-  re-entrant faces;
-- node-patch boundary-integral discretization;
-- hierarchical Cartesian multipole acceleration for matrix-vector products;
-- sparse near-field block ILU(0) preconditioning;
-- polar solvation and binding-energy output; and
-- export of surface electrostatic potentials for visualization.
+## Start here
 
-The default production PB solver remains the grid backend. The
-boundary-integral equation (BIE) path documented in the manuscript is selected
-explicitly with `-pbe=bie`; `tabi` remains accepted as a compatibility alias
-for archived inputs. This public tree contains the source snapshot and examples
-needed to build, run, and audit the reported workflow.
-
-## Versioned validation snapshot
-
-Tag `titan-bie-pb-v0.5` updates the manuscript-facing source from the earlier
-July 2026 SES snapshot to the hardened analytical SES implementation used for
-the five-test-system preconditioner cohort. The archived matrices contain 90
-rows: five test geometries, three surface representations, and six
-preconditioners. The two graph ILU(0) routes converge in every row; regularized
-rows retain ILU(0) sparsity and are recorded explicitly as
-`*_ilu0_regularized`, not as diagonal fallbacks.
-
-The inputs, scripts, raw matrix CSV files, checksums, and generated manuscript
-tables are under
-[`validation/n5_preconditioner_cohort`](validation/n5_preconditioner_cohort).
+- [MANUAL_BIE_PB.md](MANUAL_BIE_PB.md): building TITAN, preparing a protein from its PDB file, running the
+  paper's protocol, reading and checking the results.
+- [example/pbe](example/pbe/README.md): solvation energy, surface potential map, polar binding cycle, and the
+  27 proteins of the paper from the deposited PDB files.
+- [validation/rsos_v06](validation/rsos_v06/README.md): the results behind every table and figure of the
+  paper, with the scripts that produced them.
+- [manual.txt](manual.txt): the complete command-line reference of TITAN (`titan -h`).
 
 ## Build
 
-TITAN requires a C++23 compiler and OpenMP. Eigen is vendored under
-`src/eigen`.
+TITAN requires a C++23 compiler and OpenMP; Eigen is included under `src/eigen`.
 
-### Windows (MSYS2 UCRT64)
-
-```powershell
-mingw32-make PROFILE=native TARGET=titan.exe all -j8
-```
-
-The Makefile defaults to `C:/msys64/ucrt64/bin/clang++.exe`. Override
-`MSYS2_UCRT64_BIN` if MSYS2 is installed elsewhere.
-
-### Linux
+Windows (MSYS2 UCRT64):
 
 ```bash
-make PROFILE=native TOOLCHAIN=gcc all -j4
+export PATH=/c/msys64/ucrt64/bin:$PATH
+mingw32-make all -j8
 ```
 
-GCC 13 or newer is recommended. Use `PROFILE=portable` for an AVX2/FMA build
-that does not use `-march=native`.
+Linux (GCC 13 or newer):
 
-## Examples
-
-Start with [example/pbe/README.md](example/pbe/README.md). On Windows, after
-building `titan.exe`, run:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File example\pbe\01_1vii_solvation\run.ps1
+```bash
+make PROFILE=native TOOLCHAIN=gcc all -j8
 ```
 
-Additional examples are provided in:
+`PROFILE=portable` builds for AVX2/FMA without `-march=native`.
 
-- `example/mm_pbsa_bie/`: trajectory-native complex/receptor/ligand BIE
-  MM/PBSA with residue/atom decomposition and reference outputs.
-- `example/compact_mm_pbsa/`: a compact two-model submission companion.
+## Quick start
 
-The MM/PBSA path reads PDB/XTC/TRR trajectories plus index groups, reconstructs
-periodic molecules, forms the complex from the two selected molecular groups,
-and assigns charges/radii from a supplied topology or the bundled force-field
-library. Separately prepared endpoint PQR files are not required.
+```bash
+cd example/pbe
+python run_example.py 01_1vii_solvation --titan ../../titan.exe
+```
 
-## Command reference
+prints the node patches, GMRES iterations, residuals and ΔG_solv = -891.625 kcal/mol for the villin headpiece
+(PDB 1VII), as in the paper.
 
-See [manual.txt](manual.txt) or run `titan.exe -h`.
+## Changes from titan-bie-pb-v0.5
 
-## License
+- Curved point-normal cells on the analytic SES, with analytic vertex normals, replace the flat node patches.
+- The self cells are integrated by polar Duffy-type quadrature with a convergence test and the nearby cells by
+  geometrically adaptive subdivision; a cell that cannot be resolved stops the calculation.
+- The analytic SES is refined towards charges close to the surface (factor 0.35, minimum edge 0.1 Å).
+- The routine far field (p1) is a degree-one particle-cluster treecode; the degree-four expansion (p4) is the
+  accuracy control.
+- The sampled operator audit runs on the converged solution (512 targets, 1,024 rows).
+- New: `MANUAL_BIE_PB.md`, the 27-protein example with the PDB-to-PQR preparation, the surface-map script, and
+  the evidence of the revised paper (`validation/rsos_v06`), which replaces the v0.5 matrix archive.
+- The BIE MM/PBSA examples of v0.5 are not part of this release; the MM/PBSA options remain documented in
+  `manual.txt`.
 
-TITAN is released under the [MIT License](LICENSE).
+## License and citation
+
+TITAN is released under the [MIT License](LICENSE). If you use this release, please cite the paper and this
+versioned archive ([CITATION.cff](CITATION.cff)).

@@ -41,6 +41,10 @@ public:
     const double cell_y = spec.len_y / static_cast<double>(ny);
     const double cell_z = spec.len_z / static_cast<double>(nz);
 
+    // With one/two periodic cells, opposite stencil offsets alias the same
+    // cell and a half shell no longer assigns each unordered pair once.
+    const bool aliased_periodic_shell = spec.periodic && (nx < 3 || ny < 3 || nz < 3);
+
     head_.assign(static_cast<std::size_t>(nx * ny * nz), -1);
     next_.assign(point_count, -1);
 
@@ -106,7 +110,15 @@ public:
         iz = clamp_index(iz, nz);
       }
 
-      for (const auto &offset : kHalfShellOffsets) {
+      std::array<int, 27> visited_cells{};
+      std::size_t visited_count = 0;
+      const std::size_t offset_count = aliased_periodic_shell ? 27 : kHalfShellOffsets.size();
+      for (std::size_t oi = 0; oi < offset_count; ++oi) {
+        const std::array<int, 3> offset = aliased_periodic_shell
+            ? std::array<int, 3>{static_cast<int>(oi / 9) - 1,
+                                 static_cast<int>((oi / 3) % 3) - 1,
+                                 static_cast<int>(oi % 3) - 1}
+            : kHalfShellOffsets[oi];
         const int raw_ix = ix + offset[0];
         const int raw_iy = iy + offset[1];
         const int raw_iz = iz + offset[2];
@@ -122,10 +134,17 @@ public:
         const int cell_iz =
             spec.periodic ? wrap_index(raw_iz, nz) : raw_iz;
         const int cell = cell_ix * ny * nz + cell_iy * nz + cell_iz;
+        if (aliased_periodic_shell) {
+          if (std::find(visited_cells.begin(), visited_cells.begin() + visited_count,
+                        cell) != visited_cells.begin() + visited_count)
+            continue;
+          visited_cells[visited_count++] = cell;
+        }
 
         for (int j = head_[static_cast<std::size_t>(cell)]; j != -1;
              j = next_[static_cast<std::size_t>(j)]) {
-          if (offset[0] == 0 && offset[1] == 0 && offset[2] == 0 &&
+          if ((aliased_periodic_shell ||
+               (offset[0] == 0 && offset[1] == 0 && offset[2] == 0)) &&
               static_cast<std::size_t>(j) <= i) {
             continue;
           }

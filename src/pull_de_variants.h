@@ -22,6 +22,7 @@ enum class PullOptimizerKind {
   DeNlShadeLbcPattern,
   Direct,
   DirectPattern,
+  CorridorGrid,
   Unknown
 };
 

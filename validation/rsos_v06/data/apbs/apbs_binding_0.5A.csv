@@ -1,0 +1,7 @@
+case,mode,spacing_A,fine_spacing_A,dime,energy_kcalmol,exit,wall_s,peak_rss_mb,run_dir
+6lzg_complex_charmm_ph7,paper,0.5,0.4800798611111111,193x225x289,-9346.102079849426,0,53.96292029999677,2855.80078125,D:/data_MD/tabi/rsos_v06/campaign_final/apbs_binding/6lzg_complex_charmm_ph7_paper_g0p5
+6lzg_ace2_chain_A_charmm_ph7,paper,0.5,0.4621822916666667,193x225x225,-8051.009799012905,0,42.627980399996886,2259.71484375,D:/data_MD/tabi/rsos_v06/campaign_final/apbs_binding/6lzg_ace2_chain_A_charmm_ph7_paper_g0p5
+6lzg_rbd_chain_B_charmm_ph7,paper,0.5,0.47061875000000003,161x161x193,-1913.219473297562,0,18.151085100002092,1168.08984375,D:/data_MD/tabi/rsos_v06/campaign_final/apbs_binding/6lzg_rbd_chain_B_charmm_ph7_paper_g0p5
+1brs_complex_amber_ph7,paper,0.5,0.4775499999999999,161x161x161,-2079.922528841539,0,12.79107120000117,1005.91796875,D:/data_MD/tabi/rsos_v06/campaign_final/apbs_binding/1brs_complex_amber_ph7_paper_g0p5
+1brs_barnase_chain_A_amber_ph7,paper,0.5,0.45779843750000004,161x129x161,-1266.1713209663,0,10.833975000001374,804.4296875,D:/data_MD/tabi/rsos_v06/campaign_final/apbs_binding/1brs_barnase_chain_A_amber_ph7_paper_g0p5
+1brs_barstar_chain_D_amber_ph7,paper,0.5,0.49075,129x129x129,-1452.5118206010993,0,4.3930598000006285,536.21484375,D:/data_MD/tabi/rsos_v06/campaign_final/apbs_binding/1brs_barstar_chain_D_amber_ph7_paper_g0p5

@@ -44,8 +44,10 @@ inline constexpr double kAlpbAlpha = 0.571412;
     const double z = z_angstrom[atom];
     const double radius = radii_angstrom[atom];
     if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
-        !std::isfinite(radius) || radius <= 0.0)
+        !std::isfinite(radius) || radius < 0.0)
       return std::numeric_limits<double>::quiet_NaN();
+    // Zero-LJ-radius charged sites contribute no geometric volume, but remain
+    // in the electrostatic calculation (for example Amber polar hydrogens).
     const long double radius_ld = static_cast<long double>(radius);
     const long double mass = radius_ld * radius_ld * radius_ld;
     total_mass += mass;
@@ -146,17 +148,30 @@ standard_heavy_atom_radius_angstrom(char element) noexcept {
 // Pair contribution to the HCT descreening integral I_i in A^-1.  This is the
 // analytical pair integral used by the reference OBC implementation, including
 // the Ponder correction for atom i lying completely inside atom j.
-[[nodiscard]] inline double
-hct_pair_integral_inverse_angstrom(double offset_radius_i_angstrom,
-                                    double scaled_radius_j_angstrom,
-                                    double distance_angstrom) noexcept {
+//
+// rgbmax_angstrom truncates the integral's upper limit, matching Amber's egb
+// cutoff (default there: 25 A). The closed form below is G(L) - G(U) with
+// G(x) = 1/x + ((s^2 - r^2)/(4r))/x^2 + ln(x)/(2r), so clamping U at rgbmax IS
+// the truncated integral; it agrees with Amber's expanded boundary branch to
+// ~1e-10 relative and is better conditioned than that expansion. The default
+// +inf leaves every arithmetic operation below exactly as it was before the
+// parameter existed, so uncut results stay bit-for-bit reproducible.
+[[nodiscard]] inline double hct_pair_integral_inverse_angstrom(
+    double offset_radius_i_angstrom, double scaled_radius_j_angstrom,
+    double distance_angstrom,
+    double rgbmax_angstrom =
+        std::numeric_limits<double>::infinity()) noexcept {
   if (!std::isfinite(offset_radius_i_angstrom) ||
       !std::isfinite(scaled_radius_j_angstrom) ||
       !std::isfinite(distance_angstrom) || offset_radius_i_angstrom <= 0.0 ||
       scaled_radius_j_angstrom <= 0.0 || distance_angstrom <= 0.0)
     return std::numeric_limits<double>::quiet_NaN();
 
-  const double upper_distance = distance_angstrom + scaled_radius_j_angstrom;
+  double upper_distance = distance_angstrom + scaled_radius_j_angstrom;
+  // Written as a guarded comparison rather than std::min so that +inf (and a
+  // non-finite value) leaves upper_distance untouched.
+  if (rgbmax_angstrom > 0.0 && upper_distance > rgbmax_angstrom)
+    upper_distance = rgbmax_angstrom;
   if (offset_radius_i_angstrom >= upper_distance)
     return 0.0;
 
@@ -165,6 +180,9 @@ hct_pair_integral_inverse_angstrom(double offset_radius_i_angstrom,
                std::abs(distance_angstrom - scaled_radius_j_angstrom));
   if (!(lower_distance > 0.0) || !(upper_distance > 0.0))
     return std::numeric_limits<double>::quiet_NaN();
+  // Reachable only with a finite cutoff: the shell lies entirely outside it.
+  if (lower_distance >= upper_distance)
+    return 0.0;
 
   const double inv_r = 1.0 / distance_angstrom;
   const double lower_inv = 1.0 / lower_distance;

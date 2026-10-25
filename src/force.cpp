@@ -1,3 +1,6 @@
+#include "titan_topology_energy.h"
+#include "gromos_nonbonded.h"
+#include "titan_lj_pair_override.h"
 #include "Multi_MOL.h"
 #include "cache_sigma_epsilon.h"
 #include "charmm_nonbonded.h"
@@ -50,6 +53,22 @@ int force_energy_add(const cache_sigma_epsilon &CachedData, size_t i,
                      const Multi_MOL &rec, const Multi_MOL &lg, size_t snap,
                      const arguments &Arguments, size_t rec_pos = 0,
                      size_t lg_pos = 0) {
+  const bool topology_bound = titan_nb::topology_energy_required(CachedData, Arguments);
+  if (topology_bound && CachedData.elec_ener.empty()) {
+    for (std::size_t lane=0;lane<1;++lane) {
+      const std::size_t j=lg_pos+lane;
+      const double dx=0.1*(rec.m_mol[snap].pos.x[rec_pos]-lg.m_mol[snap].pos.x[j]);
+      const double dy=0.1*(rec.m_mol[snap].pos.y[rec_pos]-lg.m_mol[snap].pos.y[j]);
+      const double dz=0.1*(rec.m_mol[snap].pos.z[rec_pos]-lg.m_mol[snap].pos.z[j]);
+      const auto pair=titan_nb::evaluate_pair(CachedData,Arguments,rec.info.at(rec_pos),lg.info.at(j),
+                                             std::sqrt(dx*dx+dy*dy+dz*dz),CachedData.cutoff_dis);
+      const double factor=Arguments.self_int?0.5:1.0;
+      electro_energy+=factor*pair.elec;van_der_waals_energy+=factor*pair.vdw;
+      force_elec+=force(pair.force_elec_prefactor*dx,pair.force_elec_prefactor*dy,pair.force_elec_prefactor*dz);
+      force_vdw+=force(pair.force_vdw_prefactor*dx,pair.force_vdw_prefactor*dy,pair.force_vdw_prefactor*dz);
+    }
+    return 0;
+  }
   if (i < CachedData.elec_ener.size()) {
     electro_energy += CachedData.elec_ener[i];
     van_der_waals_energy += CachedData.vdw_ener[i];
@@ -135,11 +154,16 @@ int force_energy_add(const cache_sigma_epsilon &CachedData, size_t i,
            (Arguments.flag_interchain_energy == true &&
             lg.info[lg_pos].get_chain() == rec.info[rec_pos].get_chain())))
         return 1;
+      double v_val = temp_vdw * (c_12 - c_6);
+      double sd{square(1. / d)},
+          temp_par_vdw{temp_vdw * (12. * c_12 * sd - 6. * c_6 * sd)};
+      if (CachedData.has_charmm_pair_overrides())
+        titan_lj::override_lj_energy_force(CachedData, rec_parameters,
+                                           lg_parameters, rec_pos, lg_pos, d,
+                                           v_val, temp_par_vdw);
       electro_energy += electro_pair;
-      van_der_waals_energy += temp_vdw * (c_12 - c_6);
+      van_der_waals_energy += v_val;
       if (Arguments.flag_cal_force == true) {
-        double sd{square(1. / d)},
-            temp_par_vdw{temp_vdw * (12. * c_12 * sd - 6. * c_6 * sd)};
         force_elec.add(0.1 * electro_force_prefactor * dx,
                        0.1 * electro_force_prefactor * dy,
                        0.1 * electro_force_prefactor * dz);
@@ -164,12 +188,17 @@ int force_energy_add(const cache_sigma_epsilon &CachedData, size_t i,
             lg.info[lg_pos].get_chain() == rec.info[rec_pos].get_chain())))
         return 1;
 
+      double v_val = temp_vdw * (c_12 - c_6);
+      double sd{square(1. / d)},
+          temp_par_vdw{temp_vdw * (12. * c_12 * sd - 6. * c_6 * sd)};
+      if (CachedData.has_charmm_pair_overrides())
+        titan_lj::override_lj_energy_force(CachedData, rec_parameters,
+                                           lg_parameters, rec_pos, lg_pos, d,
+                                           v_val, temp_par_vdw);
       electro_energy += electro_pair;
-      van_der_waals_energy += temp_vdw * (c_12 - c_6);
+      van_der_waals_energy += v_val;
 
       if (Arguments.flag_cal_force == true) {
-        double sd{square(1. / d)},
-            temp_par_vdw{temp_vdw * (12. * c_12 * sd - 6. * c_6 * sd)};
         force_elec.add(0.1 * electro_force_prefactor * dx,
                        0.1 * electro_force_prefactor * dy,
                        0.1 * electro_force_prefactor * dz);
@@ -210,11 +239,9 @@ int force_energy_add(const cache_sigma_epsilon &CachedData, size_t i,
             lg.info[lg_pos].get_chain() == rec.info[rec_pos].get_chain())))
         return 1;
       double sd{1. / square(d)}, c_6{c6(d)}, c_12{square(c_6)};
-      double epsilon{sqrt(rec_parameters[rec_pos].get_epsilon() *
-                          lg_parameters[lg_pos].get_epsilon())},
-          sigma{sqrt(rec_parameters[rec_pos].get_sigma() *
-                     lg_parameters[lg_pos].get_sigma())},
-          temp_vdw{12. * sd * epsilon / c_12 - 6. * sd * sigma / c_6};
+      double sigma{}, epsilon{};
+      gromos::pair_params(CachedData,rec_parameters,lg_parameters,rec_pos,lg_pos,sigma,epsilon);
+      double temp_vdw{12. * sd * epsilon / c_12 - 6. * sd * sigma / c_6};
 
       electro_energy += electro_pair;
       van_der_waals_energy += epsilon / c_12 - sigma / c_6;
@@ -286,6 +313,11 @@ void cal_energy_force_amber(const MOL &rec, const MOL &lg,
                             const arguments &Arguments,
                             const Multi_MOL_parameters & rec_parameters,
                             const Multi_MOL_parameters & lg_parameters) {
+  if (titan_nb::topology_energy_required(CachedData, Arguments)) {
+    titan_nb::calculate(rec, lg, info_rec, info_lg, CachedData, begin, end,
+                        Energy, &Force, Arguments);
+    return;
+  }
   Energy.set_energy(0., 0.);
   Force.set_force(force(0., 0., 0.), force(0., 0., 0.));
   const bool is_charmm =
@@ -344,6 +376,10 @@ void cal_energy_force_amber(const MOL &rec, const MOL &lg,
           c_6 = 0.000;
         temp_par_vdw = temp_vdw * (12. * c_12 * sd - 6. * c_6 * sd);
         v_val = temp_vdw * (c_12 - c_6);
+        if (CachedData.has_charmm_pair_overrides())
+          titan_lj::override_lj_energy_force(CachedData, rec_parameters,
+                                             lg_parameters, i, j, d, v_val,
+                                             temp_par_vdw);
       }
 
       if (Arguments.distance_energy_cutoff > 0. &&
@@ -386,9 +422,15 @@ void cal_energy_force_opls(const MOL &rec, const MOL &lg,
                            size_t num_snap, const arguments &Arguments,
                            const Multi_MOL_parameters & rec_parameters,
                            const Multi_MOL_parameters & lg_parameters) {
+  if (titan_nb::topology_energy_required(CachedData, Arguments)) {
+    titan_nb::calculate(rec, lg, info_rec, info_lg, CachedData, begin, end,
+                        Energy, &Force, Arguments);
+    return;
+  }
   Energy.set_energy(0., 0.);
   Force.set_force(force(0., 0., 0.), force(0., 0., 0.));
   const double epsilon_in = std::max(1.0e-12, Arguments.epsilon_in);
+  const bool has_overrides = CachedData.has_charmm_pair_overrides();
 
   for (size_t j{begin}; j < end; ++j) {
     double temp_epsilon_lg{16. * lg_parameters[j].get_epsilon()},
@@ -413,6 +455,11 @@ void cal_energy_force_opls(const MOL &rec, const MOL &lg,
           c_6{c6(sqrt(temp_sigma_lg * rec_parameters[i].get_sigma()) / d)},
           c_12{square(c_6)},
           temp_par_vdw{temp_vdw * (12. * c_12 * sd - 6. * c_6 * sd)};
+      double v_val = temp_vdw * (c_12 - c_6);
+      if (has_overrides)
+        titan_lj::override_lj_energy_force(CachedData, rec_parameters,
+                                           lg_parameters, i, j, d, v_val,
+                                           temp_par_vdw);
 
       if (Arguments.distance_energy_cutoff > 0. &&
           d > Arguments.distance_energy_cutoff) {
@@ -429,12 +476,12 @@ void cal_energy_force_opls(const MOL &rec, const MOL &lg,
       }
 
       if (CachedData.elec_ener.empty()) {
-        Energy += cache_energy(charge, temp_vdw * (c_12 - c_6));
+        Energy += cache_energy(charge, v_val);
         Force += cache_force(0.1 * temp_elec * dx, 0.1 * temp_elec * dy,
                              0.1 * temp_elec * dz, 0.1 * temp_par_vdw * dx,
                              0.1 * temp_par_vdw * dy, 0.1 * temp_par_vdw * dz);
       } else {
-        CachedData.set_elec_vdw(pos, charge, temp_vdw * (c_12 - c_6));
+        CachedData.set_elec_vdw(pos, charge, v_val);
         CachedData.set_force(pos, 0.1 * temp_elec * dx, 0.1 * temp_elec * dy,
                              0.1 * temp_elec * dz, 0.1 * temp_par_vdw * dx,
                              0.1 * temp_par_vdw * dy, 0.1 * temp_par_vdw * dz);
@@ -452,6 +499,11 @@ void cal_energy_force_gromos(
     size_t num_snap, const arguments &Arguments,
     const Multi_MOL_parameters & rec_parameters,
     const Multi_MOL_parameters & lg_parameters) {
+  if (titan_nb::topology_energy_required(CachedData, Arguments)) {
+    titan_nb::calculate(rec, lg, info_rec, info_lg, CachedData, begin, end,
+                        Energy, &Force, Arguments);
+    return;
+  }
   Energy.set_energy(0., 0.);
   Force.set_force(force(0., 0., 0.), force(0., 0., 0.));
   const double epsilon_in = std::max(1.0e-12, Arguments.epsilon_in);
@@ -483,8 +535,8 @@ void cal_energy_force_gromos(
       }
       double sd{1. / square(d)}, temp_elec{sd * charge / d}, c_6{c6(d)},
           c_12{square(c_6)};
-      double epsilon{sqrt(rec_parameters[i].get_epsilon() * temp_epsilon_lg)},
-          sigma{sqrt(rec_parameters[i].get_sigma() * temp_sigma_lg)};
+      double sigma{}, epsilon{};
+      gromos::pair_params(CachedData,rec_parameters,lg_parameters,i,j,sigma,epsilon);
       double temp_vdw{12. * sd * epsilon / c_12 - 6. * sd * sigma / c_6};
 
       if (Arguments.distance_energy_cutoff > 0. &&
@@ -519,6 +571,11 @@ void cal_energy_force_martini(const MOL &rec, const MOL &lg,
                               const arguments &Arguments,
                               const Multi_MOL_parameters &rec_parameters,
                               const Multi_MOL_parameters &lg_parameters) {
+  if (titan_nb::topology_energy_required(CachedData, Arguments)) {
+    titan_nb::calculate(rec, lg, info_rec, info_lg, CachedData, begin, end,
+                        Energy, &Force, Arguments);
+    return;
+  }
   Energy.set_energy(0., 0.);
   Force.set_force(force(0., 0., 0.), force(0., 0., 0.));
   const auto elec_cfg = martini::electrostatic_config(Arguments);

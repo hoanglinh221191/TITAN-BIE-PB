@@ -69,10 +69,16 @@
 #include "functions.h"
 #include "cli/option_validation.h"
 #include "titan_ui.h"
+#include <algorithm>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
+#include <thread>
 
 using namespace std;
+
+static int run_engine(arguments &Arguments) { return engine(Arguments); }
+
 int main(int argc, char **argv) {
   try {
     arguments Arguments{};
@@ -82,20 +88,29 @@ int main(int argc, char **argv) {
         return 0;
       if (parse_status != titan_cli::kParseSuccess)
         return parse_status;
-      return engine(Arguments);
+      return run_engine(Arguments);
     } else {
       const int parse_status = Arguments.parse_arg_file();
       if (parse_status == titan_cli::kParseSuccess)
-        return engine(Arguments);
+        return run_engine(Arguments);
       if (parse_status == titan_cli::kHandledAndExit)
         return 0;
       if (parse_status != titan_cli::kNoArgumentFile)
         return parse_status;
       Arguments.parse_arguments_interactive(argc);
-      return engine(Arguments);
+      return run_engine(Arguments);
     }
   } catch (const std::exception &e) {
-    std::cerr << "Exception caught in main: " << e.what() << std::endl;
+    const std::string &option = titan_cli::active_option_token();
+    if (!option.empty()) {
+      // A std::sto* failure while reading an option value reports only the
+      // function name, which is useless on a long command line.
+      std::cerr << "Exception caught in main while handling '" << option
+                << "': " << e.what()
+                << "\n  Check the value supplied for that option." << std::endl;
+    } else {
+      std::cerr << "Exception caught in main: " << e.what() << std::endl;
+    }
     return 1;
   } catch (...) {
     std::cerr << "Unknown exception caught in main!" << std::endl;

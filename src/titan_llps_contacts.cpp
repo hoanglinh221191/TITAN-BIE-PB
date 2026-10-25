@@ -67,27 +67,9 @@ std::pair<int, int> TitanLLPS::unpack_pair(uint64_t key) {
 
 float TitanLLPS::pbc_dist2(float dx, float dy, float dz, float bx, float by,
                            float bz) {
-  if (bx > 0) {
-    const float half = bx * 0.5f;
-    if (dx > half)
-      dx -= bx;
-    else if (dx < -half)
-      dx += bx;
-  }
-  if (by > 0) {
-    const float half = by * 0.5f;
-    if (dy > half)
-      dy -= by;
-    else if (dy < -half)
-      dy += by;
-  }
-  if (bz > 0) {
-    const float half = bz * 0.5f;
-    if (dz > half)
-      dz -= bz;
-    else if (dz < -half)
-      dz += bz;
-  }
+  if (bx > 0) dx -= bx * std::round(dx / bx);
+  if (by > 0) dy -= by * std::round(dy / by);
+  if (bz > 0) dz -= bz * std::round(dz / bz);
   return dx * dx + dy * dy + dz * dz;
 }
 
@@ -131,6 +113,7 @@ void TitanLLPS::build_contacts(
     sticker_pair_keys->clear();
   if (protein_chain_pair_keys)
     protein_chain_pair_keys->clear();
+  detailed_pp_frame_keys_buf_.clear();
   const int n_atoms = static_cast<int>(pos_nm.size()) / 3;
 
   float Lx = bx;
@@ -139,7 +122,8 @@ void TitanLLPS::build_contacts(
   float shift_x = 0.0f;
   float shift_y = 0.0f;
   float shift_z = 0.0f;
-  const bool periodic = (bx > 0.0f && by > 0.0f && bz > 0.0f);
+  const bool periodic = cell_.metric.has_value() || (bx > 0.0f && by > 0.0f && bz > 0.0f);
+  if(cell_.metric) {Lx=cell_.heights[0];Ly=cell_.heights[1];Lz=cell_.heights[2];}
   if (!periodic) {
     float xmin = std::numeric_limits<float>::max();
     float ymin = std::numeric_limits<float>::max();
@@ -181,6 +165,7 @@ void TitanLLPS::build_contacts(
     x = static_cast<double>(pos_nm[3 * atom + 0]);
     y = static_cast<double>(pos_nm[3 * atom + 1]);
     z = static_cast<double>(pos_nm[3 * atom + 2]);
+    cell_.grid_coordinate(x,y,z);
   };
 
   ++cur_gen_;
@@ -192,10 +177,10 @@ void TitanLLPS::build_contacts(
         const int b = static_cast<int>(rhs);
         const int mi = atom_macro_[lhs];
         const int mj = atom_macro_[rhs];
-        if (mi < 0 || mj < 0 || mi == mj)
+        if (mi < 0 || mj < 0)
           return;
 
-        const float d2 = pbc_dist2(
+        const double d2 = frame_dist2(
             pos_nm[3 * a + 0] - pos_nm[3 * b + 0],
             pos_nm[3 * a + 1] - pos_nm[3 * b + 1],
             pos_nm[3 * a + 2] - pos_nm[3 * b + 2], periodic ? bx : 0.0f,
@@ -203,11 +188,13 @@ void TitanLLPS::build_contacts(
         if (d2 >= r_cut2_)
           return;
 
-        const int key = std::min(mi, mj) * n_macro_ + std::max(mi, mj);
-        if (seen_gen_[static_cast<std::size_t>(key)] != cur_gen_) {
-          seen_gen_[static_cast<std::size_t>(key)] = cur_gen_;
-          macro_contact_keys.push_back(
-              pack_ordered_pair(std::min(mi, mj), std::max(mi, mj)));
+        if (mi != mj) {
+          const int key = std::min(mi, mj) * n_macro_ + std::max(mi, mj);
+          if (seen_gen_[static_cast<std::size_t>(key)] != cur_gen_) {
+            seen_gen_[static_cast<std::size_t>(key)] = cur_gen_;
+            macro_contact_keys.push_back(
+                pack_ordered_pair(std::min(mi, mj), std::max(mi, mj)));
+          }
         }
 
         if (lhs >= sticker_local_idx_.size() || rhs >= sticker_local_idx_.size())
@@ -221,7 +208,23 @@ void TitanLLPS::build_contacts(
             (a < static_cast<int>(atom_chain_.size())) ? atom_chain_[a] : -1;
         const int chain_j =
             (b < static_cast<int>(atom_chain_.size())) ? atom_chain_[b] : -1;
-        if (chain_i < 0 || chain_j < 0 || chain_i == chain_j)
+        if (chain_i < 0 || chain_j < 0)
+          return;
+
+        if (contacts_on_ &&
+            lhs < protein_atom_contact_node_.size() &&
+            rhs < protein_atom_contact_node_.size()) {
+          const int residue_i = protein_atom_contact_node_[lhs];
+          const int residue_j = protein_atom_contact_node_[rhs];
+          if (residue_i >= 0 && residue_j >= 0 && residue_i != residue_j) {
+            detailed_pp_frame_keys_buf_.push_back(
+                pack_ordered_pair(residue_i, residue_j));
+          }
+        }
+
+        // Preserve legacy map/lifetime semantics: only contacts between
+        // distinct dimer-sized macro-nodes contribute to those outputs.
+        if (mi == mj || chain_i == chain_j)
           return;
 
         if (sticker_pair_keys)
@@ -260,13 +263,25 @@ void TitanLLPS::build_contacts(
                     protein_chain_pair_keys->end()),
         protein_chain_pair_keys->end());
   }
+  if (contacts_on_ && !detailed_pp_frame_keys_buf_.empty()) {
+    std::sort(detailed_pp_frame_keys_buf_.begin(),
+              detailed_pp_frame_keys_buf_.end());
+    detailed_pp_frame_keys_buf_.erase(
+        std::unique(detailed_pp_frame_keys_buf_.begin(),
+                    detailed_pp_frame_keys_buf_.end()),
+        detailed_pp_frame_keys_buf_.end());
+    for (const uint64_t key : detailed_pp_frame_keys_buf_)
+      ++detailed_contact_frame_counts_[key];
+  }
 }
 
 void TitanLLPS::build_protein_rna_contacts(
     const std::vector<float> &pos_nm, const float *rna_nm_data, int n_rna,
     float bx, float by, float bz, std::vector<uint64_t> &protein_rna_pairs) {
   protein_rna_pairs.clear();
-  if (!dynamics_enabled_ || prna_cutoff_nm_ <= 0.0f || !rna_nm_data ||
+  detailed_prna_frame_keys_buf_.clear();
+  if ((!dynamics_enabled_ && !contacts_on_) || prna_cutoff_nm_ <= 0.0f ||
+      !rna_nm_data ||
       n_rna <= 0 || sticker_atom_idx_.empty() || rna_atom_chain_.empty())
     return;
 
@@ -281,7 +296,8 @@ void TitanLLPS::build_protein_rna_contacts(
   float shift_x = 0.0f;
   float shift_y = 0.0f;
   float shift_z = 0.0f;
-  const bool periodic = (bx > 0.0f && by > 0.0f && bz > 0.0f);
+  const bool periodic = cell_.metric.has_value() || (bx > 0.0f && by > 0.0f && bz > 0.0f);
+  if(cell_.metric) {Lx=cell_.heights[0];Ly=cell_.heights[1];Lz=cell_.heights[2];}
   if (!periodic) {
     float xmin = std::numeric_limits<float>::max();
     float ymin = std::numeric_limits<float>::max();
@@ -333,12 +349,14 @@ void TitanLLPS::build_protein_rna_contacts(
       x = static_cast<double>(pos_nm[3 * atom + 0]);
       y = static_cast<double>(pos_nm[3 * atom + 1]);
       z = static_cast<double>(pos_nm[3 * atom + 2]);
+      cell_.grid_coordinate(x,y,z);
       return;
     }
     const int rna_atom = static_cast<int>(idx - sticker_count);
     x = static_cast<double>(rna_nm_data[3 * rna_atom + 0]);
     y = static_cast<double>(rna_nm_data[3 * rna_atom + 1]);
     z = static_cast<double>(rna_nm_data[3 * rna_atom + 2]);
+    cell_.grid_coordinate(x,y,z);
   };
 
   prna_grid_.for_each_pair(
@@ -365,7 +383,7 @@ void TitanLLPS::build_protein_rna_contacts(
         const float rx = rna_nm_data[3 * rna_atom + 0];
         const float ry = rna_nm_data[3 * rna_atom + 1];
         const float rz = rna_nm_data[3 * rna_atom + 2];
-        const float d2 = pbc_dist2(px - rx, py - ry, pz - rz,
+        const double d2 = frame_dist2(px - rx, py - ry, pz - rz,
                                    periodic ? bx : 0.0f, periodic ? by : 0.0f,
                                    periodic ? bz : 0.0f);
         if (d2 >= prna_cutoff2_nm_)
@@ -383,51 +401,70 @@ void TitanLLPS::build_protein_rna_contacts(
           return;
         protein_rna_pairs.push_back(
             pack_prna_pair(protein_chain, rna_chain_local));
+
+        if (contacts_on_ &&
+            protein_atom < static_cast<int>(protein_atom_contact_node_.size()) &&
+            rna_atom < static_cast<int>(rna_atom_contact_node_.size())) {
+          const int protein_residue =
+              protein_atom_contact_node_[static_cast<std::size_t>(protein_atom)];
+          const int rna_residue =
+              rna_atom_contact_node_[static_cast<std::size_t>(rna_atom)];
+          if (protein_residue >= 0 && rna_residue >= 0) {
+            detailed_prna_frame_keys_buf_.push_back(
+                pack_ordered_pair(protein_residue, rna_residue));
+          }
+        }
       });
 
   std::sort(protein_rna_pairs.begin(), protein_rna_pairs.end());
   protein_rna_pairs.erase(
       std::unique(protein_rna_pairs.begin(), protein_rna_pairs.end()),
       protein_rna_pairs.end());
+  if (contacts_on_ && !detailed_prna_frame_keys_buf_.empty()) {
+    std::sort(detailed_prna_frame_keys_buf_.begin(),
+              detailed_prna_frame_keys_buf_.end());
+    detailed_prna_frame_keys_buf_.erase(
+        std::unique(detailed_prna_frame_keys_buf_.begin(),
+                    detailed_prna_frame_keys_buf_.end()),
+        detailed_prna_frame_keys_buf_.end());
+    for (const uint64_t key : detailed_prna_frame_keys_buf_)
+      ++detailed_contact_frame_counts_[key];
+  }
 }
 
 float TitanLLPS::compute_gcc_rg(const std::vector<float> &pos_nm, float bx,
                                 float by, float bz,
                                 const std::vector<int> &gcc_macros) const {
-  if (gcc_macros.empty())
-    return 0.0f;
-  const int ref = bb_atom_[gcc_macros.front()];
-  if (ref < 0)
-    return 0.0f;
-  const float rx = pos_nm[3 * ref + 0];
-  const float ry = pos_nm[3 * ref + 1];
-  const float rz = pos_nm[3 * ref + 2];
-  gcc_rg_x_buf_.resize(gcc_macros.size());
-  gcc_rg_y_buf_.resize(gcc_macros.size());
-  gcc_rg_z_buf_.resize(gcc_macros.size());
-
-  std::size_t count = 0;
-  for (int macro : gcc_macros) {
-    const int atom = bb_atom_[macro];
-    if (atom < 0)
-      continue;
-    float dx = pos_nm[3 * atom + 0] - rx;
-    float dy = pos_nm[3 * atom + 1] - ry;
-    float dz = pos_nm[3 * atom + 2] - rz;
-    if (bx > 0)
-      dx -= bx * std::round(dx / bx);
-    if (by > 0)
-      dy -= by * std::round(dy / by);
-    if (bz > 0)
-      dz -= bz * std::round(dz / bz);
-    gcc_rg_x_buf_[count] = static_cast<double>(rx + dx);
-    gcc_rg_y_buf_[count] = static_cast<double>(ry + dy);
-    gcc_rg_z_buf_[count] = static_cast<double>(rz + dz);
-    ++count;
+  (void)bx; (void)by; (void)bz;
+  using titan_llps_geometry::Point;
+  gcc_center_.reset();
+  const auto nan=std::numeric_limits<float>::quiet_NaN();
+  if(gcc_macros.empty()) return nan;
+  std::vector<Point> lifted(n_macro_);
+  std::vector<bool> visited(n_macro_,false),member(n_macro_,false);
+  std::vector<std::vector<int>> edges(n_macro_);
+  for(int m:gcc_macros) {if(bb_atom_[m]<0) return nan;member[m]=true;}
+  for(auto key:macro_contact_keys_buf_) {
+    auto [a,b]=unpack_pair(key);
+    if(member[a] && member[b]) {edges[a].push_back(b);edges[b].push_back(a);}
   }
-  if (count == 0)
-    return 0.0f;
-  const titan_gyration::PointStats stats = titan_gyration::build_point_stats_soa(
-      gcc_rg_x_buf_.data(), gcc_rg_y_buf_.data(), gcc_rg_z_buf_.data(), count);
-  return static_cast<float>(titan_gyration::compute_rg_from_stats(stats));
+  const int root=gcc_macros.front(), atom=bb_atom_[root];
+  lifted[root]={pos_nm[3*atom],pos_nm[3*atom+1],pos_nm[3*atom+2]};
+  std::vector<int> queue{root};visited[root]=true;
+  for(std::size_t q=0;q<queue.size();++q) {
+    int a=queue[q];
+    for(int b:edges[a]) {
+      Point d{};for(int k=0;k<3;++k)d[k]=double(pos_nm[3*bb_atom_[b]+k])-pos_nm[3*bb_atom_[a]+k];
+      bool ambiguous=false;d=cell_.delta(d,&ambiguous);
+      if(ambiguous) return nan;
+      Point candidate{};for(int k=0;k<3;++k) candidate[k]=lifted[a][k]+d[k];
+      if(!visited[b]) {lifted[b]=candidate;visited[b]=true;queue.push_back(b);}
+      else for(int k=0;k<3;++k) if(std::abs(lifted[b][k]-candidate[k])>1e-5) return nan; // winding representative graph
+    }
+  }
+  if(queue.size()!=gcc_macros.size()) return nan;
+  Point center{};for(int m:gcc_macros)for(int k=0;k<3;++k)center[k]+=lifted[m][k]/gcc_macros.size();
+  double r2=0;for(int m:gcc_macros)for(int k=0;k<3;++k)r2+=std::pow(lifted[m][k]-center[k],2);
+  gcc_center_=center;
+  return std::sqrt(r2/gcc_macros.size());
 }

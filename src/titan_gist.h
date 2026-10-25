@@ -1,10 +1,15 @@
 // titan_gist.h — Grid Inhomogeneous Solvation Theory (GIST) Water Analysis
-// Computes per-voxel density, enthalpy (E_sw), and entropy for solvation
-// thermodynamics. Outputs OpenDX maps for VMD/PyMOL visualization.
+// Computes density and cutoff solute-water interaction diagnostics.
+// Adds unreferenced cutoff E_ww and first-order SO(3) NN orientational entropy.
+// Bulk-referenced enthalpy and full hydration free energy remain unavailable.
 #ifndef TITAN_GIST_H
 #define TITAN_GIST_H
 
 #include "MOL.h"
+#include "titan_exact_periodic_box.h"
+#include "titan_gist_entropy.h"
+#include <unordered_map>
+#include <optional>
 #include "Multi_MOL.h"
 #include "info.h"
 
@@ -18,10 +23,9 @@
 // GistVoxel — one cell of the 3D grid (cache-line aligned)
 // ============================================================================
 struct alignas(64) GistVoxel {
-  uint32_t count{0};       // water visit counter (serial per-frame)
-  uint32_t pad_{0};        // align doubles to 8-byte boundary
+  uint64_t count{0};       // water visits over all processed frames
   double energy_sw{0.0};   // Σ E_sw (kJ/mol)
-  double energy_ww{0.0};   // Σ E_ww (kJ/mol)  [Phase 2]
+  double energy_ww{0.0};   // half the pair energy allocated to each water
   double dipole_x{0.0};    // Σ d̂_x (unit vector)
   double dipole_y{0.0};    // Σ d̂_y
   double dipole_z{0.0};    // Σ d̂_z
@@ -56,6 +60,7 @@ public:
                       int min_count) const;
 
   int n_voxels() const { return nx_ * ny_ * nz_; }
+  std::size_t processed_frames() const { return processed_frames_; }
 
   // BUG2 fix: set DCCM's raw Cα indices for TICA centroid
   void set_tica_ca_indices(const std::vector<int> &dccm_ca_raw_indices) {
@@ -75,6 +80,7 @@ private:
   // Water model constants
   double q_O_{0}, q_H_{0}, sigma_O_{0}, eps_O_{0};
   double rho_bulk_{0}, E_ww_bulk_{0}, temperature_{300.0};
+  std::string water_model_;
 
   // Coulomb/LJ cutoff
   double cut2_{81.0};  // cutoff² (default 9² = 81 Å²)
@@ -106,6 +112,16 @@ private:
 
   // Per-frame scratch buffer
   std::vector<std::array<double, 3>> wat_buf_;
+  std::optional<TitanExactPeriodicBox> periodic_box_;
+  Eigen::Matrix3d current_rotation_{Eigen::Matrix3d::Identity()};
+  std::size_t processed_frames_{0};
+  std::unordered_map<int,std::vector<titan_gist::Quaternion>> orientations_;
+  std::size_t orientation_samples_{0};
+  // Full sampling, no reservoir/thinning hidden inside the estimator.
+  static constexpr std::size_t max_orientation_samples_=4'000'000;
+
+  std::vector<double> water_water_energies(const std::vector<int>& voxels,
+                                         bool use_grid=true) const;
 
   // Helpers
   inline int voxel_idx(double x, double y, double z) const noexcept;

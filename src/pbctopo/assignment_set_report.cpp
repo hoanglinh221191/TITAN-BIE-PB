@@ -32,12 +32,15 @@ std::string observation_class(const PbctopoCutCandidate &candidate,
                                bool selected, bool equivalent_set_complete,
                                bool credible_alternative_set_complete,
                                std::size_t spatial_lift_ambiguities,
-                               std::size_t spatial_lift_cycle_residuals) {
+                               std::size_t spatial_lift_cycle_residuals,
+                               PbctopoFrameStatus frame_status) {
   if (!candidate.hard_feasibility.certified())
     return "not_hard_feasible";
   if (!identifiability.identified)
     return "weak_observation";
-  if (selected && candidate.search_equivalence_known &&
+  if ((frame_status == PbctopoFrameStatus::Certified ||
+       frame_status == PbctopoFrameStatus::Rescued) &&
+      selected && candidate.search_equivalence_known &&
       candidate.equivalent_to_search_best && equivalent_set_complete &&
       credible_alternative_set_complete &&
       identifiability.objective_uniqueness_known &&
@@ -45,11 +48,11 @@ std::string observation_class(const PbctopoCutCandidate &candidate,
       identifiability.evidence_uniqueness_known &&
       identifiability.evidence_unique_within_search_domain &&
       candidate.search_domain_audit_known &&
-       candidate.search_domain_evidence_complete &&
-       candidate.component_search_shell_radius > 0 &&
-       !candidate.selected_assignment_touches_shell_boundary &&
-       spatial_lift_ambiguities == 0 &&
-       spatial_lift_cycle_residuals == 0) {
+      candidate.search_domain_evidence_complete &&
+      candidate.component_search_shell_radius > 0 &&
+      !candidate.selected_assignment_touches_shell_boundary &&
+      spatial_lift_ambiguities == 0 &&
+      spatial_lift_cycle_residuals == 0) {
     if (candidate.domain_completeness ==
         PbctopoDomainCompleteness::BoundedExhaustive)
       return "strong_bounded_anchor";
@@ -101,7 +104,120 @@ bool equivalent_under_order(const PbctopoCutCandidate &lhs,
          !better_candidate(rhs, lhs);
 }
 
+std::string rejection_reasons(const PbctopoHardFeasibility &audit) {
+  std::string result;
+  const auto add = [&](bool failed, const char *reason) {
+    if (!failed)
+      return;
+    if (!result.empty())
+      result += ';';
+    result += reason;
+  };
+  add(!audit.evaluated, "hard_certificate_not_evaluated");
+  add(!audit.assignment_available, "assignment_unavailable");
+  add(audit.topology_edges_checked < audit.topology_edges_available,
+      "topology_edge_audit_incomplete");
+  add(audit.metadata_edges_checked < audit.metadata_edges_available,
+      "metadata_edge_audit_incomplete");
+  add(audit.hard_edge_residuals != 0, "hard_edge_residual");
+  add(audit.atom_image_residuals != 0, "atom_image_residual");
+  add(audit.assignment_point_residuals != 0, "assignment_point_residual");
+  add(audit.topology_cycle_residuals != 0, "topology_cycle_residual");
+  add(audit.unsupported_winding_rank != 0, "unsupported_winding");
+  add(!audit.steric_audit_available, "steric_audit_unavailable");
+  add(!audit.steric_decision_complete, "steric_decision_incomplete");
+  add(!audit.steric_pair_enumeration_complete,
+      "steric_pair_enumeration_incomplete");
+  add(!audit.steric_scan_complete, "steric_scan_incomplete");
+  add(audit.hard_clashes != 0, "hard_steric_clash");
+  add(audit.metadata_internal_clashes != 0, "metadata_internal_clash");
+  add(audit.required_contacts_lost != 0, "required_contact_lost");
+  return result;
+}
+
 } // namespace
+
+void write_pbctopo_rejected_assignment_header(std::ostream &out) {
+  out << "schema_version,producer_version,record_scope,record_source,"
+         "provider_status,coordinate_unit,time_unit,topology_epoch_id,"
+         "frame,time_ps,rejection_record_index,selected_framewise,hard_feasible,"
+         "layout_signature,assignment_signature,component_count,"
+         "global_gauge_x,global_gauge_y,global_gauge_z,component_assignment,"
+         "normalized_gram_g00,normalized_gram_g01,normalized_gram_g02,"
+         "normalized_gram_g11,normalized_gram_g12,normalized_gram_g22,"
+         "rejection_reasons,hard_certificate_evaluated,assignment_available,"
+         "topology_edges_available,topology_edges_checked,"
+         "metadata_edges_available,metadata_edges_checked,hard_edge_residuals,"
+         "atom_image_residuals,assignment_point_residuals,"
+         "topology_cycle_residuals,unsupported_winding_rank,"
+         "steric_audit_available,steric_decision_complete,"
+         "steric_pair_enumeration_complete,steric_scan_complete,"
+         "steric_termination_reason,steric_pairs_checked,hard_clashes,"
+         "metadata_internal_clashes,required_contacts_checked,"
+         "required_contacts_lost,min_steric_margin_A\n";
+}
+
+void write_pbctopo_rejected_assignment_rows(
+    std::ostream &out, std::size_t frame, double time_ps,
+    std::span<const PbctopoCutCandidate> evaluated_candidates,
+    const std::array<double, 6> &normalized_gram,
+    std::uint64_t topology_epoch_id) {
+  std::vector<const PbctopoCutCandidate *> rejected;
+  for (const auto &candidate : evaluated_candidates) {
+    if (!candidate.valid || !candidate.assignment.valid ||
+        candidate.hard_feasibility.certified())
+      continue;
+    const bool certified_elsewhere = std::any_of(
+        evaluated_candidates.begin(), evaluated_candidates.end(),
+        [&](const auto &other) {
+          return other.valid && other.assignment.valid &&
+                 other.hard_feasibility.certified() &&
+                 same_pbctopo_image_assignment(candidate.assignment,
+                                                other.assignment);
+        });
+    const bool already = std::any_of(
+        rejected.begin(), rejected.end(), [&](const auto *other) {
+          return same_pbctopo_image_assignment(candidate.assignment,
+                                                other->assignment);
+        });
+    if (!certified_elsewhere && !already)
+      rejected.push_back(&candidate);
+  }
+  for (std::size_t idx = 0; idx < rejected.size(); ++idx) {
+    const auto &candidate = *rejected[idx];
+    const auto &assignment = candidate.assignment;
+    const auto &audit = candidate.hard_feasibility;
+    out << "1," << vibe_observation_producer_version()
+        << ",provider_rejected_audit_ledger,hard_certificate_evaluation,"
+           "provider_rejected,"
+        << VIBE_OBSERVATION_COORDINATE_UNIT << ','
+        << VIBE_OBSERVATION_TIME_UNIT << ',' << topology_epoch_id << ','
+        << frame << ',' << format_double(time_ps) << ',' << idx + 1
+        << ",0,0," << assignment.layout_signature << ','
+        << assignment.signature << ',' << assignment.component_offsets.size()
+        << ',' << assignment.global_gauge.x << ',' << assignment.global_gauge.y
+        << ',' << assignment.global_gauge.z << ','
+        << serialize_component_assignment(assignment);
+    for (double value : normalized_gram)
+      out << ',' << format_double(value);
+    out << ',' << rejection_reasons(audit) << ',' << (audit.evaluated ? 1 : 0)
+        << ',' << (audit.assignment_available ? 1 : 0)
+        << ',' << audit.topology_edges_available << ',' << audit.topology_edges_checked
+        << ',' << audit.metadata_edges_available << ',' << audit.metadata_edges_checked
+        << ',' << audit.hard_edge_residuals << ',' << audit.atom_image_residuals
+        << ',' << audit.assignment_point_residuals << ',' << audit.topology_cycle_residuals
+        << ',' << audit.unsupported_winding_rank
+        << ',' << (audit.steric_audit_available ? 1 : 0)
+        << ',' << (audit.steric_decision_complete ? 1 : 0)
+        << ',' << (audit.steric_pair_enumeration_complete ? 1 : 0)
+        << ',' << (audit.steric_scan_complete ? 1 : 0)
+        << ',' << static_cast<unsigned>(audit.steric_termination_reason)
+        << ',' << audit.steric_pairs_checked << ',' << audit.hard_clashes
+        << ',' << audit.metadata_internal_clashes << ',' << audit.required_contacts_checked
+        << ',' << audit.required_contacts_lost << ','
+        << format_double(audit.min_steric_margin_A) << '\n';
+  }
+}
 
 void write_pbctopo_assignment_set_header(std::ostream &out) {
   out << "schema_version,producer_version,coordinate_unit,time_unit,"
@@ -157,23 +273,54 @@ void write_pbctopo_assignment_set_rows(
     std::uint64_t topology_epoch_id,
     std::size_t soft_score_valid_assignments_within_domain,
     std::size_t spatial_lift_ambiguities,
-    std::size_t spatial_lift_cycle_residuals) {
+    std::size_t spatial_lift_cycle_residuals,
+    PbctopoFrameStatus frame_status) {
+  // Keep the retained_certified_band contract: rejected evaluations belong
+  // only in the separate audit ledger and do not contribute to band counts.
+  // Their presence still conservatively lowers domain evidence completeness.
   std::vector<const PbctopoCutCandidate *> ordered;
+  std::vector<const PbctopoCutCandidate *> rejected;
   ordered.reserve(certified_candidates.size());
   for (const auto &candidate : certified_candidates) {
-    if (candidate.valid && candidate.assignment.valid &&
-        candidate.hard_feasibility.certified()) {
+    if (!candidate.valid || !candidate.assignment.valid)
+      continue;
+    if (candidate.hard_feasibility.certified())
       ordered.push_back(&candidate);
-    }
+    else
+      rejected.push_back(&candidate);
   }
   if (better_candidate != nullptr) {
     std::stable_sort(ordered.begin(), ordered.end(),
                      [better_candidate](const auto *lhs, const auto *rhs) {
                        return better_candidate(*lhs, *rhs);
                      });
+    std::stable_sort(rejected.begin(), rejected.end(),
+                     [better_candidate](const auto *lhs, const auto *rhs) {
+                       return better_candidate(*lhs, *rhs);
+                     });
   }
   if (ordered.empty())
     return;
+  // A rejected evaluation of an assignment that is also certified (a warm
+  // start that failed point consistency, say) is not a missing image; only
+  // assignments absent from the certified list are exported as rejected.
+  std::vector<const PbctopoCutCandidate *> distinct_rejected;
+  for (const auto *candidate : rejected) {
+    const bool certified_elsewhere = std::any_of(
+        ordered.begin(), ordered.end(), [&](const auto *other) {
+          return same_pbctopo_image_assignment(other->assignment,
+                                                candidate->assignment);
+        });
+    const bool already = std::any_of(
+        distinct_rejected.begin(), distinct_rejected.end(),
+        [&](const auto *other) {
+          return same_pbctopo_image_assignment(other->assignment,
+                                                candidate->assignment);
+        });
+    if (!certified_elsewhere && !already)
+      distinct_rejected.push_back(candidate);
+  }
+  const bool exports_rejected = !distinct_rejected.empty();
 
   const PbctopoCutCandidate &pool_best = *ordered.front();
   std::size_t search_equivalent_exported = 0;
@@ -202,8 +349,11 @@ void write_pbctopo_assignment_set_rows(
           identifiability.feasible_assignments_within_domain;
 
   for (std::size_t rank = 0; rank < ordered.size(); ++rank) {
-    const PbctopoCutCandidate &candidate = *ordered[rank];
+    PbctopoCutCandidate candidate = *ordered[rank];
+    if (exports_rejected)
+      candidate.search_domain_evidence_complete = false;
     const bool selected =
+        candidate.hard_feasibility.certified() &&
         framewise_selected != nullptr && framewise_selected->assignment.valid &&
         same_pbctopo_image_assignment(candidate.assignment,
                                        framewise_selected->assignment);
@@ -228,9 +378,9 @@ void write_pbctopo_assignment_set_rows(
         << ",retained_certified_band,"
         << observation_class(candidate, identifiability, selected,
                              equivalent_set_complete,
-                             credible_alternative_set_complete,
-                             spatial_lift_ambiguities,
-                             spatial_lift_cycle_residuals)
+                              credible_alternative_set_complete,
+                              spatial_lift_ambiguities,
+                              spatial_lift_cycle_residuals, frame_status)
         << ','
         << (candidate.search_equivalence_known ? 1 : 0) << ',';
     if (candidate.search_equivalence_known) {
@@ -261,7 +411,10 @@ void write_pbctopo_assignment_set_rows(
         << (credible_alternative_set_complete ? 1 : 0) << ','
         << candidate.component_search_shell_radius << ','
         << (candidate.search_domain_audit_known ? 1 : 0) << ','
-        << (candidate.search_domain_evidence_complete ? 1 : 0) << ',';
+        << ((candidate.search_domain_evidence_complete && !exports_rejected)
+                ? 1
+                : 0)
+        << ',';
     if (candidate.search_domain_audit_known)
       out << (candidate.selected_assignment_touches_shell_boundary ? 1 : 0);
     else

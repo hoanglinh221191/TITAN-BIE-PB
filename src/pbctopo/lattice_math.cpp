@@ -279,6 +279,15 @@ PbctopoLatticeQueryAudit pbctopo_lattice_query_audit() noexcept {
   return g_lattice_query_audit;
 }
 
+void pbctopo_add_lattice_query_audit(
+    const PbctopoLatticeQueryAudit &delta) noexcept {
+  g_lattice_query_audit.queries += delta.queries;
+  g_lattice_query_audit.failures += delta.failures;
+  g_lattice_query_audit.ambiguous += delta.ambiguous;
+  g_lattice_query_audit.enumeration_budget_failures +=
+      delta.enumeration_budget_failures;
+}
+
 PbctopoLatticeQueryAudit pbctopo_lattice_query_audit_delta(
     const PbctopoLatticeQueryAudit &before,
     const PbctopoLatticeQueryAudit &after) noexcept {
@@ -597,6 +606,39 @@ void PbctopoLatticeMetric::initialize_properties() {
       }
     }
   }
+
+  reduced_cholesky_valid_ =
+      cholesky_upper_from_rows(reduced_matrix_, reduced_cholesky_upper_);
+  // Every nonzero lattice vector sum_i n_i r_i has some n_i != 0 and so a
+  // component |n_i| h_i >= h_i along the normal of the face spanned by the
+  // other two rows, where h_i = |det| / |r_j x r_k| is the cell height.  A
+  // vector shorter than half the smallest height is therefore the unique
+  // minimum image of its class, and its reduced fractional coordinates lie
+  // inside (-1/2, 1/2), so rounding finds it.
+  unique_minimum_d2_bound_ = 0.0;
+  const double reduced_det = determinant3(reduced_matrix_);
+  double smallest_height = std::numeric_limits<double>::infinity();
+  for (int axis = 0; axis < 3; ++axis) {
+    const int j = (axis + 1) % 3;
+    const int k = (axis + 2) % 3;
+    const double cx = reduced_matrix_[j][1] * reduced_matrix_[k][2] -
+                      reduced_matrix_[j][2] * reduced_matrix_[k][1];
+    const double cy = reduced_matrix_[j][2] * reduced_matrix_[k][0] -
+                      reduced_matrix_[j][0] * reduced_matrix_[k][2];
+    const double cz = reduced_matrix_[j][0] * reduced_matrix_[k][1] -
+                      reduced_matrix_[j][1] * reduced_matrix_[k][0];
+    const double face = std::sqrt(cx * cx + cy * cy + cz * cz);
+    if (!std::isfinite(face) || face <= 0.0) {
+      smallest_height = 0.0;
+      break;
+    }
+    smallest_height = std::min(smallest_height, std::fabs(reduced_det) / face);
+  }
+  if (reduced_cholesky_valid_ && std::isfinite(smallest_height) &&
+      smallest_height > 0.0) {
+    unique_minimum_d2_bound_ =
+        0.25 * smallest_height * smallest_height * (1.0 - 1.0e-6);
+  }
 }
 
 std::array<double, 3>
@@ -722,6 +764,18 @@ PbctopoNearestImage PbctopoLatticeMetric::nearest_image_scaled(
     return record_lattice_query(best);
   }
 
+  // A seed shorter than half the smallest reduced-cell height is the unique
+  // minimum image (see unique_minimum_d2_bound_): no other lattice point ties
+  // or beats it, so the neighbour scan and the enumeration below would both
+  // return exactly this, with one equivalent minimum.  Bonds and contacts
+  // end here.  A half-cell tie is at least half a height long and never takes
+  // this path; the bound is 0 when the Cholesky factor is missing.
+  if (best.d2 < unique_minimum_d2_bound_) {
+    best.equivalent_minima = 1;
+    best.ambiguous = false;
+    return record_lattice_query(best);
+  }
+
   bool half_cell_tie = false;
   for (int axis = 0; axis < 3; ++axis) {
     const double residual =
@@ -746,13 +800,13 @@ PbctopoNearestImage PbctopoLatticeMetric::nearest_image_scaled(
       for (int dz = -1; dz <= 1; ++dz)
         consider(seed[0] + dx, seed[1] + dy, seed[2] + dz);
 
-  double upper[3][3]{};
-  if (!cholesky_upper_from_rows(reduced_matrix_, upper)) {
+  if (!reduced_cholesky_valid_) {
     best.valid = false;
     best.pathological_lattice = true;
     best.lattice_status = PbctopoLatticeStatus::SingularMatrix;
     return record_lattice_query(best);
   }
+  const auto &upper = reduced_cholesky_upper_;
 
   best.equivalent_minima = 0;
   LatticeInt selected[3]{};

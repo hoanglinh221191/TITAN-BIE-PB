@@ -5,6 +5,7 @@
 #include "functions.h"
 #include "groups.h"
 #include "info.h"
+#include "titan_qha_model.h"
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 #include <Eigen/SVD>
@@ -19,14 +20,8 @@
 using namespace std;
 
 // Analytical Gaussian Entropy formulation based on Quantum Harmonic Oscillator
-double gaussian_entropy(const std::vector<double> &valid_evals) {
-  double entropy = 0.0;
-  for (double lamda_i : valid_evals) {
-    double alpha = 1.05 * 10e-13 / sqrt(13.8064 * 300.0 * fabs(lamda_i));
-    entropy += alpha / (exp(alpha) - 1.0) - log(1.0 - exp(-alpha));
-  }
-  // Returns TS in kJ/mol.
-  return 1.38064 * 0.3 * 6.02 * entropy;
+double gaussian_entropy(const std::vector<double> &valid_evals, double temperature) {
+  return titan_qha_ts_kj_mol(valid_evals, temperature);
 }
 
 // Kabsch algorithm to find optimal rotation matrix aligning Q to P.
@@ -124,7 +119,7 @@ double imp_cal_entropy(groups_cal &groups, const Multi_MOL &mol1,
 
   Eigen::MatrixXd X(3 * N_filtered, M_frames);
 
-  size_t nt = std::min(static_cast<size_t>(Arguments.nt), M_frames);
+  size_t nt = std::min(std::max<size_t>(1, Arguments.nt), M_frames);
   std::vector<std::thread> threads(nt);
   size_t chunk_size = M_frames / nt;
 
@@ -163,6 +158,8 @@ double imp_cal_entropy(groups_cal &groups, const Multi_MOL &mol1,
   Eigen::MatrixXd cov = (X * X.transpose()) / static_cast<double>(M_frames - 1);
 
   Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(cov);
+  if (solver.info() != Eigen::Success)
+    throw std::runtime_error("QHA covariance eigensolver did not converge");
   Eigen::VectorXd evals = solver.eigenvalues();
 
   std::string base_dir =
@@ -171,7 +168,8 @@ double imp_cal_entropy(groups_cal &groups, const Multi_MOL &mol1,
       base_dir + "/qha_eigenvalues_" + groups.group_name(group_index) + ".dat";
 
   std::fstream out_eigen(eigen_filename, std::ios::out);
-  out_eigen << "# Mode_Index \t Eigenvalue(amu*nm^2)\n";
+  out_eigen << "# Mode_Index \t Eigenvalue(amu*Angstrom^2)\n";
+  out_eigen << "# Temperature_K " << Arguments.qha_temperature << '\n';
 
   int total_modes = evals.size();
   std::vector<double> valid_evals;
@@ -187,7 +185,7 @@ double imp_cal_entropy(groups_cal &groups, const Multi_MOL &mol1,
   }
   out_eigen.close();
 
-  return gaussian_entropy(valid_evals);
+  return gaussian_entropy(valid_evals, Arguments.qha_temperature);
 }
 
 int cal_entropy(const Multi_MOL &mol1, const Multi_MOL &mol2,
@@ -229,14 +227,10 @@ int cal_entropy(const Multi_MOL &mol1, const Multi_MOL &mol2,
                  << "----------------------------------------------------------"
                     "---------\n";
 
-  double max_val = com_entropy > rec_entropy ? com_entropy : rec_entropy;
-  if (max_val < lg_entropy)
-    max_val = lg_entropy;
-
   entropy_result << "Delta Entropy (T*(S_com-S_rec-S_lg)): "
-                 << 2. * max_val - (com_entropy + rec_entropy + lg_entropy)
+                 << com_entropy - rec_entropy - lg_entropy
                  << " kJ/mol = "
-                 << (2. * max_val - (com_entropy + rec_entropy + lg_entropy)) /
+                 << (com_entropy - rec_entropy - lg_entropy) /
                         4.184
                  << " kcal/mol\n";
   entropy_result.close();

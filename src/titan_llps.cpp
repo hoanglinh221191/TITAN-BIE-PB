@@ -17,6 +17,7 @@
 #include <limits>
 #include <numeric>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 
 // ============================================================================
@@ -139,8 +140,16 @@ void TitanLLPS::set_sticker_beads(const std::vector<mol_info> &info,
 
   sticker_atom_idx_.clear();
   result_.sticker_residue_indices.clear();
+  protein_atom_contact_node_.assign(info.size(), -1);
+  rna_atom_contact_node_.clear();
+  contact_residue_nodes_.clear();
+  detailed_contact_frame_counts_.clear();
+  detailed_pp_frame_keys_buf_.clear();
+  detailed_prna_frame_keys_buf_.clear();
   std::unordered_map<int, int> residue_to_local;
   residue_to_local.reserve(info.size());
+  std::unordered_map<uint64_t, int> chain_residue_to_node;
+  chain_residue_to_node.reserve(info.size());
   for (std::size_t i = 0; i < sticker_mask_.size(); ++i) {
     if (!sticker_mask_[i])
       continue;
@@ -152,7 +161,27 @@ void TitanLLPS::set_sticker_beads(const std::vector<mol_info> &info,
     if (inserted)
       result_.sticker_residue_indices.push_back(resnr);
     sticker_local_idx_[i] = it->second;
+
+    const int chain_index =
+        (i < atom_chain_.size()) ? atom_chain_[i] : -1;
+    if (chain_index < 0)
+      continue;
+    const uint64_t residue_key = pack_prna_pair(chain_index, resnr);
+    auto [node_it, node_inserted] = chain_residue_to_node.emplace(
+        residue_key, static_cast<int>(contact_residue_nodes_.size()));
+    if (node_inserted) {
+      ContactResidueMeta meta;
+      meta.species = "protein";
+      meta.chain_index = chain_index;
+      meta.chain_raw_id = static_cast<int>(info[i].get_chainnum());
+      meta.chain_label = info[i].get_chain();
+      meta.residue_index = resnr;
+      meta.residue_name = info[i].get_res_name();
+      contact_residue_nodes_.push_back(std::move(meta));
+    }
+    protein_atom_contact_node_[i] = node_it->second;
   }
+  protein_contact_node_count_ = contact_residue_nodes_.size();
   n_stickers_ = static_cast<int>(result_.sticker_residue_indices.size());
 
   if (contacts_on_ && n_stickers_ > 0) {
@@ -171,8 +200,14 @@ void TitanLLPS::set_sticker_beads(const std::vector<mol_info> &info,
 void TitanLLPS::set_rna_metadata(const std::vector<mol_info> &rna_info) {
   rna_atom_chain_.assign(rna_info.size(), -1);
   rna_atom_residue_.assign(rna_info.size(), -1);
+  rna_atom_contact_node_.assign(rna_info.size(), -1);
   rna_chain_raw_ids_.clear();
   rna_chain_raw_to_local_.clear();
+  contact_residue_nodes_.resize(protein_contact_node_count_);
+  detailed_contact_frame_counts_.clear();
+  detailed_prna_frame_keys_buf_.clear();
+  std::unordered_map<uint64_t, int> chain_residue_to_node;
+  chain_residue_to_node.reserve(rna_info.size());
   for (std::size_t i = 0; i < rna_info.size(); ++i) {
     const int raw_chain = static_cast<int>(rna_info[i].get_chainnum());
     auto it = rna_chain_raw_to_local_.find(raw_chain);
@@ -185,7 +220,23 @@ void TitanLLPS::set_rna_metadata(const std::vector<mol_info> &rna_info) {
       local = it->second;
     }
     rna_atom_chain_[i] = local;
-    rna_atom_residue_[i] = static_cast<int>(rna_info[i].get_resnr());
+    const int residue_index = static_cast<int>(rna_info[i].get_resnr());
+    rna_atom_residue_[i] = residue_index;
+
+    const uint64_t residue_key = pack_prna_pair(local, residue_index);
+    auto [node_it, node_inserted] = chain_residue_to_node.emplace(
+        residue_key, static_cast<int>(contact_residue_nodes_.size()));
+    if (node_inserted) {
+      ContactResidueMeta meta;
+      meta.species = "rna";
+      meta.chain_index = local;
+      meta.chain_raw_id = raw_chain;
+      meta.chain_label = rna_info[i].get_chain();
+      meta.residue_index = residue_index;
+      meta.residue_name = rna_info[i].get_res_name();
+      contact_residue_nodes_.push_back(std::move(meta));
+    }
+    rna_atom_contact_node_[i] = node_it->second;
   }
   prev_neighbor_offsets_.assign(static_cast<std::size_t>(n_chains_) +
                                     rna_chain_raw_ids_.size() + 1,
@@ -278,6 +329,8 @@ void TitanLLPS::process_frame(const MOL &mol_frame,
                               float time_ns, int frame_idx,
                               const MOL *rna_frame,
                               const std::vector<mol_info> *rna_info) {
+  flush_async();
+  cell_=titan_llps_geometry::Cell::from_box(mol_frame.Box,box_x_nm,box_y_nm,box_z_nm);
   const auto pack_begin = std::chrono::steady_clock::now();
   const auto &ax = mol_frame.get_pos_x();
   const auto &ay = mol_frame.get_pos_y();
@@ -322,6 +375,10 @@ void TitanLLPS::process_frame_impl(const std::vector<float> &pos_nm,
                                    int frame_idx) {
   const auto frame_begin = std::chrono::steady_clock::now();
   const int n_atoms = static_cast<int>(pos_nm.size()) / 3;
+  if(pos_nm.size()%3 || n_atoms!=static_cast<int>(atom_macro_.size())) throw std::invalid_argument("LLPS: atom count differs from configured chain mapping");
+  for(float v:pos_nm) if(!std::isfinite(v)) throw std::invalid_argument("LLPS: non-finite coordinate");
+  for(int i=0;i<3*n_rna;++i) if(!std::isfinite(rna_nm_data[i])) throw std::invalid_argument("LLPS: non-finite RNA coordinate");
+
 
   macro_contact_keys_buf_.clear();
   auto &contacts = macro_contact_keys_buf_;
@@ -340,7 +397,7 @@ void TitanLLPS::process_frame_impl(const std::vector<float> &pos_nm,
   if (protein_pairs)
     perf_.protein_chain_pairs += static_cast<uint64_t>(protein_pairs->size());
 
-  if (dynamics_enabled_) {
+  if (dynamics_enabled_ || contacts_on_) {
     const auto prna_begin = std::chrono::steady_clock::now();
     build_protein_rna_contacts(pos_nm, rna_nm_data, n_rna, bx, by, bz,
                                protein_rna_pair_keys_buf_);
@@ -350,6 +407,8 @@ void TitanLLPS::process_frame_impl(const std::vector<float> &pos_nm,
             .count();
     perf_.protein_rna_pairs +=
         static_cast<uint64_t>(protein_rna_pair_keys_buf_.size());
+  }
+  if (dynamics_enabled_) {
     const auto dyn_begin = std::chrono::steady_clock::now();
     update_contact_dynamics(time_ns, frame_idx, sticker_pair_keys_buf_,
                             protein_chain_pair_keys_buf_,
@@ -441,13 +500,14 @@ void TitanLLPS::process_frame_impl(const std::vector<float> &pos_nm,
   const float gcc_fraction =
       (n_macro_ > 0) ? static_cast<float>(gcc_size) / n_macro_ : 0.0f;
   const float gcc_rg = compute_gcc_rg(pos_nm, bx, by, bz, gcc_macros);
-  const float v_box = (bx > 0 && by > 0 && bz > 0) ? bx * by * bz : 1.0f;
-  constexpr float kPi = 3.14159265f;
-  const float v_gcc = (4.0f / 3.0f) * kPi * gcc_rg * gcc_rg * gcc_rg;
-  const float v_dil = v_box - v_gcc;
-  const float rho_dense = (v_gcc > 1e-9f) ? gcc_size / v_gcc : 0.0f;
-  const float rho_dilute =
-      (v_dil > 1e-9f) ? (n_macro_ - gcc_size) / v_dil : 0.0f;
+  std::vector<titan_llps_geometry::Point> all_representatives, gcc_representatives;
+  for(int m=0;m<n_macro_;++m) {
+    int atom=bb_atom_[m];if(atom<0) throw std::invalid_argument("LLPS: missing macro-node representative");
+    all_representatives.push_back({pos_nm[3*atom],pos_nm[3*atom+1],pos_nm[3*atom+2]});
+  }
+  for(int m:gcc_macros) gcc_representatives.push_back(all_representatives[m]);
+  const auto phase=titan_llps_geometry::measure(cell_,phase_config_,all_representatives,gcc_representatives,gcc_center_);
+  const float rho_dense=phase.dense, rho_dilute=phase.dilute;
 
   float mean_k = 0.0f;
   for (int d : degree)
@@ -456,7 +516,7 @@ void TitanLLPS::process_frame_impl(const std::vector<float> &pos_nm,
     mean_k /= static_cast<float>(n_macro_);
 
   result_.frames.push_back({frame_idx, time_ns, gcc_fraction, n_clusters,
-                            gcc_size, gcc_rg, mean_k, rho_dense, rho_dilute});
+                            gcc_size, gcc_rg, mean_k, rho_dense, rho_dilute, phase});
 
   if (!result_.is_percolated && gcc_fraction >= perc_thr_) {
     result_.is_percolated = true;
@@ -478,151 +538,53 @@ void TitanLLPS::process_frame_impl(const std::vector<float> &pos_nm,
     pk_sq_[static_cast<std::size_t>(d)] += pk * pk;
   }
 
-  if (density_mode_ != "off" && bx > 0 && by > 0 && bz > 0 &&
-      !gcc_macros.empty()) {
-    const auto density_begin = std::chrono::steady_clock::now();
-    double com_x = 0.0;
-    double com_y = 0.0;
-    double com_z = 0.0;
-    int gcc_atom_count = 0;
-    for (int macro : gcc_macros) {
-      for (int chain : macro_chains_[macro]) {
-        for (int atom = chain_start_[chain];
-             atom < chain_start_[chain] + chain_len_[chain]; ++atom) {
-          com_x += pos_nm[3 * atom + 0];
-          com_y += pos_nm[3 * atom + 1];
-          com_z += pos_nm[3 * atom + 2];
-          ++gcc_atom_count;
+  if(density_mode_!="off" && density_mode_!="projection" && cell_.metric && !gcc_representatives.empty()) {
+    const auto density_begin=std::chrono::steady_clock::now();
+    auto center=gcc_center_ ? gcc_center_ : titan_llps_geometry::circular_center(cell_,gcc_representatives);
+    if(center) {
+      if(grid_nx_==0 && !density_disabled_by_budget_) {
+        if(!(voxel_size_nm_>0 && std::isfinite(voxel_size_nm_))) throw std::invalid_argument("LLPS: invalid voxel size");
+        int dims[3];std::size_t needed=1;
+        for(int k=0;k<3;++k) {
+          double n=std::max(1.0,std::floor(cell_.heights[k]/voxel_size_nm_));
+          if(n>1000000 || needed>std::numeric_limits<std::size_t>::max()/n/16) throw std::invalid_argument("LLPS: density grid too large");
+          dims[k]=static_cast<int>(n);needed*=dims[k];
+        }
+        const auto available=get_available_ram();
+        if(density_mode_=="auto" && available>0 && needed*16.0>available*.2) {
+          density_disabled_by_budget_=true;
+          TitanUI::print_warning("LLPS: skipped 3D density grid exceeding memory budget");
+        } else {
+          grid_nx_=dims[0];grid_ny_=dims[1];grid_nz_=dims[2];
+          density_reference_cell_=cell_.matrix;
+          vox_pro_.assign(needed,0);vox_rna_.assign(needed,0);
         }
       }
-    }
-    if (gcc_atom_count > 0) {
-      com_x /= gcc_atom_count;
-      com_y /= gcc_atom_count;
-      com_z /= gcc_atom_count;
-    }
-    const float sx = bx * 0.5f - static_cast<float>(com_x);
-    const float sy = by * 0.5f - static_cast<float>(com_y);
-    const float sz = bz * 0.5f - static_cast<float>(com_z);
-    shifted_pos_buf_.resize(pos_nm.size());
-    auto &shifted_pos = shifted_pos_buf_;
-    for (int atom = 0; atom < n_atoms; ++atom) {
-      float x = pos_nm[3 * atom + 0] + sx;
-      float y = pos_nm[3 * atom + 1] + sy;
-      float z = pos_nm[3 * atom + 2] + sz;
-      x -= bx * std::floor(x / bx);
-      y -= by * std::floor(y / by);
-      z -= bz * std::floor(z / bz);
-      shifted_pos[3 * atom + 0] = x;
-      shifted_pos[3 * atom + 1] = y;
-      shifted_pos[3 * atom + 2] = z;
-    }
-
-    const int nx = std::max(1, static_cast<int>(bx / voxel_size_nm_));
-    const int ny = std::max(1, static_cast<int>(by / voxel_size_nm_));
-    const int nz = std::max(1, static_cast<int>(bz / voxel_size_nm_));
-    const std::size_t needed = static_cast<std::size_t>(nx) * ny * nz;
-    const std::size_t density_bytes = needed * 2 * sizeof(uint64_t);
-    if (density_mode_ == "projection" && !density_disabled_by_budget_) {
-      density_disabled_by_budget_ = true;
-      TitanUI::print_warning(
-          "LLPS density: -llps-density=projection disables full 3D DX density "
-          "accumulation to reduce RAM.");
-    } else if (density_mode_ == "auto" && !density_disabled_by_budget_) {
-      const size_t available = get_available_ram();
-      if (available > 0 &&
-          static_cast<long double>(density_bytes) >
-              static_cast<long double>(available) * 0.20L) {
-        density_disabled_by_budget_ = true;
-        TitanUI::print_warning(
-            "LLPS density: auto policy skipped full 3D DX accumulation because "
-            "the voxel grid exceeds 20% of currently available RAM. Use "
-            "-llps-density=full to force it.");
+      if(grid_nx_>0) {
+        const auto fractional_center=cell_.fractional(*center);
+        const double weight=double(vox_pro_.size())/cell_.volume;
+        auto accumulate=[&](const float* points,int count,std::vector<double>& vox) {
+          for(int i=0;i<count;++i) {
+            auto f=cell_.fractional({points[3*i],points[3*i+1],points[3*i+2]});
+            int ids[3],dims[3]={grid_nx_,grid_ny_,grid_nz_};
+            for(int k=0;k<3;++k) {double w=f[k]-fractional_center[k]+.5;w-=std::floor(w);ids[k]=std::clamp(int(w*dims[k]),0,dims[k]-1);}
+            vox[(std::size_t(ids[0])*grid_ny_+ids[1])*grid_nz_+ids[2]]+=weight;
+          }
+        };
+        accumulate(pos_nm.data(),n_atoms,vox_pro_);
+        if(n_rna>0) {accumulate(rna_nm_data,n_rna,vox_rna_);has_rna_=true;}
+        ++density_frame_count_;
       }
     }
-
-    if (!density_disabled_by_budget_) {
-    if (needed > vox_pro_.size()) {
-      vox_pro_.assign(needed, 0);
-      vox_rna_.assign(needed, 0);
-      grid_nx_ = nx;
-      grid_ny_ = ny;
-      grid_nz_ = nz;
-      grid_bx_ = bx;
-      grid_by_ = by;
-      grid_bz_ = bz;
-      density_frame_count_ = 0;
-    }
-
-    for (int atom = 0; atom < n_atoms; ++atom) {
-      int ix = static_cast<int>(shifted_pos[3 * atom + 0] / voxel_size_nm_);
-      int iy = static_cast<int>(shifted_pos[3 * atom + 1] / voxel_size_nm_);
-      int iz = static_cast<int>(shifted_pos[3 * atom + 2] / voxel_size_nm_);
-      ix = std::clamp(ix, 0, grid_nx_ - 1);
-      iy = std::clamp(iy, 0, grid_ny_ - 1);
-      iz = std::clamp(iz, 0, grid_nz_ - 1);
-      const std::size_t flat =
-          static_cast<std::size_t>(ix) * grid_ny_ * grid_nz_ +
-          static_cast<std::size_t>(iy) * grid_nz_ + static_cast<std::size_t>(iz);
-      ++vox_pro_[flat];
-    }
-    if (rna_nm_data && n_rna > 0) {
-      for (int atom = 0; atom < n_rna; ++atom) {
-        float x = rna_nm_data[3 * atom + 0] + sx;
-        float y = rna_nm_data[3 * atom + 1] + sy;
-        float z = rna_nm_data[3 * atom + 2] + sz;
-        x -= bx * std::floor(x / bx);
-        y -= by * std::floor(y / by);
-        z -= bz * std::floor(z / bz);
-        const int ix =
-            std::clamp(static_cast<int>(x / voxel_size_nm_), 0, grid_nx_ - 1);
-        const int iy =
-            std::clamp(static_cast<int>(y / voxel_size_nm_), 0, grid_ny_ - 1);
-        const int iz =
-            std::clamp(static_cast<int>(z / voxel_size_nm_), 0, grid_nz_ - 1);
-        const std::size_t flat =
-            static_cast<std::size_t>(ix) * grid_ny_ * grid_nz_ +
-            static_cast<std::size_t>(iy) * grid_nz_ +
-            static_cast<std::size_t>(iz);
-        ++vox_rna_[flat];
-      }
-      has_rna_ = true;
-    }
-    ++density_frame_count_;
-    }
-    perf_.density_seconds += std::chrono::duration<double>(
-                                 std::chrono::steady_clock::now() -
-                                 density_begin)
-                                 .count();
+    perf_.density_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-density_begin).count();
   }
 
-  if (rna_nm_data && n_rna > 0 && bx > 0 && by > 0 && bz > 0) {
+  if (rna_nm_data && n_rna > 0 && cell_.metric && rna_atom_chain_.size()==static_cast<std::size_t>(n_rna)) {
     const auto polymer_begin = std::chrono::steady_clock::now();
     const int N = n_rna;
     if (rna_chain_starts_.empty()) {
       rna_chain_starts_.push_back(0);
-      const float half_bx = bx * 0.5f;
-      const float half_by = by * 0.5f;
-      const float half_bz = bz * 0.5f;
-      for (int k = 0; k < N - 1; ++k) {
-        float dx = rna_nm_data[3 * k + 0] - rna_nm_data[3 * (k + 1) + 0];
-        float dy = rna_nm_data[3 * k + 1] - rna_nm_data[3 * (k + 1) + 1];
-        float dz = rna_nm_data[3 * k + 2] - rna_nm_data[3 * (k + 1) + 2];
-        if (dx > half_bx)
-          dx -= bx;
-        else if (dx < -half_bx)
-          dx += bx;
-        if (dy > half_by)
-          dy -= by;
-        else if (dy < -half_by)
-          dy += by;
-        if (dz > half_bz)
-          dz -= bz;
-        else if (dz < -half_bz)
-          dz += bz;
-        if (dx * dx + dy * dy + dz * dz > 2.25f)
-          rna_chain_starts_.push_back(k + 1);
-      }
+      for(int k=0;k<N-1;++k) if(rna_atom_chain_[k]!=rna_atom_chain_[k+1]) rna_chain_starts_.push_back(k+1);
       rna_chain_starts_.push_back(N);
     }
 
@@ -642,12 +604,22 @@ void TitanLLPS::process_frame_impl(const std::vector<float> &pos_nm,
       const int start = rna_chain_starts_[chain];
       const int end = rna_chain_starts_[chain + 1];
       const int len = end - start;
+      std::vector<titan_llps_geometry::Point> unwrapped(len);
+      unwrapped[0]={rna_nm_data[3*start],rna_nm_data[3*start+1],rna_nm_data[3*start+2]};
+      bool valid=true;
+      for(int k=start+1;k<end;++k) {
+        bool ambiguous=false;auto d=cell_.delta({double(rna_nm_data[3*k])-rna_nm_data[3*(k-1)],double(rna_nm_data[3*k+1])-rna_nm_data[3*(k-1)+1],double(rna_nm_data[3*k+2])-rna_nm_data[3*(k-1)+2]},&ambiguous);
+        if(ambiguous) {valid=false;break;}
+        for(int j=0;j<3;++j)unwrapped[k-start][j]=unwrapped[k-start-1][j]+d[j];
+      }
+      if(!valid) continue;
+
       for (int s = 1; s < len && s < max_rna_chain_len_; ++s) {
         double r2_sum = 0.0;
         for (int k = start; k < end - s; ++k) {
-          const float dx = rna_nm_data[3 * k + 0] - rna_nm_data[3 * (k + s) + 0];
-          const float dy = rna_nm_data[3 * k + 1] - rna_nm_data[3 * (k + s) + 1];
-          const float dz = rna_nm_data[3 * k + 2] - rna_nm_data[3 * (k + s) + 2];
+          const double dx = unwrapped[k-start][0] - unwrapped[k+s-start][0];
+          const double dy = unwrapped[k-start][1] - unwrapped[k+s-start][1];
+          const double dz = unwrapped[k-start][2] - unwrapped[k+s-start][2];
           r2_sum += static_cast<double>(dx * dx + dy * dy + dz * dz);
         }
         sum_R2_s_[static_cast<std::size_t>(s)] += r2_sum;

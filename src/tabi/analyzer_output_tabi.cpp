@@ -617,7 +617,9 @@ void AnalyzerImpl::write_tabi_profile_header_if_needed() {
            "preconditioner_coarse_apply_calls,"
            "preconditioner_coarse_rp_identity_error_max,"
            "preconditioner_coarse_verify_rel_error_max,"
-           "surface_generator,discretization,"
+           "surface_generator,discretization,node_patch_representation,"
+           "node_patch_normal_source,node_patch_certificate,"
+           "node_patch_certificate_receptor,node_patch_certificate_ligand,"
            "rhs_scale,dielectric_contrast,operator_contrast,unknown_count,"
            "bie_system,lhs_diag_phi,lhs_diag_phin,energy_equation,"
            "kernel_convention,source_norm_s1,source_norm_s2,phi_norm,"
@@ -1470,7 +1472,13 @@ void AnalyzerImpl::append_tabi_profile_row(const FrameResult &result,
       << result.tabi_preconditioner_coarse_rp_identity_error_max << ','
       << result.tabi_preconditioner_coarse_verify_rel_error_max << ','
       << csv_escape(result.tabi_surface_generator) << ','
-      << csv_escape(result.tabi_discretization) << ',' << result.tabi_rhs_scale
+      << csv_escape(result.tabi_discretization) << ','
+      << csv_escape(result.tabi_node_patch_representation) << ','
+      << csv_escape(result.tabi_node_patch_normal_source) << ','
+      << csv_escape(result.tabi_node_patch_certificate) << ','
+      << csv_escape(result.tabi_receptor_node_patch_certificate) << ','
+      << csv_escape(result.tabi_ligand_node_patch_certificate) << ','
+      << result.tabi_rhs_scale
       << ',' << result.tabi_dielectric_contrast << ','
       << result.tabi_operator_contrast << ',' << result.tabi_unknown_count
       << ',' << csv_escape(result.tabi_bie_system) << ','

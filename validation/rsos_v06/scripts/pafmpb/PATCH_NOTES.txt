@@ -1,0 +1,25 @@
+PAFMPB (AEGB_v2_0, Mendeley Data 10.17632/gm5zh6gxh7.1, sha256 8d579c90...6a39) built on Windows
+with MSYS2 gcc/gfortran 16.1 instead of Intel icc/ifort + Cilk Plus.
+- AFMPB/ is the untouched archive; AFMPB_win/ is the build copy.
+- AFMPB_win: the program's own wall-clock function `double time()` renamed to afmpb_wtime()
+  (calls, declaration in include/afmpb.h, definition in src/afmpb-solve.c), because mingw's
+  <sys/time.h> declares the C library time(); no other source change.
+- compat/cilk/{cilk.h,cilk_api.h}: cilk_for -> OpenMP parallel for (schedule guided);
+  __cilkrts_get_nworkers -> omp_get_max_threads; __cilkrts_set_param("nworkers") -> omp_set_num_threads.
+- Build: mingw32-make C=gcc FORT=gfortran CFLAG="-O3 -std=gnu99 -fcommon -fopenmp -I../compat
+  -include ../compat/cilk/cilk_api.h" FFLAG="-O3 -std=legacy" LFLAG=-fopenmp
+- AFMPB_win/src/afmpb-utils.c (patch_win.py): ProcessPQRFile and memcomput used popen() with Linux
+  shell commands (grep/wc, /proc); rewritten in C for Windows with the same results (lines containing
+  ATOM or HETATM -> processed.pqr, their count returned; private bytes in MB). Link adds -lpsapi.
+- CFLAG adds -fcommon (globals defined in headers; gcc >= 10 defaults to -fno-common).
+- Data races in the original parallel loops, fixed by running those two loops serially (both are O(N)
+  setup): afmpb-utils.c ProcessElementGeometry element loop (nne[]++ and vnp[] += on shared vertices;
+  with 4 threads the energy changed from run to run by ~1e-4 relative), and fmm-graph.c direct-list loop
+  (mem += counter, reporting only). After the fix the 4-thread results are reproducible.
+- Input path: with meshfmt 1 (MSMS layout, normals supplied) the Kirkwood-sphere energies did not converge with
+  refinement (R = 2 A about 5% low at every spacing); with meshfmt 2 (OFF, normals computed by PAFMPB) they
+  converged (R = 2 A: -5.3%, -2.7%, -0.65% at 126, 432, 1813 nodes). The benchmark uses OFF input.
+- 21 Oct: afmpb-solve.c prints "...time for GMRES", the wall time of the whole GMRES loop from omp_get_wtime()
+  (the original only sums per-call gettimeofday() differences of the matrix-vector products, which on this
+  build overcounted: 1.49 s of products inside a 1.32 s loop on 1A63). Output line only; energies and
+  iteration counts unchanged (1SH1 -734.797, 10; 1A63 -2420.37, 12). Previous exe: ../afmpb_before_gmres_timer.exe.

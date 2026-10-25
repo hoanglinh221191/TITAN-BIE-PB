@@ -763,7 +763,10 @@ int stat_hbonds(std::vector<std::vector<std::size_t>> &Hbonds_vector,
     }
     sd = std::sqrt(sd / static_cast<double>(Hbonds_vector[i].size()));
 
-    stat_hb << std::fixed << std::setprecision(3) << time_of_snaps[i] << '\t'
+    const double time = i < time_of_snaps.size()
+                            ? time_of_snaps[i]
+                            : std::numeric_limits<double>::quiet_NaN();
+    stat_hb << std::fixed << std::setprecision(3) << time << '\t'
             << mean << '\t' << sd << '\t' << min_hb << '\t' << max_hb << '\t'
             << Hbonds_vector[i].size() << '\n';
   }
@@ -851,7 +854,7 @@ int print_hbond_per_snap(const MOL &pro_in, const MOL &lig,
                          const std::vector<mol_info> &info_rec,
                          const std::vector<mol_info> &info_lg,
                          const arguments &Arguments, std::size_t frame_index) {
-  const double time_value = pro_in.get_time();
+  const double time_value = Arguments.output_time(pro_in.get_time());
   std::ostringstream out_all;
   std::ostringstream out_rec;
   std::ostringstream out_lig;

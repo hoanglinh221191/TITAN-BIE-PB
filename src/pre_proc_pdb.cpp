@@ -194,6 +194,13 @@ int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
       type = "OPLSAA";
   }
 
+  // Receptor-only -topo2: preserve its topology atom naming, while mol2
+  // still follows the force-field library preprocessing used without -topo.
+  if (flag == 4) {
+    type = type_2;
+    type_2 = "lig";
+  }
+
   if (Arguments.flag_set_type_1 == true)
     type_2 = Arguments.mol_1_type;
   if (Arguments.flag_set_type_2 == true) {
@@ -215,10 +222,11 @@ int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
     if (flag != -1) {
       protein_1.wrapper_impl_post_proc(Arguments, type_2, amine);
       protein_2.wrapper_impl_post_proc(Arguments, type, amine);
-    } else if (Arguments.cmap.flag_cmap && Arguments.flag_sidechain) {
+    } else if (Arguments.flag_sidechain) {
+      // A reload rebuilds info with default marks; classify side chains as
+      // the first file did, or later files get whole-residue centres.
       protein_1.check_side_chain(Arguments);
-      if (Arguments.needs_mol2_for_cmap_interface())
-        protein_2.check_side_chain(Arguments);
+      protein_2.check_side_chain(Arguments);
     }
 
     protein_1.set_mol_type(Arguments.mol_1_type);
@@ -279,10 +287,10 @@ int pre_proc_pdb(string force_field, Multi_MOL &protein_1, Multi_MOL &protein_2,
   if (flag != -1) {
     protein_1.wrapper_impl_post_proc(Arguments, type_2, amine);
     protein_2.wrapper_impl_post_proc(Arguments, type, amine);
-  } else if (Arguments.cmap.flag_cmap && Arguments.flag_sidechain) {
+  } else if (Arguments.flag_sidechain) {
+    // See above: a reload must classify side chains again.
     protein_1.check_side_chain(Arguments);
-    if (Arguments.needs_mol2_for_cmap_interface())
-      protein_2.check_side_chain(Arguments);
+    protein_2.check_side_chain(Arguments);
   }
 
   protein_1.set_mol_type(Arguments.mol_1_type);

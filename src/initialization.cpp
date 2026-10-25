@@ -2,7 +2,7 @@
 #include "arguments.h"
 #include "functions.h"
 #include "groups.h"
-#include "lj_topology.h"
+#include "topology/lj_topology.h"
 #include "titan_ui.h"
 #include <expected>
 #include <filesystem>
@@ -40,6 +40,8 @@ std::expected<void, std::string> initialize_topology_streaming(
   int flag_groups{helper_parse_groups(
       Groups_from_index_file,
       Arguments)}; // ---------------------------------------------------------------------------
+  if (Arguments.gist.flag_gist && Arguments.flag_index && flag_groups!=0)
+    return std::unexpected("GIST index/water group selection failed.");
   // SCENARIO 1: SINGLE PDB FILE (-f, -i list, -pattern)
   // ---------------------------------------------------------------------------
   if (Arguments.flag_1_pdb) {
@@ -115,11 +117,12 @@ std::expected<void, std::string> initialize_topology_streaming(
     // 3. Build Topology using pre_proc_pdb (reads Frame 0 internally)
     int flag_pre_proc = 1;
     if (topo_2_is_open)
-      flag_pre_proc = 2;
+      flag_pre_proc = topo_is_open ? 2 : 4; // 4: receptor topology only
     if (Arguments.flag_use_common_topo)
       flag_pre_proc = 3;
 
-    if (Arguments.topo_name != "no" && (!Arguments.file_par || topo_is_open)) {
+    if ((Arguments.topo_name != "no" && (!Arguments.file_par || topo_is_open)) ||
+        (Arguments.topo_name_2 != "no" && (!Arguments.file_par || topo_2_is_open))) {
       show_init_pdb_progress(file_label(Arguments.pdb_name), false);
       const int r_value =
           pre_proc_pdb(force_f, pro_in, lig, water_traj, membrane_traj,
@@ -129,9 +132,10 @@ std::expected<void, std::string> initialize_topology_streaming(
       if (r_value != 0)
         return std::unexpected("pre_proc_pdb failed.");
 
-      if (flag_pre_proc < 3) {
-        lig.topo_lg(Arguments.topo_name, force_f, parameter);
-        if (flag_pre_proc == 2)
+      if (flag_pre_proc != 3) {
+        if (flag_pre_proc != 4)
+          lig.topo_lg(Arguments.topo_name, force_f, parameter);
+        if (flag_pre_proc == 2 || flag_pre_proc == 4)
           pro_in.topo_lg(Arguments.topo_name_2, force_f, parameter);
       } else {
         vector<topo_info_temp> info_topo;
@@ -271,12 +275,14 @@ int parse_input_pdb(arguments &Arguments, fstream &log, string name_pro,
     if (Arguments.flag_1_pdb == true) {
       int flag_pre_proc{1};
       if (topo_2_is_open == true)
-        flag_pre_proc = 2;
+        flag_pre_proc = topo_is_open ? 2 : 4;
       if (Arguments.flag_use_common_topo == true)
         flag_pre_proc = 3;
 
-      if (Arguments.topo_name != "no" &&
-          (Arguments.file_par == false || topo_is_open)) {
+      if ((Arguments.topo_name != "no" &&
+           (Arguments.file_par == false || topo_is_open)) ||
+          (Arguments.topo_name_2 != "no" &&
+           (Arguments.file_par == false || topo_2_is_open))) {
         const int r_value_pdb{pre_proc_pdb(
             force_f, pro_in, lig, water_traj, membrane_traj,
             Groups_from_index_file,
@@ -292,14 +298,16 @@ int parse_input_pdb(arguments &Arguments, fstream &log, string name_pro,
         else {
         }
 
-        if (flag_pre_proc < 3) {
-          std::cout << "\033[1;36m[TITAN]\033[0m \033[1;32m>> Loading "
-                       "Topology:\033[0m "
-                    << Arguments.topo_name << "\n";
-          TitanUI::log_kv(log, "Topology Loaded", Arguments.topo_name);
-          lig.topo_lg(Arguments.topo_name, force_f, parameter);
+        if (flag_pre_proc != 3) {
+          if (flag_pre_proc != 4) {
+            std::cout << "\033[1;36m[TITAN]\033[0m \033[1;32m>> Loading "
+                         "Topology:\033[0m "
+                      << Arguments.topo_name << "\n";
+            TitanUI::log_kv(log, "Topology Loaded", Arguments.topo_name);
+            lig.topo_lg(Arguments.topo_name, force_f, parameter);
+          }
 
-          if (flag_pre_proc == 2) {
+          if (flag_pre_proc == 2 || flag_pre_proc == 4) {
             std::cout << "\033[1;36m[TITAN]\033[0m \033[1;32m>> Loading "
                          "Topology 2:\033[0m "
                       << Arguments.topo_name_2 << "\n";

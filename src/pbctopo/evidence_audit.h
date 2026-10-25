@@ -1,6 +1,7 @@
 #ifndef TITAN_PBCTOPO_EVIDENCE_AUDIT_H
 #define TITAN_PBCTOPO_EVIDENCE_AUDIT_H
 
+#include "evidence_support_policy.h"
 #include "types.h"
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -41,6 +43,14 @@ struct PbctopoSelectedEvidenceAudit {
   bool evaluated = false;
   bool consistent = false;
   bool evidence_graph_connected = false;
+  std::size_t evidence_component_count = 0;
+  std::size_t evidence_edge_count = 0;
+  std::size_t explicit_contact_evidence_edges = 0;
+  std::size_t scored_contact_evidence_edges = 0;
+  std::size_t evidence_connected_component_count = 0;
+  std::size_t unconstrained_relative_components = 0;
+  std::size_t relative_lattice_degrees_of_freedom = 0;
+  std::vector<std::size_t> evidence_component_labels;
   std::size_t contacts_checked = 0;
   std::size_t contacts_lost = 0;
   PbctopoHash128 observed_pair_hash;
@@ -58,6 +68,7 @@ struct PbctopoSelectedEvidenceAudit {
   std::size_t selected_compatible_contact_loss_count = 0;
   std::size_t no_supported_contact_relation_count = 0;
   bool selected_relation_has_support = false;
+  std::vector<PbctopoSelectedEvidenceRelationAudit> relation_audits;
 };
 
 [[nodiscard]] PbctopoContactHypothesisSet
@@ -146,7 +157,9 @@ template <class Point>
 audit_pbctopo_selected_hypotheses(
     std::span<const PbctopoAtom> atoms, std::span<const Point> placed_points,
     const PbctopoContactHypothesisSet &hypothesis_set,
-    const PbctopoImageAssignment &selected_assignment, bool hard_feasible) {
+    const PbctopoImageAssignment &selected_assignment, bool hard_feasible,
+    std::span<const std::pair<std::size_t, std::size_t>>
+        explicit_component_edges = {}) {
   PbctopoSelectedEvidenceAudit result;
   if (!hard_feasible)
     return result;
@@ -165,6 +178,16 @@ audit_pbctopo_selected_hypotheses(
   result.component_relation_count = hypothesis_set.component_relation_count;
   result.ambiguous_component_relation_count =
       hypothesis_set.ambiguous_component_relation_count;
+  result.evidence_component_count = selected_assignment.component_ids.size();
+
+  auto sorted_component_ids = selected_assignment.component_ids;
+  std::sort(sorted_component_ids.begin(), sorted_component_ids.end());
+  if (std::adjacent_find(sorted_component_ids.begin(),
+                         sorted_component_ids.end()) !=
+      sorted_component_ids.end()) {
+    return std::unexpected(
+        "selected hypothesis audit contains duplicate component IDs");
+  }
 
   auto offset_for_id = [&](std::uint64_t id) -> const Int3 * {
     for (std::size_t idx = 0; idx < selected_assignment.component_ids.size(); ++idx) {
@@ -178,6 +201,34 @@ audit_pbctopo_selected_hypotheses(
   std::vector<PbctopoCanonicalAtomPair> observed_pairs;
   std::vector<PbctopoCanonicalAtomPair> lost_pairs;
   std::vector<std::pair<std::size_t, std::size_t>> connected_edges;
+  std::vector<std::pair<std::size_t, std::size_t>> explicit_edges;
+  std::vector<std::pair<std::size_t, std::size_t>> scored_edges;
+  explicit_edges.reserve(explicit_component_edges.size());
+  connected_edges.reserve(explicit_component_edges.size() +
+                           hypothesis_set.component_relation_count);
+  result.relation_audits.reserve(explicit_component_edges.size() +
+                                 hypothesis_set.component_relation_count);
+  const auto canonicalize_component_edges = [](auto &edges) {
+    for (auto &[a, b] : edges) {
+      if (b < a)
+        std::swap(a, b);
+    }
+    std::sort(edges.begin(), edges.end());
+    edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+  };
+  for (auto [a, b] : explicit_component_edges) {
+    if (a >= result.evidence_component_count ||
+        b >= result.evidence_component_count || a == b) {
+      return std::unexpected(
+          "selected hypothesis audit contains an invalid explicit component "
+          "edge");
+    }
+    if (b < a)
+      std::swap(a, b);
+    explicit_edges.emplace_back(a, b);
+  }
+  canonicalize_component_edges(explicit_edges);
+
   bool unsupported_relation = false;
   std::size_t relation_begin = 0;
   while (relation_begin < hypothesis_set.hypotheses.size()) {
@@ -190,6 +241,17 @@ audit_pbctopo_selected_hypotheses(
                first.component_id_b) {
       ++relation_end;
     }
+    if (first.component_id_a >= first.component_id_b ||
+        first.component_a >= result.evidence_component_count ||
+        first.component_b >= result.evidence_component_count ||
+        first.component_a == first.component_b ||
+        selected_assignment.component_ids[first.component_a] !=
+            first.component_id_a ||
+        selected_assignment.component_ids[first.component_b] !=
+            first.component_id_b) {
+      return std::unexpected(
+          "selected hypothesis audit contains an invalid component relation");
+    }
     const Int3 *offset_a = offset_for_id(first.component_id_a);
     const Int3 *offset_b = offset_for_id(first.component_id_b);
     if (offset_a == nullptr || offset_b == nullptr)
@@ -197,18 +259,47 @@ audit_pbctopo_selected_hypotheses(
     Int3 selected_relative{};
     if (!checked_int3_subtract(*offset_b, *offset_a, selected_relative))
       return std::unexpected("selected evidence relative shift overflow");
-    bool matched = false;
+
+    const std::pair<std::size_t, std::size_t> component_pair{
+        std::min(first.component_a, first.component_b),
+        std::max(first.component_a, first.component_b)};
+    std::vector<Int3> observed_relative_shifts;
+    observed_relative_shifts.reserve(relation_end - relation_begin);
+    for (std::size_t idx = relation_begin; idx < relation_end; ++idx) {
+      const auto &hypothesis = hypothesis_set.hypotheses[idx];
+      if (hypothesis.component_a != first.component_a ||
+          hypothesis.component_b != first.component_b ||
+          hypothesis.component_id_a != first.component_id_a ||
+          hypothesis.component_id_b != first.component_id_b) {
+        return std::unexpected(
+            "selected hypothesis relation has inconsistent component binding");
+      }
+      observed_relative_shifts.push_back(hypothesis.relative_shift);
+    }
+    const bool explicit_relation =
+        std::binary_search(explicit_edges.begin(), explicit_edges.end(),
+                           component_pair);
+    PbctopoSelectedEvidenceRelationAudit relation;
+    relation.component_a = component_pair.first;
+    relation.component_b = component_pair.second;
+    relation.component_id_a = first.component_id_a;
+    relation.component_id_b = first.component_id_b;
+    relation.evaluated = true;
+    relation.observed_hypothesis_relation = true;
+    relation.support = evaluate_pbctopo_selected_compatibility_support(
+        explicit_relation, observed_relative_shifts, selected_relative);
+
     for (std::size_t idx = relation_begin; idx < relation_end; ++idx) {
       const auto &hypothesis = hypothesis_set.hypotheses[idx];
       if (!same_delta(hypothesis.relative_shift, selected_relative))
       {
         result.alternative_hypothesis_contact_count += hypothesis.edges.size();
+        relation.alternative_hypothesis_contact_count +=
+            hypothesis.edges.size();
         continue;
       }
-      matched = true;
       compatible.push_back(hypothesis);
-      connected_edges.emplace_back(hypothesis.component_a,
-                                   hypothesis.component_b);
+      relation.compatible_contact_count += hypothesis.edges.size();
       for (const auto &edge : hypothesis.edges) {
         if (edge.a >= atoms.size() || edge.b >= atoms.size() || edge.a == edge.b)
           return std::unexpected("selected hypothesis contains an invalid edge");
@@ -223,14 +314,63 @@ audit_pbctopo_selected_hypotheses(
         const double d2 = dx * dx + dy * dy + dz * dz;
         if (!std::isfinite(d2))
           return std::unexpected("selected hypothesis audit found non-finite distance");
-        if (d2 > edge.cutoff_d2 + PBCTOPO_EOBS_LOSS_TOLERANCE_D2_A2)
+        if (d2 > edge.cutoff_d2 + PBCTOPO_EOBS_LOSS_TOLERANCE_D2_A2) {
           lost_pairs.push_back(pair);
+          ++relation.compatible_contact_loss_count;
+        }
       }
     }
+    const bool matched = relation.support.compatibility_match;
+    if (matched)
+      scored_edges.push_back(component_pair);
+    if (relation.support.active_at_threshold)
+      connected_edges.push_back(component_pair);
     unsupported_relation = unsupported_relation || !matched;
     if (matched) ++result.supported_relation_count;
     if (!matched) ++result.no_supported_contact_relation_count;
+    result.relation_audits.push_back(std::move(relation));
     relation_begin = relation_end;
+  }
+
+  for (const auto &component_pair : explicit_edges) {
+    const auto existing = std::find_if(
+        result.relation_audits.begin(), result.relation_audits.end(),
+        [&](const PbctopoSelectedEvidenceRelationAudit &relation) {
+          return relation.component_a == component_pair.first &&
+                 relation.component_b == component_pair.second;
+        });
+    if (existing != result.relation_audits.end())
+      continue;
+
+    PbctopoSelectedEvidenceRelationAudit relation;
+    relation.component_a = component_pair.first;
+    relation.component_b = component_pair.second;
+    relation.component_id_a =
+        selected_assignment.component_ids[component_pair.first];
+    relation.component_id_b =
+        selected_assignment.component_ids[component_pair.second];
+    if (relation.component_id_b < relation.component_id_a)
+      std::swap(relation.component_id_a, relation.component_id_b);
+    relation.evaluated = true;
+    relation.support = evaluate_pbctopo_selected_compatibility_support(
+        true, std::span<const Int3>{}, Int3{});
+    connected_edges.push_back(component_pair);
+    result.relation_audits.push_back(std::move(relation));
+  }
+
+  std::sort(result.relation_audits.begin(), result.relation_audits.end(),
+            [](const auto &lhs, const auto &rhs) {
+              return std::pair{lhs.component_a, lhs.component_b} <
+                     std::pair{rhs.component_a, rhs.component_b};
+            });
+  if (std::adjacent_find(
+          result.relation_audits.begin(), result.relation_audits.end(),
+          [](const auto &lhs, const auto &rhs) {
+            return lhs.component_a == rhs.component_a &&
+                   lhs.component_b == rhs.component_b;
+          }) != result.relation_audits.end()) {
+    return std::unexpected(
+        "selected hypothesis audit contains duplicate relation records");
   }
 
   std::sort(observed_pairs.begin(), observed_pairs.end());
@@ -273,27 +413,97 @@ audit_pbctopo_selected_hypotheses(
   result.compatible_hypothesis_count = compatible.size();
   result.selected_relation_has_support = !compatible.empty();
 
+  canonicalize_component_edges(scored_edges);
+  canonicalize_component_edges(connected_edges);
+  const std::size_t active_relation_count =
+      static_cast<std::size_t>(std::count_if(
+          result.relation_audits.begin(), result.relation_audits.end(),
+          [](const auto &relation) {
+            return relation.support.active_at_threshold;
+          }));
+  const std::size_t explicit_relation_count =
+      static_cast<std::size_t>(std::count_if(
+          result.relation_audits.begin(), result.relation_audits.end(),
+          [](const auto &relation) {
+            return relation.support.explicit_relation;
+          }));
+  const std::size_t compatible_relation_count =
+      static_cast<std::size_t>(std::count_if(
+          result.relation_audits.begin(), result.relation_audits.end(),
+          [](const auto &relation) {
+            return relation.support.compatibility_match;
+          }));
+  const std::size_t observed_relation_count =
+      static_cast<std::size_t>(std::count_if(
+          result.relation_audits.begin(), result.relation_audits.end(),
+          [](const auto &relation) {
+            return relation.observed_hypothesis_relation;
+          }));
+  const bool support_thresholds_replay = std::all_of(
+      result.relation_audits.begin(), result.relation_audits.end(),
+      [](const auto &relation) {
+        return relation.evaluated &&
+               std::isfinite(relation.support.support_primary) &&
+               std::isfinite(relation.support.decision_threshold) &&
+               relation.support.active_at_threshold ==
+                   (relation.support.support_primary >=
+                    relation.support.decision_threshold);
+      });
+  if (!support_thresholds_replay ||
+      active_relation_count != connected_edges.size() ||
+      explicit_relation_count != explicit_edges.size() ||
+      compatible_relation_count != scored_edges.size() ||
+      observed_relation_count != hypothesis_set.component_relation_count) {
+    return std::unexpected(
+        "selected hypothesis support records do not replay graph aggregates");
+  }
+  result.explicit_contact_evidence_edges = explicit_edges.size();
+  result.scored_contact_evidence_edges = scored_edges.size();
+  result.evidence_edge_count = connected_edges.size();
+
   std::vector<unsigned char> seen(selected_assignment.component_ids.size(), 0);
-  if (!seen.empty()) {
-    std::vector<std::vector<std::size_t>> adjacency(seen.size());
-    for (const auto &[a, b] : connected_edges) {
-      if (a < seen.size() && b < seen.size()) {
-        adjacency[a].push_back(b);
-        adjacency[b].push_back(a);
-      }
+  result.evidence_component_labels.assign(
+      selected_assignment.component_ids.size(),
+      std::numeric_limits<std::size_t>::max());
+  std::vector<std::vector<std::size_t>> adjacency(seen.size());
+  for (const auto &[a, b] : connected_edges) {
+    if (a >= seen.size() || b >= seen.size()) {
+      return std::unexpected(
+          "selected hypothesis audit contains an invalid component edge");
     }
-    std::vector<std::size_t> stack{0};
-    seen[0] = 1;
+    adjacency[a].push_back(b);
+    adjacency[b].push_back(a);
+  }
+  for (std::size_t start = 0; start < seen.size(); ++start) {
+    if (seen[start] != 0)
+      continue;
+    ++result.evidence_connected_component_count;
+    const std::size_t label =
+        result.evidence_connected_component_count - 1;
+    std::vector<std::size_t> stack{start};
+    seen[start] = 1;
+    result.evidence_component_labels[start] = label;
     while (!stack.empty()) {
       const auto node = stack.back();
       stack.pop_back();
       for (const auto next : adjacency[node]) {
-        if (seen[next] == 0) { seen[next] = 1; stack.push_back(next); }
+        if (seen[next] == 0) {
+          seen[next] = 1;
+          result.evidence_component_labels[next] = label;
+          stack.push_back(next);
+        }
       }
     }
   }
-  result.evidence_graph_connected = !seen.empty() &&
-      std::all_of(seen.begin(), seen.end(), [](unsigned char v) { return v != 0; });
+  result.evidence_graph_connected =
+      result.evidence_component_count > 0 &&
+      result.evidence_connected_component_count == 1;
+  result.unconstrained_relative_components =
+      result.evidence_connected_component_count > 0
+          ? result.evidence_connected_component_count - 1
+          : 0;
+  result.relative_lattice_degrees_of_freedom =
+      3 * result.unconstrained_relative_components;
   result.evaluated = true;
   result.consistent = lost_pairs.empty();
   if (!result.consistent) {

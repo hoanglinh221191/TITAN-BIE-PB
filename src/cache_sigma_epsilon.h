@@ -7,8 +7,11 @@
 #include "miscellaneous.h"
 #include <cstdint>
 #include <optional>
+#include <memory>
 #include <string>
 #include <vector>
+
+namespace titan_nb { struct Topology; }
 
 // ---------------------------------------------------------------------------
 // cache_energy — lightweight energy pair
@@ -74,6 +77,8 @@ struct cache_force {
 // memory allocation when force calculations are not requested.
 // ---------------------------------------------------------------------------
 struct cache_sigma_epsilon {
+
+  std::shared_ptr<const titan_nb::Topology> nonbonded_topology;
 
   // --- Nested sub-struct: groups all 6 force arrays for cache locality ---
   struct ForceArrays {

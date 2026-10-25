@@ -1,0 +1,2 @@
+nodes,triangles,apbs_field,color_mode,titan_color_limit_kT_e,apbs_color_limit_kT_e,titan_min_kT_e,titan_max_kT_e,apbs_total_min_kT_e,apbs_total_max_kT_e,apbs_reaction_min_kT_e,apbs_reaction_max_kT_e,rms_vs_total_kT_e,rms_vs_reaction_kT_e
+99675,199382,total,common,5.0,5.0,-17.66890371293277,26.805448960490686,-185.14154625093755,196.61594902234475,-159.99112394926578,710.7081478696274,11.123533140568759,334.18167005152736

@@ -3,6 +3,16 @@
 #include "MOL.h"
 #include "functions.h"
 #include "pathway_de_variants.h"
+#include "titan_path/clearance.h"
+#include "titan_path/cartesian_audit.h"
+#include "titan_path/control.h"
+#include "titan_path/continuity.h"
+#include "titan_path/geometry.h"
+#include "titan_path/navigation.h"
+#include "titan_path/registration.h"
+#include "titan_path/route.h"
+#include "titan_path/status_numeric_io.h"
+#include "titan_path/observed_boundary.h"
 #include "titan_ui.h"
 
 #include <algorithm>
@@ -10,11 +20,14 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <span>
 #include <sstream>
@@ -26,7 +39,6 @@ namespace {
 
 constexpr double kPathTol = 1.0e-8;
 constexpr std::size_t kNearestResidueEdges = 3;
-constexpr double kOutwardStopTol = 1.0e-6;
 constexpr double kMinProgressSeedGapNorm = 0.12;
 constexpr double kMinPatternStep = 0.05;
 constexpr std::size_t kPathPatternMaxSweeps = 32;
@@ -46,15 +58,11 @@ struct PathNode {
   std::string chain{" "};
   std::string res_name{"UNK"};
   Point3 com{0.0, 0.0, 0.0};
+  double radius{0.0};
   std::size_t first_local_atom{0};
 };
 
-struct PathSegment {
-  double s0{0.0};
-  double length{0.0};
-  Point3 a{0.0, 0.0, 0.0};
-  Point3 d{0.0, 0.0, 0.0};
-};
+using PathSegment = titan_path::ArcLengthSegment;
 
 struct PathContext {
   std::size_t group_index{0};
@@ -62,10 +70,18 @@ struct PathContext {
   std::vector<PathNode> all_nodes;
   std::vector<PathNode> principal_nodes;
   std::vector<PathSegment> segments;
+  std::vector<titan_path::CorridorSample> corridor_samples;
   std::vector<Interval> valid_intervals;
   std::size_t pruned_component_nodes{0};
   std::size_t pruned_branch_nodes{0};
   bool used_geometric_edges{false};
+  bool explicit_route{false};
+  std::string route_id;
+  std::string route_source;
+  std::string reference_structure_sha256;
+  std::string route_file_sha256;
+  std::string registration_mode{"legacy-auto"};
+  double registration_rmsd{0.0};
   double total_length{0.0};
 };
 
@@ -85,27 +101,60 @@ struct CandidateResult {
 };
 
 struct PathProjection {
+  bool valid{false};
   double progress{0.0};
-  double distance{0.0};
+  double distance{std::numeric_limits<double>::infinity()};
   Point3 point{0.0, 0.0, 0.0};
+  std::size_t segment_index{0};
 };
 
 struct PathwayState {
   PathProjection current_projection{};
+  std::optional<double> previous_progress{};
+  double continuity_half_window{0.0};
   std::vector<Interval> forward_intervals;
   PathwayMode mode{PathwayMode::Advance};
+  double minimum_receptor_ligand_distance{
+      std::numeric_limits<double>::infinity()};
+  bool physical_exit_gate_enabled{false};
+  bool physical_exit_passed{true};
+  bool recovery_direct_probe_used{false};
 };
 
 struct PathwayWorkerContext {
   MOL scratch{};
   cache_sigma_epsilon eval_cache{};
-  std::size_t eval_quota_remaining{0};
+  std::size_t candidate_proposals{0};
   std::size_t evaluations_done{0};
+  std::size_t scan_shell_exclusions{0};
+  std::size_t energy_evaluations_done{0};
+  std::size_t probe_evaluations{0};
+  std::size_t clearance_pair_checks{0};
+  std::size_t clearance_rejections{0};
+  std::size_t probe_clearance_rejections{0};
+  std::size_t probe_mode_rejections{0};
+  std::size_t swept_clearance_probe_evaluations{0};
+  std::size_t swept_clearance_pair_checks{0};
+  std::size_t swept_clearance_rejections{0};
+  std::size_t swept_interior_only_rejections{0};
+};
+
+struct ClearanceEvaluation {
+  double minimum_distance{std::numeric_limits<double>::infinity()};
+  double endpoint_minimum_distance{std::numeric_limits<double>::infinity()};
+  double witness_start_distance{std::numeric_limits<double>::infinity()};
+  double witness_endpoint_distance{std::numeric_limits<double>::infinity()};
+  double minimum_fraction{1.0};
+  std::size_t receptor_index{0};
+  std::size_t ligand_index{0};
+  std::size_t pair_checks{0};
+  bool passes_threshold{true};
+  bool global_minimum_complete{false};
+  bool threshold_violation_hidden_at_endpoints{false};
 };
 
 struct PathwayEvalBudget {
   std::size_t max_evals{0};
-  std::size_t block_size{8};
   std::atomic_size_t reserved{0};
 };
 
@@ -146,6 +195,46 @@ struct PathwayReportRow {
   PathwayCandidateState representative{};
   std::size_t representative_index{0};
   std::size_t count{0};
+};
+
+struct PathwayCorridorGridStats {
+  bool enabled{false};
+  bool stopped_by_eval_budget{false};
+  std::size_t longitudinal_points{0};
+  std::size_t proposed_targets{0};
+  std::size_t evaluated_targets{0};
+  std::size_t valid_targets{0};
+};
+
+struct PathwayGuidedSeedStats {
+  bool enabled{false};
+  bool stopped_by_eval_budget{false};
+  std::size_t proposed_directions{0};
+  std::size_t budget_granted_directions{0};
+  std::size_t evaluated_directions{0};
+  std::size_t valid_directions{0};
+  Point3 guide_direction{0.0, 0.0, 0.0};
+};
+
+struct PathwayCorridorProposal {
+  double progress{0.0};
+  double offset_u{0.0};
+  double offset_v{0.0};
+  double radius{0.0};
+  Point3 target{0.0, 0.0, 0.0};
+};
+
+struct PathwayFinalSelection {
+  PathwayCandidateState candidate{};
+  double minimum_energy_key{std::numeric_limits<double>::infinity()};
+  std::size_t valid_archive_size{0};
+  std::size_t forward_archive_size{0};
+  std::size_t forward_progress_rejections{0};
+  std::size_t epsilon_eligible_size{0};
+  std::size_t mode_eligible_size{0};
+  std::size_t maximum_probe_tier_size{0};
+  std::size_t navigation_eligible_size{0};
+  double minimum_navigation_cost{std::numeric_limits<double>::infinity()};
 };
 
 struct ResidueKey {
@@ -255,6 +344,18 @@ double angle_to_previous_vector(const force &vector, const force &old_vector) {
                     force(new_scaled + old_scaled).modul());
 }
 
+std::optional<force> project_vector_to_turn_cone(
+    const force &requested, const force &old_vector, double max_turn_deg,
+    bool &turn_capped) {
+  const auto projected = titan_path::project_vector_to_turn_cone(
+      {requested.Fx, requested.Fy, requested.Fz},
+      {old_vector.Fx, old_vector.Fy, old_vector.Fz}, max_turn_deg);
+  turn_capped = projected.capped;
+  if (!projected.valid)
+    return std::nullopt;
+  return force{projected.vector[0], projected.vector[1], projected.vector[2]};
+}
+
 std::size_t clamp_pattern_tail_budget(std::size_t total_budget) {
   if (total_budget == 0)
     return 0;
@@ -268,6 +369,14 @@ std::string residue_label(const PathNode &node) {
   return oss.str();
 }
 
+std::string swept_clearance_pbc_preprocessor(const arguments &Arguments) {
+  if (Arguments.pbc.solv_pbctopo)
+    return "pbctopo-" + Arguments.pbc.pbctopo_mode;
+  if (Arguments.pbc.solv_pbcn)
+    return "pbcn";
+  return "none";
+}
+
 double base_score(const cache_energy &trial, const cache_energy &reference,
                   int flag_score_function) {
   if (flag_score_function == 1) {
@@ -275,8 +384,93 @@ double base_score(const cache_energy &trial, const cache_energy &reference,
            reference.vdw_ener +
            2.0 * std::fabs(trial.elec_ener + trial.vdw_ener);
   }
-  return -1.0 * std::exp(1.6863 * (-trial.elec_ener - trial.vdw_ener +
-                                   reference.elec_ener + reference.vdw_ener));
+  const double exponent =
+      1.6863 * (-trial.elec_ener - trial.vdw_ener + reference.elec_ener +
+                reference.vdw_ener);
+  return -std::exp(std::clamp(exponent, -700.0, 700.0));
+}
+
+ClearanceEvaluation evaluate_interatomic_clearance(
+    const MOL &reference, const MOL &ligand, double rejection_threshold = 0.0) {
+  ClearanceEvaluation result;
+  double minimum_squared = std::numeric_limits<double>::infinity();
+  const double threshold_squared = rejection_threshold * rejection_threshold;
+  for (std::size_t j = 0; j < ligand.size(); ++j) {
+    const double ligand_x = ligand.pos.x[j];
+    const double ligand_y = ligand.pos.y[j];
+    const double ligand_z = ligand.pos.z[j];
+    for (std::size_t i = 0; i < reference.size(); ++i) {
+      const double dx = reference.pos.x[i] - ligand_x;
+      const double dy = reference.pos.y[i] - ligand_y;
+      const double dz = reference.pos.z[i] - ligand_z;
+      const double squared = dx * dx + dy * dy + dz * dz;
+      ++result.pair_checks;
+      if (squared < minimum_squared) {
+        minimum_squared = squared;
+        result.receptor_index = i;
+        result.ligand_index = j;
+      }
+      if (rejection_threshold > 0.0 && squared < threshold_squared) {
+        result.minimum_distance = std::sqrt(minimum_squared);
+        result.endpoint_minimum_distance = result.minimum_distance;
+        result.minimum_fraction = 1.0;
+        result.passes_threshold = false;
+        result.global_minimum_complete = false;
+        return result;
+      }
+    }
+  }
+  result.minimum_distance = std::sqrt(minimum_squared);
+  result.endpoint_minimum_distance = result.minimum_distance;
+  result.minimum_fraction = 1.0;
+  result.global_minimum_complete = true;
+  return result;
+}
+
+ClearanceEvaluation evaluate_interatomic_swept_clearance(
+    const MOL &reference, const MOL &ligand_start,
+    const force &displacement, double rejection_threshold) {
+  const titan_path::CartesianCoordinatesView reference_view{
+      std::span<const double>(reference.pos.x.data(), reference.pos.x.size()),
+      std::span<const double>(reference.pos.y.data(), reference.pos.y.size()),
+      std::span<const double>(reference.pos.z.data(), reference.pos.z.size())};
+  const titan_path::CartesianCoordinatesView ligand_view{
+      std::span<const double>(ligand_start.pos.x.data(),
+                              ligand_start.pos.x.size()),
+      std::span<const double>(ligand_start.pos.y.data(),
+                              ligand_start.pos.y.size()),
+      std::span<const double>(ligand_start.pos.z.data(),
+                              ligand_start.pos.z.size())};
+  const auto swept = titan_path::evaluate_translation_sweep(
+      reference_view, ligand_view,
+      {displacement.Fx, displacement.Fy, displacement.Fz},
+      rejection_threshold);
+  return {swept.witness_distance_angstrom,
+          swept.endpoint_distance_angstrom,
+          swept.witness_start_distance_angstrom,
+          swept.witness_endpoint_distance_angstrom,
+          swept.witness_fraction,
+          swept.receptor_index,
+          swept.ligand_index,
+          swept.pair_checks,
+          swept.passes_threshold,
+          swept.global_minimum_complete,
+          swept.threshold_violation_hidden_at_endpoints};
+}
+
+double stable_pathway_energy_key(const cache_energy &trial,
+                                 const cache_energy &reference,
+                                 int flag_score_function, double raw_score) {
+  if (flag_score_function == 1)
+    return pathway_energy_key(raw_score);
+  const double exponent =
+      1.6863 * (-trial.elec_ener - trial.vdw_ener + reference.elec_ener +
+                reference.vdw_ener);
+  if (!std::isfinite(exponent))
+    return std::numeric_limits<double>::quiet_NaN();
+  const double softplus =
+      std::max(exponent, 0.0) + std::log1p(std::exp(-std::fabs(exponent)));
+  return -softplus;
 }
 
 cache_sigma_epsilon make_eval_cache(const cache_sigma_epsilon &source) {
@@ -513,8 +707,180 @@ std::vector<Interval> shell_intervals(const PathSegment &segment,
   return out;
 }
 
+bool finalize_explicit_path_geometry(PathResult &result, const Multi_MOL &lg,
+                                     const arguments &Arguments) {
+  if (result.path.principal_nodes.size() < 2) {
+    result.error = "Explicit route contains fewer than two waypoints.";
+    return false;
+  }
+  double progress = 0.0;
+  for (std::size_t i = 1; i < result.path.principal_nodes.size(); ++i) {
+    PathSegment segment;
+    segment.a = result.path.principal_nodes[i - 1].com;
+    segment.d = sub_pt(result.path.principal_nodes[i].com, segment.a);
+    segment.length = std::sqrt(norm_sq(segment.d));
+    if (segment.length <= kPathTol) {
+      result.error = "Explicit route contains duplicate consecutive waypoints.";
+      return false;
+    }
+    segment.s0 = progress;
+    progress += segment.length;
+    result.path.segments.push_back(segment);
+  }
+  result.path.total_length = progress;
+
+  const Point3 ligand_start = mol_com(lg.m_mol[0], lg.parameters);
+  std::vector<Interval> valid;
+  for (const auto &segment : result.path.segments) {
+    auto shell = shell_intervals(segment, ligand_start,
+                                 Arguments.de.de_min_scan_radius,
+                                 Arguments.de.de_scan_radius);
+    for (const auto &interval : shell) {
+      valid.push_back(
+          {segment.s0 + interval.begin * segment.length,
+           segment.s0 + interval.end * segment.length});
+    }
+  }
+  result.path.valid_intervals = merge_intervals(std::move(valid));
+  if (result.path.valid_intervals.empty()) {
+    result.error =
+        "Explicit route does not intersect the requested scan-radius window.";
+    return false;
+  }
+  return true;
+}
+
+PathResult build_explicit_path(const Multi_MOL &rec, const Multi_MOL &lg,
+                               const arguments &Arguments) {
+  PathResult result;
+  const auto loaded =
+      titan_path::load_route_file(Arguments.de.pathway_file);
+  if (!loaded.ok) {
+    result.error = loaded.error;
+    return result;
+  }
+  if (!Arguments.de.pathway_route_id.empty() &&
+      loaded.route.route_id != Arguments.de.pathway_route_id) {
+    result.error = "Route ID mismatch: requested '" +
+                   Arguments.de.pathway_route_id + "' but file declares '" +
+                   loaded.route.route_id + "'.";
+    return result;
+  }
+
+  titan_path::RouteDefinition registered_route = loaded.route;
+  result.path.explicit_route = true;
+  result.path.route_id = loaded.route.route_id;
+  result.path.route_source = loaded.route.source;
+  result.path.reference_structure_sha256 =
+      loaded.route.reference_structure_sha256;
+  result.path.route_file_sha256 = loaded.source_file_sha256;
+  result.path.registration_mode =
+      titan_path::registration_mode_name(loaded.route.registration);
+  result.path.group_name = loaded.route.route_id;
+  result.path.group_index = std::numeric_limits<std::size_t>::max();
+
+  if (loaded.route.registration == titan_path::RegistrationMode::Rigid) {
+    std::unordered_map<std::size_t, std::size_t> current_atom_by_original_id;
+    for (std::size_t atom = 0; atom < rec.info.size(); ++atom) {
+      if (!rec.info[atom].has_original_atom_id())
+        continue;
+      const std::size_t original_id = rec.info[atom].get_original_atom_id();
+      if (!current_atom_by_original_id.emplace(original_id, atom).second) {
+        result.error = "Current receptor contains duplicate original atom ID " +
+                       std::to_string(original_id) + ".";
+        return result;
+      }
+    }
+
+    std::vector<titan_path::Vec3> reference_anchors;
+    std::vector<titan_path::Vec3> current_anchors;
+    reference_anchors.reserve(loaded.route.anchors.size());
+    current_anchors.reserve(loaded.route.anchors.size());
+    for (const auto &anchor : loaded.route.anchors) {
+      const auto found =
+          current_atom_by_original_id.find(anchor.original_atom_id);
+      if (found == current_atom_by_original_id.end()) {
+        result.error = "Route anchor original atom ID " +
+                       std::to_string(anchor.original_atom_id) +
+                       " is absent from routed g1.";
+        return result;
+      }
+      const std::size_t atom = found->second;
+      if (!anchor.chain.empty() && rec.info[atom].get_chain() != anchor.chain) {
+        result.error = "Route anchor chain mismatch for original atom ID " +
+                       std::to_string(anchor.original_atom_id) + ".";
+        return result;
+      }
+      if (rec.info[atom].get_resnr() != anchor.residue_position) {
+        result.error = "Route anchor residue-number mismatch for original atom ID " +
+                       std::to_string(anchor.original_atom_id) + ": route declares " +
+                       std::to_string(anchor.residue_position) +
+                       " but current receptor has " +
+                       std::to_string(rec.info[atom].get_resnr()) + ".";
+        return result;
+      }
+      if (rec.info[atom].get_atom() != anchor.atom_name) {
+        result.error = "Route anchor atom-name mismatch for original atom ID " +
+                       std::to_string(anchor.original_atom_id) + ".";
+        return result;
+      }
+      reference_anchors.push_back(anchor.reference_position_angstrom);
+      current_anchors.push_back(
+          {rec.m_mol[0].pos.x[atom], rec.m_mol[0].pos.y[atom],
+           rec.m_mol[0].pos.z[atom]});
+    }
+    const auto transform =
+        titan_path::fit_rigid_transform(reference_anchors, current_anchors);
+    if (!transform.valid) {
+      result.error = "Route registration failed: " + transform.error;
+      return result;
+    }
+    if (transform.rmsd_angstrom >
+        Arguments.de.path_registration_max_rmsd) {
+      std::ostringstream message;
+      message << "Route registration RMSD " << transform.rmsd_angstrom
+              << " A exceeds -pathway-registration-max-rmsd "
+              << Arguments.de.path_registration_max_rmsd << " A.";
+      result.error = message.str();
+      return result;
+    }
+    result.path.registration_rmsd = transform.rmsd_angstrom;
+    registered_route = titan_path::apply_transform(loaded.route, transform);
+  }
+
+  result.path.all_nodes.reserve(registered_route.waypoints.size());
+  result.path.principal_nodes.reserve(registered_route.waypoints.size());
+  for (const auto &waypoint : registered_route.waypoints) {
+    PathNode node;
+    node.chainnum = 0;
+    node.respos = waypoint.index;
+    node.chain = registered_route.branch_id.empty()
+                     ? "route"
+                     : registered_route.branch_id;
+    node.res_name = "WP";
+    node.com = waypoint.position_angstrom;
+    node.radius = waypoint.radius_angstrom;
+    result.path.all_nodes.push_back(node);
+    result.path.principal_nodes.push_back(std::move(node));
+  }
+  const auto corridor = titan_path::build_parallel_transport_corridor(
+      registered_route, Arguments.de.path_corridor_spacing);
+  if (!corridor.ok) {
+    result.error = "Explicit route corridor construction failed: " +
+                   corridor.error;
+    return result;
+  }
+  result.path.corridor_samples = corridor.samples;
+  if (!finalize_explicit_path_geometry(result, lg, Arguments))
+    return result;
+  result.ok = true;
+  return result;
+}
+
 PathResult build_path(const Multi_MOL &rec, const Multi_MOL &lg,
                       groups_cal &groups, const arguments &Arguments) {
+  if (!Arguments.de.pathway_file.empty())
+    return build_explicit_path(rec, lg, Arguments);
   PathResult result;
   result.path.group_index = groups.group_pathway_index();
   result.path.group_name = groups.group_name(result.path.group_index);
@@ -613,7 +979,7 @@ PathResult build_path(const Multi_MOL &rec, const Multi_MOL &lg,
       for (std::size_t k = 0; k < std::min(kNearestResidueEdges, nearest.size());
            ++k) {
         const double distance = std::sqrt(nearest[k].first);
-        if (distance > Arguments.de.dis_along_path)
+        if (distance > Arguments.de.path_graph_edge_cutoff)
           continue;
         add_edge(edges, i, nearest[k].second, distance);
       }
@@ -817,43 +1183,15 @@ double sample_interval(std::mt19937 &mt, const std::vector<Interval> &intervals)
   return intervals.back().end;
 }
 
-PathProjection project_point_to_path(const PathContext &path, const Point3 &point,
-                                     double min_progress = 0.0) {
-  PathProjection best;
-  best.distance = std::numeric_limits<double>::max();
-  best.progress = min_progress;
-  best.point = point_on_path(path, min_progress);
-
-  for (const auto &segment : path.segments) {
-    const double segment_begin = segment.s0;
-    const double segment_end = segment.s0 + segment.length;
-    if (segment_end + 1.0e-9 < min_progress)
-      continue;
-
-    const double begin_t =
-        min_progress <= segment_begin ? 0.0
-        : min_progress >= segment_end ? 1.0
-                                      : (min_progress - segment_begin) /
-                                            segment.length;
-    const Point3 offset = sub_pt(point, segment.a);
-    const double denom = norm_sq(segment.d);
-    double t = denom <= kPathTol ? begin_t : dot_pt(offset, segment.d) / denom;
-    t = std::clamp(t, begin_t, 1.0);
-    const Point3 projected = add_pt(segment.a, scale_pt(segment.d, t));
-    const double distance = dist_pt(point, projected);
-    const double progress = segment.s0 + t * segment.length;
-    if (distance + 1.0e-9 < best.distance ||
-        (std::fabs(distance - best.distance) <= 1.0e-9 &&
-         progress < best.progress)) {
-      best.distance = distance;
-      best.progress = progress;
-      best.point = projected;
-    }
-  }
-
-  if (!std::isfinite(best.distance))
-    best.distance = 0.0;
-  return best;
+PathProjection project_point_to_path(
+    const PathContext &path, const Point3 &point,
+    double reference_progress = 0.0, double min_progress = 0.0,
+    double max_progress = std::numeric_limits<double>::infinity()) {
+  const auto projection = titan_path::project_point_to_polyline(
+      path.segments, point, reference_progress, min_progress, max_progress);
+  return {projection.valid, projection.progress_angstrom,
+          projection.distance_angstrom, projection.point_angstrom,
+          projection.segment_index};
 }
 
 std::vector<Interval> build_forward_intervals(const PathContext &path,
@@ -884,17 +1222,6 @@ std::string pathway_mode_label(PathwayMode mode) {
   return mode == PathwayMode::Recovery ? "Recovery" : "Advance";
 }
 
-bool old_vector_points_outward(const PathContext &path, const Point3 &start_com,
-                               const PathProjection &current_projection,
-                               const force &old_vector) {
-  const Point3 future = add_pt(
-      start_com, {old_vector.Fx, old_vector.Fy, old_vector.Fz});
-  const PathProjection future_projection =
-      project_point_to_path(path, future, current_projection.progress);
-  return future_projection.distance >
-         current_projection.distance + kOutwardStopTol;
-}
-
 std::size_t total_pathway_evaluations_used(
     const std::vector<PathwayWorkerContext> &workers) {
   std::size_t total = 0;
@@ -903,31 +1230,100 @@ std::size_t total_pathway_evaluations_used(
   return total;
 }
 
-bool reserve_eval_budget(PathwayEvalBudget &budget,
-                         PathwayWorkerContext &worker) {
-  if (budget.max_evals == 0) {
-    ++worker.evaluations_done;
-    return true;
-  }
-  if (worker.eval_quota_remaining != 0) {
-    --worker.eval_quota_remaining;
-    ++worker.evaluations_done;
-    return true;
-  }
+std::size_t total_pathway_candidate_proposals(
+    const std::vector<PathwayWorkerContext> &workers) {
+  std::size_t total = 0;
+  for (const auto &worker : workers)
+    total += worker.candidate_proposals;
+  return total;
+}
 
-  std::size_t current = budget.reserved.load(std::memory_order_relaxed);
-  while (current < budget.max_evals) {
-    const std::size_t grant =
-        std::min(budget.block_size, budget.max_evals - current);
-    if (budget.reserved.compare_exchange_weak(current, current + grant,
-                                              std::memory_order_relaxed,
-                                              std::memory_order_relaxed)) {
-      worker.eval_quota_remaining = grant - 1;
-      ++worker.evaluations_done;
-      return true;
-    }
-  }
-  return false;
+std::size_t total_pathway_energy_evaluations(
+    const std::vector<PathwayWorkerContext> &workers) {
+  std::size_t total = 0;
+  for (const auto &worker : workers)
+    total += worker.energy_evaluations_done;
+  return total;
+}
+
+std::size_t total_pathway_scan_shell_exclusions(
+    const std::vector<PathwayWorkerContext> &workers) {
+  std::size_t total = 0;
+  for (const auto &worker : workers)
+    total += worker.scan_shell_exclusions;
+  return total;
+}
+
+std::size_t total_pathway_clearance_pair_checks(
+    const std::vector<PathwayWorkerContext> &workers) {
+  std::size_t total = 0;
+  for (const auto &worker : workers)
+    total += worker.clearance_pair_checks;
+  return total;
+}
+
+std::size_t total_pathway_clearance_rejections(
+    const std::vector<PathwayWorkerContext> &workers) {
+  std::size_t total = 0;
+  for (const auto &worker : workers)
+    total += worker.clearance_rejections;
+  return total;
+}
+
+std::size_t total_pathway_probe_evaluations(
+    const std::vector<PathwayWorkerContext> &workers) {
+  std::size_t total = 0;
+  for (const auto &worker : workers)
+    total += worker.probe_evaluations;
+  return total;
+}
+
+std::size_t total_pathway_probe_clearance_rejections(
+    const std::vector<PathwayWorkerContext> &workers) {
+  std::size_t total = 0;
+  for (const auto &worker : workers)
+    total += worker.probe_clearance_rejections;
+  return total;
+}
+
+std::size_t total_pathway_probe_mode_rejections(
+    const std::vector<PathwayWorkerContext> &workers) {
+  std::size_t total = 0;
+  for (const auto &worker : workers)
+    total += worker.probe_mode_rejections;
+  return total;
+}
+
+std::size_t total_pathway_swept_probe_evaluations(
+    const std::vector<PathwayWorkerContext> &workers) {
+  std::size_t total = 0;
+  for (const auto &worker : workers)
+    total += worker.swept_clearance_probe_evaluations;
+  return total;
+}
+
+std::size_t total_pathway_swept_pair_checks(
+    const std::vector<PathwayWorkerContext> &workers) {
+  std::size_t total = 0;
+  for (const auto &worker : workers)
+    total += worker.swept_clearance_pair_checks;
+  return total;
+}
+
+std::size_t total_pathway_swept_rejections(
+    const std::vector<PathwayWorkerContext> &workers) {
+  std::size_t total = 0;
+  for (const auto &worker : workers)
+    total += worker.swept_clearance_rejections;
+  return total;
+}
+
+std::size_t total_pathway_swept_interior_only_rejections(
+    const std::vector<PathwayWorkerContext> &workers) {
+  std::size_t total = 0;
+  for (const auto &worker : workers)
+    total += worker.swept_interior_only_rejections;
+  return total;
 }
 
 std::size_t pathway_parallel_grain(std::size_t total_items,
@@ -946,15 +1342,6 @@ std::size_t pathway_parallel_grain(std::size_t total_items,
       (total_items + workers * 2 - 1) / (workers * 2));
 }
 
-std::size_t pathway_eval_budget_block_size(std::size_t population_size,
-                                           std::size_t worker_slots) {
-  const std::size_t workers = std::max<std::size_t>(1, worker_slots);
-  const std::size_t per_worker =
-      std::max<std::size_t>(1, (population_size + workers - 1) / workers);
-  return std::clamp<std::size_t>(std::max<std::size_t>(8, per_worker / 2), 8,
-                                 64);
-}
-
 bool pathway_candidate_improves(const PathwayCandidateState &lhs,
                                 const PathwayCandidateState &rhs,
                                 PathwayMode mode) {
@@ -966,12 +1353,15 @@ std::vector<PathwayReportRow> build_grouped_report_rows(
   std::vector<std::pair<double, std::size_t>> by_progress;
   by_progress.reserve(population.size());
   for (std::size_t i = 0; i < population.size(); ++i) {
-    if (population[i].valid)
+    if (population[i].valid) {
+      if (!std::isfinite(population[i].progress))
+        throw std::invalid_argument("nonfinite report progress");
       by_progress.push_back({population[i].progress, i});
+    }
   }
   std::sort(by_progress.begin(), by_progress.end(),
             [](const auto &lhs, const auto &rhs) {
-              if (std::fabs(lhs.first - rhs.first) > kPathwayProgressDedupEps)
+              if (lhs.first != rhs.first)
                 return lhs.first < rhs.first;
               return lhs.second < rhs.second;
             });
@@ -1001,7 +1391,7 @@ std::vector<PathwayReportRow> build_grouped_report_rows(
   std::stable_sort(rows.begin(), rows.end(),
                    [&](const PathwayReportRow &lhs,
                        const PathwayReportRow &rhs) {
-                     return pathway_candidate_better(
+                     return pathway_candidate_strict_less(
                          lhs.representative, lhs.representative_index,
                          rhs.representative, rhs.representative_index, mode);
                    });
@@ -1019,15 +1409,93 @@ std::string variant_pattern_section_title(PullDeVariant variant) {
   }
 }
 
-PathwayState prepare_pathway_state(const PathContext &path,
-                                   const Point3 &start_com,
-                                   const arguments &Arguments) {
+std::optional<PathwayMode>
+read_previous_pathway_mode(const std::string &status_filename) {
+  std::ifstream input(status_filename);
+  std::string line;
+  while (std::getline(input, line)) {
+    if (line == "MODE=Recovery" || line == "MODE=RECOVERY")
+      return PathwayMode::Recovery;
+    if (line == "MODE=Advance" || line == "MODE=ADVANCE")
+      return PathwayMode::Advance;
+  }
+  return std::nullopt;
+}
+
+PathwayFinalSelection select_pathway_final_candidate(
+    const std::vector<PathwayCandidateState> &archive, PathwayMode mode,
+    double energy_key_epsilon, bool geometry_only,
+    double current_path_distance, bool fixed_probe_enabled,
+    bool navigation_enabled, double navigation_cost_epsilon) {
+  PathwayFinalSelection selection;
+  std::vector<titan_path::SelectionCandidate> candidates;
+  candidates.reserve(archive.size());
+  for (const auto &candidate : archive) {
+    titan_path::SelectionCandidate mapped{
+        candidate.energy_key, candidate.delta_progress,
+        candidate.pull_distance, candidate.minimum_clearance,
+        candidate.angle_deg, candidate.valid};
+    mapped.probe_length = candidate.probe_length;
+    mapped.fixed_probe = candidate.fixed_probe;
+    mapped.path_distance = candidate.applied_path_distance;
+    mapped.reference_path_distance = current_path_distance;
+    mapped.navigation_enabled = candidate.navigation_enabled;
+    mapped.navigation_cost = candidate.navigation_cost;
+    candidates.push_back(mapped);
+  }
+  const auto selected = titan_path::select_epsilon_progress_candidate(
+      candidates,
+      mode == PathwayMode::Recovery ? titan_path::RouteMode::Recovery
+                                    : titan_path::RouteMode::Advance,
+      energy_key_epsilon, geometry_only, fixed_probe_enabled,
+      navigation_enabled && mode == PathwayMode::Advance
+          ? std::optional<double>(navigation_cost_epsilon)
+          : std::nullopt);
+  selection.minimum_energy_key = selected.minimum_energy_key;
+  selection.valid_archive_size = selected.valid_count;
+  selection.forward_archive_size = selected.selectable_count;
+  selection.forward_progress_rejections = selected.nonforward_count;
+  selection.epsilon_eligible_size = selected.eligible_count;
+  selection.mode_eligible_size = selected.mode_eligible_count;
+  selection.maximum_probe_tier_size = selected.maximum_probe_tier_count;
+  selection.navigation_eligible_size = selected.navigation_eligible_count;
+  selection.minimum_navigation_cost = selected.minimum_navigation_cost;
+  if (selected.found)
+    selection.candidate = archive[selected.index];
+  return selection;
+}
+
+PathwayState prepare_pathway_state(
+    const PathContext &path, const Point3 &start_com,
+    const arguments &Arguments,
+    const std::optional<PathwayMode> previous_mode = std::nullopt,
+    const std::optional<double> previous_progress = std::nullopt,
+    bool observed_boundary = false) {
   PathwayState state;
-  state.current_projection = project_point_to_path(path, start_com);
+  if (previous_progress.has_value()) {
+    const auto projection = titan_path::project_with_continuity(
+        path.segments, start_com, *previous_progress,
+        observed_boundary ? 1.0 : Arguments.de.path_continuity_window, path.total_length);
+    state.current_projection = {projection.valid, projection.progress_angstrom,
+        projection.distance_angstrom, projection.point_angstrom, projection.segment_index};
+    state.previous_progress = previous_progress;
+    state.continuity_half_window = observed_boundary ? 1.0 : Arguments.de.path_continuity_window;
+  } else {
+    state.current_projection = project_point_to_path(path, start_com);
+  }
   state.forward_intervals = build_forward_intervals(
       path, start_com, state.current_projection.progress,
       Arguments.de.de_min_scan_radius, Arguments.de.de_scan_radius);
-  state.mode = state.current_projection.distance > Arguments.de.dis_along_path
+  std::optional<titan_path::RouteMode> previous;
+  if (previous_mode.has_value())
+    previous = previous_mode == PathwayMode::Recovery
+                   ? titan_path::RouteMode::Recovery
+                   : titan_path::RouteMode::Advance;
+  const auto next = titan_path::next_route_mode(
+      previous, state.current_projection.distance,
+      Arguments.de.path_recovery_enter_radius,
+      Arguments.de.path_recovery_exit_radius);
+  state.mode = next == titan_path::RouteMode::Recovery
                    ? PathwayMode::Recovery
                    : PathwayMode::Advance;
   return state;
@@ -1038,34 +1506,213 @@ PathwayCandidateState evaluate_candidate(
     const Point3 &start_com, const Multi_MOL &rec, const Multi_MOL &lg,
     PathwayWorkerContext &worker, const cache_energy &energy_ref,
     const arguments &Arguments, const de_arg &DE_arguments,
-    PathwayEvalBudget &eval_budget) {
+    bool budget_granted, const Point3 *target_override = nullptr,
+    double corridor_offset_u = 0.0, double corridor_offset_v = 0.0,
+    double corridor_radius = 0.0, bool bypass_scan_shell = false) {
+  ++worker.candidate_proposals;
   PathwayCandidateState result;
   result.progress = progress;
-  result.delta_progress = std::max(
-      0.0, progress - state.current_projection.progress);
-  const Point3 target = point_on_path(path, progress);
-  result.vector = force_from_points(start_com, target);
-  result.pull_distance = result.vector.modul();
+  result.requested_delta_progress =
+      progress - state.current_projection.progress;
+  const Point3 target =
+      target_override == nullptr ? point_on_path(path, progress)
+                                 : *target_override;
+  result.requested_vector = force_from_points(start_com, target);
+  result.vector = result.requested_vector;
+  result.requested_pull_distance = result.requested_vector.modul();
+  result.pull_distance = result.requested_pull_distance;
+  result.corridor_offset_u = corridor_offset_u;
+  result.corridor_offset_v = corridor_offset_v;
+  result.corridor_radius = corridor_radius;
+  if (!bypass_scan_shell && !titan_path::candidate_within_scan_shell(
+          result.requested_pull_distance, DE_arguments.min_scan_radius,
+          DE_arguments.scan_radius)) {
+    ++worker.scan_shell_exclusions;
+    return result;
+  }
+  result.requested_angle_deg =
+      angle_to_previous_vector(result.requested_vector,
+                               DE_arguments.old_vector);
+  if (DE_arguments.flag_old_vec) {
+    const auto projected = project_vector_to_turn_cone(
+        result.requested_vector, DE_arguments.old_vector,
+        state.mode == PathwayMode::Recovery &&
+                Arguments.de.path_probe_length > 0.0
+            ? Arguments.de.path_recovery_max_turn_angle
+            : Arguments.de.path_max_turn_angle,
+        result.turn_capped);
+    if (!projected.has_value())
+      return result;
+    result.vector = *projected;
+  }
+  const force direction_before_probe_scaling = result.vector;
   result.angle_deg =
       angle_to_previous_vector(result.vector, DE_arguments.old_vector);
-  if (DE_arguments.flag_old_vec &&
-      result.angle_deg > DE_arguments.restrain_angle) {
+  if (!budget_granted) {
     return result;
   }
-  if (!reserve_eval_budget(eval_budget, worker)) {
+  ++worker.evaluations_done;
+
+  const bool fixed_probe = Arguments.de.path_probe_length > 0.0;
+  const std::size_t probe_count = fixed_probe
+                                      ? std::max<std::size_t>(
+                                            1, Arguments.de.path_probe_lengths.size())
+                                      : 1;
+  bool clearance_passed = false;
+  bool mode_eligible_probe_selected = false;
+  std::optional<PathwayCandidateState> mode_ineligible_fallback;
+  for (std::size_t probe_index = 0; probe_index < probe_count; ++probe_index) {
+    result.vector = direction_before_probe_scaling;
+    if (fixed_probe) {
+      const double probe_length = Arguments.de.path_probe_lengths.empty()
+                                      ? Arguments.de.path_probe_length
+                                      : Arguments.de.path_probe_lengths[probe_index];
+      const auto scaled = titan_path::scale_vector_to_length(
+          {result.vector.Fx, result.vector.Fy, result.vector.Fz}, probe_length);
+      if (!scaled.has_value())
+        return result;
+      result.vector = force{(*scaled)[0], (*scaled)[1], (*scaled)[2]};
+    }
+    result.fixed_probe = fixed_probe;
+    result.pull_distance = result.vector.modul();
+    result.probe_length = result.pull_distance;
+    const Point3 applied_endpoint =
+        add_pt(start_com,
+               {result.vector.Fx, result.vector.Fy, result.vector.Fz});
+    // Keep the endpoint projection local to the current route coordinate.
+    // The requested target may be far down a self-near polyline and must not
+    // widen the continuity window or manufacture a nonlocal progress jump.
+    const double projection_half_window =
+        std::max(result.pull_distance, Arguments.de.path_corridor_spacing);
+    const double projection_min = std::max(
+        0.0, state.current_projection.progress - projection_half_window);
+    const double projection_max = std::min(
+        path.total_length,
+        state.current_projection.progress + projection_half_window);
+    const PathProjection applied_projection = project_point_to_path(
+        path, applied_endpoint, state.current_projection.progress,
+        projection_min, projection_max);
+    if (!applied_projection.valid)
+      return result;
+    result.applied_progress = applied_projection.progress;
+    result.delta_progress =
+        applied_projection.progress - state.current_projection.progress;
+    result.applied_path_distance = applied_projection.distance;
+    result.navigation_enabled = Arguments.de.path_navigation_enabled;
+    if (result.navigation_enabled) {
+      const auto applied_frame = titan_path::sample_corridor_at_progress(
+          path.corridor_samples, result.applied_progress);
+      const auto navigation = titan_path::evaluate_navigation_cost(
+          result.applied_path_distance, applied_frame.radius_angstrom,
+          result.delta_progress, result.pull_distance,
+          Arguments.de.path_navigation_tube_weight,
+          Arguments.de.path_navigation_backtrack_weight);
+      result.applied_corridor_radius =
+          navigation.applied_corridor_radius_angstrom;
+      result.navigation_tube_excess = navigation.tube_excess_angstrom;
+      result.navigation_backtrack_distance =
+          navigation.backtrack_distance_angstrom;
+      result.navigation_tube_cost = navigation.tube_cost;
+      result.navigation_backtrack_cost = navigation.backtrack_cost;
+      result.navigation_cost = navigation.total_cost;
+    }
+
+    ++worker.probe_evaluations;
+    const bool swept_clearance =
+        Arguments.de.path_clearance_mode == "swept-linear-center";
+    ClearanceEvaluation clearance;
+    if (swept_clearance) {
+      ++worker.swept_clearance_probe_evaluations;
+      clearance = evaluate_interatomic_swept_clearance(
+          rec.m_mol[0], lg.m_mol[0], result.vector,
+          Arguments.de.path_min_clearance);
+      worker.swept_clearance_pair_checks += clearance.pair_checks;
+    } else {
+      worker.scratch = lg.m_mol[0];
+      worker.scratch.translate(result.vector.Fx, result.vector.Fy,
+                               result.vector.Fz);
+      clearance = evaluate_interatomic_clearance(
+          rec.m_mol[0], worker.scratch, Arguments.de.path_min_clearance);
+    }
+    worker.clearance_pair_checks += clearance.pair_checks;
+    result.minimum_clearance = clearance.minimum_distance;
+    result.endpoint_minimum_clearance =
+        clearance.endpoint_minimum_distance;
+    result.swept_minimum_clearance =
+        swept_clearance ? clearance.minimum_distance
+                        : clearance.endpoint_minimum_distance;
+    result.swept_minimum_fraction = clearance.minimum_fraction;
+    result.swept_minimum_receptor_index = clearance.receptor_index;
+    result.swept_minimum_ligand_index = clearance.ligand_index;
+    result.swept_minimum_complete = clearance.global_minimum_complete;
+    if (!clearance.passes_threshold) {
+      ++worker.probe_clearance_rejections;
+      if (swept_clearance)
+        ++worker.swept_clearance_rejections;
+      if (swept_clearance &&
+          clearance.threshold_violation_hidden_at_endpoints)
+        ++worker.swept_interior_only_rejections;
+      continue;
+    }
+    clearance_passed = true;
+    const bool advances = result.delta_progress > 1.0e-6;
+    const bool descends =
+        result.applied_path_distance + 1.0e-6 <
+        state.current_projection.distance;
+    const bool mode_eligible =
+        !fixed_probe ||
+        (state.mode == PathwayMode::Advance ? advances : descends);
+    if (!mode_eligible) {
+      ++worker.probe_mode_rejections;
+      if (!mode_ineligible_fallback.has_value())
+        mode_ineligible_fallback = result;
+      continue;
+    }
+    mode_eligible_probe_selected = true;
+    break;
+  }
+  if (!clearance_passed) {
+    ++worker.clearance_rejections;
     return result;
   }
+  if (!mode_eligible_probe_selected) {
+    if (!mode_ineligible_fallback.has_value())
+      return result;
+    result = *mode_ineligible_fallback;
+  }
+  // The last attempted probe may differ from the retained fallback tier.
+  // Reconstruct the exact retained displacement before the single energy call.
   worker.scratch = lg.m_mol[0];
-  worker.scratch.translate(result.vector.Fx, result.vector.Fy, result.vector.Fz);
+  worker.scratch.translate(result.vector.Fx, result.vector.Fy,
+                           result.vector.Fz);
+  if (Arguments.de.path_geometry_only) {
+    result.raw_score = 0.0;
+    result.energy_key = 0.0;
+    result.valid = std::isfinite(result.pull_distance) &&
+                   std::isfinite(result.applied_progress) &&
+                   std::isfinite(result.delta_progress) &&
+                   std::isfinite(result.applied_path_distance) &&
+                   (!result.navigation_enabled ||
+                    std::isfinite(result.navigation_cost));
+    return result;
+  }
+  ++worker.energy_evaluations_done;
   eval_energy_model(rec.m_mol[0], worker.scratch, rec.info, lg.info,
                     worker.eval_cache, result.energy, Arguments, rec.parameters,
                     lg.parameters);
   result.raw_score =
       base_score(result.energy, energy_ref, Arguments.de.de_flag_score_function);
-  result.energy_key = pathway_energy_key(result.raw_score);
+  result.energy_key = stable_pathway_energy_key(
+      result.energy, energy_ref, Arguments.de.de_flag_score_function,
+      result.raw_score);
   result.valid = std::isfinite(result.raw_score) &&
-                 std::isfinite(result.energy_key) &&
-                 std::isfinite(result.pull_distance);
+                  std::isfinite(result.energy_key) &&
+                  std::isfinite(result.pull_distance) &&
+                  std::isfinite(result.applied_progress) &&
+                  std::isfinite(result.delta_progress) &&
+                  std::isfinite(result.applied_path_distance) &&
+                  (!result.navigation_enabled ||
+                   std::isfinite(result.navigation_cost));
   return result;
 }
 
@@ -1083,11 +1730,14 @@ PullDeBatchEvaluation evaluate_candidate_batch(
 
   std::vector<std::pair<double, std::size_t>> ordered;
   ordered.reserve(proposals.size());
-  for (std::size_t i = 0; i < proposals.size(); ++i)
+  for (std::size_t i = 0; i < proposals.size(); ++i) {
+    if (!std::isfinite(proposals[i]))
+      throw std::invalid_argument("nonfinite pathway proposal progress");
     ordered.push_back({proposals[i], i});
+  }
   std::sort(ordered.begin(), ordered.end(),
             [](const auto &lhs, const auto &rhs) {
-              if (std::fabs(lhs.first - rhs.first) > kPathwayProgressDedupEps)
+              if (lhs.first != rhs.first)
                 return lhs.first < rhs.first;
               return lhs.second < rhs.second;
             });
@@ -1103,6 +1753,25 @@ PullDeBatchEvaluation evaluate_candidate_batch(
     proposal_to_unique[index] = unique_progress.size() - 1;
   }
   std::vector<PathwayCandidateState> unique_results(unique_progress.size());
+  std::vector<unsigned char> budget_granted(unique_progress.size(), 0);
+
+  std::size_t available = std::numeric_limits<std::size_t>::max();
+  if (eval_budget.max_evals != 0) {
+    const std::size_t reserved =
+        eval_budget.reserved.load(std::memory_order_relaxed);
+    available = reserved >= eval_budget.max_evals
+                    ? 0
+                    : eval_budget.max_evals - reserved;
+  }
+  std::size_t granted = 0;
+  for (std::size_t i = 0; i < unique_progress.size(); ++i) {
+    if (granted < available) {
+      budget_granted[i] = 1;
+      ++granted;
+    }
+  }
+  if (eval_budget.max_evals != 0)
+    eval_budget.reserved.fetch_add(granted, std::memory_order_relaxed);
 
   const std::size_t before = total_pathway_evaluations_used(workers);
   executor.parallel_for(
@@ -1114,8 +1783,8 @@ PullDeBatchEvaluation evaluate_candidate_batch(
         for (std::size_t i = begin; i < end; ++i) {
           unique_results[i] =
               evaluate_candidate(path, state, unique_progress[i], start_com, rec,
-                                 lg, worker, energy_ref, Arguments,
-                                 DE_arguments, eval_budget);
+                                  lg, worker, energy_ref, Arguments,
+                                  DE_arguments, budget_granted[i] != 0);
         }
       });
   const std::size_t after = total_pathway_evaluations_used(workers);
@@ -1123,8 +1792,276 @@ PullDeBatchEvaluation evaluate_candidate_batch(
     results[i] = unique_results[proposal_to_unique[i]];
   batch.evaluations_used = after - before;
   batch.budget_exhausted =
-      (eval_budget.max_evals != 0 && after >= eval_budget.max_evals);
+      (eval_budget.max_evals != 0 &&
+       eval_budget.reserved.load(std::memory_order_relaxed) >=
+           eval_budget.max_evals);
   return batch;
+}
+
+std::vector<double>
+build_corridor_progress_grid(const std::vector<Interval> &intervals,
+                             double spacing) {
+  if (!std::isfinite(spacing) || spacing <= 0.0)
+    throw std::invalid_argument("corridor grid spacing must be finite and positive");
+  std::vector<double> progress;
+  for (const auto &interval : intervals) {
+    const double count_bound = std::ceil((interval.end-interval.begin)/spacing)+2.0;
+    if (!std::isfinite(interval.begin) || !std::isfinite(interval.end) ||
+        interval.end < interval.begin || !std::isfinite(count_bound) ||
+        count_bound > static_cast<double>(titan_path::kMaximumCorridorSamples-progress.size()))
+      throw std::invalid_argument("corridor grid sample count exceeds resource limit");
+    progress.push_back(interval.begin);
+    for (double value = interval.begin + spacing;
+         value < interval.end - kPathwayProgressDedupEps; value += spacing) {
+      if (value+spacing <= value || progress.size() >= titan_path::kMaximumCorridorSamples)
+        throw std::invalid_argument("corridor grid increment/count is not representable");
+      progress.push_back(value);
+    }
+    progress.push_back(interval.end);
+  }
+  std::sort(progress.begin(), progress.end());
+  std::vector<double> grouped;
+  grouped.reserve(progress.size());
+  for (double value : progress)
+    if (grouped.empty() || value-grouped.back() > kPathwayProgressDedupEps)
+      grouped.push_back(value);
+  return grouped;
+}
+
+PathwayCorridorGridStats run_pathway_corridor_grid(
+    const PathContext &path, const PathwayState &state,
+    const Point3 &start_com, const Multi_MOL &rec, const Multi_MOL &lg,
+    std::vector<PathwayWorkerContext> &workers, const cache_energy &energy_ref,
+    const arguments &Arguments, const de_arg &DE_arguments,
+    PathwayEvalBudget &eval_budget, TitanExecutor &executor,
+    std::size_t requested_workers,
+    std::vector<PathwayCandidateState> &candidates,
+    PathwayCandidateState &best_candidate) {
+  PathwayCorridorGridStats stats;
+  stats.enabled = true;
+  if (path.corridor_samples.empty())
+    return stats;
+
+  const auto progress_grid = build_corridor_progress_grid(
+      state.forward_intervals, Arguments.de.path_corridor_spacing);
+  const std::size_t radial_samples = Arguments.de.path_corridor_radial_samples;
+  constexpr std::size_t kMaximumCorridorProposals = 1000000;
+  if (radial_samples >= kMaximumCorridorProposals ||
+      progress_grid.size() > kMaximumCorridorProposals/(radial_samples+1))
+    throw std::invalid_argument("corridor proposal count exceeds resource limit (1000000)");
+  stats.longitudinal_points = progress_grid.size();
+  std::vector<titan_path::CorridorSample> frames;
+  frames.reserve(progress_grid.size());
+  for (const double progress : progress_grid)
+    frames.push_back(titan_path::sample_corridor_at_progress(
+        path.corridor_samples, progress));
+
+  std::vector<PathwayCorridorProposal> proposals;
+  proposals.reserve(progress_grid.size() * (radial_samples + 1));
+  for (const auto &frame : frames) {
+    proposals.push_back({frame.progress_angstrom, 0.0, 0.0,
+                         frame.radius_angstrom, frame.center_angstrom});
+  }
+  constexpr double kGoldenAngle = 2.39996322972865332223;
+  for (std::size_t radial = 0; radial < radial_samples; ++radial) {
+    const double fraction =
+        std::sqrt((static_cast<double>(radial) + 0.5) /
+                  static_cast<double>(radial_samples));
+    const double angle = kGoldenAngle * static_cast<double>(radial);
+    for (const auto &frame : frames) {
+      const double offset_u =
+          frame.radius_angstrom * fraction * std::cos(angle);
+      const double offset_v =
+          frame.radius_angstrom * fraction * std::sin(angle);
+      proposals.push_back(
+          {frame.progress_angstrom, offset_u, offset_v,
+           frame.radius_angstrom,
+           titan_path::corridor_point(frame, offset_u, offset_v)});
+    }
+  }
+  stats.proposed_targets = proposals.size();
+  candidates.assign(proposals.size(), PathwayCandidateState{});
+
+  std::size_t available = std::numeric_limits<std::size_t>::max();
+  if (eval_budget.max_evals != 0) {
+    const std::size_t reserved =
+        eval_budget.reserved.load(std::memory_order_relaxed);
+    available = reserved >= eval_budget.max_evals
+                    ? 0
+                    : eval_budget.max_evals - reserved;
+  }
+  std::vector<unsigned char> grants(proposals.size(), 0);
+  std::size_t feasible = 0;
+  std::size_t granted = 0;
+  for (std::size_t i = 0; i < proposals.size(); ++i) {
+    const force vector = force_from_points(start_com, proposals[i].target);
+    const double pull_distance = vector.modul();
+    const bool distance_feasible =
+        pull_distance + 1.0e-9 >= DE_arguments.min_scan_radius &&
+        pull_distance <= DE_arguments.scan_radius + 1.0e-9;
+    if (!distance_feasible)
+      continue;
+    ++feasible;
+    if (granted < available) {
+      grants[i] = 1;
+      ++granted;
+    }
+  }
+  if (eval_budget.max_evals != 0)
+    eval_budget.reserved.fetch_add(granted, std::memory_order_relaxed);
+
+  executor.parallel_for(
+      proposals.size(), requested_workers,
+      pathway_parallel_grain(proposals.size(), requested_workers,
+                             lg.m_mol[0].size()),
+      [&](std::size_t worker_id, std::size_t begin, std::size_t end) {
+        auto &worker = workers[worker_id];
+        for (std::size_t i = begin; i < end; ++i) {
+          candidates[i] = evaluate_candidate(
+              path, state, proposals[i].progress, start_com, rec, lg, worker,
+              energy_ref, Arguments, DE_arguments, grants[i] != 0,
+              &proposals[i].target, proposals[i].offset_u,
+              proposals[i].offset_v, proposals[i].radius);
+        }
+      });
+
+  stats.evaluated_targets = granted;
+  stats.stopped_by_eval_budget = granted < feasible;
+  std::size_t best_index = 0;
+  bool found = false;
+  for (std::size_t i = 0; i < candidates.size(); ++i) {
+    if (!candidates[i].valid)
+      continue;
+    ++stats.valid_targets;
+    if (!found || pathway_candidate_better(candidates[i], i,
+                                           candidates[best_index], best_index,
+                                           state.mode)) {
+      best_index = i;
+      found = true;
+    }
+  }
+  if (found)
+    best_candidate = candidates[best_index];
+  return stats;
+}
+
+PathwayGuidedSeedStats run_pathway_guided_seeds(
+    const PathContext &path, const PathwayState &state,
+    const Point3 &start_com, const Multi_MOL &rec, const Multi_MOL &lg,
+    std::vector<PathwayWorkerContext> &workers, const cache_energy &energy_ref,
+    const arguments &Arguments, const de_arg &DE_arguments,
+    PathwayEvalBudget &eval_budget, TitanExecutor &executor,
+    std::size_t requested_workers,
+    std::vector<PathwayCandidateState> &candidates,
+    PathwayCandidateState &best_candidate) {
+  PathwayGuidedSeedStats stats;
+  stats.enabled = true;
+  if (path.corridor_samples.empty() ||
+      Arguments.de.path_probe_length <= 0.0)
+    return stats;
+
+  const double nominal_probe = Arguments.de.path_probe_lengths.empty()
+                                   ? Arguments.de.path_probe_length
+                                   : Arguments.de.path_probe_lengths.front();
+  const auto current_frame = titan_path::sample_corridor_at_progress(
+      path.corridor_samples, state.current_projection.progress);
+  const titan_path::PathProjection public_projection{
+      state.current_projection.valid,
+      state.current_projection.progress,
+      state.current_projection.distance,
+      state.current_projection.point,
+      state.current_projection.segment_index};
+  const auto guide = titan_path::build_navigation_guide_direction(
+      start_com, public_projection, current_frame,
+      state.mode == PathwayMode::Recovery ? titan_path::RouteMode::Recovery
+                                          : titan_path::RouteMode::Advance,
+      nominal_probe);
+  stats.guide_direction = guide;
+  std::optional<titan_path::Vec3> old_direction;
+  if (DE_arguments.flag_old_vec) {
+    old_direction = titan_path::Vec3{DE_arguments.old_vector.Fx,
+                                     DE_arguments.old_vector.Fy,
+                                     DE_arguments.old_vector.Fz};
+  }
+  const auto seeds = titan_path::build_navigation_seed_directions(
+      guide, old_direction, current_frame,
+      Arguments.de.path_navigation_seed_radial_samples,
+      Arguments.de.path_navigation_seed_amplitude);
+  stats.proposed_directions = seeds.size();
+  candidates.assign(seeds.size(), PathwayCandidateState{});
+  if (seeds.empty())
+    return stats;
+
+  std::vector<Point3> targets(seeds.size());
+  std::vector<double> requested_progress(seeds.size(),
+                                         state.current_projection.progress);
+  const double projection_half_window =
+      std::max(nominal_probe, Arguments.de.path_corridor_spacing);
+  const double projection_min = std::max(
+      0.0, state.current_projection.progress - projection_half_window);
+  const double projection_max = std::min(
+      path.total_length,
+      state.current_projection.progress + projection_half_window);
+  for (std::size_t index = 0; index < seeds.size(); ++index) {
+    targets[index] = add_pt(
+        start_com, scale_pt(seeds[index].direction_unit, nominal_probe));
+    const auto projected = project_point_to_path(
+        path, targets[index], state.current_projection.progress,
+        projection_min, projection_max);
+    if (projected.valid)
+      requested_progress[index] = projected.progress;
+  }
+
+  std::size_t available = std::numeric_limits<std::size_t>::max();
+  if (eval_budget.max_evals != 0) {
+    const std::size_t reserved =
+        eval_budget.reserved.load(std::memory_order_relaxed);
+    available = reserved >= eval_budget.max_evals
+                    ? 0
+                    : eval_budget.max_evals - reserved;
+  }
+  const std::size_t granted = std::min(available, seeds.size());
+  stats.budget_granted_directions = granted;
+  if (eval_budget.max_evals != 0)
+    eval_budget.reserved.fetch_add(granted, std::memory_order_relaxed);
+
+  const std::size_t evaluations_before =
+      total_pathway_evaluations_used(workers);
+  executor.parallel_for(
+      seeds.size(), requested_workers,
+      pathway_parallel_grain(seeds.size(), requested_workers,
+                             lg.m_mol[0].size()),
+      [&](std::size_t worker_id, std::size_t begin, std::size_t end) {
+        auto &worker = workers[worker_id];
+        for (std::size_t index = begin; index < end; ++index) {
+          candidates[index] = evaluate_candidate(
+              path, state, requested_progress[index], start_com, rec, lg,
+              worker, energy_ref, Arguments, DE_arguments, index < granted,
+              &targets[index], 0.0, 0.0, current_frame.radius_angstrom, true);
+          candidates[index].guided_seed = true;
+          candidates[index].guided_seed_index = seeds[index].index;
+        }
+      });
+
+  stats.evaluated_directions =
+      total_pathway_evaluations_used(workers) - evaluations_before;
+  stats.stopped_by_eval_budget = granted < seeds.size();
+  std::size_t best_index = 0;
+  bool found = false;
+  for (std::size_t index = 0; index < candidates.size(); ++index) {
+    if (!candidates[index].valid)
+      continue;
+    ++stats.valid_directions;
+    if (!found || pathway_candidate_better(
+                      candidates[index], index, candidates[best_index],
+                      best_index, state.mode)) {
+      best_index = index;
+      found = true;
+    }
+  }
+  if (found)
+    best_candidate = candidates[best_index];
+  return stats;
 }
 
 PathwayPatternStats refine_pathway_candidate_pattern(
@@ -1137,7 +2074,7 @@ PathwayPatternStats refine_pathway_candidate_pattern(
   const auto started_at = std::chrono::steady_clock::now();
   double step = std::max(initial_step, kMinPatternStep);
 
-  while (stats.sweeps < kPathPatternMaxSweeps && step > kMinPatternStep) {
+  while (stats.sweeps < kPathPatternMaxSweeps && step >= kMinPatternStep) {
     std::array<double, 2> proposals{
         domain.sanitize(best_candidate.progress + step),
         domain.sanitize(best_candidate.progress - step)};
@@ -1368,17 +2305,14 @@ std::vector<std::size_t> select_pathway_direct_cell_batch_indices(
     return {select_pathway_direct_cell_index(frontier, mode)};
 
   std::sort(pareto.begin(), pareto.end(), [&](std::size_t lhs, std::size_t rhs) {
-    if (pathway_candidate_equivalent(frontier[lhs].state, frontier[rhs].state,
-                                     mode)) {
-      const double lhs_size = pathway_direct_cell_size_metric(frontier[lhs]);
-      const double rhs_size = pathway_direct_cell_size_metric(frontier[rhs]);
-      if (std::fabs(lhs_size - rhs_size) > 1.0e-12)
-        return lhs_size > rhs_size;
-      return frontier[lhs].id < frontier[rhs].id;
-    }
-    return pathway_candidate_better(frontier[lhs].state, frontier[lhs].id,
-                                    frontier[rhs].state, frontier[rhs].id,
-                                    mode);
+    if (pathway_candidate_strict_less(frontier[lhs].state, 0, frontier[rhs].state, 0, mode))
+      return true;
+    if (pathway_candidate_strict_less(frontier[rhs].state, 0, frontier[lhs].state, 0, mode))
+      return false;
+    const double lhs_size = pathway_direct_cell_size_metric(frontier[lhs]);
+    const double rhs_size = pathway_direct_cell_size_metric(frontier[rhs]);
+    if (lhs_size != rhs_size) return lhs_size > rhs_size;
+    return frontier[lhs].id < frontier[rhs].id;
   });
 
   if (pareto.size() > max_cells)
@@ -1549,16 +2483,315 @@ PathwayDirectStats run_pathway_direct_search(
   return stats;
 }
 
-void write_pathway_status_file(const info &output_info, const std::string &status,
-                               const std::string &reason, double path_distance,
-                               bool used_old_vector, const de_arg &DE_arguments) {
+void write_pathway_identity(std::ostream &output, const PathContext &path,
+                            const std::string &prefix = "") {
+  if (path.explicit_route) {
+    output << prefix << "route id: " << path.route_id << "\n";
+    output << prefix << "route source: " << path.route_source << "\n";
+    output << prefix << "reference sha256: "
+           << path.reference_structure_sha256 << "\n";
+    output << prefix << "route file sha256: " << path.route_file_sha256
+           << "\n";
+    output << prefix << "registration: " << path.registration_mode << "\n";
+    output << prefix << "registration RMSD: " << path.registration_rmsd
+           << " A\n";
+  } else {
+    output << prefix << "pathway group: " << path.group_name << " ["
+           << path.group_index << "]\n";
+  }
+}
+
+void write_pathway_status_file(
+    const info &output_info, const std::string &status,
+    const std::string &reason, const PathContext &path,
+    const PathwayState &state, bool used_old_vector,
+    const de_arg &DE_arguments, const arguments &Run_arguments,
+    const Point3 &reference_com, const Point3 &ligand_com,
+    const PathwayCandidateState *candidate = nullptr,
+    const PathwayFinalSelection *selection = nullptr,
+    std::size_t candidate_evaluations = 0,
+    std::size_t energy_evaluations = 0,
+    std::size_t clearance_pair_checks = 0,
+    std::size_t clearance_rejections = 0,
+    std::size_t candidate_proposals = 0,
+    std::size_t scan_shell_exclusions = 0,
+    std::size_t probe_evaluations = 0,
+    std::size_t probe_clearance_rejections = 0,
+    std::size_t probe_mode_rejections = 0,
+    std::size_t swept_probe_evaluations = 0,
+    std::size_t swept_pair_checks = 0,
+    std::size_t swept_rejections = 0,
+    std::size_t swept_interior_only_rejections = 0,
+    titan_path::CandidateExhaustion exhaustion =
+        titan_path::CandidateExhaustion::None,
+    std::string_view reason_detail_override = {},
+    const PathwayGuidedSeedStats *guided_stats = nullptr) {
   std::fstream status_file(output_info.get_pull_direction_status_filename(),
                            std::ios::out);
-  status_file << std::fixed << std::setprecision(4);
+  titan_path::configure_status_numeric_output(status_file);
+  status_file << "SCHEMA=TITAN_PATH_STATUS_V1\n";
   status_file << "STATUS=" << status << "\n";
   status_file << "REASON=" << reason << "\n";
-  status_file << "PATH_DISTANCE=" << path_distance << "\n";
+  status_file << "REASON_DETAIL="
+              << (reason_detail_override.empty()
+                      ? titan_path::candidate_exhaustion_name(exhaustion)
+                      : reason_detail_override)
+              << "\n";
+  status_file << "MODE=" << pathway_mode_label(state.mode) << "\n";
+  status_file << "RECOVERY_DIRECT_PROBE_USED="
+              << (state.recovery_direct_probe_used ? 1 : 0) << "\n";
+  status_file << "PATH_PROGRESS_A=" << state.current_projection.progress
+              << "\n";
+  status_file << "PATH_TOTAL_A=" << path.total_length << "\n";
+  status_file << "PROJECTION_CONTINUITY="
+              << (state.previous_progress.has_value() ? "BOUNDED_PREVIOUS_PROGRESS" : "GLOBAL_INITIAL") << "\n";
+  if (state.previous_progress.has_value()) {
+    status_file << "PREVIOUS_PATH_PROGRESS_A=" << *state.previous_progress << "\n";
+    status_file << "PROJECTION_WINDOW_MIN_A="
+                << std::max(0.0, *state.previous_progress-state.continuity_half_window) << "\n";
+    status_file << "PROJECTION_WINDOW_MAX_A="
+                << std::min(path.total_length, *state.previous_progress+state.continuity_half_window) << "\n";
+  }
+  status_file << "PATH_DISTANCE=" << state.current_projection.distance << "\n";
+  status_file << "PATH_DISTANCE_A=" << state.current_projection.distance
+              << "\n";
+  status_file << "MIN_RECEPTOR_LIGAND_DISTANCE_A="
+              << state.minimum_receptor_ligand_distance << "\n";
+  status_file << "PHYSICAL_EXIT_GATE_ENABLED="
+              << (state.physical_exit_gate_enabled ? 1 : 0) << "\n";
+  status_file << "PHYSICAL_EXIT_PASSED="
+              << (state.physical_exit_passed ? 1 : 0) << "\n";
   status_file << "USED_OLD_VECTOR=" << (used_old_vector ? 1 : 0) << "\n";
+  status_file << "MAX_TURN_ANGLE_DEG="
+              << (state.mode == PathwayMode::Recovery &&
+                          Run_arguments.de.path_probe_length > 0.0
+                      ? Run_arguments.de.path_recovery_max_turn_angle
+                      : Run_arguments.de.path_max_turn_angle)
+              << "\n";
+  status_file << "ADVANCE_MAX_TURN_ANGLE_DEG="
+              << Run_arguments.de.path_max_turn_angle << "\n";
+  status_file << "RECOVERY_MAX_TURN_ANGLE_DEG="
+              << Run_arguments.de.path_recovery_max_turn_angle << "\n";
+  status_file << "ENERGY_KEY_EPSILON="
+              << Run_arguments.de.path_energy_key_epsilon << "\n";
+  status_file << "GEOMETRY_ONLY="
+              << (Run_arguments.de.path_geometry_only ? 1 : 0) << "\n";
+  status_file << "MIN_CLEARANCE_THRESHOLD_A="
+              << Run_arguments.de.path_min_clearance << "\n";
+  status_file << "FIXED_PROBE_ENABLED="
+              << (Run_arguments.de.path_probe_length > 0.0 ? 1 : 0) << "\n";
+  status_file << "CONFIGURED_PROBE_LENGTH_A="
+              << Run_arguments.de.path_probe_length << "\n";
+  status_file << "CONFIGURED_PROBE_LENGTHS_A=";
+  for (std::size_t index = 0;
+       index < Run_arguments.de.path_probe_lengths.size(); ++index) {
+    if (index != 0)
+      status_file << ',';
+    status_file << Run_arguments.de.path_probe_lengths[index];
+  }
+  status_file << "\n";
+  status_file << "CANDIDATE_PROPOSALS=" << candidate_proposals << "\n";
+  status_file << "CANDIDATE_EVALUATIONS=" << candidate_evaluations << "\n";
+  status_file << "PROBE_EVALUATIONS=" << probe_evaluations << "\n";
+  status_file << "SCAN_SHELL_EXCLUSIONS=" << scan_shell_exclusions << "\n";
+  status_file << "ENERGY_EVALUATIONS=" << energy_evaluations << "\n";
+  status_file << "CLEARANCE_PAIR_CHECKS=" << clearance_pair_checks << "\n";
+  status_file << "CLEARANCE_REJECTIONS=" << clearance_rejections << "\n";
+  status_file << "PROBE_CLEARANCE_REJECTIONS="
+              << probe_clearance_rejections << "\n";
+  status_file << "PROBE_MODE_REJECTIONS=" << probe_mode_rejections << "\n";
+  status_file << "CLEARANCE_MODE="
+              << Run_arguments.de.path_clearance_mode << "\n";
+  if (Run_arguments.de.path_clearance_mode == "swept-linear-center") {
+    status_file << "CLEARANCE_SCOPE=CONTINUOUS_LINEAR_TRANSLATION\n";
+    status_file << "CLEARANCE_COORDINATE_FRAME="
+                   "UPSTREAM_PBC_RECONSTRUCTED_CARTESIAN\n";
+    status_file << "CLEARANCE_PERIODIC_DISTANCE_POLICY="
+                   "DIRECT_IN_RECONSTRUCTED_FRAME\n";
+    status_file << "CLEARANCE_PBC_PREPROCESSOR="
+                << swept_clearance_pbc_preprocessor(Run_arguments) << "\n";
+    status_file << "SWEPT_CLEARANCE_PROBE_EVALUATIONS="
+                << swept_probe_evaluations << "\n";
+    status_file << "SWEPT_CLEARANCE_PAIR_CHECKS=" << swept_pair_checks
+                << "\n";
+    status_file << "SWEPT_CLEARANCE_REJECTIONS=" << swept_rejections
+                << "\n";
+    status_file << "SWEPT_INTERIOR_ONLY_REJECTIONS="
+                << swept_interior_only_rejections << "\n";
+  }
+  if (Run_arguments.de.path_navigation_enabled) {
+    status_file << "NAVIGATION_ENABLED=1\n";
+    status_file << "NAVIGATION_COST_KIND=ALGORITHMIC_DIMENSIONLESS\n";
+    status_file << "NAVIGATION_SELECTION_SCOPE=ADVANCE_ONLY\n";
+    status_file << "NAVIGATION_DIRECTIONALITY=GUIDED_SEEDS_PLUS_PROGRESS_SELECTION\n";
+    status_file << "NAVIGATION_TUBE_WEIGHT="
+                << Run_arguments.de.path_navigation_tube_weight << "\n";
+    status_file << "NAVIGATION_BACKTRACK_WEIGHT="
+                << Run_arguments.de.path_navigation_backtrack_weight << "\n";
+    status_file << "NAVIGATION_COST_EPSILON="
+                << Run_arguments.de.path_navigation_cost_epsilon << "\n";
+    status_file << "NAVIGATION_SEED_RADIAL_SAMPLES="
+                << Run_arguments.de.path_navigation_seed_radial_samples
+                << "\n";
+    status_file << "NAVIGATION_SEED_AMPLITUDE="
+                << Run_arguments.de.path_navigation_seed_amplitude << "\n";
+    status_file << "NAVIGATION_RECOVERY_TANGENT_WEIGHT="
+                << titan_path::kNavigationRecoveryTangentWeight << "\n";
+    status_file << "NAVIGATION_OLD_DIRECTION_BLEND_FRACTIONS=";
+    for (std::size_t index = 0;
+         index < titan_path::kNavigationOldDirectionBlendFractions.size();
+         ++index) {
+      if (index != 0)
+        status_file << ',';
+      status_file << titan_path::kNavigationOldDirectionBlendFractions[index];
+    }
+    status_file << "\n";
+    status_file << "GUIDED_SEED_PROPOSALS="
+                << (guided_stats == nullptr
+                        ? 0
+                        : guided_stats->proposed_directions)
+                << "\n";
+    status_file << "GUIDED_SEED_EVALUATIONS="
+                << (guided_stats == nullptr
+                        ? 0
+                        : guided_stats->evaluated_directions)
+                << "\n";
+    status_file << "GUIDED_SEED_BUDGET_GRANTED="
+                << (guided_stats == nullptr
+                        ? 0
+                        : guided_stats->budget_granted_directions)
+                << "\n";
+    status_file << "GUIDED_SEED_VALID="
+                << (guided_stats == nullptr ? 0
+                                            : guided_stats->valid_directions)
+                << "\n";
+    if (guided_stats != nullptr && guided_stats->enabled) {
+      status_file << "NAVIGATION_GUIDE_X="
+                  << guided_stats->guide_direction[0] << "\n";
+      status_file << "NAVIGATION_GUIDE_Y="
+                  << guided_stats->guide_direction[1] << "\n";
+      status_file << "NAVIGATION_GUIDE_Z="
+                  << guided_stats->guide_direction[2] << "\n";
+    }
+  }
+  status_file << "REFERENCE_COM_X_A=" << reference_com[0] << "\n";
+  status_file << "REFERENCE_COM_Y_A=" << reference_com[1] << "\n";
+  status_file << "REFERENCE_COM_Z_A=" << reference_com[2] << "\n";
+  status_file << "LIGAND_COM_X_A=" << ligand_com[0] << "\n";
+  status_file << "LIGAND_COM_Y_A=" << ligand_com[1] << "\n";
+  status_file << "LIGAND_COM_Z_A=" << ligand_com[2] << "\n";
+  status_file << "ROUTE_KIND="
+              << (path.explicit_route ? "EXPLICIT" : "LEGACY_GROUP") << "\n";
+  if (path.explicit_route) {
+    status_file << "ROUTE_ID=" << path.route_id << "\n";
+    status_file << "ROUTE_SOURCE=" << path.route_source << "\n";
+    status_file << "REFERENCE_SHA256=" << path.reference_structure_sha256
+                << "\n";
+    status_file << "ROUTE_FILE_SHA256=" << path.route_file_sha256 << "\n";
+    status_file << "REGISTRATION_MODE=" << path.registration_mode << "\n";
+    status_file << "REGISTRATION_RMSD_A=" << path.registration_rmsd << "\n";
+  } else {
+    status_file << "PATHWAY_GROUP=" << path.group_name << "\n";
+    status_file << "PATHWAY_GROUP_INDEX=" << path.group_index << "\n";
+  }
+  if (candidate != nullptr && candidate->valid) {
+    status_file << "REQUESTED_TARGET_PROGRESS_A=" << candidate->progress
+                << "\n";
+    status_file << "REQUESTED_DELTA_PROGRESS_A="
+                << candidate->requested_delta_progress << "\n";
+    // Keep the V1 TARGET field's historical requested-target meaning.  The
+    // applied endpoint is reported by the additive APPLIED_* fields below.
+    status_file << "TARGET_PROGRESS_A=" << candidate->progress
+                << "\n";
+    status_file << "APPLIED_PROGRESS_A=" << candidate->applied_progress
+                << "\n";
+    status_file << "APPLIED_DELTA_PROGRESS_A=" << candidate->delta_progress
+                << "\n";
+    status_file << "APPLIED_PATH_DISTANCE_A="
+                << candidate->applied_path_distance << "\n";
+    status_file << "REQUESTED_PULL_DISTANCE_A="
+                << candidate->requested_pull_distance << "\n";
+    status_file << "ROUTE_TARGET_VECTOR_X_A="
+                << candidate->requested_vector.Fx << "\n";
+    status_file << "ROUTE_TARGET_VECTOR_Y_A="
+                << candidate->requested_vector.Fy << "\n";
+    status_file << "ROUTE_TARGET_VECTOR_Z_A="
+                << candidate->requested_vector.Fz << "\n";
+    status_file << "ROUTE_TARGET_ANGLE_DEG="
+                << candidate->requested_angle_deg << "\n";
+    status_file << "TURN_CAPPED=" << (candidate->turn_capped ? 1 : 0) << "\n";
+    titan_path::write_next_vector_status(
+        status_file,
+        {candidate->vector.Fx, candidate->vector.Fy, candidate->vector.Fz},
+        candidate->pull_distance, candidate->angle_deg);
+    status_file << "CORRIDOR_OFFSET_U_A="
+                << candidate->corridor_offset_u << "\n";
+    status_file << "CORRIDOR_OFFSET_V_A="
+                << candidate->corridor_offset_v << "\n";
+    status_file << "CORRIDOR_RADIUS_A=" << candidate->corridor_radius << "\n";
+    status_file << "TARGET_MIN_CLEARANCE_A="
+                << candidate->minimum_clearance << "\n";
+    if (Run_arguments.de.path_clearance_mode == "swept-linear-center") {
+      status_file << "TARGET_ENDPOINT_MIN_CLEARANCE_A="
+                  << candidate->endpoint_minimum_clearance << "\n";
+      status_file << "TARGET_SWEPT_MIN_CLEARANCE_A="
+                  << candidate->swept_minimum_clearance << "\n";
+      status_file << "TARGET_SWEPT_MIN_FRACTION="
+                  << candidate->swept_minimum_fraction << "\n";
+      status_file << "TARGET_SWEPT_MIN_RECEPTOR_INDEX="
+                  << candidate->swept_minimum_receptor_index << "\n";
+      status_file << "TARGET_SWEPT_MIN_LIGAND_INDEX="
+                  << candidate->swept_minimum_ligand_index << "\n";
+      status_file << "TARGET_SWEPT_MIN_COMPLETE="
+                  << (candidate->swept_minimum_complete ? 1 : 0) << "\n";
+    }
+    status_file << "TARGET_CLEARANCE_VECTOR=NEXT_VECTOR\n";
+    status_file << "TARGET_RAW_SCORE=" << candidate->raw_score << "\n";
+    status_file << "TARGET_ENERGY_KEY=" << candidate->energy_key << "\n";
+    if (candidate->navigation_enabled) {
+      status_file << "TARGET_GUIDED_SEED="
+                  << (candidate->guided_seed ? 1 : 0) << "\n";
+      status_file << "TARGET_GUIDED_SEED_INDEX="
+                  << candidate->guided_seed_index << "\n";
+      status_file << "TARGET_APPLIED_CORRIDOR_RADIUS_A="
+                  << candidate->applied_corridor_radius << "\n";
+      status_file << "TARGET_NAVIGATION_TUBE_EXCESS_A="
+                  << candidate->navigation_tube_excess << "\n";
+      status_file << "TARGET_NAVIGATION_BACKTRACK_A="
+                  << candidate->navigation_backtrack_distance << "\n";
+      status_file << "TARGET_NAVIGATION_TUBE_COST="
+                  << candidate->navigation_tube_cost << "\n";
+      status_file << "TARGET_NAVIGATION_BACKTRACK_COST="
+                  << candidate->navigation_backtrack_cost << "\n";
+      status_file << "TARGET_NAVIGATION_COST="
+                  << candidate->navigation_cost << "\n";
+    }
+  }
+  if (selection != nullptr) {
+    status_file << "ARCHIVE_MIN_ENERGY_KEY="
+                << selection->minimum_energy_key << "\n";
+    status_file << "VALID_ARCHIVE_SIZE="
+                << selection->valid_archive_size << "\n";
+    status_file << "FORWARD_ARCHIVE_SIZE="
+                << selection->forward_archive_size << "\n";
+    status_file << "FORWARD_PROGRESS_REJECTIONS="
+                << selection->forward_progress_rejections << "\n";
+    status_file << "EPSILON_ELIGIBLE_SIZE="
+                << selection->epsilon_eligible_size << "\n";
+    status_file << "MODE_ELIGIBLE_SIZE="
+                << selection->mode_eligible_size << "\n";
+    status_file << "MAXIMUM_PROBE_TIER_SIZE="
+                << selection->maximum_probe_tier_size << "\n";
+    status_file << "ENERGY_ELIGIBLE_SIZE="
+                << selection->epsilon_eligible_size << "\n";
+    if (Run_arguments.de.path_navigation_enabled) {
+      status_file << "NAVIGATION_ELIGIBLE_SIZE="
+                  << selection->navigation_eligible_size << "\n";
+      if (std::isfinite(selection->minimum_navigation_cost))
+        status_file << "ENERGY_ELIGIBLE_MIN_NAVIGATION_COST="
+                    << selection->minimum_navigation_cost << "\n";
+    }
+  }
   if (DE_arguments.snapshot_metadata_valid)
     status_file << "SNAPSHOT_TIME_PS=" << DE_arguments.snapshot_time_ps << "\n";
 }
@@ -1595,7 +2828,9 @@ int run_pathway_pull_direction_legacy_unused(
 
   const Point3 start_com = mol_com(lg.m_mol[0], lg.parameters);
   const cache_energy energy_ref =
-      reference_energy(rec, lg, CachedData, Arguments, executor);
+      Arguments.de.path_geometry_only
+          ? cache_energy{}
+          : reference_energy(rec, lg, CachedData, Arguments, executor);
   const std::size_t worker_count = std::max<std::size_t>(1, Arguments.nt);
 
   std::vector<double> progress(DE_arguments.pop_num, 0.0);
@@ -1831,11 +3066,23 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
                                de_arg &DE_arguments, arguments &Arguments,
                                info &output_info, TitanExecutor &executor,
                                groups_cal &Groups_from_index_file) {
-  if (rec.m_mol[0].mindist_mol(lg.m_mol[0], Arguments, DE_arguments) == true) {
-    TitanUI::print_info("Automatic termination is on!");
-    return 1;
+  // Fixed/tangent controls request validated Cartesian inputs, not a native
+  // route candidate. In particular, an empty scan shell must not prevent their
+  // independent supervisor from evaluating the prescribed control direction.
+  if (const char *only = std::getenv("TITAN_PATH_CARTESIAN_ONLY"); only != nullptr) {
+    const char *audit = std::getenv("TITAN_PATH_GEOMETRY_AUDIT");
+    if (std::string_view(only) != "1" || audit == nullptr || *audit == '\0') {
+      TitanUI::print_error("Cartesian-only export requires explicit audit output");
+      return 1;
+    }
+    try {
+      titan_path::write_cartesian_audit(audit, rec, lg);
+    } catch (const std::exception &error) {
+      TitanUI::print_error(std::string("Pull-direction Cartesian audit: ") + error.what());
+      return 1;
+    }
+    return 0; // Observation export only; never authorizes MD or a direction.
   }
-
   const auto built = build_path(rec, lg, Groups_from_index_file, Arguments);
   if (!built.ok) {
     TitanUI::print_error("Pull-direction pathway: " + built.error);
@@ -1855,24 +3102,116 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
   }
 
   const Point3 start_com = mol_com(lg.m_mol[0], lg.parameters);
-  const PathwayState pathway_state =
-      prepare_pathway_state(built.path, start_com, Arguments);
-  const bool off_path =
-      pathway_state.current_projection.distance > Arguments.de.dis_along_path;
+  const Point3 reference_com = mol_com(rec.m_mol[0], rec.parameters);
+  if (const char *audit = std::getenv("TITAN_PATH_GEOMETRY_AUDIT");
+      audit != nullptr && *audit != '\0') {
+    try {
+      titan_path::write_cartesian_audit(audit, rec, lg);
+    } catch (const std::exception &error) {
+      TitanUI::print_error(std::string("Pull-direction Cartesian audit: ") + error.what());
+      return 1;
+    }
+  }
+  auto previous_mode = read_previous_pathway_mode(
+      output_info.get_pull_direction_status_filename());
+  std::optional<double> previous_progress;
+  PathwayState pathway_state;
+  try {
+    const char *observed = std::getenv("TITAN_PATH_OBSERVED_BOUNDARY");
+    if (observed != nullptr && *observed != '\0') {
+      if (!Arguments.de.path_previous_status.empty() || !DE_arguments.snapshot_metadata_valid)
+        throw std::invalid_argument("observed boundary conflicts with legacy state or lacks snapshot time");
+      std::ifstream boundary_file(observed);
+      if (!boundary_file) throw std::invalid_argument("observed boundary file unavailable");
+      const auto boundary = titan_path::read_observed_boundary(
+          boundary_file, built.path.route_id, built.path.route_file_sha256,
+          built.path.reference_structure_sha256, built.path.total_length,
+          DE_arguments.snapshot_time_ps);
+      previous_progress = boundary.progress_angstrom;
+      previous_mode = boundary.mode == titan_path::RouteMode::Recovery
+                          ? PathwayMode::Recovery : PathwayMode::Advance;
+    }
+    if (!Arguments.de.path_previous_status.empty()) {
+      if (!DE_arguments.snapshot_metadata_valid)
+        throw std::invalid_argument("continuity requires authoritative snapshot time");
+      std::ifstream previous_file(Arguments.de.path_previous_status);
+      if (!previous_file) throw std::invalid_argument("previous route status file unavailable");
+      const auto previous = titan_path::read_previous_route_state(
+          previous_file, built.path.route_id, built.path.route_file_sha256,
+          built.path.reference_structure_sha256, built.path.total_length,
+          DE_arguments.snapshot_time_ps);
+      previous_progress = previous.progress_angstrom;
+      previous_mode = previous.mode == titan_path::RouteMode::Recovery
+                          ? PathwayMode::Recovery : PathwayMode::Advance;
+    }
+    pathway_state = prepare_pathway_state(built.path, start_com, Arguments,
+                                         previous_mode, previous_progress,
+                                         observed != nullptr && *observed != '\0');
+    if (observed != nullptr && *observed != '\0' &&
+        std::abs(pathway_state.current_projection.progress-*previous_progress) > .03)
+      throw std::invalid_argument("native and observed boundary progress disagree");
+  } catch (const std::exception &error) {
+    TitanUI::print_error(std::string("Pull-direction continuity: ") + error.what());
+    return 1;
+  }
+  pathway_state.minimum_receptor_ligand_distance =
+      evaluate_interatomic_clearance(rec.m_mol[0], lg.m_mol[0])
+          .minimum_distance;
+  pathway_state.physical_exit_gate_enabled =
+      Arguments.de.path_completion_min_separation > 0.0;
+  pathway_state.physical_exit_passed =
+      !pathway_state.physical_exit_gate_enabled ||
+      pathway_state.minimum_receptor_ligand_distance >=
+          Arguments.de.path_completion_min_separation;
+  const bool near_route_terminal =
+      pathway_state.current_projection.progress >=
+      std::max(0.0, built.path.total_length -
+                        Arguments.de.path_completion_tolerance);
+  const bool route_complete =
+      near_route_terminal && pathway_state.physical_exit_passed;
+  if (route_complete) {
+    write_pathway_status_file(output_info, "COMPLETE", "ROUTE_TERMINAL_REACHED",
+                              built.path, pathway_state, false, DE_arguments,
+                              Arguments, reference_com, start_com);
+    std::fstream de_report("DE_report.dat", std::ios::out);
+    de_report << std::fixed << std::setprecision(4);
+    de_report << "TITAN Pathway Pull Report\n\n";
+    de_report << "status: COMPLETE\n";
+    de_report << "reason: ROUTE_TERMINAL_REACHED\n";
+    write_pathway_identity(de_report, built.path);
+    de_report << "current progress: "
+              << pathway_state.current_projection.progress << " A\n";
+    de_report << "route arc length: " << built.path.total_length << " A\n";
+    de_report << "terminal tolerance: "
+              << Arguments.de.path_completion_tolerance << " A\n";
+    de_report << "minimum receptor-ligand distance: "
+              << pathway_state.minimum_receptor_ligand_distance << " A\n";
+    de_report << "physical exit threshold: "
+              << Arguments.de.path_completion_min_separation << " A\n";
+    TitanUI::print_info("Pathway route terminal reached.");
+    return 0;
+  }
 
+  de_arg effective_DE_arguments = DE_arguments;
+  const bool recovery_dropped_old_vector = false;
+
+  const bool use_recovery_direct_probe =
+      pathway_state.mode == PathwayMode::Recovery &&
+      pathway_state.forward_intervals.empty() &&
+      Arguments.de.path_probe_length > 0.0;
   std::string stop_reason;
-  if (DE_arguments.flag_old_vec && off_path &&
-      old_vector_points_outward(built.path, start_com,
-                                pathway_state.current_projection,
-                                DE_arguments.old_vector)) {
-    stop_reason = "OLD_VECTOR_POINTS_AWAY_FROM_PATHWAY";
-  } else if (pathway_state.forward_intervals.empty()) {
-    stop_reason = "NO_REACHABLE_FORWARD_TARGET";
+  if (pathway_state.forward_intervals.empty() &&
+      !use_recovery_direct_probe) {
+    stop_reason = near_route_terminal && !pathway_state.physical_exit_passed
+                      ? "TERMINAL_REACHED_WITHOUT_PHYSICAL_EXIT"
+                      : "NO_REACHABLE_FORWARD_TARGET";
   }
 
   const auto started_at = std::chrono::steady_clock::now();
   const cache_energy energy_ref =
-      reference_energy(rec, lg, CachedData, Arguments, executor);
+      Arguments.de.path_geometry_only
+          ? cache_energy{}
+          : reference_energy(rec, lg, CachedData, Arguments, executor);
   const std::size_t requested_workers = std::max<std::size_t>(1, Arguments.nt);
   const std::size_t worker_slots =
       std::max<std::size_t>(1, std::min(executor.capacity(), requested_workers));
@@ -1883,13 +3222,13 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
   }
 
   PathwayEvalBudget eval_budget;
-  eval_budget.block_size =
-      pathway_eval_budget_block_size(DE_arguments.pop_num, worker_slots);
 
   const PullOptimizerKind optimizer_kind =
       classify_pull_optimizer(DE_arguments.pull_opt);
   const bool use_direct_family =
       optimizer_is_direct_family(DE_arguments.pull_opt);
+  const bool use_corridor_grid =
+      optimizer_kind == PullOptimizerKind::CorridorGrid;
   const bool use_variant_de =
       (optimizer_kind == PullOptimizerKind::DeShade ||
        optimizer_kind == PullOptimizerKind::DeLShade ||
@@ -1924,7 +3263,9 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
     if (direct_total_budget > pattern_reserved_budget)
       direct_phase_budget = direct_total_budget - pattern_reserved_budget;
   }
-  eval_budget.max_evals = use_variant_de
+  eval_budget.max_evals = use_corridor_grid
+                              ? DE_arguments.pull_max_evals
+                          : use_variant_de
                               ? variant_phase_budget
                               : use_direct_family ? direct_phase_budget
                                                   : DE_arguments.pull_max_evals;
@@ -1948,30 +3289,96 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
   const PathwayDirectDomain direct_domain =
       build_pathway_direct_domain(pathway_state.forward_intervals);
 
+  std::vector<PathwayCandidateState> evaluation_archive;
   const auto batch_evaluator =
       [&](std::span<const double> proposals,
           std::span<PathwayCandidateState> evaluated_candidates) {
         std::vector<double> sanitized(proposals.size(), 0.0);
         for (std::size_t i = 0; i < proposals.size(); ++i)
           sanitized[i] = domain.sanitize(proposals[i]);
-        return evaluate_candidate_batch(
+        const PullDeBatchEvaluation batch = evaluate_candidate_batch(
             std::span<const double>(sanitized), evaluated_candidates, built.path,
             pathway_state, start_com, rec, lg, workers, energy_ref, Arguments,
-            DE_arguments, eval_budget, executor, requested_workers);
+            effective_DE_arguments, eval_budget, executor, requested_workers);
+        for (const auto &candidate : evaluated_candidates)
+          if (candidate.valid)
+            evaluation_archive.push_back(candidate);
+        return batch;
       };
 
   std::vector<PathwayCandidateState> report_candidates;
   PathwayCandidateState best_candidate;
+  PathwayFinalSelection final_selection;
+  titan_path::FinalSelectionFailure final_selection_failure =
+      titan_path::FinalSelectionFailure::None;
+  bool final_selection_attempted = false;
+  bool recovery_descent_exhausted = false;
   PullDeVariantStats de_variant_stats;
   PathwayLegacyDeStats legacy_stats;
   PathwayDirectStats direct_stats;
+  PathwayCorridorGridStats corridor_grid_stats;
+  PathwayGuidedSeedStats guided_seed_stats;
   PathwayPatternStats pattern_stats;
+  std::vector<PathwayCandidateState> guided_candidates;
+  PathwayCandidateState guided_best_candidate;
   std::size_t best_stage = 0;
   bool stopped_by_eval_budget = false;
 
+  if (stop_reason.empty() && Arguments.de.path_navigation_enabled &&
+      !use_recovery_direct_probe) {
+    try {
+      guided_seed_stats = run_pathway_guided_seeds(
+          built.path, pathway_state, start_com, rec, lg, workers, energy_ref,
+          Arguments, effective_DE_arguments, eval_budget, executor,
+          requested_workers, guided_candidates, guided_best_candidate);
+    } catch (const std::exception &error) {
+      TitanUI::print_error("TITAN-Path guided seed generation failed: " +
+                           std::string(error.what()));
+      stop_reason = "NAVIGATION_GUIDE_DEGENERATE";
+    }
+    for (const auto &candidate : guided_candidates)
+      if (candidate.valid)
+        evaluation_archive.push_back(candidate);
+  }
+
   if (stop_reason.empty()) {
     bool ok = false;
-    if (use_variant_de) {
+    if (use_recovery_direct_probe) {
+      pathway_state.recovery_direct_probe_used = true;
+      const Point3 recovery_target = pathway_state.current_projection.point;
+      best_candidate = evaluate_candidate(
+          built.path, pathway_state, pathway_state.current_projection.progress,
+          start_com, rec, lg, workers.front(), energy_ref, Arguments,
+          effective_DE_arguments, true, &recovery_target, 0.0, 0.0, 0.0,
+          true);
+      if (best_candidate.valid &&
+          best_candidate.applied_path_distance + 1.0e-6 <
+              pathway_state.current_projection.distance) {
+        report_candidates.push_back(best_candidate);
+        evaluation_archive.push_back(best_candidate);
+        ok = true;
+      } else if (best_candidate.valid) {
+        report_candidates.push_back(best_candidate);
+        stop_reason = "NO_RECOVERY_DESCENT_DIRECTION";
+        recovery_descent_exhausted = true;
+      }
+    } else if (use_corridor_grid) {
+      try {
+        corridor_grid_stats = run_pathway_corridor_grid(
+            built.path, pathway_state, start_com, rec, lg, workers, energy_ref,
+            Arguments, effective_DE_arguments, eval_budget, executor,
+            requested_workers, report_candidates, best_candidate);
+      } catch (const std::exception &error) {
+        TitanUI::print_error("TITAN-Path corridor evaluation failed: " +
+                             std::string(error.what()));
+        stop_reason = "CORRIDOR_GEOMETRY_DEGENERATE";
+      }
+      for (const auto &candidate : report_candidates)
+        if (candidate.valid)
+          evaluation_archive.push_back(candidate);
+      ok = stop_reason.empty() && best_candidate.valid;
+      stopped_by_eval_budget = corridor_grid_stats.stopped_by_eval_budget;
+    } else if (use_variant_de) {
       PullDeVariantOptions variant_options;
       variant_options.variant = de_variant_from_optimizer(optimizer_kind);
       variant_options.seed = DE_arguments.pull_seed;
@@ -2037,23 +3444,130 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
                                pattern_stats.stopped_by_eval_budget;
       best_stage = legacy_stats.best_generation;
     }
-    if (!ok || !best_candidate.valid)
-      stop_reason = "NO_VALID_FORWARD_DIRECTION";
+    for (const auto &candidate : guided_candidates)
+      if (candidate.valid)
+        report_candidates.push_back(candidate);
+    if (!best_candidate.valid && guided_best_candidate.valid) {
+      best_candidate = guided_best_candidate;
+      ok = true;
+    }
+    stopped_by_eval_budget =
+        stopped_by_eval_budget || guided_seed_stats.stopped_by_eval_budget;
+    if (stop_reason.empty() && (!ok || !best_candidate.valid))
+      stop_reason = use_recovery_direct_probe
+                        ? "NO_VALID_RECOVERY_DIRECTION"
+                        : "NO_VALID_FORWARD_DIRECTION";
+  }
+
+  if (stop_reason.empty() && best_candidate.valid) {
+    final_selection_attempted = true;
+    final_selection = select_pathway_final_candidate(
+        evaluation_archive, pathway_state.mode,
+        Arguments.de.path_energy_key_epsilon,
+        Arguments.de.path_geometry_only,
+        pathway_state.current_projection.distance,
+        Arguments.de.path_probe_length > 0.0,
+        Arguments.de.path_navigation_enabled,
+        Arguments.de.path_navigation_cost_epsilon);
+    if (final_selection.candidate.valid) {
+      best_candidate = final_selection.candidate;
+      report_candidates.push_back(best_candidate);
+    } else {
+      titan_path::SelectionResult selection_counts;
+      selection_counts.found = final_selection.candidate.valid;
+      selection_counts.valid_count = final_selection.valid_archive_size;
+      selection_counts.selectable_count = final_selection.forward_archive_size;
+      selection_counts.nonforward_count =
+          final_selection.forward_progress_rejections;
+      selection_counts.eligible_count = final_selection.epsilon_eligible_size;
+      final_selection_failure = titan_path::classify_final_selection_failure(
+          selection_counts,
+          pathway_state.mode == PathwayMode::Recovery
+              ? titan_path::RouteMode::Recovery
+              : titan_path::RouteMode::Advance);
+      if (final_selection_failure ==
+          titan_path::FinalSelectionFailure::ForwardProgressExhausted) {
+        stop_reason = "NO_FORWARD_PROGRESS_CANDIDATE";
+      } else if (final_selection_failure ==
+                 titan_path::FinalSelectionFailure::RecoveryDescentExhausted) {
+        stop_reason = "NO_RECOVERY_DESCENT_DIRECTION";
+        recovery_descent_exhausted = true;
+      } else {
+        stop_reason = pathway_state.mode == PathwayMode::Recovery
+                          ? "NO_ENERGETICALLY_SELECTABLE_RECOVERY_TARGET"
+                          : "NO_ENERGETICALLY_SELECTABLE_FORWARD_TARGET";
+      }
+    }
   }
 
   const double wall_seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                     started_at)
           .count();
+  const std::size_t candidate_proposals =
+      total_pathway_candidate_proposals(workers);
   const std::size_t total_evaluations = total_pathway_evaluations_used(workers);
+  const std::size_t scan_shell_exclusions =
+      total_pathway_scan_shell_exclusions(workers);
+  const std::size_t energy_evaluations =
+      total_pathway_energy_evaluations(workers);
+  const std::size_t clearance_pair_checks =
+      total_pathway_clearance_pair_checks(workers);
+  const std::size_t clearance_rejections =
+      total_pathway_clearance_rejections(workers);
+  const std::size_t probe_evaluations =
+      total_pathway_probe_evaluations(workers);
+  const std::size_t probe_clearance_rejections =
+      total_pathway_probe_clearance_rejections(workers);
+  const std::size_t probe_mode_rejections =
+      total_pathway_probe_mode_rejections(workers);
+  const std::size_t swept_probe_evaluations =
+      total_pathway_swept_probe_evaluations(workers);
+  const std::size_t swept_pair_checks =
+      total_pathway_swept_pair_checks(workers);
+  const std::size_t swept_rejections =
+      total_pathway_swept_rejections(workers);
+  const std::size_t swept_interior_only_rejections =
+      total_pathway_swept_interior_only_rejections(workers);
   const double evals_per_second =
       wall_seconds > 0.0 ? static_cast<double>(total_evaluations) / wall_seconds
                          : 0.0;
+  const auto exhaustion =
+      (stop_reason == "NO_VALID_FORWARD_DIRECTION" ||
+       stop_reason == "NO_VALID_RECOVERY_DIRECTION")
+          ? titan_path::classify_candidate_exhaustion(
+                candidate_proposals, total_evaluations, scan_shell_exclusions,
+                clearance_rejections, energy_evaluations)
+          : titan_path::CandidateExhaustion::None;
+  const std::string stop_reason_detail =
+      recovery_descent_exhausted
+          ? "RECOVERY_DESCENT_EXHAUSTED"
+      : final_selection_failure == titan_path::FinalSelectionFailure::None
+          ? titan_path::candidate_exhaustion_name(exhaustion)
+          : titan_path::final_selection_failure_name(final_selection_failure);
 
   if (!stop_reason.empty()) {
-    write_pathway_status_file(output_info, "STOP", stop_reason,
-                              pathway_state.current_projection.distance,
-                              DE_arguments.flag_old_vec, DE_arguments);
+    write_pathway_status_file(output_info, "STOP", stop_reason, built.path,
+                              pathway_state,
+                               effective_DE_arguments.flag_old_vec,
+                               DE_arguments, Arguments, reference_com, start_com,
+                               recovery_descent_exhausted ? &best_candidate
+                                                          : nullptr,
+                               final_selection_attempted ? &final_selection
+                                                         : nullptr,
+                               total_evaluations,
+                               energy_evaluations, clearance_pair_checks,
+                               clearance_rejections, candidate_proposals,
+                               scan_shell_exclusions,
+                               probe_evaluations,
+                               probe_clearance_rejections,
+                               probe_mode_rejections,
+                                swept_probe_evaluations,
+                                swept_pair_checks,
+                                swept_rejections,
+                                swept_interior_only_rejections,
+                                exhaustion, stop_reason_detail,
+                               &guided_seed_stats);
     std::fstream de_log(output_info.get_DE_log_filename(),
                         std::ios::out | std::ios::app);
     std::fstream de_report("DE_report.dat", std::ios::out);
@@ -2061,10 +3575,14 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
     de_report << "TITAN Pathway Pull Report\n\n";
     de_report << "status: STOP\n";
     de_report << "reason: " << stop_reason << "\n";
+    de_report << "reason detail: " << stop_reason_detail << "\n";
     de_report << "optimizer: " << DE_arguments.pull_opt << "\n";
-    de_report << "pathway group: " << built.path.group_name << " ["
-              << built.path.group_index << "]\n";
-    de_report << "pathway radius: " << Arguments.de.dis_along_path << " A\n";
+    write_pathway_identity(de_report, built.path);
+    de_report << "graph edge cutoff: "
+              << Arguments.de.path_graph_edge_cutoff << " A\n";
+    de_report << "recovery enter/exit: "
+              << Arguments.de.path_recovery_enter_radius << " / "
+              << Arguments.de.path_recovery_exit_radius << " A\n";
     de_report << "current mode: " << pathway_mode_label(pathway_state.mode)
               << "\n";
     de_report << "current progress: " << pathway_state.current_projection.progress
@@ -2073,10 +3591,39 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
               << pathway_state.current_projection.distance << " A\n";
     de_report << "terminal residue: "
               << residue_label(built.path.principal_nodes.back()) << "\n";
+    de_report << "candidate proposals: " << candidate_proposals << "\n";
     de_report << "total evaluations: " << total_evaluations << "\n";
+    de_report << "scan-shell exclusions: " << scan_shell_exclusions << "\n";
+    de_report << "energy evaluations: " << energy_evaluations << "\n";
+    de_report << "clearance pair checks: " << clearance_pair_checks << "\n";
+    de_report << "clearance rejections: " << clearance_rejections << "\n";
+    de_report << "probe evaluations: " << probe_evaluations << "\n";
+    de_report << "probe clearance rejections: "
+              << probe_clearance_rejections << "\n";
+    de_report << "probe mode rejections: " << probe_mode_rejections << "\n";
+    if (Arguments.de.path_clearance_mode == "swept-linear-center") {
+      de_report << "swept probe evaluations: " << swept_probe_evaluations
+                << "\n";
+      de_report << "swept pair checks: " << swept_pair_checks << "\n";
+      de_report << "swept rejections: " << swept_rejections << "\n";
+      de_report << "swept interior-only rejections: "
+                << swept_interior_only_rejections << "\n";
+    }
+    if (final_selection_attempted) {
+      de_report << "valid archive size: "
+                << final_selection.valid_archive_size << "\n";
+      de_report << "forward archive size: "
+                << final_selection.forward_archive_size << "\n";
+      de_report << "forward progress rejections: "
+                << final_selection.forward_progress_rejections << "\n";
+      de_report << "epsilon eligible size: "
+                << final_selection.epsilon_eligible_size << "\n";
+    }
     de_report << "wall time: " << wall_seconds << " s\n";
     de_report << "eval/s: " << evals_per_second << "\n";
-    de_log << "STOP  Reason: " << stop_reason << "  PathDist: "
+    de_log << "STOP  Reason: " << stop_reason << "  Detail: "
+           << stop_reason_detail
+           << "  PathDist: "
            << pathway_state.current_projection.distance
            << "  Progress: " << pathway_state.current_projection.progress
            << "\n--------------------------\n";
@@ -2091,9 +3638,21 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
   const auto report_rows =
       build_grouped_report_rows(report_candidates, pathway_state.mode);
 
-  write_pathway_status_file(output_info, "CONTINUE", "OK",
-                            pathway_state.current_projection.distance,
-                            DE_arguments.flag_old_vec, DE_arguments);
+  write_pathway_status_file(output_info, "CONTINUE", "OK", built.path,
+                            pathway_state,
+                             effective_DE_arguments.flag_old_vec,
+                             DE_arguments, Arguments, reference_com, start_com,
+                             &best_candidate, &final_selection,
+                             total_evaluations, energy_evaluations,
+                             clearance_pair_checks, clearance_rejections,
+                             candidate_proposals, scan_shell_exclusions,
+                             probe_evaluations, probe_clearance_rejections,
+                             probe_mode_rejections,
+                              swept_probe_evaluations, swept_pair_checks,
+                              swept_rejections,
+                              swept_interior_only_rejections,
+                              titan_path::CandidateExhaustion::None, {},
+                             &guided_seed_stats);
 
   std::fstream de_output(output_info.get_DE_output_filename(), std::ios::out);
   std::fstream de_log(output_info.get_DE_log_filename(),
@@ -2113,21 +3672,78 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
   de_report << "  ----------\n";
   de_report << "  Optimizer          : " << DE_arguments.pull_opt << "\n";
   de_report << "  Optimizer family   : "
-            << (use_direct_family ? "Direct" : "DE") << "\n";
+            << (use_corridor_grid ? "Corridor grid"
+                                  : use_direct_family ? "Direct" : "DE")
+            << "\n";
   de_report << "  Variant            : "
             << (use_variant_de
                     ? std::string(pull_de_variant_name(de_variant_stats.variant))
                     : DE_arguments.pull_opt)
             << "\n";
-  de_report << "  Pathway group      : " << built.path.group_name << " ["
-            << built.path.group_index << "]\n";
-  de_report << "  Pathway radius     : " << Arguments.de.dis_along_path << " A\n";
+  write_pathway_identity(de_report, built.path, "  ");
+  de_report << "  Graph edge cutoff  : "
+            << Arguments.de.path_graph_edge_cutoff << " A\n";
+  de_report << "  Recovery enter/exit: "
+            << Arguments.de.path_recovery_enter_radius << " / "
+            << Arguments.de.path_recovery_exit_radius << " A\n";
+  de_report << "  Corridor spacing   : "
+            << Arguments.de.path_corridor_spacing << " A\n";
+  de_report << "  Corridor radial N  : "
+            << Arguments.de.path_corridor_radial_samples << "\n";
+  de_report << "  Energy-key epsilon : "
+            << Arguments.de.path_energy_key_epsilon << "\n";
+  de_report << "  Min clearance      : "
+            << Arguments.de.path_min_clearance << " A\n";
+  de_report << "  Clearance mode     : "
+            << Arguments.de.path_clearance_mode << "\n";
+  de_report << "  Fixed probe length : "
+            << Arguments.de.path_probe_length << " A (0=legacy)\n";
+  de_report << "  Probe ladder       : ";
+  for (std::size_t index = 0;
+       index < Arguments.de.path_probe_lengths.size(); ++index) {
+    if (index != 0)
+      de_report << ',';
+    de_report << Arguments.de.path_probe_lengths[index];
+  }
+  de_report << " A\n";
+  de_report << "  Navigation enabled : "
+            << (Arguments.de.path_navigation_enabled ? "YES" : "NO")
+            << "\n";
+  if (Arguments.de.path_navigation_enabled) {
+    de_report << "  Navigation kind    : algorithmic dimensionless cost"
+              << " (not physical energy)\n";
+    de_report << "  Nav tube/backtrack : "
+              << Arguments.de.path_navigation_tube_weight << " / "
+              << Arguments.de.path_navigation_backtrack_weight << "\n";
+    de_report << "  Nav cost epsilon   : "
+              << Arguments.de.path_navigation_cost_epsilon << "\n";
+    de_report << "  Nav seed ring N/a  : "
+              << Arguments.de.path_navigation_seed_radial_samples << " / "
+              << Arguments.de.path_navigation_seed_amplitude << "\n";
+    de_report << "  Nav recovery tangent: "
+              << titan_path::kNavigationRecoveryTangentWeight << "\n";
+  }
+  de_report << "  Geometry-only      : "
+            << (Arguments.de.path_geometry_only ? "YES" : "NO") << "\n";
+  de_report << "  Old-vector recovery: "
+            << (recovery_dropped_old_vector ? "DROPPED" : "UNCHANGED")
+            << "\n";
+  de_report << "  Max handoff turn   : "
+            << Arguments.de.path_max_turn_angle << " deg\n";
+  de_report << "  Recovery max turn  : "
+            << Arguments.de.path_recovery_max_turn_angle << " deg\n";
   de_report << "  Current mode       : "
             << pathway_mode_label(pathway_state.mode) << "\n";
   de_report << "  Current progress   : "
             << pathway_state.current_projection.progress << " A\n";
   de_report << "  Current path dist  : "
             << pathway_state.current_projection.distance << " A\n";
+  de_report << "  Min rec-lig dist   : "
+            << pathway_state.minimum_receptor_ligand_distance << " A\n";
+  de_report << "  Physical exit gate : "
+            << (pathway_state.physical_exit_gate_enabled ? "ENABLED" : "DISABLED")
+            << " (threshold " << Arguments.de.path_completion_min_separation
+            << " A)\n";
   de_report << "  Arc length         : " << built.path.total_length << " A\n";
   de_report << "  Start residue      : "
             << residue_label(built.path.principal_nodes.front()) << "\n";
@@ -2142,14 +3758,50 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
 
   de_report << "  Benchmark\n";
   de_report << "  ---------\n";
+  de_report << "  Candidate proposals: " << candidate_proposals << "\n";
   de_report << "  Total evaluations  : " << total_evaluations << "\n";
+  de_report << "  Scan exclusions    : " << scan_shell_exclusions << "\n";
+  de_report << "  Energy evaluations : " << energy_evaluations << "\n";
+  de_report << "  Clearance pairs    : " << clearance_pair_checks << "\n";
+  de_report << "  Clearance rejects  : " << clearance_rejections << "\n";
+  de_report << "  Probe evals        : " << probe_evaluations << "\n";
+  de_report << "  Probe clear rejects: " << probe_clearance_rejections << "\n";
+  de_report << "  Probe mode rejects : " << probe_mode_rejections << "\n";
+  if (Arguments.de.path_clearance_mode == "swept-linear-center") {
+    de_report << "  Swept probe evals  : " << swept_probe_evaluations << "\n";
+    de_report << "  Swept pair checks  : " << swept_pair_checks << "\n";
+    de_report << "  Swept rejects      : " << swept_rejections << "\n";
+    de_report << "  Interior-only hits : "
+              << swept_interior_only_rejections << "\n";
+  }
+  if (guided_seed_stats.enabled) {
+    de_report << "  Guided proposals   : "
+              << guided_seed_stats.proposed_directions << "\n";
+    de_report << "  Guided evaluations : "
+              << guided_seed_stats.evaluated_directions << "\n";
+    de_report << "  Guided budget grant: "
+              << guided_seed_stats.budget_granted_directions << "\n";
+    de_report << "  Guided valid       : "
+              << guided_seed_stats.valid_directions << "\n";
+  }
   de_report << "  Wall time          : " << wall_seconds << " s\n";
   de_report << "  Eval/s             : " << evals_per_second << "\n";
   de_report << "  Best stage         : " << best_stage << "\n";
   de_report << "  Eval budget stop   : "
             << (stopped_by_eval_budget ? "YES" : "NO") << "\n\n";
 
-  if (use_direct_family) {
+  if (use_corridor_grid) {
+    de_report << "  Corridor Grid Stats\n";
+    de_report << "  -------------------\n";
+    de_report << "  Longitudinal points: "
+              << corridor_grid_stats.longitudinal_points << "\n";
+    de_report << "  Proposed targets   : "
+              << corridor_grid_stats.proposed_targets << "\n";
+    de_report << "  Evaluated targets  : "
+              << corridor_grid_stats.evaluated_targets << "\n";
+    de_report << "  Valid targets      : "
+              << corridor_grid_stats.valid_targets << "\n\n";
+  } else if (use_direct_family) {
     de_report << "  DIRECT Stats\n";
     de_report << "  ------------\n";
     de_report << "  Effective budget   : " << direct_stats.effective_eval_budget
@@ -2244,14 +3896,95 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
   de_report << "  --------------\n";
   de_report << "  Best raw score     : " << best_candidate.raw_score << "\n";
   de_report << "  Best energy key    : " << best_candidate.energy_key << "\n";
-  de_report << "  Best progress      : " << best_candidate.progress << " A\n";
-  de_report << "  delta_progress     : " << best_candidate.delta_progress
+  de_report << "  Archive E-key min  : "
+            << final_selection.minimum_energy_key << "\n";
+  de_report << "  Valid archive size : "
+            << final_selection.valid_archive_size << "\n";
+  de_report << "  Forward candidates : "
+            << final_selection.forward_archive_size << "\n";
+  de_report << "  Epsilon eligible   : "
+            << final_selection.epsilon_eligible_size << "\n";
+  de_report << "  Mode eligible      : "
+            << final_selection.mode_eligible_size << "\n";
+  de_report << "  Maximum probe tier : "
+            << final_selection.maximum_probe_tier_size << "\n";
+  if (Arguments.de.path_navigation_enabled) {
+    de_report << "  Navigation eligible: "
+              << final_selection.navigation_eligible_size << "\n";
+    if (std::isfinite(final_selection.minimum_navigation_cost))
+      de_report << "  Energy-pool nav min: "
+                << final_selection.minimum_navigation_cost << "\n";
+  }
+  de_report << "  Final selection    : "
+            << (pathway_state.mode == PathwayMode::Recovery
+                    ? "recovery lexicographic"
+                : Arguments.de.path_navigation_enabled
+                    ? "energy epsilon, navigation epsilon, then maximum progress"
+                : Arguments.de.path_geometry_only
+                    ? "maximum progress geometry-only"
+                    : "maximum progress within energy-key epsilon")
+            << "\n";
+  de_report << "  Requested progress : " << best_candidate.progress << " A\n";
+  de_report << "  Requested dProgress: "
+            << best_candidate.requested_delta_progress << " A\n";
+  de_report << "  Applied progress   : " << best_candidate.applied_progress
             << " A\n";
+  de_report << "  Applied dProgress  : " << best_candidate.delta_progress
+            << " A\n";
+  de_report << "  Applied path dist  : "
+            << best_candidate.applied_path_distance << " A\n";
+  de_report << "  Route target vector: ("
+            << best_candidate.requested_vector.Fx << ", "
+            << best_candidate.requested_vector.Fy << ", "
+            << best_candidate.requested_vector.Fz << ")\n";
+  de_report << "  Route target angle : "
+            << best_candidate.requested_angle_deg << " deg\n";
+  de_report << "  Turn projection    : "
+            << (best_candidate.turn_capped ? "CAPPED" : "UNCHANGED") << "\n";
   de_report << "  Pull vector        : (" << best_candidate.vector.Fx << ", "
             << best_candidate.vector.Fy << ", " << best_candidate.vector.Fz
             << ")\n";
-  de_report << "  Pull distance      : " << best_candidate.pull_distance
+  de_report << "  Requested pull dist: "
+            << best_candidate.requested_pull_distance << " A\n";
+  de_report << "  Applied pull dist  : " << best_candidate.pull_distance
             << " A\n";
+  de_report << "  Corridor offset    : ("
+            << best_candidate.corridor_offset_u << ", "
+            << best_candidate.corridor_offset_v << ") A of R="
+            << best_candidate.corridor_radius << " A\n";
+  de_report << "  Applied clearance  : "
+            << best_candidate.minimum_clearance << " A\n";
+  if (Arguments.de.path_clearance_mode == "swept-linear-center") {
+    de_report << "  Endpoint clearance : "
+              << best_candidate.endpoint_minimum_clearance << " A\n";
+    de_report << "  Swept clearance    : "
+              << best_candidate.swept_minimum_clearance << " A at tau="
+              << best_candidate.swept_minimum_fraction << "\n";
+    de_report << "  Swept witness pair : receptor["
+              << best_candidate.swept_minimum_receptor_index << "] ligand["
+              << best_candidate.swept_minimum_ligand_index << "]\n";
+    de_report << "  Swept min complete : "
+              << (best_candidate.swept_minimum_complete ? "YES" : "NO")
+              << "\n";
+  }
+  if (best_candidate.navigation_enabled) {
+    de_report << "  Guided seed        : "
+              << (best_candidate.guided_seed ? "YES" : "NO") << " ["
+              << best_candidate.guided_seed_index << "]\n";
+    de_report << "  Applied corridor R : "
+              << best_candidate.applied_corridor_radius << " A\n";
+    de_report << "  Navigation excess  : "
+              << best_candidate.navigation_tube_excess << " A\n";
+    de_report << "  Navigation backtrack: "
+              << best_candidate.navigation_backtrack_distance << " A\n";
+    de_report << "  Navigation tube cost: "
+              << best_candidate.navigation_tube_cost << "\n";
+    de_report << "  Navigation back cost: "
+              << best_candidate.navigation_backtrack_cost << "\n";
+    de_report << "  Navigation cost    : "
+              << best_candidate.navigation_cost
+              << " (dimensionless algorithmic)\n";
+  }
   de_report << "  Angle to old       : " << best_angle << " deg\n\n";
 
   de_report << "  Ranked Candidate Table\n";
@@ -2259,7 +3992,8 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
   de_report << std::setw(8) << "Rank" << std::setw(8) << "Index"
             << std::setw(8) << "Count" << std::setw(14) << "RawScore"
             << std::setw(14) << "EKey" << std::setw(14) << "Progress"
-            << std::setw(14) << "dProg" << std::setw(12) << "Pull(A)"
+            << std::setw(14) << "dProg" << std::setw(14) << "NavCost"
+            << std::setw(12) << "Pull(A)"
             << std::setw(12) << "Angle" << std::setw(18) << "Elec"
             << std::setw(18) << "VdW" << "\n";
   for (std::size_t rank = 0;
@@ -2272,7 +4006,10 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
               << std::scientific << std::setw(14) << candidate.raw_score
               << std::setw(14) << candidate.energy_key << std::fixed
               << std::setw(14) << candidate.progress << std::setw(14)
-              << candidate.delta_progress << std::setw(12)
+              << candidate.delta_progress << std::setw(14)
+              << (candidate.navigation_enabled ? candidate.navigation_cost
+                                               : 0.0)
+              << std::setw(12)
               << candidate.pull_distance << std::setw(12)
               << candidate.angle_deg
               << std::scientific << std::setw(18)
@@ -2284,8 +4021,10 @@ int run_pathway_pull_direction(Multi_MOL &rec, Multi_MOL &lg,
   de_output << best_candidate.vector.Fx << "  " << best_candidate.vector.Fy
             << "  " << best_candidate.vector.Fz << "  Angle: " << best_angle
             << " -- Modul: " << best_candidate.vector.modul() << " Angstrom\n";
-  de_output << "# Pull g2 toward the best reachable point on the forward tail "
-               "of the auto-ordered pathway of g1\n";
+  de_output << "# Pull g2 toward the selected reachable point on the forward "
+               "route\n";
+  if (built.path.explicit_route)
+    de_output << "# Route ID: " << built.path.route_id << "\n";
   de_output << "# Current progress: " << pathway_state.current_projection.progress
             << " A\n";
   de_output << "# Terminal residue: "

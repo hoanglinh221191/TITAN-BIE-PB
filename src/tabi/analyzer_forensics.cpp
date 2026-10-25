@@ -213,7 +213,7 @@ void AnalyzerImpl::write_tabi_formulation_audit_header_if_needed() const {
            "diag_max,kappa_inv_A,coulomb_factor_kcal_mol,"
            "boundary_energy_kJmol,reference_energy_kJmol,"
            "selected_energy_scale,selected_energy_kJmol,residual,iterations,"
-           "surface_geometry,panels,solid_angle_fallbacks,matvec_mode,"
+           "surface_geometry,panels,solid_angle_fallbacks,solid_angle_clamps,matvec_mode,"
            "near_integration,near_self_pairs,near_one_ring_pairs,"
            "near_duffy_pairs,near_centroid_pairs,near_fallbacks,"
            "near_integration_seconds,duffy_subdivisions_max,"
@@ -268,7 +268,7 @@ void AnalyzerImpl::append_tabi_formulation_audit_row(
       << result.tabi_selected_energy_scale << ',' << result.energy_kj_mol << ','
       << result.linear_residual << ',' << result.solvent_iterations << ','
       << csv_escape(result.tabi_surface_geometry) << ','
-      << result.tabi_surface_panels << ',' << result.tabi_solid_angle_fallbacks
+      << result.tabi_surface_panels << ',' << result.tabi_solid_angle_fallbacks << ',' << result.tabi_solid_angle_clamps
       << ',' << csv_escape(result.tabi_matvec_mode) << ','
       << csv_escape(result.tabi_near_integration) << ','
       << result.tabi_near_self_pairs << ',' << result.tabi_near_one_ring_pairs

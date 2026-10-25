@@ -1,6 +1,8 @@
 #include "tabi_calderon_aux_surface.h"
 #include "tabi_calderon_trace_space.h"
 #include "tabi_types.h"
+#include "tabi_near.h"
+#include "tabi_sphere_clip.h"
 
 #include "../titan_surface.h"
 
@@ -9,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -132,6 +135,9 @@ QuantizedKey quantized_key(double x, double y, double z) noexcept {
 }
 
 int mesh_rings_for_point_count(int point_count) noexcept {
+  // Legacy latlong policy: 64 rings / 16128 triangles per atom at the cap.
+  // Requests >= 3969 are saturated even with highres_surface; use icosphere
+  // for further refinement. Keep explicit latlong reproducible.
   const int safe_points = std::max(8, point_count);
   const int rings =
       static_cast<int>(std::lround(std::sqrt(static_cast<double>(safe_points) *
@@ -477,18 +483,23 @@ double triangle_solid_angle(const Vertex &a, const Vertex &b, const Vertex &c,
   return 2.0 * std::atan2(numerator, denominator);
 }
 
-std::size_t add_vertex(
-    SurfaceMesh &mesh,
-    std::unordered_map<QuantizedKey, std::size_t, QuantizedKeyHash> &lookup,
-    const Atom &atom, std::size_t atom_index, const UnitVertex &unit,
-    double radius) {
+std::size_t add_vertex(SurfaceMesh &mesh,
+                       std::unordered_multimap<QuantizedKey, std::size_t,
+                                               QuantizedKeyHash> &lookup,
+                       const Atom &atom, std::size_t atom_index,
+                       const UnitVertex &unit, double radius) {
   const double x = atom.x + unit.x * radius;
   const double y = atom.y + unit.y * radius;
   const double z = atom.z + unit.z * radius;
   const QuantizedKey key = quantized_key(x, y, z);
-  auto found = lookup.find(key);
-  if (found != lookup.end())
-    return found->second;
+  const auto range = lookup.equal_range(key);
+  for (auto found = range.first; found != range.second; ++found) {
+    const auto &v = mesh.vertices[found->second];
+    // A hash bucket is not geometric identity. Clipped seam vertices can be
+    // less than 1e-8 A apart while belonging to different exposed patches.
+    if (norm3(v.x - x, v.y - y, v.z - z) <= 1e-12)
+      return found->second;
+  }
   const std::size_t index = mesh.vertices.size();
   mesh.vertices.push_back({x, y, z, unit.x, unit.y, unit.z, atom_index});
   lookup.emplace(key, index);
@@ -589,7 +600,10 @@ void finalize_solid_angle_diagonal(SurfaceMesh &mesh,
         diagonal = 1.0;
         solid_angle = kTwoPi;
       } else {
-        diagonal = std::clamp(diagonal, 0.25, 1.75);
+        const double clamped = std::clamp(diagonal, 0.25, 1.75);
+        if (clamped != diagonal)
+          ++mesh.solid_angle_clamps;
+        diagonal = clamped;
       }
     }
     panel.diagonal = diagonal;
@@ -613,9 +627,37 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
   const int point_count =
       std::clamp(options.surface_point_count, 8, surface_point_max);
   const std::string sphere_mesh_mode =
-      resolve_sphere_mesh_mode(options.sphere_mesh_mode);
+      resolve_sphere_mesh_mode(options.sphere_mesh_mode == "auto" &&
+                                      options.surface_mode == "vdw"
+                                  ? "icosphere"
+                                  : options.sphere_mesh_mode);
   const UnitSphereMesh &unit_mesh =
       cached_unit_sphere_mesh(point_count, sphere_mesh_mode);
+  // Salt is deliberately not a condition here.  The quadrature nodes are pure
+  // geometry; the screened kernels reuse them at solve time, where kappa is
+  // known.  Gating on salt_m <= 0 left every ionic-strength run on the
+  // uncorrected flat self term.
+  const bool curved_poisson = options.surface_mode == "vdw" &&
+      options.discretization == "centroid" &&
+      options.formulation != "tabi2-nodepatch" &&
+      options.near_integration != "centroid" && !options.surface_only;
+  const bool curved_node_geometry = options.surface_mode == "vdw" &&
+      (options.discretization == "node-patch" || options.formulation == "tabi2-nodepatch");
+  std::vector<std::shared_ptr<const SpherePatchQuadrature>> sphere_quadrature(
+      curved_poisson ? unit_mesh.triangles.size() : 0);
+  std::shared_ptr<std::vector<std::array<double, 4>>> sphere_geometry;
+  if ((curved_poisson || curved_node_geometry) && !original_indices.empty()) {
+    sphere_geometry = std::make_shared<std::vector<std::array<double, 4>>>(
+        *std::max_element(original_indices.begin(), original_indices.end()) + 1);
+    for (std::size_t i = 0; i < atoms.size(); ++i)
+      (*sphere_geometry)[original_indices[i]] =
+          {atoms[i].x, atoms[i].y, atoms[i].z, atoms[i].radius};
+  }
+  std::shared_ptr<SpherePatchQuadrature> node_parent_geometry;
+  if(curved_node_geometry){
+    node_parent_geometry=std::make_shared<SpherePatchQuadrature>();
+    node_parent_geometry->spheres=sphere_geometry;
+  }
 
   std::vector<double> surface_radii(atoms.size(), 0.0);
   for (std::size_t i = 0; i < atoms.size(); ++i)
@@ -629,7 +671,7 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
   mesh.vertices.reserve(atoms.size() * unit_mesh.vertices.size());
   mesh.triangles.reserve(atoms.size() * unit_mesh.triangles.size());
   mesh.panels.reserve(atoms.size() * unit_mesh.triangles.size());
-  std::unordered_map<QuantizedKey, std::size_t, QuantizedKeyHash> vertex_lookup;
+  std::unordered_multimap<QuantizedKey, std::size_t, QuantizedKeyHash> vertex_lookup;
   vertex_lookup.reserve(atoms.size() * unit_mesh.vertices.size());
   std::unordered_map<std::size_t, double> area_by_atom;
   std::unordered_map<std::size_t, double> radius_by_atom;
@@ -650,162 +692,232 @@ SurfaceMesh build_triangle_mesh(const std::vector<Atom> &atoms,
     const double radius = surface_radii[atom_index];
     if (radius <= 0.0)
       continue;
+    std::vector<SphereClip::Cap> caps;
+    caps.reserve(neighbors[atom_index].size());
+    bool covered = false;
+    // Without clipping (-pbe-bie-sphere-patch-clip=off) the triangles stay
+    // whole and the buried test below decides each one, as before the
+    // clipping was introduced.
+    const bool clip = options.surface_mode == "vdw" && options.sphere_patch_clip;
+    if (clip) {
+      for (const auto j : neighbors[atom_index]) {
+        const auto &other = atoms[j];
+        const double dx = other.x - atom.x, dy = other.y - atom.y,
+                     dz = other.z - atom.z;
+        const double d = norm3(dx, dy, dz), r = surface_radii[j];
+        if (d == 0.0 && r == radius) {
+          // Coincident duplicate balls have one boundary, owned by the first.
+          if (j < atom_index)
+            covered = true;
+          continue;
+        }
+        if (d + radius <= r) {
+          covered = true;
+          break;
+        }
+        if (d >= radius + r || d + r <= radius)
+          continue;
+        caps.push_back(
+            {{dx / d, dy / d, dz / d},
+             std::clamp((d * d + radius * radius - r * r) / (2 * d * radius),
+                        -1., 1.)});
+      }
+    }
+    if (covered) {
+      mesh.buried_candidates += unit_mesh.triangles.size();
+      continue;
+    }
+    std::vector<SphereClip::Triangle> pieces;
+    pieces.reserve(16);
     for (const UnitTriangle &unit_tri : unit_mesh.triangles) {
-      const UnitVertex &ua = unit_mesh.vertices[unit_tri.a];
-      const UnitVertex &ub = unit_mesh.vertices[unit_tri.b];
-      const UnitVertex &uc = unit_mesh.vertices[unit_tri.c];
-      const double ax = atom.x + ua.x * radius;
-      const double ay = atom.y + ua.y * radius;
-      const double az = atom.z + ua.z * radius;
-      const double bx = atom.x + ub.x * radius;
-      const double by = atom.y + ub.y * radius;
-      const double bz = atom.z + ub.z * radius;
-      const double cx = atom.x + uc.x * radius;
-      const double cy = atom.y + uc.y * radius;
-      const double cz = atom.z + uc.z * radius;
-      double panel_ux = (ua.x + ub.x + uc.x) / 3.0;
-      double panel_uy = (ua.y + ub.y + uc.y) / 3.0;
-      double panel_uz = (ua.z + ub.z + uc.z) / 3.0;
-      const double panel_len = norm3(panel_ux, panel_uy, panel_uz);
-      if (panel_len <= 1.0e-14)
-        continue;
-      panel_ux /= panel_len;
-      panel_uy /= panel_len;
-      panel_uz /= panel_len;
-      const double px = atom.x + panel_ux * radius;
-      const double py = atom.y + panel_uy * radius;
-      const double pz = atom.z + panel_uz * radius;
-
-      const bool centroid_buried =
-          point_buried(px, py, pz, atoms, surface_radii, neighbors[atom_index]);
-      const int buried_vertices =
-          static_cast<int>(point_buried(ax, ay, az, atoms, surface_radii,
-                                        neighbors[atom_index])) +
-          static_cast<int>(point_buried(bx, by, bz, atoms, surface_radii,
-                                        neighbors[atom_index])) +
-          static_cast<int>(point_buried(cx, cy, cz, atoms, surface_radii,
-                                        neighbors[atom_index]));
-      if (centroid_buried || buried_vertices == 3) {
+      const UnitVertex &base_a = unit_mesh.vertices[unit_tri.a];
+      const UnitVertex &base_b = unit_mesh.vertices[unit_tri.b];
+      const UnitVertex &base_c = unit_mesh.vertices[unit_tri.c];
+      const SphereClip::Triangle base{{{base_a.x, base_a.y, base_a.z},
+                                       {base_b.x, base_b.y, base_b.z},
+                                       {base_c.x, base_c.y, base_c.z}}};
+      pieces.clear();
+      if (caps.empty())
+        pieces.push_back(base);
+      else
+        SphereClip::clip(base, caps, pieces);
+      if (pieces.empty())
         ++mesh.buried_candidates;
-        continue;
+      for (const auto &piece : pieces) {
+        const UnitVertex ua{piece[0][0], piece[0][1], piece[0][2]};
+        const UnitVertex ub{piece[1][0], piece[1][1], piece[1][2]};
+        const UnitVertex uc{piece[2][0], piece[2][1], piece[2][2]};
+        const double ax = atom.x + ua.x * radius;
+        const double ay = atom.y + ua.y * radius;
+        const double az = atom.z + ua.z * radius;
+        const double bx = atom.x + ub.x * radius;
+        const double by = atom.y + ub.y * radius;
+        const double bz = atom.z + ub.z * radius;
+        const double cx = atom.x + uc.x * radius;
+        const double cy = atom.y + uc.y * radius;
+        const double cz = atom.z + uc.z * radius;
+        double panel_ux = (ua.x + ub.x + uc.x) / 3.0;
+        double panel_uy = (ua.y + ub.y + uc.y) / 3.0;
+        double panel_uz = (ua.z + ub.z + uc.z) / 3.0;
+        const double panel_len = norm3(panel_ux, panel_uy, panel_uz);
+        if (panel_len <= 1.0e-14)
+          continue;
+        panel_ux /= panel_len;
+        panel_uy /= panel_len;
+        panel_uz /= panel_len;
+        const double px = atom.x + panel_ux * radius;
+        const double py = atom.y + panel_uy * radius;
+        const double pz = atom.z + panel_uz * radius;
+
+        if (!clip) {
+          const bool centroid_buried = point_buried(
+              px, py, pz, atoms, surface_radii, neighbors[atom_index]);
+          const int buried_vertices =
+              static_cast<int>(point_buried(ax, ay, az, atoms, surface_radii,
+                                            neighbors[atom_index])) +
+              static_cast<int>(point_buried(bx, by, bz, atoms, surface_radii,
+                                            neighbors[atom_index])) +
+              static_cast<int>(point_buried(cx, cy, cz, atoms, surface_radii,
+                                            neighbors[atom_index]));
+          if (centroid_buried || buried_vertices == 3) {
+            ++mesh.buried_candidates;
+            continue;
+          }
+        }
+        ++mesh.exposed_candidates;
+
+        std::size_t ia = add_vertex(mesh, vertex_lookup, atom,
+                                    original_indices[atom_index], ua, radius);
+        std::size_t ib = add_vertex(mesh, vertex_lookup, atom,
+                                    original_indices[atom_index], ub, radius);
+        std::size_t ic = add_vertex(mesh, vertex_lookup, atom,
+                                    original_indices[atom_index], uc, radius);
+
+        const Vertex &va = mesh.vertices[ia];
+        const Vertex &vb = mesh.vertices[ib];
+        const Vertex &vc = mesh.vertices[ic];
+        double ux = vb.x - va.x;
+        double uy = vb.y - va.y;
+        double uz = vb.z - va.z;
+        double vx = vc.x - va.x;
+        double vy = vc.y - va.y;
+        double vz = vc.z - va.z;
+        double nx = uy * vz - uz * vy;
+        double ny = uz * vx - ux * vz;
+        double nz = ux * vy - uy * vx;
+        double normal_len = norm3(nx, ny, nz);
+        if (normal_len <= 1.0e-14)
+          continue;
+        const double planar_area = 0.5 * normal_len;
+        double area =
+            spherical_triangle_area_unit(ua, ub, uc) * radius * radius;
+        if (!std::isfinite(area) || area <= 1.0e-14)
+          area = 0.5 * normal_len;
+        const double edge_ab = norm3(vb.x - va.x, vb.y - va.y, vb.z - va.z);
+        const double edge_bc = norm3(vc.x - vb.x, vc.y - vb.y, vc.z - vb.z);
+        const double edge_ca = norm3(va.x - vc.x, va.y - vc.y, va.z - vc.z);
+        const double edge_min = std::min({edge_ab, edge_bc, edge_ca});
+        const double edge_max = std::max({edge_ab, edge_bc, edge_ca});
+        nx /= normal_len;
+        ny /= normal_len;
+        nz /= normal_len;
+        const double flat_px = (va.x + vb.x + vc.x) / 3.0;
+        const double flat_py = (va.y + vb.y + vc.y) / 3.0;
+        const double flat_pz = (va.z + vb.z + vc.z) / 3.0;
+        const double radial_x = flat_px - atom.x;
+        const double radial_y = flat_py - atom.y;
+        const double radial_z = flat_pz - atom.z;
+        bool face_flipped = false;
+        if (nx * radial_x + ny * radial_y + nz * radial_z < 0.0) {
+          std::swap(ib, ic);
+          nx = -nx;
+          ny = -ny;
+          nz = -nz;
+          face_flipped = true;
+        }
+        const double radial_len = norm3(radial_x, radial_y, radial_z);
+        const double radial_dot =
+            radial_len > 1.0e-14
+                ? (nx * radial_x + ny * radial_y + nz * radial_z) / radial_len
+                : 1.0;
+        quality_area_min = std::min(quality_area_min, area);
+        quality_area_max = std::max(quality_area_max, area);
+        quality_area_sum += area;
+        quality_area_square_sum += area * area;
+        quality_planar_area_sum += planar_area;
+        const double signed_volume = (va.x * (vb.y * vc.z - vb.z * vc.y) -
+                                      va.y * (vb.x * vc.z - vb.z * vc.x) +
+                                      va.z * (vb.x * vc.y - vb.y * vc.x)) /
+                                     6.0;
+        quality_signed_volume_sum +=
+            face_flipped ? -signed_volume : signed_volume;
+        if (edge_min > 1.0e-14)
+          quality_aspect_max =
+              std::max(quality_aspect_max, edge_max / edge_min);
+        quality_radial_dot_min = std::min(quality_radial_dot_min, radial_dot);
+        quality_radial_dot_sum += radial_dot;
+        quality_centroid_radial_error_max = std::max(
+            quality_centroid_radial_error_max, std::abs(radial_len - radius));
+        ++quality_count;
+        area_by_atom[original_indices[atom_index]] += area;
+        radius_by_atom[original_indices[atom_index]] = radius;
+
+        Triangle tri;
+        tri.v0 = ia;
+        tri.v1 = ib;
+        tri.v2 = ic;
+        tri.atom_index = original_indices[atom_index];
+        tri.cx = px;
+        tri.cy = py;
+        tri.cz = pz;
+        tri.nx = nx;
+        tri.ny = ny;
+        tri.nz = nz;
+        tri.area = area;
+        mesh.triangles.push_back(tri);
+        Panel panel;
+        panel.x = px;
+        panel.y = py;
+        panel.z = pz;
+        panel.nx = panel_ux;
+        panel.ny = panel_uy;
+        panel.nz = panel_uz;
+        panel.area = area;
+        panel.diagonal = 1.0;
+        panel.solid_angle = kTwoPi;
+        panel.atom_index = tri.atom_index;
+        panel.v0x = va.x;
+        panel.v0y = va.y;
+        panel.v0z = va.z;
+        panel.v1x = vb.x;
+        panel.v1y = vb.y;
+        panel.v1z = vb.z;
+        panel.v2x = vc.x;
+        panel.v2y = vc.y;
+        panel.v2z = vc.z;
+        panel.v0_index = ia;
+        panel.v1_index = ib;
+        panel.v2_index = ic;
+        panel.has_triangle_geometry = true;
+        if(curved_node_geometry) panel.sphere_patch_quadrature=node_parent_geometry;
+        if (curved_poisson) {
+          const auto triangle_index =
+              static_cast<std::size_t>(&unit_tri - unit_mesh.triangles.data());
+          if (piece == base) {
+            auto &quadrature = sphere_quadrature[triangle_index];
+            if (!quadrature)
+              quadrature = prepare_sphere_patch_quadrature(
+                  {ua.x, ua.y, ua.z}, {ub.x, ub.y, ub.z}, {uc.x, uc.y, uc.z},
+                  sphere_geometry);
+            panel.sphere_patch_quadrature = quadrature;
+          } else {
+            panel.sphere_patch_quadrature = prepare_sphere_patch_quadrature(
+                {ua.x, ua.y, ua.z}, {ub.x, ub.y, ub.z}, {uc.x, uc.y, uc.z},
+                sphere_geometry, true);
+          }
+        }
+        mesh.panels.push_back(panel);
       }
-      ++mesh.exposed_candidates;
-
-      std::size_t ia =
-          add_vertex(mesh, vertex_lookup, atom, original_indices[atom_index], ua,
-                     radius);
-      std::size_t ib =
-          add_vertex(mesh, vertex_lookup, atom, original_indices[atom_index], ub,
-                     radius);
-      std::size_t ic =
-          add_vertex(mesh, vertex_lookup, atom, original_indices[atom_index], uc,
-                     radius);
-
-      const Vertex &va = mesh.vertices[ia];
-      const Vertex &vb = mesh.vertices[ib];
-      const Vertex &vc = mesh.vertices[ic];
-      double ux = vb.x - va.x;
-      double uy = vb.y - va.y;
-      double uz = vb.z - va.z;
-      double vx = vc.x - va.x;
-      double vy = vc.y - va.y;
-      double vz = vc.z - va.z;
-      double nx = uy * vz - uz * vy;
-      double ny = uz * vx - ux * vz;
-      double nz = ux * vy - uy * vx;
-      double normal_len = norm3(nx, ny, nz);
-      if (normal_len <= 1.0e-14)
-        continue;
-      const double planar_area = 0.5 * normal_len;
-      double area = spherical_triangle_area_unit(ua, ub, uc) * radius * radius;
-      if (!std::isfinite(area) || area <= 1.0e-14)
-        area = 0.5 * normal_len;
-      const double edge_ab = norm3(vb.x - va.x, vb.y - va.y, vb.z - va.z);
-      const double edge_bc = norm3(vc.x - vb.x, vc.y - vb.y, vc.z - vb.z);
-      const double edge_ca = norm3(va.x - vc.x, va.y - vc.y, va.z - vc.z);
-      const double edge_min = std::min({edge_ab, edge_bc, edge_ca});
-      const double edge_max = std::max({edge_ab, edge_bc, edge_ca});
-      nx /= normal_len;
-      ny /= normal_len;
-      nz /= normal_len;
-      const double flat_px = (va.x + vb.x + vc.x) / 3.0;
-      const double flat_py = (va.y + vb.y + vc.y) / 3.0;
-      const double flat_pz = (va.z + vb.z + vc.z) / 3.0;
-      const double radial_x = flat_px - atom.x;
-      const double radial_y = flat_py - atom.y;
-      const double radial_z = flat_pz - atom.z;
-      bool face_flipped = false;
-      if (nx * radial_x + ny * radial_y + nz * radial_z < 0.0) {
-        std::swap(ib, ic);
-        nx = -nx;
-        ny = -ny;
-        nz = -nz;
-        face_flipped = true;
-      }
-      const double radial_len = norm3(radial_x, radial_y, radial_z);
-      const double radial_dot =
-          radial_len > 1.0e-14
-              ? (nx * radial_x + ny * radial_y + nz * radial_z) / radial_len
-              : 1.0;
-      quality_area_min = std::min(quality_area_min, area);
-      quality_area_max = std::max(quality_area_max, area);
-      quality_area_sum += area;
-      quality_area_square_sum += area * area;
-      quality_planar_area_sum += planar_area;
-      const double signed_volume =
-          (va.x * (vb.y * vc.z - vb.z * vc.y) -
-           va.y * (vb.x * vc.z - vb.z * vc.x) +
-           va.z * (vb.x * vc.y - vb.y * vc.x)) /
-          6.0;
-      quality_signed_volume_sum += face_flipped ? -signed_volume : signed_volume;
-      if (edge_min > 1.0e-14)
-        quality_aspect_max = std::max(quality_aspect_max, edge_max / edge_min);
-      quality_radial_dot_min = std::min(quality_radial_dot_min, radial_dot);
-      quality_radial_dot_sum += radial_dot;
-      quality_centroid_radial_error_max = std::max(
-          quality_centroid_radial_error_max, std::abs(radial_len - radius));
-      ++quality_count;
-      area_by_atom[original_indices[atom_index]] += area;
-      radius_by_atom[original_indices[atom_index]] = radius;
-
-      Triangle tri;
-      tri.v0 = ia;
-      tri.v1 = ib;
-      tri.v2 = ic;
-      tri.atom_index = original_indices[atom_index];
-      tri.cx = px;
-      tri.cy = py;
-      tri.cz = pz;
-      tri.nx = nx;
-      tri.ny = ny;
-      tri.nz = nz;
-      tri.area = area;
-      mesh.triangles.push_back(tri);
-      Panel panel;
-      panel.x = px;
-      panel.y = py;
-      panel.z = pz;
-      panel.nx = panel_ux;
-      panel.ny = panel_uy;
-      panel.nz = panel_uz;
-      panel.area = area;
-      panel.diagonal = 1.0;
-      panel.solid_angle = kTwoPi;
-      panel.atom_index = tri.atom_index;
-      panel.v0x = va.x;
-      panel.v0y = va.y;
-      panel.v0z = va.z;
-      panel.v1x = vb.x;
-      panel.v1y = vb.y;
-      panel.v1z = vb.z;
-      panel.v2x = vc.x;
-      panel.v2y = vc.y;
-      panel.v2z = vc.z;
-      panel.v0_index = ia;
-      panel.v1_index = ib;
-      panel.v2_index = ic;
-      panel.has_triangle_geometry = true;
-      mesh.panels.push_back(panel);
     }
   }
 
@@ -1005,22 +1117,122 @@ std::vector<Panel> build_surface(const std::vector<Atom> &atoms,
                        finite_atoms, options.ses_grid_spacing,
                        options.probe_radius, executor,
                        options.ses_max_grid_vertices, true,
-                       options.analytic_ses_engine)
+                       options.analytic_ses_engine, options.ses_remesh_edge,
+                       calderon::ChargeRefinement{
+                           options.ses_charge_refine,
+                           options.ses_charge_refine_min_edge,
+                           options.ses_charge_refine_min_charge},
+                       options.ses_remesh_iterations)
                  : calderon::build_implicit_ses_surface(
                        finite_atoms, options.ses_grid_spacing,
                        options.probe_radius, executor,
                        options.ses_max_grid_vertices, true);
     if (primary_surface.status != "pass") {
+      std::string hint;
+      // Say what the status means and what to change.  These two are the
+      // ones a correct input can still hit, and both are about the spacing
+      // rather than about anything wrong with the molecule.
+      if (primary_surface.status == "analytic_sheet_bridge_below_spacing") {
+        hint = "  " +
+               std::to_string(primary_surface.analytic_sheet_bridge_faces) +
+               " triangle(s) join two facing sheets of the surface across a"
+               " gap narrower than one grid cell, so a single cell holds"
+               " both sheets and no repair can separate them.  Reduce"
+               " -pbe-bie-ses-grid-spacing (currently " +
+               std::to_string(options.ses_grid_spacing) + " A).";
+      } else if (primary_surface.status == "analytic_vertex_commit_refused") {
+        hint = "  " +
+               std::to_string(primary_surface.analytic_vertex_refused) +
+               " vertex/vertices could not be moved onto their certified"
+               " analytic target without reversing an incident triangle; the"
+               " largest outstanding move is " +
+               std::to_string(
+                   primary_surface.analytic_vertex_refused_distance_max) +
+               " A.  Reduce -pbe-bie-ses-grid-spacing.";
+      }
       throw std::runtime_error(
           "TABI " + options.primary_surface +
           " surface failed watertight topology gate: " +
-          primary_surface.status);
+          primary_surface.status + hint);
+    }
+    if (analytic && options.analytic_ses_engine == "patch-ray-resolution") {
+      // The resolution policy accepts what the certified engine refuses, so
+      // say how much of the surface is on the analytic patches.
+      const auto &s = primary_surface;
+      const std::size_t vertices = s.mesh.vertices.size();
+      std::cerr << "TABI SES patch-ray-resolution: h=" << options.ses_grid_spacing
+                << " A vertices=" << vertices
+                << " triangles=" << s.mesh.triangles.size()
+                << " marching_vertices=" << s.projection_queries
+                << " projected=" << s.projected_vertices << " ("
+                << (s.projection_queries == 0U
+                        ? 0.0
+                        : 100.0 * static_cast<double>(s.projected_vertices) /
+                              static_cast<double>(s.projection_queries))
+                << "%) partial=" << s.resolution_partial_projection_vertices
+                << " star_refused=" << s.resolution_star_refused_vertices
+                << " sheet_refused=" << s.resolution_sheet_refused_vertices
+                << " missing=" << s.resolution_missing_projection_vertices
+                << " reverted=" << s.resolution_reverted_vertices
+                << " revert_rounds=" << s.resolution_revert_rounds
+                << " initial_intersections="
+                << s.resolution_initial_intersections
+                << " odd_ray_rows=" << s.odd_ray_rows
+                << " uncertified_ray_rows="
+                << s.patch_ray_unresolved_uncertified_rows
+                << " nearby_parity_vertices="
+                << s.resolution_nearby_parity_vertices
+                << " fallback_sign_vertices=" << s.morphology_fallback_vertices
+                << " thin_solvent_filled=" << s.resolution_thin_solvent_filled
+                << " thin_plates_opened=" << s.resolution_thin_plates_opened
+                << " unprojected_distance_max_A="
+                << s.resolution_unprojected_distance_max
+                << " projection_rms_A=" << s.analytic_projection_distance_rms
+                << " min_angle_below_5/10/20_deg=" << s.resolution_angle_below_5
+                << '/' << s.resolution_angle_below_10 << '/'
+                << s.resolution_angle_below_20
+                << " remesh_edge_A=" << s.resolution_remesh_edge
+                << " remesh_iterations=" << s.resolution_remesh_iterations
+                << " remesh_undone=" << s.resolution_remesh_reverted
+                << " splits=" << s.resolution_remesh_splits
+                << " collapses=" << s.resolution_remesh_collapses
+                << " remesh_flips=" << s.resolution_remesh_flips
+                << " off_surface=" << s.resolution_remesh_off_surface
+                << " remesh_sheet_refused=" << s.resolution_remesh_sheet_refused
+                << " refine_charges=" << s.resolution_refine_charges
+                << " refined_vertices=" << s.resolution_refined_vertices
+                << " analytic_normals=" << s.resolution_analytic_normal_vertices
+                << " analytic_normal_refused="
+                << s.resolution_analytic_normal_refused
+                << " edges_below_0.05/0.2_A=" << s.resolution_short_edges_005
+                << '/' << s.resolution_short_edges_020
+                << " edge_min_A=" << s.resolution_edge_min
+                << " edge_mean_A=" << s.resolution_edge_mean
+                << " build_s=" << s.build_ms / 1000.0
+                << " (patches_s=" << s.patch_build_ms / 1000.0
+                << " rays_s=" << s.ray_build_ms / 1000.0
+                << " topology_s=" << s.topology_ms / 1000.0
+                << " polygonize_s=" << s.polygonize_ms / 1000.0
+                << " projection_s=" << s.projection_ms / 1000.0
+                << " remesh_s=" << s.resolution_remesh_ms / 1000.0 << ")\n";
+    }
+    if (!analytic) {
+      const auto &s = primary_surface;
+      std::cerr << "TABI Grid-SES: h=" << options.ses_grid_spacing
+                << " A vertices=" << s.mesh.vertices.size()
+                << " triangles=" << s.mesh.triangles.size()
+                << " projected=" << s.projected_vertices << " ("
+                << (s.projection_queries == 0U
+                        ? 0.0
+                        : 100.0 * static_cast<double>(s.projected_vertices) /
+                              static_cast<double>(s.projection_queries))
+                << "%) build_s=" << s.build_ms / 1000.0 << "\n";
     }
     mesh = std::move(primary_surface.mesh);
     calderon_trace = std::move(primary_surface.trace_spaces);
     mesh.sphere_mesh_mode = options.primary_surface;
-    if (analytic && options.analytic_ses_engine ==
-                        "patch-ray-experimental") {
+    if (analytic && (options.analytic_ses_engine == "patch-ray-experimental" ||
+                     options.analytic_ses_engine == "patch-ray-resolution")) {
       // Reuse the established profile columns as a stable high-level split:
       // neighbor = patch graph + compact ray CSR, mesh = topology + active
       // polygonization + projection/repair. surface_build_ms remains total.
@@ -1036,6 +1248,27 @@ std::vector<Panel> build_surface(const std::vector<Atom> &atoms,
       if (vertex.atom_index < original_indices.size()) {
         vertex.atom_index = original_indices[vertex.atom_index];
       }
+    }
+    // Hand the analytic vertex normals to the triangles, where node-patch
+    // construction can find them by vertex index.  Only the surface engine
+    // knows which vertices lie on the SES - the analytic engines' certified
+    // projections, or Grid-SES vertices moved onto it from their nearest
+    // probe position - so this is the last point at which the information
+    // exists.
+    if (std::any_of(mesh.vertices.begin(), mesh.vertices.end(),
+                    [](const Vertex &v) { return v.normal_analytic; })) {
+      constexpr double nan = std::numeric_limits<double>::quiet_NaN();
+      auto normals = std::make_shared<std::vector<std::array<double, 3>>>(
+          mesh.vertices.size(), std::array<double, 3>{nan, nan, nan});
+      for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+        const Vertex &v = mesh.vertices[i];
+        if (v.normal_analytic)
+          (*normals)[i] = {v.nx, v.ny, v.nz};
+      }
+      std::shared_ptr<const std::vector<std::array<double, 3>>> shared =
+          std::move(normals);
+      for (Panel &panel : mesh.panels)
+        panel.analytic_vertex_normals = shared;
     }
     for (Triangle &triangle : mesh.triangles) {
       if (triangle.atom_index < original_indices.size()) {
@@ -1108,6 +1341,12 @@ std::vector<Panel> build_surface(const std::vector<Atom> &atoms,
     result->surface_analytic_ses_engine =
         primary_surface.analytic_ses_engine;
     result->surface_status_detail = primary_surface.status;
+    if (options.primary_surface == "sphere-patch" && options.surface_mode == "vdw") {
+      result->surface_topology_source = options.sphere_patch_clip
+                                            ? "sphere_patch_cap_clip"
+                                            : "sphere_patch_whole_triangles";
+      result->surface_status_detail = "approximate_exposed_patches";
+    }
     result->surface_cavity_policy = primary_surface.cavity_policy;
     result->surface_odd_ray_rows = primary_surface.odd_ray_rows;
     result->surface_patch_ray_unresolved_uncertified_rows =
@@ -1244,6 +1483,7 @@ std::vector<Panel> build_surface(const std::vector<Atom> &atoms,
     result->avg_valence = mesh.avg_valence;
     result->nonmanifold_edges = mesh.nonmanifold_edges;
     result->solid_angle_fallbacks = mesh.solid_angle_fallbacks;
+    result->solid_angle_clamps = mesh.solid_angle_clamps;
     result->diag_min = mesh.diag_min;
     result->diag_max = mesh.diag_max;
   }

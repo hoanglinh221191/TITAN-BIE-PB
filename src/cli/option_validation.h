@@ -34,6 +34,15 @@ inline constexpr std::array<std::string_view, 0> boolean_options{};
 namespace titan_cli {
 
 inline constexpr int kParseSuccess = 0;
+// The parser converts several hundred option values with std::sto*, whose
+// exceptions carry only "stoi" or "stod" and no indication of which option was
+// being read. Recording the token currently under inspection lets the
+// top-level handler name it, without restructuring the parse loop.
+inline std::string &active_option_token() {
+  static thread_local std::string token;
+  return token;
+}
+
 inline constexpr int kNoArgumentFile = 1;
 inline constexpr int kHandledAndExit = 2;
 inline constexpr int kInvalidArguments = 3;

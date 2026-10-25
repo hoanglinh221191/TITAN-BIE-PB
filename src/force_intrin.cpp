@@ -1,3 +1,4 @@
+#include "titan_topology_energy.h"
 #include "cache_sigma_epsilon.h"
 #include "force.h"
 #include "functions.h"
@@ -29,6 +30,22 @@ int force_energy_add_intrin(const cache_sigma_epsilon &CachedData, size_t *i,
                             const Multi_MOL &rec, const Multi_MOL &lg,
                             size_t snap, const arguments &Arguments,
                             size_t rec_pos = 0, size_t lg_pos = 0) {
+  const bool topology_bound = titan_nb::topology_energy_required(CachedData, Arguments);
+  if (topology_bound && CachedData.elec_ener.empty()) {
+    for (std::size_t lane=0;lane<4;++lane) {
+      const std::size_t j=lg_pos+lane;
+      const double dx=0.1*(rec.m_mol[snap].pos.x[rec_pos]-lg.m_mol[snap].pos.x[j]);
+      const double dy=0.1*(rec.m_mol[snap].pos.y[rec_pos]-lg.m_mol[snap].pos.y[j]);
+      const double dz=0.1*(rec.m_mol[snap].pos.z[rec_pos]-lg.m_mol[snap].pos.z[j]);
+      const auto pair=titan_nb::evaluate_pair(CachedData,Arguments,rec.info.at(rec_pos),lg.info.at(j),
+                                             std::sqrt(dx*dx+dy*dy+dz*dz),CachedData.cutoff_dis);
+      const double factor=Arguments.self_int?0.5:1.0;
+      electro_energy+=factor*pair.elec;van_der_waals_energy+=factor*pair.vdw;
+      force_elec+=force(pair.force_elec_prefactor*dx,pair.force_elec_prefactor*dy,pair.force_elec_prefactor*dz);
+      force_vdw+=force(pair.force_vdw_prefactor*dx,pair.force_vdw_prefactor*dy,pair.force_vdw_prefactor*dz);
+    }
+    return 0;
+  }
   if (!CachedData.elec_ener.empty()) {
     __m256d elec_temp =
         _mm256_set_pd(CachedData.elec_ener[i[0]], CachedData.elec_ener[i[1]],

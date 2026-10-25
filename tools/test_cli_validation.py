@@ -58,6 +58,22 @@ def expect_accepted(
         )
 
 
+def expect_runtime_rejected(
+    binary: Path, arguments: list[str], *required_fragments: str
+) -> None:
+    completed = run(binary, *arguments)
+    combined = output(completed)
+    if completed.returncode == 0:
+        raise AssertionError(
+            f"command unexpectedly succeeded: {arguments!r}\n{combined}"
+        )
+    missing = [fragment for fragment in required_fragments if fragment not in combined]
+    if missing:
+        raise AssertionError(
+            f"command {arguments!r} did not report {missing!r}\n{combined}"
+        )
+
+
 def write_arg_file(directory: Path, name: str, content: str) -> Path:
     path = directory / name
     path.write_text(content, encoding="utf-8", newline="\n")
@@ -65,12 +81,92 @@ def write_arg_file(directory: Path, name: str, content: str) -> Path:
 
 
 def verify(binary: Path) -> None:
+    expect_accepted(binary, ["-dham-segment-map", "metadata.txt", "--version"], "TITAN ")
+    expect_accepted(binary, ["--dham-segment-map", "metadata.txt", "--version"], "TITAN ")
+    expect_runtime_rejected(
+        binary,
+        ["-dham", "-dham-segment-map", "metadata.txt", "-dham-ener", "energy.txt"],
+        "-dham-segment-map and -dham-ener are mutually exclusive",
+    )
     expect_accepted(binary, ["-1pdb", "--version"], "TITAN ")
     expect_accepted(binary, ["-gbsa", "--version"], "TITAN ")
     expect_accepted(
         binary,
         ["-gbsa-sasa-points", "384", "-pbsa-sasa-points", "1536", "--version"],
         "TITAN ",
+    )
+    expect_runtime_rejected(
+        binary,
+        [
+            "-pathway-file",
+            "known-route.tpath",
+            "-pathway-probe-lengths",
+            "1.0,0.5,0.25",
+            "-pathway-clearance-mode",
+            "swept-linear-center",
+            "-pull-direct",
+            "-pull-opt",
+            "corridor-grid",
+        ],
+        "swept-linear-center clearance requires -pbcn or -pbctopo",
+    )
+    expect_accepted(
+        binary,
+        [
+            "-pathway-file",
+            "known-route.tpath",
+            "-pathway-route-id",
+            "route-A",
+            "-pathway-corridor-spacing",
+            "0.5",
+            "-pathway-corridor-radial-samples",
+            "16",
+            "-pathway-recovery-enter",
+            "4.0",
+            "-pathway-recovery-exit",
+            "3.0",
+            "-pathway-recovery-max-turn-angle",
+            "60.0",
+            "-pathway-energy-key-epsilon",
+            "0.05",
+            "-pathway-completion-min-separation",
+            "4.0",
+            "-pathway-min-clearance",
+            "1.5",
+            "-pathway-probe-lengths",
+            "1.0,0.5,0.25",
+            "-pathway-navigation",
+            "-pathway-navigation-tube-weight",
+            "1.0",
+            "-pathway-navigation-backtrack-weight",
+            "2.0",
+            "-pathway-navigation-cost-epsilon",
+            "0.1",
+            "-pathway-navigation-seed-radial-samples",
+            "8",
+            "-pathway-navigation-seed-amplitude",
+            "0.35",
+            "-pathway-clearance-mode",
+            "swept-linear-center",
+            "-pbcn",
+            "-pull-opt",
+            "corridor-grid",
+            "--version",
+        ],
+        "TITAN ",
+    )
+    expect_runtime_rejected(
+        binary,
+        [
+            "-pathway-file",
+            "known-route.tpath",
+            "-pathway-probe-lengths",
+            "1.0,not-a-number,0.25",
+            "-pull-opt",
+            "corridor-grid",
+            "--version",
+        ],
+        "-pathway-probe-lengths expects positive finite distances",
     )
     expect_rejected(binary, ["-1pdb", "tru", "--version"], "CLI010", "tru")
     expect_rejected(binary, ["-gbsa", "maybe", "--version"], "CLI010", "maybe")
@@ -204,6 +300,35 @@ def verify(binary: Path) -> None:
             "--version=true\n",
         )
         expect_accepted(binary, ["-a", str(complete_pbe)], "TITAN ")
+
+        pathway = write_arg_file(
+            directory,
+            "pathway.in",
+            "-pathway-file=routes/known.tpath\n"
+            "-pathway-route-id=route-A\n"
+            "-pathway-previous-status=states/previous.txt\n"
+            "-pathway-continuity-window=1.0\n"
+            "-pathway-corridor-spacing=0.5\n"
+            "-pathway-corridor-radial-samples=16\n"
+            "-pathway-recovery-enter=4.0\n"
+            "-pathway-recovery-exit=3.0\n"
+            "-pathway-recovery-max-turn-angle=60.0\n"
+            "-pathway-energy-key-epsilon=0.05\n"
+            "-pathway-completion-min-separation=4.0\n"
+            "-pathway-min-clearance=1.5\n"
+            "-pathway-probe-lengths=1.0,0.5,0.25\n"
+            "-pathway-navigation\n"
+            "-pathway-navigation-tube-weight=1.0\n"
+            "-pathway-navigation-backtrack-weight=2.0\n"
+            "-pathway-navigation-cost-epsilon=0.1\n"
+            "-pathway-navigation-seed-radial-samples=8\n"
+            "-pathway-navigation-seed-amplitude=0.35\n"
+            "-pathway-clearance-mode=swept-linear-center\n"
+            "-pbcn\n"
+            "-pull-opt=corridor-grid\n"
+            "--version=true\n",
+        )
+        expect_accepted(binary, ["-a", str(pathway)], "TITAN ")
 
 
 def main() -> int:

@@ -6,6 +6,7 @@
 #include "titan_simd_dispatch.h"
 
 #include "titan_kinetics.h"
+#include "titan_markov_estimator.h"
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 #include <array>
@@ -61,7 +62,7 @@ inline std::vector<int> build_segment_boundaries(
   return boundaries;
 }
 
-inline void build_tpm_for_lag(const std::vector<int> &discrete_traj,
+inline bool build_tpm_for_lag(const std::vector<int> &discrete_traj,
                               const std::vector<int> &boundaries, int n_k,
                               int lag, Eigen::MatrixXd &count_tmp,
                               Eigen::MatrixXd &c_sym_tmp,
@@ -76,17 +77,10 @@ inline void build_tpm_for_lag(const std::vector<int> &discrete_traj,
     }
   }
 
-  c_sym_tmp.noalias() = 0.5 * (count_tmp + count_tmp.transpose());
-  tpm_tmp.setZero();
-  const double uniform_prob = 1.0 / static_cast<double>(n_k);
-  for (int i = 0; i < n_k; ++i) {
-    const double row_sum = c_sym_tmp.row(i).sum();
-    if (row_sum < 1e-10) {
-      tpm_tmp.row(i).setConstant(uniform_prob);
-    } else {
-      tpm_tmp.row(i) = c_sym_tmp.row(i) / row_sum;
-    }
-  }
+  (void)c_sym_tmp;
+  Eigen::VectorXd stationary;
+  std::string error;
+  return titan_markov::reversible_mle(count_tmp, tpm_tmp, stationary, error);
 }
 
 inline std::vector<double> compute_its_values_from_eigenvalues(
@@ -916,50 +910,13 @@ void TitanMSM::build_markov_model(int msm_lag_time) {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Step 2 — Symmetrize COUNT matrix (enforce detailed balance)
-  // -------------------------------------------------------------------------
-  Eigen::MatrixXd C_sym = 0.5 * (count_matrix_ + count_matrix_.transpose());
-
-  // -------------------------------------------------------------------------
-  // Step 3 — Row-normalize → row-stochastic TPM
-  // -------------------------------------------------------------------------
-  tpm_ = Eigen::MatrixXd::Zero(n_k_, n_k_);
-  for (int i = 0; i < n_k_; ++i) {
-    double row_sum = C_sym.row(i).sum();
-    if (row_sum < 1e-10) {
-      TitanUI::print_info(
-          "[WARNING] TitanMSM: microstate " + std::to_string(i) +
-          " is unvisited (zero row in count matrix). Setting uniform row. "
-          "Consider pruning unvisited states.");
-      tpm_.row(i) = Eigen::VectorXd::Constant(n_k_, 1.0 / n_k_).transpose();
-    } else {
-      tpm_.row(i) = C_sym.row(i) / row_sum;
-    }
+  std::string estimator_error;
+  if (!titan_markov::reversible_mle(count_matrix_, tpm_, stationary_dist_, estimator_error)) {
+    msm_built_ = false;
+    eigen_solved_ = false;
+    TitanUI::print_error("MSM: " + estimator_error);
+    return;
   }
-
-  // -------------------------------------------------------------------------
-  // Step 4 — Stationary distribution via power iteration
-  // pi (1×k) = pi * T  until convergence (max 1000 steps)
-  // Initialize pi as uniform.
-  // -------------------------------------------------------------------------
-  Eigen::RowVectorXd pi = Eigen::RowVectorXd::Constant(n_k_, 1.0 / n_k_);
-  Eigen::RowVectorXd pi_new(n_k_);
-
-  for (int it = 0; it < 1000; ++it) {
-    pi_new.noalias() = pi * tpm_;
-    double max_change = (pi_new - pi).cwiseAbs().maxCoeff();
-    pi = pi_new;
-    if (max_change < 1e-10)
-      break;
-  }
-
-  // Normalize
-  double pi_sum = pi.sum();
-  if (pi_sum > 1e-30)
-    pi /= pi_sum;
-
-  stationary_dist_ = pi.transpose();
   msm_built_ = true;
 
   // Fix 4: cache eigendecomposition NOW (once, used by ITS + PCCA)
@@ -1532,8 +1489,14 @@ void TitanMSM::export_results(
             LagResult &res = results[static_cast<size_t>(li)];
             res.lag = lag;
 
-            build_tpm_for_lag(discrete_traj_, boundaries, n_k_, lag, c_tmp,
-                              c_sym_tmp, t_tmp);
+            if (!build_tpm_for_lag(discrete_traj_, boundaries, n_k_, lag, c_tmp,
+                                  c_sym_tmp, t_tmp)) {
+              res.its_values.assign(static_cast<size_t>(std::max(0, n_timescales)),
+                                    std::numeric_limits<double>::quiet_NaN());
+              res.solver_mode = "invalid_counts_or_mle_failure";
+              res.ok = true;
+              continue;
+            }
 
             std::string effective_mode;
             if (!solve_its_eigenvalues(t_tmp, its_solver_mode, n_timescales,
@@ -1569,9 +1532,9 @@ void TitanMSM::export_results(
           const int lag = res.lag;
           solver_hist[res.solver_mode] += 1;
 
-          build_tpm_for_lag(discrete_traj_, boundaries, n_k_, lag, c_tmp_write,
-                            c_sym_tmp_write, t_tmp_write);
-          {
+          const bool have_tpm = build_tpm_for_lag(discrete_traj_, boundaries, n_k_, lag, c_tmp_write,
+                                                 c_sym_tmp_write, t_tmp_write);
+          if (have_tpm) {
             const std::string tpm_path = info_output.get_msm_its_tpm_dir() +
                                          "/tpm_lag" + std::to_string(lag) + ".dat";
             std::ofstream ft(tpm_path);

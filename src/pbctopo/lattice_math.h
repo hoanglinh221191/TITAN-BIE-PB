@@ -50,6 +50,9 @@ struct PbctopoLatticeQueryAudit {
 
 void pbctopo_reset_lattice_query_audit() noexcept;
 PbctopoLatticeQueryAudit pbctopo_lattice_query_audit() noexcept;
+// Adds counts measured on another thread to this thread's audit, so that work
+// moved to executor workers is counted where the serial code counted it.
+void pbctopo_add_lattice_query_audit(const PbctopoLatticeQueryAudit &delta) noexcept;
 PbctopoLatticeQueryAudit pbctopo_lattice_query_audit_delta(
     const PbctopoLatticeQueryAudit &before,
     const PbctopoLatticeQueryAudit &after) noexcept;
@@ -99,6 +102,14 @@ private:
   bool reduction_fallback_ = false;
   double condition_estimate_ = 0.0;
   PbctopoLatticeStatus status_ = PbctopoLatticeStatus::InvalidBox;
+  // Upper Cholesky factor of the reduced Gram matrix, computed once instead
+  // of on every enumerating query.
+  double reduced_cholesky_upper_[3][3]{};
+  bool reduced_cholesky_valid_ = false;
+  // A query whose rounded reduced-basis seed is shorter than this (a quarter
+  // of the smallest reduced-cell height squared, with a safety margin) has
+  // the seed as its unique minimum image; 0 when not established.
+  double unique_minimum_d2_bound_ = 0.0;
 };
 
 } // namespace titan_pbctopo

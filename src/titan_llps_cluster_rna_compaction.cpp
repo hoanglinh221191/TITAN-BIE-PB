@@ -1,6 +1,6 @@
 ﻿// Split from titan_llps_cluster.cpp. Keep TITAN_LLPS public behavior unchanged.
 #include "titan_llps_cluster.h"
-#include "BoxMatrix.h"
+#include "titan_exact_periodic_box.h"
 #include "MOL.h"
 #include "MOL_info.h"
 #include "box_type.h"
@@ -191,7 +191,7 @@ void TitanLLPSCluster::update_rna_compaction(
   if (rna_chains.empty())
     return;
 
-  const BoxMatrix bmat(Box);
+  const TitanExactPeriodicBox bmat(Box);
   const double prna_cut = rna_compaction_prna_cutoff_angstrom_;
   const double prna_cut_sq = prna_cut * prna_cut;
   const double intra_cut = rna_compaction_intra_cutoff_angstrom_;
@@ -226,9 +226,9 @@ void TitanLLPSCluster::update_rna_compaction(
     sticker_indices_by_chain = &fallback_sticker_indices_by_chain;
   }
 
-  const double bx = Box.get_a();
-  const double by = Box.get_b();
-  const double bz = Box.get_c();
+  const double bx = bmat.heights[0];
+  const double by = bmat.heights[1];
+  const double bz = bmat.heights[2];
   const bool have_periodic_box = bx > 0.0 && by > 0.0 && bz > 0.0;
   int nx = 1;
   int ny = 1;
@@ -246,6 +246,7 @@ void TitanLLPSCluster::update_rna_compaction(
     cz = bz / static_cast<double>(nz);
     sticker_grid.reserve(stickers.size() * 2 + 1);
     auto periodic_cell = [&](double x, double y, double z) {
+      bmat.grid_coordinate(x,y,z);
       int ix = static_cast<int>(std::floor(x / cx));
       int iy = static_cast<int>(std::floor(y / cy));
       int iz = static_cast<int>(std::floor(z / cz));
@@ -279,9 +280,10 @@ void TitanLLPSCluster::update_rna_compaction(
     for (std::size_t bead_idx = 0; bead_idx < beads.size() && bead_idx < xyz.size();
          ++bead_idx) {
       const auto &rna = beads[bead_idx];
-      int ix = static_cast<int>(std::floor(rna.x / cx));
-      int iy = static_cast<int>(std::floor(rna.y / cy));
-      int iz = static_cast<int>(std::floor(rna.z / cz));
+      double gx=rna.x,gy=rna.y,gz=rna.z;bmat.grid_coordinate(gx,gy,gz);
+      int ix = static_cast<int>(std::floor(gx / cx));
+      int iy = static_cast<int>(std::floor(gy / cy));
+      int iz = static_cast<int>(std::floor(gz / cz));
       ix = ((ix % nx) + nx) % nx;
       iy = ((iy % ny) + ny) % ny;
       iz = ((iz % nz) + nz) % nz;

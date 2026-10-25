@@ -30,9 +30,13 @@ std::string lowercase_copy(const std::string &text) {
 
 double compute_tica_timescale(double eigenvalue, int lag, double dt_ns) {
   const double abs_lambda = std::abs(eigenvalue);
-  if (abs_lambda >= 1.0 || abs_lambda < 1e-15) {
+  if (!std::isfinite(abs_lambda) || abs_lambda > 1.0 + 1e-8)
+    throw std::runtime_error("TICA: eigenvalue outside the reversible covariance bound.");
+  if (abs_lambda >= 1.0) {
     return std::numeric_limits<double>::infinity();
   }
+  if (abs_lambda < 1e-15)
+    return 0.0;
   return -static_cast<double>(lag) * dt_ns / std::log(abs_lambda);
 }
 
@@ -72,6 +76,8 @@ std::string tica_backend_to_string(TicaBackend backend) {
     return "exact_dual";
   case TicaBackend::Randomized:
     return "randomized";
+  case TicaBackend::ExactStreaming:
+    return "exact_streaming";
   }
   return "unknown";
 }
@@ -92,6 +98,10 @@ bool tica_backend_from_string(const std::string &text, TicaBackend &backend) {
   }
   if (value == "randomized" || value == "rand") {
     backend = TicaBackend::Randomized;
+    return true;
+  }
+  if (value == "exact_streaming" || value == "streaming") {
+    backend = TicaBackend::ExactStreaming;
     return true;
   }
   return false;
@@ -117,13 +127,15 @@ TitanKinetics::TitanKinetics(int feature_dim, int lag_time, int n_components,
       eigenvectors_(Eigen::MatrixXd::Zero(feature_dim, n_comp_)),
       timescales_(Eigen::VectorXd::Constant(
           n_comp_, std::numeric_limits<double>::infinity())) {
-  if (backend_ == TicaBackend::ExactDense) {
+  if (backend_ == TicaBackend::ExactDense || backend_ == TicaBackend::ExactStreaming) {
     sum_xx_ = Eigen::MatrixXd::Zero(feature_dim, feature_dim);
     sum_xtau_ = Eigen::MatrixXd::Zero(feature_dim, feature_dim);
   }
-  if (backend_ == TicaBackend::Randomized) {
+  if (backend_ == TicaBackend::Randomized || backend_ == TicaBackend::ExactStreaming) {
     open_spool_for_write_();
   }
+  if (backend_ == TicaBackend::Randomized)
+    TitanUI::print_warning("TICA randomized is a PCA-truncated approximation; low-variance slow modes can be lost. Use exact_streaming for exact covariances and disk replay.");
 }
 
 TitanKinetics::~TitanKinetics() {
@@ -204,7 +216,7 @@ void TitanKinetics::append_cached_frame_(const Eigen::VectorXd &x) {
   const uint64_t frame_bytes =
       static_cast<uint64_t>(std::max(0, dim_)) * sizeof(double);
 
-  if (backend_ == TicaBackend::Randomized) {
+  if (backend_ == TicaBackend::Randomized || backend_ == TicaBackend::ExactStreaming) {
     const auto start = std::chrono::steady_clock::now();
     if (!spool_writer_.is_open()) {
       open_spool_for_write_();
@@ -237,34 +249,9 @@ void TitanKinetics::append_cached_frame_(const Eigen::VectorXd &x) {
           kExactDualPeakFactor * estimated_raw_bytes;
       if (estimated_peak_bytes >
           static_cast<long double>(hard_memory_cap_bytes_)) {
-        backend_ = TicaBackend::Randomized;
-        const auto promotion_start = std::chrono::steady_clock::now();
-        open_spool_for_write_();
-        for (int64_t i = 0; i < n_frames_; ++i) {
-          spool_writer_.write(
-              reinterpret_cast<const char *>(frame_cache_.row(i).data()),
-              static_cast<std::streamsize>(dim_ * sizeof(double)));
-        }
-        frame_cache_.resize(0, dim_);
-        timing_stats_.cache_promotion_seconds += seconds_since(promotion_start);
-        timing_stats_.promoted_cache_frames += n_frames_;
-        timing_stats_.spool_write_frames += n_frames_;
-        timing_stats_.spool_write_bytes +=
-            static_cast<uint64_t>(std::max<int64_t>(0, n_frames_)) * frame_bytes;
-        TitanUI::print_warning(
-            "TICA: exact_dual peak estimate exceeded the hard memory cap. "
-            "Promoting backend from exact_dual to randomized.");
-        const auto write_start = std::chrono::steady_clock::now();
-        spool_writer_.write(reinterpret_cast<const char *>(x.data()),
-                            static_cast<std::streamsize>(dim_ * sizeof(double)));
-        if (!spool_writer_) {
-          throw std::runtime_error(
-              "TICA randomized: failed writing promoted spool file.");
-        }
-        timing_stats_.spool_write_seconds += seconds_since(write_start);
-        ++timing_stats_.spool_write_frames;
-        timing_stats_.spool_write_bytes += frame_bytes;
-        return;
+        throw std::runtime_error(
+            "TICA exact_dual exceeds its memory cap. Select exact_streaming or explicitly opt into the randomized approximation.");
+
       }
     }
     frame_cache_.conservativeResize(new_rows, dim_);
@@ -298,13 +285,7 @@ void TitanKinetics::accumulate_frame(const Eigen::VectorXd &x) {
 
   append_cached_frame_(x);
 
-  const int write_slot = (circ_head_ + circ_count_) % std::max(1, lag_);
-  circ_buf_.row(write_slot) = x.transpose();
-
   sum_x_ += x;
-  if (backend_ == TicaBackend::ExactDense) {
-    sum_xx_.selfadjointView<Eigen::Upper>().rankUpdate(x);
-  }
   ++n_frames_;
 
   if (circ_count_ == lag_) {
@@ -312,12 +293,19 @@ void TitanKinetics::accumulate_frame(const Eigen::VectorXd &x) {
                                                dim_);
     sum_x_lagged_ += x_lagged;
     sum_x_paired_ += x;
-    if (backend_ == TicaBackend::ExactDense) {
+    if (backend_ == TicaBackend::ExactDense || backend_ == TicaBackend::ExactStreaming) {
+      // Reversible C0 uses the same lag-pair endpoints as Ctau.
+      sum_xx_.selfadjointView<Eigen::Upper>().rankUpdate(x);
+      sum_xx_.selfadjointView<Eigen::Upper>().rankUpdate(x_lagged);
       sum_xtau_.noalias() += x * x_lagged.transpose();
     }
     ++n_pairs_;
+    // Consume the old frame before replacing its circular-buffer slot.
+    circ_buf_.row(circ_head_) = x.transpose();
     circ_head_ = (circ_head_ + 1) % lag_;
   } else {
+    const int write_slot = (circ_head_ + circ_count_) % std::max(1, lag_);
+    circ_buf_.row(write_slot) = x.transpose();
     ++circ_count_;
   }
 }
@@ -332,22 +320,18 @@ void TitanKinetics::reset_lag_buffer() {
 }
 
 void TitanKinetics::solve_exact_dense_() {
-  const Eigen::VectorXd mean_lagged =
-      sum_x_lagged_ / static_cast<double>(n_pairs_);
-  const Eigen::VectorXd mean_paired =
-      sum_x_paired_ / static_cast<double>(n_pairs_);
-
   Eigen::MatrixXd C0 =
       Eigen::MatrixXd(sum_xx_.selfadjointView<Eigen::Upper>()) /
-          static_cast<double>(n_frames_) -
+          (2.0 * static_cast<double>(n_pairs_)) -
       mean_ * mean_.transpose();
 
   Eigen::MatrixXd Ctau =
-      sum_xtau_ / static_cast<double>(n_pairs_) -
-      mean_paired * mean_lagged.transpose();
+      ((sum_xtau_ + sum_xtau_.transpose()) /
+       (2.0 * static_cast<double>(n_pairs_))).eval() -
+      mean_ * mean_.transpose();
 
-  C0 = 0.5 * (C0 + C0.transpose());
-  Ctau = 0.5 * (Ctau + Ctau.transpose());
+  C0 = (0.5 * (C0 + C0.transpose())).eval();
+  Ctau = (0.5 * (Ctau + Ctau.transpose())).eval();
 
   const double epsilon = 1e-6 * C0.trace() / std::max(1, dim_);
   C0.diagonal().array() += epsilon;
@@ -603,15 +587,6 @@ void TitanKinetics::solve_reduced_from_basis_(const Eigen::MatrixXd &basis,
 
   const int reduced_dim = static_cast<int>(basis.cols());
   Eigen::MatrixXd C0 = Eigen::MatrixXd::Zero(reduced_dim, reduced_dim);
-  const Eigen::VectorXd mean_lagged =
-      sum_x_lagged_ / static_cast<double>(n_pairs_);
-  const Eigen::VectorXd mean_paired =
-      sum_x_paired_ / static_cast<double>(n_pairs_);
-  const RowVectorXd delta_current =
-      (mean_ - mean_paired).transpose() * basis;
-  const RowVectorXd delta_lagged =
-      (mean_ - mean_lagged).transpose() * basis;
-
   Eigen::MatrixXd Ctau = Eigen::MatrixXd::Zero(reduced_dim, reduced_dim);
   const int ring_size = std::max(1, lag_);
   FrameMatrixRM lag_buffer = FrameMatrixRM::Zero(ring_size, reduced_dim);
@@ -637,13 +612,11 @@ void TitanKinetics::solve_reduced_from_basis_(const Eigen::MatrixXd &basis,
       ++next_boundary;
     }
 
-    C0.noalias() += z_row.transpose() * z_row;
-
     if (ring_count == lag_) {
       z_current = z_row;
-      z_current += delta_current;
       z_lagged = lag_buffer.row(ring_head);
-      z_lagged += delta_lagged;
+      C0.noalias() += z_current.transpose() * z_current;
+      C0.noalias() += z_lagged.transpose() * z_lagged;
       Ctau.noalias() += z_current.transpose() * z_lagged;
 
       lag_buffer.row(ring_head) = z_row;
@@ -698,11 +671,11 @@ void TitanKinetics::solve_reduced_from_basis_(const Eigen::MatrixXd &basis,
     timing_stats_.reduced_solve_replay_frames += n_frames_;
   }
 
-  C0 /= static_cast<double>(n_frames_);
+  C0 /= 2.0 * static_cast<double>(n_pairs_);
   const double epsilon = 1e-6 * C0.trace() / std::max(1, dim_);
   C0.diagonal().array() += epsilon;
   Ctau /= static_cast<double>(n_pairs_);
-  Ctau = 0.5 * (Ctau + Ctau.transpose());
+  Ctau = (0.5 * (Ctau + Ctau.transpose())).eval();
 
   TitanUI::print_info("TICA (" + label + "): reduced C0 trace = " +
                       std::to_string(C0.trace()) +
@@ -762,7 +735,8 @@ void TitanKinetics::solve_tica() {
     return;
   }
 
-  mean_ = sum_x_ / static_cast<double>(n_frames_);
+  mean_ = (sum_x_lagged_ + sum_x_paired_) /
+          (2.0 * static_cast<double>(n_pairs_));
 
   TitanUI::print_info("TICA: " + std::to_string(n_frames_) + " frames, " +
                       std::to_string(n_pairs_) + " lagged pairs, D=" +
@@ -772,6 +746,10 @@ void TitanKinetics::solve_tica() {
   try {
     switch (backend_) {
     case TicaBackend::ExactDense:
+      solve_exact_dense_();
+      break;
+    case TicaBackend::ExactStreaming:
+      close_spool_writer_();
       solve_exact_dense_();
       break;
     case TicaBackend::ExactDual:

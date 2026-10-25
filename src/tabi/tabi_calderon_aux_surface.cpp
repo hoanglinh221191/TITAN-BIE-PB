@@ -1,4 +1,5 @@
 #include "tabi_calderon_aux_surface.h"
+#include "tabi_shared_vertex_separation.h"
 
 #include "tabi_analytic_ses.h"
 #include "tabi_ses_bilevel_grid.h"
@@ -16,6 +17,7 @@
 #include <numbers>
 #include <tuple>
 #include <unordered_map>
+#include <iostream>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -23,6 +25,7 @@
 #ifdef TITAN_TABI_SES_TEST_HOOKS
 #include <cstdlib>
 #include <iostream>
+#include <iterator>
 #endif
 
 namespace TitanPBE::Tabi::calderon {
@@ -198,9 +201,16 @@ struct AtomGrid {
   return best;
 }
 
+// `radius_offset` grows or shrinks every atom for this query only.  A caller
+// that wants a certificate rather than an answer passes a small negative
+// offset to prove containment and a small positive one to prove exclusion,
+// which leaves a thin shell around the boundary uncertified instead of
+// resolving it by whichever way the last bit of a squared distance happened
+// to fall.
 [[nodiscard]] bool point_inside_union(const AtomGrid &grid,
                                       std::span<const Atom> atoms,
-                                      const Vec3 &point) noexcept {
+                                      const Vec3 &point,
+                                      double radius_offset = 0.0) noexcept {
   const CellKey center = cell_for(grid, point);
   for (int dz = -1; dz <= 1; ++dz) {
     for (int dy = -1; dy <= 1; ++dy) {
@@ -211,10 +221,13 @@ struct AtomGrid {
           continue;
         for (const std::size_t index : found->second) {
           const Atom &atom = atoms[index];
+          const double radius = atom.radius + radius_offset;
+          if (!(radius > 0.0))
+            continue;
           const double rx = point.x - atom.x;
           const double ry = point.y - atom.y;
           const double rz = point.z - atom.z;
-          if (rx * rx + ry * ry + rz * rz < atom.radius * atom.radius)
+          if (rx * rx + ry * ry + rz * rz < radius * radius)
             return true;
         }
       }
@@ -245,6 +258,55 @@ struct AtomGrid {
     return result;
   }();
   return directions;
+}
+
+// The current-family engines take their inside/outside sign by sampling the
+// probe ball at these directions and asking whether every sample lands in the
+// dilated atom set.  Sampling the sphere instead of testing the ball admits a
+// vertex whose probe does not really fit, so the surface sits outside the SES
+// by an amount set by the angular resolution of this set and not by the grid
+// spacing -- which is why refining the grid does not reduce it.
+//
+// Half-width 1 is the 26 directions `current` has always used: the widest gap
+// between neighbouring directions is 27.6 degrees and the average is 15.5,
+// which at a 1.4 A probe is 0.16 A and 0.05 A of radial slack.  Half-width 2
+// is 98 directions at 17.6 and 8.2 degrees, which is `current-dense`.
+[[nodiscard]] std::vector<Vec3> build_closing_sample_directions(
+    int half_width) {
+  std::vector<Vec3> result;
+  result.push_back({}); // the unshifted probe centre
+  for (int dz = -half_width; dz <= half_width; ++dz)
+    for (int dy = -half_width; dy <= half_width; ++dy)
+      for (int dx = -half_width; dx <= half_width; ++dx) {
+        if (dx == 0 && dy == 0 && dz == 0)
+          continue;
+        const Vec3 direction =
+            normalized({static_cast<double>(dx), static_cast<double>(dy),
+                        static_cast<double>(dz)});
+        // A lattice box repeats the directions its inner shells already
+        // cover, so the cost is the direction count rather than the lattice
+        // size.  The test is an AND over every sample, so the order the
+        // survivors end up in cannot change the answer.
+        if (std::none_of(result.begin(), result.end(),
+                         [&](const Vec3 &seen) {
+                           return norm(seen - direction) < 1.0e-12;
+                         }))
+          result.push_back(direction);
+      }
+  return result;
+}
+
+[[nodiscard]] const std::vector<Vec3> &closing_sample_directions(
+    int half_width) {
+  static const std::vector<Vec3> narrow = build_closing_sample_directions(1);
+  static const std::vector<Vec3> dense = build_closing_sample_directions(2);
+  return half_width <= 1 ? narrow : dense;
+}
+
+// `current-dense` differs from `current` in that one number and nothing else,
+// so everything that asks "is this the sampled-closing engine" asks here.
+[[nodiscard]] bool is_current_family_engine(std::string_view engine) noexcept {
+  return engine == "current" || engine == "current-dense";
 }
 
 [[nodiscard]] VertexKey vertex_key(const Vec3 &point) noexcept {
@@ -340,12 +402,23 @@ void add_triangle(
   mesh.panels.push_back(panel);
 }
 
+// `edge_margin` rescales the crossing parameter into [m, 1-m], holding every
+// marching vertex that far from both endpoints of its edge as a fraction of
+// the edge.  A crossing that lands a hair from an endpoint is the classic
+// source of sliver triangles, and the rescale is continuous and monotone, so
+// a small change in the field still moves the vertex by a small amount.  It
+// never merges two vertices, so the combinatorics are exactly those of the
+// unrescaled mesh and the surface stays closed.  Zero disables it, which is
+// what the `current` engine passes: that engine's geometry is fixed by the
+// runs already published with it.
 [[nodiscard]] Vec3 interpolate(const Vec3 &a, const Vec3 &b, double fa,
-                               double fb) noexcept {
+                               double fb, double edge_margin) noexcept {
   const double denominator = fa - fb;
-  const double t = std::abs(denominator) > 1.0e-300
-                       ? std::clamp(fa / denominator, 0.0, 1.0)
-                       : 0.5;
+  double t = std::abs(denominator) > 1.0e-300
+                 ? std::clamp(fa / denominator, 0.0, 1.0)
+                 : 0.5;
+  if (edge_margin > 0.0 && edge_margin < 0.5)
+    t = edge_margin + (1.0 - 2.0 * edge_margin) * t;
   return a + t * (b - a);
 }
 
@@ -353,7 +426,8 @@ void polygonize_tetrahedron(
     SurfaceMesh &mesh,
     std::unordered_map<VertexKey, std::size_t, VertexKeyHash> &vertex_lookup,
     const AtomGrid &atom_grid, std::span<const Atom> atoms,
-    const std::array<Vec3, 4> &points, const std::array<double, 4> &values) {
+    const std::array<Vec3, 4> &points, const std::array<double, 4> &values,
+    double edge_margin) {
   std::array<int, 4> inside{};
   std::array<int, 4> outside{};
   int inside_count = 0;
@@ -372,7 +446,7 @@ void polygonize_tetrahedron(
     return interpolate(points[static_cast<std::size_t>(a)],
                        points[static_cast<std::size_t>(b)],
                        values[static_cast<std::size_t>(a)],
-                       values[static_cast<std::size_t>(b)]);
+                       values[static_cast<std::size_t>(b)], edge_margin);
   };
   if (inside_count == 1) {
     const int i = inside[0];
@@ -506,6 +580,35 @@ struct FaceMoveValidation {
   bool geometry_valid{false};
   bool orientation_preserved{false};
 };
+
+[[nodiscard]] double face_edge_ratio(const Vec3 &a, const Vec3 &b,
+                                     const Vec3 &c) noexcept {
+  const double ab = norm(b - a);
+  const double bc = norm(c - b);
+  const double ca = norm(a - c);
+  const double shortest = std::min({ab, bc, ca});
+  const double longest = std::max({ab, bc, ca});
+  if (!(shortest > 1.0e-14) || !std::isfinite(longest))
+    return std::numeric_limits<double>::infinity();
+  return longest / shortest;
+}
+
+// A refused vertex stays on its marching position, off the analytic surface
+// by the move it did not make.  That is certifiable only while the largest
+// outstanding move is small against the spacing the mesh is drawn at, and
+// this is the fraction of a cell the certificate grants.  Every refusal the
+// commit is allowed to invent for its own reasons is held to the same
+// number, so no refusal can be the thing that fails the certificate.
+constexpr double kRefusedVertexToleranceCells = 0.25;
+
+// The marching mesh reaches the projection with a worst edge ratio near 16
+// and no poor triangle; the projection alone takes it past 60.  A bound
+// above what marching produces refuses only what the projection newly
+// creates, and never blocks a move that improves a face already past it.
+// NanoShaper reports a worst ratio under 10, which this cannot reach: what
+// stands between is the marching mesh itself, not the projection.
+constexpr double kProjectionShapeRatioBound = 20.0;
+
 
 [[nodiscard]] FaceMoveValidation validate_face_move(
     const Vec3 &a, const Vec3 &b, const Vec3 &c,
@@ -1998,6 +2101,7 @@ struct LocalPatchRepairMetrics {
   double local_sliver_ms{0.0};
   double full_projection_ms{0.0};
   double seam_weld_ms{0.0};
+  double refused_sliver_repair_ms{0.0};
   double certificate_cleanup_ms{0.0};
   double orientation_repair_ms{0.0};
   double wide_repair_ms{0.0};
@@ -2034,6 +2138,19 @@ struct LocalPatchRepairMetrics {
   double sampled_hausdorff_proxy{0.0};
   std::size_t analytic_vertex_projection_misses{0};
   double analytic_vertex_residual_max{0.0};
+  // Vertices the last transactional projection could not move, with the
+  // distance each still needs.  Both are small by construction (1-3 on a
+  // protein surface of 10^4-10^5 vertices) and the targeted sliver repair
+  // reads them to find the faces that blocked the move.
+  std::vector<std::uint32_t> refused_vertex_indices;
+  std::vector<double> refused_vertex_distances;
+  std::vector<std::uint8_t> refused_vertex_shape_flags;
+  double analytic_vertex_refused_distance_max{0.0};
+  // The subset of those refusals the commit chose, to keep a one ring from
+  // being sheared by a move it would otherwise have accepted.
+  std::size_t analytic_vertex_refused_for_shape{0};
+  std::size_t refused_sliver_collapses{0};
+  std::size_t analytic_sheet_bridge_faces{0};
   std::size_t projection_orientation_reversals{0};
   std::size_t orientation_repair_rounds{0};
   std::size_t orientation_repair_faces{0};
@@ -2523,6 +2640,20 @@ struct ProjectionCommitResult {
   std::size_t vertices_rescued{0U};
   std::size_t max_component_size{0U};
   std::size_t retained_bytes{0U};
+  // Moves refused for the shape of the one ring rather than its orientation.
+  // Counted apart because the two failures want different repairs and only
+  // this one is a choice the commit made.
+  std::size_t shape_rejections{0U};
+  // Vertices left in the rejected state.  Kept in production, not only in
+  // test builds: the repair pipeline needs to know which one-rings blocked
+  // the move, and the list is empty or tiny on every surface that gets here.
+  std::vector<std::uint32_t> refused_vertices;
+  // Parallel to refused_vertices: 1 where the commit declined the move to
+  // keep the one ring's shape, 0 where a face would have reversed.  The
+  // targeted sliver repair unblocks the second kind and must leave the
+  // first alone, or it collapses an edge to enable the very move the gate
+  // declined and hands the shear back.
+  std::vector<std::uint8_t> refused_for_shape;
   bool all_faces_certified{false};
 #ifdef TITAN_TABI_SES_TEST_HOOKS
   std::vector<std::uint8_t> final_state;
@@ -2542,7 +2673,8 @@ struct ProjectionCommitResult {
     std::span<const Vertex> proposals,
     std::span<const std::uint8_t> proposal_valid,
     std::span<const Vec3> reference_normals,
-    std::vector<std::uint8_t> &affected_faces) {
+    std::vector<std::uint8_t> &affected_faces,
+    double shape_refusal_distance_limit = 0.0) {
   ProjectionCommitResult result;
   if (proposals.size() != mesh.vertices.size() ||
       proposal_valid.size() != mesh.vertices.size() ||
@@ -2552,7 +2684,8 @@ struct ProjectionCommitResult {
     return result;
 
   // 0 = no certified proposal, 1 = pending, 2 = committed,
-  // 3 = current coupled component, 4 = finally rejected.
+  // 3 = current coupled component, 4 = rejected because a face would
+  // have reversed, 5 = declined to keep the one ring's shape.
   std::vector<std::uint8_t> state(mesh.vertices.size(), 0U);
   for (std::size_t vertex = 0U; vertex < mesh.vertices.size(); ++vertex) {
     if (proposal_valid[vertex] != 0U)
@@ -2591,6 +2724,43 @@ struct ProjectionCommitResult {
     return true;
   };
 
+  // A move survives validate_faces whenever every incident face keeps its
+  // orientation, however much the move distorts it.  At a seam two
+  // neighbouring vertices take their closest point on different patches -- a
+  // contact sphere and a reentrant sphere -- and shear the triangle between
+  // them; that is where this mesh loses its worst aspect ratio, and nothing
+  // downstream recovers it.  Refusing such a move keeps the shape and leaves
+  // the vertex off the surface by the distance it did not travel, so it is
+  // offered only inside the tolerance the vertex certificate already grants
+  // refusals.  A vertex that must travel further is committed whatever it
+  // does to its one ring: position is the thing the certificate is about.
+  const auto move_degrades_shape = [&](std::size_t vertex,
+                                       std::span<const std::size_t> faces) {
+    if (!(shape_refusal_distance_limit > 0.0))
+      return false;
+    const Vertex &proposal = proposals[vertex];
+    const Vec3 target{proposal.x, proposal.y, proposal.z};
+    if (!(norm(target - mesh_vertex(mesh, vertex)) <=
+          shape_refusal_distance_limit))
+      return false;
+    for (const std::size_t triangle_index : faces) {
+      const Triangle &triangle = mesh.triangles[triangle_index];
+      const auto moved = [&](std::size_t index) {
+        return index == vertex ? target : mesh_vertex(mesh, index);
+      };
+      const double after = face_edge_ratio(
+          moved(triangle.v0), moved(triangle.v1), moved(triangle.v2));
+      if (!(after > kProjectionShapeRatioBound))
+        continue;
+      const double before = face_edge_ratio(mesh_vertex(mesh, triangle.v0),
+                                            mesh_vertex(mesh, triangle.v1),
+                                            mesh_vertex(mesh, triangle.v2));
+      if (after > before)
+        return true;
+    }
+    return false;
+  };
+
   std::vector<std::uint8_t> selected(mesh.vertices.size(), 0U);
   std::vector<std::size_t> incident_faces;
   for (std::size_t vertex = 0U; vertex < mesh.vertices.size(); ++vertex) {
@@ -2604,6 +2774,15 @@ struct ProjectionCommitResult {
          position < incidence.offsets[vertex + 1U]; ++position)
       incident_faces.push_back(incidence.triangles[position]);
     bool orientation_failed = false;
+    if (move_degrades_shape(vertex, incident_faces)) {
+      // Final, not deferred to the coupled pass: the coupled pass exists to
+      // rescue moves that only a neighbour's move makes safe, and this one
+      // is safe already.  It was declined.
+      state[vertex] = 5U;
+      ++result.shape_rejections;
+      selected[vertex] = 0U;
+      continue;
+    }
     if (validate_faces(incident_faces, selected, orientation_failed)) {
       mesh.vertices[vertex] = proposals[vertex];
       state[vertex] = 2U;
@@ -2683,9 +2862,13 @@ struct ProjectionCommitResult {
       face_selected[triangle_index] = 0U;
   }
 
-  result.rejected_vertices =
-      static_cast<std::size_t>(std::count(state.begin(), state.end(),
-                                          std::uint8_t{4U}));
+  for (std::size_t vertex = 0U; vertex < state.size(); ++vertex) {
+    if (state[vertex] != 4U && state[vertex] != 5U)
+      continue;
+    result.refused_vertices.push_back(static_cast<std::uint32_t>(vertex));
+    result.refused_for_shape.push_back(state[vertex] == 5U ? 1U : 0U);
+  }
+  result.rejected_vertices = result.refused_vertices.size();
   result.all_faces_certified = true;
   for (std::size_t triangle_index = 0U;
        triangle_index < mesh.triangles.size(); ++triangle_index) {
@@ -2705,11 +2888,82 @@ struct ProjectionCommitResult {
       incident_faces.capacity() * sizeof(std::size_t) +
       stack.capacity() * sizeof(std::size_t) +
       component.capacity() * sizeof(std::size_t) +
-      component_faces.capacity() * sizeof(std::size_t);
+      component_faces.capacity() * sizeof(std::size_t) +
+      result.refused_vertices.capacity() * sizeof(std::uint32_t) +
+      result.refused_for_shape.capacity() * sizeof(std::uint8_t);
 #ifdef TITAN_TABI_SES_TEST_HOOKS
   result.final_state = std::move(state);
 #endif
   return result;
+}
+
+// A vertex is refused by specific faces in its one ring: those whose smallest
+// altitude is below the move it still needs, so the move sweeps the vertex
+// past the opposite edge and reverses the face.  Every other incident face
+// would have survived.  Collapsing the shortest edge of exactly those faces
+// removes the obstruction and touches nothing else, which is what separates
+// this from lowering the global short-edge threshold until something gives.
+[[nodiscard]] std::vector<EdgeKey> collect_refused_vertex_sliver_edges(
+    const SurfaceMesh &mesh, const CompactVertexIncidence &incidence,
+    std::span<const std::uint32_t> refused,
+    std::span<const double> distances,
+    std::span<const std::uint8_t> shape_flags, double &maximum_length) {
+  std::vector<EdgeKey> edges;
+  maximum_length = 0.0;
+  for (std::size_t entry = 0U; entry < refused.size(); ++entry) {
+    const std::size_t vertex = refused[entry];
+    if (vertex + 1U >= incidence.offsets.size())
+      continue;
+    // A shape refusal is not an obstruction to clear.  The move was safe and
+    // was declined, so collapsing an edge to make room for it would spend a
+    // sliver to buy back the shear the refusal prevented.
+    if (entry < shape_flags.size() && shape_flags[entry] != 0U)
+      continue;
+    const double move = entry < distances.size()
+                            ? distances[entry]
+                            : std::numeric_limits<double>::quiet_NaN();
+    if (!std::isfinite(move) || !(move > 0.0))
+      continue;
+    for (std::size_t position = incidence.offsets[vertex];
+         position < incidence.offsets[vertex + 1U]; ++position) {
+      const std::size_t face = incidence.triangles[position];
+      if (face >= mesh.triangles.size())
+        continue;
+      const Triangle &triangle = mesh.triangles[face];
+      const Vec3 a = mesh_vertex(mesh, triangle.v0);
+      const Vec3 b = mesh_vertex(mesh, triangle.v1);
+      const Vec3 c = mesh_vertex(mesh, triangle.v2);
+      const double ab = norm(b - a);
+      const double bc = norm(c - b);
+      const double ca = norm(a - c);
+      const double longest = std::max({ab, bc, ca});
+      if (!(longest > 0.0) || !std::isfinite(longest))
+        continue;
+      if (!(norm(cross(b - a, c - a)) / longest < move))
+        continue;
+      EdgeKey shortest{triangle.v0, triangle.v1};
+      double shortest_length = ab;
+      if (bc < shortest_length) {
+        shortest = {triangle.v1, triangle.v2};
+        shortest_length = bc;
+      }
+      if (ca < shortest_length) {
+        shortest = {triangle.v2, triangle.v0};
+        shortest_length = ca;
+      }
+      if (shortest.lo > shortest.hi)
+        std::swap(shortest.lo, shortest.hi);
+      edges.push_back(shortest);
+      maximum_length = std::max(maximum_length, shortest_length);
+    }
+  }
+  std::sort(edges.begin(), edges.end(),
+            [](const EdgeKey &left, const EdgeKey &right) {
+              return std::tie(left.lo, left.hi) <
+                     std::tie(right.lo, right.hi);
+            });
+  edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+  return edges;
 }
 
 [[nodiscard]] bool project_all_vertices_to_analytic_patches(
@@ -2723,6 +2977,13 @@ struct ProjectionCommitResult {
 #ifdef TITAN_TABI_SES_TEST_HOOKS
   metrics.debug_last_projection_state.clear();
 #endif
+  // Refused vertices are indices into the current compact vertex set, so a
+  // list left over from a coarser mesh must never survive into a failed
+  // attempt on a newer one.
+  metrics.refused_vertex_indices.clear();
+  metrics.refused_vertex_distances.clear();
+  metrics.refused_vertex_shape_flags.clear();
+  metrics.analytic_vertex_refused_distance_max = 0.0;
   if (mesh.vertices.empty() || mesh.triangles.empty())
     return false;
 
@@ -2809,8 +3070,39 @@ struct ProjectionCommitResult {
   }
 
   std::vector<std::uint8_t> affected(mesh.triangles.size(), 0U);
-  const ProjectionCommitResult commit = commit_projection_proposals(
-      mesh, incidence, proposals, proposal_valid, reference_normals, affected);
+  // The shape gate is a local rule serving a global number, so it can pay
+  // its cost and buy nothing: on a lone sphere it declines three vertices of
+  // 1428 and the worst edge ratio comes out at 23.0556 either way, because
+  // the face that sets the maximum is made by moves the gate allows.  Paying
+  // 0.04 A of position on a surface known in closed form, for no change in
+  // the number the gate exists to hold down, is not a trade worth making.
+  // So commit both ways and keep the gated mesh only when it is measurably
+  // better shaped; ties go to the mesh that sits on the surface.  The
+  // proposals are already computed and a commit is linear in the mesh, so
+  // this costs one extra pass over what the projection itself cost.
+  std::vector<Vertex> before_commit = mesh.vertices;
+  ProjectionCommitResult commit = commit_projection_proposals(
+      mesh, incidence, proposals, proposal_valid, reference_normals, affected,
+      kRefusedVertexToleranceCells * grid_spacing);
+  if (commit.shape_rejections != 0U) {
+    const double gated_ratio = mesh_max_edge_ratio(mesh);
+    std::vector<Vertex> gated_vertices = mesh.vertices;
+    mesh.vertices = before_commit;
+    std::vector<std::uint8_t> plain_affected(mesh.triangles.size(), 0U);
+    ProjectionCommitResult plain = commit_projection_proposals(
+        mesh, incidence, proposals, proposal_valid, reference_normals,
+        plain_affected);
+    if (!(mesh_max_edge_ratio(mesh) > gated_ratio)) {
+      for (std::size_t face = 0U; face < affected.size(); ++face)
+        affected[face] = static_cast<std::uint8_t>(
+            affected[face] | plain_affected[face]);
+      commit = std::move(plain);
+    } else {
+      mesh.vertices = std::move(gated_vertices);
+    }
+  }
+  before_commit.clear();
+  before_commit.shrink_to_fit();
 #ifdef TITAN_TABI_SES_TEST_HOOKS
   metrics.debug_last_projection_state = commit.final_state;
 #endif
@@ -2846,12 +3138,54 @@ struct ProjectionCommitResult {
                    reference_normals.capacity() * sizeof(Vec3) +
                    affected.capacity() * sizeof(std::uint8_t) +
                    commit.retained_bytes);
+  // Record which vertices stayed behind and how far each still had to go.
+  // The distance is measured against the mesh as it stands now: an accepted
+  // vertex already sits on its target, and a refused one was not moved, so
+  // this is exactly the outstanding correction.
+  metrics.refused_vertex_indices = commit.refused_vertices;
+  metrics.refused_vertex_shape_flags = commit.refused_for_shape;
+  metrics.refused_vertex_distances.clear();
+  metrics.refused_vertex_distances.reserve(commit.refused_vertices.size());
+  double refused_distance_max = 0.0;
+  for (const std::uint32_t vertex : commit.refused_vertices) {
+    const double distance =
+        vertex < proposals.size()
+            ? norm(Vec3{proposals[vertex].x, proposals[vertex].y,
+                        proposals[vertex].z} -
+                   mesh_vertex(mesh, vertex))
+            : std::numeric_limits<double>::infinity();
+    metrics.refused_vertex_distances.push_back(distance);
+    refused_distance_max = std::max(refused_distance_max, distance);
+  }
+  metrics.analytic_vertex_refused_distance_max = refused_distance_max;
+  // A refused vertex is not an uncertified one: its target was proved to be
+  // the closest point on a bounded analytic patch, and the only reason it
+  // stayed put is that one incident face would have reversed.  Leaving it
+  // costs the surface that one outstanding move, which is meaningful only
+  // against the spacing the rest of the mesh is drawn at.  Certify while the
+  // largest outstanding move is a quarter cell or less, and report the count
+  // and the distance either way rather than hiding them behind a bit.
+  metrics.analytic_vertex_refused_for_shape += commit.shape_rejections;
   metrics.analytic_vertex_certificate =
       metrics.analytic_vertex_projection_misses == 0U &&
-      commit.rejected_vertices == 0U &&
-      commit.accepted_vertices == mesh.vertices.size() &&
-      commit.all_faces_certified;
+      commit.accepted_vertices + commit.rejected_vertices ==
+          mesh.vertices.size() &&
+      commit.all_faces_certified &&
+      refused_distance_max <= kRefusedVertexToleranceCells * grid_spacing;
   return commit.accepted_vertices != 0U;
+}
+
+// Name the audit status after what actually failed.  One string used to cover
+// three unrelated outcomes, and on a molecular surface the one that fires is
+// almost never a projection that missed: every query is answered and
+// certified, and what fails is the commit of a handful of those answers.
+[[nodiscard]] std::string
+analytic_vertex_failure_status(const LocalPatchRepairMetrics &metrics) {
+  if (metrics.analytic_vertex_projection_misses != 0U)
+    return "vertex_projection_missed";
+  if (!metrics.refused_vertex_indices.empty())
+    return "vertex_commit_refused";
+  return "vertex_commit_uncertified";
 }
 
 void certify_all_face_orientations(
@@ -2865,6 +3199,7 @@ void certify_all_face_orientations(
   metrics.analytic_orientation_centroid_queries = 0U;
   metrics.analytic_orientation_uncertified_faces = 0U;
   metrics.analytic_inverted_faces = 0U;
+  metrics.analytic_sheet_bridge_faces = 0U;
   metrics.analytic_orientation_min_cosine = 1.0;
   metrics.analytic_normal_quality_status = "not_run";
   metrics.analytic_orientation_smooth_faces = 0U;
@@ -2984,6 +3319,12 @@ void certify_all_face_orientations(
     }
     if (!(cosine > kOrientationTolerance)) {
       ++metrics.analytic_inverted_faces;
+      // Two of this face's own certified vertex normals point against each
+      // other, so its corners are on facing sheets of the surface and the
+      // triangle spans the gap between them.  Refining or reconnecting the
+      // mesh cannot fix that: at this spacing one cell holds both sheets.
+      if (coherence < 0.0)
+        ++metrics.analytic_sheet_bridge_faces;
       continue;
     }
     ++metrics.analytic_orientation_certified_faces;
@@ -3036,7 +3377,10 @@ void certify_all_face_orientations(
         normal_quality_pass ? "pass" : "warning";
   }
   if (metrics.analytic_inverted_faces != 0U)
-    metrics.analytic_orientation_status = "inverted_face";
+    metrics.analytic_orientation_status =
+        metrics.analytic_sheet_bridge_faces == metrics.analytic_inverted_faces
+            ? "sheet_bridge_below_spacing"
+            : "inverted_face";
   else if (metrics.analytic_orientation_uncertified_faces != 0U)
     metrics.analytic_orientation_status = "orientation_uncertified";
   else if (collect_normal_quality &&
@@ -3139,6 +3483,54 @@ void emit_projection_failure_diagnostics(
               << ",hit_point=" << hit.point.x << ';' << hit.point.y << ';'
               << hit.point.z << ",hit_normal=" << hit.normal.x << ';'
               << hit.normal.y << ';' << hit.normal.z << '\n';
+    // Which incident face refuses the move: report each one-ring face's
+    // shape and the cosine between its normal before and after moving this
+    // vertex to the certified hit.  A negative cosine on a face whose
+    // smallest altitude is below the move distance is a sliver flip.
+    if (!certified_finite_projection_hit(hit) ||
+        vertex_index + 1U >= diagnostic_incidence.offsets.size())
+      continue;
+    const Vec3 target{hit.point.x, hit.point.y, hit.point.z};
+    for (std::size_t position = diagnostic_incidence.offsets[vertex_index];
+         position < diagnostic_incidence.offsets[vertex_index + 1U];
+         ++position) {
+      const std::size_t face = diagnostic_incidence.triangles[position];
+      if (face >= mesh.triangles.size())
+        continue;
+      const Triangle &triangle = mesh.triangles[face];
+      const Vec3 a = mesh_vertex(mesh, triangle.v0);
+      const Vec3 b = mesh_vertex(mesh, triangle.v1);
+      const Vec3 c = mesh_vertex(mesh, triangle.v2);
+      const auto moved = [&](std::size_t index, const Vec3 &p) {
+        return index == vertex_index ? target : p;
+      };
+      const Vec3 old_normal = cross(b - a, c - a);
+      const Vec3 a2 = moved(triangle.v0, a);
+      const Vec3 b2 = moved(triangle.v1, b);
+      const Vec3 c2 = moved(triangle.v2, c);
+      const Vec3 new_normal = cross(b2 - a2, c2 - a2);
+      const double ab = norm(b - a);
+      const double bc = norm(c - b);
+      const double ca = norm(a - c);
+      const double longest = std::max({ab, bc, ca});
+      const double shortest = std::min({ab, bc, ca});
+      const double area = 0.5 * norm(old_normal);
+      const double old_length = norm(old_normal);
+      const double new_length = norm(new_normal);
+      std::cerr << "ses_projection_diag,unresolved_incident_face,vertex="
+                << vertex_index << ",face=" << face << ",area=" << area
+                << ",min_altitude=" << (longest > 0.0 ? 2.0 * area / longest : 0.0)
+                << ",quality=" << normalized_triangle_quality(a, b, c)
+                << ",edge_ratio="
+                << (shortest > 1.0e-14
+                        ? longest / shortest
+                        : std::numeric_limits<double>::infinity())
+                << ",cos_old_new="
+                << (old_length > 0.0 && new_length > 0.0
+                        ? dot(old_normal, new_normal) / (old_length * new_length)
+                        : std::numeric_limits<double>::quiet_NaN())
+                << ",new_area=" << 0.5 * new_length << '\n';
+    }
   }
 
   constexpr double kOrientationTolerance = 1.0e-8;
@@ -3762,18 +4154,26 @@ struct LineTriangleInterval {
       64.0 * std::numeric_limits<double>::epsilon() * normal_a_length *
           normal_b_length)
     return coplanar_shared_vertex_intersects_beyond(a, b, normal_a,
-                                                     tolerance);
+                                                     tolerance) &&
+           !detail::certified_shared_vertex_separation(common, a[1], a[2],
+                                                      b[1], b[2]);
 
   const Vec3 direction = (1.0 / normal_cross_length) * normal_cross;
   const LineTriangleInterval interval_a = line_triangle_interval_at_vertex(
       common, a[1], a[2], direction);
   const LineTriangleInterval interval_b = line_triangle_interval_at_vertex(
       common, b[1], b[2], direction);
+  // An ill-conditioned line reconstruction (invalid interval) used to count
+  // as an intersection. A certified separation now overrules it, and the
+  // tolerance test below; a certificate never adds an intersection.
   if (!interval_a.valid || !interval_b.valid)
-    return true;
+    return !detail::certified_shared_vertex_separation(common, a[1], a[2],
+                                                       b[1], b[2]);
   const double lower = std::max(interval_a.lower, interval_b.lower);
   const double upper = std::min(interval_a.upper, interval_b.upper);
-  return lower <= upper && (lower < -tolerance || upper > tolerance);
+  return lower <= upper && (lower < -tolerance || upper > tolerance) &&
+         !detail::certified_shared_vertex_separation(common, a[1], a[2],
+                                                    b[1], b[2]);
 }
 
 struct SelfIntersectionAudit {
@@ -3782,9 +4182,19 @@ struct SelfIntersectionAudit {
   std::size_t second{std::numeric_limits<std::size_t>::max()};
 };
 
+// `pairs`, when given, receives every intersecting (lower, higher) triangle
+// index pair in ascending order.  The count and first pair are unchanged.
+// active (optional, one flag per triangle): only pairs with at least one
+// active triangle are tested.  When every intersecting pair has one (the
+// remesh passes: the mesh before a pass is intersection-free and only the
+// active triangles changed), the result is the full audit's.
 [[nodiscard]] SelfIntersectionAudit detect_self_intersections(
     const SurfaceMesh &mesh, double grid_spacing,
-    std::size_t &scratch_bytes, TitanExecutor *executor = nullptr) {
+    std::size_t &scratch_bytes, TitanExecutor *executor = nullptr,
+    std::vector<std::array<std::uint32_t, 2>> *pairs = nullptr,
+    const std::vector<std::uint8_t> *active = nullptr) {
+  if (pairs != nullptr)
+    pairs->clear();
   if (mesh.triangles.size() < 2U)
     return {};
   SelfIntersectionAudit result;
@@ -3793,13 +4203,26 @@ struct SelfIntersectionAudit {
               std::numeric_limits<double>::infinity()};
   std::vector<TriangleBounds> bounds;
   bounds.reserve(mesh.triangles.size());
+  double extent_sum = 0.0;
   for (const Triangle &triangle : mesh.triangles) {
     bounds.push_back(triangle_bounds(mesh, triangle));
-    origin.x = std::min(origin.x, bounds.back().lower.x);
-    origin.y = std::min(origin.y, bounds.back().lower.y);
-    origin.z = std::min(origin.z, bounds.back().lower.z);
+    const TriangleBounds &box = bounds.back();
+    origin.x = std::min(origin.x, box.lower.x);
+    origin.y = std::min(origin.y, box.lower.y);
+    origin.z = std::min(origin.z, box.lower.z);
+    extent_sum += std::max({box.upper.x - box.lower.x, box.upper.y - box.lower.y,
+                            box.upper.z - box.lower.z});
   }
-  const double cell_size = std::max(1.0e-6, 2.0 * grid_spacing);
+  // Two boxes that overlap share a cell whatever the cell size, so the size
+  // changes only the cost.  Two grid spacings suit a mesh whose edges are
+  // about one spacing; a remesh graded towards charges has much smaller
+  // triangles, which then crowd each cell, so the size follows the mean
+  // triangle extent, within a quarter of the old size and the old size.
+  const double mean_extent =
+      extent_sum / static_cast<double>(mesh.triangles.size());
+  const double cell_size =
+      std::max(1.0e-6, std::clamp(2.0 * mean_extent, 0.5 * grid_spacing,
+                                  2.0 * grid_spacing));
   const double tolerance = std::max(
       1.0e-12 * std::max(1.0, grid_spacing),
       64.0 * std::numeric_limits<double>::epsilon() *
@@ -3824,6 +4247,8 @@ struct SelfIntersectionAudit {
                            cell_coordinate(box.upper.y, origin.y),
                            cell_coordinate(box.upper.z, origin.z)};
     cell_ranges.push_back({first, last});
+    if (active != nullptr && !(*active)[index])
+      continue;
     for (std::int64_t z = first.z; z <= last.z; ++z) {
       for (std::int64_t y = first.y; y <= last.y; ++y) {
         for (std::int64_t x = first.x; x <= last.x; ++x)
@@ -3835,6 +4260,7 @@ struct SelfIntersectionAudit {
     SelfIntersectionAudit audit;
     std::vector<std::uint32_t> candidates;
     std::vector<std::uint64_t> candidate_bits;
+    std::vector<std::array<std::uint32_t, 2>> pairs;
   };
   const std::size_t candidate_bit_words =
       mesh.triangles.size() / 64U +
@@ -3862,7 +4288,6 @@ struct SelfIntersectionAudit {
                                  std::size_t begin, std::size_t end) {
     IntersectionWorker &worker = per_worker[worker_index];
     for (std::size_t index = begin; index < end; ++index) {
-      const TriangleBounds &box = bounds[index];
       const WeldCellKey &first = cell_ranges[index][0];
       const WeldCellKey &last = cell_ranges[index][1];
       worker.candidates.clear();
@@ -3873,7 +4298,9 @@ struct SelfIntersectionAudit {
             if (found == read_cells.end())
               continue;
             for (const std::uint32_t other : found->second) {
-              if (other >= index)
+              if (active == nullptr ? other >= index
+                                    : (other == index ||
+                                       ((*active)[index] && other > index)))
                 continue;
               const std::size_t word = static_cast<std::size_t>(other) / 64U;
               const std::uint64_t bit =
@@ -3891,21 +4318,26 @@ struct SelfIntersectionAudit {
         const std::uint64_t bit =
             std::uint64_t{1} << (static_cast<unsigned>(other) & 63U);
         worker.candidate_bits[word] &= ~bit;
-        if (!bounds_overlap(box, bounds[other], tolerance))
+        // The pair as the full scan takes it: hi the larger index.
+        const std::size_t hi = std::max(index, static_cast<std::size_t>(other));
+        const std::size_t lo = std::min(index, static_cast<std::size_t>(other));
+        if (!bounds_overlap(bounds[hi], bounds[lo], tolerance))
           continue;
         const SharedTriangleSimplex shared = shared_triangle_simplex(
-            mesh.triangles[index], mesh.triangles[other]);
+            mesh.triangles[hi], mesh.triangles[lo]);
         if (!shared_simplex_intersects_beyond(
-                mesh, mesh.triangles[index], mesh.triangles[other], shared,
+                mesh, mesh.triangles[hi], mesh.triangles[lo], shared,
                 tolerance))
           continue;
-        if (worker.audit.count == 0U || index < worker.audit.second ||
-            (index == worker.audit.second &&
-             static_cast<std::size_t>(other) < worker.audit.first)) {
-          worker.audit.first = static_cast<std::size_t>(other);
-          worker.audit.second = index;
+        if (worker.audit.count == 0U || hi < worker.audit.second ||
+            (hi == worker.audit.second && lo < worker.audit.first)) {
+          worker.audit.first = lo;
+          worker.audit.second = hi;
         }
         ++worker.audit.count;
+        if (pairs != nullptr)
+          worker.pairs.push_back({static_cast<std::uint32_t>(lo),
+                                  static_cast<std::uint32_t>(hi)});
       }
     }
   };
@@ -3929,7 +4361,11 @@ struct SelfIntersectionAudit {
     worker_scratch_bytes +=
         worker.candidates.capacity() * sizeof(std::uint32_t) +
         worker.candidate_bits.capacity() * sizeof(std::uint64_t);
+    if (pairs != nullptr)
+      pairs->insert(pairs->end(), worker.pairs.begin(), worker.pairs.end());
   }
+  if (pairs != nullptr)
+    std::sort(pairs->begin(), pairs->end());
   std::size_t nested_cell_capacity = 0U;
   for (const auto &entry : cells)
     nested_cell_capacity += entry.second.capacity();
@@ -4821,6 +5257,21 @@ void repair_patch_ray_surface_local(
   metrics.poor_triangles_before = shape_before.poor_triangles;
   metrics.triangle_quality_min_before = shape_before.minimum_quality;
   metrics.max_edge_ratio_before = shape_before.maximum_edge_ratio;
+  // Per-stage mesh shape, so the stage that spends it can be named rather
+  // than guessed.  Diagnostic only; production compiles none of this.
+  const auto stage_shape = [&](const char *stage) {
+#ifdef TITAN_TABI_SES_TEST_HOOKS
+    const MeshShapeAudit now = measure_mesh_shape(mesh);
+    std::cerr << "ses_stage_shape,stage=" << stage
+              << ",panels=" << mesh.triangles.size()
+              << ",max_edge_ratio=" << now.maximum_edge_ratio
+              << ",min_quality=" << now.minimum_quality
+              << ",poor=" << now.poor_triangles << std::endl;
+#else
+    (void)stage;
+#endif
+  };
+  stage_shape("marching");
   double repair_ms = 0.0;
   bool topology_certified = false;
   const auto collapse_rounds = [&](int maximum_rounds,
@@ -4865,6 +5316,7 @@ void repair_patch_ray_surface_local(
   const double initial_collapse_begin = repair_ms;
   collapse_rounds(8, 1.0e-2);
   metrics.initial_collapse_ms = repair_ms - initial_collapse_begin;
+  stage_shape("initial_collapse");
 
   const auto flip_rounds = [&](int maximum_rounds) {
     std::vector<CompactEdgeFlipUndo> undo;
@@ -4904,6 +5356,7 @@ void repair_patch_ray_surface_local(
                                  projection_begin)
                                  .count();
   metrics.projection_ms = metrics.stable_sliver_ms;
+  stage_shape("stable_sliver_smooth");
 
   // Projection can create a new, strictly local short edge.  One cleanup
   // round is enough because projected vertices are Jacobi-updated from a
@@ -4912,6 +5365,7 @@ void repair_patch_ray_surface_local(
   collapse_rounds(4, 1.0e-2);
   metrics.post_projection_collapse_ms =
       repair_ms - post_projection_collapse_begin;
+  stage_shape("post_projection_collapse");
   const auto refinement_begin = std::chrono::steady_clock::now();
   const auto local_sliver_begin = std::chrono::steady_clock::now();
   smooth_analytic_slivers_local(mesh, patches, projection, grid_spacing,
@@ -4920,6 +5374,7 @@ void repair_patch_ray_surface_local(
                                 std::chrono::steady_clock::now() -
                                 local_sliver_begin)
                                 .count();
+  stage_shape("local_sliver_smooth");
   const auto timed_project_all = [&]() {
     const auto project_begin = std::chrono::steady_clock::now();
     const bool accepted = project_all_vertices_to_analytic_patches(
@@ -4931,6 +5386,7 @@ void repair_patch_ray_surface_local(
     return accepted;
   };
   bool projected = timed_project_all();
+  stage_shape("full_projection");
   if (projected) {
     const auto weld_begin = std::chrono::steady_clock::now();
     SurfaceMesh welded_candidate;
@@ -4955,6 +5411,106 @@ void repair_patch_ray_surface_local(
                                .count();
     repair_ms += metrics.seam_weld_ms;
   }
+  // One refused vertex fails the certificate for the whole surface, and on a
+  // molecular mesh the obstruction is a micro-sliver in that vertex's one
+  // ring rather than anything wrong with its projection.  Collapse exactly
+  // those slivers and reproject, before the global short-edge cleanup below,
+  // which rewrites parts of the surface that were never in question.
+  // Repair whenever a refusal is large enough to matter rather than only when
+  // the certificate fails, so the tolerance above stays a backstop for what
+  // cannot be repaired instead of the mechanism that grants the certificate.
+  constexpr double kRefusedSliverRepairCells = 0.05;
+  const auto refused_sliver_begin = std::chrono::steady_clock::now();
+  for (int round = 0; round < 4 && projected &&
+                      !metrics.refused_vertex_indices.empty() &&
+                      metrics.analytic_vertex_refused_distance_max >
+                          kRefusedSliverRepairCells * grid_spacing;
+       ++round) {
+    const CompactVertexIncidence incidence =
+        build_compact_vertex_incidence(mesh);
+    if (incidence.offsets.size() != mesh.vertices.size() + 1U)
+      break;
+    double maximum_length = 0.0;
+    const std::vector<EdgeKey> sliver_edges =
+        collect_refused_vertex_sliver_edges(
+            mesh, incidence, metrics.refused_vertex_indices,
+            metrics.refused_vertex_distances,
+            metrics.refused_vertex_shape_flags, maximum_length);
+    if (sliver_edges.empty() || !(maximum_length > 0.0))
+      break;
+    const auto stage_begin = std::chrono::steady_clock::now();
+    SurfaceMesh candidate;
+    const std::size_t collapsed = collapse_selected_manifold_edges_compact(
+        mesh, candidate,
+        std::nextafter(maximum_length,
+                       std::numeric_limits<double>::infinity()),
+        sliver_edges, metrics.scratch_bytes);
+    bool accepted = false;
+    if (collapsed > 0U) {
+      // This repair may run on a surface that already holds a certificate, so
+      // it audits the candidate outright instead of inheriting the standing
+      // topology certificate the way the generic collapse rounds do.
+      orient_mesh_consistently(candidate);
+      ++metrics.topology_fallback_audits;
+      if (build_closed_surface_trace_spaces(candidate).quality.valid) {
+        // Keep the mesh that goes in, so a collapse that reprojects into a
+        // worse state can be put back exactly.  The retained metrics belong
+        // to that mesh and stay valid with it, so the rollback needs no
+        // second projection.
+        SurfaceMesh previous;
+        previous.vertices = mesh.vertices;
+        previous.triangles = mesh.triangles;
+        previous.panels = mesh.panels;
+        const bool previous_certificate = metrics.analytic_vertex_certificate;
+        const std::size_t previous_refused =
+            metrics.refused_vertex_indices.size();
+        const double previous_distance =
+            metrics.analytic_vertex_refused_distance_max;
+        const std::vector<std::uint32_t> previous_indices =
+            metrics.refused_vertex_indices;
+        const std::vector<double> previous_distances =
+            metrics.refused_vertex_distances;
+        const std::vector<std::uint8_t> previous_shape_flags =
+            metrics.refused_vertex_shape_flags;
+        mesh.vertices = std::move(candidate.vertices);
+        mesh.triangles = std::move(candidate.triangles);
+        mesh.panels = std::move(candidate.panels);
+        assign_all_analytic_triangle_owners(mesh);
+        topology_certified = true;
+        const bool reprojected = timed_project_all();
+        const bool regressed =
+            !reprojected ||
+            (previous_certificate && !metrics.analytic_vertex_certificate) ||
+            metrics.refused_vertex_indices.size() > previous_refused ||
+            metrics.analytic_vertex_refused_distance_max > previous_distance;
+        if (regressed) {
+          mesh.vertices = std::move(previous.vertices);
+          mesh.triangles = std::move(previous.triangles);
+          mesh.panels = std::move(previous.panels);
+          assign_all_analytic_triangle_owners(mesh);
+          metrics.analytic_vertex_certificate = previous_certificate;
+          metrics.refused_vertex_indices = previous_indices;
+          metrics.refused_vertex_distances = previous_distances;
+          metrics.refused_vertex_shape_flags = previous_shape_flags;
+          metrics.analytic_vertex_refused_distance_max = previous_distance;
+        } else {
+          metrics.collapsed_edges += collapsed;
+          metrics.refused_sliver_collapses += collapsed;
+          accepted = true;
+        }
+      }
+    }
+    repair_ms += std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - stage_begin)
+                     .count();
+    if (!accepted)
+      break;
+  }
+  metrics.refused_sliver_repair_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - refused_sliver_begin)
+          .count();
+  stage_shape("refused_sliver_repair");
   const auto certificate_cleanup_begin = std::chrono::steady_clock::now();
   for (int cleanup = 0;
        cleanup < 4 && projected && !metrics.analytic_vertex_certificate;
@@ -4970,6 +5526,7 @@ void repair_patch_ray_surface_local(
       std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - certificate_cleanup_begin)
           .count();
+  stage_shape("certificate_cleanup");
   const auto orientation_repair_begin = std::chrono::steady_clock::now();
   bool orientation_topology_changed = false;
   for (int cleanup = 0; cleanup < 20 && projected; ++cleanup) {
@@ -5039,6 +5596,7 @@ void repair_patch_ray_surface_local(
       std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - orientation_repair_begin)
           .count();
+  stage_shape("orientation_repair");
   if (projected && orientation_topology_changed) {
     // A topology transaction may remove the vertices whose safe projection
     // was rejected.  The collapse itself must not manufacture a certificate:
@@ -5292,6 +5850,7 @@ void repair_patch_ray_surface_local(
                                std::chrono::steady_clock::now() -
                                wide_repair_begin)
                                .count();
+  stage_shape("wide_repair");
   metrics.projection_ms += std::chrono::duration<double, std::milli>(
                                std::chrono::steady_clock::now() -
                                refinement_begin)
@@ -5330,7 +5889,7 @@ void repair_patch_ray_surface_local(
           std::chrono::steady_clock::now() - sampled_audit_begin)
           .count();
   if (!metrics.analytic_vertex_certificate)
-    metrics.analytic_audit_status = "vertex_projection_failed";
+    metrics.analytic_audit_status = analytic_vertex_failure_status(metrics);
   metrics.projection_ms += std::chrono::duration<double, std::milli>(
                                std::chrono::steady_clock::now() - audit_begin)
                                .count();
@@ -5683,8 +6242,11 @@ void polygonize_grid(SurfaceMesh &mesh, const AtomGrid &ownership_atom_grid,
             points[k] = cube_points[vertex];
             tetra_values[k] = cube_values[vertex];
           }
+          // Zero keeps this engine's geometry exactly as the runs already
+          // published with it produced; see
+          // docs/TITAN_SES_ENGINE_FIX_2026-09-15.md.
           polygonize_tetrahedron(mesh, vertex_lookup, ownership_atom_grid,
-                                 atoms, points, tetra_values);
+                                 atoms, points, tetra_values, 0.0);
         }
       }
     }
@@ -6010,6 +6572,27 @@ static_assert(sizeof(ActivePatchRayCell) <= 8U);
   return result;
 }
 
+// Fraction of a marching edge that every crossing is held away from both of
+// its endpoints, for the patch-ray engine only.  0.10 is the largest value
+// that improves every fixture on every measure at once: worst aspect ratio
+// 1.3x to 3.5x lower, poor triangles 10x to 16x fewer, normal fit better on
+// all of them, 1 percent more panels and 0.06 percent more area.  Larger
+// values improve shape further but approach a cliff where one fixture loses
+// 40 percent of its panels, which is resolution the caller did not ask to
+// give up.  The measurement is in docs/TITAN_SES_EDGE_MARGIN_2026-09-15.md;
+// test builds may override the value to repeat it.
+[[nodiscard]] double patch_ray_edge_margin() noexcept {
+  constexpr double kPatchRayEdgeMargin = 0.10;
+#ifdef TITAN_TABI_SES_TEST_HOOKS
+  if (const char *override_value = std::getenv("TITAN_TABI_SES_SNAP")) {
+    const double parsed = std::atof(override_value);
+    if (std::isfinite(parsed) && parsed >= 0.0 && parsed < 0.5)
+      return parsed;
+  }
+#endif
+  return kPatchRayEdgeMargin;
+}
+
 [[nodiscard]] std::pair<std::size_t, std::size_t> polygonize_patch_ray_grid(
     SurfaceMesh &mesh, const AtomGrid &ownership_atom_grid,
     std::span<const Atom> atoms, const Vec3 &lower, double grid_spacing,
@@ -6033,6 +6616,7 @@ static_assert(sizeof(ActivePatchRayCell) <= 8U);
       std::array<std::size_t, 3>{0, 1, 1}};
   std::unordered_map<VertexKey, std::size_t, VertexKeyHash> vertex_lookup;
   vertex_lookup.reserve(active.size() * 2U);
+  const double edge_margin = patch_ray_edge_margin();
   const std::size_t cell_nx = nx - 1U;
   const std::size_t cell_ny = ny - 1U;
   for (const ActivePatchRayCell &cell : active) {
@@ -6066,19 +6650,1474 @@ static_assert(sizeof(ActivePatchRayCell) <= 8U);
         tetra_values[k] = cube_values[vertex];
       }
       polygonize_tetrahedron(mesh, vertex_lookup, ownership_atom_grid, atoms,
-                             points, tetra_values);
+                             points, tetra_values, edge_margin);
     }
   }
   return {active.size(), active.size_bytes()};
 }
 
+struct ResolutionProjectionMetrics {
+  std::size_t projected{0};
+  std::size_t missing{0};
+  std::size_t star_refused{0};
+  std::size_t sheet_refused{0};
+  std::size_t partial{0};
+  std::size_t reverted{0};
+  std::size_t rounds{0};
+  std::size_t initial_intersections{0};
+  std::size_t final_intersections{0};
+  double unprojected_distance_max{0.0};
+  double projected_distance_rms{0.0};
+  double ms{0.0};
+};
+
+// Resolution policy for the patch-ray engine.  Marching tetrahedra on the
+// certified ray-parity signs gives a closed, consistently oriented mesh whose
+// triangles each lie inside their own tetrahedron, so it cannot intersect
+// itself.  Features thinner than the grid cell (two sheets closer than h, a
+// neck, a sliver patch) are resolved only to that cell: this is the accepted
+// topology.  Each vertex then moves onto its closest analytic patch point
+// unless the move would turn an incident triangle against its marching
+// orientation or nearly degenerate it, or the point is on another sheet than
+// the vertex's own (kResolutionSheetCosine).  Any triangle pair that still
+// intersects sends all six of its vertices back to their marching positions;
+// since the pure marching mesh is intersection-free, the loop ends with a
+// valid surface.  Connectivity is never changed.
+//
+// Where a plate or gap is thinner than about one cell, the closest patch
+// point of a vertex on its rim can be on the facing sheet. Every incident
+// triangle may still pass the orientation test, since rim triangles stand
+// sideways already, but the vertex then sits on that sheet with a star facing
+// the other way, next to the sheet's own vertices. On the 13,541-atom complex
+// at h = 1 A the remeshed surface had 25 vertices whose area-weighted star
+// normal was more than 78 degrees from their surface normal (20 more than
+// 90), and non-adjacent vertex pairs 0.09 A apart, 0.02 A from each other's
+// dual cell, where no quadrature of the BIE operator converges. So a point
+// whose surface normal is more than acos(kResolutionSheetCosine) from the
+// vertex's marching star normal is treated as not found, and a vertex moved
+// onto the surface whose final star turns that far from it goes back. The
+// complex then has 3 such vertices and no non-adjacent pair closer than
+// 0.35 of the local edge.
+constexpr double kResolutionSheetCosine = 0.2;
+[[nodiscard]] bool resolution_sheet_agrees(
+    const Vec3 &star_normal, const analytic_ses::LocalProjectionHit &hit) {
+  const Vec3 normal{hit.normal.x, hit.normal.y, hit.normal.z};
+  if (!hit.normal_certified || !finite_vec3(normal) || !(norm(normal) > 1e-12) ||
+      !(norm(star_normal) > 0.0))
+    return true;
+  return dot(normalized(star_normal), normalized(normal)) >=
+         kResolutionSheetCosine;
+}
+// A node-patch cell is collocated at its mesh vertex, and the smooth-surface
+// jump coefficient one half assumes the normal there is the surface normal.
+// A vertex the engine left on the analytic SES has that normal exactly, so
+// the final position is queried once more and the certified normal stored.
+// Projection and remeshing assign normals along the way, but a vertex that
+// remeshing never revisited keeps a star normal, so the flag is set here from
+// the final geometry rather than carried through every operation.  Vertices
+// off the surface (marching or part-way positions) keep their star normal,
+// and a certified normal whose final star faces another sheet is refused, as
+// in the projection itself.
+void mark_analytic_vertex_normals(
+    SurfaceMesh &mesh, const analytic_ses::PatchComplex &patches,
+    const analytic_ses::LocalPatchProjectionIndex &projection,
+    double grid_spacing, TitanExecutor *executor, std::size_t &analytic,
+    std::size_t &refused) {
+  const std::size_t vertex_count = mesh.vertices.size();
+  std::vector<Vec3> star(vertex_count);
+  for (const Triangle &t : mesh.triangles)
+    for (const std::size_t w : {t.v0, t.v1, t.v2})
+      star[w] = star[w] + t.area * Vec3{t.nx, t.ny, t.nz};
+  // A projected vertex sits exactly on its closest point; part-way and
+  // marching vertices are a sizeable fraction of an edge away.
+  constexpr double kOnSurfaceA = 1.0e-6;
+  std::vector<std::uint8_t> state(vertex_count, 0U); // 1 analytic, 2 refused
+  const auto mark = [&](std::size_t, std::size_t begin, std::size_t end) {
+    for (std::size_t i = begin; i < end; ++i) {
+      Vertex &v = mesh.vertices[i];
+      v.normal_analytic = false;
+      const analytic_ses::LocalProjectionHit hit = nearest_local_patch(
+          patches, projection, v.atom_index, Vec3{v.x, v.y, v.z},
+          grid_spacing);
+      if (!certified_finite_projection_hit(hit) ||
+          !(hit.distance <= kOnSurfaceA))
+        continue;
+      if (!resolution_sheet_agrees(star[i], hit)) {
+        state[i] = 2U;
+        continue;
+      }
+      const Vec3 unit =
+          normalized(Vec3{hit.normal.x, hit.normal.y, hit.normal.z});
+      v.nx = unit.x;
+      v.ny = unit.y;
+      v.nz = unit.z;
+      v.normal_analytic = true;
+      state[i] = 1U;
+    }
+  };
+  if (executor != nullptr && executor->capacity() > 1U)
+    executor->parallel_for(vertex_count, executor->capacity(), 256U, mark);
+  else
+    mark(0U, 0U, vertex_count);
+  analytic = static_cast<std::size_t>(
+      std::count(state.begin(), state.end(), std::uint8_t{1}));
+  refused = static_cast<std::size_t>(
+      std::count(state.begin(), state.end(), std::uint8_t{2}));
+}
+void resolution_project_patch_ray_surface(
+    SurfaceMesh &mesh, const analytic_ses::PatchComplex &patches,
+    const analytic_ses::LocalPatchProjectionIndex &projection,
+    double grid_spacing, TitanExecutor *executor,
+    ResolutionProjectionMetrics &metrics) {
+  const auto begin = std::chrono::steady_clock::now();
+  const std::size_t vertex_count = mesh.vertices.size();
+  const std::size_t triangle_count = mesh.triangles.size();
+  if (vertex_count == 0U || triangle_count == 0U)
+    return;
+  std::vector<std::size_t> offsets(vertex_count + 1U, 0U);
+  for (const Triangle &triangle : mesh.triangles) {
+    ++offsets[triangle.v0 + 1U];
+    ++offsets[triangle.v1 + 1U];
+    ++offsets[triangle.v2 + 1U];
+  }
+  for (std::size_t vertex = 0; vertex < vertex_count; ++vertex)
+    offsets[vertex + 1U] += offsets[vertex];
+  std::vector<std::size_t> incident(offsets.back());
+  {
+    std::vector<std::size_t> cursor(offsets.begin(), offsets.end() - 1);
+    for (std::size_t index = 0; index < triangle_count; ++index) {
+      const Triangle &triangle = mesh.triangles[index];
+      incident[cursor[triangle.v0]++] = index;
+      incident[cursor[triangle.v1]++] = index;
+      incident[cursor[triangle.v2]++] = index;
+    }
+  }
+  std::vector<Vec3> marching(vertex_count);
+  for (std::size_t vertex = 0; vertex < vertex_count; ++vertex)
+    marching[vertex] = mesh_vertex(mesh, vertex);
+  std::vector<Vec3> reference(triangle_count);
+  for (std::size_t index = 0; index < triangle_count; ++index) {
+    const Triangle &triangle = mesh.triangles[index];
+    reference[index] = normalized(
+        cross(marching[triangle.v1] - marching[triangle.v0],
+              marching[triangle.v2] - marching[triangle.v0]));
+  }
+
+  // A marching vertex lies on a grid edge whose endpoints straddle the
+  // surface, so its closest surface point is within one edge length.
+  const double search = 2.0 * grid_spacing;
+  std::vector<analytic_ses::LocalProjectionHit> hits(vertex_count);
+  const auto project_range = [&](std::size_t, std::size_t first,
+                                 std::size_t last) {
+    for (std::size_t vertex = first; vertex < last; ++vertex) {
+      const Vertex &v = mesh.vertices[vertex];
+      hits[vertex] = nearest_local_patch(patches, projection, v.atom_index,
+                                         marching[vertex], search);
+    }
+  };
+  if (executor != nullptr && executor->capacity() > 1U && vertex_count > 1U)
+    executor->parallel_for(vertex_count, executor->capacity(), 256U,
+                           project_range);
+  else
+    project_range(0U, 0U, vertex_count);
+
+  // Sequential acceptance keeps the result independent of thread count.
+  const double minimum_twice_area = 1.0e-3 * grid_spacing * grid_spacing;
+  constexpr double kMinimumOrientationCosine = 0.2;
+  std::vector<std::uint8_t> moved(vertex_count, 0U);
+  const auto star_accepts = [&](std::size_t vertex, const Vec3 &candidate) {
+    for (std::size_t slot = offsets[vertex]; slot < offsets[vertex + 1U];
+         ++slot) {
+      const std::size_t index = incident[slot];
+      const Triangle &triangle = mesh.triangles[index];
+      const auto position = [&](std::size_t corner) {
+        return corner == vertex ? candidate : mesh_vertex(mesh, corner);
+      };
+      const Vec3 a = position(triangle.v0);
+      const Vec3 normal_vector =
+          cross(position(triangle.v1) - a, position(triangle.v2) - a);
+      const double twice_area = norm(normal_vector);
+      if (!(twice_area > minimum_twice_area) ||
+          dot(normal_vector, reference[index]) <=
+              kMinimumOrientationCosine * twice_area)
+        return false;
+    }
+    return true;
+  };
+  double squared_sum = 0.0;
+  for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
+    const analytic_ses::LocalProjectionHit &hit = hits[vertex];
+    const Vec3 target{hit.point.x, hit.point.y, hit.point.z};
+    if (!hit.found || !std::isfinite(hit.distance) || !finite_vec3(target) ||
+        hit.distance > search) {
+      ++metrics.missing;
+      continue;
+    }
+    // The point must be on the vertex's own sheet as its marching star sees
+    // it; otherwise the vertex does not move towards it at all.
+    Vec3 marching_star{};
+    for (std::size_t slot = offsets[vertex]; slot < offsets[vertex + 1U];
+         ++slot) {
+      const Triangle &triangle = mesh.triangles[incident[slot]];
+      marching_star =
+          marching_star + cross(marching[triangle.v1] - marching[triangle.v0],
+                                marching[triangle.v2] - marching[triangle.v0]);
+    }
+    if (!resolution_sheet_agrees(marching_star, hit)) {
+      ++metrics.sheet_refused;
+      continue;
+    }
+    // A refused full move is retried half and a quarter of the way, so a
+    // vertex in a tight spot still gets closer to the surface instead of
+    // staying a full marching offset away.
+    double fraction = 0.0;
+    for (const double t : {1.0, 0.5, 0.25}) {
+      if (star_accepts(vertex, marching[vertex] + t * (target - marching[vertex]))) {
+        fraction = t;
+        break;
+      }
+    }
+    if (fraction == 0.0) {
+      ++metrics.star_refused;
+      continue;
+    }
+    const Vec3 accepted = marching[vertex] + fraction * (target - marching[vertex]);
+    Vertex &v = mesh.vertices[vertex];
+    v.x = accepted.x;
+    v.y = accepted.y;
+    v.z = accepted.z;
+    // 1 = on the surface, 2 = half way, 4 = a quarter of the way.
+    moved[vertex] = fraction == 1.0 ? 1U : (fraction == 0.5 ? 2U : 4U);
+    if (fraction < 1.0)
+      ++metrics.partial;
+    ++metrics.projected;
+    squared_sum += hit.distance * hit.distance;
+  }
+  // With every vertex in place, the star of a vertex moved onto the surface
+  // must still face the sheet of its point: its neighbours have moved too.
+  // One that does not goes back to its marching position; that changes its
+  // neighbours' stars, so the sweep repeats until nothing changes. A vertex
+  // moved part of the way is not on the sheet and keeps its star normal, so
+  // it is left alone.
+  for (int round = 0; round < 8; ++round) {
+    bool changed = false;
+    for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
+      if (moved[vertex] != 1U)
+        continue;
+      Vec3 star{};
+      for (std::size_t slot = offsets[vertex]; slot < offsets[vertex + 1U];
+           ++slot) {
+        const Triangle &triangle = mesh.triangles[incident[slot]];
+        const Vec3 a = mesh_vertex(mesh, triangle.v0);
+        star = star + cross(mesh_vertex(mesh, triangle.v1) - a,
+                            mesh_vertex(mesh, triangle.v2) - a);
+      }
+      if (resolution_sheet_agrees(star, hits[vertex]))
+        continue;
+      Vertex &v = mesh.vertices[vertex];
+      v.x = marching[vertex].x;
+      v.y = marching[vertex].y;
+      v.z = marching[vertex].z;
+      moved[vertex] = 0U;
+      ++metrics.sheet_refused;
+      changed = true;
+    }
+    if (!changed)
+      break;
+  }
+
+  std::vector<std::array<std::uint32_t, 2>> pairs;
+  std::size_t scratch_bytes = 0U;
+  constexpr std::size_t kMaximumRounds = 64U;
+  for (std::size_t round = 0; round <= kMaximumRounds; ++round) {
+    const SelfIntersectionAudit audit = detect_self_intersections(
+        mesh, grid_spacing, scratch_bytes, executor, &pairs);
+    if (round == 0U)
+      metrics.initial_intersections = audit.count;
+    metrics.final_intersections = audit.count;
+    if (audit.count == 0U || round == kMaximumRounds)
+      break;
+    ++metrics.rounds;
+    std::size_t reverted_this_round = 0U;
+    for (const auto &pair : pairs) {
+      for (const std::uint32_t index : pair) {
+        const Triangle &triangle = mesh.triangles[index];
+        for (const std::size_t vertex : {triangle.v0, triangle.v1, triangle.v2}) {
+          if (moved[vertex] == 0U)
+            continue;
+          Vertex &v = mesh.vertices[vertex];
+          v.x = marching[vertex].x;
+          v.y = marching[vertex].y;
+          v.z = marching[vertex].z;
+          moved[vertex] = 0U;
+          ++reverted_this_round;
+        }
+      }
+    }
+    metrics.reverted += reverted_this_round;
+    if (reverted_this_round == 0U)
+      break;
+  }
+
+  for (std::size_t index = 0; index < triangle_count; ++index)
+    update_triangle_geometry(mesh, index);
+  squared_sum = 0.0;
+  std::size_t projected = 0U;
+  for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
+    Vertex &v = mesh.vertices[vertex];
+    const analytic_ses::LocalProjectionHit &hit = hits[vertex];
+    if (moved[vertex] == 1U) {
+      ++projected;
+      squared_sum += hit.distance * hit.distance;
+      const Vec3 normal{hit.normal.x, hit.normal.y, hit.normal.z};
+      if (hit.normal_certified && finite_vec3(normal) && norm(normal) > 1e-12) {
+        const Vec3 unit = normalized(normal);
+        v.nx = unit.x;
+        v.ny = unit.y;
+        v.nz = unit.z;
+        continue;
+      }
+    } else if (moved[vertex] != 0U) {
+      metrics.unprojected_distance_max = std::max(
+          metrics.unprojected_distance_max,
+          (moved[vertex] == 2U ? 0.5 : 0.75) * hit.distance);
+    } else if (hit.found && std::isfinite(hit.distance)) {
+      metrics.unprojected_distance_max =
+          std::max(metrics.unprojected_distance_max, hit.distance);
+    } else {
+      metrics.unprojected_distance_max =
+          std::max(metrics.unprojected_distance_max, search);
+    }
+    Vec3 summed{};
+    for (std::size_t slot = offsets[vertex]; slot < offsets[vertex + 1U];
+         ++slot) {
+      const Triangle &triangle = mesh.triangles[incident[slot]];
+      summed = summed + triangle.area * Vec3{triangle.nx, triangle.ny,
+                                             triangle.nz};
+    }
+    if (norm(summed) > 0.0) {
+      const Vec3 unit = normalized(summed);
+      v.nx = unit.x;
+      v.ny = unit.y;
+      v.nz = unit.z;
+    }
+  }
+  metrics.projected = projected;
+  metrics.projected_distance_rms =
+      projected == 0U ? 0.0
+                      : std::sqrt(squared_sum / static_cast<double>(projected));
+  metrics.ms = std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - begin)
+                   .count();
+}
+
+[[nodiscard]] double triangle_min_angle(const Vec3 &a, const Vec3 &b,
+                                        const Vec3 &c) noexcept {
+  const double ab = norm(b - a), bc = norm(c - b), ca = norm(a - c);
+  const auto angle = [](double opposite, double s1, double s2) {
+    const double cosine = (s1 * s1 + s2 * s2 - opposite * opposite) /
+                          std::max(1e-300, 2.0 * s1 * s2);
+    return std::acos(std::clamp(cosine, -1.0, 1.0));
+  };
+  return std::min({angle(bc, ab, ca), angle(ca, ab, bc), angle(ab, bc, ca)});
+}
+
+struct ResolutionQualityMetrics {
+  std::size_t angle_below_5{0}, angle_below_10{0}, angle_below_20{0};
+  // Edge counts are per triangle side, so an interior edge counts twice.
+  std::size_t edges_below_005{0}, edges_below_020{0};
+  double edge_min{0.0}, edge_mean{0.0};
+  double ms{0.0};
+};
+
+void measure_resolution_quality(const SurfaceMesh &mesh,
+                                ResolutionQualityMetrics &metrics) {
+  double edge_sum = 0.0;
+  metrics.edge_min = std::numeric_limits<double>::infinity();
+  metrics.angle_below_5 = metrics.angle_below_10 = metrics.angle_below_20 = 0U;
+  metrics.edges_below_005 = metrics.edges_below_020 = 0U;
+  for (const Triangle &triangle : mesh.triangles) {
+    const Vec3 a = mesh_vertex(mesh, triangle.v0),
+               b = mesh_vertex(mesh, triangle.v1),
+               c = mesh_vertex(mesh, triangle.v2);
+    edge_sum += norm(b - a) + norm(c - b) + norm(a - c);
+    metrics.edge_min =
+        std::min({metrics.edge_min, norm(b - a), norm(c - b), norm(a - c)});
+    for (const double length : {norm(b - a), norm(c - b), norm(a - c)}) {
+      metrics.edges_below_005 += length < 0.05;
+      metrics.edges_below_020 += length < 0.20;
+    }
+    const double smallest = triangle_min_angle(a, b, c) * 180.0 / std::numbers::pi;
+    metrics.angle_below_5 += smallest < 5.0;
+    metrics.angle_below_10 += smallest < 10.0;
+    metrics.angle_below_20 += smallest < 20.0;
+  }
+  metrics.edge_mean =
+      mesh.triangles.empty()
+          ? 0.0
+          : edge_sum / static_cast<double>(3U * mesh.triangles.size());
+}
+
+struct ResolutionRemeshMetrics {
+  std::size_t iterations{0};
+  std::size_t splits{0};
+  std::size_t collapses{0};
+  std::size_t flips{0};
+  std::size_t relaxed{0};
+  std::size_t undone_operations{0};
+  std::size_t vertices_before{0};
+  std::size_t vertices_after{0};
+  std::size_t off_surface_vertices{0};
+  std::size_t final_intersections{0};
+  // Snaps not taken because the point was on another sheet than the vertex's
+  // star (kResolutionSheetCosine).
+  std::size_t sheet_refused{0};
+  // Charge-adaptive remeshing: final vertices whose local target edge is
+  // below the uniform one.
+  std::size_t refined_vertices{0};
+  double target_edge{0.0};
+  double ms{0.0};
+};
+
+// Local target edge of the resolution remeshing (ChargeRefinement).  Charges
+// are hashed on a grid whose cell is the reach edge/alpha, beyond which the
+// uniform edge applies, so a query visits 27 cells at most.
+class RemeshSizing {
+public:
+  RemeshSizing(std::span<const Atom> atoms, double edge,
+               const ChargeRefinement &refine)
+      : edge_(edge), alpha_(refine.alpha),
+        min_edge_(std::clamp(refine.min_edge, 1.0e-3, edge)) {
+    if (!(alpha_ > 0.0) || !(edge_ > 0.0) || !std::isfinite(alpha_))
+      return;
+    reach_ = edge_ / alpha_;
+    for (const Atom &atom : atoms)
+      if (std::abs(atom.q) >= refine.min_charge &&
+          std::isfinite(atom.x + atom.y + atom.z))
+        charges_.push_back({atom.x, atom.y, atom.z});
+    for (std::size_t k = 0; k < charges_.size(); ++k)
+      cells_[cell_key(cell_of(charges_[k]))].push_back(k);
+    build_dense_grid();
+  }
+  [[nodiscard]] bool active() const noexcept { return !charges_.empty(); }
+  [[nodiscard]] std::size_t charges() const noexcept { return charges_.size(); }
+  [[nodiscard]] double smallest() const noexcept {
+    return active() ? min_edge_ : edge_;
+  }
+  [[nodiscard]] double operator()(const Vec3 &x) const {
+    if (charges_.empty())
+      return edge_;
+    double best = reach_ * reach_;
+    const std::array<std::int64_t, 3> c = cell_of(x);
+    if (!dense_start_.empty()) {
+      // The same charges as the hashed cells, from a dense CSR grid; the
+      // minimum does not depend on the order they are visited in.
+      for (std::int64_t dx = -1; dx <= 1; ++dx) {
+        const std::int64_t gx = c[0] + dx - lo_[0];
+        if (gx < 0 || gx >= dim_[0])
+          continue;
+        for (std::int64_t dy = -1; dy <= 1; ++dy) {
+          const std::int64_t gy = c[1] + dy - lo_[1];
+          if (gy < 0 || gy >= dim_[1])
+            continue;
+          for (std::int64_t dz = -1; dz <= 1; ++dz) {
+            const std::int64_t gz = c[2] + dz - lo_[2];
+            if (gz < 0 || gz >= dim_[2])
+              continue;
+            const std::size_t cell =
+                static_cast<std::size_t>((gx * dim_[1] + gy) * dim_[2] + gz);
+            for (std::uint32_t p = dense_start_[cell]; p < dense_start_[cell + 1];
+                 ++p) {
+              const Vec3 d = x - charges_[dense_items_[p]];
+              best = std::min(best, dot(d, d));
+            }
+          }
+        }
+      }
+      return std::clamp(alpha_ * std::sqrt(best), min_edge_, edge_);
+    }
+    for (std::int64_t dx = -1; dx <= 1; ++dx)
+      for (std::int64_t dy = -1; dy <= 1; ++dy)
+        for (std::int64_t dz = -1; dz <= 1; ++dz) {
+          const auto found = cells_.find(cell_key({c[0] + dx, c[1] + dy, c[2] + dz}));
+          if (found == cells_.end())
+            continue;
+          for (const std::size_t k : found->second) {
+            const Vec3 d = x - charges_[k];
+            best = std::min(best, dot(d, d));
+          }
+        }
+    return std::clamp(alpha_ * std::sqrt(best), min_edge_, edge_);
+  }
+
+private:
+  [[nodiscard]] std::array<std::int64_t, 3> cell_of(const Vec3 &x) const {
+    return {static_cast<std::int64_t>(std::floor(x.x / reach_)),
+            static_cast<std::int64_t>(std::floor(x.y / reach_)),
+            static_cast<std::int64_t>(std::floor(x.z / reach_))};
+  }
+  [[nodiscard]] static std::uint64_t
+  cell_key(const std::array<std::int64_t, 3> &c) noexcept {
+    constexpr std::int64_t bias = std::int64_t{1} << 20;
+    constexpr std::uint64_t mask = (std::uint64_t{1} << 21) - 1U;
+    return ((static_cast<std::uint64_t>(c[0] + bias) & mask) << 42) |
+           ((static_cast<std::uint64_t>(c[1] + bias) & mask) << 21) |
+           (static_cast<std::uint64_t>(c[2] + bias) & mask);
+  }
+  // The charges' cells as a dense grid over their bounding box, when it is of
+  // reasonable size; otherwise the hashed cells serve the queries.
+  void build_dense_grid() {
+    if (charges_.empty())
+      return;
+    std::array<std::int64_t, 3> lo = cell_of(charges_[0]), hi = lo;
+    for (const Vec3 &q : charges_) {
+      const auto c = cell_of(q);
+      for (int a = 0; a < 3; ++a) {
+        lo[a] = std::min(lo[a], c[a]);
+        hi[a] = std::max(hi[a], c[a]);
+      }
+    }
+    std::array<std::int64_t, 3> dim{};
+    std::int64_t total = 1;
+    for (int a = 0; a < 3; ++a) {
+      dim[a] = hi[a] - lo[a] + 1;
+      if (dim[a] <= 0 || dim[a] > (std::int64_t{1} << 20))
+        return;
+      total *= dim[a];
+      if (total > (std::int64_t{1} << 24))
+        return;
+    }
+    lo_ = lo;
+    dim_ = dim;
+    const auto index = [&](const Vec3 &q) {
+      const auto c = cell_of(q);
+      return static_cast<std::size_t>(
+          ((c[0] - lo_[0]) * dim_[1] + (c[1] - lo_[1])) * dim_[2] + (c[2] - lo_[2]));
+    };
+    dense_start_.assign(static_cast<std::size_t>(total) + 1, 0U);
+    for (const Vec3 &q : charges_)
+      ++dense_start_[index(q) + 1];
+    for (std::size_t c = 0; c + 1 < dense_start_.size(); ++c)
+      dense_start_[c + 1] += dense_start_[c];
+    dense_items_.resize(charges_.size());
+    std::vector<std::uint32_t> fill(dense_start_.begin(), dense_start_.end() - 1);
+    for (std::size_t k = 0; k < charges_.size(); ++k)
+      dense_items_[fill[index(charges_[k])]++] = static_cast<std::uint32_t>(k);
+  }
+  double edge_{0.0}, alpha_{0.0}, min_edge_{0.0}, reach_{0.0};
+  std::vector<Vec3> charges_;
+  std::unordered_map<std::uint64_t, std::vector<std::size_t>> cells_;
+  std::array<std::int64_t, 3> lo_{}, dim_{};
+  std::vector<std::uint32_t> dense_start_, dense_items_;
+};
+
+// Isotropic remeshing (Botsch and Kobbelt 2004) of the resolution-policy
+// mesh onto the analytic SES.  Each iteration splits edges longer than 4/3 L
+// at their midpoint, collapses edges shorter than 4/5 L when the link
+// condition holds, flips edges towards Delaunay on nearly flat pairs and
+// relaxes vertices tangentially; every new or moved vertex is put on the
+// closest analytic patch point when that point is within L/2.  Operations in
+// one pass never share a triangle or a vertex star, and adjacency is rebuilt
+// between passes.  Each local change must keep every touched triangle within
+// 60 degrees of its previous orientation and above a minimum area, and a
+// snapped point must be on the vertex's own sheet (kResolutionSheetCosine
+// against the new star).  An iteration that ends with any self-intersection
+// is rolled back and the remeshing stops there, so the result is always
+// closed, consistently oriented and intersection-free.
+void remesh_resolution_surface(
+    SurfaceMesh &mesh, const analytic_ses::PatchComplex &patches,
+    const analytic_ses::LocalPatchProjectionIndex &projection,
+    double grid_spacing, double target_edge, int iterations,
+    TitanExecutor *executor, ResolutionRemeshMetrics &metrics,
+    const RemeshSizing *sizing = nullptr) {
+  const auto begin = std::chrono::steady_clock::now();
+  metrics.target_edge = target_edge;
+  metrics.vertices_before = mesh.vertices.size();
+  if (mesh.triangles.empty() || !(target_edge > 0.0))
+    return;
+  // Wall time of each phase, printed at the end (diagnostic only).
+  using PhaseClock = std::chrono::steady_clock;
+  const auto since = [](PhaseClock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(PhaseClock::now() - t0)
+        .count();
+  };
+  double ms_rebuild = 0, ms_sort = 0, ms_select = 0, ms_snap = 0,
+         ms_split = 0, ms_collapse = 0, ms_flip = 0, ms_propose = 0,
+         ms_accept = 0, ms_export = 0, ms_detect = 0;
+  std::size_t settle_rounds = 0, loop_snaps = 0, loop_batches = 0;
+  double ms_loop_snap = 0;
+  // The target edge at a point: uniform, or graded towards shallow charges
+  // (ChargeRefinement).  Without charges every threshold below is the
+  // uniform one, operation for operation.
+  const bool graded = sizing != nullptr && sizing->active();
+  const auto local_edge = [&](const Vec3 &x) {
+    return graded ? (*sizing)(x) : target_edge;
+  };
+  const auto min_twice_area_at = [&](const Vec3 &x) {
+    const double edge = local_edge(x);
+    return 1.0e-3 * edge * edge;
+  };
+  const double smallest_edge = graded ? sizing->smallest() : target_edge;
+  using Tri = std::array<std::size_t, 3>;
+  struct State {
+    std::vector<Vec3> p, n;
+    std::vector<std::size_t> atom;
+    std::vector<std::uint8_t> on_surface, vertex_alive;
+    std::vector<Tri> tri;
+    std::vector<std::uint8_t> tri_alive;
+  } s;
+  for (const Vertex &v : mesh.vertices) {
+    s.p.push_back({v.x, v.y, v.z});
+    s.n.push_back({v.nx, v.ny, v.nz});
+    s.atom.push_back(v.atom_index);
+    s.on_surface.push_back(0U);
+    s.vertex_alive.push_back(1U);
+  }
+  for (const Triangle &t : mesh.triangles) {
+    s.tri.push_back({t.v0, t.v1, t.v2});
+    s.tri_alive.push_back(1U);
+  }
+  const double long_edge = 4.0 / 3.0 * target_edge;
+  const double short_edge = 4.0 / 5.0 * target_edge;
+  const double minimum_twice_area = 1.0e-3 * target_edge * target_edge;
+  constexpr double kKeepOrientation = 0.5;
+  const auto normal_of = [&](const Tri &t, double &twice_area) {
+    const Vec3 c = cross(s.p[t[1]] - s.p[t[0]], s.p[t[2]] - s.p[t[0]]);
+    twice_area = norm(c);
+    return twice_area > 0.0 ? (1.0 / twice_area) * c : Vec3{};
+  };
+  // A snap is taken only within half an edge, so the closest-point search is
+  // bounded there too: the closest patch point, when it is that near, is the
+  // same either way, and the search prunes the patches beyond it.
+  const auto snap = [&](const Vec3 &x, std::size_t atom, Vec3 &point,
+                        Vec3 &normal) {
+    const analytic_ses::LocalProjectionHit hit =
+        nearest_local_patch(patches, projection, atom, x, 0.5 * target_edge);
+    const Vec3 at{hit.point.x, hit.point.y, hit.point.z};
+    if (!hit.found || !finite_vec3(at) || !(hit.distance <= 0.5 * target_edge))
+      return false;
+    point = at;
+    const Vec3 hn{hit.normal.x, hit.normal.y, hit.normal.z};
+    normal = hit.normal_certified && finite_vec3(hn) && norm(hn) > 1e-12
+                 ? normalized(hn)
+                 : Vec3{};
+    return true;
+  };
+  // The split and collapse passes snap one midpoint per edge they act on, in
+  // a serial loop.  An edge is acted on only while no operation of the pass
+  // has touched its two triangles, so its endpoints, its frame and the owner
+  // atom the snap is hinted with are still those at the start of the pass:
+  // the snap can be computed ahead, in parallel, and the loop takes it.
+  // Which edges the loop reaches is found first by running its locking
+  // serially without the snaps (`select`), so few snaps are wasted; an edge
+  // the loop reaches that was not planned (a collapse refused after its snap
+  // leaves its neighbours unlocked) is snapped in the loop as before.
+  struct PlannedSnap {
+    Vec3 point{}, normal{};
+    std::size_t atom{0};
+    std::uint8_t planned{0U}, snapped{0U};
+  };
+  std::vector<std::size_t> picked;
+  const auto plan_snaps = [&](std::vector<PlannedSnap> &plan, std::size_t count,
+                              const auto &select) {
+    const auto select_begin = PhaseClock::now();
+    plan.assign(count, PlannedSnap{});
+    picked.clear();
+    for (std::size_t k = 0; k < count; ++k) {
+      PlannedSnap &p = plan[k];
+      if (!select(k, p.point, p.atom))
+        continue;
+      p.planned = 1U;
+      picked.push_back(k);
+    }
+    ms_select += since(select_begin);
+    const auto snap_begin = PhaseClock::now();
+    const auto work = [&](std::size_t, std::size_t begin, std::size_t end) {
+      for (std::size_t j = begin; j < end; ++j) {
+        PlannedSnap &p = plan[picked[j]];
+        const Vec3 midpoint = p.point;
+        p.snapped = snap(midpoint, p.atom, p.point, p.normal) ? 1U : 0U;
+      }
+    };
+    if (executor != nullptr && executor->capacity() > 1U && picked.size() > 64U)
+      executor->parallel_for(picked.size(), executor->capacity(), 16U, work);
+    else
+      work(0U, 0U, picked.size());
+    ms_snap += since(snap_begin);
+  };
+  std::vector<PlannedSnap> plan;
+  // star: the summed unnormalised normals of the vertex's triangles at the
+  // snapped point; normal: the snapped point's unit normal, or zero.
+  const auto sheet_agrees = [&](const Vec3 &star, const Vec3 &normal) {
+    if (!(norm(normal) > 0.0) || !(norm(star) > 0.0) ||
+        dot(normalized(star), normal) >= kResolutionSheetCosine)
+      return true;
+    ++metrics.sheet_refused;
+    return false;
+  };
+
+  // Undo log.  Operations of one pass never share a triangle or a vertex
+  // star, so any subset of them can be undone independently.
+  struct VertexOld {
+    std::size_t index;
+    Vec3 p, n;
+    std::uint8_t on_surface, alive;
+  };
+  struct Operation {
+    std::vector<std::pair<std::size_t, Tri>> triangles;
+    std::vector<std::pair<std::size_t, std::uint8_t>> triangle_alive;
+    std::vector<VertexOld> vertices;
+    std::vector<std::size_t> created_triangles, created_vertices;
+  };
+  std::vector<Operation> operations;
+  std::vector<std::int64_t> triangle_operation, vertex_operation;
+  const auto start_pass = [&] {
+    operations.clear();
+    triangle_operation.assign(s.tri.size(), -1);
+    vertex_operation.assign(s.p.size(), -1);
+  };
+  const auto touch_triangle = [&](Operation &op, std::size_t t) {
+    op.triangles.push_back({t, s.tri[t]});
+    op.triangle_alive.push_back({t, s.tri_alive[t]});
+    if (t >= triangle_operation.size())
+      triangle_operation.resize(t + 1U, -1);
+    triangle_operation[t] = static_cast<std::int64_t>(operations.size());
+  };
+  const auto touch_vertex = [&](Operation &op, std::size_t i) {
+    op.vertices.push_back({i, s.p[i], s.n[i], s.on_surface[i], s.vertex_alive[i]});
+    if (i >= vertex_operation.size())
+      vertex_operation.resize(i + 1U, -1);
+    vertex_operation[i] = static_cast<std::int64_t>(operations.size());
+  };
+  const auto add_triangle_state = [&](Operation &op, const Tri &t) {
+    const std::size_t index = s.tri.size();
+    s.tri.push_back(t);
+    s.tri_alive.push_back(1U);
+    op.created_triangles.push_back(index);
+    if (index >= triangle_operation.size())
+      triangle_operation.resize(index + 1U, -1);
+    triangle_operation[index] = static_cast<std::int64_t>(operations.size());
+    return index;
+  };
+  const auto undo = [&](const Operation &op) {
+    for (const std::size_t t : op.created_triangles)
+      s.tri_alive[t] = 0U;
+    for (const std::size_t i : op.created_vertices)
+      s.vertex_alive[i] = 0U;
+    for (const auto &[t, old] : op.triangles)
+      s.tri[t] = old;
+    for (const auto &[t, alive] : op.triangle_alive)
+      s.tri_alive[t] = alive;
+    for (const VertexOld &old : op.vertices) {
+      s.p[old.index] = old.p;
+      s.n[old.index] = old.n;
+      s.on_surface[old.index] = old.on_surface;
+      s.vertex_alive[old.index] = old.alive;
+    }
+  };
+
+  // Adjacency for the current state.
+  std::vector<std::vector<std::uint32_t>> vt;
+  std::unordered_map<EdgeKey, std::array<std::size_t, 2>, EdgeKeyHash> et;
+  const auto rebuild = [&] {
+    const auto rebuild_begin = PhaseClock::now();
+    vt.assign(s.p.size(), {});
+    et.clear();
+    et.reserve(s.tri.size() * 2U);
+    for (std::size_t t = 0; t < s.tri.size(); ++t) {
+      if (!s.tri_alive[t])
+        continue;
+      const Tri &tr = s.tri[t];
+      for (int k = 0; k < 3; ++k) {
+        vt[tr[k]].push_back(static_cast<std::uint32_t>(t));
+        auto [it, inserted] = et.try_emplace(
+            edge_key(tr[k], tr[(k + 1) % 3]),
+            std::array<std::size_t, 2>{t, SIZE_MAX});
+        if (!inserted)
+          it->second[1] = t;
+      }
+    }
+    ms_rebuild += since(rebuild_begin);
+  };
+  // For an edge owned by t1 and t2, (u, v, a, b) with t1 = (u, v, a) in
+  // winding order and t2 = (v, u, b).
+  const auto edge_frame = [&](std::size_t t1, std::size_t t2, std::size_t lo,
+                              std::size_t hi, std::array<std::size_t, 4> &f) {
+    const Tri &r1 = s.tri[t1];
+    const Tri &r2 = s.tri[t2];
+    for (int k = 0; k < 3; ++k) {
+      const std::size_t x = r1[k], y = r1[(k + 1) % 3];
+      if ((x == lo && y == hi) || (x == hi && y == lo)) {
+        f = {x, y, r1[(k + 2) % 3], SIZE_MAX};
+        for (int j = 0; j < 3; ++j)
+          if (r2[j] == y && r2[(j + 1) % 3] == x)
+            f[3] = r2[(j + 2) % 3];
+        return f[3] != SIZE_MAX && f[2] != f[3];
+      }
+    }
+    return false;
+  };
+  const auto sorted_edges = [&](bool longest_first) {
+    const auto sort_begin = PhaseClock::now();
+    std::vector<std::pair<double, EdgeKey>> edges;
+    edges.reserve(et.size());
+    for (const auto &[key, owners] : et)
+      if (owners[1] != SIZE_MAX)
+        edges.push_back({norm(s.p[key.lo] - s.p[key.hi]), key});
+    std::sort(edges.begin(), edges.end(), [&](const auto &l, const auto &r) {
+      if (l.first != r.first)
+        return longest_first ? l.first > r.first : l.first < r.first;
+      return std::tie(l.second.lo, l.second.hi) < std::tie(r.second.lo, r.second.hi);
+    });
+    ms_sort += since(sort_begin);
+    return edges;
+  };
+
+  std::vector<std::array<std::uint32_t, 2>> pairs;
+  std::vector<std::size_t> exported_triangle;
+  std::vector<std::uint8_t> active_triangles;
+  std::size_t scratch_bytes = 0U;
+  SurfaceMesh audit_mesh;
+  const auto export_mesh = [&](SurfaceMesh &out) {
+    std::vector<std::size_t> remap(s.p.size(), SIZE_MAX);
+    out.vertices.clear();
+    out.triangles.clear();
+    out.panels.clear();
+    exported_triangle.clear();
+    for (std::size_t i = 0; i < s.p.size(); ++i) {
+      if (!s.vertex_alive[i])
+        continue;
+      remap[i] = out.vertices.size();
+      Vertex v;
+      v.x = s.p[i].x;
+      v.y = s.p[i].y;
+      v.z = s.p[i].z;
+      v.nx = s.n[i].x;
+      v.ny = s.n[i].y;
+      v.nz = s.n[i].z;
+      v.atom_index = s.atom[i];
+      out.vertices.push_back(v);
+    }
+    for (std::size_t t = 0; t < s.tri.size(); ++t) {
+      if (!s.tri_alive[t])
+        continue;
+      Triangle tr;
+      tr.v0 = remap[s.tri[t][0]];
+      tr.v1 = remap[s.tri[t][1]];
+      tr.v2 = remap[s.tri[t][2]];
+      tr.atom_index = s.atom[s.tri[t][0]];
+      out.triangles.push_back(tr);
+      exported_triangle.push_back(t);
+      Panel panel;
+      panel.atom_index = tr.atom_index;
+      panel.has_triangle_geometry = true;
+      out.panels.push_back(panel);
+      update_triangle_geometry(out, out.triangles.size() - 1U);
+    }
+  };
+  // Audits the pass and undoes the operations behind every intersecting pair.
+  // The state before the pass was intersection-free, so undoing all of them
+  // always ends the loop.
+  const auto settle_pass = [&] {
+    std::vector<std::uint8_t> undone(operations.size(), 0U);
+    for (int round = 0; round < 16; ++round) {
+      ++settle_rounds;
+      auto phase_begin = PhaseClock::now();
+      export_mesh(audit_mesh);
+      ms_export += since(phase_begin);
+      phase_begin = PhaseClock::now();
+      // Active: a triangle an operation of the pass touched or one with a
+      // vertex it moved; the rest are as before the pass, which was
+      // intersection-free, so no intersecting pair is missed.
+      active_triangles.assign(exported_triangle.size(), 0U);
+      for (std::size_t local = 0; local < exported_triangle.size(); ++local) {
+        const std::size_t t = exported_triangle[local];
+        bool hot = t < triangle_operation.size() && triangle_operation[t] >= 0;
+        for (const std::size_t w : s.tri[t])
+          hot = hot || (w < vertex_operation.size() && vertex_operation[w] >= 0);
+        active_triangles[local] = hot ? 1U : 0U;
+      }
+      const SelfIntersectionAudit audit = detect_self_intersections(
+          audit_mesh, grid_spacing, scratch_bytes, executor, &pairs,
+          &active_triangles);
+      ms_detect += since(phase_begin);
+      if (audit.count == 0U)
+        return;
+      bool any = false;
+      const auto undo_index = [&](std::int64_t index) {
+        if (index < 0 || undone[static_cast<std::size_t>(index)])
+          return;
+        undo(operations[static_cast<std::size_t>(index)]);
+        undone[static_cast<std::size_t>(index)] = 1U;
+        ++metrics.undone_operations;
+        any = true;
+      };
+      for (const auto &pair : pairs)
+        for (const std::uint32_t local : pair) {
+          const std::size_t t = exported_triangle[local];
+          if (t < triangle_operation.size())
+            undo_index(triangle_operation[t]);
+          for (const std::size_t w : s.tri[t])
+            if (w < vertex_operation.size())
+              undo_index(vertex_operation[w]);
+        }
+      if (!any)
+        for (std::size_t k = 0; k < operations.size(); ++k)
+          undo_index(static_cast<std::int64_t>(k));
+      if (!any)
+        return;
+    }
+    for (std::size_t k = 0; k < operations.size(); ++k)
+      if (!undone[k]) {
+        undo(operations[k]);
+        ++metrics.undone_operations;
+      }
+  };
+
+  for (int iteration = 0; iteration < iterations; ++iteration) {
+    std::size_t changes = 0U;
+    // Split.
+    rebuild();
+    start_pass();
+    {
+      std::vector<std::uint8_t> locked(s.tri.size(), 0U);
+      const auto edges = sorted_edges(true);
+      // Every edge the loop reaches is split, so this locking is the loop's.
+      std::vector<std::uint8_t> will_lock(s.tri.size(), 0U);
+      plan_snaps(plan, edges.size(), [&](std::size_t k, Vec3 &midpoint,
+                                         std::size_t &atom) {
+        const auto &[length, key] = edges[k];
+        if (!(length > 4.0 / 3.0 * smallest_edge))
+          return false;
+        const double local =
+            graded ? local_edge(0.5 * (s.p[key.lo] + s.p[key.hi])) : target_edge;
+        if (!(length > 4.0 / 3.0 * local))
+          return false;
+        const auto owners = et.at(key);
+        if (will_lock[owners[0]] || will_lock[owners[1]])
+          return false;
+        std::array<std::size_t, 4> f{};
+        if (!edge_frame(owners[0], owners[1], key.lo, key.hi, f))
+          return false;
+        will_lock[owners[0]] = will_lock[owners[1]] = 1U;
+        midpoint = 0.5 * (s.p[f[0]] + s.p[f[1]]);
+        atom = s.atom[f[0]];
+        return true;
+      });
+      const auto split_begin = PhaseClock::now();
+      for (std::size_t k = 0; k < edges.size(); ++k) {
+        const auto &[length, key] = edges[k];
+        if (!(length > 4.0 / 3.0 * smallest_edge))
+          break;
+        const double local =
+            graded ? local_edge(0.5 * (s.p[key.lo] + s.p[key.hi])) : target_edge;
+        if (!(length > 4.0 / 3.0 * local))
+          continue;
+        const double split_min_twice_area = 1.0e-3 * local * local;
+        const auto owners = et.at(key);
+        const std::size_t t1 = owners[0], t2 = owners[1];
+        if (locked[t1] || locked[t2])
+          continue;
+        std::array<std::size_t, 4> f{};
+        if (!edge_frame(t1, t2, key.lo, key.hi, f))
+          continue;
+        const auto [u, v, a, b] = f;
+        double area1 = 0, area2 = 0;
+        const Vec3 n1 = normal_of(s.tri[t1], area1), n2 = normal_of(s.tri[t2], area2);
+        Operation op;
+        const Vec3 midpoint = 0.5 * (s.p[u] + s.p[v]);
+        Vec3 m = midpoint, mn{};
+        bool snapped = false;
+        if (plan[k].planned) {
+          m = plan[k].point;
+          mn = plan[k].normal;
+          snapped = plan[k].snapped != 0U;
+        } else {
+          const auto loop_snap_begin = PhaseClock::now();
+          snapped = snap(midpoint, s.atom[u], m, mn);
+          ms_loop_snap += since(loop_snap_begin);
+          ++loop_snaps;
+        }
+        const std::size_t mi = s.p.size();
+        s.p.push_back(m);
+        s.n.push_back(norm(mn) > 0 ? mn : normalized(s.n[u] + s.n[v]));
+        s.atom.push_back(s.atom[u]);
+        s.on_surface.push_back(snapped ? 1U : 0U);
+        s.vertex_alive.push_back(1U);
+        op.created_vertices.push_back(mi);
+        if (mi >= vertex_operation.size())
+          vertex_operation.resize(mi + 1U, -1);
+        vertex_operation[mi] = static_cast<std::int64_t>(operations.size());
+        const std::array<Tri, 4> parts = {Tri{u, mi, a}, Tri{mi, v, a},
+                                         Tri{v, mi, b}, Tri{mi, u, b}};
+        const auto parts_valid = [&] {
+          Vec3 star{};
+          for (int k = 0; k < 4; ++k) {
+            double twice = 0;
+            const Vec3 nn = normal_of(parts[k], twice);
+            if (!(twice > split_min_twice_area) ||
+                dot(nn, k < 2 ? n1 : n2) <= kKeepOrientation)
+              return false;
+            star = star + twice * nn;
+          }
+          return sheet_agrees(star, mn);
+        };
+        if (snapped && !parts_valid()) {
+          s.p[mi] = midpoint;
+          s.n[mi] = normalized(s.n[u] + s.n[v]);
+          s.on_surface[mi] = 0U;
+        }
+        touch_triangle(op, t1);
+        touch_triangle(op, t2);
+        s.tri[t1] = parts[0];
+        s.tri[t2] = parts[2];
+        add_triangle_state(op, parts[1]);
+        add_triangle_state(op, parts[3]);
+        locked[t1] = locked[t2] = 1U;
+        locked.push_back(1U);
+        locked.push_back(1U);
+        operations.push_back(std::move(op));
+        ++metrics.splits;
+        ++changes;
+      }
+      ms_split += since(split_begin);
+    }
+    settle_pass();
+    // Collapse.
+    rebuild();
+    start_pass();
+    {
+      std::vector<std::uint8_t> locked(s.p.size(), 0U);
+      std::vector<std::size_t> neighbors_u, neighbors_v, common;
+      const auto neighbors = [&](std::size_t x, std::vector<std::size_t> &out) {
+        out.clear();
+        for (const std::uint32_t t : vt[x])
+          for (const std::size_t w : s.tri[t])
+            if (w != x)
+              out.push_back(w);
+        std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
+      };
+      const auto edges = sorted_edges(false);
+      // As if every collapse the loop reaches were accepted; one that is
+      // refused leaves its neighbours free, and the loop snaps those itself.
+      std::vector<std::uint8_t> will_lock(s.p.size(), 0U);
+      plan_snaps(plan, edges.size(), [&](std::size_t k, Vec3 &midpoint,
+                                         std::size_t &atom) {
+        const auto &[length, key] = edges[k];
+        if (!(length < short_edge))
+          return false;
+        const double local =
+            graded ? local_edge(0.5 * (s.p[key.lo] + s.p[key.hi])) : target_edge;
+        if (!(length < 4.0 / 5.0 * local))
+          return false;
+        const auto owners = et.at(key);
+        std::array<std::size_t, 4> f{};
+        if (!edge_frame(owners[0], owners[1], key.lo, key.hi, f))
+          return false;
+        const auto [u, v, a, b] = f;
+        if (will_lock[u] || will_lock[v] || will_lock[a] || will_lock[b])
+          return false;
+        if (vt[a].size() <= 3U || vt[b].size() <= 3U)
+          return false;
+        neighbors(u, neighbors_u);
+        neighbors(v, neighbors_v);
+        common.clear();
+        std::set_intersection(neighbors_u.begin(), neighbors_u.end(),
+                              neighbors_v.begin(), neighbors_v.end(),
+                              std::back_inserter(common));
+        if (common.size() != 2U)
+          return false;
+        for (const std::size_t w : neighbors_u)
+          will_lock[w] = 1U;
+        for (const std::size_t w : neighbors_v)
+          will_lock[w] = 1U;
+        will_lock[u] = will_lock[v] = 1U;
+        midpoint = 0.5 * (s.p[u] + s.p[v]);
+        atom = s.atom[u];
+        return true;
+      });
+      // An edge the plan did not foresee (a refused collapse freed it) is
+      // snapped together with the next unforeseen edges the loop may still
+      // reach, in parallel.  An edge the loop reaches has its pass-start
+      // endpoints, frame and owner atom, so its snap is the one the loop
+      // would compute; one that ends up locked was snapped for nothing.
+      std::vector<std::size_t> ahead_u, ahead_v, ahead_common;
+      std::size_t ahead_batches = 0;
+      const auto snap_ahead = [&](std::size_t first) {
+        constexpr std::size_t kAheadBatch = 256;
+        picked.clear();
+        for (std::size_t j = first;
+             j < edges.size() && picked.size() < kAheadBatch; ++j) {
+          if (plan[j].planned)
+            continue;
+          const auto &[length_j, key_j] = edges[j];
+          if (!(length_j < short_edge))
+            break;
+          const double local_j =
+              graded ? local_edge(0.5 * (s.p[key_j.lo] + s.p[key_j.hi]))
+                     : target_edge;
+          if (!(length_j < 4.0 / 5.0 * local_j))
+            continue;
+          const auto owners_j = et.at(key_j);
+          std::array<std::size_t, 4> fj{};
+          if (!edge_frame(owners_j[0], owners_j[1], key_j.lo, key_j.hi, fj))
+            continue;
+          const auto [uj, vj, aj, bj] = fj;
+          if (locked[uj] || locked[vj] || locked[aj] || locked[bj])
+            continue;
+          if (vt[aj].size() <= 3U || vt[bj].size() <= 3U)
+            continue;
+          neighbors(uj, ahead_u);
+          neighbors(vj, ahead_v);
+          ahead_common.clear();
+          std::set_intersection(ahead_u.begin(), ahead_u.end(), ahead_v.begin(),
+                                ahead_v.end(), std::back_inserter(ahead_common));
+          if (ahead_common.size() != 2U)
+            continue;
+          PlannedSnap &pj = plan[j];
+          pj.point = 0.5 * (s.p[uj] + s.p[vj]);
+          pj.atom = s.atom[uj];
+          pj.planned = 1U;
+          picked.push_back(j);
+        }
+        const auto work = [&](std::size_t, std::size_t begin, std::size_t end) {
+          for (std::size_t q = begin; q < end; ++q) {
+            PlannedSnap &pq = plan[picked[q]];
+            const Vec3 midpoint_q = pq.point;
+            pq.snapped = snap(midpoint_q, pq.atom, pq.point, pq.normal) ? 1U : 0U;
+          }
+        };
+        if (executor != nullptr && executor->capacity() > 1U && picked.size() > 8U)
+          executor->parallel_for(picked.size(), executor->capacity(), 4U, work);
+        else
+          work(0U, 0U, picked.size());
+        loop_snaps += picked.size();
+        ++ahead_batches;
+      };
+      const auto collapse_begin = PhaseClock::now();
+      for (std::size_t k = 0; k < edges.size(); ++k) {
+        const auto &[length, key] = edges[k];
+        if (!(length < short_edge))
+          break;
+        const double local =
+            graded ? local_edge(0.5 * (s.p[key.lo] + s.p[key.hi])) : target_edge;
+        if (!(length < 4.0 / 5.0 * local))
+          continue;
+        const double collapse_long_edge = 4.0 / 3.0 * local;
+        const double collapse_min_twice_area = 1.0e-3 * local * local;
+        const auto owners = et.at(key);
+        const std::size_t t1 = owners[0], t2 = owners[1];
+        std::array<std::size_t, 4> f{};
+        if (!edge_frame(t1, t2, key.lo, key.hi, f))
+          continue;
+        const auto [u, v, a, b] = f;
+        if (locked[u] || locked[v] || locked[a] || locked[b])
+          continue;
+        if (vt[a].size() <= 3U || vt[b].size() <= 3U)
+          continue;
+        neighbors(u, neighbors_u);
+        neighbors(v, neighbors_v);
+        common.clear();
+        std::set_intersection(neighbors_u.begin(), neighbors_u.end(),
+                              neighbors_v.begin(), neighbors_v.end(),
+                              std::back_inserter(common));
+        if (common.size() != 2U)
+          continue;
+        const Vec3 midpoint = 0.5 * (s.p[u] + s.p[v]);
+        Vec3 target = midpoint, tn{};
+        bool snapped = false;
+        if (!plan[k].planned) {
+          const auto loop_snap_begin = PhaseClock::now();
+          snap_ahead(k);
+          ms_loop_snap += since(loop_snap_begin);
+        }
+        target = plan[k].point;
+        tn = plan[k].normal;
+        snapped = plan[k].snapped != 0U;
+        bool valid = true;
+        const Vec3 saved_u = s.p[u];
+        Vec3 star{};
+        for (const std::size_t w : {u, v}) {
+          for (const std::uint32_t t : vt[w]) {
+            if (t == t1 || t == t2)
+              continue;
+            Tri after = s.tri[t];
+            for (auto &corner : after)
+              if (corner == u || corner == v)
+                corner = u;
+            double old_twice = 0, new_twice = 0;
+            const Vec3 old_n = normal_of(s.tri[t], old_twice);
+            s.p[u] = target;
+            const Vec3 new_n = normal_of(after, new_twice);
+            s.p[u] = saved_u;
+            if (!(new_twice > collapse_min_twice_area) ||
+                dot(old_n, new_n) <= kKeepOrientation) {
+              valid = false;
+              break;
+            }
+            star = star + new_twice * new_n;
+          }
+          if (!valid)
+            break;
+        }
+        if (valid && snapped && !sheet_agrees(star, tn))
+          valid = false;
+        for (const std::size_t w : neighbors_u)
+          if (valid && w != v && norm(s.p[w] - target) > collapse_long_edge)
+            valid = false;
+        for (const std::size_t w : neighbors_v)
+          if (valid && w != u && norm(s.p[w] - target) > collapse_long_edge)
+            valid = false;
+        if (!valid)
+          continue;
+        Operation op;
+        touch_vertex(op, u);
+        touch_vertex(op, v);
+        touch_triangle(op, t1);
+        touch_triangle(op, t2);
+        for (const std::uint32_t t : vt[v])
+          if (t != t1 && t != t2)
+            touch_triangle(op, t);
+        for (const std::uint32_t t : vt[u])
+          if (t != t1 && t != t2)
+            touch_triangle(op, t);
+        s.p[u] = target;
+        s.n[u] = snapped && norm(tn) > 0 ? tn : normalized(s.n[u] + s.n[v]);
+        s.on_surface[u] = snapped ? 1U : 0U;
+        s.tri_alive[t1] = s.tri_alive[t2] = 0U;
+        for (const std::uint32_t t : vt[v])
+          if (t != t1 && t != t2)
+            for (auto &corner : s.tri[t])
+              if (corner == v)
+                corner = u;
+        s.vertex_alive[v] = 0U;
+        for (const std::size_t w : neighbors_u)
+          locked[w] = 1U;
+        for (const std::size_t w : neighbors_v)
+          locked[w] = 1U;
+        locked[u] = locked[v] = 1U;
+        operations.push_back(std::move(op));
+        ++metrics.collapses;
+        ++changes;
+      }
+      ms_collapse += since(collapse_begin);
+      loop_batches += ahead_batches;
+    }
+    settle_pass();
+    // Flip towards Delaunay on nearly flat pairs.
+    rebuild();
+    start_pass();
+    {
+      const auto flip_begin = PhaseClock::now();
+      std::vector<std::uint8_t> locked(s.tri.size(), 0U);
+      std::vector<std::size_t> valence(s.p.size(), 0U);
+      for (std::size_t i = 0; i < s.p.size(); ++i)
+        valence[i] = vt[i].size();
+      std::unordered_set<EdgeKey, EdgeKeyHash> created;
+      for (const auto &[length, key] : sorted_edges(true)) {
+        (void)length;
+        const auto owners = et.at(key);
+        const std::size_t t1 = owners[0], t2 = owners[1];
+        if (locked[t1] || locked[t2])
+          continue;
+        std::array<std::size_t, 4> f{};
+        if (!edge_frame(t1, t2, key.lo, key.hi, f))
+          continue;
+        const auto [u, v, a, b] = f;
+        if (et.count(edge_key(a, b)) != 0U || created.count(edge_key(a, b)) != 0U ||
+            valence[u] <= 3U || valence[v] <= 3U)
+          continue;
+        double s1 = 0, s2 = 0, s3 = 0, s4 = 0;
+        const Vec3 n1 = normal_of(s.tri[t1], s1), n2 = normal_of(s.tri[t2], s2);
+        if (!(s1 > 0) || !(s2 > 0) || dot(n1, n2) < 0.95)
+          continue;
+        const Tri f1{a, u, b}, f2{b, v, a};
+        const Vec3 m1 = normal_of(f1, s3), m2 = normal_of(f2, s4);
+        const Vec3 mean = normalized(n1 + n2);
+        const double flip_min_twice_area =
+            graded ? min_twice_area_at(0.5 * (s.p[u] + s.p[v]))
+                   : minimum_twice_area;
+        if (!(s3 > flip_min_twice_area) || !(s4 > flip_min_twice_area) ||
+            dot(m1, mean) < 0.9 || dot(m2, mean) < 0.9)
+          continue;
+        const double before = std::min(triangle_min_angle(s.p[u], s.p[v], s.p[a]),
+                                       triangle_min_angle(s.p[v], s.p[u], s.p[b]));
+        const double after = std::min(triangle_min_angle(s.p[a], s.p[u], s.p[b]),
+                                      triangle_min_angle(s.p[b], s.p[v], s.p[a]));
+        if (!(after > before + 1.0e-3))
+          continue;
+        Operation op;
+        touch_triangle(op, t1);
+        touch_triangle(op, t2);
+        s.tri[t1] = f1;
+        s.tri[t2] = f2;
+        locked[t1] = locked[t2] = 1U;
+        created.insert(edge_key(a, b));
+        --valence[u];
+        --valence[v];
+        ++valence[a];
+        ++valence[b];
+        operations.push_back(std::move(op));
+        ++metrics.flips;
+        ++changes;
+      }
+      ms_flip += since(flip_begin);
+    }
+    settle_pass();
+    // Tangential relaxation onto the surface.
+    rebuild();
+    start_pass();
+    {
+      const std::size_t count = s.p.size();
+      std::vector<Vec3> proposal(count);
+      std::vector<Vec3> proposal_normal(count);
+      std::vector<std::uint8_t> has(count, 0U);
+      const auto propose = [&](std::size_t, std::size_t first, std::size_t last) {
+        for (std::size_t i = first; i < last; ++i) {
+          has[i] = 0U;
+          if (!s.vertex_alive[i] || vt[i].empty())
+            continue;
+          Vec3 centroid{};
+          double weight = 0.0;
+          for (const std::uint32_t t : vt[i]) {
+            double twice = 0;
+            (void)normal_of(s.tri[t], twice);
+            const Tri &tr = s.tri[t];
+            centroid = centroid + (twice / 3.0) * (s.p[tr[0]] + s.p[tr[1]] + s.p[tr[2]]);
+            weight += twice;
+          }
+          if (!(weight > 0))
+            continue;
+          centroid = (1.0 / weight) * centroid;
+          const Vec3 normal = norm(s.n[i]) > 0 ? normalized(s.n[i]) : Vec3{};
+          const Vec3 step = centroid - s.p[i];
+          const Vec3 tangential = step - dot(step, normal) * normal;
+          Vec3 point{}, pn{};
+          if (snap(s.p[i] + tangential, s.atom[i], point, pn)) {
+            proposal[i] = point;
+            proposal_normal[i] = pn;
+            has[i] = 1U;
+          }
+        }
+      };
+      auto relax_begin = PhaseClock::now();
+      if (executor != nullptr && executor->capacity() > 1U)
+        executor->parallel_for(count, executor->capacity(), 256U, propose);
+      else
+        propose(0U, 0U, count);
+      ms_propose += since(relax_begin);
+      relax_begin = PhaseClock::now();
+      for (std::size_t i = 0; i < count; ++i) {
+        if (!has[i])
+          continue;
+        const Vec3 here = s.p[i];
+        double before = std::numbers::pi, after = std::numbers::pi;
+        bool valid = true;
+        Vec3 star{};
+        const double relax_min_twice_area =
+            graded ? min_twice_area_at(proposal[i]) : minimum_twice_area;
+        for (const std::uint32_t t : vt[i]) {
+          double old_twice = 0, new_twice = 0;
+          const Vec3 old_n = normal_of(s.tri[t], old_twice);
+          before = std::min(before, triangle_min_angle(s.p[s.tri[t][0]],
+                                                       s.p[s.tri[t][1]],
+                                                       s.p[s.tri[t][2]]));
+          s.p[i] = proposal[i];
+          const Vec3 new_n = normal_of(s.tri[t], new_twice);
+          after = std::min(after, triangle_min_angle(s.p[s.tri[t][0]],
+                                                     s.p[s.tri[t][1]],
+                                                     s.p[s.tri[t][2]]));
+          s.p[i] = here;
+          if (!(new_twice > relax_min_twice_area) ||
+              dot(old_n, new_n) <= kKeepOrientation) {
+            valid = false;
+            break;
+          }
+          star = star + new_twice * new_n;
+        }
+        if (valid && !sheet_agrees(star, proposal_normal[i]))
+          valid = false;
+        // Moving onto the surface is accepted unless it costs angle quality.
+        if (!valid || (s.on_surface[i] && !(after > before - 1.0e-3)))
+          continue;
+        Operation op;
+        touch_vertex(op, i);
+        s.p[i] = proposal[i];
+        if (norm(proposal_normal[i]) > 0)
+          s.n[i] = proposal_normal[i];
+        s.on_surface[i] = 1U;
+        operations.push_back(std::move(op));
+        ++metrics.relaxed;
+      }
+      ms_accept += since(relax_begin);
+    }
+    settle_pass();
+    ++metrics.iterations;
+    if (changes == 0U)
+      break;
+  }
+  auto final_begin = PhaseClock::now();
+  export_mesh(mesh);
+  ms_export += since(final_begin);
+  // Vertex normals off the surface: area-weighted triangle normals.
+  std::vector<Vec3> summed(mesh.vertices.size());
+  for (const Triangle &t : mesh.triangles)
+    for (const std::size_t w : {t.v0, t.v1, t.v2})
+      summed[w] = summed[w] + t.area * Vec3{t.nx, t.ny, t.nz};
+  std::size_t index = 0;
+  for (std::size_t i = 0; i < s.p.size(); ++i) {
+    if (!s.vertex_alive[i])
+      continue;
+    Vertex &v = mesh.vertices[index];
+    if (graded && local_edge(s.p[i]) < target_edge)
+      ++metrics.refined_vertices;
+    if (!s.on_surface[i] || norm(s.n[i]) == 0.0) {
+      ++metrics.off_surface_vertices;
+      if (norm(summed[index]) > 0) {
+        const Vec3 unit = normalized(summed[index]);
+        v.nx = unit.x;
+        v.ny = unit.y;
+        v.nz = unit.z;
+      }
+    }
+    ++index;
+  }
+  std::size_t final_scratch = 0U;
+  final_begin = PhaseClock::now();
+  metrics.final_intersections =
+      detect_self_intersections(mesh, grid_spacing, final_scratch, executor).count;
+  ms_detect += since(final_begin);
+  metrics.vertices_after = mesh.vertices.size();
+  metrics.ms = std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - begin)
+                   .count();
+  std::cerr << "TABI SES remesh timing: total " << metrics.ms / 1000.0
+            << " s over " << metrics.iterations << " iteration(s): rebuild "
+            << ms_rebuild / 1000.0 << ", sort " << ms_sort / 1000.0
+            << ", select " << ms_select / 1000.0 << ", snap "
+            << ms_snap / 1000.0 << ", split " << ms_split / 1000.0
+            << ", collapse " << ms_collapse / 1000.0 << " (loop snaps "
+            << loop_snaps << " in " << loop_batches << " batch(es), "
+            << ms_loop_snap / 1000.0 << " s), flip "
+            << ms_flip / 1000.0 << " (incl. its sort), relax propose "
+            << ms_propose / 1000.0 << ", relax accept " << ms_accept / 1000.0
+            << ", export " << ms_export / 1000.0 << ", self-intersection "
+            << ms_detect / 1000.0 << " (" << settle_rounds
+            << " settle round(s))\n";
+}
+
 AuxiliarySurfaceResult build_patch_ray_experimental_surface(
     analytic_ses::PatchComplex &patches, const Vec3 &lower,
     double grid_spacing, std::size_t nx, std::size_t ny, std::size_t nz,
-    TitanExecutor *executor, bool validate_topology) {
+    TitanExecutor *executor, bool validate_topology,
+    bool resolution_policy = false, double remesh_edge = 0.0,
+    std::span<const Atom> charges = {}, ChargeRefinement refinement = {},
+    int remesh_iterations = 6) {
   const auto begin = std::chrono::steady_clock::now();
   AuxiliarySurfaceResult result;
-  result.analytic_ses_engine = "patch-ray-experimental";
+  result.analytic_ses_engine =
+      resolution_policy ? "patch-ray-resolution" : "patch-ray-experimental";
   result.cavity_policy = "external-only";
   result.grid_vertices = nx * ny * nz;
   const analytic_ses::PatchRayGrid rays = analytic_ses::build_patch_ray_grid(
@@ -6098,7 +8137,16 @@ AuxiliarySurfaceResult build_patch_ray_experimental_surface(
   result.patch_ray_peak_temporary_bytes = rays.peak_temporary_bytes;
   for (const auto &axis : rays.axes)
     result.odd_ray_rows += axis.odd_rows;
-  if (rays.status != "pass") {
+  // A ray row whose patch intersection stays uncertified after the perturbed
+  // retries makes the certified engine refuse the surface. The resolution
+  // policy instead leaves that row out of the parity vote, as it does for an
+  // odd row, and its grid vertices take the symbolic-perturbation or
+  // morphology path. On one 2,065-atom protein at h = 0.5 A, one such row
+  // used to abort the build (and with it a BIE solve); h = 0.45 and 0.6 A
+  // were fine.
+  const bool uncertified_rows_voted_out =
+      resolution_policy && rays.status == "uncertified_quartic";
+  if (rays.status != "pass" && !uncertified_rows_voted_out) {
     result.status = "patch_ray_" + rays.status;
     return result;
   }
@@ -6121,10 +8169,39 @@ AuxiliarySurfaceResult build_patch_ray_experimental_surface(
                                    std::size_t iz) {
     return ix + nx * (iy + ny * iz);
   };
+  // The scale every tolerance below is measured against.  It has to include
+  // how far the molecule sits from the origin, not only how big it is: a
+  // double holds a coordinate of 1000 A to 1e-13, so a squared distance or a
+  // ray crossing computed there carries that much noise whatever the atom
+  // radii are.
+  double parity_scale = std::max(1.0, grid_spacing);
+  for (const Atom &atom : patches.atoms) {
+    parity_scale =
+        std::max(parity_scale, atom.radius + patches.probe_radius);
+    parity_scale = std::max({parity_scale, std::abs(atom.x), std::abs(atom.y),
+                             std::abs(atom.z)});
+  }
+  // How close a boundary may come to a grid vertex before the cheap tests
+  // below refuse to certify it either way.  Both of them decide an exact tie
+  // by the last bit of an inexact quantity, and a grid vertex can sit exactly
+  // on a boundary: at the origin with spacing 0.3 and radius 1.5 the vertex
+  // (0.9, 1.2, 0) is exactly on the sphere, since 0.81 + 1.44 = 2.25 = 1.5^2
+  // in binary too.  The same molecule a thousand angstrom away puts it 1e-13
+  // off and the answer flips.  Leaving the shell uncertified sends those few
+  // vertices to the symbolic-perturbation path, which exists for this case.
+  const double certificate_margin = std::max(
+      1024.0 * std::numeric_limits<double>::epsilon() * parity_scale,
+      1.0e-12 * grid_spacing);
   // 0 = unresolved, 1 = outside, 2 = inside.  An axis with an odd number of
-  // crossings is ignored only for the grid vertices that use that row.  This
-  // keeps certified parity authoritative everywhere else instead of turning a
-  // single degenerate line into a whole-grid morphology fallback.
+  // crossings, or an uncertified row (resolution policy only), is ignored
+  // only for the grid vertices that use that row.  This keeps certified
+  // parity authoritative everywhere else instead of turning a single
+  // degenerate line into a whole-grid morphology fallback.
+  // The row indices of vertex_crossings.
+  const auto row_of = [nx, ny](std::size_t axis, std::size_t ix,
+                               std::size_t iy, std::size_t iz) {
+    return axis == 0U ? iy + ny * iz : (axis == 1U ? ix + nx * iz : ix + nx * iy);
+  };
   std::vector<std::uint8_t> direct_classification(result.grid_vertices, 0U);
   const auto classify_parity_slices = [&](std::size_t begin_z,
                                            std::size_t end_z) {
@@ -6142,6 +8219,18 @@ AuxiliarySurfaceResult build_patch_ray_experimental_surface(
           unsigned inside_votes = 0U;
           for (std::size_t axis = 0; axis < crossings.size(); ++axis) {
             if ((crossings[axis].size() & 1U) != 0U)
+              continue;
+            if (uncertified_rows_voted_out &&
+                rays.axes[axis].row_uncertified(row_of(axis, ix, iy, iz)))
+              continue;
+            // A crossing that lands on the query coordinate makes this axis
+            // parity a tie: upper_bound counts it as passed, which is a
+            // choice, not a measurement.  Refuse the axis rather than make
+            // the choice.
+            if (nearest_crossing_distance(
+                    crossings[axis], coordinates[axis],
+                    std::numeric_limits<double>::infinity()) <=
+                certificate_margin)
               continue;
             ++valid_votes;
             inside_votes += static_cast<unsigned>(
@@ -6176,12 +8265,9 @@ AuxiliarySurfaceResult build_patch_ray_experimental_surface(
   std::vector<std::size_t> geometric_counts(workers, 0U);
   std::vector<std::size_t> confident_counts(workers, 0U);
   std::vector<std::size_t> local_repair_counts(workers, 0U);
+  std::vector<std::size_t> nearby_repair_counts(workers, 0U);
   std::vector<std::size_t> morphology_counts(workers, 0U);
   std::vector<std::array<std::vector<double>, 3>> parity_scratch(workers);
-  double parity_scale = std::max(1.0, grid_spacing);
-  for (const Atom &atom : patches.atoms)
-    parity_scale =
-        std::max(parity_scale, atom.radius + patches.probe_radius);
   const double parity_duplicate_tolerance = std::max(
       512.0 * std::numeric_limits<double>::epsilon() * parity_scale,
       1.0e-11 * grid_spacing);
@@ -6220,12 +8306,14 @@ AuxiliarySurfaceResult build_patch_ray_experimental_surface(
             // regions from morphology sampling.  The VDW union is contained
             // in the SES body, while points outside every probe-expanded atom
             // cannot belong to it.
-            if (point_inside_union(atom_grid, patches.atoms, point)) {
+            if (point_inside_union(atom_grid, patches.atoms, point,
+                                   -certificate_margin)) {
               classification[index] = 2U;
               ++geometric_counts[worker];
               continue;
             }
-            if (!point_inside_union(expanded_grid, expanded_atoms, point)) {
+            if (!point_inside_union(expanded_grid, expanded_atoms, point,
+                                    certificate_margin)) {
               classification[index] = 1U;
               ++geometric_counts[worker];
               continue;
@@ -6261,6 +8349,33 @@ AuxiliarySurfaceResult build_patch_ray_experimental_surface(
               ++local_repair_counts[worker];
               continue;
             }
+            // Next to a ray row whose quartic stayed uncertified, the
+            // infinitesimal offsets meet the same near-tangency. A certified
+            // point 1e-3 h or 1e-2 h away is still a far better witness than
+            // the sampled morphology predicate: it can only differ from the
+            // vertex if the surface passes within that distance, which moves
+            // the marching surface by less than 0.01 h there. On a 2,065-atom
+            // protein at h = 0.5 A, the 22 vertices that used to reach the
+            // morphology predicate raised the area 0.3% above its trend in h.
+            if (uncertified_rows_voted_out) {
+              for (const double scale : {1.0e-3, 1.0e-2}) {
+                for (const Vec3 &offset : symbolic_offsets) {
+                  repaired_state = certify_perturbed_point_parity(
+                      patches, projection.reentrant_probes,
+                      point + (scale * grid_spacing / symbolic_delta) * offset,
+                      parity_duplicate_tolerance, parity_scratch[worker]);
+                  if (repaired_state != 0U)
+                    break;
+                }
+                if (repaired_state != 0U)
+                  break;
+              }
+              if (repaired_state != 0U) {
+                classification[index] = repaired_state;
+                ++nearby_repair_counts[worker];
+                continue;
+              }
+            }
 
             bool inside = true;
             for (const Vec3 &direction : fallback_directions) {
@@ -6287,6 +8402,7 @@ AuxiliarySurfaceResult build_patch_ray_experimental_surface(
     result.geometric_certificate_vertices += geometric_counts[worker];
     result.parity_confident_vertices += confident_counts[worker];
     result.parity_local_repair_vertices += local_repair_counts[worker];
+    result.resolution_nearby_parity_vertices += nearby_repair_counts[worker];
     result.morphology_fallback_vertices += morphology_counts[worker];
   }
   result.parity_fallback_vertices = result.morphology_fallback_vertices;
@@ -6297,6 +8413,34 @@ AuxiliarySurfaceResult build_patch_ray_experimental_surface(
         "three_axis_ray_parity_symbolic_perturbation";
   } else {
     result.topology_source = "three_axis_ray_parity";
+  }
+  // Resolution policy: a solvent slab or a molecular plate one grid cell
+  // thick along an axis would be polygonized as two facing sheets closer than
+  // the spacing.  Fill such solvent slabs, then open such molecular plates,
+  // so no feature thinner than one cell reaches the solver.
+  if (resolution_policy) {
+    const auto pass = [&](std::uint8_t from, std::uint8_t to) {
+      std::vector<std::size_t> changed;
+      for (std::size_t iz = 1; iz + 1 < nz; ++iz)
+        for (std::size_t iy = 1; iy + 1 < ny; ++iy)
+          for (std::size_t ix = 1; ix + 1 < nx; ++ix) {
+            const std::size_t index = grid_index(ix, iy, iz);
+            if (classification[index] != from)
+              continue;
+            const auto is_to = [&](std::size_t other) {
+              return classification[other] == to;
+            };
+            if ((is_to(index - 1) && is_to(index + 1)) ||
+                (is_to(index - nx) && is_to(index + nx)) ||
+                (is_to(index - nx * ny) && is_to(index + nx * ny)))
+              changed.push_back(index);
+          }
+      for (const std::size_t index : changed)
+        classification[index] = to;
+      return changed.size();
+    };
+    result.resolution_thin_solvent_filled = pass(1U, 2U);
+    result.resolution_thin_plates_opened = pass(2U, 1U);
   }
   for (std::size_t iz = 0; iz < nz; ++iz) {
     for (std::size_t iy = 0; iy < ny; ++iy) {
@@ -6443,6 +8587,85 @@ AuxiliarySurfaceResult build_patch_ray_experimental_surface(
       remove_nonphysical_components(result.mesh, patches.atoms) > 0U;
   if (removed_components)
     orient_mesh_consistently(result.mesh);
+  if (resolution_policy) {
+    ResolutionProjectionMetrics resolution;
+    resolution_project_patch_ray_surface(result.mesh, patches, projection,
+                                         grid_spacing, executor, resolution);
+    result.projection_ms = resolution.ms;
+    result.projected_vertices = resolution.projected;
+    result.projection_queries = result.mesh.vertices.size();
+    result.rejected_projection_vertices =
+        result.mesh.vertices.size() - resolution.projected;
+    result.resolution_missing_projection_vertices = resolution.missing;
+    result.resolution_star_refused_vertices = resolution.star_refused;
+    result.resolution_sheet_refused_vertices = resolution.sheet_refused;
+    result.resolution_partial_projection_vertices = resolution.partial;
+    // Isotropic remeshing onto the analytic SES; remesh_edge 0 means one grid
+    // spacing and a negative value keeps the marching connectivity.
+    ResolutionRemeshMetrics remeshed;
+    if (remesh_edge >= 0.0 && resolution.final_intersections == 0U) {
+      const double edge = remesh_edge > 0.0 ? remesh_edge : grid_spacing;
+      const RemeshSizing sizing(charges, edge, refinement);
+      remesh_resolution_surface(result.mesh, patches, projection, grid_spacing,
+                                edge, remesh_iterations, executor, remeshed,
+                                &sizing);
+      result.resolution_refine_charges = sizing.charges();
+      result.resolution_refined_vertices = remeshed.refined_vertices;
+      result.resolution_remesh_iterations = remeshed.iterations;
+      result.resolution_remesh_reverted = remeshed.undone_operations;
+      resolution.final_intersections = remeshed.final_intersections;
+      result.resolution_remesh_splits = remeshed.splits;
+      result.resolution_remesh_collapses = remeshed.collapses;
+      result.resolution_remesh_flips = remeshed.flips;
+      result.resolution_remesh_off_surface = remeshed.off_surface_vertices;
+      result.resolution_remesh_sheet_refused = remeshed.sheet_refused;
+      result.resolution_remesh_edge = remeshed.target_edge;
+      result.resolution_remesh_ms = remeshed.ms;
+    }
+    ResolutionQualityMetrics quality;
+    measure_resolution_quality(result.mesh, quality);
+    result.resolution_angle_below_5 = quality.angle_below_5;
+    result.resolution_angle_below_10 = quality.angle_below_10;
+    result.resolution_angle_below_20 = quality.angle_below_20;
+    result.resolution_edge_min = quality.edge_min;
+    result.resolution_edge_mean = quality.edge_mean;
+    result.resolution_short_edges_005 = quality.edges_below_005 / 2U;
+    result.resolution_short_edges_020 = quality.edges_below_020 / 2U;
+    result.resolution_reverted_vertices = resolution.reverted;
+    result.resolution_revert_rounds = resolution.rounds;
+    result.resolution_initial_intersections =
+        resolution.initial_intersections;
+    result.analytic_self_intersections = resolution.final_intersections;
+    result.resolution_unprojected_distance_max =
+        resolution.unprojected_distance_max;
+    result.analytic_projection_distance_rms =
+        resolution.projected_distance_rms;
+    result.repair_ms = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - repair_begin)
+                           .count();
+    if (result.mesh.triangles.empty()) {
+      result.status = "empty_analytic_surface";
+    } else {
+      orient_mesh_consistently(result.mesh);
+      mark_analytic_vertex_normals(result.mesh, patches, projection,
+                                   grid_spacing, executor,
+                                   result.resolution_analytic_normal_vertices,
+                                   result.resolution_analytic_normal_refused);
+      result.trace_spaces = build_closed_surface_trace_spaces(result.mesh);
+      result.status = result.trace_spaces.quality.failure_reason;
+      // Odd ray rows and morphology-fallback signs change only which side of
+      // a cell a few grid vertices fall on; the marching mesh stays closed.
+      // They are reported, not refused.  Intersections are still refused.
+      if (result.status == "pass" && resolution.final_intersections != 0U)
+        result.status = "resolution_self_intersection";
+      if (!validate_topology && result.status == "pass")
+        result.trace_spaces.quality.failure_reason = "pass";
+    }
+    result.build_ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - begin)
+                          .count();
+    return result;
+  }
   LocalPatchRepairMetrics local_metrics;
   repair_patch_ray_surface_local(result.mesh, patches, projection,
                                   grid_spacing, local_metrics, executor);
@@ -6472,7 +8695,8 @@ AuxiliarySurfaceResult build_patch_ray_experimental_surface(
             .count();
     local_metrics.sampled_analytic_audit_ms += sampled_audit_ms;
     if (!local_metrics.analytic_vertex_certificate)
-      local_metrics.analytic_audit_status = "vertex_projection_failed";
+      local_metrics.analytic_audit_status =
+          analytic_vertex_failure_status(local_metrics);
     local_metrics.projection_ms += orientation_ms + sampled_audit_ms;
   }
 #ifdef TITAN_TABI_SES_TEST_HOOKS
@@ -6497,6 +8721,7 @@ AuxiliarySurfaceResult build_patch_ray_experimental_surface(
   result.local_sliver_ms = local_metrics.local_sliver_ms;
   result.full_projection_ms = local_metrics.full_projection_ms;
   result.seam_weld_ms = local_metrics.seam_weld_ms;
+  result.refused_sliver_repair_ms = local_metrics.refused_sliver_repair_ms;
   result.certificate_cleanup_ms = local_metrics.certificate_cleanup_ms;
   result.orientation_repair_ms = local_metrics.orientation_repair_ms;
   result.wide_repair_ms = local_metrics.wide_repair_ms;
@@ -6561,6 +8786,15 @@ AuxiliarySurfaceResult build_patch_ray_experimental_surface(
       local_metrics.analytic_vertex_projection_misses;
   result.analytic_vertex_residual_max =
       local_metrics.analytic_vertex_residual_max;
+  result.analytic_vertex_refused =
+      local_metrics.refused_vertex_indices.size();
+  result.analytic_vertex_refused_distance_max =
+      local_metrics.analytic_vertex_refused_distance_max;
+  result.analytic_vertex_refused_for_shape =
+      local_metrics.analytic_vertex_refused_for_shape;
+  result.refused_sliver_collapses = local_metrics.refused_sliver_collapses;
+  result.analytic_sheet_bridge_faces =
+      local_metrics.analytic_sheet_bridge_faces;
   result.analytic_vertex_certificate =
       local_metrics.analytic_vertex_certificate;
   result.analytic_orientation_status =
@@ -6629,6 +8863,327 @@ AuxiliarySurfaceResult build_patch_ray_experimental_surface(
                         std::chrono::steady_clock::now() - begin)
                         .count();
   return result;
+}
+
+// Nearest point to x on the boundary of a union of balls (the atoms grown by
+// the probe radius, whose boundary is the solvent-accessible surface), looked
+// for within `reach`.  On that boundary the nearest point is the radial
+// projection onto one sphere, the projection onto the circle where two
+// spheres meet, or a point where three meet; each candidate counts only when
+// no other ball covers it.  The distance from a sphere's surface bounds every
+// candidate on that sphere from below, so spheres are taken nearest first and
+// the search stops once the bound passes the best point found.  `scratch`
+// holds the nearby balls between calls.  False when no boundary point lies
+// within reach.
+struct BallBoundaryCandidate {
+  std::size_t index;
+  double surface_distance;
+};
+bool nearest_ball_union_boundary(const AtomGrid &grid,
+                                 std::span<const Atom> balls, const Vec3 &x,
+                                 double reach,
+                                 std::vector<BallBoundaryCandidate> &scratch,
+                                 std::vector<std::size_t> &cover,
+                                 Vec3 &nearest, double &distance) {
+  scratch.clear();
+  cover.clear();
+  const CellKey center = cell_for(grid, x);
+  const int span = std::max(
+      1, static_cast<int>(std::ceil((grid.max_radius + reach) / grid.cell_size)));
+  for (int dz = -span; dz <= span; ++dz)
+    for (int dy = -span; dy <= span; ++dy)
+      for (int dx = -span; dx <= span; ++dx) {
+        const auto found =
+            grid.cells.find({center.x + dx, center.y + dy, center.z + dz});
+        if (found == grid.cells.end())
+          continue;
+        for (const std::size_t index : found->second) {
+          const Atom &ball = balls[index];
+          const double r = norm(x - Vec3{ball.x, ball.y, ball.z});
+          // A ball covering any point within reach of x.
+          if (!(r < ball.radius + reach))
+            continue;
+          cover.push_back(index);
+          const double surface = std::abs(r - ball.radius);
+          if (surface < reach)
+            scratch.push_back({index, surface});
+        }
+      }
+  std::sort(scratch.begin(), scratch.end(),
+            [](const BallBoundaryCandidate &a, const BallBoundaryCandidate &b) {
+              return a.surface_distance < b.surface_distance ||
+                     (a.surface_distance == b.surface_distance &&
+                      a.index < b.index);
+            });
+  const auto centre_of = [&](std::size_t i) {
+    return Vec3{balls[i].x, balls[i].y, balls[i].z};
+  };
+  // Strictly inside another ball; a point on that ball's sphere is still on
+  // the boundary.
+  const auto covered = [&](const Vec3 &p, std::size_t a, std::size_t b,
+                           std::size_t c) {
+    for (const std::size_t j : cover) {
+      if (j == a || j == b || j == c)
+        continue;
+      const double rj = balls[j].radius - 1.0e-10;
+      const Vec3 d = p - centre_of(j);
+      if (dot(d, d) < rj * rj)
+        return true;
+    }
+    return false;
+  };
+  constexpr std::size_t none = static_cast<std::size_t>(-1);
+  double best = reach;
+  bool found_point = false;
+  const auto offer = [&](const Vec3 &p, std::size_t a, std::size_t b,
+                         std::size_t c) {
+    const double d = norm(x - p);
+    if (d < best && !covered(p, a, b, c)) {
+      best = d;
+      nearest = p;
+      found_point = true;
+    }
+  };
+  for (const auto &s : scratch) {
+    if (!(s.surface_distance < best))
+      break;
+    const Vec3 c = centre_of(s.index);
+    const double r = norm(x - c);
+    if (r > 1.0e-12)
+      offer(c + (balls[s.index].radius / r) * (x - c), s.index, none, none);
+  }
+  // Circles: the bound of a pair is the larger surface distance, which is the
+  // second ball's in this order.
+  const auto circle = [&](std::size_t a, std::size_t b, Vec3 &m, Vec3 &axis,
+                          double &radius) {
+    const Vec3 ca = centre_of(a), cb = centre_of(b);
+    const double ra = balls[a].radius, rb = balls[b].radius;
+    const double d = norm(cb - ca);
+    if (!(d > 1.0e-12) || !(d < ra + rb) || !(d > std::abs(ra - rb)))
+      return false;
+    axis = (1.0 / d) * (cb - ca);
+    const double t = (d * d + ra * ra - rb * rb) / (2.0 * d);
+    const double r2 = ra * ra - t * t;
+    if (!(r2 > 0.0))
+      return false;
+    m = ca + t * axis;
+    radius = std::sqrt(r2);
+    return true;
+  };
+  for (std::size_t jb = 1; jb < scratch.size(); ++jb) {
+    if (!(scratch[jb].surface_distance < best))
+      break;
+    for (std::size_t ja = 0; ja < jb; ++ja) {
+      const std::size_t a = scratch[ja].index, b = scratch[jb].index;
+      Vec3 m, axis;
+      double radius = 0.0;
+      if (!circle(a, b, m, axis, radius))
+        continue;
+      const Vec3 w = (x - m) - dot(x - m, axis) * axis;
+      const double wl = norm(w);
+      // On the axis every circle point is equally near: take any.
+      const Vec3 e = wl > 1.0e-12
+                         ? (1.0 / wl) * w
+                         : normalized(cross(axis, std::abs(axis.x) < 0.9
+                                                      ? Vec3{1.0, 0.0, 0.0}
+                                                      : Vec3{0.0, 1.0, 0.0}));
+      offer(m + radius * e, a, b, none);
+    }
+  }
+  // Points where three spheres meet.
+  for (std::size_t jc = 2; jc < scratch.size(); ++jc) {
+    if (!(scratch[jc].surface_distance < best))
+      break;
+    for (std::size_t jb = 1; jb < jc; ++jb)
+      for (std::size_t ja = 0; ja < jb; ++ja) {
+        const std::size_t a = scratch[ja].index, b = scratch[jb].index,
+                          c = scratch[jc].index;
+        const Vec3 ca = centre_of(a), cb = centre_of(b), cc = centre_of(c);
+        const double ra = balls[a].radius, rb = balls[b].radius,
+                     rc = balls[c].radius;
+        const double d = norm(cb - ca);
+        if (!(d > 1.0e-12))
+          continue;
+        const Vec3 ex = (1.0 / d) * (cb - ca);
+        const double i = dot(ex, cc - ca);
+        const Vec3 off = (cc - ca) - i * ex;
+        const double j = norm(off);
+        if (!(j > 1.0e-9))
+          continue;
+        const Vec3 ey = (1.0 / j) * off;
+        const Vec3 ez = cross(ex, ey);
+        const double px = (ra * ra - rb * rb + d * d) / (2.0 * d);
+        const double py = (ra * ra - rc * rc + i * i + j * j) / (2.0 * j) -
+                          (i / j) * px;
+        const double pz2 = ra * ra - px * px - py * py;
+        if (!(pz2 >= 0.0))
+          continue;
+        const double pz = std::sqrt(pz2);
+        const Vec3 base = ca + px * ex + py * ey;
+        offer(base + pz * ez, a, b, c);
+        offer(base - pz * ez, a, b, c);
+      }
+  }
+  distance = best;
+  return found_point;
+}
+
+// The solvent-excluded surface as a level set: f(x) = probe - dist(x, P),
+// with P the probe centres that touch no atom, i.e. everything outside the
+// probe-grown atoms.  f is negative inside the SES, zero exactly on it and,
+// near it, a signed distance to it, so interpolating its zero crossings
+// converges with the grid spacing.  A point outside the grown atoms is itself
+// in P and gets probe + its distance to them.  `reach` bounds the search:
+// beyond it f is only bounded, which is enough for a vertex whose value no
+// zero crossing of the marching cells depends on.
+double exact_ses_field(const AtomGrid &grid, std::span<const Atom> balls,
+                       const Vec3 &x, double probe_radius, double reach,
+                       std::vector<BallBoundaryCandidate> &scratch,
+                       std::vector<std::size_t> &cover) {
+  const double sas = sample_union_sdf(grid, balls, x).value;
+  if (sas >= 0.0)
+    return probe_radius + sas;
+  // -sas is the depth into the deepest ball, which never exceeds the
+  // distance to the union's boundary.
+  if (-sas >= reach)
+    return probe_radius + sas;
+  Vec3 nearest;
+  double distance = 0.0;
+  if (!nearest_ball_union_boundary(grid, balls, x, reach, scratch, cover,
+                                   nearest, distance))
+    return probe_radius - reach;
+  return probe_radius - distance;
+}
+
+// Moves each marching vertex onto the SES along the line from its nearest
+// probe position, where the normal is exact: the SES is the envelope of probe
+// balls centred on the accessible surface, and the probe that touches the
+// solute at a point lies along its normal.  A vertex keeps its marching
+// position and star normal when the move is more than a quarter cell, when
+// the projected point turns out to lie nearer another probe position (a cusp
+// where two reentrant faces meet), when its normal faces away from the star
+// of its triangles, or when the move reverses an incident triangle.
+void project_grid_ses_vertices(SurfaceMesh &mesh, const AtomGrid &grid,
+                               std::span<const Atom> balls,
+                               double probe_radius, double grid_spacing,
+                               TitanExecutor *executor, std::size_t &projected,
+                               std::size_t &kept) {
+  const std::size_t n = mesh.vertices.size();
+  std::vector<Vec3> star(n);
+  for (const Triangle &t : mesh.triangles)
+    for (const std::size_t w : {t.v0, t.v1, t.v2})
+      star[w] = star[w] + t.area * Vec3{t.nx, t.ny, t.nz};
+  std::vector<Vec3> target(n), normal(n);
+  std::vector<std::uint8_t> move(n, 0U);
+  const double reach = probe_radius + 2.0 * grid_spacing;
+  const auto solve = [&](std::size_t, std::size_t begin, std::size_t end) {
+    std::vector<BallBoundaryCandidate> scratch;
+    std::vector<std::size_t> cover;
+    for (std::size_t i = begin; i < end; ++i) {
+      const Vertex &v = mesh.vertices[i];
+      const Vec3 x{v.x, v.y, v.z};
+      Vec3 probe;
+      double distance = 0.0;
+      if (!nearest_ball_union_boundary(grid, balls, x, reach, scratch, cover,
+                                       probe, distance) ||
+          !(distance > 1.0e-9) ||
+          !(std::abs(distance - probe_radius) <= 0.25 * grid_spacing))
+        continue;
+      const Vec3 outward = (1.0 / distance) * (probe - x);
+      const Vec3 on_surface = probe - probe_radius * outward;
+      const double star_length = norm(star[i]);
+      if (!(star_length > 0.0) ||
+          dot(outward, star[i]) < kResolutionSheetCosine * star_length)
+        continue;
+      Vec3 check;
+      double check_distance = 0.0;
+      if (!nearest_ball_union_boundary(grid, balls, on_surface, reach, scratch,
+                                       cover, check, check_distance) ||
+          !(std::abs(check_distance - probe_radius) <= 1.0e-6))
+        continue;
+      target[i] = on_surface;
+      normal[i] = outward;
+      move[i] = 1U;
+    }
+  };
+  if (executor != nullptr && executor->capacity() > 1U)
+    executor->parallel_for(n, executor->capacity(), 256U, solve);
+  else
+    solve(0U, 0U, n);
+  const std::vector<Vertex> original = mesh.vertices;
+  const auto position = [&](std::size_t i) {
+    return move[i] ? target[i]
+                   : Vec3{original[i].x, original[i].y, original[i].z};
+  };
+  // A triangle whose normal turns against its marching normal holds a
+  // vertex back; repeat until none does.
+  for (int round = 0; round < 8; ++round) {
+    bool reverted = false;
+    for (const Triangle &t : mesh.triangles) {
+      if (!(move[t.v0] || move[t.v1] || move[t.v2]))
+        continue;
+      const Vec3 a = position(t.v0), b = position(t.v1), c = position(t.v2);
+      if (dot(cross(b - a, c - a), Vec3{t.nx, t.ny, t.nz}) > 0.0)
+        continue;
+      for (const std::size_t w : {t.v0, t.v1, t.v2})
+        if (move[w]) {
+          move[w] = 0U;
+          reverted = true;
+        }
+    }
+    if (!reverted)
+      break;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    if (!move[i])
+      continue;
+    Vertex &v = mesh.vertices[i];
+    v.x = target[i].x;
+    v.y = target[i].y;
+    v.z = target[i].z;
+    v.nx = normal[i].x;
+    v.ny = normal[i].y;
+    v.nz = normal[i].z;
+    v.normal_analytic = true;
+  }
+  for (std::size_t t = 0; t < mesh.triangles.size(); ++t)
+    update_triangle_geometry(mesh, t);
+  // Where the marching cells joined two sheets of the SES that pass within a
+  // cell of each other, the moves pull the joined vertices onto different
+  // sheets and the surface crosses itself without any triangle turning over.
+  // Every moved vertex of an intersecting pair goes back to its marching
+  // position, until no pair is left or none of its vertices moved.
+  std::vector<std::array<std::uint32_t, 2>> pairs;
+  for (int round = 0; round < 16; ++round) {
+    std::size_t scratch_bytes = 0;
+    if (detect_self_intersections(mesh, grid_spacing, scratch_bytes, executor,
+                                  &pairs)
+            .count == 0U)
+      break;
+    std::vector<std::uint8_t> touched(n, 0U);
+    bool any = false;
+    for (const auto &pair : pairs)
+      for (const std::uint32_t t : pair) {
+        const Triangle &tri = mesh.triangles[t];
+        for (const std::size_t w : {tri.v0, tri.v1, tri.v2})
+          if (move[w]) {
+            move[w] = 0U;
+            mesh.vertices[w] = original[w];
+            touched[w] = 1U;
+            any = true;
+          }
+      }
+    if (!any)
+      break;
+    for (std::size_t t = 0; t < mesh.triangles.size(); ++t) {
+      const Triangle &tri = mesh.triangles[t];
+      if (touched[tri.v0] || touched[tri.v1] || touched[tri.v2])
+        update_triangle_geometry(mesh, t);
+    }
+  }
+  projected = static_cast<std::size_t>(
+      std::count(move.begin(), move.end(), std::uint8_t{1}));
+  kept = n - projected;
 }
 
 } // namespace
@@ -6713,6 +9268,10 @@ build_implicit_surface(std::span<const Atom> atoms, double grid_spacing,
                        std::size_t max_grid_vertices, bool validate_topology) {
   const auto begin = std::chrono::steady_clock::now();
   AuxiliarySurfaceResult result;
+  // No analytic engine ran here.  The field defaults to the analytic default,
+  // so leaving it would report a grid-ses run as an analytic `current` run,
+  // which is exactly the provenance a reader would rely on.
+  result.analytic_ses_engine = "not_applicable";
   if (atoms.empty() || !(grid_spacing > 0.0) || !std::isfinite(grid_spacing) ||
       !(probe_radius >= 0.0) || !std::isfinite(probe_radius)) {
     result.status = "invalid_input";
@@ -6773,44 +9332,31 @@ build_implicit_surface(std::span<const Atom> atoms, double grid_spacing,
                                    std::size_t iz) {
     return ix + nx * (iy + ny * iz);
   };
+  // The solvent-excluded volume is the morphological closing of the atoms by
+  // the probe ball (grown by the probe, then eroded by it).  The erosion is
+  // evaluated exactly, as the distance to the boundary of the grown atoms
+  // (exact_ses_field), not by testing a few directions on the probe sphere:
+  // a direction set lets a probe through gaps between its directions, which
+  // leaves the surface outside the SES by an amount the grid spacing does not
+  // reduce.  A zero crossing depends only on vertices within a cell diagonal
+  // of it, so the exact value is needed only up to probe + 2 h from the
+  // accessible surface.  The zero isosurface is then welded and
+  // topology-audited, so no open patch reaches the solver.
+  const double field_reach = probe_radius + 2.0 * grid_spacing;
   const auto evaluate_slices = [&](std::size_t begin_z, std::size_t end_z) {
+    std::vector<BallBoundaryCandidate> scratch;
+    std::vector<std::size_t> cover;
     for (std::size_t iz = begin_z; iz < end_z; ++iz) {
       for (std::size_t iy = 0; iy < ny; ++iy) {
         for (std::size_t ix = 0; ix < nx; ++ix) {
           const Vec3 point{lower.x + grid_spacing * static_cast<double>(ix),
                            lower.y + grid_spacing * static_cast<double>(iy),
                            lower.z + grid_spacing * static_cast<double>(iz)};
-          if (probe_radius == 0.0) {
-            values[grid_index(ix, iy, iz)] =
-                sample_union_sdf(field_atom_grid, field_atoms, point).value;
-            continue;
-          }
-
-          // The solvent-excluded molecular volume is the morphological closing
-          // (VDW union dilated by the probe, then eroded by the same probe).
-          // Evaluate the erosion with a symmetric 26-direction spherical
-          // stencil at every grid vertex. The zero isosurface is subsequently
-          // welded and topology-audited, so no open patch reaches the solver.
-          double eroded_value =
-              sample_union_sdf(field_atom_grid, field_atoms, point).value;
-          for (int dz = -1; dz <= 1; ++dz) {
-            for (int dy = -1; dy <= 1; ++dy) {
-              for (int dx = -1; dx <= 1; ++dx) {
-                if (dx == 0 && dy == 0 && dz == 0) {
-                  continue;
-                }
-                const Vec3 direction = normalized({static_cast<double>(dx),
-                                                   static_cast<double>(dy),
-                                                   static_cast<double>(dz)});
-                const Vec3 probe_point = point + probe_radius * direction;
-                eroded_value = std::max(
-                    eroded_value,
-                    sample_union_sdf(field_atom_grid, field_atoms, probe_point)
-                        .value);
-              }
-            }
-          }
-          values[grid_index(ix, iy, iz)] = eroded_value;
+          values[grid_index(ix, iy, iz)] =
+              probe_radius == 0.0
+                  ? sample_union_sdf(field_atom_grid, field_atoms, point).value
+                  : exact_ses_field(field_atom_grid, field_atoms, point,
+                                    probe_radius, field_reach, scratch, cover);
         }
       }
     }
@@ -6902,6 +9448,13 @@ build_implicit_surface(std::span<const Atom> atoms, double grid_spacing,
     result.status = "pass";
   } else {
     orient_mesh_consistently(result.mesh);
+    if (probe_radius > 0.0) {
+      result.projection_queries = result.mesh.vertices.size();
+      std::size_t kept = 0;
+      project_grid_ses_vertices(result.mesh, field_atom_grid, field_atoms,
+                                probe_radius, grid_spacing, executor,
+                                result.projected_vertices, kept);
+    }
     result.trace_spaces = build_closed_surface_trace_spaces(result.mesh);
     result.status = result.trace_spaces.quality.failure_reason;
   }
@@ -6933,7 +9486,10 @@ AuxiliarySurfaceResult build_analytic_ses_surface(std::span<const Atom> atoms,
                                                   TitanExecutor *executor,
                                                   std::size_t max_grid_vertices,
                                                   bool validate_topology,
-                                                  std::string_view engine) {
+                                                  std::string_view engine,
+                                                  double remesh_edge,
+                                                  ChargeRefinement charge_refinement,
+                                                  int remesh_iterations) {
   const auto begin = std::chrono::steady_clock::now();
   AuxiliarySurfaceResult result;
   result.analytic_ses_engine = std::string(engine);
@@ -6943,13 +9499,15 @@ AuxiliarySurfaceResult build_analytic_ses_surface(std::span<const Atom> atoms,
     result.status = "invalid_input";
     return result;
   }
-  if (engine != "current" && engine != "patch-ray-experimental") {
+  if (!is_current_family_engine(engine) &&
+      engine != "patch-ray-experimental" &&
+      engine != "patch-ray-resolution") {
     result.status = "invalid_analytic_ses_engine";
     return result;
   }
   const auto patch_begin = std::chrono::steady_clock::now();
   analytic_ses::PatchComplex patches = analytic_ses::build_patch_complex(
-      atoms, probe_radius, executor, engine == "current");
+      atoms, probe_radius, executor, is_current_family_engine(engine));
   result.patch_build_ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - patch_begin)
                               .count();
@@ -6988,10 +9546,11 @@ AuxiliarySurfaceResult build_analytic_ses_surface(std::span<const Atom> atoms,
     return result;
   }
   result.grid_vertices = nx * ny * nz;
-  if (engine == "patch-ray-experimental") {
+  if (engine == "patch-ray-experimental" || engine == "patch-ray-resolution") {
     AuxiliarySurfaceResult experimental = build_patch_ray_experimental_surface(
         patches, lower, grid_spacing, nx, ny, nz, executor,
-        validate_topology);
+        validate_topology, engine == "patch-ray-resolution", remesh_edge,
+        atoms, charge_refinement, remesh_iterations);
     experimental.patch_build_ms = result.patch_build_ms;
     experimental.build_ms += result.patch_build_ms;
     return experimental;
@@ -7012,7 +9571,8 @@ AuxiliarySurfaceResult build_analytic_ses_surface(std::span<const Atom> atoms,
   // from analytic ray crossings, so avoid 27 square roots and minimum-distance
   // reductions per grid vertex here.
   std::vector<std::uint8_t> topology_inside(result.grid_vertices, 0U);
-  const auto &sample_directions = topology_sample_directions();
+  const auto &sample_directions =
+      closing_sample_directions(engine == "current-dense" ? 2 : 1);
   const auto evaluate_topology_slices = [&](std::size_t begin_z,
                                             std::size_t end_z) {
     for (std::size_t iz = begin_z; iz < end_z; ++iz) {

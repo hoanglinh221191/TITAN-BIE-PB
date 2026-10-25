@@ -5,6 +5,9 @@
 #include "arguments.h"
 #include "c6c12.h"
 #include "charmm_nonbonded.h"
+#include "gromos_nonbonded.h"
+#include "titan_lj_pair_override.h"
+#include "titan_topology_energy.h"
 #include "martini_nonbonded.h"
 
 #include <algorithm>
@@ -219,6 +222,13 @@ EnergyDecompositionProvider::pair_energy_generic_at_distance(
       pos_b >= frame_b.size() || pos_a >= mol_a.parameters.size() ||
       pos_b >= mol_b.parameters.size())
     return out;
+  if (titan_nb::topology_energy_required(*cached_data_, *args_)) {
+    const auto pair = titan_nb::evaluate_pair(*cached_data_, *args_, mol_a.info.at(pos_a),
+                                            mol_b.info.at(pos_b), d_nm,
+                                            cutoff_active_ ? cutoff_nm_ : -1.0);
+    const double factor = args_->self_int && &mol_a != &mol_b ? 0.5 : 1.0;
+    return {factor * pair.elec, factor * pair.vdw};
+  }
   if (d_nm <= titan_energy_validation::kMinimumPairDistanceNm)
     return out;
   if (cutoff_active_ && cutoff_nm_ > 0.0 && d_nm > cutoff_nm_)
@@ -276,11 +286,9 @@ EnergyDecompositionProvider::pair_energy_generic_at_distance(
          (args_->flag_interchain_energy &&
           mol_b.info[pos_b].get_chain() == mol_a.info[pos_a].get_chain())))
       return {};
-    const double c6_ij = std::sqrt(std::max(
-        0.0, mol_b.parameters.sigma[pos_b] * mol_a.parameters.sigma[pos_a]));
-    const double c12_ij = std::sqrt(std::max(
-        0.0,
-        mol_b.parameters.epsilon[pos_b] * mol_a.parameters.epsilon[pos_a]));
+    double c6_ij{}, c12_ij{};
+    gromos::pair_params(*cached_data_, mol_a.parameters, mol_b.parameters,
+                        pos_a, pos_b, c6_ij, c12_ij);
     const double inv_r2 = 1.0 / (d_nm * d_nm);
     const double inv_r6 = inv_r2 * inv_r2 * inv_r2;
     out.vdw = c12_ij * inv_r6 * inv_r6 - c6_ij * inv_r6;
@@ -305,6 +313,11 @@ EnergyDecompositionProvider::pair_energy_generic_at_distance(
     // Match the production pair kernels' 4*epsilon convention.
     out.vdw = 4.0 * epsilon_ij *
               (square(sr6) - (repulsive_only ? 0.0 : sr6));
+    // ENE-11: pair-specific [ nonbond_params ] replace the combination rule.
+    if (cached_data_->has_charmm_pair_overrides())
+      titan_lj::override_lj_energy(*cached_data_, mol_a.parameters,
+                                   mol_b.parameters, pos_a, pos_b, d_nm,
+                                   out.vdw);
   }
   return out;
 }

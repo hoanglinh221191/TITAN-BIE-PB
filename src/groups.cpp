@@ -395,6 +395,40 @@ int groups_cal::finalize_index_groups(arguments &Arguments) {
   }
   this->groups[group_1].check_conti();
   this->groups[group_2].check_conti();
+  if (Arguments.gist.flag_gist) {
+    if (Arguments.n_wat < 0) {
+      std::optional<size_t> candidate;
+      for (size_t i=0;i<groups.size();++i) {
+        const auto name=uppercase_copy(trim_copy(groups[i].name));
+        if (name!="WATER" && name!="SOL" && name!="WAT" && name!="HOH") continue;
+        if (candidate && groups[*candidate].atom_index!=groups[i].atom_index) {
+          TitanUI::print_error("GIST water group is ambiguous; set -n_wat to one complete ordered O,H,H water group index.");
+          return 1;
+        }
+        candidate=i;
+      }
+      if (!candidate) {
+        TitanUI::print_error("GIST requires -n_wat <water group index> or a unique Water/SOL/WAT/HOH group.");
+        return 1;
+      }
+      Arguments.n_wat=static_cast<int>(*candidate);
+      TitanUI::print_info("[GIST] Selected water index group " + std::to_string(*candidate) + " (" + groups[*candidate].name + ") before coordinate loading.");
+    }
+    if (static_cast<size_t>(Arguments.n_wat)>=groups.size() ||
+        groups[Arguments.n_wat].atom_index.empty() || groups[Arguments.n_wat].atom_index.size()%3) {
+      TitanUI::print_error("GIST water group must contain complete ordered O,H,H triplets.");
+      return 1;
+    }
+    std::set<size_t> solute(groups[group_1].atom_index.begin(),groups[group_1].atom_index.end());
+    solute.insert(groups[group_2].atom_index.begin(),groups[group_2].atom_index.end());
+    std::set<size_t> water;
+    for (size_t atom:groups[Arguments.n_wat].atom_index) {
+      if (!atom || solute.contains(atom) || !water.insert(atom).second) {
+        TitanUI::print_error("GIST water group overlaps solute or contains duplicate/invalid atom indices.");
+        return 1;
+      }
+    }
+  }
   if (Arguments.entropy_quasi == true) {
     if (Arguments.group_entropy_com != -1) {
       this->group_entropy_com = Arguments.group_entropy_com;
@@ -900,6 +934,8 @@ int groups_cal::parse_subgroups() {
 
 size_t groups_cal::add_group_pathway(arguments &Arguments) {
   if (Arguments.de.flag_pathway == false)
+    return 0;
+  if (!Arguments.de.pathway_file.empty())
     return 0;
 
   group_pathway = Arguments.de.group_pathway;

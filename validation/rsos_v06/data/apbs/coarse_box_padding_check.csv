@@ -1,0 +1,7 @@
+dime,fine_spacing_A,energy_kcalmol,exit,wall_s,peak_rss_mb,run_dir,protein,variant,cavities,cavity_points
+193x193x193,0.2841875,-742.2921203996176,0,25.529004799958784,1508.44921875,D:/data_MD/tabi/rsos_v06/review_checks/apbs_cavity_box/1sh1_base,1SH1,base,3,25
+193x193x193,0.2841875,-724.2397149796845,0,27.164764300046954,1509.01171875,D:/data_MD/tabi/rsos_v06/review_checks/apbs_cavity_box/1sh1_cavity_filled,1SH1,cavity_filled,3,25
+193x193x193,0.2841875,-742.310321789675,0,29.165901300031692,1508.16015625,D:/data_MD/tabi/rsos_v06/review_checks/apbs_cavity_box/1sh1_coarse_box_48A,1SH1,coarse_box_48A,3,25
+321x225x225,0.2788125,-2424.0122527748563,0,80.62575380003545,3628.15625,D:/data_MD/tabi/rsos_v06/review_checks/apbs_cavity_box/1a63_base,1A63,base,19,28
+321x225x225,0.2788125,-2401.375242342256,0,75.89995200000703,3628.69140625,D:/data_MD/tabi/rsos_v06/review_checks/apbs_cavity_box/1a63_cavity_filled,1A63,cavity_filled,19,28
+321x225x225,0.2788125,-2424.1144829086998,0,82.46187910001026,3628.765625,D:/data_MD/tabi/rsos_v06/review_checks/apbs_cavity_box/1a63_coarse_box_48A,1A63,coarse_box_48A,19,28

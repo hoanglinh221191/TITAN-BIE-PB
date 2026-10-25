@@ -11,8 +11,36 @@ enum class PathwayMode { Advance, Recovery };
 
 struct PathwayCandidateState {
   double progress{0.0};
+  double requested_delta_progress{0.0};
   double delta_progress{0.0};
+  double applied_progress{0.0};
+  double applied_path_distance{std::numeric_limits<double>::infinity()};
+  double requested_pull_distance{0.0};
   double pull_distance{0.0};
+  double probe_length{0.0};
+  bool fixed_probe{false};
+  bool navigation_enabled{false};
+  bool guided_seed{false};
+  std::size_t guided_seed_index{0};
+  double applied_corridor_radius{0.0};
+  double navigation_tube_excess{0.0};
+  double navigation_backtrack_distance{0.0};
+  double navigation_tube_cost{0.0};
+  double navigation_backtrack_cost{0.0};
+  double navigation_cost{0.0};
+  force requested_vector{};
+  double requested_angle_deg{0.0};
+  bool turn_capped{false};
+  double corridor_offset_u{0.0};
+  double corridor_offset_v{0.0};
+  double corridor_radius{0.0};
+  double minimum_clearance{0.0};
+  double endpoint_minimum_clearance{0.0};
+  double swept_minimum_clearance{0.0};
+  double swept_minimum_fraction{1.0};
+  std::size_t swept_minimum_receptor_index{0};
+  std::size_t swept_minimum_ligand_index{0};
+  bool swept_minimum_complete{false};
   cache_energy energy{};
   double raw_score{std::numeric_limits<double>::infinity()};
   double energy_key{std::numeric_limits<double>::infinity()};
@@ -82,6 +110,13 @@ bool pathway_candidate_better(const PathwayCandidateState &lhs,
                               std::size_t lhs_index,
                               const PathwayCandidateState &rhs,
                               std::size_t rhs_index, PathwayMode mode);
+// Exact lexicographic priority plus stable identity for std::sort/stable_sort.
+// Keep tolerance-based acceptance/equivalence in the decision functions above
+// and below; pairwise epsilon ties do not define a strict weak ordering.
+bool pathway_candidate_strict_less(const PathwayCandidateState &lhs,
+                                   std::size_t lhs_index,
+                                   const PathwayCandidateState &rhs,
+                                   std::size_t rhs_index, PathwayMode mode);
 bool pathway_candidate_equivalent(const PathwayCandidateState &lhs,
                                   const PathwayCandidateState &rhs,
                                   PathwayMode mode);

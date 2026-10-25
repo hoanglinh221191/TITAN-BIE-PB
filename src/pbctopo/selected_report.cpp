@@ -106,7 +106,13 @@ bool populate_pbctopo_selected_candidate_report(
   report.continuity_margin_atom_a = candidate.continuity_margin_atom_a;
   report.continuity_margin_atom_b = candidate.continuity_margin_atom_b;
   report.anchor_max_edge_A = nan;
-  if (std::isfinite(candidate.min_pair_d2)) {
+  if (candidate.hard_feasibility.evaluated &&
+      candidate.hard_feasibility.steric_audit_available &&
+      std::isfinite(candidate.hard_feasibility.min_steric_margin_A)) {
+    // The certified audit's own minimum margin, over every pair it checked.
+    report.clash_margin_A = candidate.hard_feasibility.min_steric_margin_A;
+  } else if (std::isfinite(candidate.min_pair_d2)) {
+    // No hard audit: the margin of the closest pair is the best available.
     double active_clash_cutoff = fallback_clash_cutoff;
     if (candidate.clash_atom_a < atoms.size() &&
         candidate.clash_atom_b < atoms.size()) {

@@ -1,0 +1,6 @@
+# Structure and data files keep their bytes on every platform, so their SHA-256 sums
+# (inputs/fagbi27_fixture_manifest.csv, validation/rsos_v06/SHA256SUMS) hold after checkout.
+*.pqr -text
+*.pdb -text
+example/pbe/04_fagbi27_protocol/inputs/** -text
+validation/rsos_v06/** -text

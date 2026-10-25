@@ -2,13 +2,16 @@ cff-version: 1.2.0
 message: "If you use this TITAN release, please cite the associated manuscript and this versioned software archive."
 type: software
 title: "A Stabilized Boundary-Integral Poisson-Boltzmann Solver for Biomolecular Solvation Electrostatics"
-version: "titan-bie-pb-v0.5"
-date-released: "2026-08-14"
+version: "titan-bie-pb-v0.6"
+date-released: "2026-10-25"
 license: "MIT"
 authors:
   - family-names: "O"
     given-names: "My Na"
-    affiliation: "Faculty of Applied Science, Ho Chi Minh City University of Technology, Vietnam National University Ho Chi Minh City"
+    affiliation: "Faculty of Applied Science, Ho Chi Minh City University of Technology (HCMUT), Vietnam National University Ho Chi Minh City"
+  - family-names: "Huynh"
+    given-names: "Quang Linh"
+    affiliation: "Faculty of Applied Science, Ho Chi Minh City University of Technology (HCMUT), Vietnam National University Ho Chi Minh City"
   - family-names: "Nguyen"
     given-names: "Hoang Linh"
     affiliation: "Institute of Fundamental and Applied Sciences, Duy Tan University"
@@ -16,12 +19,13 @@ authors:
     given-names: "Mai Suan"
     affiliation: "Institute of Physics, Polish Academy of Sciences"
 repository-code: "https://github.com/hoanglinh221191/TITAN-BIE-PB"
-abstract: "This manuscript-associated TITAN release provides the hardened analytical patch-ray solvent-excluded-surface implementation, an end-to-end biomolecular Poisson-Boltzmann workflow, and sparse near-field block ILU(0) stabilization for coupled boundary-integral solves. It includes source code, build instructions, five-system preconditioner validation data, PBE and MM/PBSA examples, and reference outputs."
+abstract: "Source release of TITAN for the revised paper: a boundary-integral Poisson-Boltzmann solver on curved node-patch cells of a charge-graded analytic solvent-excluded surface, with convergence-tested self quadrature, a hierarchical Cartesian multipole far field, and a sparse near-field block ILU(0) preconditioner for GMRES. It includes the full TITAN source, a user manual, runnable examples (including the paper's 27 proteins from the deposited PDB files), and the data and scripts behind the paper's tables and figures."
 keywords:
   - Poisson-Boltzmann
   - boundary integral equation
-  - fast multipole method
+  - solvent-excluded surface
+  - treecode
   - biomolecular electrostatics
   - solvation free energy
-  - MM/PBSA
   - ILU(0)
+  - GMRES
